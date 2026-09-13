@@ -1,0 +1,29 @@
+schemaVersion: '1.0'
+uid: SDP0000002-AGENTFACTORY
+type: software_deployment_pattern
+name: BeerCanLabs Agent Factory Product Pattern
+description: Reusable, multi-cloud substrate for autonomous AI agent fleets providing scale-to-zero ingress lease handover, model routing gateway, immutable execution ledger, and Garrison C2 sidecars.
+version: 1.0.0
+catalogStatus: complete
+lifecycleStatus: preferred
+owner:
+  team: platform-ai-team
+  contact: platform-ai@example.com
+tags:
+  - agent-factory
+  - multi-cloud
+  - core-product
+  - substrate
+serviceGroups:
+  - id: agent-factory-kernel
+    name: Mandatory Factory Kernel
+    deploymentTarget: Multi-Cloud (GCP Cloud Run, AWS ECS Fargate, Docker)
+    components:
+      - productComponent: doorman-lease-broker
+      - productComponent: litellm-route-proxy
+      - productComponent: postgres-audit-ledger
+      - productComponent: universal-garrison-sidecar
+      - productComponent: promptfoo-training-gym
+deployableObjects:
+  - dataStoreService: 01M15NEKT7-H42Y
+  - aiGateway: 01M15NEKT7-QKPW
