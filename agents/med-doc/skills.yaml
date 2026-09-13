@@ -1,0 +1,5 @@
+skills:
+  - id: log-stream-triage
+    description: Parse container stdout/stderr and trace logs for exception patterns
+  - id: post-mortem-generator
+    description: Generate structured post-mortem reports with root-cause analysis

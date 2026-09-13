@@ -1,0 +1,5 @@
+skills:
+  - id: mcp-registry-index
+    description: Scan, index, and validate Model Context Protocol (MCP) server endpoints
+  - id: vector-knowledge-store
+    description: Ingest and query organizational documentation and runbooks

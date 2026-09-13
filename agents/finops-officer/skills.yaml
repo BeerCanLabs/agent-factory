@@ -1,0 +1,7 @@
+skills:
+  - id: garrison-finops-stream
+    description: Ingest live token consumption and rate limits from Agent Garrison C2
+  - id: cloud-billing-query
+    description: Query AWS Cost Explorer and GCP Cloud Billing APIs
+  - id: killswitch-dispatch
+    description: Issue C2 PAUSE or THROTTLE commands for rogue agent instances
