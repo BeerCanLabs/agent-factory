@@ -1,0 +1,24 @@
+{
+  "name": "@beercanlabs/agent-factory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Opinionated infrastructure & runtime plumbing for autonomous AI agent fleets",
+  "workspaces": [
+    "sidecar"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "keywords": [
+    "ai-agents",
+    "bedrock",
+    "vertex-ai",
+    "hermes",
+    "openclaw",
+    "garrison",
+    "agent-infrastructure"
+  ],
+  "author": "BeerCanLabs",
+  "license": "Apache-2.0"
+}

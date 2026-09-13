@@ -1,0 +1,21 @@
+{
+  "name": "@beercanlabs/garrison-sidecar",
+  "version": "0.1.0",
+  "description": "Universal telemetry & C2 sidecar for autonomous agent runtimes",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
