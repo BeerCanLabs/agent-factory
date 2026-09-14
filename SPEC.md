@@ -85,3 +85,42 @@ All 5 pre-built agents ship with standard capability contracts and customizable 
 | `med-doc` | MedDoc | Triage container crashes, OOMs, and tool execution failures | Container logs, memory profiler, stack trace parser |
 | `factory-mechanic` | Factory Mechanic | Cloud infrastructure health, scaling issues, and CI/CD pipelines | Docker, Terraform, Cloud Run/ECS APIs |
 | `compliance-officer` | Compliance Officer | Egress security, data loss prevention (DLP), PII redaction, SOC2 audit trails | Audit logs, regex DLP filters, IAM policies |
+
+---
+
+## 6. Standard Factory Discovery & Health Contract (Garrison C2 Protocol)
+
+To allow zero-configuration discovery by Agent Garrison (or any compatible C2 dashboard), an Agent Factory instance or gateway exposes standard discovery and health endpoints:
+
+### 1. Health & Liveness Probe
+- **Endpoints:** `GET /healthz`, `GET /api/v1/health`
+- **Response (200 OK):**
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "uptime": 14280,
+  "timestamp": "2026-09-14T00:00:00.000Z"
+}
+```
+
+### 2. Fleet Catalog & Discovery Probe
+- **Endpoints:** `GET /api/v1/agents`, `GET /v1/mcp/agents`
+- **Headers:** Optional `Authorization: Bearer <API_KEY_OR_JWT>`
+- **Response (200 OK):**
+```json
+[
+  {
+    "id": "agent-id",
+    "name": "Human-Readable Agent Name",
+    "role": "Functional role or responsibility",
+    "domain": "Engineering | Operations | Executive | Analytics",
+    "sectorId": "sector-eng",
+    "model": "claude-3-7-sonnet | gpt-4o | hermes-3-70b",
+    "provider": "gcp-cloud-run | aws-ecs | local",
+    "state": "IDLE | WORKING | PAUSED | BLOCKED_FOR_HUMAN",
+    "tools": ["git", "slack", "cloud-run"]
+  }
+]
+```
+

@@ -197,15 +197,43 @@ function startAgentProcess() {
   });
 }
 
-// 6. Local Health Check HTTP Server (for ECS / Cloud Run / K8s probes)
+// 6. Local Health Check & Discovery HTTP Server (for ECS / Cloud Run / K8s probes & Garrison discovery)
 const server = http.createServer((req, res) => {
-  if (req.url === '/healthz' || req.url === '/') {
+  // Healthcheck endpoints
+  if (req.url === '/healthz' || req.url === '/' || req.url === '/api/v1/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', agentId: AGENT_ID, state, uptime: process.uptime() }));
+    res.end(JSON.stringify({
+      status: 'ok',
+      agentId: AGENT_ID,
+      agentName: AGENT_NAME,
+      state,
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString()
+    }));
     return;
   }
-  res.writeHead(404);
-  res.end();
+
+  // Garrison standard agent discovery endpoints
+  if (req.url === '/api/v1/agents' || req.url === '/v1/mcp/agents') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify([
+      {
+        id: AGENT_ID,
+        name: AGENT_NAME,
+        role: AGENT_ROLE,
+        domain: AGENT_SECTOR.replace(/^sector-/, ''),
+        sectorId: AGENT_SECTOR,
+        model: AGENT_MODEL,
+        provider: AGENT_PROVIDER,
+        state,
+        tools: ['core-exec', 'garrison-c2', 'telemetry']
+      }
+    ]));
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Not found' }));
 });
 
 server.listen(PORT, '0.0.0.0', () => {

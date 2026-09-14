@@ -32,7 +32,7 @@
 │  - Nous Research Hermes / Hermes Agent                                 │
 │  - OpenClaw / OpenDevin                                                │
 │  - LangGraph / CrewAI / AutoGen                                        │
-│  - BeerCanLabs Skippy Matrix (`SM-archie`, `SM-donna`, `SM-finley`)    │
+│  - Enterprise Agent Fleets (`agent-researcher`, `agent-builder`, `agent-sentinel`) │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
