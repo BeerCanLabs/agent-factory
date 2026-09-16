@@ -72,6 +72,7 @@ function makeState(overrides: Partial<FactoryState> = {}): FactoryState {
     runtime: noopRuntime(),
     idleMs: 0,
     idleTimers: new Map(),
+    secretValues: new Set<string>(),
     ...overrides,
   };
 }
@@ -159,6 +160,26 @@ describe('control plane HTTP + MCP', { concurrency: false }, () => {
     });
     assert.equal(crash.status, 201);
     assert.equal(state.agents.get('med-doc')?.state, 'WORKING');
+  });
+
+  it('strips payload text from POST /ledger', async () => {
+    const res = await request(port, '/api/v1/ledger', {
+      method: 'POST',
+      token,
+      body: {
+        agentId: 'echo-agent',
+        type: 'llm',
+        prompt: 'never store this prompt',
+        inputTokens: 2,
+      },
+    });
+    assert.equal(res.status, 201);
+    const ledger = await request(port, '/api/v1/ledger?agent=echo-agent', { token });
+    const rows = ledger.json as Array<Record<string, unknown>>;
+    const llm = rows.filter((e) => e.type === 'llm');
+    assert.ok(llm.length >= 1);
+    assert.equal(llm.some((e) => JSON.stringify(e).includes('never store this prompt')), false);
+    assert.ok(llm.some((e) => typeof e.payloadSha256 === 'string'));
   });
 
   it('accepts a doorman conversation handoff', async () => {

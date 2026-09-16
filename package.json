@@ -8,8 +8,8 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "test": "npm run build --workspaces --if-present && npm run test --workspaces --if-present",
+    "build": "npm run build -w @beercanlabs/factory-ledger && npm run build --workspaces --if-present",
+    "test": "npm run build && npm run test --workspaces --if-present",
     "validate": "npm exec -w @beercanlabs/factory-contract -- tsx src/cli.ts validate --all ../../agents"
   },
   "keywords": [

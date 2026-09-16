@@ -10,6 +10,9 @@
     "dev": "tsx watch src/index.ts",
     "test": "tsx --test src/index.test.ts"
   },
+  "dependencies": {
+    "@beercanlabs/factory-ledger": "0.1.0"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",

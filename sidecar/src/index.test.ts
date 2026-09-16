@@ -7,6 +7,7 @@ import { createProxyServer } from './proxy.js';
 import { createControlServer } from './server.js';
 import { garrisonFromEnv } from './garrison.js';
 import { usageFromLlmJson } from './tokens.js';
+import { payloadHash } from '@beercanlabs/factory-ledger';
 
 function listen(server: http.Server, host = '127.0.0.1'): Promise<number> {
   return new Promise((resolve) => {
@@ -84,7 +85,8 @@ describe('intercept proxy', { concurrency: false }, () => {
   let proxyPort = 0;
   let controlPort = 0;
   const killSwitch = new KillSwitch(1000);
-  const ledger = new Ledger('echo', undefined);
+  const secret = 'sk-live-sidecar-secret';
+  const ledger = new Ledger('echo', undefined, undefined, [secret]);
 
   before(async () => {
     upstream = http.createServer((req, res) => {
@@ -118,12 +120,16 @@ describe('intercept proxy', { concurrency: false }, () => {
   });
 
   it('counts tokens without agent instrumentation', async () => {
-    const res = await request(proxyPort, '/v1/chat/completions', { method: 'POST', body: { model: 'gpt-test' } });
+    const body = { model: 'gpt-test', messages: [{ role: 'user', content: `hello ${secret}` }] };
+    const res = await request(proxyPort, '/v1/chat/completions', { method: 'POST', body });
     assert.equal(res.status, 200);
     const llm = ledger.events.filter((e) => e.type === 'llm');
     assert.ok(llm.length >= 1);
     assert.equal(llm[0]?.inputTokens, 3);
     assert.equal(llm[0]?.outputTokens, 5);
+    assert.equal(llm[0]?.payloadSha256, payloadHash(body));
+    assert.equal(JSON.stringify(llm[0]).includes(secret), false);
+    assert.equal('payload' in (llm[0] ?? {}), false);
   });
 
   it('isolate drops egress', async () => {

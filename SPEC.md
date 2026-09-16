@@ -83,6 +83,8 @@ Remote shell `EXEC` is **not** a factory kernel command.
 
 Append-only store of tokens, MCP invocations, and system actions, with actor/authorization. Answers “what did the agent do, and who authorized it?” Garrison and FinOps *read* this API; they do not own it.
 
+**Zero-knowledge flush:** the write path is a closed schema (metadata + `payloadSha256`). Prompt text, MCP params, and Discord bodies are hashed, never stored. The sidecar redacts bound secret *values* from logs and ledger lines before disk. There is no post-hoc redact of JSONL.
+
 ### 3.6 Headless control plane
 
 Factory gateway (REST + MCP):
@@ -162,6 +164,6 @@ Daemon vs on-behalf-of identity (`identity.yaml`) may land later as optional car
 | Secret binding | `packages/secrets-bind` (env, file, HTTP vault/SM). Wake returns 412 if unbound |
 | Scale-to-zero + wake | Control-plane wake + idle timer; webhook from `surface.yaml`; AWS RunTask schedule; Cloud Run `min_instance_count = 0` |
 | Memory hydration | `packages/hydrate` + `runtimes/generic/start.sh` |
-| Factory ledger | `packages/ledger` append-only JSONL; sidecar POSTs here |
+| Factory ledger | `packages/ledger` closed schema + hash + secret mask; sidecar POSTs here |
 | Event routing | `type=crash` wakes `med-doc`; `budget.alert` wakes `finops-officer` |
 | Blueprints | AWS/GCP modules with sidecar+worker, named-secret IAM, mind bucket, no `AmazonBedrockFullAccess` |

@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { FileLedger } from '@beercanlabs/factory-ledger';
+import { FileLedger, secretValuesFromEnv } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { authFromEnv } from '@beercanlabs/factory-auth';
 import { loadCatalog } from './catalog.js';
@@ -30,10 +30,12 @@ mkdirSync(MEMORY_STORE, { recursive: true });
 mkdirSync(EPHEMERAL, { recursive: true });
 
 const agents = loadCatalog(AGENTS_ROOT, sidecarUrls);
+const secretValues = new Set<string>(secretValuesFromEnv());
 
 const state: FactoryState = {
   agents: new Map(agents.map((a) => [a.id, a])),
-  ledger: new FileLedger(LEDGER_PATH),
+  ledger: new FileLedger(LEDGER_PATH, { secrets: () => secretValues }),
+  secretValues,
   token: TOKEN,
   auth: authFromEnv(),
   version: VERSION,

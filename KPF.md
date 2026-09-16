@@ -37,9 +37,9 @@ Source of truth for factory-owned flows. Canonical architecture: [POSITION_PAPER
 - **If it silently breaks:** Unmetered spend, or kill-switch that only SIGSTOPs a child the sidecar spawned.
 
 ### 7. Immutable Execution Ledger
-- **Description:** Every token, MCP invocation, and system action is appended to a factory-owned ledger with actor/authorization. Clients (Garrison, FinOps cartridge) query it. They do not own it.
+- **Description:** Every token, MCP invocation, and system action is appended to a factory-owned ledger with actor/authorization. Entries are metadata + payload hash only; the sidecar masks bound secret strings before flush. Clients (Garrison, FinOps cartridge) query it. They do not own it.
 - **Entry points:** Sidecar writer, `GET /api/v1/ledger`.
-- **If it silently breaks:** No SOC2 trail, disputed spend, missing “who authorized this.”
+- **If it silently breaks:** No SOC2 trail, disputed spend, missing “who authorized this,” or an immutable PII/secret spill.
 
 ### 8. Authenticated Factory MCP + REST
 - **Description:** External clients talk to the factory control plane over REST and MCP with OIDC/bearer auth. The gateway lists cartridges, wakes agents, applies kill-switch, and queries the ledger. It does not catalog a shared skill library or vault API keys.

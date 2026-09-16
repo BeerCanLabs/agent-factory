@@ -1,3 +1,4 @@
+import { secretValuesFromEnv } from '@beercanlabs/factory-ledger';
 import { KillSwitch } from './killswitch.js';
 import { Ledger } from './ledger.js';
 import { createProxyServer } from './proxy.js';
@@ -17,8 +18,9 @@ if (process.env.AGENT_CMD) {
   console.warn('[factory-sidecar] AGENT_CMD is ignored. The sidecar is not the agent PID 1.');
 }
 
+const secrets = secretValuesFromEnv();
 const killSwitch = new KillSwitch(parseInt(process.env.THROTTLE_TPM || '60', 10));
-const ledger = new Ledger(AGENT_ID, LEDGER_URL, process.env.FACTORY_TOKEN || TOKEN);
+const ledger = new Ledger(AGENT_ID, LEDGER_URL, process.env.FACTORY_TOKEN || TOKEN, secrets);
 const garrison = garrisonFromEnv(process.env);
 
 const control = createControlServer({
@@ -34,6 +36,7 @@ const proxy = createProxyServer({
   upstream: UPSTREAM,
   killSwitch,
   ledger,
+  secrets,
 });
 
 control.listen(PORT, '0.0.0.0', () => {

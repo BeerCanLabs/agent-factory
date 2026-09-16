@@ -1,28 +1,43 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { toLedgerEvent, type LedgerEvent } from './sanitize.js';
 
-export type LedgerEvent = {
-  timestamp: string;
-  agentId: string;
-  type: string;
-  actor?: string;
-  requestId?: string;
-  [k: string]: unknown;
-};
+export type { LedgerEvent } from './sanitize.js';
+export {
+  LEDGER_TYPES,
+  canonicalJson,
+  payloadHash,
+  redactSecrets,
+  secretValuesFromEnv,
+  toLedgerEvent,
+} from './sanitize.js';
 
 export type LedgerStore = {
-  append(event: LedgerEvent): LedgerEvent;
+  append(event: Record<string, unknown>): LedgerEvent;
   query(filter?: { agent?: string | null; from?: string | null; to?: string | null }): LedgerEvent[];
 };
 
-/** Append-only JSONL. No update/delete API — that is the immutability guarantee. */
+export type LedgerOptions = {
+  secrets?: Iterable<string> | (() => Iterable<string>);
+};
+
+function secretsOf(opts?: LedgerOptions): Iterable<string> {
+  const s = opts?.secrets;
+  if (!s) return [];
+  return typeof s === 'function' ? s() : s;
+}
+
+/** Append-only JSONL. Schema + redaction run before flush; no update/delete API. */
 export class FileLedger implements LedgerStore {
-  constructor(private readonly filePath: string) {
+  constructor(
+    private readonly filePath: string,
+    private readonly opts: LedgerOptions = {},
+  ) {
     mkdirSync(dirname(filePath), { recursive: true });
   }
 
-  append(event: LedgerEvent): LedgerEvent {
-    const full = { ...event, timestamp: event.timestamp || new Date().toISOString() };
+  append(event: Record<string, unknown>): LedgerEvent {
+    const full = toLedgerEvent(event, secretsOf(this.opts));
     appendFileSync(this.filePath, `${JSON.stringify(full)}\n`, { encoding: 'utf8' });
     return full;
   }
@@ -44,11 +59,14 @@ export class FileLedger implements LedgerStore {
 
 export class MemoryLedger implements LedgerStore {
   readonly events: LedgerEvent[] = [];
-  append(event: LedgerEvent): LedgerEvent {
-    const full = { ...event, timestamp: event.timestamp || new Date().toISOString() };
+  constructor(private readonly opts: LedgerOptions = {}) {}
+
+  append(event: Record<string, unknown>): LedgerEvent {
+    const full = toLedgerEvent(event, secretsOf(this.opts));
     this.events.push(full);
     return full;
   }
+
   query(filter: { agent?: string | null; from?: string | null; to?: string | null } = {}): LedgerEvent[] {
     return this.events.filter((e) => {
       if (filter.agent && e.agentId !== filter.agent) return false;

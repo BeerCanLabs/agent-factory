@@ -10,6 +10,7 @@ export type ProxyOptions = {
   killSwitch: KillSwitch;
   ledger: Ledger;
   actor?: string;
+  secrets?: string[];
 };
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
@@ -50,6 +51,7 @@ export function createProxyServer(opts: ProxyOptions): http.Server {
         type: 'mcp',
         mcpMethod: mcp.method,
         mcpName: mcp.name,
+        params: inboundJson,
         requestId,
         actor: opts.actor,
       });
@@ -77,6 +79,7 @@ export function createProxyServer(opts: ProxyOptions): http.Server {
             model: usage.model,
             inputTokens: usage.input,
             outputTokens: usage.output,
+            payload: inboundJson ?? incoming.toString('utf8'),
             requestId,
             actor: opts.actor,
           });

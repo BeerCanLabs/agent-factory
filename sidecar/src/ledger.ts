@@ -1,16 +1,6 @@
-export type LedgerEvent = {
-  timestamp: string;
-  agentId: string;
-  type: 'llm' | 'mcp' | 'action';
-  model?: string;
-  inputTokens?: number;
-  outputTokens?: number;
-  mcpMethod?: string;
-  mcpName?: string;
-  action?: string;
-  requestId: string;
-  actor?: string;
-};
+import { toLedgerEvent, type LedgerEvent } from '@beercanlabs/factory-ledger';
+
+export type { LedgerEvent };
 
 export class Ledger {
   readonly events: LedgerEvent[] = [];
@@ -18,14 +8,18 @@ export class Ledger {
     private readonly agentId: string,
     private readonly ledgerUrl: string | undefined,
     private readonly authToken?: string,
+    private readonly secrets: string[] = [],
   ) {}
 
-  async append(event: Omit<LedgerEvent, 'timestamp' | 'agentId'>): Promise<LedgerEvent> {
-    const full: LedgerEvent = {
-      ...event,
-      timestamp: new Date().toISOString(),
-      agentId: this.agentId,
-    };
+  async append(event: Record<string, unknown>): Promise<LedgerEvent> {
+    const full = toLedgerEvent(
+      {
+        ...event,
+        timestamp: new Date().toISOString(),
+        agentId: this.agentId,
+      },
+      this.secrets,
+    );
     this.events.push(full);
     if (this.events.length > 5000) this.events.shift();
     if (this.ledgerUrl) {

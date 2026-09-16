@@ -19,6 +19,7 @@ export type FactoryState = {
   idleMs: number;
   idleTimers: Map<string, ReturnType<typeof setTimeout>>;
   doormanUrl?: string;
+  secretValues: Set<string>;
 };
 
 function json(res: http.ServerResponse, status: number, body: unknown) {
@@ -133,6 +134,9 @@ export async function apply(
   if (command === 'RESUME' || next === 'WORKING') {
     const bound = await bindSecrets(agent.requires, state.providers);
     if (!bound.ok) return { error: 'unbound_secrets', missing: bound.missing, status: 412 };
+    for (const value of Object.values(bound.env)) {
+      if (value.length >= 4) state.secretValues.add(value);
+    }
     await state.runtime.start(agent, bound.env);
     scheduleIdle(state, id);
     await notifyDoorman(state, id, 'available');
@@ -287,6 +291,7 @@ export function createFactoryServer(state: FactoryState): http.Server {
           type: 'action',
           action: 'CONVERSATION_HANDOFF',
           actor: 'doorman',
+          content: payload,
         });
         json(res, 202, { ok: true });
       } catch (err) {

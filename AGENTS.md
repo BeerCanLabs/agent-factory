@@ -71,7 +71,7 @@ Mac mini / VM: `landing-zones/mac-mini` (Compose). GCP: `landing-zones/gcp`. AWS
 1. `GET /healthz` on the control plane.
 2. Authenticated `GET /api/v1/agents` lists cartridges.
 3. `POST /mcp` `tools/list` works.
-4. Bind echo’s secrets; `POST /api/v1/agents/echo-agent/wake` returns 200 not 412; ledger has a `RESUME` row; `MEMORY_STORE` has prefix data after idle.
+4. Bind echo’s secrets; `POST /api/v1/agents/echo-agent/wake` returns 200 not 412; ledger has a `RESUME` row; `MEMORY_STORE` has prefix data after idle. Ledger JSONL must not contain secret values or prompt/content fields (metadata + `payloadSha256` only).
 5. Doorman `/healthz` is ok with `discord: idle` when no Discord surface/token.
 6. If they provided a Discord-surface agent **and** a bot token: Doorman `discord: connected`, presence offline until wake.
 
