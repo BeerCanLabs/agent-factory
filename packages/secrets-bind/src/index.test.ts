@@ -1,0 +1,56 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { bindSecrets, envProvider, fileProvider, httpProvider } from './index.js';
+
+describe('bindSecrets', () => {
+  it('binds names from env without storing values in the factory', async () => {
+    const result = await bindSecrets(['API_KEY'], [envProvider({ API_KEY: 'from-env' })]);
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.env.API_KEY, 'from-env');
+  });
+
+  it('rejects boot when a required name is unbound', async () => {
+    const result = await bindSecrets(['API_KEY', 'OTHER'], [envProvider({ OTHER: 'x' })]);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.deepEqual(result.missing, ['API_KEY']);
+  });
+
+  it('reads a gitignored env file as a BYO source', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'secrets-'));
+    const file = join(dir, '.factory-secrets');
+    writeFileSync(file, 'ECHO_WEBHOOK_SECRET=whsec\n');
+    try {
+      const result = await bindSecrets(['ECHO_WEBHOOK_SECRET'], [fileProvider(file)]);
+      assert.equal(result.ok, true);
+      if (result.ok) assert.equal(result.env.ECHO_WEBHOOK_SECRET, 'whsec');
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('uses an HTTP vault/SM proxy (BYO, not a factory vault)', async () => {
+    const { createServer } = await import('node:http');
+    const server = createServer((req, res) => {
+      if (req.url?.endsWith('/API_KEY')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ value: 'vaulted' }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('no port');
+    try {
+      const result = await bindSecrets(['API_KEY'], [httpProvider(`http://127.0.0.1:${addr.port}`)]);
+      assert.equal(result.ok, true);
+      if (result.ok) assert.equal(result.env.API_KEY, 'vaulted');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+});

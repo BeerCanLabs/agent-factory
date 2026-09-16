@@ -6,3 +6,6 @@ dist
 *.tfstate.*
 .terraform
 .terraform.lock.hcl
+data/
+factory.secrets
+*.secrets

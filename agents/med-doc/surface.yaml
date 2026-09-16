@@ -1,0 +1,6 @@
+triggers:
+  - type: queue
+    provider: local
+    name: factory-crash-events
+  - type: http
+    path: /wake

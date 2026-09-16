@@ -9,5 +9,5 @@ export AGENT_ROLE="${AGENT_ROLE:-Autonomous Research & Synthesis Agent}"
 export AGENT_MODEL="${AGENT_MODEL:-hermes-3-llama-3.1-70b}"
 export AGENT_PROVIDER="${AGENT_PROVIDER:-aws-ecs}"
 
-# Launch the Garrison Sidecar which in turn manages and monitors the Hermes worker process
+# Sidecar process only. Pair with a worker container; do not treat this as the agent PID 1.
 exec node /app/sidecar/dist/index.js

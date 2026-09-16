@@ -2,13 +2,15 @@
   "name": "@beercanlabs/agent-factory",
   "version": "0.1.0",
   "private": true,
-  "description": "Opinionated infrastructure & runtime plumbing for autonomous AI agent fleets",
+  "description": "Headless infrastructure for portable autonomous agent cartridges",
   "workspaces": [
-    "sidecar"
+    "sidecar",
+    "packages/*"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "test": "echo \"No tests specified\" && exit 0"
+    "test": "npm run build --workspaces --if-present && npm run test --workspaces --if-present",
+    "validate": "npm exec -w @beercanlabs/factory-contract -- tsx src/cli.ts validate --all ../../agents"
   },
   "keywords": [
     "ai-agents",

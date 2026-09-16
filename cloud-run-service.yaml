@@ -1,0 +1,48 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: example-agent-worker
+  annotations:
+    run.googleapis.com/launch-stage: BETA
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        run.googleapis.com/container-dependencies: '{"agent-sidecar":["worker-container"]}'
+    spec:
+      containers:
+      - name: worker-container
+        image: gcr.io/YOUR_PROJECT_ID/your-python-agent-image:latest
+        env:
+        - name: OPENAI_BASE_URL
+          value: "http://127.0.0.1:8080"
+        - name: HTTP_PROXY
+          value: "http://127.0.0.1:8080"
+      - name: agent-sidecar
+        image: gcr.io/YOUR_PROJECT_ID/factory-sidecar:latest
+        ports:
+        - containerPort: 9090
+        env:
+        - name: PORT
+          value: "9090"
+        - name: PROXY_PORT
+          value: "8080"
+        - name: UPSTREAM_LLM_BASE_URL
+          value: "https://generativelanguage.googleapis.com"
+        - name: FACTORY_LEDGER_URL
+          value: "https://factory.internal/api/v1/ledger"
+        - name: AGENT_ID
+          value: "example-agent"
+        - name: AGENT_NAME
+          value: "Example Agent"
+        - name: SIDECAR_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: sidecar-token
+              key: latest
+        # Garrison is optional. Uncomment to enable the overlay sink:
+        # - name: TELEMETRY_SINKS
+        #   value: garrison
+        # - name: GARRISON_URL
+        #   value: "https://garrison.example"

@@ -1,3 +1,2 @@
 mode: daemon
 serviceAccount: finops-officer@factory.iam
-schedule: "*/1 * * * *"

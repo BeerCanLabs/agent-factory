@@ -1,0 +1,6 @@
+triggers:
+  - type: http
+    path: /wake
+  - type: webhook
+    path: /hooks/echo
+    secretRef: ECHO_WEBHOOK_SECRET

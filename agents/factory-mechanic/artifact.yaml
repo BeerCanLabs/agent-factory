@@ -1,0 +1,2 @@
+kind: oci
+ref: oci://ghcr.io/beercanlabs/factory-mechanic:latest

@@ -1,0 +1,25 @@
+{
+  "name": "@beercanlabs/factory-control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "tsx --test src/index.test.ts"
+  },
+  "dependencies": {
+    "@beercanlabs/factory-contract": "0.1.0",
+    "@beercanlabs/factory-hydrate": "0.1.0",
+    "@beercanlabs/factory-ledger": "0.1.0",
+    "@beercanlabs/factory-secrets-bind": "0.1.0",
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

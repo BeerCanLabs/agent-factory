@@ -1,0 +1,6 @@
+triggers:
+  - type: webhook
+    path: /hooks/pipeline
+    secretRef: PIPELINE_WEBHOOK_SECRET
+  - type: http
+    path: /wake

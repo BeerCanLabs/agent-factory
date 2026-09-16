@@ -1,126 +1,165 @@
-# 🏭 BeerCanLabs Agent Factory — Architectural Specification
+# Agent Factory — Architectural Specification
 
-## 1. Overview & Separation of Concerns
-The **Agent Factory** is the hosting, plumbing, optimization, and lifecycle infrastructure for autonomous AI agents. It is strictly decoupled from **Agent Garrison**, which serves as the 3D Command & Control (C2), spatial telemetry, and human-in-the-loop (HITL) approval deck.
+Canonical architecture: [POSITION_PAPER.md](./POSITION_PAPER.md). This file is the implementation spec. On conflict, the paper wins.
+
+---
+
+## 1. Separation of concerns
+
+The **Agent Factory** is hosting, plumbing, governance, and lifecycle. **Agent Garrison** (and any other UI) is a privileged client of the factory control plane. Garrison is not a structural dependency.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  AGENT GARRISON (C2 Console & 3D Spatial Deck)                              │
-│  - 3D Hex FOB: Operational Sectors + "The Training Gym / Guild Hall"        │
-│  - Operator Approvals (Jira, Slack, Garrison HUD)                           │
-│  - FinOps Cost Visualizers & Enterprise RBAC (Entra ID, Cloudflare Access)  │
+│  PRIVILEGED CLIENTS (optional overlays)                                     │
+│  Garrison C2, CLIs (claude code, codex, agy), Web UIs                       │
 └──────────────────────────────────────▲──────────────────────────────────────┘
-                                       │ WebSocket Highway & REST Telemetry
+                                       │ REST / WebSocket / MCP
 ┌──────────────────────────────────────┴──────────────────────────────────────┐
-│  AGENT FACTORY (Infrastructure, Identity & Lifecycle Plumbing)              │
-│  ├── 1. The Doorman: Scale-to-zero wake daemon (Discord/Slack/Queue leases) │
-│  ├── 2. Cloud OAuth Broker: Central redirect URI & user delegation (OBO)    │
-│  ├── 3. MCP Tool Gateway: Zero-trust tool broker & API credential vault     │
-│  ├── 4. Optimization Engine (Gym): Multi-model cost-to-accuracy benchmark   │
-│  └── 5. Persistent Memory Substrate: Survives restarts & session compaction │
+│  AGENT FACTORY KERNEL                                                       │
+│  ├── Cartridge registry (soul.md, surface.yaml, secrets.manifest.yaml)      │
+│  ├── Scale-to-zero compute + wake routing                                   │
+│  ├── Secret binding (BYO Vault / AWS SM / GCP SM)                           │
+│  ├── Persistent mind (object-storage hydrate / replicate)                   │
+│  ├── Factory sidecar (egress intercept, kill-switch, OTLP)                  │
+│  └── Immutable execution ledger                                             │
 └──────────────────────────────────────▲──────────────────────────────────────┘
-                                       │ Hosts & Executes
+                                       │ hosts, does not author
 ┌──────────────────────────────────────┴──────────────────────────────────────┐
-│  FOUNDATIONAL FACTORY AGENTS                                                │
-│  ├── 1. FinOps Officer: Real-time token burn, budget caps & kill-switches    │
-│  ├── 2. The Librarian: Skill definitions, system prompts & MCP catalogs     │
-│  ├── 3. MedDoc: Agent runtime health diagnostics & crash post-mortems       │
-│  ├── 4. Factory Mechanic: Cloud infrastructure & container pipeline triage  │
-│  └── 5. Compliance Officer: Egress security, PII redaction & SOC2 audits     │
+│  PORTABLE CARTRIDGES (example set in agents/)                               │
+│  FinOps Officer, Librarian, MedDoc, Factory Mechanic, Compliance Officer    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. What the Factory Provides vs. What the Adopter Brings
+## 2. Cartridge contract
 
-### What the Factory Provides (The Substrate):
-1. **Compute & Auto-Scaling:** Cloud Run, AWS ECS Fargate, or Kubernetes with scale-to-zero support.
-2. **The Doorman:** Socket lease handover service for long-lived listener sockets (Discord/Slack/Queues) waking sleeping containers on-demand.
-3. **Cloud OAuth Broker:** Centralized OAuth 2.0 PKCE callback handler (`https://factory.domain/oauth/callback`) storing encrypted tokens for headless cloud execution.
-4. **Persistent Memory Substrate:** Managed vector database / relational state surviving container lifecycle restarts.
-5. **Universal Garrison Sidecar:** Embedded agent daemon streaming heartbeats, CPU/memory/TPM metrics, container WebTTY stdout/stderr, and intercepting C2 tactical commands (pause/resume/isolate).
+Adopters define an agent as:
 
-### What the Adopter Brings (The Agent Specification):
-Adopting companies define an agent with 4 simple declarative files:
 ```
 my-agent/
-├── soul.md          # Identity, persona, tone, purpose, operating boundaries
-├── skills.yaml      # Permitted tool bindings & MCP server endpoints
-├── surface.yaml     # Ingress triggers (Slack channel, Discord DM, webhook, Garrison sortie)
-└── identity.yaml    # Execution mode: Daemon (Service Principal) vs. On-Behalf-Of (User Delegation)
+├── soul.md                  # identity, persona, tone, purpose, boundaries
+├── surface.yaml             # ingress: cron, webhook, queue, http
+├── secrets.manifest.yaml    # requires: [NAME, ...] — never values
+├── skills.yaml              # optional MCP peripheral allowlist
+├── identity.yaml            # optional: daemon | on_behalf_of
+└── artifact.yaml            # portable compute pointer (OCI / serverless / managed engine)
 ```
 
----
+`skills.yaml` is **not** a factory-hosted code library. Ordinary skills ship inside the artifact. MCP entries are environmental peripherals, bloated tools, or centralized stateful security.
 
-## 3. The Execution Identity Model: Daemon vs. On-Behalf-Of (OBO)
-Headless cloud agents execute in one of two modes:
-1. **Daemon Mode (Service Principal):**
-   - The agent acts as an autonomous service account (e.g. `finops-officer@factory.iam`).
-   - Used for scheduled background audits, monitoring, and infrastructure tasks.
-2. **On-Behalf-Of Mode (User Delegation):**
-   - When triggered by a human (e.g. via Slack DM or Garrison sortie), the Factory injects the requesting user's scoped OAuth access token.
-   - Allows the agent to read personal calendars, query private Jira boards, or submit Git PRs strictly within the delegating user's permissions.
+The factory does not import agent logic. Example cartridges under `agents/` are fixtures, not kernel modules.
 
 ---
 
-## 4. The Model Optimization Engine ("The Training Gym")
-Every agent is designed to accomplish a specific capability contract. The Factory includes an automated evaluation harness:
-1. **Benchmark Suite:** Runs the agent against representative test scenarios with defined assertions.
-2. **Multi-Model Evaluation Matrix:** Sweeps the agent across candidate models (e.g. Claude 3.7 Sonnet -> Claude 3.5 Haiku -> Gemini 2.0 Flash -> Hermes 3 8B -> DeepSeek R1).
-3. **Cost-to-Accuracy Optimization:** Finds the cheapest model that achieves $\ge 98\%$ task pass rate.
-4. **Graduation to Garrison FOB:**
-   - In **Agent Garrison**, the agent resides in **"The Training Gym"** hex tile during evaluation.
-   - Once optimized, the agent graduates with a verified cost-efficiency rating and deploys to production sector tiles.
+## 3. Kernel capabilities
 
----
+### 3.1 Always available, not always on
 
-## 5. The 5 Foundational Factory Agents (Customizable Personas)
-All 5 pre-built agents ship with standard capability contracts and customizable persona/prompt overlays:
+Agents consume zero active compute when idle. A `surface.yaml` trigger or control-plane `wake` request scales the instance from zero, runs the work, persists mind, and scales back to zero.
 
-| Agent Identifier | Default Role | Core Mandate | Primary Tools |
-| :--- | :--- | :--- | :--- |
-| `finops-officer` | FinOps Officer | Monitors token burn rates against monthly limits; triggers kill-switches | Cloud billing APIs, Garrison FinOps stream |
-| `librarian` | The Librarian | Curates skills, system documentation, and MCP server registries | Vector search, schema validator, git repos |
-| `med-doc` | MedDoc | Triage container crashes, OOMs, and tool execution failures | Container logs, memory profiler, stack trace parser |
-| `factory-mechanic` | Factory Mechanic | Cloud infrastructure health, scaling issues, and CI/CD pipelines | Docker, Terraform, Cloud Run/ECS APIs |
-| `compliance-officer` | Compliance Officer | Egress security, data loss prevention (DLP), PII redaction, SOC2 audit trails | Audit logs, regex DLP filters, IAM policies |
+### 3.2 Ephemeral compute, persistent mind
 
----
+Local disk is disposable. On cold start the factory hydrates memory from object storage and continuously replicates out.
 
-## 6. Standard Factory Discovery & Health Contract (Garrison C2 Protocol)
+### 3.3 Secret binding, not secret storage
 
-To allow zero-configuration discovery by Agent Garrison (or any compatible C2 dashboard), an Agent Factory instance or gateway exposes standard discovery and health endpoints:
+The cartridge declares names. The factory fetches values from the adopter’s secrets manager and injects them at boot. The factory is not a vault. An MCP gateway must not store API credentials.
 
-### 1. Health & Liveness Probe
-- **Endpoints:** `GET /healthz`, `GET /api/v1/health`
-- **Response (200 OK):**
+### 3.4 Sidecar (injected observability)
+
+Every worker is wrapped by a factory sidecar that:
+
+- intercepts LLM HTTP and MCP egress (the agent does not report its own token counts)
+- writes token, tool, and action records to the factory ledger
+- acts as kill-switch: `PAUSE` / `RESUME` / `ISOLATE` / `THROTTLE` at the proxy
+- taps stdout/stderr and emits OTLP
+
+The sidecar is not the agent’s PID 1 and is not named for Garrison. An optional `TELEMETRY_SINKS=garrison` adapter may push heartbeats to a client.
+
+Remote shell `EXEC` is **not** a factory kernel command.
+
+### 3.5 Immutable execution ledger
+
+Append-only store of tokens, MCP invocations, and system actions, with actor/authorization. Answers “what did the agent do, and who authorized it?” Garrison and FinOps *read* this API; they do not own it.
+
+### 3.6 Headless control plane
+
+Factory gateway (REST + MCP):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/healthz`, `/api/v1/health` | liveness |
+| GET | `/api/v1/agents` | cartridge catalog |
+| POST | `/api/v1/agents/:id/wake` | scale from zero |
+| POST | `/api/v1/agents/:id/pause\|resume\|isolate` | kill-switch |
+| GET | `/api/v1/ledger` | audit query |
+
+The same surface is exposed as MCP tools. Auth is bearer/OIDC. Per-container fake `/v1/mcp/agents` JSON is not MCP and is not the factory catalog.
+
+Discovery payload (control plane, not sidecar):
+
 ```json
 {
-  "status": "ok",
-  "version": "0.1.0",
-  "uptime": 14280,
-  "timestamp": "2026-09-14T00:00:00.000Z"
+  "id": "agent-id",
+  "name": "Human-Readable Agent Name",
+  "role": "Functional role",
+  "state": "IDLE | WORKING | PAUSED | ISOLATED | BLOCKED_FOR_HUMAN | ERROR",
+  "model": "optional",
+  "provider": "gcp-cloud-run | aws-ecs | local",
+  "artifact": "oci://..."
 }
 ```
 
-### 2. Fleet Catalog & Discovery Probe
-- **Endpoints:** `GET /api/v1/agents`, `GET /v1/mcp/agents`
-- **Headers:** Optional `Authorization: Bearer <API_KEY_OR_JWT>`
-- **Response (200 OK):**
-```json
-[
-  {
-    "id": "agent-id",
-    "name": "Human-Readable Agent Name",
-    "role": "Functional role or responsibility",
-    "domain": "Engineering | Operations | Executive | Analytics",
-    "sectorId": "sector-eng",
-    "model": "claude-3-7-sonnet | gpt-4o | hermes-3-70b",
-    "provider": "gcp-cloud-run | aws-ecs | local",
-    "state": "IDLE | WORKING | PAUSED | BLOCKED_FOR_HUMAN",
-    "tools": ["git", "slack", "cloud-run"]
-  }
-]
-```
+`sectorId` and other overlay geometry belong to Garrison, not the factory schema.
 
+### 3.7 Decentralized control plane
+
+Budget enforcement and crash diagnosis are *cartridges* (FinOps, MedDoc), not hardcoded factory modules. The factory routes ledger events and crash logs; it does not contain agent-specific remediation logic.
+
+---
+
+## 4. Foundational example cartridges
+
+Shipped under `agents/` as portable examples. Factory code must not import them.
+
+| Identifier | Mandate |
+|---|---|
+| `finops-officer` | Read the factory ledger; recommend or trigger kill-switch via factory API |
+| `librarian` | Index *peripheral* MCP endpoints and docs; not a factory skill runtime |
+| `med-doc` | Consume crash/OOM events routed by the factory; produce post-mortems |
+| `factory-mechanic` | IaC and pipeline triage as an agent, not as factory code |
+| `compliance-officer` | DLP / audit consumption of ledger + logs |
+
+---
+
+## 5. Deferred — not factory kernel
+
+These appear in earlier drafts. They are **not** required to satisfy the position paper and must not be implemented as kernel:
+
+1. **Doorman** — long-lived Discord/Slack socket lease handover.
+2. **Cloud OAuth broker** — factory-stored OBO refresh tokens.
+3. **Training Gym** — Promptfoo / multi-model graduation / Garrison hex “gym” tile.
+4. **LiteLLM-as-product** — a model-router SKU. A sidecar intercept proxy *is* kernel; a routing marketplace is not.
+5. **Shared skills catalog / capability triage bot** — contradicts “skills live in the artifact.”
+6. **Voice / robotics streaming gateway.**
+7. **MCP tool gateway as credential vault** — contradicts secret binding.
+
+Daemon vs on-behalf-of identity (`identity.yaml`) may land later as optional cartridge metadata. It is not required for the kernel contract.
+
+---
+
+## 6. Current tree vs kernel (gap)
+
+| Kernel piece | In tree today |
+|---|---|
+| Cartridge schema + validator | `packages/contract` + `npm run validate` |
+| `surface.yaml` / `secrets.manifest.yaml` / `memory.yaml` | Present on all example agents |
+| Factory sidecar intercept | `sidecar/`: LLM proxy, isolate/pause/throttle, optional Garrison sink |
+| Control plane REST + MCP | `packages/control-plane` |
+| Secret binding | `packages/secrets-bind` (env, file, HTTP vault/SM). Wake returns 412 if unbound |
+| Scale-to-zero + wake | Control-plane wake + idle timer; webhook from `surface.yaml`; AWS RunTask schedule; Cloud Run `min_instance_count = 0` |
+| Memory hydration | `packages/hydrate` + `runtimes/generic/start.sh` |
+| Factory ledger | `packages/ledger` append-only JSONL; sidecar POSTs here |
+| Event routing | `type=crash` wakes `med-doc`; `budget.alert` wakes `finops-officer` |
+| Blueprints | AWS/GCP modules with sidecar+worker, named-secret IAM, mind bucket, no `AmazonBedrockFullAccess` |

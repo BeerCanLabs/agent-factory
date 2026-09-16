@@ -1,0 +1,5 @@
+triggers:
+  - type: cron
+    schedule: "*/1 * * * *"
+  - type: http
+    path: /wake

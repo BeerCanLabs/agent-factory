@@ -1,0 +1,2 @@
+mode: daemon
+serviceAccount: librarian@factory.iam

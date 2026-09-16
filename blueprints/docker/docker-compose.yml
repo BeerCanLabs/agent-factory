@@ -1,42 +1,49 @@
-version: '3.8'
-
 services:
-  hermes-agent:
+  control-plane:
     build:
       context: ../..
-      dockerfile: sidecar/Dockerfile
-    container_name: factory-hermes-01
+      dockerfile: packages/control-plane/Dockerfile
+    container_name: factory-control-plane
     environment:
-      - AGENT_ID=hermes-researcher-01
-      - AGENT_NAME=Hermes-Prime
-      - AGENT_SECTOR=sector-eng
-      - AGENT_ROLE=Deep Codebase Research & Analysis
-      - AGENT_MODEL=hermes-3-llama-3.1-70b
-      - AGENT_PROVIDER=aws-ecs
-      - GARRISON_URL=http://host.docker.internal:3001
-      - PORT=9091
+      - PORT=8088
+      - AGENTS_ROOT=/app/agents
+      - FACTORY_TOKEN=dev-token
+      - FACTORY_SECRETS_FILE=/run/factory.secrets
+      - FACTORY_LEDGER_PATH=/data/ledger.jsonl
+      - MEMORY_STORE_DIR=/data/mind
+      - MEMORY_EPHEMERAL_DIR=/data/ephemeral
+      - FACTORY_IDLE_MS=60000
+      - FACTORY_CRON=1
+    volumes:
+      - factory-data:/data
+      - ./.env.example:/run/factory.secrets:ro
     ports:
-      - "9091:9091"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: unless-stopped
+      - "8088:8088"
+    restart: "no"
 
-  openclaw-agent:
+  # Debug-only warm sidecar. Default factory path is scale-to-zero via control-plane wake.
+  echo-sidecar:
+    profiles: ["always-on"]
     build:
       context: ../..
       dockerfile: sidecar/Dockerfile
-    container_name: factory-openclaw-01
+    container_name: factory-echo-sidecar
     environment:
-      - AGENT_ID=openclaw-builder-01
-      - AGENT_NAME=OpenClaw-Titan
-      - AGENT_SECTOR=sector-ops
-      - AGENT_ROLE=Continuous Sandbox & Deployment Worker
-      - AGENT_MODEL=claude-3-7-sonnet
-      - AGENT_PROVIDER=gcp-cloud-run
-      - GARRISON_URL=http://host.docker.internal:3001
-      - PORT=9092
+      - AGENT_ID=echo-agent
+      - AGENT_NAME=Echo
+      - PORT=9090
+      - PROXY_PORT=8080
+      - UPSTREAM_LLM_BASE_URL=http://127.0.0.1:9
+      - FACTORY_LEDGER_URL=http://control-plane:8088/api/v1/ledger
+      - FACTORY_TOKEN=dev-token
+      - SIDECAR_TOKEN=dev-token
     ports:
-      - "9092:9092"
+      - "9090:9090"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    restart: unless-stopped
+    restart: "no"
+    depends_on:
+      - control-plane
+
+volumes:
+  factory-data:

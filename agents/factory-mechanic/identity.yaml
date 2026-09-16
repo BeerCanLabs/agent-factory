@@ -1,0 +1,2 @@
+mode: daemon
+serviceAccount: factory-mechanic@factory.iam

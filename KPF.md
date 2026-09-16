@@ -1,66 +1,70 @@
 # Key Product Flows (KPF) — Agent Factory
 
-This document is the single source of truth for user-facing flows and core capabilities supported by the Agent Factory orchestration framework. The focus is strictly on the infrastructure, orchestration, and capabilities of the factory itself, independent of any specific agent implementation or cloud provider.
+Source of truth for factory-owned flows. Canonical architecture: [POSITION_PAPER.md](./POSITION_PAPER.md). Overlay UX (Garrison, web, CLI) is a client of these flows, not a participant inside them.
 
 ---
 
-## 1. Declarative Agent Provisioning
-- **Description:** An operator defines a new agent or updates an existing one via configuration files. Applying the configuration automatically provisions the underlying serverless compute instance, dedicated persistent memory storage, identity bindings, and scheduled triggers. The flow abstracts away the underlying cloud infrastructure into a unified agent definition.
-- **Entry points:** Infrastructure as Code (IaC) modules, agent configuration directories.
-- **If it silently breaks:** Agents fail to deploy, crash loop due to missing bindings, or experience downtime.
+## Kernel flows
+
+### 1. Declarative Agent Provisioning
+- **Description:** An operator submits a cartridge (`soul.md`, `surface.yaml`, `secrets.manifest.yaml`, artifact pointer). The factory validates the contract and provisions serverless compute, memory storage, secret bindings, and triggers. No agent logic is copied into the factory.
+- **Entry points:** Cartridge directories, IaC modules, `factory validate`.
+- **If it silently breaks:** Agents fail to deploy, crash-loop on missing bindings, or run with an incomplete contract.
+
+### 2. Fast Cold-Start State Hydration
+- **Description:** On wake, the entrypoint hydrates markdown/db snapshots from object storage into ephemeral disk and replicates back out. The agent must assume local disk will be destroyed.
+- **Entry points:** Runtime entrypoints, hydration config on the cartridge.
+- **If it silently breaks:** Amnesia on restart.
+
+### 3. Event-Driven Wake (surface.yaml)
+- **Description:** Cron, authenticated webhook, queue, or HTTP triggers scale an agent from zero, pass the event, and allow scale-back to zero.
+- **Entry points:** Control-plane wake, cloud scheduler, ingress.
+- **If it silently breaks:** Events dropped, or agents stay warm and burn idle compute.
+
+### 4. Always Available, Not Always On
+- **Description:** Idle agents use zero active compute. Wake is authenticated. After work, scale to zero.
+- **Entry points:** Cloud scheduling, ingress, control-plane `POST /api/v1/agents/:id/wake`.
+- **If it silently breaks:** Cron never fires, or instances run 24/7.
+
+### 5. Zero Plaintext Secrets (binding, not storage)
+- **Description:** Cartridges declare secret *names*. The factory binds values from the adopter’s BYO manager (Vault, AWS SM, GCP SM) at boot. The factory does not store secrets and is not a vault. MCP is not a credential store.
+- **Entry points:** `secrets.manifest.yaml`, IaC bindings.
+- **If it silently breaks:** Secrets in git, or boot with unbound names.
+
+### 6. Injected Observability + Kill-Switch
+- **Description:** The factory sidecar intercepts LLM and MCP egress, counts tokens, records tool calls, and can pause / isolate / throttle by closing or rate-limiting the proxy. Agents do not emit custom spend telemetry.
+- **Entry points:** Sidecar proxy, control-plane pause/isolate.
+- **If it silently breaks:** Unmetered spend, or kill-switch that only SIGSTOPs a child the sidecar spawned.
+
+### 7. Immutable Execution Ledger
+- **Description:** Every token, MCP invocation, and system action is appended to a factory-owned ledger with actor/authorization. Clients (Garrison, FinOps cartridge) query it. They do not own it.
+- **Entry points:** Sidecar writer, `GET /api/v1/ledger`.
+- **If it silently breaks:** No SOC2 trail, disputed spend, missing “who authorized this.”
+
+### 8. Authenticated Factory MCP + REST
+- **Description:** External clients talk to the factory control plane over REST and MCP with OIDC/bearer auth. The gateway lists cartridges, wakes agents, applies kill-switch, and queries the ledger. It does not catalog a shared skill library or vault API keys.
+- **Entry points:** Control-plane MCP server, `/api/v1/*`.
+- **If it silently breaks:** Unauthenticated control, or clients scraping per-sidecar fake MCP JSON.
+
+### 9. Crash and budget event routing
+- **Description:** Worker non-zero exits / OOM become ledger events. If the MedDoc cartridge is installed, the factory wakes it. Budget anomalies are visible on the ledger for the FinOps cartridge. Remediation logic lives in those agents, not in factory modules.
+- **Entry points:** Sidecar exit hooks, control-plane event routes.
+- **If it silently breaks:** Crashes vanish; FinOps has nothing to read.
 
 ---
 
-## 2. Fast Cold-Start State Hydration & Anti-"50 First Dates" Persistence
-- **Description:** When an agent instance spins up, the container entrypoint downloads the latest markdown memories and starts a replication process to restore and continuously replicate the internal databases to remote object storage with sub-second replication latency.
-- **Entry points:** Container entrypoints, state replication configuration.
-- **If it silently breaks:** Agents suffer amnesia on container restart, forgetting past user conversations, user preferences, or task progress.
+## Deferred flows (not kernel)
 
----
+These remain documented so they are not reintroduced as silent kernel scope.
 
-## 3. Multi-Channel Identity & Real-Time Streaming
-- **Description:** The factory allows agents to natively interface across multiple surfaces (chat apps, Web UI, voice). For voice and robotics, external clients send user transcript text to a streaming endpoint. The agent streams back structured chunks, enabling physical gestures during long-path cognition and real-time audio playback upon first token arrival.
-- **Entry points:** Gateway routing, voice protocol endpoints.
-- **If it silently breaks:** Robot gets stuck in a thinking hold, voice replies fail to stream, or integrations drop messages.
+### D1. Multi-channel identity and real-time voice/robotics streaming
+Voice transcript streaming and gesture clocks are overlay/runtime concerns, not factory kernel.
 
----
+### D2. Autonomous capability triage bot
+A factory bot that sweeps per-agent backlogs and a centralized skills catalog contradicts portable cartridges (skills live in the artifact).
 
-## 4. Event-Driven Agent Triggers
-- **Description:** Agents dynamically react to asynchronous webhook events originating from external event engines (e.g., code repositories, monitoring logs, system alerts). The agent receives the webhook, verifies the signature, and autonomously executes the necessary remediation or operational task.
-- **Entry points:** Webhook ingress controllers, event handler skills.
-- **If it silently breaks:** Critical events are ignored, or agents fail to authenticate the incoming payload.
+### D3. Shared skills catalog execution
+The factory does not host a plug-and-play code library. MCP is for peripherals only.
 
----
-
-## 5. Always Available, Not Always On (Serverless Execution)
-- **Description:** The factory orchestration ensures agents consume zero active compute when idle. The scheduler or an incoming event sends an authenticated request to wake the agent. The serverless instance wakes up from zero, executes the autonomous task, logs results to persistent memory, and seamlessly scales back down to zero.
-- **Entry points:** Cloud scheduling modules, server ingress configurations.
-- **If it silently breaks:** Scheduled routines do not run, or agents run continuously without scaling down, inflating compute costs.
-
----
-
-## 6. Zero Plaintext Secrets Enforcement (Plug-and-Play)
-- **Description:** No plaintext tokens, passwords, or local environment files are stored in version control. All credentials are fetched dynamically at runtime via a plug-and-play secrets management architecture (BYO-cloud secrets manager). The factory binds the required secrets securely to the agent's environment at boot.
-- **Entry points:** IaC secret bindings, environment configuration.
-- **If it silently breaks:** Secrets leak into repositories, or agents fail to boot due to missing permission grants on the secrets provider.
-
----
-
-## 7. Autonomous Task & Capability Triage
-- **Description:** When an agent encounters a limitation or receives a request outside its current capabilities, it automatically generates a structured task or feature request on its own designated backlog. A centralized factory orchestration bot is accountable for sweeping these backlogs and tracking capability gaps across the entire matrix.
-- **Entry points:** Triage skills, factory catalog configurations.
-- **If it silently breaks:** Agent limitations are lost, or feature requests produce unformatted issues that cannot be actioned by human operators.
-
----
-
-## 8. Authenticated MCP Gateway
-- **Description:** External client interfaces and peer agents communicate over an internet-exposed Model Context Protocol (MCP) gateway. The gateway acts as a strict zero-trust boundary enforcing secure OAuth/OIDC identity checks. The gateway lists factory agents, catalogs available skills, routes work to the owning agent, checks status, and enforces scope authorization without relying on static API keys.
-- **Entry points:** OAuth server modules, MCP gateway routers.
-- **If it silently breaks:** Unauthenticated or expired requests are admitted, unauthorized identities get in, or agents cannot securely delegate skills.
-
----
-
-## 9. Extensible Capability Execution (Shared Skills Catalog)
-- **Description:** Agents can securely invoke internal systems, third-party APIs, and external tooling via a shared, plug-and-play skills repository. The factory provides the mechanism for agents to access capabilities dynamically, without hardcoding specific tools into the core factory engine. The infrastructure simply facilitates the connection between the agent and the capability.
-- **Entry points:** Centralized skills directory, agent capability manifests.
-- **If it silently breaks:** Agents cannot utilize tools, execution requests fail with unclear errors, or agents execute unauthorized commands outside their scoped capabilities.
+### D4. Doorman / OAuth broker / Training Gym
+Socket-lease handover, factory-stored OBO tokens, and multi-model graduation are out of paper scope.

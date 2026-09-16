@@ -1,0 +1,5 @@
+skills:
+  - id: iac-plan
+    description: Read Terraform and Cloud Run/ECS APIs as an environmental peripheral
+  - id: git-pr
+    description: Open pull requests against factory IaC (requires GIT_WRITE_TOKEN binding)

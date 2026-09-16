@@ -1,0 +1,19 @@
+{
+  "name": "@beercanlabs/factory-hydrate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "factory-hydrate": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test src/index.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
