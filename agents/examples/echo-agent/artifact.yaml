@@ -1,2 +1,5 @@
 kind: oci
 ref: oci://ghcr.io/beercanlabs/factory-echo-agent:latest
+localCommand:
+  - node
+  - worker.mjs

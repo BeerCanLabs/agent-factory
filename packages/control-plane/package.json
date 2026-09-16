@@ -11,6 +11,7 @@
     "test": "tsx --test src/index.test.ts"
   },
   "dependencies": {
+    "@beercanlabs/factory-auth": "0.1.0",
     "@beercanlabs/factory-contract": "0.1.0",
     "@beercanlabs/factory-hydrate": "0.1.0",
     "@beercanlabs/factory-ledger": "0.1.0",

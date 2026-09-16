@@ -60,6 +60,19 @@ describe('validateCartridge', () => {
     }
   });
 
+  it('accepts a discord surface trigger', () => {
+    const dir = fixture({
+      ...valid,
+      'surface.yaml': 'triggers:\n  - type: discord\n',
+    });
+    try {
+      const result = validateCartridge(dir);
+      assert.equal(result.ok, true, JSON.stringify(result.issues, null, 2));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
   it('rejects .env in the cartridge', () => {
     const dir = fixture({ ...valid, '.env': 'API_KEY=abc\n' });
     try {

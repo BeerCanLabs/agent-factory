@@ -16,9 +16,7 @@
     "ai-agents",
     "bedrock",
     "vertex-ai",
-    "hermes",
-    "openclaw",
-    "garrison",
+    "mcp",
     "agent-infrastructure"
   ],
   "author": "BeerCanLabs",

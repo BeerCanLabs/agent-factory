@@ -10,6 +10,7 @@ export type AgentRecord = {
   state: 'IDLE' | 'WORKING' | 'PAUSED' | 'ISOLATED' | 'BLOCKED_FOR_HUMAN' | 'ERROR';
   provider: string;
   artifact: string;
+  localCommand?: string[];
   sidecarUrl?: string;
   requires: string[];
   triggers: Surface['triggers'];
@@ -27,9 +28,14 @@ export function loadCatalog(agentsRoot: string, sidecarUrls: Record<string, stri
     const name = titleFromSoul(soul) ?? result.cartridgeId;
     const role = mandateFromSoul(soul) ?? name;
     let artifact = '';
+    let localCommand: string[] | undefined;
     try {
-      const raw = parseYaml(readFileSync(join(dir, 'artifact.yaml'), 'utf8')) as { ref?: string };
+      const raw = parseYaml(readFileSync(join(dir, 'artifact.yaml'), 'utf8')) as {
+        ref?: string;
+        localCommand?: string[];
+      };
       artifact = raw.ref ?? '';
+      localCommand = raw.localCommand;
     } catch {
       artifact = '';
     }
@@ -61,6 +67,7 @@ export function loadCatalog(agentsRoot: string, sidecarUrls: Record<string, stri
       state: 'IDLE',
       provider: 'local',
       artifact,
+      localCommand,
       sidecarUrl: sidecarUrls[result.cartridgeId],
       requires,
       triggers,

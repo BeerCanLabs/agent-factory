@@ -5,6 +5,7 @@ COPY packages ./packages
 COPY sidecar/package.json ./sidecar/package.json
 RUN npm install
 RUN npm run build -w @beercanlabs/factory-contract \
+  -w @beercanlabs/factory-auth \
   -w @beercanlabs/factory-secrets-bind \
   -w @beercanlabs/factory-hydrate \
   -w @beercanlabs/factory-ledger \
@@ -14,6 +15,7 @@ FROM node:22-alpine
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/contract/package.json ./packages/contract/package.json
+COPY packages/auth/package.json ./packages/auth/package.json
 COPY packages/secrets-bind/package.json ./packages/secrets-bind/package.json
 COPY packages/hydrate/package.json ./packages/hydrate/package.json
 COPY packages/ledger/package.json ./packages/ledger/package.json
@@ -21,6 +23,7 @@ COPY packages/control-plane/package.json ./packages/control-plane/package.json
 COPY sidecar/package.json ./sidecar/package.json
 RUN npm install --omit=dev
 COPY --from=builder /app/packages/contract/dist ./packages/contract/dist
+COPY --from=builder /app/packages/auth/dist ./packages/auth/dist
 COPY --from=builder /app/packages/secrets-bind/dist ./packages/secrets-bind/dist
 COPY --from=builder /app/packages/hydrate/dist ./packages/hydrate/dist
 COPY --from=builder /app/packages/ledger/dist ./packages/ledger/dist

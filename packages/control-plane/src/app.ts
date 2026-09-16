@@ -3,6 +3,8 @@ import { timingSafeEqual } from 'node:crypto';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import type { LedgerStore } from '@beercanlabs/factory-ledger';
+import type { AuthProvider } from '@beercanlabs/factory-auth';
+import { bearerAuth } from '@beercanlabs/factory-auth';
 import { AgentRecord } from './catalog.js';
 import type { Runtime } from './runtime.js';
 
@@ -10,11 +12,13 @@ export type FactoryState = {
   agents: Map<string, AgentRecord>;
   ledger: LedgerStore;
   token: string | undefined;
+  auth: AuthProvider;
   version: string;
   providers: SecretProvider[];
   runtime: Runtime;
   idleMs: number;
   idleTimers: Map<string, ReturnType<typeof setTimeout>>;
+  doormanUrl?: string;
 };
 
 function json(res: http.ServerResponse, status: number, body: unknown) {
@@ -33,9 +37,29 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
-function requireAuth(req: http.IncomingMessage, state: FactoryState): boolean {
-  if (!state.token) return true;
-  return req.headers.authorization === `Bearer ${state.token}`;
+async function requireAuth(req: http.IncomingMessage, state: FactoryState): Promise<boolean> {
+  const auth = state.auth ?? (state.token ? bearerAuth(state.token) : undefined);
+  if (!auth) return true;
+  const result = await auth.verify(req.headers.authorization);
+  return result.ok;
+}
+
+async function notifyDoorman(state: FactoryState, agentId: string, presence: 'offline' | 'available') {
+  if (!state.doormanUrl) return;
+  try {
+    const res = await fetch(`${state.doormanUrl.replace(/\/$/, '')}/api/v1/presence`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
+      },
+      body: JSON.stringify({ agentId, presence }),
+    });
+    if (!res.ok) console.error(`[control-plane] doorman presence ${res.status}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[control-plane] doorman unreachable: ${message}`);
+  }
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -94,6 +118,7 @@ async function scaleToZero(state: FactoryState, agent: AgentRecord) {
     action: 'SCALE_TO_ZERO',
     actor: 'control-plane',
   });
+  await notifyDoorman(state, agent.id, 'offline');
 }
 
 export async function apply(
@@ -110,6 +135,7 @@ export async function apply(
     if (!bound.ok) return { error: 'unbound_secrets', missing: bound.missing, status: 412 };
     await state.runtime.start(agent, bound.env);
     scheduleIdle(state, id);
+    await notifyDoorman(state, id, 'available');
   }
 
   if (command === 'PAUSE' || command === 'ISOLATE') {
@@ -194,7 +220,7 @@ export function createFactoryServer(state: FactoryState): http.Server {
       return;
     }
 
-    if (!requireAuth(req, state)) {
+    if (!(await requireAuth(req, state))) {
       json(res, 401, { error: 'unauthorized' });
       return;
     }
@@ -242,6 +268,31 @@ export function createFactoryServer(state: FactoryState): http.Server {
       }
       const result = await apply(state, agent.id, 'WORKING', 'RESUME');
       json(res, 'error' in result ? (result.status ?? 400) : 200, result);
+      return;
+    }
+
+    const convoMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/conversation$/);
+    if (convoMatch && req.method === 'POST') {
+      const agent = state.agents.get(convoMatch[1]);
+      if (!agent) {
+        json(res, 404, { error: 'not_found' });
+        return;
+      }
+      try {
+        const payload = JSON.parse(await readBody(req)) as unknown;
+        await state.runtime.deliver(agent, payload);
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId: agent.id,
+          type: 'action',
+          action: 'CONVERSATION_HANDOFF',
+          actor: 'doorman',
+        });
+        json(res, 202, { ok: true });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        json(res, 400, { error: message });
+      }
       return;
     }
 

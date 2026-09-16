@@ -66,5 +66,5 @@ A factory bot that sweeps per-agent backlogs and a centralized skills catalog co
 ### D3. Shared skills catalog execution
 The factory does not host a plug-and-play code library. MCP is for peripherals only.
 
-### D4. Doorman / OAuth broker / Training Gym
-Socket-lease handover, factory-stored OBO tokens, and multi-model graduation are out of paper scope.
+### D4. OAuth broker / Training Gym
+Factory-stored OBO tokens and multi-model graduation are out of paper scope. Doorman is a kernel *module*: deployed idle, no Discord app at factory build; Gateway + offline/available presence when a Discord-surface cartridge binds a token.

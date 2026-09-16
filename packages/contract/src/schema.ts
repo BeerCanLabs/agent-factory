@@ -41,9 +41,18 @@ const httpTrigger = z
   })
   .strict();
 
+const discordTrigger = z
+  .object({
+    type: z.literal('discord'),
+    secretRef: secretName.default('DISCORD_BOT_TOKEN'),
+  })
+  .strict();
+
 export const surfaceSchema = z
   .object({
-    triggers: z.array(z.discriminatedUnion('type', [cronTrigger, webhookTrigger, queueTrigger, httpTrigger])).min(1),
+    triggers: z
+      .array(z.discriminatedUnion('type', [cronTrigger, webhookTrigger, queueTrigger, httpTrigger, discordTrigger]))
+      .min(1),
   })
   .strict();
 
@@ -51,6 +60,7 @@ export const artifactSchema = z
   .object({
     kind: z.enum(['oci', 'serverless', 'managed']),
     ref: z.string().min(1),
+    localCommand: z.array(z.string()).min(1).optional(),
   })
   .strict();
 

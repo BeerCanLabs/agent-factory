@@ -1,4 +1,5 @@
-# Prefer landing-zones/mac-mini for new deploys. Kept as an alias.
+# Landing zone: Mac mini / Linux VM (Docker).
+# Doorman is always on and idle. No Discord app required.
 services:
   control-plane:
     build:
@@ -13,10 +14,12 @@ services:
       - FACTORY_LEDGER_PATH=/data/ledger.jsonl
       - MEMORY_STORE_DIR=/data/mind
       - MEMORY_EPHEMERAL_DIR=/data/ephemeral
+      - FACTORY_IDLE_MS=60000
+      - FACTORY_CRON=1
       - DOORMAN_URL=http://doorman:8090
     volumes:
       - factory-data:/data
-      - ../../landing-zones/docker-secrets.env:/run/factory.secrets:ro
+      - ../docker-secrets.env:/run/factory.secrets:ro
     ports:
       - "8088:8088"
     restart: "no"
@@ -31,7 +34,7 @@ services:
       - FACTORY_TOKEN=dev-token
       - FACTORY_SECRETS_FILE=/run/factory.secrets
     volumes:
-      - ../../landing-zones/docker-secrets.env:/run/factory.secrets:ro
+      - ../docker-secrets.env:/run/factory.secrets:ro
     ports:
       - "8090:8090"
     restart: "no"

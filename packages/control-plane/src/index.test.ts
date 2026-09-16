@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
+import { bearerAuth } from '@beercanlabs/factory-auth';
 import { pullMind, pushMind } from '@beercanlabs/factory-hydrate';
 import { loadCatalog } from './catalog.js';
 import { createFactoryServer, FactoryState, handleMcp } from './app.js';
@@ -65,6 +66,7 @@ function makeState(overrides: Partial<FactoryState> = {}): FactoryState {
     agents: new Map(catalog.map((a) => [a.id, a])),
     ledger: new MemoryLedger(),
     token: 'dev-token',
+    auth: bearerAuth('dev-token'),
     version: 'test',
     providers: [envProvider({ ECHO_WEBHOOK_SECRET: 'whsec', FACTORY_LEDGER_TOKEN: 'ledger' })],
     runtime: noopRuntime(),
@@ -157,6 +159,15 @@ describe('control plane HTTP + MCP', { concurrency: false }, () => {
     });
     assert.equal(crash.status, 201);
     assert.equal(state.agents.get('med-doc')?.state, 'WORKING');
+  });
+
+  it('accepts a doorman conversation handoff', async () => {
+    const res = await request(port, '/api/v1/agents/echo-agent/conversation', {
+      method: 'POST',
+      token,
+      body: { content: 'hello', channelId: 'c1' },
+    });
+    assert.equal(res.status, 202, JSON.stringify(res.json));
   });
 
   it('exposes the same surface over MCP', async () => {

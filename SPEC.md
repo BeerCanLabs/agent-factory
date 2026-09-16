@@ -137,7 +137,7 @@ Shipped under `agents/` as portable examples. Factory code must not import them.
 
 These appear in earlier drafts. They are **not** required to satisfy the position paper and must not be implemented as kernel:
 
-1. **Doorman** — long-lived Discord/Slack socket lease handover.
+1. **Doorman (module, not a deploy-time Discord app).** Always installed, idle until a cartridge declares `type: discord` and `DISCORD_BOT_TOKEN` (or `secretRef`) binds. Gateway stays up; presence is offline while the agent sleeps and available after conversation handoff. Slack RTM and true TCP socket transfer remain deferred.
 2. **Cloud OAuth broker** — factory-stored OBO refresh tokens.
 3. **Training Gym** — Promptfoo / multi-model graduation / Garrison hex “gym” tile.
 4. **LiteLLM-as-product** — a model-router SKU. A sidecar intercept proxy *is* kernel; a routing marketplace is not.
@@ -155,6 +155,8 @@ Daemon vs on-behalf-of identity (`identity.yaml`) may land later as optional car
 |---|---|
 | Cartridge schema + validator | `packages/contract` + `npm run validate` |
 | `surface.yaml` / `secrets.manifest.yaml` / `memory.yaml` | Present on all example agents |
+| Doorman | `packages/doorman` — idle without a bot token; presence offline/available |
+| Auth | `packages/auth` — bearer or OIDC iss/aud (Cloudflare / Entra / Google) |
 | Factory sidecar intercept | `sidecar/`: LLM proxy, isolate/pause/throttle, optional Garrison sink |
 | Control plane REST + MCP | `packages/control-plane` |
 | Secret binding | `packages/secrets-bind` (env, file, HTTP vault/SM). Wake returns 412 if unbound |

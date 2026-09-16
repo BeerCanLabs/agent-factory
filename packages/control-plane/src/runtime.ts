@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pullMind, pushMind, type MindStore } from '@beercanlabs/factory-hydrate';
 import type { AgentRecord } from './catalog.js';
@@ -8,6 +8,7 @@ export type Runtime = {
   start(agent: AgentRecord, env: Record<string, string>): Promise<void>;
   stop(agent: AgentRecord): Promise<number | null>;
   running(id: string): boolean;
+  deliver(agent: AgentRecord, payload: unknown): Promise<void>;
 };
 
 export function memoryRuntime(opts: {
@@ -30,6 +31,7 @@ export function memoryRuntime(opts: {
       const spec = opts.workerCommand?.(agent);
       if (!spec) return;
       const child = spawn(spec.cmd, spec.args, {
+        cwd: agent.dir,
         env: { ...process.env, ...env, MEMORY_DIR: dest, AGENT_ID: agent.id },
         stdio: 'inherit',
       });
@@ -39,6 +41,11 @@ export function memoryRuntime(opts: {
         if (agent.memoryPrefix) pushMind(opts.store, agent.memoryPrefix, dest);
         opts.onExit?.(agent, code);
       });
+    },
+    async deliver(agent, payload) {
+      const dest = join(opts.ephemeralRoot, agent.id);
+      mkdirSync(dest, { recursive: true });
+      appendFileSync(join(dest, 'inbox.jsonl'), `${JSON.stringify(payload)}\n`);
     },
     async stop(agent) {
       const child = procs.get(agent.id);
@@ -67,5 +74,6 @@ export function noopRuntime(): Runtime {
       ids.delete(agent.id);
       return 0;
     },
+    async deliver() {},
   };
 }

@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { FileLedger } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
+import { authFromEnv } from '@beercanlabs/factory-auth';
 import { loadCatalog } from './catalog.js';
 import { apply, createFactoryServer, FactoryState } from './app.js';
 import { memoryRuntime } from './runtime.js';
@@ -34,17 +35,20 @@ const state: FactoryState = {
   agents: new Map(agents.map((a) => [a.id, a])),
   ledger: new FileLedger(LEDGER_PATH),
   token: TOKEN,
+  auth: authFromEnv(),
   version: VERSION,
   providers: providersFromEnv(),
   idleMs: IDLE_MS,
   idleTimers: new Map(),
+  doormanUrl: process.env.DOORMAN_URL,
   runtime: memoryRuntime({
     store: { root: MEMORY_STORE },
     ephemeralRoot: EPHEMERAL,
     workerCommand: (agent) => {
-      if (process.env.FACTORY_SPAWN_WORKERS !== '1') return undefined;
-      if (agent.id === 'echo-agent') {
-        return { cmd: 'node', args: [join(agent.dir, 'worker.mjs')] };
+      if (process.env.FACTORY_SPAWN_WORKERS === '0') return undefined;
+      if (agent.localCommand?.length) {
+        const [cmd, ...args] = agent.localCommand;
+        return { cmd, args };
       }
       return undefined;
     },
