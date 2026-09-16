@@ -63,6 +63,11 @@ An agent should never be burdened with writing custom code to report its budget 
 ### Immutable Accountability (The Execution Ledger)
 While Observability answers *"What is the agent doing right now?"*, the Ledger answers *"What did the agent do yesterday, and who authorized it?"* Every token spent, every MCP tool invoked, and every system action taken by an agent is recorded in an append-only, immutable execution ledger provided by the Factory. This provides a non-repudiable audit trail required for SOC2 compliance, trust, and FinOps billing.
 
+### Zero-Knowledge Logging & Deterministic Redaction
+Because the Execution Ledger is immutable, accidentally recording Personally Identifiable Information (PII) or plaintext credentials creates a permanent, non-compliant data spill. To prevent this, the Factory enforces a zero-knowledge boundary before any data is flushed to disk:
+- **Deterministic Secret Masking:** Because the Factory dynamically injects secrets at boot, the Sidecar knows their exact string values. It acts as an outbound firewall, automatically finding and redacting those secrets from all logs and ledger entries.
+- **Metadata-First Ledgers:** The ledger strictly records execution *metadata* (e.g., actor ID, tool invoked, token cost, timestamp) and cryptographic *hashes* of the payloads, rather than raw text. This guarantees a verifiable audit trail without accumulating toxic, regulated data.
+
 ---
 
 ## 5. Headless by Design (UX as an Overlay)
