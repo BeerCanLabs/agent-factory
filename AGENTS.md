@@ -22,6 +22,7 @@ Do not assume AWS, GCP, or Discord. Ask:
 2. **Identity provider** for the factory console — Cloudflare Access, Microsoft Entra, Google OAuth/OIDC, or a long-lived bearer token for a first bring-up.
 3. **Secrets backend** — GCP Secret Manager, AWS Secrets Manager, Vault, or a gitignored file on a VM.
 4. **Discord** — optional. Only if they already have (or will add) an *agent with a Discord surface*. Factory deploy itself must not block on a Discord app.
+5. **Prompt traces** — optional. Off by default. If they want troubleshooting copies of LLM prompts in **mind** (not the ledger): `FACTORY_TRACE_PROMPTS=on` and `FACTORY_TRACE_TTL_SECONDS` (default `86400`; `0` = no expiry). Sidecar writes redacted JSON under `$MEMORY_DIR/traces/`.
 
 If they cannot answer (1) and cannot grant you access, stop and tell them what access you need.
 

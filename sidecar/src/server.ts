@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { KillSwitch } from './killswitch.js';
 import { Ledger } from './ledger.js';
+import type { TraceConfig } from './traces.js';
 
 export type ControlOptions = {
   agentId: string;
@@ -9,6 +10,7 @@ export type ControlOptions = {
   killSwitch: KillSwitch;
   ledger: Ledger;
   version: string;
+  traces?: TraceConfig;
 };
 
 function unauthorized(res: http.ServerResponse) {
@@ -46,6 +48,10 @@ export function createControlServer(opts: ControlOptions): http.Server {
           uptime: Math.round((Date.now() - started) / 1000),
           timestamp: new Date().toISOString(),
           version: opts.version,
+          traces: {
+            enabled: Boolean(opts.traces?.enabled),
+            ttlSeconds: opts.traces ? Math.round(opts.traces.ttlMs / 1000) : 0,
+          },
         }),
       );
       return;

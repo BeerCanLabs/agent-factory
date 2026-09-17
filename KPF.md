@@ -36,6 +36,10 @@ Source of truth for factory-owned flows. Canonical architecture: [POSITION_PAPER
 - **Entry points:** Sidecar proxy, control-plane pause/isolate.
 - **If it silently breaks:** Unmetered spend, or kill-switch that only SIGSTOPs a child the sidecar spawned.
 
+### 6b. Optional prompt traces (mind, not ledger)
+- **Description:** Admins may enable `FACTORY_TRACE_PROMPTS` so the sidecar stores secret-masked LLM request/response JSON under the agent’s hydrated mind, pruned by `FACTORY_TRACE_TTL_SECONDS`. Off by default. Deletable; not append-only audit.
+- **If it silently breaks:** Operators cannot replay what was sent to the model; or traces retain secrets / never expire.
+
 ### 7. Immutable Execution Ledger
 - **Description:** Every token, MCP invocation, and system action is appended to a factory-owned ledger with actor/authorization. Entries are metadata + payload hash only; the sidecar masks bound secret strings before flush. Clients (Garrison, FinOps cartridge) query it. They do not own it.
 - **Entry points:** Sidecar writer, `GET /api/v1/ledger`.

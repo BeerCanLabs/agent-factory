@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { KillSwitch } from './killswitch.js';
 import { Ledger } from './ledger.js';
 import { toolFromMcpJson, usageFromLlmJson } from './tokens.js';
+import { writeTrace, type TraceConfig } from './traces.js';
 
 export type ProxyOptions = {
   upstream: string;
@@ -11,6 +12,7 @@ export type ProxyOptions = {
   ledger: Ledger;
   actor?: string;
   secrets?: string[];
+  traces?: TraceConfig;
 };
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
@@ -83,6 +85,20 @@ export function createProxyServer(opts: ProxyOptions): http.Server {
             requestId,
             actor: opts.actor,
           });
+          if (opts.traces?.enabled) {
+            writeTrace(
+              opts.traces,
+              {
+                timestamp: new Date().toISOString(),
+                requestId,
+                kind: 'llm',
+                model: usage.model,
+                request: inboundJson ?? incoming.toString('utf8'),
+                response: parsed,
+              },
+              opts.secrets ?? [],
+            );
+          }
         }
         const outHeaders = { ...proxyRes.headers };
         delete outHeaders['content-length'];

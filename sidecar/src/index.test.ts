@@ -1,6 +1,9 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { KillSwitch } from './killswitch.js';
 import { Ledger } from './ledger.js';
 import { createProxyServer } from './proxy.js';
@@ -157,5 +160,44 @@ describe('intercept proxy', { concurrency: false }, () => {
     const res = await request(controlPort, '/healthz');
     assert.equal(res.status, 200);
     assert.equal((res.json as { status: string }).status, 'ok');
+    assert.equal((res.json as { traces: { enabled: boolean } }).traces.enabled, false);
+  });
+});
+
+describe('prompt traces in mind', { concurrency: false }, () => {
+  it('writes a redacted LLM trace when FACTORY_TRACE_PROMPTS is on', async () => {
+    const mind = mkdtempSync(join(tmpdir(), 'trace-mind-'));
+    const killSwitch = new KillSwitch(1000);
+    const secret = 'sk-live-sidecar-secret';
+    const ledger = new Ledger('echo', undefined, undefined, [secret]);
+    const traces = { enabled: true, ttlMs: 86_400_000, dir: join(mind, 'traces') };
+    const upstream = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ model: 'gpt-test', usage: { prompt_tokens: 1, completion_tokens: 1 }, choices: [] }));
+    });
+    const upPort = await listen(upstream);
+    const proxy = createProxyServer({
+      upstream: `http://127.0.0.1:${upPort}`,
+      killSwitch,
+      ledger,
+      secrets: [secret],
+      traces,
+    });
+    const proxyPort = await listen(proxy);
+    try {
+      const body = { model: 'gpt-test', messages: [{ role: 'user', content: `hello ${secret}` }] };
+      const res = await request(proxyPort, '/v1/chat/completions', { method: 'POST', body });
+      assert.equal(res.status, 200);
+      const files = readdirSync(join(mind, 'traces'));
+      assert.equal(files.length, 1);
+      const disk = readFileSync(join(mind, 'traces', files[0]), 'utf8');
+      assert.equal(disk.includes(secret), false);
+      assert.equal(disk.includes('hello ***'), true);
+    } finally {
+      await Promise.all([
+        new Promise<void>((r) => proxy.close(() => r())),
+        new Promise<void>((r) => upstream.close(() => r())),
+      ]);
+    }
   });
 });

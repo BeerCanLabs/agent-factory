@@ -4,6 +4,7 @@ import { Ledger } from './ledger.js';
 import { createProxyServer } from './proxy.js';
 import { createControlServer } from './server.js';
 import { garrisonFromEnv, pushHeartbeat } from './garrison.js';
+import { traceConfigFromEnv } from './traces.js';
 
 const AGENT_ID = process.env.AGENT_ID || 'agent';
 const AGENT_NAME = process.env.AGENT_NAME || AGENT_ID;
@@ -19,6 +20,7 @@ if (process.env.AGENT_CMD) {
 }
 
 const secrets = secretValuesFromEnv();
+const traces = traceConfigFromEnv();
 const killSwitch = new KillSwitch(parseInt(process.env.THROTTLE_TPM || '60', 10));
 const ledger = new Ledger(AGENT_ID, LEDGER_URL, process.env.FACTORY_TOKEN || TOKEN, secrets);
 const garrison = garrisonFromEnv(process.env);
@@ -30,6 +32,7 @@ const control = createControlServer({
   killSwitch,
   ledger,
   version: VERSION,
+  traces,
 });
 
 const proxy = createProxyServer({
@@ -37,6 +40,7 @@ const proxy = createProxyServer({
   killSwitch,
   ledger,
   secrets,
+  traces,
 });
 
 control.listen(PORT, '0.0.0.0', () => {

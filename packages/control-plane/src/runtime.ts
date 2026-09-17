@@ -32,7 +32,14 @@ export function memoryRuntime(opts: {
       if (!spec) return;
       const child = spawn(spec.cmd, spec.args, {
         cwd: agent.dir,
-        env: { ...process.env, ...env, MEMORY_DIR: dest, AGENT_ID: agent.id },
+        env: {
+          ...process.env,
+          ...env,
+          MEMORY_DIR: dest,
+          AGENT_ID: agent.id,
+          FACTORY_TRACE_PROMPTS: process.env.FACTORY_TRACE_PROMPTS ?? '',
+          FACTORY_TRACE_TTL_SECONDS: process.env.FACTORY_TRACE_TTL_SECONDS ?? '',
+        },
         stdio: 'inherit',
       });
       procs.set(agent.id, child);

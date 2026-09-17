@@ -74,6 +74,7 @@ Every worker is wrapped by a factory sidecar that:
 - writes token, tool, and action records to the factory ledger
 - acts as kill-switch: `PAUSE` / `RESUME` / `ISOLATE` / `THROTTLE` at the proxy
 - taps stdout/stderr and emits OTLP
+- optionally writes **redacted** LLM prompt/response traces into the agent’s mind (`$MEMORY_DIR/traces/`) when `FACTORY_TRACE_PROMPTS` is on. TTL is `FACTORY_TRACE_TTL_SECONDS` (default 86400; `0` disables expiry). This is not the ledger.
 
 The sidecar is not the agent’s PID 1 and is not named for Garrison. An optional `TELEMETRY_SINKS=garrison` adapter may push heartbeats to a client.
 
