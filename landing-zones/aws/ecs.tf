@@ -37,9 +37,9 @@ resource "aws_ecs_task_definition" "control_plane" {
   }
 
   container_definitions = jsonencode([{
-    name      = "control-plane"
-    image     = var.control_plane_image
-    essential = true
+    name         = "control-plane"
+    image        = var.control_plane_image
+    essential    = true
     portMappings = [{ containerPort = 8088, hostPort = 8088 }]
     environment  = local.cp_env
     secrets = [
@@ -88,9 +88,9 @@ resource "aws_ecs_task_definition" "doorman" {
   execution_role_arn       = aws_iam_role.execution.arn
   task_role_arn            = aws_iam_role.task.arn
   container_definitions = jsonencode([{
-    name      = "doorman"
-    image     = var.doorman_image
-    essential = true
+    name         = "doorman"
+    image        = var.doorman_image
+    essential    = true
     portMappings = [{ containerPort = 8090, hostPort = 8090 }]
     environment = [
       { name = "PORT", value = "8090" },
@@ -160,7 +160,7 @@ resource "aws_ecs_task_definition" "echo" {
         { name = "FACTORY_TRACE_TTL_SECONDS", value = tostring(var.trace_ttl_seconds) },
       ]
       mountPoints = [{ sourceVolume = "mind", containerPath = "/mind" }]
-      dependsOn = [{ containerName = "sidecar", condition = "START" }]
+      dependsOn   = [{ containerName = "sidecar", condition = "START" }]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -171,9 +171,9 @@ resource "aws_ecs_task_definition" "echo" {
       }
     },
     {
-      name      = "sidecar"
-      image     = var.sidecar_image
-      essential = true
+      name         = "sidecar"
+      image        = var.sidecar_image
+      essential    = true
       portMappings = [{ containerPort = 9090, hostPort = 9090 }]
       environment = [
         { name = "AGENT_ID", value = "echo-agent" },
