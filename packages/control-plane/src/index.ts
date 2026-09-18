@@ -5,14 +5,13 @@ import { FileLedger, secretValuesFromEnv } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { authFromEnv } from '@beercanlabs/factory-auth';
 import { loadCatalog } from './catalog.js';
-import { apply, createFactoryServer, FactoryState } from './app.js';
+import { apply, createFactoryServer, FactoryState, SYSTEM } from './app.js';
 import { memoryRuntime } from './runtime.js';
 import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { agentsDueForCron } from './scheduler.js';
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
 const AGENTS_ROOT = process.env.AGENTS_ROOT || fileURLToPath(new URL('../../../agents', import.meta.url));
-const TOKEN = process.env.FACTORY_TOKEN;
 const VERSION = '0.1.0';
 const LEDGER_PATH = process.env.FACTORY_LEDGER_PATH || join(process.cwd(), 'data', 'ledger.jsonl');
 const MEMORY_STORE = process.env.MEMORY_STORE_DIR || join(process.cwd(), 'data', 'mind');
@@ -37,7 +36,8 @@ const state: FactoryState = {
   agents: new Map(agents.map((a) => [a.id, a])),
   ledger: new FileLedger(LEDGER_PATH, { secrets: () => secretValues }),
   secretValues,
-  token: TOKEN,
+  doormanToken: process.env.DOORMAN_TOKEN,
+  sidecarToken: process.env.SIDECAR_TOKEN,
   auth: authFromEnv(),
   version: VERSION,
   providers: providersFromEnv(),
@@ -70,11 +70,11 @@ const state: FactoryState = {
               agentId: agent.id,
               type: code === 0 ? 'action' : 'crash',
               action: 'EXIT',
-              actor: 'runtime',
+              actor: SYSTEM.runtime,
               requestId: `exit-${Date.now()}`,
             });
             if (code !== 0 && state.agents.has('med-doc')) {
-              void apply(state, 'med-doc', 'WORKING', 'RESUME');
+              void apply(state, 'med-doc', 'WORKING', 'RESUME', SYSTEM.router);
             }
           },
         }),
@@ -91,7 +91,7 @@ if (process.env.FACTORY_CRON !== '0') {
   setInterval(() => {
     const due = agentsDueForCron(state.agents.values());
     for (const agent of due) {
-      if (agent.state === 'IDLE') void apply(state, agent.id, 'WORKING', 'RESUME');
+      if (agent.state === 'IDLE') void apply(state, agent.id, 'WORKING', 'RESUME', SYSTEM.scheduler);
     }
   }, 60_000);
 }

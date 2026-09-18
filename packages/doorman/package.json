@@ -10,7 +10,8 @@
     "test": "tsx --test src/index.test.ts"
   },
   "dependencies": {
-    "@beercanlabs/factory-secrets-bind": "0.1.0"
+    "@beercanlabs/factory-secrets-bind": "0.1.0",
+    "@beercanlabs/factory-auth": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

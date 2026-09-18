@@ -150,6 +150,44 @@ resource "aws_secretsmanager_secret_version" "factory_token" {
   secret_string = random_password.factory_token.result
 }
 
+locals {
+  readable_secret_arns = concat(
+    [aws_secretsmanager_secret.factory_token.arn, aws_secretsmanager_secret.echo_webhook.arn, aws_secretsmanager_secret.factory_tokens.arn],
+    [for s in aws_secretsmanager_secret.service : s.arn],
+  )
+  # One credential per caller->callee edge, each with its least role.
+  service_tokens = toset(["DOORMAN_OPERATOR_TOKEN", "SIDECAR_INGEST_TOKEN", "DOORMAN_TOKEN", "SIDECAR_TOKEN"])
+}
+
+resource "random_password" "service" {
+  for_each = local.service_tokens
+  length   = 40
+  special  = false
+}
+
+resource "aws_secretsmanager_secret" "service" {
+  for_each = local.service_tokens
+  name     = "factory/${var.environment}/${each.key}"
+}
+
+resource "aws_secretsmanager_secret_version" "service" {
+  for_each      = local.service_tokens
+  secret_id     = aws_secretsmanager_secret.service[each.key].id
+  secret_string = random_password.service[each.key].result
+}
+
+resource "aws_secretsmanager_secret" "factory_tokens" {
+  name = "factory/${var.environment}/FACTORY_TOKENS"
+}
+
+resource "aws_secretsmanager_secret_version" "factory_tokens" {
+  secret_id = aws_secretsmanager_secret.factory_tokens.id
+  secret_string = jsonencode([
+    { name = "doorman", token = random_password.service["DOORMAN_OPERATOR_TOKEN"].result, roles = ["operator"] },
+    { name = "sidecar", token = random_password.service["SIDECAR_INGEST_TOKEN"].result, roles = ["ingest"] },
+  ])
+}
+
 resource "aws_secretsmanager_secret" "echo_webhook" {
   name = "factory/${var.environment}/ECHO_WEBHOOK_SECRET"
 }
@@ -231,7 +269,7 @@ resource "aws_iam_role_policy" "execution_secrets" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["secretsmanager:GetSecretValue"]
-      Resource = [aws_secretsmanager_secret.factory_token.arn, aws_secretsmanager_secret.echo_webhook.arn]
+      Resource = local.readable_secret_arns
     }]
   })
 }
@@ -272,7 +310,7 @@ resource "aws_iam_role_policy" "task" {
       {
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.factory_token.arn, aws_secretsmanager_secret.echo_webhook.arn]
+        Resource = local.readable_secret_arns
       }
     ]
   })

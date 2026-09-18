@@ -23,7 +23,7 @@ Landing zone is a **Draftsman interview**: pick a baseline pattern in `.draft/sd
 | Control plane REST + MCP | Discord (Doorman holds Gateway when a cartridge has a `discord` surface **and** a bot token is bound) |
 | Sidecar intercept + kill-switch | Garrison or any other UI |
 | Secret binding, S3/volume hydrate, ledger | Prompt traces in mind (`FACTORY_TRACE_PROMPTS`) |
-| Auth plug-in (bearer or OIDC: Cloudflare / Entra / Google) | |
+| Auth: JWKS-verified OIDC (Entra / Cloudflare / Google) + named service tokens, RBAC | |
 
 ---
 

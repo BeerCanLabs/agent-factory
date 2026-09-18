@@ -3,7 +3,6 @@ locals {
   cp_env = [
     { name = "PORT", value = "8088" },
     { name = "AGENTS_ROOT", value = "/app/agents" },
-    { name = "FACTORY_AUTH", value = var.factory_auth },
     { name = "FACTORY_OIDC_ISSUER", value = var.oidc_issuer },
     { name = "FACTORY_OIDC_AUDIENCE", value = var.oidc_audience },
     { name = "FACTORY_RUNTIME", value = "ecs" },
@@ -44,6 +43,9 @@ resource "aws_ecs_task_definition" "control_plane" {
     environment  = local.cp_env
     secrets = [
       { name = "FACTORY_TOKEN", valueFrom = aws_secretsmanager_secret.factory_token.arn },
+      { name = "FACTORY_TOKENS", valueFrom = aws_secretsmanager_secret.factory_tokens.arn },
+      { name = "DOORMAN_TOKEN", valueFrom = aws_secretsmanager_secret.service["DOORMAN_TOKEN"].arn },
+      { name = "SIDECAR_TOKEN", valueFrom = aws_secretsmanager_secret.service["SIDECAR_TOKEN"].arn },
       { name = "ECHO_WEBHOOK_SECRET", valueFrom = aws_secretsmanager_secret.echo_webhook.arn },
     ]
     mountPoints = [{ sourceVolume = "ledger", containerPath = "/data" }]
@@ -97,7 +99,8 @@ resource "aws_ecs_task_definition" "doorman" {
       { name = "FACTORY_URL", value = "http://${aws_lb.factory.dns_name}" },
     ]
     secrets = [
-      { name = "FACTORY_TOKEN", valueFrom = aws_secretsmanager_secret.factory_token.arn },
+      { name = "FACTORY_TOKEN", valueFrom = aws_secretsmanager_secret.service["DOORMAN_OPERATOR_TOKEN"].arn },
+      { name = "DOORMAN_TOKEN", valueFrom = aws_secretsmanager_secret.service["DOORMAN_TOKEN"].arn },
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -185,7 +188,8 @@ resource "aws_ecs_task_definition" "echo" {
         { name = "FACTORY_TRACE_TTL_SECONDS", value = tostring(var.trace_ttl_seconds) },
       ]
       secrets = [
-        { name = "FACTORY_TOKEN", valueFrom = aws_secretsmanager_secret.factory_token.arn },
+        { name = "FACTORY_INGEST_TOKEN", valueFrom = aws_secretsmanager_secret.service["SIDECAR_INGEST_TOKEN"].arn },
+        { name = "SIDECAR_TOKEN", valueFrom = aws_secretsmanager_secret.service["SIDECAR_TOKEN"].arn },
       ]
       mountPoints = [{ sourceVolume = "mind", containerPath = "/mind" }]
       logConfiguration = {
