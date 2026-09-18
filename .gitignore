@@ -9,3 +9,6 @@ dist
 data/
 factory.secrets
 *.secrets
+
+# Local AI session handoff notes. Not project documentation; never commit.
+HANDOFF.md
