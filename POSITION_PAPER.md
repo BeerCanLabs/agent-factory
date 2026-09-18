@@ -1,80 +1,69 @@
 # Position Paper: The Agent Factory Architecture
 
 ## Abstract
-As the deployment of autonomous AI agents transitions from isolated experiments to enterprise fleets, the infrastructure hosting them must mature. This document outlines the guiding design principles for the **Agent Factory**: an open-source orchestration model designed to securely host, scale, govern, and observe autonomous agents. 
+As the deployment of autonomous AI agents transitions from isolated experiments to enterprise fleets, the infrastructure hosting them must mature. This document outlines the guiding design principles for the **Agent Factory**: an open-source orchestration manifesto designed to securely build, host, govern, and observe autonomous agents. 
 
-While the Factory *design* is cloud-provider agnostic, any actual Factory deployment is natively integrated into a specific cloud provider's ecosystem. The core philosophy of the Agent Factory is summarized by a strict architectural mandate: **The Factory is the universal console; the Agent is the portable cartridge.**
+The core mission of the Factory is to achieve three enterprise mandates simultaneously, enabling **enterprise-class guardrails at vibe code speeds**:
+1. **Ease of Creation:** Radically accelerate the building of agentic workflows by standardizing skills and configurations.
+2. **Protection from Risk:** Govern the ability of the agent to execute actions that could produce bad outcomes via strict network and credential firewalls.
+3. **Tracking on Value:** Provide absolute, immutable insight into the cost, quality, and quantity of the work the agent performs.
 
-To achieve this, the architecture is strictly segmented into the Agent/Factory Contract, Core Functionality, Governance, Reporting, and a clean separation from gamified visualization overlays.
-
----
-
-## 1. The Agent / Factory Contract
-For an agent to be portable across different Factory environments, the Factory must have a rigid, opinionated definition of what an agent *is*. The Factory defines an agent as a standardized bundle containing:
-
-1. **A Portable Compute Artifact:** A standardized execution package (e.g., an OCI container image, a serverless function, or a managed reasoning engine definition like Vertex AI / AWS Bedrock) capable of running the agent's logic.
-2. **Declarative Configuration:** Metadata defining the agent's operating parameters (e.g., `soul.md` for persona/instructions, `surface.yaml` for ingress event triggers).
-3. **A Secrets Manifest:** A declarative list of credential *variables* it requires (e.g., `Requires: API_KEY`), without any plaintext values.
-4. **Standard I/O & Telemetry:** The artifact must emit its telemetry and logs via standardized streams or open observability protocols.
-
-**The Contract:** If the Agent provides this bundle, the Factory promises to provision the compute, inject the required secrets at boot, route wake-events to the execution environment, and hydrate its memory. 
+To achieve this, the Agent Factory is designed as a holistic ecosystem composed of Three Pillars: **The Assembly Line, The Execution Engine, and The Observability Plane**.
 
 ---
 
-## 2. Functionality (The Engine)
-The Factory provides the physical plumbing and compute optimization necessary to host fleets of agents at scale.
+## 1. The Three Pillars of the Factory
 
-### Always Available, Not Always On
-Autonomous agents possess intermittent burst workloads. To prevent runaway FinOps costs, the Factory architecture is strictly bound to serverless and on-demand execution. The Factory orchestration ensures agents consume zero active compute when idle. When an event occurs (e.g., a webhook or cron schedule), the Factory wakes the appropriate agent from zero instances, allows it to execute, and seamlessly scales it back to zero.
+### Pillar 1: The Assembly Line (Creation & Training)
+The Factory provides the standards and blueprints for agent creation. Rather than forcing developers to write bespoke infrastructure code, the Assembly Line (often exposed via UX overlays or tools like DRAFT) allows creators to compile approved dependencies into a standardized, portable artifact called a **Cartridge**. 
 
-### Ephemeral Compute, Persistent Mind
-Because the Factory enforces "Scale-to-Zero" compute, the agent's compute instance is entirely disposable. The agent must assume its local storage will be destroyed at any moment. The Factory provides a persistence substrate where all memories, databases, and session logs are continuously synced to remote object storage and instantly re-hydrated the exact millisecond the agent wakes up on a cold boot.
+**Continuous Agent Optimization (Training)**
+The Factory equips the ecosystem with a mandatory **Benchmark Harness**, while its usage remains an optional business practice. "Training" in the Factory is not black-box fine-tuning; it is Automated Cost/Quality Benchmarking. The Harness automatically runs an agent's regression suite against multiple LLMs (e.g., Opus vs. Haiku). It outputs a Cost vs. Quality Matrix (e.g., 98% pass rate for $2,000/mo vs. 80% pass rate for $200/mo), allowing human administrators to define the FinOps policy before deployment.
 
-### Runtime Agnosticism (The Polyglot Factory)
-The Factory remains entirely agnostic to the agent's internal framework. Whether an agent is written in Python (CrewAI), TypeScript (LangChain), runs inside a raw Docker container, or leverages a managed AI orchestrator (like Vertex AI Reasoning Engine), it makes no difference. The universal contract is defined by standardized APIs, input/output streams, and portable deployment artifacts, rather than proprietary framework lock-in.
+**Skills & Systems of Record**
+* **Build-Time Skills:** 90% of an agent's capabilities are standard open-source dependencies compiled into the Cartridge at build-time. The runtime Factory is unconcerned with these.
+* **No Data Replication:** The agent's persistent memory is strictly an ephemeral scratchpad. The Factory forbids syncing massive enterprise datasets into agent memory. Agents must query Systems of Record live using injected secrets.
 
-### Skill Distribution: Dependencies vs. Peripherals
-The Factory does not host a centralized library of agent code. 
-- **Code Dependencies (Default):** 90% of shared skills (e.g., JSON parsing, math, web scraping) must be packaged as standard software libraries (`npm` / Python packages) bundled *within* the agent's compute artifact. This ensures execution is fast and the agent remains fully portable.
-- **MCP Servers (Micro-Tools):** The Factory only exposes skills as external Model Context Protocol (MCP) servers when the skill is an *Environmental Peripheral* (e.g., a local LAN printer), unacceptably bloated (e.g., a 4GB headless browser), or requires centralized stateful security (e.g., a database connection pool).
+### Pillar 2: The Execution Engine (Governance & Risk)
+The Execution Engine (The Console) is the serverless runtime environment that powers the Cartridge. It enforces strict separation of concerns. The Cartridge holds the business logic; the Console holds the rules.
 
----
+**Zero Trust Identity & RBAC**
+In adherence with the "Zero Agent Logic" rule, agent developers never write authentication validators. The Factory is the universal Identity Gateway:
+1. **Inbound AuthZ:** The Factory validates the caller's Enterprise Identity (e.g., Entra ID) and RBAC roles before waking an agent.
+2. **Outbound AuthZ:** The Factory issues short-lived Workload Identities to agents so they can securely access internal databases without hardcoded passwords.
+3. **Control Plane RBAC:** Factory administration (budgets, secrets, ledgers) is strictly gated by Enterprise RBAC.
 
-## 3. Governance (Rules & Boundaries)
-Governance ensures the Factory remains a secure, agnostic platform rather than a bloated monolith.
+**FinOps: The Policy Engine & Egress Proxy**
+Agents are firewalled from directly accessing paid LLMs. All outbound requests route through the Factory's Sidecar (Egress Proxy). The Proxy counts the tokens, calculates the exact cost, and checks the **Policy Engine**. If the admin-defined budget is exceeded, the Factory drops the connection and shifts the agent into a `BLOCKED_BUDGET_EXCEEDED` state.
 
-### The Cartridge & The Console (Zero Agent Logic)
-If there is specific logic necessary for an agent to perform its duties, that logic *must* live with the agent. An agent must be perfectly portable. If a Factory contains agent-specific logic or proprietary standard libraries, it has violated this design principle. The Factory does not care *what* the agent is doing; it simply provides the electricity.
+**Secrets & The Readiness Protocol**
+The Factory favors federated identity (OAuth/OIDC) but supports legacy static keys through a strictly governed Control Plane API. Plaintext secrets must never be passed in conversational prompts. 
+Instead, the Factory implements a **Readiness Loop**:
+* **Pre-Flight:** Before boot, if a declared secret is missing from the Vault, the Factory aborts and emits `PRE_FLIGHT_MISSING_SECRET`. UX overlays route this to provisioning workflows (e.g., The Librarian).
+* **Runtime:** If a token is rejected at runtime (401 Unauthorized), the Factory catches the failure, purges the cache, and emits `RUNTIME_AUTH_FAILURE`. UX overlays route this to diagnostic workflows (e.g., The Infirmary).
 
-### Secret Binding, Not Secret Storage
-An agent repository must never contain plaintext secrets, nor should the Factory attempt to act as a proprietary vault. The Agent is responsible only for declaring *what* it needs. The Factory is responsible for the *plumbing*—fetching the actual secret from the enterprise's preferred BYO secrets manager (e.g., HashiCorp Vault, AWS Secrets Manager) and dynamically injecting it at boot.
+**Event-Driven Autonomy**
+The Factory rejects holding open synchronous API connections for long-running reasoning. It mandates the **Asynchronous Request-Reply Pattern**. Triggers return an immediate acknowledgment (`HTTP 202`), the agent spins up from zero, does its work, and egresses results asynchronously via Webhooks or Pub/Sub topics.
 
-### Native FinOps and Health Telemetry
-While the Factory avoids containing agent-specific logic, it must natively provide the essential operational features to manage fleets safely. Rather than relying on agentic bots for core infrastructure tasks, the Factory itself creates and delivers these outcomes:
-- **FinOps Controls:** The Factory tracks how and when money is spent across agents, providing hard gates to cut execution or spending when budgets are maxed.
-- **Health & Telemetry (MedDoc):** The Factory continuously monitors telemetry to verify agent health. It natively exposes system errors, degradations, and performance issues to the overarching ecosystem.
+### Pillar 3: The Observability Plane (Value & Insight)
+Because autonomous agents operate without constant human supervision, the Factory provides a tamper-proof Observability Plane, strictly separating compliance data from ephemeral diagnostics.
 
----
+**The Immutable Execution Ledger**
+Every token spent, tool invoked, and system action taken is recorded in an append-only, immutable ledger for SOC2 compliance and ROI tracking. 
+* **Deterministic Secret Redaction:** The Factory sidecar automatically redacts injected secrets from both the ledger and the agent's egress traffic.
+* **No Prompt Logging:** The ledger does *not* record conversational prompts, strictly recording execution metadata to prevent massive data spills.
 
-## 4. Reporting (Observability & Accountability)
-Because autonomous agents operate without constant human supervision, the Factory must provide rigorous, tamper-proof reporting.
-
-### Observability is Injected, Not Coded (The Sidecar Pattern)
-An agent should never be burdened with writing custom code to report its budget usage or health telemetry. The Factory achieves observability by wrapping every agent in a universal "Sidecar" proxy or injecting telemetry endpoints. The agent simply executes its logic; the Factory sidecar intercepts the traffic, counts the tokens, streams logs, and acts as the emergency kill-switch.
-
-### Immutable Accountability (The Execution Ledger)
-While Observability answers *"What is the agent doing right now?"*, the Ledger answers *"What did the agent do yesterday, and who authorized it?"* Every token spent, every MCP tool invoked, and every system action taken by an agent is recorded in an append-only, immutable execution ledger provided by the Factory. This provides a non-repudiable audit trail required for SOC2 compliance, trust, and FinOps billing.
-
-### Immutable Accountability & Secret Redaction
-Because the Execution Ledger is immutable, accidentally recording plaintext credentials creates a permanent, non-compliant data spill. To prevent this, the Factory enforces strict data boundaries:
-- **Deterministic Secret Redaction:** Because the Factory dynamically injects secrets at boot, it knows their exact string values. The Factory acts as an outbound firewall, automatically finding and redacting those secrets before committing any entries to the ledger.
-- **No Prompt Logging:** The ledger does *not* record prompts or raw conversational text. It strictly records execution *metadata* (e.g., actor ID, tool invoked, token cost, timestamp) rather than prompt bodies, ensuring a verifiable audit trail focused purely on system actions.
+**Health & Diagnostics (OpenTelemetry)**
+Because health diagnostics (stack traces, memory metrics, crash loops) are high-volume and ephemeral, writing them to an immutable ledger causes massive database bloat. Instead, the Factory's Sidecar natively emits this data using the **OpenTelemetry (OTel)** standard, routing it to enterprise APMs (Datadog, Splunk). If fatal thresholds are crossed, the Factory halts compute and emits a `BLOCKED_UNHEALTHY` state.
 
 ---
 
-## 5. Headless by Design (UX as an Overlay)
-The Agent Factory is inherently headless. It is designed to be API-first and MCP-first, meaning there is absolutely no User Experience (UX) or graphical interface hardcoded into the Factory's architecture. 
+## 2. The Integration Contract (Headless by Design)
+The Agent Factory is inherently headless. It does not invent proprietary networking paradigms. Instead, it mandates that every agent exposes its capabilities through the four standard integration patterns:
 
-External interfaces—whether they are command-line developer tools (`claude code`, `codex`, `agy`), standard Web UIs, or rich 3D gamification environments (like Agent Garrison)—act purely as privileged clients. They consume the Factory's telemetry and issue standard REST, WebSocket, or MCP commands. 
+1. **REST APIs:** For Control Plane management (provisioning secrets, setting budgets) and immediate status polling.
+2. **WebSockets:** For persistent, bidirectional stateful communication.
+3. **Webhooks:** For asynchronous, point-to-point push notifications when an agent finishes a long-running task.
+4. **Pub/Sub:** For decoupled event routing across an enterprise event bus.
 
-If any UX layer is taken offline or replaced, the Agent Factory and its fleets of agents must continue to operate, scale, and report flawlessly. The user experience is strictly an overlay; it is never a structural dependency.
+External interfaces—whether they are command-line tools or rich 3D gamification environments (like Agent Garrison)—act purely as privileged clients connecting to these four surfaces. The user experience is strictly an overlay; it is never a structural dependency of the Factory.
