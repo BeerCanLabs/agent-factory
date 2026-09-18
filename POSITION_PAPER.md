@@ -1,9 +1,9 @@
 # Position Paper: The Agent Factory Architecture
 
 ## Abstract
-As the deployment of autonomous AI agents transitions from isolated experiments to enterprise fleets, the infrastructure hosting them must mature. This document outlines the guiding design principles for the **Agent Factory**: a universal, open-source orchestration model designed to securely host, scale, govern, and observe autonomous agents. 
+As the deployment of autonomous AI agents transitions from isolated experiments to enterprise fleets, the infrastructure hosting them must mature. This document outlines the guiding design principles for the **Agent Factory**: an open-source orchestration model designed to securely host, scale, govern, and observe autonomous agents. 
 
-The core philosophy of the Agent Factory is summarized by a strict architectural mandate: **The Factory is the universal console; the Agent is the portable cartridge.**
+While the Factory *design* is cloud-provider agnostic, any actual Factory deployment is natively integrated into a specific cloud provider's ecosystem. The core philosophy of the Agent Factory is summarized by a strict architectural mandate: **The Factory is the universal console; the Agent is the portable cartridge.**
 
 To achieve this, the architecture is strictly segmented into the Agent/Factory Contract, Core Functionality, Governance, Reporting, and a clean separation from gamified visualization overlays.
 
@@ -49,8 +49,10 @@ If there is specific logic necessary for an agent to perform its duties, that lo
 ### Secret Binding, Not Secret Storage
 An agent repository must never contain plaintext secrets, nor should the Factory attempt to act as a proprietary vault. The Agent is responsible only for declaring *what* it needs. The Factory is responsible for the *plumbing*—fetching the actual secret from the enterprise's preferred BYO secrets manager (e.g., HashiCorp Vault, AWS Secrets Manager) and dynamically injecting it at boot.
 
-### Agentic Infrastructure Management (Decentralized Control Plane)
-Instead of bloating the Factory's codebase with complex, hardcoded logic to enforce budgets or debug crashed execution environments, the Factory relies on a decentralized control plane. It delegates infrastructure management to specialized, standard agents (e.g., a *FinOps Agent*, a *MedDoc Agent*). If an instance crashes, the Factory routes the crash log to the MedDoc Agent to diagnose.
+### Native FinOps and Health Telemetry
+While the Factory avoids containing agent-specific logic, it must natively provide the essential operational features to manage fleets safely. Rather than relying on agentic bots for core infrastructure tasks, the Factory itself creates and delivers these outcomes:
+- **FinOps Controls:** The Factory tracks how and when money is spent across agents, providing hard gates to cut execution or spending when budgets are maxed.
+- **Health & Telemetry (MedDoc):** The Factory continuously monitors telemetry to verify agent health. It natively exposes system errors, degradations, and performance issues to the overarching ecosystem.
 
 ---
 
@@ -63,10 +65,10 @@ An agent should never be burdened with writing custom code to report its budget 
 ### Immutable Accountability (The Execution Ledger)
 While Observability answers *"What is the agent doing right now?"*, the Ledger answers *"What did the agent do yesterday, and who authorized it?"* Every token spent, every MCP tool invoked, and every system action taken by an agent is recorded in an append-only, immutable execution ledger provided by the Factory. This provides a non-repudiable audit trail required for SOC2 compliance, trust, and FinOps billing.
 
-### Zero-Knowledge Logging & Deterministic Redaction
-Because the Execution Ledger is immutable, accidentally recording Personally Identifiable Information (PII) or plaintext credentials creates a permanent, non-compliant data spill. To prevent this, the Factory enforces a zero-knowledge boundary before any data is flushed to disk:
-- **Deterministic Secret Masking:** Because the Factory dynamically injects secrets at boot, the Sidecar knows their exact string values. It acts as an outbound firewall, automatically finding and redacting those secrets from all logs and ledger entries.
-- **Metadata-First Ledgers:** The ledger strictly records execution *metadata* (e.g., actor ID, tool invoked, token cost, timestamp) and cryptographic *hashes* of the payloads, rather than raw text. This guarantees a verifiable audit trail without accumulating toxic, regulated data.
+### Immutable Accountability & Secret Redaction
+Because the Execution Ledger is immutable, accidentally recording plaintext credentials creates a permanent, non-compliant data spill. To prevent this, the Factory enforces strict data boundaries:
+- **Deterministic Secret Redaction:** Because the Factory dynamically injects secrets at boot, it knows their exact string values. The Factory acts as an outbound firewall, automatically finding and redacting those secrets before committing any entries to the ledger.
+- **No Prompt Logging:** The ledger does *not* record prompts or raw conversational text. It strictly records execution *metadata* (e.g., actor ID, tool invoked, token cost, timestamp) rather than prompt bodies, ensuring a verifiable audit trail focused purely on system actions.
 
 ---
 
