@@ -251,6 +251,14 @@ describe('egress gateway', { concurrency: false }, () => {
     assert.equal((await call(port, '/anthropic/v1/messages', { token, body: messages() })).status, 402);
   });
 
+  it('enforces a run-level model pin', async () => {
+    ctx.run.model = 'test-claude';
+    assert.equal((await call(port, '/anthropic/v1/messages', { token, body: messages('test-claude') })).status, 200);
+    const other = await call(port, '/anthropic/v1/messages', { token, body: messages('test-other') });
+    assert.equal(other.status, 403);
+    assert.equal(other.json().error, 'model_pinned');
+  });
+
   it('applies the kill switch from agent state', async () => {
     ctx.agentState = 'ISOLATED';
     assert.equal((await call(port, '/anthropic/v1/messages', { token, body: messages() })).status, 403);

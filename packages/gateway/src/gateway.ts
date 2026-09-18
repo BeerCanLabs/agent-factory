@@ -26,7 +26,7 @@ export type Policy = {
 };
 
 export type RunContext = {
-  run: { runId: string; agentId: string; state: string; live: boolean };
+  run: { runId: string; agentId: string; state: string; live: boolean; model?: string };
   agentState: string;
   policy: Policy;
   spend: { run: number; day: number; month: number };
@@ -259,6 +259,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
     if (req.method === 'POST' && parsed) {
       if (!model) return deny(res, ctx, route, 400, 'model_required');
       if (ctx.policy.models && !ctx.policy.models.includes(model)) return deny(res, ctx, route, 403, 'model_not_allowed', { model });
+      if (ctx.run.model && ctx.run.model !== model) return deny(res, ctx, route, 403, 'model_pinned', { model, pinned: ctx.run.model });
       if (!priceFor(opts.prices, model)) return deny(res, ctx, route, 403, 'unpriced_model', { model });
     }
     const w = tpm.get(ctx.run.runId);

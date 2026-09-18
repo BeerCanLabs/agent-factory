@@ -26,6 +26,8 @@ export type FactoryState = {
   approvals: ApprovalStore;
   /** URL agents use to reach the control plane (result reporting, input fetch). */
   publicUrl?: string;
+  /** URL agents use to reach the egress gateway; handed to every run as FACTORY_GATEWAY_URL. */
+  gatewayUrl?: string;
   /** Max wall-clock per run before it is stopped as TIMED_OUT. 0 disables. */
   idleMs: number;
   idleTimers: Map<string, ReturnType<typeof setTimeout>>;
@@ -199,7 +201,7 @@ export function unblockRun(state: FactoryState, runId: string, from: RunState, a
   return next;
 }
 
-export type CreateRunOptions = { actor: string; trigger: string; input?: unknown; callbackUrl?: string };
+export type CreateRunOptions = { actor: string; trigger: string; input?: unknown; callbackUrl?: string; model?: string };
 
 /** The single entry point for waking an agent: manual, webhook, cron, event route, Doorman. */
 export async function createRun(state: FactoryState, agentId: string, opts: CreateRunOptions): Promise<Outcome<Run>> {
@@ -236,6 +238,7 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
     trigger: opts.trigger,
     input: opts.input,
     callbackUrl: opts.callbackUrl,
+    ...(opts.model ? { model: opts.model } : {}),
   });
   record(state, run, 'RUN_QUEUED', opts.actor);
   if (busy) return { status: 202, body: run };
@@ -262,6 +265,8 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
     FACTORY_RUN_ID: run.runId,
     FACTORY_RUN_TOKEN: await state.runTokens.mint(run),
     ...(state.publicUrl ? { FACTORY_URL: state.publicUrl } : {}),
+    ...(run.model ? { FACTORY_MODEL: run.model } : {}),
+    ...(state.gatewayUrl ? { FACTORY_GATEWAY_URL: state.gatewayUrl } : {}),
   };
   try {
     const { handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv });
@@ -670,11 +675,16 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 400, { error: 'callbackUrl must be a string' });
       return;
     }
+    if (body.model !== undefined && (typeof body.model !== 'string' || !/^[\w.:@/-]{1,128}$/.test(body.model))) {
+      json(res, 400, { error: 'model must be a model id' });
+      return;
+    }
     const out = await createRun(state, runCreate[1], {
       actor: principal.actor,
       trigger: runCreate[2] === 'wake' ? 'manual' : 'api',
       input: body.input,
       callbackUrl: body.callbackUrl as string | undefined,
+      model: body.model as string | undefined,
     });
     json(res, out.status, out.body);
     return;
@@ -852,7 +862,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     json(res, 200, {
-      run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state) },
+      run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state), ...(run.model ? { model: run.model } : {}) },
       agentState: agent.state,
       policy: state.policies.get(run.agentId),
       spend: state.spend.get(run.agentId, run.runId),

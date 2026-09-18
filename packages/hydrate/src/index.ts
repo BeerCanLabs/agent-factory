@@ -44,3 +44,5 @@ export function pushMind(store: MindStore, prefix: string, src: string): void {
   mkdirSync(join(store.root), { recursive: true });
   cpSync(src, dest, { recursive: true });
 }
+
+export { gatewayEnv } from './gateway-env.js';

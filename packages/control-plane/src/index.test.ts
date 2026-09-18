@@ -210,6 +210,14 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal(started?.runId, run.runId);
     });
 
+    it('pins a run to a model and hands it to the agent and gateway', async () => {
+      const run = (await wake('echo-agent', { model: 'test-model-1' })).json as RunBody;
+      assert.equal(state.runtime.started.at(-1)?.runEnv.FACTORY_MODEL, 'test-model-1');
+      const ctx = (await request(port, `/api/v1/gateway/runs/${run.runId}`, { token: TOKENS.gateway })).json as { run: { model: string } };
+      assert.equal(ctx.run.model, 'test-model-1');
+      assert.equal((await wake('echo-agent', { model: 'bad model; rm -rf' })).status, 400);
+    });
+
     it('wake is an alias that also returns 202', async () => {
       const res = await request(port, '/api/v1/agents/echo-agent/wake', { method: 'POST', token: TOKENS.operator });
       assert.equal(res.status, 202);
