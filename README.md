@@ -16,14 +16,25 @@ Landing zone is a **Draftsman interview**: pick a baseline pattern in `.draft/sd
 
 ---
 
-## Kernel vs optional
+## Kernel vs Optional
 
 | Always | Optional |
 |---|---|
 | Control plane REST + MCP | Discord (Doorman holds Gateway when a cartridge has a `discord` surface **and** a bot token is bound) |
-| Sidecar intercept + kill-switch | Garrison or any other UI |
+| Gateway intercept + kill-switch | Garrison or any other UI |
 | Secret binding, S3/volume hydrate, ledger | Prompt traces in mind (`FACTORY_TRACE_PROMPTS`) |
 | Auth: JWKS-verified OIDC (Entra / Cloudflare / Google) + named service tokens, RBAC | |
+
+---
+
+## Known Gaps (As Designed)
+
+The architecture is opinionated and accepts certain limits by design:
+- **Cloud Providers:** GCP and Azure are notes and examples only; full IaC is currently AWS and Docker Compose.
+- **Compose Isolation:** Compose-host is root-equivalent; trust is assumed for the control plane.
+- **Queues:** SQS is the only inbound queue provider supported.
+- **Event Bus:** EventBridge delivery is at-least-once, meaning subscribers must handle idempotency.
+- **Control Plane:** The control plane is a single writer/instance by design to serialize the ledger hash chain.
 
 ---
 
@@ -32,11 +43,11 @@ Landing zone is a **Draftsman interview**: pick a baseline pattern in `.draft/sd
 ```
 AGENTS.md                 # implementing-AI playbook
 POSITION_PAPER.md
-packages/…                # kernel
+packages/…                # kernel (control-plane, gateway, doorman, etc)
 agents/                   # example cartridges (not factory modules)
 landing-zones/            # PATTERNS.md + aws/azure/gcp/compose binds
 .draft/sdp.yaml           # three baseline patterns + interview slots
-runtimes/generic/         # hydrate then exec
+runtimes/generic/         # agent shim + exec
 ```
 
 ---

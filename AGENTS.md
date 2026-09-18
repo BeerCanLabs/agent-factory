@@ -11,7 +11,7 @@ If a Draftsman / drafting-table session is available, run **that** onboarding in
 A working factory on **whatever landing zone they actually have** (new Azure subscription, new AWS account, GCP, or a Linux VM):
 
 - Control plane REST + MCP up and authenticated
-- Agents wake from zero; sidecar in the same unit; mind on object storage; ledger metadata+hash
+- Agents wake from zero; shim in the same unit; mind on object storage; ledger metadata+hash
 - Doorman deployed **idle** (no Discord app required)
 - Kernel from this repo; cloud products from the pattern table, not from a hardcoded AWS module
 
@@ -35,7 +35,7 @@ Example: Azure + serverless-containers → Container Apps + Blob + Key Vault + E
 
 ## Kernel (always)
 
-`packages/contract`, `auth`, `secrets-bind`, `hydrate`, `ledger`, `control-plane`, `doorman`, `sidecar/`. Example cartridges under `agents/` are not factory modules.
+`packages/contract`, `auth`, `secrets-bind`, `hydrate`, `ledger`, `control-plane`, `doorman`, `telemetry/`. Example cartridges under `agents/` are not factory modules.
 
 ## Landing-zone examples (optional cargo-cult)
 

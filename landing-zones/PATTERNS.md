@@ -7,7 +7,7 @@ The factory kernel does not choose a cloud. Draftsman (or any implementing AI) r
 | RA | Serverless Event-Driven (`01KS8N4KR4-SVED`) | Containerized Microservices (`01KV0REFAR-CMSV`) | Same RA, single host |
 | Ingress | Cloud Run URL / Azure ingress / Front Door / ALB | ALB / App Gateway / GCLB | Published ports |
 | Mailbox (control plane + Doorman) | min=0 or 1 on the same platform | ECS/AKS/GKE **service** desired ≥ 1 | Compose services |
-| Agent + sidecar | Revision/job min=0 | RunTask / Job / ACA Job — **no** 24/7 service | Process spawn |
+| Agent           | Revision/job min=0 | RunTask / Job / ACA Job — **no** 24/7 service | Process spawn |
 | Mind | S3 / Blob / GCS | S3 / Blob / GCS | Volume |
 | Ledger | Object or file on durable volume | EFS / Azure Files / Filestore / JSONL | Volume |
 | Secrets | SM / Key Vault / GCP SM | same | gitignored file |
