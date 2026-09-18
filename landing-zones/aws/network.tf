@@ -180,11 +180,6 @@ data "aws_iam_policy_document" "endpoint_same_account" {
       type        = "*"
       identifiers = ["*"]
     }
-    condition {
-      test     = "StringEquals"
-      variable = "aws:PrincipalAccount"
-      values   = [var.account_id]
-    }
   }
 }
 
