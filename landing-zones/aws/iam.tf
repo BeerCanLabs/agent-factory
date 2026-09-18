@@ -96,7 +96,7 @@ resource "aws_iam_role_policy" "control_plane" {
       {
         Effect   = "Allow"
         Action   = ["elasticfilesystem:ClientMount", "elasticfilesystem:ClientWrite"]
-        Resource = aws_efs_file_system.ledger.arn
+        Resource = [aws_efs_file_system.ledger.arn, aws_efs_access_point.ledger.arn]
       },
       {
         Sid      = "PublishFactoryEvents"

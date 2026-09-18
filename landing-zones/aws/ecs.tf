@@ -253,7 +253,6 @@ resource "aws_ecs_task_definition" "agent" {
     name                   = "worker"
     image                  = each.value
     essential              = true
-    readonlyRootFilesystem = true
     environment = [
       { name = "AGENT_ID", value = each.key },
       { name = "MEMORY_DIR", value = "/tmp/mind" },
@@ -262,11 +261,7 @@ resource "aws_ecs_task_definition" "agent" {
       { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
       { name = "FACTORY_URL", value = local.cp_url },
     ]
-    secrets          = [for name in var.agents[each.key].secrets : { name = name, valueFrom = "factory/${var.environment}/${name}" }]
-    mountPoints      = [{ sourceVolume = "tmp", containerPath = "/tmp" }]
+    secrets          = [for name in var.agents[each.key].secrets : { name = name, valueFrom = "${local.secret_arn}/${name}" }]
     logConfiguration = local.log["agent"]
   }])
-  volume {
-    name = "tmp"
-  }
 }
