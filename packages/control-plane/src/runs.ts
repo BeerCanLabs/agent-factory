@@ -1,7 +1,6 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SignJWT, jwtVerify } from 'jose';
 
 export const TERMINAL_STATES = [
   'DONE',
@@ -107,44 +106,4 @@ export class FileRunStore extends MemoryRunStore {
   }
 }
 
-/**
- * Short-lived credential an agent run presents to the factory (result reporting now; the egress
- * gateway later). HS256 over a factory-held key. Valid only while its run is non-terminal.
- */
-export class RunTokens {
-  private readonly key: Uint8Array;
-  readonly ephemeral: boolean;
-
-  constructor(secret: string | undefined, private readonly ttlSec = 6 * 3600) {
-    if (secret && secret.length < 32) throw new Error('FACTORY_RUN_TOKEN_KEY must be at least 32 characters');
-    this.ephemeral = !secret;
-    this.key = secret ? new TextEncoder().encode(secret) : randomBytes(32);
-  }
-
-  mint(run: Pick<Run, 'runId' | 'agentId'>): Promise<string> {
-    return new SignJWT({ run: run.runId })
-      .setProtectedHeader({ alg: 'HS256', typ: 'factory-run+jwt' })
-      .setSubject(run.agentId)
-      .setIssuer('agent-factory')
-      .setAudience('agent-factory:run')
-      .setIssuedAt()
-      .setExpirationTime(`${this.ttlSec}s`)
-      .sign(this.key);
-  }
-
-  async verify(token: string | undefined): Promise<{ runId: string; agentId: string } | null> {
-    if (!token) return null;
-    try {
-      const { payload } = await jwtVerify(token, this.key, {
-        issuer: 'agent-factory',
-        audience: 'agent-factory:run',
-        algorithms: ['HS256'],
-        typ: 'factory-run+jwt',
-      });
-      if (typeof payload.run !== 'string' || typeof payload.sub !== 'string') return null;
-      return { runId: payload.run, agentId: payload.sub };
-    } catch {
-      return null;
-    }
-  }
-}
+export { RunTokens } from '@beercanlabs/factory-auth';
