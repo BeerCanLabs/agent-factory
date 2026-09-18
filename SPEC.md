@@ -167,4 +167,4 @@ Daemon vs on-behalf-of identity (`identity.yaml`) may land later as optional car
 | Memory hydration | `packages/hydrate` + `runtimes/generic/start.sh` |
 | Factory ledger | `packages/ledger` closed schema + hash + secret mask; sidecar POSTs here |
 | Event routing | `type=crash` wakes `med-doc`; `budget.alert` wakes `finops-officer` |
-| Blueprints | AWS/GCP modules with sidecar+worker, named-secret IAM, mind bucket, no `AmazonBedrockFullAccess` |
+| Landing zones | Three SDP baseline patterns; AWS Terraform is orchestrated-tasks×AWS only; Azure/GCP are slot binds |

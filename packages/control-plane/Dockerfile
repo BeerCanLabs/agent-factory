@@ -12,6 +12,7 @@ RUN npm run build -w @beercanlabs/factory-contract \
   -w @beercanlabs/factory-control-plane
 
 FROM node:22-alpine
+RUN apk add --no-cache aws-cli
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/contract/package.json ./packages/contract/package.json

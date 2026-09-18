@@ -1,15 +1,17 @@
 schemaVersion: '1.0'
 uid: SDP0000002-AGENTFACTORY
 type: software_deployment_pattern
-name: BeerCanLabs Agent Factory Product Pattern
+name: BeerCanLabs Agent Factory
 description: >-
-  Multi-cloud substrate for autonomous AI agent fleets. Kernel is the position-paper
-  contract: portable cartridges, scale-to-zero, secret binding, factory sidecar intercept,
-  immutable ledger, headless REST/MCP. Garrison is a privileged client, not kernel.
-version: 1.0.0
-catalogStatus: complete
+  Headless factory for portable agent cartridges. The kernel is cloud-agnostic
+  (contract, control plane, sidecar, secret bind, mind hydrate, ledger, idle Doorman).
+  Where it lands is a Draftsman interview: pick one of three baseline patterns,
+  then bind AWS, Azure, GCP, or a VM to the slots. Garrison is a client, not kernel.
+version: 1.1.0
+catalogStatus: incomplete
 lifecycleStatus: preferred
 canonicalDoc: POSITION_PAPER.md
+followsReferenceArchitecture: 01KS8N4KR4-SVED
 owner:
   team: platform-ai-team
   contact: platform-ai@example.com
@@ -18,30 +20,157 @@ tags:
   - multi-cloud
   - core-product
   - substrate
+businessContext:
+  pillar: business-pillar.platform
+  productFamily: Skippy / Agent Factory
+notes:
+  availabilityRequirement: >-
+    Mailboxes (ingress, control plane, Doorman) are always reachable. Agent compute
+    is zero when idle. Availability of "the fleet" is the mailbox, not warm agents.
+  dataClassification: Confidential — ledger is metadata+hash only; mind is adopter data.
+  failureDomain:
+    scope: service-group
+    description: >-
+      Loss of control plane blocks wake/MCP. Loss of one agent task does not take
+      down the factory. Doorman failure affects Discord only.
+  patternDeviations: >-
+    Preferred RA is Serverless Event-Driven for *agents* (no sticky instance).
+    Control plane + Doorman may stay warm (orchestrated-tasks pattern) because they
+    are mailboxes, not cartridges. Compose pattern runs kernel on one host for CI/dev.
+  architecturalBaseline: >-
+    These questions are answered by the kernel, not by the cloud. Draftsman binds
+    provider products onto the slots in `baselinePatterns`.
+    1. What is always on? Ingress + control plane + Doorman. Not agents.
+    2. How do agents run? Scale-to-zero on wake from surface.yaml.
+    3. Where is mind? Object storage; local disk is disposable.
+    4. Where are secrets? Adopter BYO manager; factory binds names only.
+    5. How is spend observed? Sidecar intercept, not agent-coded telemetry.
+    6. What is the audit log? Append-only metadata + payloadSha256; optional TTL traces in mind.
+    7. Is Discord required? No. Doorman is installed idle.
+  baselinePatterns:
+    - id: serverless-containers
+      name: Serverless containers
+      follows: 01KS8N4KR4-SVED
+      when: >-
+        Default when the landing zone has request-woken containers (Azure Container
+        Apps, Cloud Run, App Runner / Lambda+HTTP). Agents min=0. Control plane may
+        also min=0 behind the same ingress.
+    - id: orchestrated-tasks
+      name: Orchestrated tasks
+      follows: 01KV0REFAR-CMSV
+      when: >-
+        Control plane + Doorman run as always-on services; agents are Jobs/RunTask
+        with a sidecar in the same task. Use when the org standard is AKS/ECS/GKE.
+    - id: compose-host
+      name: Compose on a host
+      follows: 01KV0REFAR-CMSV
+      when: >-
+        Single Linux VM or CI runner. Docker Compose. Not a cloud lock-in; not a
+        product SKU named for a specific workstation.
+networkZones:
+  - id: edge
+    name: Edge / ingress
+    tier: frontend
+    description: Load balancer or managed ingress. Holds inbound HTTP/MCP. Not Discord Gateway.
+  - id: mailbox
+    name: Mailbox
+    tier: application
+    description: Control plane and Doorman. Cheap, always reachable.
+  - id: agents
+    name: Agent compute
+    tier: application
+    description: Disposable workers + sidecar. Scale to zero.
+  - id: data
+    name: Data
+    tier: data
+    description: Object-store mind and append-only ledger.
 serviceGroups:
-  - id: agent-factory-kernel
-    name: Mandatory Factory Kernel
-    deploymentTarget: Multi-Cloud (GCP Cloud Run, AWS ECS Fargate, Docker)
-    components:
-      - productComponent: cartridge-contract
-      - productComponent: factory-control-plane
-      - productComponent: factory-sidecar-intercept
-      - productComponent: secret-binding
-      - productComponent: memory-hydrate
-      - productComponent: postgres-audit-ledger
-  - id: agent-factory-overlays
-    name: Optional clients (not kernel)
-    deploymentTarget: Adopter
-    components:
-      - productComponent: garrison-telemetry-sink
-  - id: agent-factory-deferred
-    name: Deferred — not factory kernel
-    deploymentTarget: none
-    components:
-      - productComponent: doorman-lease-broker
-      - productComponent: litellm-route-proxy
-      - productComponent: promptfoo-training-gym
-      - productComponent: oauth-obo-broker
-deployableObjects:
-  - dataStoreService: 01M15NEKT7-H42Y
-  - aiGateway: 01M15NEKT7-QKPW
+  - name: Kernel mailbox
+    deploymentTarget: drafting-interview-required
+    notes: >-
+      Bind this group to Azure Container Apps / Cloud Run / ECS service / Compose
+      after the human names a provider. Do not assume AWS.
+    deployableObjects:
+      - ref: factory-control-plane
+        networkZone: mailbox
+        diagramTier: application
+        intent: ha
+        notes: REST + MCP. Headless console.
+      - ref: factory-doorman
+        networkZone: mailbox
+        diagramTier: utility
+        intent: standalone
+        notes: Always deployed, idle until a discord-surface cartridge binds a bot token.
+      - ref: factory-ingress
+        networkZone: edge
+        diagramTier: presentation
+        intent: ha
+        notes: Cloud load balancer / Front Door / Cloud Run ingress. Discord Gateway cannot live here.
+  - name: Kernel data
+    deploymentTarget: drafting-interview-required
+    deployableObjects:
+      - ref: factory-mind-store
+        networkZone: data
+        diagramTier: data
+        intent: ha
+        notes: Object storage (S3 / Blob / GCS / volume). Hydrate on wake, push on sleep.
+      - ref: factory-ledger
+        networkZone: data
+        diagramTier: data
+        intent: ha
+        notes: Append-only metadata+hash. Not Postgres-required; EFS/JSONL/Blob are valid.
+  - name: Agent cartridge runtime
+    deploymentTarget: drafting-interview-required
+    notes: One task = worker + sidecar. No 24/7 service for agents.
+    deployableObjects:
+      - ref: factory-sidecar
+        networkZone: agents
+        diagramTier: application
+        intent: standalone
+        notes: Intercept, kill-switch, redact, optional mind traces.
+      - ref: cartridge-worker
+        networkZone: agents
+        diagramTier: application
+        intent: standalone
+        notes: Portable OCI/serverless artifact. Factory does not author agent logic.
+tierVariants:
+  - tier: serverless-containers
+    notes: Map mailbox+agents to min=0 container platform. Mind+ledger to object storage. Secrets to Key Vault / SM.
+    deploymentTarget:
+      provider: drafting-interview-required
+  - tier: orchestrated-tasks
+    notes: Mailbox as desiredCount>=1 services; agents as jobs. Sidecar colocated.
+    deploymentTarget:
+      provider: drafting-interview-required
+  - tier: compose-host
+    notes: landing-zones/compose. Kernel on one Docker host.
+    deploymentTarget:
+      provider: docker
+decisionRecords:
+  - ref: local-baseline-mailbox-not-agent
+    key: always-on
+    notes: Always-on is the mailbox (ingress, control plane, Doorman). Agents are not always on.
+  - ref: local-baseline-object-mind
+    key: persistent-mind
+    notes: Mind is object storage. Local disk is disposable.
+  - ref: local-baseline-byo-secrets
+    key: secret-binding
+    notes: Factory binds names from the adopter vault. Factory is not a vault.
+  - ref: local-baseline-discord-optional
+    key: doorman
+    notes: Discord is a choice. Doorman is installed empty. Gateway is not a load balancer.
+  - ref: local-baseline-provider-interview
+    key: deploymentTargets
+    notes: >-
+      AWS vs Azure vs GCP vs VM is a Draftsman onboarding interview, not a kernel
+      decision. landing-zones/aws is an orchestrated-tasks *example*, not the SDP.
+externalInteractions:
+  - name: Adopter IdP
+    type: external
+    notes: Cloudflare Access, Entra, Google OIDC, or bearer for first bring-up.
+  - name: Adopter secrets manager
+    type: external
+    notes: AWS SM, Azure Key Vault, GCP SM, Vault, or a file on a VM.
+  - name: Discord Gateway
+    type: external
+    notes: Optional. Only after a cartridge declares type discord and a bot token binds.

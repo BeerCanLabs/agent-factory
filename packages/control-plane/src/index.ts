@@ -7,6 +7,7 @@ import { authFromEnv } from '@beercanlabs/factory-auth';
 import { loadCatalog } from './catalog.js';
 import { apply, createFactoryServer, FactoryState } from './app.js';
 import { memoryRuntime } from './runtime.js';
+import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { agentsDueForCron } from './scheduler.js';
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
@@ -43,32 +44,40 @@ const state: FactoryState = {
   idleMs: IDLE_MS,
   idleTimers: new Map(),
   doormanUrl: process.env.DOORMAN_URL,
-  runtime: memoryRuntime({
-    store: { root: MEMORY_STORE },
-    ephemeralRoot: EPHEMERAL,
-    workerCommand: (agent) => {
-      if (process.env.FACTORY_SPAWN_WORKERS === '0') return undefined;
-      if (agent.localCommand?.length) {
-        const [cmd, ...args] = agent.localCommand;
-        return { cmd, args };
-      }
-      return undefined;
-    },
-    onExit: (agent, code) => {
-      agent.state = code === 0 ? 'IDLE' : 'ERROR';
-      state.ledger.append({
-        timestamp: new Date().toISOString(),
-        agentId: agent.id,
-        type: code === 0 ? 'action' : 'crash',
-        action: 'EXIT',
-        actor: 'runtime',
-        requestId: `exit-${Date.now()}`,
-      });
-      if (code !== 0 && state.agents.has('med-doc')) {
-        void apply(state, 'med-doc', 'WORKING', 'RESUME');
-      }
-    },
-  }),
+  runtime:
+    process.env.FACTORY_RUNTIME === 'ecs'
+      ? ecsRuntime({
+          cluster: process.env.FACTORY_ECS_CLUSTER || '',
+          taskMap: parseTaskMap(process.env.FACTORY_ECS_TASKS),
+          subnets: (process.env.FACTORY_ECS_SUBNETS || '').split(',').filter(Boolean),
+          securityGroups: (process.env.FACTORY_ECS_SECURITY_GROUPS || '').split(',').filter(Boolean),
+        })
+      : memoryRuntime({
+          store: { root: MEMORY_STORE, uri: process.env.MEMORY_STORE_URI },
+          ephemeralRoot: EPHEMERAL,
+          workerCommand: (agent) => {
+            if (process.env.FACTORY_SPAWN_WORKERS === '0') return undefined;
+            if (agent.localCommand?.length) {
+              const [cmd, ...args] = agent.localCommand;
+              return { cmd, args };
+            }
+            return undefined;
+          },
+          onExit: (agent, code) => {
+            agent.state = code === 0 ? 'IDLE' : 'ERROR';
+            state.ledger.append({
+              timestamp: new Date().toISOString(),
+              agentId: agent.id,
+              type: code === 0 ? 'action' : 'crash',
+              action: 'EXIT',
+              actor: 'runtime',
+              requestId: `exit-${Date.now()}`,
+            });
+            if (code !== 0 && state.agents.has('med-doc')) {
+              void apply(state, 'med-doc', 'WORKING', 'RESUME');
+            }
+          },
+        }),
 };
 
 process.env.FACTORY_STARTED_AT = String(Date.now());

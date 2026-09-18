@@ -1,4 +1,4 @@
-# Landing zone: Mac mini / Linux VM (Docker).
+# Landing zone: Docker Compose on a VM or workstation.
 # Doorman is always on and idle. No Discord app required.
 services:
   control-plane:

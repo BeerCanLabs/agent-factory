@@ -1,81 +1,62 @@
 # Agent Factory — instructions for implementing AIs
 
-You are deploying **BeerCanLabs Agent Factory** from this repository. The human said some variant of “build that.” Follow this file. Canonical architecture: `POSITION_PAPER.md`. On conflict, the paper wins, then this file, then `SPEC.md`.
+You are deploying **BeerCanLabs Agent Factory**. Canonical architecture: `POSITION_PAPER.md`. On conflict: paper, then `.draft/sdp.yaml`, then this file.
 
-You are not installing Hermes, OpenClaw, or Garrison. Those are not the factory.
+You are not installing Hermes, OpenClaw, or Garrison. You are not required to use AWS, ECS, or S3.
+
+If a Draftsman / drafting-table session is available, run **that** onboarding interview and write answers into the SDP (`deploymentTarget`, `tierVariants.deploymentTarget.provider`). If not, ask the same questions here.
 
 ## Goal
 
-Leave a **fully functional factory** on the landing zone they choose:
+A working factory on **whatever landing zone they actually have** (new Azure subscription, new AWS account, GCP, or a Linux VM):
 
-- Control plane (REST + MCP) reachable and authenticated
-- Portable cartridges can wake from zero with secrets bound, mind hydrated, ledger appended
-- Sidecar intercepts LLM/MCP egress (kill-switch)
-- **Doorman is installed but idle** until an agent cartridge declares a Discord surface *and* Discord bot credentials are bound. Do **not** require a Discord application to deploy the factory.
-- Sleeping Discord-surface agents appear **offline** in Discord. After Doorman wakes the agent and hands off the conversation they appear **available**. Doorman keeps the Gateway socket; it does not drop the connection while “offline.”
+- Control plane REST + MCP up and authenticated
+- Agents wake from zero; sidecar in the same unit; mind on object storage; ledger metadata+hash
+- Doorman deployed **idle** (no Discord app required)
+- Kernel from this repo; cloud products from the pattern table, not from a hardcoded AWS module
 
-## Interview (ask before provisioning)
+## Interview (Draftsman baseline)
 
-Do not assume AWS, GCP, or Discord. Ask:
+Ask in this order. Do not skip to Terraform.
 
-1. **Landing zone** — GCP, AWS, VMware, Mac mini / Linux VM, or other. They must have credentials for that zone (e.g. `gcloud`, `aws`, SSH, or local Docker).
-2. **Identity provider** for the factory console — Cloudflare Access, Microsoft Entra, Google OAuth/OIDC, or a long-lived bearer token for a first bring-up.
-3. **Secrets backend** — GCP Secret Manager, AWS Secrets Manager, Vault, or a gitignored file on a VM.
-4. **Discord** — optional. Only if they already have (or will add) an *agent with a Discord surface*. Factory deploy itself must not block on a Discord app.
-5. **Prompt traces** — optional. Off by default. If they want troubleshooting copies of LLM prompts in **mind** (not the ledger): `FACTORY_TRACE_PROMPTS=on` and `FACTORY_TRACE_TTL_SECONDS` (default `86400`; `0` = no expiry). Sidecar writes redacted JSON under `$MEMORY_DIR/traces/`.
+1. **Provider** — Azure, AWS, GCP, or a VM/Compose host? Use credentials they give you. If they only have Azure, do **not** apply `landing-zones/aws`.
+2. **Baseline pattern** (`.draft/sdp.yaml` `notes.baselinePatterns` / `landing-zones/PATTERNS.md`):
+   - `serverless-containers` — Container Apps / Cloud Run / App Runner; agents min=0
+   - `orchestrated-tasks` — AKS / ECS / GKE; mailbox as a service, agents as jobs
+   - `compose-host` — `landing-zones/compose`
+3. **IdP** — Entra, Cloudflare Access, Google OIDC, or bearer for first bring-up.
+4. **Secrets manager** — Key Vault, AWS SM, GCP SM, Vault, or a file on the VM.
+5. **Discord** — optional; only if they will add a cartridge with a `discord` surface.
+6. **Prompt traces** — optional; `FACTORY_TRACE_PROMPTS` + TTL.
 
-If they cannot answer (1) and cannot grant you access, stop and tell them what access you need.
+Record the answers on the SDP (`tierVariants`, `serviceGroups[].deploymentTarget`). Then bind the slot table in `landing-zones/PATTERNS.md` and provision.
 
-## What to install (kernel)
+Example: Azure + serverless-containers → Container Apps + Blob + Key Vault + Entra. No ECS.
 
-Always:
+## Kernel (always)
 
-| Piece | Path |
-|---|---|
-| Cartridge contract | `packages/contract` |
-| Secret binding | `packages/secrets-bind` |
-| Mind hydrate | `packages/hydrate` |
-| Ledger | `packages/ledger` |
-| Control plane | `packages/control-plane` |
-| Sidecar | `sidecar/` |
-| Auth hook | `packages/auth` |
-| Doorman (idle) | `packages/doorman` |
-| Landing-zone contract | `landing-zones/CONTRACT.md` |
-| Reference zone | `landing-zones/gcp` or `landing-zones/mac-mini` |
+`packages/contract`, `auth`, `secrets-bind`, `hydrate`, `ledger`, `control-plane`, `doorman`, `sidecar/`. Example cartridges under `agents/` are not factory modules.
 
-Never install as factory kernel: Hermes, OpenClaw, Garrison, a shared skill library, a factory-owned OAuth token vault.
+## Landing-zone examples (optional cargo-cult)
 
-## Landing zones
-
-Read `landing-zones/CONTRACT.md`. Copy the closest reference (`gcp`, `mac-mini`) and adapt. The factory is the control plane + mailbox + bind + hydrate + ledger + sidecar. An “agent task only” Terraform module is incomplete.
-
-Mac mini / VM: `landing-zones/mac-mini` (Compose). GCP: `landing-zones/gcp`. AWS: adapt GCP’s resource list; do not cargo-cult `blueprints/aws` without adding the control plane.
-
-## Auth
-
-`FACTORY_AUTH=bearer|oidc|none`
-
-- `oidc`: `FACTORY_OIDC_ISSUER` + `FACTORY_OIDC_AUDIENCE` (Cloudflare Access, Entra, Google).
-- `bearer`: `FACTORY_TOKEN` — acceptable for first bring-up; tell them to switch to OIDC.
-- `none`: local break-glass only.
+- `landing-zones/aws` — **orchestrated-tasks × AWS only**. Use iff interview selected that pair.
+- `landing-zones/azure` — bind notes, not a second kernel.
+- `landing-zones/gcp` — bind notes.
+- `landing-zones/compose` — compose-host.
 
 ## Discord / Doorman
 
-- Deploy Doorman **always** as a process/service. It starts with no bot token and does nothing.
-- When a cartridge has `surface.yaml` `type: discord` and `DISCORD_BOT_TOKEN` (or the named `secretRef`) binds successfully, Doorman logs in, **presence = offline/invisible**, and waits.
-- Inbound Discord message → `POST /api/v1/agents/:id/wake` → presence available → hand off conversation (`POST /api/v1/agents/:id/conversation`).
-- Agent scale-to-zero → presence offline again. **Do not disconnect the Gateway.**
-- Offline is presence, not a dropped socket.
+Always deploy Doorman. No bot token at factory build. Presence offline while the agent sleeps; available after handoff; do not drop the Gateway.
 
-## Definition of done (verify)
+## Definition of done
 
-1. `GET /healthz` on the control plane.
-2. Authenticated `GET /api/v1/agents` lists cartridges.
-3. `POST /mcp` `tools/list` works.
-4. Bind echo’s secrets; `POST /api/v1/agents/echo-agent/wake` returns 200 not 412; ledger has a `RESUME` row; `MEMORY_STORE` has prefix data after idle. Ledger JSONL must not contain secret values or prompt/content fields (metadata + `payloadSha256` only).
-5. Doorman `/healthz` is ok with `discord: idle` when no Discord surface/token.
-6. If they provided a Discord-surface agent **and** a bot token: Doorman `discord: connected`, presence offline until wake.
+1. Control plane `/healthz` on the chosen ingress
+2. Authenticated `GET /api/v1/agents` and `POST /mcp` `tools/list`
+3. Echo (or their cartridge) wake returns 200; compute actually starts on the chosen pattern; ledger has `RESUME`; mind prefix exists after idle
+4. Ledger has no secrets and no prompt bodies
+5. Doorman `/healthz` is `discord: idle` without a bot token
+6. SDP `deploymentTarget` is no longer `drafting-interview-required`
 
 ## Secrets
 
-Cartridges declare **names only**. Never commit values. Unbound required names → HTTP 412 with `missing: [...]`.
+Names only in git. Unbound required names → HTTP 412.

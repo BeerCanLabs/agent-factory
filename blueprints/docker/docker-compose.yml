@@ -1,4 +1,4 @@
-# Prefer landing-zones/mac-mini for new deploys. Kept as an alias.
+# Prefer landing-zones/compose for new deploys. Kept as an alias.
 services:
   control-plane:
     build:
