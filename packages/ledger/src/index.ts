@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { toLedgerEvent, type LedgerEvent } from './sanitize.js';
+import { canonicalJson, toLedgerEvent, type LedgerEvent } from './sanitize.js';
 
 export type { LedgerEvent } from './sanitize.js';
 export {
@@ -11,15 +12,31 @@ export {
   secretValuesFromEnv,
   toLedgerEvent,
 } from './sanitize.js';
+export { FileCheckpointSink, S3CheckpointSink, checkpointSinkFromEnv } from './checkpoints.js';
+export type { Checkpoint, CheckpointRef, CheckpointSink } from './checkpoints.js';
+import type { CheckpointSink } from './checkpoints.js';
+
+/** A stored row: the sanitized event plus its position and hash in the chain. */
+export type ChainedEvent = LedgerEvent & { seq: number; prevHash: string; hash: string };
+
+export type LedgerFilter = { agent?: string | null; from?: string | null; to?: string | null };
+
+export type VerifyResult =
+  | { ok: true; rows: number; head: string; checkpointsChecked: number }
+  | { ok: false; rows: number; firstBadSeq: number; reason: string };
 
 export type LedgerStore = {
-  append(event: Record<string, unknown>): LedgerEvent;
-  query(filter?: { agent?: string | null; from?: string | null; to?: string | null }): LedgerEvent[];
+  append(event: Record<string, unknown>): ChainedEvent;
+  query(filter?: LedgerFilter): ChainedEvent[];
+  head(): { seq: number; hash: string };
+  verify(checkpoints?: Array<{ toSeq: number; hash: string }>): VerifyResult;
 };
 
 export type LedgerOptions = {
   secrets?: Iterable<string> | (() => Iterable<string>);
 };
+
+export const GENESIS = '0'.repeat(64);
 
 function secretsOf(opts?: LedgerOptions): Iterable<string> {
   const s = opts?.secrets;
@@ -27,52 +44,166 @@ function secretsOf(opts?: LedgerOptions): Iterable<string> {
   return typeof s === 'function' ? s() : s;
 }
 
-/** Append-only JSONL. Schema + redaction run before flush; no update/delete API. */
+/** hash = sha256(prevHash + "\n" + canonical(event without hash)). */
+export function rowHash(prevHash: string, row: LedgerEvent & { seq: number; prevHash: string }): string {
+  return createHash('sha256').update(`${prevHash}\n${canonicalJson(row)}`, 'utf8').digest('hex');
+}
+
+function chain(prev: { seq: number; hash: string }, event: LedgerEvent): ChainedEvent {
+  const body = { ...event, seq: prev.seq + 1, prevHash: prev.hash };
+  return { ...body, hash: rowHash(prev.hash, body) };
+}
+
+function matches(e: LedgerEvent, f: LedgerFilter): boolean {
+  if (f.agent && e.agentId !== f.agent) return false;
+  if (f.from && e.timestamp < f.from) return false;
+  if (f.to && e.timestamp > f.to) return false;
+  return true;
+}
+
+/** Recompute the chain from `genesis`, then confirm each externally held checkpoint lands on it. */
+export function verifyChain(
+  rows: ChainedEvent[],
+  genesis: string,
+  checkpoints: Array<{ toSeq: number; hash: string }> = [],
+): VerifyResult {
+  let prev = genesis;
+  for (let i = 0; i < rows.length; i++) {
+    const { hash, ...body } = rows[i];
+    if (body.seq !== i + 1) return { ok: false, rows: rows.length, firstBadSeq: i + 1, reason: `seq gap: found ${body.seq}` };
+    if (body.prevHash !== prev) return { ok: false, rows: rows.length, firstBadSeq: body.seq, reason: 'prevHash does not link' };
+    if (rowHash(prev, body) !== hash) return { ok: false, rows: rows.length, firstBadSeq: body.seq, reason: 'row content altered' };
+    prev = hash;
+  }
+  for (const c of checkpoints) {
+    const row = rows[c.toSeq - 1];
+    if (!row) return { ok: false, rows: rows.length, firstBadSeq: rows.length + 1, reason: `rows missing: checkpoint covers seq ${c.toSeq}` };
+    if (row.hash !== c.hash) return { ok: false, rows: rows.length, firstBadSeq: c.toSeq, reason: 'chain diverges from WORM checkpoint' };
+  }
+  return { ok: true, rows: rows.length, head: prev, checkpointsChecked: checkpoints.length };
+}
+
+/**
+ * Append-only, hash-chained JSONL with one writer. Schema and redaction run before the row is
+ * hashed, so no prompt text or secret value is ever part of the chain. There is no update or delete.
+ */
 export class FileLedger implements LedgerStore {
+  private readonly rows: ChainedEvent[] = [];
+  private readonly genesis: string;
+
   constructor(
     private readonly filePath: string,
     private readonly opts: LedgerOptions = {},
   ) {
     mkdirSync(dirname(filePath), { recursive: true });
+    let legacy = '';
+    if (existsSync(filePath)) {
+      for (const line of readFileSync(filePath, 'utf8').split('\n')) {
+        if (!line) continue;
+        const row = JSON.parse(line) as ChainedEvent;
+        if (typeof row.hash !== 'string') {
+          if (this.rows.length) throw new Error(`${filePath}: unchained row after chained rows`);
+          legacy += `${line}\n`;
+          continue;
+        }
+        this.rows.push(row);
+      }
+    }
+    // Rows written before chaining existed are sealed under the genesis hash.
+    this.genesis = legacy ? createHash('sha256').update(legacy, 'utf8').digest('hex') : GENESIS;
   }
 
-  append(event: Record<string, unknown>): LedgerEvent {
-    const full = toLedgerEvent(event, secretsOf(this.opts));
-    appendFileSync(this.filePath, `${JSON.stringify(full)}\n`, { encoding: 'utf8' });
-    return full;
+  head() {
+    const last = this.rows.at(-1);
+    return last ? { seq: last.seq, hash: last.hash } : { seq: 0, hash: this.genesis };
   }
 
-  query(filter: { agent?: string | null; from?: string | null; to?: string | null } = {}): LedgerEvent[] {
-    if (!existsSync(this.filePath)) return [];
-    const rows = readFileSync(this.filePath, 'utf8')
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as LedgerEvent);
-    return rows.filter((e) => {
-      if (filter.agent && e.agentId !== filter.agent) return false;
-      if (filter.from && e.timestamp < filter.from) return false;
-      if (filter.to && e.timestamp > filter.to) return false;
-      return true;
-    });
+  append(event: Record<string, unknown>): ChainedEvent {
+    const row = chain(this.head(), toLedgerEvent(event, secretsOf(this.opts)));
+    appendFileSync(this.filePath, `${JSON.stringify(row)}\n`, { encoding: 'utf8' });
+    this.rows.push(row);
+    return row;
+  }
+
+  query(filter: LedgerFilter = {}): ChainedEvent[] {
+    return this.rows.filter((e) => matches(e, filter));
+  }
+
+  since(seq: number): ChainedEvent[] {
+    return this.rows.slice(seq);
+  }
+
+  /** Verifies what is on disk now, not the in-memory copy. */
+  verify(checkpoints: Array<{ toSeq: number; hash: string }> = []): VerifyResult {
+    const onDisk = existsSync(this.filePath)
+      ? readFileSync(this.filePath, 'utf8')
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => JSON.parse(l) as ChainedEvent)
+          .filter((r) => typeof r.hash === 'string')
+      : [];
+    return verifyChain(onDisk, this.genesis, checkpoints);
   }
 }
 
 export class MemoryLedger implements LedgerStore {
-  readonly events: LedgerEvent[] = [];
+  readonly events: ChainedEvent[] = [];
   constructor(private readonly opts: LedgerOptions = {}) {}
 
-  append(event: Record<string, unknown>): LedgerEvent {
-    const full = toLedgerEvent(event, secretsOf(this.opts));
-    this.events.push(full);
-    return full;
+  head() {
+    const last = this.events.at(-1);
+    return last ? { seq: last.seq, hash: last.hash } : { seq: 0, hash: GENESIS };
   }
 
-  query(filter: { agent?: string | null; from?: string | null; to?: string | null } = {}): LedgerEvent[] {
-    return this.events.filter((e) => {
-      if (filter.agent && e.agentId !== filter.agent) return false;
-      if (filter.from && e.timestamp < filter.from) return false;
-      if (filter.to && e.timestamp > filter.to) return false;
-      return true;
-    });
+  append(event: Record<string, unknown>): ChainedEvent {
+    const row = chain(this.head(), toLedgerEvent(event, secretsOf(this.opts)));
+    this.events.push(row);
+    return row;
+  }
+
+  query(filter: LedgerFilter = {}): ChainedEvent[] {
+    return this.events.filter((e) => matches(e, filter));
+  }
+
+  since(seq: number): ChainedEvent[] {
+    return this.events.slice(seq);
+  }
+
+  verify(checkpoints: Array<{ toSeq: number; hash: string }> = []): VerifyResult {
+    return verifyChain(this.events, GENESIS, checkpoints);
+  }
+}
+
+/**
+ * Ship every row since the last checkpoint to write-once storage. The WORM copy is both the
+ * retention copy and the anchor `verify` compares the local chain against.
+ */
+export class Checkpointer {
+  private lastSeq = 0;
+  private busy = false;
+
+  constructor(
+    private readonly ledger: LedgerStore & { since(seq: number): ChainedEvent[] },
+    private readonly sink: CheckpointSink,
+  ) {}
+
+  async init(): Promise<void> {
+    const refs = await this.sink.list();
+    this.lastSeq = refs.reduce((m, r) => Math.max(m, r.toSeq), 0);
+  }
+
+  async flush(): Promise<{ toSeq: number; hash: string } | null> {
+    if (this.busy) return null;
+    const rows = this.ledger.since(this.lastSeq);
+    if (!rows.length) return null;
+    this.busy = true;
+    try {
+      const last = rows[rows.length - 1];
+      await this.sink.write({ fromSeq: rows[0].seq, toSeq: last.seq, prevHash: rows[0].prevHash, hash: last.hash, rows });
+      this.lastSeq = last.seq;
+      return { toSeq: last.seq, hash: last.hash };
+    } finally {
+      this.busy = false;
+    }
   }
 }

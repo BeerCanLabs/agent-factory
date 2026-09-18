@@ -17,6 +17,8 @@ services:
       - FACTORY_PUBLIC_URL=http://127.0.0.1:8088
       - FACTORY_SECRETS_FILE=/run/factory.secrets
       - FACTORY_LEDGER_PATH=/data/ledger.jsonl
+      # Local anchor only; not write-once. Production binds an Object Lock / immutable bucket.
+      - FACTORY_LEDGER_WORM_URI=file:///data/worm
       - MEMORY_STORE_DIR=/data/mind
       - MEMORY_EPHEMERAL_DIR=/data/ephemeral
       - DOORMAN_URL=http://doorman:8090

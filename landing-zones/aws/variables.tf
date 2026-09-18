@@ -57,3 +57,9 @@ variable "trace_ttl_seconds" {
   type    = number
   default = 86400
 }
+
+variable "ledger_retention_days" {
+  type        = number
+  default     = 365
+  description = "COMPLIANCE-mode retention for ledger checkpoints. Cannot be shortened once objects are written."
+}
