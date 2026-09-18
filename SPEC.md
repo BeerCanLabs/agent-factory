@@ -20,7 +20,7 @@ The **Agent Factory** is hosting, plumbing, governance, and lifecycle. **Agent G
 │  ├── Scale-to-zero compute + wake routing                                   │
 │  ├── Secret binding (BYO Vault / AWS SM / GCP SM)                           │
 │  ├── Persistent mind (object-storage hydrate / replicate)                   │
-│  ├── Factory sidecar (egress intercept, kill-switch, OTLP)                  │
+│  ├── Egress gateway (only route out: meter, budget, tools, credentials)     │
 │  └── Immutable execution ledger                                             │
 └──────────────────────────────────────▲──────────────────────────────────────┘
                                        │ hosts, does not author
@@ -66,19 +66,18 @@ Local disk is disposable. On cold start the factory hydrates memory from object 
 
 The cartridge declares names. The factory fetches values from the adopter’s secrets manager and injects them at boot. The factory is not a vault. An MCP gateway must not store API credentials.
 
-### 3.4 Sidecar (injected observability)
+### 3.4 Agent shim and health
 
-Every worker is wrapped by a factory sidecar that:
+There is no sidecar container. Every agent image runs under the factory shim (`packages/hydrate/dist/shim.js`, the entrypoint of `runtimes/generic`), which has no security role:
 
-- intercepts LLM HTTP and MCP egress (the agent does not report its own token counts)
-- writes token, tool, and action records to the factory ledger
-- acts as kill-switch: `PAUSE` / `RESUME` / `ISOLATE` / `THROTTLE` at the proxy
-- taps stdout/stderr and emits OTLP
-- optionally writes **redacted** LLM prompt/response traces into the agent’s mind (`$MEMORY_DIR/traces/`) when `FACTORY_TRACE_PROMPTS` is on. TTL is `FACTORY_TRACE_TTL_SECONDS` (default 86400; `0` disables expiry). This is not the ledger.
+- hydrates mind from object storage, replicates it every `FACTORY_MIND_SYNC_SECONDS` and on exit;
+- points stock SDKs at the gateway (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`) with the run token as their API key;
+- heartbeats `POST /api/v1/runs/:id/heartbeat` with worker RSS every `FACTORY_HEARTBEAT_SECONDS`;
+- reports `failed` if the worker exits non-zero without reporting.
 
-The sidecar is not the agent’s PID 1 and is not named for Garrison. An optional `TELEMETRY_SINKS=garrison` adapter may push heartbeats to a client.
+A run that has sent a heartbeat and then goes silent for `FACTORY_HEARTBEAT_TIMEOUT_MS`, or reports RSS over `FACTORY_MAX_RSS_MB`, has its compute halted and is parked in `BLOCKED_UNHEALTHY`, with a `crash` event routed to MedDoc. `FACTORY_CRASH_LOOP_THRESHOLD` consecutive failed runs within 10 minutes pause the agent until an operator resumes it.
 
-Remote shell `EXEC` is **not** a factory kernel command.
+Health and throughput are OpenTelemetry metrics (`factory.runs.*`, `factory.run.duration`, `factory.health.events`, `factory.gateway.*`) exported over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. They are never written to the ledger. Overlays such as Garrison poll the REST surface; the factory does not push to them.
 
 ### 3.5 Tamper-evident execution ledger
 
@@ -193,19 +192,17 @@ Daemon vs on-behalf-of identity (`identity.yaml`) may land later as optional car
 
 ---
 
-## 6. Current tree vs kernel (gap)
+## 6. Where each kernel piece lives
 
-| Kernel piece | In tree today |
+| Kernel piece | In tree |
 |---|---|
 | Cartridge schema + validator | `packages/contract` + `npm run validate` |
-| `surface.yaml` / `secrets.manifest.yaml` / `memory.yaml` | Present on all example agents |
-| Doorman | `packages/doorman` — idle without a bot token; presence offline/available |
-| Auth | `packages/auth` — JWKS-verified OIDC + named service tokens, role-gated routes, fail-closed |
-| Factory sidecar intercept | `sidecar/`: LLM proxy, isolate/pause/throttle, optional Garrison sink |
-| Control plane REST + MCP | `packages/control-plane` |
-| Secret binding | `packages/secrets-bind` (env, file, HTTP vault/SM). Wake returns 412 if unbound |
-| Scale-to-zero + wake | Control-plane wake + idle timer; webhook from `surface.yaml`; AWS RunTask schedule; Cloud Run `min_instance_count = 0` |
-| Memory hydration | `packages/hydrate` + `runtimes/generic/start.sh` |
-| Factory ledger | `packages/ledger` closed schema + hash + secret mask; sidecar POSTs here |
-| Event routing | `type=crash` wakes `med-doc`; `budget.alert` wakes `finops-officer` |
-| Landing zones | Three SDP baseline patterns; AWS Terraform is orchestrated-tasks×AWS only; Azure/GCP are slot binds |
+| Auth + RBAC | `packages/auth` — JWKS-verified OIDC, named service tokens, run tokens |
+| Control plane REST + MCP, runs, policy, approvals, health | `packages/control-plane` |
+| Egress gateway | `packages/gateway` |
+| Ledger (hash chain + WORM checkpoints) | `packages/ledger` |
+| Secret binding | `packages/secrets-bind` (env, file, HTTP vault, AWS Secrets Manager) |
+| Mind hydration + agent shim | `packages/hydrate` + `runtimes/generic` |
+| Metrics | `packages/telemetry` (OTLP) |
+| Doorman | `packages/doorman` — idle without a bot token |
+| Landing zones | Compose and AWS (ECS) binds; Azure/GCP slot notes |

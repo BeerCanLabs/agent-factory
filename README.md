@@ -33,7 +33,6 @@ Landing zone is a **Draftsman interview**: pick a baseline pattern in `.draft/sd
 AGENTS.md                 # implementing-AI playbook
 POSITION_PAPER.md
 packages/…                # kernel
-sidecar/
 agents/                   # example cartridges (not factory modules)
 landing-zones/            # PATTERNS.md + aws/azure/gcp/compose binds
 .draft/sdp.yaml           # three baseline patterns + interview slots

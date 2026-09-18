@@ -4,11 +4,10 @@
   "private": true,
   "description": "Headless infrastructure for portable autonomous agent cartridges",
   "workspaces": [
-    "sidecar",
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @beercanlabs/factory-auth -w @beercanlabs/factory-contract -w @beercanlabs/factory-ledger -w @beercanlabs/factory-secrets-bind -w @beercanlabs/factory-hydrate -w @beercanlabs/factory-gateway && npm run build --workspaces --if-present",
+    "build": "npm run build -w @beercanlabs/factory-auth -w @beercanlabs/factory-contract -w @beercanlabs/factory-ledger -w @beercanlabs/factory-secrets-bind -w @beercanlabs/factory-hydrate -w @beercanlabs/factory-telemetry -w @beercanlabs/factory-gateway && npm run build --workspaces --if-present",
     "test": "npm run build && npm run test --workspaces --if-present",
     "validate": "npm exec -w @beercanlabs/factory-contract -- tsx src/cli.ts validate --all ../../agents"
   },

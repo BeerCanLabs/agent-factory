@@ -34,6 +34,9 @@ export type Run = {
   result?: unknown;
   error?: string;
   missing?: string[];
+  startedAt?: string;
+  lastHeartbeatAt?: string;
+  rssMb?: number;
 };
 
 export function isTerminal(state: RunState): boolean {
