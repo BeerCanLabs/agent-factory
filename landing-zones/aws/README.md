@@ -1,16 +1,24 @@
-# AWS bind — pattern `orchestrated-tasks` only
+# AWS landing zone (ECS Fargate, pattern `orchestrated-tasks`)
 
-Use this directory **only** if the SDP interview selected **orchestrated-tasks** and **AWS**. It is not the factory kernel. Azure/GCP/Compose use `PATTERNS.md`, not this Terraform.
+Deploys to the **BeerCanLabs** AWS account only. Every AWS-touching command goes through `scripts/bcl-aws`, which reads an isolated config (`~/.aws/beercanlabs/config`), refuses Frontline accounts, and checks the live account before anything runs. The provider's `allowed_account_ids` refuses any other account at plan time.
 
-Implements `landing-zones/CONTRACT.md` on a greenfield AWS account (ECS+ALB+S3+EFS).
+## What it builds
 
-Creates: VPC (public subnets), ALB, ECS cluster, Fargate **control plane** + **Doorman** services, S3 mind bucket, EFS ledger, Secrets Manager token, ECR repos, echo **task definition** (worker under the factory shim) with **no** 24/7 service. Wake is `ecs RunTask` from the control plane (`FACTORY_RUNTIME=ecs`).
+| Tier | Subnets | Route out | Runs |
+|---|---|---|---|
+| Service | public ×2 | IGW | ALB (HTTPS only, :80 redirects), control plane (1 task, the single ledger writer), gateway, Doorman |
+| Agents | private ×2 | **none** — no NAT, no IGW | one Fargate task per run, started by the control plane |
 
-## Credentials (BeerCanLabs account only)
+- **Agents' reachable set** is the control plane (`control-plane.factory.internal:8088`), the gateway (`gateway.factory.internal:8081`), and VPC endpoints for ECR, S3 (mind bucket and ECR layers only), Secrets Manager and CloudWatch Logs. Endpoint policies admit only this account's principals, so the endpoints cannot be used to ship data to another account.
+- **IAM:** each agent gets its own task role limited to `s3://<mind>/<agent-id>/*`. The control plane can `RunTask` only `factory-prod-agent-*` definitions in this cluster and is explicitly denied provider keys. Only the gateway role can read provider keys.
+- **Ledger:** EFS (encrypted, uid-1000 access point) holds the hot chain. Checkpoints ship to an S3 bucket with **Object Lock in COMPLIANCE mode** (`ledger_retention_days`). The control plane deploys stop-before-start, so the chain never has two writers.
+- **Metrics:** an ADOT collector next to the control plane and gateway turns OTLP into CloudWatch metrics.
+- **Secrets:** Terraform generates every factory credential (one per caller→callee edge). Provider keys (`provider_secret_names`) are created empty for you to fill.
 
-This deploys to the **BeerCanLabs** AWS account, never an employer or shared account.
+## What you do once
 
-1. `~/.aws/beercanlabs/config` holds only the BeerCanLabs Identity Center profile:
+1. Create the BeerCanLabs AWS account (not a Frontline email) and enable IAM Identity Center with a `FactoryAdmin` permission set.
+2. Create `~/.aws/beercanlabs/config`:
    ```ini
    [profile beercanlabs-deploy]
    sso_start_url = <BeerCanLabs Identity Center start URL>
@@ -19,27 +27,31 @@ This deploys to the **BeerCanLabs** AWS account, never an employer or shared acc
    sso_role_name = FactoryAdmin
    region = us-east-1
    ```
-2. `export BCL_AWS_ACCOUNT_ID=<id>` (uncomment in `.envrc`), then `AWS_CONFIG_FILE=~/.aws/beercanlabs/config aws sso login --profile beercanlabs-deploy`.
-3. Every AWS-touching command goes through `scripts/bcl-aws`, which checks the account before anything runs:
-   `scripts/bcl-aws terraform -chdir=landing-zones/aws plan`.
-   The provider's `allowed_account_ids` makes terraform refuse any other account.
+3. `AWS_CONFIG_FILE=~/.aws/beercanlabs/config aws sso login --profile beercanlabs-deploy`
+4. A DNS name for the control plane and an ACM certificate for it in `us-east-1`.
 
-## Apply order
-
-1. `scripts/bcl-aws terraform -chdir=landing-zones/aws init && scripts/bcl-aws terraform -chdir=landing-zones/aws apply` with empty image vars — creates ECR/VPC/IAM/S3/EFS.
-2. Build and push:
+## Deploy
 
 ```bash
-aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
-docker build -f packages/control-plane/Dockerfile -t "$ECR_CP:0.1" .
-docker build -f packages/doorman/Dockerfile -t "$ECR_DOORMAN:0.1" .
-docker build -f packages/gateway/Dockerfile -t "$ECR_GATEWAY:0.1" .
-docker build -f runtimes/generic/Dockerfile -t "$ECR_ECHO:0.1" .
-# push each
+export BCL_AWS_ACCOUNT_ID=<id> FACTORY_CERT_ARN=<acm arn> FACTORY_DOMAIN=<name on the cert>
+./scripts/aws-deploy.sh
 ```
 
-3. `terraform apply` again with `control_plane_image`, `doorman_image`, `gateway_image`, `echo_worker_image`.
-4. Read `factory_token_secret_arn`; put cartridge secrets (`ECHO_WEBHOOK_SECRET`, …) in Secrets Manager.
-5. Hit `control_plane_url/healthz`.
+The script runs the bootstrap stack (state bucket, GitHub OIDC `factory-deploy` role), applies the landing zone, builds and pushes immutable images tagged with the commit, applies the services, and runs the definition-of-done checks:
+- HTTP redirects to HTTPS, and unauthenticated calls get 401;
+- an echo run completes from a private subnet with no NAT;
+- the ledger verifies against its Object Lock checkpoints.
 
-Do not create an ECS service for echo. Do not require a Discord app.
+Point `FACTORY_DOMAIN` at `alb_dns_name` before the checks run.
+
+After the first deploy, `.github/workflows/deploy.yml` (manual trigger, `main` only) does the same with OIDC credentials. Set repository variables `BCL_AWS_ACCOUNT_ID`, `FACTORY_CERT_ARN` and `FACTORY_DOMAIN`.
+
+## Enable LLM egress for an agent
+
+1. Put the key in Secrets Manager: `scripts/bcl-aws aws secretsmanager put-secret-value --secret-id factory/prod/ANTHROPIC_API_KEY --secret-string ...`
+2. Set `gateway_prices` (USD per million tokens). Unpriced models are refused.
+3. `PUT /api/v1/agents/<id>/policy {"routes":["anthropic"], "budgetUsd":{"perDay":5}}`, or run `factory-bench --apply` to set the model and budget from measured cost and quality.
+
+## Cost notes
+
+There are no NAT gateways. Fixed costs are the ALB, the four interface endpoints (billed hourly per AZ, two AZs), EFS, and the always-on control plane, gateway and Doorman tasks. Agents cost nothing while idle.
