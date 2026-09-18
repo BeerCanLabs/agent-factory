@@ -37,3 +37,7 @@ output "cluster_name" {
 output "echo_task_family" {
   value = try(aws_ecs_task_definition.echo[0].family, null)
 }
+
+output "ledger_worm_bucket" {
+  value = aws_s3_bucket.ledger_worm.bucket
+}

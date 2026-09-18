@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { FileLedger, secretValuesFromEnv } from '@beercanlabs/factory-ledger';
+import { Checkpointer, FileLedger, checkpointSinkFromEnv, secretValuesFromEnv } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { authFromEnv } from '@beercanlabs/factory-auth';
 import { loadCatalog } from './catalog.js';
@@ -45,6 +45,15 @@ const agents = loadCatalog(AGENTS_ROOT, sidecarUrls);
 const secretValues = new Set<string>(secretValuesFromEnv());
 
 const ledger = new FileLedger(LEDGER_PATH, { secrets: () => secretValues });
+const ledgerSink = checkpointSinkFromEnv();
+{
+  // Never append on top of a chain that no longer verifies: that would launder the tampering.
+  const check = ledger.verify(ledgerSink ? await ledgerSink.list() : []);
+  if (!check.ok) {
+    console.error(`[control-plane] ledger integrity failure at seq ${check.firstBadSeq}: ${check.reason}`);
+    process.exit(3);
+  }
+}
 
 const state: FactoryState = {
   agents: new Map(agents.map((a) => [a.id, a])),
@@ -54,6 +63,7 @@ const state: FactoryState = {
   // Only the gateway can write costUsd (stripped for other writers), so every priced llm row counts.
   spend: SpendTracker.fromLedger(ledger.query(), () => true),
   secretValues,
+  ledgerSink,
   doormanToken: process.env.DOORMAN_TOKEN,
   sidecarToken: process.env.SIDECAR_TOKEN,
   auth: authFromEnv(),
@@ -104,6 +114,20 @@ if (state.runTokens.ephemeral) {
 await reconcileRuns(state);
 if (state.runtime.status) {
   setInterval(() => void reconcileRuns(state), 15_000).unref();
+}
+
+if (ledgerSink) {
+  const checkpointer = new Checkpointer(ledger, ledgerSink);
+  await checkpointer.init();
+  const every = parseInt(process.env.FACTORY_LEDGER_CHECKPOINT_SECONDS || '300', 10) * 1000;
+  const ship = () =>
+    checkpointer.flush().catch((err) => console.error(`[control-plane] ledger checkpoint failed: ${err instanceof Error ? err.message : String(err)}`));
+  setInterval(ship, every).unref();
+  for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(sig, () => void ship().finally(() => process.exit(0)));
+  }
+} else {
+  console.warn('[control-plane] FACTORY_LEDGER_WORM_URI unset: ledger is hash-chained but has no write-once anchor');
 }
 
 const server = createFactoryServer(state);

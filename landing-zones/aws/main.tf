@@ -132,6 +132,49 @@ resource "aws_s3_bucket" "mind" {
   force_destroy = true
 }
 
+# Write-once ledger copy. COMPLIANCE-mode Object Lock: no principal, including root, can delete or
+# overwrite a checkpoint before its retention date. This bucket cannot be destroyed while locked.
+resource "aws_s3_bucket" "ledger_worm" {
+  bucket              = "agent-factory-ledger-${var.environment}-${random_id.suffix.hex}"
+  object_lock_enabled = true
+  force_destroy       = false
+}
+
+resource "aws_s3_bucket_versioning" "ledger_worm" {
+  bucket = aws_s3_bucket.ledger_worm.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_object_lock_configuration" "ledger_worm" {
+  bucket = aws_s3_bucket.ledger_worm.id
+  rule {
+    default_retention {
+      mode = "COMPLIANCE"
+      days = var.ledger_retention_days
+    }
+  }
+  depends_on = [aws_s3_bucket_versioning.ledger_worm]
+}
+
+resource "aws_s3_bucket_public_access_block" "ledger_worm" {
+  bucket                  = aws_s3_bucket.ledger_worm.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "ledger_worm" {
+  bucket = aws_s3_bucket.ledger_worm.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
 resource "random_id" "suffix" {
   byte_length = 4
 }
@@ -348,6 +391,12 @@ resource "aws_iam_role_policy" "control_plane" {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket"]
         Resource = [aws_s3_bucket.mind.arn, "${aws_s3_bucket.mind.arn}/*"]
+      },
+      {
+        Sid      = "LedgerWormAppendOnly"
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:PutObjectRetention", "s3:GetObject", "s3:ListBucket"]
+        Resource = [aws_s3_bucket.ledger_worm.arn, "${aws_s3_bucket.ledger_worm.arn}/*"]
       }
     ]
   })

@@ -2,7 +2,7 @@ import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
-import { redactSecrets, type LedgerStore } from '@beercanlabs/factory-ledger';
+import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
 import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanlabs/factory-auth';
 import { AgentRecord } from './catalog.js';
 import type { Runtime } from './runtime.js';
@@ -34,6 +34,8 @@ export type FactoryState = {
   /** Presented to agent sidecars' command API. */
   sidecarToken?: string;
   secretValues: Set<string>;
+  /** Write-once copy of the ledger; `verify` checks the local chain against it. */
+  ledgerSink?: CheckpointSink;
 };
 
 /** Actors for actions the factory takes on its own (not on behalf of a caller). */
@@ -662,6 +664,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       content: payload,
     });
     json(res, 202, { ok: true });
+    return;
+  }
+
+  if (path === '/api/v1/ledger/verify' && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    const anchors = state.ledgerSink ? await state.ledgerSink.list() : [];
+    const result = state.ledger.verify(anchors);
+    json(res, result.ok ? 200 : 409, { ...result, worm: Boolean(state.ledgerSink) });
     return;
   }
 

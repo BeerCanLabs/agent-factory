@@ -12,6 +12,8 @@ locals {
     { name = "FACTORY_ECS_TASKS", value = "echo-agent:factory-agent-echo-${var.environment}" },
     { name = "FACTORY_LEDGER_PATH", value = "/data/ledger.jsonl" },
     { name = "FACTORY_RUNS_DIR", value = "/data/runs" },
+    { name = "FACTORY_LEDGER_WORM_URI", value = "s3://${aws_s3_bucket.ledger_worm.bucket}/ledger" },
+    { name = "FACTORY_LEDGER_RETENTION_DAYS", value = tostring(var.ledger_retention_days) },
     { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
     { name = "FACTORY_PUBLIC_URL", value = "http://${aws_lb.factory.dns_name}" },
     { name = "MEMORY_STORE_URI", value = "s3://${aws_s3_bucket.mind.bucket}" },

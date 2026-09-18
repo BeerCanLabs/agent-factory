@@ -80,11 +80,15 @@ The sidecar is not the agent’s PID 1 and is not named for Garrison. An optiona
 
 Remote shell `EXEC` is **not** a factory kernel command.
 
-### 3.5 Immutable execution ledger
+### 3.5 Tamper-evident execution ledger
 
-Append-only store of tokens, MCP invocations, and system actions, with actor/authorization. Answers “what did the agent do, and who authorized it?” Garrison and FinOps *read* this API; they do not own it.
+Append-only store of tokens, costs, MCP invocations, and system actions, with actor/authorization. Answers "what did the agent do, and who authorized it?" Garrison and FinOps *read* this API; they do not own it.
 
-**Zero-knowledge flush:** the write path is a closed schema (metadata + `payloadSha256`). Prompt text, MCP params, and Discord bodies are hashed, never stored. The sidecar redacts bound secret *values* from logs and ledger lines before disk. There is no post-hoc redact of JSONL.
+**Zero-knowledge flush:** the write path is a closed schema (metadata + `payloadSha256`). Prompt text, MCP params, and Discord bodies are hashed, never stored. Bound secret *values* are masked before a row is hashed or written.
+
+**Hash chain:** every row carries `seq`, `prevHash` and `hash = sha256(prevHash + "\n" + canonical(row))`. Editing, deleting or reordering any row breaks the chain from that `seq` on. `GET /api/v1/ledger/verify` recomputes the chain from disk (409 on failure), and the control plane refuses to start on a chain that does not verify rather than append on top of it. The control plane is the single writer.
+
+**Write-once anchor:** every `FACTORY_LEDGER_CHECKPOINT_SECONDS` (and on shutdown) the rows since the last checkpoint are shipped to `FACTORY_LEDGER_WORM_URI`. On AWS this is an S3 bucket with Object Lock in COMPLIANCE mode (`ledger_retention_days`), so the checkpoint — rows included — cannot be deleted or overwritten by anyone before retention ends. `verify` checks that the local chain lands on every checkpoint hash, which catches truncation and a history rewritten from genesis. Tamper-*evident* locally, tamper-*proof* for everything already checkpointed.
 
 ### 3.6 Headless control plane
 

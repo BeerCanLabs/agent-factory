@@ -168,6 +168,18 @@ describe('control plane', { concurrency: false }, () => {
       );
     });
 
+    it('verifies the ledger chain for viewers and reports tampering with 409', async () => {
+      await wake();
+      const ok = await request(port, '/api/v1/ledger/verify', { token: TOKENS.viewer });
+      assert.equal(ok.status, 200);
+      assert.equal((ok.json as { ok: boolean }).ok, true);
+      const rows = (state.ledger as MemoryLedger).events;
+      (rows[0] as { actor?: string }).actor = 'someone-else';
+      const bad = await request(port, '/api/v1/ledger/verify', { token: TOKENS.viewer });
+      assert.equal(bad.status, 409);
+      assert.equal((bad.json as { firstBadSeq: number }).firstBadSeq, 1);
+    });
+
     it('strips payload text from POST /ledger', async () => {
       await request(port, '/api/v1/ledger', {
         method: 'POST',
