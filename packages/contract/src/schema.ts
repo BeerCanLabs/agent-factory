@@ -29,8 +29,8 @@ const webhookTrigger = z
 const queueTrigger = z
   .object({
     type: z.literal('queue'),
-    provider: z.enum(['pubsub', 'sqs', 'local']),
-    name: z.string().min(1),
+    provider: z.literal('sqs'),
+    name: z.string().url('queue name is the SQS queue URL'),
   })
   .strict();
 

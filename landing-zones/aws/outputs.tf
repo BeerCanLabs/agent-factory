@@ -32,3 +32,7 @@ output "provider_secrets" {
 output "agent_task_families" {
   value = { for k, t in aws_ecs_task_definition.agent : k => t.family }
 }
+
+output "event_bus" {
+  value = aws_cloudwatch_event_bus.factory.name
+}

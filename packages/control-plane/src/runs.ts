@@ -58,12 +58,15 @@ function stamp(): string {
 
 export class MemoryRunStore implements RunStore {
   protected readonly runs = new Map<string, Run>();
+  /** Called after every create/update, e.g. to publish run events. */
+  onChange?: (run: Run) => void;
 
   create(fields: Omit<Run, 'runId' | 'createdAt' | 'updatedAt'>): Run {
     const now = stamp();
     const run: Run = { ...fields, runId: randomUUID(), createdAt: now, updatedAt: now };
     this.runs.set(run.runId, run);
     this.persist(run);
+    this.onChange?.({ ...run });
     return { ...run };
   }
 
@@ -78,6 +81,7 @@ export class MemoryRunStore implements RunStore {
     const next: Run = { ...cur, ...patch, updatedAt: stamp() };
     this.runs.set(runId, next);
     this.persist(next);
+    if (patch.state !== undefined && patch.state !== cur.state) this.onChange?.({ ...next });
     return { ...next };
   }
 

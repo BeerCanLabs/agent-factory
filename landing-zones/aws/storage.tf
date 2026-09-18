@@ -114,3 +114,8 @@ resource "aws_cloudwatch_log_group" "factory" {
   name              = "/ecs/${local.name}"
   retention_in_days = 30
 }
+
+# Enterprise event bus: run outcomes and blocks, budget alerts, crashes, approval requests.
+resource "aws_cloudwatch_event_bus" "factory" {
+  name = local.name
+}

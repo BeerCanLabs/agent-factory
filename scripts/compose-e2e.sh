@@ -60,6 +60,27 @@ run="$(wait_run "$(head -1 <<<"$r" | jq -r .runId)")"
 [ -z "$(docker ps -aq --filter label=factory.run="$(jq -r .runId <<<"$run")")" ] || die "run container not removed"
 ok "webhook -> 202 -> container -> input/result via run token -> DONE -> container removed"
 
+echo "== integration surfaces: WebSocket stream and event bus"
+ws_out="$(cd "$ROOT" && node --input-type=module -e "
+import { WebSocket } from 'ws';
+const ws = new WebSocket('ws://localhost:8088/api/v1/events?agent=echo-agent', { headers: { authorization: 'Bearer dev-admin-token' } });
+const seen = [];
+const t = setTimeout(() => { console.log(JSON.stringify(seen)); process.exit(1); }, 30000);
+ws.on('message', async (d) => {
+  const e = JSON.parse(String(d));
+  if (e.kind === 'hello') {
+    await fetch('http://localhost:8088/api/v1/hooks/echo-agent', { method: 'POST', headers: { 'x-factory-secret': 'e2e-echo-webhook', 'content-type': 'application/json' }, body: '{\"via\":\"ws\"}' });
+    return;
+  }
+  if (e.kind === 'run') seen.push(e.run.state);
+  if (e.kind === 'run' && e.run.state === 'DONE') { clearTimeout(t); console.log(JSON.stringify(seen)); process.exit(0); }
+});
+")" || die "WebSocket stream: $ws_out"
+grep -q '"WORKING"' <<<"$ws_out" && grep -q '"DONE"' <<<"$ws_out" || die "WebSocket stream states: $ws_out"
+sleep 2
+"${DC[@]}" exec -T control-plane sh -c 'cat /data/events.ndjson' | jq -se 'map(select(.kind=="run" and .run.state=="DONE")) | length >= 2' >/dev/null || die "event bus missing run:DONE"
+ok "WebSocket streamed $ws_out; bus file holds run outcomes"
+
 echo "== egress policy (deny by default)"
 [ "$(api -X POST -d '{"model":"test-big"}' -o /dev/null -w '%{http_code}' $CP/api/v1/agents/llm-summarizer/runs)" = 202 ] || die "run create"
 denied="$(wait_run "$(api "$CP/api/v1/runs?agent=llm-summarizer" | jq -r '.[-1].runId')")"
@@ -112,9 +133,13 @@ echo "== tamper evidence"
 docker run --rm -v agent-factory_factory-data:/data --entrypoint sh node:22-alpine -c \
   "sed -i '2s/\"actor\":\"[^\"]*\"/\"actor\":\"oidc:someone-else\"/' /data/ledger.jsonl"
 "${DC[@]}" start control-plane >/dev/null
-sleep 3
-st="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$("${DC[@]}" ps -aq control-plane)")"
-"${DC[@]}" logs control-plane 2>&1 | grep -q 'ledger integrity failure at seq 2' || die "tampered ledger not detected ($st)"
+detected=""
+for _ in $(seq 1 30); do
+  detected="$("${DC[@]}" logs control-plane 2>&1 | grep -o 'ledger integrity failure at seq [0-9]*' | tail -1 || true)"
+  [ -n "$detected" ] && break
+  sleep 1
+done
+[ "$detected" = "ledger integrity failure at seq 2" ] || die "tampered ledger not detected (got: '${detected}')"
 ok "edited ledger row -> control plane refuses to start (seq 2)"
 
 echo

@@ -10,6 +10,9 @@ import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { FileRunStore, RunTokens } from './runs.js';
 import { callbackPolicyFromEnv } from './callbacks.js';
 import { ApprovalStore, PolicyStore, SpendTracker, validatePolicy } from './policy.js';
+import { EventHub, attachBus, busSinkFromEnv, runEvent, tapLedger } from './events.js';
+import { attachEventStream } from './stream.js';
+import { startQueuePollers } from './queues.js';
 import { memoryRuntime } from './runtime.js';
 import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
@@ -38,7 +41,8 @@ mkdirSync(EPHEMERAL, { recursive: true });
 const agents = loadCatalog(AGENTS_ROOT);
 const secretValues = new Set<string>(secretValuesFromEnv());
 
-const ledger = new FileLedger(LEDGER_PATH, { secrets: () => secretValues });
+const hub = new EventHub();
+const ledger = tapLedger(new FileLedger(LEDGER_PATH, { secrets: () => secretValues }), hub);
 const ledgerSink = checkpointSinkFromEnv();
 {
   // Never append on top of a chain that no longer verifies: that would launder the tampering.
@@ -65,7 +69,7 @@ const state: FactoryState = {
   auth: authFromEnv(),
   version: VERSION,
   providers: providersFromEnv(),
-  runs: new FileRunStore(RUNS_DIR),
+  runs: Object.assign(new FileRunStore(RUNS_DIR), { onChange: (run: Parameters<typeof runEvent>[0]) => hub.publish(runEvent(run)) }),
   runTokens: new RunTokens(process.env.FACTORY_RUN_TOKEN_KEY),
   callbacks: callbackPolicyFromEnv(),
   publicUrl: process.env.FACTORY_PUBLIC_URL,
@@ -141,7 +145,12 @@ if (ledgerSink) {
   console.warn('[control-plane] FACTORY_LEDGER_WORM_URI unset: ledger is hash-chained but has no write-once anchor');
 }
 
+const busSink = busSinkFromEnv();
+if (busSink) attachBus(hub, busSink);
+
 const server = createFactoryServer(state);
+attachEventStream(server, state, hub);
+startQueuePollers(state);
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[control-plane] listening on :${PORT} with ${state.agents.size} cartridges`);
 });
