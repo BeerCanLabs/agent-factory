@@ -22,7 +22,7 @@ if (process.env.AGENT_CMD) {
 const secrets = secretValuesFromEnv();
 const traces = traceConfigFromEnv();
 const killSwitch = new KillSwitch(parseInt(process.env.THROTTLE_TPM || '60', 10));
-const ledger = new Ledger(AGENT_ID, LEDGER_URL, process.env.FACTORY_TOKEN || TOKEN, secrets);
+const ledger = new Ledger(AGENT_ID, LEDGER_URL, process.env.FACTORY_INGEST_TOKEN, secrets);
 const garrison = garrisonFromEnv(process.env);
 
 const control = createControlServer({

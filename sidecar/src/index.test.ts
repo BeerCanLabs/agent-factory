@@ -164,6 +164,27 @@ describe('intercept proxy', { concurrency: false }, () => {
   });
 });
 
+describe('sidecar control API without a configured token', () => {
+  it('fails closed', async () => {
+    const control = createControlServer({
+      agentId: 'echo',
+      agentName: 'Echo',
+      token: undefined,
+      killSwitch: new KillSwitch(1000),
+      ledger: new Ledger('echo'),
+      version: 'test',
+    });
+    const port = await listen(control);
+    try {
+      const cmd = await request(port, '/api/v1/command', { method: 'POST', body: { command: 'RESUME' } });
+      assert.equal(cmd.status, 401);
+      assert.equal((await request(port, '/healthz')).status, 200);
+    } finally {
+      await new Promise<void>((r) => control.close(() => r()));
+    }
+  });
+});
+
 describe('prompt traces in mind', { concurrency: false }, () => {
   it('writes a redacted LLM trace when FACTORY_TRACE_PROMPTS is on', async () => {
     const mind = mkdtempSync(join(tmpdir(), 'trace-mind-'));

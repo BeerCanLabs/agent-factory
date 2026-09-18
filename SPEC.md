@@ -98,7 +98,19 @@ Factory gateway (REST + MCP):
 | POST | `/api/v1/agents/:id/pause\|resume\|isolate` | kill-switch |
 | GET | `/api/v1/ledger` | audit query |
 
-The same surface is exposed as MCP tools. Auth is bearer/OIDC. Per-container fake `/v1/mcp/agents` JSON is not MCP and is not the factory catalog.
+The same surface is exposed as MCP tools. Per-container fake `/v1/mcp/agents` JSON is not MCP and is not the factory catalog.
+
+**Auth and roles.** The control plane refuses to start without auth configured (`FACTORY_AUTH=none` works only with `FACTORY_INSECURE_NO_AUTH=1`). Humans use OIDC: the JWT signature is verified against the IdP's JWKS, plus iss, aud and exp; roles come from `FACTORY_OIDC_ROLES_CLAIM` (default `roles`), optionally mapped through `FACTORY_OIDC_ROLE_MAP`. Services use named bearer tokens (`FACTORY_TOKENS`, JSON `[{name, token, roles}]`). `FACTORY_TOKEN` is a break-glass admin token.
+
+| Role | Can |
+|---|---|
+| `viewer` | list agents, read ledger, MCP read tools |
+| `operator` | viewer + wake/pause/resume/isolate, conversation handoff |
+| `approver` | viewer + approve held actions |
+| `ingest` | `POST /api/v1/ledger` only (actor forced to the token's name, server timestamp) |
+| `admin` | everything |
+
+Every ledger action row records the authenticated principal as `actor` (`oidc:<email>`, `token:<name>`, `webhook:<agent>`, or `factory:<subsystem>` for self-initiated actions). Webhooks authenticate with the cartridge's `secretRef` (header `x-factory-secret`), not a factory bearer. Doorman's presence API requires `DOORMAN_TOKEN`; the sidecar command API requires `SIDECAR_TOKEN`, and both fail closed.
 
 Discovery payload (control plane, not sidecar):
 
@@ -159,7 +171,7 @@ Daemon vs on-behalf-of identity (`identity.yaml`) may land later as optional car
 | Cartridge schema + validator | `packages/contract` + `npm run validate` |
 | `surface.yaml` / `secrets.manifest.yaml` / `memory.yaml` | Present on all example agents |
 | Doorman | `packages/doorman` — idle without a bot token; presence offline/available |
-| Auth | `packages/auth` — bearer or OIDC iss/aud (Cloudflare / Entra / Google) |
+| Auth | `packages/auth` — JWKS-verified OIDC + named service tokens, role-gated routes, fail-closed |
 | Factory sidecar intercept | `sidecar/`: LLM proxy, isolate/pause/throttle, optional Garrison sink |
 | Control plane REST + MCP | `packages/control-plane` |
 | Secret binding | `packages/secrets-bind` (env, file, HTTP vault/SM). Wake returns 412 if unbound |

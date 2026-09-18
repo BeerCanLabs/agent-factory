@@ -1,10 +1,14 @@
 import http from 'node:http';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
+import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createDoorman, fakeGateway } from './index.js';
 
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const FACTORY_URL = (process.env.FACTORY_URL || 'http://127.0.0.1:8088').replace(/\/$/, '');
 const FACTORY_TOKEN = process.env.FACTORY_TOKEN;
+const presenceAuth = bearerAuth(
+  process.env.DOORMAN_TOKEN ? [{ name: 'control-plane', token: process.env.DOORMAN_TOKEN, roles: ['operator'] }] : [],
+);
 
 const gateway = fakeGateway();
 const door = createDoorman({
@@ -63,6 +67,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (path === '/api/v1/presence' && req.method === 'POST') {
+    if (!(await presenceAuth.verify(req.headers.authorization)).ok) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
     let body = '';
     for await (const c of req) body += c;
     const payload = JSON.parse(body || '{}') as { agentId?: string; presence?: string };

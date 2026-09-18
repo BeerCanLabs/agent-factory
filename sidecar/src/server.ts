@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import { KillSwitch } from './killswitch.js';
 import { Ledger } from './ledger.js';
 import type { TraceConfig } from './traces.js';
@@ -12,6 +13,12 @@ export type ControlOptions = {
   version: string;
   traces?: TraceConfig;
 };
+
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
 
 function unauthorized(res: http.ServerResponse) {
   res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -57,12 +64,10 @@ export function createControlServer(opts: ControlOptions): http.Server {
       return;
     }
 
-    if (opts.token) {
-      const header = req.headers.authorization ?? '';
-      if (header !== `Bearer ${opts.token}`) {
-        unauthorized(res);
-        return;
-      }
+    const header = req.headers.authorization ?? '';
+    if (!opts.token || !safeEqual(header, `Bearer ${opts.token}`)) {
+      unauthorized(res);
+      return;
     }
 
     if (path === '/api/v1/ledger' && req.method === 'GET') {

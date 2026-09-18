@@ -60,13 +60,24 @@ function request(
   });
 }
 
+const TOKENS = {
+  admin: 'dev-token',
+  viewer: 'viewer-token',
+  operator: 'operator-token',
+  ingest: 'ingest-token',
+};
+
 function makeState(overrides: Partial<FactoryState> = {}): FactoryState {
   const catalog = loadCatalog(agentsRoot);
   return {
     agents: new Map(catalog.map((a) => [a.id, a])),
     ledger: new MemoryLedger(),
-    token: 'dev-token',
-    auth: bearerAuth('dev-token'),
+    auth: bearerAuth([
+      { name: 'admin', token: TOKENS.admin, roles: ['admin'] },
+      { name: 'viewer', token: TOKENS.viewer, roles: ['viewer'] },
+      { name: 'operator', token: TOKENS.operator, roles: ['operator'] },
+      { name: 'sidecar', token: TOKENS.ingest, roles: ['ingest'] },
+    ]),
     version: 'test',
     providers: [envProvider({ ECHO_WEBHOOK_SECRET: 'whsec', FACTORY_LEDGER_TOKEN: 'ledger' })],
     runtime: noopRuntime(),
@@ -97,7 +108,7 @@ describe('scheduler', () => {
 describe('control plane HTTP + MCP', { concurrency: false }, () => {
   let server: http.Server;
   let port = 0;
-  const token = 'dev-token';
+  const token = TOKENS.admin;
   let state: FactoryState;
 
   before(async () => {
@@ -109,6 +120,11 @@ describe('control plane HTTP + MCP', { concurrency: false }, () => {
   after(async () => {
     await new Promise<void>((r) => server.close(() => r()));
   });
+
+  const actorsFor = (agent: string, action: string) =>
+    (state.ledger.query({ agent }) as Array<{ action?: string; actor?: string }>)
+      .filter((e) => e.action === action)
+      .map((e) => e.actor);
 
   it('serves health without auth', async () => {
     const res = await request(port, '/healthz');
@@ -122,19 +138,22 @@ describe('control plane HTTP + MCP', { concurrency: false }, () => {
   });
 
   it('lists cartridges from the registry', async () => {
-    const res = await request(port, '/api/v1/agents', { token });
+    const res = await request(port, '/api/v1/agents', { token: TOKENS.viewer });
     assert.equal(res.status, 200);
     const rows = res.json as { id: string }[];
     assert.ok(rows.some((a) => a.id === 'echo-agent'));
   });
 
-  it('wakes an agent after binding secrets', async () => {
-    const wake = await request(port, '/api/v1/agents/echo-agent/wake', { method: 'POST', token });
+  it('forbids a viewer from waking an agent', async () => {
+    const res = await request(port, '/api/v1/agents/echo-agent/wake', { method: 'POST', token: TOKENS.viewer });
+    assert.equal(res.status, 403);
+  });
+
+  it('wakes an agent and records the calling principal as actor', async () => {
+    const wake = await request(port, '/api/v1/agents/echo-agent/wake', { method: 'POST', token: TOKENS.operator });
     assert.equal(wake.status, 200, JSON.stringify(wake.json));
     assert.equal((wake.json as { state: string }).state, 'WORKING');
-    const ledger = await request(port, '/api/v1/ledger?agent=echo-agent', { token });
-    const rows = ledger.json as { type: string; action?: string }[];
-    assert.ok(rows.some((e) => e.action === 'RESUME'));
+    assert.ok(actorsFor('echo-agent', 'RESUME').includes('token:operator'));
   });
 
   it('rejects wake when secrets are unbound', async () => {
@@ -143,29 +162,54 @@ describe('control plane HTTP + MCP', { concurrency: false }, () => {
     assert.ok(((res.json as { missing: string[] }).missing ?? []).includes('CLOUD_BILLING_READER'));
   });
 
-  it('wakes via authenticated webhook from surface.yaml', async () => {
-    const res = await request(port, '/api/v1/hooks/echo-agent', {
-      method: 'POST',
-      token,
-      headers: { 'x-factory-secret': 'whsec' },
-    });
+  it('wakes via webhook using the cartridge secret, no factory bearer', async () => {
+    const res = await request(port, '/api/v1/hooks/echo-agent', { method: 'POST', headers: { 'x-factory-secret': 'whsec' } });
     assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.ok(actorsFor('echo-agent', 'RESUME').includes('webhook:echo-agent'));
+  });
+
+  it('rejects a webhook with a wrong or missing secret, even with an admin bearer', async () => {
+    assert.equal((await request(port, '/api/v1/hooks/echo-agent', { method: 'POST', headers: { 'x-factory-secret': 'nope' } })).status, 401);
+    assert.equal((await request(port, '/api/v1/hooks/echo-agent', { method: 'POST', token })).status, 401);
+  });
+
+  it('only the ingest role may write the ledger', async () => {
+    const body = { agentId: 'echo-agent', type: 'llm', inputTokens: 1 };
+    assert.equal((await request(port, '/api/v1/ledger', { method: 'POST', token: TOKENS.operator, body })).status, 403);
+    assert.equal((await request(port, '/api/v1/ledger', { method: 'POST', body })).status, 401);
+    assert.equal((await request(port, '/api/v1/ledger', { method: 'POST', token: TOKENS.ingest, body })).status, 201);
+  });
+
+  it('ingest cannot spoof the actor or read the catalog', async () => {
+    await request(port, '/api/v1/ledger', {
+      method: 'POST',
+      token: TOKENS.ingest,
+      body: { agentId: 'echo-agent', type: 'action', action: 'SPOOF', actor: 'oidc:ceo@example.com' },
+    });
+    assert.deepEqual(actorsFor('echo-agent', 'SPOOF'), ['token:sidecar']);
+    assert.equal((await request(port, '/api/v1/agents', { token: TOKENS.ingest })).status, 403);
+  });
+
+  it('rejects ledger event types outside the ingest set', async () => {
+    const res = await request(port, '/api/v1/ledger', { method: 'POST', token: TOKENS.ingest, body: { agentId: 'echo-agent', type: 'approval' } });
+    assert.equal(res.status, 400);
   });
 
   it('routes crash ledger events to med-doc', async () => {
     const crash = await request(port, '/api/v1/ledger', {
       method: 'POST',
-      token,
+      token: TOKENS.ingest,
       body: { agentId: 'echo-agent', type: 'crash' },
     });
     assert.equal(crash.status, 201);
     assert.equal(state.agents.get('med-doc')?.state, 'WORKING');
+    assert.ok(actorsFor('med-doc', 'RESUME').includes('factory:event-router'));
   });
 
   it('strips payload text from POST /ledger', async () => {
     const res = await request(port, '/api/v1/ledger', {
       method: 'POST',
-      token,
+      token: TOKENS.ingest,
       body: {
         agentId: 'echo-agent',
         type: 'llm',
@@ -182,23 +226,42 @@ describe('control plane HTTP + MCP', { concurrency: false }, () => {
     assert.ok(llm.some((e) => typeof e.payloadSha256 === 'string'));
   });
 
-  it('accepts a doorman conversation handoff', async () => {
+  it('accepts a doorman conversation handoff from an operator', async () => {
     const res = await request(port, '/api/v1/agents/echo-agent/conversation', {
       method: 'POST',
-      token,
+      token: TOKENS.operator,
       body: { content: 'hello', channelId: 'c1' },
     });
     assert.equal(res.status, 202, JSON.stringify(res.json));
   });
 
-  it('exposes the same surface over MCP', async () => {
-    const listed = (await handleMcp(state, { jsonrpc: '2.0', id: 1, method: 'tools/list' })) as {
+  it('exposes the same surface over MCP, filtered and enforced by role', async () => {
+    const admin = { actor: 'token:admin', roles: ['admin' as const] };
+    const viewer = { actor: 'token:viewer', roles: ['viewer' as const] };
+    const listed = (await handleMcp(state, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, admin)) as {
       result: { tools: { name: string }[] };
     };
     const names = listed.result.tools.map((t) => t.name);
     assert.ok(names.includes('list_agents'));
     assert.ok(names.includes('wake_agent'));
     assert.ok(names.includes('query_ledger'));
+
+    const viewerList = (await handleMcp(state, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, viewer)) as {
+      result: { tools: { name: string }[] };
+    };
+    assert.equal(viewerList.result.tools.some((t) => t.name === 'wake_agent'), false);
+
+    const denied = (await handleMcp(
+      state,
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'wake_agent', arguments: { id: 'echo-agent' } } },
+      viewer,
+    )) as { error?: { message: string } };
+    assert.match(denied.error?.message ?? '', /forbidden/);
+  });
+
+  it('MCP over HTTP requires auth', async () => {
+    const res = await request(port, '/mcp', { method: 'POST', body: { jsonrpc: '2.0', id: 1, method: 'tools/list' } });
+    assert.equal(res.status, 401);
   });
 });
 

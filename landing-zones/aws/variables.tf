@@ -38,11 +38,6 @@ variable "echo_worker_image" {
   default = ""
 }
 
-variable "factory_auth" {
-  type    = string
-  default = "bearer"
-}
-
 variable "oidc_issuer" {
   type    = string
   default = ""

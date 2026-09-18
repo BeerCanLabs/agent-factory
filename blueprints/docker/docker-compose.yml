@@ -7,8 +7,11 @@ services:
     environment:
       - PORT=8088
       - AGENTS_ROOT=/app/agents
-      - FACTORY_AUTH=bearer
-      - FACTORY_TOKEN=dev-token
+      # Dev-only tokens. Each service gets its own name and least role.
+      - FACTORY_TOKEN=dev-admin-token
+      - 'FACTORY_TOKENS=[{"name":"doorman","token":"dev-doorman-token","roles":["operator"]},{"name":"sidecar","token":"dev-ingest-token","roles":["ingest"]}]'
+      - DOORMAN_TOKEN=dev-presence-token
+      - SIDECAR_TOKEN=dev-sidecar-token
       - FACTORY_SECRETS_FILE=/run/factory.secrets
       - FACTORY_LEDGER_PATH=/data/ledger.jsonl
       - MEMORY_STORE_DIR=/data/mind
@@ -28,7 +31,8 @@ services:
     environment:
       - PORT=8090
       - FACTORY_URL=http://control-plane:8088
-      - FACTORY_TOKEN=dev-token
+      - FACTORY_TOKEN=dev-doorman-token
+      - DOORMAN_TOKEN=dev-presence-token
       - FACTORY_SECRETS_FILE=/run/factory.secrets
     volumes:
       - ../../landing-zones/docker-secrets.env:/run/factory.secrets:ro

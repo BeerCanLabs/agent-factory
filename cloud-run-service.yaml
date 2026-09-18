@@ -41,6 +41,11 @@ spec:
             secretKeyRef:
               name: sidecar-token
               key: latest
+        - name: FACTORY_INGEST_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: factory-ingest-token
+              key: latest
         # Garrison is optional. Uncomment to enable the overlay sink:
         # - name: TELEMETRY_SINKS
         #   value: garrison
