@@ -18,8 +18,6 @@ locals {
     { name = "FACTORY_PUBLIC_URL", value = "http://${aws_lb.factory.dns_name}" },
     { name = "MEMORY_STORE_URI", value = "s3://${aws_s3_bucket.mind.bucket}" },
     { name = "DOORMAN_URL", value = "http://${aws_lb.factory.dns_name}:8090" },
-    { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
-    { name = "FACTORY_TRACE_TTL_SECONDS", value = tostring(var.trace_ttl_seconds) },
   ]
 }
 
@@ -50,7 +48,6 @@ resource "aws_ecs_task_definition" "control_plane" {
       { name = "FACTORY_TOKEN", valueFrom = aws_secretsmanager_secret.factory_token.arn },
       { name = "FACTORY_TOKENS", valueFrom = aws_secretsmanager_secret.factory_tokens.arn },
       { name = "DOORMAN_TOKEN", valueFrom = aws_secretsmanager_secret.service["DOORMAN_TOKEN"].arn },
-      { name = "SIDECAR_TOKEN", valueFrom = aws_secretsmanager_secret.service["SIDECAR_TOKEN"].arn },
       { name = "FACTORY_RUN_TOKEN_KEY", valueFrom = aws_secretsmanager_secret.service["FACTORY_RUN_TOKEN_KEY"].arn },
       { name = "FACTORY_CALLBACK_SIGNING_KEY", valueFrom = aws_secretsmanager_secret.service["FACTORY_CALLBACK_SIGNING_KEY"].arn },
     ]
@@ -138,7 +135,8 @@ resource "aws_ecs_service" "doorman" {
   depends_on = [aws_lb_listener.doorman]
 }
 
-# Worker + sidecar. No ECS service — control plane RunTask from zero.
+# One agent task = the worker image under the factory shim. No ECS service: the control plane
+# RunTasks it from zero. Its only route out is the egress gateway.
 resource "aws_ecs_task_definition" "echo" {
   family                   = "factory-agent-echo-${var.environment}"
   network_mode             = "awsvpc"
@@ -149,10 +147,6 @@ resource "aws_ecs_task_definition" "echo" {
   task_role_arn            = aws_iam_role.task.arn
   count                    = local.images_ready ? 1 : 0
 
-  volume {
-    name = "mind"
-  }
-
   container_definitions = jsonencode([
     {
       name      = "worker"
@@ -160,52 +154,20 @@ resource "aws_ecs_task_definition" "echo" {
       essential = true
       environment = [
         { name = "AGENT_ID", value = "echo-agent" },
-        { name = "OPENAI_BASE_URL", value = "http://127.0.0.1:8080" },
-        { name = "MEMORY_DIR", value = "/mind" },
+        { name = "MEMORY_DIR", value = "/tmp/mind" },
         { name = "MEMORY_PREFIX", value = "echo-agent" },
         { name = "MEMORY_STORE_URI", value = "s3://${aws_s3_bucket.mind.bucket}" },
-        { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
-        { name = "FACTORY_TRACE_TTL_SECONDS", value = tostring(var.trace_ttl_seconds) },
+        { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
       ]
       secrets = [
         { name = "ECHO_WEBHOOK_SECRET", valueFrom = aws_secretsmanager_secret.echo_webhook.arn },
       ]
-      mountPoints = [{ sourceVolume = "mind", containerPath = "/mind" }]
-      dependsOn   = [{ containerName = "sidecar", condition = "START" }]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
           "awslogs-group"         = aws_cloudwatch_log_group.factory.name
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "echo-worker"
-        }
-      }
-    },
-    {
-      name         = "sidecar"
-      image        = var.sidecar_image
-      essential    = true
-      portMappings = [{ containerPort = 9090, hostPort = 9090 }]
-      environment = [
-        { name = "AGENT_ID", value = "echo-agent" },
-        { name = "PORT", value = "9090" },
-        { name = "PROXY_PORT", value = "8080" },
-        { name = "MEMORY_DIR", value = "/mind" },
-        { name = "FACTORY_LEDGER_URL", value = "http://${aws_lb.factory.dns_name}/api/v1/ledger" },
-        { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
-        { name = "FACTORY_TRACE_TTL_SECONDS", value = tostring(var.trace_ttl_seconds) },
-      ]
-      secrets = [
-        { name = "FACTORY_INGEST_TOKEN", valueFrom = aws_secretsmanager_secret.service["SIDECAR_INGEST_TOKEN"].arn },
-        { name = "SIDECAR_TOKEN", valueFrom = aws_secretsmanager_secret.service["SIDECAR_TOKEN"].arn },
-      ]
-      mountPoints = [{ sourceVolume = "mind", containerPath = "/mind" }]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.factory.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "echo-sidecar"
         }
       }
     }

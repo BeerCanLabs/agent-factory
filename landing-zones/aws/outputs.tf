@@ -14,8 +14,8 @@ output "ecr_doorman" {
   value = aws_ecr_repository.doorman.repository_url
 }
 
-output "ecr_sidecar" {
-  value = aws_ecr_repository.sidecar.repository_url
+output "ecr_gateway" {
+  value = aws_ecr_repository.gateway.repository_url
 }
 
 output "ecr_echo_worker" {

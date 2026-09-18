@@ -4,6 +4,7 @@ import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
 import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanlabs/factory-auth';
+import type { Meter } from '@opentelemetry/api';
 import { AgentRecord } from './catalog.js';
 import type { Runtime } from './runtime.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
@@ -31,8 +32,13 @@ export type FactoryState = {
   doormanUrl?: string;
   /** Presented to Doorman's presence API. */
   doormanToken?: string;
-  /** Presented to agent sidecars' command API. */
-  sidecarToken?: string;
+  /** A run that has sent heartbeats is halted as BLOCKED_UNHEALTHY after this much silence. 0 disables. */
+  heartbeatTimeoutMs?: number;
+  /** Halt a run whose reported RSS exceeds this. 0 disables. */
+  maxRssMb?: number;
+  /** Consecutive failed runs within 10 minutes that pause the agent. 0 disables. */
+  crashLoopThreshold?: number;
+  metrics?: FactoryMetrics;
   secretValues: Set<string>;
   /** Write-once copy of the ledger; `verify` checks the local chain against it. */
   ledgerSink?: CheckpointSink;
@@ -45,8 +51,30 @@ export const SYSTEM = {
   runtime: 'factory:runtime',
   router: 'factory:event-router',
   reconciler: 'factory:reconciler',
+  health: 'factory:health',
   policy: 'factory:policy',
 } as const;
+
+export type FactoryMetrics = {
+  runs: ReturnType<Meter['createCounter']>;
+  runSeconds: ReturnType<Meter['createHistogram']>;
+  health: ReturnType<Meter['createCounter']>;
+};
+
+export function factoryMetrics(meter: Meter, state: () => FactoryState): FactoryMetrics {
+  meter
+    .createObservableGauge('factory.runs.active', { description: 'Non-terminal runs by state' })
+    .addCallback((obs) => {
+      const counts = new Map<string, number>();
+      for (const r of state().runs.list({ active: true })) counts.set(r.state, (counts.get(r.state) ?? 0) + 1);
+      for (const [st, n] of counts) obs.observe(n, { state: st });
+    });
+  return {
+    runs: meter.createCounter('factory.runs.finished', { description: 'Runs reaching a terminal or blocked state' }),
+    runSeconds: meter.createHistogram('factory.run.duration', { unit: 's', description: 'Wall-clock from start to terminal state' }),
+    health: meter.createCounter('factory.health.events', { description: 'Health interventions (unhealthy halts, crash-loop pauses)' }),
+  };
+}
 
 const INGEST_TYPES = new Set(['llm', 'mcp', 'action', 'crash', 'budget.alert']);
 const MAX_BODY = 256 * 1024;
@@ -121,24 +149,6 @@ async function notifyDoorman(state: FactoryState, agentId: string, presence: 'of
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[control-plane] doorman unreachable: ${message}`);
-  }
-}
-
-async function notifySidecar(agent: AgentRecord, command: string, token: string | undefined) {
-  if (!agent.sidecarUrl) return;
-  try {
-    const res = await fetch(`${agent.sidecarUrl.replace(/\/$/, '')}/api/v1/command`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : undefined),
-      },
-      body: JSON.stringify({ command }),
-    });
-    if (!res.ok) console.error(`[control-plane] sidecar ${agent.id} ${res.status}`);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[control-plane] sidecar ${agent.id} unreachable: ${message}`);
   }
 }
 
@@ -255,7 +265,7 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
   };
   try {
     const { handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv });
-    cur = state.runs.update(run.runId, { state: 'WORKING', taskHandle: handle });
+    cur = state.runs.update(run.runId, { state: 'WORKING', taskHandle: handle, startedAt: new Date().toISOString() });
   } catch (err) {
     return finishRun(state, run.runId, 'FAILED', {
       actor: SYSTEM.runtime,
@@ -265,7 +275,6 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
   agent.state = 'WORKING';
   record(state, cur, 'RUN_STARTED', run.actor);
   scheduleTimeout(state, cur);
-  await notifySidecar(agent, 'RESUME', state.sidecarToken);
   await notifyDoorman(state, agent.id, 'available');
   return cur;
 }
@@ -288,6 +297,10 @@ export async function finishRun(
     ...(extra.error !== undefined ? { error: extra.error } : {}),
   });
   record(state, done, `RUN_${terminal}`, extra.actor);
+  state.metrics?.runs.add(1, { agent: done.agentId, state: terminal, trigger: done.trigger });
+  if (done.startedAt) {
+    state.metrics?.runSeconds.record((Date.parse(done.updatedAt) - Date.parse(done.startedAt)) / 1000, { agent: done.agentId, state: terminal });
+  }
 
   const timer = state.idleTimers.get(done.agentId);
   if (timer) clearTimeout(timer);
@@ -310,6 +323,7 @@ export async function finishRun(
   }
 
   void fireCallback(state, done);
+  if (terminal === 'FAILED') await breakCrashLoop(state, done.agentId);
 
   const next = state.runs.list({ agentId: done.agentId, active: true }).find((r) => r.state === 'QUEUED');
   if (next && agent && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED') await startRun(state, next);
@@ -345,7 +359,6 @@ export async function applyKillSwitch(
 ): Promise<Outcome<AgentRecord>> {
   const agent = state.agents.get(id);
   if (!agent) return { status: 404, body: { error: 'not_found' } };
-  await notifySidecar(agent, command, state.sidecarToken);
   if (command === 'PAUSE') agent.state = 'PAUSED';
   else if (command === 'ISOLATE') agent.state = 'ISOLATED';
   else agent.state = activeRun(state, id) ? 'WORKING' : 'IDLE';
@@ -355,6 +368,59 @@ export async function applyKillSwitch(
     if (next) await startRun(state, next);
   }
   return { status: 200, body: agent };
+}
+
+/** Pause an agent whose recent runs keep failing, so the queue stops feeding it. */
+async function breakCrashLoop(state: FactoryState, agentId: string) {
+  const threshold = state.crashLoopThreshold ?? 0;
+  const agent = state.agents.get(agentId);
+  if (threshold <= 0 || !agent || agent.state === 'PAUSED' || agent.state === 'ISOLATED') return;
+  const since = Date.now() - 10 * 60_000;
+  const recent = state.runs
+    .list({ agentId })
+    .filter((r) => isTerminal(r.state) && Date.parse(r.updatedAt) >= since)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  let streak = 0;
+  for (const r of recent) {
+    if (r.state !== 'FAILED') break;
+    streak++;
+  }
+  if (streak < threshold) return;
+  await applyKillSwitch(state, agentId, 'PAUSE', SYSTEM.health);
+  state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'CRASH_LOOP_PAUSED', actor: SYSTEM.health });
+  state.metrics?.health.add(1, { agent: agentId, kind: 'crash_loop' });
+}
+
+/** Halt compute for a run that went silent or over its memory ceiling; park it for a human. */
+export async function haltUnhealthy(state: FactoryState, runId: string, reason: string) {
+  const run = state.runs.get(runId);
+  if (!run || isTerminal(run.state) || run.state === 'BLOCKED_UNHEALTHY') return;
+  const agent = state.agents.get(run.agentId);
+  if (agent) {
+    try {
+      await state.runtime.stop(agent, run.taskHandle);
+    } catch (err) {
+      console.error(`[control-plane] halt ${run.agentId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    agent.state = 'ERROR';
+  }
+  blockRun(state, runId, 'BLOCKED_UNHEALTHY', SYSTEM.health);
+  state.runs.update(runId, { error: reason });
+  const crash = state.ledger.append({ timestamp: new Date().toISOString(), agentId: run.agentId, runId, type: 'crash', action: reason, actor: SYSTEM.health });
+  state.metrics?.health.add(1, { agent: run.agentId, kind: 'unhealthy' });
+  await routeEvents(state, crash);
+}
+
+/** Runs opt in to liveness by sending their first heartbeat; silent runs are governed by the run timeout. */
+export async function checkHealth(state: FactoryState, now = Date.now()) {
+  for (const run of state.runs.list({ active: true })) {
+    if (run.state !== 'WORKING' || !run.lastHeartbeatAt) continue;
+    if (state.heartbeatTimeoutMs && now - Date.parse(run.lastHeartbeatAt) > state.heartbeatTimeoutMs) {
+      await haltUnhealthy(state, run.runId, 'HEARTBEAT_LOST');
+    } else if (state.maxRssMb && (run.rssMb ?? 0) > state.maxRssMb) {
+      await haltUnhealthy(state, run.runId, 'MEMORY_CEILING');
+    }
+  }
 }
 
 async function routeEvents(state: FactoryState, event: { type: string; agentId: string; runId?: string }) {
@@ -558,10 +624,18 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   // Agent-facing: authenticated by the run token minted at start.
-  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result)$/);
-  if (runSelf && ((runSelf[2] === 'input' && req.method === 'GET') || (runSelf[2] === 'result' && req.method === 'POST'))) {
+  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat)$/);
+  if (runSelf && ((runSelf[2] === 'input' && req.method === 'GET') || (runSelf[2] !== 'input' && req.method === 'POST'))) {
     const run = await authenticateRun(req, res, state, runSelf[1]);
     if (!run) return;
+    if (runSelf[2] === 'heartbeat') {
+      const hb = await readJson(req);
+      const rssMb = typeof hb.rssMb === 'number' && Number.isFinite(hb.rssMb) ? hb.rssMb : undefined;
+      state.runs.update(run.runId, { lastHeartbeatAt: new Date().toISOString(), ...(rssMb !== undefined ? { rssMb } : {}) });
+      if (state.maxRssMb && rssMb !== undefined && rssMb > state.maxRssMb) await haltUnhealthy(state, run.runId, 'MEMORY_CEILING');
+      json(res, 200, { ok: true, state: state.runs.get(run.runId)?.state });
+      return;
+    }
     if (runSelf[2] === 'input') {
       json(res, 200, { runId: run.runId, input: run.input ?? null });
       return;

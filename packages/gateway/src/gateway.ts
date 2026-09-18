@@ -6,6 +6,7 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { SseMeter, costUsd, priceFor, usageFromJson, type Price, type Provider, type Usage } from './meter.js';
 import { writeTrace, type TraceConfig } from './traces.js';
+import type { Meter } from '@opentelemetry/api';
 
 export type Route = {
   id: string;
@@ -50,6 +51,7 @@ export type GatewayOptions = {
   traces?: TraceConfig;
   contextTtlMs?: number;
   maxBodyBytes?: number;
+  meter?: Meter;
 };
 
 const STRIP = new Set([
@@ -133,6 +135,14 @@ export function createGateway(opts: GatewayOptions): http.Server {
   const tpm = new Map<string, { windowStart: number; tokens: number }>();
   const credCache = new Map<string, string>();
   const secretValues = new Set<string>();
+  const m = opts.meter
+    ? {
+        requests: opts.meter.createCounter('factory.gateway.requests', { description: 'Egress requests by route and outcome' }),
+        latency: opts.meter.createHistogram('factory.gateway.upstream.duration', { unit: 's' }),
+        tokens: opts.meter.createCounter('factory.gateway.tokens', { description: 'Metered LLM tokens' }),
+        cost: opts.meter.createCounter('factory.gateway.cost', { unit: 'USD' }),
+      }
+    : undefined;
 
   async function context(runId: string): Promise<RunContext | null> {
     const hit = ctxCache.get(runId);
@@ -176,6 +186,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
   }
 
   function deny(res: http.ServerResponse, ctx: RunContext, route: Route, status: number, reason: string, extra: Record<string, unknown> = {}) {
+    m?.requests.add(1, { route: route.id, outcome: reason, agent: ctx.run.agentId });
     ledger(ctx, route, { type: 'action', action: `EGRESS_DENIED_${reason.toUpperCase()}` });
     send(res, status, { error: reason, ...extra });
   }
@@ -189,7 +200,12 @@ export function createGateway(opts: GatewayOptions): http.Server {
     authHeader: string | undefined,
     onResponse?: (status: number, isSse: boolean) => { chunk: (b: Buffer) => void },
   ): Promise<number> {
-    return new Promise((resolve) => {
+    const t0 = performance.now();
+    const done = (status: number) => {
+      m?.requests.add(1, { route: route.id, outcome: String(status) });
+      m?.latency.record((performance.now() - t0) / 1000, { route: route.id });
+    };
+    return new Promise<number>((resolve) => {
       const base = new URL(route.upstream);
       // Build by string so `//host` in the path can never switch origin (and carry the credential elsewhere).
       const dest = new URL(base.origin + base.pathname.replace(/\/$/, '') + rest);
@@ -218,6 +234,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
         });
         upRes.on('end', () => {
           res.end();
+          done(status);
           resolve(status);
         });
         upRes.on('error', () => {
@@ -286,6 +303,10 @@ export function createGateway(opts: GatewayOptions): http.Server {
     }
     if (!usage) return;
     const cost = price ? costUsd(usage, price) : 0;
+    const attrs = { route: route.id, model: usage.model ?? model ?? 'unknown', agent: ctx.run.agentId };
+    m?.tokens.add(usage.input + usage.cacheRead + usage.cacheWrite, { ...attrs, direction: 'input' });
+    m?.tokens.add(usage.output, { ...attrs, direction: 'output' });
+    m?.cost.add(cost, attrs);
     const tokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
     const cur = tpm.get(ctx.run.runId);
     if (!cur || Date.now() - cur.windowStart >= 60_000) tpm.set(ctx.run.runId, { windowStart: Date.now(), tokens });

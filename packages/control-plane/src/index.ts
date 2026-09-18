@@ -5,7 +5,8 @@ import { Checkpointer, FileLedger, checkpointSinkFromEnv, secretValuesFromEnv } 
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { authFromEnv } from '@beercanlabs/factory-auth';
 import { loadCatalog } from './catalog.js';
-import { activeRun, createFactoryServer, createRun, FactoryState, finishRun, reconcileRuns, SYSTEM } from './app.js';
+import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, factoryMetrics, finishRun, reconcileRuns, SYSTEM } from './app.js';
+import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { FileRunStore, RunTokens } from './runs.js';
 import { callbackPolicyFromEnv } from './callbacks.js';
 import { ApprovalStore, PolicyStore, SpendTracker, validatePolicy } from './policy.js';
@@ -30,18 +31,10 @@ function defaultPolicy() {
   return checked.policy;
 }
 
-const sidecarUrls: Record<string, string> = {};
-if (process.env.SIDECAR_URLS) {
-  for (const pair of process.env.SIDECAR_URLS.split(',')) {
-    const [id, url] = pair.split('=').map((s) => s.trim());
-    if (id && url) sidecarUrls[id] = url;
-  }
-}
-
 mkdirSync(MEMORY_STORE, { recursive: true });
 mkdirSync(EPHEMERAL, { recursive: true });
 
-const agents = loadCatalog(AGENTS_ROOT, sidecarUrls);
+const agents = loadCatalog(AGENTS_ROOT);
 const secretValues = new Set<string>(secretValuesFromEnv());
 
 const ledger = new FileLedger(LEDGER_PATH, { secrets: () => secretValues });
@@ -65,7 +58,9 @@ const state: FactoryState = {
   secretValues,
   ledgerSink,
   doormanToken: process.env.DOORMAN_TOKEN,
-  sidecarToken: process.env.SIDECAR_TOKEN,
+  heartbeatTimeoutMs: parseInt(process.env.FACTORY_HEARTBEAT_TIMEOUT_MS || '90000', 10),
+  maxRssMb: parseInt(process.env.FACTORY_MAX_RSS_MB || '0', 10),
+  crashLoopThreshold: parseInt(process.env.FACTORY_CRASH_LOOP_THRESHOLD || '3', 10),
   auth: authFromEnv(),
   version: VERSION,
   providers: providersFromEnv(),
@@ -111,7 +106,11 @@ if (state.runTokens.ephemeral) {
   console.warn('[control-plane] FACTORY_RUN_TOKEN_KEY unset: run tokens die with this process');
 }
 
+const telemetry = initTelemetry('factory-control-plane', VERSION);
+state.metrics = factoryMetrics(telemetry.meter, () => state);
+
 await reconcileRuns(state);
+setInterval(() => void checkHealth(state), 15_000).unref();
 if (state.runtime.status) {
   setInterval(() => void reconcileRuns(state), 15_000).unref();
 }

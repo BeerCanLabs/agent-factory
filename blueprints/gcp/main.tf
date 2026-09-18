@@ -35,8 +35,8 @@ resource "google_cloud_run_v2_service" "agent" {
       name  = "worker"
       image = var.worker_image
       env {
-        name  = "OPENAI_BASE_URL"
-        value = "http://127.0.0.1:8080"
+        name  = "FACTORY_GATEWAY_URL"
+        value = var.gateway_url
       }
       env {
         name  = "MEMORY_STORE_URI"
@@ -46,29 +46,9 @@ resource "google_cloud_run_v2_service" "agent" {
         name  = "AGENT_ID"
         value = var.agent_id
       }
-    }
-
-    containers {
-      name  = "sidecar"
-      image = var.sidecar_image
-      ports {
-        container_port = 9090
-      }
       env {
-        name  = "PORT"
-        value = "9090"
-      }
-      env {
-        name  = "PROXY_PORT"
-        value = "8080"
-      }
-      env {
-        name  = "AGENT_ID"
-        value = var.agent_id
-      }
-      env {
-        name  = "FACTORY_LEDGER_URL"
-        value = var.factory_ledger_url
+        name  = "FACTORY_URL"
+        value = var.factory_url
       }
 
       dynamic "env" {

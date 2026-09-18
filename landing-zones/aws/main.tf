@@ -26,7 +26,8 @@ data "aws_availability_zones" "available" {
 
 locals {
   azs          = slice(data.aws_availability_zones.available.names, 0, 2)
-  images_ready = var.control_plane_image != "" && var.doorman_image != "" && var.sidecar_image != "" && var.echo_worker_image != ""
+  images_ready = var.control_plane_image != "" && var.doorman_image != "" && var.gateway_image != "" && var.echo_worker_image != ""
+  gateway_url  = "http://gateway.factory.internal:8081"
 }
 
 resource "aws_vpc" "factory" {
@@ -115,8 +116,8 @@ resource "aws_ecr_repository" "doorman" {
   force_delete         = true
 }
 
-resource "aws_ecr_repository" "sidecar" {
-  name                 = "factory-sidecar"
+resource "aws_ecr_repository" "gateway" {
+  name                 = "factory-gateway"
   image_tag_mutability = "MUTABLE"
   force_delete         = true
 }
@@ -199,7 +200,7 @@ locals {
     [for s in aws_secretsmanager_secret.service : s.arn],
   )
   # One credential per caller->callee edge, each with its least role.
-  service_tokens = toset(["DOORMAN_OPERATOR_TOKEN", "SIDECAR_INGEST_TOKEN", "DOORMAN_TOKEN", "SIDECAR_TOKEN", "FACTORY_RUN_TOKEN_KEY", "FACTORY_CALLBACK_SIGNING_KEY"])
+  service_tokens = toset(["DOORMAN_OPERATOR_TOKEN", "GATEWAY_TOKEN", "DOORMAN_TOKEN", "FACTORY_RUN_TOKEN_KEY", "FACTORY_CALLBACK_SIGNING_KEY"])
 }
 
 resource "random_password" "service" {
@@ -227,7 +228,7 @@ resource "aws_secretsmanager_secret_version" "factory_tokens" {
   secret_id = aws_secretsmanager_secret.factory_tokens.id
   secret_string = jsonencode([
     { name = "doorman", token = random_password.service["DOORMAN_OPERATOR_TOKEN"].result, roles = ["operator"] },
-    { name = "sidecar", token = random_password.service["SIDECAR_INGEST_TOKEN"].result, roles = ["ingest"] },
+    { name = "gateway", token = random_password.service["GATEWAY_TOKEN"].result, roles = ["gateway"] },
   ])
 }
 

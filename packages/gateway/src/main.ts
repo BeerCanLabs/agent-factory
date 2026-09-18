@@ -4,6 +4,7 @@ import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { createGateway, type ControlClient, type Route } from './gateway.js';
 import type { Price } from './meter.js';
 import { traceConfigFromEnv } from './traces.js';
+import { initTelemetry } from '@beercanlabs/factory-telemetry';
 
 function required(name: string): string {
   const v = process.env[name];
@@ -54,6 +55,7 @@ const server = createGateway({
   control,
   providers: providersFromEnv(),
   traces: traceConfigFromEnv(),
+  meter: initTelemetry('factory-gateway', '0.1.0').meter,
 });
 
 const port = parseInt(process.env.PORT || '8081', 10);

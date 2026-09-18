@@ -11,7 +11,8 @@ import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { pullMind, pushMind } from '@beercanlabs/factory-hydrate';
 import { loadCatalog } from './catalog.js';
-import { createFactoryServer, FactoryState, handleMcp, reconcileRuns } from './app.js';
+import { checkHealth, createFactoryServer, FactoryState, factoryMetrics, handleMcp, reconcileRuns } from './app.js';
+import { AggregationTemporality, InMemoryMetricExporter, MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { noopRuntime, type Runtime } from './runtime.js';
 import { cronMatches } from './scheduler.js';
 import { FileRunStore, MemoryRunStore, RunTokens, type Run } from './runs.js';
@@ -457,6 +458,64 @@ describe('control plane', { concurrency: false }, () => {
         ['APPROVAL_REQUESTED', 'run:echo-agent'],
         ['APPROVAL_GRANTED', 'token:dale'],
       ]);
+    });
+  });
+
+  describe('health', () => {
+    const beat = (run: RunBody, body: unknown = {}) =>
+      request(port, `/api/v1/runs/${run.runId}/heartbeat`, { method: 'POST', token: tokenFor(run.runId), body });
+
+    it('heartbeats need the run token; silence after the first beat halts the run as BLOCKED_UNHEALTHY', async () => {
+      state.heartbeatTimeoutMs = 1000;
+      const run = (await wake()).json as RunBody;
+      assert.equal((await request(port, `/api/v1/runs/${run.runId}/heartbeat`, { method: 'POST', token: TOKENS.admin })).status, 401);
+      await checkHealth(state);
+      assert.equal(state.runs.get(run.runId)?.state, 'WORKING', 'no heartbeat yet: not monitored');
+      assert.equal((await beat(run, { rssMb: 50 })).status, 200);
+      await checkHealth(state, Date.now() + 500);
+      assert.equal(state.runs.get(run.runId)?.state, 'WORKING');
+      await checkHealth(state, Date.now() + 5000);
+      const halted = state.runs.get(run.runId)!;
+      assert.equal(halted.state, 'BLOCKED_UNHEALTHY');
+      assert.equal(halted.error, 'HEARTBEAT_LOST');
+      assert.equal(state.runtime.running('echo-agent'), false, 'compute halted');
+      assert.ok(state.ledger.query({ agent: 'echo-agent' }).some((e) => e.type === 'crash' && e.action === 'HEARTBEAT_LOST'));
+      assert.equal(state.runs.list({ agentId: 'med-doc' }).length, 1, 'crash routed to med-doc');
+    });
+
+    it('a heartbeat over the memory ceiling halts immediately', async () => {
+      state.maxRssMb = 100;
+      const run = (await wake()).json as RunBody;
+      await beat(run, { rssMb: 512 });
+      assert.equal(state.runs.get(run.runId)?.state, 'BLOCKED_UNHEALTHY');
+      assert.equal(state.runs.get(run.runId)?.error, 'MEMORY_CEILING');
+    });
+
+    it('three consecutive failures pause the agent until an operator resumes it', async () => {
+      state.crashLoopThreshold = 3;
+      for (let i = 0; i < 3; i++) {
+        const run = (await wake()).json as RunBody;
+        await request(port, `/api/v1/runs/${run.runId}/result`, { method: 'POST', token: tokenFor(run.runId), body: { status: 'failed' } });
+      }
+      assert.equal(state.agents.get('echo-agent')?.state, 'PAUSED');
+      assert.ok(actions('echo-agent').some((e) => e.action === 'CRASH_LOOP_PAUSED' && e.actor === 'factory:health'));
+      assert.equal((await wake()).status, 409);
+      await request(port, '/api/v1/agents/echo-agent/resume', { method: 'POST', token: TOKENS.operator });
+      assert.equal((await wake()).status, 202);
+    });
+
+    it('emits run metrics through OpenTelemetry', async () => {
+      const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+      const reader = new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 60_000 });
+      const provider = new MeterProvider({ readers: [reader] });
+      state.metrics = factoryMetrics(provider.getMeter('test'), () => state);
+      const run = (await wake()).json as RunBody;
+      await reader.forceFlush();
+      await request(port, `/api/v1/runs/${run.runId}/result`, { method: 'POST', token: tokenFor(run.runId), body: { status: 'succeeded' } });
+      await reader.forceFlush();
+      const names = exporter.getMetrics().flatMap((rm) => rm.scopeMetrics.flatMap((sm) => sm.metrics.map((m) => m.descriptor.name)));
+      for (const n of ['factory.runs.finished', 'factory.run.duration', 'factory.runs.active']) assert.ok(names.includes(n), n);
+      await provider.shutdown();
     });
   });
 

@@ -28,7 +28,7 @@ variable "doorman_image" {
   default = ""
 }
 
-variable "sidecar_image" {
+variable "gateway_image" {
   type    = string
   default = ""
 }

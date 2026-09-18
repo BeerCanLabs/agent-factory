@@ -11,14 +11,13 @@ export type AgentRecord = {
   provider: string;
   artifact: string;
   localCommand?: string[];
-  sidecarUrl?: string;
   requires: string[];
   triggers: Surface['triggers'];
   memoryPrefix?: string;
   dir: string;
 };
 
-export function loadCatalog(agentsRoot: string, sidecarUrls: Record<string, string> = {}): AgentRecord[] {
+export function loadCatalog(agentsRoot: string): AgentRecord[] {
   const dirs = walk(agentsRoot);
   const out: AgentRecord[] = [];
   for (const dir of dirs) {
@@ -68,7 +67,6 @@ export function loadCatalog(agentsRoot: string, sidecarUrls: Record<string, stri
       provider: 'local',
       artifact,
       localCommand,
-      sidecarUrl: sidecarUrls[result.cartridgeId],
       requires,
       triggers,
       memoryPrefix,
