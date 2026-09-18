@@ -89,6 +89,7 @@ const state: FactoryState = {
           taskMap: parseTaskMap(process.env.FACTORY_ECS_TASKS),
           subnets: (process.env.FACTORY_ECS_SUBNETS || '').split(',').filter(Boolean),
           securityGroups: (process.env.FACTORY_ECS_SECURITY_GROUPS || '').split(',').filter(Boolean),
+          assignPublicIp: process.env.FACTORY_ECS_ASSIGN_PUBLIC_IP !== 'false',
         })
       : memoryRuntime({
           store: { root: MEMORY_STORE, uri: process.env.MEMORY_STORE_URI },

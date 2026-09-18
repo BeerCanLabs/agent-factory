@@ -1,29 +1,41 @@
-locals {
-  subnet_ids = aws_subnet.public[*].id
-  cp_env = [
-    { name = "PORT", value = "8088" },
-    { name = "AGENTS_ROOT", value = "/app/agents" },
-    { name = "FACTORY_OIDC_ISSUER", value = var.oidc_issuer },
-    { name = "FACTORY_OIDC_AUDIENCE", value = var.oidc_audience },
-    { name = "FACTORY_RUNTIME", value = "ecs" },
-    { name = "FACTORY_ECS_CLUSTER", value = aws_ecs_cluster.factory.name },
-    { name = "FACTORY_ECS_SUBNETS", value = join(",", local.subnet_ids) },
-    { name = "FACTORY_ECS_SECURITY_GROUPS", value = aws_security_group.tasks.id },
-    { name = "FACTORY_ECS_TASKS", value = "echo-agent:factory-agent-echo-${var.environment}" },
-    { name = "FACTORY_LEDGER_PATH", value = "/data/ledger.jsonl" },
-    { name = "FACTORY_RUNS_DIR", value = "/data/runs" },
-    { name = "FACTORY_LEDGER_WORM_URI", value = "s3://${aws_s3_bucket.ledger_worm.bucket}/ledger" },
-    { name = "FACTORY_LEDGER_RETENTION_DAYS", value = tostring(var.ledger_retention_days) },
-    { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
-    { name = "FACTORY_PUBLIC_URL", value = "http://${aws_lb.factory.dns_name}" },
-    { name = "MEMORY_STORE_URI", value = "s3://${aws_s3_bucket.mind.bucket}" },
-    { name = "DOORMAN_URL", value = "http://${aws_lb.factory.dns_name}:8090" },
-  ]
+resource "aws_ecs_cluster" "factory" {
+  name = local.name
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
 }
+
+locals {
+  log = { for svc in ["control-plane", "gateway", "doorman", "otel", "agent"] : svc => {
+    logDriver = "awslogs"
+    options = {
+      "awslogs-group"         = aws_cloudwatch_log_group.factory.name
+      "awslogs-region"        = var.aws_region
+      "awslogs-stream-prefix" = svc
+    }
+  } }
+
+  # ADOT collector: receives OTLP from the service on localhost, emits CloudWatch EMF metrics.
+  otel = {
+    name             = "otel"
+    image            = var.otel_collector_image
+    essential        = false
+    command          = ["--config=/etc/ecs/ecs-default-config.yaml"]
+    logConfiguration = local.log["otel"]
+  }
+  otel_env = [{ name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4318" }]
+
+  secret = { for k in local.generated : k => aws_secretsmanager_secret.generated[k].arn }
+
+  agent_task_map = join(",", [for id, _ in local.agent_images : "${id}:${local.name}-agent-${id}"])
+}
+
+# ---- control plane: the only ledger writer ---------------------------------------------------
 
 resource "aws_ecs_task_definition" "control_plane" {
   count                    = local.images_ready ? 1 : 0
-  family                   = "factory-control-plane"
+  family                   = "${local.name}-control-plane"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = "512"
@@ -32,47 +44,73 @@ resource "aws_ecs_task_definition" "control_plane" {
   task_role_arn            = aws_iam_role.control_plane.arn
 
   volume {
-    name = "ledger"
+    name = "data"
     efs_volume_configuration {
-      file_system_id = aws_efs_file_system.ledger.id
+      file_system_id     = aws_efs_file_system.ledger.id
+      transit_encryption = "ENABLED"
+      authorization_config {
+        access_point_id = aws_efs_access_point.ledger.id
+        iam             = "ENABLED"
+      }
     }
   }
 
-  container_definitions = jsonencode([{
-    name         = "control-plane"
-    image        = var.control_plane_image
-    essential    = true
-    portMappings = [{ containerPort = 8088, hostPort = 8088 }]
-    environment  = local.cp_env
-    secrets = [
-      { name = "FACTORY_TOKEN", valueFrom = aws_secretsmanager_secret.factory_token.arn },
-      { name = "FACTORY_TOKENS", valueFrom = aws_secretsmanager_secret.factory_tokens.arn },
-      { name = "DOORMAN_TOKEN", valueFrom = aws_secretsmanager_secret.service["DOORMAN_TOKEN"].arn },
-      { name = "FACTORY_RUN_TOKEN_KEY", valueFrom = aws_secretsmanager_secret.service["FACTORY_RUN_TOKEN_KEY"].arn },
-      { name = "FACTORY_CALLBACK_SIGNING_KEY", valueFrom = aws_secretsmanager_secret.service["FACTORY_CALLBACK_SIGNING_KEY"].arn },
-    ]
-    mountPoints = [{ sourceVolume = "ledger", containerPath = "/data" }]
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        "awslogs-group"         = aws_cloudwatch_log_group.factory.name
-        "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "control-plane"
-      }
-    }
-  }])
+  container_definitions = jsonencode([
+    {
+      name         = "control-plane"
+      image        = var.control_plane_image
+      essential    = true
+      portMappings = [{ containerPort = 8088 }]
+      environment = concat(local.otel_env, [
+        { name = "PORT", value = "8088" },
+        { name = "AGENTS_ROOT", value = "/app/agents" },
+        { name = "FACTORY_OIDC_ISSUER", value = var.oidc_issuer },
+        { name = "FACTORY_OIDC_AUDIENCE", value = var.oidc_audience },
+        { name = "FACTORY_OIDC_ROLES_CLAIM", value = var.oidc_roles_claim },
+        { name = "FACTORY_RUNTIME", value = "ecs" },
+        { name = "FACTORY_ECS_CLUSTER", value = aws_ecs_cluster.factory.name },
+        { name = "FACTORY_ECS_SUBNETS", value = join(",", aws_subnet.agents[*].id) },
+        { name = "FACTORY_ECS_SECURITY_GROUPS", value = aws_security_group.agents.id },
+        { name = "FACTORY_ECS_ASSIGN_PUBLIC_IP", value = "false" },
+        { name = "FACTORY_ECS_TASKS", value = local.agent_task_map },
+        { name = "FACTORY_LEDGER_PATH", value = "/data/ledger.jsonl" },
+        { name = "FACTORY_LEDGER_WORM_URI", value = "s3://${aws_s3_bucket.ledger_worm.bucket}/ledger" },
+        { name = "FACTORY_LEDGER_RETENTION_DAYS", value = tostring(var.ledger_retention_days) },
+        { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
+        { name = "FACTORY_PUBLIC_URL", value = local.cp_url },
+        { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
+        { name = "DOORMAN_URL", value = local.doorman_url },
+        { name = "MEMORY_STORE_DIR", value = "/tmp/mind" },
+        { name = "MEMORY_EPHEMERAL_DIR", value = "/tmp/ephemeral" },
+      ])
+      secrets = [
+        { name = "FACTORY_TOKEN", valueFrom = local.secret["FACTORY_TOKEN"] },
+        { name = "FACTORY_TOKENS", valueFrom = aws_secretsmanager_secret.factory_tokens.arn },
+        { name = "DOORMAN_TOKEN", valueFrom = local.secret["DOORMAN_TOKEN"] },
+        { name = "FACTORY_RUN_TOKEN_KEY", valueFrom = local.secret["FACTORY_RUN_TOKEN_KEY"] },
+        { name = "FACTORY_CALLBACK_SIGNING_KEY", valueFrom = local.secret["FACTORY_CALLBACK_SIGNING_KEY"] },
+      ]
+      mountPoints      = [{ sourceVolume = "data", containerPath = "/data" }]
+      stopTimeout      = 30
+      logConfiguration = local.log["control-plane"]
+    },
+    local.otel,
+  ])
 }
 
 resource "aws_ecs_service" "control_plane" {
   count           = local.images_ready ? 1 : 0
-  name            = "factory-control-plane"
+  name            = "control-plane"
   cluster         = aws_ecs_cluster.factory.id
   task_definition = aws_ecs_task_definition.control_plane[0].arn
   desired_count   = 1
   launch_type     = "FARGATE"
+  # Stop the old task before starting the new one: two writers would fork the ledger chain.
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
   network_configuration {
-    subnets          = local.subnet_ids
-    security_groups  = [aws_security_group.tasks.id]
+    subnets          = aws_subnet.service[*].id
+    security_groups  = [aws_security_group.control_plane.id]
     assign_public_ip = true
   }
   load_balancer {
@@ -80,96 +118,154 @@ resource "aws_ecs_service" "control_plane" {
     container_name   = "control-plane"
     container_port   = 8088
   }
-  depends_on = [aws_lb_listener.http, aws_efs_mount_target.ledger]
+  service_registries {
+    registry_arn = aws_service_discovery_service.svc["control-plane"].arn
+  }
+  depends_on = [aws_lb_listener.https, aws_efs_mount_target.ledger]
 }
 
-resource "aws_ecs_task_definition" "doorman" {
+# ---- gateway: the only route out for agents --------------------------------------------------
+
+resource "aws_ecs_task_definition" "gateway" {
   count                    = local.images_ready ? 1 : 0
-  family                   = "factory-doorman"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = "256"
-  memory                   = "512"
-  execution_role_arn       = aws_iam_role.execution.arn
-  container_definitions = jsonencode([{
-    name         = "doorman"
-    image        = var.doorman_image
-    essential    = true
-    portMappings = [{ containerPort = 8090, hostPort = 8090 }]
-    environment = [
-      { name = "PORT", value = "8090" },
-      { name = "FACTORY_URL", value = "http://${aws_lb.factory.dns_name}" },
-    ]
-    secrets = [
-      { name = "FACTORY_TOKEN", valueFrom = aws_secretsmanager_secret.service["DOORMAN_OPERATOR_TOKEN"].arn },
-      { name = "DOORMAN_TOKEN", valueFrom = aws_secretsmanager_secret.service["DOORMAN_TOKEN"].arn },
-    ]
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        "awslogs-group"         = aws_cloudwatch_log_group.factory.name
-        "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "doorman"
-      }
-    }
-  }])
-}
-
-resource "aws_ecs_service" "doorman" {
-  count           = local.images_ready ? 1 : 0
-  name            = "factory-doorman"
-  cluster         = aws_ecs_cluster.factory.id
-  task_definition = aws_ecs_task_definition.doorman[0].arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-  network_configuration {
-    subnets          = local.subnet_ids
-    security_groups  = [aws_security_group.tasks.id]
-    assign_public_ip = true
-  }
-  load_balancer {
-    target_group_arn = aws_lb_target_group.doorman.arn
-    container_name   = "doorman"
-    container_port   = 8090
-  }
-  depends_on = [aws_lb_listener.doorman]
-}
-
-# One agent task = the worker image under the factory shim. No ECS service: the control plane
-# RunTasks it from zero. Its only route out is the egress gateway.
-resource "aws_ecs_task_definition" "echo" {
-  family                   = "factory-agent-echo-${var.environment}"
+  family                   = "${local.name}-gateway"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = "512"
   memory                   = "1024"
   execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn            = aws_iam_role.task.arn
-  count                    = local.images_ready ? 1 : 0
-
+  task_role_arn            = aws_iam_role.gateway.arn
   container_definitions = jsonencode([
     {
-      name      = "worker"
-      image     = var.echo_worker_image
-      essential = true
-      environment = [
-        { name = "AGENT_ID", value = "echo-agent" },
-        { name = "MEMORY_DIR", value = "/tmp/mind" },
-        { name = "MEMORY_PREFIX", value = "echo-agent" },
-        { name = "MEMORY_STORE_URI", value = "s3://${aws_s3_bucket.mind.bucket}" },
-        { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
-      ]
+      name         = "gateway"
+      image        = var.gateway_image
+      essential    = true
+      portMappings = [{ containerPort = 8081 }]
+      environment = concat(local.otel_env, [
+        { name = "PORT", value = "8081" },
+        { name = "FACTORY_URL", value = local.cp_url },
+        { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
+        { name = "FACTORY_GATEWAY_ROUTES", value = var.gateway_routes },
+        { name = "FACTORY_PRICES", value = var.gateway_prices },
+        { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
+        { name = "FACTORY_TRACE_DIR", value = "/tmp/traces" },
+      ])
       secrets = [
-        { name = "ECHO_WEBHOOK_SECRET", valueFrom = aws_secretsmanager_secret.echo_webhook.arn },
+        { name = "FACTORY_GATEWAY_TOKEN", valueFrom = local.secret["GATEWAY_TOKEN"] },
+        { name = "FACTORY_RUN_TOKEN_KEY", valueFrom = local.secret["FACTORY_RUN_TOKEN_KEY"] },
       ]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.factory.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "echo-worker"
-        }
-      }
-    }
+      logConfiguration = local.log["gateway"]
+    },
+    local.otel,
   ])
+}
+
+resource "aws_ecs_service" "gateway" {
+  count           = local.images_ready ? 1 : 0
+  name            = "gateway"
+  cluster         = aws_ecs_cluster.factory.id
+  task_definition = aws_ecs_task_definition.gateway[0].arn
+  desired_count   = var.gateway_count
+  launch_type     = "FARGATE"
+  network_configuration {
+    subnets          = aws_subnet.service[*].id
+    security_groups  = [aws_security_group.gateway.id]
+    assign_public_ip = true
+  }
+  service_registries {
+    registry_arn = aws_service_discovery_service.svc["gateway"].arn
+  }
+}
+
+# ---- doorman ---------------------------------------------------------------------------------
+
+resource "aws_iam_role" "doorman" {
+  name               = "${local.name}-doorman"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+resource "aws_iam_role_policy" "doorman" {
+  name = "discord-token-only"
+  role = aws_iam_role.doorman.id
+  policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = "${local.secret_arn}/DISCORD_BOT_TOKEN*" }]
+  })
+}
+
+resource "aws_ecs_task_definition" "doorman" {
+  count                    = local.images_ready ? 1 : 0
+  family                   = "${local.name}-doorman"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = aws_iam_role.doorman.arn
+  container_definitions = jsonencode([{
+    name         = "doorman"
+    image        = var.doorman_image
+    essential    = true
+    portMappings = [{ containerPort = 8090 }]
+    environment = [
+      { name = "PORT", value = "8090" },
+      { name = "FACTORY_URL", value = local.cp_url },
+      { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
+    ]
+    secrets = [
+      { name = "FACTORY_TOKEN", valueFrom = local.secret["DOORMAN_OPERATOR_TOKEN"] },
+      { name = "DOORMAN_TOKEN", valueFrom = local.secret["DOORMAN_TOKEN"] },
+    ]
+    logConfiguration = local.log["doorman"]
+  }])
+}
+
+resource "aws_ecs_service" "doorman" {
+  count           = local.images_ready ? 1 : 0
+  name            = "doorman"
+  cluster         = aws_ecs_cluster.factory.id
+  task_definition = aws_ecs_task_definition.doorman[0].arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+  network_configuration {
+    subnets          = aws_subnet.service[*].id
+    security_groups  = [aws_security_group.doorman.id]
+    assign_public_ip = true
+  }
+  service_registries {
+    registry_arn = aws_service_discovery_service.svc["doorman"].arn
+  }
+}
+
+# ---- agents: task definitions only; the control plane RunTasks them from zero -----------------
+
+resource "aws_ecs_task_definition" "agent" {
+  for_each                 = local.agent_images
+  family                   = "${local.name}-agent-${each.key}"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = tostring(var.agents[each.key].cpu)
+  memory                   = tostring(var.agents[each.key].memory)
+  execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = aws_iam_role.agent[each.key].arn
+  container_definitions = jsonencode([{
+    name                   = "worker"
+    image                  = each.value
+    essential              = true
+    readonlyRootFilesystem = true
+    environment = [
+      { name = "AGENT_ID", value = each.key },
+      { name = "MEMORY_DIR", value = "/tmp/mind" },
+      { name = "MEMORY_PREFIX", value = each.key },
+      { name = "MEMORY_STORE_URI", value = "s3://${aws_s3_bucket.mind.bucket}" },
+      { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
+      { name = "FACTORY_URL", value = local.cp_url },
+    ]
+    secrets          = [for name in var.agents[each.key].secrets : { name = name, valueFrom = "factory/${var.environment}/${name}" }]
+    mountPoints      = [{ sourceVolume = "tmp", containerPath = "/tmp" }]
+    logConfiguration = local.log["agent"]
+  }])
+  volume {
+    name = "tmp"
+  }
 }
