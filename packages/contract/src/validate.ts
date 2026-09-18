@@ -6,6 +6,7 @@ import {
   artifactSchema,
   identitySchema,
   memorySchema,
+  benchSchema,
   secretsManifestSchema,
   skillsSchema,
   surfaceSchema,
@@ -141,6 +142,15 @@ export function validateCartridge(dir: string): ValidationResult {
     const raw = parseYamlFile(filePath, issues);
     if (raw !== undefined) {
       const parsed = memorySchema.safeParse(raw);
+      if (!parsed.success) zodIssues(filePath, parsed.error, issues);
+    }
+  }
+
+  if (entries.has('bench.yaml')) {
+    const filePath = join(dir, 'bench.yaml');
+    const raw = parseYamlFile(filePath, issues);
+    if (raw !== undefined) {
+      const parsed = benchSchema.safeParse(raw);
       if (!parsed.success) zodIssues(filePath, parsed.error, issues);
     }
   }

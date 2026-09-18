@@ -1,0 +1,9 @@
+cases:
+  - id: names-the-subject
+    input: { text: "The factory gateway meters every token and enforces budgets before each call." }
+    expect:
+      contains: ["gateway"]
+  - id: stays-short
+    input: { text: "Agents wake from zero, do their work, and scale back to zero." }
+    expect:
+      matches: "^.{1,200}$"

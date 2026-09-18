@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { pullMind, pushMind, type MindStore } from '@beercanlabs/factory-hydrate';
+import { gatewayEnv, pullMind, pushMind, type MindStore } from '@beercanlabs/factory-hydrate';
 import type { AgentRecord } from './catalog.js';
 
 /** `runEnv` is non-secret run metadata (FACTORY_RUN_ID, FACTORY_URL, ...) plus the short-lived run token. */
@@ -48,6 +48,7 @@ export function memoryRuntime(opts: {
           HOME: process.env.HOME ?? '',
           ...secrets,
           ...ctx.runEnv,
+          ...gatewayEnv(ctx.runEnv),
           MEMORY_DIR: dest,
           AGENT_ID: agent.id,
         },

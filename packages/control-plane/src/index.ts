@@ -68,6 +68,7 @@ const state: FactoryState = {
   runTokens: new RunTokens(process.env.FACTORY_RUN_TOKEN_KEY),
   callbacks: callbackPolicyFromEnv(),
   publicUrl: process.env.FACTORY_PUBLIC_URL,
+  gatewayUrl: process.env.FACTORY_GATEWAY_URL,
   idleMs: IDLE_MS,
   idleTimers: new Map(),
   doormanUrl: process.env.DOORMAN_URL,

@@ -95,12 +95,39 @@ export const memorySchema = z
   })
   .strict();
 
+const benchCase = z
+  .object({
+    id: z.string().regex(/^[a-z0-9][a-z0-9-_]*$/i, 'case ids are slugs'),
+    input: z.unknown().optional(),
+    expect: z
+      .object({
+        status: z.enum(['DONE', 'FAILED']).default('DONE'),
+        equals: z.unknown().optional(),
+        contains: z.array(z.string()).optional(),
+        matches: z.string().optional(),
+      })
+      .strict()
+      .default({ status: 'DONE' }),
+    timeoutSeconds: z.number().positive().max(3600).default(300),
+  })
+  .strict();
+
+/** The cartridge's regression suite. Deterministic checks only; the harness runs it per model. */
+export const benchSchema = z
+  .object({
+    cases: z.array(benchCase).min(1),
+  })
+  .strict()
+  .refine((b) => new Set(b.cases.map((c) => c.id)).size === b.cases.length, { message: 'case ids must be unique' });
+
 export type SecretsManifest = z.infer<typeof secretsManifestSchema>;
 export type Surface = z.infer<typeof surfaceSchema>;
 export type Artifact = z.infer<typeof artifactSchema>;
 export type Skills = z.infer<typeof skillsSchema>;
 export type Identity = z.infer<typeof identitySchema>;
 export type Memory = z.infer<typeof memorySchema>;
+export type Bench = z.infer<typeof benchSchema>;
+export type BenchCase = z.infer<typeof benchCase>;
 
-export const REQUIRED_FILES = ['soul.md', 'surface.yaml', 'secrets.manifest.yaml', 'artifact.yaml'] as const;
+export const REQUIRED_FILES = ['soul.md', 'surface.yaml', 'secrets.manifest.yaml', 'artifact.yaml', 'bench.yaml'] as const;
 export const OPTIONAL_FILES = ['skills.yaml', 'identity.yaml', 'memory.yaml'] as const;

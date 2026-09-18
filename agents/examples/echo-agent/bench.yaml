@@ -1,0 +1,9 @@
+cases:
+  - id: echoes-object
+    input: { hello: world }
+    expect:
+      equals: { echo: { hello: world } }
+  - id: echoes-text
+    input: "ping"
+    expect:
+      contains: ["ping"]

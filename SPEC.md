@@ -162,6 +162,10 @@ Route and price configuration: `FACTORY_GATEWAY_CONFIG` (JSON `{routes, prices}`
 
 ---
 
+### 3.9 Benchmark harness (cost vs quality)
+
+Every cartridge ships `bench.yaml`: cases with an `input` and deterministic expectations (`status`, `equals`, `contains`, `matches`). Running it is optional. `factory-bench --cartridge <dir> --models a,b` runs each case as a real run through the factory with the run **pinned** to the model (`POST /runs {model}`; the gateway refuses any other model for that run), reads each run's cost from the ledger, and prints the Cost vs Quality Matrix projected to `--runs-per-month`. It recommends the cheapest model meeting `--min-pass` with a per-run budget of 2× the most expensive observed case; `--apply` writes that into the agent's policy (admin). No LLM judge: grading is reproducible.
+
 ## 4. Foundational example cartridges
 
 Shipped under `agents/` as portable examples. Factory code must not import them.
@@ -182,7 +186,6 @@ These appear in earlier drafts. They are **not** required to satisfy the positio
 
 1. **Doorman (module, not a deploy-time Discord app).** Always installed, idle until a cartridge declares `type: discord` and `DISCORD_BOT_TOKEN` (or `secretRef`) binds. Gateway stays up; presence is offline while the agent sleeps and available after conversation handoff. Slack RTM and true TCP socket transfer remain deferred.
 2. **Cloud OAuth broker** — factory-stored OBO refresh tokens.
-3. **Training Gym** — Promptfoo / multi-model graduation / Garrison hex “gym” tile.
 4. **LiteLLM-as-product** — a model-router SKU. A sidecar intercept proxy *is* kernel; a routing marketplace is not.
 5. **Shared skills catalog / capability triage bot** — contradicts “skills live in the artifact.”
 6. **Voice / robotics streaming gateway.**
