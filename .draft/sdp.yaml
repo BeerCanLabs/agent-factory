@@ -4,7 +4,7 @@ type: software_deployment_pattern
 name: BeerCanLabs Agent Factory
 description: >-
   Headless factory for portable agent cartridges. The kernel is cloud-agnostic
-  (contract, control plane, sidecar, secret bind, mind hydrate, ledger, idle Doorman).
+  (contract, control plane, shim, secret bind, mind hydrate, ledger, idle Doorman).
   Where it lands is a Draftsman interview: pick one of three baseline patterns,
   then bind AWS, Azure, GCP, or a VM to the slots. Garrison is a client, not kernel.
 version: 1.1.0
@@ -60,7 +60,7 @@ notes:
       follows: 01KV0REFAR-CMSV
       when: >-
         Control plane + Doorman run as always-on services; agents are Jobs/RunTask
-        with a sidecar in the same task. Use when the org standard is AKS/ECS/GKE.
+        with a shim in the same task. Use when the org standard is AKS/ECS/GKE.
     - id: compose-host
       name: Compose on a host
       follows: 01KV0REFAR-CMSV
@@ -79,7 +79,7 @@ networkZones:
   - id: agents
     name: Agent compute
     tier: application
-    description: Disposable workers + sidecar. Scale to zero.
+    description: Disposable workers + shim. Scale to zero.
   - id: data
     name: Data
     tier: data
@@ -121,9 +121,9 @@ serviceGroups:
         notes: Append-only metadata+hash. Not Postgres-required; EFS/JSONL/Blob are valid.
   - name: Agent cartridge runtime
     deploymentTarget: drafting-interview-required
-    notes: One task = worker + sidecar. No 24/7 service for agents.
+    notes: One task = worker + shim. No 24/7 service for agents.
     deployableObjects:
-      - ref: factory-sidecar
+      - ref: factory-gateway
         networkZone: agents
         diagramTier: application
         intent: standalone

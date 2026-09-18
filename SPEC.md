@@ -126,9 +126,9 @@ The same surface is exposed as MCP tools. Per-container fake `/v1/mcp/agents` JS
 | `ingest` | `POST /api/v1/ledger` only (actor forced to the token's name, server timestamp) |
 | `admin` | everything |
 
-Every ledger action row records the authenticated principal as `actor` (`oidc:<email>`, `token:<name>`, `webhook:<agent>`, or `factory:<subsystem>` for self-initiated actions). Webhooks authenticate with the cartridge's `secretRef` (header `x-factory-secret`), not a factory bearer. Doorman's presence API requires `DOORMAN_TOKEN`; the sidecar command API requires `SIDECAR_TOKEN`, and both fail closed.
+Every ledger action row records the authenticated principal as `actor` (`oidc:<email>`, `token:<name>`, `webhook:<agent>`, or `factory:<subsystem>` for self-initiated actions). Webhooks authenticate with the cartridge's `secretRef` (header `x-factory-secret`), not a factory bearer. Doorman's presence API requires `DOORMAN_TOKEN`; the gateway command API requires `GATEWAY_TOKEN`, and both fail closed.
 
-Discovery payload (control plane, not sidecar):
+Discovery payload (control plane):
 
 ```json
 {
@@ -186,10 +186,10 @@ These appear in earlier drafts. They are **not** required to satisfy the positio
 
 1. **Doorman (module, not a deploy-time Discord app).** Always installed, idle until a cartridge declares `type: discord` and `DISCORD_BOT_TOKEN` (or `secretRef`) binds. Gateway stays up; presence is offline while the agent sleeps and available after conversation handoff. Slack RTM and true TCP socket transfer remain deferred.
 2. **Cloud OAuth broker** — factory-stored OBO refresh tokens.
-4. **LiteLLM-as-product** — a model-router SKU. A sidecar intercept proxy *is* kernel; a routing marketplace is not.
-5. **Shared skills catalog / capability triage bot** — contradicts “skills live in the artifact.”
-6. **Voice / robotics streaming gateway.**
-7. **MCP tool gateway as credential vault** — contradicts secret binding.
+3. **LiteLLM-as-product** — a model-router SKU. A network-enforced egress gateway *is* kernel; a routing marketplace is not.
+4. **Shared skills catalog / capability triage bot** — contradicts “skills live in the artifact.”
+5. **Voice / robotics streaming gateway.**
+6. **MCP tool gateway as credential vault** — contradicts secret binding.
 
 Daemon vs on-behalf-of identity (`identity.yaml`) may land later as optional cartridge metadata. It is not required for the kernel contract.
 
