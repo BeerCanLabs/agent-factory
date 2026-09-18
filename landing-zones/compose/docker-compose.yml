@@ -48,6 +48,7 @@ services:
       # Local anchor only; not write-once. Production binds an Object Lock / immutable bucket.
       FACTORY_LEDGER_WORM_URI: file:///data/worm
       FACTORY_LEDGER_CHECKPOINT_SECONDS: 60
+      FACTORY_EVENT_BUS: file:///data/events.ndjson
       FACTORY_RUNTIME: docker
       DOCKER_HOST: tcp://docker-proxy:2375
       FACTORY_DOCKER_NETWORK: factory-agents

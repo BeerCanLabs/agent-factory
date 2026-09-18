@@ -98,6 +98,18 @@ resource "aws_iam_role_policy" "control_plane" {
         Action   = ["elasticfilesystem:ClientMount", "elasticfilesystem:ClientWrite"]
         Resource = aws_efs_file_system.ledger.arn
       },
+      {
+        Sid      = "PublishFactoryEvents"
+        Effect   = "Allow"
+        Action   = ["events:PutEvents"]
+        Resource = aws_cloudwatch_event_bus.factory.arn
+      },
+      {
+        Sid      = "QueueTriggers"
+        Effect   = "Allow"
+        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+        Resource = "arn:aws:sqs:${var.aws_region}:${var.account_id}:${local.name}-*"
+      },
       local.telemetry_statement,
     ]
   })

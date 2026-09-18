@@ -80,6 +80,7 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_PUBLIC_URL", value = local.cp_url },
         { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
         { name = "DOORMAN_URL", value = local.doorman_url },
+        { name = "FACTORY_EVENT_BUS", value = "eventbridge:${aws_cloudwatch_event_bus.factory.name}" },
         { name = "MEMORY_STORE_DIR", value = "/tmp/mind" },
         { name = "MEMORY_EPHEMERAL_DIR", value = "/tmp/ephemeral" },
       ])
