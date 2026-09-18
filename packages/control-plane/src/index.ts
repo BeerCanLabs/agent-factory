@@ -8,6 +8,7 @@ import { loadCatalog } from './catalog.js';
 import { activeRun, createFactoryServer, createRun, FactoryState, finishRun, reconcileRuns, SYSTEM } from './app.js';
 import { FileRunStore, RunTokens } from './runs.js';
 import { callbackPolicyFromEnv } from './callbacks.js';
+import { ApprovalStore, PolicyStore, SpendTracker, validatePolicy } from './policy.js';
 import { memoryRuntime } from './runtime.js';
 import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { agentsDueForCron } from './scheduler.js';
@@ -19,7 +20,15 @@ const LEDGER_PATH = process.env.FACTORY_LEDGER_PATH || join(process.cwd(), 'data
 const MEMORY_STORE = process.env.MEMORY_STORE_DIR || join(process.cwd(), 'data', 'mind');
 const EPHEMERAL = process.env.MEMORY_EPHEMERAL_DIR || join(process.cwd(), 'data', 'ephemeral');
 const IDLE_MS = parseInt(process.env.FACTORY_IDLE_MS || '300000', 10);
-const RUNS_DIR = process.env.FACTORY_RUNS_DIR || join(dirname(LEDGER_PATH), 'runs');
+const DATA_DIR = dirname(LEDGER_PATH);
+const RUNS_DIR = process.env.FACTORY_RUNS_DIR || join(DATA_DIR, 'runs');
+
+function defaultPolicy() {
+  if (!process.env.FACTORY_DEFAULT_POLICY) return undefined;
+  const checked = validatePolicy(JSON.parse(process.env.FACTORY_DEFAULT_POLICY));
+  if (!checked.ok) throw new Error(`FACTORY_DEFAULT_POLICY: ${checked.error}`);
+  return checked.policy;
+}
 
 const sidecarUrls: Record<string, string> = {};
 if (process.env.SIDECAR_URLS) {
@@ -35,9 +44,15 @@ mkdirSync(EPHEMERAL, { recursive: true });
 const agents = loadCatalog(AGENTS_ROOT, sidecarUrls);
 const secretValues = new Set<string>(secretValuesFromEnv());
 
+const ledger = new FileLedger(LEDGER_PATH, { secrets: () => secretValues });
+
 const state: FactoryState = {
   agents: new Map(agents.map((a) => [a.id, a])),
-  ledger: new FileLedger(LEDGER_PATH, { secrets: () => secretValues }),
+  ledger,
+  policies: new PolicyStore(process.env.FACTORY_POLICIES_DIR || join(DATA_DIR, 'policies'), defaultPolicy()),
+  approvals: new ApprovalStore(join(DATA_DIR, 'approvals')),
+  // Only the gateway can write costUsd (stripped for other writers), so every priced llm row counts.
+  spend: SpendTracker.fromLedger(ledger.query(), () => true),
   secretValues,
   doormanToken: process.env.DOORMAN_TOKEN,
   sidecarToken: process.env.SIDECAR_TOKEN,

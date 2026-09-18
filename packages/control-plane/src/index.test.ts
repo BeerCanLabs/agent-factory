@@ -16,6 +16,7 @@ import { noopRuntime, type Runtime } from './runtime.js';
 import { cronMatches } from './scheduler.js';
 import { FileRunStore, MemoryRunStore, RunTokens, type Run } from './runs.js';
 import { checkCallbackUrl, deliverCallback } from './callbacks.js';
+import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
 
 const agentsRoot = fileURLToPath(new URL('../../../agents', import.meta.url));
 
@@ -68,6 +69,8 @@ const TOKENS = {
   viewer: 'viewer-token',
   operator: 'operator-token',
   ingest: 'ingest-token',
+  gateway: 'gateway-token',
+  approver: 'approver-token',
 };
 const SIGNING_KEY = 'callback-signing-key-for-tests';
 
@@ -81,7 +84,12 @@ function makeState(overrides: Partial<FactoryState> = {}): FactoryState & { runt
       { name: 'viewer', token: TOKENS.viewer, roles: ['viewer'] },
       { name: 'operator', token: TOKENS.operator, roles: ['operator'] },
       { name: 'sidecar', token: TOKENS.ingest, roles: ['ingest'] },
+      { name: 'gateway', token: TOKENS.gateway, roles: ['gateway'] },
+      { name: 'dale', token: TOKENS.approver, roles: ['approver'] },
     ]),
+    policies: new PolicyStore(),
+    spend: new SpendTracker(),
+    approvals: new ApprovalStore(),
     version: 'test',
     providers: [envProvider({ ECHO_WEBHOOK_SECRET: 'whsec', FACTORY_LEDGER_TOKEN: 'ledger' })],
     runtime: noopRuntime(),
@@ -348,6 +356,95 @@ describe('control plane', { concurrency: false }, () => {
         assert.match(out.error ?? '', /private/, target);
       }
       assert.equal((await wake('echo-agent', { callbackUrl: 'ftp://example.com' })).status, 400);
+    });
+  });
+
+  describe('policy, budget, approvals', () => {
+    const put = (agent: string, body: unknown, token = TOKENS.admin) =>
+      request(port, `/api/v1/agents/${agent}/policy`, { method: 'PUT', token, body });
+    const llm = (run: RunBody, costUsd: number, token = TOKENS.gateway) =>
+      request(port, '/api/v1/ledger', {
+        method: 'POST',
+        token,
+        body: { agentId: run.agentId, runId: run.runId, type: 'llm', model: 'test-model', inputTokens: 1, costUsd, actor: `run:${run.agentId}` },
+      });
+
+    it('policy is deny-by-default, admin-only to change, and validated', async () => {
+      assert.deepEqual((await request(port, '/api/v1/agents/echo-agent/policy', { token: TOKENS.viewer })).json, { routes: [] });
+      assert.equal((await put('echo-agent', { routes: ['anthropic'] }, TOKENS.operator)).status, 403);
+      assert.equal((await put('echo-agent', { routes: 'anthropic' })).status, 400);
+      assert.equal((await put('echo-agent', { routes: [], budgetUsd: { perWeek: 1 } })).status, 400);
+      assert.equal((await put('echo-agent', { routes: ['anthropic'], budgetUsd: { perRun: 1 } })).status, 200);
+      assert.ok(actions('echo-agent').some((e) => e.action === 'POLICY_UPDATED' && e.actor === 'token:admin'));
+    });
+
+    it('the gateway gets run context, including spend', async () => {
+      const run = (await wake()).json as RunBody;
+      assert.equal((await request(port, `/api/v1/gateway/runs/${run.runId}`, { token: TOKENS.operator })).status, 403);
+      await llm(run, 0.25);
+      const ctx = (await request(port, `/api/v1/gateway/runs/${run.runId}`, { token: TOKENS.gateway })).json as {
+        run: { live: boolean };
+        spend: { run: number };
+      };
+      assert.equal(ctx.run.live, true);
+      assert.equal(ctx.spend.run, 0.25);
+    });
+
+    it('only the gateway may attest a run actor or report cost', async () => {
+      const run = (await wake()).json as RunBody;
+      await llm(run, 5, TOKENS.ingest);
+      const rows = state.ledger.query({ agent: 'echo-agent' }).filter((e) => e.type === 'llm');
+      assert.equal(rows.at(-1)?.actor, 'token:sidecar');
+      assert.equal(rows.at(-1)?.costUsd, undefined);
+      assert.equal(state.spend.get('echo-agent', run.runId).run, 0);
+      await llm(run, 0.1);
+      assert.equal(state.ledger.query({ agent: 'echo-agent' }).filter((e) => e.type === 'llm').at(-1)?.actor, 'run:echo-agent');
+      const wrongAgent = await request(port, '/api/v1/ledger', {
+        method: 'POST',
+        token: TOKENS.gateway,
+        body: { agentId: 'med-doc', runId: run.runId, type: 'llm', costUsd: 1 },
+      });
+      assert.equal(wrongAgent.status, 400);
+    });
+
+    it('crossing the budget blocks the run, alerts, and raising the budget unblocks it', async () => {
+      await put('echo-agent', { routes: ['anthropic'], budgetUsd: { perRun: 1 } });
+      const run = (await wake()).json as RunBody;
+      await llm(run, 0.6);
+      assert.equal(state.runs.get(run.runId)?.state, 'WORKING');
+      await llm(run, 0.6);
+      assert.equal(state.runs.get(run.runId)?.state, 'BLOCKED_BUDGET_EXCEEDED');
+      const alert = state.ledger.query({ agent: 'echo-agent' }).find((e) => e.type === 'budget.alert');
+      assert.equal(alert?.action, 'BUDGET_PERRUN_EXCEEDED');
+      assert.equal(state.runs.list({ agentId: 'finops-officer' }).length, 1, 'budget alert routed to finops-officer');
+      await put('echo-agent', { routes: ['anthropic'], budgetUsd: { perRun: 5 } });
+      assert.equal(state.runs.get(run.runId)?.state, 'WORKING');
+      assert.ok(actions('echo-agent').some((e) => e.action === 'RUN_UNBLOCKED'));
+    });
+
+    it('approvals: request blocks the run, approver decides, one consume per approval', async () => {
+      const run = (await wake()).json as RunBody;
+      const req = { runId: run.runId, route: 'tools', tool: 'deploy', argsSha256: 'abc' };
+      const first = await request(port, '/api/v1/gateway/approvals', { method: 'POST', token: TOKENS.gateway, body: req });
+      assert.equal(first.status, 201);
+      const approval = first.json as { approvalId: string; state: string };
+      assert.equal(state.runs.get(run.runId)?.state, 'BLOCKED_FOR_HUMAN');
+      const again = await request(port, '/api/v1/gateway/approvals', { method: 'POST', token: TOKENS.gateway, body: req });
+      assert.equal((again.json as { approvalId: string }).approvalId, approval.approvalId, 'idempotent');
+
+      assert.equal((await request(port, `/api/v1/approvals/${approval.approvalId}`, { method: 'POST', token: TOKENS.operator, body: { decision: 'approve' } })).status, 403);
+      assert.equal((await request(port, `/api/v1/gateway/approvals/${approval.approvalId}/consume`, { method: 'POST', token: TOKENS.gateway })).status, 409);
+      const decided = await request(port, `/api/v1/approvals/${approval.approvalId}`, { method: 'POST', token: TOKENS.approver, body: { decision: 'approve' } });
+      assert.equal(decided.status, 200);
+      assert.equal(state.runs.get(run.runId)?.state, 'WORKING');
+      assert.equal((await request(port, `/api/v1/gateway/approvals/${approval.approvalId}/consume`, { method: 'POST', token: TOKENS.gateway })).status, 200);
+      assert.equal((await request(port, `/api/v1/gateway/approvals/${approval.approvalId}/consume`, { method: 'POST', token: TOKENS.gateway })).status, 409);
+
+      const trail = actions('echo-agent').filter((e) => e.action?.startsWith('APPROVAL_'));
+      assert.deepEqual(trail.map((e) => [e.action, e.actor]), [
+        ['APPROVAL_REQUESTED', 'run:echo-agent'],
+        ['APPROVAL_GRANTED', 'token:dale'],
+      ]);
     });
   });
 

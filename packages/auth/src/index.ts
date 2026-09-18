@@ -1,7 +1,7 @@
-import { timingSafeEqual } from 'node:crypto';
-import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { SignJWT, createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
 
-export const ROLES = ['viewer', 'operator', 'approver', 'ingest', 'admin'] as const;
+export const ROLES = ['viewer', 'operator', 'approver', 'ingest', 'gateway', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
 
 export type Principal = { actor: string; roles: Role[] };
@@ -13,11 +13,13 @@ export type AuthProvider = {
   verify(authorization: string | undefined): Promise<AuthResult>;
 };
 
-/** admin implies everything; operator and approver each imply viewer; ingest implies nothing else. */
+/** admin implies everything; operator and approver imply viewer; gateway implies ingest. */
 export function hasRole(principal: Principal, role: Role): boolean {
   const r = principal.roles;
   if (r.includes('admin') || r.includes(role)) return true;
-  return role === 'viewer' && (r.includes('operator') || r.includes('approver'));
+  if (role === 'viewer') return r.includes('operator') || r.includes('approver');
+  if (role === 'ingest') return r.includes('gateway');
+  return false;
 }
 
 function asRoles(values: unknown, roleMap?: Record<string, Role>): Role[] {
@@ -202,4 +204,47 @@ export function authFromEnv(env: NodeJS.ProcessEnv = process.env): AuthProvider 
     throw new Error('no auth configured: set FACTORY_TOKEN/FACTORY_TOKENS or FACTORY_OIDC_ISSUER+AUDIENCE');
   }
   return providers.length === 1 ? providers[0] : anyAuth(providers);
+}
+
+/**
+ * Short-lived credential an agent run presents to the factory and its egress gateway.
+ * HS256 over FACTORY_RUN_TOKEN_KEY, shared by the control plane (mint) and gateway (verify).
+ * Signature and expiry only; the holder must also confirm the run is still live.
+ */
+export class RunTokens {
+  private readonly key: Uint8Array;
+  readonly ephemeral: boolean;
+
+  constructor(secret: string | undefined, private readonly ttlSec = 6 * 3600) {
+    if (secret && secret.length < 32) throw new Error('FACTORY_RUN_TOKEN_KEY must be at least 32 characters');
+    this.ephemeral = !secret;
+    this.key = secret ? new TextEncoder().encode(secret) : randomBytes(32);
+  }
+
+  mint(run: { runId: string; agentId: string }): Promise<string> {
+    return new SignJWT({ run: run.runId })
+      .setProtectedHeader({ alg: 'HS256', typ: 'factory-run+jwt' })
+      .setSubject(run.agentId)
+      .setIssuer('agent-factory')
+      .setAudience('agent-factory:run')
+      .setIssuedAt()
+      .setExpirationTime(`${this.ttlSec}s`)
+      .sign(this.key);
+  }
+
+  async verify(token: string | undefined): Promise<{ runId: string; agentId: string } | null> {
+    if (!token) return null;
+    try {
+      const { payload } = await jwtVerify(token, this.key, {
+        issuer: 'agent-factory',
+        audience: 'agent-factory:run',
+        algorithms: ['HS256'],
+        typ: 'factory-run+jwt',
+      });
+      if (typeof payload.run !== 'string' || typeof payload.sub !== 'string') return null;
+      return { runId: payload.run, agentId: payload.sub };
+    } catch {
+      return null;
+    }
+  }
 }

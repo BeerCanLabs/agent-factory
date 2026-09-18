@@ -8,6 +8,7 @@ import { AgentRecord } from './catalog.js';
 import type { Runtime } from './runtime.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
+import { exceededWindow, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
 
 export type FactoryState = {
   agents: Map<string, AgentRecord>;
@@ -19,6 +20,9 @@ export type FactoryState = {
   runs: RunStore;
   runTokens: RunTokens;
   callbacks: CallbackPolicy;
+  policies: PolicyStore;
+  spend: SpendTracker;
+  approvals: ApprovalStore;
   /** URL agents use to reach the control plane (result reporting, input fetch). */
   publicUrl?: string;
   /** Max wall-clock per run before it is stopped as TIMED_OUT. 0 disables. */
@@ -39,6 +43,7 @@ export const SYSTEM = {
   runtime: 'factory:runtime',
   router: 'factory:event-router',
   reconciler: 'factory:reconciler',
+  policy: 'factory:policy',
 } as const;
 
 const INGEST_TYPES = new Set(['llm', 'mcp', 'action', 'crash', 'budget.alert']);
@@ -160,6 +165,26 @@ function scheduleTimeout(state: FactoryState, run: Run) {
   }, state.idleMs);
   t.unref?.();
   state.idleTimers.set(run.agentId, t);
+}
+
+/** Park a live run. The task keeps running; the gateway refuses its egress until unblocked. */
+export function blockRun(state: FactoryState, runId: string, to: 'BLOCKED_BUDGET_EXCEEDED' | 'BLOCKED_FOR_HUMAN' | 'BLOCKED_UNHEALTHY', actor: string) {
+  const run = state.runs.get(runId);
+  if (!run || isTerminal(run.state) || run.state === to) return run;
+  const timer = state.idleTimers.get(run.agentId);
+  if (timer) clearTimeout(timer);
+  const next = state.runs.update(runId, { state: to });
+  record(state, next, to, actor);
+  return next;
+}
+
+export function unblockRun(state: FactoryState, runId: string, from: RunState, actor: string) {
+  const run = state.runs.get(runId);
+  if (!run || run.state !== from) return run;
+  const next = state.runs.update(runId, { state: 'WORKING' });
+  record(state, next, 'RUN_UNBLOCKED', actor);
+  scheduleTimeout(state, next);
+  return next;
 }
 
 export type CreateRunOptions = { actor: string; trigger: string; input?: unknown; callbackUrl?: string };
@@ -373,6 +398,14 @@ const TOOLS: ToolSpec[] = [
   { name: 'pause_agent', description: 'Pause agent egress', role: 'operator', args: { id: { type: 'string' } }, required: ['id'] },
   { name: 'resume_agent', description: 'Resume agent egress', role: 'operator', args: { id: { type: 'string' } }, required: ['id'] },
   { name: 'isolate_agent', description: 'Isolate agent egress', role: 'operator', args: { id: { type: 'string' } }, required: ['id'] },
+  { name: 'list_approvals', description: 'List pending tool-call approvals', role: 'viewer', args: {} },
+  {
+    name: 'decide_approval',
+    description: 'Approve or reject a held tool call',
+    role: 'approver',
+    args: { approvalId: { type: 'string' }, decision: { type: 'string' } },
+    required: ['approvalId', 'decision'],
+  },
 ];
 
 export async function handleMcp(state: FactoryState, payload: Record<string, unknown>, principal: Principal): Promise<unknown> {
@@ -414,6 +447,8 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'list_agents') return [...state.agents.values()];
   if (name === 'query_ledger') return state.ledger.query({ agent: args.agent });
   if (name === 'get_run') return state.runs.get(args.runId) ?? { error: 'not_found' };
+  if (name === 'list_approvals') return state.approvals.list({ state: 'pending' });
+  if (name === 'decide_approval') return decideApproval(state, args.approvalId, args.decision, actor).body;
   const id = args.id;
   if (!id) return { error: 'id required' };
   if (name === 'wake_agent') return (await createRun(state, id, { actor, trigger: 'mcp' })).body;
@@ -421,6 +456,27 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'resume_agent') return (await applyKillSwitch(state, id, 'RESUME', actor)).body;
   if (name === 'isolate_agent') return (await applyKillSwitch(state, id, 'ISOLATE', actor)).body;
   return { error: `unknown tool ${name}` };
+}
+
+function decideApproval(state: FactoryState, id: string, decision: string, actor: string): Outcome<unknown> {
+  if (decision !== 'approve' && decision !== 'reject') return { status: 400, body: { error: 'decision must be approve or reject' } };
+  const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor);
+  if (!decided) return { status: 409, body: { error: 'approval not pending' } };
+  state.ledger.append({
+    timestamp: new Date().toISOString(),
+    agentId: decided.agentId,
+    runId: decided.runId,
+    type: 'action',
+    action: decision === 'approve' ? 'APPROVAL_GRANTED' : 'APPROVAL_REJECTED',
+    actor,
+    approvalId: decided.approvalId,
+    mcpName: decided.tool,
+    route: decided.route,
+  });
+  if (!state.approvals.list({ state: 'pending', runId: decided.runId }).length) {
+    unblockRun(state, decided.runId, 'BLOCKED_FOR_HUMAN', actor);
+  }
+  return { status: 200, body: decided };
 }
 
 function bearerOf(req: http.IncomingMessage): string | undefined {
@@ -636,15 +692,146 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 400, { error: `type must be one of ${[...INGEST_TYPES].join(', ')}` });
       return;
     }
+    // The gateway verified the run token, so it may attest the run as the actor. Other writers may not.
+    const isGateway = hasRole({ ...principal, roles: principal.roles.filter((r) => r !== 'admin') }, 'gateway');
+    const run = typeof event.runId === 'string' ? state.runs.get(event.runId) : undefined;
+    if (isGateway && event.runId !== undefined && (!run || run.agentId !== event.agentId)) {
+      json(res, 400, { error: 'runId does not belong to agentId' });
+      return;
+    }
+    const actor = isGateway && run && event.actor === `run:${run.agentId}` ? event.actor : principal.actor;
     const stored = state.ledger.append({
       ...event,
+      ...(isGateway ? {} : { costUsd: undefined }),
       agentId: event.agentId,
       type: event.type,
-      actor: principal.actor,
+      actor,
       timestamp: new Date().toISOString(),
     });
+    if (isGateway && stored.type === 'llm' && typeof stored.costUsd === 'number') {
+      state.spend.add(stored.agentId, stored.runId, stored.costUsd, stored.timestamp);
+      const window = exceededWindow(state.policies.get(stored.agentId), state.spend.get(stored.agentId, stored.runId));
+      if (window && run && !isTerminal(run.state) && run.state !== 'BLOCKED_BUDGET_EXCEEDED') {
+        blockRun(state, run.runId, 'BLOCKED_BUDGET_EXCEEDED', SYSTEM.policy);
+        const alert = state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId: run.agentId,
+          runId: run.runId,
+          type: 'budget.alert',
+          action: `BUDGET_${window.toUpperCase()}_EXCEEDED`,
+          actor: SYSTEM.policy,
+        });
+        await routeEvents(state, alert);
+      }
+    }
     await routeEvents(state, stored);
     json(res, 201, { ok: true });
+    return;
+  }
+
+  const policyMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/policy$/);
+  if (policyMatch && (req.method === 'GET' || req.method === 'PUT')) {
+    const principal = await authenticate(req, res, state, req.method === 'GET' ? 'viewer' : 'admin');
+    if (!principal) return;
+    const agentId = policyMatch[1];
+    if (!state.agents.has(agentId)) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    if (req.method === 'GET') {
+      json(res, 200, state.policies.get(agentId));
+      return;
+    }
+    const checked = validatePolicy(await readJson(req));
+    if (!checked.ok) {
+      json(res, 400, { error: checked.error });
+      return;
+    }
+    state.policies.set(agentId, checked.policy);
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'POLICY_UPDATED', actor: principal.actor });
+    for (const run of state.runs.list({ agentId, active: true })) {
+      if (run.state === 'BLOCKED_BUDGET_EXCEEDED' && !exceededWindow(checked.policy, state.spend.get(agentId, run.runId))) {
+        unblockRun(state, run.runId, 'BLOCKED_BUDGET_EXCEEDED', principal.actor);
+      }
+    }
+    json(res, 200, checked.policy);
+    return;
+  }
+
+  const gwRun = path.match(/^\/api\/v1\/gateway\/runs\/([^/]+)$/);
+  if (gwRun && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'gateway'))) return;
+    const run = state.runs.get(gwRun[1]);
+    const agent = run ? state.agents.get(run.agentId) : undefined;
+    if (!run || !agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    json(res, 200, {
+      run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state) },
+      agentState: agent.state,
+      policy: state.policies.get(run.agentId),
+      spend: state.spend.get(run.agentId, run.runId),
+    });
+    return;
+  }
+
+  if (path === '/api/v1/gateway/approvals' && req.method === 'POST') {
+    if (!(await authenticate(req, res, state, 'gateway'))) return;
+    const b = await readJson(req);
+    const run = typeof b.runId === 'string' ? state.runs.get(b.runId) : undefined;
+    if (!run || isTerminal(run.state) || typeof b.route !== 'string' || typeof b.tool !== 'string' || typeof b.argsSha256 !== 'string') {
+      json(res, 400, { error: 'live runId, route, tool, argsSha256 required' });
+      return;
+    }
+    const { approval, created } = state.approvals.request({
+      runId: run.runId,
+      agentId: run.agentId,
+      route: b.route,
+      tool: b.tool,
+      argsSha256: b.argsSha256,
+    });
+    if (created) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: run.agentId,
+        runId: run.runId,
+        type: 'action',
+        action: 'APPROVAL_REQUESTED',
+        actor: `run:${run.agentId}`,
+        approvalId: approval.approvalId,
+        mcpName: approval.tool,
+        route: approval.route,
+      });
+      blockRun(state, run.runId, 'BLOCKED_FOR_HUMAN', SYSTEM.policy);
+    }
+    json(res, created ? 201 : 200, approval);
+    return;
+  }
+
+  const gwConsume = path.match(/^\/api\/v1\/gateway\/approvals\/([^/]+)\/consume$/);
+  if (gwConsume && req.method === 'POST') {
+    if (!(await authenticate(req, res, state, 'gateway'))) return;
+    const consumed = state.approvals.consume(gwConsume[1]);
+    json(res, consumed ? 200 : 409, consumed ?? { error: 'approval not approved or already used' });
+    return;
+  }
+
+  if (path === '/api/v1/approvals' && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    const url = new URL(req.url ?? '/', 'http://factory.local');
+    const st = url.searchParams.get('state') as 'pending' | null;
+    json(res, 200, state.approvals.list({ ...(st ? { state: st } : {}), ...(url.searchParams.get('runId') ? { runId: url.searchParams.get('runId')! } : {}) }));
+    return;
+  }
+
+  const decideMatch = path.match(/^\/api\/v1\/approvals\/([^/]+)$/);
+  if (decideMatch && req.method === 'POST') {
+    const principal = await authenticate(req, res, state, 'approver');
+    if (!principal) return;
+    const b = await readJson(req);
+    const out = decideApproval(state, decideMatch[1], String(b.decision ?? ''), principal.actor);
+    json(res, out.status, out.body);
     return;
   }
 

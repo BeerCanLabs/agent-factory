@@ -16,6 +16,9 @@ export type LedgerEvent = {
   mcpName?: string;
   action?: string;
   payloadSha256?: string;
+  costUsd?: number;
+  route?: string;
+  approvalId?: string;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
@@ -32,6 +35,9 @@ const ALLOWED = new Set<keyof LedgerEvent>([
   'mcpName',
   'action',
   'payloadSha256',
+  'costUsd',
+  'route',
+  'approvalId',
 ]);
 
 const PAYLOAD_KEYS = ['payload', 'body', 'content', 'prompt', 'params', 'messages', 'text', 'input', 'output'];
@@ -119,6 +125,9 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (raw.mcpMethod !== undefined) event.mcpMethod = String(raw.mcpMethod);
   if (raw.mcpName !== undefined) event.mcpName = String(raw.mcpName);
   if (raw.action !== undefined) event.action = String(raw.action);
+  if (typeof raw.costUsd === 'number' && Number.isFinite(raw.costUsd)) event.costUsd = raw.costUsd;
+  if (raw.route !== undefined) event.route = String(raw.route);
+  if (raw.approvalId !== undefined) event.approvalId = String(raw.approvalId);
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);

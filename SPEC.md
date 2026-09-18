@@ -103,6 +103,11 @@ Factory gateway (REST + MCP):
 | POST | `/api/v1/hooks/:id` | cartridge secret | webhook trigger, creates a run |
 | GET | `/api/v1/ledger` | viewer | audit query |
 | POST | `/api/v1/ledger` | ingest | metadata-only event write |
+| GET/PUT | `/api/v1/agents/:id/policy` | viewer / admin | egress policy (routes, models, tools, budget, TPM) |
+| GET | `/api/v1/approvals?state=pending` | viewer | held tool calls |
+| POST | `/api/v1/approvals/:id` | approver | `{decision: approve\|reject}` |
+| GET | `/api/v1/gateway/runs/:runId` | gateway | run state, agent kill-switch state, policy, spend |
+| POST | `/api/v1/gateway/approvals`, `.../:id/consume` | gateway | open / use a one-shot approval |
 
 **Runs.** Every wake (manual, webhook, cron, event route, Doorman) creates a run: `QUEUED → STARTING → WORKING →` one of `DONE`, `FAILED`, `TIMED_OUT`, `CANCELLED`, or `PRE_FLIGHT_MISSING_SECRET`. One run per agent executes at a time; others queue. Runs persist on disk (`FACTORY_RUNS_DIR`) and are reconciled on restart: remote tasks (ECS) are re-adopted or finished from DescribeTasks, in-process tasks are marked `FAILED`. The agent receives `FACTORY_RUN_ID`, `FACTORY_URL` and a short-lived `FACTORY_RUN_TOKEN` (HS256, `FACTORY_RUN_TOKEN_KEY`) valid only while its run is live. On a terminal state the factory POSTs to `callbackUrl` (https, public addresses only) with `x-factory-signature: t=<unix>,v1=hex(HMAC-SHA256(FACTORY_CALLBACK_SIGNING_KEY, "<t>.<body>"))`. On ECS, cartridge secrets come from the task definition's Secrets Manager `secrets` block under `factory/<env>/<NAME>`, the same names pre-flight checks via `FACTORY_SECRETS_AWS_PREFIX`; RunTask overrides carry only run metadata.
 
@@ -136,9 +141,21 @@ Discovery payload (control plane, not sidecar):
 
 `sectorId` and other overlay geometry belong to Garrison, not the factory schema.
 
-### 3.7 Decentralized control plane
+### 3.7 Policy lives in the kernel
 
-Budget enforcement and crash diagnosis are *cartridges* (FinOps, MedDoc), not hardcoded factory modules. The factory routes ledger events and crash logs; it does not contain agent-specific remediation logic.
+Budgets, model and route allowlists, tool allowlists and approval requirements are admin-set per agent (`PUT /api/v1/agents/:id/policy`) and enforced by the factory. Policy is deny-by-default: an agent with no policy has no egress. Cartridges such as FinOps and MedDoc *consume* factory events (`budget.alert`, `crash`) to recommend and diagnose; they are not the enforcement point.
+
+### 3.8 Egress gateway
+
+One fleet-wide gateway (`packages/gateway`) is the only route out of the agent network. Agents point their SDK base URLs at `http://<gateway>/<route-id>` and present their run token as the API key (`x-api-key`, `Authorization: Bearer`, or `x-factory-run-token`). The gateway:
+
+- verifies the run token (HS256, shared `FACTORY_RUN_TOKEN_KEY`) and asks the control plane whether the run is live, the agent is paused/isolated, and what its policy and spend are (cached ≤1s);
+- strips the run token and injects the real credential for the route from the adopter's secret manager — **agents never hold provider keys**; an upstream 401 purges the cached credential and records `RUNTIME_AUTH_FAILURE`;
+- meters LLM usage from JSON and SSE (Anthropic Messages, OpenAI Chat and Responses; forces `stream_options.include_usage`), prices it from the operator's price table (unpriced models are refused), and writes `llm` ledger rows with `costUsd` attested as `run:<agent>`. A response with no usage is charged at its `max_tokens` and marked `METERING_GAP`;
+- enforces budgets **before** each call using control-plane spend plus spend not yet acknowledged; the control plane moves the run to `BLOCKED_BUDGET_EXCEEDED` when a settled call crosses a limit. Overshoot is therefore bounded by one in-flight request per replica;
+- governs MCP `tools/call`: tools outside the route's allowlist are refused without contacting the server; `requireApproval` tools return JSON-RPC error `-32003` with an `approvalId`, park the run in `BLOCKED_FOR_HUMAN`, and are released exactly once — for the same arguments — after an `approver` decides.
+
+Route and price configuration: `FACTORY_GATEWAY_CONFIG` (JSON `{routes, prices}`) or `FACTORY_GATEWAY_ROUTES` + `FACTORY_PRICES`. Prices are USD per million tokens and are the operator's responsibility; the factory ships none.
 
 ---
 
