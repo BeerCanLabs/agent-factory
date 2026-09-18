@@ -1,0 +1,7 @@
+{
+  "routes": [
+    { "id": "anthropic", "kind": "llm", "provider": "anthropic", "upstream": "https://api.anthropic.com", "credential": { "secret": "ANTHROPIC_API_KEY", "header": "x-api-key" } },
+    { "id": "openai", "kind": "llm", "provider": "openai", "upstream": "https://api.openai.com", "credential": { "secret": "OPENAI_API_KEY", "header": "authorization", "format": "Bearer {}" } }
+  ],
+  "prices": {}
+}

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** Directory stand-in or object storage (`uri: s3://bucket`). */
@@ -40,8 +40,8 @@ export function pushMind(store: MindStore, prefix: string, src: string): void {
   const dest = join(store.root, prefix);
   mkdirSync(dest, { recursive: true });
   if (!existsSync(src)) return;
-  rmSync(dest, { recursive: true, force: true });
-  mkdirSync(join(store.root), { recursive: true });
+  // Clear contents, not the directory: in containers `dest` is often a mount point.
+  for (const name of readdirSync(dest)) rmSync(join(dest, name), { recursive: true, force: true });
   cpSync(src, dest, { recursive: true });
 }
 

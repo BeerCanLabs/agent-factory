@@ -443,6 +443,18 @@ describe('control plane', { concurrency: false }, () => {
       assert.ok(actions('echo-agent').some((e) => e.action === 'RUN_UNBLOCKED'));
     });
 
+    it('a crossing on a run that already finished still raises exactly one budget.alert', async () => {
+      await put('echo-agent', { routes: ['anthropic'], budgetUsd: { perDay: 1 } });
+      const run = (await wake()).json as RunBody;
+      await request(port, `/api/v1/runs/${run.runId}/result`, { method: 'POST', token: tokenFor(run.runId), body: { status: 'succeeded' } });
+      await llm(run, 1.5);
+      await llm(run, 0.1);
+      const alerts = state.ledger.query({ agent: 'echo-agent' }).filter((e) => e.type === 'budget.alert');
+      assert.equal(alerts.length, 1);
+      assert.equal(alerts[0].action, 'BUDGET_PERDAY_EXCEEDED');
+      assert.equal(state.runs.get(run.runId)?.state, 'DONE');
+    });
+
     it('approvals: request blocks the run, approver decides, one consume per approval', async () => {
       const run = (await wake()).json as RunBody;
       const req = { runId: run.runId, route: 'tools', tool: 'deploy', argsSha256: 'abc' };
