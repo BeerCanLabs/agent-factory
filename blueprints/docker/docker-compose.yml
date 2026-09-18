@@ -12,6 +12,9 @@ services:
       - 'FACTORY_TOKENS=[{"name":"doorman","token":"dev-doorman-token","roles":["operator"]},{"name":"sidecar","token":"dev-ingest-token","roles":["ingest"]}]'
       - DOORMAN_TOKEN=dev-presence-token
       - SIDECAR_TOKEN=dev-sidecar-token
+      - FACTORY_RUN_TOKEN_KEY=dev-run-token-key-0123456789abcdef
+      - FACTORY_CALLBACK_SIGNING_KEY=dev-callback-signing-key
+      - FACTORY_PUBLIC_URL=http://127.0.0.1:8088
       - FACTORY_SECRETS_FILE=/run/factory.secrets
       - FACTORY_LEDGER_PATH=/data/ledger.jsonl
       - MEMORY_STORE_DIR=/data/mind

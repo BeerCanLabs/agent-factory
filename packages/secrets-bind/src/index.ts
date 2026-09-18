@@ -1,4 +1,8 @@
+import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 export type SecretProvider = {
   name: string;
@@ -61,6 +65,43 @@ export function httpProvider(baseUrl: string, token?: string): SecretProvider {
   };
 }
 
+export type AwsCli = (args: string[]) => Promise<string>;
+
+/**
+ * AWS Secrets Manager under a name prefix (e.g. `factory/prod/`). The same prefix the ECS task
+ * definition's `secrets` block reads from, so pre-flight checks exactly what the task will receive.
+ */
+export function awsSecretsManagerProvider(prefix: string, cli?: AwsCli): SecretProvider {
+  const run: AwsCli =
+    cli ??
+    (async (args) => {
+      const region = process.env.AWS_REGION ? ['--region', process.env.AWS_REGION] : [];
+      const { stdout } = await execFileAsync('aws', [...args, ...region], { encoding: 'utf8' });
+      return stdout;
+    });
+  return {
+    name: 'aws-sm',
+    async get(secretName) {
+      try {
+        const out = await run([
+          'secretsmanager',
+          'get-secret-value',
+          '--secret-id',
+          `${prefix}${secretName}`,
+          '--query',
+          'SecretString',
+          '--output',
+          'text',
+        ]);
+        const value = out.replace(/\n$/, '');
+        return value && value !== 'None' ? value : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+  };
+}
+
 export function parseEnvFile(body: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of body.split('\n')) {
@@ -95,6 +136,7 @@ export async function bindSecrets(
 export function providersFromEnv(env: NodeJS.ProcessEnv = process.env): SecretProvider[] {
   const providers: SecretProvider[] = [envProvider(env)];
   if (env.FACTORY_SECRETS_FILE) providers.push(fileProvider(env.FACTORY_SECRETS_FILE));
+  if (env.FACTORY_SECRETS_AWS_PREFIX) providers.push(awsSecretsManagerProvider(env.FACTORY_SECRETS_AWS_PREFIX));
   if (env.FACTORY_SECRETS_HTTP_URL) {
     providers.push(httpProvider(env.FACTORY_SECRETS_HTTP_URL, env.FACTORY_SECRETS_HTTP_TOKEN));
   }

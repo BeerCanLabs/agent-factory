@@ -156,7 +156,7 @@ locals {
     [for s in aws_secretsmanager_secret.service : s.arn],
   )
   # One credential per caller->callee edge, each with its least role.
-  service_tokens = toset(["DOORMAN_OPERATOR_TOKEN", "SIDECAR_INGEST_TOKEN", "DOORMAN_TOKEN", "SIDECAR_TOKEN"])
+  service_tokens = toset(["DOORMAN_OPERATOR_TOKEN", "SIDECAR_INGEST_TOKEN", "DOORMAN_TOKEN", "SIDECAR_TOKEN", "FACTORY_RUN_TOKEN_KEY", "FACTORY_CALLBACK_SIGNING_KEY"])
 }
 
 resource "random_password" "service" {
@@ -286,21 +286,52 @@ resource "aws_iam_role" "task" {
   })
 }
 
+# Agent tasks: mind bucket only. No ECS control, no factory secrets (those arrive via the
+# execution role's `secrets` injection, scoped per task definition).
 resource "aws_iam_role_policy" "task" {
-  name = "factory-task"
+  name = "factory-agent-task"
   role = aws_iam_role.task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:DeleteObject"]
+      Resource = [aws_s3_bucket.mind.arn, "${aws_s3_bucket.mind.arn}/*"]
+    }]
+  })
+}
+
+resource "aws_iam_role" "control_plane" {
+  name = "factory-control-plane-${var.environment}"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+data "aws_caller_identity" "current" {}
+
+resource "aws_iam_role_policy" "control_plane" {
+  name = "factory-control-plane"
+  role = aws_iam_role.control_plane.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:DeleteObject"]
-        Resource = [aws_s3_bucket.mind.arn, "${aws_s3_bucket.mind.arn}/*"]
+        Effect    = "Allow"
+        Action    = ["ecs:RunTask"]
+        Resource  = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task-definition/factory-agent-*"
+        Condition = { ArnEquals = { "ecs:cluster" = aws_ecs_cluster.factory.arn } }
       },
       {
-        Effect   = "Allow"
-        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:DescribeTasks"]
-        Resource = "*"
+        Effect    = "Allow"
+        Action    = ["ecs:StopTask", "ecs:DescribeTasks"]
+        Resource  = "*"
+        Condition = { ArnEquals = { "ecs:cluster" = aws_ecs_cluster.factory.arn } }
       },
       {
         Effect   = "Allow"
@@ -308,9 +339,15 @@ resource "aws_iam_role_policy" "task" {
         Resource = [aws_iam_role.execution.arn, aws_iam_role.task.arn]
       },
       {
+        Sid      = "PreFlightReadsCartridgeSecrets"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
-        Resource = local.readable_secret_arns
+        Resource = "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:factory/${var.environment}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket"]
+        Resource = [aws_s3_bucket.mind.arn, "${aws_s3_bucket.mind.arn}/*"]
       }
     ]
   })

@@ -1,11 +1,13 @@
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { FileLedger, secretValuesFromEnv } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { authFromEnv } from '@beercanlabs/factory-auth';
 import { loadCatalog } from './catalog.js';
-import { apply, createFactoryServer, FactoryState, SYSTEM } from './app.js';
+import { activeRun, createFactoryServer, createRun, FactoryState, finishRun, reconcileRuns, SYSTEM } from './app.js';
+import { FileRunStore, RunTokens } from './runs.js';
+import { callbackPolicyFromEnv } from './callbacks.js';
 import { memoryRuntime } from './runtime.js';
 import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { agentsDueForCron } from './scheduler.js';
@@ -17,6 +19,7 @@ const LEDGER_PATH = process.env.FACTORY_LEDGER_PATH || join(process.cwd(), 'data
 const MEMORY_STORE = process.env.MEMORY_STORE_DIR || join(process.cwd(), 'data', 'mind');
 const EPHEMERAL = process.env.MEMORY_EPHEMERAL_DIR || join(process.cwd(), 'data', 'ephemeral');
 const IDLE_MS = parseInt(process.env.FACTORY_IDLE_MS || '300000', 10);
+const RUNS_DIR = process.env.FACTORY_RUNS_DIR || join(dirname(LEDGER_PATH), 'runs');
 
 const sidecarUrls: Record<string, string> = {};
 if (process.env.SIDECAR_URLS) {
@@ -41,6 +44,10 @@ const state: FactoryState = {
   auth: authFromEnv(),
   version: VERSION,
   providers: providersFromEnv(),
+  runs: new FileRunStore(RUNS_DIR),
+  runTokens: new RunTokens(process.env.FACTORY_RUN_TOKEN_KEY),
+  callbacks: callbackPolicyFromEnv(),
+  publicUrl: process.env.FACTORY_PUBLIC_URL,
   idleMs: IDLE_MS,
   idleTimers: new Map(),
   doormanUrl: process.env.DOORMAN_URL,
@@ -63,24 +70,26 @@ const state: FactoryState = {
             }
             return undefined;
           },
-          onExit: (agent, code) => {
-            agent.state = code === 0 ? 'IDLE' : 'ERROR';
-            state.ledger.append({
-              timestamp: new Date().toISOString(),
-              agentId: agent.id,
-              type: code === 0 ? 'action' : 'crash',
-              action: 'EXIT',
+          onExit: (_agent, code, ctx) => {
+            void finishRun(state, ctx.runId, code === 0 ? 'DONE' : 'FAILED', {
               actor: SYSTEM.runtime,
-              requestId: `exit-${Date.now()}`,
+              exitCode: code,
+              ...(code === 0 ? {} : { error: `exit ${code}` }),
             });
-            if (code !== 0 && state.agents.has('med-doc')) {
-              void apply(state, 'med-doc', 'WORKING', 'RESUME', SYSTEM.router);
-            }
           },
         }),
 };
 
 process.env.FACTORY_STARTED_AT = String(Date.now());
+
+if (state.runTokens.ephemeral) {
+  console.warn('[control-plane] FACTORY_RUN_TOKEN_KEY unset: run tokens die with this process');
+}
+
+await reconcileRuns(state);
+if (state.runtime.status) {
+  setInterval(() => void reconcileRuns(state), 15_000).unref();
+}
 
 const server = createFactoryServer(state);
 server.listen(PORT, '0.0.0.0', () => {
@@ -91,7 +100,7 @@ if (process.env.FACTORY_CRON !== '0') {
   setInterval(() => {
     const due = agentsDueForCron(state.agents.values());
     for (const agent of due) {
-      if (agent.state === 'IDLE') void apply(state, agent.id, 'WORKING', 'RESUME', SYSTEM.scheduler);
+      if (!activeRun(state, agent.id)) void createRun(state, agent.id, { actor: SYSTEM.scheduler, trigger: 'cron' });
     }
   }, 60_000);
 }

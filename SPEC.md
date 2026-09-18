@@ -90,13 +90,21 @@ Append-only store of tokens, MCP invocations, and system actions, with actor/aut
 
 Factory gateway (REST + MCP):
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/healthz`, `/api/v1/health` | liveness |
-| GET | `/api/v1/agents` | cartridge catalog |
-| POST | `/api/v1/agents/:id/wake` | scale from zero |
-| POST | `/api/v1/agents/:id/pause\|resume\|isolate` | kill-switch |
-| GET | `/api/v1/ledger` | audit query |
+| Method | Path | Role | Purpose |
+|---|---|---|---|
+| GET | `/healthz`, `/api/v1/health` | none | liveness |
+| GET | `/api/v1/agents` | viewer | cartridge catalog |
+| POST | `/api/v1/agents/:id/runs` (alias `/wake`) | operator | start a run: **202** + run; body `{input?, callbackUrl?}`; 412 on missing secrets; 409 if paused/isolated |
+| POST | `/api/v1/agents/:id/pause\|resume\|isolate` | operator | kill-switch |
+| GET | `/api/v1/runs`, `/api/v1/runs/:runId` | viewer | run status |
+| POST | `/api/v1/runs/:runId/cancel` | operator | stop a run |
+| GET | `/api/v1/runs/:runId/input` | run token | agent fetches its input |
+| POST | `/api/v1/runs/:runId/result` | run token | agent reports `{status: succeeded\|failed, output?, error?}` |
+| POST | `/api/v1/hooks/:id` | cartridge secret | webhook trigger, creates a run |
+| GET | `/api/v1/ledger` | viewer | audit query |
+| POST | `/api/v1/ledger` | ingest | metadata-only event write |
+
+**Runs.** Every wake (manual, webhook, cron, event route, Doorman) creates a run: `QUEUED → STARTING → WORKING →` one of `DONE`, `FAILED`, `TIMED_OUT`, `CANCELLED`, or `PRE_FLIGHT_MISSING_SECRET`. One run per agent executes at a time; others queue. Runs persist on disk (`FACTORY_RUNS_DIR`) and are reconciled on restart: remote tasks (ECS) are re-adopted or finished from DescribeTasks, in-process tasks are marked `FAILED`. The agent receives `FACTORY_RUN_ID`, `FACTORY_URL` and a short-lived `FACTORY_RUN_TOKEN` (HS256, `FACTORY_RUN_TOKEN_KEY`) valid only while its run is live. On a terminal state the factory POSTs to `callbackUrl` (https, public addresses only) with `x-factory-signature: t=<unix>,v1=hex(HMAC-SHA256(FACTORY_CALLBACK_SIGNING_KEY, "<t>.<body>"))`. On ECS, cartridge secrets come from the task definition's Secrets Manager `secrets` block under `factory/<env>/<NAME>`, the same names pre-flight checks via `FACTORY_SECRETS_AWS_PREFIX`; RunTask overrides carry only run metadata.
 
 The same surface is exposed as MCP tools. Per-container fake `/v1/mcp/agents` JSON is not MCP and is not the factory catalog.
 

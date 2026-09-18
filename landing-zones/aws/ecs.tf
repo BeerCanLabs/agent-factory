@@ -9,8 +9,11 @@ locals {
     { name = "FACTORY_ECS_CLUSTER", value = aws_ecs_cluster.factory.name },
     { name = "FACTORY_ECS_SUBNETS", value = join(",", local.subnet_ids) },
     { name = "FACTORY_ECS_SECURITY_GROUPS", value = aws_security_group.tasks.id },
-    { name = "FACTORY_ECS_TASKS", value = "echo-agent:factory-echo-${var.environment}" },
+    { name = "FACTORY_ECS_TASKS", value = "echo-agent:factory-agent-echo-${var.environment}" },
     { name = "FACTORY_LEDGER_PATH", value = "/data/ledger.jsonl" },
+    { name = "FACTORY_RUNS_DIR", value = "/data/runs" },
+    { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
+    { name = "FACTORY_PUBLIC_URL", value = "http://${aws_lb.factory.dns_name}" },
     { name = "MEMORY_STORE_URI", value = "s3://${aws_s3_bucket.mind.bucket}" },
     { name = "DOORMAN_URL", value = "http://${aws_lb.factory.dns_name}:8090" },
     { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
@@ -26,7 +29,7 @@ resource "aws_ecs_task_definition" "control_plane" {
   cpu                      = "512"
   memory                   = "1024"
   execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn            = aws_iam_role.task.arn
+  task_role_arn            = aws_iam_role.control_plane.arn
 
   volume {
     name = "ledger"
@@ -46,7 +49,8 @@ resource "aws_ecs_task_definition" "control_plane" {
       { name = "FACTORY_TOKENS", valueFrom = aws_secretsmanager_secret.factory_tokens.arn },
       { name = "DOORMAN_TOKEN", valueFrom = aws_secretsmanager_secret.service["DOORMAN_TOKEN"].arn },
       { name = "SIDECAR_TOKEN", valueFrom = aws_secretsmanager_secret.service["SIDECAR_TOKEN"].arn },
-      { name = "ECHO_WEBHOOK_SECRET", valueFrom = aws_secretsmanager_secret.echo_webhook.arn },
+      { name = "FACTORY_RUN_TOKEN_KEY", valueFrom = aws_secretsmanager_secret.service["FACTORY_RUN_TOKEN_KEY"].arn },
+      { name = "FACTORY_CALLBACK_SIGNING_KEY", valueFrom = aws_secretsmanager_secret.service["FACTORY_CALLBACK_SIGNING_KEY"].arn },
     ]
     mountPoints = [{ sourceVolume = "ledger", containerPath = "/data" }]
     logConfiguration = {
@@ -88,7 +92,6 @@ resource "aws_ecs_task_definition" "doorman" {
   cpu                      = "256"
   memory                   = "512"
   execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn            = aws_iam_role.task.arn
   container_definitions = jsonencode([{
     name         = "doorman"
     image        = var.doorman_image
@@ -135,7 +138,7 @@ resource "aws_ecs_service" "doorman" {
 
 # Worker + sidecar. No ECS service — control plane RunTask from zero.
 resource "aws_ecs_task_definition" "echo" {
-  family                   = "factory-echo-${var.environment}"
+  family                   = "factory-agent-echo-${var.environment}"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = "512"
@@ -161,6 +164,9 @@ resource "aws_ecs_task_definition" "echo" {
         { name = "MEMORY_STORE_URI", value = "s3://${aws_s3_bucket.mind.bucket}" },
         { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
         { name = "FACTORY_TRACE_TTL_SECONDS", value = tostring(var.trace_ttl_seconds) },
+      ]
+      secrets = [
+        { name = "ECHO_WEBHOOK_SECRET", valueFrom = aws_secretsmanager_secret.echo_webhook.arn },
       ]
       mountPoints = [{ sourceVolume = "mind", containerPath = "/mind" }]
       dependsOn   = [{ containerName = "sidecar", condition = "START" }]

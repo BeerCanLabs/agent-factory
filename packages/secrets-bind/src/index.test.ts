@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bindSecrets, envProvider, fileProvider, httpProvider } from './index.js';
+import { awsSecretsManagerProvider, bindSecrets, envProvider, fileProvider, httpProvider } from './index.js';
 
 describe('bindSecrets', () => {
   it('binds names from env without storing values in the factory', async () => {
@@ -52,5 +52,21 @@ describe('bindSecrets', () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
+  });
+
+  it('reads AWS Secrets Manager under the task-definition prefix', async () => {
+    const asked: string[] = [];
+    const provider = awsSecretsManagerProvider('factory/prod/', async (args) => {
+      const id = args[args.indexOf('--secret-id') + 1];
+      asked.push(id);
+      if (id === 'factory/prod/ECHO_WEBHOOK_SECRET') return 'from-sm\n';
+      throw new Error('ResourceNotFoundException');
+    });
+    const ok = await bindSecrets(['ECHO_WEBHOOK_SECRET'], [provider]);
+    assert.equal(ok.ok, true);
+    if (ok.ok) assert.equal(ok.env.ECHO_WEBHOOK_SECRET, 'from-sm');
+    const missing = await bindSecrets(['NOPE'], [provider]);
+    assert.equal(missing.ok, false);
+    assert.deepEqual(asked, ['factory/prod/ECHO_WEBHOOK_SECRET', 'factory/prod/NOPE']);
   });
 });

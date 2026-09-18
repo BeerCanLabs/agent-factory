@@ -8,6 +8,7 @@ export type LedgerEvent = {
   type: string;
   actor?: string;
   requestId?: string;
+  runId?: string;
   model?: string;
   inputTokens?: number;
   outputTokens?: number;
@@ -23,6 +24,7 @@ const ALLOWED = new Set<keyof LedgerEvent>([
   'type',
   'actor',
   'requestId',
+  'runId',
   'model',
   'inputTokens',
   'outputTokens',
@@ -110,6 +112,7 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   };
   if (raw.actor !== undefined) event.actor = String(raw.actor);
   if (raw.requestId !== undefined) event.requestId = String(raw.requestId);
+  if (raw.runId !== undefined) event.runId = String(raw.runId);
   if (raw.model !== undefined) event.model = String(raw.model);
   if (typeof raw.inputTokens === 'number') event.inputTokens = raw.inputTokens;
   if (typeof raw.outputTokens === 'number') event.outputTokens = raw.outputTokens;
