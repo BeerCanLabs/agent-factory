@@ -13,7 +13,11 @@ terraform {
 }
 
 provider "aws" {
-  region = var.aws_region
+  region              = var.aws_region
+  allowed_account_ids = [var.account_id]
+  default_tags {
+    tags = { owner = "beercanlabs", system = "agent-factory", environment = var.environment }
+  }
 }
 
 data "aws_availability_zones" "available" {
@@ -21,7 +25,7 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  azs    = slice(data.aws_availability_zones.available.names, 0, 2)
+  azs          = slice(data.aws_availability_zones.available.names, 0, 2)
   images_ready = var.control_plane_image != "" && var.doorman_image != "" && var.sidecar_image != "" && var.echo_worker_image != ""
 }
 
@@ -256,8 +260,8 @@ resource "aws_iam_role_policy" "task" {
         Resource = [aws_s3_bucket.mind.arn, "${aws_s3_bucket.mind.arn}/*"]
       },
       {
-        Effect = "Allow"
-        Action = ["ecs:RunTask", "ecs:StopTask", "ecs:DescribeTasks"]
+        Effect   = "Allow"
+        Action   = ["ecs:RunTask", "ecs:StopTask", "ecs:DescribeTasks"]
         Resource = "*"
       },
       {

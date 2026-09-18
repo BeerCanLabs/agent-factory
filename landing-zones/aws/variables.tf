@@ -1,3 +1,12 @@
+variable "account_id" {
+  type        = string
+  description = "BeerCanLabs AWS account id. Set by scripts/bcl-aws (TF_VAR_account_id); terraform refuses any other account."
+  validation {
+    condition     = can(regex("^[0-9]{12}$", var.account_id)) && !contains(["854882517534", "108327567228", "992163310528"], var.account_id)
+    error_message = "account_id must be the 12-digit BeerCanLabs account, never a Frontline account."
+  }
+}
+
 variable "aws_region" {
   type    = string
   default = "us-east-1"

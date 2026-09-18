@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Run an AWS-touching command (aws, terraform, ...) against the BeerCanLabs account only.
+# Isolated config, no ambient creds, and an account preflight before anything executes.
+set -euo pipefail
+
+BCL_DIR="$HOME/.aws/beercanlabs"
+FRONTLINE_SSO="d-906769eaa2"
+FRONTLINE_ACCOUNTS=(854882517534 108327567228 992163310528)
+
+die() { echo "bcl-aws: $*" >&2; exit 1; }
+
+[ $# -gt 0 ] || die "usage: scripts/bcl-aws <command> [args...]"
+[ -f "$BCL_DIR/config" ] || die "missing $BCL_DIR/config (BeerCanLabs-only AWS config). See landing-zones/aws/README.md."
+grep -q "$FRONTLINE_SSO" "$BCL_DIR/config" && die "$BCL_DIR/config references the Frontline SSO start URL."
+
+: "${BCL_AWS_ACCOUNT_ID:?set BCL_AWS_ACCOUNT_ID (the BeerCanLabs account id), e.g. via .envrc}"
+[[ "$BCL_AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || die "BCL_AWS_ACCOUNT_ID must be 12 digits."
+for a in "${FRONTLINE_ACCOUNTS[@]}"; do
+  [ "$BCL_AWS_ACCOUNT_ID" != "$a" ] || die "BCL_AWS_ACCOUNT_ID is a Frontline account."
+done
+
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_DEFAULT_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE
+export AWS_CONFIG_FILE="$BCL_DIR/config"
+export AWS_SHARED_CREDENTIALS_FILE="$BCL_DIR/credentials"
+export AWS_PROFILE="${BCL_AWS_PROFILE:-beercanlabs-deploy}"
+export AWS_SDK_LOAD_CONFIG=1
+
+actual="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
+  || die "no valid session for profile $AWS_PROFILE. Run: AWS_CONFIG_FILE=$BCL_DIR/config aws sso login --profile $AWS_PROFILE"
+for a in "${FRONTLINE_ACCOUNTS[@]}"; do
+  [ "$actual" != "$a" ] || die "session resolved to Frontline account $actual. Aborting."
+done
+[ "$actual" = "$BCL_AWS_ACCOUNT_ID" ] || die "session account $actual != BCL_AWS_ACCOUNT_ID $BCL_AWS_ACCOUNT_ID."
+
+export TF_VAR_account_id="$BCL_AWS_ACCOUNT_ID"
+echo "bcl-aws: account $actual, profile $AWS_PROFILE" >&2
+exec "$@"
