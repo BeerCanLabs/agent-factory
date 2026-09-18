@@ -31,7 +31,9 @@ COPY --from=builder /app/packages/ledger/dist ./packages/ledger/dist
 COPY --from=builder /app/packages/telemetry/dist ./packages/telemetry/dist
 COPY --from=builder /app/packages/control-plane/dist ./packages/control-plane/dist
 COPY agents ./agents
+RUN mkdir -p /data/mind && chown -R node:node /data
 ENV PORT=8088
 ENV AGENTS_ROOT=/app/agents
 EXPOSE 8088
+USER node
 CMD ["node", "packages/control-plane/dist/index.js"]

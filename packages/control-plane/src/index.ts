@@ -12,6 +12,7 @@ import { callbackPolicyFromEnv } from './callbacks.js';
 import { ApprovalStore, PolicyStore, SpendTracker, validatePolicy } from './policy.js';
 import { memoryRuntime } from './runtime.js';
 import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
+import { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
 import { agentsDueForCron } from './scheduler.js';
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
@@ -73,7 +74,16 @@ const state: FactoryState = {
   idleTimers: new Map(),
   doormanUrl: process.env.DOORMAN_URL,
   runtime:
-    process.env.FACTORY_RUNTIME === 'ecs'
+    process.env.FACTORY_RUNTIME === 'docker'
+      ? dockerRuntime({
+          api: dockerApi(process.env.DOCKER_HOST || 'unix:///var/run/docker.sock'),
+          images: parseImageMap(process.env.FACTORY_DOCKER_IMAGES),
+          network: process.env.FACTORY_DOCKER_NETWORK || 'factory-agents',
+          mindVolume: process.env.FACTORY_DOCKER_MIND_VOLUME,
+          ensureMindPath: (prefix) => mkdirSync(join(MEMORY_STORE, prefix), { recursive: true }),
+          memoryMb: parseInt(process.env.FACTORY_DOCKER_MEMORY_MB || '512', 10),
+        })
+      : process.env.FACTORY_RUNTIME === 'ecs'
       ? ecsRuntime({
           cluster: process.env.FACTORY_ECS_CLUSTER || '',
           taskMap: parseTaskMap(process.env.FACTORY_ECS_TASKS),

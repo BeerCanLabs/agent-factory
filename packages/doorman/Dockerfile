@@ -17,4 +17,5 @@ COPY --from=builder /app/packages/secrets-bind/dist ./packages/secrets-bind/dist
 COPY --from=builder /app/packages/doorman/dist ./packages/doorman/dist
 ENV PORT=8090
 EXPOSE 8090
+USER node
 CMD ["node", "packages/doorman/dist/server.js"]

@@ -803,19 +803,25 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       timestamp: new Date().toISOString(),
     });
     if (isGateway && stored.type === 'llm' && typeof stored.costUsd === 'number') {
+      const policy = state.policies.get(stored.agentId);
+      const before = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
       state.spend.add(stored.agentId, stored.runId, stored.costUsd, stored.timestamp);
-      const window = exceededWindow(state.policies.get(stored.agentId), state.spend.get(stored.agentId, stored.runId));
-      if (window && run && !isTerminal(run.state) && run.state !== 'BLOCKED_BUDGET_EXCEEDED') {
-        blockRun(state, run.runId, 'BLOCKED_BUDGET_EXCEEDED', SYSTEM.policy);
+      const after = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
+      // Alert once per crossing, even if the run already finished; block only a run that is still live.
+      if (after && after !== before) {
         const alert = state.ledger.append({
           timestamp: new Date().toISOString(),
-          agentId: run.agentId,
-          runId: run.runId,
+          agentId: stored.agentId,
+          runId: stored.runId,
           type: 'budget.alert',
-          action: `BUDGET_${window.toUpperCase()}_EXCEEDED`,
+          action: `BUDGET_${after.toUpperCase()}_EXCEEDED`,
           actor: SYSTEM.policy,
         });
         await routeEvents(state, alert);
+      }
+      const live = run ? state.runs.get(run.runId) : undefined;
+      if (after && live && !isTerminal(live.state) && live.state !== 'BLOCKED_BUDGET_EXCEEDED') {
+        blockRun(state, live.runId, 'BLOCKED_BUDGET_EXCEEDED', SYSTEM.policy);
       }
     }
     await routeEvents(state, stored);

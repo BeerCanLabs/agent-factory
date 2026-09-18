@@ -1,0 +1,9 @@
+{
+  "routes": [
+    { "id": "anthropic", "kind": "llm", "provider": "anthropic", "upstream": "http://mock-provider:8080", "credential": { "secret": "ANTHROPIC_API_KEY", "header": "x-api-key" } }
+  ],
+  "prices": {
+    "test-big": { "inputPerMTok": 15, "outputPerMTok": 75 },
+    "test-small": { "inputPerMTok": 1, "outputPerMTok": 5 }
+  }
+}
