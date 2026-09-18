@@ -1,7 +1,7 @@
-import http from 'node:http';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createDoorman, fakeGateway } from './index.js';
+import { createDoormanHttp } from './http.js';
 
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const FACTORY_URL = (process.env.FACTORY_URL || 'http://127.0.0.1:8088').replace(/\/$/, '');
@@ -59,31 +59,7 @@ async function reconcileFromFactory() {
   }
 }
 
-const server = http.createServer(async (req, res) => {
-  const path = (req.url ?? '/').split('?')[0];
-  if (path === '/healthz' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', ...door.status() }));
-    return;
-  }
-  if (path === '/api/v1/presence' && req.method === 'POST') {
-    if (!(await presenceAuth.verify(req.headers.authorization)).ok) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'unauthorized' }));
-      return;
-    }
-    let body = '';
-    for await (const c of req) body += c;
-    const payload = JSON.parse(body || '{}') as { agentId?: string; presence?: string };
-    if (payload.agentId && payload.presence === 'offline') await door.onAgentIdle(payload.agentId);
-    if (payload.agentId && payload.presence === 'available') await door.onAgentWorking(payload.agentId);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(door.status()));
-    return;
-  }
-  res.writeHead(404);
-  res.end();
-});
+const server = createDoormanHttp(door, presenceAuth);
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[doorman] idle mailbox on :${PORT} (no Discord app required to deploy)`);

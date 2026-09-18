@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "tsx --test src/index.test.ts"
+    "test": "tsx --test src/index.test.ts src/http.test.ts"
   },
   "dependencies": {
     "@beercanlabs/factory-secrets-bind": "0.1.0",
