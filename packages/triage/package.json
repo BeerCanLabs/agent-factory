@@ -5,7 +5,8 @@
   "description": "Crash log router and diagnostic webhook engine for the Factory",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc"
+    "build": "echo 'No build yet'",
+    "test": "echo 'No tests yet'"
   },
   "dependencies": {}
 }

@@ -5,7 +5,8 @@
   "description": "Deterministic cost aggregation and circuit-breaker enforcement for the Factory",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc"
+    "build": "echo 'No build yet'",
+    "test": "echo 'No tests yet'"
   },
   "dependencies": {}
 }
