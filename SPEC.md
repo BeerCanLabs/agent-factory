@@ -96,7 +96,7 @@ The control plane is the only ingress point to the factory kernel. Routes expect
 | Method | Path | Role | Purpose |
 |---|---|---|---|
 | GET | `/healthz`, `/api/v1/health` | none | liveness |
-| POST | `/api/v1/registry/agents` | admin | Register a new agent Cartridge. Validates source and secrets. Enters `PENDING_DEPLOY` or `BUDGET_APPROVED` (if auto-approved by Policy Engine). |
+| POST | `/api/v1/registry/agents` | admin | Register a new agent Cartridge. Validates source and secrets. Enters `PENDING_BUDGET` or `PENDING_DEPLOY` (if auto-approved by Policy Engine). |
 | POST | `/api/v1/registry/agents/:id/deploy` | admin | Cloud provision the agent (e.g. create ECS Task Definition) and launch to production. |
 | GET | `/api/v1/registry/agents` | viewer | View all registered agents and their deployment state. |
 | GET | `/api/v1/agents` | viewer | cartridge catalog |

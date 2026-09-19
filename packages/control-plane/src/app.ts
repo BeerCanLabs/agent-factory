@@ -627,11 +627,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     
     // Evaluate Policy Engine globally
     const globalPolicy = state.policies.get('__global__');
-    let stateResult = 'PENDING_DEPLOY';
+    let stateResult = 'PENDING_BUDGET';
     
     if (globalPolicy && globalPolicy.budgetUsd) {
       state.policies.set(agentId, globalPolicy);
-      stateResult = 'BUDGET_APPROVED';
+      stateResult = 'PENDING_DEPLOY';
       state.ledger.append({
         timestamp: new Date().toISOString(),
         agentId,
@@ -673,8 +673,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 404, { error: 'not_found' });
       return;
     }
-    if (agent.state !== 'BUDGET_APPROVED') {
-      json(res, 400, { error: 'Agent must be BUDGET_APPROVED before deployment' });
+    if (agent.state !== 'PENDING_DEPLOY') {
+      json(res, 400, { error: 'Agent must be PENDING_DEPLOY before deployment' });
       return;
     }
     

@@ -7,7 +7,7 @@ export type AgentRecord = {
   id: string;
   name: string;
   role: string;
-  state: 'IDLE' | 'WORKING' | 'PAUSED' | 'ISOLATED' | 'BLOCKED_FOR_HUMAN' | 'ERROR' | 'PENDING_DEPLOY' | 'BUDGET_APPROVED';
+  state: 'IDLE' | 'WORKING' | 'PAUSED' | 'ISOLATED' | 'BLOCKED_FOR_HUMAN' | 'ERROR' | 'PENDING_BUDGET' | 'PENDING_DEPLOY' | 'DEPLOYING';
   provider: string;
   artifact: string;
   localCommand?: string[];
