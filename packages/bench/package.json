@@ -1,0 +1,24 @@
+{
+  "name": "@beercanlabs/factory-bench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cost vs quality benchmark: run a cartridge's regression suite per model through the factory",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "factory-bench": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test src/index.test.ts"
+  },
+  "dependencies": {
+    "@beercanlabs/factory-contract": "0.1.0",
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

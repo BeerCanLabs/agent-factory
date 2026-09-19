@@ -32,23 +32,23 @@ Source of truth for factory-owned flows. Canonical architecture: [POSITION_PAPER
 - **If it silently breaks:** Secrets in git, or boot with unbound names.
 
 ### 6. Injected Observability + Kill-Switch
-- **Description:** The factory sidecar intercepts LLM and MCP egress, counts tokens, records tool calls, and can pause / isolate / throttle by closing or rate-limiting the proxy. Agents do not emit custom spend telemetry.
-- **Entry points:** Sidecar proxy, control-plane pause/isolate.
-- **If it silently breaks:** Unmetered spend, or kill-switch that only SIGSTOPs a child the sidecar spawned.
+- **Description:** The factory gateway intercepts LLM and MCP egress, counts tokens, records tool calls, and can pause / isolate / throttle by closing or rate-limiting the proxy. Agents do not emit custom spend telemetry.
+- **Entry points:** Gateway proxy, control-plane pause/isolate.
+- **If it silently breaks:** Unmetered spend, or kill-switch that fails to stop egress.
 
 ### 6b. Optional prompt traces (mind, not ledger)
-- **Description:** Admins may enable `FACTORY_TRACE_PROMPTS` so the sidecar stores secret-masked LLM request/response JSON under the agent’s hydrated mind, pruned by `FACTORY_TRACE_TTL_SECONDS`. Off by default. Deletable; not append-only audit.
+- **Description:** Admins may enable `FACTORY_TRACE_PROMPTS` so the gateway stores secret-masked LLM request/response JSON under the agent’s hydrated mind, pruned by `FACTORY_TRACE_TTL_SECONDS`. Off by default. Deletable; not append-only audit.
 - **If it silently breaks:** Operators cannot replay what was sent to the model; or traces retain secrets / never expire.
 
 ### 7. Immutable Execution Ledger
-- **Description:** Every token, MCP invocation, and system action is appended to a factory-owned ledger with actor/authorization. Entries are metadata + payload hash only; the sidecar masks bound secret strings before flush. Clients (Garrison, FinOps cartridge) query it. They do not own it.
-- **Entry points:** Sidecar writer, `GET /api/v1/ledger`.
+- **Description:** Every token, MCP invocation, and system action is appended to a factory-owned ledger with actor/authorization. Entries are metadata + payload hash only; the ledger masks bound secret strings before flush. Clients (Garrison, FinOps cartridge) query it. They do not own it.
+- **Entry points:** Gateway/shim writer, `GET /api/v1/ledger`.
 - **If it silently breaks:** No SOC2 trail, disputed spend, missing “who authorized this,” or an immutable PII/secret spill.
 
 ### 8. Authenticated Factory MCP + REST
 - **Description:** External clients talk to the factory control plane over REST and MCP with OIDC/bearer auth. The gateway lists cartridges, wakes agents, applies kill-switch, and queries the ledger. It does not catalog a shared skill library or vault API keys.
 - **Entry points:** Control-plane MCP server, `/api/v1/*`.
-- **If it silently breaks:** Unauthenticated control, or clients scraping per-sidecar fake MCP JSON.
+- **If it silently breaks:** Unauthenticated control, or clients scraping fake MCP JSON.
 
 ### 9. Crash and budget event routing
 - **Description:** Worker non-zero exits / OOM become ledger events. If the MedDoc cartridge is installed, the factory wakes it. Budget anomalies are visible on the ledger for the FinOps cartridge. Remediation logic lives in those agents, not in factory modules.
