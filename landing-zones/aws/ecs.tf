@@ -107,8 +107,8 @@ resource "aws_ecs_service" "control_plane" {
   desired_count   = 1
   launch_type     = "FARGATE"
   # Stop the old task before starting the new one: two writers would fork the ledger chain.
-  deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 100
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
   network_configuration {
     subnets          = aws_subnet.service[*].id
     security_groups  = [aws_security_group.control_plane.id]
@@ -167,7 +167,10 @@ resource "aws_ecs_service" "gateway" {
   cluster         = aws_ecs_cluster.factory.id
   task_definition = aws_ecs_task_definition.gateway[0].arn
   desired_count   = var.gateway_count
-  launch_type     = "FARGATE"
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE_SPOT"
+    weight            = 1
+  }
   network_configuration {
     subnets          = aws_subnet.service[*].id
     security_groups  = [aws_security_group.gateway.id]
@@ -227,7 +230,10 @@ resource "aws_ecs_service" "doorman" {
   cluster         = aws_ecs_cluster.factory.id
   task_definition = aws_ecs_task_definition.doorman[0].arn
   desired_count   = 1
-  launch_type     = "FARGATE"
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE_SPOT"
+    weight            = 1
+  }
   network_configuration {
     subnets          = aws_subnet.service[*].id
     security_groups  = [aws_security_group.doorman.id]

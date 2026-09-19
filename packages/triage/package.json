@@ -1,0 +1,11 @@
+{
+  "name": "@beercanlabs/factory-triage",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Crash log router and diagnostic webhook engine for the Factory",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {}
+}
