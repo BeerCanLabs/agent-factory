@@ -972,7 +972,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     
     // Evaluate Policy Engine globally
     const globalPolicy = state.policies.get('__global__');
-    let stateResult = 'PENDING_BUDGET';
+    let stateResult: 'PENDING_BUDGET' | 'PENDING_DEPLOY' = 'PENDING_BUDGET';
     
     if (globalPolicy && globalPolicy.budgetUsd) {
       state.policies.set(agentId, globalPolicy);
