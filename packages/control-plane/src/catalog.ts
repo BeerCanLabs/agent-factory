@@ -7,7 +7,7 @@ export type AgentRecord = {
   id: string;
   name: string;
   role: string;
-  state: 'IDLE' | 'WORKING' | 'PAUSED' | 'ISOLATED' | 'BLOCKED_FOR_HUMAN' | 'ERROR' | 'PENDING_BUDGET' | 'PENDING_DEPLOY' | 'DEPLOYING';
+  state: 'SLEEPING' | 'WORKING' | 'PAUSED' | 'ISOLATED' | 'BLOCKED_FOR_HUMAN' | 'ERROR' | 'PENDING_BUDGET' | 'PENDING_DEPLOY' | 'DEPLOYING';
   provider: string;
   artifact: string;
   localCommand?: string[];
@@ -63,7 +63,7 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
       id: result.cartridgeId,
       name,
       role,
-      state: 'IDLE',
+      state: 'SLEEPING',
       provider: 'local',
       artifact,
       localCommand,

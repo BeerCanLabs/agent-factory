@@ -12,7 +12,7 @@ A working factory on **whatever landing zone they actually have** (new Azure sub
 
 - Control plane REST + MCP up and authenticated
 - Agents wake from zero; shim in the same unit; mind on object storage; ledger metadata+hash
-- Doorman deployed **idle** (no Discord app required)
+- Doorman deployed **sleeping** (no Discord app required)
 - Kernel from this repo; cloud products from the pattern table, not from a hardcoded AWS module
 
 ## Interview (Draftsman baseline)
@@ -52,9 +52,9 @@ Always deploy Doorman. No bot token at factory build. Presence offline while the
 
 1. Control plane `/healthz` on the chosen ingress
 2. Authenticated `GET /api/v1/agents` and `POST /mcp` `tools/list`
-3. Echo (or their cartridge) wake returns 200; compute actually starts on the chosen pattern; ledger has `RESUME`; mind prefix exists after idle
+3. Echo (or their cartridge) wake returns 200; compute actually starts on the chosen pattern; ledger has `RESUME`; mind prefix exists after sleeping
 4. Ledger has no secrets and no prompt bodies
-5. Doorman `/healthz` is `discord: idle` without a bot token
+5. Doorman `/healthz` is `discord: sleeping` without a bot token
 6. SDP `deploymentTarget` is no longer `drafting-interview-required`
 
 ## Secrets
