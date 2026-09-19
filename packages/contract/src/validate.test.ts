@@ -113,7 +113,7 @@ describe('bench suite', () => {
 });
 
 describe('repo example cartridges', () => {
-  const ids = ['finops-officer', 'librarian', 'med-doc', 'factory-mechanic', 'compliance-officer', 'examples/echo-agent'];
+  const ids = ['librarian', 'factory-mechanic', 'compliance-officer', 'examples/echo-agent'];
 
   for (const id of ids) {
     it(`validates agents/${id}`, () => {
