@@ -12,3 +12,4 @@ factory.secrets
 
 # Local AI session handoff notes. Not project documentation; never commit.
 HANDOFF.md
+castle_session_transcript.txt
