@@ -168,3 +168,27 @@ resource "aws_iam_role_policy" "agent" {
     ]
   })
 }
+
+# Extruded policy for Factory PaaS native deployments
+resource "aws_iam_role_policy" "control_plane_paas" {
+  name = "control-plane-paas-orchestration"
+  role = aws_iam_role.control_plane.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = [
+          "iam:CreateRole",
+          "iam:PutRolePolicy",
+          "iam:PassRole",
+          "ecs:RegisterTaskDefinition",
+          "codebuild:StartBuild",
+          "codebuild:BatchGetBuilds"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
