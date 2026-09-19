@@ -55,3 +55,12 @@ runtimes/generic/         # agent shim + exec
 ## License
 
 Apache-2.0 © BeerCanLabs
+
+## Deployment Gotchas
+
+If you are deploying this architecture using the included GitHub Actions pipeline (`deploy.yml`), you must ensure that your GitHub Repository Variables are configured. Without these variables, the AWS OIDC authentication step will fail with an `Invalid Request ARN` error because it will not know which AWS Account ID to authenticate against.
+
+Before running the pipeline, set the following Repository Variables (`Settings -> Secrets and variables -> Actions`):
+- `BCL_AWS_ACCOUNT_ID`: Your 12-digit AWS Account ID.
+- `FACTORY_CERT_ARN`: Your ACM Certificate ARN (for the ALB).
+- `FACTORY_DOMAIN`: The domain name for the Control Plane.

@@ -44,7 +44,16 @@ The script runs the bootstrap stack (state bucket, GitHub OIDC `factory-deploy` 
 
 Point `FACTORY_DOMAIN` at `alb_dns_name` before the checks run.
 
-After the first deploy, `.github/workflows/deploy.yml` (manual trigger, `main` only) does the same with OIDC credentials. Set repository variables `BCL_AWS_ACCOUNT_ID`, `FACTORY_CERT_ARN` and `FACTORY_DOMAIN`.
+After the first deploy, `.github/workflows/deploy.yml` (manual trigger, `main` only) does the same with OIDC credentials. 
+
+> [!IMPORTANT]
+> **GitHub Actions OIDC Setup Gotcha**
+> If you are deploying via GitHub Actions, the pipeline will fail at the `aws-actions/configure-aws-credentials@v4` step if you do not set up your GitHub repository variables. 
+> You MUST set the following Repository Variables in GitHub (`Settings > Secrets and variables > Actions > Variables`):
+> 1. `BCL_AWS_ACCOUNT_ID` (e.g., 566332862296) - Required to assume the OIDC deployment role.
+> 2. `FACTORY_CERT_ARN` - Your ACM Certificate ARN for the ALB.
+> 3. `FACTORY_DOMAIN` - The domain name that routes to your Factory.
+
 
 ## Enable LLM egress for an agent
 
