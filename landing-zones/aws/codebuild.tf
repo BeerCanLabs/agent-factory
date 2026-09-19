@@ -69,7 +69,7 @@ resource "aws_codebuild_project" "factory_agent_builder" {
 
     environment_variable {
       name  = "ECR_REPO_URI"
-      value = aws_ecr_repository.agents.repository_url
+      value = aws_ecr_repository.dynamic_agents.repository_url
     }
   }
 

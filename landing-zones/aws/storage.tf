@@ -119,3 +119,12 @@ resource "aws_cloudwatch_log_group" "factory" {
 resource "aws_cloudwatch_event_bus" "factory" {
   name = local.name
 }
+
+resource "aws_ecr_repository" "dynamic_agents" {
+  name                 = "factory-dynamic-agents"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
