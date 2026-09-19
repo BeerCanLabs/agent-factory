@@ -11,6 +11,7 @@
     "test": "tsx --test src/index.test.ts src/integrations.test.ts src/runtime-ecs.test.ts src/runtime-docker.test.ts src/gateway.e2e.test.ts src/bench.e2e.test.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-codebuild": "^3.1136.0",
     "@aws-sdk/client-ecs": "^3.1136.0",
     "@aws-sdk/client-iam": "^3.1136.0",
     "@beercanlabs/factory-auth": "0.1.0",
