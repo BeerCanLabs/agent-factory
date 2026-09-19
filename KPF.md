@@ -72,3 +72,29 @@ The factory does not host a plug-and-play code library. MCP is for peripherals o
 
 ### D4. OAuth broker / Training Gym
 Factory-stored OBO tokens and multi-model graduation are out of paper scope. Doorman is a kernel *module*: deployed idle, no Discord app at factory build; Gateway + offline/available presence when a Discord-surface cartridge binds a token.
+
+## The Four Factory Interfaces (Action-to-Interface Mapping)
+
+The Factory is a strictly headless infrastructure engine. External clients, UIs, and enterprise systems interact with the Factory's Kernel flows exclusively through four documented interfaces. This decoupled architecture guarantees that a UI designer can build robust UX (e.g., chat interfaces, debugging consoles, dashboard metrics) without ever modifying the Factory's internal code.
+
+### 1. The Synchronous API (REST)
+*Use for immediate, transactional commands and configuration.*
+* **Declarative Provisioning (KPF 1):** `POST` a cartridge manifest to the registry.
+* **Access & Lifecycle (KPF 4, 8):** `POST` to manually wake an agent; `PUT` to update authentication/RBAC.
+* **Governance Command (KPF 6):** `POST` to toggle the Kill-Switch or close the egress proxy.
+* **Ledger Query (KPF 7):** `GET` the immutable execution ledger for FinOps or auditing.
+
+### 2. Webhooks
+*Use for asynchronous handoffs and lifecycle state changes.*
+* **Asynchronous Wake & Callback (KPF 3):** An external system triggers an agent via an authenticated POST to a webhook endpoint, allowing the agent to spin up, process, and POST the result back when complete.
+* **Crash & Budget Routing (KPF 9):** The Factory alerts an external system (or an ITSM tool) when an agent hits a FinOps circuit breaker or exits with an OOM crash.
+
+### 3. WebSockets
+*Use for persistent, real-time bidirectional streaming between the Cartridge and a Client.*
+* **Execution Streaming:** Bridging the active Cartridge execution (live token generation, human-in-the-loop approval requests) to a frontend UI.
+* **Live Telemetry Taps (KPF 6b):** A developer connects to stream live prompt traces and egress logs from the Sidecar during active execution.
+
+### 4. Events (Pub/Sub)
+*Use for decoupled background triggers and immutable exhaust.*
+* **Queue Triggers (KPF 3):** A background event (e.g., a database record is created) drops onto the queue to silently wake a Cartridge.
+* **Ledger Exhaust (KPF 7):** The Factory drops continuous `Tokens_Burned` and `Tool_Executed` events onto the message broker for enterprise data lakes (like Datadog/Splunk) to ingest without blocking the Cartridge's execution loop.
