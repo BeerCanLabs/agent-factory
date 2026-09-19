@@ -321,7 +321,7 @@ export async function finishRun(
         console.error(`[control-plane] stop ${agent.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    if (agent.state === 'WORKING') agent.state = terminal === 'DONE' ? 'IDLE' : 'ERROR';
+    if (agent.state === 'WORKING') agent.state = terminal === 'DONE' ? 'SLEEPING' : 'ERROR';
     await notifyDoorman(state, agent.id, 'offline');
   }
   if (terminal === 'FAILED' && done.agentId !== 'med-doc' && state.agents.has('med-doc')) {
@@ -368,7 +368,7 @@ export async function applyKillSwitch(
   if (!agent) return { status: 404, body: { error: 'not_found' } };
   if (command === 'PAUSE') agent.state = 'PAUSED';
   else if (command === 'ISOLATE') agent.state = 'ISOLATED';
-  else agent.state = activeRun(state, id) ? 'WORKING' : 'IDLE';
+  else agent.state = activeRun(state, id) ? 'WORKING' : 'SLEEPING';
   state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: command, actor });
   if (command === 'RESUME' && !activeRun(state, id)) {
     const next = state.runs.list({ agentId: id, active: true }).find((r) => r.state === 'QUEUED');
@@ -458,7 +458,7 @@ export async function reconcileRuns(state: FactoryState): Promise<void> {
       });
     } else if (s.state === 'running') {
       const agent = state.agents.get(run.agentId);
-      if (agent && agent.state === 'IDLE') agent.state = 'WORKING';
+      if (agent && agent.state === 'SLEEPING') agent.state = 'WORKING';
     }
   }
 }
@@ -679,7 +679,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     
     // Trigger Cloud Provisioning here
-    agent.state = 'IDLE'; // Officially online
+    agent.state = 'SLEEPING'; // Officially online
     
     state.ledger.append({
       timestamp: new Date().toISOString(),
