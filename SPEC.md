@@ -89,13 +89,16 @@ Append-only store of tokens, costs, MCP invocations, and system actions, with ac
 
 **Write-once anchor:** every `FACTORY_LEDGER_CHECKPOINT_SECONDS` (and on shutdown) the rows since the last checkpoint are shipped to `FACTORY_LEDGER_WORM_URI`. On AWS this is an S3 bucket with Object Lock in COMPLIANCE mode (`ledger_retention_days`), so the checkpoint — rows included — cannot be deleted or overwritten by anyone before retention ends. `verify` checks that the local chain lands on every checkpoint hash, which catches truncation and a history rewritten from genesis. Tamper-*evident* locally, tamper-*proof* for everything already checkpointed.
 
-### 3.6 Headless control plane
+### 3.6 API / MCP surface
 
-Factory gateway (REST + MCP):
+The control plane is the only ingress point to the factory kernel. Routes expect an `Authorization: Bearer <token>` signed by the `FACTORY_AUTH` IdP and validated against `FACTORY_OIDC_*`.
 
 | Method | Path | Role | Purpose |
 |---|---|---|---|
 | GET | `/healthz`, `/api/v1/health` | none | liveness |
+| POST | `/api/v1/registry/agents` | admin | Register a new agent Cartridge. Validates source and secrets. Enters `PENDING_DEPLOY` or `BUDGET_APPROVED` (if auto-approved by Policy Engine). |
+| POST | `/api/v1/registry/agents/:id/deploy` | admin | Cloud provision the agent (e.g. create ECS Task Definition) and launch to production. |
+| GET | `/api/v1/registry/agents` | viewer | View all registered agents and their deployment state. |
 | GET | `/api/v1/agents` | viewer | cartridge catalog |
 | POST | `/api/v1/agents/:id/runs` (alias `/wake`) | operator | start a run: **202** + run; body `{input?, callbackUrl?}`; 412 on missing secrets; 409 if paused/isolated |
 | POST | `/api/v1/agents/:id/pause\|resume\|isolate` | operator | kill-switch |
@@ -106,7 +109,8 @@ Factory gateway (REST + MCP):
 | POST | `/api/v1/hooks/:id` | cartridge secret | webhook trigger, creates a run |
 | GET | `/api/v1/ledger` | viewer | audit query |
 | POST | `/api/v1/ledger` | ingest | metadata-only event write |
-| GET/PUT | `/api/v1/agents/:id/policy` | viewer / admin | egress policy (routes, models, tools, budget, TPM) |
+| GET/PUT | `/api/v1/policies/budget` | admin | Manage global and departmental Policy Engine limits. |
+| GET/PUT | `/api/v1/agents/:id/policy` | viewer / admin | egress policy (routes, models, tools, per-agent budget, TPM) |
 | GET | `/api/v1/approvals?state=pending` | viewer | held tool calls |
 | POST | `/api/v1/approvals/:id` | approver | `{decision: approve\|reject}` |
 | GET | `/api/v1/gateway/runs/:runId` | gateway | run state, agent kill-switch state, policy, spend |

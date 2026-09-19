@@ -8,23 +8,27 @@ Source of truth for factory-owned flows. Canonical architecture: [POSITION_PAPER
 
 The Factory provides distinct functional domains. External UIs (like Garrison) bind to these capabilities using strictly defined interfaces, ensuring the infrastructure remains completely decoupled from the frontend experience.
 
-### 1. Agent Registry Service (Declarative Provisioning)
-- **Description:** Cartridges (Agents) must not live inside the Factory repository, as this couples the reasoning logic to the infrastructure. Each agent lives in its own standalone repository (e.g., `github.com/dalesackrider/rosie`). When an agent is ready for deployment, its CI/CD pipeline submits its declarative cartridge (`soul.md`, `surface.yaml`, `secrets.manifest.yaml`, and artifact pointer) to the Factory's Registry. The Factory validates the contract and provisions the necessary serverless compute, IAM roles, and secret bindings.
+### 1. Agent Registry Service (Factory-Driven Deployment & Governance)
+- **Description:** Cartridges (Agents) must not live inside the Factory repository. Each agent lives in its own standalone repository (e.g., `github.com/dalesackrider/SM-rosie`). The Factory itself is the deployment engine, taking over from standard CI/CD. The deployment lifecycle is a strict state machine, governed by Role-Based Access Control (RBAC). **Every state transition is appended to the Immutable Ledger, cryptographically recording the authenticated OIDC identity of the user who performed the action.**
+  1. **Registration (RBAC: `Factory.Registrar`):** An authenticated operator submits the agent manifest. The Factory pulls the definition, validates that the source repo is accessible, and verifies that the agent's declared secrets already exist in the Bring-Your-Own Secrets Manager (BYO-SM).
+  2. **Validation:** If the secrets are missing or the code violates Factory constraints, the registration is rejected. If it passes, the agent enters a `VALIDATED` state.
+  3. **Policy Engine Evaluation (Budget):** To prevent FinOps admins from becoming a manual deployment bottleneck, the Factory executes an automated Policy Engine. Authorized `Factory.FinOps` users pre-define organizational constraints (e.g., "Default budget of $10/day for all new agents" or "Shared circuit-breaker for the Engineering Department"). When an agent is registered, the Policy Engine evaluates it. If it complies, it automatically transitions to the `BUDGET_APPROVED` state. Exceptions require a manual RBAC override.
+  4. **Deployment (RBAC: `Factory.Deployer`):** An authorized user explicitly triggers the deployment. The Factory Control Plane natively orchestrates the cloud provider (e.g., dynamically provisioning the ECS Task Definition and strict IAM Task Role in AWS) to push the agent into production.
 - **Interface (REST API):**
-  - `POST /api/v1/registry/agents` (Agent's CI/CD pipeline registers the new or updated cartridge)
-  - `GET /api/v1/registry/agents` (UI discovers and lists all available agents and their declared skills)
-  - `GET /api/v1/registry/agents/:id` (UI fetches a specific agent's `soul.md` and configuration)
+  - `POST /api/v1/registry/agents` (Registers and validates the new Cartridge)
+  - `PUT /api/v1/registry/agents/:id/budget` (FinOps user assigns the budget)
+  - `POST /api/v1/registry/agents/:id/deploy` (Authorized action that triggers cloud provisioning)
 
 ### 2. Key Management (The "Locksmith")
 - **Description:** A secure pathway for operators to inject credentials into the Enterprise's Bring-Your-Own Secrets Manager (BYO-SM) such as AWS Secrets Manager or HashiCorp Vault. The Factory *reads* these secrets at boot, but the Locksmith is the *write* path. 
 - **Interface (CLI/SDK):** `factory-cli locksmith set <agent> <secret_name> <value>`. The UI/CLI communicates directly with the cloud provider's SDK to vault the secret.
 - **Architectural Boundary:** The Factory Control Plane does not accept plaintext secrets over its REST API to prevent itself from becoming a vault or a high-value attack vector.
 
-### 3. Cost Management Per Agent (Budget & Kill-Switch)
-- **Description:** Real-time visibility into token burn and unit economics. The Factory intercepts all egress traffic, prices tokens, and enforces hard daily budgets (circuit breakers).
+### 3. Cost Management & Policy Engine (FinOps & Kill-Switch)
+- **Description:** Real-time visibility into token burn and automated governance. The Factory intercepts all egress traffic, prices tokens, and evaluates them against the Policy Engine's rules. If an agent (or an overarching departmental budget) hits its circuit-breaker limit, the Factory automatically pauses egress.
 - **Interface (REST API):** 
   - `GET /api/v1/gateway/runs/:runId` (UI pulls current spend)
-  - `PUT /api/v1/agents/:id/policy` (UI sets budget thresholds)
+  - `PUT /api/v1/policies/budget` (FinOps user sets organizational, departmental, or per-agent budget thresholds)
   - `POST /api/v1/agents/:id/pause` (UI manually triggers the kill-switch)
 
 ### 4. LLM & MCP Gateway (Unified Egress & Tool Governance)
