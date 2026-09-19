@@ -610,102 +610,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const trigger = agent?.triggers.find((t) => t.type === 'webhook');
     if (!agent || !trigger || trigger.type !== 'webhook') {
       
-  // --- REGISTRY SERVICE ---
-  if (path === '/api/v1/registry/agents' && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'admin');
-    if (!principal) return;
-    const body = await readJson(req);
-    const agentId = require('crypto').randomUUID(); // Strict cryptographic UID
-    
-    state.ledger.append({
-      timestamp: new Date().toISOString(),
-      agentId,
-      type: 'action',
-      action: 'AGENT_REGISTERED',
-      actor: principal.actor
-    });
-    
-    // Evaluate Policy Engine globally
-    const globalPolicy = state.policies.get('__global__');
-    let stateResult = 'PENDING_BUDGET';
-    
-    if (globalPolicy && globalPolicy.budgetUsd) {
-      state.policies.set(agentId, globalPolicy);
-      stateResult = 'PENDING_DEPLOY';
-      state.ledger.append({
-        timestamp: new Date().toISOString(),
-        agentId,
-        type: 'action',
-        action: 'BUDGET_APPROVED_BY_POLICY',
-        actor: 'SYSTEM.policy'
-      });
-    }
-    
-    const record = {
-      id: agentId,
-      name: body.name || agentId,
-      role: body.role || 'Agent',
-      state: stateResult,
-      provider: 'cloud',
-      artifact: body.repo || '',
-      requires: body.secrets || [],
-      triggers: [],
-      dir: '/tmp/' + agentId
-    };
-    state.agents.set(agentId, record);
-    json(res, 201, record);
-    return;
-  }
-  
-  if (path === '/api/v1/registry/agents' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
-    json(res, 200, Array.from(state.agents.values()));
-    return;
-  }
-  
-  const deployMatch = path.match(/^\/api\/v1\/registry\/agents\/([^\/]+)\/deploy$/);
-  if (deployMatch && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'admin');
-    if (!principal) return;
-    const agentId = deployMatch[1];
-    const agent = state.agents.get(agentId);
-    if (!agent) {
-      json(res, 404, { error: 'not_found' });
-      return;
-    }
-    if (agent.state !== 'PENDING_DEPLOY') {
-      json(res, 400, { error: 'Agent must be PENDING_DEPLOY before deployment' });
-      return;
-    }
-    
-    // Trigger Cloud Provisioning here
-    agent.state = 'SLEEPING'; // Officially online
-    
-    state.ledger.append({
-      timestamp: new Date().toISOString(),
-      agentId,
-      type: 'action',
-      action: 'AGENT_DEPLOYED',
-      actor: principal.actor
-    });
-    
-    json(res, 200, agent);
-    return;
-  }
-  
-  if (path === '/api/v1/policies/budget' && req.method === 'PUT') {
-    const principal = await authenticate(req, res, state, 'admin');
-    if (!principal) return;
-    const checked = validatePolicy(await readJson(req));
-    if (!checked.ok) {
-      json(res, 400, { error: checked.error });
-      return;
-    }
-    state.policies.set('__global__', checked.policy);
-    json(res, 200, checked.policy);
-    return;
-  }
-  // --- END REGISTRY SERVICE ---
+
 
   json(res, 404, { error: 'not_found' });
       return;
@@ -1050,5 +955,101 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
+  // --- REGISTRY SERVICE ---
+  if (path === '/api/v1/registry/agents' && req.method === 'POST') {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return;
+    const body = await readJson(req);
+    const agentId = require('crypto').randomUUID(); // Strict cryptographic UID
+    
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'AGENT_REGISTERED',
+      actor: principal.actor
+    });
+    
+    // Evaluate Policy Engine globally
+    const globalPolicy = state.policies.get('__global__');
+    let stateResult = 'PENDING_BUDGET';
+    
+    if (globalPolicy && globalPolicy.budgetUsd) {
+      state.policies.set(agentId, globalPolicy);
+      stateResult = 'PENDING_DEPLOY';
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId,
+        type: 'action',
+        action: 'BUDGET_APPROVED_BY_POLICY',
+        actor: 'SYSTEM.policy'
+      });
+    }
+    
+    const record = {
+      id: agentId,
+      name: body.name || agentId,
+      role: (typeof body.role === 'string' ? body.role : 'Agent'),
+      state: stateResult,
+      provider: 'cloud',
+      artifact: (typeof body.repo === 'string' ? body.repo : ''),
+      requires: (Array.isArray(body.secrets) ? body.secrets : []),
+      triggers: [],
+      dir: '/tmp/' + agentId
+    };
+    state.agents.set(agentId, record);
+    json(res, 201, record);
+    return;
+  }
+  
+  if (path === '/api/v1/registry/agents' && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    json(res, 200, Array.from(state.agents.values()));
+    return;
+  }
+  
+  const deployMatch = path.match(/^\/api\/v1\/registry\/agents\/([^\/]+)\/deploy$/);
+  if (deployMatch && req.method === 'POST') {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return;
+    const agentId = deployMatch[1];
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    if (agent.state !== 'PENDING_DEPLOY') {
+      json(res, 400, { error: 'Agent must be PENDING_DEPLOY before deployment' });
+      return;
+    }
+    
+    // Trigger Cloud Provisioning here
+    agent.state = 'SLEEPING'; // Officially online
+    
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'AGENT_DEPLOYED',
+      actor: principal.actor
+    });
+    
+    json(res, 200, agent);
+    return;
+  }
+  
+  if (path === '/api/v1/policies/budget' && req.method === 'PUT') {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return;
+    const checked = validatePolicy(await readJson(req));
+    if (!checked.ok) {
+      json(res, 400, { error: checked.error });
+      return;
+    }
+    state.policies.set('__global__', checked.policy);
+    json(res, 200, checked.policy);
+    return;
+  }
+  // --- END REGISTRY SERVICE ---
   json(res, 404, { error: 'not_found' });
 }
