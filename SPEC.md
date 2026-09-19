@@ -116,6 +116,21 @@ The control plane is the only ingress point to the factory kernel. Routes expect
 | GET | `/api/v1/gateway/runs/:runId` | gateway | run state, agent kill-switch state, policy, spend |
 | POST | `/api/v1/gateway/approvals`, `.../:id/consume` | gateway | open / use a one-shot approval |
 
+**Policy Payload Schema:**
+The `PUT /api/v1/policies/budget` and `PUT /api/v1/agents/:id/policy` endpoints expect a JSON object:
+```json
+{
+  "routes": ["openai", "anthropic"],
+  "models": ["gpt-4o", "claude-3-5-sonnet"],
+  "budgetUsd": {
+    "perRun": 0.50,
+    "perDay": 10.00,
+    "perMonth": 300.00
+  },
+  "tokensPerMinute": 50000
+}
+```
+
 **Runs.** Every wake (manual, webhook, cron, event route, Doorman) creates a run: `QUEUED → STARTING → WORKING →` one of `DONE`, `FAILED`, `TIMED_OUT`, `CANCELLED`, or `PRE_FLIGHT_MISSING_SECRET`. One run per agent executes at a time; others queue. Runs persist on disk (`FACTORY_RUNS_DIR`) and are reconciled on restart: remote tasks (ECS) are re-adopted or finished from DescribeTasks, in-process tasks are marked `FAILED`. The agent receives `FACTORY_RUN_ID`, `FACTORY_URL` and a short-lived `FACTORY_RUN_TOKEN` (HS256, `FACTORY_RUN_TOKEN_KEY`) valid only while its run is live. On a terminal state the factory POSTs to `callbackUrl` (https, public addresses only) with `x-factory-signature: t=<unix>,v1=hex(HMAC-SHA256(FACTORY_CALLBACK_SIGNING_KEY, "<t>.<body>"))`. On ECS, cartridge secrets come from the task definition's Secrets Manager `secrets` block under `factory/<env>/<NAME>`, the same names pre-flight checks via `FACTORY_SECRETS_AWS_PREFIX`; RunTask overrides carry only run metadata.
 
 The same surface is exposed as MCP tools. Per-container fake `/v1/mcp/agents` JSON is not MCP and is not the factory catalog.
