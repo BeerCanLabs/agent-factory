@@ -1,5 +1,6 @@
-import { registerAgentTaskDefinition } from './aws/ecs';
-import { provisionAgentRoles } from './aws/iam';
+import { registerAgentTaskDefinition } from './aws/ecs.js';
+import { provisionAgentRoles } from './aws/iam.js';
+import { buildAgentImage } from './aws/codebuild.js';
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
@@ -1025,32 +1026,33 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     
-    try {
-      console.log(`Provisioning AWS IAM Roles for ${agentId}...`);
-      const { taskRoleArn, executionRoleArn } = await provisionAgentRoles(agentId, agent.requires);
-      console.log(`Registering AWS ECS Task Definition for ${agentId}...`);
-      
-      // Temporarily use the generic factory agent image until CodeBuild is wired up
-      const imageUri = process.env.DEFAULT_AGENT_IMAGE || 'amazon/amazon-ecs-sample';
-      
-      await registerAgentTaskDefinition(agentId, imageUri, agent.requires, taskRoleArn, executionRoleArn);
-      
-      agent.state = 'SLEEPING'; // Officially online
-    } catch (err) {
-      console.error('Failed to provision AWS infrastructure:', err);
-      json(res, 500, { error: 'Failed to provision AWS infrastructure. Check IAM permissions of the Control Plane.' });
-      return;
-    }
+    agent.state = 'DEPLOYING';
+    json(res, 202, agent);
     
-    state.ledger.append({
-      timestamp: new Date().toISOString(),
-      agentId,
-      type: 'action',
-      action: 'AGENT_DEPLOYED',
-      actor: principal.actor
-    });
-    
-    json(res, 200, agent);
+    void (async () => {
+      try {
+        console.log(`Building Agent Image with CodeBuild for ${agentId}...`);
+        const imageUri = await buildAgentImage(agentId, agent.artifact);
+        
+        console.log(`Provisioning AWS IAM Roles for ${agentId}...`);
+        const { taskRoleArn, executionRoleArn } = await provisionAgentRoles(agentId, agent.requires);
+        console.log(`Registering AWS ECS Task Definition for ${agentId}...`);
+        
+        await registerAgentTaskDefinition(agentId, imageUri, agent.requires, taskRoleArn, executionRoleArn);
+        
+        agent.state = 'SLEEPING'; // Officially online
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId,
+          type: 'action',
+          action: 'AGENT_DEPLOYED',
+          actor: principal.actor
+        });
+      } catch (err) {
+        console.error('Failed to provision AWS infrastructure:', err);
+        agent.state = 'ERROR';
+      }
+    })();
     return;
   }
   
