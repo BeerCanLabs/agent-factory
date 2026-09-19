@@ -1,0 +1,11 @@
+{
+  "name": "@beercanlabs/factory-budget",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deterministic cost aggregation and circuit-breaker enforcement for the Factory",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {}
+}

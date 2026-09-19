@@ -1,4 +1,0 @@
-# Crash events reach MedDoc through the control plane's event router (type=crash), not a queue.
-triggers:
-  - type: http
-    path: /wake

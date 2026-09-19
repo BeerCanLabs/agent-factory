@@ -4,56 +4,54 @@ Source of truth for factory-owned flows. Canonical architecture: [POSITION_PAPER
 
 ---
 
-## Kernel flows
+## Core Functional Pillars & UI Binding Interfaces
 
-### 1. Declarative Agent Provisioning
-- **Description:** An operator submits a cartridge (`soul.md`, `surface.yaml`, `secrets.manifest.yaml`, artifact pointer). The factory validates the contract and provisions serverless compute, memory storage, secret bindings, and triggers. No agent logic is copied into the factory.
-- **Entry points:** Cartridge directories, IaC modules, `factory validate`.
-- **If it silently breaks:** Agents fail to deploy, crash-loop on missing bindings, or run with an incomplete contract.
+The Factory provides distinct functional domains. External UIs (like Garrison) bind to these capabilities using strictly defined interfaces, ensuring the infrastructure remains completely decoupled from the frontend experience.
 
-### 2. Fast Cold-Start State Hydration
-- **Description:** On wake, the entrypoint hydrates markdown/db snapshots from object storage into ephemeral disk and replicates back out. The agent must assume local disk will be destroyed.
-- **Entry points:** Runtime entrypoints, hydration config on the cartridge.
-- **If it silently breaks:** Amnesia on restart.
+### 1. Agent Registry Service (Declarative Provisioning)
+- **Description:** Cartridges (Agents) must not live inside the Factory repository, as this couples the reasoning logic to the infrastructure. Each agent lives in its own standalone repository (e.g., `github.com/dalesackrider/rosie`). When an agent is ready for deployment, its CI/CD pipeline submits its declarative cartridge (`soul.md`, `surface.yaml`, `secrets.manifest.yaml`, and artifact pointer) to the Factory's Registry. The Factory validates the contract and provisions the necessary serverless compute, IAM roles, and secret bindings.
+- **Interface (REST API):**
+  - `POST /api/v1/registry/agents` (Agent's CI/CD pipeline registers the new or updated cartridge)
+  - `GET /api/v1/registry/agents` (UI discovers and lists all available agents and their declared skills)
+  - `GET /api/v1/registry/agents/:id` (UI fetches a specific agent's `soul.md` and configuration)
 
-### 3. Event-Driven Wake (surface.yaml)
-- **Description:** Cron, authenticated webhook, queue, or HTTP triggers scale an agent from zero, pass the event, and allow scale-back to zero.
-- **Entry points:** Control-plane wake, cloud scheduler, ingress.
-- **If it silently breaks:** Events dropped, or agents stay warm and burn idle compute.
+### 2. Key Management (The "Locksmith")
+- **Description:** A secure pathway for operators to inject credentials into the Enterprise's Bring-Your-Own Secrets Manager (BYO-SM) such as AWS Secrets Manager or HashiCorp Vault. The Factory *reads* these secrets at boot, but the Locksmith is the *write* path. 
+- **Interface (CLI/SDK):** `factory-cli locksmith set <agent> <secret_name> <value>`. The UI/CLI communicates directly with the cloud provider's SDK to vault the secret.
+- **Architectural Boundary:** The Factory Control Plane does not accept plaintext secrets over its REST API to prevent itself from becoming a vault or a high-value attack vector.
 
-### 4. Always Available, Not Always On
-- **Description:** Idle agents use zero active compute. Wake is authenticated. After work, scale to zero.
-- **Entry points:** Cloud scheduling, ingress, control-plane `POST /api/v1/agents/:id/wake`.
-- **If it silently breaks:** Cron never fires, or instances run 24/7.
+### 3. Cost Management Per Agent (Budget & Kill-Switch)
+- **Description:** Real-time visibility into token burn and unit economics. The Factory intercepts all egress traffic, prices tokens, and enforces hard daily budgets (circuit breakers).
+- **Interface (REST API):** 
+  - `GET /api/v1/gateway/runs/:runId` (UI pulls current spend)
+  - `PUT /api/v1/agents/:id/policy` (UI sets budget thresholds)
+  - `POST /api/v1/agents/:id/pause` (UI manually triggers the kill-switch)
 
-### 5. Zero Plaintext Secrets (binding, not storage)
-- **Description:** Cartridges declare secret *names*. The factory binds values from the adopter’s BYO manager (Vault, AWS SM, GCP SM) at boot. The factory does not store secrets and is not a vault. MCP is not a credential store.
-- **Entry points:** `secrets.manifest.yaml`, IaC bindings.
-- **If it silently breaks:** Secrets in git, or boot with unbound names.
+### 4. LLM & MCP Gateway (Unified Egress & Tool Governance)
+- **Description:** The network proxy that intercepts all outbound traffic from the Cartridges. It strips the agent's run-token and injects the real API keys (OpenAI, Anthropic, etc.), meters the token consumption, and allows the Factory to transparently reroute or downgrade models. It also intercepts Model Context Protocol (MCP) tool calls, enforcing allowlists and parking unauthorized calls for human approval.
+- **Interface (REST / WebSockets):**
+  - `GET /api/v1/approvals?state=pending` (UI fetches held tool calls)
+  - `POST /api/v1/approvals/:id` (UI approves or rejects the action)
+  - `WebSocket /stream` (UI streams live tool execution logs directly to the user)
 
-### 6. Injected Observability + Kill-Switch
-- **Description:** The factory gateway intercepts LLM and MCP egress, counts tokens, records tool calls, and can pause / isolate / throttle by closing or rate-limiting the proxy. Agents do not emit custom spend telemetry.
-- **Entry points:** Gateway proxy, control-plane pause/isolate.
-- **If it silently breaks:** Unmetered spend, or kill-switch that fails to stop egress.
+### 5. Doorman (Presence & Real-Time Routing)
+- **Description:** The persistent, stateful connection manager. Because Agents scale to zero to save costs, they cannot hold WebSockets open. Doorman holds these connections (like Discord Gateway, Slack RTM, or Custom WebSockets) 24/7, manages the "Online/Offline" presence, and wakes the agent when an event occurs.
+- **Interface (WebSockets / Webhooks):**
+  - Custom UI frontends establish a WebSocket connection directly with Doorman.
+  - Doorman uses an internal Webhook (`POST /wake`) to trigger the stateless Agent.
 
-### 6b. Optional prompt traces (mind, not ledger)
-- **Description:** Admins may enable `FACTORY_TRACE_PROMPTS` so the gateway stores secret-masked LLM request/response JSON under the agent’s hydrated mind, pruned by `FACTORY_TRACE_TTL_SECONDS`. Off by default. Deletable; not append-only audit.
-- **If it silently breaks:** Operators cannot replay what was sent to the model; or traces retain secrets / never expire.
+### 6. Triage Function (Unified Error Surface Area)
+- **Description:** A unified, append-only ledger where all system faults converge. Whether an agent crashes from an Out-of-Memory error, lacks a secret during pre-flight, gets blocked by the LLM, or fails a DOM parsing task internally, the error is written here.
+- **Interface (REST API / PubSub):**
+  - `GET /api/v1/ledger` (UI pulls the immutable audit trail for debugging)
+  - `Webhook (EventBridge/SQS)` (The Factory drops a crash event into a queue)
+  - **Kernel Module (`packages/triage`):** The Factory's triage module consumes these infrastructure faults (like OOM crashes) and routes them to external observability dashboards or Slack webhooks for operators.
 
-### 7. Immutable Execution Ledger
-- **Description:** Every token, MCP invocation, and system action is appended to a factory-owned ledger with actor/authorization. Entries are metadata + payload hash only; the ledger masks bound secret strings before flush. Clients (Garrison, FinOps cartridge) query it. They do not own it.
-- **Entry points:** Gateway/shim writer, `GET /api/v1/ledger`.
-- **If it silently breaks:** No SOC2 trail, disputed spend, missing “who authorized this,” or an immutable PII/secret spill.
-
-### 8. Authenticated Factory MCP + REST
-- **Description:** External clients talk to the factory control plane over REST and MCP with OIDC/bearer auth. The gateway lists cartridges, wakes agents, applies kill-switch, and queries the ledger. It does not catalog a shared skill library or vault API keys.
-- **Entry points:** Control-plane MCP server, `/api/v1/*`.
-- **If it silently breaks:** Unauthenticated control, or clients scraping fake MCP JSON.
-
-### 9. Crash and budget event routing
-- **Description:** Worker non-zero exits / OOM become ledger events. If the MedDoc cartridge is installed, the factory wakes it. Budget anomalies are visible on the ledger for the FinOps cartridge. Remediation logic lives in those agents, not in factory modules.
-- **Entry points:** Sidecar exit hooks, control-plane event routes.
-- **If it silently breaks:** Crashes vanish; FinOps has nothing to read.
+### 7. Training Function (The Gym / Benchmarking)
+- **Description:** The capability to benchmark agents against deterministic expectations (cost vs. quality) or run multi-model graduation simulations to ensure an agent performs safely before it is promoted to production.
+- **Interface (REST API):** 
+  - `POST /api/v1/agents/:id/runs` with `{ model: "pinned-model", trace: true }`. The UI forces the factory to run a pinned simulation and collect prompt traces (`FACTORY_TRACE_PROMPTS`) for evaluation.
+  - **Cartridge Ecosystem:** To preserve the "Console vs. Cartridge" boundary, the Factory does not evaluate the agent logic itself. Instead, a specialized "Trainer Agent" Cartridge evaluates the traces.
 
 ---
 
@@ -62,39 +60,7 @@ Source of truth for factory-owned flows. Canonical architecture: [POSITION_PAPER
 These remain documented so they are not reintroduced as silent kernel scope.
 
 ### D1. Multi-channel identity and real-time voice/robotics streaming
-Voice transcript streaming and gesture clocks are overlay/runtime concerns, not factory kernel.
+Voice transcript streaming and gesture clocks are overlay/runtime concerns, not factory kernel. Doorman can hold the connection, but the heavy lifting of streaming logic belongs in the Cartridge.
 
-### D2. Autonomous capability triage bot
-A factory bot that sweeps per-agent backlogs and a centralized skills catalog contradicts portable cartridges (skills live in the artifact).
-
-### D3. Shared skills catalog execution
+### D2. Shared skills catalog execution
 The factory does not host a plug-and-play code library. MCP is for peripherals only.
-
-### D4. OAuth broker / Training Gym
-Factory-stored OBO tokens and multi-model graduation are out of paper scope. Doorman is a kernel *module*: deployed idle, no Discord app at factory build; Gateway + offline/available presence when a Discord-surface cartridge binds a token.
-
-## The Four Factory Interfaces (Action-to-Interface Mapping)
-
-The Factory is a strictly headless infrastructure engine. External clients, UIs, and enterprise systems interact with the Factory's Kernel flows exclusively through four documented interfaces. This decoupled architecture guarantees that a UI designer can build robust UX (e.g., chat interfaces, debugging consoles, dashboard metrics) without ever modifying the Factory's internal code.
-
-### 1. The Synchronous API (REST)
-*Use for immediate, transactional commands and configuration.*
-* **Declarative Provisioning (KPF 1):** `POST` a cartridge manifest to the registry.
-* **Access & Lifecycle (KPF 4, 8):** `POST` to manually wake an agent; `PUT` to update authentication/RBAC.
-* **Governance Command (KPF 6):** `POST` to toggle the Kill-Switch or close the egress proxy.
-* **Ledger Query (KPF 7):** `GET` the immutable execution ledger for FinOps or auditing.
-
-### 2. Webhooks
-*Use for asynchronous handoffs and lifecycle state changes.*
-* **Asynchronous Wake & Callback (KPF 3):** An external system triggers an agent via an authenticated POST to a webhook endpoint, allowing the agent to spin up, process, and POST the result back when complete.
-* **Crash & Budget Routing (KPF 9):** The Factory alerts an external system (or an ITSM tool) when an agent hits a FinOps circuit breaker or exits with an OOM crash.
-
-### 3. WebSockets
-*Use for persistent, real-time bidirectional streaming between the Cartridge and a Client.*
-* **Execution Streaming:** Bridging the active Cartridge execution (live token generation, human-in-the-loop approval requests) to a frontend UI.
-* **Live Telemetry Taps (KPF 6b):** A developer connects to stream live prompt traces and egress logs from the Sidecar during active execution.
-
-### 4. Events (Pub/Sub)
-*Use for decoupled background triggers and immutable exhaust.*
-* **Queue Triggers (KPF 3):** A background event (e.g., a database record is created) drops onto the queue to silently wake a Cartridge.
-* **Ledger Exhaust (KPF 7):** The Factory drops continuous `Tokens_Burned` and `Tool_Executed` events onto the message broker for enterprise data lakes (like Datadog/Splunk) to ingest without blocking the Cartridge's execution loop.
