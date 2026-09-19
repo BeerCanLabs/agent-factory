@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/index.test.ts"
+    "test": "tsx --test src/index.test.ts src/shim.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

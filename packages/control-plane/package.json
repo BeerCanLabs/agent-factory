@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "test": "tsx --test src/index.test.ts"
+    "test": "tsx --test src/index.test.ts src/integrations.test.ts src/runtime-ecs.test.ts src/runtime-docker.test.ts src/gateway.e2e.test.ts src/bench.e2e.test.ts"
   },
   "dependencies": {
     "@beercanlabs/factory-auth": "0.1.0",
@@ -16,11 +16,19 @@
     "@beercanlabs/factory-hydrate": "0.1.0",
     "@beercanlabs/factory-ledger": "0.1.0",
     "@beercanlabs/factory-secrets-bind": "0.1.0",
-    "yaml": "^2.6.1"
+    "jose": "^6.2.12",
+    "yaml": "^2.6.1",
+    "@beercanlabs/factory-telemetry": "0.1.0",
+    "@opentelemetry/api": "^1.9.1",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "@beercanlabs/factory-gateway": "0.1.0",
+    "@opentelemetry/sdk-metrics": "^2.11.0",
+    "@beercanlabs/factory-bench": "0.1.0",
+    "@types/ws": "^8.18.1"
   }
 }

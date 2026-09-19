@@ -1,0 +1,140 @@
+# Landing zone: Docker Compose on one host (pattern 3, compose-host).
+#
+# Networks enforce the paper, not configuration:
+#   agents   internal: no route off the host. Agent containers join only this network, so their
+#            only reachable peers are the control plane (run API) and the gateway (all egress).
+#   control  internal: control plane <-> docker API proxy, Doorman.
+#   egress   normal bridge: the gateway (providers), control plane (callbacks), Doorman (Discord).
+#
+# Trust note: the control plane can create containers, which on a single host is equivalent to
+# root on that host. The socket proxy removes exec/image/volume/network APIs and the runtime hardens
+# every container it creates, but a compromised control plane could still request a privileged one.
+# Managed runtimes (ECS, Cloud Run, Container Apps) do not have this property.
+name: agent-factory
+
+x-factory-keys: &factory-keys
+  FACTORY_RUN_TOKEN_KEY: dev-run-token-key-0123456789abcdef
+  FACTORY_SECRETS_FILE: /run/factory.secrets
+
+services:
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    environment:
+      CONTAINERS: 1
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [control]
+    restart: unless-stopped
+
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: packages/control-plane/Dockerfile
+    image: factory-control-plane:dev
+    environment:
+      <<: *factory-keys
+      PORT: 8088
+      AGENTS_ROOT: /app/agents
+      # Dev-only tokens. Each service gets its own name and least role.
+      FACTORY_TOKEN: dev-admin-token
+      FACTORY_TOKENS: '[{"name":"doorman","token":"dev-doorman-token","roles":["operator"]},{"name":"gateway","token":"dev-gateway-token","roles":["gateway"]}]'
+      DOORMAN_URL: http://doorman:8090
+      DOORMAN_TOKEN: dev-presence-token
+      FACTORY_CALLBACK_SIGNING_KEY: dev-callback-signing-key
+      FACTORY_PUBLIC_URL: http://control-plane:8088
+      FACTORY_GATEWAY_URL: http://gateway:8081
+      FACTORY_LEDGER_PATH: /data/ledger.jsonl
+      # Local anchor only; not write-once. Production binds an Object Lock / immutable bucket.
+      FACTORY_LEDGER_WORM_URI: file:///data/worm
+      FACTORY_LEDGER_CHECKPOINT_SECONDS: 60
+      FACTORY_EVENT_BUS: file:///data/events.ndjson
+      FACTORY_RUNTIME: docker
+      DOCKER_HOST: tcp://docker-proxy:2375
+      FACTORY_DOCKER_NETWORK: factory-agents
+      FACTORY_DOCKER_MIND_VOLUME: factory-mind
+      FACTORY_DOCKER_IMAGES: echo-agent=factory-agent-echo:dev,llm-summarizer=factory-agent-llm-summarizer:dev
+      MEMORY_STORE_DIR: /data/mind
+      MEMORY_EPHEMERAL_DIR: /tmp/ephemeral
+      FACTORY_IDLE_MS: 300000
+      FACTORY_CRON: 1
+    volumes:
+      - factory-data:/data
+      - factory-mind:/data/mind
+      - ../docker-secrets.env:/run/factory.secrets:ro
+    ports:
+      - "8088:8088"
+    networks: [agents, control, egress]
+    depends_on: [docker-proxy]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8088/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      retries: 20
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: packages/gateway/Dockerfile
+    image: factory-gateway:dev
+    environment:
+      <<: *factory-keys
+      FACTORY_URL: http://control-plane:8088
+      FACTORY_GATEWAY_TOKEN: dev-gateway-token
+      FACTORY_GATEWAY_CONFIG: /config/gateway.json
+    volumes:
+      - ./gateway.json:/config/gateway.json:ro
+      - ../docker-secrets.env:/run/factory.secrets:ro
+    networks: [agents, egress]
+    depends_on:
+      control-plane: { condition: service_healthy }
+    restart: unless-stopped
+
+  doorman:
+    build:
+      context: ../..
+      dockerfile: packages/doorman/Dockerfile
+    image: factory-doorman:dev
+    environment:
+      PORT: 8090
+      FACTORY_URL: http://control-plane:8088
+      FACTORY_TOKEN: dev-doorman-token
+      DOORMAN_TOKEN: dev-presence-token
+      FACTORY_SECRETS_FILE: /run/factory.secrets
+    volumes:
+      - ../docker-secrets.env:/run/factory.secrets:ro
+    networks: [control, egress]
+    depends_on:
+      control-plane: { condition: service_healthy }
+    restart: unless-stopped
+
+  # Agent images. Built with `docker compose --profile agents build`; never started by compose:
+  # the control plane starts one container per run on the agents network.
+  agent-echo:
+    profiles: [agents]
+    build:
+      context: ../..
+      dockerfile: runtimes/generic/Dockerfile
+      args: { CARTRIDGE: examples/echo-agent }
+    image: factory-agent-echo:dev
+  agent-llm-summarizer:
+    profiles: [agents]
+    build:
+      context: ../..
+      dockerfile: runtimes/generic/Dockerfile
+      args: { CARTRIDGE: examples/llm-summarizer }
+    image: factory-agent-llm-summarizer:dev
+
+networks:
+  agents:
+    name: factory-agents
+    internal: true
+  control:
+    internal: true
+  egress: {}
+
+volumes:
+  factory-data:
+  factory-mind:
+    name: factory-mind

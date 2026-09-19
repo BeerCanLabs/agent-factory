@@ -21,6 +21,7 @@ const valid = {
   'surface.yaml': 'triggers:\n  - type: http\n    path: /wake\n',
   'secrets.manifest.yaml': 'requires:\n  - API_KEY\n',
   'artifact.yaml': 'kind: oci\nref: oci://example/echo:latest\n',
+  'bench.yaml': 'cases:\n  - id: smoke\n    input: {q: 1}\n    expect: {contains: ["1"]}\n',
 };
 
 describe('validateCartridge', () => {
@@ -79,6 +80,32 @@ describe('validateCartridge', () => {
       const result = validateCartridge(dir);
       assert.equal(result.ok, false);
       assert.ok(result.issues.some((i) => i.message.includes('env files are forbidden')));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+});
+
+describe('bench suite', () => {
+  it('is required', () => {
+    const { 'bench.yaml': _, ...rest } = valid;
+    const dir = fixture(rest);
+    try {
+      const result = validateCartridge(dir);
+      assert.equal(result.ok, false);
+      assert.ok(result.issues.some((i) => i.path.endsWith('bench.yaml')));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('rejects duplicate case ids and unknown expectation keys', () => {
+    const dir = fixture({ ...valid, 'bench.yaml': 'cases:\n  - id: a\n  - id: a\n    expect: {judge: llm}\n' });
+    try {
+      const result = validateCartridge(dir);
+      assert.equal(result.ok, false);
+      assert.ok(result.issues.some((i) => /unique/.test(i.message)));
+      assert.ok(result.issues.some((i) => /judge|unrecognized/i.test(i.message)));
     } finally {
       rmSync(dir, { recursive: true });
     }

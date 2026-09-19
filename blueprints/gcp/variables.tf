@@ -12,8 +12,9 @@ variable "worker_image" {
   type = string
 }
 
-variable "sidecar_image" {
-  type = string
+variable "gateway_url" {
+  type        = string
+  description = "Internal URL of the fleet egress gateway (the only egress for agents)"
 }
 
 variable "secret_ids" {
@@ -22,8 +23,9 @@ variable "secret_ids" {
   description = "Secret Manager secret ids declared in secrets.manifest.yaml"
 }
 
-variable "factory_ledger_url" {
-  type = string
+variable "factory_url" {
+  type        = string
+  description = "Control plane URL agents use for run input, results and heartbeats"
 }
 
 variable "agent_id" {

@@ -1,0 +1,18 @@
+# Overlay for the end-to-end proof: a mock provider on the egress network and priced test models.
+services:
+  mock-provider:
+    image: node:22-alpine
+    command: ["node", "/mock/mock-provider.mjs"]
+    volumes:
+      - ./e2e/mock-provider.mjs:/mock/mock-provider.mjs:ro
+    networks: [egress]
+  gateway:
+    volumes:
+      - ./e2e/gateway.json:/config/gateway.json:ro
+      - ./e2e/secrets.env:/run/factory.secrets:ro
+    depends_on: [mock-provider]
+  control-plane:
+    environment:
+      FACTORY_LEDGER_CHECKPOINT_SECONDS: 5
+    volumes:
+      - ./e2e/secrets.env:/run/factory.secrets:ro
