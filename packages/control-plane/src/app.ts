@@ -615,7 +615,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const principal = await authenticate(req, res, state, 'admin');
     if (!principal) return;
     const body = await readJson(req);
-    const agentId = body.id || 'agent-' + Date.now();
+    const agentId = require('crypto').randomUUID(); // Strict cryptographic UID
     
     state.ledger.append({
       timestamp: new Date().toISOString(),
