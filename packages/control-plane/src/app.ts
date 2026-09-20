@@ -1000,7 +1000,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       provider: 'cloud',
       artifact: (typeof body.repo === 'string' ? body.repo : ''),
       requires: (Array.isArray(body.secrets) ? body.secrets : []),
-      triggers: [],
+      triggers: (Array.isArray(body.triggers) ? body.triggers : []),
       dir: '/tmp/' + agentId
     };
     state.agents.set(agentId, record);
