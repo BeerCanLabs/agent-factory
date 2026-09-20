@@ -36,7 +36,7 @@ export function ecsRuntime(opts: {
   return {
     running: (id) => running.has(id),
     async start(agent, _secrets, ctx) {
-      const family = opts.taskMap[agent.id];
+      const family = opts.taskMap[agent.id] || (agent.provider === 'cloud' ? `agent-${agent.id}` : undefined);
       if (!family) throw new Error(`no ECS task definition mapped for ${agent.id}`);
       const net = JSON.stringify({
         awsvpcConfiguration: {
@@ -47,7 +47,7 @@ export function ecsRuntime(opts: {
       });
       const overrides = JSON.stringify({
         containerOverrides: [
-          { name: container, environment: Object.entries(ctx.runEnv).map(([name, value]) => ({ name, value })) },
+          { name: agent.provider === 'cloud' ? 'agent-container' : container, environment: Object.entries(ctx.runEnv).map(([name, value]) => ({ name, value })) },
         ],
       });
       const out = await cli([
@@ -88,7 +88,7 @@ export function ecsRuntime(opts: {
       if (!task) return { state: 'unknown' };
       if (task.lastStatus !== 'STOPPED') return { state: 'running' };
       for (const [id, arn] of running) if (arn === handle) running.delete(id);
-      const worker = task.containers?.find((c) => c.name === container);
+      const worker = task.containers?.find((c) => c.name === container || c.name === 'agent-container');
       return { state: 'stopped', exitCode: worker?.exitCode ?? null, reason: task.stoppedReason };
     },
     async deliver() {
