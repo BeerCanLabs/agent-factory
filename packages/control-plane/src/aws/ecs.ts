@@ -44,7 +44,7 @@ export async function registerAgentTaskDefinition(
         logConfiguration: {
           logDriver: "awslogs",
           options: {
-            "awslogs-group": `/ecs/factory-agents`,
+            "awslogs-group": `/ecs/factory-prod`,
             "awslogs-region": process.env.AWS_REGION || "us-east-1",
             "awslogs-stream-prefix": `agent-${agentId}`,
           },

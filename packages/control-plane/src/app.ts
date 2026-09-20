@@ -220,19 +220,22 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
     if (bad) return { status: 400, body: { error: bad } };
   }
 
-  const bound = await bindSecrets(agent.requires, state.providers);
-  if (!bound.ok) {
-    const run = state.runs.create({
-      agentId,
-      state: 'PRE_FLIGHT_MISSING_SECRET',
-      actor: opts.actor,
-      trigger: opts.trigger,
-      callbackUrl: opts.callbackUrl,
-      missing: bound.missing,
-    });
-    record(state, run, 'PRE_FLIGHT_MISSING_SECRET', opts.actor);
-    void fireCallback(state, run);
-    return { status: 412, body: { error: 'unbound_secrets', missing: bound.missing, runId: run.runId } };
+  let bound: { ok: true, env: Record<string, string> } | { ok: false, missing: string[] } = { ok: true, env: {} };
+  if (agent.provider === 'local') {
+    bound = await bindSecrets(agent.requires, state.providers);
+    if (!bound.ok) {
+      const run = state.runs.create({
+        agentId,
+        state: 'PRE_FLIGHT_MISSING_SECRET',
+        actor: opts.actor,
+        trigger: opts.trigger,
+        callbackUrl: opts.callbackUrl,
+        missing: bound.missing,
+      });
+      record(state, run, 'PRE_FLIGHT_MISSING_SECRET', opts.actor);
+      void fireCallback(state, run);
+      return { status: 412, body: { error: 'unbound_secrets', missing: bound.missing, runId: run.runId } };
+    }
   }
 
   const busy = activeRun(state, agentId);
