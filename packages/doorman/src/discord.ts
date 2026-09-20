@@ -26,6 +26,7 @@ export function createDiscordGateway(): Gateway {
     const isMentioned = client.user && message.mentions.has(client.user.id);
     
     if (isDM || isMentioned) {
+      console.log(`[doorman] Discord message received in channel ${message.channelId} from ${message.author.id}`);
       for (const handler of handlers) {
         handler({
           channelId: message.channelId,
@@ -35,6 +36,13 @@ export function createDiscordGateway(): Gateway {
         });
       }
     }
+  });
+
+  let currentPresence: Presence = 'offline';
+
+  client.on(Events.ClientReady, () => {
+    console.log(`[doorman] Discord gateway ready as ${client.user?.tag}`);
+    client.user?.setStatus(currentPresence === 'offline' ? 'invisible' : 'online');
   });
 
   return {
@@ -49,8 +57,9 @@ export function createDiscordGateway(): Gateway {
       await client.login(token);
     },
     async setPresence(status: Presence) {
+      currentPresence = status;
       if (!client.isReady()) return;
-      client.user.setStatus(status === 'offline' ? 'invisible' : 'online');
+      client.user?.setStatus(status === 'offline' ? 'invisible' : 'online');
     },
     onMessage(handler) {
       handlers.push(handler);
