@@ -60,7 +60,7 @@ export function createDoorman(opts: {
   gateway?: Gateway;
   gatewayFactory?: () => Gateway;
   providers: SecretProvider[];
-  wake: (agentId: string) => Promise<void>;
+  wake: (agentId: string, msg?: unknown) => Promise<void>;
   handoff: (msg: Conversation) => Promise<void>;
 }): Doorman {
   const agents = new Map<string, { ref: string; gateway: Gateway }>();
@@ -119,7 +119,7 @@ export function createDoorman(opts: {
     async receive(msg) {
       const state = agents.get(msg.agentId);
       if (!state || !state.gateway.connected) return;
-      await opts.wake(msg.agentId);
+      await opts.wake(msg.agentId, msg);
       await state.gateway.setPresence('available');
       await opts.handoff(msg);
     },
