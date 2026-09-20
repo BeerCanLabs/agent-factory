@@ -71,7 +71,7 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_ECS_CLUSTER", value = aws_ecs_cluster.factory.name },
         { name = "FACTORY_ECS_SUBNETS", value = join(",", aws_subnet.agents[*].id) },
         { name = "FACTORY_ECS_SECURITY_GROUPS", value = aws_security_group.agents.id },
-        { name = "FACTORY_ECS_ASSIGN_PUBLIC_IP", value = "false" },
+        { name = "FACTORY_ECS_ASSIGN_PUBLIC_IP", value = "true" },
         { name = "FACTORY_ECS_TASKS", value = local.agent_task_map },
         { name = "FACTORY_LEDGER_PATH", value = "/data/ledger.jsonl" },
         { name = "FACTORY_LEDGER_WORM_URI", value = "s3://${aws_s3_bucket.ledger_worm.bucket}/ledger" },
@@ -193,7 +193,7 @@ resource "aws_iam_role_policy" "doorman" {
   role = aws_iam_role.doorman.id
   policy = jsonencode({
     Version   = "2012-10-17"
-    Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = "${local.secret_arn}/DISCORD_BOT_TOKEN*" }]
+    Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = "${local.secret_arn}/*DISCORD_BOT_TOKEN*" }]
   })
 }
 
