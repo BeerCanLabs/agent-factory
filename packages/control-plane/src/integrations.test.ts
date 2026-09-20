@@ -29,7 +29,7 @@ function setup() {
     ledger: tapLedger(new MemoryLedger(), hub),
     auth: bearerAuth([
       { name: 'viewer', token: 'viewer-token', roles: ['viewer'] },
-      { name: 'sidecar', token: 'ingest-token', roles: ['ingest'] },
+      { name: 'gateway', token: 'ingest-token', roles: ['ingest'] },
     ]),
     version: 'test',
     providers: [envProvider({ ECHO_WEBHOOK_SECRET: 'whsec' })],
