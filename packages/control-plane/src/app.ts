@@ -2,7 +2,7 @@ import { registerAgentTaskDefinition } from './aws/ecs.js';
 import { provisionAgentRoles } from './aws/iam.js';
 import { buildAgentImage } from './aws/codebuild.js';
 import http from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, randomUUID } from 'node:crypto';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
