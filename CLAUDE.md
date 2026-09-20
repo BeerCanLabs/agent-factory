@@ -1,6 +1,6 @@
-# Antigravity Rules for agent-factory
+# Claude Rules for agent-factory
 
-These rules dictate how you (Antigravity) must interact with this repository.
+These rules dictate how you (Claude) must interact with this repository.
 
 ## 1. AWS and Infrastructure Operations
 This repository contains a highly isolated deployment pipeline targeting the BeerCanLabs AWS account. To prevent credential leakage or accidental deployments to Frontline accounts, **you must never use the standard `aws` or `terraform` CLI commands directly.**
