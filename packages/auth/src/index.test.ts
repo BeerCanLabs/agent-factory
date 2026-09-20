@@ -104,11 +104,11 @@ describe('bearer', () => {
   it('matches named tokens and returns their roles', async () => {
     const auth = bearerAuth([
       { name: 'doorman', token: 'doorman-token-000000', roles: ['operator'] },
-      { name: 'sidecar', token: 'sidecar-token-000000', roles: ['ingest'] },
+      { name: 'gateway', token: 'gateway-token-000000', roles: ['ingest'] },
     ]);
-    const r = await auth.verify('Bearer sidecar-token-000000');
+    const r = await auth.verify('Bearer gateway-token-000000');
     assert.ok(r.ok);
-    if (r.ok) assert.equal(r.principal.actor, 'token:sidecar');
+    if (r.ok) assert.equal(r.principal.actor, 'token:gateway');
     assert.equal((await auth.verify('Bearer nope')).ok, false);
     assert.equal((await auth.verify(undefined)).ok, false);
   });

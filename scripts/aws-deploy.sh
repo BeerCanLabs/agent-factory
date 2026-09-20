@@ -28,7 +28,7 @@ say "landing zone: base infrastructure and registries"
 "$BCL" terraform -chdir="$LZ" init -input=false -reconfigure \
   -backend-config="bucket=$STATE_BUCKET" -backend-config="key=agent-factory/landing-zone.tfstate" \
   -backend-config="region=$REGION" -backend-config="use_lockfile=true" -backend-config="encrypt=true" >/dev/null
-AGENTS_JSON="$(printf '{"echo-agent":{"image":"%s/factory-agent-echo-agent:%s","secrets":["ECHO_WEBHOOK_SECRET"]},"llm-summarizer":{"image":"%s/factory-agent-llm-summarizer:%s"},"rosie":{"image":"%s/rosie:%s","secrets":["HA_LONG_LIVED_TOKEN","ROSIE_DISCORD_BOT_TOKEN"]}}' "$REGISTRY" "$TAG" "$REGISTRY" "$TAG" "$REGISTRY" "$TAG")"
+AGENTS_JSON="$(printf '{"echo-agent":{"image":"%s/factory-agent-echo-agent:%s","secrets":["ECHO_WEBHOOK_SECRET"]},"llm-summarizer":{"image":"%s/factory-agent-llm-summarizer:%s"}}' "$REGISTRY" "$TAG" "$REGISTRY" "$TAG")"
 export TF_VAR_agents="$AGENTS_JSON"
 export TF_VAR_control_plane_image="$REGISTRY/factory-control-plane:$TAG"
 export TF_VAR_gateway_image="$REGISTRY/factory-gateway:$TAG"
@@ -43,7 +43,6 @@ build "$ROOT/packages/gateway/Dockerfile" factory-gateway
 build "$ROOT/packages/doorman/Dockerfile" factory-doorman
 build "$ROOT/runtimes/generic/Dockerfile" factory-agent-echo-agent examples/echo-agent
 build "$ROOT/runtimes/generic/Dockerfile" factory-agent-llm-summarizer examples/llm-summarizer
-build "$ROOT/agents/rosie/Dockerfile" rosie agents/rosie
 
 say "landing zone: services"
 export TF_VAR_control_plane_image="$REGISTRY/factory-control-plane:$TAG" \
