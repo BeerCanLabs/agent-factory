@@ -24,3 +24,6 @@ The isolated configuration directory is maintained at `~/.aws/beercanlabs/`. The
 
 ## 3. Asynchronous Operations
 Do not poll asynchronous or long-running tasks. If a build or deployment task is dispatched, return the Task ID immediately to the user and conclude the turn.
+
+## 4. CI/CD and Deployments
+When deploying changes or running workflows, **ALWAYS** use the GitHub CLI (`gh workflow run <workflow.yml> --ref <branch>`) to trigger the CI/CD pipeline instead of running deployment scripts (like `aws-deploy.sh`) locally. Offloading this compute to GitHub Actions saves local resources and preserves AI context window tokens.
