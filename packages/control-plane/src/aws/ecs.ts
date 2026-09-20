@@ -1,13 +1,35 @@
 import { ECSClient, RegisterTaskDefinitionCommand } from "@aws-sdk/client-ecs";
+import { SecretsManagerClient, DescribeSecretCommand } from "@aws-sdk/client-secrets-manager";
 
 const ecsClient = new ECSClient({});
+const smClient = new SecretsManagerClient({});
+
+export async function resolveSecretArn(secretNameOrArn: string): Promise<string> {
+  if (secretNameOrArn.startsWith("arn:aws:")) {
+    return secretNameOrArn;
+  }
+  const prefix = process.env.FACTORY_SECRETS_AWS_PREFIX || "factory/prod/";
+  const secretId = secretNameOrArn.startsWith(prefix) ? secretNameOrArn : `${prefix}${secretNameOrArn}`;
+  try {
+    const res = await smClient.send(new DescribeSecretCommand({ SecretId: secretId }));
+    if (res.ARN) return res.ARN;
+  } catch {
+    try {
+      const res = await smClient.send(new DescribeSecretCommand({ SecretId: secretNameOrArn }));
+      if (res.ARN) return res.ARN;
+    } catch {}
+  }
+  const region = process.env.AWS_REGION || "us-east-1";
+  const accountId = process.env.BCL_AWS_ACCOUNT_ID || "566332862296";
+  return `arn:aws:secretsmanager:${region}:${accountId}:secret:${prefix}${secretNameOrArn}`;
+}
 
 /**
  * Registers an ECS Fargate Task Definition for a Factory agent.
  * 
  * @param agentId - The unique identifier for the agent
  * @param imageUri - The container image URI
- * @param secrets - Array of AWS Secrets Manager ARNs
+ * @param secrets - Array of AWS Secrets Manager secret names or ARNs
  * @param taskRoleArn - ARN for the task role
  * @param execRoleArn - ARN for the task execution role
  */
@@ -18,6 +40,21 @@ export async function registerAgentTaskDefinition(
   taskRoleArn: string,
   execRoleArn: string
 ) {
+  const resolvedSecrets = await Promise.all(
+    secrets.map(async (secretNameOrArn, i) => {
+      const arn = await resolveSecretArn(secretNameOrArn);
+      const namePart = secretNameOrArn.startsWith("arn:aws:")
+        ? (secretNameOrArn.split(':').pop() || `SECRET_${i}`)
+        : secretNameOrArn;
+      const envName = namePart.replace(/^.*[\/:]/, '').replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase();
+      
+      return {
+        name: envName,
+        valueFrom: arn,
+      };
+    })
+  );
+
   const command = new RegisterTaskDefinitionCommand({
     family: `agent-${agentId}`,
     networkMode: "awsvpc",
@@ -31,16 +68,7 @@ export async function registerAgentTaskDefinition(
         name: `agent-container`,
         image: imageUri,
         essential: true,
-        secrets: secrets.map((secretArn, i) => {
-          // Attempt to generate a safe environment variable name from the secret ARN
-          const namePart = secretArn.split(':').pop() || `SECRET_${i}`;
-          const envName = namePart.replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase();
-          
-          return {
-            name: envName,
-            valueFrom: secretArn,
-          };
-        }),
+        secrets: resolvedSecrets,
         logConfiguration: {
           logDriver: "awslogs",
           options: {

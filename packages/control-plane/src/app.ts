@@ -758,10 +758,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     const payload = await readJson(req);
     await state.runtime.deliver(agent, payload);
+    const currentRun = activeRun(state, agent.id);
+    if (currentRun && currentRun.input === undefined) {
+      currentRun.input = payload;
+    }
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId: agent.id,
-      runId: activeRun(state, agent.id)?.runId,
+      runId: currentRun?.runId,
       type: 'action',
       action: 'CONVERSATION_HANDOFF',
       actor: principal.actor,

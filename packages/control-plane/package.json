@@ -14,6 +14,7 @@
     "@aws-sdk/client-codebuild": "^3.1136.0",
     "@aws-sdk/client-ecs": "^3.1136.0",
     "@aws-sdk/client-iam": "^3.1136.0",
+    "@aws-sdk/client-secrets-manager": "^3.1136.0",
     "@beercanlabs/factory-auth": "0.1.0",
     "@beercanlabs/factory-contract": "0.1.0",
     "@beercanlabs/factory-hydrate": "0.1.0",

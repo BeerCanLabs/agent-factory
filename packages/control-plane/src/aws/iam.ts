@@ -83,7 +83,10 @@ export async function provisionAgentRoles(
         {
           Effect: "Allow",
           Action: ["secretsmanager:GetSecretValue"],
-          Resource: secrets.map(s => `arn:aws:secretsmanager:*:*:secret:factory/*/${s}*`),
+          Resource: secrets.map(s => {
+            if (s.startsWith("arn:aws:")) return s;
+            return `arn:aws:secretsmanager:*:*:secret:factory/*/${s}*`;
+          }),
         },
       ],
     });
