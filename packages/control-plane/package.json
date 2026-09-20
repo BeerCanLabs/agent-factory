@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "test": "tsx --test src/index.test.ts src/integrations.test.ts src/runtime-ecs.test.ts src/runtime-docker.test.ts src/gateway.e2e.test.ts src/bench.e2e.test.ts"
+    "test": "tsx --test src/catalog.test.ts src/index.test.ts src/integrations.test.ts src/runtime-ecs.test.ts src/runtime-docker.test.ts src/gateway.e2e.test.ts src/bench.e2e.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-codebuild": "^3.1136.0",

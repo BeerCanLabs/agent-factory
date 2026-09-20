@@ -110,7 +110,7 @@ The following gaps exist between current repository code, `SPEC.md`, and the can
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **TSK-001** | GAP-001 | Consolidate Cartridge Manifest into unified `cartridge.yaml` | `COMPLETED` | *None* (Released) | `packages/contract/*` | Implemented `cartridgeSchema` and unified manifest validator with full backward compatibility. |
 | **TSK-002** | GAP-007 | Make `bench.yaml` optional in contract validation | `COMPLETED` | *None* (Released) | `packages/contract/*` | Moved `bench.yaml` to `OPTIONAL_FILES`; verified across test suites. |
-| **TSK-003** | GAP-002, GAP-003 | Reconcile Registry Service with Cartridge Contract | `OPEN` | *None* | `packages/control-plane/src/app.ts`, `packages/control-plane/src/catalog.ts` | Align `POST /api/v1/registry/agents` with the unified cartridge manifest. |
+| **TSK-003** | GAP-002, GAP-003 | Reconcile Registry Service with Cartridge Contract | `COMPLETED` | *None* (Released) | `packages/control-plane/src/catalog.ts`, `packages/control-plane/src/app.ts`, `packages/control-plane/src/catalog.test.ts` | Aligned `loadCatalog` and registry API with unified `cartridge.yaml` and prebuilt OCI image handling. |
 | **TSK-004** | GAP-004 | Standardize Worker Invocation (Input Injection / Result Capture) | `COMPLETED` | *None* (Released) | `packages/hydrate/*`, `agents/examples/*` | Implemented input prefetch (env/file) and result bridging in factory-shim. |
 | **TSK-005** | GAP-005 | Language-Agnostic Shim Architecture & Starter Templates | `COMPLETED` | *None* (Released) | `packages/hydrate/*`, `agents/examples/*` | Built decoupled starter-python reference cartridge with SQLite memory and Dockerfile. |
 | **TSK-006** | GAP-006 | Align Positioning Paper & Architecture on Egress Routing | `OPEN` | *None* | `POSITION_PAPER.md`, `SPEC.md` | Clarify the network gateway pattern vs. sidecar proxy reality. |
@@ -182,3 +182,5 @@ compute:
 | 2026-09-20 | Gemini | Executed and completed TSK-001 and TSK-002: added `cartridgeSchema` to `packages/contract`, updated `validateCartridge` for unified manifests, moved `bench.yaml` to optional, and added 5 new unit tests. | TSK-001, TSK-002 |
 | 2026-09-20 | Gemini | Executed and completed TSK-004 and TSK-005: implemented input prefetching and result file bridging in `packages/hydrate/src/shim.ts`, and authored the reference `starter-python` cartridge. | TSK-004, TSK-005 |
 | 2026-09-20 | Gemini | Executed and completed TSK-007: authored comprehensive Cartridge Developer Guide (`docs/CARTRIDGE_DEVELOPER_GUIDE.md`) and updated root `README.md`. | TSK-007, GAP-008 |
+| 2026-09-20 | Gemini | Executed and completed TSK-003: updated `packages/control-plane/src/catalog.ts` and `app.ts` to natively discover and parse unified `cartridge.yaml` manifests, added pre-built OCI image bypass for deployments, and added unit tests in `catalog.test.ts`. | TSK-003, GAP-002, GAP-003 |
+
