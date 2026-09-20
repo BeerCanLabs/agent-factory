@@ -83,6 +83,9 @@ phases:
     commands:
       - echo Logging in to Amazon ECR...
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPO_URI
+      - echo Cloning repository...
+      - git clone $REPO_URL agent-repo
+      - cd agent-repo
   build:
     commands:
       - echo Build started on `date`

@@ -12,6 +12,11 @@ export async function buildAgentImage(agentId: string, repoUrl: string): Promise
           name: 'AGENT_ID',
           value: agentId,
           type: 'PLAINTEXT'
+        },
+        {
+          name: 'REPO_URL',
+          value: repoUrl,
+          type: 'PLAINTEXT'
         }
       ]
     })
