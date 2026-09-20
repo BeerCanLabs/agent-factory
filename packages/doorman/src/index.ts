@@ -57,56 +57,80 @@ export type Doorman = {
 };
 
 export function createDoorman(opts: {
-  gateway: Gateway;
+  gatewayFactory: () => Gateway;
   providers: SecretProvider[];
   wake: (agentId: string) => Promise<void>;
   handoff: (msg: Conversation) => Promise<void>;
 }): Doorman {
-  let boundAgent: string | undefined;
-  let boundRef: string | undefined;
+  const agents = new Map<string, { ref: string; gateway: Gateway }>();
 
   return {
     status() {
+      // Just returning the status of the first one for backwards compatibility of the healthcheck format
+      // In a real app we'd want to return a list of agent statuses
+      const first = [...agents.values()][0];
       return {
-        discord: opts.gateway.connected ? 'connected' : 'idle',
-        presence: opts.gateway.presence,
-        agentId: boundAgent,
+        discord: first?.gateway.connected ? 'connected' : 'idle',
+        presence: first?.gateway.presence || 'offline',
+        agentId: agents.keys().next().value,
       };
     },
     async reconcile(surfaces) {
       if (surfaces.length === 0) return;
-      const surface = surfaces[0];
-      const bound = await bindSecrets([surface.secretRef], opts.providers);
-      if (!bound.ok) {
-        return;
+      
+      const desiredAgents = new Set(surfaces.map(s => s.agentId));
+      
+      // Destroy gateways for agents no longer requested
+      for (const [agentId, state] of agents) {
+        if (!desiredAgents.has(agentId)) {
+          await state.gateway.destroy();
+          agents.delete(agentId);
+        }
       }
-      if (!opts.gateway.connected) {
-        await opts.gateway.login(bound.env[surface.secretRef]);
-        await opts.gateway.setPresence('offline');
-        boundAgent = surface.agentId;
-        boundRef = surface.secretRef;
-        opts.gateway.onMessage((msg) => {
-          void this.receive({ ...msg, agentId: surface.agentId });
-        });
-      } else if (boundAgent !== surface.agentId) {
-        boundAgent = surface.agentId;
-        boundRef = surface.secretRef;
+
+      // Create and login new gateways
+      for (const surface of surfaces) {
+        if (agents.has(surface.agentId)) continue; // Already running
+
+        const bound = await bindSecrets([surface.secretRef], opts.providers);
+        if (!bound.ok || !bound.env[surface.secretRef]) {
+          console.error(`[doorman] failed to bind secret ${surface.secretRef} for ${surface.agentId}`);
+          continue;
+        }
+
+        const gateway = opts.gatewayFactory();
+        agents.set(surface.agentId, { ref: surface.secretRef, gateway });
+        
+        try {
+          await gateway.login(bound.env[surface.secretRef]);
+          await gateway.setPresence('offline');
+          
+          gateway.onMessage((msg) => {
+            void this.receive({ ...msg, agentId: surface.agentId });
+          });
+          console.log(`[doorman] connected Discord gateway for ${surface.agentId}`);
+        } catch (err) {
+          console.error(`[doorman] Discord login failed for ${surface.agentId}:`, err);
+          agents.delete(surface.agentId);
+        }
       }
-      void boundRef;
     },
     async receive(msg) {
-      if (!opts.gateway.connected) return;
+      const state = agents.get(msg.agentId);
+      if (!state || !state.gateway.connected) return;
       await opts.wake(msg.agentId);
-      await opts.gateway.setPresence('available');
+      await state.gateway.setPresence('available');
       await opts.handoff(msg);
     },
     async onAgentIdle(agentId) {
-      if (boundAgent !== agentId || !opts.gateway.connected) return;
-      await opts.gateway.setPresence('offline');
+      const state = agents.get(agentId);
+      if (!state || !state.gateway.connected) return;
+      await state.gateway.setPresence('offline');
     },
     async onAgentWorking(agentId) {
-      if (boundAgent !== agentId || !opts.gateway.connected) return;
-      await opts.gateway.setPresence('available');
+      const state = agents.get(agentId);
+      if (!state || !state.gateway.connected) return;
+      await state.gateway.setPresence('available');
     },
   };
 }
