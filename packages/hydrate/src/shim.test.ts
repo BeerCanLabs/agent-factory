@@ -96,9 +96,27 @@ describe('shim process', () => {
     assert.deepEqual(result?.body, { status: 'failed', error: 'worker exited 7' });
   });
 
+  it('bridges input and automatically posts result for decoupled worker', async () => {
+    calls.length = 0;
+    const { out } = await run(
+      `
+      import { readFileSync, writeFileSync } from 'node:fs';
+      const input = process.env.FACTORY_INPUT;
+      const resultFile = process.env.FACTORY_RESULT_FILE;
+      writeFileSync(resultFile, JSON.stringify({ status: 'succeeded', output: { echo: input } }));
+      `,
+      { FACTORY_INPUT: 'hello-from-test' }
+    );
+    assert.equal(out.status, 0, out.stderr);
+    const result = calls.find((c) => c.path === '/api/v1/runs/run-9/result');
+    assert.ok(result, 'result should have been automatically posted by shim');
+    assert.deepEqual(result.body, { status: 'succeeded', output: { echo: 'hello-from-test' } });
+  });
+
   it('refuses to start without MEMORY_DIR', () => {
     const out = spawnSync(process.execPath, ['--import', 'tsx', shim, '--', 'true'], { env: { PATH: process.env.PATH }, encoding: 'utf8' });
     assert.equal(out.status, 2);
     assert.equal(existsSync('/nonexistent'), false);
   });
 });
+

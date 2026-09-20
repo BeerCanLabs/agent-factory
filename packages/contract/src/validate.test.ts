@@ -87,25 +87,111 @@ describe('validateCartridge', () => {
 });
 
 describe('bench suite', () => {
-  it('is required', () => {
+  it('is optional by default', () => {
     const { 'bench.yaml': _, ...rest } = valid;
     const dir = fixture(rest);
     try {
       const result = validateCartridge(dir);
-      assert.equal(result.ok, false);
-      assert.ok(result.issues.some((i) => i.path.endsWith('bench.yaml')));
+      assert.equal(result.ok, true, JSON.stringify(result.issues, null, 2));
     } finally {
       rmSync(dir, { recursive: true });
     }
   });
 
-  it('rejects duplicate case ids and unknown expectation keys', () => {
+  it('rejects duplicate case ids and unknown expectation keys when provided', () => {
     const dir = fixture({ ...valid, 'bench.yaml': 'cases:\n  - id: a\n  - id: a\n    expect: {judge: llm}\n' });
     try {
       const result = validateCartridge(dir);
       assert.equal(result.ok, false);
       assert.ok(result.issues.some((i) => /unique/.test(i.message)));
       assert.ok(result.issues.some((i) => /judge|unrecognized/i.test(i.message)));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+});
+
+describe('unified cartridge.yaml', () => {
+  const unifiedValid = {
+    'soul.md': '# Soul\n\nUnified cartridge persona.\n',
+    'cartridge.yaml': `schemaVersion: "1.0"
+id: test-agent
+name: "Test Agent"
+role: "Automation"
+triggers:
+  - type: http
+    path: /wake
+  - type: cron
+    schedule: "0 9 * * 1-5"
+secrets:
+  requires:
+    - API_KEY
+    - name: SLACK_TOKEN
+      description: "Slack OAuth Bot Token"
+persistence:
+  prefix: "test-agent-state"
+compute:
+  kind: oci
+  ref: "ghcr.io/org/test-agent:latest"
+`,
+  };
+
+  it('accepts a valid unified cartridge without bench.yaml', () => {
+    const dir = fixture(unifiedValid);
+    try {
+      const result = validateCartridge(dir);
+      assert.equal(result.ok, true, JSON.stringify(result.issues, null, 2));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('accepts a valid unified cartridge with bench.yaml', () => {
+    const dir = fixture({
+      ...unifiedValid,
+      'bench.yaml': 'cases:\n  - id: smoke\n    input: { test: true }\n    expect: { status: DONE }\n',
+    });
+    try {
+      const result = validateCartridge(dir);
+      assert.equal(result.ok, true, JSON.stringify(result.issues, null, 2));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('rejects plaintext secrets in cartridge.yaml', () => {
+    const dir = fixture({
+      ...unifiedValid,
+      'cartridge.yaml': `${unifiedValid['cartridge.yaml']}token: "secret-token-value"\n`,
+    });
+    try {
+      const result = validateCartridge(dir);
+      assert.equal(result.ok, false);
+      assert.ok(result.issues.some((i) => /plaintext secret|unrecognized key/i.test(i.message)));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('rejects missing soul or prompt in unified cartridge', () => {
+    const dir = fixture({ 'cartridge.yaml': unifiedValid['cartridge.yaml'] });
+    try {
+      const result = validateCartridge(dir);
+      assert.equal(result.ok, false);
+      assert.ok(result.issues.some((i) => /missing soul\.md/i.test(i.message)));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('rejects when referenced prompt file does not exist', () => {
+    const dir = fixture({
+      'cartridge.yaml': `${unifiedValid['cartridge.yaml']}prompt: "./nonexistent.md"\n`,
+    });
+    try {
+      const result = validateCartridge(dir);
+      assert.equal(result.ok, false);
+      assert.ok(result.issues.some((i) => /does not exist/i.test(i.message)));
     } finally {
       rmSync(dir, { recursive: true });
     }
@@ -122,3 +208,4 @@ describe('repo example cartridges', () => {
     });
   }
 });
+

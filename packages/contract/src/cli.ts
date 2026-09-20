@@ -16,7 +16,9 @@ Exit 1 if any cartridge is invalid.
 
 function isCartridgeDir(dir: string): boolean {
   try {
-    return statSync(dir).isDirectory() && readdirSync(dir).includes('soul.md');
+    if (!statSync(dir).isDirectory()) return false;
+    const entries = readdirSync(dir);
+    return entries.includes('cartridge.yaml') || entries.includes('soul.md');
   } catch {
     return false;
   }

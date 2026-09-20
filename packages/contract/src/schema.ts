@@ -1,9 +1,19 @@
 import { z } from 'zod';
 
-const secretName = z
+export const secretName = z
   .string()
   .min(1)
   .regex(/^[A-Z][A-Z0-9_]*$/, 'secret names must be ENV-style (A-Z, 0-9, _)');
+
+export const secretItem = z.union([
+  secretName,
+  z
+    .object({
+      name: secretName,
+      description: z.string().optional(),
+    })
+    .strict(),
+]);
 
 export const secretsManifestSchema = z
   .object({
@@ -11,14 +21,14 @@ export const secretsManifestSchema = z
   })
   .strict();
 
-const cronTrigger = z
+export const cronTrigger = z
   .object({
     type: z.literal('cron'),
     schedule: z.string().min(1),
   })
   .strict();
 
-const webhookTrigger = z
+export const webhookTrigger = z
   .object({
     type: z.literal('webhook'),
     path: z.string().startsWith('/'),
@@ -26,7 +36,7 @@ const webhookTrigger = z
   })
   .strict();
 
-const queueTrigger = z
+export const queueTrigger = z
   .object({
     type: z.literal('queue'),
     provider: z.literal('sqs'),
@@ -34,33 +44,41 @@ const queueTrigger = z
   })
   .strict();
 
-const httpTrigger = z
+export const httpTrigger = z
   .object({
     type: z.literal('http'),
     path: z.string().startsWith('/'),
   })
   .strict();
 
-const discordTrigger = z
+export const discordTrigger = z
   .object({
     type: z.literal('discord'),
     secretRef: secretName.default('DISCORD_BOT_TOKEN'),
   })
   .strict();
 
+export const triggerSchema = z.discriminatedUnion('type', [
+  cronTrigger,
+  webhookTrigger,
+  queueTrigger,
+  httpTrigger,
+  discordTrigger,
+]);
+
 export const surfaceSchema = z
   .object({
-    triggers: z
-      .array(z.discriminatedUnion('type', [cronTrigger, webhookTrigger, queueTrigger, httpTrigger, discordTrigger]))
-      .min(1),
+    triggers: z.array(triggerSchema).min(1),
   })
   .strict();
 
 export const artifactSchema = z
   .object({
-    kind: z.enum(['oci', 'serverless', 'managed']),
+    kind: z.enum(['oci', 'serverless', 'managed', 'local']),
     ref: z.string().min(1),
     localCommand: z.array(z.string()).min(1).optional(),
+    cpu: z.number().positive().optional(),
+    memory: z.number().positive().optional(),
   })
   .strict();
 
@@ -92,10 +110,11 @@ export const identitySchema = z
 export const memorySchema = z
   .object({
     prefix: z.string().min(1),
+    enabled: z.boolean().optional(),
   })
   .strict();
 
-const benchCase = z
+export const benchCase = z
   .object({
     id: z.string().regex(/^[a-z0-9][a-z0-9-_]*$/i, 'case ids are slugs'),
     input: z.unknown().optional(),
@@ -120,6 +139,31 @@ export const benchSchema = z
   .strict()
   .refine((b) => new Set(b.cases.map((c) => c.id)).size === b.cases.length, { message: 'case ids must be unique' });
 
+/** Unified cartridge.yaml schema */
+export const cartridgeSchema = z
+  .object({
+    schemaVersion: z.string().default('1.0'),
+    id: z.string().regex(/^[a-z0-9][a-z0-9-_]*$/i, 'cartridge id must be a slug').optional(),
+    name: z.string().min(1).optional(),
+    role: z.string().optional(),
+    prompt: z.string().optional(),
+    triggers: z.array(triggerSchema).min(1).optional(),
+    secrets: z
+      .object({
+        requires: z.array(secretItem).default([]),
+      })
+      .strict()
+      .optional(),
+    persistence: memorySchema.optional(),
+    memory: memorySchema.optional(),
+    compute: artifactSchema.optional(),
+    artifact: artifactSchema.optional(),
+    skills: z.array(mcpEntry).optional(),
+    mcpAllowlist: z.array(mcpEntry).optional(),
+    identity: identitySchema.optional(),
+  })
+  .strict();
+
 export type SecretsManifest = z.infer<typeof secretsManifestSchema>;
 export type Surface = z.infer<typeof surfaceSchema>;
 export type Artifact = z.infer<typeof artifactSchema>;
@@ -128,6 +172,8 @@ export type Identity = z.infer<typeof identitySchema>;
 export type Memory = z.infer<typeof memorySchema>;
 export type Bench = z.infer<typeof benchSchema>;
 export type BenchCase = z.infer<typeof benchCase>;
+export type Cartridge = z.infer<typeof cartridgeSchema>;
 
-export const REQUIRED_FILES = ['soul.md', 'surface.yaml', 'secrets.manifest.yaml', 'artifact.yaml', 'bench.yaml'] as const;
-export const OPTIONAL_FILES = ['skills.yaml', 'identity.yaml', 'memory.yaml'] as const;
+export const REQUIRED_FILES = ['soul.md', 'surface.yaml', 'secrets.manifest.yaml', 'artifact.yaml'] as const;
+export const OPTIONAL_FILES = ['bench.yaml', 'skills.yaml', 'identity.yaml', 'memory.yaml'] as const;
+

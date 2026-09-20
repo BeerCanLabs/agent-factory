@@ -38,16 +38,23 @@ The architecture is opinionated and accepts certain limits by design:
 
 ---
 
-## Layout
+## Documentation & Layout
+
+- **[Cartridge Developer Guide](docs/CARTRIDGE_DEVELOPER_GUIDE.md)** — Step-by-step guide to building, testing, and packaging an Agent Cartridge using the "New Hire" model.
+- **[DESIGN_AUTHORITY.md](DESIGN_AUTHORITY.md)** — The Single Source of Truth (SSOT) for architectural intent, component contracts, and AI governance.
+- **[POSITION_PAPER.md](POSITION_PAPER.md)** — The foundational manifesto: Console vs. Cartridge.
+- **[AGENTS.md](AGENTS.md)** — Instructions for implementing AIs deploying the Factory.
 
 ```
-AGENTS.md                 # implementing-AI playbook
-POSITION_PAPER.md
-packages/…                # kernel (control-plane, gateway, doorman, etc)
-agents/                   # example cartridges (not factory modules)
-landing-zones/            # PATTERNS.md + aws/azure/gcp/compose binds
-.draft/sdp.yaml           # three baseline patterns + interview slots
-runtimes/generic/         # agent shim + exec
+docs/CARTRIDGE_DEVELOPER_GUIDE.md # Developer tutorial for building cartridges
+DESIGN_AUTHORITY.md               # SSOT architecture & AI locking board
+AGENTS.md                         # implementing-AI playbook
+POSITION_PAPER.md                 # Core manifesto
+packages/…                        # kernel (contract, control-plane, gateway, hydrate, etc.)
+agents/                           # example cartridges (starter-python, echo-agent, etc.)
+landing-zones/                    # PATTERNS.md + aws/azure/gcp/compose binds
+.draft/sdp.yaml                   # three baseline patterns + interview slots
+runtimes/generic/                 # agent shim + exec
 ```
 
 ---
