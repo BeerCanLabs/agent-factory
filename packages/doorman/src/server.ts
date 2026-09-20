@@ -14,13 +14,14 @@ const presenceAuth = bearerAuth(
 const door = createDoorman({
   gatewayFactory: createDiscordGateway,
   providers: providersFromEnv(),
-  wake: async (agentId) => {
+  wake: async (agentId, msg) => {
     const res = await fetch(`${FACTORY_URL}/api/v1/agents/${encodeURIComponent(agentId)}/wake`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(FACTORY_TOKEN ? { Authorization: `Bearer ${FACTORY_TOKEN}` } : {}),
       },
+      body: msg ? JSON.stringify({ input: msg }) : undefined,
     });
     if (!res.ok) console.error(`[doorman] wake ${agentId} ${res.status}`);
   },
