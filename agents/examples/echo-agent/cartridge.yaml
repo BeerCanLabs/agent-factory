@@ -1,0 +1,27 @@
+schemaVersion: "1.0"
+id: echo-agent
+name: "Echo Agent"
+role: "Diagnostic Echo"
+prompt: "./soul.md"
+
+triggers:
+  - type: http
+    path: /wake
+  - type: webhook
+    path: /hooks/echo
+    secretRef: ECHO_WEBHOOK_SECRET
+
+secrets:
+  requires:
+    - name: ECHO_WEBHOOK_SECRET
+      description: "HMAC signing secret for inbound webhook verification"
+
+persistence:
+  prefix: echo-agent
+
+compute:
+  kind: oci
+  ref: oci://ghcr.io/beercanlabs/factory-echo-agent:latest
+  localCommand:
+    - node
+    - worker.mjs

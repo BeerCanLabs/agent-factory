@@ -48,6 +48,10 @@ resource "aws_route_table_association" "service" {
 # Local routes only (plus the S3 gateway endpoint). There is deliberately no default route.
 resource "aws_route_table" "agents" {
   vpc_id = aws_vpc.factory.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.factory.id
+  }
   tags   = { Name = "${local.name}-agents-no-egress" }
 }
 
@@ -251,4 +255,10 @@ resource "aws_service_discovery_service" "svc" {
   health_check_custom_config {
     failure_threshold = 1
   }
+}
+
+resource "aws_vpc_security_group_egress_rule" "agents_to_internet" {
+  security_group_id = aws_security_group.agents.id
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
 }

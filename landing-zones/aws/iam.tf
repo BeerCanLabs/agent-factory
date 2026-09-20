@@ -61,7 +61,10 @@ resource "aws_iam_role_policy" "control_plane" {
         Sid       = "StartOnlyAgentTasks"
         Effect    = "Allow"
         Action    = ["ecs:RunTask"]
-        Resource  = "arn:aws:ecs:${var.aws_region}:${var.account_id}:task-definition/${local.name}-agent-*"
+        Resource  = [
+          "arn:aws:ecs:${var.aws_region}:${var.account_id}:task-definition/${local.name}-agent-*",
+          "arn:aws:ecs:${var.aws_region}:${var.account_id}:task-definition/agent-*"
+        ]
         Condition = { ArnEquals = { "ecs:cluster" = aws_ecs_cluster.factory.arn } }
       },
       {
@@ -73,7 +76,10 @@ resource "aws_iam_role_policy" "control_plane" {
       {
         Effect   = "Allow"
         Action   = ["iam:PassRole"]
-        Resource = concat([aws_iam_role.execution.arn], [for r in aws_iam_role.agent : r.arn])
+        Resource = concat([aws_iam_role.execution.arn], [for r in aws_iam_role.agent : r.arn], [
+          "arn:aws:iam::${var.account_id}:role/factory-agent-exec-*",
+          "arn:aws:iam::${var.account_id}:role/factory-agent-task-*"
+        ])
       },
       {
         Sid      = "PreFlightReadsCartridgeSecrets"

@@ -1,0 +1,18 @@
+cases:
+  - id: triage-alert
+    input:
+      event: "high_cpu_alert"
+      service: "payment-gateway"
+      metric: "98% for 5m"
+    expect:
+      status: DONE
+      contains:
+        - "payment-gateway"
+        - "high_cpu_alert"
+  - id: echo-ping
+    input:
+      ping: "pong"
+    expect:
+      status: DONE
+      contains:
+        - "pong"

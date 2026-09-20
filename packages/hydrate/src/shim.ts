@@ -5,7 +5,7 @@
  *   hydrate mind -> point SDKs at the gateway -> heartbeat -> run worker -> replicate mind -> report crash.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { pullMind, pushMind, type MindStore } from './index.js';
 import { gatewayEnv } from './gateway-env.js';
 
@@ -16,6 +16,24 @@ function rssMb(pid: number | undefined): number | undefined {
   try {
     const m = readFileSync(`/proc/${pid}/status`, 'utf8').match(/VmRSS:\s+(\d+)\s+kB/);
     return m ? Math.round(Number(m[1]) / 1024) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function get(path: string): Promise<unknown | undefined> {
+  const base = process.env.FACTORY_URL?.replace(/\/$/, '');
+  const runId = process.env.FACTORY_RUN_ID;
+  const token = process.env.FACTORY_RUN_TOKEN;
+  if (!base || !runId || !token) return undefined;
+  try {
+    const res = await fetch(`${base}/api/v1/runs/${runId}/${path}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return undefined;
+    return await res.json();
   } catch {
     return undefined;
   }
@@ -64,7 +82,45 @@ export async function main(argv: string[]): Promise<number> {
   const usesStore = Boolean(store.uri || store.root);
   if (usesStore && prefix) pullMind(store, prefix, dir);
 
-  const child = spawn(cmd[0], cmd.slice(1), { stdio: 'inherit', env: { ...process.env, ...gatewayEnv(process.env) } });
+  // Prefetch run input to bridge it via FACTORY_INPUT and FACTORY_INPUT_FILE for decoupled workers
+  const runId = process.env.FACTORY_RUN_ID;
+  const defaultResultFile = runId ? `/tmp/factory-result-${runId}.json` : undefined;
+  const resultFile = process.env.FACTORY_RESULT_FILE || defaultResultFile;
+
+  const defaultInputFile = runId ? `/tmp/factory-input-${runId}.json` : undefined;
+  const inputFile = process.env.FACTORY_INPUT_FILE || defaultInputFile;
+
+  if (inputFile && existsSync(inputFile)) {
+    try { rmSync(inputFile, { force: true }); } catch {}
+  }
+  if (resultFile && existsSync(resultFile)) {
+    try { rmSync(resultFile, { force: true }); } catch {}
+  }
+
+  let inputVal = process.env.FACTORY_INPUT;
+  if (!inputVal) {
+    const fetched = (await get('input')) as { input?: unknown } | undefined;
+    if (fetched && fetched.input !== undefined) {
+      inputVal = typeof fetched.input === 'string' ? fetched.input : JSON.stringify(fetched.input);
+    }
+  }
+  if (inputVal !== undefined && inputFile) {
+    try {
+      writeFileSync(inputFile, inputVal, 'utf8');
+    } catch {
+      // Ignore tmp file write error
+    }
+  }
+
+  const childEnv: Record<string, string | undefined> = {
+    ...process.env,
+    ...gatewayEnv(process.env),
+    FACTORY_INPUT: inputVal,
+  };
+  if (inputFile) childEnv.FACTORY_INPUT_FILE = inputFile;
+  if (resultFile) childEnv.FACTORY_RESULT_FILE = resultFile;
+
+  const child = spawn(cmd[0], cmd.slice(1), { stdio: 'inherit', env: childEnv });
   for (const sig of ['SIGTERM', 'SIGINT'] as const) process.on(sig, () => child.kill(sig));
 
   const beatEvery = Number(process.env.FACTORY_HEARTBEAT_SECONDS || '15') * 1000;
@@ -84,8 +140,22 @@ export async function main(argv: string[]): Promise<number> {
   clearInterval(hb);
   if (sync) clearInterval(sync);
   if (usesStore) safePush(store, prefix, dir);
-  // If the worker died without reporting, say so now instead of waiting for task reconciliation.
-  if (code !== 0) await post('result', { status: 'failed', error: `worker exited ${code}` });
+
+  if (code === 0) {
+    // If the decoupled worker wrote a result file, automatically report it to the factory
+    if (resultFile && existsSync(resultFile)) {
+      try {
+        const raw = readFileSync(resultFile, 'utf8');
+        const parsed = JSON.parse(raw);
+        await post('result', parsed);
+      } catch (err) {
+        console.error(`[shim] could not report result from ${resultFile}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  } else {
+    // If the worker died without reporting, say so now instead of waiting for task reconciliation.
+    await post('result', { status: 'failed', error: `worker exited ${code}` });
+  }
   return code;
 }
 

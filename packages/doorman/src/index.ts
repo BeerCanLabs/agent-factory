@@ -57,7 +57,8 @@ export type Doorman = {
 };
 
 export function createDoorman(opts: {
-  gatewayFactory: () => Gateway;
+  gateway?: Gateway;
+  gatewayFactory?: () => Gateway;
   providers: SecretProvider[];
   wake: (agentId: string) => Promise<void>;
   handoff: (msg: Conversation) => Promise<void>;
@@ -98,7 +99,7 @@ export function createDoorman(opts: {
           continue;
         }
 
-        const gateway = opts.gatewayFactory();
+        const gateway = opts.gatewayFactory ? opts.gatewayFactory() : (opts.gateway || fakeGateway());
         agents.set(surface.agentId, { ref: surface.secretRef, gateway });
         
         try {

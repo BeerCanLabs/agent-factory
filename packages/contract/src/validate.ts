@@ -3,6 +3,7 @@ import { join, basename } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
   REQUIRED_FILES,
+  cartridgeSchema,
   artifactSchema,
   identitySchema,
   memorySchema,
@@ -76,9 +77,49 @@ export function validateCartridge(dir: string): ValidationResult {
   const entries = new Set(readdirSync(dir));
 
   if (entries.has('.env') || entries.has('.env.local')) {
-    issue(issues, join(dir, '.env'), 'env files are forbidden in a cartridge; use secrets.manifest.yaml');
+    issue(issues, join(dir, '.env'), 'env files are forbidden in a cartridge; declare secret requirements in manifest');
   }
 
+  // Unified Cartridge format: cartridge.yaml
+  if (entries.has('cartridge.yaml')) {
+    const manifestPath = join(dir, 'cartridge.yaml');
+    const raw = parseYamlFile(manifestPath, issues);
+    if (raw !== undefined) {
+      assertNoSecretValues(raw, manifestPath, issues);
+      const parsed = cartridgeSchema.safeParse(raw);
+      if (!parsed.success) {
+        zodIssues(manifestPath, parsed.error, issues);
+      } else {
+        if (parsed.data.prompt) {
+          const promptPath = join(dir, parsed.data.prompt);
+          if (existsSync(promptPath)) {
+            const promptContent = readUtf8(promptPath).trim();
+            if (!promptContent) issue(issues, promptPath, 'prompt file is empty');
+          } else if (parsed.data.prompt.startsWith('.') || parsed.data.prompt.endsWith('.md')) {
+            issue(issues, manifestPath, `referenced prompt file "${parsed.data.prompt}" does not exist`);
+          }
+        } else if (entries.has('soul.md')) {
+          const soul = readUtf8(join(dir, 'soul.md')).trim();
+          if (!soul) issue(issues, join(dir, 'soul.md'), 'soul.md is empty');
+        } else {
+          issue(issues, manifestPath, 'missing soul.md or cartridge.yaml prompt definition');
+        }
+      }
+    }
+
+    if (entries.has('bench.yaml')) {
+      const filePath = join(dir, 'bench.yaml');
+      const rawBench = parseYamlFile(filePath, issues);
+      if (rawBench !== undefined) {
+        const parsed = benchSchema.safeParse(rawBench);
+        if (!parsed.success) zodIssues(filePath, parsed.error, issues);
+      }
+    }
+
+    return { ok: issues.length === 0, cartridgeId, issues };
+  }
+
+  // Legacy multi-file manifest format
   for (const name of REQUIRED_FILES) {
     if (!entries.has(name)) {
       issue(issues, join(dir, name), 'required cartridge file is missing');
@@ -157,3 +198,4 @@ export function validateCartridge(dir: string): ValidationResult {
 
   return { ok: issues.length === 0, cartridgeId, issues };
 }
+
