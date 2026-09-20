@@ -11,6 +11,7 @@ COPY package.json package-lock.json ./
 COPY packages/auth/package.json ./packages/auth/package.json
 COPY packages/secrets-bind/package.json ./packages/secrets-bind/package.json
 COPY packages/doorman/package.json ./packages/doorman/package.json
+RUN apk add --no-cache aws-cli
 RUN npm install --omit=dev
 COPY --from=builder /app/packages/auth/dist ./packages/auth/dist
 COPY --from=builder /app/packages/secrets-bind/dist ./packages/secrets-bind/dist
