@@ -991,7 +991,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     
     const record = {
       id: agentId,
-      name: body.name || agentId,
+      name: (typeof body.name === 'string' ? body.name : agentId),
       role: (typeof body.role === 'string' ? body.role : 'Agent'),
       state: stateResult,
       provider: 'cloud',
