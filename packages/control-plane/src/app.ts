@@ -8,6 +8,7 @@ import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
 import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
+import type { Surface } from '@beercanlabs/factory-contract';
 import { AgentRecord } from './catalog.js';
 import type { Runtime } from './runtime.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
@@ -992,18 +993,35 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       });
     }
     
+    // Support unified cartridge manifest registration or legacy flat body
+    const cartridge = (body.cartridge && typeof body.cartridge === 'object' ? body.cartridge : body) as Record<string, unknown>;
+    const artifact = typeof cartridge.compute === 'object' && cartridge.compute !== null
+      ? ((cartridge.compute as { ref?: string }).ref ?? '')
+      : (typeof cartridge.repo === 'string' ? cartridge.repo : (typeof body.repo === 'string' ? body.repo : ''));
+
+    const rawSecrets = (cartridge.secrets && typeof cartridge.secrets === 'object' && Array.isArray((cartridge.secrets as { requires?: unknown[] }).requires))
+      ? (cartridge.secrets as { requires: unknown[] }).requires
+      : (Array.isArray(body.secrets) ? body.secrets : []);
+
+    const requires = rawSecrets.map((s: unknown) => (typeof s === 'string' ? s : (typeof s === 'object' && s !== null && 'name' in s ? (s as { name: string }).name : String(s))));
+    const triggers = (Array.isArray(cartridge.triggers) ? cartridge.triggers : (Array.isArray(body.triggers) ? body.triggers : [])) as Surface['triggers'];
+    const memoryPrefix = (typeof cartridge.persistence === 'object' && cartridge.persistence !== null && 'prefix' in cartridge.persistence)
+      ? (cartridge.persistence as { prefix: string }).prefix
+      : (typeof cartridge.memory === 'object' && cartridge.memory !== null && 'prefix' in cartridge.memory ? (cartridge.memory as { prefix: string }).prefix : agentId);
+
     const record = {
-      id: agentId,
-      name: (typeof body.name === 'string' ? body.name : agentId),
-      role: (typeof body.role === 'string' ? body.role : 'Agent'),
+      id: typeof cartridge.id === 'string' ? cartridge.id : agentId,
+      name: typeof cartridge.name === 'string' ? cartridge.name : (typeof body.name === 'string' ? body.name : agentId),
+      role: typeof cartridge.role === 'string' ? cartridge.role : (typeof body.role === 'string' ? body.role : 'Agent'),
       state: stateResult,
       provider: 'cloud',
-      artifact: (typeof body.repo === 'string' ? body.repo : ''),
-      requires: (Array.isArray(body.secrets) ? body.secrets : []),
-      triggers: (Array.isArray(body.triggers) ? body.triggers : []),
+      artifact,
+      requires,
+      triggers,
+      memoryPrefix,
       dir: '/tmp/' + agentId
     };
-    state.agents.set(agentId, record);
+    state.agents.set(record.id, record);
     json(res, 201, record);
     return;
   }
@@ -1034,8 +1052,15 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     
     void (async () => {
       try {
-        console.log(`Building Agent Image with CodeBuild for ${agentId}...`);
-        const imageUri = await buildAgentImage(agentId, agent.artifact);
+        const isPrebuiltImage = Boolean(agent.artifact && (agent.artifact.startsWith('oci://') || agent.artifact.includes('.dkr.ecr.') || agent.artifact.includes('ghcr.io') || agent.artifact.includes('docker.io')));
+        let imageUri = '';
+        if (isPrebuiltImage) {
+          imageUri = agent.artifact.replace(/^oci:\/\//, '');
+          console.log(`Using pre-built OCI image for ${agentId}: ${imageUri}`);
+        } else {
+          console.log(`Building Agent Image with CodeBuild for ${agentId}...`);
+          imageUri = await buildAgentImage(agentId, agent.artifact);
+        }
         
         console.log(`Provisioning AWS IAM Roles for ${agentId}...`);
         const { taskRoleArn, executionRoleArn } = await provisionAgentRoles(agentId, agent.requires);
