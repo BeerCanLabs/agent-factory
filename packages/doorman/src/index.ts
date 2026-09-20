@@ -65,7 +65,7 @@ export function createDoorman(opts: {
 }): Doorman {
   const agents = new Map<string, { ref: string; gateway: Gateway }>();
 
-  return {
+  const doorman: Doorman = {
     status() {
       // Just returning the status of the first one for backwards compatibility of the healthcheck format
       // In a real app we'd want to return a list of agent statuses
@@ -107,7 +107,7 @@ export function createDoorman(opts: {
           await gateway.setPresence('offline');
           
           gateway.onMessage((msg) => {
-            void this.receive({ ...msg, agentId: surface.agentId });
+            void doorman.receive({ ...msg, agentId: surface.agentId });
           });
           console.log(`[doorman] connected Discord gateway for ${surface.agentId}`);
         } catch (err) {
@@ -134,4 +134,6 @@ export function createDoorman(opts: {
       await state.gateway.setPresence('available');
     },
   };
+  
+  return doorman;
 }
