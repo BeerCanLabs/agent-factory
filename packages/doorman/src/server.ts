@@ -1,7 +1,8 @@
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth } from '@beercanlabs/factory-auth';
-import { createDoorman, fakeGateway } from './index.js';
+import { createDoorman } from './index.js';
 import { createDoormanHttp } from './http.js';
+import { createDiscordGateway } from './discord.js';
 
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const FACTORY_URL = (process.env.FACTORY_URL || 'http://127.0.0.1:8088').replace(/\/$/, '');
@@ -10,9 +11,8 @@ const presenceAuth = bearerAuth(
   process.env.DOORMAN_TOKEN ? [{ name: 'control-plane', token: process.env.DOORMAN_TOKEN, roles: ['operator'] }] : [],
 );
 
-const gateway = fakeGateway();
 const door = createDoorman({
-  gateway,
+  gatewayFactory: createDiscordGateway,
   providers: providersFromEnv(),
   wake: async (agentId) => {
     const res = await fetch(`${FACTORY_URL}/api/v1/agents/${encodeURIComponent(agentId)}/wake`, {
