@@ -21,3 +21,6 @@ The isolated configuration directory is maintained at `~/.aws/beercanlabs/`. The
 ## 2. General Etiquette
 * Follow the architectural constraints defined in `POSITION_PAPER.md` (Console vs. Cartridge).
 * The Factory relies on four specific ingress/egress interfaces (API, Webhooks, WebSockets, Events) as documented in `KPF.md`. Do not invent new interfaces.
+
+## 3. Asynchronous Operations
+Do not poll asynchronous or long-running tasks. If a build or deployment task is dispatched, return the Task ID immediately to the user and conclude the turn.
