@@ -1,6 +1,7 @@
 import {
   IAMClient,
   CreateRoleCommand,
+  GetRoleCommand,
   PutRolePolicyCommand,
 } from "@aws-sdk/client-iam";
 
@@ -27,26 +28,44 @@ export async function provisionAgentRoles(
   const executionRoleName = `AgentExecutionRole-${agentId}`;
 
   // 1. Create Task Role
-  const createTaskRoleResponse = await client.send(
-    new CreateRoleCommand({
-      RoleName: taskRoleName,
-      AssumeRolePolicyDocument: assumeRolePolicyDocument,
-      Description: `Task Role for Agent ${agentId}`,
-    })
-  );
-
-  const taskRoleArn = createTaskRoleResponse.Role?.Arn as string;
+  let taskRoleArn = "";
+  try {
+    const createTaskRoleResponse = await client.send(
+      new CreateRoleCommand({
+        RoleName: taskRoleName,
+        AssumeRolePolicyDocument: assumeRolePolicyDocument,
+        Description: `Task Role for Agent ${agentId}`,
+      })
+    );
+    taskRoleArn = createTaskRoleResponse.Role?.Arn as string;
+  } catch (err: any) {
+    if (err.name === "EntityAlreadyExistsException" || err.name === "EntityAlreadyExists" || err.Code === "EntityAlreadyExists") {
+      const getRoleRes = await client.send(new GetRoleCommand({ RoleName: taskRoleName }));
+      taskRoleArn = getRoleRes.Role?.Arn as string;
+    } else {
+      throw err;
+    }
+  }
 
   // 2. Create Execution Role
-  const createExecutionRoleResponse = await client.send(
-    new CreateRoleCommand({
-      RoleName: executionRoleName,
-      AssumeRolePolicyDocument: assumeRolePolicyDocument,
-      Description: `Execution Role for Agent ${agentId}`,
-    })
-  );
-
-  const executionRoleArn = createExecutionRoleResponse.Role?.Arn as string;
+  let executionRoleArn = "";
+  try {
+    const createExecutionRoleResponse = await client.send(
+      new CreateRoleCommand({
+        RoleName: executionRoleName,
+        AssumeRolePolicyDocument: assumeRolePolicyDocument,
+        Description: `Execution Role for Agent ${agentId}`,
+      })
+    );
+    executionRoleArn = createExecutionRoleResponse.Role?.Arn as string;
+  } catch (err: any) {
+    if (err.name === "EntityAlreadyExistsException" || err.name === "EntityAlreadyExists" || err.Code === "EntityAlreadyExists") {
+      const getRoleRes = await client.send(new GetRoleCommand({ RoleName: executionRoleName }));
+      executionRoleArn = getRoleRes.Role?.Arn as string;
+    } else {
+      throw err;
+    }
+  }
 
   // 3. Attach ECR permissions to Execution Role
   const ecrPolicyDocument = JSON.stringify({
