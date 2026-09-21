@@ -2,28 +2,17 @@
 
 These rules dictate how you (Claude) must interact with this repository.
 
-## 1. AWS and Infrastructure Operations
-This repository contains a highly isolated deployment pipeline targeting the BeerCanLabs AWS account. To prevent credential leakage or accidental deployments to Frontline accounts, **you must never use the standard `aws` or `terraform` CLI commands directly.**
-
-When you need to interact with AWS or Terraform:
-1. You MUST use the wrapper script located at `./scripts/bcl-aws`.
-2. You MUST ensure `.envrc` is sourced in your execution environment before running the wrapper, as it contains the required `BCL_AWS_ACCOUNT_ID` variable.
-
-**Examples:**
-* ❌ Incorrect: `aws sts get-caller-identity`
-* ❌ Incorrect: `terraform apply`
-* ✅ Correct: `source .envrc && ./scripts/bcl-aws aws sts get-caller-identity`
-* ✅ Correct: `source .envrc && ./scripts/bcl-aws aws ecs list-clusters`
-* ✅ Correct: `source .envrc && ./scripts/bcl-aws terraform plan`
-
-The isolated configuration directory is maintained at `~/.aws/beercanlabs/`. The script automatically handles pointing the CLI tools to this directory and purging ambient environment variables.
+## 1. Reference Architecture & Decoupling
+This repository is the canonical reference implementation of **Agent Factory**.
+- It must remain **cloud-agnostic and provider-neutral**.
+- Do not commit company-specific AWS account IDs, internal deployment scripts, or private credentials into this repository.
+- Production and enterprise deployments for BeerCanLabs belong in the dedicated operations repository (`BeerCanLabs/submind-aws`).
 
 ## 2. General Etiquette
-* Follow the architectural constraints defined in `POSITION_PAPER.md` (Console vs. Cartridge).
+* Follow the canonical architecture defined in `POSITION_PAPER.md` and `AGENTS.md`.
 * The Factory relies on four specific ingress/egress interfaces (API, Webhooks, WebSockets, Events) as documented in `KPF.md`. Do not invent new interfaces.
+* Kernel packages live in `packages/` (`contract`, `auth`, `secrets-bind`, `hydrate`, `ledger`, `control-plane`, `doorman`, `telemetry/`).
+* Landing zone examples in `landing-zones/` are reference patterns for cloud providers (`aws`, `azure`, `gcp`, `compose`).
 
-## 3. Asynchronous Operations
-Do not poll asynchronous or long-running tasks. If a build or deployment task is dispatched, return the Task ID immediately to the user and conclude the turn.
-
-## 4. CI/CD and Deployments
-When deploying changes or running workflows, **ALWAYS** use the GitHub CLI (`gh workflow run <workflow.yml> --ref <branch>`) to trigger the CI/CD pipeline instead of running deployment scripts (like `aws-deploy.sh`) locally. Offloading this compute to GitHub Actions saves local resources and preserves AI context window tokens.
+## 3. Continuous Integration
+All PRs and commits are verified by `.github/workflows/ci.yml` which executes the test suite (`npm test`, `npm run validate`) and the Docker compose end-to-end isolation proof (`./scripts/compose-e2e.sh`).

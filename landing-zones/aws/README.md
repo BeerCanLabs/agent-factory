@@ -1,6 +1,6 @@
 # AWS landing zone (ECS Fargate, pattern `orchestrated-tasks`)
 
-Deploys to the **BeerCanLabs** AWS account only. Every AWS-touching command goes through `scripts/bcl-aws`, which reads an isolated config (`~/.aws/beercanlabs/config`), refuses Frontline accounts, and checks the live account before anything runs. The provider's `allowed_account_ids` refuses any other account at plan time.
+This landing zone provisions the reference Agent Factory architecture on AWS ECS Fargate.
 
 ## What it builds
 
@@ -15,49 +15,38 @@ Deploys to the **BeerCanLabs** AWS account only. Every AWS-touching command goes
 - **Metrics:** an ADOT collector next to the control plane and gateway turns OTLP into CloudWatch metrics.
 - **Secrets:** Terraform generates every factory credential (one per caller→callee edge). Provider keys (`provider_secret_names`) are created empty for you to fill.
 
-## What you do once
+## Prerequisites
 
-1. Create the BeerCanLabs AWS account (not a Frontline email) and enable IAM Identity Center with a `FactoryAdmin` permission set.
-2. Create `~/.aws/beercanlabs/config`:
-   ```ini
-   [profile beercanlabs-deploy]
-   sso_start_url = <BeerCanLabs Identity Center start URL>
-   sso_region = us-east-1
-   sso_account_id = <BeerCanLabs account id>
-   sso_role_name = FactoryAdmin
-   region = us-east-1
-   ```
-3. `AWS_CONFIG_FILE=~/.aws/beercanlabs/config aws sso login --profile beercanlabs-deploy`
-4. A DNS name for the control plane and an ACM certificate for it in `us-east-1`.
+1. An AWS account with permissions to provision VPC, ECS, S3, Secrets Manager, and IAM roles.
+2. An ACM TLS certificate and domain name for the control plane ALB in `us-east-1`.
 
-## Deploy
+## Provisioning
 
+### 1. Bootstrap State & CI Deploy Role
 ```bash
-export BCL_AWS_ACCOUNT_ID=<id> FACTORY_CERT_ARN=<acm arn> FACTORY_DOMAIN=<name on the cert>
-./scripts/aws-deploy.sh
+cd landing-zones/aws/bootstrap
+terraform init
+terraform apply -var="account_id=<YOUR_AWS_ACCOUNT_ID>"
 ```
 
-The script runs the bootstrap stack (state bucket, GitHub OIDC `factory-deploy` role), applies the landing zone, builds and pushes immutable images tagged with the commit, applies the services, and runs the definition-of-done checks:
-- HTTP redirects to HTTPS, and unauthenticated calls get 401;
-- an echo run completes from a private subnet with no NAT;
-- the ledger verifies against its Object Lock checkpoints.
-
-Point `FACTORY_DOMAIN` at `alb_dns_name` before the checks run.
-
-After the first deploy, `.github/workflows/deploy.yml` (manual trigger, `main` only) does the same with OIDC credentials. 
-
-> [!IMPORTANT]
-> **GitHub Actions OIDC Setup Gotcha**
-> If you are deploying via GitHub Actions, the pipeline will fail at the `aws-actions/configure-aws-credentials@v4` step if you do not set up your GitHub repository variables. 
-> You MUST set the following Repository Variables in GitHub (`Settings > Secrets and variables > Actions > Variables`):
-> 1. `BCL_AWS_ACCOUNT_ID` (e.g., 566332862296) - Required to assume the OIDC deployment role.
-> 2. `FACTORY_CERT_ARN` - Your ACM Certificate ARN for the ALB.
-> 3. `FACTORY_DOMAIN` - The domain name that routes to your Factory.
-
+### 2. Provision Landing Zone
+```bash
+cd landing-zones/aws
+terraform init -reconfigure \
+  -backend-config="bucket=<STATE_BUCKET>" \
+  -backend-config="key=agent-factory/landing-zone.tfstate" \
+  -backend-config="region=us-east-1"
+terraform apply \
+  -var="account_id=<YOUR_AWS_ACCOUNT_ID>" \
+  -var="certificate_arn=<YOUR_ACM_CERT_ARN>"
+```
 
 ## Enable LLM egress for an agent
 
-1. Put the key in Secrets Manager: `scripts/bcl-aws aws secretsmanager put-secret-value --secret-id factory/prod/ANTHROPIC_API_KEY --secret-string ...`
+1. Put the key in Secrets Manager:
+   ```bash
+   aws secretsmanager put-secret-value --secret-id factory/prod/ANTHROPIC_API_KEY --secret-string ...
+   ```
 2. Set `gateway_prices` (USD per million tokens). Unpriced models are refused.
 3. `PUT /api/v1/agents/<id>/policy {"routes":["anthropic"], "budgetUsd":{"perDay":5}}`, or run `factory-bench --apply` to set the model and budget from measured cost and quality.
 

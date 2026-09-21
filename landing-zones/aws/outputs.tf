@@ -20,7 +20,7 @@ output "ledger_worm_bucket" {
 }
 
 output "admin_token_secret" {
-  description = "Break-glass admin bearer. Read with scripts/bcl-aws aws secretsmanager get-secret-value."
+  description = "Break-glass admin bearer secret name in AWS Secrets Manager."
   value       = aws_secretsmanager_secret.generated["FACTORY_TOKEN"].name
 }
 
