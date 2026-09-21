@@ -15,6 +15,7 @@ export type Gateway = {
   presence: Presence;
   login(token: string): Promise<void>;
   setPresence(status: Presence): Promise<void>;
+  setAgentName?(name: string): void;
   onMessage(handler: (msg: Omit<Conversation, 'agentId'>) => void): void;
   destroy(): Promise<void>;
 };
@@ -24,6 +25,7 @@ export function fakeGateway(): Gateway {
   return {
     connected: false,
     presence: 'offline',
+    setAgentName(_name) {},
     async login() {
       this.connected = true;
       this.presence = 'offline';
@@ -43,6 +45,7 @@ export function fakeGateway(): Gateway {
 
 export type DiscordSurface = {
   agentId: string;
+  name?: string;
   secretRef: string;
 };
 
@@ -100,6 +103,9 @@ export function createDoorman(opts: {
         }
 
         const gateway = opts.gatewayFactory ? opts.gatewayFactory() : (opts.gateway || fakeGateway());
+        if (surface.name && gateway.setAgentName) {
+          gateway.setAgentName(surface.name);
+        }
         agents.set(surface.agentId, { ref: surface.secretRef, gateway });
         
         try {
@@ -119,8 +125,10 @@ export function createDoorman(opts: {
     async receive(msg) {
       const state = agents.get(msg.agentId);
       if (!state || !state.gateway.connected) return;
-      await opts.wake(msg.agentId, msg);
-      await state.gateway.setPresence('available');
+      if (state.gateway.presence === 'offline') {
+        await opts.wake(msg.agentId, msg);
+        await state.gateway.setPresence('available');
+      }
       await opts.handoff(msg);
     },
     async onAgentIdle(agentId) {

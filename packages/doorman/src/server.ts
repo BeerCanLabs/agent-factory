@@ -46,12 +46,13 @@ async function reconcileFromFactory() {
     if (!res.ok) return;
     const agents = (await res.json()) as Array<{
       id: string;
+      name?: string;
       triggers?: Array<{ type: string; secretRef?: string }>;
     }>;
     const surfaces = agents.flatMap((a) =>
       (a.triggers ?? [])
         .filter((t) => t.type === 'discord')
-        .map((t) => ({ agentId: a.id, secretRef: t.secretRef || 'DISCORD_BOT_TOKEN' })),
+        .map((t) => ({ agentId: a.id, name: a.name, secretRef: t.secretRef || 'DISCORD_BOT_TOKEN' })),
     );
     await door.reconcile(surfaces);
   } catch (err) {
