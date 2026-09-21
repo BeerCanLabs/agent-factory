@@ -70,6 +70,12 @@ export async function registerAgentTaskDefinition(
         image: imageUri,
         essential: true,
         secrets: resolvedSecrets,
+        environment: [
+          {
+            name: "FACTORY_MIND_BUCKET",
+            value: process.env.FACTORY_MIND_BUCKET || "agent-factory-mind-prod-924cfefd",
+          },
+        ],
         logConfiguration: {
           logDriver: "awslogs",
           options: {
