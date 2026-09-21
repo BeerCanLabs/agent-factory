@@ -47,6 +47,7 @@ export type DiscordSurface = {
   agentId: string;
   name?: string;
   secretRef: string;
+  initialPresence?: Presence;
 };
 
 export type Doorman = {
@@ -94,7 +95,15 @@ export function createDoorman(opts: {
 
       // Create and login new gateways
       for (const surface of surfaces) {
-        if (agents.has(surface.agentId)) continue; // Already running
+        if (agents.has(surface.agentId)) {
+          if (surface.initialPresence) {
+            const existing = agents.get(surface.agentId);
+            if (existing && existing.gateway.presence !== surface.initialPresence) {
+              await existing.gateway.setPresence(surface.initialPresence);
+            }
+          }
+          continue;
+        }
 
         const bound = await bindSecrets([surface.secretRef], opts.providers);
         if (!bound.ok || !bound.env[surface.secretRef]) {
@@ -110,12 +119,12 @@ export function createDoorman(opts: {
         
         try {
           await gateway.login(bound.env[surface.secretRef]);
-          await gateway.setPresence('offline');
+          await gateway.setPresence(surface.initialPresence ?? 'offline');
           
           gateway.onMessage((msg) => {
             void doorman.receive({ ...msg, agentId: surface.agentId });
           });
-          console.log(`[doorman] connected Discord gateway for ${surface.agentId}`);
+          console.log(`[doorman] connected Discord gateway for ${surface.agentId} (presence: ${surface.initialPresence ?? 'offline'})`);
         } catch (err) {
           console.error(`[doorman] Discord login failed for ${surface.agentId}:`, err);
           agents.delete(surface.agentId);
