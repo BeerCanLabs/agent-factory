@@ -167,6 +167,40 @@ describe('hash chain', () => {
     rmSync(dir, { recursive: true });
   });
 
+  it('recovers canonical chain and prunes orphaned concurrent writes from disk', () => {
+    const { dir, path, ledger } = ledgerWith(3);
+    // Rows 1, 2, 3 are written.
+    // Simulate a concurrent write where two instances write seq 4.
+    // Row 4a: orphan write that never gets continued
+    // Row 4b: canon write that is followed by row 5
+    const row4b = ledger.append({ agentId: 'a', type: 'action', action: 'CANON_4', actor: 'token:t' });
+    const row5 = ledger.append({ agentId: 'a', type: 'action', action: 'CANON_5', actor: 'token:t' });
+
+    // Now inject orphan row4a into disk between row 3 and row 4b
+    const lines = readFileSync(path, 'utf8').trim().split('\n');
+    const row3 = JSON.parse(lines[2]);
+    const fake4a = {
+      timestamp: new Date().toISOString(),
+      agentId: 'a',
+      type: 'action',
+      action: 'ORPHAN_4A',
+      actor: 'token:t',
+      seq: 4,
+      prevHash: row3.hash,
+      hash: 'e'.repeat(64),
+    };
+    lines.splice(3, 0, JSON.stringify(fake4a));
+    writeFileSync(path, `${lines.join('\n')}\n`);
+
+    // Reloading FileLedger should prune the orphan and verify clean
+    const reloaded = new FileLedger(path);
+    assert.equal(reloaded.query().length, 5);
+    assert.deepEqual(reloaded.query().map((r) => r.seq), [1, 2, 3, 4, 5]);
+    const v = reloaded.verify();
+    assert.equal(v.ok, true);
+    rmSync(dir, { recursive: true });
+  });
+
   it('memory ledger chains too', () => {
     const m = new MemoryLedger();
     m.append({ agentId: 'a', type: 'action' });
