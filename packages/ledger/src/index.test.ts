@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Checkpointer, FileCheckpointSink, FileLedger, MemoryLedger, S3CheckpointSink, payloadHash, redactSecrets, toLedgerEvent } from './index.js';
+import { Checkpointer, FileCheckpointSink, FileLedger, MemoryLedger, S3CheckpointSink, GcsCheckpointSink, checkpointSinkFromEnv, payloadHash, redactSecrets, toLedgerEvent } from './index.js';
 
 describe('toLedgerEvent', () => {
   it('drops prompt/content and stores a payload hash', () => {
@@ -195,3 +195,29 @@ describe('S3 object-lock sink', () => {
     assert.deepEqual(await sink.list(), [{ toSeq: 7, hash }]);
   });
 });
+
+describe('GCS checkpoint sink', () => {
+  it('writes to GCS and parses ckpt keys from listing', async () => {
+    const calls: string[][] = [];
+    const hash = 'b'.repeat(64);
+    const sink = new GcsCheckpointSink('gcs://my-gcp-bucket/ledger', 365, async (args) => {
+      calls.push(args);
+      if (args[0] === 'ls') {
+        return `gs://my-gcp-bucket/ledger/ckpt-000000000012-${hash}.jsonl\ngs://my-gcp-bucket/ledger/other.txt\n`;
+      }
+      return '';
+    });
+    await sink.write({ fromSeq: 1, toSeq: 12, prevHash: '0'.repeat(64), hash, rows: [] });
+    assert.equal(calls[0][0], 'cp');
+    assert.equal(calls[0][2], `gs://my-gcp-bucket/ledger/ckpt-000000000012-${hash}.jsonl`);
+    assert.deepEqual(await sink.list(), [{ toSeq: 12, hash }]);
+  });
+
+  it('instantiates GcsCheckpointSink from gcs:// and gs:// environment variable', () => {
+    const s1 = checkpointSinkFromEnv({ FACTORY_LEDGER_WORM_URI: 'gcs://bucket/path' });
+    assert.ok(s1 instanceof GcsCheckpointSink);
+    const s2 = checkpointSinkFromEnv({ FACTORY_LEDGER_WORM_URI: 'gs://bucket/path' });
+    assert.ok(s2 instanceof GcsCheckpointSink);
+  });
+});
+

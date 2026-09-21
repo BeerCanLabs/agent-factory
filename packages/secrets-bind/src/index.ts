@@ -102,6 +102,34 @@ export function awsSecretsManagerProvider(prefix: string, cli?: AwsCli): SecretP
   };
 }
 
+export type GcpCli = (args: string[]) => Promise<string>;
+
+/**
+ * GCP Secret Manager provider. Reads secret versions via gcloud CLI (or injected cli runner)
+ * under the configured GCP project ID.
+ */
+export function gcpSecretManagerProvider(projectId: string, cli?: GcpCli): SecretProvider {
+  const run: GcpCli =
+    cli ??
+    (async (args) => {
+      const { stdout } = await execFileAsync('gcloud', ['secrets', 'versions', 'access', 'latest', ...args], { encoding: 'utf8' });
+      return stdout;
+    });
+  return {
+    name: 'gcp-sm',
+    async get(secretName) {
+      try {
+        const out = await run(['--secret', secretName, '--project', projectId]);
+        const value = out.replace(/\r?\n$/, '');
+        return value || undefined;
+      } catch {
+        return undefined;
+      }
+    },
+  };
+}
+
+
 export function parseEnvFile(body: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of body.split('\n')) {
@@ -137,6 +165,7 @@ export function providersFromEnv(env: NodeJS.ProcessEnv = process.env): SecretPr
   const providers: SecretProvider[] = [envProvider(env)];
   if (env.FACTORY_SECRETS_FILE) providers.push(fileProvider(env.FACTORY_SECRETS_FILE));
   if (env.FACTORY_SECRETS_AWS_PREFIX) providers.push(awsSecretsManagerProvider(env.FACTORY_SECRETS_AWS_PREFIX));
+  if (env.FACTORY_SECRETS_GCP_PROJECT) providers.push(gcpSecretManagerProvider(env.FACTORY_SECRETS_GCP_PROJECT));
   if (env.FACTORY_SECRETS_HTTP_URL) {
     providers.push(httpProvider(env.FACTORY_SECRETS_HTTP_URL, env.FACTORY_SECRETS_HTTP_TOKEN));
   }

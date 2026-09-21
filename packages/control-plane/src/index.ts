@@ -13,7 +13,7 @@ import { ApprovalStore, PolicyStore, SpendTracker, validatePolicy } from './poli
 import { EventHub, attachBus, busSinkFromEnv, runEvent, tapLedger } from './events.js';
 import { attachEventStream } from './stream.js';
 import { startQueuePollers } from './queues.js';
-import { memoryRuntime } from './runtime.js';
+import { memoryRuntime, type DeployProvider } from './runtime.js';
 import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
 import { agentsDueForCron } from './scheduler.js';
@@ -53,9 +53,28 @@ const ledgerSink = checkpointSinkFromEnv();
   }
 }
 
+let deployProvider: DeployProvider | undefined;
+const deployProviderType = process.env.FACTORY_DEPLOY_PROVIDER || (process.env.FACTORY_RUNTIME === 'ecs' ? 'aws' : process.env.FACTORY_RUNTIME === 'cloudrun' ? 'gcp' : undefined);
+if (deployProviderType === 'aws') {
+  try {
+    const { awsDeployProvider } = await import('./aws/deploy.js');
+    deployProvider = awsDeployProvider();
+  } catch (err) {
+    console.warn('[control-plane] failed to initialize AWS deploy provider:', err);
+  }
+} else if (deployProviderType === 'gcp') {
+  try {
+    const { gcpDeployProvider } = await import('./gcp/deploy.js');
+    deployProvider = gcpDeployProvider();
+  } catch (err) {
+    console.warn('[control-plane] failed to initialize GCP deploy provider:', err);
+  }
+}
+
 const state: FactoryState = {
   agents: new Map(agents.map((a) => [a.id, a])),
   ledger,
+  deployProvider,
   policies: new PolicyStore(process.env.FACTORY_POLICIES_DIR || join(DATA_DIR, 'policies'), defaultPolicy()),
   approvals: new ApprovalStore(join(DATA_DIR, 'approvals')),
   // Only the gateway can write costUsd (stripped for other writers), so every priced llm row counts.
