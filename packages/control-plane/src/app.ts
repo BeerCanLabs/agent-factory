@@ -1,5 +1,7 @@
 import http from 'node:http';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
@@ -14,6 +16,7 @@ import { exceededWindow, validatePolicy, type ApprovalStore, type PolicyStore, t
 
 export type FactoryState = {
   agents: Map<string, AgentRecord>;
+  registryDir?: string;
   ledger: LedgerStore;
   auth: AuthProvider;
   version: string;
@@ -1170,6 +1173,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       dir: '/tmp/' + agentId
     };
     state.agents.set(record.id, record);
+    if (state.registryDir) {
+      try {
+        mkdirSync(state.registryDir, { recursive: true });
+        writeFileSync(join(state.registryDir, `${record.id}.json`), JSON.stringify(record, null, 2), 'utf8');
+      } catch (err) {
+        console.warn(`[control-plane] failed to persist dynamic agent ${record.id}:`, err);
+      }
+    }
     json(res, 201, record);
     return;
   }
