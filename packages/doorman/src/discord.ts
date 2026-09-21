@@ -1,6 +1,13 @@
 import { Client, GatewayIntentBits, Partials, Events, ActivityType } from 'discord.js';
 import type { Gateway, Conversation, Presence } from './index.js';
 
+interface StandbySession {
+  messageId: string;
+  typingInterval: NodeJS.Timeout;
+  warnTimer: NodeJS.Timeout;
+  failTimer: NodeJS.Timeout;
+}
+
 export function createDiscordGateway(): Gateway {
   const client = new Client({
     intents: [
@@ -13,18 +20,37 @@ export function createDiscordGateway(): Gateway {
   });
 
   const handlers: Array<(msg: Omit<Conversation, 'agentId'>) => void> = [];
-  const standbyMessages = new Map<string, string>(); // channelId -> standby messageId
+  const standbySessions = new Map<string, StandbySession>(); // channelId -> StandbySession
   let currentPresence: Presence = 'offline';
   let agentName = 'your agent';
 
+  function clearStandbySession(channelId: string) {
+    const session = standbySessions.get(channelId);
+    if (!session) return;
+    clearInterval(session.typingInterval);
+    clearTimeout(session.warnTimer);
+    clearTimeout(session.failTimer);
+    standbySessions.delete(channelId);
+  }
+
   client.on(Events.MessageCreate, async (message) => {
-    // If it's a message from this bot, check if there is a standby message to auto-delete
+    // If it's a message from this bot
     if (message.author.id === client.user?.id) {
-      const pendingStandby = standbyMessages.get(message.channelId);
-      if (pendingStandby) {
-        standbyMessages.delete(message.channelId);
+      const session = standbySessions.get(message.channelId);
+      if (session) {
+        // If this message IS the standby message we just sent/edited, ignore it!
+        if (message.id === session.messageId) {
+          return;
+        }
+
+        // This is the real reply from the agent container!
+        const standbyId = session.messageId;
+        clearStandbySession(message.channelId);
         try {
-          await message.channel.messages.delete(pendingStandby);
+          const standbyMsg = await message.channel.messages.fetch(standbyId);
+          if (standbyMsg) {
+            await standbyMsg.delete();
+          }
         } catch {
           // ignore delete errors (e.g. already deleted or missing perm)
         }
@@ -43,18 +69,64 @@ export function createDiscordGateway(): Gateway {
     if (isDM || isMentioned) {
       console.log(`[doorman] Discord message received in channel ${message.channelId} from ${message.author.id}`);
 
-      // 1. Immediately trigger Discord typing indicator
-      void message.channel.sendTyping().catch(() => {});
-
-      // 2. If the agent is currently offline (sleeping), send standby message and set booting activity
-      if (currentPresence === 'offline') {
+      // If the agent is currently offline (sleeping), start standby session with recurring typing and timers
+      if (currentPresence === 'offline' && !standbySessions.has(message.channelId)) {
         try {
-          client.user?.setActivity(`Booting up ${agentName}...`, { type: ActivityType.Custom });
-          const sent = await message.channel.send(`⏳ *Standby, while I get ${agentName} for you...*`);
-          standbyMessages.set(message.channelId, sent.id);
+          // 1. Immediately trigger typing indicator and repeat every 7s so it doesn't expire
+          void message.channel.sendTyping().catch(() => {});
+          const typingInterval = setInterval(() => {
+            void message.channel.sendTyping().catch(() => {});
+          }, 7000);
+
+          client.user?.setActivity(`Getting ${agentName} (~30s)...`, { type: ActivityType.Custom });
+          const sent = await message.channel.send(
+            `⏳ *Standby while I get ${agentName} for you — should take about 30 seconds...*`
+          );
+
+          // 2. Warning trigger at 30 seconds if agent has not yet responded
+          const warnTimer = setTimeout(async () => {
+            try {
+              const current = standbySessions.get(message.channelId);
+              if (current && current.messageId === sent.id) {
+                const msg = await message.channel.messages.fetch(sent.id);
+                if (msg) {
+                  await msg.edit(`⏳ *This is taking longer than expected. Still waiting on ${agentName}...*`);
+                }
+              }
+            } catch (err) {
+              console.warn('[doorman] Failed to update 30s standby message:', err);
+            }
+          }, 30_000);
+
+          // 3. Failure trigger at 75 seconds if agent completely fails to load
+          const failTimer = setTimeout(async () => {
+            try {
+              const current = standbySessions.get(message.channelId);
+              if (current && current.messageId === sent.id) {
+                const msg = await message.channel.messages.fetch(sent.id);
+                if (msg) {
+                  await msg.edit(`❌ *${agentName} failed to load — please contact your support staff or try again later.*`);
+                }
+              }
+            } catch (err) {
+              console.warn('[doorman] Failed to update failure standby message:', err);
+            }
+            clearStandbySession(message.channelId);
+            client.user?.setPresence({ activities: [] });
+          }, 75_000);
+
+          standbySessions.set(message.channelId, {
+            messageId: sent.id,
+            typingInterval,
+            warnTimer,
+            failTimer,
+          });
         } catch (err) {
-          console.warn('[doorman] Failed to send standby message:', err);
+          console.warn('[doorman] Failed to start standby session:', err);
         }
+      } else {
+        // Keep typing indicator active if already in a session or active conversation
+        void message.channel.sendTyping().catch(() => {});
       }
 
       for (const handler of handlers) {
@@ -99,6 +171,9 @@ export function createDiscordGateway(): Gateway {
       handlers.push(handler);
     },
     async destroy() {
+      for (const channelId of standbySessions.keys()) {
+        clearStandbySession(channelId);
+      }
       await client.destroy();
     },
   };

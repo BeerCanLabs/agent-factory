@@ -894,6 +894,9 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     if (currentRun && currentRun.input === undefined) {
       currentRun.input = payload;
     }
+    if (currentRun) {
+      scheduleTimeout(state, currentRun);
+    }
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId: agent.id,
