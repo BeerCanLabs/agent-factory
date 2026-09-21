@@ -113,7 +113,7 @@ The following gaps exist between current repository code, `SPEC.md`, and the can
 | **TSK-003** | GAP-002, GAP-003 | Reconcile Registry Service with Cartridge Contract | `COMPLETED` | *None* (Released) | `packages/control-plane/src/catalog.ts`, `packages/control-plane/src/app.ts`, `packages/control-plane/src/catalog.test.ts` | Aligned `loadCatalog` and registry API with unified `cartridge.yaml` and prebuilt OCI image handling. |
 | **TSK-004** | GAP-004 | Standardize Worker Invocation (Input Injection / Result Capture) | `COMPLETED` | *None* (Released) | `packages/hydrate/*`, `agents/examples/*` | Implemented input prefetch (env/file) and result bridging in factory-shim. |
 | **TSK-005** | GAP-005 | Language-Agnostic Shim Architecture & Starter Templates | `COMPLETED` | *None* (Released) | `packages/hydrate/*`, `agents/examples/*` | Built decoupled starter-python reference cartridge with SQLite memory and Dockerfile. |
-| **TSK-006** | GAP-006 | Align Positioning Paper & Architecture on Egress Routing | `OPEN` | *None* | `POSITION_PAPER.md`, `SPEC.md` | Clarify the network gateway pattern vs. sidecar proxy reality. |
+| **TSK-006** | GAP-006 | Align Positioning Paper & Architecture on Egress Routing | `COMPLETED` | *None* (Released) | `POSITION_PAPER.md`, `DESIGN_AUTHORITY.md` | Aligned positioning paper with actual centralized egress gateway and run token injection architecture. |
 | **TSK-007** | GAP-008 | Author Comprehensive Cartridge Developer Guide | `COMPLETED` | *None* (Released) | `docs/CARTRIDGE_DEVELOPER_GUIDE.md`, `README.md` | Authored end-to-end guide based on New Hire model with code examples & case studies. |
 
 ---
@@ -183,4 +183,5 @@ compute:
 | 2026-09-20 | Gemini | Executed and completed TSK-004 and TSK-005: implemented input prefetching and result file bridging in `packages/hydrate/src/shim.ts`, and authored the reference `starter-python` cartridge. | TSK-004, TSK-005 |
 | 2026-09-20 | Gemini | Executed and completed TSK-007: authored comprehensive Cartridge Developer Guide (`docs/CARTRIDGE_DEVELOPER_GUIDE.md`) and updated root `README.md`. | TSK-007, GAP-008 |
 | 2026-09-20 | Gemini | Executed and completed TSK-003: updated `packages/control-plane/src/catalog.ts` and `app.ts` to natively discover and parse unified `cartridge.yaml` manifests, added pre-built OCI image bypass for deployments, and added unit tests in `catalog.test.ts`. | TSK-003, GAP-002, GAP-003 |
+| 2026-09-20 | Gemini | Executed and completed TSK-006: aligned `POSITION_PAPER.md` with the production Egress Gateway pattern and run token injection model, removing inaccurate references to localhost Envoy sidecars. | TSK-006, GAP-006 |
 
