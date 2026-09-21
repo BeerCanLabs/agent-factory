@@ -47,6 +47,38 @@ export async function provisionAgentRoles(
     }
   }
 
+  // 1b. Attach S3 Mind Bucket Persistence Policy to Task Role
+  const persistencePolicyDocument = JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Action: [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ],
+        Resource: [
+          "arn:aws:s3:::agent-factory-mind-*",
+          "arn:aws:s3:::agent-factory-mind-*/*"
+        ],
+      },
+    ],
+  });
+
+  try {
+    await client.send(
+      new PutRolePolicyCommand({
+        RoleName: taskRoleName,
+        PolicyName: "MindPersistenceAccess",
+        PolicyDocument: persistencePolicyDocument,
+      })
+    );
+  } catch (err: any) {
+    console.warn(`[iam] Failed to attach MindPersistenceAccess to ${taskRoleName}:`, err);
+  }
+
   // 2. Create Execution Role
   let executionRoleArn = "";
   try {
