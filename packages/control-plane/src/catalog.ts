@@ -14,6 +14,7 @@ export type AgentRecord = {
   requires: string[];
   triggers: Surface['triggers'];
   memoryPrefix?: string;
+  warmDownSeconds?: number;
   dir: string;
 };
 
@@ -39,6 +40,7 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
     let requires: string[] = [];
     let triggers: Surface['triggers'] = [];
     let memoryPrefix: string | undefined = result.cartridgeId;
+    let warmDownSeconds: number | undefined;
 
     // Check for unified cartridge.yaml first
     if (entries.has('cartridge.yaml')) {
@@ -60,6 +62,9 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
         }
         if (raw.persistence?.prefix || raw.memory?.prefix) {
           memoryPrefix = raw.persistence?.prefix || raw.memory?.prefix;
+        }
+        if (raw.runtime?.warmDownSeconds) {
+          warmDownSeconds = Number(raw.runtime.warmDownSeconds);
         }
       } catch (err) {
         console.error(`[catalog] failed to parse cartridge.yaml in ${dir}:`, err);
@@ -115,6 +120,7 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
       requires,
       triggers,
       memoryPrefix,
+      warmDownSeconds,
       dir,
     });
   }

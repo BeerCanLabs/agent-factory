@@ -161,6 +161,12 @@ export const cartridgeSchema = z
     skills: z.array(mcpEntry).optional(),
     mcpAllowlist: z.array(mcpEntry).optional(),
     identity: identitySchema.optional(),
+    runtime: z
+      .object({
+        warmDownSeconds: z.number().int().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .strict();
 

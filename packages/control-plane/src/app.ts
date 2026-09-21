@@ -214,11 +214,15 @@ export function activeRun(state: FactoryState, agentId: string): Run | undefined
 function scheduleTimeout(state: FactoryState, run: Run) {
   const prev = state.idleTimers.get(run.agentId);
   if (prev) clearTimeout(prev);
-  if (state.idleMs <= 0) return;
+  const agent = state.agents.get(run.agentId);
+  const timeoutMs = (agent?.warmDownSeconds && agent.warmDownSeconds > 0)
+    ? agent.warmDownSeconds * 1000
+    : (state.idleMs > 0 ? state.idleMs : 3_600_000);
+  if (timeoutMs <= 0) return;
   const t = setTimeout(() => {
     const cur = state.runs.get(run.runId);
     if (cur && !isTerminal(cur.state)) void finishRun(state, run.runId, 'TIMED_OUT', { actor: SYSTEM.idle });
-  }, state.idleMs);
+  }, timeoutMs);
   t.unref?.();
   state.idleTimers.set(run.agentId, t);
 }
@@ -1148,6 +1152,10 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       ? (cartridge.persistence as { prefix: string }).prefix
       : (typeof cartridge.memory === 'object' && cartridge.memory !== null && 'prefix' in cartridge.memory ? (cartridge.memory as { prefix: string }).prefix : agentId);
 
+    const warmDownSeconds = (typeof cartridge.runtime === 'object' && cartridge.runtime !== null && 'warmDownSeconds' in cartridge.runtime)
+      ? Number((cartridge.runtime as { warmDownSeconds: number }).warmDownSeconds)
+      : undefined;
+
     const record = {
       id: typeof cartridge.id === 'string' ? cartridge.id : agentId,
       name: typeof cartridge.name === 'string' ? cartridge.name : (typeof body.name === 'string' ? body.name : agentId),
@@ -1158,6 +1166,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       requires,
       triggers,
       memoryPrefix,
+      warmDownSeconds,
       dir: '/tmp/' + agentId
     };
     state.agents.set(record.id, record);
