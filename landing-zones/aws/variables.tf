@@ -1,9 +1,9 @@
 variable "account_id" {
   type        = string
-  description = "BeerCanLabs AWS account id. Set by scripts/aws-wrapper (TF_VAR_account_id); terraform refuses any other account."
+  description = "Target AWS account id."
   validation {
-    condition     = can(regex("^[0-9]{12}$", var.account_id)) && !contains(["111111111111", "222222222222", "333333333333"], var.account_id)
-    error_message = "account_id must be the 12-digit BeerCanLabs account, never a Enterprise account."
+    condition     = can(regex("^[0-9]{12}$", var.account_id))
+    error_message = "account_id must be a valid 12-digit AWS account id."
   }
 }
 

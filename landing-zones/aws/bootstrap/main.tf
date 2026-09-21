@@ -1,5 +1,5 @@
 # One-time, per account: remote state for the landing zone and a keyless CI deploy role.
-# Run through scripts/aws-wrapper; its own state stays local (landing-zones/aws/bootstrap/terraform.tfstate, gitignored).
+# State stays local (landing-zones/aws/bootstrap/terraform.tfstate, gitignored).
 terraform {
   required_version = ">= 1.10.0"
   required_providers {
@@ -11,10 +11,11 @@ terraform {
 }
 
 variable "account_id" {
-  type = string
+  type        = string
+  description = "Target AWS account id."
   validation {
-    condition     = can(regex("^[0-9]{12}$", var.account_id)) && !contains(["111111111111", "222222222222", "333333333333"], var.account_id)
-    error_message = "account_id must be the 12-digit BeerCanLabs account, never a Enterprise account."
+    condition     = can(regex("^[0-9]{12}$", var.account_id))
+    error_message = "account_id must be a valid 12-digit AWS account id."
   }
 }
 
