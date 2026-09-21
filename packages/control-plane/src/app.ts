@@ -48,7 +48,44 @@ export type FactoryState = {
   secretValues: Set<string>;
   /** Write-once copy of the ledger; `verify` checks the local chain against it. */
   ledgerSink?: CheckpointSink;
+  /** In-memory mailboxes for running tasks to receive follow-up messages while warm. */
+  mailboxes?: Map<string, MailboxQueue>;
 };
+
+export type MailboxMessage = {
+  id: string;
+  timestamp: string;
+  payload: unknown;
+};
+
+export type MailboxQueue = {
+  messages: MailboxMessage[];
+  waiters: Array<(msg: MailboxMessage) => void>;
+};
+
+export function deliverToMailbox(state: FactoryState, agentId: string, payload: unknown) {
+  if (!state.mailboxes) state.mailboxes = new Map();
+  let queue = state.mailboxes.get(agentId);
+  if (!queue) {
+    queue = { messages: [], waiters: [] };
+    state.mailboxes.set(agentId, queue);
+  }
+  const msg: MailboxMessage = {
+    id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    timestamp: new Date().toISOString(),
+    payload,
+  };
+  const waiter = queue.waiters.shift();
+  if (waiter) {
+    waiter(msg);
+  } else {
+    queue.messages.push(msg);
+  }
+  const run = activeRun(state, agentId);
+  if (run) {
+    scheduleTimeout(state, run);
+  }
+}
 
 /** Actors for actions the factory takes on its own (not on behalf of a caller). */
 export const SYSTEM = {
@@ -319,6 +356,15 @@ export async function finishRun(
   const timer = state.idleTimers.get(done.agentId);
   if (timer) clearTimeout(timer);
   state.idleTimers.delete(done.agentId);
+
+  const queue = state.mailboxes?.get(done.agentId);
+  if (queue) {
+    while (queue.waiters.length > 0) {
+      const w = queue.waiters.shift();
+      w?.({ id: 'done', timestamp: new Date().toISOString(), payload: null });
+    }
+    queue.messages.length = 0;
+  }
 
   if (agent) {
     if (state.runtime.running(agent.id) || done.taskHandle) {
@@ -649,8 +695,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   // Agent-facing: authenticated by the run token minted at start.
-  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat)$/);
-  if (runSelf && ((runSelf[2] === 'input' && req.method === 'GET') || (runSelf[2] !== 'input' && req.method === 'POST'))) {
+  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox)$/);
+  if (runSelf && (((runSelf[2] === 'input' || runSelf[2] === 'mailbox') && req.method === 'GET') || (runSelf[2] !== 'input' && runSelf[2] !== 'mailbox' && req.method === 'POST'))) {
     const run = await authenticateRun(req, res, state, runSelf[1]);
     if (!run) return;
     if (runSelf[2] === 'heartbeat') {
@@ -663,6 +709,49 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     if (runSelf[2] === 'input') {
       json(res, 200, { runId: run.runId, input: run.input ?? null });
+      return;
+    }
+    if (runSelf[2] === 'mailbox') {
+      if (!state.mailboxes) state.mailboxes = new Map();
+      let queue = state.mailboxes.get(run.agentId);
+      if (!queue) {
+        queue = { messages: [], waiters: [] };
+        state.mailboxes.set(run.agentId, queue);
+      }
+      if (queue.messages.length > 0) {
+        const nextMsg = queue.messages.shift();
+        json(res, 200, { ok: true, message: nextMsg });
+        return;
+      }
+      const url = new URL(req.url ?? '/', 'http://factory.local');
+      const timeout = Math.min(Math.max(parseInt(url.searchParams.get('timeout') || '15000', 10), 0), 30000);
+      if (timeout === 0) {
+        json(res, 200, { ok: true, message: null });
+        return;
+      }
+      let resolved = false;
+      const waiter = (msg: MailboxMessage) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        json(res, 200, { ok: true, message: msg });
+      };
+      const timer = setTimeout(() => {
+        if (resolved) return;
+        resolved = true;
+        const idx = queue!.waiters.indexOf(waiter);
+        if (idx !== -1) queue!.waiters.splice(idx, 1);
+        json(res, 200, { ok: true, message: null });
+      }, timeout);
+      queue.waiters.push(waiter);
+      req.on('close', () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          const idx = queue!.waiters.indexOf(waiter);
+          if (idx !== -1) queue!.waiters.splice(idx, 1);
+        }
+      });
       return;
     }
     const body = await readJson(req);
@@ -758,6 +847,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     const payload = await readJson(req);
     await state.runtime.deliver(agent, payload);
+    deliverToMailbox(state, agent.id, payload);
     const currentRun = activeRun(state, agent.id);
     if (currentRun && currentRun.input === undefined) {
       currentRun.input = payload;

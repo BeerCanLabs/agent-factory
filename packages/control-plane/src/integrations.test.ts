@@ -1,3 +1,4 @@
+import type { AddressInfo } from 'node:net';
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -18,7 +19,9 @@ import { EventHub, attachBus, eventBridgeSink, fileSink, runEvent, tapLedger, ty
 import { attachEventStream } from './stream.js';
 import { pollQueueOnce } from './queues.js';
 
+const listen = (s: http.Server) => new Promise<number>((r) => s.listen(0, '127.0.0.1', () => r((s.address() as AddressInfo).port)));
 const agentsRoot = fileURLToPath(new URL('../../../agents', import.meta.url));
+const TOKENS = { operator: 'operator-token', viewer: 'viewer-token' };
 
 function setup() {
   const hub = new EventHub();
@@ -29,6 +32,7 @@ function setup() {
     ledger: tapLedger(new MemoryLedger(), hub),
     auth: bearerAuth([
       { name: 'viewer', token: 'viewer-token', roles: ['viewer'] },
+      { name: 'operator', token: 'operator-token', roles: ['operator'] },
       { name: 'gateway', token: 'ingest-token', roles: ['ingest'] },
     ]),
     version: 'test',
@@ -171,5 +175,41 @@ describe('SQS queue trigger', () => {
     deleted.length = 0;
     assert.equal(await pollQueueOnce(state, 'echo-agent', 'https://sqs.us-east-1.amazonaws.com/1/q', cli), 0);
     assert.deepEqual(deleted, [], 'paused agent: messages stay on the queue for redelivery');
+  });
+
+  it('delivers follow-up messages via /conversation to active run mailbox', async () => {
+    const { state } = setup();
+    const srv = createFactoryServer(state);
+    const port = await listen(srv);
+    try {
+      // 1. Wake agent
+      const wakeRes = await fetch(`http://127.0.0.1:${port}/api/v1/agents/echo-agent/wake`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${TOKENS.operator}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: { text: 'first' } }),
+      });
+      assert.equal(wakeRes.status, 202);
+      const run = (await wakeRes.json()) as { runId: string };
+      const runToken = await state.runTokens.mint(state.runs.get(run.runId)!);
+
+      // 2. Deliver second message via /conversation
+      const convRes = await fetch(`http://127.0.0.1:${port}/api/v1/agents/echo-agent/conversation`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${TOKENS.operator}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: 'second' }),
+      });
+      assert.equal(convRes.status, 202);
+
+      // 3. Worker polls mailbox and receives the message immediately
+      const mailRes = await fetch(`http://127.0.0.1:${port}/api/v1/runs/${run.runId}/mailbox?timeout=1000`, {
+        headers: { 'Authorization': `Bearer ${runToken}` },
+      });
+      assert.equal(mailRes.status, 200);
+      const mailBody = (await mailRes.json()) as { ok: boolean; message: { payload: { text: string } } };
+      assert.equal(mailBody.ok, true);
+      assert.deepEqual(mailBody.message.payload, { text: 'second' });
+    } finally {
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
   });
 });
