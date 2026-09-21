@@ -24,7 +24,7 @@ const VERSION = '0.1.0';
 const LEDGER_PATH = process.env.FACTORY_LEDGER_PATH || join(process.cwd(), 'data', 'ledger.jsonl');
 const MEMORY_STORE = process.env.MEMORY_STORE_DIR || join(process.cwd(), 'data', 'mind');
 const EPHEMERAL = process.env.MEMORY_EPHEMERAL_DIR || join(process.cwd(), 'data', 'ephemeral');
-const IDLE_MS = parseInt(process.env.FACTORY_IDLE_MS || '300000', 10);
+const IDLE_MS = parseInt(process.env.FACTORY_IDLE_MS || '3600000', 10);
 const DATA_DIR = dirname(LEDGER_PATH);
 const RUNS_DIR = process.env.FACTORY_RUNS_DIR || join(DATA_DIR, 'runs');
 
