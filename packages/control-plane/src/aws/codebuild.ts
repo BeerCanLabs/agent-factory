@@ -42,7 +42,8 @@ export async function buildAgentImage(agentId: string, repoUrl: string): Promise
     }
 
     if (build.buildStatus === 'SUCCEEDED') {
-      const ecrRepoUri = process.env.FACTORY_ECR_REPO_URI || '566332862296.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents';
+      const ecrRepoUri = process.env.FACTORY_ECR_REPO_URI;
+      if (!ecrRepoUri) throw new Error('FACTORY_ECR_REPO_URI environment variable is required');
       return `${ecrRepoUri}:${agentId}`;
     }
 

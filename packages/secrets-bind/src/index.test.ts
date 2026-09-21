@@ -69,4 +69,28 @@ describe('bindSecrets', () => {
     assert.equal(missing.ok, false);
     assert.deepEqual(asked, ['factory/prod/ECHO_WEBHOOK_SECRET', 'factory/prod/NOPE']);
   });
+
+  it('reads GCP Secret Manager and handles missing secrets cleanly', async () => {
+    const asked: string[] = [];
+    const provider = (await import('./index.js')).gcpSecretManagerProvider('my-project', async (args) => {
+      const secret = args[args.indexOf('--secret') + 1];
+      const project = args[args.indexOf('--project') + 1];
+      asked.push(`${project}/${secret}`);
+      if (secret === 'MY_GCP_SECRET') return 'supersecret-gcp\n';
+      throw new Error('NOT_FOUND');
+    });
+    const ok = await bindSecrets(['MY_GCP_SECRET'], [provider]);
+    assert.equal(ok.ok, true);
+    if (ok.ok) assert.equal(ok.env.MY_GCP_SECRET, 'supersecret-gcp');
+    const missing = await bindSecrets(['UNSET_SECRET'], [provider]);
+    assert.equal(missing.ok, false);
+    assert.deepEqual(asked, ['my-project/MY_GCP_SECRET', 'my-project/UNSET_SECRET']);
+  });
+
+  it('wires gcpSecretManagerProvider into providersFromEnv', async () => {
+    const { providersFromEnv } = await import('./index.js');
+    const providers = providersFromEnv({ FACTORY_SECRETS_GCP_PROJECT: 'proj-123' });
+    assert.ok(providers.some((p) => p.name === 'gcp-sm'));
+  });
 });
+

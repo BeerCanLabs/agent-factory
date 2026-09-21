@@ -12,7 +12,7 @@ export {
   secretValuesFromEnv,
   toLedgerEvent,
 } from './sanitize.js';
-export { FileCheckpointSink, S3CheckpointSink, checkpointSinkFromEnv } from './checkpoints.js';
+export { FileCheckpointSink, S3CheckpointSink, GcsCheckpointSink, checkpointSinkFromEnv } from './checkpoints.js';
 export type { Checkpoint, CheckpointRef, CheckpointSink } from './checkpoints.js';
 import type { CheckpointSink } from './checkpoints.js';
 

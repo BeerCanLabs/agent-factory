@@ -130,10 +130,64 @@ export class S3CheckpointSink implements CheckpointSink {
   }
 }
 
+export type GcsCli = (args: string[]) => Promise<string>;
+
+/**
+ * GCS bucket with Retention Policy. Objects written here are protected
+ * from deletion or modification by the bucket's retention period.
+ */
+export class GcsCheckpointSink implements CheckpointSink {
+  private readonly bucket: string;
+  private readonly prefix: string;
+  private readonly cli: GcsCli;
+
+  constructor(uri: string, private readonly retentionDays: number, cli?: GcsCli) {
+    const m = uri.match(/^(?:gcs|gs):\/\/([^/]+)\/?(.*)$/);
+    if (!m) throw new Error(`not a gcs:// or gs:// uri: ${uri}`);
+    this.bucket = m[1];
+    this.prefix = m[2] ? `${m[2].replace(/\/$/, '')}/` : '';
+    this.cli =
+      cli ??
+      (async (args) => {
+        return (await execFileAsync('gcloud', ['storage', ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })).stdout;
+      });
+  }
+
+  async write(c: Checkpoint): Promise<void> {
+    const dir = mkdtempSync(join(tmpdir(), 'ckpt-'));
+    const file = join(dir, 'body.jsonl');
+    writeFileSync(file, body(c));
+    try {
+      const dest = `gs://${this.bucket}/${this.prefix}${keyFor(c)}`;
+      await this.cli(['cp', file, dest]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  async list(): Promise<CheckpointRef[]> {
+    const refs: CheckpointRef[] = [];
+    try {
+      const out = await this.cli(['ls', `gs://${this.bucket}/${this.prefix}ckpt-*`]);
+      for (const line of out.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const r = parseKey(trimmed);
+        if (r) refs.push(r);
+      }
+    } catch {
+      /* Empty listing or non-existent prefix returns empty */
+    }
+    return refs.sort((a, b) => a.toSeq - b.toSeq);
+  }
+}
+
 export function checkpointSinkFromEnv(env: NodeJS.ProcessEnv = process.env): CheckpointSink | undefined {
   const uri = env.FACTORY_LEDGER_WORM_URI;
   if (!uri) return undefined;
   if (uri.startsWith('s3://')) return new S3CheckpointSink(uri, Number(env.FACTORY_LEDGER_RETENTION_DAYS || '365'));
+  if (uri.startsWith('gcs://') || uri.startsWith('gs://')) return new GcsCheckpointSink(uri, Number(env.FACTORY_LEDGER_RETENTION_DAYS || '365'));
   if (uri.startsWith('file://')) return new FileCheckpointSink(uri.slice('file://'.length));
-  throw new Error(`FACTORY_LEDGER_WORM_URI must be s3:// or file://, got ${uri}`);
+  throw new Error(`FACTORY_LEDGER_WORM_URI must be s3://, gcs://, gs:// or file://, got ${uri}`);
 }
+

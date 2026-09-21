@@ -1,6 +1,3 @@
-import { registerAgentTaskDefinition } from './aws/ecs.js';
-import { provisionAgentRoles } from './aws/iam.js';
-import { buildAgentImage } from './aws/codebuild.js';
 import http from 'node:http';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
@@ -10,7 +7,7 @@ import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanl
 import type { Meter } from '@opentelemetry/api';
 import type { Surface } from '@beercanlabs/factory-contract';
 import { AgentRecord } from './catalog.js';
-import type { Runtime } from './runtime.js';
+import type { DeployProvider, Runtime } from './runtime.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { exceededWindow, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
@@ -22,6 +19,8 @@ export type FactoryState = {
   version: string;
   providers: SecretProvider[];
   runtime: Runtime;
+  /** Provider-specific deploy lifecycle (build → identity → compute). Absent = deploy endpoint returns 501. */
+  deployProvider?: DeployProvider;
   runs: RunStore;
   runTokens: RunTokens;
   callbacks: CallbackPolicy;
@@ -656,6 +655,45 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
+  if ((path === '/api/v1/metrics' || path === '/metrics') && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    const activeRuns = state.runs.list({ active: true });
+    const runCounts: Record<string, number> = {};
+    for (const r of activeRuns) runCounts[r.state] = (runCounts[r.state] ?? 0) + 1;
+
+    const agentCounts: Record<string, number> = {};
+    for (const a of state.agents.values()) agentCounts[a.state] = (agentCounts[a.state] ?? 0) + 1;
+
+    let daySpend = 0;
+    let monthSpend = 0;
+    for (const id of state.agents.keys()) {
+      const s = state.spend.get(id, undefined);
+      daySpend += s.day;
+      monthSpend += s.month;
+    }
+
+    json(res, 200, {
+      uptimeSeconds: Math.round((Date.now() - started) / 1000),
+      agents: {
+        total: state.agents.size,
+        byState: agentCounts,
+      },
+      runs: {
+        active: activeRuns.length,
+        byState: runCounts,
+      },
+      ledger: {
+        totalRows: state.ledger.query().length,
+        wormConfigured: Boolean(state.ledgerSink),
+      },
+      spendUsd: {
+        day: Number(daySpend.toFixed(4)),
+        month: Number(monthSpend.toFixed(4)),
+      },
+    });
+    return;
+  }
+
   // Webhooks authenticate with the cartridge's own shared secret, not a factory bearer.
   const hookMatch = path.match(/^\/api\/v1\/hooks\/([^/]+)$/);
   if (hookMatch && req.method === 'POST') {
@@ -811,7 +849,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (path === '/api/v1/runs' && req.method === 'GET') {
     if (!(await authenticate(req, res, state, 'viewer'))) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
-    json(res, 200, state.runs.list({ agentId: url.searchParams.get('agent'), active: url.searchParams.get('active') === 'true' }));
+    const runs = state.runs.list({ agentId: url.searchParams.get('agent'), active: url.searchParams.get('active') === 'true' });
+    const limit = url.searchParams.has('limit') ? Math.max(1, Math.min(1000, parseInt(url.searchParams.get('limit')!, 10) || 50)) : undefined;
+    const offset = url.searchParams.has('offset') ? Math.max(0, parseInt(url.searchParams.get('offset')!, 10) || 0) : 0;
+    const paged = limit !== undefined ? runs.slice(offset, offset + limit) : runs;
+    json(res, 200, paged);
     return;
   }
 
@@ -876,15 +918,15 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (path === '/api/v1/ledger' && req.method === 'GET') {
     if (!(await authenticate(req, res, state, 'viewer'))) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
-    json(
-      res,
-      200,
-      state.ledger.query({
-        agent: url.searchParams.get('agent'),
-        from: url.searchParams.get('from'),
-        to: url.searchParams.get('to'),
-      }),
-    );
+    const rows = state.ledger.query({
+      agent: url.searchParams.get('agent'),
+      from: url.searchParams.get('from'),
+      to: url.searchParams.get('to'),
+    });
+    const limit = url.searchParams.has('limit') ? Math.max(1, Math.min(1000, parseInt(url.searchParams.get('limit')!, 10) || 50)) : undefined;
+    const offset = url.searchParams.has('offset') ? Math.max(0, parseInt(url.searchParams.get('offset')!, 10) || 0) : 0;
+    const paged = limit !== undefined ? rows.slice(offset, offset + limit) : rows;
+    json(res, 200, paged);
     return;
   }
 
@@ -1141,27 +1183,32 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     
+    if (!state.deployProvider) {
+      json(res, 501, { error: 'deploy_provider_not_configured', message: 'No deploy provider bound. Configure a DeployProvider for your target cloud.' });
+      return;
+    }
+
     agent.state = 'DEPLOYING';
     json(res, 202, agent);
     
     void (async () => {
       try {
-        const isPrebuiltImage = Boolean(agent.artifact && (agent.artifact.startsWith('oci://') || agent.artifact.includes('.dkr.ecr.') || agent.artifact.includes('ghcr.io') || agent.artifact.includes('docker.io')));
+        const dp = state.deployProvider!;
+        const isPrebuiltImage = Boolean(agent.artifact && (agent.artifact.startsWith('oci://') || agent.artifact.includes('.dkr.ecr.') || agent.artifact.includes('ghcr.io') || agent.artifact.includes('docker.io') || agent.artifact.includes('gcr.io') || agent.artifact.includes('-docker.pkg.dev')));
         let imageUri = '';
         if (isPrebuiltImage) {
           imageUri = agent.artifact.replace(/^oci:\/\//, '');
-          console.log(`Using pre-built OCI image for ${agentId}: ${imageUri}`);
+          console.log(`[control-plane] Using pre-built OCI image for ${agentId}: ${imageUri}`);
         } else {
-          console.log(`Building Agent Image with CodeBuild for ${agentId}...`);
-          imageUri = await buildAgentImage(agentId, agent.artifact);
+          console.log(`[control-plane] Building image for ${agentId}...`);
+          imageUri = await dp.buildImage(agentId, agent.artifact);
         }
-        
-        console.log(`Provisioning AWS IAM Roles for ${agentId}...`);
-        const { taskRoleArn, executionRoleArn } = await provisionAgentRoles(agentId, agent.requires);
-        console.log(`Registering AWS ECS Task Definition for ${agentId}...`);
-        
-        await registerAgentTaskDefinition(agentId, imageUri, agent.requires, taskRoleArn, executionRoleArn);
-        
+
+        console.log(`[control-plane] Provisioning identity for ${agentId}...`);
+        const { identity, executionIdentity } = await dp.provisionIdentity(agentId, agent.requires);
+        console.log(`[control-plane] Registering compute for ${agentId}...`);
+        await dp.registerCompute(agentId, imageUri, agent.requires, identity, executionIdentity);
+
         agent.state = 'SLEEPING'; // Officially online
         state.ledger.append({
           timestamp: new Date().toISOString(),
@@ -1171,7 +1218,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
           actor: principal.actor
         });
       } catch (err) {
-        console.error('Failed to provision AWS infrastructure:', err);
+        console.error(`[control-plane] Deploy failed for ${agentId}:`, err);
         agent.state = 'ERROR';
       }
     })();
