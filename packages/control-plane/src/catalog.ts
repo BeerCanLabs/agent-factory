@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { validateCartridge, type Surface, type Cartridge } from '@beercanlabs/factory-contract';
@@ -156,5 +156,24 @@ function titleFromSoul(soul: string): string | undefined {
 function mandateFromSoul(soul: string): string | undefined {
   const m = soul.match(/\*\*Mandate:\*\*\s*(.+)$/m);
   return m?.[1]?.trim();
+}
+
+export function loadDynamicRegistry(registryDir: string): AgentRecord[] {
+  if (!existsSync(registryDir)) return [];
+  const records: AgentRecord[] = [];
+  try {
+    for (const f of readdirSync(registryDir)) {
+      if (!f.endsWith('.json')) continue;
+      try {
+        const data = JSON.parse(readFileSync(join(registryDir, f), 'utf8')) as AgentRecord;
+        if (data && data.id) records.push(data);
+      } catch (err) {
+        console.warn(`[control-plane] failed to parse dynamic agent ${f}:`, err);
+      }
+    }
+  } catch (err) {
+    console.warn(`[control-plane] failed to read dynamic registry dir ${registryDir}:`, err);
+  }
+  return records;
 }
 

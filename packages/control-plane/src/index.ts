@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { Checkpointer, FileLedger, checkpointSinkFromEnv, secretValuesFromEnv } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { authFromEnv } from '@beercanlabs/factory-auth';
-import { loadCatalog } from './catalog.js';
+import { loadCatalog, loadDynamicRegistry } from './catalog.js';
 import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, factoryMetrics, finishRun, reconcileRuns, SYSTEM } from './app.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { FileRunStore, RunTokens } from './runs.js';
@@ -27,6 +27,7 @@ const EPHEMERAL = process.env.MEMORY_EPHEMERAL_DIR || join(process.cwd(), 'data'
 const IDLE_MS = parseInt(process.env.FACTORY_IDLE_MS || '3600000', 10);
 const DATA_DIR = dirname(LEDGER_PATH);
 const RUNS_DIR = process.env.FACTORY_RUNS_DIR || join(DATA_DIR, 'runs');
+const REGISTRY_DIR = process.env.FACTORY_REGISTRY_DIR || join(DATA_DIR, 'registry');
 
 function defaultPolicy() {
   if (!process.env.FACTORY_DEFAULT_POLICY) return undefined;
@@ -37,8 +38,11 @@ function defaultPolicy() {
 
 mkdirSync(MEMORY_STORE, { recursive: true });
 mkdirSync(EPHEMERAL, { recursive: true });
+mkdirSync(REGISTRY_DIR, { recursive: true });
 
-const agents = loadCatalog(AGENTS_ROOT);
+const staticAgents = loadCatalog(AGENTS_ROOT);
+const dynamicAgents = loadDynamicRegistry(REGISTRY_DIR);
+const allAgents = [...staticAgents, ...dynamicAgents];
 const secretValues = new Set<string>(secretValuesFromEnv());
 
 const hub = new EventHub();
@@ -72,7 +76,8 @@ if (deployProviderType === 'aws') {
 }
 
 const state: FactoryState = {
-  agents: new Map(agents.map((a) => [a.id, a])),
+  agents: new Map(allAgents.map((a) => [a.id, a])),
+  registryDir: REGISTRY_DIR,
   ledger,
   deployProvider,
   policies: new PolicyStore(process.env.FACTORY_POLICIES_DIR || join(DATA_DIR, 'policies'), defaultPolicy()),
