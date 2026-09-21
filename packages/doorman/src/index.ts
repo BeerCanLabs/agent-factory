@@ -137,8 +137,9 @@ export function createDoorman(opts: {
       if (state.gateway.presence === 'offline') {
         await opts.wake(msg.agentId, msg);
         await state.gateway.setPresence('available');
+      } else {
+        await opts.handoff(msg);
       }
-      await opts.handoff(msg);
     },
     async onAgentIdle(agentId) {
       const state = agents.get(agentId);
