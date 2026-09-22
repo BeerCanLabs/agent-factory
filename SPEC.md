@@ -34,19 +34,30 @@ The **Agent Factory** is hosting, plumbing, governance, and lifecycle. **Agent G
 
 ## 2. Cartridge contract
 
-Adopters define an agent as:
+Adopters define an agent cartridge using either the primary unified contract or the legacy multi-file manifest:
 
+### Primary: Unified Cartridge Manifest
+```
+my-agent/
+├── soul.md                  # job description, persona, tone, mission, boundaries
+├── cartridge.yaml           # employment contract: schemaVersion, triggers, secrets.requires, persistence, compute, skills
+├── bench.yaml               # optional performance rubric: deterministic test cases
+├── agent.py / worker.mjs    # hands & eyes: task reasoning and tool execution
+└── Dockerfile               # container packaging
+```
+
+### Legacy: Multi-file Manifest
 ```
 my-agent/
 ├── soul.md                  # identity, persona, tone, purpose, boundaries
-├── surface.yaml             # ingress: cron, webhook, queue, http
+├── surface.yaml             # ingress: cron, webhook, queue, http, discord
 ├── secrets.manifest.yaml    # requires: [NAME, ...] — never values
 ├── skills.yaml              # optional MCP peripheral allowlist
 ├── identity.yaml            # optional: daemon | on_behalf_of
 └── artifact.yaml            # portable compute pointer (OCI / serverless / managed engine)
 ```
 
-`skills.yaml` is **not** a factory-hosted code library. Ordinary skills ship inside the artifact. MCP entries are environmental peripherals, bloated tools, or centralized stateful security.
+`skills.yaml` (or `skills` in `cartridge.yaml`) is **not** a factory-hosted code library. Ordinary skills ship inside the artifact. MCP entries are environmental peripherals, bloated tools, or centralized stateful security.
 
 The factory does not import agent logic. Example cartridges under `agents/` are fixtures, not kernel modules.
 
@@ -105,10 +116,12 @@ The control plane is the only ingress point to the factory kernel. Routes expect
 | GET | `/api/v1/runs`, `/api/v1/runs/:runId` | viewer | run status |
 | POST | `/api/v1/runs/:runId/cancel` | operator | stop a run |
 | GET | `/api/v1/runs/:runId/input` | run token | agent fetches its input |
+| GET | `/api/v1/runs/:runId/mailbox` | run token | long-poll follow-up messages during warm window (`?timeout=ms`) |
 | POST | `/api/v1/runs/:runId/result` | run token | agent reports `{status: succeeded\|failed, output?, error?}` |
 | POST | `/api/v1/hooks/:id` | cartridge secret | webhook trigger, creates a run |
 | GET | `/api/v1/ledger` | viewer | audit query |
 | POST | `/api/v1/ledger` | ingest | metadata-only event write |
+| GET | `/api/v1/metrics`, `/metrics` | viewer | runtime and ledger telemetry (active runs, agent states, spend) |
 | GET/PUT | `/api/v1/policies/budget` | admin | Manage global and departmental Policy Engine limits. |
 | GET/PUT | `/api/v1/agents/:id/policy` | viewer / admin | egress policy (routes, models, tools, per-agent budget, TPM) |
 | GET | `/api/v1/approvals?state=pending` | viewer | held tool calls |
