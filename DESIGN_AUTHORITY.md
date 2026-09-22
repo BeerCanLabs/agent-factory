@@ -140,6 +140,8 @@ The following gaps exist between current repository code, `SPEC.md`, and the can
 | **TSK-014** | GAP-019 | Add Pagination to /api/v1/runs and /api/v1/ledger | `COMPLETED` | *None* (Released) | `packages/control-plane/src/app.ts`, `packages/control-plane/src/index.test.ts`, `DESIGN_AUTHORITY.md` | Added limit and offset query parameters to /api/v1/runs and /api/v1/ledger endpoints with unit test coverage. |
 | **TSK-015** | GAP-021 | Deprecate and Clean Stale Docker Blueprint | `COMPLETED` | *None* (Released) | `blueprints/docker/*`, `DESIGN_AUTHORITY.md` | Removed stale docker-compose.yml and .env.example, replaced with superseded README pointing to landing-zones/compose. |
 | **TSK-016** | GAP-024 | Implement REST Metrics Endpoint (/api/v1/metrics) | `COMPLETED` | *None* (Released) | `packages/control-plane/src/app.ts`, `packages/control-plane/src/index.test.ts`, `DESIGN_AUTHORITY.md` | Added /api/v1/metrics and /metrics endpoints returning active runs, agents by state, ledger status, and spend with unit test coverage. |
+| **TSK-017** | GAP-008 | Align Cartridge Documentation Across Agent Factory & Templates | `COMPLETED` | *None* (Released) | `SPEC.md`, `docs/CARTRIDGE_DEVELOPER_GUIDE.md`, `DESIGN_AUTHORITY.md`, `SM-template/*`, `SM-rosie/README.md` | Documented unified cartridge.yaml alongside legacy manifest in SPEC.md, added runtime.warmDownSeconds, skills, and /mailbox long-polling pattern to Developer Guide and API table, aligned SM-template blueprint and verified contract. |
+
 
 
 
@@ -228,4 +230,6 @@ compute:
 | 2026-09-21 | Gemini | Executed and completed TSK-014: added `limit` and `offset` pagination to `GET /api/v1/runs` and `GET /api/v1/ledger` endpoints with unit test coverage. | TSK-014, GAP-019 |
 | 2026-09-21 | Gemini | Executed and completed TSK-015: removed obsolete `blueprints/docker/docker-compose.yml` and `.env.example`, replacing with superseded pointer to canonical `landing-zones/compose`. | TSK-015, GAP-021 |
 | 2026-09-21 | Gemini | Executed and completed TSK-016: implemented authenticated `GET /api/v1/metrics` and `GET /metrics` endpoints exposing active runs, agent states, ledger status, and spend. | TSK-016, GAP-024 |
+| 2026-09-21 | Antigravity | Executed and completed TSK-017: aligned documentation across SPEC.md, CARTRIDGE_DEVELOPER_GUIDE.md, SM-template, and SM-rosie to reflect canonical cartridge.yaml contract, warmDownSeconds, and mailbox long-poll pattern. | TSK-017, GAP-008 |
+
 

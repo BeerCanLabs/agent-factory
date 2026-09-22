@@ -139,6 +139,15 @@ compute:
   localCommand:
     - python3
     - agent.py
+
+# Optional: Warm conversation window before scaling back to zero (seconds)
+runtime:
+  warmDownSeconds: 3600
+
+# Optional: Environmental MCP peripherals and skills
+skills:
+  - id: pagerduty-ops
+    description: "Inspect active alerts and incident timelines via PagerDuty"
 ```
 
 > [!IMPORTANT]
@@ -248,6 +257,14 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
+### Conversational Agents: Warm-Down Window & Mailbox
+For interactive agents (e.g., Discord or Slack chatbots), agents often stay warm after their first turn to handle follow-up user messages with zero cold-start latency:
+1. Declare `runtime.warmDownSeconds: 3600` (e.g. 1 hour) in `cartridge.yaml`.
+2. After processing the initial turn, long-poll the factory mailbox:
+   `GET /api/v1/runs/${FACTORY_RUN_ID}/mailbox?timeout=20000` with header `Authorization: Bearer ${FACTORY_RUN_TOKEN}`.
+3. If a follow-up message arrives, reset your idle timer and handle the turn.
+4. When the idle window expires without further messages, call `write_result()` and exit `0` to scale back to zero.
 
 ---
 
