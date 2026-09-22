@@ -78,7 +78,7 @@ export function createDiscordGateway(): Gateway {
       return client.isReady();
     },
     get presence(): Presence {
-      return client.user?.presence?.status === 'invisible' ? 'offline' : 'available';
+      return currentPresence;
     },
     setAgentName(name: string) {
       if (name) agentName = name;
