@@ -207,6 +207,27 @@ compute:
 * **Perimeter Defense:** The Cartridge never holds a public IP address or directly opens unauthenticated public ports. Ingress is completely governed by the Console (Doorman for Discord, Ingress Gateway for webhooks/APIs).
 * **Network & Gateway Security:** Outbound provider API calls (`anthropic`, `openai`) route via environment injection (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`), authenticated with short-lived run tokens, metered, and governed with hard-kill circuit breakers by the Factory Egress Gateway.
 
+### 6.4 Two-Stage Agent Retirement Lifecycle (Zero Ongoing Cost Guarantee)
+* **Objective:** Guarantee that retired agents incur strictly $0 in continuing cloud costs while providing safety against accidental operational destruction.
+* **Stage 1: Soft-Retirement / Scream Test (`RETIRED_PENDING_PURGE`):**
+  - All ingress triggers, Doorman presence gateways, and compute wakes are immediately cut. Compute drops to 0 replicas.
+  - Secret bindings and persistent memory remain in place.
+  - An administrative holding period (configurable, default: 1 calendar week) begins.
+  - An operator can invoke `POST /api/v1/registry/agents/:id/reinstate` during this period to restore the agent to production.
+* **Stage 2: Permanent Purge & Archival (`RETIRED`):**
+  - Triggered after the holding window expires or via administrative override (`POST /api/v1/registry/agents/:id/purge`).
+  - Cloud task definitions and compute services are deleted.
+  - Secrets are permanently destroyed/purged from the enterprise vault.
+  - Persistent mind storage is compressed and archived into cold tier object storage.
+  - Immutable execution ledger rows remain permanently preserved.
+
+### 6.5 Headless Observability & GraphQL Telemetry Surface
+* **Strict Separation:** The Factory kernel never builds UI dashboards, formats PDF reports, or renders email summaries. It strictly captures structured data and serves it via headless APIs.
+* **Core Metrics Pillars:** Cost (USD spend, token burn), Quantity (task throughput, turns, duration), Quality (deterministic benchmark pass rates, regression ledger).
+* **API Surface Division:**
+  - **REST:** Discrete operational actions (`/runs`, `/wake`, `/pause`, `/metrics`).
+  - **GraphQL (`/graphql`):** Deep, multi-dimensional telemetry querying for downstream analytics engines, BI tools, and reporting cron jobs. Allows clients to request exact aggregations (daily/weekly/monthly rollups, model cost breakdowns, department attribution) in a single request without over-fetching.
+
 ---
 
 ## 7. Change Log & Audit Trail
@@ -231,5 +252,7 @@ compute:
 | 2026-09-21 | Gemini | Executed and completed TSK-015: removed obsolete `blueprints/docker/docker-compose.yml` and `.env.example`, replacing with superseded pointer to canonical `landing-zones/compose`. | TSK-015, GAP-021 |
 | 2026-09-21 | Gemini | Executed and completed TSK-016: implemented authenticated `GET /api/v1/metrics` and `GET /metrics` endpoints exposing active runs, agent states, ledger status, and spend. | TSK-016, GAP-024 |
 | 2026-09-21 | Antigravity | Executed and completed TSK-017: aligned documentation across SPEC.md, CARTRIDGE_DEVELOPER_GUIDE.md, SM-template, and SM-rosie to reflect canonical cartridge.yaml contract, warmDownSeconds, and mailbox long-poll pattern. | TSK-017, GAP-008 |
+| 2026-09-21 | Antigravity | Formulated and recorded Intent Alignment: Two-Stage Agent Retirement Lifecycle (Scream Test & Zero Cost Guarantee) and Headless Observability / GraphQL Telemetry surface across KPF.md, SPEC.md, and DESIGN_AUTHORITY.md. | GAP-018 |
+
 
 
