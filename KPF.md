@@ -14,10 +14,16 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
   2. **Validation:** If the secrets are missing or the code violates Factory constraints, the registration is rejected. If it passes, the agent enters a `PENDING_BUDGET` state.
   3. **Policy Engine Evaluation (Budget):** To prevent FinOps admins from becoming a manual deployment bottleneck, the Factory executes an automated Policy Engine. Authorized `Factory.FinOps` users pre-define organizational constraints (e.g., "Default budget of $10/day for all new agents" or "Shared circuit-breaker for the Engineering Department"). When an agent is registered, the Policy Engine evaluates it. If it complies, it automatically transitions to the `PENDING_DEPLOY` state. Exceptions require a manual RBAC override.
   4. **Deployment (RBAC: `Factory.Deployer`):** An authorized user explicitly triggers the deployment. The Factory Control Plane transitions the agent to `DEPLOYING` and natively orchestrates the cloud provider (e.g., dynamically provisioning the ECS Task Definition and strict IAM Task Role in AWS) to push the agent into production (`SLEEPING`).
+  5. **Retirement & Decommissioning (RBAC: `Factory.Deployer` / `Factory.Admin`):** When an agent reaches end-of-life, the Factory executes a two-stage retirement workflow designed to prevent accidental data destruction while guaranteeing zero ongoing cloud costs:
+     - **Stage 1 (Soft-Retire / "Scream Test"):** Triggering retirement immediately disables all ingress triggers, Doorman presence, and compute wakeups, dropping active compute and egress costs to $0. The agent enters `RETIRED_PENDING_PURGE` for a configurable holding period (default: 1 calendar week). Secrets and persistent memory remain preserved in case of accidental retirement. If an operator invokes reinstatement during this window, the agent returns to `SLEEPING`.
+     - **Stage 2 (Permanent Purge & Archival):** Once the scream-test holding period expires (or upon explicit administrative purge), the Factory destroys cloud task definitions, revokes and purges the agent's secrets from the vault, and compresses/archives persistent mind storage to cold archive. The cryptographic execution ledger history remains immutable forever.
 - **Interface (REST API):**
   - `POST /api/v1/registry/agents` (Registers and validates the new Cartridge)
   - `PUT /api/v1/registry/agents/:id/budget` (FinOps user assigns the budget)
   - `POST /api/v1/registry/agents/:id/deploy` (Authorized action that triggers cloud provisioning)
+  - `POST /api/v1/registry/agents/:id/retire` (Transitions agent to `RETIRED_PENDING_PURGE`; cuts compute and triggers)
+  - `POST /api/v1/registry/agents/:id/reinstate` (Aborts retirement during holding period; returns agent to active service)
+  - `POST /api/v1/registry/agents/:id/purge` (Permanently destroys task definitions, purges vault secrets, archives mind)
 
 ### 2. Key Management (The "Locksmith")
 - **Description:** A secure pathway for operators to inject credentials into the Enterprise's Bring-Your-Own Secrets Manager (BYO-SM) such as AWS Secrets Manager or HashiCorp Vault. The Factory *reads* these secrets at boot, but the Locksmith is the *write* path. 
@@ -51,11 +57,23 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
   - `Webhook (EventBridge/SQS)` (The Factory drops a crash event into a queue)
   - **Kernel Module (`packages/triage`):** The Factory's triage module consumes these infrastructure faults (like OOM crashes) and routes them to external observability dashboards or Slack webhooks for operators.
 
-### 7. Training Function (The Gym / Benchmarking)
-- **Description:** The capability to benchmark agents against deterministic expectations (cost vs. quality) or run multi-model graduation simulations to ensure an agent performs safely before it is promoted to production.
-- **Interface (REST API):** 
-  - `POST /api/v1/agents/:id/runs` with `{ model: "pinned-model", trace: true }`. The UI forces the factory to run a pinned simulation and collect prompt traces (`FACTORY_TRACE_PROMPTS`) for evaluation.
-  - **Cartridge Ecosystem:** To preserve the "Console vs. Cartridge" boundary, the Factory does not evaluate the agent logic itself. Instead, a specialized "Trainer Agent" Cartridge evaluates the traces.
+### 7. Quality Governance & Benchmarking (Definition of Good)
+- **Description:** Objective measurement of agent quality against deterministic expectations. The Factory enforces a two-phase model:
+  1. **Phase 1 (Offline Rubric Gating):** Every cartridge may declare a `bench.yaml` suite of deterministic test cases with concrete inputs and assertions (`equals`, `contains`, `matches`). The Factory can execute benchmark simulations across candidate LLMs to generate a Cost-vs-Quality Scorecard before production promotion. (Policy engine rules may require passing scores or allow administrative exception).
+  2. **Phase 2 (Live Runtime Evaluation — Roadmap):** Continuous evaluation of live conversation and task traces (`FACTORY_TRACE_PROMPTS`) by designated evaluator cartridges.
+- **Interface (CLI / REST API):** 
+  - `POST /api/v1/agents/:id/runs` with `{ model: "pinned-model", trace: true }`. The UI forces the factory to run a pinned simulation and collect prompt traces for evaluation.
+  - CLI: `factory-bench --cartridge <dir> --models a,b` runs cases, scores accuracy, measures cost from the ledger, and outputs recommended models.
+
+### 8. Headless Observability & Telemetry Surface (Cost, Quantity, Quality)
+- **Description:** The Factory operates strictly on a headless architecture. It does not format PDF reports, build email templates, or render dashboard charts—those are client/UX layer concerns. Instead, the Factory captures structured telemetry (Cost, Quantity of work, and Quality pass rates) as a native byproduct of execution and exposes them via clean, queryable APIs for scheduled or ad-hoc enterprise reporting.
+- **Interface (REST & GraphQL APIs):**
+  - **REST (Real-time snapshots & metrics):** `GET /api/v1/metrics`, `GET /metrics` for cluster/agent health and operational counters.
+  - **GraphQL (Flexible Telemetry & Analytics):** `POST /graphql` provides an expressive query surface allowing reporting engines, dashboards (Garrison, BI tools), and automated crons to pull precisely filtered time-series data without over-fetching:
+    - Multi-dimensional rollups across daily, weekly, or monthly cadences.
+    - Cost breakdown by agent, model, department, and tool.
+    - Throughput metrics (completed tasks, failed runs, warm-window durations).
+    - Quality metrics (benchmark regression history and pass rates).
 
 ---
 
