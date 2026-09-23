@@ -75,12 +75,41 @@ export function verifyChain(
     if (rowHash(prev, body) !== hash) return { ok: false, rows: rows.length, firstBadSeq: body.seq, reason: 'row content altered' };
     prev = hash;
   }
-  for (const c of checkpoints) {
-    const row = rows[c.toSeq - 1];
-    if (!row) return { ok: false, rows: rows.length, firstBadSeq: rows.length + 1, reason: `rows missing: checkpoint covers seq ${c.toSeq}` };
-    if (row.hash !== c.hash) return { ok: false, rows: rows.length, firstBadSeq: c.toSeq, reason: 'chain diverges from WORM checkpoint' };
+  if (!checkpoints.length) {
+    return { ok: true, rows: rows.length, head: prev, checkpointsChecked: 0 };
   }
-  return { ok: true, rows: rows.length, head: prev, checkpointsChecked: checkpoints.length };
+
+  // Find checkpoints that match rows on disk.
+  const confirmedSeqs = new Set<number>();
+  for (const c of checkpoints) {
+    if (rows[c.toSeq - 1]?.hash === c.hash) {
+      confirmedSeqs.add(c.toSeq);
+    }
+  }
+
+  const maxConfirmedSeq = confirmedSeqs.size > 0 ? Math.max(...confirmedSeqs) : 0;
+  const maxCheckpointSeq = Math.max(...checkpoints.map((c) => c.toSeq));
+
+  // The ledger must cover all checkpoints up to the highest one.
+  if (rows.length < maxCheckpointSeq) {
+    return { ok: false, rows: rows.length, firstBadSeq: rows.length + 1, reason: `rows missing: checkpoint covers seq ${maxCheckpointSeq}` };
+  }
+
+  // If the highest checkpoint has not been confirmed, the head has diverged.
+  if (!confirmedSeqs.has(maxCheckpointSeq)) {
+    return { ok: false, rows: rows.length, firstBadSeq: maxCheckpointSeq, reason: 'chain diverges from WORM checkpoint' };
+  }
+
+  // Any checkpoint whose toSeq > maxConfirmedSeq has diverged.
+  // Checkpoints with toSeq <= maxConfirmedSeq that do not match are abandoned forks,
+  // because a later checkpoint on the verified unbroken chain already mathematically seals earlier rows.
+  for (const c of checkpoints) {
+    if (c.toSeq > maxConfirmedSeq) {
+      return { ok: false, rows: rows.length, firstBadSeq: c.toSeq, reason: 'chain diverges from WORM checkpoint' };
+    }
+  }
+
+  return { ok: true, rows: rows.length, head: prev, checkpointsChecked: confirmedSeqs.size };
 }
 
 /**

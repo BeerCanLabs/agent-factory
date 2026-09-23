@@ -128,6 +128,23 @@ describe('hash chain', () => {
     assert.equal((await cp.flush()), null, 'nothing new to ship');
     assert.equal(ledger.verify(await sink.list()).ok, true);
 
+    // Duplicate checkpoint for same sequence (e.g. from an aborted concurrent writer):
+    // as long as the chain matches a valid checkpoint for that seq, verification succeeds.
+    const checkpointsWithOrphan = [
+      ...(await sink.list()),
+      { toSeq: 4, hash: '0'.repeat(64) }, // orphan/alternate checkpoint for seq 4
+    ];
+    assert.equal(ledger.verify(checkpointsWithOrphan).ok, true);
+
+    // If no checkpoint for that seq matches, it must fail:
+    const checkpointsWithoutMatch = [
+      { toSeq: 4, hash: '1'.repeat(64) },
+      { toSeq: 4, hash: '2'.repeat(64) },
+    ];
+    const failedMatch = ledger.verify(checkpointsWithoutMatch);
+    assert.equal(failedMatch.ok, false);
+    if (!failedMatch.ok) assert.match(failedMatch.reason, /WORM/);
+
     // Drop the last two rows: the chain alone still verifies, the checkpoint does not.
     const lines = readFileSync(path, 'utf8').trim().split('\n');
     writeFileSync(path, `${lines.slice(0, 2).join('\n')}\n`);
@@ -142,6 +159,7 @@ describe('hash chain', () => {
     const v = forged.verify(await sink.list());
     assert.equal(v.ok, false);
     if (!v.ok) assert.match(v.reason, /WORM/);
+
     rmSync(dir, { recursive: true });
   });
 
