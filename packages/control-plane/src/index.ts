@@ -17,6 +17,7 @@ import { memoryRuntime } from './runtime.js';
 import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
 import { agentsDueForCron } from './scheduler.js';
+import { ScheduleStore } from './schedules.js';
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
 const AGENTS_ROOT = process.env.AGENTS_ROOT || fileURLToPath(new URL('../../../agents', import.meta.url));
@@ -148,6 +149,9 @@ if (ledgerSink) {
 const busSink = busSinkFromEnv();
 if (busSink) attachBus(hub, busSink);
 
+const schedulesPath = process.env.FACTORY_SCHEDULES_PATH || join(process.cwd(), 'data', 'schedules.json');
+state.schedules = new ScheduleStore(schedulesPath);
+
 const server = createFactoryServer(state);
 attachEventStream(server, state, hub);
 startQueuePollers(state);
@@ -157,9 +161,30 @@ server.listen(PORT, '0.0.0.0', () => {
 
 if (process.env.FACTORY_CRON !== '0') {
   setInterval(() => {
+    // 1. Static cartridge crons
     const due = agentsDueForCron(state.agents.values());
     for (const agent of due) {
       if (!activeRun(state, agent.id)) void createRun(state, agent.id, { actor: SYSTEM.scheduler, trigger: 'cron' });
+    }
+
+    // 2. Dynamic action schedules
+    if (state.schedules) {
+      const dueSchedules = state.schedules.checkDue(new Date());
+      for (const sched of dueSchedules) {
+        console.log(`[scheduler] Firing dynamic schedule "${sched.name}" (${sched.id}) for agent ${sched.agentId}`);
+        void createRun(state, sched.agentId, {
+          actor: SYSTEM.scheduler,
+          trigger: 'schedule',
+          input: {
+            content: sched.prompt,
+            message: sched.prompt,
+            channelId: sched.channelId,
+            scheduleId: sched.id,
+            scheduleName: sched.name,
+            source: 'schedule',
+          },
+        });
+      }
     }
   }, 60_000);
 }

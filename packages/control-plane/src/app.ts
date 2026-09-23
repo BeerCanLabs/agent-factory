@@ -15,6 +15,7 @@ import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } fr
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { exceededWindow, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
 import { Keymaster } from '@beercanlabs/factory-keymaster';
+import { ScheduleStore, type ScheduledAction } from './schedules.js';
 
 export type FactoryState = {
   agents: Map<string, AgentRecord>;
@@ -30,6 +31,7 @@ export type FactoryState = {
   spend: SpendTracker;
   approvals: ApprovalStore;
   keymaster?: Keymaster;
+  schedules?: ScheduleStore;
   /** URL agents use to reach the control plane (result reporting, input fetch). */
   publicUrl?: string;
   /** URL agents use to reach the egress gateway; handed to every run as FACTORY_GATEWAY_URL. */
@@ -172,6 +174,31 @@ async function authenticate(
     return null;
   }
   return result.principal;
+}
+
+async function authenticateOperatorOrRun(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  state: FactoryState,
+): Promise<{ actor: string; agentId?: string } | null> {
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!token) {
+    json(res, 401, { error: 'unauthorized' });
+    return null;
+  }
+  const runPayload = await state.runTokens.verify(token);
+  if (runPayload) {
+    return {
+      actor: `run:${runPayload.agentId}:${runPayload.runId}`,
+      agentId: runPayload.agentId,
+    };
+  }
+  const result = await state.auth.verify(req.headers.authorization);
+  if (result.ok && (hasRole(result.principal, 'operator') || hasRole(result.principal, 'viewer'))) {
+    return { actor: result.principal.actor };
+  }
+  json(res, 401, { error: 'unauthorized' });
+  return null;
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -725,7 +752,17 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     if (runSelf[2] === 'input') {
-      json(res, 200, { runId: run.runId, input: run.input ?? null });
+      const now = new Date();
+      json(res, 200, {
+        runId: run.runId,
+        input: run.input ?? null,
+        temporal: {
+          local: now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', dateStyle: 'full', timeStyle: 'long' }),
+          utc: now.toISOString(),
+          dayOfWeek: now.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long' }),
+          timezone: 'America/Los_Angeles',
+        },
+      });
       return;
     }
     if (runSelf[2] === 'mailbox') {
@@ -879,6 +916,60 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       content: payload,
     });
     json(res, 202, { ok: true });
+    return;
+  }
+
+  // Schedules: dynamic scheduled actions
+  if (path === '/api/v1/schedules' && req.method === 'GET') {
+    const caller = await authenticateOperatorOrRun(req, res, state);
+    if (!caller) return;
+    const url = new URL(req.url ?? '/', 'http://factory.local');
+    const agentFilter = url.searchParams.get('agent') || undefined;
+    json(res, 200, { schedules: state.schedules?.list(agentFilter ? { agentId: agentFilter } : undefined) ?? [] });
+    return;
+  }
+
+  if (path === '/api/v1/schedules' && req.method === 'POST') {
+    const caller = await authenticateOperatorOrRun(req, res, state);
+    if (!caller) return;
+    const body = await readJson(req);
+    const agentId = (body.agentId as string) || caller.agentId;
+    if (!agentId || !state.agents.has(agentId)) {
+      json(res, 400, { error: 'invalid_or_missing_agent' });
+      return;
+    }
+    if (!body.cron || typeof body.cron !== 'string') {
+      json(res, 400, { error: 'missing_cron' });
+      return;
+    }
+    if (!body.prompt || typeof body.prompt !== 'string') {
+      json(res, 400, { error: 'missing_prompt' });
+      return;
+    }
+
+    const schedule: ScheduledAction = {
+      id: (body.id as string) || `sched-${randomUUID()}`,
+      agentId,
+      name: (body.name as string) || `Scheduled action for ${agentId}`,
+      cron: (body.cron as string).trim(),
+      timezone: (body.timezone as string) || 'America/Los_Angeles',
+      channelId: (body.channelId as string) || (body.channel_id as string),
+      prompt: body.prompt as string,
+      enabled: body.enabled !== false,
+      createdAt: new Date().toISOString(),
+    };
+
+    state.schedules?.save(schedule);
+    json(res, 200, { ok: true, schedule });
+    return;
+  }
+
+  const schedDelete = path.match(/^\/api\/v1\/schedules\/([^/]+)$/);
+  if (schedDelete && req.method === 'DELETE') {
+    const caller = await authenticateOperatorOrRun(req, res, state);
+    if (!caller) return;
+    const deleted = state.schedules?.delete(schedDelete[1]);
+    json(res, 200, { ok: true, deleted: Boolean(deleted) });
     return;
   }
 
