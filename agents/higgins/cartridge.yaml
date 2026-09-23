@@ -34,6 +34,8 @@ secrets:
       description: "xAI Grok API key for butler intelligence"
     - name: ANTHROPIC_API_KEY
       description: "Anthropic Claude API key for reasoning"
+    - name: GOOGLE_CALENDAR_CREDENTIALS
+      description: "Google Calendar OAuth credentials for Stephanie's schedule sync"
 
 persistence:
   enabled: true
