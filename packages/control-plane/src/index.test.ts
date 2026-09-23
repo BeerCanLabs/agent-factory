@@ -15,6 +15,7 @@ import { checkHealth, createFactoryServer, FactoryState, factoryMetrics, handleM
 import { AggregationTemporality, InMemoryMetricExporter, MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { noopRuntime, type Runtime } from './runtime.js';
 import { cronMatches } from './scheduler.js';
+import { ScheduleStore } from './schedules.js';
 import { FileRunStore, MemoryRunStore, RunTokens, type Run } from './runs.js';
 import { checkCallbackUrl, deliverCallback } from './callbacks.js';
 import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
@@ -118,6 +119,41 @@ describe('scheduler', () => {
   it('matches */1 cron on the current minute', () => {
     assert.equal(cronMatches('* * * * *'), true);
     assert.equal(cronMatches('60 * * * *'), false);
+  });
+
+  it('matches comma and range expressions', () => {
+    const fixed = { minute: 0, hour: 12, day: 23, month: 9, weekday: 3 };
+    assert.equal(cronMatches('0 12 * * *', fixed), true);
+    assert.equal(cronMatches('0 10,12,14 * * *', fixed), true);
+    assert.equal(cronMatches('0 10-15 * * *', fixed), true);
+    assert.equal(cronMatches('0 1-5 * * *', fixed), false);
+  });
+
+  it('evaluates schedules with timezone and deduplicates within minute', () => {
+    const store = new ScheduleStore();
+    const fixed = new Date('2026-09-22T19:00:00Z'); // 12:00 PM Pacific (PDT, UTC-7)
+    store.save({
+      id: 'sched-1',
+      agentId: 'rosie',
+      name: 'Kitty litter noon check',
+      cron: '0 12 * * *',
+      timezone: 'America/Los_Angeles',
+      prompt: 'Check litter levels',
+      enabled: true,
+      createdAt: fixed.toISOString(),
+    });
+
+    const due = store.checkDue(fixed);
+    assert.equal(due.length, 1);
+    assert.equal(due[0].id, 'sched-1');
+
+    // Running again in same minute does not re-trigger
+    const dueAgain = store.checkDue(fixed);
+    assert.equal(dueAgain.length, 0);
+
+    // Delete schedule
+    assert.equal(store.delete('sched-1'), true);
+    assert.equal(store.list().length, 0);
   });
 });
 
