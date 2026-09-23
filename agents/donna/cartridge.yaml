@@ -1,0 +1,71 @@
+schemaVersion: "1.0"
+id: donna
+name: "Donna"
+role: "Executive Assistant & Orchestrator"
+prompt: "./soul.md"
+
+triggers:
+  - type: http
+    path: /wake
+  - type: webhook
+    path: /hooks/donna-triage
+    secretRef: DONNA_WEBHOOK_SECRET
+  - type: cron
+    schedule: "0 15 * * 1-5"
+  - type: discord
+    secretRef: DONNA_DISCORD_BOT_TOKEN
+
+secrets:
+  requires:
+    - name: DONNA_DISCORD_BOT_TOKEN
+      description: "Discord Bot Token for Doorman presence and executive messaging"
+    - name: XAI_API_KEY
+      description: "xAI API Key for Donna LLM inference"
+    - name: NOTION_API_KEY
+      description: "Notion API Key for The Submind Operations Board"
+    - name: DONNA_WEBHOOK_SECRET
+      description: "HMAC signing secret for incoming webhook triage"
+    - name: GOOGLE_CALENDAR_CREDENTIALS
+      description: "Service account or credentials JSON for Google Calendar API writes"
+    - name: REACHY_DAEMON_SECRET
+      description: "Optional auth token for Reachy Mini Wireless daemon"
+    - name: GMAIL_CREDENTIALS
+      description: "Google OAuth token with Gmail read/draft/send scopes"
+    - name: DONNA_GCP_CREDENTIALS
+      description: "GCP service account credentials for GCS print queue and Google Drive access"
+    - name: DONNA_FITBIT_TOKENS
+      description: "OAuth tokens for Fitbit / Google Health steps, activity, and sleep"
+
+persistence:
+  enabled: true
+  prefix: donna-state
+
+compute:
+  kind: oci
+  ref: "566332862296.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents:donna"
+  localCommand:
+    - python3
+    - agent.py
+
+runtime:
+  warmDownSeconds: 3600
+
+skills:
+  - id: google-calendar
+    description: "Direct read/write Google Calendar event operations"
+  - id: reachy-bridge
+    description: "Reachy Mini Wireless robot embodiment gestures and vision"
+  - id: gmail
+    description: "Search, triage, draft composition, and read attachments via Gmail API (direct sending gated)"
+  - id: entity-memory
+    description: "Cross-session entity relationships and long-term knowledge graph"
+  - id: home-print
+    description: "Submit print jobs to the house laser printer via GCS queue"
+  - id: google-drive
+    description: "Store, retrieve, and search documents in Google Drive"
+  - id: notion
+    description: "Task and delivery tracking on The Submind Operations Board"
+  - id: action-scheduling
+    description: "Schedule automated recurring and one-off executive actions with Factory Control Plane"
+  - id: google-health
+    description: "Retrieve Dale's daily step counts, activity, heart rate, and sleep from Google Health / Fitbit"

@@ -17,6 +17,7 @@ export type AgentRecord = {
   triggers: Surface['triggers'];
   memoryPrefix?: string;
   dir: string;
+  warmDownSeconds?: number;
 };
 
 export function loadCatalog(agentsRoot: string): AgentRecord[] {
@@ -44,10 +45,13 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
     let triggers: Surface['triggers'] = [];
     let memoryPrefix: string | undefined = result.cartridgeId;
 
+    let rawCartridge: Cartridge | undefined;
+
     // Check for unified cartridge.yaml first
     if (entries.has('cartridge.yaml')) {
       try {
         const raw = parseYaml(readFileSync(join(dir, 'cartridge.yaml'), 'utf8')) as Cartridge;
+        rawCartridge = raw;
         if (raw.name) name = raw.name;
         if (raw.role) role = raw.role;
         if (raw.compute?.ref || raw.artifact?.ref) {
@@ -116,12 +120,14 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
       }
     }
 
+    const isCloud = rawCartridge?.compute?.kind === 'oci' || (process.env.FACTORY_RUNTIME === 'ecs' && !localCommand);
+
     out.push({
       id: result.cartridgeId,
       name,
       role,
       state: 'SLEEPING',
-      provider: 'local',
+      provider: isCloud ? 'cloud' : 'local',
       artifact,
       localCommand,
       requires,
@@ -130,6 +136,7 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
       triggers,
       memoryPrefix,
       dir,
+      warmDownSeconds: rawCartridge?.runtime?.warmDownSeconds ?? 300,
     });
   }
   return out;

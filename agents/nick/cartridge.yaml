@@ -1,0 +1,39 @@
+schemaVersion: "1.0"
+id: nick
+name: "Nick Burns"
+role: "Company Webmaster & Client Support Specialist"
+prompt: "./soul.md"
+
+triggers:
+  - type: http
+    path: /wake
+  - type: discord
+    secretRef: NICK_DISCORD_BOT_TOKEN
+
+secrets:
+  requires:
+    - name: NICK_DISCORD_BOT_TOKEN
+      description: "Discord Bot Token for Nick Burns webmaster and client support chat"
+    - name: ALC_SUPPORT_GITHUB_TOKEN
+      description: "GitHub Token for American Lutheran Church Kellogg repository management"
+    - name: XAI_API_KEY
+      description: "xAI API key for inference and vision analysis"
+
+persistence:
+  enabled: true
+  prefix: "nick-state"
+
+compute:
+  kind: oci
+  ref: "566332862296.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents:nick"
+  localCommand:
+    - python3
+    - agent.py
+
+skills:
+  - id: alc-website-support
+    description: "Website maintenance, partials build, visual crop verification, and CI/CD verification for ALC Kellogg"
+  - id: client-issue-triage
+    description: "GitHub issue intake, deduplication, and 3-way approval triage via Discord"
+  - id: feature-request
+    description: "Submit feature requests for webmaster and client support tooling"

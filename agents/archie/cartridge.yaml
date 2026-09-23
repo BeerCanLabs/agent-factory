@@ -1,0 +1,49 @@
+schemaVersion: "1.0"
+id: archie
+name: "Archie"
+role: "Head of Engineering & Infrastructure Architect"
+prompt: "./soul.md"
+
+triggers:
+  - type: http
+    path: /wake
+  - type: webhook
+    path: /hooks/github
+    secretRef: GITHUB_WEBHOOK_SECRET
+  - type: discord
+    secretRef: ARCHIE_DISCORD_BOT_TOKEN
+
+secrets:
+  requires:
+    - name: GITHUB_TOKEN
+      description: "GitHub token for repository inspection, PR review, and issue triage"
+    - name: GITHUB_WEBHOOK_SECRET
+      description: "HMAC signing secret for incoming GitHub webhooks"
+    - name: ARCHIE_DISCORD_BOT_TOKEN
+      description: "Discord Bot Token for Doorman presence and messaging"
+    - name: NOTION_API_KEY
+      description: "Notion API Key for The Submind Operations Board"
+    - name: XAI_API_KEY
+      description: "xAI API Key for Archie LLM inference"
+
+persistence:
+  enabled: true
+  prefix: archie-state
+
+compute:
+  kind: oci
+  ref: "566332862296.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents:archie"
+  localCommand:
+    - python3
+    - agent.py
+
+runtime:
+  warmDownSeconds: 3600
+
+skills:
+  - id: cloud-ops
+    description: "Cloud Run, ECS, and Terraform operations"
+  - id: notion
+    description: "Task and delivery tracking on The Submind Operations Board"
+  - id: feature-request
+    description: "Convert capability gaps to structured GitHub issues"

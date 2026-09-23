@@ -73,7 +73,7 @@ const state: FactoryState = {
   runs: Object.assign(new FileRunStore(RUNS_DIR), { onChange: (run: Parameters<typeof runEvent>[0]) => hub.publish(runEvent(run)) }),
   runTokens: new RunTokens(process.env.FACTORY_RUN_TOKEN_KEY),
   callbacks: callbackPolicyFromEnv(),
-  publicUrl: process.env.FACTORY_PUBLIC_URL,
+  publicUrl: process.env.FACTORY_PUBLIC_URL || process.env.FACTORY_URL || 'http://control-plane.factory.internal:8088',
   gatewayUrl: process.env.FACTORY_GATEWAY_URL,
   idleMs: IDLE_MS,
   idleTimers: new Map(),
@@ -149,7 +149,7 @@ if (ledgerSink) {
 const busSink = busSinkFromEnv();
 if (busSink) attachBus(hub, busSink);
 
-const schedulesPath = process.env.FACTORY_SCHEDULES_PATH || join(process.cwd(), 'data', 'schedules.json');
+const schedulesPath = process.env.FACTORY_SCHEDULES_PATH || join(DATA_DIR, 'schedules.json');
 state.schedules = new ScheduleStore(schedulesPath);
 
 const server = createFactoryServer(state);

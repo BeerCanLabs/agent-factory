@@ -1,0 +1,50 @@
+schemaVersion: "1.0"
+id: rosie
+name: "Rosie"
+role: "Home Assistant Infrastructure Manager & Robotic Maid"
+prompt: "./soul.md"
+
+triggers:
+  - type: http
+    path: /wake
+  - type: discord
+    secretRef: ROSIE_DISCORD_BOT_TOKEN
+
+secrets:
+  requires:
+    - name: ROSIE_DISCORD_BOT_TOKEN
+      description: "Discord Bot Token for Doorman presence and home automation commands"
+    - name: HA_LONG_LIVED_TOKEN
+      description: "Long-lived access token for Home Assistant REST API"
+    - name: HASS_URL
+      description: "Home Assistant base URL"
+    - name: NOTION_API_KEY
+      description: "Notion API Key for The Submind Operations Board"
+    - name: XAI_API_KEY
+      description: "xAI Grok API key for robotic intelligence and tool execution"
+
+persistence:
+  enabled: true
+  prefix: rosie-state
+
+compute:
+  kind: oci
+  ref: "566332862296.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents:rosie"
+  localCommand:
+    - node
+    - worker.mjs
+
+runtime:
+  warmDownSeconds: 3600
+
+skills:
+  - id: home-assistant
+    description: "Manage Home Assistant devices, scenes, states, and automations"
+  - id: home-assistant-automations
+    description: "Create, update, toggle, reload, and troubleshoot Home Assistant automations"
+  - id: kitty-litter-monitoring
+    description: "Monitor Litter-Robot levels, waste drawer status, and health telemetry for Zander and Lexi"
+  - id: action-scheduling
+    description: "Schedule automated recurring and one-off agent actions with Factory Control Plane"
+  - id: notion
+    description: "Task and delivery tracking on The Submind Operations Board"
