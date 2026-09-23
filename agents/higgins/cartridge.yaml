@@ -1,0 +1,64 @@
+schemaVersion: "1.0"
+id: higgins
+name: "Higgins"
+role: "Estate & Executive Manager"
+prompt: "./soul.md"
+
+triggers:
+  - type: http
+    path: /wake
+  - type: discord
+    secretRef: HIGGINS_DISCORD_BOT_TOKEN
+
+secrets:
+  requires:
+    - name: HIGGINS_DISCORD_BOT_TOKEN
+      description: "Discord Bot Token for Higgins Doorman presence and butler commands"
+    - name: MOTION_API_KEY
+      description: "Motion API key for Stephanie's task and schedule management"
+    - name: CC_API_TOKEN
+      description: "Closing Climb API token for Buffini Referral Maker pipeline"
+    - name: REFERRAL_MAKER_USERNAME
+      description: "Buffini Referral Maker login username"
+    - name: REFERRAL_MAKER_PASSWORD
+      description: "Buffini Referral Maker login password"
+    - name: HIGGINS_GITHUB_TOKEN
+      description: "GitHub token for issue filing and repository updates"
+    - name: HA_LONG_LIVED_TOKEN
+      description: "Home Assistant REST API token"
+    - name: HASS_URL
+      description: "Home Assistant URL"
+    - name: NOTION_API_KEY
+      description: "Notion API key"
+    - name: XAI_API_KEY
+      description: "xAI Grok API key for butler intelligence"
+    - name: ANTHROPIC_API_KEY
+      description: "Anthropic Claude API key for reasoning"
+
+persistence:
+  enabled: true
+  prefix: higgins-state
+
+compute:
+  kind: oci
+  ref: "566332862296.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents:higgins"
+  localCommand:
+    - python3
+    - agent.py
+
+runtime:
+  warmDownSeconds: 3600
+
+skills:
+  - id: referral-maker
+    description: "Manage Buffini Referral Maker CRM, Closing Climb deals, and e-ink display"
+  - id: motion
+    description: "Manage Stephanie's tasks, calendar blocks, and auto-scheduling in Motion"
+  - id: home-print
+    description: "Queue Weekly 25 Outreach sheets to the home printer"
+  - id: google-calendar
+    description: "Create and update events on Google Calendar synced with Motion"
+  - id: web-search
+    description: "Search the web for real estate information and research"
+  - id: action-scheduling
+    description: "Schedule automated recurring and one-off agent actions with Factory Control Plane"
