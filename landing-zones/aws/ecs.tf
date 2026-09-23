@@ -83,6 +83,7 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_EVENT_BUS", value = "eventbridge:${aws_cloudwatch_event_bus.factory.name}" },
         { name = "MEMORY_STORE_DIR", value = "/tmp/mind" },
         { name = "MEMORY_EPHEMERAL_DIR", value = "/tmp/ephemeral" },
+        { name = "FACTORY_IDLE_MS", value = "3600000" },
       ])
       secrets = [
         { name = "FACTORY_TOKEN", valueFrom = local.secret["FACTORY_TOKEN"] },

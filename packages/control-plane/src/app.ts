@@ -244,11 +244,13 @@ export function activeRun(state: FactoryState, agentId: string): Run | undefined
 function scheduleTimeout(state: FactoryState, run: Run) {
   const prev = state.idleTimers.get(run.agentId);
   if (prev) clearTimeout(prev);
-  if (state.idleMs <= 0) return;
+  const agent = state.agents.get(run.agentId);
+  const timeoutMs = (agent?.warmDownSeconds && agent.warmDownSeconds > 0) ? agent.warmDownSeconds * 1000 : state.idleMs;
+  if (timeoutMs <= 0) return;
   const t = setTimeout(() => {
     const cur = state.runs.get(run.runId);
     if (cur && !isTerminal(cur.state)) void finishRun(state, run.runId, 'TIMED_OUT', { actor: SYSTEM.idle });
-  }, state.idleMs);
+  }, timeoutMs);
   t.unref?.();
   state.idleTimers.set(run.agentId, t);
 }
@@ -903,8 +905,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     await state.runtime.deliver(agent, payload);
     deliverToMailbox(state, agent.id, payload);
     const currentRun = activeRun(state, agent.id);
-    if (currentRun && currentRun.input === undefined) {
-      currentRun.input = payload;
+    if (currentRun) {
+      if (currentRun.input === undefined) {
+        currentRun.input = payload;
+      }
+      scheduleTimeout(state, currentRun);
     }
     state.ledger.append({
       timestamp: new Date().toISOString(),
