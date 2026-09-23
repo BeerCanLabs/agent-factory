@@ -8,12 +8,13 @@ import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
 import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
-import type { Surface } from '@beercanlabs/factory-contract';
+import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import { AgentRecord } from './catalog.js';
 import type { Runtime } from './runtime.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { exceededWindow, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
+import { Keymaster } from '@beercanlabs/factory-keymaster';
 
 export type FactoryState = {
   agents: Map<string, AgentRecord>;
@@ -28,6 +29,7 @@ export type FactoryState = {
   policies: PolicyStore;
   spend: SpendTracker;
   approvals: ApprovalStore;
+  keymaster?: Keymaster;
   /** URL agents use to reach the control plane (result reporting, input fetch). */
   publicUrl?: string;
   /** URL agents use to reach the egress gateway; handed to every run as FACTORY_GATEWAY_URL. */
@@ -260,7 +262,7 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
 
   let bound: { ok: true, env: Record<string, string> } | { ok: false, missing: string[] } = { ok: true, env: {} };
   if (agent.provider === 'local') {
-    bound = await bindSecrets(agent.requires, state.providers);
+    bound = await bindSecrets(agent.ungated ?? agent.requires, state.providers);
     if (!bound.ok) {
       const run = state.runs.create({
         agentId,
@@ -295,7 +297,7 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
   const agent = state.agents.get(run.agentId)!;
   let env = secrets;
   if (!env) {
-    const bound = await bindSecrets(agent.requires, state.providers);
+    const bound = await bindSecrets(agent.ungated ?? agent.requires, state.providers);
     if (!bound.ok) {
       const failed = state.runs.update(run.runId, { state: 'PRE_FLIGHT_MISSING_SECRET', missing: bound.missing });
       record(state, failed, 'PRE_FLIGHT_MISSING_SECRET', SYSTEM.runtime);
@@ -621,6 +623,21 @@ async function authenticateRun(req: http.IncomingMessage, res: http.ServerRespon
     return null;
   }
   return run;
+}
+
+export function getKeymaster(state: FactoryState): Keymaster {
+  if (!state.keymaster) {
+    state.keymaster = new Keymaster({
+      approvals: state.approvals,
+      ledger: state.ledger,
+      providers: state.providers,
+      runTokens: state.runTokens,
+      secretValues: state.secretValues,
+      getAgent: (agentId: string) => state.agents.get(agentId),
+      getRun: (runId: string) => state.runs.get(runId),
+    });
+  }
+  return state.keymaster;
 }
 
 import { UI_HTML } from './ui.js';
@@ -1031,6 +1048,46 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
+  const kmCheckout = path === '/api/v1/keymaster/checkout' || path === '/api/v1/gateway/keymaster/checkout';
+  if (kmCheckout && req.method === 'POST') {
+    const isGatewayPath = path.startsWith('/api/v1/gateway/');
+    let actor: string | undefined;
+    if (isGatewayPath) {
+      const principal = await authenticate(req, res, state, 'gateway');
+      if (!principal) return;
+      actor = principal.actor;
+    }
+    const b = (await readJson(req)) as Record<string, unknown>;
+    const runId = typeof b.runId === 'string' ? b.runId : undefined;
+    const approvalId = typeof b.approvalId === 'string' ? b.approvalId : undefined;
+    const gatedSecret = typeof b.gatedSecret === 'string' ? b.gatedSecret : undefined;
+    const turnId = typeof b.turnId === 'string' ? b.turnId : undefined;
+    const proofHash = typeof b.proofHash === 'string' ? b.proofHash : undefined;
+
+    if (!runId || !approvalId || !gatedSecret || !turnId) {
+      json(res, 400, { error: 'runId, approvalId, gatedSecret, turnId required' });
+      return;
+    }
+
+    if (!isGatewayPath) {
+      const run = await authenticateRun(req, res, state, runId);
+      if (!run) return;
+      actor = `run:${run.agentId}`;
+    }
+
+    const km = getKeymaster(state);
+    const outcome = await km.checkout({
+      runId,
+      approvalId,
+      gatedSecret,
+      turnId,
+      proofHash,
+      actor,
+    });
+    json(res, outcome.status, outcome.ok ? outcome.lease : { error: outcome.error, details: outcome.details });
+    return;
+  }
+
   if (path === '/api/v1/approvals' && req.method === 'GET') {
     if (!(await authenticate(req, res, state, 'viewer'))) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
@@ -1093,17 +1150,18 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       ? ((cartridge.compute as { ref?: string }).ref ?? '')
       : (typeof cartridge.repo === 'string' ? cartridge.repo : (typeof body.repo === 'string' ? body.repo : ''));
 
-    const rawSecrets = (cartridge.secrets && typeof cartridge.secrets === 'object' && Array.isArray((cartridge.secrets as { requires?: unknown[] }).requires))
-      ? (cartridge.secrets as { requires: unknown[] }).requires
-      : (Array.isArray(body.secrets) ? body.secrets : []);
-
-    const requires = rawSecrets.map((s: unknown) => (typeof s === 'string' ? s : (typeof s === 'object' && s !== null && 'name' in s ? (s as { name: string }).name : String(s))));
+    const classified = cartridge.secrets && typeof cartridge.secrets === 'object'
+      ? classifySecrets(cartridge.secrets as Parameters<typeof classifySecrets>[0])
+      : classifySecrets({ requires: Array.isArray(body.secrets) ? body.secrets : [] });
+    const requires = classified.all;
+    const ungated = classified.ungated;
+    const gated = classified.gated;
     const triggers = (Array.isArray(cartridge.triggers) ? cartridge.triggers : (Array.isArray(body.triggers) ? body.triggers : [])) as Surface['triggers'];
     const memoryPrefix = (typeof cartridge.persistence === 'object' && cartridge.persistence !== null && 'prefix' in cartridge.persistence)
       ? (cartridge.persistence as { prefix: string }).prefix
       : (typeof cartridge.memory === 'object' && cartridge.memory !== null && 'prefix' in cartridge.memory ? (cartridge.memory as { prefix: string }).prefix : agentId);
 
-    const record = {
+    const record: AgentRecord = {
       id: typeof cartridge.id === 'string' ? cartridge.id : agentId,
       name: typeof cartridge.name === 'string' ? cartridge.name : (typeof body.name === 'string' ? body.name : agentId),
       role: typeof cartridge.role === 'string' ? cartridge.role : (typeof body.role === 'string' ? body.role : 'Agent'),
@@ -1111,6 +1169,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       provider: 'cloud',
       artifact,
       requires,
+      ungated: ungated.length ? ungated : requires,
+      gated,
       triggers,
       memoryPrefix,
       dir: '/tmp/' + agentId

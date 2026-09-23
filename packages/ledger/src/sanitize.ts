@@ -19,6 +19,9 @@ export type LedgerEvent = {
   costUsd?: number;
   route?: string;
   approvalId?: string;
+  leaseId?: string;
+  gatedSecret?: string;
+  turnId?: string;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
@@ -38,6 +41,9 @@ const ALLOWED = new Set<keyof LedgerEvent>([
   'costUsd',
   'route',
   'approvalId',
+  'leaseId',
+  'gatedSecret',
+  'turnId',
 ]);
 
 const PAYLOAD_KEYS = ['payload', 'body', 'content', 'prompt', 'params', 'messages', 'text', 'input', 'output'];
@@ -128,6 +134,9 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (typeof raw.costUsd === 'number' && Number.isFinite(raw.costUsd)) event.costUsd = raw.costUsd;
   if (raw.route !== undefined) event.route = String(raw.route);
   if (raw.approvalId !== undefined) event.approvalId = String(raw.approvalId);
+  if (raw.leaseId !== undefined) event.leaseId = String(raw.leaseId);
+  if (raw.gatedSecret !== undefined) event.gatedSecret = String(raw.gatedSecret);
+  if (raw.turnId !== undefined) event.turnId = String(raw.turnId);
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);

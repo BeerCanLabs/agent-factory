@@ -38,7 +38,11 @@ const door = createDoorman({
   },
 });
 
+let isReconciling = false;
+
 async function reconcileFromFactory() {
+  if (isReconciling) return;
+  isReconciling = true;
   try {
     const res = await fetch(`${FACTORY_URL}/api/v1/agents`, {
       headers: FACTORY_TOKEN ? { Authorization: `Bearer ${FACTORY_TOKEN}` } : {},
@@ -52,12 +56,19 @@ async function reconcileFromFactory() {
     const surfaces = agents.flatMap((a) =>
       (a.triggers ?? [])
         .filter((t) => t.type === 'discord')
-        .map((t) => ({ agentId: a.id, name: a.name, secretRef: t.secretRef || 'DISCORD_BOT_TOKEN' })),
+        .map((t) => ({
+          agentId: a.id,
+          name: a.name,
+          initialPresence: 'offline' as const,
+          secretRef: t.secretRef || 'DISCORD_BOT_TOKEN',
+        })),
     );
     await door.reconcile(surfaces);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[doorman] reconcile: ${message}`);
+  } finally {
+    isReconciling = false;
   }
 }
 
@@ -67,5 +78,10 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[doorman] idle mailbox on :${PORT} (no Discord app required to deploy)`);
 });
 
-setInterval(() => void reconcileFromFactory(), 15_000);
-void reconcileFromFactory();
+async function pollReconcile() {
+  try {
+    await reconcileFromFactory();
+  } catch {}
+  setTimeout(() => void pollReconcile(), 30_000);
+}
+void pollReconcile();
