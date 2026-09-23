@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { validateCartridge, type Surface, type Cartridge } from '@beercanlabs/factory-contract';
+import { validateCartridge, classifySecrets, type Surface, type Cartridge, type SecretsManifest } from '@beercanlabs/factory-contract';
 
 export type AgentRecord = {
   id: string;
@@ -12,6 +12,8 @@ export type AgentRecord = {
   artifact: string;
   localCommand?: string[];
   requires: string[];
+  ungated: string[];
+  gated: string[];
   triggers: Surface['triggers'];
   memoryPrefix?: string;
   dir: string;
@@ -37,6 +39,8 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
     let artifact = '';
     let localCommand: string[] | undefined;
     let requires: string[] = [];
+    let ungated: string[] = [];
+    let gated: string[] = [];
     let triggers: Surface['triggers'] = [];
     let memoryPrefix: string | undefined = result.cartridgeId;
 
@@ -52,8 +56,11 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
         if (raw.compute?.localCommand || raw.artifact?.localCommand) {
           localCommand = raw.compute?.localCommand || raw.artifact?.localCommand;
         }
-        if (raw.secrets?.requires) {
-          requires = raw.secrets.requires.map((s) => (typeof s === 'string' ? s : s.name));
+        if (raw.secrets) {
+          const classified = classifySecrets(raw.secrets);
+          requires = classified.all;
+          ungated = classified.ungated;
+          gated = classified.gated;
         }
         if (raw.triggers) {
           triggers = raw.triggers;
@@ -81,10 +88,15 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
     }
     if (requires.length === 0 && entries.has('secrets.manifest.yaml')) {
       try {
-        const raw = parseYaml(readFileSync(join(dir, 'secrets.manifest.yaml'), 'utf8')) as { requires?: string[] };
-        requires = raw.requires ?? [];
+        const raw = parseYaml(readFileSync(join(dir, 'secrets.manifest.yaml'), 'utf8')) as SecretsManifest;
+        const classified = classifySecrets(raw);
+        requires = classified.all;
+        ungated = classified.ungated;
+        gated = classified.gated;
       } catch {
         requires = [];
+        ungated = [];
+        gated = [];
       }
     }
     if (triggers.length === 0 && entries.has('surface.yaml')) {
@@ -113,6 +125,8 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
       artifact,
       localCommand,
       requires,
+      ungated: ungated.length ? ungated : requires,
+      gated,
       triggers,
       memoryPrefix,
       dir,

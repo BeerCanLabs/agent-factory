@@ -47,9 +47,23 @@ describe('doorman', () => {
       authorId: 'u1',
     });
     assert.deepEqual(woken, ['echo-agent']);
-    assert.deepEqual(handed, ['hello']);
+    assert.deepEqual(handed, []);
     assert.equal(gw.presence, 'available');
     assert.equal(gw.connected, true);
+
+    // Reconcile runs in background while agent is warm and working
+    await door.reconcile([{ agentId: 'echo-agent', secretRef: 'DISCORD_BOT_TOKEN' }]);
+    assert.equal(gw.presence, 'available', 'reconcile must NOT clobber available presence back to offline');
+
+    await door.receive({
+      agentId: 'echo-agent',
+      channelId: 'c1',
+      messageId: 'm2',
+      content: 'how are you?',
+      authorId: 'u1',
+    });
+    assert.deepEqual(woken, ['echo-agent'], 'must NOT wake again while already available');
+    assert.deepEqual(handed, ['how are you?']);
 
     await door.onAgentIdle('echo-agent');
     assert.equal(gw.presence, 'offline');

@@ -47,6 +47,7 @@ export type DiscordSurface = {
   agentId: string;
   name?: string;
   secretRef: string;
+  initialPresence?: Presence;
 };
 
 export type Doorman = {
@@ -67,6 +68,7 @@ export function createDoorman(opts: {
   handoff: (msg: Conversation) => Promise<void>;
 }): Doorman {
   const agents = new Map<string, { ref: string; gateway: Gateway }>();
+  let isReconciling = false;
 
   const doorman: Doorman = {
     status() {
@@ -80,56 +82,68 @@ export function createDoorman(opts: {
       };
     },
     async reconcile(surfaces) {
-      if (surfaces.length === 0) return;
-      
-      const desiredAgents = new Set(surfaces.map(s => s.agentId));
-      
-      // Destroy gateways for agents no longer requested
-      for (const [agentId, state] of agents) {
-        if (!desiredAgents.has(agentId)) {
-          await state.gateway.destroy();
-          agents.delete(agentId);
-        }
-      }
-
-      // Create and login new gateways
-      for (const surface of surfaces) {
-        if (agents.has(surface.agentId)) continue; // Already running
-
-        const bound = await bindSecrets([surface.secretRef], opts.providers);
-        if (!bound.ok || !bound.env[surface.secretRef]) {
-          console.error(`[doorman] failed to bind secret ${surface.secretRef} for ${surface.agentId}`);
-          continue;
-        }
-
-        const gateway = opts.gatewayFactory ? opts.gatewayFactory() : (opts.gateway || fakeGateway());
-        if (surface.name && gateway.setAgentName) {
-          gateway.setAgentName(surface.name);
-        }
-        agents.set(surface.agentId, { ref: surface.secretRef, gateway });
+      if (isReconciling || surfaces.length === 0) return;
+      isReconciling = true;
+      try {
+        const desiredAgents = new Set(surfaces.map(s => s.agentId));
         
-        try {
-          await gateway.login(bound.env[surface.secretRef]);
-          await gateway.setPresence('offline');
-          
-          gateway.onMessage((msg) => {
-            void doorman.receive({ ...msg, agentId: surface.agentId });
-          });
-          console.log(`[doorman] connected Discord gateway for ${surface.agentId}`);
-        } catch (err) {
-          console.error(`[doorman] Discord login failed for ${surface.agentId}:`, err);
-          agents.delete(surface.agentId);
+        // Destroy gateways for agents no longer requested
+        for (const [agentId, state] of agents) {
+          if (!desiredAgents.has(agentId)) {
+            await state.gateway.destroy().catch(() => {});
+            agents.delete(agentId);
+          }
         }
+
+        // Create and login new gateways
+        for (const surface of surfaces) {
+          if (agents.has(surface.agentId)) {
+            continue;
+          }
+
+          const bound = await bindSecrets([surface.secretRef], opts.providers);
+          if (!bound.ok || !bound.env[surface.secretRef]) {
+            console.warn(`[doorman] failed to bind secret ${surface.secretRef} for ${surface.agentId}`);
+            continue;
+          }
+
+          if (agents.has(surface.agentId)) {
+            continue;
+          }
+
+          const gateway = opts.gatewayFactory ? opts.gatewayFactory() : (opts.gateway || fakeGateway());
+          if (surface.name && gateway.setAgentName) {
+            gateway.setAgentName(surface.name);
+          }
+          
+          try {
+            await gateway.login(bound.env[surface.secretRef]);
+            await gateway.setPresence(surface.initialPresence ?? 'offline');
+            
+            gateway.onMessage((msg) => {
+              void doorman.receive({ ...msg, agentId: surface.agentId });
+            });
+            agents.set(surface.agentId, { ref: surface.secretRef, gateway });
+            console.log(`[doorman] connected Discord gateway for ${surface.agentId} (presence: ${surface.initialPresence ?? 'offline'})`);
+          } catch (err) {
+            console.error(`[doorman] Discord login failed for ${surface.agentId}:`, err);
+            await gateway.destroy().catch(() => {});
+            agents.delete(surface.agentId);
+          }
+        }
+      } finally {
+        isReconciling = false;
       }
     },
     async receive(msg) {
       const state = agents.get(msg.agentId);
       if (!state || !state.gateway.connected) return;
       if (state.gateway.presence === 'offline') {
-        await opts.wake(msg.agentId, msg);
         await state.gateway.setPresence('available');
+        await opts.wake(msg.agentId, msg);
+      } else {
+        await opts.handoff(msg);
       }
-      await opts.handoff(msg);
     },
     async onAgentIdle(agentId) {
       const state = agents.get(agentId);

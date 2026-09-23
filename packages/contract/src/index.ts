@@ -12,6 +12,10 @@ export {
   triggerSchema,
   secretName,
   secretItem,
+  secretGate,
+  mcpEntry,
+  classifySecrets,
+  classifyCapabilities,
 } from './schema.js';
 export type {
   SecretsManifest,
@@ -23,6 +27,10 @@ export type {
   Bench,
   BenchCase,
   Cartridge,
+  SecretGate,
+  ClassifiedSecrets,
+  ClassifiedCapabilities,
+  McpCapability,
 } from './schema.js';
 export { validateCartridge } from './validate.js';
 export type { ValidationIssue, ValidationResult } from './validate.js';

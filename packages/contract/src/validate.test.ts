@@ -209,3 +209,95 @@ describe('repo example cartridges', () => {
   }
 });
 
+describe('gated vs ungated secrets & capabilities', () => {
+  it('classifies legacy 1.0 requires as ungated', async () => {
+    const { classifySecrets } = await import('./schema.js');
+    const res = classifySecrets({ requires: ['DISCORD_BOT_TOKEN', 'API_KEY'] });
+    assert.deepEqual(res.ungated, ['DISCORD_BOT_TOKEN', 'API_KEY']);
+    assert.deepEqual(res.gated, []);
+    assert.deepEqual(res.all, ['DISCORD_BOT_TOKEN', 'API_KEY']);
+  });
+
+  it('classifies explicit ungated and gated secrets', async () => {
+    const { classifySecrets } = await import('./schema.js');
+    const res = classifySecrets({
+      ungated: ['BOOT_CONFIG_SECRET'],
+      gated: ['PROD_DB_PASSWORD', 'FINANCIAL_LEDGER_KEY'],
+    });
+    assert.deepEqual(res.ungated, ['BOOT_CONFIG_SECRET']);
+    assert.deepEqual(res.gated, ['PROD_DB_PASSWORD', 'FINANCIAL_LEDGER_KEY']);
+    assert.deepEqual(res.all, ['BOOT_CONFIG_SECRET', 'PROD_DB_PASSWORD', 'FINANCIAL_LEDGER_KEY']);
+  });
+
+  it('handles item objects with gate: gated in requires', async () => {
+    const { classifySecrets } = await import('./schema.js');
+    const res = classifySecrets({
+      requires: [
+        'BOOT_SECRET',
+        { name: 'GATED_SECRET', description: 'Gated', gate: 'gated' },
+        { name: 'NORMAL_SECRET', description: 'Ungated', gate: 'ungated' },
+      ],
+    });
+    assert.deepEqual(res.ungated, ['BOOT_SECRET', 'NORMAL_SECRET']);
+    assert.deepEqual(res.gated, ['GATED_SECRET']);
+  });
+
+  it('validates a cartridge with gated secrets in cartridge.yaml', () => {
+    const dir = fixture({
+      'cartridge.yaml': `
+schemaVersion: "1.0"
+id: "gated-agent"
+name: "Gated Agent"
+role: "Security Tester"
+triggers:
+  - type: http
+    path: /wake
+secrets:
+  ungated:
+    - PUBLIC_API_KEY
+  gated:
+    - HIGH_SECURITY_KEY
+compute:
+  kind: managed
+  ref: "managed:gated-agent"
+`,
+      'soul.md': '# Gated Agent\n',
+    });
+    try {
+      const result = validateCartridge(dir);
+      assert.equal(result.ok, true, JSON.stringify(result.issues, null, 2));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('validates a cartridge with gated skills/capabilities', () => {
+    const dir = fixture({
+      'cartridge.yaml': `
+schemaVersion: "1.0"
+id: "skilled-agent"
+name: "Skilled Agent"
+role: "Worker"
+triggers:
+  - type: http
+    path: /wake
+skills:
+  - id: safe-tool
+    gate: ungated
+  - id: dangerous-tool
+    gate: gated
+compute:
+  kind: managed
+  ref: "managed:skilled-agent"
+`,
+      'soul.md': '# Skilled Agent\n',
+    });
+    try {
+      const result = validateCartridge(dir);
+      assert.equal(result.ok, true, JSON.stringify(result.issues, null, 2));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+});
+

@@ -1,0 +1,22 @@
+{
+  "name": "@beercanlabs/factory-keymaster",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test src/keymaster.test.ts"
+  },
+  "dependencies": {
+    "@beercanlabs/factory-auth": "0.1.0",
+    "@beercanlabs/factory-contract": "0.1.0",
+    "@beercanlabs/factory-ledger": "0.1.0",
+    "@beercanlabs/factory-secrets-bind": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
