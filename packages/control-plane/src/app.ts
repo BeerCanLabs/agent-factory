@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
@@ -1275,7 +1275,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const principal = await authenticate(req, res, state, 'admin');
     if (!principal) return;
     const body = await readJson(req);
-    const agentId = randomUUID(); // Strict cryptographic UID
+    const cartridge = (body.cartridge && typeof body.cartridge === 'object' ? body.cartridge : body) as Record<string, unknown>;
+    const agentId = typeof cartridge.id === 'string' ? cartridge.id : (typeof body.id === 'string' ? body.id : randomUUID());
     
     state.ledger.append({
       timestamp: new Date().toISOString(),
@@ -1300,9 +1301,6 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         actor: 'SYSTEM.policy'
       });
     }
-    
-    // Support unified cartridge manifest registration or legacy flat body
-    const cartridge = (body.cartridge && typeof body.cartridge === 'object' ? body.cartridge : body) as Record<string, unknown>;
     const artifact = typeof cartridge.compute === 'object' && cartridge.compute !== null
       ? ((cartridge.compute as { ref?: string }).ref ?? '')
       : (typeof cartridge.repo === 'string' ? cartridge.repo : (typeof body.repo === 'string' ? body.repo : ''));
@@ -1353,6 +1351,157 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (path === '/api/v1/registry/agents' && req.method === 'GET') {
     if (!(await authenticate(req, res, state, 'viewer'))) return;
     json(res, 200, Array.from(state.agents.values()));
+    return;
+  }
+
+  const regAgentMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)$/);
+  if (regAgentMatch && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    const agent = state.agents.get(regAgentMatch[1]);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    json(res, 200, agent);
+    return;
+  }
+
+  const budgetMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/budget$/);
+  if (budgetMatch && req.method === 'PUT') {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return;
+    const agentId = budgetMatch[1];
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    const checked = validatePolicy(await readJson(req));
+    if (!checked.ok) {
+      json(res, 400, { error: checked.error });
+      return;
+    }
+    state.policies.set(agentId, checked.policy);
+    if (agent.state === 'PENDING_BUDGET') {
+      agent.state = 'PENDING_DEPLOY';
+    }
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'BUDGET_APPROVED',
+      actor: principal.actor,
+    });
+    if (state.registryDir) {
+      try {
+        mkdirSync(state.registryDir, { recursive: true });
+        writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
+      } catch (err) {
+        console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
+      }
+    }
+    json(res, 200, agent);
+    return;
+  }
+
+  const retireMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/retire$/);
+  if (retireMatch && req.method === 'POST') {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return;
+    const agentId = retireMatch[1];
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    agent.state = 'RETIRED_PENDING_PURGE';
+    const now = new Date();
+    agent.retiredAt = now.toISOString();
+    agent.purgeDueAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    state.ledger.append({
+      timestamp: now.toISOString(),
+      agentId,
+      type: 'action',
+      action: 'AGENT_RETIRED_PENDING_PURGE',
+      actor: principal.actor,
+    });
+    if (state.registryDir) {
+      try {
+        mkdirSync(state.registryDir, { recursive: true });
+        writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
+      } catch (err) {
+        console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
+      }
+    }
+    json(res, 200, agent);
+    return;
+  }
+
+  const reinstateMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/reinstate$/);
+  if (reinstateMatch && req.method === 'POST') {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return;
+    const agentId = reinstateMatch[1];
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    if (agent.state !== 'RETIRED_PENDING_PURGE') {
+      json(res, 400, { error: 'agent_not_retired', message: 'Only retired agents can be reinstated' });
+      return;
+    }
+    agent.state = 'SLEEPING';
+    delete agent.retiredAt;
+    delete agent.purgeDueAt;
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'AGENT_REINSTATED',
+      actor: principal.actor,
+    });
+    if (state.registryDir) {
+      try {
+        mkdirSync(state.registryDir, { recursive: true });
+        writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
+      } catch (err) {
+        console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
+      }
+    }
+    json(res, 200, agent);
+    return;
+  }
+
+  const purgeMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/purge$/);
+  if (purgeMatch && req.method === 'POST') {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return;
+    const agentId = purgeMatch[1];
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    state.agents.delete(agentId);
+    if (state.registryDir) {
+      try {
+        const filePath = join(state.registryDir, `${agentId}.json`);
+        if (existsSync(filePath)) {
+          unlinkSync(filePath);
+        }
+      } catch (err) {
+        console.warn(`[control-plane] failed to delete dynamic agent file ${agentId}:`, err);
+      }
+    }
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'AGENT_PURGED',
+      actor: principal.actor,
+    });
+    json(res, 200, { ok: true, id: agentId, action: 'purged' });
     return;
   }
   
