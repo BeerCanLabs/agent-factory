@@ -11,7 +11,7 @@ triggers:
     path: /hooks/ops-alerts
     secretRef: ALERT_WEBHOOK_SECRET
   - type: discord
-    secretRef: DISCORD_BOT_TOKEN
+    secretRef: STARTER_DISCORD_BOT_TOKEN
 
 secrets:
   requires:

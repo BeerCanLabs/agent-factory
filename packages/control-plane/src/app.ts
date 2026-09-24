@@ -289,6 +289,20 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
     if (bad) return { status: 400, body: { error: bad } };
   }
 
+  // Deduplicate incoming runs with identical messageId
+  if (opts.input && typeof opts.input === 'object') {
+    const msgId = (opts.input as Record<string, any>).messageId;
+    if (msgId) {
+      const existing = state.runs.list({ agentId }).find((r) => {
+        const rInput = r.input as Record<string, any> | undefined;
+        return rInput && rInput.messageId === msgId;
+      });
+      if (existing) {
+        return { status: 200, body: existing };
+      }
+    }
+  }
+
   let bound: { ok: true, env: Record<string, string> } | { ok: false, missing: string[] } = { ok: true, env: {} };
   if (agent.provider === 'local') {
     bound = await bindSecrets(agent.ungated ?? agent.requires, state.providers);
