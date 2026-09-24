@@ -63,6 +63,25 @@ resource "aws_lb_listener_rule" "control_plane_api" {
         "/api/v1/ledger*",
         "/api/v1/schedules*",
         "/api/v1/registry*",
+      ]
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "control_plane_agents" {
+  count        = var.garrison_image != "" ? 1 : 0
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 20
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.control.arn
+  }
+
+  condition {
+    path_pattern {
+      values = [
+        "/api/v1/agents",
         "/api/v1/agents/*/runs*",
         "/api/v1/gateway/*",
       ]
