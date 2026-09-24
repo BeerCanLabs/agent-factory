@@ -97,9 +97,11 @@ resource "aws_security_group" "efs" {
 locals {
   # [sg, port, source sg, description]
   ingress = {
-    alb_https   = [aws_security_group.alb.id, 443, null, "HTTPS from anywhere"]
-    cp_from_alb = [aws_security_group.control_plane.id, 8088, aws_security_group.alb.id, "API via ALB"]
-    cp_from_ag  = [aws_security_group.control_plane.id, 8088, aws_security_group.agents.id, "run input/result/heartbeat"]
+    alb_https         = [aws_security_group.alb.id, 443, null, "HTTPS from anywhere"]
+    cp_from_alb       = [aws_security_group.control_plane.id, 8088, aws_security_group.alb.id, "API via ALB"]
+    garrison_from_alb = [aws_security_group.control_plane.id, 3000, aws_security_group.alb.id, "Garrison via ALB"]
+    cp_from_cp        = [aws_security_group.control_plane.id, 8088, aws_security_group.control_plane.id, "control plane from garrison/internal"]
+    cp_from_ag        = [aws_security_group.control_plane.id, 8088, aws_security_group.agents.id, "run input/result/heartbeat"]
     cp_from_gw  = [aws_security_group.control_plane.id, 8088, aws_security_group.gateway.id, "gateway run context + ledger"]
     cp_from_dm  = [aws_security_group.control_plane.id, 8088, aws_security_group.doorman.id, "Doorman wake/handoff"]
     gw_from_ag  = [aws_security_group.gateway.id, 8081, aws_security_group.agents.id, "agent egress"]
