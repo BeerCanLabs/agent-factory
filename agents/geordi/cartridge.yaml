@@ -1,0 +1,50 @@
+schemaVersion: "1.0"
+id: geordi
+name: "Geordi"
+role: "Chief Engineer — Platform Reliability, Cloudflare & DNS"
+prompt: "./soul.md"
+
+triggers:
+  - type: http
+    path: /wake
+  - type: discord
+    secretRef: GEORDI_DISCORD_BOT_TOKEN
+
+secrets:
+  requires:
+    - name: GEORDI_DISCORD_BOT_TOKEN
+      description: "Discord Bot Token for Geordi Doorman presence and chat operations"
+    - name: GEORDI_GITHUB_TOKEN
+      description: "GitHub Personal Access Token for engineering issues and repos"
+    - name: NOTION_API_KEY
+      description: "Notion API Key for The Submind Operations Board"
+    - name: CLOUDFLARE_API_TOKEN
+      description: "Cloudflare API Token for edge DNS and proxy management"
+    - name: DREAMHOST_DNS_API_KEY
+      description: "DreamHost DNS API Key for zone automation"
+    - name: XAI_API_KEY
+      description: "xAI API Key for Grok LLM inference"
+
+persistence:
+  enabled: true
+  prefix: geordi-state
+
+compute:
+  kind: oci
+  ref: "566332862296.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents:geordi"
+  localCommand:
+    - python3
+    - agent.py
+
+runtime:
+  warmDownSeconds: 3600
+
+skills:
+  - id: cloudflare-ops
+    description: "Cloudflare DNS, SSL/TLS, and Anycast edge proxy configuration"
+  - id: dns-dreamhost
+    description: "DreamHost DNS zone management"
+  - id: notion
+    description: "Task and delivery tracking on The Submind Operations Board"
+  - id: feature-request
+    description: "Submit feature requests to BeerCanLabs/skippy-matrix"

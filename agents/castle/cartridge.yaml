@@ -1,0 +1,50 @@
+schemaVersion: "1.0"
+id: castle
+name: "Castle"
+role: "Editorial Partner & Ghostwriting Agent"
+prompt: "./soul.md"
+
+triggers:
+  - type: http
+    path: /wake
+  - type: discord
+    secretRef: CASTLE_DISCORD_BOT_TOKEN
+
+secrets:
+  requires:
+    - name: CASTLE_DISCORD_BOT_TOKEN
+      description: "Discord Bot Token for Castle editorial chat"
+    - name: CASTLE_GITHUB_TOKEN
+      description: "GitHub Token for blog repository publishing and commits"
+    - name: NOTION_API_KEY
+      description: "Notion API Key for Submind Operations Board"
+    - name: XAI_API_KEY
+      description: "xAI API Key for Grok LLM inference"
+
+persistence:
+  enabled: true
+  prefix: castle-state
+
+compute:
+  kind: oci
+  ref: "566332862296.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents:castle"
+  localCommand:
+    - python3
+    - agent.py
+
+runtime:
+  warmDownSeconds: 3600
+
+skills:
+  - id: dalesackrider-blog
+    description: "Authoring and publishing for dalesackrider.com"
+  - id: iquitagain-blog
+    description: "Authoring and publishing for iquitagain.com"
+  - id: sackrider-org-blog
+    description: "Authoring and publishing for sackrider.org"
+  - id: wereadthebible-blog
+    description: "Authoring and publishing for wereadthebible.com"
+  - id: notion
+    description: "Task and delivery tracking on The Submind Operations Board"
+  - id: feature-request
+    description: "Submit feature requests for editorial workflows"

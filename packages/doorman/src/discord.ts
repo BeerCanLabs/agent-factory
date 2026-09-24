@@ -23,6 +23,7 @@ export function createDiscordGateway(): Gateway {
   const standbySessions = new Map<string, StandbySession>(); // channelId -> StandbySession
   let currentPresence: Presence = 'offline';
   let agentName = 'your agent';
+  const seenMessageIds = new Set<string>();
 
   function clearStandbySession(channelId: string) {
     const session = standbySessions.get(channelId);
@@ -70,6 +71,15 @@ export function createDiscordGateway(): Gateway {
     const isMentioned = client.user && message.mentions.has(client.user.id);
 
     if (isDM || isMentioned) {
+      if (seenMessageIds.has(message.id)) {
+        return;
+      }
+      seenMessageIds.add(message.id);
+      if (seenMessageIds.size > 2000) {
+        const first = seenMessageIds.values().next().value;
+        if (first) seenMessageIds.delete(first);
+      }
+
       console.log(`[doorman] Discord message received in channel ${message.channelId} from ${message.author.id}`);
 
       // If the agent is currently offline (sleeping), start standby session with recurring typing and timers

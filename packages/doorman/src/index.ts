@@ -68,6 +68,7 @@ export function createDoorman(opts: {
   handoff: (msg: Conversation) => Promise<void>;
 }): Doorman {
   const agents = new Map<string, { ref: string; gateway: Gateway }>();
+  const connecting = new Set<string>();
   let isReconciling = false;
 
   const doorman: Doorman = {
@@ -97,17 +98,20 @@ export function createDoorman(opts: {
 
         // Create and login new gateways
         for (const surface of surfaces) {
-          if (agents.has(surface.agentId)) {
+          if (agents.has(surface.agentId) || connecting.has(surface.agentId)) {
             continue;
           }
+          connecting.add(surface.agentId);
 
           const bound = await bindSecrets([surface.secretRef], opts.providers);
           if (!bound.ok || !bound.env[surface.secretRef]) {
             console.warn(`[doorman] failed to bind secret ${surface.secretRef} for ${surface.agentId}`);
+            connecting.delete(surface.agentId);
             continue;
           }
 
           if (agents.has(surface.agentId)) {
+            connecting.delete(surface.agentId);
             continue;
           }
 
@@ -129,6 +133,8 @@ export function createDoorman(opts: {
             console.error(`[doorman] Discord login failed for ${surface.agentId}:`, err);
             await gateway.destroy().catch(() => {});
             agents.delete(surface.agentId);
+          } finally {
+            connecting.delete(surface.agentId);
           }
         }
       } finally {
