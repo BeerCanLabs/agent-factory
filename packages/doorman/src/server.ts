@@ -51,6 +51,7 @@ async function reconcileFromFactory() {
     const agents = (await res.json()) as Array<{
       id: string;
       name?: string;
+      state?: string;
       triggers?: Array<{ type: string; secretRef?: string }>;
     }>;
     const surfaces = agents.flatMap((a) =>
@@ -59,7 +60,7 @@ async function reconcileFromFactory() {
         .map((t) => ({
           agentId: a.id,
           name: a.name,
-          initialPresence: 'offline' as const,
+          initialPresence: (a.state === 'WORKING' ? 'available' : 'offline') as 'available' | 'offline',
           secretRef: t.secretRef || 'DISCORD_BOT_TOKEN',
         })),
     );

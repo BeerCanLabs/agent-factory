@@ -58,10 +58,10 @@ resource "aws_iam_role_policy" "control_plane" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid       = "StartOnlyAgentTasks"
-        Effect    = "Allow"
-        Action    = ["ecs:RunTask"]
-        Resource  = [
+        Sid    = "StartOnlyAgentTasks"
+        Effect = "Allow"
+        Action = ["ecs:RunTask"]
+        Resource = [
           "arn:aws:ecs:${var.aws_region}:${var.account_id}:task-definition/${local.name}-agent-*",
           "arn:aws:ecs:${var.aws_region}:${var.account_id}:task-definition/agent-*"
         ]
@@ -74,8 +74,8 @@ resource "aws_iam_role_policy" "control_plane" {
         Condition = { ArnEquals = { "ecs:cluster" = aws_ecs_cluster.factory.arn } }
       },
       {
-        Effect   = "Allow"
-        Action   = ["iam:PassRole"]
+        Effect = "Allow"
+        Action = ["iam:PassRole"]
         Resource = concat([aws_iam_role.execution.arn], [for r in aws_iam_role.agent : r.arn], [
           "arn:aws:iam::${var.account_id}:role/factory-agent-exec-*",
           "arn:aws:iam::${var.account_id}:role/factory-agent-task-*"
@@ -184,8 +184,8 @@ resource "aws_iam_role_policy" "control_plane_paas" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = [
+        Effect = "Allow"
+        Action = [
           "iam:CreateRole",
           "iam:PutRolePolicy",
           "iam:PassRole",

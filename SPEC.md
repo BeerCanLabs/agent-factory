@@ -34,19 +34,30 @@ The **Agent Factory** is hosting, plumbing, governance, and lifecycle. **Agent G
 
 ## 2. Cartridge contract
 
-Adopters define an agent as:
+Adopters define an agent cartridge using either the primary unified contract or the legacy multi-file manifest:
 
+### Primary: Unified Cartridge Manifest
+```
+my-agent/
+├── soul.md                  # job description, persona, tone, mission, boundaries
+├── cartridge.yaml           # employment contract: schemaVersion, triggers, secrets.requires, persistence, compute, skills
+├── bench.yaml               # optional performance rubric: deterministic test cases
+├── agent.py / worker.mjs    # hands & eyes: task reasoning and tool execution
+└── Dockerfile               # container packaging
+```
+
+### Legacy: Multi-file Manifest
 ```
 my-agent/
 ├── soul.md                  # identity, persona, tone, purpose, boundaries
-├── surface.yaml             # ingress: cron, webhook, queue, http
+├── surface.yaml             # ingress: cron, webhook, queue, http, discord
 ├── secrets.manifest.yaml    # requires: [NAME, ...] — never values
 ├── skills.yaml              # optional MCP peripheral allowlist
 ├── identity.yaml            # optional: daemon | on_behalf_of
 └── artifact.yaml            # portable compute pointer (OCI / serverless / managed engine)
 ```
 
-`skills.yaml` is **not** a factory-hosted code library. Ordinary skills ship inside the artifact. MCP entries are environmental peripherals, bloated tools, or centralized stateful security.
+`skills.yaml` (or `skills` in `cartridge.yaml`) is **not** a factory-hosted code library. Ordinary skills ship inside the artifact. MCP entries are environmental peripherals, bloated tools, or centralized stateful security.
 
 The factory does not import agent logic. Example cartridges under `agents/` are fixtures, not kernel modules.
 
@@ -98,6 +109,9 @@ The control plane is the only ingress point to the factory kernel. Routes expect
 | GET | `/healthz`, `/api/v1/health` | none | liveness |
 | POST | `/api/v1/registry/agents` | admin | Register a new agent Cartridge. Validates source and secrets. Enters `PENDING_BUDGET` or `PENDING_DEPLOY` (if auto-approved by Policy Engine). |
 | POST | `/api/v1/registry/agents/:id/deploy` | admin | Cloud provision the agent (e.g. create ECS Task Definition) and launch to production. |
+| POST | `/api/v1/registry/agents/:id/retire` | admin | Begin retirement holding period ("scream test"). Triggers/compute disabled ($0 cost); state preserved. |
+| POST | `/api/v1/registry/agents/:id/reinstate` | admin | Abort retirement during holding window; restore agent to active state. |
+| POST | `/api/v1/registry/agents/:id/purge` | admin | Permanent teardown: destroy task definitions, purge vault secrets, archive mind to cold storage. |
 | GET | `/api/v1/registry/agents` | viewer | View all registered agents and their deployment state. |
 | GET | `/api/v1/agents` | viewer | cartridge catalog |
 | POST | `/api/v1/agents/:id/runs` (alias `/wake`) | operator | start a run: **202** + run; body `{input?, callbackUrl?}`; 412 on missing secrets; 409 if paused/isolated |
@@ -105,10 +119,13 @@ The control plane is the only ingress point to the factory kernel. Routes expect
 | GET | `/api/v1/runs`, `/api/v1/runs/:runId` | viewer | run status |
 | POST | `/api/v1/runs/:runId/cancel` | operator | stop a run |
 | GET | `/api/v1/runs/:runId/input` | run token | agent fetches its input |
+| GET | `/api/v1/runs/:runId/mailbox` | run token | long-poll follow-up messages during warm window (`?timeout=ms`) |
 | POST | `/api/v1/runs/:runId/result` | run token | agent reports `{status: succeeded\|failed, output?, error?}` |
 | POST | `/api/v1/hooks/:id` | cartridge secret | webhook trigger, creates a run |
 | GET | `/api/v1/ledger` | viewer | audit query |
 | POST | `/api/v1/ledger` | ingest | metadata-only event write |
+| GET | `/api/v1/metrics`, `/metrics` | viewer | runtime and ledger telemetry (active runs, agent states, spend) |
+| POST | `/graphql` | viewer | headless GraphQL telemetry query surface (cost, quantity, quality multi-dimensional rollups) |
 | GET/PUT | `/api/v1/policies/budget` | admin | Manage global and departmental Policy Engine limits. |
 | GET/PUT | `/api/v1/agents/:id/policy` | viewer / admin | egress policy (routes, models, tools, per-agent budget, TPM) |
 | GET | `/api/v1/approvals?state=pending` | viewer | held tool calls |
@@ -154,7 +171,7 @@ Discovery payload (control plane):
   "id": "agent-id",
   "name": "Human-Readable Agent Name",
   "role": "Functional role",
-  "state": "IDLE | WORKING | PAUSED | ISOLATED | BLOCKED_FOR_HUMAN | ERROR",
+  "state": "IDLE | WORKING | PAUSED | ISOLATED | BLOCKED_FOR_HUMAN | ERROR | RETIRED_PENDING_PURGE | RETIRED",
   "model": "optional",
   "provider": "gcp-cloud-run | aws-ecs | local",
   "artifact": "oci://..."

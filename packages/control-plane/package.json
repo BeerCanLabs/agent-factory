@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./runtime": "./dist/runtime.js",
+    "./aws/*": "./dist/aws/*.js",
+    "./gcp/*": "./dist/gcp/*.js"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
