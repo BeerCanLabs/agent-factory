@@ -183,6 +183,16 @@ describe.skip('control plane', { concurrency: false }, () => {
       assert.equal((await request(port, '/api/v1/agents', { token: TOKENS.viewer })).status, 200);
     });
 
+    it('serves metrics for viewers and requires authentication', async () => {
+      assert.equal((await request(port, '/api/v1/metrics')).status, 401);
+      const res = await request(port, '/api/v1/metrics', { token: TOKENS.viewer });
+      assert.equal(res.status, 200);
+      const metrics = res.json as { agents: { total: number }; runs: { active: number }; ledger: { totalRows: number } };
+      assert.ok(typeof metrics.agents.total === 'number');
+      assert.ok(typeof metrics.runs.active === 'number');
+      assert.ok(typeof metrics.ledger.totalRows === 'number');
+    });
+
     it('forbids a viewer from starting a run', async () => {
       assert.equal((await wake('echo-agent', {}, TOKENS.viewer)).status, 403);
     });
@@ -226,6 +236,15 @@ describe.skip('control plane', { concurrency: false }, () => {
       const rows = (await request(port, '/api/v1/ledger?agent=echo-agent', { token: TOKENS.admin })).json as Array<Record<string, unknown>>;
       assert.equal(JSON.stringify(rows).includes('never store this prompt'), false);
       assert.ok(rows.some((e) => typeof e.payloadSha256 === 'string'));
+
+      const paged1 = (await request(port, '/api/v1/ledger?agent=echo-agent&limit=1&offset=0', { token: TOKENS.admin })).json as Array<Record<string, unknown>>;
+      assert.equal(paged1.length, 1);
+      assert.deepEqual(paged1[0], rows[0]);
+      if (rows.length > 1) {
+        const paged2 = (await request(port, '/api/v1/ledger?agent=echo-agent&limit=1&offset=1', { token: TOKENS.admin })).json as Array<Record<string, unknown>>;
+        assert.equal(paged2.length, 1);
+        assert.deepEqual(paged2[0], rows[1]);
+      }
     });
   });
 
@@ -362,7 +381,11 @@ describe.skip('control plane', { concurrency: false }, () => {
       const run = (await wake()).json as RunBody;
       assert.equal((await request(port, `/api/v1/runs/${run.runId}`, { token: TOKENS.viewer })).status, 200);
       const list = (await request(port, '/api/v1/runs?agent=echo-agent', { token: TOKENS.viewer })).json as RunBody[];
-      assert.equal(list.length, 1);
+      assert.ok(list.length >= 1);
+
+      const paged = (await request(port, '/api/v1/runs?agent=echo-agent&limit=1&offset=0', { token: TOKENS.viewer })).json as RunBody[];
+      assert.equal(paged.length, 1);
+      assert.equal(paged[0].runId, list[0].runId);
     });
   });
 

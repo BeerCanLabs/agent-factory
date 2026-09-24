@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { Checkpointer, FileLedger, checkpointSinkFromEnv, secretValuesFromEnv } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { authFromEnv } from '@beercanlabs/factory-auth';
-import { loadCatalog } from './catalog.js';
+import { loadCatalog, loadDynamicRegistry } from './catalog.js';
 import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, factoryMetrics, finishRun, reconcileRuns, SYSTEM } from './app.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { FileRunStore, RunTokens } from './runs.js';
@@ -13,7 +13,7 @@ import { ApprovalStore, PolicyStore, SpendTracker, validatePolicy } from './poli
 import { EventHub, attachBus, busSinkFromEnv, runEvent, tapLedger } from './events.js';
 import { attachEventStream } from './stream.js';
 import { startQueuePollers } from './queues.js';
-import { memoryRuntime } from './runtime.js';
+import { memoryRuntime, type DeployProvider } from './runtime.js';
 import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
 import { agentsDueForCron } from './scheduler.js';
@@ -25,9 +25,10 @@ const VERSION = '0.1.0';
 const LEDGER_PATH = process.env.FACTORY_LEDGER_PATH || join(process.cwd(), 'data', 'ledger.jsonl');
 const MEMORY_STORE = process.env.MEMORY_STORE_DIR || join(process.cwd(), 'data', 'mind');
 const EPHEMERAL = process.env.MEMORY_EPHEMERAL_DIR || join(process.cwd(), 'data', 'ephemeral');
-const IDLE_MS = parseInt(process.env.FACTORY_IDLE_MS || '300000', 10);
+const IDLE_MS = parseInt(process.env.FACTORY_IDLE_MS || '3600000', 10);
 const DATA_DIR = dirname(LEDGER_PATH);
 const RUNS_DIR = process.env.FACTORY_RUNS_DIR || join(DATA_DIR, 'runs');
+const REGISTRY_DIR = process.env.FACTORY_REGISTRY_DIR || join(DATA_DIR, 'registry');
 
 function defaultPolicy() {
   if (!process.env.FACTORY_DEFAULT_POLICY) return undefined;
@@ -38,8 +39,11 @@ function defaultPolicy() {
 
 mkdirSync(MEMORY_STORE, { recursive: true });
 mkdirSync(EPHEMERAL, { recursive: true });
+mkdirSync(REGISTRY_DIR, { recursive: true });
 
-const agents = loadCatalog(AGENTS_ROOT);
+const staticAgents = loadCatalog(AGENTS_ROOT);
+const dynamicAgents = loadDynamicRegistry(REGISTRY_DIR);
+const allAgents = [...staticAgents, ...dynamicAgents];
 const secretValues = new Set<string>(secretValuesFromEnv());
 
 const hub = new EventHub();
@@ -54,9 +58,29 @@ const ledgerSink = checkpointSinkFromEnv();
   }
 }
 
+let deployProvider: DeployProvider | undefined;
+const deployProviderType = process.env.FACTORY_DEPLOY_PROVIDER || (process.env.FACTORY_RUNTIME === 'ecs' ? 'aws' : process.env.FACTORY_RUNTIME === 'cloudrun' ? 'gcp' : undefined);
+if (deployProviderType === 'aws') {
+  try {
+    const { awsDeployProvider } = await import('./aws/deploy.js');
+    deployProvider = awsDeployProvider();
+  } catch (err) {
+    console.warn('[control-plane] failed to initialize AWS deploy provider:', err);
+  }
+} else if (deployProviderType === 'gcp') {
+  try {
+    const { gcpDeployProvider } = await import('./gcp/deploy.js');
+    deployProvider = gcpDeployProvider();
+  } catch (err) {
+    console.warn('[control-plane] failed to initialize GCP deploy provider:', err);
+  }
+}
+
 const state: FactoryState = {
-  agents: new Map(agents.map((a) => [a.id, a])),
+  agents: new Map(allAgents.map((a) => [a.id, a])),
+  registryDir: REGISTRY_DIR,
   ledger,
+  deployProvider,
   policies: new PolicyStore(process.env.FACTORY_POLICIES_DIR || join(DATA_DIR, 'policies'), defaultPolicy()),
   approvals: new ApprovalStore(join(DATA_DIR, 'approvals')),
   // Only the gateway can write costUsd (stripped for other writers), so every priced llm row counts.

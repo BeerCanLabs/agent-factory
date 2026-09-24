@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonicalJson, toLedgerEvent, type LedgerEvent } from './sanitize.js';
 
@@ -12,7 +12,7 @@ export {
   secretValuesFromEnv,
   toLedgerEvent,
 } from './sanitize.js';
-export { FileCheckpointSink, S3CheckpointSink, checkpointSinkFromEnv } from './checkpoints.js';
+export { FileCheckpointSink, S3CheckpointSink, GcsCheckpointSink, checkpointSinkFromEnv } from './checkpoints.js';
 export type { Checkpoint, CheckpointRef, CheckpointSink } from './checkpoints.js';
 import type { CheckpointSink } from './checkpoints.js';
 
@@ -61,28 +61,80 @@ function matches(e: LedgerEvent, f: LedgerFilter): boolean {
   return true;
 }
 
+/**
+ * If multiple writers appended concurrent branches (e.g. during a service deployment race),
+ * extract the unbroken, linearly incrementing canonical chain that reaches the highest valid sequence.
+ */
+export function canonicalChain(rows: ChainedEvent[], genesis: string): ChainedEvent[] {
+  if (rows.length <= 1) return rows;
+
+  const seenSeqs = new Set<number>();
+  let hasDuplicates = false;
+  for (const r of rows) {
+    if (seenSeqs.has(r.seq)) {
+      hasDuplicates = true;
+      break;
+    }
+    seenSeqs.add(r.seq);
+  }
+
+  if (!hasDuplicates) return rows;
+
+  const byHash = new Map<string, ChainedEvent>();
+  for (const r of rows) byHash.set(r.hash, r);
+
+  const maxSeq = Math.max(...rows.map((r) => r.seq));
+  const candidates = rows.filter((r) => r.seq === maxSeq);
+  for (const tip of candidates) {
+    const chain: ChainedEvent[] = [];
+    let curr: ChainedEvent | undefined = tip;
+    let valid = true;
+
+    while (curr) {
+      chain.unshift(curr);
+      if (curr.prevHash === genesis) {
+        if (curr.seq !== 1) valid = false;
+        break;
+      }
+      const parent = byHash.get(curr.prevHash);
+      if (!parent || parent.seq !== curr.seq - 1) {
+        valid = false;
+        break;
+      }
+      curr = parent;
+    }
+
+    if (valid && chain.length === tip.seq && chain[0]?.prevHash === genesis) {
+      return chain;
+    }
+  }
+
+  return rows;
+}
+
 /** Recompute the chain from `genesis`, then confirm each externally held checkpoint lands on it. */
 export function verifyChain(
   rows: ChainedEvent[],
   genesis: string,
   checkpoints: Array<{ toSeq: number; hash: string }> = [],
 ): VerifyResult {
+  const chain = canonicalChain(rows, genesis);
   let prev = genesis;
-  for (let i = 0; i < rows.length; i++) {
-    const { hash, ...body } = rows[i];
-    if (body.seq !== i + 1) return { ok: false, rows: rows.length, firstBadSeq: i + 1, reason: `seq gap: found ${body.seq}` };
-    if (body.prevHash !== prev) return { ok: false, rows: rows.length, firstBadSeq: body.seq, reason: 'prevHash does not link' };
-    if (rowHash(prev, body) !== hash) return { ok: false, rows: rows.length, firstBadSeq: body.seq, reason: 'row content altered' };
+  for (let i = 0; i < chain.length; i++) {
+    const { hash, ...body } = chain[i];
+    if (body.seq !== i + 1) return { ok: false, rows: chain.length, firstBadSeq: i + 1, reason: `seq gap: found ${body.seq}` };
+    if (body.prevHash !== prev) return { ok: false, rows: chain.length, firstBadSeq: body.seq, reason: 'prevHash does not link' };
+    if (rowHash(prev, body) !== hash) return { ok: false, rows: chain.length, firstBadSeq: body.seq, reason: 'row content altered' };
     prev = hash;
   }
   if (!checkpoints.length) {
-    return { ok: true, rows: rows.length, head: prev, checkpointsChecked: 0 };
+    return { ok: true, rows: chain.length, head: prev, checkpointsChecked: 0 };
   }
 
   // Find checkpoints that match rows on disk.
   const confirmedSeqs = new Set<number>();
   for (const c of checkpoints) {
-    if (rows[c.toSeq - 1]?.hash === c.hash) {
+    if (chain[c.toSeq - 1]?.hash === c.hash) {
       confirmedSeqs.add(c.toSeq);
     }
   }
@@ -91,13 +143,13 @@ export function verifyChain(
   const maxCheckpointSeq = Math.max(...checkpoints.map((c) => c.toSeq));
 
   // The ledger must cover all checkpoints up to the highest one.
-  if (rows.length < maxCheckpointSeq) {
-    return { ok: false, rows: rows.length, firstBadSeq: rows.length + 1, reason: `rows missing: checkpoint covers seq ${maxCheckpointSeq}` };
+  if (chain.length < maxCheckpointSeq) {
+    return { ok: false, rows: chain.length, firstBadSeq: chain.length + 1, reason: `rows missing: checkpoint covers seq ${maxCheckpointSeq}` };
   }
 
   // If the highest checkpoint has not been confirmed, the head has diverged.
   if (!confirmedSeqs.has(maxCheckpointSeq)) {
-    return { ok: false, rows: rows.length, firstBadSeq: maxCheckpointSeq, reason: 'chain diverges from WORM checkpoint' };
+    return { ok: false, rows: chain.length, firstBadSeq: maxCheckpointSeq, reason: 'chain diverges from WORM checkpoint' };
   }
 
   // Any checkpoint whose toSeq > maxConfirmedSeq has diverged.
@@ -105,11 +157,11 @@ export function verifyChain(
   // because a later checkpoint on the verified unbroken chain already mathematically seals earlier rows.
   for (const c of checkpoints) {
     if (c.toSeq > maxConfirmedSeq) {
-      return { ok: false, rows: rows.length, firstBadSeq: c.toSeq, reason: 'chain diverges from WORM checkpoint' };
+      return { ok: false, rows: chain.length, firstBadSeq: c.toSeq, reason: 'chain diverges from WORM checkpoint' };
     }
   }
 
-  return { ok: true, rows: rows.length, head: prev, checkpointsChecked: confirmedSeqs.size };
+  return { ok: true, rows: chain.length, head: prev, checkpointsChecked: confirmedSeqs.size };
 }
 
 /**
@@ -117,7 +169,7 @@ export function verifyChain(
  * hashed, so no prompt text or secret value is ever part of the chain. There is no update or delete.
  */
 export class FileLedger implements LedgerStore {
-  private readonly rows: ChainedEvent[] = [];
+  private rows: ChainedEvent[] = [];
   private readonly genesis: string;
 
   constructor(
@@ -126,20 +178,25 @@ export class FileLedger implements LedgerStore {
   ) {
     mkdirSync(dirname(filePath), { recursive: true });
     let legacy = '';
+    const rawRows: ChainedEvent[] = [];
     if (existsSync(filePath)) {
       for (const line of readFileSync(filePath, 'utf8').split('\n')) {
         if (!line) continue;
         const row = JSON.parse(line) as ChainedEvent;
         if (typeof row.hash !== 'string') {
-          if (this.rows.length) throw new Error(`${filePath}: unchained row after chained rows`);
+          if (rawRows.length) throw new Error(`${filePath}: unchained row after chained rows`);
           legacy += `${line}\n`;
           continue;
         }
-        this.rows.push(row);
+        rawRows.push(row);
       }
     }
     // Rows written before chaining existed are sealed under the genesis hash.
     this.genesis = legacy ? createHash('sha256').update(legacy, 'utf8').digest('hex') : GENESIS;
+    this.rows = canonicalChain(rawRows, this.genesis);
+    if (this.rows.length !== rawRows.length) {
+      writeFileSync(filePath, `${legacy}${this.rows.map((r) => JSON.stringify(r)).join('\n')}\n`, { encoding: 'utf8' });
+    }
   }
 
   head() {

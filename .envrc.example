@@ -1,0 +1,9 @@
+# Example direnv configuration for Agent Factory
+# Copy to .envrc (which is gitignored) and customize for your environment.
+
+# Target AWS configuration (if deploying to AWS)
+# export AWS_CONFIG_FILE="$HOME/.aws/config"
+# export AWS_PROFILE=my-deploy-profile
+# export AWS_REGION=us-east-1
+# export AWS_ACCOUNT_ID=123456789012
+# export FACTORY_ECR_REPO_URI="123456789012.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents"

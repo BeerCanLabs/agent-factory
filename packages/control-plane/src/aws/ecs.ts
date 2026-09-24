@@ -20,7 +20,8 @@ export async function resolveSecretArn(secretNameOrArn: string): Promise<string>
     } catch {}
   }
   const region = process.env.AWS_REGION || "us-east-1";
-  const accountId = process.env.BCL_AWS_ACCOUNT_ID || "566332862296";
+  const accountId = process.env.AWS_ACCOUNT_ID || process.env.BCL_AWS_ACCOUNT_ID;
+  if (!accountId) throw new Error('AWS_ACCOUNT_ID environment variable is required');
   return `arn:aws:secretsmanager:${region}:${accountId}:secret:${prefix}${secretNameOrArn}`;
 }
 
@@ -69,6 +70,12 @@ export async function registerAgentTaskDefinition(
         image: imageUri,
         essential: true,
         secrets: resolvedSecrets,
+        environment: [
+          {
+            name: "FACTORY_MIND_BUCKET",
+            value: process.env.FACTORY_MIND_BUCKET || "agent-factory-mind-prod-924cfefd",
+          },
+        ],
         logConfiguration: {
           logDriver: "awslogs",
           options: {

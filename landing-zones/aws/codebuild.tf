@@ -74,7 +74,7 @@ resource "aws_codebuild_project" "factory_agent_builder" {
   }
 
   source {
-    type = "NO_SOURCE"
+    type      = "NO_SOURCE"
     buildspec = <<EOF
 version: 0.2
 

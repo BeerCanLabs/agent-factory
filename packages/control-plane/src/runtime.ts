@@ -101,3 +101,18 @@ export function noopRuntime(): Runtime & { started: NoopStart[] } {
     async deliver() {},
   };
 }
+
+/**
+ * Provider-specific infrastructure provisioning for the /deploy lifecycle.
+ * The kernel dispatches through this interface; implementations live in
+ * provider-specific deploy repos (submind-aws, submind-gcp) or in
+ * landing-zone reference code.
+ */
+export type DeployProvider = {
+  /** Build the agent's container image from source. Returns the image URI. */
+  buildImage(agentId: string, sourceRef: string): Promise<string>;
+  /** Provision IAM / roles / service accounts for the agent. */
+  provisionIdentity(agentId: string, secrets: string[]): Promise<{ identity: string; executionIdentity?: string }>;
+  /** Register the agent's compute definition (ECS task def, Cloud Run job, etc.). */
+  registerCompute(agentId: string, imageUri: string, secrets: string[], identity: string, executionIdentity?: string): Promise<void>;
+};
