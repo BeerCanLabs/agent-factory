@@ -252,8 +252,8 @@ resource "aws_ecs_task_definition" "garrison" {
   family                   = "${local.name}-garrison"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                      = "512"
-  memory                   = "1024"
+  cpu                      = "1024"
+  memory                   = "2048"
   execution_role_arn       = aws_iam_role.execution.arn
   task_role_arn            = aws_iam_role.control_plane.arn
   container_definitions = jsonencode([{
