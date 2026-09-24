@@ -178,6 +178,10 @@ export const cartridgeSchema = z
       })
       .passthrough()
       .optional(),
+    model: z.string().optional(),
+    models: z.array(z.string()).optional(),
+    requestedModels: z.array(z.string()).optional(),
+    approvedModels: z.array(z.string()).optional(),
   })
   .strict();
 

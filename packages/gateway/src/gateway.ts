@@ -258,7 +258,10 @@ export function createGateway(opts: GatewayOptions): http.Server {
     const model = typeof parsed?.model === 'string' ? parsed.model : undefined;
     if (req.method === 'POST' && parsed) {
       if (!model) return deny(res, ctx, route, 400, 'model_required');
-      if (ctx.policy.models && !ctx.policy.models.includes(model)) return deny(res, ctx, route, 403, 'model_not_allowed', { model });
+      const isTraining = ctx.agentState === 'TRAINING';
+      if (!isTraining && ctx.policy.models && !ctx.policy.models.includes(model)) {
+        return deny(res, ctx, route, 403, 'model_not_allowed', { model });
+      }
       if (ctx.run.model && ctx.run.model !== model) return deny(res, ctx, route, 403, 'model_pinned', { model, pinned: ctx.run.model });
       if (!priceFor(opts.prices, model)) return deny(res, ctx, route, 403, 'unpriced_model', { model });
     }

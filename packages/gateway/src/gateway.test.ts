@@ -240,6 +240,16 @@ describe('egress gateway', { concurrency: false }, () => {
     assert.ok(ledger.some((e) => e.action === 'EGRESS_DENIED_ROUTE_NOT_ALLOWED'));
   });
 
+  it('allows candidate models outside policy when agentState is TRAINING', async () => {
+    ctx.policy = policy({ models: ['test-other'] });
+    ctx.agentState = 'TRAINING';
+    // 'test-claude' is not in ctx.policy.models, but because agentState is TRAINING, it is permitted
+    assert.equal((await call(port, '/anthropic/v1/messages', { token, body: messages('test-claude') })).status, 200);
+    ctx.agentState = 'SLEEPING';
+    // When back to production state, unapproved models are blocked
+    assert.equal((await call(port, '/anthropic/v1/messages', { token, body: messages('test-claude') })).json().error, 'model_not_allowed');
+  });
+
   it('enforces the budget before the call, counting spend not yet seen by the control plane', async () => {
     ctx.policy = policy({ budgetUsd: { perRun: 0.02 } });
     assert.equal((await call(port, '/anthropic/v1/messages', { token, body: messages() })).status, 200); // costs 0.021
