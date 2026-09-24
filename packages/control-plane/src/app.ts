@@ -1320,6 +1320,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       ? Number((cartridge.runtime as { warmDownSeconds: number }).warmDownSeconds)
       : undefined;
 
+    const model = typeof cartridge.model === 'string' ? cartridge.model : (typeof body.model === 'string' ? body.model : 'gemini-2.0-flash');
+    const requestedModels = Array.isArray(cartridge.requestedModels)
+      ? cartridge.requestedModels
+      : (Array.isArray(body.requestedModels) ? body.requestedModels : (Array.isArray(body.models) ? body.models : []));
+    const approvedModels = Array.isArray(cartridge.approvedModels) && cartridge.approvedModels.length > 0
+      ? cartridge.approvedModels
+      : (Array.isArray(body.approvedModels) && body.approvedModels.length > 0 ? body.approvedModels : [model]);
+
     const record: AgentRecord = {
       id: typeof cartridge.id === 'string' ? cartridge.id : agentId,
       name: typeof cartridge.name === 'string' ? cartridge.name : (typeof body.name === 'string' ? body.name : agentId),
@@ -1333,9 +1341,21 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       triggers,
       memoryPrefix,
       warmDownSeconds,
-      dir: '/tmp/' + agentId
+      dir: '/tmp/' + agentId,
+      model,
+      requestedModels,
+      approvedModels,
     };
     state.agents.set(record.id, record);
+
+    // Sync approved models into the agent's egress policy
+    const currentPol = state.policies.get(record.id);
+    state.policies.set(record.id, {
+      ...currentPol,
+      routes: currentPol?.routes?.length ? currentPol.routes : ['llm'],
+      models: approvedModels,
+    });
+
     if (state.registryDir) {
       try {
         mkdirSync(state.registryDir, { recursive: true });
@@ -1572,6 +1592,105 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     state.policies.set('__global__', checked.policy);
     json(res, 200, checked.policy);
+    return;
+  }
+
+  // Model Governance: Approve candidate model for production use
+  const approveModelMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/models\/approve$/);
+  if (approveModelMatch && req.method === 'POST') {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return;
+    const agentId = approveModelMatch[1];
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    const b = await readJson(req);
+    if (typeof b.model !== 'string' || !b.model.trim()) {
+      json(res, 400, { error: 'model_required', message: 'A model identifier string is required' });
+      return;
+    }
+    const targetModel = b.model.trim();
+    if (!agent.approvedModels) {
+      agent.approvedModels = [agent.model || 'gemini-2.0-flash'];
+    }
+    if (!agent.approvedModels.includes(targetModel)) {
+      agent.approvedModels.push(targetModel);
+    }
+    // Synchronize into egress policy so the Gateway immediately permits it
+    const currentPolicy = state.policies.get(agentId);
+    const mergedModels = Array.from(new Set([...(currentPolicy.models || []), targetModel]));
+    state.policies.set(agentId, {
+      ...currentPolicy,
+      models: mergedModels,
+    });
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'MODEL_APPROVED',
+      actor: principal.actor,
+      model: targetModel,
+    });
+    if (state.registryDir) {
+      try {
+        mkdirSync(state.registryDir, { recursive: true });
+        writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
+      } catch (err) {
+        console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
+      }
+    }
+    json(res, 200, { success: true, agent, approvedModels: agent.approvedModels });
+    return;
+  }
+
+  // Model Governance: Switch active production model (strictly guarded by approvedModels)
+  const switchModelMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/model$/);
+  if (switchModelMatch && (req.method === 'POST' || req.method === 'PUT')) {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return;
+    const agentId = switchModelMatch[1];
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    const b = await readJson(req);
+    if (typeof b.model !== 'string' || !b.model.trim()) {
+      json(res, 400, { error: 'model_required', message: 'A model identifier string is required' });
+      return;
+    }
+    const targetModel = b.model.trim();
+    const approved = agent.approvedModels && agent.approvedModels.length > 0
+      ? agent.approvedModels
+      : [agent.model || 'gemini-2.0-flash'];
+    if (!approved.includes(targetModel)) {
+      json(res, 400, {
+        error: 'model_not_approved',
+        message: `Model "${targetModel}" has not been approved for this agent. Approve it first via training validation.`,
+        approvedModels: approved,
+      });
+      return;
+    }
+    agent.model = targetModel;
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'MODEL_SWITCHED',
+      actor: principal.actor,
+      activeModel: targetModel,
+    });
+    if (state.registryDir) {
+      try {
+        mkdirSync(state.registryDir, { recursive: true });
+        writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
+      } catch (err) {
+        console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
+      }
+    }
+    json(res, 200, { success: true, agent, activeModel: targetModel });
     return;
   }
   // --- END REGISTRY SERVICE ---

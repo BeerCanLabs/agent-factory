@@ -34,6 +34,9 @@ export type AgentRecord = {
   dir: string;
   retiredAt?: string;
   purgeDueAt?: string;
+  model?: string;
+  requestedModels?: string[];
+  approvedModels?: string[];
 };
 
 export function loadCatalog(agentsRoot: string): AgentRecord[] {
@@ -157,6 +160,11 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
       memoryPrefix,
       warmDownSeconds: warmDownSeconds ?? rawCartridge?.runtime?.warmDownSeconds ?? 300,
       dir,
+      model: rawCartridge?.model || 'gemini-2.0-flash',
+      requestedModels: rawCartridge?.requestedModels || rawCartridge?.models || [],
+      approvedModels: rawCartridge?.approvedModels && rawCartridge.approvedModels.length > 0
+        ? rawCartridge.approvedModels
+        : [rawCartridge?.model || 'gemini-2.0-flash'],
     });
   }
   return out;

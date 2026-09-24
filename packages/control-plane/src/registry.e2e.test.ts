@@ -142,4 +142,54 @@ describe('KPF 1: Agent Registry & Lifecycle E2E', { concurrency: false }, () => 
     assert.ok(actions.includes('AGENT_REINSTATED'));
     assert.ok(actions.includes('AGENT_PURGED'));
   });
+
+  it('governs model approval and active model switching', async () => {
+    // 1. Register agent with requestedModels and default approvedModel
+    const regRes = await http_(cpPort, '/api/v1/registry/agents', 'POST', ADMIN, {
+      id: 'sm-model-test',
+      name: 'Model Test Agent',
+      model: 'claude-3-5-sonnet',
+      requestedModels: ['claude-3-5-sonnet', 'gemini-2.0-flash'],
+      approvedModels: ['claude-3-5-sonnet'],
+    });
+    assert.equal(regRes.status, 201);
+    assert.equal(regRes.body.model, 'claude-3-5-sonnet');
+    assert.deepEqual(regRes.body.approvedModels, ['claude-3-5-sonnet']);
+    assert.deepEqual(regRes.body.requestedModels, ['claude-3-5-sonnet', 'gemini-2.0-flash']);
+
+    // 2. Attempt to switch to an unapproved model -> fails 400
+    const failSwitch = await http_(cpPort, '/api/v1/registry/agents/sm-model-test/model', 'POST', ADMIN, {
+      model: 'gemini-2.0-flash',
+    });
+    assert.equal(failSwitch.status, 400);
+    assert.equal(failSwitch.body.error, 'model_not_approved');
+
+    // 3. Approve model (e.g. following Gym training results) -> succeeds
+    const approveRes = await http_(cpPort, '/api/v1/registry/agents/sm-model-test/models/approve', 'POST', ADMIN, {
+      model: 'gemini-2.0-flash',
+    });
+    assert.equal(approveRes.status, 200);
+    assert.ok(approveRes.body.approvedModels.includes('gemini-2.0-flash'));
+
+    // 4. Verify policy store was updated with approved model
+    const policy = state.policies.get('sm-model-test');
+    assert.ok(policy.models?.includes('gemini-2.0-flash'));
+
+    // 5. Now switch active model to newly approved model -> succeeds
+    const successSwitch = await http_(cpPort, '/api/v1/registry/agents/sm-model-test/model', 'POST', ADMIN, {
+      model: 'gemini-2.0-flash',
+    });
+    assert.equal(successSwitch.status, 200);
+    assert.equal(successSwitch.body.activeModel, 'gemini-2.0-flash');
+
+    // 6. Confirm agent record has active model updated
+    const afterSwitch = await http_(cpPort, '/api/v1/registry/agents/sm-model-test', 'GET', ADMIN);
+    assert.equal(afterSwitch.body.model, 'gemini-2.0-flash');
+
+    // 7. Verify ledger recorded MODEL_APPROVED and MODEL_SWITCHED
+    const ledgerEvents = state.ledger.query().filter((e) => e.agentId === 'sm-model-test');
+    const actions = ledgerEvents.map((e) => (e as { action?: string }).action);
+    assert.ok(actions.includes('MODEL_APPROVED'));
+    assert.ok(actions.includes('MODEL_SWITCHED'));
+  });
 });
