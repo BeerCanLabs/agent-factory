@@ -7,7 +7,21 @@ export type AgentRecord = {
   id: string;
   name: string;
   role: string;
-  state: 'SLEEPING' | 'WORKING' | 'PAUSED' | 'ISOLATED' | 'BLOCKED_FOR_HUMAN' | 'ERROR' | 'PENDING_BUDGET' | 'PENDING_DEPLOY' | 'DEPLOYING';
+  state:
+    | 'SLEEPING'
+    | 'WORKING'
+    | 'PAUSED'
+    | 'ISOLATED'
+    | 'BLOCKED_FOR_HUMAN'
+    | 'ERROR'
+    | 'PENDING_BUDGET'
+    | 'PENDING_DEPLOY'
+    | 'DEPLOYING'
+    | 'RETIRED_PENDING_PURGE'
+    | 'PURGED'
+    | 'IDLE'
+    | 'TRAINING'
+    | 'OUT_OF_BUDGET';
   provider: string;
   artifact: string;
   localCommand?: string[];
@@ -18,6 +32,8 @@ export type AgentRecord = {
   memoryPrefix?: string;
   warmDownSeconds?: number;
   dir: string;
+  retiredAt?: string;
+  purgeDueAt?: string;
 };
 
 export function loadCatalog(agentsRoot: string): AgentRecord[] {
