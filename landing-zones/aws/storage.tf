@@ -101,9 +101,9 @@ resource "aws_efs_access_point" "ledger" {
 }
 
 resource "aws_ecr_repository" "repo" {
-  for_each             = toset(concat(["control-plane", "doorman", "gateway"], [for id in keys(var.agents) : "agent-${id}"]))
+  for_each             = toset(concat(["control-plane", "doorman", "gateway", "garrison"], [for id in keys(var.agents) : "agent-${id}"]))
   name                 = "factory-${each.key}"
-  image_tag_mutability = "IMMUTABLE"
+  image_tag_mutability = "MUTABLE"
   force_delete         = false
   image_scanning_configuration {
     scan_on_push = true

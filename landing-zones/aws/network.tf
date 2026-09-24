@@ -238,7 +238,7 @@ resource "aws_service_discovery_private_dns_namespace" "factory" {
 }
 
 resource "aws_service_discovery_service" "svc" {
-  for_each = toset(["control-plane", "gateway", "doorman"])
+  for_each = toset(["control-plane", "gateway", "doorman", "garrison"])
   name     = each.key
   dns_config {
     namespace_id   = aws_service_discovery_private_dns_namespace.factory.id

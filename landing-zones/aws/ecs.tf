@@ -245,6 +245,63 @@ resource "aws_ecs_service" "doorman" {
   }
 }
 
+# ---- garrison: 3D command & control gaming interface ------------------------
+
+resource "aws_ecs_task_definition" "garrison" {
+  count                    = local.images_ready && var.garrison_image != "" ? 1 : 0
+  family                   = "${local.name}-garrison"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = aws_iam_role.control_plane.arn
+  container_definitions = jsonencode([{
+    name         = "garrison"
+    image        = var.garrison_image
+    essential    = true
+    portMappings = [{ containerPort = 3000 }]
+    environment = [
+      { name = "PORT", value = "3000" },
+      { name = "HOST", value = "0.0.0.0" },
+      { name = "NODE_ENV", value = "production" },
+      { name = "FACTORY_URL", value = local.cp_url },
+      { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
+      { name = "AWS_REGION", value = var.aws_region },
+    ]
+    secrets = [
+      { name = "FACTORY_TOKEN", valueFrom = local.secret["FACTORY_TOKEN"] },
+    ]
+    logConfiguration = local.log["control-plane"]
+  }])
+}
+
+resource "aws_ecs_service" "garrison" {
+  count           = local.images_ready && var.garrison_image != "" ? 1 : 0
+  name            = "garrison"
+  cluster         = aws_ecs_cluster.factory.id
+  task_definition = aws_ecs_task_definition.garrison[0].arn
+  desired_count   = 1
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE_SPOT"
+    weight            = 1
+  }
+  network_configuration {
+    subnets          = aws_subnet.service[*].id
+    security_groups  = [aws_security_group.control_plane.id]
+    assign_public_ip = true
+  }
+  load_balancer {
+    target_group_arn = aws_lb_target_group.garrison[0].arn
+    container_name   = "garrison"
+    container_port   = 3000
+  }
+  service_registries {
+    registry_arn = aws_service_discovery_service.svc["garrison"].arn
+  }
+  depends_on = [aws_lb_listener.https]
+}
+
 # ---- agents: task definitions only; the control plane RunTasks them from zero -----------------
 
 resource "aws_ecs_task_definition" "agent" {

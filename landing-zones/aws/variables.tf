@@ -105,3 +105,9 @@ variable "otel_collector_image" {
   type    = string
   default = "public.ecr.aws/aws-observability/aws-otel-collector:v0.43.3"
 }
+
+variable "garrison_image" {
+  type        = string
+  description = "Docker image for Agent Garrison gaming interface and control deck"
+  default     = ""
+}

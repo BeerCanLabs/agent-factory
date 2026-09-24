@@ -28,6 +28,48 @@ resource "aws_lb_target_group" "control" {
   }
 }
 
+resource "aws_lb_target_group" "garrison" {
+  count       = var.garrison_image != "" ? 1 : 0
+  name        = "${local.name}-garrison"
+  port        = 3000
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.factory.id
+  target_type = "ip"
+  health_check {
+    path                = "/api/v1/health"
+    matcher             = "200"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+}
+
+resource "aws_lb_listener_rule" "control_plane_api" {
+  count        = var.garrison_image != "" ? 1 : 0
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 10
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.control.arn
+  }
+
+  condition {
+    path_pattern {
+      values = [
+        "/healthz",
+        "/api/v1/runs*",
+        "/api/v1/ledger*",
+        "/api/v1/schedules*",
+        "/api/v1/registry*",
+        "/api/v1/agents/*/runs*",
+        "/api/v1/gateway/*",
+      ]
+    }
+  }
+}
+
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.factory.arn
   port              = 443
@@ -36,7 +78,7 @@ resource "aws_lb_listener" "https" {
   certificate_arn   = var.certificate_arn
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.control.arn
+    target_group_arn = var.garrison_image != "" ? aws_lb_target_group.garrison[0].arn : aws_lb_target_group.control.arn
   }
 }
 
