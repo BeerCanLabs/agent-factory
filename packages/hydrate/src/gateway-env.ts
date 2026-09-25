@@ -10,6 +10,10 @@ export function gatewayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     OPENAI_API_KEY: token,
     DISCORD_BASE_URL: `${gw}/discord`,
     DISCORD_API_BASE: `${gw}/discord`,
+    GOOGLE_CALENDAR_BASE_URL: `${gw}/google-calendar`,
+    GOOGLE_OAUTH_BASE_URL: `${gw}/google-oauth`,
+    GMAIL_BASE_URL: `${gw}/google-gmail`,
+    GOOGLE_DRIVE_BASE_URL: `${gw}/google-drive`,
   };
   // An image that set its own values keeps them; the gateway still rejects anything but a run token.
   for (const k of Object.keys(out)) if (env[k]) delete out[k];

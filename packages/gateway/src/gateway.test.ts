@@ -20,11 +20,11 @@ async function listen(server: http.Server): Promise<number> {
 function call(
   port: number,
   path: string,
-  opts: { token?: string; header?: 'bearer' | 'x-api-key'; body?: unknown; method?: string } = {},
+  opts: { token?: string; header?: 'bearer' | 'x-api-key'; body?: unknown; method?: string; headers?: Record<string, string> } = {},
 ): Promise<{ status: number; text: string; json: () => any }> {
   return new Promise((resolve, reject) => {
     const data = opts.body === undefined ? undefined : Buffer.from(JSON.stringify(opts.body));
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    const headers: Record<string, string> = { 'content-type': 'application/json', ...(opts.headers ?? {}) };
     if (opts.token) {
       if (opts.header === 'x-api-key') headers['x-api-key'] = opts.token;
       else headers.authorization = `Bearer ${opts.token}`;
@@ -94,7 +94,7 @@ describe('egress gateway', { concurrency: false }, () => {
     },
   ];
 
-  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['anthropic', 'openai', 'tools', 'discord'], ...p });
+  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['anthropic', 'openai', 'tools', 'discord', 'google-calendar'], ...p });
   const settle = () => new Promise((r) => setTimeout(r, 20));
   const lastLlm = () => ledger.filter((e) => e.type === 'llm').at(-1);
 
@@ -109,7 +109,7 @@ describe('egress gateway', { concurrency: false }, () => {
           res.writeHead(upstreamStatus, { 'content-type': 'application/json' });
           return res.end('{"error":"nope"}');
         }
-        if (req.url?.startsWith('/discord')) {
+        if (req.url?.startsWith('/discord') || req.url?.startsWith('/gcal')) {
           res.writeHead(200, { 'content-type': 'application/json' });
           return res.end(JSON.stringify({ ok: true }));
         }
@@ -144,6 +144,7 @@ describe('egress gateway', { concurrency: false }, () => {
         { id: 'openai', kind: 'llm', provider: 'openai', upstream: `http://127.0.0.1:${upPort}`, credential: { secret: 'PROVIDER_KEY', header: 'authorization', format: 'Bearer {}' } },
         { id: 'tools', kind: 'mcp', upstream: `http://127.0.0.1:${upPort}/mcp`, credential: { secret: 'PROVIDER_KEY', header: 'authorization', format: 'Bearer {}' } },
         { id: 'discord', kind: 'http', upstream: `http://127.0.0.1:${upPort}/discord`, credential: { secret: '{agent}_DISCORD_BOT_TOKEN', header: 'authorization', format: 'Bot {}' } },
+        { id: 'google-calendar', kind: 'http', upstream: `http://127.0.0.1:${upPort}/gcal` },
         { id: 'forbidden', kind: 'llm', provider: 'anthropic', upstream: `http://127.0.0.1:${upPort}` },
       ],
       prices: { 'test-*': { inputPerMTok: 3, outputPerMTok: 15 } },
@@ -234,6 +235,19 @@ describe('egress gateway', { concurrency: false }, () => {
     assert.equal(res.status, 200);
     assert.equal(seen[0].headers.authorization, 'Bot bot-agent-secret');
     assert.equal(JSON.parse(seen[0].body).content, 'hello discord');
+  });
+
+  it('forwards caller authorization for uncredentialed HTTP route when x-factory-run-token is presented', async () => {
+    const res = await call(port, '/google-calendar/calendars/primary/events', {
+      headers: {
+        'x-factory-run-token': token,
+        authorization: 'Bearer user-oauth-token',
+      },
+      body: { summary: 'Team Meeting' },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(seen[0].headers.authorization, 'Bearer user-oauth-token');
+    assert.equal(JSON.parse(seen[0].body).summary, 'Team Meeting');
   });
 
   it('charges the worst case when a response reports no usage', async () => {

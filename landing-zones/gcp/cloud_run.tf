@@ -118,6 +118,10 @@ resource "google_cloud_run_v2_service" "control_plane" {
         name  = "MEMORY_EPHEMERAL_DIR"
         value = "/tmp/ephemeral"
       }
+      env {
+        name  = "FACTORY_DEFAULT_POLICY"
+        value = jsonencode({ routes = ["anthropic", "openai", "discord", "google-calendar", "google-oauth", "google-gmail", "google-drive"] })
+      }
 
       # --- Secrets (injected from Secret Manager) ---
       env {
@@ -384,6 +388,22 @@ resource "google_cloud_run_v2_job" "agents" {
         env {
           name  = "ANTHROPIC_BASE_URL"
           value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/anthropic" : ""
+        }
+        env {
+          name  = "GOOGLE_CALENDAR_BASE_URL"
+          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/google-calendar" : ""
+        }
+        env {
+          name  = "GOOGLE_OAUTH_BASE_URL"
+          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/google-oauth" : ""
+        }
+        env {
+          name  = "GMAIL_BASE_URL"
+          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/google-gmail" : ""
+        }
+        env {
+          name  = "GOOGLE_DRIVE_BASE_URL"
+          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/google-drive" : ""
         }
         env {
           name  = "FACTORY_URL"

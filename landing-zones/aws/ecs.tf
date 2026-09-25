@@ -72,7 +72,7 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_ECS_SUBNETS", value = join(",", aws_subnet.agents[*].id) },
         { name = "FACTORY_ECS_SECURITY_GROUPS", value = aws_security_group.agents.id },
         { name = "FACTORY_ECS_ASSIGN_PUBLIC_IP", value = "false" },
-        { name = "FACTORY_DEFAULT_POLICY", value = jsonencode({ routes = ["anthropic", "openai", "discord"] }) },
+        { name = "FACTORY_DEFAULT_POLICY", value = jsonencode({ routes = ["anthropic", "openai", "discord", "google-calendar", "google-oauth", "google-gmail", "google-drive"] }) },
         { name = "AWS_REGION", value = var.aws_region },
         { name = "AWS_DEFAULT_REGION", value = var.aws_region },
         { name = "FACTORY_ECS_TASKS", value = local.agent_task_map },

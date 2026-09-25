@@ -233,7 +233,13 @@ export function createGateway(opts: GatewayOptions): http.Server {
       for (const [k, v] of Object.entries(req.headers)) if (v !== undefined && !STRIP.has(k.toLowerCase())) headers[k] = v;
       headers['accept-encoding'] = 'identity';
       if (body.length) headers['content-length'] = String(body.length);
-      if (route.credential && authHeader) headers[route.credential.header.toLowerCase()] = authHeader;
+      if (route.credential && authHeader) {
+        headers[route.credential.header.toLowerCase()] = authHeader;
+      } else if (req.headers['x-upstream-authorization']) {
+        headers['authorization'] = req.headers['x-upstream-authorization'];
+      } else if (req.headers['authorization'] && req.headers['x-factory-run-token']) {
+        headers['authorization'] = req.headers['authorization'];
+      }
       const transport = dest.protocol === 'https:' ? https : http;
       const up = transport.request(dest, { method: req.method, headers }, (upRes) => {
         const status = upRes.statusCode ?? 502;
