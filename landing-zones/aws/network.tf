@@ -45,7 +45,6 @@ resource "aws_route_table_association" "service" {
   route_table_id = aws_route_table.service.id
 }
 
-# Local routes only (plus the S3 gateway endpoint). There is deliberately no default route.
 resource "aws_route_table" "agents" {
   vpc_id = aws_vpc.factory.id
   tags   = { Name = "${local.name}-agents-no-egress" }

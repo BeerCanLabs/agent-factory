@@ -15,6 +15,8 @@ describe('gatewayEnv', () => {
     const env = gatewayEnv({ FACTORY_GATEWAY_URL: 'http://gw:8081/', FACTORY_RUN_TOKEN: 'run-tok' });
     assert.equal(env.ANTHROPIC_BASE_URL, 'http://gw:8081/anthropic');
     assert.equal(env.OPENAI_BASE_URL, 'http://gw:8081/openai/v1');
+    assert.equal(env.DISCORD_BASE_URL, 'http://gw:8081/discord');
+    assert.equal(env.DISCORD_API_BASE, 'http://gw:8081/discord');
     assert.equal(env.ANTHROPIC_API_KEY, 'run-tok');
     assert.deepEqual(gatewayEnv({ FACTORY_RUN_TOKEN: 'x' }), {});
     assert.equal(gatewayEnv({ FACTORY_GATEWAY_URL: 'http://gw', FACTORY_RUN_TOKEN: 't', ANTHROPIC_BASE_URL: 'mine' }).ANTHROPIC_BASE_URL, undefined);

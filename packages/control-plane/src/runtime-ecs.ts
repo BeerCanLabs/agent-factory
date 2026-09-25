@@ -8,9 +8,12 @@ const execFileAsync = promisify(execFile);
 export type EcsCli = (args: string[]) => Promise<string>;
 
 export function defaultEcsCli(region?: string): EcsCli {
+  const resolvedRegion = region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
   return async (args) => {
-    const extra = region ? ['--region', region] : [];
-    const { stdout } = await execFileAsync('aws', [...args, ...extra, '--output', 'json'], { encoding: 'utf8' });
+    const { stdout } = await execFileAsync('aws', [...args, '--region', resolvedRegion, '--output', 'json'], {
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
     return stdout;
   };
 }
@@ -29,7 +32,7 @@ export function ecsRuntime(opts: {
   workerContainer?: string;
   cli?: EcsCli;
 }): Runtime {
-  const cli = opts.cli ?? defaultEcsCli(process.env.AWS_REGION);
+  const cli = opts.cli ?? defaultEcsCli(process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1');
   const container = opts.workerContainer ?? 'worker';
   const running = new Map<string, string>();
 
@@ -75,7 +78,14 @@ export function ecsRuntime(opts: {
     async stop(agent, handle) {
       const arn = handle ?? running.get(agent.id);
       if (!arn) return null;
-      await cli(['ecs', 'stop-task', '--cluster', opts.cluster, '--task', arn, '--reason', 'factory scale-to-zero']);
+      try {
+        await cli(['ecs', 'stop-task', '--cluster', opts.cluster, '--task', arn, '--reason', 'factory scale-to-zero']);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!msg.includes('task was not found') && !msg.includes('referenced task was not found')) {
+          throw err;
+        }
+      }
       running.delete(agent.id);
       return 0;
     },

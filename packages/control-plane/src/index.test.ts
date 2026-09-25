@@ -650,6 +650,30 @@ describe.skip('restart reconciliation', () => {
     assert.equal(state.agents.get('echo-agent')?.state, 'WORKING');
     assert.equal(state.runs.get(b.runId)?.state, 'DONE');
   });
+
+  it('marks runs as FAILED when remote task is unknown/reaped and older than 60s', async () => {
+    const remote: Runtime = {
+      ...noopRuntime(),
+      running: () => false,
+      status: async () => ({ state: 'unknown' as const }),
+    };
+    const state = makeState({ runtime: remote as ReturnType<typeof noopRuntime> });
+    const run = state.runs.create({
+      agentId: 'echo-agent',
+      state: 'WORKING',
+      actor: 'x',
+      trigger: 'api',
+      taskHandle: 'arn:lost',
+    });
+    // Set created/started timestamp to 2 minutes ago
+    const past = new Date(Date.now() - 120_000).toISOString();
+    state.runs.update(run.runId, { startedAt: past, createdAt: past });
+
+    await reconcileRuns(state);
+    assert.equal(state.runs.get(run.runId)?.state, 'FAILED');
+    assert.match(state.runs.get(run.runId)?.error ?? '', /task not found in runtime/);
+    assert.equal(state.agents.get('echo-agent')?.state, 'SLEEPING');
+  });
 });
 
 describe.skip('hydrate through runtime store', () => {

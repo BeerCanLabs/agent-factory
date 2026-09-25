@@ -152,17 +152,32 @@ export function createGateway(opts: GatewayOptions): http.Server {
     return ctx;
   }
 
-  async function credential(route: Route): Promise<string | undefined> {
+  async function credential(route: Route, ctx?: RunContext): Promise<string | undefined> {
     if (!route.credential) return undefined;
-    const name = route.credential.secret;
+    let name = route.credential.secret;
+    if (ctx && (name.includes('{agent}') || name.includes('${agent}'))) {
+      const agentVar = ctx.run.agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      name = name.replace(/\$\{agent\}|\{agent\}/gi, agentVar);
+    }
     let value = credCache.get(name);
     if (!value) {
       const bound = await bindSecrets([name], opts.providers);
-      if (!bound.ok) return undefined;
-      value = bound.env[name];
-      credCache.set(name, value);
-      if (value.length >= 4) secretValues.add(value);
+      if (bound.ok && bound.env[name]) {
+        value = bound.env[name];
+        credCache.set(name, value);
+        if (value.length >= 4) secretValues.add(value);
+      } else if (route.credential.secret !== name) {
+        // Fallback to the base secret name if the agent-specific secret is not found
+        const fallbackName = route.credential.secret.replace(/\$\{agent\}|\{agent\}[_-]?/gi, '');
+        const fallbackBound = await bindSecrets([fallbackName], opts.providers);
+        if (fallbackBound.ok && fallbackBound.env[fallbackName]) {
+          value = fallbackBound.env[fallbackName];
+          credCache.set(name, value);
+          if (value.length >= 4) secretValues.add(value);
+        }
+      }
     }
+    if (!value) return undefined;
     return (route.credential.format ?? '{}').replace('{}', value);
   }
 
@@ -276,7 +291,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
       body = Buffer.from(JSON.stringify({ ...parsed, stream_options: { ...(parsed.stream_options as object), include_usage: true } }));
     }
 
-    const cred = await credential(route);
+    const cred = await credential(route, ctx);
     if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
     const requestId = randomUUID();
     const price = priceFor(opts.prices, model);
@@ -390,7 +405,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
         return send(res, 200, { jsonrpc: '2.0', id: (parsed as JsonRpc)?.id ?? null, error: { code: -32003, message: 'approval already used' } });
       }
     }
-    const cred = await credential(route);
+    const cred = await credential(route, ctx);
     if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
     const status = await forward(req, res, route, rest, raw, cred);
     if (status === 401) {
@@ -437,7 +452,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
       const raw = await readBody(req, limit);
       if (route.kind === 'llm') return await handleLlm(req, res, ctx, route, rest, raw);
       if (route.kind === 'mcp') return await handleMcp(req, res, ctx, route, rest, raw);
-      const cred = await credential(route);
+      const cred = await credential(route, ctx);
       if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
       const status = await forward(req, res, route, rest, raw, cred);
       ledger(ctx, route, { type: 'action', action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS' });

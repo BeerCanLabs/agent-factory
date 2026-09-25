@@ -138,7 +138,7 @@ resource "aws_iam_role_policy" "gateway" {
         Sid      = "InjectProviderKeysOnly"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [for arn in local.provider_secret_arns : "${arn}*"]
+        Resource = concat([for arn in local.provider_secret_arns : "${arn}*"], ["${local.secret_arn}/*_DISCORD_BOT_TOKEN*", "${local.secret_arn}/DISCORD_BOT_TOKEN*"])
       },
       local.telemetry_statement,
     ]

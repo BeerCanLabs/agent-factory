@@ -15,6 +15,7 @@ import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callba
 import { exceededWindow, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
 import { Keymaster } from '@beercanlabs/factory-keymaster';
 import { ScheduleStore, type ScheduledAction } from './schedules.js';
+import { gatewayEnv } from '@beercanlabs/factory-hydrate';
 
 export type FactoryState = {
   agents: Map<string, AgentRecord>;
@@ -356,12 +357,17 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
   for (const value of Object.values(env)) if (value.length >= 4) state.secretValues.add(value);
 
   let cur = state.runs.update(run.runId, { state: 'STARTING' });
+  const runToken = await state.runTokens.mint(run);
   const runEnv: Record<string, string> = {
     FACTORY_RUN_ID: run.runId,
-    FACTORY_RUN_TOKEN: await state.runTokens.mint(run),
+    FACTORY_RUN_TOKEN: runToken,
     ...(state.publicUrl ? { FACTORY_URL: state.publicUrl } : {}),
     ...(run.model ? { FACTORY_MODEL: run.model } : {}),
     ...(state.gatewayUrl ? { FACTORY_GATEWAY_URL: state.gatewayUrl } : {}),
+    ...gatewayEnv({
+      FACTORY_GATEWAY_URL: state.gatewayUrl,
+      FACTORY_RUN_TOKEN: runToken,
+    }),
   };
   try {
     const { handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv });
@@ -561,6 +567,17 @@ export async function reconcileRuns(state: FactoryState): Promise<void> {
     } else if (s.state === 'running') {
       const agent = state.agents.get(run.agentId);
       if (agent && agent.state === 'SLEEPING') agent.state = 'WORKING';
+      if (!state.idleTimers.has(run.agentId)) {
+        scheduleTimeout(state, run);
+      }
+    } else if (s.state === 'unknown') {
+      const ageMs = Date.now() - new Date(run.startedAt || run.createdAt).getTime();
+      if (ageMs > 60_000) {
+        await finishRun(state, run.runId, 'FAILED', {
+          actor: SYSTEM.reconciler,
+          error: 'task lost: task not found in runtime',
+        });
+      }
     }
   }
 }
