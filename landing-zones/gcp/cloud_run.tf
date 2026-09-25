@@ -186,6 +186,14 @@ resource "google_cloud_run_v2_service" "gateway" {
       max_instance_count = 5
     }
 
+    vpc_access {
+      network_interfaces {
+        network    = google_compute_network.factory.id
+        subnetwork = google_compute_subnetwork.services.id
+      }
+      egress = "ALL_TRAFFIC"
+    }
+
     containers {
       image = var.gateway_image
 
@@ -331,6 +339,14 @@ resource "google_cloud_run_v2_job" "agents" {
 
       timeout = "3600s" # 1-hour max per task; matches AWS run timeout pattern
 
+      vpc_access {
+        network_interfaces {
+          network    = google_compute_network.factory.id
+          subnetwork = google_compute_subnetwork.agents.id
+        }
+        egress = "ALL_TRAFFIC"
+      }
+
       containers {
         image = each.value.image
 
@@ -356,6 +372,22 @@ resource "google_cloud_run_v2_job" "agents" {
         env {
           name  = "MEMORY_STORE_URI"
           value = "gcs://${google_storage_bucket.mind.name}"
+        }
+        env {
+          name  = "DISCORD_BASE_URL"
+          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/discord" : ""
+        }
+        env {
+          name  = "OPENAI_BASE_URL"
+          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/v1" : ""
+        }
+        env {
+          name  = "ANTHROPIC_BASE_URL"
+          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/anthropic" : ""
+        }
+        env {
+          name  = "FACTORY_URL"
+          value = local.images_ready ? google_cloud_run_v2_service.control_plane[0].uri : ""
         }
 
         # Secrets from Secret Manager
