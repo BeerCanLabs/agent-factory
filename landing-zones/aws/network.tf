@@ -170,6 +170,16 @@ resource "aws_vpc_security_group_egress_rule" "agents_dns" {
   cidr_ipv4         = "${cidrhost(aws_vpc.factory.cidr_block, 2)}/32"
 }
 
+# ECS Task Metadata & IAM Task Role Credentials (link-local, non-routable outside host)
+resource "aws_vpc_security_group_egress_rule" "agents_to_ecs_metadata" {
+  security_group_id = aws_security_group.agents.id
+  ip_protocol       = "tcp"
+  from_port         = 80
+  to_port           = 80
+  cidr_ipv4         = "169.254.170.2/32"
+  description       = "ECS task metadata and IAM credentials endpoint"
+}
+
 # ---- endpoints: locked to this account so they cannot become an exfiltration path -----------
 
 data "aws_iam_policy_document" "endpoint_same_account" {
