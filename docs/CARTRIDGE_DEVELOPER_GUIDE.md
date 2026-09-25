@@ -164,8 +164,13 @@ When the Factory Console wakes your cartridge:
 1. **Input Payload:** Injected via the `FACTORY_INPUT` environment variable and written to `/tmp/factory-input.json`.
 2. **Secrets:** Injected into `os.environ` using the exact names declared in `cartridge.yaml`.
 3. **Memory Directory:** The Console hydrates previous state into `os.environ["MEMORY_DIR"]` (defaults to `/memory`).
-4. **LLM Egress Interception:** The Console sets `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` to point to the **Factory Egress Gateway** with a temporary run token.
-5. **Output Delivery:** The agent simply writes its JSON response to `/tmp/factory-result.json` and exits `0`.
+4. **Egress Interception & Credential Injection:** The Console enforces a **Zero-Trust Network Perimeter** (no public IP, no default internet gateway route `0.0.0.0/0`). Outbound traffic to LLMs and third-party APIs (such as Discord) egresses exclusively through the **Factory Egress Gateway** via standard Base URL variables:
+   - `ANTHROPIC_BASE_URL` (`${GATEWAY_URL}/anthropic`)
+   - `OPENAI_BASE_URL` (`${GATEWAY_URL}/v1`)
+   - `DISCORD_BASE_URL` (`${GATEWAY_URL}/discord`)
+   Agents authenticate to the gateway using their ephemeral `FACTORY_RUN_TOKEN`. The Gateway verifies run lifecycle and egress policy, meters the call, injects the real provider key or bot token (`Bot <token>`), and proxies to the upstream service.
+5. **Portability Fallback:** Cartridges remain 100% portable. If `DISCORD_BASE_URL` is unset, code defaults to `https://discord.com/api/v10` and uses local secrets (`DISCORD_BOT_TOKEN`).
+6. **Output Delivery:** The agent simply writes its JSON response to `/tmp/factory-result.json` and exits `0`.
 
 ### Complete Python Example (`agent.py`):
 ```python
@@ -265,6 +270,37 @@ For interactive agents (e.g., Discord or Slack chatbots), agents often stay warm
    `GET /api/v1/runs/${FACTORY_RUN_ID}/mailbox?timeout=20000` with header `Authorization: Bearer ${FACTORY_RUN_TOKEN}`.
 3. If a follow-up message arrives, reset your idle timer and handle the turn.
 4. When the idle window expires without further messages, call `write_result()` and exit `0` to scale back to zero.
+
+### Egress to External APIs (e.g. Discord, Slack)
+Because cartridges operate inside a zero-trust VPC with no public IP or direct internet egress route, third-party API communication uses perimeter credential injection through the Gateway:
+
+```python
+import os
+import urllib.request
+import json
+
+def reply_discord(channel_id: str, content: str):
+    base_url = os.environ.get("DISCORD_BASE_URL", "https://discord.com/api/v10").rstrip("/")
+    run_token = os.environ.get("FACTORY_RUN_TOKEN")
+    is_gateway = "discord.com" not in base_url
+
+    # In the Factory: send run token. The Gateway attaches the real Bot token.
+    # Standalone: use local DISCORD_BOT_TOKEN directly.
+    auth_header = (
+        f"Bearer {run_token}"
+        if (is_gateway and run_token)
+        else f"Bot {os.environ.get('DISCORD_BOT_TOKEN', '')}"
+    )
+
+    req = urllib.request.Request(
+        f"{base_url}/channels/{channel_id}/messages",
+        data=json.dumps({"content": content[:1900]}).encode("utf-8"),
+        headers={"Authorization": auth_header, "Content-Type": "application/json"},
+        method="POST"
+    )
+    urllib.request.urlopen(req, timeout=10)
+```
+When running in production, the Factory Gateway intercepts the request, validates the cartridge's policy, strips `FACTORY_RUN_TOKEN`, resolves the agent-specific credential (`{agent}_DISCORD_BOT_TOKEN`), and forwards the call to `discord.com`. When running standalone, it connects directly using local tokens. Cartridge code never needs to hardcode environment-specific endpoints.
 
 ---
 

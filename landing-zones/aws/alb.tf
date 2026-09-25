@@ -82,7 +82,7 @@ resource "aws_lb_listener_rule" "control_plane_agents" {
     path_pattern {
       values = [
         "/api/v1/agents",
-        "/api/v1/agents/*/runs*",
+        "/api/v1/agents/*",
         "/api/v1/gateway/*",
       ]
     }

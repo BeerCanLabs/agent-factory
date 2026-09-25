@@ -87,12 +87,14 @@ describe('egress gateway', { concurrency: false }, () => {
       name: 'test',
       async get(name) {
         secretFetches++;
+        if (name === 'ECHO_AGENT_DISCORD_BOT_TOKEN') return 'bot-agent-secret';
+        if (name === 'DISCORD_BOT_TOKEN') return 'bot-fallback-secret';
         return name === 'PROVIDER_KEY' ? REAL_KEY : undefined;
       },
     },
   ];
 
-  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['anthropic', 'openai', 'tools'], ...p });
+  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['anthropic', 'openai', 'tools', 'discord'], ...p });
   const settle = () => new Promise((r) => setTimeout(r, 20));
   const lastLlm = () => ledger.filter((e) => e.type === 'llm').at(-1);
 
@@ -106,6 +108,10 @@ describe('egress gateway', { concurrency: false }, () => {
         if (upstreamStatus !== 200) {
           res.writeHead(upstreamStatus, { 'content-type': 'application/json' });
           return res.end('{"error":"nope"}');
+        }
+        if (req.url?.startsWith('/discord')) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ ok: true }));
         }
         if (req.url?.startsWith('/v1/messages') && parsed.stream) {
           res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -137,6 +143,7 @@ describe('egress gateway', { concurrency: false }, () => {
         { id: 'anthropic', kind: 'llm', provider: 'anthropic', upstream: `http://127.0.0.1:${upPort}`, credential: { secret: 'PROVIDER_KEY', header: 'x-api-key' } },
         { id: 'openai', kind: 'llm', provider: 'openai', upstream: `http://127.0.0.1:${upPort}`, credential: { secret: 'PROVIDER_KEY', header: 'authorization', format: 'Bearer {}' } },
         { id: 'tools', kind: 'mcp', upstream: `http://127.0.0.1:${upPort}/mcp`, credential: { secret: 'PROVIDER_KEY', header: 'authorization', format: 'Bearer {}' } },
+        { id: 'discord', kind: 'http', upstream: `http://127.0.0.1:${upPort}/discord`, credential: { secret: '{agent}_DISCORD_BOT_TOKEN', header: 'authorization', format: 'Bot {}' } },
         { id: 'forbidden', kind: 'llm', provider: 'anthropic', upstream: `http://127.0.0.1:${upPort}` },
       ],
       prices: { 'test-*': { inputPerMTok: 3, outputPerMTok: 15 } },
@@ -220,6 +227,13 @@ describe('egress gateway', { concurrency: false }, () => {
     assert.equal(JSON.parse(seen[0].body).stream_options.include_usage, true);
     assert.equal(seen[0].headers.authorization, `Bearer ${REAL_KEY}`);
     assert.equal(lastLlm()!.outputTokens, 50);
+  });
+
+  it('resolves agent-specific credential for HTTP route and injects Bot header', async () => {
+    const res = await call(port, '/discord/channels/123/messages', { token, body: { content: 'hello discord' } });
+    assert.equal(res.status, 200);
+    assert.equal(seen[0].headers.authorization, 'Bot bot-agent-secret');
+    assert.equal(JSON.parse(seen[0].body).content, 'hello discord');
   });
 
   it('charges the worst case when a response reports no usage', async () => {
