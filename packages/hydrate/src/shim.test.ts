@@ -17,6 +17,10 @@ describe('gatewayEnv', () => {
     assert.equal(env.OPENAI_BASE_URL, 'http://gw:8081/openai/v1');
     assert.equal(env.DISCORD_BASE_URL, 'http://gw:8081/discord');
     assert.equal(env.DISCORD_API_BASE, 'http://gw:8081/discord');
+    assert.equal(env.GOOGLE_CALENDAR_BASE_URL, 'http://gw:8081/google-calendar');
+    assert.equal(env.GOOGLE_OAUTH_BASE_URL, 'http://gw:8081/google-oauth');
+    assert.equal(env.GMAIL_BASE_URL, 'http://gw:8081/google-gmail');
+    assert.equal(env.GOOGLE_DRIVE_BASE_URL, 'http://gw:8081/google-drive');
     assert.equal(env.ANTHROPIC_API_KEY, 'run-tok');
     assert.deepEqual(gatewayEnv({ FACTORY_RUN_TOKEN: 'x' }), {});
     assert.equal(gatewayEnv({ FACTORY_GATEWAY_URL: 'http://gw', FACTORY_RUN_TOKEN: 't', ANTHROPIC_BASE_URL: 'mine' }).ANTHROPIC_BASE_URL, undefined);
