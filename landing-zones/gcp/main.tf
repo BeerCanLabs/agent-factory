@@ -25,6 +25,8 @@ resource "google_project_service" "apis" {
     "storage.googleapis.com",
     "iam.googleapis.com",
     "logging.googleapis.com",
+    "compute.googleapis.com",
+    "vpcaccess.googleapis.com",
   ])
   service            = each.value
   disable_on_destroy = false

@@ -91,6 +91,18 @@ resource "google_secret_manager_secret_iam_member" "gw_provider_secrets" {
   member    = "serviceAccount:${google_service_account.gateway.email}"
 }
 
+# Gateway reads Discord bot tokens for perimeter credential injection
+resource "google_project_iam_member" "gw_discord_tokens" {
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.gateway.email}"
+  condition {
+    title       = "DiscordBotTokensOnly"
+    description = "Allows Gateway to read Discord bot tokens for perimeter credential injection"
+    expression  = "resource.name.endsWith('DISCORD_BOT_TOKEN')"
+  }
+}
+
 # ---- doorman ---------------------------------------------------------------------------------
 resource "google_service_account" "doorman" {
   account_id   = "${local.name}-dm"

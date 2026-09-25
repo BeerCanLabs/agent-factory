@@ -79,6 +79,35 @@ export async function provisionAgentRoles(
     console.warn(`[iam] Failed to attach MindPersistenceAccess to ${taskRoleName}:`, err);
   }
 
+  // 1c. Attach Bedrock Converse Policy to Task Role
+  const bedrockPolicyDocument = JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Action: [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
+          "bedrock:Converse",
+          "bedrock:ConverseStream",
+        ],
+        Resource: "*",
+      },
+    ],
+  });
+
+  try {
+    await client.send(
+      new PutRolePolicyCommand({
+        RoleName: taskRoleName,
+        PolicyName: "BedrockConverseAccess",
+        PolicyDocument: bedrockPolicyDocument,
+      })
+    );
+  } catch (err: any) {
+    console.warn(`[iam] Failed to attach BedrockConverseAccess to ${taskRoleName}:`, err);
+  }
+
   // 2. Create Execution Role
   let executionRoleArn = "";
   try {

@@ -185,7 +185,7 @@ data "aws_iam_policy_document" "endpoint_same_account" {
 }
 
 resource "aws_vpc_endpoint" "interface" {
-  for_each            = toset(["ecr.api", "ecr.dkr", "secretsmanager", "logs"])
+  for_each            = toset(["ecr.api", "ecr.dkr", "secretsmanager", "logs", "bedrock-runtime"])
   vpc_id              = aws_vpc.factory.id
   service_name        = "com.amazonaws.${var.aws_region}.${each.key}"
   vpc_endpoint_type   = "Interface"
