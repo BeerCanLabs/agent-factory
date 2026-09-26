@@ -111,7 +111,8 @@ export function createDiscordGateway(): Gateway {
             }
           }, 30_000);
 
-          // 3. Failure trigger at 75 seconds if agent completely fails to load
+          // 3. Failure trigger (default 180s, configurable via DOORMAN_STANDBY_TIMEOUT_MS) if agent completely fails to load
+          const failureTimeoutMs = Number(process.env.DOORMAN_STANDBY_TIMEOUT_MS) || 180_000;
           const failTimer = setTimeout(async () => {
             try {
               const current = standbySessions.get(message.channelId);
@@ -126,7 +127,7 @@ export function createDiscordGateway(): Gateway {
             }
             clearStandbySession(message.channelId);
             client.user?.setPresence({ activities: [] });
-          }, 75_000);
+          }, failureTimeoutMs);
 
           standbySessions.set(message.channelId, {
             messageId: sent.id,

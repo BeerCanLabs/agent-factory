@@ -1,6 +1,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { createGateway, type Approval, type ControlClient, type Policy, type RunContext } from './gateway.js';
@@ -248,6 +249,34 @@ describe('egress gateway', { concurrency: false }, () => {
     assert.equal(res.status, 200);
     assert.equal(seen[0].headers.authorization, 'Bearer user-oauth-token');
     assert.equal(JSON.parse(seen[0].body).summary, 'Team Meeting');
+  });
+
+  it('tunnels HTTPS CONNECT to allowed hosts with run token', async () => {
+    ctx.policy = policy({ hosts: ['127.0.0.1'] });
+    const s = net.connect(port, '127.0.0.1', () => {
+      s.write(`CONNECT 127.0.0.1:${upPort} HTTP/1.1\r\nProxy-Authorization: Bearer ${token}\r\n\r\n`);
+    });
+    const data = await new Promise<string>((resolve) => {
+      s.once('data', (buf) => resolve(buf.toString()));
+    });
+    s.destroy();
+    assert.ok(data.startsWith('HTTP/1.1 200 Connection Established'));
+    await settle();
+    assert.ok(ledger.some((e) => e.action === 'EGRESS_TUNNEL'));
+  });
+
+  it('denies HTTPS CONNECT to unallowed hosts', async () => {
+    ctx.policy = policy({ hosts: ['api.notion.com'] });
+    const s = net.connect(port, '127.0.0.1', () => {
+      s.write(`CONNECT evil.com:443 HTTP/1.1\r\nProxy-Authorization: Bearer ${token}\r\n\r\n`);
+    });
+    const data = await new Promise<string>((resolve) => {
+      s.once('data', (buf) => resolve(buf.toString()));
+    });
+    s.destroy();
+    assert.ok(data.startsWith('HTTP/1.1 403 Forbidden'));
+    await settle();
+    assert.ok(ledger.some((e) => String(e.action).startsWith('EGRESS_DENIED_HOST')));
   });
 
   it('charges the worst case when a response reports no usage', async () => {

@@ -7,7 +7,7 @@ import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
 import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
-import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
+import { classifySecrets, deriveEgress, type Surface } from '@beercanlabs/factory-contract';
 import { AgentRecord } from './catalog.js';
 import type { DeployProvider, Runtime } from './runtime.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
@@ -356,6 +356,23 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
   }
   for (const value of Object.values(env)) if (value.length >= 4) state.secretValues.add(value);
 
+  // Ensure agent egress policy allows required routes and hosts
+  const egress = deriveEgress(agent as any);
+  const curPolicy = state.policies.get(agent.id);
+  const effRoutes = Array.from(new Set([
+    ...(curPolicy?.routes ?? []),
+    ...egress.routes,
+  ]));
+  const effHosts = Array.from(new Set([
+    ...(curPolicy?.hosts ?? []),
+    ...egress.hosts,
+  ]));
+  state.policies.set(agent.id, {
+    ...curPolicy,
+    routes: effRoutes.length ? effRoutes : ['anthropic', 'openai'],
+    hosts: effHosts,
+  });
+
   let cur = state.runs.update(run.runId, { state: 'STARTING' });
   const runToken = await state.runTokens.mint(run);
   const runEnv: Record<string, string> = {
@@ -692,7 +709,8 @@ function bearerOf(req: http.IncomingMessage): string | undefined {
 async function authenticateRun(req: http.IncomingMessage, res: http.ServerResponse, state: FactoryState, runId: string) {
   const claims = await state.runTokens.verify(bearerOf(req));
   const run = claims && claims.runId === runId ? state.runs.get(runId) : undefined;
-  if (!claims || !run || run.agentId !== claims.agentId || isTerminal(run.state)) {
+  const isResultPost = (req.url?.includes('/result') || false) && req.method === 'POST';
+  if (!claims || !run || run.agentId !== claims.agentId || (isTerminal(run.state) && (!isResultPost || run.state !== 'TIMED_OUT'))) {
     json(res, 401, { error: 'invalid_run_token' });
     return null;
   }
@@ -852,6 +870,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     if (runSelf[2] === 'mailbox') {
+      scheduleTimeout(state, run);
       if (!state.mailboxes) state.mailboxes = new Map();
       let queue = state.mailboxes.get(run.agentId);
       if (!queue) {
@@ -1375,11 +1394,21 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     };
     state.agents.set(record.id, record);
 
-    // Sync approved models into the agent's egress policy
+    // Sync approved models and derived egress into the agent's egress policy
+    const egress = deriveEgress(record as any);
     const currentPol = state.policies.get(record.id);
+    const effectiveRoutes = Array.from(new Set([
+      ...(currentPol?.routes ?? []),
+      ...egress.routes,
+    ]));
+    const effectiveHosts = Array.from(new Set([
+      ...(currentPol?.hosts ?? []),
+      ...egress.hosts,
+    ]));
     state.policies.set(record.id, {
       ...currentPol,
-      routes: currentPol?.routes?.length ? currentPol.routes : ['llm'],
+      routes: effectiveRoutes.length ? effectiveRoutes : ['anthropic', 'openai'],
+      hosts: effectiveHosts,
       models: approvedModels,
     });
 

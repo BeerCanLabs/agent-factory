@@ -178,6 +178,13 @@ export const cartridgeSchema = z
       })
       .passthrough()
       .optional(),
+    egress: z
+      .object({
+        routes: z.array(z.string()).optional(),
+        hosts: z.array(z.string()).optional(),
+      })
+      .strict()
+      .optional(),
     model: z.string().optional(),
     models: z.array(z.string()).optional(),
     requestedModels: z.array(z.string()).optional(),
@@ -185,6 +192,14 @@ export const cartridgeSchema = z
   })
   .strict();
 
+export const egressSchema = z
+  .object({
+    routes: z.array(z.string()).optional(),
+    hosts: z.array(z.string()).optional(),
+  })
+  .strict();
+
+export type Egress = z.infer<typeof egressSchema>;
 export type SecretsManifest = z.infer<typeof secretsManifestSchema>;
 export type Surface = z.infer<typeof surfaceSchema>;
 export type Artifact = z.infer<typeof artifactSchema>;
@@ -194,6 +209,30 @@ export type Memory = z.infer<typeof memorySchema>;
 export type Bench = z.infer<typeof benchSchema>;
 export type BenchCase = z.infer<typeof benchCase>;
 export type Cartridge = z.infer<typeof cartridgeSchema>;
+
+export function deriveEgress(cartridge?: {
+  triggers?: Array<{ type: string }>;
+  models?: string[];
+  approvedModels?: string[];
+  model?: string;
+  egress?: { routes?: string[]; hosts?: string[] };
+}): { routes: string[]; hosts: string[] } {
+  const routes = new Set<string>(cartridge?.egress?.routes ?? []);
+  const hosts = new Set<string>(cartridge?.egress?.hosts ?? []);
+
+  // 1. Triggers requiring dedicated egress routes
+  if (cartridge?.triggers?.some((t) => t.type === 'discord')) {
+    routes.add('discord');
+  }
+
+  // 2. Default standard LLM routes if none provided
+  if (!routes.has('anthropic') && !routes.has('openai') && routes.size === 0) {
+    routes.add('anthropic');
+    routes.add('openai');
+  }
+
+  return { routes: Array.from(routes), hosts: Array.from(hosts) };
+}
 
 export const REQUIRED_FILES = ['soul.md', 'surface.yaml', 'secrets.manifest.yaml', 'artifact.yaml'] as const;
 export const OPTIONAL_FILES = ['bench.yaml', 'skills.yaml', 'identity.yaml', 'memory.yaml'] as const;

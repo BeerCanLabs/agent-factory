@@ -4,6 +4,10 @@ export function gatewayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const token = env.FACTORY_RUN_TOKEN;
   if (!gw || !token) return {};
   const out: Record<string, string> = {
+    HTTP_PROXY: gw,
+    HTTPS_PROXY: gw,
+    http_proxy: gw,
+    https_proxy: gw,
     ANTHROPIC_BASE_URL: `${gw}/anthropic`,
     OPENAI_BASE_URL: `${gw}/openai/v1`,
     ANTHROPIC_API_KEY: token,

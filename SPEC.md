@@ -184,13 +184,18 @@ Discovery payload (control plane):
 
 Budgets, model and route allowlists, tool allowlists and approval requirements are admin-set per agent (`PUT /api/v1/agents/:id/policy`) and enforced by the factory. Policy is deny-by-default: an agent with no policy has no egress. Cartridges such as FinOps and MedDoc *consume* factory events (`budget.alert`, `crash`) to recommend and diagnose; they are not the enforcement point.
 
-### 3.8 Egress gateway
+### 3.8 Egress gateway and network isolation
 
-One fleet-wide gateway (`packages/gateway`) is the only route out of the agent network. Agents point their SDK base URLs at `http://<gateway>/<route-id>` (e.g. `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `DISCORD_BASE_URL`) and present their run token as the API key (`x-api-key`, `Authorization: Bearer`, or `x-factory-run-token`). The gateway:
+For complete specification of the zero-trust perimeter, dual reverse/forward proxy, and egress schema, see [docs/NETWORK_ISOLATION_AND_EGRESS.md](./docs/NETWORK_ISOLATION_AND_EGRESS.md).
+
+One fleet-wide gateway (`packages/gateway`) is the only route out of the agent network. The gateway operates as both a **reverse proxy** (via Base URL rewrites for LLMs and Discord) and a **forward proxy** (via `HTTP_PROXY`/`HTTPS_PROXY` with HTTP `CONNECT` tunneling for arbitrary external APIs like GitHub, Notion, etc.). Agents authenticate using their run token (`x-api-key`, `Authorization: Bearer`, `x-factory-run-token`, or `Proxy-Authorization`).
+
+The gateway:
 
 - verifies the run token (HS256, shared `FACTORY_RUN_TOKEN_KEY`) and asks the control plane whether the run is live, the agent is paused/isolated, and what its policy and spend are (cached ≤1s);
 - strips the run token and injects the real credential for the route from the adopter's secret manager — **agents never hold provider keys**; for HTTP routes (such as Discord), the gateway dynamically resolves agent-specific tokens (e.g., `{agent}_DISCORD_BOT_TOKEN`) with fallback to global secrets; an upstream 401 purges the cached credential and records `RUNTIME_AUTH_FAILURE`;
 - proxies arbitrary HTTP routes (`type: "http"`, e.g. `/discord/*` to `https://discord.com/api/v10/*`), injecting configured headers (`Authorization: Bot <token>`) so agents in zero-egress VPC subnets communicate outbound without public IPs or IGW routes;
+- handles HTTP `CONNECT` requests for HTTPS tunneling, matching the destination authority against the agent's policy `hosts` allowlist (supporting wildcards, e.g. `*.github.com`), establishing raw TCP tunnels, and recording `EGRESS_TUNNEL` events in the audit ledger;
 - meters LLM usage from JSON and SSE (Anthropic Messages, OpenAI Chat and Responses; forces `stream_options.include_usage`), prices it from the operator's price table (unpriced models are refused), and writes `llm` ledger rows with `costUsd` attested as `run:<agent>`. A response with no usage is charged at its `max_tokens` and marked `METERING_GAP`;
 - enforces budgets **before** each call using control-plane spend plus spend not yet acknowledged; the control plane moves the run to `BLOCKED_BUDGET_EXCEEDED` when a settled call crosses a limit. Overshoot is therefore bounded by one in-flight request per replica;
 - governs MCP `tools/call`: tools outside the route's allowlist are refused without contacting the server; `requireApproval` tools return JSON-RPC error `-32003` with an `approvalId`, park the run in `BLOCKED_FOR_HUMAN`, and are released exactly once — for the same arguments — after an `approver` decides.
