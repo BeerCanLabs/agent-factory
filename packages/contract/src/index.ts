@@ -16,6 +16,8 @@ export {
   mcpEntry,
   classifySecrets,
   classifyCapabilities,
+  egressSchema,
+  deriveEgress,
 } from './schema.js';
 export type {
   SecretsManifest,
@@ -27,6 +29,7 @@ export type {
   Bench,
   BenchCase,
   Cartridge,
+  Egress,
   SecretGate,
   ClassifiedSecrets,
   ClassifiedCapabilities,

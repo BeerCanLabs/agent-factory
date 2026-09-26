@@ -9,6 +9,7 @@ export type ToolRule = { allow: string[] | '*'; requireApproval?: string[] };
 export type AgentPolicy = {
   routes: string[];
   models?: string[];
+  hosts?: string[];
   tools?: Record<string, ToolRule>;
   budgetUsd?: { perRun?: number; perDay?: number; perMonth?: number };
   tokensPerMinute?: number;
@@ -27,10 +28,11 @@ function positive(v: unknown): v is number {
 export function validatePolicy(raw: unknown): { ok: true; policy: AgentPolicy } | { ok: false; error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: 'policy must be an object' };
   const r = raw as Record<string, unknown>;
-  const allowed = new Set(['routes', 'models', 'tools', 'budgetUsd', 'tokensPerMinute']);
+  const allowed = new Set(['routes', 'models', 'hosts', 'tools', 'budgetUsd', 'tokensPerMinute']);
   for (const k of Object.keys(r)) if (!allowed.has(k)) return { ok: false, error: `unknown policy field ${k}` };
   if (!isStringArray(r.routes ?? [])) return { ok: false, error: 'routes must be an array of route ids' };
   if (r.models !== undefined && !isStringArray(r.models)) return { ok: false, error: 'models must be an array of model ids' };
+  if (r.hosts !== undefined && !isStringArray(r.hosts)) return { ok: false, error: 'hosts must be an array of hostnames' };
   if (r.tokensPerMinute !== undefined && !positive(r.tokensPerMinute)) return { ok: false, error: 'tokensPerMinute must be >= 0' };
   if (r.budgetUsd !== undefined) {
     const b = r.budgetUsd as Record<string, unknown>;

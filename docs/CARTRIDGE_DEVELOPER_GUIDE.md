@@ -144,6 +144,15 @@ compute:
 runtime:
   warmDownSeconds: 3600
 
+# Network Egress Policy (routes and allowed hosts for zero-trust perimeter)
+# See docs/NETWORK_ISOLATION_AND_EGRESS.md for details
+egress:
+  routes:
+    - llm              # anthropic, openai reverse-proxy routes
+    - discord          # derived automatically if a discord trigger is present
+  hosts:
+    - api.pagerduty.com # allowed target hosts for HTTP_PROXY / CONNECT tunneling
+
 # Optional: Environmental MCP peripherals and skills
 skills:
   - id: pagerduty-ops

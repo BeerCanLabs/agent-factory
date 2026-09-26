@@ -13,6 +13,8 @@ const shim = fileURLToPath(new URL('./shim.ts', import.meta.url));
 describe('gatewayEnv', () => {
   it('points stock SDKs at the gateway with the run token as their key', () => {
     const env = gatewayEnv({ FACTORY_GATEWAY_URL: 'http://gw:8081/', FACTORY_RUN_TOKEN: 'run-tok' });
+    assert.equal(env.HTTP_PROXY, 'http://gw:8081');
+    assert.equal(env.HTTPS_PROXY, 'http://gw:8081');
     assert.equal(env.ANTHROPIC_BASE_URL, 'http://gw:8081/anthropic');
     assert.equal(env.OPENAI_BASE_URL, 'http://gw:8081/openai/v1');
     assert.equal(env.DISCORD_BASE_URL, 'http://gw:8081/discord');

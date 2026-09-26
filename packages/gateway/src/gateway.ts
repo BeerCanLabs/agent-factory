@@ -1,5 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
+import stream from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import type { RunTokens } from '@beercanlabs/factory-auth';
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
@@ -20,6 +22,7 @@ export type ToolRule = { allow: string[] | '*'; requireApproval?: string[] };
 export type Policy = {
   routes: string[];
   models?: string[];
+  hosts?: string[];
   tools?: Record<string, ToolRule>;
   budgetUsd?: { perRun?: number; perDay?: number; perMonth?: number };
   tokensPerMinute?: number;
@@ -96,13 +99,34 @@ function readBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
   });
 }
 
-/** Run token from `Authorization: Bearer`, `x-api-key` (Anthropic SDKs), or `x-factory-run-token`. */
+/** Run token from `Authorization: Bearer`, `x-api-key` (Anthropic SDKs), `Proxy-Authorization: Bearer`, or `x-factory-run-token`. */
 function presentedToken(req: http.IncomingMessage): string | undefined {
   const h = req.headers;
   if (typeof h['x-factory-run-token'] === 'string') return h['x-factory-run-token'];
   if (typeof h['x-api-key'] === 'string') return h['x-api-key'];
+  const proxyAuth = h['proxy-authorization'];
+  if (typeof proxyAuth === 'string' && proxyAuth.startsWith('Bearer ')) return proxyAuth.slice(7).trim();
   const a = h.authorization;
   return a?.startsWith('Bearer ') ? a.slice(7).trim() : undefined;
+}
+
+function isHostAllowed(policy: Policy, routes: Map<string, Route>, destHost: string): boolean {
+  const allowed = new Set(policy.hosts ?? []);
+  for (const rId of policy.routes) {
+    const r = routes.get(rId);
+    if (r) {
+      try {
+        allowed.add(new URL(r.upstream).hostname);
+      } catch {}
+    }
+  }
+  if (allowed.has('*') || allowed.has(destHost)) return true;
+  for (const h of allowed) {
+    if (h.startsWith('*.') && (destHost === h.slice(2) || destHost.endsWith('.' + h.slice(2)))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function tryJson(buf: Buffer): unknown {
@@ -161,19 +185,21 @@ export function createGateway(opts: GatewayOptions): http.Server {
     }
     let value = credCache.get(name);
     if (!value) {
-      const bound = await bindSecrets([name], opts.providers);
-      if (bound.ok && bound.env[name]) {
-        value = bound.env[name];
-        credCache.set(name, value);
-        if (value.length >= 4) secretValues.add(value);
-      } else if (route.credential.secret !== name) {
-        // Fallback to the base secret name if the agent-specific secret is not found
-        const fallbackName = route.credential.secret.replace(/\$\{agent\}|\{agent\}[_-]?/gi, '');
-        const fallbackBound = await bindSecrets([fallbackName], opts.providers);
-        if (fallbackBound.ok && fallbackBound.env[fallbackName]) {
-          value = fallbackBound.env[fallbackName];
+      const candidates = [
+        name,
+        name.toLowerCase(),
+        name.toLowerCase().replace(/_/g, '-'),
+        route.credential.secret.replace(/\$\{agent\}|\{agent\}[_-]?/gi, ''),
+        'DISCORD_BOT_TOKEN',
+      ];
+      for (const cand of candidates) {
+        if (!cand) continue;
+        const bound = await bindSecrets([cand], opts.providers);
+        if (bound.ok && bound.env[cand]) {
+          value = bound.env[cand];
           credCache.set(name, value);
           if (value.length >= 4) secretValues.add(value);
+          break;
         }
       }
     }
@@ -430,10 +456,47 @@ export function createGateway(opts: GatewayOptions): http.Server {
     }
   }
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     try {
       const url = req.url ?? '/';
       if (url === '/healthz') return send(res, 200, { status: 'ok', routes: [...routes.keys()] });
+
+      // Forward HTTP proxy support (e.g. GET http://api.notion.com/v1/users)
+      if (url.startsWith('http://') || url.startsWith('https://')) {
+        const parsed = new URL(url);
+        const claims = await opts.runTokens.verify(presentedToken(req));
+        if (!claims) return send(res, 401, { error: 'invalid_run_token' });
+        const ctx = await context(claims.runId);
+        if (!ctx || ctx.run.agentId !== claims.agentId || !ctx.run.live) return send(res, 401, { error: 'run_not_live' });
+        if (ctx.agentState === 'ISOLATED') return send(res, 403, { error: 'isolated' });
+        if (ctx.agentState === 'PAUSED') return send(res, 503, { error: 'paused' });
+        if (ctx.run.state === 'BLOCKED_UNHEALTHY') return send(res, 503, { error: 'unhealthy' });
+
+        if (!isHostAllowed(ctx.policy, routes, parsed.hostname)) {
+          void opts.control.ledger({
+            agentId: ctx.run.agentId,
+            runId: ctx.run.runId,
+            actor: `run:${ctx.run.agentId}`,
+            type: 'action',
+            action: `EGRESS_DENIED_HOST_${parsed.hostname}`,
+          });
+          return send(res, 403, { error: 'host_not_allowed', host: parsed.hostname });
+        }
+
+        const raw = await readBody(req, limit);
+        const routeStub: Route = { id: `proxy-${parsed.hostname}`, kind: 'http', upstream: `${parsed.protocol}//${parsed.host}` };
+        const status = await forward(req, res, routeStub, parsed.pathname + parsed.search, raw, undefined);
+        void opts.control.ledger({
+          agentId: ctx.run.agentId,
+          runId: ctx.run.runId,
+          actor: `run:${ctx.run.agentId}`,
+          type: 'action',
+          action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS_PROXY',
+          host: parsed.hostname,
+        });
+        return;
+      }
+
       const m = url.match(/^\/([A-Za-z0-9_.-]+)(\/.*)?$/);
       const route = m ? routes.get(m[1]) : undefined;
       if (!route) return send(res, 404, { error: 'unknown_route' });
@@ -468,4 +531,76 @@ export function createGateway(opts: GatewayOptions): http.Server {
       send(res, status, { error: redactSecrets(err instanceof Error ? err.message : String(err), secretValues) });
     }
   });
+
+  server.on('connect', async (req: http.IncomingMessage, clientSocket: stream.Duplex, head: Buffer) => {
+    try {
+      const token = presentedToken(req);
+      const claims = await opts.runTokens.verify(token);
+      if (!claims) {
+        clientSocket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        clientSocket.destroy();
+        return;
+      }
+      const ctx = await context(claims.runId);
+      if (!ctx || ctx.run.agentId !== claims.agentId || !ctx.run.live) {
+        clientSocket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        clientSocket.destroy();
+        return;
+      }
+      if (ctx.agentState === 'ISOLATED' || ctx.agentState === 'PAUSED' || ctx.run.state === 'BLOCKED_UNHEALTHY') {
+        clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        clientSocket.destroy();
+        return;
+      }
+
+      const [destHost, portStr] = (req.url ?? '').split(':');
+      const destPort = parseInt(portStr || '443', 10);
+      if (!destHost || isNaN(destPort)) {
+        clientSocket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+        clientSocket.destroy();
+        return;
+      }
+
+      if (!isHostAllowed(ctx.policy, routes, destHost)) {
+        void opts.control.ledger({
+          agentId: ctx.run.agentId,
+          runId: ctx.run.runId,
+          actor: `run:${ctx.run.agentId}`,
+          type: 'action',
+          action: `EGRESS_DENIED_HOST_${destHost}`,
+        });
+        clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        clientSocket.destroy();
+        return;
+      }
+
+      const upstreamSocket = net.connect(destPort, destHost, () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (head && head.length) upstreamSocket.write(head);
+        upstreamSocket.pipe(clientSocket);
+        clientSocket.pipe(upstreamSocket);
+        void opts.control.ledger({
+          agentId: ctx.run.agentId,
+          runId: ctx.run.runId,
+          actor: `run:${ctx.run.agentId}`,
+          type: 'action',
+          action: 'EGRESS_TUNNEL',
+          host: destHost,
+          port: destPort,
+        });
+      });
+
+      upstreamSocket.on('error', (err) => {
+        console.warn(`[gateway] connect error to ${destHost}:${destPort}: ${err.message}`);
+        clientSocket.destroy();
+      });
+      clientSocket.on('error', () => {
+        upstreamSocket.destroy();
+      });
+    } catch {
+      clientSocket.destroy();
+    }
+  });
+
+  return server;
 }
