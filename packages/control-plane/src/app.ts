@@ -196,7 +196,9 @@ async function authenticateOperatorOrRun(
       agentId: runPayload.agentId,
     };
   }
-  const result = await state.auth.verify(req.headers.authorization);
+  const authHeader = req.headers.authorization || 
+    (req.headers['cf-access-jwt-assertion'] ? `Bearer ${req.headers['cf-access-jwt-assertion']}` : undefined);
+  const result = await state.auth.verify(authHeader);
   if (result.ok && (hasRole(result.principal, 'operator') || hasRole(result.principal, 'viewer'))) {
     return { actor: result.principal.actor };
   }

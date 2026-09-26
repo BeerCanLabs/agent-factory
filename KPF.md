@@ -77,6 +77,54 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 
 ---
 
+## KPF Action, Actor & Protocol Matrix
+
+| KPF | Action | Actor | Protocol |
+| :--- | :--- | :--- | :--- |
+| **KPF 1: Agent Registry & Lifecycle** | Register New Cartridge | 👤 Developer | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | List All Registered Agents | 👤 Operator | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Get Agent Details & Lifecycle State | 👤 Operator | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Assign / Update Agent Budget | 👤 FinOps Admin | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Provision Cloud Infrastructure (Deploy) | 👤 Release Engineer | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Wake Agent / Dispatch Run | ⚙️ Doorman | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Cancel Active Run / Sleep Container | 👤 Operator | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Pause Agent (Operational Kill-Switch) | 👤 Operator | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Resume Paused Agent | 👤 Operator | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Stage 1 Retirement ("Scream Test") | 👤 Platform Admin | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Reinstate Agent from Holding Period | 👤 Platform Admin | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Stage 2 Permanent Purge & Mind Archival | 👤 Security Admin | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Approve Candidate LLM Model | 👤 QA Lead | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Switch Production LLM Model | 👤 Lead Engineer | REST / HTTPS |
+| **KPF 2: Key Management ("Locksmith")** | Inject Secret into Cloud Vault | 👤 Security Admin | CLI / Cloud Provider SDK |
+| **KPF 2: Key Management ("Locksmith")** | Verify Secrets Pre-Flight | ⚙️ Control Plane | Internal / Cloud Provider SDK |
+| **KPF 2: Key Management ("Locksmith")** | Rotate / Revoke Secret | 👤 Security Admin | CLI / Cloud Provider SDK |
+| **KPF 3: Cost Management & FinOps** | Query Live Run Spend | 👤 FinOps Admin | REST / HTTPS |
+| **KPF 3: Cost Management & FinOps** | Get Agent Policy & Spend Caps | 👤 FinOps Admin | REST / HTTPS |
+| **KPF 3: Cost Management & FinOps** | Update Org / Dept / Agent Budget Policy | 👤 FinOps Admin | REST / HTTPS |
+| **KPF 3: Cost Management & FinOps** | Emergency Egress Quarantine (Isolate) | 👤 Security Admin | REST / HTTPS |
+| **KPF 4: LLM & MCP Egress Gateway** | Egress LLM Request | ⚙️ Agent Runtime | HTTP Reverse Proxy |
+| **KPF 4: LLM & MCP Egress Gateway** | Egress Third-Party HTTP / API | ⚙️ Agent Runtime | HTTP Forward Proxy (`CONNECT`) |
+| **KPF 4: LLM & MCP Egress Gateway** | List Held Tool Calls (HITL Pending) | 👤 Approver | REST / HTTPS |
+| **KPF 4: LLM & MCP Egress Gateway** | Approve / Reject Held Tool Action | 👤 Approver | REST / HTTPS |
+| **KPF 4: LLM & MCP Egress Gateway** | Stream Live Execution Logs | 👤 Operator | WebSocket |
+| **KPF 5: Doorman (Presence & Routing)** | Receive External Ingress Event | 👤 End User | WebSocket / Inbound Webhook |
+| **KPF 5: Doorman (Presence & Routing)** | Trigger Ingress Wake | ⚙️ Doorman | Internal HTTP Webhook |
+| **KPF 5: Doorman (Presence & Routing)** | Deliver Follow-Up Turn to Running Agent | ⚙️ Doorman | REST / HTTPS |
+| **KPF 5: Doorman (Presence & Routing)** | Container Mailbox Retrieval | ⚙️ Agent Runtime | HTTP Long-Polling |
+| **KPF 5: Doorman (Presence & Routing)** | Agent Container Heartbeat | ⚙️ Agent Runtime | REST / HTTPS |
+| **KPF 6: Triage & Fault Ledger** | Query Immutable Ledger Audit Trail | 👤 Auditor | REST / HTTPS |
+| **KPF 6: Triage & Fault Ledger** | Query Run State & Execution Errors | 👤 SRE | REST / HTTPS |
+| **KPF 6: Triage & Fault Ledger** | Report Run Exit / Crash Result | ⚙️ Agent Runtime | REST / HTTPS |
+| **KPF 6: Triage & Fault Ledger** | Infrastructure Fault Alert Sink | ⚙️ Triage Engine | Cloud Pub/Sub (`EventBridge` / `SQS`) |
+| **KPF 7: Quality & Benchmarking** | Execute Offline Benchmark Suite | 👤 Developer | CLI |
+| **KPF 7: Quality & Benchmarking** | Run Pinned Simulation with Tracing | 👤 QA Lead | REST / HTTPS |
+| **KPF 7: Quality & Benchmarking** | Retrieve Benchmark History & Scorecard | 👤 QA Lead | REST / HTTPS |
+| **KPF 8: Headless Observability** | Query Real-Time Operational Metrics | 👤 SRE | REST / HTTPS |
+| **KPF 8: Headless Observability** | Prometheus Metrics Pull | ⚙️ Monitoring Agent | HTTP (Prometheus scrape) |
+| **KPF 8: Headless Observability** | Deep Telemetry & Multi-Dimensional Query | ⚙️ Analytics System | GraphQL / HTTPS |
+
+---
+
 ## Deferred flows (not kernel)
 
 These remain documented so they are not reintroduced as silent kernel scope.

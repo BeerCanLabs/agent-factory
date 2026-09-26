@@ -1,6 +1,6 @@
 # Agent Factory — instructions for implementing AIs
 
-You are deploying **BeerCanLabs Agent Factory**. Canonical architecture: `POSITION_PAPER.md`. On conflict: paper, then `.draft/sdp.yaml`, then this file.
+You are deploying **BeerCanLabs Agent Factory**. Canonical architecture & task SSOT: `DESIGN_AUTHORITY.md` and `POSITION_PAPER.md`. On conflict: `DESIGN_AUTHORITY.md`, paper, then `.draft/sdp.yaml`, then this file. Cartridges use "The Notebook & Safe" pattern (local SQLite in `$MEMORY_DIR` synced to mind storage by Console shim; zero cloud SDKs in cartridges).
 
 You are not installing Hermes, OpenClaw, or Garrison. You are not required to use AWS, ECS, or S3.
 
