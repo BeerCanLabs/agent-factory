@@ -169,6 +169,22 @@ async function authenticate(
     (req.headers['cf-access-jwt-assertion'] ? `Bearer ${req.headers['cf-access-jwt-assertion']}` : undefined);
   const result = await state.auth.verify(authHeader);
   if (!result.ok) {
+    const cfEmail = (req.headers['cf-access-authenticated-user-email'] as string | undefined)?.toLowerCase().trim();
+    if (cfEmail) {
+      const adminEmails = (process.env.FACTORY_ADMIN_EMAILS || 'dale.sackrider@gmail.com')
+        .split(',')
+        .map((s) => s.trim().toLowerCase());
+      const isAdmin = adminEmails.includes(cfEmail);
+      const principal: Principal = {
+        actor: `cloudflare:${cfEmail}`,
+        roles: isAdmin ? ['admin', 'operator', 'approver', 'viewer', 'ingest'] : ['viewer'],
+      };
+      if (hasRole(principal, role)) {
+        return principal;
+      }
+      json(res, 403, { error: 'forbidden', required: role });
+      return null;
+    }
     json(res, 401, { error: 'unauthorized' });
     return null;
   }
@@ -184,6 +200,10 @@ async function authenticateOperatorOrRun(
   res: http.ServerResponse,
   state: FactoryState,
 ): Promise<{ actor: string; agentId?: string } | null> {
+  const cfEmail = (req.headers['cf-access-authenticated-user-email'] as string | undefined)?.toLowerCase().trim();
+  if (cfEmail) {
+    return { actor: `cloudflare:${cfEmail}` };
+  }
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   if (!token) {
     json(res, 401, { error: 'unauthorized' });
@@ -244,6 +264,23 @@ function record(state: FactoryState, run: Pick<Run, 'agentId' | 'runId'>, action
 
 export function activeRun(state: FactoryState, agentId: string): Run | undefined {
   return state.runs.list({ agentId, active: true }).find((r) => r.state !== 'QUEUED');
+}
+
+export function enrichAgent(state: FactoryState, a: AgentRecord) {
+  const s = state.spend.get(a.id, undefined);
+  const pol = state.policies.get(a.id);
+  const activeR = activeRun(state, a.id);
+  return {
+    ...a,
+    version: (a as any).version || '1.0.0',
+    state: activeR ? 'RUNNING' : a.state,
+    currentSpendUsd: Number((s?.day ?? 0).toFixed(4)),
+    spendLimitUsd: Number((pol?.budgetUsd?.perDay ?? 0).toFixed(2)),
+    lastRunId: activeR?.runId,
+    domain: (a as any).domain || 'Factory Operations',
+    mindPrefix: a.memoryPrefix ? `s3://beercanlabs-minds/${a.memoryPrefix}/` : `s3://beercanlabs-minds/${a.id}/`,
+    sqliteSizeKb: (a as any).sqliteSizeKb ?? 0,
+  };
 }
 
 function scheduleTimeout(state: FactoryState, run: Run) {
@@ -778,10 +815,15 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
     let daySpend = 0;
     let monthSpend = 0;
+    let totalBudgetDay = 0;
     for (const id of state.agents.keys()) {
       const s = state.spend.get(id, undefined);
       daySpend += s.day;
       monthSpend += s.month;
+      const pol = state.policies.get(id);
+      if (pol?.budgetUsd?.perDay) {
+        totalBudgetDay += pol.budgetUsd.perDay;
+      }
     }
 
     json(res, 200, {
@@ -801,8 +843,24 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       spendUsd: {
         day: Number(daySpend.toFixed(4)),
         month: Number(monthSpend.toFixed(4)),
+        limit: Number(totalBudgetDay.toFixed(2)),
       },
     });
+    return;
+  }
+
+  if (path === '/api/v1/triage' && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    const failedRuns = state.runs.list({}).filter((r) => r.state === 'FAILED' || r.error);
+    const incidents = failedRuns.map((r) => ({
+      id: `inc-${r.runId.slice(0, 8)}`,
+      timestamp: r.updatedAt || r.startedAt || r.createdAt || new Date().toISOString(),
+      agentId: r.agentId,
+      severity: r.error?.includes('OOM') ? 'CRITICAL' : 'ERROR',
+      category: r.missing ? 'SECRET_MISSING' : r.error?.includes('timeout') ? 'TIMEOUT' : 'CRASH_LOOP',
+      message: r.error || 'Run terminated with failure state',
+    }));
+    json(res, 200, incidents);
     return;
   }
 
@@ -932,7 +990,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   if (path === '/api/v1/agents' && req.method === 'GET') {
     if (!(await authenticate(req, res, state, 'viewer'))) return;
-    json(res, 200, [...state.agents.values()]);
+    json(res, 200, [...state.agents.values()].map((a) => enrichAgent(state, a)));
     return;
   }
 
@@ -1099,7 +1157,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     if (!(await authenticate(req, res, state, 'viewer'))) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
     const rows = state.ledger.query({
-      agent: url.searchParams.get('agent'),
+      agent: url.searchParams.get('agent') || url.searchParams.get('agentId') || undefined,
       from: url.searchParams.get('from'),
       to: url.searchParams.get('to'),
     });
@@ -1428,7 +1486,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   
   if (path === '/api/v1/registry/agents' && req.method === 'GET') {
     if (!(await authenticate(req, res, state, 'viewer'))) return;
-    json(res, 200, Array.from(state.agents.values()));
+    json(res, 200, Array.from(state.agents.values()).map((a) => enrichAgent(state, a)));
     return;
   }
 
@@ -1440,7 +1498,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 404, { error: 'not_found' });
       return;
     }
-    json(res, 200, agent);
+    json(res, 200, enrichAgent(state, agent));
     return;
   }
 
@@ -1454,7 +1512,20 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 404, { error: 'not_found' });
       return;
     }
-    const checked = validatePolicy(await readJson(req));
+    const body = await readJson(req);
+    let policyInput: unknown = body;
+    if (body && typeof body === 'object' && 'spendLimitUsd' in body) {
+      const currentPol = state.policies.get(agentId) ?? { routes: ['anthropic', 'openai'] };
+      const period = (body as any).period === 'monthly' ? 'perMonth' : 'perDay';
+      policyInput = {
+        ...currentPol,
+        budgetUsd: {
+          ...currentPol.budgetUsd,
+          [period]: Number((body as any).spendLimitUsd),
+        },
+      };
+    }
+    const checked = validatePolicy(policyInput);
     if (!checked.ok) {
       json(res, 400, { error: checked.error });
       return;
@@ -1478,7 +1549,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
       }
     }
-    json(res, 200, agent);
+    json(res, 200, enrichAgent(state, agent));
     return;
   }
 
