@@ -478,6 +478,16 @@ export async function applyKillSwitch(
   else if (command === 'ISOLATE') agent.state = 'ISOLATED';
   else agent.state = activeRun(state, id) ? 'WORKING' : 'SLEEPING';
   state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: command, actor });
+  if (state.registryDir) {
+    try {
+      const filePath = join(state.registryDir, `${id}.json`);
+      if (existsSync(filePath)) {
+        writeFileSync(filePath, JSON.stringify(agent, null, 2), 'utf8');
+      }
+    } catch (err) {
+      console.warn(`[control-plane] failed to persist dynamic agent state ${id}:`, err);
+    }
+  }
   if (command === 'RESUME' && !activeRun(state, id)) {
     const next = state.runs.list({ agentId: id, active: true }).find((r) => r.state === 'QUEUED');
     if (next) await startRun(state, next);
@@ -1584,6 +1594,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         await dp.registerCompute(agentId, imageUri, agent.requires, identity, executionIdentity);
 
         agent.state = 'SLEEPING'; // Officially online
+        if (state.registryDir) {
+          try {
+            mkdirSync(state.registryDir, { recursive: true });
+            writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
+          } catch (err) {
+            console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
+          }
+        }
         state.ledger.append({
           timestamp: new Date().toISOString(),
           agentId,
@@ -1594,6 +1612,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       } catch (err) {
         console.error(`[control-plane] Deploy failed for ${agentId}:`, err);
         agent.state = 'ERROR';
+        if (state.registryDir) {
+          try {
+            const filePath = join(state.registryDir, `${agent.id}.json`);
+            if (existsSync(filePath)) {
+              writeFileSync(filePath, JSON.stringify(agent, null, 2), 'utf8');
+            }
+          } catch {}
+        }
       }
     })();
     return;
