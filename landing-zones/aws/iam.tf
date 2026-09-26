@@ -187,11 +187,13 @@ resource "aws_iam_role_policy" "control_plane_paas" {
         Effect = "Allow"
         Action = [
           "iam:CreateRole",
+          "iam:GetRole",
           "iam:PutRolePolicy",
           "iam:PassRole",
           "ecs:RegisterTaskDefinition",
           "codebuild:StartBuild",
-          "codebuild:BatchGetBuilds"
+          "codebuild:BatchGetBuilds",
+          "secretsmanager:DescribeSecret"
         ]
         Resource = "*"
       }

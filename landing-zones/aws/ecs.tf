@@ -64,6 +64,7 @@ resource "aws_ecs_task_definition" "control_plane" {
       environment = concat(local.otel_env, [
         { name = "PORT", value = "8088" },
         { name = "AGENTS_ROOT", value = "/app/agents" },
+        { name = "AWS_ACCOUNT_ID", value = local.account_id },
         { name = "FACTORY_OIDC_ISSUER", value = var.oidc_issuer },
         { name = "FACTORY_OIDC_AUDIENCE", value = var.oidc_audience },
         { name = "FACTORY_OIDC_ROLES_CLAIM", value = var.oidc_roles_claim },

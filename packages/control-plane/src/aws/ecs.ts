@@ -4,7 +4,7 @@ import { SecretsManagerClient, DescribeSecretCommand } from "@aws-sdk/client-sec
 const ecsClient = new ECSClient({});
 const smClient = new SecretsManagerClient({});
 
-export async function resolveSecretArn(secretNameOrArn: string): Promise<string> {
+export async function resolveSecretArn(secretNameOrArn: string, fallbackArn?: string): Promise<string> {
   if (secretNameOrArn.startsWith("arn:aws:")) {
     return secretNameOrArn;
   }
@@ -20,7 +20,8 @@ export async function resolveSecretArn(secretNameOrArn: string): Promise<string>
     } catch {}
   }
   const region = process.env.AWS_REGION || "us-east-1";
-  const accountId = process.env.AWS_ACCOUNT_ID || process.env.BCL_AWS_ACCOUNT_ID;
+  const parsedAccount = fallbackArn?.startsWith("arn:aws:") ? fallbackArn.split(":")[4] : undefined;
+  const accountId = process.env.AWS_ACCOUNT_ID || process.env.BCL_AWS_ACCOUNT_ID || parsedAccount;
   if (!accountId) throw new Error('AWS_ACCOUNT_ID environment variable is required');
   return `arn:aws:secretsmanager:${region}:${accountId}:secret:${prefix}${secretNameOrArn}`;
 }
@@ -43,7 +44,7 @@ export async function registerAgentTaskDefinition(
 ) {
   const resolvedSecrets = await Promise.all(
     secrets.map(async (secretNameOrArn, i) => {
-      const arn = await resolveSecretArn(secretNameOrArn);
+      const arn = await resolveSecretArn(secretNameOrArn, taskRoleArn);
       const namePart = secretNameOrArn.startsWith("arn:aws:")
         ? (secretNameOrArn.split(':').pop() || `SECRET_${i}`)
         : secretNameOrArn;
