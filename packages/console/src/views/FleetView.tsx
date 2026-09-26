@@ -151,56 +151,56 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
 
       {/* KPI Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <div className="text-xs font-medium text-slate-400 flex items-center justify-between">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 shadow-sm transition-colors">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center justify-between">
             <span>Fleet Size</span>
-            <Zap className="w-4 h-4 text-blue-400" />
+            <Zap className="w-4 h-4 text-blue-500" />
           </div>
-          <div className="text-2xl font-bold text-white mt-1">{agents.length}</div>
-          <div className="text-xs text-slate-400 mt-1">Autonomous Cartridges</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white mt-1">{agents.length}</div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Autonomous Cartridges</div>
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <div className="text-xs font-medium text-slate-400 flex items-center justify-between">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 shadow-sm transition-colors">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center justify-between">
             <span>Active Containers</span>
-            <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
           </div>
-          <div className="text-2xl font-bold text-emerald-400 mt-1">{runningCount}</div>
-          <div className="text-xs text-slate-400 mt-1">{sleepingCount} Cold / Sleeping</div>
+          <div className="text-2xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">{runningCount}</div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">{sleepingCount} Cold / Sleeping</div>
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <div className="text-xs font-medium text-slate-400 flex items-center justify-between">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 shadow-sm transition-colors">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center justify-between">
             <span>24h Egress Spend</span>
-            <DollarSign className="w-4 h-4 text-emerald-400" />
+            <DollarSign className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
           </div>
-          <div className="text-2xl font-bold text-white mt-1">${totalSpend.toFixed(2)}</div>
-          <div className="text-xs text-slate-400 mt-1">of ${totalBudget.toFixed(2)} allocated budget</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white mt-1">${totalSpend.toFixed(2)}</div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">of ${totalBudget.toFixed(2)} allocated budget</div>
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <div className="text-xs font-medium text-slate-400 flex items-center justify-between">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 shadow-sm transition-colors">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center justify-between">
             <span>Perimeter Isolation</span>
-            <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800">
+            <span className="text-[10px] bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-300 dark:border-emerald-800">
               Zero-Trust
             </span>
           </div>
-          <div className="text-sm font-semibold text-emerald-400 mt-1">No Public IPs</div>
-          <div className="text-xs text-slate-400 mt-1">Egress Routed via Gateway Only</div>
+          <div className="text-sm font-semibold text-emerald-600 dark:text-emerald-400 mt-1">No Public IPs</div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Egress Routed via Gateway Only</div>
         </div>
       </div>
 
       {/* Filter & Search Bar */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-slate-900/60 border border-slate-800 p-3 rounded-xl">
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white/70 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 p-3 rounded-xl shadow-sm transition-colors">
         <div className="flex items-center space-x-2 w-full sm:w-auto">
           <div className="relative w-full sm:w-64">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-500" />
+            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
             <input
               type="text"
               placeholder="Search fleet by name, role, ID..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+              className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-emerald-500"
             />
           </div>
         </div>
@@ -212,8 +212,8 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
               onClick={() => setFilterState(st)}
               className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
                 filterState === st
-                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                  : 'text-slate-400 hover:text-slate-200 bg-slate-950 border border-slate-800'
+                  ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800'
               }`}
             >
               {st}
@@ -223,10 +223,10 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
       </div>
 
       {/* Fleet Table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden shadow-sm transition-colors">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
-            <thead className="bg-slate-950/80 border-b border-slate-800 text-slate-400 uppercase text-[10px] tracking-wider font-semibold">
+            <thead className="bg-slate-100 dark:bg-slate-950/80 border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 uppercase text-[10px] tracking-wider font-semibold">
               <tr>
                 <th className="py-3 px-4">Agent</th>
                 <th className="py-3 px-4">Department</th>
@@ -237,35 +237,35 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                 <th className="py-3 px-4 text-right">Quick Controls</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800/60">
+            <tbody className="divide-y divide-slate-200 dark:divide-slate-800/60">
               {filteredAgents.map((agent) => (
-                <tr key={agent.id} className="hover:bg-slate-800/30 transition">
+                <tr key={agent.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition">
                   <td className="py-3 px-4">
                     <button
                       onClick={() => onSelectAgent(agent.id)}
-                      className="text-left font-bold text-slate-100 hover:text-emerald-400 transition flex items-center space-x-1.5"
+                      className="text-left font-bold text-slate-900 dark:text-slate-100 hover:text-emerald-600 dark:hover:text-emerald-400 transition flex items-center space-x-1.5"
                     >
                       <span>{agent.name}</span>
-                      <ExternalLink className="w-3 h-3 text-slate-500" />
+                      <ExternalLink className="w-3 h-3 text-slate-400" />
                     </button>
-                    <p className="text-[11px] text-slate-400 font-mono">{agent.id}</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">{agent.id}</p>
                   </td>
-                  <td className="py-3 px-4 text-slate-300 font-medium">{agent.domain || 'Core'}</td>
+                  <td className="py-3 px-4 text-slate-700 dark:text-slate-300 font-medium">{agent.domain || 'Core'}</td>
                   <td className="py-3 px-4">{getStateBadge(agent.state)}</td>
                   <td className="py-3 px-4">
-                    <span className="font-mono text-[11px] bg-slate-950 px-2 py-0.5 rounded border border-slate-800 text-slate-300">
+                    <span className="font-mono text-[11px] bg-slate-100 dark:bg-slate-950 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300">
                       {agent.model}
                     </span>
                   </td>
                   <td className="py-3 px-4">
-                    <div className="font-semibold text-slate-200">${(agent.currentSpendUsd || 0).toFixed(2)}</div>
-                    <div className="text-[10px] text-slate-400">cap: ${agent.spendLimitUsd || 0}/day</div>
+                    <div className="font-semibold text-slate-800 dark:text-slate-200">${(agent.currentSpendUsd || 0).toFixed(2)}</div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400">cap: ${agent.spendLimitUsd || 0}/day</div>
                   </td>
                   <td className="py-3 px-4">
-                    <div className="text-[11px] text-slate-300">
+                    <div className="text-[11px] text-slate-700 dark:text-slate-300">
                       SQLite: {(agent.sqliteSizeKb || 0) > 1024 ? `${((agent.sqliteSizeKb || 0) / 1024).toFixed(1)}MB` : `${agent.sqliteSizeKb || 0}KB`}
                     </div>
-                    <div className="text-[10px] text-emerald-400/80">S3 WAL Checkpointed</div>
+                    <div className="text-[10px] text-emerald-600 dark:text-emerald-400/80">S3 WAL Checkpointed</div>
                   </td>
                   <td className="py-3 px-4 text-right">
                     <div className="flex items-center justify-end space-x-1.5">
@@ -284,9 +284,9 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                         <button
                           onClick={() => handleSleep(agent)}
                           disabled={!permissions.canSleep}
-                          className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded font-medium text-xs flex items-center space-x-1 border border-slate-700 transition"
+                          className="px-2.5 py-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded font-medium text-xs flex items-center space-x-1 border border-slate-300 dark:border-slate-700 transition"
                         >
-                          <Square className="w-3 h-3 fill-current text-amber-400" />
+                          <Square className="w-3 h-3 fill-current text-amber-500 dark:text-amber-400" />
                           <span>Sleep</span>
                         </button>
                       )}
@@ -296,7 +296,7 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                           onClick={() => handlePause(agent)}
                           disabled={!permissions.canPause}
                           title="Quarantine / Pause Agent"
-                          className="p-1 text-slate-400 hover:text-amber-400 disabled:opacity-40 rounded hover:bg-slate-800 transition"
+                          className="p-1 text-slate-500 dark:text-slate-400 hover:text-amber-500 rounded hover:bg-slate-200 dark:hover:bg-slate-800 transition"
                         >
                           <Pause className="w-3.5 h-3.5" />
                         </button>
@@ -314,7 +314,7 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
 
                       <button
                         onClick={() => onSelectAgent(agent.id)}
-                        className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition"
+                        className="p-1 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded hover:bg-slate-200 dark:hover:bg-slate-800 transition"
                         title="Open Workbench"
                       >
                         <Sliders className="w-3.5 h-3.5" />
@@ -330,37 +330,37 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
 
       {/* Wake Dispatch Modal */}
       {wakeModalAgent && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl max-w-lg w-full p-6 space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl max-w-lg w-full p-6 space-y-4 shadow-2xl transition-colors">
+            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
               <div className="flex items-center space-x-2">
-                <div className="w-3 h-3 rounded-full bg-emerald-400 animate-pulse" />
-                <h3 className="text-base font-bold text-white">Wake Agent: {wakeModalAgent.name}</h3>
+                <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">Wake Agent: {wakeModalAgent.name}</h3>
               </div>
-              <button onClick={() => setWakeModalAgent(null)} className="text-slate-400 hover:text-white">
+              <button onClick={() => setWakeModalAgent(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white">
                 ✕
               </button>
             </div>
 
-            <p className="text-xs text-slate-400">
+            <p className="text-xs text-slate-600 dark:text-slate-400">
               Awakening will initialize the container from cold storage, pull remote mind SQLite notebook from S3,
               and start the warm operational window.
             </p>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-300">Initial Turn Prompt / Input Payload</label>
+              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Initial Turn Prompt / Input Payload</label>
               <textarea
                 rows={4}
                 value={wakePrompt}
                 onChange={(e) => setWakePrompt(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs text-slate-100 font-mono focus:outline-none focus:border-emerald-500"
+                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-3 text-xs text-slate-900 dark:text-slate-100 font-mono focus:outline-none focus:border-emerald-500"
               />
             </div>
 
             <div className="flex items-center justify-end space-x-3 pt-2">
               <button
                 onClick={() => setWakeModalAgent(null)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold transition"
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg text-xs font-semibold transition"
               >
                 Cancel
               </button>

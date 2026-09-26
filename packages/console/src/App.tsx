@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { CloudflareAuthProvider, useAuth } from './auth/CloudflareAuth.js';
+import { ThemeProvider } from './context/ThemeContext.js';
 import { Header } from './components/Header.js';
 import { Sidebar, type ScreenId } from './components/Sidebar.js';
 import { FleetView } from './views/FleetView.js';
@@ -53,7 +54,7 @@ const MainLayout: React.FC = () => {
   const activeAgentsCount = agents.filter((a) => a.state === 'RUNNING').length;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-200">
       <Header onRefresh={loadData} isRefreshing={isRefreshing} />
 
       <div className="flex flex-1 overflow-hidden">
@@ -99,9 +100,11 @@ const MainLayout: React.FC = () => {
 
 export const App: React.FC = () => {
   return (
-    <CloudflareAuthProvider>
-      <MainLayout />
-    </CloudflareAuthProvider>
+    <ThemeProvider>
+      <CloudflareAuthProvider>
+        <MainLayout />
+      </CloudflareAuthProvider>
+    </ThemeProvider>
   );
 };
 
