@@ -75,10 +75,12 @@ const server = http.createServer((req, res) => {
     const headers = { ...req.headers };
     headers.host = targetUrl.host;
 
-    // Inject service token if not explicitly provided
-    if (!headers.authorization && FACTORY_TOKEN) {
+    // Inject service token
+    if (FACTORY_TOKEN) {
       headers.authorization = `Bearer ${FACTORY_TOKEN}`;
     }
+
+    console.log(`[proxy] ${req.method} ${pathname} -> ${targetUrl.toString()} (tokenLen=${FACTORY_TOKEN.length})`);
 
     const proxyReq = http.request(
       targetUrl,

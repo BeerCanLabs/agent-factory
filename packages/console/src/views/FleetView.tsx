@@ -169,16 +169,16 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
               {filterCategory === 'USER'
                 ? 'Autonomous Subminds'
                 : filterCategory === 'BUILTIN'
-                ? 'Built-in & System Utilities'
+                ? 'Built-in System Actors'
                 : 'All Fleet Cartridges'}
             </span>
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
             {filterCategory === 'USER'
-              ? 'User-defined submind personas and operational partners.'
+              ? 'User-defined submind personas and autonomous operational agents.'
               : filterCategory === 'BUILTIN'
-              ? 'Platform utility cartridges, compliance guards, and runtime diagnostics.'
-              : 'Complete unified view of all registered cartridges.'}
+              ? 'Core factory operational actors (Doorman, Keymaster, Doctor, Coach).'
+              : 'Complete unified view of all factory subminds and system actors.'}
           </p>
         </div>
 
