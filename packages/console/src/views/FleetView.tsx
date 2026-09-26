@@ -25,6 +25,7 @@ interface FleetViewProps {
 
 export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onRefresh }) => {
   const permissions = usePermissions();
+  const [filterCategory, setFilterCategory] = useState<'USER' | 'BUILTIN' | 'ALL'>('USER');
   const [filterState, setFilterState] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [wakeModalAgent, setWakeModalAgent] = useState<AgentRecord | null>(null);
@@ -32,19 +33,29 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
   const [isWaking, setIsWaking] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
+  const userAgents = agents.filter((a) => !a.isBuiltin && a.category !== 'builtin');
+  const builtinAgents = agents.filter((a) => Boolean(a.isBuiltin || a.category === 'builtin'));
+
   const filteredAgents = agents.filter((a) => {
+    const isBuiltin = Boolean(a.isBuiltin || a.category === 'builtin');
+    const matchesCategory =
+      filterCategory === 'ALL' ||
+      (filterCategory === 'USER' && !isBuiltin) ||
+      (filterCategory === 'BUILTIN' && isBuiltin);
     const matchesState = filterState === 'ALL' || a.state === filterState;
     const matchesSearch =
       a.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       a.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (a.role && a.role.toLowerCase().includes(searchQuery.toLowerCase()));
-    return matchesState && matchesSearch;
+    return matchesCategory && matchesState && matchesSearch;
   });
 
-  const runningCount = agents.filter((a) => a.state === 'RUNNING').length;
-  const sleepingCount = agents.filter((a) => a.state === 'SLEEPING').length;
-  const totalSpend = agents.reduce((sum, a) => sum + (a.currentSpendUsd || 0), 0);
-  const totalBudget = agents.reduce((sum, a) => sum + (a.spendLimitUsd || 0), 0);
+  const displayedAgents =
+    filterCategory === 'USER' ? userAgents : filterCategory === 'BUILTIN' ? builtinAgents : agents;
+  const runningCount = displayedAgents.filter((a) => a.state === 'RUNNING').length;
+  const sleepingCount = displayedAgents.filter((a) => a.state === 'SLEEPING').length;
+  const totalSpend = displayedAgents.reduce((sum, a) => sum + (a.currentSpendUsd || 0), 0);
+  const totalBudget = displayedAgents.reduce((sum, a) => sum + (a.spendLimitUsd || 0), 0);
 
   const handleWake = async () => {
     if (!wakeModalAgent) return;
@@ -149,6 +160,82 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
         </div>
       )}
 
+      {/* Category Separation Tabs */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center space-x-2">
+            <Zap className="w-5 h-5 text-indigo-500" />
+            <span>
+              {filterCategory === 'USER'
+                ? 'Autonomous Subminds'
+                : filterCategory === 'BUILTIN'
+                ? 'Built-in & System Utilities'
+                : 'All Fleet Cartridges'}
+            </span>
+          </h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            {filterCategory === 'USER'
+              ? 'User-defined submind personas and operational partners.'
+              : filterCategory === 'BUILTIN'
+              ? 'Platform utility cartridges, compliance guards, and runtime diagnostics.'
+              : 'Complete unified view of all registered cartridges.'}
+          </p>
+        </div>
+
+        <div className="flex items-center space-x-1.5 p-1 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl">
+          <button
+            onClick={() => setFilterCategory('USER')}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center space-x-2 ${
+              filterCategory === 'USER'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            <span>User Subminds</span>
+            <span
+              className={`px-1.5 py-0.2 rounded-full text-[10px] ${
+                filterCategory === 'USER'
+                  ? 'bg-indigo-700 text-white'
+                  : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              {userAgents.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setFilterCategory('BUILTIN')}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center space-x-2 ${
+              filterCategory === 'BUILTIN'
+                ? 'bg-slate-800 dark:bg-slate-700 text-white shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            <span>Built-in & System</span>
+            <span
+              className={`px-1.5 py-0.2 rounded-full text-[10px] ${
+                filterCategory === 'BUILTIN'
+                  ? 'bg-slate-900 text-slate-300'
+                  : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              {builtinAgents.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setFilterCategory('ALL')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+              filterCategory === 'ALL'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            All ({agents.length})
+          </button>
+        </div>
+      </div>
+
       {/* KPI Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 shadow-sm transition-colors">
@@ -156,8 +243,10 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
             <span>Fleet Size</span>
             <Zap className="w-4 h-4 text-blue-500" />
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-white mt-1">{agents.length}</div>
-          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Autonomous Cartridges</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white mt-1">{displayedAgents.length}</div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+            {filterCategory === 'USER' ? 'Submind Personas' : filterCategory === 'BUILTIN' ? 'System Utilities' : 'Autonomous Cartridges'}
+          </div>
         </div>
 
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 shadow-sm transition-colors">
@@ -241,13 +330,24 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
               {filteredAgents.map((agent) => (
                 <tr key={agent.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition">
                   <td className="py-3 px-4">
-                    <button
-                      onClick={() => onSelectAgent(agent.id)}
-                      className="text-left font-bold text-slate-900 dark:text-slate-100 hover:text-emerald-600 dark:hover:text-emerald-400 transition flex items-center space-x-1.5"
-                    >
-                      <span>{agent.name}</span>
-                      <ExternalLink className="w-3 h-3 text-slate-400" />
-                    </button>
+                    <div className="flex items-center space-x-2">
+                      <button
+                        onClick={() => onSelectAgent(agent.id)}
+                        className="text-left font-bold text-slate-900 dark:text-slate-100 hover:text-emerald-600 dark:hover:text-emerald-400 transition flex items-center space-x-1.5"
+                      >
+                        <span>{agent.name}</span>
+                        <ExternalLink className="w-3 h-3 text-slate-400" />
+                      </button>
+                      {agent.isBuiltin || agent.category === 'builtin' ? (
+                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-300 dark:border-slate-700">
+                          Built-in
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">
+                          User Submind
+                        </span>
+                      )}
+                    </div>
                     <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">{agent.id}</p>
                   </td>
                   <td className="py-3 px-4 text-slate-700 dark:text-slate-300 font-medium">{agent.domain || 'Core'}</td>

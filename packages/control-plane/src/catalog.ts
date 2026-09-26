@@ -3,6 +3,23 @@ import { basename, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { validateCartridge, classifySecrets, type Surface, type Cartridge, type SecretsManifest } from '@beercanlabs/factory-contract';
 
+export type AgentCategory = 'user' | 'builtin';
+
+export const BUILTIN_AGENT_IDS = new Set([
+  'factory-mechanic',
+  'librarian',
+  'compliance-officer',
+  'echo-agent',
+  'llm-summarizer',
+  'starter-python',
+]);
+
+export function isBuiltinCartridge(id: string, dir?: string): boolean {
+  if (BUILTIN_AGENT_IDS.has(id)) return true;
+  if (dir && (dir.includes('/examples/') || dir.includes('/agents/examples/'))) return true;
+  return false;
+}
+
 export type AgentRecord = {
   id: string;
   name: string;
@@ -22,6 +39,8 @@ export type AgentRecord = {
     | 'IDLE'
     | 'TRAINING'
     | 'OUT_OF_BUDGET';
+  category?: AgentCategory;
+  isBuiltin?: boolean;
   provider: string;
   artifact: string;
   localCommand?: string[];
@@ -143,6 +162,8 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
       }
     }
 
+    const isBuiltin = (rawCartridge as any)?.isBuiltin ?? ((rawCartridge as any)?.category ? (rawCartridge as any).category === 'builtin' : isBuiltinCartridge(result.cartridgeId, dir));
+    const category: AgentCategory = isBuiltin ? 'builtin' : 'user';
     const isCloud = rawCartridge?.compute?.kind === 'oci' || (process.env.FACTORY_RUNTIME === 'ecs' && !localCommand);
 
     out.push({
@@ -150,6 +171,8 @@ export function loadCatalog(agentsRoot: string): AgentRecord[] {
       name,
       role,
       state: 'SLEEPING',
+      category,
+      isBuiltin,
       provider: isCloud ? 'cloud' : 'local',
       artifact,
       localCommand,
@@ -209,7 +232,14 @@ export function loadDynamicRegistry(registryDir: string): AgentRecord[] {
       if (!f.endsWith('.json')) continue;
       try {
         const data = JSON.parse(readFileSync(join(registryDir, f), 'utf8')) as AgentRecord;
-        if (data && data.id) records.push(data);
+        if (data && data.id) {
+          const isBuiltin = data.isBuiltin ?? (data.category ? data.category === 'builtin' : isBuiltinCartridge(data.id, data.dir));
+          records.push({
+            ...data,
+            isBuiltin,
+            category: isBuiltin ? 'builtin' : 'user',
+          });
+        }
       } catch (err) {
         console.warn(`[control-plane] failed to parse dynamic agent ${f}:`, err);
       }

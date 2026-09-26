@@ -134,12 +134,30 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
                 onChange={(e) => onSelectAgent(e.target.value)}
                 className="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-white font-bold text-base rounded px-2 py-1 border border-slate-300 dark:border-slate-800 cursor-pointer focus:outline-none focus:border-emerald-500"
               >
-                {agents.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name} ({a.id})
-                  </option>
-                ))}
+                <optgroup label="User Subminds">
+                  {agents.filter((a) => !a.isBuiltin && a.category !== 'builtin').map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name} ({a.id})
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Built-in & System Utilities">
+                  {agents.filter((a) => a.isBuiltin || a.category === 'builtin').map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name} ({a.id})
+                    </option>
+                  ))}
+                </optgroup>
               </select>
+              {agent.isBuiltin || agent.category === 'builtin' ? (
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-300 dark:border-slate-700">
+                  Built-in
+                </span>
+              ) : (
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">
+                  User Submind
+                </span>
+              )}
               <span className="text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
                 v{agent.version}
               </span>

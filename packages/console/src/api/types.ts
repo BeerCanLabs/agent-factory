@@ -9,12 +9,16 @@ export type AgentState =
   | 'RETIRED_PENDING_PURGE'
   | 'PURGED';
 
+export type AgentCategory = 'user' | 'builtin';
+
 export interface AgentRecord {
   id: string;
   name: string;
   role?: string;
   version: string;
   state: AgentState;
+  category?: AgentCategory;
+  isBuiltin?: boolean;
   model: string;
   approvedModels?: string[];
   spendLimitUsd?: number;
