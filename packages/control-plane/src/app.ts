@@ -8,7 +8,7 @@ import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanla
 import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, deriveEgress, type Surface } from '@beercanlabs/factory-contract';
-import { AgentRecord } from './catalog.js';
+import { AgentRecord, isBuiltinCartridge, type AgentCategory } from './catalog.js';
 import type { DeployProvider, Runtime } from './runtime.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
@@ -270,14 +270,18 @@ export function enrichAgent(state: FactoryState, a: AgentRecord) {
   const s = state.spend.get(a.id, undefined);
   const pol = state.policies.get(a.id);
   const activeR = activeRun(state, a.id);
+  const isBuiltin = a.isBuiltin ?? (a.category ? a.category === 'builtin' : isBuiltinCartridge(a.id, a.dir));
+  const category: AgentCategory = isBuiltin ? 'builtin' : 'user';
   return {
     ...a,
+    category,
+    isBuiltin,
     version: (a as any).version || '1.0.0',
     state: activeR ? 'RUNNING' : a.state,
     currentSpendUsd: Number((s?.day ?? 0).toFixed(4)),
     spendLimitUsd: Number((pol?.budgetUsd?.perDay ?? 0).toFixed(2)),
     lastRunId: activeR?.runId,
-    domain: (a as any).domain || 'Factory Operations',
+    domain: (a as any).domain || (isBuiltin ? 'Platform Infrastructure' : 'Submind Autonomous Operations'),
     mindPrefix: a.memoryPrefix ? `s3://beercanlabs-minds/${a.memoryPrefix}/` : `s3://beercanlabs-minds/${a.id}/`,
     sqliteSizeKb: (a as any).sqliteSizeKb ?? 0,
   };
