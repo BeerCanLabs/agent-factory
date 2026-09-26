@@ -74,6 +74,7 @@ export type OidcOptions = {
   rolesClaim?: string;
   roleMap?: Record<string, Role>;
   clockToleranceSec?: number;
+  adminEmails?: string[];
 };
 
 async function discoverJwks(issuer: string): Promise<string> {
@@ -123,9 +124,14 @@ export function oidcAuth(opts: OidcOptions): AuthProvider {
       }
       if (typeof payload.sub !== 'string' || !payload.sub) return { ok: false, reason: 'jwt has no sub' };
       const email = typeof payload.email === 'string' ? payload.email : undefined;
+      const roles = asRoles(payload[claim], opts.roleMap);
+      const adminList = opts.adminEmails ?? ['dale.sackrider@gmail.com'];
+      if (email && adminList.some((e) => e.toLowerCase() === email.toLowerCase())) {
+        if (!roles.includes('admin')) roles.push('admin');
+      }
       return {
         ok: true,
-        principal: { actor: `oidc:${email ?? payload.sub}`, roles: asRoles(payload[claim], opts.roleMap) },
+        principal: { actor: `oidc:${email ?? payload.sub}`, roles },
       };
     },
   };
@@ -190,6 +196,9 @@ export function authFromEnv(env: NodeJS.ProcessEnv = process.env): AuthProvider 
     if (!env.FACTORY_OIDC_ISSUER || !env.FACTORY_OIDC_AUDIENCE) {
       throw new Error('OIDC needs both FACTORY_OIDC_ISSUER and FACTORY_OIDC_AUDIENCE');
     }
+    const adminEmails = env.FACTORY_ADMIN_EMAILS
+      ? env.FACTORY_ADMIN_EMAILS.split(',').map((s) => s.trim().toLowerCase())
+      : ['dale.sackrider@gmail.com'];
     providers.push(
       oidcAuth({
         issuer: env.FACTORY_OIDC_ISSUER,
@@ -197,6 +206,7 @@ export function authFromEnv(env: NodeJS.ProcessEnv = process.env): AuthProvider 
         jwksUrl: env.FACTORY_OIDC_JWKS_URL || undefined,
         rolesClaim: env.FACTORY_OIDC_ROLES_CLAIM || undefined,
         roleMap: env.FACTORY_OIDC_ROLE_MAP ? (JSON.parse(env.FACTORY_OIDC_ROLE_MAP) as Record<string, Role>) : undefined,
+        adminEmails,
       }),
     );
   }

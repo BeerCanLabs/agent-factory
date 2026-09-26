@@ -191,10 +191,15 @@ from pathlib import Path
 from datetime import datetime, timezone
 from anthropic import Anthropic
 
-# 1. Filing Cabinet: Persistent SQLite Memory
+# 1. The Notebook: Persistent SQLite Memory ("The Notebook & Safe")
+# Cartridges write to local SQLite in $MEMORY_DIR; the Factory Console backs up to S3.
+# NEVER import boto3 or cloud storage SDKs for cartridge memory.
 def get_db(memory_dir: Path) -> sqlite3.Connection:
     memory_dir.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(str(memory_dir / "ops_state.db"))
+    db.execute("PRAGMA journal_mode=WAL;")
+    db.execute("PRAGMA synchronous=NORMAL;")
+    db.execute("PRAGMA busy_timeout=5000;")
     db.execute("""
         CREATE TABLE IF NOT EXISTS incidents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -203,8 +208,23 @@ def get_db(memory_dir: Path) -> sqlite3.Connection:
             summary TEXT NOT NULL
         )
     """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_incidents_timestamp ON incidents (timestamp);")
     db.commit()
     return db
+
+def prune_old_records(conn: sqlite3.Connection, retention_days: int = 14):
+    """Keep the notebook small (<10MB) so S3 backup remains sub-second."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+    conn.execute("DELETE FROM incidents WHERE timestamp < ?", (cutoff,))
+    conn.commit()
+
+def close_db(conn: sqlite3.Connection):
+    """Clean checkpoint so S3 syncs a single, unfragmented .db file without dangling WAL locks."""
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    finally:
+        conn.close()
 
 # 2. Toolbox: Tools available to the Agent
 def query_system_health(service_name: str) -> dict:

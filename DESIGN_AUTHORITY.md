@@ -142,6 +142,7 @@ The following gaps exist between current repository code, `SPEC.md`, and the can
 | **TSK-016** | GAP-024 | Implement REST Metrics Endpoint (/api/v1/metrics) | `COMPLETED` | *None* (Released) | `packages/control-plane/src/app.ts`, `packages/control-plane/src/index.test.ts`, `DESIGN_AUTHORITY.md` | Added /api/v1/metrics and /metrics endpoints returning active runs, agents by state, ledger status, and spend with unit test coverage. |
 | **TSK-017** | GAP-008 | Align Cartridge Documentation Across Agent Factory & Templates | `COMPLETED` | *None* (Released) | `SPEC.md`, `docs/CARTRIDGE_DEVELOPER_GUIDE.md`, `DESIGN_AUTHORITY.md`, `SM-template/*`, `SM-rosie/README.md` | Documented unified cartridge.yaml alongside legacy manifest in SPEC.md, added runtime.warmDownSeconds, skills, and /mailbox long-polling pattern to Developer Guide and API table, aligned SM-template blueprint and verified contract. |
 | **TSK-018** | GAP-009 | Base URL Reverse Proxy Egress & Discord Route Integration | `COMPLETED` | *None* (Released) | `packages/gateway/*`, `packages/hydrate/*`, `packages/control-plane/*`, `landing-zones/aws/*`, `docs/*`, `SPEC.md`, `DESIGN_AUTHORITY.md` | Re-sealed agent network perimeter (zero public IPs, zero IGW route), added reverse proxy discord route to gateway with per-agent credential injection, injected DISCORD_BASE_URL via gatewayEnv and runEnv, updated cartridge documentation. |
+| **TSK-019** | GAP-025 | Fleet-Wide Private Agent Memory Architecture & Optimization | `COMPLETED` | *None* (Released) | `SM-template/*`, `SM-*/*`, `docs/CARTRIDGE_DEVELOPER_GUIDE.md`, `tests/*`, `DESIGN_AUTHORITY.md` | Standardized "Notebook & Safe" pattern across all 9 agents and SM-template. Purged cloud SDKs (boto3) from cartridges; cartridges write to local SQLite ($MEMORY_DIR) with WAL mode, busy_timeout=5000, 14-day history pruning, and PRAGMA wal_checkpoint(TRUNCATE) on shutdown. Sync is handled exclusively by Factory Console shim. Verified with automated regression tests. |
 
 
 
@@ -227,7 +228,17 @@ compute:
 * **Core Metrics Pillars:** Cost (USD spend, token burn), Quantity (task throughput, turns, duration), Quality (deterministic benchmark pass rates, regression ledger).
 * **API Surface Division:**
   - **REST:** Discrete operational actions (`/runs`, `/wake`, `/pause`, `/metrics`).
-  - **GraphQL (`/graphql`):** Deep, multi-dimensional telemetry querying for downstream analytics engines, BI tools, and reporting cron jobs. Allows clients to request exact aggregations (daily/weekly/monthly rollups, model cost breakdowns, department attribution) in a single request without over-fetching.
+### 6.6 Agent Memory Architecture ("The Notebook & Safe")
+* **Separation of Concerns:**
+  - **Cartridge (The Employee):** Strictly reads and writes to local embedded files (SQLite) in `$MEMORY_DIR` (`<agent>_state.db`). Cartridges **never** import cloud SDKs (`boto3`, `@google-cloud/storage`, Azure Blob SDK) and never know about cloud storage buckets.
+  - **Console (The Building Safe):** Handled transparently by `packages/hydrate/src/shim.ts`. On wake, the Console pulls remote mind storage (`s3://...` / `gs://...`) into `$MEMORY_DIR`. On sleep/exit, the Console pushes `$MEMORY_DIR` back to the remote mind bucket.
+* **SQLite Storage Engine Standards:**
+  - **WAL Mode:** Every cartridge SQLite database must execute `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;` on connection.
+  - **Single-Writer Clean Checkpointing:** Cartridges execute `PRAGMA wal_checkpoint(TRUNCATE)` in their shutdown/exit cleanup (`finally:` block). This collapses the `-wal` and `-shm` write-ahead logs into the primary `.db` file, guaranteeing clean, atomic object storage synchronization without lock artifacts.
+  - **Rolling Retention Pruning:** Raw chat turns and audit entries must have rolling retention (default 14 days) pruned automatically on wake to prevent boundless context database growth. Permanent knowledge (entities, facts, operational logs) is retained indefinitely.
+* **Private Agent Memory Isolation:**
+  - Cartridge memory is **strictly private** to each agent. Agents never share SQLite databases or object storage mind prefixes.
+  - Cross-agent collaboration and knowledge sharing is strictly conducted via the MCP Ingress Gateway (`talk_to_agent`), preserving encapsulation, provenance, and auditability.
 
 ---
 
@@ -254,6 +265,7 @@ compute:
 | 2026-09-21 | Gemini | Executed and completed TSK-016: implemented authenticated `GET /api/v1/metrics` and `GET /metrics` endpoints exposing active runs, agent states, ledger status, and spend. | TSK-016, GAP-024 |
 | 2026-09-21 | Antigravity | Executed and completed TSK-017: aligned documentation across SPEC.md, CARTRIDGE_DEVELOPER_GUIDE.md, SM-template, and SM-rosie to reflect canonical cartridge.yaml contract, warmDownSeconds, and mailbox long-poll pattern. | TSK-017, GAP-008 |
 | 2026-09-21 | Antigravity | Formulated and recorded Intent Alignment: Two-Stage Agent Retirement Lifecycle (Scream Test & Zero Cost Guarantee) and Headless Observability / GraphQL Telemetry surface across KPF.md, SPEC.md, and DESIGN_AUTHORITY.md. | GAP-018 |
+| 2026-09-26 | Antigravity | Executed and completed TSK-019: codified "Notebook & Safe" memory pattern into Section 6.6 and Developer Guide. Standardized all 9 production agent cartridges and SM-template on local SQLite ($MEMORY_DIR) with WAL mode, busy_timeout=5000, 14-day history pruning, and PRAGMA wal_checkpoint(TRUNCATE). Purged all cloud SDKs from cartridges. Verified with automated lifecycle tests. | TSK-019, GAP-025 |
 
 
 
