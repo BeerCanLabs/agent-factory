@@ -359,7 +359,9 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                   </td>
                   <td className="py-3 px-4">
                     <div className="font-semibold text-slate-800 dark:text-slate-200">${(agent.currentSpendUsd || 0).toFixed(2)}</div>
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400">cap: ${agent.spendLimitUsd || 0}/day</div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                      cap: {agent.spendLimitMonthlyUsd ? `$${agent.spendLimitMonthlyUsd}/mo` : `$${agent.spendLimitUsd || 0}/day`}
+                    </div>
                   </td>
                   <td className="py-3 px-4">
                     <div className="text-[11px] text-slate-700 dark:text-slate-300">

@@ -158,6 +158,11 @@ export type AgentRecord = {
   model?: string;
   requestedModels?: string[];
   approvedModels?: string[];
+  budgetUsd?: { perRun?: number; perDay?: number; perMonth?: number };
+  spendLimitUsd?: number;
+  spendLimitMonthlyUsd?: number;
+  currentSpendUsd?: number;
+  currentSpendMonthlyUsd?: number;
 };
 
 export function loadCatalog(agentsRoot: string, options: { includeRetired?: boolean } = {}): AgentRecord[] {

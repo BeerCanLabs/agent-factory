@@ -11,19 +11,27 @@ interface FinOpsViewProps {
 
 export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => {
   const permissions = usePermissions();
+  const [viewPeriod, setViewPeriod] = useState<'daily' | 'monthly'>('monthly');
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
-  const [newBudgetLimit, setNewBudgetLimit] = useState<number>(25);
+  const [newBudgetLimit, setNewBudgetLimit] = useState<number>(100);
+  const [editingPeriod, setEditingPeriod] = useState<'daily' | 'monthly'>('monthly');
   const [isUpdating, setIsUpdating] = useState(false);
 
-  const totalSpend = agents.reduce((sum, a) => sum + (a.currentSpendUsd || 0), 0);
-  const totalBudget = agents.reduce((sum, a) => sum + (a.spendLimitUsd || 0), 0);
-  const spendPercent = totalBudget > 0 ? (totalSpend / totalBudget) * 100 : 0;
+  // Compute spend and budget totals based on active view window (daily vs monthly)
+  const totalDailySpend = agents.reduce((sum, a) => sum + (a.currentSpendUsd || 0), 0);
+  const totalMonthlySpend = agents.reduce((sum, a) => sum + (a.currentSpendMonthlyUsd || a.currentSpendUsd || 0), 0);
+  const totalDailyBudget = agents.reduce((sum, a) => sum + (a.spendLimitUsd || 0), 0);
+  const totalMonthlyBudget = agents.reduce((sum, a) => sum + (a.spendLimitMonthlyUsd || (a.spendLimitUsd ? a.spendLimitUsd * 30 : 0)), 0);
+
+  const activeSpend = viewPeriod === 'monthly' ? totalMonthlySpend : totalDailySpend;
+  const activeBudget = viewPeriod === 'monthly' ? totalMonthlyBudget : totalDailyBudget;
+  const spendPercent = activeBudget > 0 ? (activeSpend / activeBudget) * 100 : 0;
 
   const handleUpdateBudget = async (agentId: string) => {
     setIsUpdating(true);
     try {
-      await factoryApi.setAgentBudget(agentId, newBudgetLimit);
-      alert(`Budget cap for ${agentId} updated to $${newBudgetLimit}/day.`);
+      await factoryApi.setAgentBudget(agentId, newBudgetLimit, editingPeriod);
+      alert(`Budget cap for ${agentId} updated to $${newBudgetLimit}/${editingPeriod === 'monthly' ? 'month' : 'day'}.`);
       setEditingAgentId(null);
       onRefresh();
     } catch (err: any) {
@@ -46,22 +54,50 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center space-x-2">
-          <DollarSign className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-          <span>FinOps Governance & Spend Circuit Breakers</span>
-        </h2>
-        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-          Real-time token burn attribution, departmental cost caps, and emergency egress kill-switches.
-        </p>
+      {/* Header & Window Toggle */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center space-x-2">
+            <DollarSign className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+            <span>FinOps Governance & Spend Circuit Breakers</span>
+          </h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+            Real-time token burn attribution, departmental cost caps, and emergency egress kill-switches.
+          </p>
+        </div>
+
+        {/* Global Window View Toggle */}
+        <div className="flex items-center space-x-1.5 p-1 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl">
+          <button
+            onClick={() => setViewPeriod('monthly')}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition ${
+              viewPeriod === 'monthly'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            Monthly Budget
+          </button>
+          <button
+            onClick={() => setViewPeriod('daily')}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition ${
+              viewPeriod === 'daily'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            Daily Budget
+          </button>
+        </div>
       </div>
 
       {/* Overview Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-2 shadow-sm transition-colors">
-          <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">Global 24h Spend</span>
-          <div className="text-3xl font-bold text-slate-900 dark:text-white">${totalSpend.toFixed(2)}</div>
+          <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">
+            Global {viewPeriod === 'monthly' ? '30-Day Monthly' : '24h Daily'} Spend
+          </span>
+          <div className="text-3xl font-bold text-slate-900 dark:text-white">${activeSpend.toFixed(2)}</div>
           <div className="w-full bg-slate-100 dark:bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-200 dark:border-slate-800">
             <div
               className={`h-full transition-all duration-500 ${
@@ -72,7 +108,7 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
           </div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400 flex justify-between">
             <span>{spendPercent.toFixed(1)}% of limit</span>
-            <span>Limit: ${totalBudget.toFixed(2)}/day</span>
+            <span>Limit: ${activeBudget.toFixed(2)}/{viewPeriod === 'monthly' ? 'mo' : 'day'}</span>
           </div>
         </div>
 
@@ -87,9 +123,9 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
 
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-2 shadow-sm transition-colors">
           <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">Automated Circuit Breakers</span>
-          <div className="text-lg font-bold text-slate-900 dark:text-white">Active (Auto-Pause)</div>
+          <div className="text-lg font-bold text-slate-900 dark:text-white">Active (Multi-Window)</div>
           <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-            When an agent reaches 100% of daily spend ceiling, egress gateway returns 402 Payment Required 
+            When an agent reaches 100% of its daily or monthly spend ceiling, egress gateway returns 402 Payment Required 
             and freezes execution.
           </p>
         </div>
@@ -102,7 +138,9 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
             <TrendingUp className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
             <span>Agent Spend Attribution & Budget Allocation</span>
           </h3>
-          <span className="text-xs text-slate-500 dark:text-slate-400">Daily Rolling Windows</span>
+          <span className="text-xs text-slate-500 dark:text-slate-400">
+            {viewPeriod === 'monthly' ? 'Monthly Allocation Window' : 'Daily Rolling Window'}
+          </span>
         </div>
 
         <div className="overflow-x-auto">
@@ -113,67 +151,120 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
                 <th className="py-3 px-4">Department</th>
                 <th className="py-3 px-4">Active Model</th>
                 <th className="py-3 px-4">Current Spend</th>
-                <th className="py-3 px-4">Daily Cap</th>
+                <th className="py-3 px-4">Configured Budget</th>
                 <th className="py-3 px-4">Headroom</th>
                 <th className="py-3 px-4 text-right">FinOps Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 dark:divide-slate-800/60">
               {agents.map((agent) => {
-                const current = agent.currentSpendUsd || 0;
-                const limit = agent.spendLimitUsd || 0;
-                const headroom = Math.max(0, limit - current);
+                const currentSpend = viewPeriod === 'monthly'
+                  ? (agent.currentSpendMonthlyUsd ?? agent.currentSpendUsd ?? 0)
+                  : (agent.currentSpendUsd ?? 0);
+                
+                const currentLimit = viewPeriod === 'monthly'
+                  ? (agent.spendLimitMonthlyUsd || (agent.spendLimitUsd ? agent.spendLimitUsd * 30 : 0))
+                  : (agent.spendLimitUsd || 0);
+
+                const headroom = Math.max(0, currentLimit - currentSpend);
                 const isEditing = editingAgentId === agent.id;
+
+                const hasMonthly = Boolean(agent.spendLimitMonthlyUsd && agent.spendLimitMonthlyUsd > 0);
+                const hasDaily = Boolean(agent.spendLimitUsd && agent.spendLimitUsd > 0);
 
                 return (
                   <tr key={agent.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition">
-                    <td className="py-3 px-4 font-bold text-slate-900 dark:text-white">{agent.name}</td>
+                    <td className="py-3 px-4">
+                      <div className="font-bold text-slate-900 dark:text-white">{agent.name}</div>
+                      <div className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">{agent.id}</div>
+                    </td>
                     <td className="py-3 px-4 text-slate-700 dark:text-slate-300">{agent.domain || 'Core'}</td>
                     <td className="py-3 px-4 font-mono text-[11px] text-slate-700 dark:text-slate-300">{agent.model}</td>
-                    <td className="py-3 px-4 font-semibold text-slate-800 dark:text-slate-200">${current.toFixed(2)}</td>
+                    <td className="py-3 px-4 font-semibold text-slate-800 dark:text-slate-200">
+                      ${currentSpend.toFixed(2)}
+                      <div className="text-[10px] text-slate-400 dark:text-slate-500 font-normal">
+                        {viewPeriod === 'monthly' ? 'month-to-date' : 'past 24h'}
+                      </div>
+                    </td>
                     <td className="py-3 px-4">
                       {isEditing ? (
-                        <div className="flex items-center space-x-1.5">
-                          <input
-                            type="number"
-                            min="1"
-                            value={newBudgetLimit}
-                            onChange={(e) => setNewBudgetLimit(Number(e.target.value))}
-                            className="w-16 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded px-2 py-0.5 text-xs text-slate-900 dark:text-white"
-                          />
-                          <button
-                            onClick={() => handleUpdateBudget(agent.id)}
-                            disabled={isUpdating}
-                            className="px-2 py-0.5 bg-emerald-600 text-white rounded text-[10px] font-semibold"
-                          >
-                            Save
-                          </button>
-                          <button
-                            onClick={() => setEditingAgentId(null)}
-                            className="px-1 text-slate-400 hover:text-slate-700 dark:hover:text-white text-[10px]"
-                          >
-                            ✕
-                          </button>
+                        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-1.5">
+                          <div className="flex items-center space-x-1">
+                            <span className="text-slate-400">$</span>
+                            <input
+                              type="number"
+                              min="1"
+                              value={newBudgetLimit}
+                              onChange={(e) => setNewBudgetLimit(Number(e.target.value))}
+                              className="w-16 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded px-2 py-0.5 text-xs text-slate-900 dark:text-white"
+                            />
+                            <select
+                              value={editingPeriod}
+                              onChange={(e) => setEditingPeriod(e.target.value as 'daily' | 'monthly')}
+                              className="bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded px-1.5 py-0.5 text-[11px] text-slate-900 dark:text-white cursor-pointer"
+                            >
+                              <option value="monthly">/ month</option>
+                              <option value="daily">/ day</option>
+                            </select>
+                          </div>
+                          <div className="flex items-center space-x-1">
+                            <button
+                              onClick={() => handleUpdateBudget(agent.id)}
+                              disabled={isUpdating}
+                              className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-semibold transition"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={() => setEditingAgentId(null)}
+                              className="px-1 text-slate-400 hover:text-slate-700 dark:hover:text-white text-[10px]"
+                            >
+                              ✕
+                            </button>
+                          </div>
                         </div>
                       ) : (
-                        <div className="flex items-center space-x-2">
-                          <span className="font-semibold text-slate-700 dark:text-slate-300">${limit.toFixed(2)}/day</span>
-                          {permissions.canSetBudget && (
-                            <button
-                              onClick={() => {
-                                setEditingAgentId(agent.id);
-                                setNewBudgetLimit(limit);
-                              }}
-                              className="text-[10px] text-emerald-600 dark:text-emerald-400 hover:underline"
-                            >
-                              Edit
-                            </button>
+                        <div className="space-y-0.5">
+                          <div className="flex items-center space-x-2">
+                            {hasMonthly ? (
+                              <span className="font-semibold text-slate-900 dark:text-slate-100">
+                                ${agent.spendLimitMonthlyUsd?.toFixed(2)}/mo
+                              </span>
+                            ) : hasDaily ? (
+                              <span className="font-semibold text-slate-900 dark:text-slate-100">
+                                ${agent.spendLimitUsd?.toFixed(2)}/day
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 italic">No budget set</span>
+                            )}
+                            {permissions.canSetBudget && (
+                              <button
+                                onClick={() => {
+                                  setEditingAgentId(agent.id);
+                                  setEditingPeriod(hasMonthly ? 'monthly' : 'daily');
+                                  setNewBudgetLimit(agent.spendLimitMonthlyUsd || agent.spendLimitUsd || 100);
+                                }}
+                                className="text-[10px] text-emerald-600 dark:text-emerald-400 hover:underline font-semibold"
+                              >
+                                Edit
+                              </button>
+                            )}
+                          </div>
+                          {hasMonthly && hasDaily && (
+                            <div className="text-[10px] text-slate-400 dark:text-slate-500">
+                              also: ${agent.spendLimitUsd?.toFixed(2)}/day cap
+                            </div>
                           )}
                         </div>
                       )}
                     </td>
                     <td className="py-3 px-4">
-                      <span className="font-mono text-emerald-600 dark:text-emerald-400 font-semibold">${headroom.toFixed(2)}</span>
+                      <span className="font-mono text-emerald-600 dark:text-emerald-400 font-semibold">
+                        ${headroom.toFixed(2)}
+                      </span>
+                      <div className="text-[10px] text-slate-400 dark:text-slate-500">
+                        remaining
+                      </div>
                     </td>
                     <td className="py-3 px-4 text-right">
                       <button
