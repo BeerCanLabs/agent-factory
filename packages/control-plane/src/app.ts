@@ -279,7 +279,10 @@ export function enrichAgent(state: FactoryState, a: AgentRecord) {
     version: (a as any).version || '1.0.0',
     state: activeR ? 'RUNNING' : a.state,
     currentSpendUsd: Number((s?.day ?? 0).toFixed(4)),
+    currentSpendMonthlyUsd: Number((s?.month ?? 0).toFixed(4)),
     spendLimitUsd: Number((pol?.budgetUsd?.perDay ?? 0).toFixed(2)),
+    spendLimitMonthlyUsd: Number((pol?.budgetUsd?.perMonth ?? 0).toFixed(2)),
+    budgetUsd: pol?.budgetUsd,
     lastRunId: activeR?.runId,
     domain: (a as any).domain || (isBuiltin ? 'Platform Infrastructure' : 'Submind Autonomous Operations'),
     mindPrefix: a.memoryPrefix ? `s3://beercanlabs-minds/${a.memoryPrefix}/` : `s3://beercanlabs-minds/${a.id}/`,
@@ -820,6 +823,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     let daySpend = 0;
     let monthSpend = 0;
     let totalBudgetDay = 0;
+    let totalBudgetMonth = 0;
     for (const id of state.agents.keys()) {
       const s = state.spend.get(id, undefined);
       daySpend += s.day;
@@ -827,6 +831,9 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       const pol = state.policies.get(id);
       if (pol?.budgetUsd?.perDay) {
         totalBudgetDay += pol.budgetUsd.perDay;
+      }
+      if (pol?.budgetUsd?.perMonth) {
+        totalBudgetMonth += pol.budgetUsd.perMonth;
       }
     }
 
@@ -848,6 +855,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         day: Number(daySpend.toFixed(4)),
         month: Number(monthSpend.toFixed(4)),
         limit: Number(totalBudgetDay.toFixed(2)),
+        monthLimit: Number(totalBudgetMonth.toFixed(2)),
       },
     });
     return;

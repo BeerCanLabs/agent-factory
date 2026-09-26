@@ -180,7 +180,13 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
           <div className="h-6 w-px bg-slate-200 dark:bg-slate-800" />
           <div className="text-right">
             <div className="text-[10px] text-slate-400 dark:text-slate-500 uppercase font-semibold">Spend Cap</div>
-            <div className="font-bold text-slate-700 dark:text-slate-300">${agent.spendLimitUsd || 0}/day</div>
+            <div className="font-bold text-slate-700 dark:text-slate-300">
+              {agent.spendLimitMonthlyUsd
+                ? `$${agent.spendLimitMonthlyUsd}/mo`
+                : agent.spendLimitUsd
+                ? `$${agent.spendLimitUsd}/day`
+                : '$0'}
+            </div>
           </div>
         </div>
       </div>

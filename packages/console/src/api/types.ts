@@ -22,7 +22,10 @@ export interface AgentRecord {
   model: string;
   approvedModels?: string[];
   spendLimitUsd?: number;
+  spendLimitMonthlyUsd?: number;
   currentSpendUsd?: number;
+  currentSpendMonthlyUsd?: number;
+  budgetUsd?: { perRun?: number; perDay?: number; perMonth?: number };
   warmDownSeconds?: number;
   lastRunId?: string;
   lastStateChange?: string;
