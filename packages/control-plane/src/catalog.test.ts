@@ -13,28 +13,15 @@ describe('loadCatalog', () => {
     const agents = loadCatalog(agentsRoot);
     const byId = new Map(agents.map((a) => [a.id, a]));
 
-    // Check that starter-python is discovered and loaded from its unified cartridge.yaml
-    const starter = byId.get('starter-python');
-    assert.ok(starter, 'starter-python should be loaded');
-    assert.equal(starter.name, 'Operations Assistant');
-    assert.equal(starter.role, 'Operations & Incident Triage');
-    assert.equal(starter.artifact, 'ghcr.io/beercanlabs/starter-python:latest');
-    assert.equal(starter.memoryPrefix, 'starter-python-state');
-    assert.ok(starter.requires.includes('ALERT_WEBHOOK_SECRET'));
-    assert.ok(starter.requires.includes('OPS_NOTIFY_WEBHOOK'));
-    assert.ok(starter.triggers.some((t) => t.type === 'webhook' && t.path === '/hooks/ops-alerts'));
-    assert.ok(starter.triggers.some((t) => t.type === 'discord'));
-
-    // Check that echo-agent is loaded
-    const echo = byId.get('echo-agent');
-    assert.ok(echo, 'echo-agent should be loaded');
-    assert.equal(echo.name, 'Echo Agent');
-    assert.ok(echo.requires.includes('ECHO_WEBHOOK_SECRET'));
-
-    // Check that legacy cartridges continue to load
-    for (const legacyId of ['librarian', 'factory-mechanic', 'compliance-officer']) {
-      assert.ok(byId.has(legacyId), `${legacyId} should be loaded`);
+    // Check that user submind cartridges are loaded
+    for (const submindId of ['archie', 'castle', 'donna', 'finley', 'geordi', 'higgins', 'nick', 'rosie', 'switch']) {
+      assert.ok(byId.has(submindId), `submind ${submindId} should be loaded`);
+      assert.equal(byId.get(submindId)?.category, 'user');
     }
+
+    // Verify retired placeholders are excluded from the main active catalog
+    assert.equal(byId.has('starter-python'), false);
+    assert.equal(byId.has('echo-agent'), false);
   });
 
   it('loads dynamic agents from registry directory', () => {

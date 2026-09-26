@@ -53,7 +53,7 @@ describe('benchmark harness against a live factory', { concurrency: false }, () 
 
     const root = mkdtempSync(join(tmpdir(), 'bench-e2e-'));
     const state = {
-      agents: new Map(loadCatalog(agentsRoot).map((a) => [a.id, a])),
+      agents: new Map(loadCatalog(agentsRoot, { includeRetired: true }).map((a) => [a.id, a])),
       ledger: new MemoryLedger(),
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },

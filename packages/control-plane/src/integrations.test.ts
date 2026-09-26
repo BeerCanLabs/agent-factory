@@ -28,7 +28,7 @@ function setup() {
   const runs = new MemoryRunStore();
   runs.onChange = (r) => hub.publish(runEvent(r));
   const state = {
-    agents: new Map(loadCatalog(agentsRoot).map((a) => [a.id, a])),
+    agents: new Map(loadCatalog(agentsRoot, { includeRetired: true }).map((a) => [a.id, a])),
     ledger: tapLedger(new MemoryLedger(), hub),
     auth: bearerAuth([
       { name: 'viewer', token: 'viewer-token', roles: ['viewer'] },

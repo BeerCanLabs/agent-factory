@@ -141,7 +141,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
                     </option>
                   ))}
                 </optgroup>
-                <optgroup label="Built-in & System Utilities">
+                <optgroup label="Built-in System Actors">
                   {agents.filter((a) => a.isBuiltin || a.category === 'builtin').map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name} ({a.id})

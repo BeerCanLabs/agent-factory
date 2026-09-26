@@ -66,7 +66,7 @@ describe('control plane + gateway, over HTTP', { concurrency: false }, () => {
     const upPort = await listen(upstream);
 
     state = {
-      agents: new Map(loadCatalog(agentsRoot).map((a) => [a.id, a])),
+      agents: new Map(loadCatalog(agentsRoot, { includeRetired: true }).map((a) => [a.id, a])),
       ledger: new MemoryLedger(),
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },

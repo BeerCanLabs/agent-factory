@@ -5,7 +5,16 @@ import { validateCartridge, classifySecrets, type Surface, type Cartridge, type 
 
 export type AgentCategory = 'user' | 'builtin';
 
+// Operational Built-in System Actors
 export const BUILTIN_AGENT_IDS = new Set([
+  'doorman',
+  'keymaster',
+  'doctor',
+  'coach',
+]);
+
+// Retired sample/placeholder cartridges that are no longer active agents
+export const RETIRED_PLACEHOLDER_IDS = new Set([
   'factory-mechanic',
   'librarian',
   'compliance-officer',
@@ -16,9 +25,102 @@ export const BUILTIN_AGENT_IDS = new Set([
 
 export function isBuiltinCartridge(id: string, dir?: string): boolean {
   if (BUILTIN_AGENT_IDS.has(id)) return true;
+  if (RETIRED_PLACEHOLDER_IDS.has(id)) return true;
   if (dir && (dir.includes('/examples/') || dir.includes('/agents/examples/'))) return true;
   return false;
 }
+
+export const BUILTIN_SYSTEM_AGENTS: AgentRecord[] = [
+  {
+    id: 'doorman',
+    name: 'Doorman',
+    role: 'Ingress Gateway, Routing & Agent Presence Controller',
+    state: 'WORKING',
+    category: 'builtin',
+    isBuiltin: true,
+    provider: 'cloud',
+    artifact: 'factory-doorman:latest',
+    requires: ['DOORMAN_SECRET', 'FACTORY_API_TOKEN'],
+    ungated: ['DOORMAN_SECRET', 'FACTORY_API_TOKEN'],
+    gated: [],
+    triggers: [
+      { type: 'http', path: '/api/v1/presence' },
+      { type: 'webhook', path: '/hooks/ingress' },
+    ],
+    memoryPrefix: 'system-doorman',
+    warmDownSeconds: 0,
+    dir: '/app/packages/doorman',
+    model: 'deterministic',
+    requestedModels: [],
+    approvedModels: [],
+  },
+  {
+    id: 'keymaster',
+    name: 'Keymaster',
+    role: 'Cryptographic Locksmith, Vault Hydration & Pre-flight Secrets Verifier',
+    state: 'WORKING',
+    category: 'builtin',
+    isBuiltin: true,
+    provider: 'cloud',
+    artifact: 'factory-keymaster:latest',
+    requires: ['AWS_SECRETS_MANAGER_ROLE', 'VAULT_MASTER_KEY'],
+    ungated: ['AWS_SECRETS_MANAGER_ROLE', 'VAULT_MASTER_KEY'],
+    gated: [],
+    triggers: [{ type: 'http', path: '/api/v1/keys/verify' }],
+    memoryPrefix: 'system-keymaster',
+    warmDownSeconds: 0,
+    dir: '/app/packages/keymaster',
+    model: 'deterministic',
+    requestedModels: [],
+    approvedModels: [],
+  },
+  {
+    id: 'doctor',
+    name: 'Doctor',
+    role: 'Triage Engine, Crash Diagnostic Router & Health Quarantine',
+    state: 'WORKING',
+    category: 'builtin',
+    isBuiltin: true,
+    provider: 'cloud',
+    artifact: 'factory-triage:latest',
+    requires: ['INCIDENT_WEBHOOK_URL'],
+    ungated: ['INCIDENT_WEBHOOK_URL'],
+    gated: [],
+    triggers: [
+      { type: 'webhook', path: '/hooks/triage' },
+      { type: 'http', path: '/api/v1/triage' },
+    ],
+    memoryPrefix: 'system-doctor',
+    warmDownSeconds: 0,
+    dir: '/app/packages/triage',
+    model: 'deterministic',
+    requestedModels: [],
+    approvedModels: [],
+  },
+  {
+    id: 'coach',
+    name: 'Coach',
+    role: 'Quality Benchmark Evaluator, Training Function & Model Graduation Gate',
+    state: 'WORKING',
+    category: 'builtin',
+    isBuiltin: true,
+    provider: 'cloud',
+    artifact: 'factory-bench:latest',
+    requires: ['EVAL_MODEL_API_KEY'],
+    ungated: ['EVAL_MODEL_API_KEY'],
+    gated: [],
+    triggers: [
+      { type: 'http', path: '/api/v1/bench/run' },
+      { type: 'http', path: '/api/v1/bench/scorecard' },
+    ],
+    memoryPrefix: 'system-coach',
+    warmDownSeconds: 0,
+    dir: '/app/packages/bench',
+    model: 'gemini-2.0-flash',
+    requestedModels: ['gemini-2.0-flash', 'claude-3-5-sonnet'],
+    approvedModels: ['gemini-2.0-flash'],
+  },
+];
 
 export type AgentRecord = {
   id: string;
@@ -58,12 +160,13 @@ export type AgentRecord = {
   approvedModels?: string[];
 };
 
-export function loadCatalog(agentsRoot: string): AgentRecord[] {
+export function loadCatalog(agentsRoot: string, options: { includeRetired?: boolean } = {}): AgentRecord[] {
   const dirs = walk(agentsRoot);
   const out: AgentRecord[] = [];
   for (const dir of dirs) {
     const result = validateCartridge(dir);
     if (!result.ok) continue;
+    if (!options.includeRetired && RETIRED_PLACEHOLDER_IDS.has(result.cartridgeId)) continue;
 
     const entries = new Set(readdirSync(dir));
     let soulContent = '';

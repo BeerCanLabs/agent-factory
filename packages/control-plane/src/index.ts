@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { Checkpointer, FileLedger, checkpointSinkFromEnv, secretValuesFromEnv } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { authFromEnv } from '@beercanlabs/factory-auth';
-import { loadCatalog, loadDynamicRegistry } from './catalog.js';
+import { loadCatalog, loadDynamicRegistry, BUILTIN_SYSTEM_AGENTS } from './catalog.js';
 import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, factoryMetrics, finishRun, reconcileRuns, SYSTEM } from './app.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { FileRunStore, RunTokens } from './runs.js';
@@ -43,7 +43,8 @@ mkdirSync(REGISTRY_DIR, { recursive: true });
 
 const staticAgents = loadCatalog(AGENTS_ROOT);
 const dynamicAgents = loadDynamicRegistry(REGISTRY_DIR);
-const allAgents = [...staticAgents, ...dynamicAgents];
+// Built-in system actors (Doorman, Keymaster, Doctor, Coach) are first-class system agents
+const allAgents = [...BUILTIN_SYSTEM_AGENTS, ...staticAgents.filter(a => !BUILTIN_SYSTEM_AGENTS.some(s => s.id === a.id)), ...dynamicAgents];
 const secretValues = new Set<string>(secretValuesFromEnv());
 
 const hub = new EventHub();

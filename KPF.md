@@ -25,9 +25,9 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
   - `POST /api/v1/registry/agents/:id/reinstate` (Aborts retirement during holding period; returns agent to active service)
   - `POST /api/v1/registry/agents/:id/purge` (Permanently destroys task definitions, purges vault secrets, archives mind)
 
-### 2. Key Management (The "Locksmith")
-- **Description:** A secure pathway for operators to inject credentials into the Enterprise's Bring-Your-Own Secrets Manager (BYO-SM) such as AWS Secrets Manager or HashiCorp Vault. The Factory *reads* these secrets at boot, but the Locksmith is the *write* path. 
-- **Interface (CLI/SDK):** `factory-cli locksmith set <agent> <secret_name> <value>`. The UI/CLI communicates directly with the cloud provider's SDK to vault the secret.
+### 2. Key Management (The "Keymaster")
+- **Description:** Cryptographic secrets orchestration and verification actor (`packages/keymaster`). A built-in agent responsible for pre-flight secret validation against Bring-Your-Own Secrets Manager (BYO-SM) vaults, zero-trust secrets hydration into runtime enclaves, and ephemeral session leasing. Operators use direct cloud SDK/CLI tools to inject or rotate vault credentials; Keymaster verifies and governs them.
+- **Interface (CLI/SDK/REST):** `POST /api/v1/keys/verify`, internal pre-flight checks, and CLI vault commands.
 - **Architectural Boundary:** The Factory Control Plane does not accept plaintext secrets over its REST API to prevent itself from becoming a vault or a high-value attack vector.
 
 ### 3. Cost Management & Policy Engine (FinOps & Kill-Switch)
@@ -45,24 +45,25 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
   - `WebSocket /stream` (UI streams live tool execution logs directly to the user)
 
 ### 5. Doorman (Presence & Real-Time Routing)
-- **Description:** The persistent, stateful connection manager. Because Agents scale to zero to save costs, they cannot hold WebSockets open. Doorman holds these connections (like Discord Gateway, Slack RTM, or Custom WebSockets) 24/7, manages the "Online/Offline" presence, and wakes the agent when an event occurs.
+- **Description:** Persistent, stateful connection manager and ingress routing actor (`packages/doorman`). Because AI Subminds scale to zero to save costs, they cannot hold WebSockets open. Doorman holds these connections (like Discord Gateway, Slack RTM, or Custom WebSockets) 24/7, manages the "Online/Offline" presence, and wakes the agent when an event occurs.
 - **Interface (WebSockets / Webhooks):**
   - Custom UI frontends establish a WebSocket connection directly with Doorman.
   - Doorman uses an internal Webhook (`POST /wake`) to trigger the stateless Agent.
 
-### 6. Triage Function (Unified Error Surface Area)
-- **Description:** A unified, append-only ledger where all system faults converge. Whether an agent crashes from an Out-of-Memory error, lacks a secret during pre-flight, gets blocked by the LLM, or fails a DOM parsing task internally, the error is written here.
+### 6. Doctor (Triage Function & Incident Engine)
+- **Description:** Built-in triage and diagnostic actor (`packages/triage`). A unified, append-only fault engine where all system faults converge. Whether an agent crashes from an Out-of-Memory error, lacks a secret during pre-flight, gets blocked by the LLM, or fails a task internally, Doctor diagnoses the failure, writes to the immutable ledger, and routes diagnostic alerts to operators.
 - **Interface (REST API / PubSub):**
   - `GET /api/v1/ledger` (UI pulls the immutable audit trail for debugging)
   - `Webhook (EventBridge/SQS)` (The Factory drops a crash event into a queue)
-  - **Kernel Module (`packages/triage`):** The Factory's triage module consumes these infrastructure faults (like OOM crashes) and routes them to external observability dashboards or Slack webhooks for operators.
+  - **Kernel Module (`packages/triage`):** Doctor consumes these infrastructure faults (like OOM crashes) and routes them to external observability dashboards or Slack webhooks for operators.
 
-### 7. Quality Governance & Benchmarking (Definition of Good)
-- **Description:** Objective measurement of agent quality against deterministic expectations. The Factory enforces a two-phase model:
-  1. **Phase 1 (Offline Rubric Gating):** Every cartridge may declare a `bench.yaml` suite of deterministic test cases with concrete inputs and assertions (`equals`, `contains`, `matches`). The Factory can execute benchmark simulations across candidate LLMs to generate a Cost-vs-Quality Scorecard before production promotion. (Policy engine rules may require passing scores or allow administrative exception).
-  2. **Phase 2 (Live Runtime Evaluation — Roadmap):** Continuous evaluation of live conversation and task traces (`FACTORY_TRACE_PROMPTS`) by designated evaluator cartridges.
+### 7. Coach (Training Function & Quality Governance)
+- **Description:** Built-in training, evaluation, and quality governance actor (`packages/bench`). Responsible for objective measurement of agent quality against deterministic expectations and closed-loop model evaluation:
+  1. **Phase 1 (Offline Rubric Gating):** Coach executes candidate model simulations against `bench.yaml` test cases with concrete assertions (`equals`, `contains`, `matches`), producing Cost-vs-Quality Scorecards before production model switching.
+  2. **Phase 2 (Live Runtime Evaluation & Training):** Coach continuously evaluates live prompt and task traces (`FACTORY_TRACE_PROMPTS`) collected in mind storage, assessing regression, drift, and recommending prompt or model optimizations.
 - **Interface (CLI / REST API):** 
-  - `POST /api/v1/agents/:id/runs` with `{ model: "pinned-model", trace: true }`. The UI forces the factory to run a pinned simulation and collect prompt traces for evaluation.
+  - `POST /api/v1/agents/:id/runs` with `{ model: "pinned-model", trace: true }`. Run pinned simulation and collect prompt traces for Coach evaluation.
+  - CLI: `factory-bench --cartridge <dir> --models a,b` runs cases, scores accuracy, measures cost from the ledger, and outputs recommended models.
   - CLI: `factory-bench --cartridge <dir> --models a,b` runs cases, scores accuracy, measures cost from the ledger, and outputs recommended models.
 
 ### 8. Headless Observability & Telemetry Surface (Cost, Quantity, Quality)
@@ -86,7 +87,7 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 | **KPF 1: Agent Registry & Lifecycle** | Get Agent Details & Lifecycle State | 👤 Operator | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Assign / Update Agent Budget | 👤 FinOps Admin | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Provision Cloud Infrastructure (Deploy) | 👤 Release Engineer | REST / HTTPS |
-| **KPF 1: Agent Registry & Lifecycle** | Wake Agent / Dispatch Run | ⚙️ Doorman | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Wake Agent / Dispatch Run | 🤖 Doorman | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Cancel Active Run / Sleep Container | 👤 Operator | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Pause Agent (Operational Kill-Switch) | 👤 Operator | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Resume Paused Agent | 👤 Operator | REST / HTTPS |
@@ -95,9 +96,9 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 | **KPF 1: Agent Registry & Lifecycle** | Stage 2 Permanent Purge & Mind Archival | 👤 Security Admin | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Approve Candidate LLM Model | 👤 QA Lead | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Switch Production LLM Model | 👤 Lead Engineer | REST / HTTPS |
-| **KPF 2: Key Management ("Locksmith")** | Inject Secret into Cloud Vault | 👤 Security Admin | CLI / Cloud Provider SDK |
-| **KPF 2: Key Management ("Locksmith")** | Verify Secrets Pre-Flight | ⚙️ Control Plane | Internal / Cloud Provider SDK |
-| **KPF 2: Key Management ("Locksmith")** | Rotate / Revoke Secret | 👤 Security Admin | CLI / Cloud Provider SDK |
+| **KPF 2: Key Management ("Keymaster")** | Inject Secret into Cloud Vault | 👤 Security Admin | CLI / Cloud Provider SDK |
+| **KPF 2: Key Management ("Keymaster")** | Verify Secrets Pre-Flight & Enclave Leases | 🤖 Keymaster | Internal / Vault IPC |
+| **KPF 2: Key Management ("Keymaster")** | Rotate / Revoke Secret | 👤 Security Admin | CLI / Cloud Provider SDK |
 | **KPF 3: Cost Management & FinOps** | Query Live Run Spend | 👤 FinOps Admin | REST / HTTPS |
 | **KPF 3: Cost Management & FinOps** | Get Agent Policy & Spend Caps | 👤 FinOps Admin | REST / HTTPS |
 | **KPF 3: Cost Management & FinOps** | Update Org / Dept / Agent Budget Policy | 👤 FinOps Admin | REST / HTTPS |
@@ -108,17 +109,18 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 | **KPF 4: LLM & MCP Egress Gateway** | Approve / Reject Held Tool Action | 👤 Approver | REST / HTTPS |
 | **KPF 4: LLM & MCP Egress Gateway** | Stream Live Execution Logs | 👤 Operator | WebSocket |
 | **KPF 5: Doorman (Presence & Routing)** | Receive External Ingress Event | 👤 End User | WebSocket / Inbound Webhook |
-| **KPF 5: Doorman (Presence & Routing)** | Trigger Ingress Wake | ⚙️ Doorman | Internal HTTP Webhook |
-| **KPF 5: Doorman (Presence & Routing)** | Deliver Follow-Up Turn to Running Agent | ⚙️ Doorman | REST / HTTPS |
+| **KPF 5: Doorman (Presence & Routing)** | Trigger Ingress Wake | 🤖 Doorman | Internal HTTP Webhook |
+| **KPF 5: Doorman (Presence & Routing)** | Deliver Follow-Up Turn to Running Agent | 🤖 Doorman | REST / HTTPS |
 | **KPF 5: Doorman (Presence & Routing)** | Container Mailbox Retrieval | ⚙️ Agent Runtime | HTTP Long-Polling |
 | **KPF 5: Doorman (Presence & Routing)** | Agent Container Heartbeat | ⚙️ Agent Runtime | REST / HTTPS |
-| **KPF 6: Triage & Fault Ledger** | Query Immutable Ledger Audit Trail | 👤 Auditor | REST / HTTPS |
-| **KPF 6: Triage & Fault Ledger** | Query Run State & Execution Errors | 👤 SRE | REST / HTTPS |
-| **KPF 6: Triage & Fault Ledger** | Report Run Exit / Crash Result | ⚙️ Agent Runtime | REST / HTTPS |
-| **KPF 6: Triage & Fault Ledger** | Infrastructure Fault Alert Sink | ⚙️ Triage Engine | Cloud Pub/Sub (`EventBridge` / `SQS`) |
-| **KPF 7: Quality & Benchmarking** | Execute Offline Benchmark Suite | 👤 Developer | CLI |
-| **KPF 7: Quality & Benchmarking** | Run Pinned Simulation with Tracing | 👤 QA Lead | REST / HTTPS |
-| **KPF 7: Quality & Benchmarking** | Retrieve Benchmark History & Scorecard | 👤 QA Lead | REST / HTTPS |
+| **KPF 6: Triage & Fault Ledger (Doctor)** | Query Immutable Ledger Audit Trail | 👤 Auditor | REST / HTTPS |
+| **KPF 6: Triage & Fault Ledger (Doctor)** | Query Run State & Execution Errors | 👤 SRE | REST / HTTPS |
+| **KPF 6: Triage & Fault Ledger (Doctor)** | Report Run Exit / Crash Result | ⚙️ Agent Runtime | REST / HTTPS |
+| **KPF 6: Triage & Fault Ledger (Doctor)** | Route Infrastructure Crash & Incident Alerts | 🤖 Doctor | Cloud Pub/Sub (`EventBridge` / `SQS`) |
+| **KPF 7: Quality & Benchmarking (Coach)** | Execute Offline Benchmark Suite | 🤖 Coach / 👤 Dev | CLI / REST |
+| **KPF 7: Quality & Benchmarking (Coach)** | Run Pinned Simulation with Tracing | 🤖 Coach | REST / HTTPS |
+| **KPF 7: Quality & Benchmarking (Coach)** | Retrieve Benchmark History & Scorecard | 👤 QA Lead | REST / HTTPS |
+| **KPF 7: Quality & Benchmarking (Coach)** | Continuous Prompt & Task Trace Evaluation | 🤖 Coach | S3 Mind Storage / REST |
 | **KPF 8: Headless Observability** | Query Real-Time Operational Metrics | 👤 SRE | REST / HTTPS |
 | **KPF 8: Headless Observability** | Prometheus Metrics Pull | ⚙️ Monitoring Agent | HTTP (Prometheus scrape) |
 | **KPF 8: Headless Observability** | Deep Telemetry & Multi-Dimensional Query | ⚙️ Analytics System | GraphQL / HTTPS |
