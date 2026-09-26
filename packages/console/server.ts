@@ -9,6 +9,7 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT || 3000);
 const CLIENT_DIR = path.join(__dirname, 'dist', 'client');
 const CP_URL = process.env.FACTORY_CONTROL_PLANE_URL || 'http://127.0.0.1:8088';
+const FACTORY_TOKEN = process.env.FACTORY_TOKEN || '';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -73,6 +74,11 @@ const server = http.createServer((req, res) => {
     const targetUrl = new URL(pathname + parsedUrl.search, CP_URL);
     const headers = { ...req.headers };
     headers.host = targetUrl.host;
+
+    // Inject service token if not explicitly provided
+    if (!headers.authorization && FACTORY_TOKEN) {
+      headers.authorization = `Bearer ${FACTORY_TOKEN}`;
+    }
 
     const proxyReq = http.request(
       targetUrl,
