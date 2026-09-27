@@ -377,15 +377,15 @@ resource "aws_ecs_task_definition" "console" {
 resource "aws_ecs_service" "console" {
   count           = local.images_ready && var.console_image != "" ? 1 : 0
   name            = "console"
-  cluster         = aws_ecs_cluster.main.id
+  cluster         = aws_ecs_cluster.factory.id
   task_definition = aws_ecs_task_definition.console[0].arn
   desired_count   = 1
   launch_type     = "FARGATE"
 
   network_configuration {
     subnets          = aws_subnet.service[*].id
-    security_groups  = [aws_security_group.agents.id]
-    assign_public_ip = false
+    security_groups  = [aws_security_group.control_plane.id]
+    assign_public_ip = true
   }
   load_balancer {
     target_group_arn = aws_lb_target_group.console[0].arn
