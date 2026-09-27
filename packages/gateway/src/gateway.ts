@@ -31,6 +31,7 @@ export type Policy = {
 export type RunContext = {
   run: { runId: string; agentId: string; state: string; live: boolean; model?: string };
   agentState: string;
+  isBuiltin?: boolean;
   policy: Policy;
   spend: { run: number; day: number; month: number };
 };
@@ -56,6 +57,8 @@ export type GatewayOptions = {
   maxBodyBytes?: number;
   meter?: Meter;
 };
+
+const BUILTIN_AGENT_IDS = new Set(['doorman', 'keymaster', 'doctor', 'coach']);
 
 const STRIP = new Set([
   'host',
@@ -511,7 +514,8 @@ export function createGateway(opts: GatewayOptions): http.Server {
       if (ctx.agentState === 'PAUSED') return deny(res, ctx, route, 503, 'paused');
       if (ctx.run.state === 'BLOCKED_UNHEALTHY') return deny(res, ctx, route, 503, 'unhealthy');
       if (!ctx.policy.routes.includes(route.id)) return deny(res, ctx, route, 403, 'route_not_allowed', { route: route.id });
-      if (route.kind === 'llm') {
+      const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
+      if (route.kind === 'llm' && !isBuiltin) {
         const pending = unacked.get(ctx.run.runId) ?? 0;
         const spend = { run: ctx.spend.run + pending, day: ctx.spend.day + pending, month: ctx.spend.month + pending };
         const window = ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED' ? 'blocked' : overBudget(ctx.policy, spend);

@@ -8,7 +8,7 @@ import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanla
 import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, deriveEgress, type Surface } from '@beercanlabs/factory-contract';
-import { AgentRecord, isBuiltinCartridge, type AgentCategory } from './catalog.js';
+import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, type AgentCategory } from './catalog.js';
 import type { DeployProvider, Runtime } from './runtime.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
@@ -270,19 +270,20 @@ export function enrichAgent(state: FactoryState, a: AgentRecord) {
   const s = state.spend.get(a.id, undefined);
   const pol = state.policies.get(a.id);
   const activeR = activeRun(state, a.id);
-  const isBuiltin = a.isBuiltin ?? (a.category ? a.category === 'builtin' : isBuiltinCartridge(a.id, a.dir));
-  const category: AgentCategory = isBuiltin ? 'builtin' : 'user';
+  const isBuiltin = Boolean(a.isBuiltin || a.category === 'builtin' || BUILTIN_AGENT_IDS.has(a.id));
+  const category: AgentCategory = isBuiltin ? 'builtin' : (a.category ?? 'user');
   return {
     ...a,
     category,
     isBuiltin,
+    budgetExempt: isBuiltin,
     version: (a as any).version || '1.0.0',
     state: activeR ? 'RUNNING' : a.state,
     currentSpendUsd: Number((s?.day ?? 0).toFixed(4)),
     currentSpendMonthlyUsd: Number((s?.month ?? 0).toFixed(4)),
-    spendLimitUsd: Number((pol?.budgetUsd?.perDay ?? 0).toFixed(2)),
-    spendLimitMonthlyUsd: Number((pol?.budgetUsd?.perMonth ?? 0).toFixed(2)),
-    budgetUsd: pol?.budgetUsd,
+    spendLimitUsd: isBuiltin ? null : Number((pol?.budgetUsd?.perDay ?? 0).toFixed(2)),
+    spendLimitMonthlyUsd: isBuiltin ? null : Number((pol?.budgetUsd?.perMonth ?? 0).toFixed(2)),
+    budgetUsd: isBuiltin ? undefined : pol?.budgetUsd,
     lastRunId: activeR?.runId,
     domain: (a as any).domain || (isBuiltin ? 'Platform Infrastructure' : 'Submind Autonomous Operations'),
     mindPrefix: a.memoryPrefix ? `s3://beercanlabs-minds/${a.memoryPrefix}/` : `s3://beercanlabs-minds/${a.id}/`,
@@ -537,6 +538,16 @@ export async function applyKillSwitch(
 ): Promise<Outcome<AgentRecord>> {
   const agent = state.agents.get(id);
   if (!agent) return { status: 404, body: { error: 'not_found' } };
+  const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
+  if (isBuiltin && (command === 'PAUSE' || command === 'ISOLATE')) {
+    return {
+      status: 400,
+      body: {
+        error: 'builtin_agents_exempt_from_killswitch',
+        message: 'Built-in system agents are critical infrastructure and cannot be paused or isolated.',
+      } as any,
+    };
+  }
   if (command === 'PAUSE') agent.state = 'PAUSED';
   else if (command === 'ISOLATE') agent.state = 'ISOLATED';
   else agent.state = activeRun(state, id) ? 'WORKING' : 'SLEEPING';
@@ -562,7 +573,8 @@ export async function applyKillSwitch(
 async function breakCrashLoop(state: FactoryState, agentId: string) {
   const threshold = state.crashLoopThreshold ?? 0;
   const agent = state.agents.get(agentId);
-  if (threshold <= 0 || !agent || agent.state === 'PAUSED' || agent.state === 'ISOLATED') return;
+  const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(agentId));
+  if (isBuiltin || threshold <= 0 || !agent || agent.state === 'PAUSED' || agent.state === 'ISOLATED') return;
   const since = Date.now() - 10 * 60_000;
   const recent = state.runs
     .list({ agentId })
@@ -825,15 +837,19 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     let totalBudgetDay = 0;
     let totalBudgetMonth = 0;
     for (const id of state.agents.keys()) {
+      const a = state.agents.get(id);
+      const isBuiltin = Boolean(a?.isBuiltin || a?.category === 'builtin' || BUILTIN_AGENT_IDS.has(id));
       const s = state.spend.get(id, undefined);
       daySpend += s.day;
       monthSpend += s.month;
-      const pol = state.policies.get(id);
-      if (pol?.budgetUsd?.perDay) {
-        totalBudgetDay += pol.budgetUsd.perDay;
-      }
-      if (pol?.budgetUsd?.perMonth) {
-        totalBudgetMonth += pol.budgetUsd.perMonth;
+      if (!isBuiltin) {
+        const pol = state.policies.get(id);
+        if (pol?.budgetUsd?.perDay) {
+          totalBudgetDay += pol.budgetUsd.perDay;
+        }
+        if (pol?.budgetUsd?.perMonth) {
+          totalBudgetMonth += pol.budgetUsd.perMonth;
+        }
       }
     }
 
@@ -1209,25 +1225,29 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       timestamp: new Date().toISOString(),
     });
     if (isGateway && stored.type === 'llm' && typeof stored.costUsd === 'number') {
-      const policy = state.policies.get(stored.agentId);
-      const before = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
+      const agent = state.agents.get(stored.agentId);
+      const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(stored.agentId));
       state.spend.add(stored.agentId, stored.runId, stored.costUsd, stored.timestamp);
-      const after = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
-      // Alert once per crossing, even if the run already finished; block only a run that is still live.
-      if (after && after !== before) {
-        const alert = state.ledger.append({
-          timestamp: new Date().toISOString(),
-          agentId: stored.agentId,
-          runId: stored.runId,
-          type: 'budget.alert',
-          action: `BUDGET_${after.toUpperCase()}_EXCEEDED`,
-          actor: SYSTEM.policy,
-        });
-        await routeEvents(state, alert);
-      }
-      const live = run ? state.runs.get(run.runId) : undefined;
-      if (after && live && !isTerminal(live.state) && live.state !== 'BLOCKED_BUDGET_EXCEEDED') {
-        blockRun(state, live.runId, 'BLOCKED_BUDGET_EXCEEDED', SYSTEM.policy);
+      if (!isBuiltin) {
+        const policy = state.policies.get(stored.agentId);
+        const before = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
+        const after = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
+        // Alert once per crossing, even if the run already finished; block only a run that is still live.
+        if (after && after !== before) {
+          const alert = state.ledger.append({
+            timestamp: new Date().toISOString(),
+            agentId: stored.agentId,
+            runId: stored.runId,
+            type: 'budget.alert',
+            action: `BUDGET_${after.toUpperCase()}_EXCEEDED`,
+            actor: SYSTEM.policy,
+          });
+          await routeEvents(state, alert);
+        }
+        const live = run ? state.runs.get(run.runId) : undefined;
+        if (after && live && !isTerminal(live.state) && live.state !== 'BLOCKED_BUDGET_EXCEEDED') {
+          blockRun(state, live.runId, 'BLOCKED_BUDGET_EXCEEDED', SYSTEM.policy);
+        }
       }
     }
     await routeEvents(state, stored);
@@ -1240,17 +1260,30 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const principal = await authenticate(req, res, state, req.method === 'GET' ? 'viewer' : 'admin');
     if (!principal) return;
     const agentId = policyMatch[1];
-    if (!state.agents.has(agentId)) {
+    const agent = state.agents.get(agentId);
+    if (!agent) {
       json(res, 404, { error: 'not_found' });
       return;
     }
+    const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
     if (req.method === 'GET') {
-      json(res, 200, state.policies.get(agentId));
+      const pol = state.policies.get(agentId);
+      if (isBuiltin) {
+        delete pol.budgetUsd;
+      }
+      json(res, 200, pol);
       return;
     }
     const checked = validatePolicy(await readJson(req));
     if (!checked.ok) {
       json(res, 400, { error: checked.error });
+      return;
+    }
+    if (isBuiltin && checked.policy.budgetUsd !== undefined) {
+      json(res, 400, {
+        error: 'builtin_agents_exempt_from_budget',
+        message: 'Built-in system agents are critical infrastructure and are exempt from spend limits. Budgets cannot be assigned.',
+      });
       return;
     }
     state.policies.set(agentId, checked.policy);
@@ -1273,10 +1306,13 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 404, { error: 'not_found' });
       return;
     }
+    const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
+    const pol = state.policies.get(run.agentId);
     json(res, 200, {
       run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state), ...(run.model ? { model: run.model } : {}) },
       agentState: agent.state,
-      policy: state.policies.get(run.agentId),
+      isBuiltin,
+      policy: isBuiltin ? { ...pol, budgetUsd: undefined } : pol,
       spend: state.spend.get(run.agentId, run.runId),
     });
     return;
@@ -1522,6 +1558,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const agent = state.agents.get(agentId);
     if (!agent) {
       json(res, 404, { error: 'not_found' });
+      return;
+    }
+    const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
+    if (isBuiltin) {
+      json(res, 400, {
+        error: 'builtin_agents_exempt_from_budget',
+        message: 'Built-in system agents are critical infrastructure and are exempt from spend limits. Budgets cannot be assigned.',
+      });
       return;
     }
     const body = await readJson(req);

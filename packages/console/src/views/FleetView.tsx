@@ -56,7 +56,9 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
   const runningCount = displayedAgents.filter((a) => a.state === 'RUNNING').length;
   const sleepingCount = displayedAgents.filter((a) => a.state === 'SLEEPING').length;
   const totalSpend = displayedAgents.reduce((sum, a) => sum + (a.currentSpendUsd || 0), 0);
-  const totalBudget = displayedAgents.reduce((sum, a) => sum + (a.spendLimitUsd || 0), 0);
+  const totalBudget = displayedAgents
+    .filter((a) => !a.isBuiltin && a.category !== 'builtin' && !a.budgetExempt)
+    .reduce((sum, a) => sum + (a.spendLimitUsd || 0), 0);
 
   const handleWake = async () => {
     if (!wakeModalAgent) return;
@@ -392,7 +394,11 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                   <td className="py-3 px-4">
                     <div className="font-semibold text-slate-800 dark:text-slate-200">${(agent.currentSpendUsd || 0).toFixed(2)}</div>
                     <div className="text-[10px] text-slate-500 dark:text-slate-400">
-                      cap: {agent.spendLimitMonthlyUsd ? `$${agent.spendLimitMonthlyUsd}/mo` : `$${agent.spendLimitUsd || 0}/day`}
+                      cap: {agent.isBuiltin || agent.category === 'builtin' || agent.budgetExempt
+                        ? 'Exempt'
+                        : agent.spendLimitMonthlyUsd
+                        ? `$${agent.spendLimitMonthlyUsd}/mo`
+                        : `$${agent.spendLimitUsd || 0}/day`}
                     </div>
                   </td>
                   <td className="py-3 px-4">

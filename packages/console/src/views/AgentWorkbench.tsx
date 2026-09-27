@@ -215,11 +215,13 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
           <div className="text-right">
             <div className="text-[10px] text-slate-400 dark:text-slate-500 uppercase font-semibold">Spend Cap</div>
             <div className="font-bold text-slate-700 dark:text-slate-300">
-              {agent.spendLimitMonthlyUsd
+              {agent.isBuiltin || agent.category === 'builtin' || agent.budgetExempt
+                ? 'Exempt (System Core)'
+                : agent.spendLimitMonthlyUsd
                 ? `$${agent.spendLimitMonthlyUsd}/mo`
                 : agent.spendLimitUsd
                 ? `$${agent.spendLimitUsd}/day`
-                : '$0'}
+                : 'No budget set'}
             </div>
           </div>
         </div>
