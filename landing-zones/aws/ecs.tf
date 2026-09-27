@@ -346,8 +346,8 @@ resource "aws_ecs_task_definition" "console" {
   network_mode             = "awsvpc"
   cpu                      = 512
   memory                   = 1024
-  execution_role_arn       = aws_iam_role.ecs_exec.arn
-  task_role_arn            = aws_iam_role.agent.arn
+  execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = aws_iam_role.control_plane.arn
   container_definitions = jsonencode([
     {
       name         = "console"
@@ -360,12 +360,12 @@ resource "aws_ecs_task_definition" "console" {
         { name = "PORT", value = "3000" }
       ]
       secrets = [
-        { name = "FACTORY_TOKEN", valueFrom = "${aws_secretsmanager_secret.tokens.arn}:FACTORY_TOKEN::" }
+        { name = "FACTORY_TOKEN", valueFrom = local.secret["FACTORY_TOKEN"] }
       ]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.main.name
+          "awslogs-group"         = aws_cloudwatch_log_group.factory.name
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "console"
         }
