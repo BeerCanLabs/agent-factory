@@ -119,6 +119,11 @@ resource "aws_ecs_service" "control_plane" {
     security_groups  = [aws_security_group.control_plane.id]
     assign_public_ip = true
   }
+  load_balancer {
+    target_group_arn = aws_lb_target_group.control.arn
+    container_name   = "control-plane"
+    container_port   = 8088
+  }
   service_registries {
     registry_arn = aws_service_discovery_service.svc["control-plane"].arn
   }
@@ -331,4 +336,60 @@ resource "aws_ecs_task_definition" "agent" {
     secrets          = [for name in var.agents[each.key].secrets : { name = name, valueFrom = "${local.secret_arn}/${name}" }]
     logConfiguration = local.log["agent"]
   }])
+}
+
+# ---- console: 2D dashboard -----------------------------------------------
+resource "aws_ecs_task_definition" "console" {
+  count                    = local.images_ready && var.console_image != "" ? 1 : 0
+  family                   = "${local.name}-console"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 512
+  memory                   = 1024
+  execution_role_arn       = aws_iam_role.ecs_exec.arn
+  task_role_arn            = aws_iam_role.agent.arn
+  container_definitions = jsonencode([
+    {
+      name         = "console"
+      image        = var.console_image
+      essential    = true
+      portMappings = [{ containerPort = 3000, protocol = "tcp" }]
+      environment = [
+        { name = "NODE_ENV", value = "production" },
+        { name = "FACTORY_CONTROL_PLANE_URL", value = "http://control-plane.factory.internal:8088" },
+        { name = "PORT", value = "3000" }
+      ]
+      secrets = [
+        { name = "FACTORY_TOKEN", valueFrom = "${aws_secretsmanager_secret.tokens.arn}:FACTORY_TOKEN::" }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.main.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "console"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_ecs_service" "console" {
+  count           = local.images_ready && var.console_image != "" ? 1 : 0
+  name            = "console"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.console[0].arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = aws_subnet.service[*].id
+    security_groups  = [aws_security_group.agents.id]
+    assign_public_ip = false
+  }
+  load_balancer {
+    target_group_arn = aws_lb_target_group.console[0].arn
+    container_name   = "console"
+    container_port   = 3000
+  }
 }

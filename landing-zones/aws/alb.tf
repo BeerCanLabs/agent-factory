@@ -55,7 +55,7 @@ resource "aws_lb_listener" "https" {
   certificate_arn   = var.certificate_arn
   default_action {
     type             = "forward"
-    target_group_arn = var.garrison_image != "" ? aws_lb_target_group.garrison[0].arn : aws_lb_target_group.control.arn
+    target_group_arn = aws_lb_target_group.control.arn
   }
 }
 
@@ -69,6 +69,75 @@ resource "aws_lb_listener" "http_redirect" {
       port        = "443"
       protocol    = "HTTPS"
       status_code = "HTTP_301"
+    }
+  }
+}
+
+# Dummy rules to keep the target group associated with the ALB so ECS doesn't fail service updates.
+# We don't use this routing anymore (Garrison proxies API requests securely instead).
+resource "aws_lb_listener_rule" "control_plane_dummy" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 99
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.control.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/dummy-unused-path-for-ecs-validation/*"]
+    }
+  }
+}
+
+resource "aws_lb_target_group" "console" {
+  count       = var.console_image != "" ? 1 : 0
+  name        = "${local.name}-console"
+  port        = 3000
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.factory.id
+  target_type = "ip"
+  health_check {
+    path                = "/api/v1/health"
+    matcher             = "200"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+}
+
+resource "aws_lb_listener_rule" "console_route" {
+  count        = var.console_image != "" ? 1 : 0
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 10
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.console[0].arn
+  }
+
+  condition {
+    host_header {
+      values = ["factory-dashboard.dalesackrider.com"]
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "garrison_route" {
+  count        = var.garrison_image != "" ? 1 : 0
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 20
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.garrison[0].arn
+  }
+
+  condition {
+    host_header {
+      values = ["garrison.dalesackrider.com"]
     }
   }
 }

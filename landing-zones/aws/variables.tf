@@ -111,3 +111,8 @@ variable "garrison_image" {
   description = "Docker image for Agent Garrison gaming interface and control deck"
   default     = ""
 }
+variable "console_image" {
+  type        = string
+  description = "Docker image for Factory Dashboard 2D UI"
+  default     = ""
+}
