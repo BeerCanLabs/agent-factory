@@ -119,11 +119,6 @@ resource "aws_ecs_service" "control_plane" {
     security_groups  = [aws_security_group.control_plane.id]
     assign_public_ip = true
   }
-  load_balancer {
-    target_group_arn = aws_lb_target_group.control.arn
-    container_name   = "control-plane"
-    container_port   = 8088
-  }
   service_registries {
     registry_arn = aws_service_discovery_service.svc["control-plane"].arn
   }
