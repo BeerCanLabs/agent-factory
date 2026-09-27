@@ -8,6 +8,8 @@ export function gatewayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     HTTPS_PROXY: gw,
     http_proxy: gw,
     https_proxy: gw,
+    NO_PROXY: 'localhost,127.0.0.1,.internal,169.254.169.254,169.254.170.2',
+    no_proxy: 'localhost,127.0.0.1,.internal,169.254.169.254,169.254.170.2',
     ANTHROPIC_BASE_URL: `${gw}/anthropic`,
     OPENAI_BASE_URL: `${gw}/openai/v1`,
     ANTHROPIC_API_KEY: token,
