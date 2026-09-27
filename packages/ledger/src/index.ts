@@ -83,7 +83,10 @@ export function canonicalChain(rows: ChainedEvent[], genesis: string): ChainedEv
   const byHash = new Map<string, ChainedEvent>();
   for (const r of rows) byHash.set(r.hash, r);
 
-  const maxSeq = Math.max(...rows.map((r) => r.seq));
+  let maxSeq = 0;
+  for (const r of rows) {
+    if (r.seq > maxSeq) maxSeq = r.seq;
+  }
   const candidates = rows.filter((r) => r.seq === maxSeq);
   for (const tip of candidates) {
     const chain: ChainedEvent[] = [];
@@ -91,7 +94,7 @@ export function canonicalChain(rows: ChainedEvent[], genesis: string): ChainedEv
     let valid = true;
 
     while (curr) {
-      chain.unshift(curr);
+      chain.push(curr);
       if (curr.prevHash === genesis) {
         if (curr.seq !== 1) valid = false;
         break;
@@ -103,6 +106,7 @@ export function canonicalChain(rows: ChainedEvent[], genesis: string): ChainedEv
       }
       curr = parent;
     }
+    chain.reverse();
 
     if (valid && chain.length === tip.seq && chain[0]?.prevHash === genesis) {
       return chain;
@@ -139,8 +143,15 @@ export function verifyChain(
     }
   }
 
-  const maxConfirmedSeq = confirmedSeqs.size > 0 ? Math.max(...confirmedSeqs) : 0;
-  const maxCheckpointSeq = Math.max(...checkpoints.map((c) => c.toSeq));
+  let maxConfirmedSeq = 0;
+  for (const seq of confirmedSeqs) {
+    if (seq > maxConfirmedSeq) maxConfirmedSeq = seq;
+  }
+
+  let maxCheckpointSeq = 0;
+  for (const c of checkpoints) {
+    if (c.toSeq > maxCheckpointSeq) maxCheckpointSeq = c.toSeq;
+  }
 
   // The ledger must cover all checkpoints up to the highest one.
   if (chain.length < maxCheckpointSeq) {
@@ -181,14 +192,19 @@ export class FileLedger implements LedgerStore {
     const rawRows: ChainedEvent[] = [];
     if (existsSync(filePath)) {
       for (const line of readFileSync(filePath, 'utf8').split('\n')) {
-        if (!line) continue;
-        const row = JSON.parse(line) as ChainedEvent;
-        if (typeof row.hash !== 'string') {
-          if (rawRows.length) throw new Error(`${filePath}: unchained row after chained rows`);
-          legacy += `${line}\n`;
-          continue;
+        const cleanLine = line.replace(/\0/g, '').trim();
+        if (!cleanLine) continue;
+        try {
+          const row = JSON.parse(cleanLine) as ChainedEvent;
+          if (typeof row.hash !== 'string') {
+            if (rawRows.length) throw new Error(`${filePath}: unchained row after chained rows`);
+            legacy += `${cleanLine}\n`;
+            continue;
+          }
+          rawRows.push(row);
+        } catch (e) {
+          console.warn(`[FileLedger] Skipping corrupted row: ${e}`);
         }
-        rawRows.push(row);
       }
     }
     // Rows written before chaining existed are sealed under the genesis hash.
@@ -221,13 +237,21 @@ export class FileLedger implements LedgerStore {
 
   /** Verifies what is on disk now, not the in-memory copy. */
   verify(checkpoints: Array<{ toSeq: number; hash: string }> = []): VerifyResult {
-    const onDisk = existsSync(this.filePath)
-      ? readFileSync(this.filePath, 'utf8')
-          .split('\n')
-          .filter(Boolean)
-          .map((l) => JSON.parse(l) as ChainedEvent)
-          .filter((r) => typeof r.hash === 'string')
-      : [];
+    const onDisk: ChainedEvent[] = [];
+    if (existsSync(this.filePath)) {
+      for (const line of readFileSync(this.filePath, 'utf8').split('\n')) {
+        const cleanLine = line.replace(/\0/g, '').trim();
+        if (!cleanLine) continue;
+        try {
+          const row = JSON.parse(cleanLine) as ChainedEvent;
+          if (typeof row.hash === 'string') {
+            onDisk.push(row);
+          }
+        } catch (e) {
+          // ignore corrupted lines
+        }
+      }
+    }
     return verifyChain(onDisk, this.genesis, checkpoints);
   }
 }
