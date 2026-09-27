@@ -39,11 +39,10 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
     setIsUpdating(true);
     try {
       await factoryApi.setAgentBudget(agentId, newBudgetLimit, editingPeriod);
-      alert(`Budget cap for ${agentId} updated to $${newBudgetLimit}/${editingPeriod === 'monthly' ? 'month' : 'day'}.`);
       setEditingAgentId(null);
       onRefresh();
     } catch (err: any) {
-      alert(`Budget update failed: ${err.message}`);
+      console.error(`Budget update failed: ${err.message}`);
     } finally {
       setIsUpdating(false);
     }
@@ -53,10 +52,9 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
     if (!confirm(`EMERGENCY ACTION: Sever all network egress for ${agent.name} immediately?`)) return;
     try {
       await factoryApi.isolateAgent(agent.id);
-      alert(`Agent ${agent.name} egress severed.`);
       onRefresh();
     } catch (err: any) {
-      alert(`Isolation failed: ${err.message}`);
+      console.error(`Isolation failed: ${err.message}`);
     }
   };
 
