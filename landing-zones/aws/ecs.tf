@@ -150,6 +150,7 @@ resource "aws_ecs_task_definition" "gateway" {
       environment = concat(local.otel_env, [
         { name = "PORT", value = "8081" },
         { name = "FACTORY_URL", value = local.cp_url },
+      { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_GATEWAY_ROUTES", value = var.gateway_routes },
         { name = "FACTORY_PRICES", value = var.gateway_prices },
@@ -219,6 +220,7 @@ resource "aws_ecs_task_definition" "doorman" {
     environment = [
       { name = "PORT", value = "8090" },
       { name = "FACTORY_URL", value = local.cp_url },
+      { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
       { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
     ]
     secrets = [
@@ -270,6 +272,7 @@ resource "aws_ecs_task_definition" "garrison" {
       { name = "HOST", value = "0.0.0.0" },
       { name = "NODE_ENV", value = "production" },
       { name = "FACTORY_URL", value = local.cp_url },
+      { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
       { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
       { name = "AWS_REGION", value = var.aws_region },
     ]
@@ -328,6 +331,7 @@ resource "aws_ecs_task_definition" "agent" {
       { name = "MEMORY_STORE_URI", value = "s3://${aws_s3_bucket.mind.bucket}" },
       { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
       { name = "FACTORY_URL", value = local.cp_url },
+      { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
     ]
     secrets          = [for name in var.agents[each.key].secrets : { name = name, valueFrom = "${local.secret_arn}/${name}" }]
     logConfiguration = local.log["agent"]

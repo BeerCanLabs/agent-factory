@@ -45,49 +45,7 @@ resource "aws_lb_target_group" "garrison" {
   }
 }
 
-resource "aws_lb_listener_rule" "control_plane_api" {
-  count        = var.garrison_image != "" ? 1 : 0
-  listener_arn = aws_lb_listener.https.arn
-  priority     = 10
 
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.control.arn
-  }
-
-  condition {
-    path_pattern {
-      values = [
-        "/healthz",
-        "/api/v1/runs*",
-        "/api/v1/ledger*",
-        "/api/v1/schedules*",
-        "/api/v1/registry*",
-      ]
-    }
-  }
-}
-
-resource "aws_lb_listener_rule" "control_plane_agents" {
-  count        = var.garrison_image != "" ? 1 : 0
-  listener_arn = aws_lb_listener.https.arn
-  priority     = 20
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.control.arn
-  }
-
-  condition {
-    path_pattern {
-      values = [
-        "/api/v1/agents",
-        "/api/v1/agents/*",
-        "/api/v1/gateway/*",
-      ]
-    }
-  }
-}
 
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.factory.arn

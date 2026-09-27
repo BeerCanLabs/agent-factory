@@ -33,6 +33,9 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
   const [wakePrompt, setWakePrompt] = useState('Process incoming operational turn');
   const [isWaking, setIsWaking] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [budgetModalAgent, setBudgetModalAgent] = useState<AgentRecord | null>(null);
+  const [budgetLimit, setBudgetLimit] = useState<string>('');
+  const [isSettingBudget, setIsSettingBudget] = useState(false);
 
   const userAgents = agents.filter((a) => !a.isBuiltin && a.category !== 'builtin');
   const builtinAgents = agents.filter((a) => Boolean(a.isBuiltin || a.category === 'builtin'));
@@ -72,6 +75,21 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
       alert(`Failed to wake agent: ${err.message}`);
     } finally {
       setIsWaking(false);
+    }
+  };
+
+  const handleBudgetSubmit = async () => {
+    if (!budgetModalAgent) return;
+    setIsSettingBudget(true);
+    try {
+      await factoryApi.setAgentBudget(budgetModalAgent.id, parseFloat(budgetLimit) || 0, 'perMonth');
+      setActionMessage(`Budget updated for ${budgetModalAgent.name}.`);
+      setBudgetModalAgent(null);
+      onRefresh();
+    } catch (err: any) {
+      alert(`Failed to update budget: ${err.message}`);
+    } finally {
+      setIsSettingBudget(false);
     }
   };
 
@@ -428,7 +446,7 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                         </span>
                       )}
 
-                      {agent.state === 'SLEEPING' && (
+                      {(agent.state === 'SLEEPING' || agent.state === 'ERROR') && (
                         <button
                           onClick={() => setWakeModalAgent(agent)}
                           disabled={!permissions.canWake}
@@ -472,6 +490,18 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                       )}
 
                       <button
+                        onClick={() => {
+                          setBudgetModalAgent(agent);
+                          setBudgetLimit(agent.spendLimitMonthlyUsd ? String(agent.spendLimitMonthlyUsd) : '0');
+                        }}
+                        disabled={agent.isBuiltin || agent.category === 'builtin' || agent.budgetExempt}
+                        className="p-1 text-slate-500 dark:text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 disabled:opacity-40 rounded hover:bg-slate-200 dark:hover:bg-slate-800 transition"
+                        title="Configure Budget Limits"
+                      >
+                        <DollarSign className="w-3.5 h-3.5" />
+                      </button>
+
+                      <button
                         onClick={() => onSelectAgent(agent.id)}
                         className="p-1 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded hover:bg-slate-200 dark:hover:bg-slate-800 transition"
                         title="Open Workbench"
@@ -486,6 +516,56 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
           </table>
         </div>
       </div>
+
+      {/* Budget Configuration Modal */}
+      {budgetModalAgent && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl max-w-sm w-full p-6 space-y-4 shadow-2xl transition-colors">
+            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
+              <div className="flex items-center space-x-2">
+                <div className="w-3 h-3 rounded-full bg-emerald-500" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">Budget: {budgetModalAgent.name}</h3>
+              </div>
+              <button onClick={() => setBudgetModalAgent(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white">
+                ✕
+              </button>
+            </div>
+            
+            <p className="text-xs text-slate-600 dark:text-slate-400">
+              Set the monthly LLM egress spend limit for this agent in USD.
+            </p>
+            
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Monthly Limit ($)</label>
+              <input
+                type="number"
+                min="0"
+                step="5"
+                value={budgetLimit}
+                onChange={(e) => setBudgetLimit(e.target.value)}
+                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-3 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
+              />
+            </div>
+            
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                onClick={() => setBudgetModalAgent(null)}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg text-xs font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBudgetSubmit}
+                disabled={isSettingBudget}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-2 shadow-lg transition"
+              >
+                <DollarSign className="w-3.5 h-3.5" />
+                <span>{isSettingBudget ? 'Saving...' : 'Save Budget'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Wake Dispatch Modal */}
       {wakeModalAgent && (
