@@ -27,7 +27,18 @@ async function call(method: string, path: string, body?: unknown): Promise<Respo
   });
 }
 
+// Circuit breaker: track Control Plane ledger health so the gateway can refuse
+// to proxy when the audit trail is unreachable, rather than crashing.
+let _ledgerUp = true;
+let _lastLedgerFailure = 0;
+const LEDGER_PROBE_INTERVAL_MS = 5_000;
+
 const control: ControlClient = {
+  ledgerAvailable() {
+    if (_ledgerUp) return true;
+    // Half-open: allow a probe attempt after cooldown so recovery is automatic.
+    return Date.now() - _lastLedgerFailure > LEDGER_PROBE_INTERVAL_MS;
+  },
   async runContext(runId) {
     const res = await call('GET', `/api/v1/gateway/runs/${encodeURIComponent(runId)}`);
     if (res.status === 404) return null;
@@ -43,8 +54,21 @@ const control: ControlClient = {
     return (await call('POST', `/api/v1/gateway/approvals/${encodeURIComponent(id)}/consume`)).ok;
   },
   async ledger(event) {
-    const res = await call('POST', '/api/v1/ledger', event);
-    if (!res.ok) throw new Error(`ledger ${res.status}`);
+    try {
+      const res = await call('POST', '/api/v1/ledger', event);
+      if (!res.ok) {
+        console.error(`[gateway] ledger write rejected: ${res.status}`);
+        _ledgerUp = false;
+        _lastLedgerFailure = Date.now();
+        return;
+      }
+      if (!_ledgerUp) console.log('[gateway] ledger connection recovered');
+      _ledgerUp = true;
+    } catch (err) {
+      console.error(`[gateway] ledger write failed: ${err instanceof Error ? err.message : String(err)}`);
+      _ledgerUp = false;
+      _lastLedgerFailure = Date.now();
+    }
   },
 };
 

@@ -44,6 +44,8 @@ export type ControlClient = {
   requestApproval(req: { runId: string; route: string; tool: string; argsSha256: string }): Promise<Approval>;
   consumeApproval(approvalId: string): Promise<boolean>;
   ledger(event: Record<string, unknown>): Promise<void>;
+  /** Circuit breaker: returns false when the ledger endpoint is known-unreachable. */
+  ledgerAvailable?(): boolean;
 };
 
 export type GatewayOptions = {
@@ -464,6 +466,12 @@ export function createGateway(opts: GatewayOptions): http.Server {
       const url = req.url ?? '/';
       if (url === '/healthz') return send(res, 200, { status: 'ok', routes: [...routes.keys()] });
 
+      // Circuit breaker: refuse to proxy if the ledger is unreachable.
+      // Agents must not egress without an audit trail.
+      if (opts.control.ledgerAvailable?.() === false) {
+        return send(res, 503, { error: 'ledger_unavailable' });
+      }
+
       // Forward HTTP proxy support (e.g. GET http://api.notion.com/v1/users)
       if (url.startsWith('http://') || url.startsWith('https://')) {
         const parsed = new URL(url);
@@ -482,7 +490,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
             actor: `run:${ctx.run.agentId}`,
             type: 'action',
             action: `EGRESS_DENIED_HOST_${parsed.hostname}`,
-          });
+          }).catch(() => {});
           return send(res, 403, { error: 'host_not_allowed', host: parsed.hostname });
         }
 
@@ -496,7 +504,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
           type: 'action',
           action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS_PROXY',
           host: parsed.hostname,
-        });
+        }).catch(() => {});
         return;
       }
 
@@ -538,6 +546,13 @@ export function createGateway(opts: GatewayOptions): http.Server {
 
   server.on('connect', async (req: http.IncomingMessage, clientSocket: stream.Duplex, head: Buffer) => {
     try {
+      // Circuit breaker: refuse tunnels if the ledger is unreachable.
+      if (opts.control.ledgerAvailable?.() === false) {
+        clientSocket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+        clientSocket.destroy();
+        return;
+      }
+
       const token = presentedToken(req);
       const claims = await opts.runTokens.verify(token);
       if (!claims) {
@@ -572,7 +587,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
           actor: `run:${ctx.run.agentId}`,
           type: 'action',
           action: `EGRESS_DENIED_HOST_${destHost}`,
-        });
+        }).catch(() => {});
         clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
         clientSocket.destroy();
         return;
@@ -591,7 +606,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
           action: 'EGRESS_TUNNEL',
           host: destHost,
           port: destPort,
-        });
+        }).catch(() => {});
       });
 
       upstreamSocket.on('error', (err) => {
