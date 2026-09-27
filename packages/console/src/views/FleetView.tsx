@@ -12,6 +12,7 @@ import {
   AlertCircle,
   CheckCircle2,
   Sliders,
+  UploadCloud,
 } from 'lucide-react';
 import type { AgentRecord, AgentState } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
@@ -106,6 +107,16 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
     }
   };
 
+  const handleDeploy = async (agent: AgentRecord) => {
+    try {
+      await factoryApi.deployAgent(agent.id);
+      setActionMessage(`Deployment triggered for ${agent.name}. Compute identity and task definitions are provisioning.`);
+      onRefresh();
+    } catch (err: any) {
+      alert(`Failed to deploy agent: ${err.message}`);
+    }
+  };
+
   const getStateBadge = (state: AgentState) => {
     switch (state) {
       case 'RUNNING':
@@ -120,6 +131,27 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
           <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700">
             <span className="w-1.5 h-1.5 rounded-full bg-slate-400 mr-1.5" />
             SLEEPING ($0 Compute)
+          </span>
+        );
+      case 'PENDING_DEPLOY':
+        return (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border border-blue-300 dark:border-blue-800">
+            <Clock className="w-3 h-3 mr-1 text-blue-600 dark:text-blue-400" />
+            PENDING DEPLOY
+          </span>
+        );
+      case 'DEPLOYING':
+        return (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-800">
+            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-ping mr-1.5" />
+            DEPLOYING...
+          </span>
+        );
+      case 'PENDING_BUDGET':
+        return (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+            <AlertCircle className="w-3 h-3 mr-1 text-amber-600 dark:text-amber-400" />
+            PENDING BUDGET
           </span>
         );
       case 'PAUSED':
@@ -371,6 +403,25 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                   </td>
                   <td className="py-3 px-4 text-right">
                     <div className="flex items-center justify-end space-x-1.5">
+                      {agent.state === 'PENDING_DEPLOY' && (
+                        <button
+                          onClick={() => handleDeploy(agent)}
+                          disabled={!permissions.canDeploy}
+                          className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded font-medium text-xs flex items-center space-x-1 shadow-sm transition"
+                          title="Deploy Agent: Provision Cloud Compute & IAM"
+                        >
+                          <UploadCloud className="w-3.5 h-3.5" />
+                          <span>Deploy</span>
+                        </button>
+                      )}
+
+                      {agent.state === 'DEPLOYING' && (
+                        <span className="px-2.5 py-1 bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300 rounded font-medium text-xs flex items-center space-x-1 border border-indigo-300 dark:border-indigo-800">
+                          <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping mr-1" />
+                          <span>Deploying</span>
+                        </span>
+                      )}
+
                       {agent.state === 'SLEEPING' && (
                         <button
                           onClick={() => setWakeModalAgent(agent)}

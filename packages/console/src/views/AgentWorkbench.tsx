@@ -16,6 +16,7 @@ import {
   DollarSign,
   Shield,
   Layers,
+  UploadCloud,
 } from 'lucide-react';
 import type { AgentRecord } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
@@ -106,6 +107,20 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
     }
   };
 
+  const handleDeploy = async () => {
+    try {
+      await factoryApi.deployAgent(agent.id);
+      setLogs((prev) => [
+        ...prev,
+        `[${new Date().toISOString()}] Cloud deployment triggered. Provisioning AWS IAM roles & ECS task definition...`,
+      ]);
+      alert(`Deployment initiated for ${agent.name}. It will transition to SLEEPING once compute registration finishes.`);
+      onRefresh();
+    } catch (err: any) {
+      alert(`Deployment failed: ${err.message}`);
+    }
+  };
+
   const handlePurge = async () => {
     if (!confirm(`CAUTION: Stage 2 Permanent Purge will permanently destroy ECS task definitions, purge vault secrets, and compress mind state to cold archive. Proceed?`)) {
       return;
@@ -168,9 +183,28 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
 
         {/* State Pill & Quick Stats */}
         <div className="flex items-center space-x-4 text-xs">
+          {agent.state === 'PENDING_DEPLOY' && (
+            <button
+              onClick={handleDeploy}
+              disabled={!permissions.canDeploy}
+              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-semibold text-xs flex items-center space-x-1.5 shadow-sm transition"
+              title="Deploy Agent: Provision Cloud Compute & IAM"
+            >
+              <UploadCloud className="w-3.5 h-3.5" />
+              <span>Deploy to Cloud</span>
+            </button>
+          )}
+
+          {agent.state === 'DEPLOYING' && (
+            <div className="px-3 py-1.5 bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300 rounded-lg font-semibold text-xs flex items-center space-x-1.5 border border-indigo-300 dark:border-indigo-800">
+              <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
+              <span>Deploying Compute...</span>
+            </div>
+          )}
+
           <div className="text-right">
             <div className="text-[10px] text-slate-400 dark:text-slate-500 uppercase font-semibold">Current State</div>
-            <div className="font-bold text-emerald-600 dark:text-emerald-400">{agent.state}</div>
+            <div className={`font-bold ${agent.state === 'PENDING_DEPLOY' ? 'text-blue-600 dark:text-blue-400' : 'text-emerald-600 dark:text-emerald-400'}`}>{agent.state}</div>
           </div>
           <div className="h-6 w-px bg-slate-200 dark:bg-slate-800" />
           <div className="text-right">
