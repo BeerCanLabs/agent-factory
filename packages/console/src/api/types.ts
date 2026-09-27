@@ -19,6 +19,7 @@ export interface AgentRecord {
   state: AgentState;
   category?: AgentCategory;
   isBuiltin?: boolean;
+  budgetExempt?: boolean;
   model: string;
   approvedModels?: string[];
   spendLimitUsd?: number;

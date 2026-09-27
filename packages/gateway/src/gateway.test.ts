@@ -318,6 +318,17 @@ describe('egress gateway', { concurrency: false }, () => {
     assert.equal((await call(port, '/anthropic/v1/messages', { token, body: messages() })).status, 402);
   });
 
+  it('bypasses budget checks unconditionally for built-in system actors', async () => {
+    ctx.isBuiltin = true;
+    ctx.policy = policy({ budgetUsd: { perRun: 0.001 } });
+    ctx.run.state = 'BLOCKED_BUDGET_EXCEEDED';
+    // Even if state says BLOCKED_BUDGET_EXCEEDED or budget limit is tiny, built-ins are exempt!
+    const res = await call(port, '/anthropic/v1/messages', { token, body: messages() });
+    assert.equal(res.status, 200);
+    ctx.isBuiltin = false;
+    ctx.run.state = 'WORKING';
+  });
+
   it('enforces a run-level model pin', async () => {
     ctx.run.model = 'test-claude';
     assert.equal((await call(port, '/anthropic/v1/messages', { token, body: messages('test-claude') })).status, 200);

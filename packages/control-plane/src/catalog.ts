@@ -23,11 +23,8 @@ export const RETIRED_PLACEHOLDER_IDS = new Set([
   'starter-python',
 ]);
 
-export function isBuiltinCartridge(id: string, dir?: string): boolean {
-  if (BUILTIN_AGENT_IDS.has(id)) return true;
-  if (RETIRED_PLACEHOLDER_IDS.has(id)) return true;
-  if (dir && (dir.includes('/examples/') || dir.includes('/agents/examples/'))) return true;
-  return false;
+export function isBuiltinCartridge(id: string, _dir?: string): boolean {
+  return BUILTIN_AGENT_IDS.has(id);
 }
 
 export const BUILTIN_SYSTEM_AGENTS: AgentRecord[] = [
