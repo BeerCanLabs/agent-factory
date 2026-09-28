@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { Checkpointer, FileLedger, checkpointSinkFromEnv, secretValuesFromEnv } from '@beercanlabs/factory-ledger';
+import { Checkpointer, FileLedger, LedgerLease, LeaseHeldError, checkpointSinkFromEnv, secretValuesFromEnv } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { authFromEnv } from '@beercanlabs/factory-auth';
 import { loadCatalog, loadDynamicRegistry, BUILTIN_SYSTEM_AGENTS } from './catalog.js';
@@ -46,6 +46,24 @@ const dynamicAgents = loadDynamicRegistry(REGISTRY_DIR);
 // Built-in system actors (Doorman, Keymaster, Doctor, Coach) are first-class system agents
 const allAgents = [...BUILTIN_SYSTEM_AGENTS, ...staticAgents.filter(a => !BUILTIN_SYSTEM_AGENTS.some(s => s.id === a.id)), ...dynamicAgents];
 const secretValues = new Set<string>(secretValuesFromEnv());
+
+// LG1: exactly one writer per ledger. Take the lease before opening the file; never share it with another process.
+const ledgerLease = new LedgerLease(`${LEDGER_PATH}.lease`, {
+  ttlMs: parseInt(process.env.FACTORY_LEDGER_LEASE_TTL_MS || '30000', 10),
+  onLost: (by) => {
+    console.error(`[control-plane] ledger lease lost to ${by?.holder ?? 'unknown'}; stopping before a second writer can tear the ledger`);
+    process.exit(4);
+  },
+});
+try {
+  ledgerLease.acquire();
+} catch (err) {
+  if (!(err instanceof LeaseHeldError)) throw err;
+  console.error(`[control-plane] ${err.message}`);
+  process.exit(4);
+}
+ledgerLease.keepAlive();
+console.log(`[control-plane] ledger lease held by ${ledgerLease.holder}`);
 
 const hub = new EventHub();
 const ledger = tapLedger(new FileLedger(LEDGER_PATH, { secrets: () => secretValues }), hub);
@@ -166,10 +184,13 @@ if (ledgerSink) {
     checkpointer.flush().catch((err) => console.error(`[control-plane] ledger checkpoint failed: ${err instanceof Error ? err.message : String(err)}`));
   setInterval(ship, every).unref();
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {
-    process.once(sig, () => void ship().finally(() => process.exit(0)));
+    process.once(sig, () => void ship().finally(() => { ledgerLease.release(); process.exit(0); }));
   }
 } else {
   console.warn('[control-plane] FACTORY_LEDGER_WORM_URI unset: ledger is hash-chained but has no write-once anchor');
+  for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(sig, () => { ledgerLease.release(); process.exit(0); });
+  }
 }
 
 const busSink = busSinkFromEnv();

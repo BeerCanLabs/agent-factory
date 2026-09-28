@@ -14,6 +14,7 @@ export {
 } from './sanitize.js';
 export { FileCheckpointSink, S3CheckpointSink, GcsCheckpointSink, checkpointSinkFromEnv } from './checkpoints.js';
 export type { Checkpoint, CheckpointRef, CheckpointSink } from './checkpoints.js';
+export { LedgerLease, LeaseHeldError, type LeaseRecord } from './lease.js';
 import type { CheckpointSink } from './checkpoints.js';
 
 /** A stored row: the sanitized event plus its position and hash in the chain. */
