@@ -7,7 +7,7 @@ import { RunTokens } from '@beercanlabs/factory-auth';
 import { createGateway, type ConnectionTokenResult, type ControlClient, type RunContext } from './gateway.js';
 
 const tokens = new RunTokens('gateway-conn-test-run-token-key-0123456789');
-const GOOGLE_TOKEN = 'ya29.google-access-token-for-donna';
+const GOOGLE_TOKEN = 'fake-google-access-token-for-donna';
 
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
