@@ -273,6 +273,13 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal((await wake('echo-agent', { model: 'bad model; rm -rf' })).status, 400);
     });
 
+    it('E7: starting a run never grants egress (deny by default)', async () => {
+      const before = state.policies.get('med-doc');
+      await wake('med-doc');
+      assert.deepEqual(state.policies.get('med-doc'), before);
+      assert.deepEqual(state.policies.get('med-doc').routes, []);
+    });
+
     it('wake is an alias that also returns 202', async () => {
       const res = await request(port, '/api/v1/agents/echo-agent/wake', { method: 'POST', token: TOKENS.operator });
       assert.equal(res.status, 202);
