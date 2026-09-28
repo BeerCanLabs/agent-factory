@@ -51,6 +51,13 @@ terraform apply \
 2. Set `gateway_prices` (USD per million tokens). Unpriced models are refused.
 3. `PUT /api/v1/agents/<id>/policy {"routes":["anthropic"], "budgetUsd":{"perDay":5}}`, or run `factory-bench --apply` to set the model and budget from measured cost and quality.
 
+## Factory model API (Bedrock)
+
+Agents call models at `${FACTORY_MODEL_BASE_URL}/chat/completions` (OpenAI Chat Completions format). The gateway's `models` route translates each call to Bedrock Converse and signs it with the gateway task role, which is allowed `bedrock:InvokeModel` on foundation models and this account's inference profiles; agents hold no AWS credentials.
+
+1. Set `model_catalog` to the models this factory offers (default: `claude-sonnet-4-5` and `claude-haiku-4-5` via US cross-region inference profiles). Enable model access for them in the Bedrock console.
+2. `PUT /api/v1/agents/<id>/policy {"routes":["models"], "models":["claude-sonnet-4-5"], "budgetUsd":{"perDay":5}}`.
+
 ## Cost notes
 
 There are no NAT gateways. Fixed costs are the ALB, the four interface endpoints (billed hourly per AZ, two AZs), EFS, and the always-on control plane, gateway and Doorman tasks. Agents cost nothing while idle.

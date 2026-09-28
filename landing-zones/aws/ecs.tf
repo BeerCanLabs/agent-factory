@@ -157,6 +157,7 @@ resource "aws_ecs_task_definition" "gateway" {
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_GATEWAY_ROUTES", value = var.gateway_routes },
         { name = "FACTORY_PRICES", value = var.gateway_prices },
+        { name = "FACTORY_MODEL_CATALOG", value = jsonencode({ for name, m in var.model_catalog : name => { for k, v in m : k => v if v != null } }) },
         { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
         { name = "FACTORY_TRACE_DIR", value = "/tmp/traces" },
       ])
