@@ -42,8 +42,12 @@ export function ecsRuntime(opts: {
       // An agent deployed through admission (§6.8 L4) runs the task definition the deploy registered for its
       // admitted commit, never a statically mapped one.
       const deployed = Boolean(agent.deployedCommit);
-      const family = deployed ? `agent-${agent.id}` : opts.taskMap[agent.id] || (agent.provider === 'cloud' ? `agent-${agent.id}` : undefined);
+      const mapped = deployed ? undefined : opts.taskMap[agent.id];
+      const family = mapped ?? (deployed || agent.provider === 'cloud' ? `agent-${agent.id}` : undefined);
       if (!family) throw new Error(`no ECS task definition mapped for ${agent.id}`);
+      // The container name follows where the task definition came from: landing-zone mapped tasks use the
+      // configured worker container; task definitions the factory registers (aws/ecs.ts) use 'agent-container'.
+      const workerName = mapped ? container : 'agent-container';
       const net = JSON.stringify({
         awsvpcConfiguration: {
           subnets: opts.subnets,
@@ -53,7 +57,7 @@ export function ecsRuntime(opts: {
       });
       const overrides = JSON.stringify({
         containerOverrides: [
-          { name: deployed || agent.provider === 'cloud' ? 'agent-container' : container, environment: Object.entries(ctx.runEnv).map(([name, value]) => ({ name, value })) },
+          { name: workerName, environment: Object.entries(ctx.runEnv).map(([name, value]) => ({ name, value })) },
         ],
       });
       const out = await cli([

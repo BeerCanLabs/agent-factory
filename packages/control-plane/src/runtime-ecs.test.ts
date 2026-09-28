@@ -57,6 +57,14 @@ describe('ecsRuntime', () => {
     assert.equal(args.includes('ECHO_WEBHOOK_SECRET'), false);
   });
 
+  it('a landing-zone mapped task overrides its worker container, even for an oci (cloud) cartridge', async () => {
+    const { rt, calls } = fake();
+    await rt.start({ ...echo, provider: 'cloud' }, {}, { runId: 'run-9', runEnv: { FACTORY_RUN_ID: 'run-9' } });
+    const overrides = calls[0][calls[0].indexOf('--overrides') + 1];
+    assert.ok(overrides.includes('"name":"worker"'), overrides);
+    assert.equal(calls[0][calls[0].indexOf('--task-definition') + 1], 'factory-echo-prod');
+  });
+
   it('stops by durable handle and reports exit via DescribeTasks', async () => {
     const { rt, calls, stop } = fake();
     await rt.start(echo, {}, { runId: 'run-2', runEnv: {} });
