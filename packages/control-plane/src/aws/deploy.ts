@@ -20,8 +20,9 @@ export function awsDeployProvider(): DeployProvider {
       secrets: string[],
       identity: string,
       executionIdentity?: string,
+      memoryPrefix?: string,
     ): Promise<void> {
-      await registerAgentTaskDefinition(agentId, imageUri, secrets, identity, executionIdentity ?? identity);
+      await registerAgentTaskDefinition(agentId, imageUri, secrets, identity, executionIdentity ?? identity, memoryPrefix ?? agentId);
     },
   };
 }

@@ -40,8 +40,13 @@ export async function registerAgentTaskDefinition(
   imageUri: string,
   secrets: string[],
   taskRoleArn: string,
-  execRoleArn: string
+  execRoleArn: string,
+  memoryPrefix: string = agentId,
 ) {
+  // Landing-zone settings (never hard-coded here): where minds live and where logs go.
+  const mindBucket = process.env.FACTORY_MIND_BUCKET;
+  const logGroup = process.env.FACTORY_LOG_GROUP;
+  if (!mindBucket || !logGroup) throw new Error('FACTORY_MIND_BUCKET and FACTORY_LOG_GROUP must be set to register agent compute');
   const resolvedSecrets = await Promise.all(
     secrets.map(async (secretNameOrArn, i) => {
       const arn = await resolveSecretArn(secretNameOrArn, taskRoleArn);
@@ -71,16 +76,16 @@ export async function registerAgentTaskDefinition(
         image: imageUri,
         essential: true,
         secrets: resolvedSecrets,
+        // The shim (packages/hydrate) pulls the mind into MEMORY_DIR before the worker starts and pushes it after.
         environment: [
-          {
-            name: "FACTORY_MIND_BUCKET",
-            value: process.env.FACTORY_MIND_BUCKET || "agent-factory-mind-prod-924cfefd",
-          },
+          { name: "FACTORY_MIND_BUCKET", value: mindBucket },
+          { name: "MEMORY_STORE_URI", value: `s3://${mindBucket}` },
+          { name: "MEMORY_PREFIX", value: memoryPrefix },
         ],
         logConfiguration: {
           logDriver: "awslogs",
           options: {
-            "awslogs-group": `/ecs/factory-prod`,
+            "awslogs-group": logGroup,
             "awslogs-region": process.env.AWS_REGION || "us-east-1",
             "awslogs-stream-prefix": `agent-${agentId}`,
           },
