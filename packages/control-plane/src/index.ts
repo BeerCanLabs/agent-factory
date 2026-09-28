@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { Checkpointer, FileLedger, LedgerLease, LeaseHeldError, checkpointSinkFromEnv, secretValuesFromEnv } from '@beercanlabs/factory-ledger';
+import { Checkpointer, FileLedger, LedgerLease, LeaseHeldError, archiveAndStartSegment, checkpointSinkFromEnv, readSegment, secretValuesFromEnv, segmentWormUri } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { authFromEnv } from '@beercanlabs/factory-auth';
 import { loadCatalog, loadDynamicRegistry, BUILTIN_SYSTEM_AGENTS } from './catalog.js';
@@ -63,19 +63,41 @@ try {
   process.exit(4);
 }
 ledgerLease.keepAlive();
+// Release on every exit (including refusals below) so the next start need not wait out the TTL. Only frees our own lease.
+process.on('exit', () => ledgerLease.release());
 console.log(`[control-plane] ledger lease held by ${ledgerLease.holder}`);
 
 const hub = new EventHub();
-const ledger = tapLedger(new FileLedger(LEDGER_PATH, { secrets: () => secretValues }), hub);
-const ledgerSink = checkpointSinkFromEnv();
+// LG2: each segment has its own genesis and its own write-once checkpoint prefix.
+const openSegment = () => {
+  const segment = readSegment(LEDGER_PATH);
+  const store = new FileLedger(LEDGER_PATH, { secrets: () => secretValues, genesis: segment?.genesis });
+  const sink = checkpointSinkFromEnv({ ...process.env, FACTORY_LEDGER_WORM_URI: segmentWormUri(process.env.FACTORY_LEDGER_WORM_URI, segment) });
+  return { segment, store, sink };
+};
+let opened = openSegment();
 {
   // Never append on top of a chain that no longer verifies: that would launder the tampering.
-  const check = ledger.verify(ledgerSink ? await ledgerSink.list() : []);
+  const check = opened.store.verify(opened.sink ? await opened.sink.list() : []);
   if (!check.ok) {
-    console.error(`[control-plane] ledger integrity failure at seq ${check.firstBadSeq}: ${check.reason}`);
-    process.exit(3);
+    const recoverSeq = process.env.FACTORY_LEDGER_RECOVER_SEQ;
+    const reason = process.env.FACTORY_LEDGER_RECOVER_REASON ?? '';
+    // Recovery is an explicit operator decision for this exact failure; a stale setting never launders a new one.
+    if (recoverSeq !== String(check.firstBadSeq) || !reason.trim()) {
+      console.error(`[control-plane] ledger integrity failure at seq ${check.firstBadSeq}: ${check.reason}`);
+      console.error(`[control-plane] to archive this ledger unchanged and start a new segment (LG2), set FACTORY_LEDGER_RECOVER_SEQ=${check.firstBadSeq} and FACTORY_LEDGER_RECOVER_REASON`);
+      process.exit(3);
+    }
+    const record = archiveAndStartSegment(LEDGER_PATH, { failedAtSeq: check.firstBadSeq, failure: check.reason, reason });
+    opened = openSegment();
+    opened.store.append({ agentId: 'factory', type: 'action', action: 'LEDGER_RECOVERY', actor: 'system:ledger', payloadSha256: record.genesis });
+    console.warn(`[control-plane] ledger segment ${record.previous.segment} archived unchanged as ${record.previous.archive} (sha256 ${record.previous.archiveSha256}); recording continues in segment ${record.segment}`);
+  } else if (process.env.FACTORY_LEDGER_RECOVER_SEQ) {
+    console.warn('[control-plane] FACTORY_LEDGER_RECOVER_SEQ is set but the ledger verifies; ignoring it (remove the setting)');
   }
 }
+const ledger = tapLedger(opened.store, hub);
+const ledgerSink = opened.sink;
 
 let deployProvider: DeployProvider | undefined;
 const deployProviderType = process.env.FACTORY_DEPLOY_PROVIDER || (process.env.FACTORY_RUNTIME === 'ecs' ? 'aws' : process.env.FACTORY_RUNTIME === 'cloudrun' ? 'gcp' : undefined);

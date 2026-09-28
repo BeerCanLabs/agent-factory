@@ -80,6 +80,9 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_LEDGER_PATH", value = "/data/ledger.jsonl" },
         { name = "FACTORY_LEDGER_WORM_URI", value = "s3://${aws_s3_bucket.ledger_worm.bucket}/ledger" },
         { name = "FACTORY_LEDGER_RETENTION_DAYS", value = tostring(var.ledger_retention_days) },
+        # LG2 recovery: empty except for the one deploy that archives a failed ledger (exact failing seq + reason).
+        { name = "FACTORY_LEDGER_RECOVER_SEQ", value = var.ledger_recover_seq },
+        { name = "FACTORY_LEDGER_RECOVER_REASON", value = var.ledger_recover_reason },
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_PUBLIC_URL", value = local.cp_url },
         { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
