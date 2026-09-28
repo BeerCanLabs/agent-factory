@@ -1,0 +1,8 @@
+# Images are built from source only: never ship local build output, dependencies, state, or VCS data.
+**/node_modules
+**/dist
+**/.terraform
+**/*.tfstate
+**/*.tfstate.*
+.git
+.claude

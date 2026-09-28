@@ -7,8 +7,8 @@ RUN npm run build -w @beercanlabs/factory-contract \
   -w @beercanlabs/factory-auth \
   -w @beercanlabs/factory-secrets-bind \
   -w @beercanlabs/factory-hydrate \
-  -w @beercanlabs/factory-keymaster \
   -w @beercanlabs/factory-ledger \
+  -w @beercanlabs/factory-keymaster \
   -w @beercanlabs/factory-telemetry \
   -w @beercanlabs/factory-control-plane
 
