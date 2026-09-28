@@ -43,3 +43,11 @@ describe('hydrate', () => {
   });
 });
 
+
+describe('platformEnv (mind sync is platform traffic, E6)', () => {
+  it('drops proxy variables and keeps everything else', async () => {
+    const { platformEnv } = await import('./index.js');
+    const env = platformEnv({ HTTPS_PROXY: 'http://run:t@gw', http_proxy: 'x', ALL_PROXY: 'y', AWS_REGION: 'us-east-1', MEMORY_DIR: '/m' });
+    assert.deepEqual(env, { AWS_REGION: 'us-east-1', MEMORY_DIR: '/m' });
+  });
+});

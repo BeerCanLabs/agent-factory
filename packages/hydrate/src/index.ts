@@ -10,8 +10,21 @@ export type MindStore = {
 
 export type SyncExecutor = (cmd: string, args: string[]) => void;
 
+const PROXY_VARS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy'];
+
+/**
+ * Environment for the shim's own mind sync. Mind sync is platform traffic (DESIGN_AUTHORITY.md E6): it uses the
+ * private object-storage endpoint with the agent's own role, so it must not go through the gateway proxy that the
+ * agent's code is pointed at. The agent process itself keeps the proxy.
+ */
+export function platformEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out = { ...env };
+  for (const k of PROXY_VARS) delete out[k];
+  return out;
+}
+
 function defaultSync(cmd: string, args: string[]): void {
-  execFileSync(cmd, args, { stdio: 'inherit' });
+  execFileSync(cmd, args, { stdio: 'inherit', env: platformEnv(process.env) });
 }
 
 function s3Prefix(store: MindStore, prefix: string): string {

@@ -140,6 +140,17 @@ resource "aws_iam_role_policy" "gateway" {
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = concat([for arn in local.provider_secret_arns : "${arn}*"], ["${local.secret_arn}/*"])
       },
+      {
+        # Factory model API (§6.9): the gateway, never an agent, calls Bedrock. Converse is authorized by
+        # bedrock:InvokeModel; cross-region inference profiles need both the profile and the foundation models.
+        Sid    = "FactoryModelApiBedrock"
+        Effect = "Allow"
+        Action = ["bedrock:InvokeModel"]
+        Resource = [
+          "arn:aws:bedrock:*::foundation-model/*",
+          "arn:aws:bedrock:*:${var.account_id}:inference-profile/*",
+        ]
+      },
       local.telemetry_statement,
     ]
   })

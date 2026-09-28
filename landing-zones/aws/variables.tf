@@ -67,13 +67,37 @@ variable "provider_secret_names" {
 variable "gateway_routes" {
   description = "JSON array of gateway routes."
   type        = string
-  default     = "[{\"id\":\"anthropic\",\"kind\":\"llm\",\"provider\":\"anthropic\",\"upstream\":\"https://api.anthropic.com\",\"credential\":{\"secret\":\"ANTHROPIC_API_KEY\",\"header\":\"x-api-key\"}},{\"id\":\"openai\",\"kind\":\"llm\",\"provider\":\"openai\",\"upstream\":\"https://api.openai.com\",\"credential\":{\"secret\":\"OPENAI_API_KEY\",\"header\":\"authorization\",\"format\":\"Bearer {}\"}},{\"id\":\"discord\",\"kind\":\"http\",\"upstream\":\"https://discord.com/api/v10\",\"credential\":{\"secret\":\"{agent}_DISCORD_BOT_TOKEN\",\"header\":\"authorization\",\"format\":\"Bot {}\"}},{\"id\":\"google-calendar\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/calendar/v3\"},{\"id\":\"google-oauth\",\"kind\":\"http\",\"upstream\":\"https://oauth2.googleapis.com\"},{\"id\":\"google-gmail\",\"kind\":\"http\",\"upstream\":\"https://gmail.googleapis.com\"},{\"id\":\"google-drive\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/drive/v3\"}]"
+  default     = "[{\"id\":\"anthropic\",\"kind\":\"llm\",\"provider\":\"anthropic\",\"upstream\":\"https://api.anthropic.com\",\"credential\":{\"secret\":\"ANTHROPIC_API_KEY\",\"header\":\"x-api-key\"}},{\"id\":\"openai\",\"kind\":\"llm\",\"provider\":\"openai\",\"upstream\":\"https://api.openai.com\",\"credential\":{\"secret\":\"OPENAI_API_KEY\",\"header\":\"authorization\",\"format\":\"Bearer {}\"}},{\"id\":\"discord\",\"kind\":\"http\",\"upstream\":\"https://discord.com/api/v10\",\"credential\":{\"secret\":\"{agent}_DISCORD_BOT_TOKEN\",\"header\":\"authorization\",\"format\":\"Bot {}\"}},{\"id\":\"google-calendar\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/calendar/v3\"},{\"id\":\"google-oauth\",\"kind\":\"http\",\"upstream\":\"https://oauth2.googleapis.com\"},{\"id\":\"google-gmail\",\"kind\":\"http\",\"upstream\":\"https://gmail.googleapis.com\"},{\"id\":\"google-drive\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/drive/v3\"},{\"id\":\"models\",\"kind\":\"models\"}]"
 }
 
 variable "gateway_prices" {
   description = "JSON object of model -> USD per million tokens. Unpriced models are refused."
   type        = string
   default     = "{}"
+}
+
+variable "model_catalog" {
+  description = "Models the factory model API offers (§6.9 M3): neutral name -> provider adapter, provider model id, region, and USD per million tokens. Passed to the gateway as FACTORY_MODEL_CATALOG."
+  type = map(object({
+    provider = string
+    id       = string
+    region   = optional(string)
+    price    = object({ inputPerMTok = number, outputPerMTok = number })
+  }))
+  default = {
+    "claude-sonnet-4-5" = {
+      provider = "bedrock-converse"
+      id       = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      region   = "us-east-1"
+      price    = { inputPerMTok = 3, outputPerMTok = 15 }
+    }
+    "claude-haiku-4-5" = {
+      provider = "bedrock-converse"
+      id       = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+      region   = "us-east-1"
+      price    = { inputPerMTok = 1, outputPerMTok = 5 }
+    }
+  }
 }
 
 variable "gateway_count" {
@@ -120,5 +144,17 @@ variable "garrison_image" {
 variable "console_image" {
   type        = string
   description = "Docker image for Factory Dashboard 2D UI"
+  default     = ""
+}
+
+variable "ledger_recover_seq" {
+  description = "LG2: set only for the deploy that archives a failed ledger; must equal the failing seq the control plane reports."
+  type        = string
+  default     = ""
+}
+
+variable "ledger_recover_reason" {
+  description = "LG2: why the ledger is being archived (recorded with the new segment). Required with ledger_recover_seq."
+  type        = string
   default     = ""
 }

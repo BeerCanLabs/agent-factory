@@ -1,4 +1,7 @@
-/** Point stock Anthropic/OpenAI SDKs at the factory gateway, with the run token as their key. */
+/**
+ * Point agents at the factory gateway, with the run token as their key: the factory model API
+ * (`FACTORY_MODEL_BASE_URL`, OpenAI Chat Completions format, §6.9 M1) and stock Anthropic/OpenAI SDKs.
+ */
 export function gatewayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const gw = env.FACTORY_GATEWAY_URL?.replace(/\/$/, '');
   const token = env.FACTORY_RUN_TOKEN;
@@ -13,6 +16,7 @@ export function gatewayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     https_proxy: proxy,
     NO_PROXY: 'localhost,127.0.0.1,.internal,169.254.169.254,169.254.170.2',
     no_proxy: 'localhost,127.0.0.1,.internal,169.254.169.254,169.254.170.2',
+    FACTORY_MODEL_BASE_URL: `${gw}/models/v1`,
     ANTHROPIC_BASE_URL: `${gw}/anthropic`,
     OPENAI_BASE_URL: `${gw}/openai/v1`,
     ANTHROPIC_API_KEY: token,
