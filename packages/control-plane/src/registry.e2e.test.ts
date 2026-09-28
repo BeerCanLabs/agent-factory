@@ -161,6 +161,9 @@ describe('KPF 1: Agent Registry & Lifecycle E2E', { concurrency: false }, () => 
     assert.equal(regRes.body.model, 'claude-3-5-sonnet');
     assert.deepEqual(regRes.body.approvedModels, ['claude-3-5-sonnet']);
     assert.deepEqual(regRes.body.requestedModels, ['claude-3-5-sonnet', 'gemini-2.0-flash']);
+    // E7 deny-by-default: registration grants no egress, whatever the cartridge requests
+    assert.deepEqual(state.policies.get('sm-model-test').routes, []);
+    assert.equal(state.policies.get('sm-model-test').hosts, undefined);
 
     // 2. Attempt to switch to an unapproved model -> fails 400
     const failSwitch = await http_(cpPort, '/api/v1/registry/agents/sm-model-test/model', 'POST', ADMIN, {

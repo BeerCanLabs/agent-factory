@@ -212,6 +212,7 @@ export type Bench = z.infer<typeof benchSchema>;
 export type BenchCase = z.infer<typeof benchCase>;
 export type Cartridge = z.infer<typeof cartridgeSchema>;
 
+/** The egress a cartridge requests, for an admin to review. Never a grant (DESIGN_AUTHORITY.md E7). */
 export function deriveEgress(cartridge?: {
   triggers?: Array<{ type: string }>;
   models?: string[];
@@ -225,12 +226,6 @@ export function deriveEgress(cartridge?: {
   // 1. Triggers requiring dedicated egress routes
   if (cartridge?.triggers?.some((t) => t.type === 'discord')) {
     routes.add('discord');
-  }
-
-  // 2. Default standard LLM routes if none provided
-  if (!routes.has('anthropic') && !routes.has('openai') && routes.size === 0) {
-    routes.add('anthropic');
-    routes.add('openai');
   }
 
   return { routes: Array.from(routes), hosts: Array.from(hosts) };
