@@ -26,8 +26,9 @@ This landing zone provisions the reference Agent Factory architecture on AWS ECS
 ```bash
 cd landing-zones/aws/bootstrap
 terraform init
-terraform apply -var="account_id=<YOUR_AWS_ACCOUNT_ID>"
+terraform apply -var="account_id=<YOUR_AWS_ACCOUNT_ID>" -var="github_repo=<OWNER>/<OPS_REPO>"
 ```
+Only the `main` branch of `github_repo` (your private deployment repo, not this public reference) can assume the deploy role.
 
 ### 2. Provision Landing Zone
 ```bash
