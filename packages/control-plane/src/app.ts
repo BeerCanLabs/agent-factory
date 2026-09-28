@@ -55,6 +55,8 @@ export type FactoryState = {
   crashLoopThreshold?: number;
   metrics?: FactoryMetrics;
   secretValues: Set<string>;
+  /** Short-lived cache of bound secret values, so pre-flight and redaction do not hit the vault on every wake. */
+  secretCache?: Map<string, { value: string; at: number }>;
   /** Write-once copy of the ledger; `verify` checks the local chain against it. */
   ledgerSink?: CheckpointSink;
   /** In-memory mailboxes for running tasks to receive follow-up messages while warm. */
@@ -293,14 +295,41 @@ export function enrichAgent(state: FactoryState, a: AgentRecord) {
   };
 }
 
+const SECRET_CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function bindAgentSecrets(state: FactoryState, names: string[]): Promise<{ ok: true; env: Record<string, string> } | { ok: false; missing: string[] }> {
+  const cache = (state.secretCache ??= new Map());
+  const now = Date.now();
+  const env: Record<string, string> = {};
+  const uncached: string[] = [];
+  for (const name of names) {
+    const hit = cache.get(name);
+    if (hit && now - hit.at < SECRET_CACHE_TTL_MS) env[name] = hit.value;
+    else uncached.push(name);
+  }
+  if (uncached.length) {
+    const bound = await bindSecrets(uncached, state.providers);
+    if (!bound.ok) return bound;
+    for (const [name, value] of Object.entries(bound.env)) {
+      cache.set(name, { value, at: now });
+      env[name] = value;
+    }
+  }
+  for (const value of Object.values(env)) if (value.length >= 4) state.secretValues.add(value);
+  return { ok: true, env };
+}
+
 function scheduleTimeout(state: FactoryState, run: Run) {
   const prev = state.idleTimers.get(run.agentId);
   if (prev) clearTimeout(prev);
   const agent = state.agents.get(run.agentId);
-  const timeoutMs = (agent?.warmDownSeconds && agent.warmDownSeconds > 0)
+  const idleWindowMs = (agent?.warmDownSeconds && agent.warmDownSeconds > 0)
     ? agent.warmDownSeconds * 1000
     : (state.idleMs > 0 ? state.idleMs : 3_600_000);
-  if (timeoutMs <= 0) return;
+  // idleMs is a hard wall-clock cap from run start: activity can extend the idle window, never past the cap.
+  const started = run.startedAt ? Date.parse(run.startedAt) : Date.now();
+  const capMs = state.idleMs > 0 ? state.idleMs - (Date.now() - started) : Infinity;
+  const timeoutMs = Math.max(0, Math.min(idleWindowMs, capMs));
   const t = setTimeout(() => {
     const cur = state.runs.get(run.runId);
     if (cur && !isTerminal(cur.state)) void finishRun(state, run.runId, 'TIMED_OUT', { actor: SYSTEM.idle });
@@ -357,22 +386,21 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
     }
   }
 
-  let bound: { ok: true, env: Record<string, string> } | { ok: false, missing: string[] } = { ok: true, env: {} };
-  if (agent.provider === 'local') {
-    bound = await bindSecrets(agent.ungated ?? agent.requires, state.providers);
-    if (!bound.ok) {
-      const run = state.runs.create({
-        agentId,
-        state: 'PRE_FLIGHT_MISSING_SECRET',
-        actor: opts.actor,
-        trigger: opts.trigger,
-        callbackUrl: opts.callbackUrl,
-        missing: bound.missing,
-      });
-      record(state, run, 'PRE_FLIGHT_MISSING_SECRET', opts.actor);
-      void fireCallback(state, run);
-      return { status: 412, body: { error: 'unbound_secrets', missing: bound.missing, runId: run.runId } };
-    }
+  // S1 backstop, every runtime: pre-flight required secrets (412) and learn their values so they are redacted
+  // from results and ledger rows. Cloud runtimes ignore the values; their platform injects its own.
+  const bound = await bindAgentSecrets(state, agent.ungated ?? agent.requires);
+  if (!bound.ok) {
+    const run = state.runs.create({
+      agentId,
+      state: 'PRE_FLIGHT_MISSING_SECRET',
+      actor: opts.actor,
+      trigger: opts.trigger,
+      callbackUrl: opts.callbackUrl,
+      missing: bound.missing,
+    });
+    record(state, run, 'PRE_FLIGHT_MISSING_SECRET', opts.actor);
+    void fireCallback(state, run);
+    return { status: 412, body: { error: 'unbound_secrets', missing: bound.missing, runId: run.runId } };
   }
 
   const busy = activeRun(state, agentId);
@@ -394,7 +422,7 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
   const agent = state.agents.get(run.agentId)!;
   let env = secrets;
   if (!env) {
-    const bound = await bindSecrets(agent.ungated ?? agent.requires, state.providers);
+    const bound = await bindAgentSecrets(state, agent.ungated ?? agent.requires);
     if (!bound.ok) {
       const failed = state.runs.update(run.runId, { state: 'PRE_FLIGHT_MISSING_SECRET', missing: bound.missing });
       record(state, failed, 'PRE_FLIGHT_MISSING_SECRET', SYSTEM.runtime);
@@ -961,7 +989,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     if (runSelf[2] === 'mailbox') {
-      scheduleTimeout(state, run);
+      // Polling is not activity: refreshing the timeout here let a looping agent keep itself alive forever.
+      // Only a delivered conversation turn extends the idle window (see the conversation handler).
       if (!state.mailboxes) state.mailboxes = new Map();
       let queue = state.mailboxes.get(run.agentId);
       if (!queue) {
@@ -1230,10 +1259,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     if (isGateway && stored.type === 'llm' && typeof stored.costUsd === 'number') {
       const agent = state.agents.get(stored.agentId);
       const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(stored.agentId));
+      const policy = state.policies.get(stored.agentId);
+      // `before` must be read before the spend is added, or a crossing is never detected.
+      const before = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
       state.spend.add(stored.agentId, stored.runId, stored.costUsd, stored.timestamp);
       if (!isBuiltin) {
-        const policy = state.policies.get(stored.agentId);
-        const before = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
         const after = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
         // Alert once per crossing, even if the run already finished; block only a run that is still live.
         if (after && after !== before) {

@@ -1,0 +1,17 @@
+schemaVersion: "1.0"
+id: finops-officer
+name: "FinOps Officer"
+role: "FinOps"
+prompt: "./soul.md"
+triggers:
+  - type: cron
+    schedule: "*/1 * * * *"
+  - type: http
+    path: /wake
+secrets:
+  requires:
+    - name: CLOUD_BILLING_READER
+    - name: FACTORY_LEDGER_TOKEN
+compute:
+  kind: oci
+  ref: oci://ghcr.io/beercanlabs/finops-officer:test
