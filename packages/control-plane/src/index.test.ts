@@ -273,6 +273,24 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal((await wake('echo-agent', { model: 'bad model; rm -rf' })).status, 400);
     });
 
+    it('pre-flight never reads gateway-held provider keys (S1, GAP-040)', async () => {
+      const prevProviders = state.providers;
+      const asked: string[] = [];
+      // Like the landing zone's NeverProviderKeys deny: reading the key fails.
+      state.providers = [{ name: 'deny', async get(n: string) { asked.push(n); if (n === 'ECHO_WEBHOOK_SECRET') throw new Error('AccessDenied'); return undefined; } }];
+      state.secretCache = new Map();
+      state.gatewayHeldSecrets = new Set(['ECHO_WEBHOOK_SECRET']);
+      try {
+        const res = await wake('echo-agent');
+        assert.equal(res.status, 202, JSON.stringify(res.json));
+        assert.equal(asked.includes('ECHO_WEBHOOK_SECRET'), false, 'control plane asked for a gateway-held key');
+      } finally {
+        state.providers = prevProviders;
+        state.gatewayHeldSecrets = undefined;
+        state.secretCache = new Map();
+      }
+    });
+
     it('E7: starting a run never grants egress (deny by default)', async () => {
       const before = state.policies.get('med-doc');
       await wake('med-doc');
