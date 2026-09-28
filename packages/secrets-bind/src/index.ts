@@ -92,8 +92,13 @@ export type AwsCli = (args: string[], input?: string) => Promise<string>;
 
 function spawnAwsCli(args: string[], input?: string): Promise<string> {
   const region = process.env.AWS_REGION ? ['--region', process.env.AWS_REGION] : [];
+  // Node connects a child's stdin with a socket, and Linux refuses to reopen a socket via /dev/stdin (ENXIO),
+  // so the CLI's `file:///dev/stdin` fails. When there is input, `cat` hands the CLI a real pipe instead.
+  const [cmd, argv] = input === undefined
+    ? ['aws', [...args, ...region]]
+    : ['sh', ['-c', 'cat | aws "$@"', 'sh', ...args, ...region]];
   return new Promise((resolve, reject) => {
-    const child = spawn('aws', [...args, ...region], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(cmd, argv, { stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     child.stdout.on('data', (c) => (out += c));
