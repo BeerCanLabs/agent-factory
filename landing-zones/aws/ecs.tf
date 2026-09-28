@@ -88,6 +88,8 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_LEDGER_RECOVER_REASON", value = var.ledger_recover_reason },
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_PUBLIC_URL", value = local.cp_url },
+        # §6.11: where people's browsers reach the factory (OAuth consent callbacks and reconnect links).
+        { name = "FACTORY_PUBLIC_BASE_URL", value = var.factory_public_base_url },
         { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
         # Where factory-registered agents keep their minds and send logs (aws/ecs.ts registers their task definitions).
         { name = "FACTORY_MIND_BUCKET", value = aws_s3_bucket.mind.bucket },

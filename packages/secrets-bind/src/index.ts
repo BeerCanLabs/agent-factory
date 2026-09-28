@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 
@@ -7,7 +7,26 @@ const execFileAsync = promisify(execFile);
 export type SecretProvider = {
   name: string;
   get(secretName: string): Promise<string | undefined>;
+  /**
+   * Write (create or replace) a secret value. Optional: read-only sources (env, file) have none.
+   * Used by the Keymaster to persist OAuth grants (§6.11 K2/K3). Never logs or echoes the value.
+   */
+  put?(secretName: string, value: string): Promise<void>;
 };
+
+export class SecretWriteNotImplementedError extends Error {
+  constructor(provider: string) {
+    super(`secret provider "${provider}" does not implement writes yet`);
+    this.name = 'SecretWriteNotImplementedError';
+  }
+}
+
+export type WritableSecretProvider = SecretProvider & { put: NonNullable<SecretProvider['put']> };
+
+/** The first provider that can write secrets, or undefined when none is configured. */
+export function writableProvider(providers: SecretProvider[]): WritableSecretProvider | undefined {
+  return providers.find((p) => typeof p.put === 'function') as WritableSecretProvider | undefined;
+}
 
 export type BindResult =
   | { ok: true; env: Record<string, string> }
@@ -62,25 +81,47 @@ export function httpProvider(baseUrl: string, token?: string): SecretProvider {
         return undefined;
       }
     },
+    async put() {
+      throw new SecretWriteNotImplementedError('http');
+    },
   };
 }
 
-export type AwsCli = (args: string[]) => Promise<string>;
+/** `input` is written to the CLI's stdin (so secret values never appear in argv or the process list). */
+export type AwsCli = (args: string[], input?: string) => Promise<string>;
+
+function spawnAwsCli(args: string[], input?: string): Promise<string> {
+  const region = process.env.AWS_REGION ? ['--region', process.env.AWS_REGION] : [];
+  return new Promise((resolve, reject) => {
+    const child = spawn('aws', [...args, ...region], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (c) => (out += c));
+    child.stderr.on('data', (c) => (err += c));
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(err.split('\n').find((l) => l.trim()) || `exit ${code}`))));
+    child.stdin.end(input ?? '');
+  });
+}
 
 /**
  * AWS Secrets Manager under a name prefix (e.g. `factory/prod/`). The same prefix the ECS task
  * definition's `secrets` block reads from, so pre-flight checks exactly what the task will receive.
  */
 export function awsSecretsManagerProvider(prefix: string, cli?: AwsCli): SecretProvider {
-  const run: AwsCli =
-    cli ??
-    (async (args) => {
-      const region = process.env.AWS_REGION ? ['--region', process.env.AWS_REGION] : [];
-      const { stdout } = await execFileAsync('aws', [...args, ...region], { encoding: 'utf8' });
-      return stdout;
-    });
+  const run: AwsCli = cli ?? spawnAwsCli;
   return {
     name: 'aws-sm',
+    async put(secretName, value) {
+      const id = `${prefix}${secretName}`;
+      // The value goes over stdin (`file:///dev/stdin`), never argv.
+      try {
+        await run(['secretsmanager', 'put-secret-value', '--secret-id', id, '--secret-string', 'file:///dev/stdin'], value);
+      } catch (err) {
+        if (!/ResourceNotFoundException/.test(err instanceof Error ? err.message : String(err))) throw err;
+        await run(['secretsmanager', 'create-secret', '--name', id, '--secret-string', 'file:///dev/stdin'], value);
+      }
+    },
     async get(secretName) {
       try {
         const out = await run([
@@ -125,6 +166,9 @@ export function gcpSecretManagerProvider(projectId: string, cli?: GcpCli): Secre
       } catch {
         return undefined;
       }
+    },
+    async put() {
+      throw new SecretWriteNotImplementedError('gcp-sm');
     },
   };
 }

@@ -18,7 +18,18 @@ export type Route = {
   provider?: Provider;
   upstream?: string;
   credential?: { secret: string; header: string; format?: string };
+  /**
+   * Keymaster connection (§6.11 K3): the gateway asks the control plane for a current access token for
+   * (agent, connection) and injects it as `Authorization: Bearer`. Never combined with `credential`.
+   */
+  connection?: string;
+  /** Scopes to request for this route's connection (service-account connections; user grants use what was granted). */
+  scopes?: string[];
 };
+
+export type ConnectionTokenResult =
+  | { ok: true; accessToken: string; expiresAt: string }
+  | { ok: false; status: number; error: string; provider?: string; connectUrl?: string };
 
 export type ToolRule = { allow: string[] | '*'; requireApproval?: string[] };
 export type Policy = {
@@ -45,6 +56,8 @@ export type ControlClient = {
   runContext(runId: string): Promise<RunContext | null>;
   requestApproval(req: { runId: string; route: string; tool: string; argsSha256: string }): Promise<Approval>;
   consumeApproval(approvalId: string): Promise<boolean>;
+  /** Keymaster access token for a live run's agent connection (§6.11). */
+  connectionToken?(req: { runId: string; agentId: string; connection: string; scopes?: string[] }): Promise<ConnectionTokenResult>;
   ledger(event: Record<string, unknown>): Promise<void>;
   /** Circuit breaker: returns false when the ledger endpoint is known-unreachable. */
   ledgerAvailable?(): boolean;
@@ -82,6 +95,7 @@ const STRIP = new Set([
   'authorization',
   'x-api-key',
   'x-factory-run-token',
+  'x-upstream-authorization',
   'accept-encoding',
   'cookie',
 ]);
@@ -133,7 +147,8 @@ function isHostAllowed(policy: Policy, routes: Map<string, Route>, destHost: str
   const allowed = new Set(policy.hosts ?? []);
   for (const rId of policy.routes) {
     const r = routes.get(rId);
-    if (r?.upstream) {
+    // Connection routes are reachable only through the gateway's token injection, never as a raw tunnel host.
+    if (r?.upstream && !r.connection) {
       try {
         allowed.add(new URL(r.upstream).hostname);
       } catch {}
@@ -169,6 +184,10 @@ function overBudget(policy: Policy, spend: RunContext['spend']): string | undefi
 type JsonRpc = { jsonrpc?: string; id?: unknown; method?: string; params?: { name?: unknown; arguments?: unknown } };
 
 export function createGateway(opts: GatewayOptions): http.Server {
+  for (const r of opts.routes) {
+    if (r.connection && r.credential) throw new Error(`route ${r.id}: a connection route must not also carry a static credential`);
+    if (r.connection && r.kind !== 'http') throw new Error(`route ${r.id}: connections are supported on http routes only`);
+  }
   const routes = new Map(opts.routes.map((r) => [r.id, r]));
   const ttl = opts.contextTtlMs ?? 1000;
   const limit = opts.maxBodyBytes ?? 10 * 1024 * 1024;
@@ -177,6 +196,8 @@ export function createGateway(opts: GatewayOptions): http.Server {
   const unacked = new Map<string, number>();
   const tpm = new Map<string, { windowStart: number; tokens: number }>();
   const credCache = new Map<string, string>();
+  /** Keymaster access tokens by agent × connection, until 60s before expiry. */
+  const connCache = new Map<string, { token: string; expiresAtMs: number }>();
   const secretValues = new Set<string>();
   const modelAdapters = opts.modelAdapters ?? defaultModelAdapters();
   const m = opts.meter
@@ -225,6 +246,50 @@ export function createGateway(opts: GatewayOptions): http.Server {
     }
     if (!value) return undefined;
     return (route.credential.format ?? '{}').replace('{}', value);
+  }
+
+  async function connectionToken(route: Route, ctx: RunContext): Promise<ConnectionTokenResult> {
+    if (!opts.control.connectionToken) return { ok: false, status: 503, error: 'connections_unavailable' };
+    const key = `${ctx.run.agentId}\u0000${route.connection}\u0000${(route.scopes ?? []).join(' ')}`;
+    const hit = connCache.get(key);
+    if (hit && hit.expiresAtMs - 60_000 > Date.now()) return { ok: true, accessToken: hit.token, expiresAt: new Date(hit.expiresAtMs).toISOString() };
+    const r = await opts.control.connectionToken({
+      runId: ctx.run.runId,
+      agentId: ctx.run.agentId,
+      connection: route.connection!,
+      ...(route.scopes?.length ? { scopes: route.scopes } : {}),
+    });
+    if (r.ok) {
+      if (r.accessToken.length >= 4) secretValues.add(r.accessToken);
+      connCache.set(key, { token: r.accessToken, expiresAtMs: Date.parse(r.expiresAt) || Date.now() + 5 * 60_000 });
+    }
+    return r;
+  }
+
+  /** Forward an HTTP route call with the agent's Keymaster connection token injected (§6.11 K3/K4). */
+  async function handleConnection(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
+    const host = route.upstream ? new URL(route.upstream).hostname : undefined;
+    let tok: ConnectionTokenResult;
+    try {
+      tok = await connectionToken(route, ctx);
+    } catch (err) {
+      console.error(`[gateway] connection token ${route.id}: ${err instanceof Error ? err.message : String(err)}`);
+      tok = { ok: false, status: 503, error: 'connection_unavailable' };
+    }
+    if (!tok.ok) {
+      if (tok.error === 'needs_reconsent') {
+        m?.requests.add(1, { route: route.id, outcome: 'needs_reconsent', agent: ctx.run.agentId });
+        ledger(ctx, route, { type: 'action', action: 'CONNECTION_NEEDS_RECONSENT', connection: route.connection, provider: tok.provider, host });
+        return send(res, 428, { error: 'needs_reconsent', provider: tok.provider, connectUrl: tok.connectUrl });
+      }
+      return deny(res, ctx, route, tok.status >= 400 && tok.status < 600 ? tok.status : 503, 'connection_unavailable', { connection: route.connection });
+    }
+    const status = await forward(req, res, route, rest, raw, `Bearer ${tok.accessToken}`);
+    if (status === 401) {
+      // The upstream rejected the token: drop it so the next call asks the Keymaster again.
+      for (const k of connCache.keys()) if (k.startsWith(`${ctx.run.agentId}\u0000${route.connection}\u0000`)) connCache.delete(k);
+    }
+    ledger(ctx, route, { type: 'action', action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS', connection: route.connection, host, status });
   }
 
   /** Resolves true once the control plane has accepted the event. */
@@ -284,7 +349,10 @@ export function createGateway(opts: GatewayOptions): http.Server {
       for (const [k, v] of Object.entries(req.headers)) if (v !== undefined && !STRIP.has(k.toLowerCase())) headers[k] = v;
       headers['accept-encoding'] = 'identity';
       if (body.length) headers['content-length'] = String(body.length);
-      if (route.credential && authHeader) {
+      if (route.connection) {
+        // §6.11: only the Keymaster's token goes upstream; the caller's credentials never do.
+        if (authHeader) headers['authorization'] = authHeader;
+      } else if (route.credential && authHeader) {
         headers[route.credential.header.toLowerCase()] = authHeader;
       } else if (req.headers['x-upstream-authorization']) {
         headers['authorization'] = req.headers['x-upstream-authorization'];
@@ -646,6 +714,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
       if (route.kind === 'llm') return await handleLlm(req, res, ctx, route, rest, raw);
       if (route.kind === 'models') return await handleModels(req, res, ctx, route, rest, raw);
       if (route.kind === 'mcp') return await handleMcp(req, res, ctx, route, rest, raw);
+      if (route.connection) return await handleConnection(req, res, ctx, route, rest, raw);
       const cred = await credential(route, ctx);
       if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
       const status = await forward(req, res, route, rest, raw, cred);
