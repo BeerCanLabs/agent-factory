@@ -292,6 +292,68 @@ if __name__ == "__main__":
     main()
 ```
 
+### Calling models
+Agents call models through the gateway using the **factory model API**: the OpenAI Chat Completions request format (DESIGN_AUTHORITY §6.9). You never hold a provider key, never import a provider or cloud SDK (`boto3`, `anthropic`, …) for inference, and never call a provider directly. The gateway meters and ledgers every call, enforces your policy and budget, and translates the request to whichever provider operations has configured (Bedrock, Anthropic, Vertex, …).
+
+**Request.** `POST ${FACTORY_MODEL_BASE_URL}/chat/completions` with header `Authorization: Bearer ${FACTORY_RUN_TOKEN}` and a JSON body:
+
+| Field | Required | Notes |
+|---|---|---|
+| `model` | yes | A neutral model name, e.g. `claude-sonnet-4-5`, `claude-haiku-4-5`. Not a provider id. |
+| `messages` | yes | `[{"role": "system" \| "user" \| "assistant", "content": "<string>"}]` |
+| `max_tokens` | no | Output token limit. |
+| `temperature` | no | |
+
+Streaming is not supported yet: `"stream": true` returns `400 {"error": "streaming_not_supported"}`.
+
+**Response** (OpenAI shape):
+```json
+{"id": "chatcmpl-…", "object": "chat.completion", "model": "claude-sonnet-4-5",
+ "choices": [{"index": 0, "message": {"role": "assistant", "content": "…"}, "finish_reason": "stop"}],
+ "usage": {"prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500}}
+```
+
+**Which model you get is decided by policy, not by your code.** Your cartridge declares a *preferred* model; an admin's policy decides which models your agent may use (deny by default, E7), and operations decides which models the factory offers. If the factory sets `FACTORY_MODEL` for a run, use it; the gateway refuses any other model for that run. `GET ${FACTORY_MODEL_BASE_URL}/models` lists the models your policy currently allows.
+
+| Status | `error` | Meaning |
+|---|---|---|
+| 400 | `model_not_offered` | This factory does not offer that model name. |
+| 403 | `route_not_allowed` | Your policy does not grant the `models` route. Ask an admin. |
+| 403 | `model_not_allowed` / `model_pinned` | Your policy (or this run) does not allow that model. |
+| 402 | `budget_exceeded` | Your budget window is spent. |
+| 429 | `throttled` / `upstream_throttled` | Your tokens-per-minute limit, or the provider, is throttling. Back off and retry. |
+
+A minimal example using only the Python standard library:
+
+```python
+import json
+import os
+import urllib.request
+
+def ask(prompt: str, system: str = "You are a helpful assistant.") -> str:
+    body = {
+        "model": os.environ.get("FACTORY_MODEL", "claude-sonnet-4-5"),
+        "max_tokens": 1024,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    req = urllib.request.Request(
+        os.environ["FACTORY_MODEL_BASE_URL"].rstrip("/") + "/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {os.environ['FACTORY_RUN_TOKEN']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        return json.load(resp)["choices"][0]["message"]["content"]
+```
+
+Because the format is OpenAI's, the stock OpenAI SDK also works: `OpenAI(base_url=os.environ["FACTORY_MODEL_BASE_URL"], api_key=os.environ["FACTORY_RUN_TOKEN"])` (non-streaming calls only).
+
 ### Conversational Agents: Warm-Down Window & Mailbox
 For interactive agents (e.g., Discord or Slack chatbots), agents often stay warm after their first turn to handle follow-up user messages with zero cold-start latency:
 1. Declare `runtime.warmDownSeconds: 3600` (e.g. 1 hour) in `cartridge.yaml`.

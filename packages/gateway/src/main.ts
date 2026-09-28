@@ -3,6 +3,7 @@ import { RunTokens } from '@beercanlabs/factory-auth';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { createGateway, type ControlClient, type Route } from './gateway.js';
 import type { Price } from './meter.js';
+import { parseModelCatalog, type ModelCatalog } from './models.js';
 import { traceConfigFromEnv } from './traces.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 
@@ -15,8 +16,10 @@ function required(name: string): string {
 const FACTORY_URL = required('FACTORY_URL').replace(/\/$/, '');
 const TOKEN = required('FACTORY_GATEWAY_TOKEN');
 const config = process.env.FACTORY_GATEWAY_CONFIG
-  ? (JSON.parse(readFileSync(process.env.FACTORY_GATEWAY_CONFIG, 'utf8')) as { routes?: Route[]; prices?: Record<string, Price> })
+  ? (JSON.parse(readFileSync(process.env.FACTORY_GATEWAY_CONFIG, 'utf8')) as { routes?: Route[]; prices?: Record<string, Price>; models?: ModelCatalog })
   : { routes: JSON.parse(process.env.FACTORY_GATEWAY_ROUTES ?? '[]') as Route[], prices: JSON.parse(process.env.FACTORY_PRICES ?? '{}') as Record<string, Price> };
+// Offered models (§6.9 M3): FACTORY_MODEL_CATALOG wins over a config file's `models`.
+const modelCatalog = process.env.FACTORY_MODEL_CATALOG ? parseModelCatalog(process.env.FACTORY_MODEL_CATALOG) : parseModelCatalog(JSON.stringify(config.models ?? {}));
 
 async function call(method: string, path: string, body?: unknown): Promise<Response> {
   return fetch(`${FACTORY_URL}${path}`, {
@@ -80,9 +83,10 @@ const server = createGateway({
   providers: providersFromEnv(),
   traces: traceConfigFromEnv(),
   meter: initTelemetry('factory-gateway', '0.1.0').meter,
+  modelCatalog,
 });
 
 const port = parseInt(process.env.PORT || '8081', 10);
 server.listen(port, '0.0.0.0', () => {
-  console.log(`[gateway] :${port} routes=${(config.routes ?? []).map((r) => r.id).join(',') || '(none)'}`);
+  console.log(`[gateway] :${port} routes=${(config.routes ?? []).map((r) => r.id).join(',') || '(none)'} models=${Object.keys(modelCatalog).join(',') || '(none)'}`);
 });
