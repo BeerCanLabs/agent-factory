@@ -113,9 +113,10 @@ resource "aws_ecs_service" "control_plane" {
   task_definition = aws_ecs_task_definition.control_plane[0].arn
   desired_count   = 1
   launch_type     = "FARGATE"
-  # Stop the old task before starting the new one: two writers would fork the ledger chain.
-  deployment_minimum_healthy_percent = 100
-  deployment_maximum_percent         = 200
+  # LG1: stop the old task before starting the new one: two writers would tear and fork the ledger chain.
+  # (6bf03d0 flipped this to 100/200 under the same comment; conformance now fails if it changes.)
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
   network_configuration {
     subnets          = aws_subnet.service[*].id
     security_groups  = [aws_security_group.control_plane.id]

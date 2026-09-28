@@ -73,6 +73,21 @@ describe('E6 network-enforced (AWS landing zone)', () => {
   });
 });
 
+describe('LG1 single ledger writer (AWS landing zone)', () => {
+  it('the control plane deploys stop-then-start, never side by side', () => {
+    const svc = read('landing-zones/aws/ecs.tf').match(/resource "aws_ecs_service" "control_plane" \{[\s\S]*?\n\}/)?.[0] ?? '';
+    assert.ok(svc, 'control-plane service not found');
+    assert.match(svc, /deployment_minimum_healthy_percent\s*=\s*0\b/);
+    assert.match(svc, /deployment_maximum_percent\s*=\s*100\b/);
+  });
+  it('the control plane takes the ledger lease before opening the ledger', () => {
+    const src = read('packages/control-plane/src/index.ts');
+    const lease = src.indexOf('ledgerLease.acquire()');
+    const open = src.indexOf('new FileLedger(');
+    assert.ok(lease > 0 && open > lease, 'lease must be acquired before the ledger is opened');
+  });
+});
+
 describe('E2–E4 the gateway attributes, ledgers, and gates every egress path', { concurrency: false }, () => {
   const tokens = new RunTokens('conformance-run-token-key-0123456789');
   const ledger: Array<Record<string, unknown>> = [];
