@@ -102,6 +102,35 @@ export function noopRuntime(): Runtime & { started: NoopStart[] } {
   };
 }
 
+/** A pinned agent source: a git repository at one exact commit (L3/L4). Never a branch or "latest". */
+export type SourceRef = { repo: string; commit: string };
+
+export const FULL_SHA = /^[0-9a-f]{40}$/;
+
+/** The immutable image tag for one admitted commit: `<agentId>-<commit[:12]>`. */
+export function imageTagFor(agentId: string, commit: string): string {
+  return `${agentId}-${commit.slice(0, 12)}`;
+}
+
+/**
+ * Why an admission build refused a commit. `no_tests`: the repository has no tests for its language.
+ * `tests_failed`: the agent's own tests (or their dependency install) failed. `source_unavailable`: the
+ * repository or commit could not be fetched. `build_failed` / `push_failed`: the image did not build or push.
+ * `not_supported`: this provider cannot run tests inside its build yet, so it admits nothing.
+ */
+export type AdmissionRefusal = 'no_tests' | 'tests_failed' | 'source_unavailable' | 'build_failed' | 'push_failed' | 'not_supported';
+
+export class AdmissionRefusedError extends Error {
+  constructor(
+    readonly reason: AdmissionRefusal,
+    message: string,
+    readonly phase?: string,
+  ) {
+    super(message);
+    this.name = 'AdmissionRefusedError';
+  }
+}
+
 /**
  * Provider-specific infrastructure provisioning for the /deploy lifecycle.
  * The kernel dispatches through this interface; implementations live in
@@ -109,8 +138,12 @@ export function noopRuntime(): Runtime & { started: NoopStart[] } {
  * landing-zone reference code.
  */
 export type DeployProvider = {
-  /** Build the agent's container image from source. Returns the image URI. */
-  buildImage(agentId: string, sourceRef: string): Promise<string>;
+  /**
+   * Admission build (L3): check out exactly `source.commit`, refuse a repository without tests, run the agent's
+   * own tests, build the image, and push it tagged `imageTagFor(agentId, commit)`, never a mutable tag (L4).
+   * Returns the image URI. Throws AdmissionRefusedError with the reason when the commit is refused.
+   */
+  buildImage(agentId: string, source: SourceRef): Promise<string>;
   /** Provision IAM / roles / service accounts for the agent. */
   provisionIdentity(agentId: string, secrets: string[]): Promise<{ identity: string; executionIdentity?: string }>;
   /** Register the agent's compute definition (ECS task def, Cloud Run job, etc.). */

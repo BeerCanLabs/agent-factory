@@ -9,7 +9,8 @@ import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanl
 import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, type AgentCategory } from './catalog.js';
-import type { DeployProvider, Runtime } from './runtime.js';
+import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, type SourceRef } from './runtime.js';
+import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver } from './source.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { exceededWindow, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
@@ -27,6 +28,8 @@ export type FactoryState = {
   runtime: Runtime;
   /** Provider-specific deploy lifecycle (build → identity → compute). Absent = deploy endpoint returns 501. */
   deployProvider?: DeployProvider;
+  /** Pins a registration that names no commit to the repository's default-branch HEAD. Default: `git ls-remote`. */
+  resolveCommit?: CommitResolver;
   runs: RunStore;
   runTokens: RunTokens;
   callbacks: CallbackPolicy;
@@ -134,6 +137,17 @@ const INGEST_TYPES = new Set(['llm', 'mcp', 'action', 'crash', 'budget.alert']);
 const MAX_BODY = 256 * 1024;
 
 type Outcome<T> = { status: number; body: T | { error: string; [k: string]: unknown } };
+
+/** Writes a registry record so it survives a restart (and, being a registry record, wins over the static catalog). */
+function persistAgent(state: FactoryState, agent: AgentRecord): void {
+  if (!state.registryDir) return;
+  try {
+    mkdirSync(state.registryDir, { recursive: true });
+    writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
+  } catch (err) {
+    console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
+  }
+}
 
 function json(res: http.ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -1448,13 +1462,50 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const body = await readJson(req);
     const cartridge = (body.cartridge && typeof body.cartridge === 'object' ? body.cartridge : body) as Record<string, unknown>;
     const agentId = typeof cartridge.id === 'string' ? cartridge.id : (typeof body.id === 'string' ? body.id : randomUUID());
-    
+    if (BUILTIN_AGENT_IDS.has(agentId)) {
+      json(res, 409, { error: 'builtin_agent', message: `${agentId} is a built-in system agent and cannot be registered` });
+      return;
+    }
+
+    // §6.8 L3: a registration names a repository and is pinned to one exact commit, never a branch.
+    const rawRepo = body.repo ?? cartridge.repo;
+    let source: SourceRef | undefined;
+    if (rawRepo !== undefined) {
+      const repo = checkRepoUrl(rawRepo);
+      if (!repo) {
+        json(res, 400, { error: 'invalid_repo', message: 'repo must be an https git URL without embedded credentials' });
+        return;
+      }
+      let commit = body.commit ?? cartridge.commit;
+      if (commit !== undefined && (typeof commit !== 'string' || !FULL_SHA.test(commit))) {
+        json(res, 400, { error: 'invalid_commit', message: 'commit must be a full 40-character lowercase git SHA' });
+        return;
+      }
+      if (commit === undefined) {
+        try {
+          commit = await (state.resolveCommit ?? gitLsRemoteResolver)(repo);
+        } catch (err) {
+          json(res, 422, {
+            error: 'commit_unresolved',
+            message: `could not resolve the default-branch HEAD of ${repo}; pass "commit" explicitly (${err instanceof Error ? err.message.split('\n')[0] : 'unknown error'})`,
+          });
+          return;
+        }
+        if (typeof commit !== 'string' || !FULL_SHA.test(commit)) {
+          json(res, 422, { error: 'commit_unresolved', message: `resolver returned no full SHA for ${repo}` });
+          return;
+        }
+      }
+      source = { repo, commit: commit as string };
+    }
+
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId,
       type: 'action',
       action: 'AGENT_REGISTERED',
-      actor: principal.actor
+      actor: principal.actor,
+      ...(source ? { requestId: `commit:${source.commit}` } : {}),
     });
     
     // Evaluate Policy Engine globally
@@ -1516,6 +1567,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       model,
       requestedModels,
       approvedModels,
+      ...(source ? { repo: source.repo, commit: source.commit } : {}),
     };
     state.agents.set(record.id, record);
 
@@ -1722,69 +1774,124 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 404, { error: 'not_found' });
       return;
     }
-    if (agent.state !== 'PENDING_DEPLOY') {
-      json(res, 400, { error: 'Agent must be PENDING_DEPLOY before deployment' });
+    if (agent.isBuiltin || BUILTIN_AGENT_IDS.has(agent.id)) {
+      json(res, 400, { error: 'builtin_agent', message: 'Built-in system agents are deployed with the platform, not through the registry' });
       return;
     }
-    
+    if (agent.state === 'DEPLOYING' || agent.state === 'RETIRED_PENDING_PURGE' || agent.state === 'PURGED') {
+      json(res, 409, { error: 'invalid_state', message: `Agent is ${agent.state}` });
+      return;
+    }
+
+    // A deploy request may re-pin the registered source to another exact commit (it is then admitted afresh).
+    const body = await readJson(req);
+    const repo = body.repo !== undefined ? checkRepoUrl(body.repo) : agent.repo;
+    if (body.repo !== undefined && !repo) {
+      json(res, 400, { error: 'invalid_repo', message: 'repo must be an https git URL without embedded credentials' });
+      return;
+    }
+    const commit = body.commit !== undefined ? body.commit : agent.commit;
+    if (body.commit !== undefined && (typeof commit !== 'string' || !FULL_SHA.test(commit))) {
+      json(res, 400, { error: 'invalid_commit', message: 'commit must be a full 40-character lowercase git SHA' });
+      return;
+    }
+    // L4: only an admitted commit deploys, as an image tagged by its SHA. A record without a pinned source, or
+    // whose image is a mutable tag, is refused rather than built from "latest".
+    if (!repo || typeof commit !== 'string' || !FULL_SHA.test(commit)) {
+      json(res, 409, { error: 'commit_required', message: 'Register the agent with "repo" (and optionally "commit") before deploying; the factory deploys only a pinned, admitted commit' });
+      return;
+    }
+
+    // L4 / E7: a policy owner must have set this agent's own policy, with at least one route, before it deploys.
+    if (!state.policies.has(agentId) || state.policies.get(agentId).routes.length === 0) {
+      json(res, 409, { error: 'policy_required', message: 'Set the agent policy (PUT /api/v1/agents/:id/policy) with at least one route before deploying' });
+      return;
+    }
+
     if (!state.deployProvider) {
       json(res, 501, { error: 'deploy_provider_not_configured', message: 'No deploy provider bound. Configure a DeployProvider for your target cloud.' });
       return;
     }
 
+    const source: SourceRef = { repo, commit };
+    const previousState = agent.state;
+    agent.repo = repo;
+    agent.commit = commit;
     agent.state = 'DEPLOYING';
+    agent.admission = { commit, status: 'building', at: new Date().toISOString() };
+    persistAgent(state, agent);
     json(res, 202, agent);
-    
-    void (async () => {
-      try {
-        const dp = state.deployProvider!;
-        const isPrebuiltImage = Boolean(agent.artifact && (agent.artifact.startsWith('oci://') || agent.artifact.includes('.dkr.ecr.') || agent.artifact.includes('ghcr.io') || agent.artifact.includes('docker.io') || agent.artifact.includes('gcr.io') || agent.artifact.includes('-docker.pkg.dev')));
-        let imageUri = '';
-        if (isPrebuiltImage) {
-          imageUri = agent.artifact.replace(/^oci:\/\//, '');
-          console.log(`[control-plane] Using pre-built OCI image for ${agentId}: ${imageUri}`);
-        } else {
-          console.log(`[control-plane] Building image for ${agentId}...`);
-          imageUri = await dp.buildImage(agentId, agent.artifact);
-        }
 
+    void (async () => {
+      const dp = state.deployProvider!;
+      let imageUri: string;
+      try {
+        console.log(`[control-plane] Admission build for ${agentId} at ${commit}...`);
+        imageUri = await dp.buildImage(agentId, source);
+      } catch (err) {
+        const refused = err instanceof AdmissionRefusedError;
+        const reason = refused ? err.reason : 'build_failed';
+        const message = redactSecrets(err instanceof Error ? err.message : String(err), state.secretValues ?? []);
+        console.error(`[control-plane] Admission refused ${agentId}@${commit}: ${reason}: ${message}`);
+        agent.admission = { commit, status: 'refused', reason, phase: refused ? err.phase : undefined, message, at: new Date().toISOString() };
+        // A refused new version leaves the running version in place.
+        agent.state = agent.deployedCommit ? (previousState === 'ERROR' ? 'SLEEPING' : previousState) : 'ERROR';
+        persistAgent(state, agent);
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId,
+          type: 'action',
+          action: `AGENT_ADMISSION_REFUSED:${reason}`,
+          actor: principal.actor,
+          requestId: `commit:${commit}`,
+        });
+        return;
+      }
+      try {
+        agent.admission = { commit, status: 'admitted', at: new Date().toISOString() };
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId,
+          type: 'action',
+          action: 'AGENT_ADMITTED',
+          actor: principal.actor,
+          requestId: `commit:${commit}`,
+        });
         console.log(`[control-plane] Provisioning identity for ${agentId}...`);
         const { identity, executionIdentity } = await dp.provisionIdentity(agentId, agent.requires);
-        console.log(`[control-plane] Registering compute for ${agentId}...`);
+        console.log(`[control-plane] Registering compute for ${agentId} with ${imageUri}...`);
         await dp.registerCompute(agentId, imageUri, agent.requires, identity, executionIdentity);
 
+        agent.artifact = imageUri;
+        agent.deployedCommit = commit;
+        agent.provider = 'cloud';
         agent.state = 'SLEEPING'; // Officially online
-        if (state.registryDir) {
-          try {
-            mkdirSync(state.registryDir, { recursive: true });
-            writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
-          } catch (err) {
-            console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
-          }
-        }
+        persistAgent(state, agent);
         state.ledger.append({
           timestamp: new Date().toISOString(),
           agentId,
           type: 'action',
           action: 'AGENT_DEPLOYED',
-          actor: principal.actor
+          actor: principal.actor,
+          requestId: `commit:${commit}`,
         });
       } catch (err) {
         console.error(`[control-plane] Deploy failed for ${agentId}:`, err);
         agent.state = 'ERROR';
-        if (state.registryDir) {
-          try {
-            const filePath = join(state.registryDir, `${agent.id}.json`);
-            if (existsSync(filePath)) {
-              writeFileSync(filePath, JSON.stringify(agent, null, 2), 'utf8');
-            }
-          } catch {}
-        }
+        persistAgent(state, agent);
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId,
+          type: 'action',
+          action: 'AGENT_DEPLOY_FAILED',
+          actor: principal.actor,
+          requestId: `commit:${commit}`,
+        });
       }
     })();
     return;
   }
-  
+
   if (path === '/api/v1/policies/budget' && req.method === 'PUT') {
     const principal = await authenticate(req, res, state, 'admin');
     if (!principal) return;
