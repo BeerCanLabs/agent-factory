@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Enabled by `npm install` (package.json "prepare" sets core.hooksPath=.githooks). Applies to every tool that pushes.
+exec "$(git rev-parse --show-toplevel)/scripts/conformance.sh"
