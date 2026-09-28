@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonicalJson, toLedgerEvent, type LedgerEvent } from './sanitize.js';
 
@@ -15,6 +15,7 @@ export {
 export { FileCheckpointSink, S3CheckpointSink, GcsCheckpointSink, checkpointSinkFromEnv } from './checkpoints.js';
 export type { Checkpoint, CheckpointRef, CheckpointSink } from './checkpoints.js';
 export { LedgerLease, LeaseHeldError, type LeaseRecord } from './lease.js';
+export { archiveAndStartSegment, readSegment, segmentGenesis, segmentWormUri, type SegmentRecord } from './segment.js';
 import type { CheckpointSink } from './checkpoints.js';
 
 /** A stored row: the sanitized event plus its position and hash in the chain. */
@@ -35,6 +36,8 @@ export type LedgerStore = {
 
 export type LedgerOptions = {
   secrets?: Iterable<string> | (() => Iterable<string>);
+  /** Genesis hash of the current segment (LG2); defaults to the original ledger's genesis. */
+  genesis?: string;
 };
 
 export const GENESIS = '0'.repeat(64);
@@ -209,11 +212,10 @@ export class FileLedger implements LedgerStore {
       }
     }
     // Rows written before chaining existed are sealed under the genesis hash.
-    this.genesis = legacy ? createHash('sha256').update(legacy, 'utf8').digest('hex') : GENESIS;
+    this.genesis = opts.genesis ?? (legacy ? createHash('sha256').update(legacy, 'utf8').digest('hex') : GENESIS);
+    // LG2: never rewrite the file. If rows do not form one chain, verification reports it and the control plane
+    // refuses to start; recovery archives the file unchanged and starts a new segment.
     this.rows = canonicalChain(rawRows, this.genesis);
-    if (this.rows.length !== rawRows.length) {
-      writeFileSync(filePath, `${legacy}${this.rows.map((r) => JSON.stringify(r)).join('\n')}\n`, { encoding: 'utf8' });
-    }
   }
 
   head() {
@@ -240,17 +242,20 @@ export class FileLedger implements LedgerStore {
   verify(checkpoints: Array<{ toSeq: number; hash: string }> = []): VerifyResult {
     const onDisk: ChainedEvent[] = [];
     if (existsSync(this.filePath)) {
-      for (const line of readFileSync(this.filePath, 'utf8').split('\n')) {
-        const cleanLine = line.replace(/\0/g, '').trim();
-        if (!cleanLine) continue;
+      const lines = readFileSync(this.filePath, 'utf8').split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line.trim()) continue;
+        // LG2: an unreadable line (torn write, NUL bytes) is damage, never something to skip or clean up.
+        let row: ChainedEvent | undefined;
         try {
-          const row = JSON.parse(cleanLine) as ChainedEvent;
-          if (typeof row.hash === 'string') {
-            onDisk.push(row);
-          }
-        } catch (e) {
-          // ignore corrupted lines
+          row = line.includes('\0') ? undefined : (JSON.parse(line) as ChainedEvent);
+        } catch {}
+        if (!row) {
+          const afterSeq = onDisk.at(-1)?.seq ?? 0;
+          return { ok: false, rows: onDisk.length, firstBadSeq: afterSeq + 1, reason: `unreadable line ${i + 1}` };
         }
+        if (typeof row.hash === 'string') onDisk.push(row);
       }
     }
     return verifyChain(onDisk, this.genesis, checkpoints);
