@@ -6,6 +6,28 @@ import { join } from 'node:path';
 import { Checkpointer, FileCheckpointSink, FileLedger, MemoryLedger, S3CheckpointSink, GcsCheckpointSink, checkpointSinkFromEnv, payloadHash, redactSecrets, toLedgerEvent } from './index.js';
 
 describe('toLedgerEvent', () => {
+  it('keeps well-formed connection fields (§6.11) and drops anything that could carry text or tokens', () => {
+    const ok = toLedgerEvent({
+      agentId: 'donna',
+      type: 'action',
+      action: 'CONNECTION_GRANTED',
+      provider: 'google',
+      connection: 'google-service-account',
+      scopes: ['https://www.googleapis.com/auth/calendar.readonly', 'not a scope <script>'],
+      status: 404,
+      refreshToken: '1//secret',
+    });
+    assert.equal(ok.provider, 'google');
+    assert.equal(ok.connection, 'google-service-account');
+    assert.deepEqual(ok.scopes, ['https://www.googleapis.com/auth/calendar.readonly']);
+    assert.equal(ok.status, 404);
+    assert.equal(JSON.stringify(ok).includes('1//secret'), false);
+    const bad = toLedgerEvent({ agentId: 'd', type: 'action', provider: 'has spaces', status: 99999, scopes: 'x' });
+    assert.equal(bad.provider, undefined);
+    assert.equal(bad.status, undefined);
+    assert.equal(bad.scopes, undefined);
+  });
+
   it('drops prompt/content and stores a payload hash', () => {
     const event = toLedgerEvent({
       agentId: 'echo',

@@ -5,6 +5,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateCartridge } from './validate.js';
+import { cartridgeSchema } from './schema.js';
+
+describe('cartridge connections (§6.11 K1)', () => {
+  it('accepts declared provider connections with scopes and rejects unknown keys', () => {
+    const ok = cartridgeSchema.safeParse({
+      connections: [
+        { provider: 'google', scopes: ['https://www.googleapis.com/auth/calendar'] },
+        { provider: 'google-service-account', scopes: ['https://www.googleapis.com/auth/devstorage.read_write'] },
+      ],
+    });
+    assert.equal(ok.success, true);
+    assert.equal(cartridgeSchema.safeParse({ connections: [{ provider: 'google', refreshToken: 'x' }] }).success, false);
+    assert.equal(cartridgeSchema.safeParse({ connections: [{ provider: 'Not A Slug' }] }).success, false);
+  });
+});
 
 const repoAgents = fileURLToPath(new URL('../../../agents', import.meta.url));
 

@@ -87,6 +87,40 @@ describe('bindSecrets', () => {
     assert.deepEqual(asked, ['my-project/MY_GCP_SECRET', 'my-project/UNSET_SECRET']);
   });
 
+  it('writes AWS secrets over stdin, creating the secret when it does not exist yet', async () => {
+    const calls: Array<{ args: string[]; input?: string }> = [];
+    const existing = new Set<string>();
+    const provider = awsSecretsManagerProvider('factory/prod/', async (args, input) => {
+      calls.push({ args, input });
+      const id = args[args.indexOf(args.includes('--name') ? '--name' : '--secret-id') + 1];
+      if (args[1] === 'put-secret-value' && !existing.has(id)) throw new Error('An error occurred (ResourceNotFoundException) when calling the PutSecretValue operation');
+      if (args[1] === 'create-secret') existing.add(id);
+      return '{}';
+    });
+    await provider.put!('connections/donna/google', '{"refreshToken":"rt-secret"}');
+    assert.deepEqual(calls.map((c) => c.args[1]), ['put-secret-value', 'create-secret']);
+    assert.equal(calls[1].args[calls[1].args.indexOf('--name') + 1], 'factory/prod/connections/donna/google');
+    for (const c of calls) {
+      assert.equal(c.input, '{"refreshToken":"rt-secret"}');
+      assert.equal(c.args.join(' ').includes('rt-secret'), false, 'secret value never in argv');
+    }
+    calls.length = 0;
+    await provider.put!('connections/donna/google', '{"refreshToken":"rt-2"}');
+    assert.deepEqual(calls.map((c) => c.args[1]), ['put-secret-value']);
+  });
+
+  it('surfaces AWS write errors other than not-found; other backends say writes are not implemented', async () => {
+    const provider = awsSecretsManagerProvider('p/', async () => {
+      throw new Error('AccessDeniedException');
+    });
+    await assert.rejects(provider.put!('x', 'v'), /AccessDenied/);
+    const { gcpSecretManagerProvider, writableProvider, SecretWriteNotImplementedError } = await import('./index.js');
+    await assert.rejects(gcpSecretManagerProvider('p', async () => '').put!('x', 'v'), SecretWriteNotImplementedError);
+    await assert.rejects(httpProvider('http://127.0.0.1:1').put!('x', 'v'), SecretWriteNotImplementedError);
+    assert.equal(writableProvider([envProvider({})]), undefined);
+    assert.equal(writableProvider([envProvider({}), provider])?.name, 'aws-sm');
+  });
+
   it('wires gcpSecretManagerProvider into providersFromEnv', async () => {
     const { providersFromEnv } = await import('./index.js');
     const providers = providersFromEnv({ FACTORY_SECRETS_GCP_PROJECT: 'proj-123' });

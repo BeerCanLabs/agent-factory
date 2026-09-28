@@ -27,6 +27,13 @@ export function gatewayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     GOOGLE_OAUTH_BASE_URL: `${gw}/google-oauth`,
     GMAIL_BASE_URL: `${gw}/google-gmail`,
     GOOGLE_DRIVE_BASE_URL: `${gw}/google-drive`,
+    // Drive media uploads are served under www.googleapis.com/upload/drive/v3, outside the google-drive route.
+    GOOGLE_DRIVE_UPLOAD_BASE_URL: `${gw}/google-drive-upload`,
+    // Keymaster connections (§6.11): the gateway injects the Google access token; the agent holds none.
+    // Google Health API (health.googleapis.com; paths start with /v4). Cloud Storage JSON API root: /storage/v1 and
+    // /upload/storage/v1 both live under it.
+    GOOGLE_HEALTH_BASE_URL: `${gw}/google-health`,
+    GOOGLE_STORAGE_BASE_URL: `${gw}/google-storage`,
   };
   // An image that set its own values keeps them; the gateway still rejects anything but a run token.
   for (const k of Object.keys(out)) if (env[k]) delete out[k];

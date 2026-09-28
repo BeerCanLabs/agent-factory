@@ -18,6 +18,7 @@ export {
   classifyCapabilities,
   egressSchema,
   deriveEgress,
+  connectionSchema,
 } from './schema.js';
 export type {
   SecretsManifest,
@@ -30,6 +31,7 @@ export type {
   BenchCase,
   Cartridge,
   Egress,
+  Connection,
   SecretGate,
   ClassifiedSecrets,
   ClassifiedCapabilities,

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { validateCartridge, classifySecrets, type Surface, type Cartridge, type SecretsManifest } from '@beercanlabs/factory-contract';
+import { validateCartridge, classifySecrets, connectionSchema, type Surface, type Cartridge, type SecretsManifest, type Connection } from '@beercanlabs/factory-contract';
 
 export type AgentCategory = 'user' | 'builtin';
 
@@ -165,7 +165,20 @@ export type AgentRecord = {
   deployedCommit?: string;
   /** Outcome of the last admission build of `commit`. */
   admission?: { commit: string; status: 'building' | 'admitted' | 'refused'; reason?: string; phase?: string; message?: string; at: string };
+  /** Connections the cartridge declares (§6.11 K1): provider plus scopes. A request shown to admins, not a grant. */
+  connections?: Connection[];
 };
+
+/** The declared connections of a cartridge body, validated; invalid entries are dropped. */
+export function connectionsOf(cartridge: { connections?: unknown }): { connections?: Connection[] } {
+  if (!Array.isArray(cartridge.connections)) return {};
+  const out: Connection[] = [];
+  for (const c of cartridge.connections) {
+    const parsed = connectionSchema.safeParse(c);
+    if (parsed.success) out.push(parsed.data);
+  }
+  return out.length ? { connections: out } : {};
+}
 
 /**
  * One agent list from the three sources. Built-in system actors cannot be replaced. A dynamic registry record
@@ -311,6 +324,7 @@ export function loadCatalog(agentsRoot: string, options: { includeRetired?: bool
       approvedModels: rawCartridge?.approvedModels && rawCartridge.approvedModels.length > 0
         ? rawCartridge.approvedModels
         : [rawCartridge?.model || 'gemini-2.0-flash'],
+      ...connectionsOf(rawCartridge ?? {}),
     });
   }
   return out;
