@@ -1505,7 +1505,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       type: 'action',
       action: 'AGENT_REGISTERED',
       actor: principal.actor,
-      ...(source ? { requestId: `commit:${source.commit}` } : {}),
+      ...(source ? { commit: source.commit } : {}),
     });
     
     // Evaluate Policy Engine globally
@@ -1843,7 +1843,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
           type: 'action',
           action: `AGENT_ADMISSION_REFUSED:${reason}`,
           actor: principal.actor,
-          requestId: `commit:${commit}`,
+          commit,
         });
         return;
       }
@@ -1855,7 +1855,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
           type: 'action',
           action: 'AGENT_ADMITTED',
           actor: principal.actor,
-          requestId: `commit:${commit}`,
+          commit,
         });
         console.log(`[control-plane] Provisioning identity for ${agentId}...`);
         const { identity, executionIdentity } = await dp.provisionIdentity(agentId, agent.requires);
@@ -1873,7 +1873,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
           type: 'action',
           action: 'AGENT_DEPLOYED',
           actor: principal.actor,
-          requestId: `commit:${commit}`,
+          commit,
         });
       } catch (err) {
         console.error(`[control-plane] Deploy failed for ${agentId}:`, err);
@@ -1885,7 +1885,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
           type: 'action',
           action: 'AGENT_DEPLOY_FAILED',
           actor: principal.actor,
-          requestId: `commit:${commit}`,
+          commit,
         });
       }
     })();
