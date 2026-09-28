@@ -161,7 +161,7 @@ describe('Keymaster connections API (§6.11)', { concurrency: false }, () => {
   });
 
   it('callback exchanges the code, stores the grant, ledgers CONNECTION_GRANTED without tokens, and refuses replay', async () => {
-    tokenReply = { status: 200, body: { access_token: 'ya29.fresh-access', refresh_token: '1//refresh-from-consent', expires_in: 3599, scope: `${CAL} ${GMAIL}`, token_type: 'Bearer' } };
+    tokenReply = { status: 200, body: { access_token: 'fake-fresh-access', refresh_token: 'fake-refresh-from-consent', expires_in: 3599, scope: `${CAL} ${GMAIL}`, token_type: 'Bearer' } };
     const st = signConsentState(stateKey(), { agentId: 'donna', provider: 'google', scopes: [CAL, GMAIL], actor: 'cloudflare:owner@example.com', nonce: 'nonce-ok', exp: Date.now() + 60_000 });
     const res = await req(`/api/v1/connections/google/callback?code=auth-code-1&state=${encodeURIComponent(st)}`);
     assert.equal(res.status, 200, res.text);
@@ -170,7 +170,7 @@ describe('Keymaster connections API (§6.11)', { concurrency: false }, () => {
     assert.equal(tokenCalls[0].get('code'), 'auth-code-1');
     assert.equal(tokenCalls[0].get('redirect_uri'), `${BASE}/api/v1/connections/google/callback`);
     const grant = JSON.parse(values.get(grantSecretName('donna', 'google'))!) as Grant;
-    assert.equal(grant.refreshToken, '1//refresh-from-consent');
+    assert.equal(grant.refreshToken, 'fake-refresh-from-consent');
     assert.equal(grant.status, 'active');
     assert.equal(grant.grantedBy, 'cloudflare:owner@example.com');
     assert.deepEqual(grant.scopes, [CAL, GMAIL]);
