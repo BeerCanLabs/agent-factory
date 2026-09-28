@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { awsSecretsManagerProvider, bindSecrets, envProvider, fileProvider, httpProvider } from './index.js';
@@ -107,6 +107,24 @@ describe('bindSecrets', () => {
     calls.length = 0;
     await provider.put!('connections/donna/google', '{"refreshToken":"rt-2"}');
     assert.deepEqual(calls.map((c) => c.args[1]), ['put-secret-value']);
+  });
+
+  it('the real CLI spawn lets `aws` read the value from file:///dev/stdin (regression: ENXIO on Linux)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fake-aws-'));
+    const out = join(dir, 'written');
+    // A stand-in `aws` that opens its --secret-string file:// path exactly as the real CLI does.
+    writeFileSync(join(dir, 'aws'), '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --secret-string ] && cat "${2#file://}" > "$FAKE_AWS_OUT"; shift; done\n', { mode: 0o755 });
+    const saved = { PATH: process.env.PATH, FAKE_AWS_OUT: process.env.FAKE_AWS_OUT, AWS_REGION: process.env.AWS_REGION };
+    process.env.PATH = `${dir}:${process.env.PATH}`;
+    process.env.FAKE_AWS_OUT = out;
+    delete process.env.AWS_REGION;
+    try {
+      await awsSecretsManagerProvider('factory/prod/').put!('connections/donna/google', '{"refreshToken":"rt-live"}');
+      assert.equal(readFileSync(out, 'utf8'), '{"refreshToken":"rt-live"}');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('surfaces AWS write errors other than not-found; other backends say writes are not implemented', async () => {
