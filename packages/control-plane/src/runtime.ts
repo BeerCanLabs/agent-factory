@@ -118,7 +118,7 @@ export function imageTagFor(agentId: string, commit: string): string {
  * repository or commit could not be fetched. `build_failed` / `push_failed`: the image did not build or push.
  * `not_supported`: this provider cannot run tests inside its build yet, so it admits nothing.
  */
-export type AdmissionRefusal = 'no_tests' | 'tests_failed' | 'source_unavailable' | 'build_failed' | 'push_failed' | 'not_supported';
+export type AdmissionRefusal = 'no_tests' | 'tests_failed' | 'source_unavailable' | 'hardcoded_secret' | 'build_failed' | 'push_failed' | 'not_supported';
 
 export class AdmissionRefusedError extends Error {
   constructor(

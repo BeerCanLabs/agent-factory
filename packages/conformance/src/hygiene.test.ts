@@ -1,7 +1,9 @@
 // DESIGN_AUTHORITY.md §6.3.2 (S1), §6.7 (enforcement), and cross-package contracts that have drifted before.
 import { describe, it } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
-import { baseline, expectOnlyBaselined, files, read, registeredGaps } from './support.js';
+import { baseline, expectOnlyBaselined, files, read, registeredGaps, repoRoot } from './support.js';
 
 describe('S1 agents never hold real secrets', () => {
   it('agent task definitions do not inject secret values', () => {
@@ -50,5 +52,12 @@ describe('console mirrors control-plane contracts', () => {
     const console_ = union(read('packages/console/src/api/types.ts'), /export type AgentState =[\s\S]*?;/);
     assert.ok(cp.size > 5, 'could not read control-plane states');
     assert.deepEqual([...cp].filter((s) => !console_.has(s)), []);
+  });
+});
+
+describe('K1 no hard-coded credentials (GAP-045)', () => {
+  it('the platform repo contains no credential values (scripts/secret-scan.sh)', () => {
+    const r = spawnSync('bash', [join(repoRoot, 'scripts/secret-scan.sh'), repoRoot], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
   });
 });

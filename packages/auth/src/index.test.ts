@@ -103,8 +103,8 @@ describe('oidc discovery + remote JWKS', () => {
 describe('bearer', () => {
   it('matches named tokens and returns their roles', async () => {
     const auth = bearerAuth([
-      { name: 'doorman', token: 'doorman-token-000000', roles: ['operator'] },
-      { name: 'gateway', token: 'gateway-token-000000', roles: ['ingest'] },
+      { name: 'doorman', token: 'doorman-token-000000', roles: ['operator'] }, // secret-scan:allow (test fixture)
+      { name: 'gateway', token: 'gateway-token-000000', roles: ['ingest'] }, // secret-scan:allow (test fixture)
     ]);
     const r = await auth.verify('Bearer gateway-token-000000');
     assert.ok(r.ok);
