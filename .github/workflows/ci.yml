@@ -22,6 +22,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Build every production image from this clean checkout, exactly as a deploy does, before anything
+      # (npm install, builds) can leave artifacts behind. A deploy must never be the first place one fails.
+      - name: Build production images
+        run: |
+          set -e
+          for spec in packages/control-plane/Dockerfile: packages/gateway/Dockerfile: packages/doorman/Dockerfile: \
+                      packages/console/Dockerfile: runtimes/generic/Dockerfile:examples/echo-agent \
+                      runtimes/generic/Dockerfile:examples/llm-summarizer; do
+            f="${spec%%:*}"; c="${spec#*:}"
+            echo "::group::$f ${c}"
+            docker build --platform linux/amd64 -f "$f" ${c:+--build-arg CARTRIDGE=$c} .
+            echo "::endgroup::"
+          done
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
