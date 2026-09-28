@@ -65,9 +65,9 @@ variable "provider_secret_names" {
 }
 
 variable "gateway_routes" {
-  description = "JSON array of gateway routes."
+  description = "JSON array of gateway routes. Google routes name a Keymaster `connection` (§6.11): the gateway injects the access token the control plane's Keymaster issues; no Google credential is configured here or held by agents."
   type        = string
-  default     = "[{\"id\":\"anthropic\",\"kind\":\"llm\",\"provider\":\"anthropic\",\"upstream\":\"https://api.anthropic.com\",\"credential\":{\"secret\":\"ANTHROPIC_API_KEY\",\"header\":\"x-api-key\"}},{\"id\":\"openai\",\"kind\":\"llm\",\"provider\":\"openai\",\"upstream\":\"https://api.openai.com\",\"credential\":{\"secret\":\"OPENAI_API_KEY\",\"header\":\"authorization\",\"format\":\"Bearer {}\"}},{\"id\":\"discord\",\"kind\":\"http\",\"upstream\":\"https://discord.com/api/v10\",\"credential\":{\"secret\":\"{agent}_DISCORD_BOT_TOKEN\",\"header\":\"authorization\",\"format\":\"Bot {}\"}},{\"id\":\"google-calendar\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/calendar/v3\"},{\"id\":\"google-oauth\",\"kind\":\"http\",\"upstream\":\"https://oauth2.googleapis.com\"},{\"id\":\"google-gmail\",\"kind\":\"http\",\"upstream\":\"https://gmail.googleapis.com\"},{\"id\":\"google-drive\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/drive/v3\"},{\"id\":\"models\",\"kind\":\"models\"}]"
+  default     = "[{\"id\":\"anthropic\",\"kind\":\"llm\",\"provider\":\"anthropic\",\"upstream\":\"https://api.anthropic.com\",\"credential\":{\"secret\":\"ANTHROPIC_API_KEY\",\"header\":\"x-api-key\"}},{\"id\":\"openai\",\"kind\":\"llm\",\"provider\":\"openai\",\"upstream\":\"https://api.openai.com\",\"credential\":{\"secret\":\"OPENAI_API_KEY\",\"header\":\"authorization\",\"format\":\"Bearer {}\"}},{\"id\":\"discord\",\"kind\":\"http\",\"upstream\":\"https://discord.com/api/v10\",\"credential\":{\"secret\":\"{agent}_DISCORD_BOT_TOKEN\",\"header\":\"authorization\",\"format\":\"Bot {}\"}},{\"id\":\"google-calendar\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/calendar/v3\",\"connection\":\"google\"},{\"id\":\"google-oauth\",\"kind\":\"http\",\"upstream\":\"https://oauth2.googleapis.com\"},{\"id\":\"google-gmail\",\"kind\":\"http\",\"upstream\":\"https://gmail.googleapis.com\",\"connection\":\"google\"},{\"id\":\"google-drive\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/drive/v3\",\"connection\":\"google\"},{\"id\":\"google-drive-upload\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/upload/drive/v3\",\"connection\":\"google\"},{\"id\":\"google-health\",\"kind\":\"http\",\"upstream\":\"https://health.googleapis.com\",\"connection\":\"google\"},{\"id\":\"google-storage\",\"kind\":\"http\",\"upstream\":\"https://storage.googleapis.com\",\"connection\":\"google-service-account\",\"scopes\":[\"https://www.googleapis.com/auth/devstorage.read_write\"]},{\"id\":\"models\",\"kind\":\"models\"}]"
 }
 
 variable "gateway_prices" {
@@ -155,6 +155,12 @@ variable "ledger_recover_seq" {
 
 variable "ledger_recover_reason" {
   description = "LG2: why the ledger is being archived (recorded with the new segment). Required with ledger_recover_seq."
+  type        = string
+  default     = ""
+}
+
+variable "factory_public_base_url" {
+  description = "Public origin of the factory for browser flows (Keymaster OAuth consent and callbacks, §6.11), e.g. https://factory.example.com. Register <this>/api/v1/connections/google/callback as a redirect URI on the Google OAuth client. Empty disables consent links."
   type        = string
   default     = ""
 }

@@ -139,6 +139,7 @@ const state: FactoryState = {
   runs: Object.assign(new FileRunStore(RUNS_DIR), { onChange: (run: Parameters<typeof runEvent>[0]) => hub.publish(runEvent(run)) }),
   runTokens: new RunTokens(process.env.FACTORY_RUN_TOKEN_KEY),
   callbacks: callbackPolicyFromEnv(),
+  publicBaseUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
   publicUrl: process.env.FACTORY_PUBLIC_URL || process.env.FACTORY_URL || 'http://control-plane.factory.internal:8088',
   gatewayUrl: process.env.FACTORY_GATEWAY_URL,
   gatewayHeldSecrets: new Set((process.env.FACTORY_GATEWAY_HELD_SECRETS ?? '').split(',').map((s) => s.trim()).filter(Boolean)),

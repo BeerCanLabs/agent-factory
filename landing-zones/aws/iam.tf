@@ -36,6 +36,10 @@ resource "aws_iam_role_policy" "execution_secrets" {
 
 locals {
   provider_secret_arns = [for s in aws_secretsmanager_secret.provider : s.arn]
+  # §6.11 K1: OAuth grants (one secret per agent x provider) and the app credentials they depend on. Only the
+  # control plane's Keymaster reads or writes them; the gateway asks the control plane for access tokens.
+  keymaster_grant_arns = ["${local.secret_arn}/connections/*"]
+  keymaster_app_arns   = ["${local.secret_arn}/GOOGLE_OAUTH_CLIENT*", "${local.secret_arn}/GOOGLE_SERVICE_ACCOUNT*"]
   telemetry_statement = {
     Sid      = "OtelToCloudWatch"
     Effect   = "Allow"
@@ -86,6 +90,12 @@ resource "aws_iam_role_policy" "control_plane" {
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = "${local.secret_arn}/*"
+      },
+      {
+        Sid      = "KeymasterGrantStore"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue", "secretsmanager:CreateSecret", "secretsmanager:DescribeSecret"]
+        Resource = concat(local.keymaster_grant_arns, local.keymaster_app_arns)
       },
       {
         Sid      = "NeverProviderKeys"
@@ -139,6 +149,13 @@ resource "aws_iam_role_policy" "gateway" {
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = concat([for arn in local.provider_secret_arns : "${arn}*"], ["${local.secret_arn}/*"])
+      },
+      {
+        # K1/K3: the gateway never reads OAuth grants or app credentials; it gets short-lived tokens from the control plane.
+        Sid      = "NeverKeymasterGrants"
+        Effect   = "Deny"
+        Action   = ["secretsmanager:*"]
+        Resource = concat(local.keymaster_grant_arns, local.keymaster_app_arns)
       },
       {
         # Factory model API (§6.9): the gateway, never an agent, calls Bedrock. Converse is authorized by

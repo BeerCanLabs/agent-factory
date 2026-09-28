@@ -27,6 +27,12 @@ export type LedgerEvent = {
   port?: number;
   /** Full git commit SHA (admission and deploys, §6.8). */
   commit?: string;
+  /** Upstream HTTP status of a gateway route call (E3). */
+  status?: number;
+  /** Keymaster connection (§6.11): provider or connection name, and the scopes granted. Never tokens. */
+  provider?: string;
+  connection?: string;
+  scopes?: string[];
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
@@ -52,6 +58,10 @@ const ALLOWED = new Set<keyof LedgerEvent>([
   'host',
   'port',
   'commit',
+  'status',
+  'provider',
+  'connection',
+  'scopes',
 ]);
 
 const PAYLOAD_KEYS = ['payload', 'body', 'content', 'prompt', 'params', 'messages', 'text', 'input', 'output'];
@@ -149,6 +159,14 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (typeof raw.host === 'string' && /^[a-z0-9.-]{1,253}$/i.test(raw.host)) event.host = raw.host.toLowerCase();
   if (typeof raw.port === 'number' && Number.isInteger(raw.port) && raw.port > 0 && raw.port < 65536) event.port = raw.port;
   if (typeof raw.commit === 'string' && /^[0-9a-f]{40}$/.test(raw.commit)) event.commit = raw.commit;
+  if (typeof raw.status === 'number' && Number.isInteger(raw.status) && raw.status >= 100 && raw.status < 600) event.status = raw.status;
+  if (typeof raw.provider === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(raw.provider)) event.provider = raw.provider;
+  if (typeof raw.connection === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(raw.connection)) event.connection = raw.connection;
+  if (Array.isArray(raw.scopes)) {
+    // Scope identifiers only (e.g. https://www.googleapis.com/auth/calendar.readonly), never free text.
+    const scopes = raw.scopes.filter((s): s is string => typeof s === 'string' && /^[A-Za-z0-9._:/#-]{1,200}$/.test(s)).slice(0, 64);
+    if (scopes.length) event.scopes = scopes;
+  }
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);
