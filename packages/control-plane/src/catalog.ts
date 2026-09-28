@@ -18,7 +18,6 @@ export const RETIRED_PLACEHOLDER_IDS = new Set([
   'factory-mechanic',
   'librarian',
   'compliance-officer',
-  'echo-agent',
   'llm-summarizer',
   'starter-python',
 ]);

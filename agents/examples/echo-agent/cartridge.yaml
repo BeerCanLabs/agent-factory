@@ -2,6 +2,8 @@ schemaVersion: "1.0"
 id: echo-agent
 name: "Echo Agent"
 role: "Diagnostic Echo"
+# Factory self-test agent (compose proof, deploy definition of done): listed with built-in & system agents.
+category: builtin
 prompt: "./soul.md"
 
 triggers:

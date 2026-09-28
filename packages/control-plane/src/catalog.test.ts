@@ -19,9 +19,10 @@ describe('loadCatalog', () => {
       assert.equal(byId.get(submindId)?.category, 'user');
     }
 
-    // Verify retired placeholders are excluded from the main active catalog
+    // Retired placeholders are excluded from the main active catalog
     assert.equal(byId.has('starter-python'), false);
-    assert.equal(byId.has('echo-agent'), false);
+    // echo-agent is the factory self-test (compose proof, deploy DoD), listed with built-in & system agents
+    assert.equal(byId.get('echo-agent')?.category, 'builtin');
   });
 
   it('loads dynamic agents from registry directory', () => {
