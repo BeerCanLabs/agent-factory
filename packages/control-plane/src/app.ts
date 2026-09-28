@@ -8,13 +8,14 @@ import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanla
 import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
-import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, type AgentCategory } from './catalog.js';
+import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, connectionsOf, type AgentCategory } from './catalog.js';
 import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, type SourceRef } from './runtime.js';
 import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver } from './source.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { exceededWindow, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
-import { Keymaster } from '@beercanlabs/factory-keymaster';
+import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
+import { handleConnections } from './connections.js';
 import { ScheduleStore, type ScheduledAction } from './schedules.js';
 import { gatewayEnv } from '@beercanlabs/factory-hydrate';
 
@@ -37,6 +38,12 @@ export type FactoryState = {
   spend: SpendTracker;
   approvals: ApprovalStore;
   keymaster?: Keymaster;
+  /** Keymaster connections (§6.11): OAuth grants and app credentials. Created on first use. */
+  connections?: ConnectionKeymaster;
+  /** The factory's public origin for browser flows (OAuth consent callbacks). From the landing zone; never hard-coded. */
+  publicBaseUrl?: string;
+  /** Signs OAuth consent state. Defaults to the callback signing key. */
+  connectionStateKey?: string;
   schedules?: ScheduleStore;
   /** URL agents use to reach the control plane (result reporting, input fetch). */
   publicUrl?: string;
@@ -149,7 +156,7 @@ function persistAgent(state: FactoryState, agent: AgentRecord): void {
   }
 }
 
-function json(res: http.ServerResponse, status: number, body: unknown) {
+export function json(res: http.ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
 }
@@ -169,7 +176,7 @@ function readBody(req: http.IncomingMessage, limit = MAX_BODY): Promise<string> 
   });
 }
 
-async function readJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+export async function readJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   const raw = await readBody(req);
   if (!raw.trim()) return {};
   const parsed = JSON.parse(raw) as unknown;
@@ -177,7 +184,7 @@ async function readJson(req: http.IncomingMessage): Promise<Record<string, unkno
   return parsed as Record<string, unknown>;
 }
 
-async function authenticate(
+export async function authenticate(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   state: FactoryState,
@@ -841,6 +848,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     res.end(UI_HTML);
     return;
   }
+
+  if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gateway/connections/token') && (await handleConnections(state, req, res, path))) return;
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
     json(res, 200, {
@@ -1568,6 +1577,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       requestedModels,
       approvedModels,
       ...(source ? { repo: source.repo, commit: source.commit } : {}),
+      ...connectionsOf(cartridge),
     };
     state.agents.set(record.id, record);
 

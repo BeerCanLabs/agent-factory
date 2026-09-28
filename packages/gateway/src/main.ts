@@ -56,6 +56,20 @@ const control: ControlClient = {
   async consumeApproval(id) {
     return (await call('POST', `/api/v1/gateway/approvals/${encodeURIComponent(id)}/consume`)).ok;
   },
+  async connectionToken(req) {
+    const res = await call('POST', '/api/v1/gateway/connections/token', req);
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (res.ok && typeof body.accessToken === 'string' && typeof body.expiresAt === 'string') {
+      return { ok: true, accessToken: body.accessToken, expiresAt: body.expiresAt };
+    }
+    return {
+      ok: false,
+      status: res.status,
+      error: typeof body.error === 'string' ? body.error : `control_plane_${res.status}`,
+      provider: typeof body.provider === 'string' ? body.provider : undefined,
+      connectUrl: typeof body.connectUrl === 'string' ? body.connectUrl : undefined,
+    };
+  },
   async ledger(event) {
     try {
       const res = await call('POST', '/api/v1/ledger', event);

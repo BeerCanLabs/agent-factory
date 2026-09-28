@@ -148,6 +148,18 @@ export const benchSchema = z
   .strict()
   .refine((b) => new Set(b.cases.map((c) => c.id)).size === b.cases.length, { message: 'case ids must be unique' });
 
+/**
+ * A connection the agent needs (§6.11 K1): provider plus scopes. A request shown at admission; the Keymaster holds
+ * the credential and the gateway injects it. `google` is a person's OAuth grant; `google-service-account` is the
+ * factory's app credential.
+ */
+export const connectionSchema = z
+  .object({
+    provider: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'connection provider must be a slug (e.g. google)'),
+    scopes: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+
 /** Unified cartridge.yaml schema */
 export const cartridgeSchema = z
   .object({
@@ -191,6 +203,7 @@ export const cartridgeSchema = z
     models: z.array(z.string()).optional(),
     requestedModels: z.array(z.string()).optional(),
     approvedModels: z.array(z.string()).optional(),
+    connections: z.array(connectionSchema).optional(),
   })
   .strict();
 
@@ -211,6 +224,7 @@ export type Memory = z.infer<typeof memorySchema>;
 export type Bench = z.infer<typeof benchSchema>;
 export type BenchCase = z.infer<typeof benchCase>;
 export type Cartridge = z.infer<typeof cartridgeSchema>;
+export type Connection = z.infer<typeof connectionSchema>;
 
 /** The egress a cartridge requests, for an admin to review. Never a grant (DESIGN_AUTHORITY.md E7). */
 export function deriveEgress(cartridge?: {
