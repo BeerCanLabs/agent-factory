@@ -132,7 +132,7 @@ describe('§6.8 L3/L4: pinned registration, admission build, and SHA-tagged depl
     const stored = JSON.parse(readFileSync(join(regDir, 'donna.json'), 'utf8'));
     assert.equal(stored.commit, C1);
     const reg = actions('donna').find((e) => e.action === 'AGENT_REGISTERED');
-    assert.equal(reg?.requestId, `commit:${C1}`);
+    assert.equal(reg?.commit, C1);
   });
 
   it('registration without a commit resolves the default-branch HEAD once and pins it', async () => {
@@ -197,7 +197,7 @@ describe('§6.8 L3/L4: pinned registration, admission build, and SHA-tagged depl
     assert.equal(stored.deployedCommit, C1);
     const deployed = actions('donna').find((e) => e.action === 'AGENT_DEPLOYED');
     assert.ok(deployed, 'AGENT_DEPLOYED ledgered');
-    assert.equal(deployed.requestId, `commit:${C1}`);
+    assert.equal(deployed.commit, C1);
     assert.equal(JSON.stringify(actions('donna')).includes('secret'), false);
   });
 
@@ -213,7 +213,7 @@ describe('§6.8 L3/L4: pinned registration, admission build, and SHA-tagged depl
     assert.equal(agent.admission?.phase, 'PRE_BUILD');
     assert.equal(agent.deployedCommit, C1, 'the admitted commit is still the deployed one');
     assert.equal(agent.state, 'SLEEPING');
-    assert.ok(actions('donna').some((e) => e.action === 'AGENT_ADMISSION_REFUSED:tests_failed' && e.requestId === `commit:${C2}`));
+    assert.ok(actions('donna').some((e) => e.action === 'AGENT_ADMISSION_REFUSED:tests_failed' && e.commit === C2));
   });
 
   it('a repository without tests (no_tests) is refused with the reason and never deployed', async () => {
