@@ -55,6 +55,8 @@ export type FactoryState = {
   secretValues: Set<string>;
   /** Short-lived cache of bound secret values, so pre-flight and redaction do not hit the vault on every wake. */
   secretCache?: Map<string, { value: string; at: number }>;
+  /** Provider keys only the gateway holds (injected at egress, S1). Pre-flight treats them as satisfied and never reads them. */
+  gatewayHeldSecrets?: Set<string>;
   /** Write-once copy of the ledger; `verify` checks the local chain against it. */
   ledgerSink?: CheckpointSink;
   /** In-memory mailboxes for running tasks to receive follow-up messages while warm. */
@@ -300,7 +302,7 @@ async function bindAgentSecrets(state: FactoryState, names: string[]): Promise<{
   const now = Date.now();
   const env: Record<string, string> = {};
   const uncached: string[] = [];
-  for (const name of names) {
+  for (const name of names.filter((n) => !state.gatewayHeldSecrets?.has(n))) {
     const hit = cache.get(name);
     if (hit && now - hit.at < SECRET_CACHE_TTL_MS) env[name] = hit.value;
     else uncached.push(name);

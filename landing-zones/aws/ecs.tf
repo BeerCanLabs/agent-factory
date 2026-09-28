@@ -83,6 +83,8 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_PUBLIC_URL", value = local.cp_url },
         { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
+        # Provider keys are gateway-held (S1): the control plane is denied them and pre-flight never reads them.
+        { name = "FACTORY_GATEWAY_HELD_SECRETS", value = join(",", var.provider_secret_names) },
         { name = "DOORMAN_URL", value = local.doorman_url },
         { name = "FACTORY_EVENT_BUS", value = "eventbridge:${aws_cloudwatch_event_bus.factory.name}" },
         { name = "MEMORY_STORE_DIR", value = "/tmp/mind" },
