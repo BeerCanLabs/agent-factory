@@ -176,7 +176,7 @@ describe('E2–E4 the gateway attributes, ledgers, and gates every egress path',
     assert.match(await proxy(`GET http://127.0.0.1:${upPort}/ HTTP/1.1`, basic()), / 200 /);
     await settle();
     const rows = ledger.filter((e) => e.runId === ctx.run.runId && e.agentId === 'agent-x');
-    assert.ok(rows.some((e) => e.action === 'EGRESS_TUNNEL'), 'CONNECT tunnel not ledgered');
+    assert.ok(rows.some((e) => e.action === 'EGRESS_TUNNEL' && e.host === '127.0.0.1'), 'CONNECT tunnel not ledgered with its host');
     assert.ok(rows.some((e) => e.action === 'EGRESS_PROXY'), 'forward proxy not ledgered');
     assert.ok(rows.length >= 3, 'route call not ledgered');
   });

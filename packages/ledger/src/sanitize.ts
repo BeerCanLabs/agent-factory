@@ -22,6 +22,11 @@ export type LedgerEvent = {
   leaseId?: string;
   gatedSecret?: string;
   turnId?: string;
+  /** Egress destination of a tunnelled or proxied connection (hostname only) — E3. */
+  host?: string;
+  port?: number;
+  /** Full git commit SHA (admission and deploys, §6.8). */
+  commit?: string;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
@@ -44,6 +49,9 @@ const ALLOWED = new Set<keyof LedgerEvent>([
   'leaseId',
   'gatedSecret',
   'turnId',
+  'host',
+  'port',
+  'commit',
 ]);
 
 const PAYLOAD_KEYS = ['payload', 'body', 'content', 'prompt', 'params', 'messages', 'text', 'input', 'output'];
@@ -137,6 +145,10 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (raw.leaseId !== undefined) event.leaseId = String(raw.leaseId);
   if (raw.gatedSecret !== undefined) event.gatedSecret = String(raw.gatedSecret);
   if (raw.turnId !== undefined) event.turnId = String(raw.turnId);
+  // Only well-formed values: these fields must never become a channel for arbitrary text.
+  if (typeof raw.host === 'string' && /^[a-z0-9.-]{1,253}$/i.test(raw.host)) event.host = raw.host.toLowerCase();
+  if (typeof raw.port === 'number' && Number.isInteger(raw.port) && raw.port > 0 && raw.port < 65536) event.port = raw.port;
+  if (typeof raw.commit === 'string' && /^[0-9a-f]{40}$/.test(raw.commit)) event.commit = raw.commit;
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);
