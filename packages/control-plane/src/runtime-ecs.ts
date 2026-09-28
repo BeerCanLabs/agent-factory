@@ -39,7 +39,10 @@ export function ecsRuntime(opts: {
   return {
     running: (id) => running.has(id),
     async start(agent, _secrets, ctx) {
-      const family = opts.taskMap[agent.id] || (agent.provider === 'cloud' ? `agent-${agent.id}` : undefined);
+      // An agent deployed through admission (§6.8 L4) runs the task definition the deploy registered for its
+      // admitted commit, never a statically mapped one.
+      const deployed = Boolean(agent.deployedCommit);
+      const family = deployed ? `agent-${agent.id}` : opts.taskMap[agent.id] || (agent.provider === 'cloud' ? `agent-${agent.id}` : undefined);
       if (!family) throw new Error(`no ECS task definition mapped for ${agent.id}`);
       const net = JSON.stringify({
         awsvpcConfiguration: {
@@ -50,7 +53,7 @@ export function ecsRuntime(opts: {
       });
       const overrides = JSON.stringify({
         containerOverrides: [
-          { name: agent.provider === 'cloud' ? 'agent-container' : container, environment: Object.entries(ctx.runEnv).map(([name, value]) => ({ name, value })) },
+          { name: deployed || agent.provider === 'cloud' ? 'agent-container' : container, environment: Object.entries(ctx.runEnv).map(([name, value]) => ({ name, value })) },
         ],
       });
       const out = await cli([

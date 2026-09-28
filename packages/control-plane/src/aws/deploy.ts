@@ -1,12 +1,12 @@
-import type { DeployProvider } from '../runtime.js';
+import type { DeployProvider, SourceRef } from '../runtime.js';
 import { buildAgentImage } from './codebuild.js';
 import { provisionAgentRoles } from './iam.js';
 import { registerAgentTaskDefinition } from './ecs.js';
 
 export function awsDeployProvider(): DeployProvider {
   return {
-    async buildImage(agentId: string, sourceRef: string): Promise<string> {
-      return buildAgentImage(agentId, sourceRef);
+    async buildImage(agentId: string, source: SourceRef): Promise<string> {
+      return buildAgentImage(agentId, source);
     },
 
     async provisionIdentity(agentId: string, secrets: string[]): Promise<{ identity: string; executionIdentity?: string }> {
