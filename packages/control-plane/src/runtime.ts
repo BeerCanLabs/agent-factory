@@ -147,5 +147,6 @@ export type DeployProvider = {
   /** Provision IAM / roles / service accounts for the agent. */
   provisionIdentity(agentId: string, secrets: string[]): Promise<{ identity: string; executionIdentity?: string }>;
   /** Register the agent's compute definition (ECS task def, Cloud Run job, etc.). */
-  registerCompute(agentId: string, imageUri: string, secrets: string[], identity: string, executionIdentity?: string): Promise<void>;
+  /** `memoryPrefix`: the agent's mind prefix; the runtime must hand it to the shim (MEMORY_STORE_URI + MEMORY_PREFIX). */
+  registerCompute(agentId: string, imageUri: string, secrets: string[], identity: string, executionIdentity?: string, memoryPrefix?: string): Promise<void>;
 };

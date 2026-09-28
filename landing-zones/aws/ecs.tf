@@ -89,6 +89,9 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_PUBLIC_URL", value = local.cp_url },
         { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
+        # Where factory-registered agents keep their minds and send logs (aws/ecs.ts registers their task definitions).
+        { name = "FACTORY_MIND_BUCKET", value = aws_s3_bucket.mind.bucket },
+        { name = "FACTORY_LOG_GROUP", value = aws_cloudwatch_log_group.factory.name },
         # Provider keys are gateway-held (S1): the control plane is denied them and pre-flight never reads them.
         { name = "FACTORY_GATEWAY_HELD_SECRETS", value = join(",", var.provider_secret_names) },
         { name = "DOORMAN_URL", value = local.doorman_url },
