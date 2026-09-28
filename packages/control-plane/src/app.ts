@@ -7,7 +7,7 @@ import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
 import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
-import { classifySecrets, deriveEgress, type Surface } from '@beercanlabs/factory-contract';
+import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, type AgentCategory } from './catalog.js';
 import type { DeployProvider, Runtime } from './runtime.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
@@ -39,8 +39,6 @@ export type FactoryState = {
   publicUrl?: string;
   /** URL agents use to reach the egress gateway; handed to every run as FACTORY_GATEWAY_URL. */
   gatewayUrl?: string;
-  /** Hosts every agent may tunnel to through the gateway (landing-zone platform services, e.g. the model API and mind bucket). */
-  egressHosts?: string[];
   /** Max wall-clock per run before it is stopped as TIMED_OUT. 0 disables. */
   idleMs: number;
   idleTimers: Map<string, ReturnType<typeof setTimeout>>;
@@ -433,23 +431,7 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
   }
   for (const value of Object.values(env)) if (value.length >= 4) state.secretValues.add(value);
 
-  // Ensure agent egress policy allows required routes and hosts
-  const egress = deriveEgress(agent as any);
-  const curPolicy = state.policies.get(agent.id);
-  const effRoutes = Array.from(new Set([
-    ...(curPolicy?.routes ?? []),
-    ...egress.routes,
-  ]));
-  const effHosts = Array.from(new Set([
-    ...(curPolicy?.hosts ?? []),
-    ...egress.hosts,
-    ...(state.egressHosts ?? []),
-  ]));
-  state.policies.set(agent.id, {
-    ...curPolicy,
-    routes: effRoutes.length ? effRoutes : ['anthropic', 'openai'],
-    hosts: effHosts,
-  });
+  // E7 deny-by-default: starting a run never changes the agent's policy; only admin actions do.
 
   let cur = state.runs.update(run.runId, { state: 'STARTING' });
   const runToken = await state.runTokens.mint(run);
@@ -1535,23 +1517,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     };
     state.agents.set(record.id, record);
 
-    // Sync approved models and derived egress into the agent's egress policy
-    const egress = deriveEgress(record as any);
-    const currentPol = state.policies.get(record.id);
-    const effectiveRoutes = Array.from(new Set([
-      ...(currentPol?.routes ?? []),
-      ...egress.routes,
-    ]));
-    const effectiveHosts = Array.from(new Set([
-      ...(currentPol?.hosts ?? []),
-      ...egress.hosts,
-    ]));
-    state.policies.set(record.id, {
-      ...currentPol,
-      routes: effectiveRoutes.length ? effectiveRoutes : ['anthropic', 'openai'],
-      hosts: effectiveHosts,
-      models: approvedModels,
-    });
+    // E7 deny-by-default: registration grants nothing. The cartridge's declared egress is a request an admin
+    // reviews; routes, hosts, and budgets come only from the policy API.
 
     if (state.registryDir) {
       try {
