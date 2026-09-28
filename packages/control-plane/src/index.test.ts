@@ -77,7 +77,7 @@ const TOKENS = {
 const SIGNING_KEY = 'callback-signing-key-for-tests';
 
 function makeState(overrides: Partial<FactoryState> = {}): FactoryState & { runtime: ReturnType<typeof noopRuntime> } {
-  const catalog = loadCatalog(agentsRoot);
+  const catalog = loadCatalog(agentsRoot, { includeRetired: true });
   return {
     agents: new Map(catalog.map((a) => [a.id, a])),
     ledger: new MemoryLedger(),
@@ -157,7 +157,7 @@ describe('scheduler', () => {
   });
 });
 
-describe.skip('control plane', { concurrency: false }, () => {
+describe('control plane', { concurrency: false }, () => {
   let server: http.Server;
   let port = 0;
   let state: ReturnType<typeof makeState>;
@@ -361,6 +361,33 @@ describe.skip('control plane', { concurrency: false }, () => {
       const slow = (await wake()).json as RunBody;
       await sleep(60);
       assert.equal(state.runs.get(slow.runId)?.state, 'TIMED_OUT');
+    });
+
+    it('mailbox polling does not extend the idle window (GAP-030)', async () => {
+      const agent = state.agents.get('echo-agent')!;
+      const prev = agent.warmDownSeconds;
+      agent.warmDownSeconds = 1; // no wall-clock cap (idleMs = 0): only the idle window can end this run
+      try {
+        const run = (await wake()).json as RunBody;
+        for (let i = 0; i < 8; i++) {
+          await request(port, `/api/v1/runs/${run.runId}/mailbox?timeout=0`, { token: tokenFor(run.runId) });
+          await sleep(200);
+        }
+        assert.equal(state.runs.get(run.runId)?.state, 'TIMED_OUT');
+      } finally {
+        agent.warmDownSeconds = prev;
+      }
+    });
+
+    it('the wall-clock cap overrides a longer idle window', async () => {
+      state.idleMs = 40;
+      try {
+        const run = (await wake()).json as RunBody;
+        await sleep(60);
+        assert.equal(state.runs.get(run.runId)?.state, 'TIMED_OUT');
+      } finally {
+        state.idleMs = 0;
+      }
     });
 
     it('webhooks authenticate by cartridge secret and pass the body as input', async () => {

@@ -1,0 +1,15 @@
+schemaVersion: "1.0"
+id: med-doc
+name: "MedDoc"
+role: "Crash triage"
+prompt: "./soul.md"
+# Crash events reach MedDoc through the control plane's event router (type=crash), not a queue.
+triggers:
+  - type: http
+    path: /wake
+secrets:
+  requires:
+    - name: FACTORY_LEDGER_TOKEN
+compute:
+  kind: oci
+  ref: oci://ghcr.io/beercanlabs/med-doc:test
