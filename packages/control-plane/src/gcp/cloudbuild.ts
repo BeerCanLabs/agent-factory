@@ -9,6 +9,7 @@
  */
 
 import { CloudBuildClient, protos } from '@google-cloud/cloudbuild';
+import { imageTagFor, type SourceRef } from '../runtime.js';
 
 type Build = protos.google.devtools.cloudbuild.v1.IBuild;
 
@@ -20,17 +21,19 @@ const TERMINAL_STATUSES = new Set(['SUCCESS', 'FAILURE', 'INTERNAL_ERROR', 'TIME
  * and push it to the Artifact Registry. Polls until completion.
  *
  * @param agentId  - Unique agent ID; used as the Docker image tag.
- * @param repoUrl  - Git repository URL to clone and build from.
- * @returns        - Full image URI (artifact-registry-repo:agentId).
+ * @param source   - Git repository and the exact commit to build (never a branch).
+ * @returns        - Full image URI (artifact-registry-repo:<agentId>-<commit[:12]>). Does not run the agent's
+ *                   tests, so it is not an admission gate (see ./deploy.ts).
  */
-export async function buildAgentImage(agentId: string, repoUrl: string): Promise<string> {
+export async function buildAgentImage(agentId: string, source: SourceRef): Promise<string> {
+  const repoUrl = source.repo;
   const projectId = process.env.FACTORY_GCP_PROJECT;
   if (!projectId) throw new Error('FACTORY_GCP_PROJECT environment variable is not set');
 
   const arRepo = process.env.FACTORY_ARTIFACT_REGISTRY;
   if (!arRepo) throw new Error('FACTORY_ARTIFACT_REGISTRY environment variable is not set');
 
-  const imageUri = `${arRepo}:${agentId}`;
+  const imageUri = `${arRepo}:${imageTagFor(agentId, source.commit)}`;
   const client = new CloudBuildClient();
 
   // Inline build definition — equivalent to the CodeBuild buildspec.
@@ -40,7 +43,7 @@ export async function buildAgentImage(agentId: string, repoUrl: string): Promise
       gitSource: {
         url: repoUrl,
         dir: '.',
-        revision: 'refs/heads/main',
+        revision: source.commit,
       },
     },
     steps: [

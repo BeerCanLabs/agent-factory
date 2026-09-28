@@ -77,6 +77,9 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "AWS_REGION", value = var.aws_region },
         { name = "AWS_DEFAULT_REGION", value = var.aws_region },
         { name = "FACTORY_ECS_TASKS", value = local.agent_task_map },
+        # Agent admission builds (§6.8 L3/L4) push <agentId>-<commit[:12]> images here.
+        { name = "FACTORY_ECR_REPO_URI", value = aws_ecr_repository.dynamic_agents.repository_url },
+        { name = "FACTORY_AGENT_BUILDER_PROJECT", value = aws_codebuild_project.factory_agent_builder.name },
         { name = "FACTORY_LEDGER_PATH", value = "/data/ledger.jsonl" },
         { name = "FACTORY_LEDGER_WORM_URI", value = "s3://${aws_s3_bucket.ledger_worm.bucket}/ledger" },
         { name = "FACTORY_LEDGER_RETENTION_DAYS", value = tostring(var.ledger_retention_days) },

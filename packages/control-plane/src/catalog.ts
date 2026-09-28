@@ -158,7 +158,27 @@ export type AgentRecord = {
   spendLimitMonthlyUsd?: number;
   currentSpendUsd?: number;
   currentSpendMonthlyUsd?: number;
+  /** Registered source (§6.8 L3): git repository and the exact commit pinned for admission. */
+  repo?: string;
+  commit?: string;
+  /** The commit whose SHA-tagged image is deployed now (L4). */
+  deployedCommit?: string;
+  /** Outcome of the last admission build of `commit`. */
+  admission?: { commit: string; status: 'building' | 'admitted' | 'refused'; reason?: string; phase?: string; message?: string; at: string };
 };
+
+/**
+ * One agent list from the three sources. Built-in system actors cannot be replaced. A dynamic registry record
+ * replaces a static catalog cartridge with the same id (§6.8 L2: agents move from the baked catalog to
+ * registration one at a time).
+ */
+export function mergeAgents(builtins: AgentRecord[], staticAgents: AgentRecord[], registry: AgentRecord[]): AgentRecord[] {
+  const out = new Map<string, AgentRecord>();
+  for (const a of staticAgents) out.set(a.id, a);
+  for (const a of registry) out.set(a.id, a);
+  for (const a of builtins) out.set(a.id, a);
+  return [...out.values()];
+}
 
 export function loadCatalog(agentsRoot: string, options: { includeRetired?: boolean } = {}): AgentRecord[] {
   const dirs = walk(agentsRoot);
