@@ -12,7 +12,9 @@ import { noopRuntime } from './runtime.js';
 import { MemoryRunStore, type Run } from './runs.js';
 import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
 
-const agentsRoot = fileURLToPath(new URL('../../../agents', import.meta.url));
+// Test fixtures, where echo-agent is a user agent: these tests prove user-agent governance (budget, isolate),
+// which built-in agents are exempt from.
+const agentsRoot = fileURLToPath(new URL('../test-fixtures/agents', import.meta.url));
 const KEY = 'e2e-run-token-key-0123456789abcdefghij';
 const ADMIN = 'admin-e2e';
 const GATEWAY = 'gateway-e2e';

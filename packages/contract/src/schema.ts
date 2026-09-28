@@ -155,6 +155,8 @@ export const cartridgeSchema = z
     id: z.string().regex(/^[a-z0-9][a-z0-9-_]*$/i, 'cartridge id must be a slug').optional(),
     name: z.string().min(1).optional(),
     role: z.string().optional(),
+    /** `builtin` lists the agent with platform/system agents (and applies their budget and kill-switch exemptions). */
+    category: z.enum(['user', 'builtin']).optional(),
     prompt: z.string().optional(),
     triggers: z.array(triggerSchema).min(1).optional(),
     secrets: z
