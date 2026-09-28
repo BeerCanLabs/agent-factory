@@ -100,7 +100,6 @@ const state: FactoryState = {
   callbacks: callbackPolicyFromEnv(),
   publicUrl: process.env.FACTORY_PUBLIC_URL || process.env.FACTORY_URL || 'http://control-plane.factory.internal:8088',
   gatewayUrl: process.env.FACTORY_GATEWAY_URL,
-  egressHosts: (process.env.FACTORY_EGRESS_HOSTS ?? '').split(',').map((h) => h.trim()).filter(Boolean),
   idleMs: IDLE_MS,
   idleTimers: new Map(),
   doormanUrl: process.env.DOORMAN_URL,
