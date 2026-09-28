@@ -8,13 +8,15 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { SseMeter, costUsd, priceFor, usageFromJson, type Price, type Provider, type Usage } from './meter.js';
 import { writeTrace, type TraceConfig } from './traces.js';
+import { ModelUpstreamError, defaultModelAdapters, parseChatRequest, type ChatResult, type ModelAdapter, type ModelCatalog } from './models.js';
 import type { Meter } from '@opentelemetry/api';
 
 export type Route = {
   id: string;
-  kind: 'llm' | 'mcp' | 'http';
+  /** `models` is the factory model API (§6.9): no fixed upstream; the model catalog routes each call. */
+  kind: 'llm' | 'mcp' | 'http' | 'models';
   provider?: Provider;
-  upstream: string;
+  upstream?: string;
   credential?: { secret: string; header: string; format?: string };
 };
 
@@ -58,6 +60,10 @@ export type GatewayOptions = {
   contextTtlMs?: number;
   maxBodyBytes?: number;
   meter?: Meter;
+  /** Offered models for the `models` route (operations config, M3). */
+  modelCatalog?: ModelCatalog;
+  /** Adapters by catalog `provider`; defaults to the built-in ones. */
+  modelAdapters?: Record<string, ModelAdapter>;
 };
 
 const BUILTIN_AGENT_IDS = new Set(['doorman', 'keymaster', 'doctor', 'coach']);
@@ -127,7 +133,7 @@ function isHostAllowed(policy: Policy, routes: Map<string, Route>, destHost: str
   const allowed = new Set(policy.hosts ?? []);
   for (const rId of policy.routes) {
     const r = routes.get(rId);
-    if (r) {
+    if (r?.upstream) {
       try {
         allowed.add(new URL(r.upstream).hostname);
       } catch {}
@@ -172,6 +178,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
   const tpm = new Map<string, { windowStart: number; tokens: number }>();
   const credCache = new Map<string, string>();
   const secretValues = new Set<string>();
+  const modelAdapters = opts.modelAdapters ?? defaultModelAdapters();
   const m = opts.meter
     ? {
         requests: opts.meter.createCounter('factory.gateway.requests', { description: 'Egress requests by route and outcome' }),
@@ -260,6 +267,11 @@ export function createGateway(opts: GatewayOptions): http.Server {
       m?.latency.record((performance.now() - t0) / 1000, { route: route.id });
     };
     return new Promise<number>((resolve) => {
+      if (!route.upstream) {
+        send(res, 500, { error: 'route_has_no_upstream' });
+        resolve(500);
+        return;
+      }
       const base = new URL(route.upstream);
       // Build by string so `//host` in the path can never switch origin (and carry the credential elsewhere).
       const dest = new URL(base.origin + base.pathname.replace(/\/$/, '') + rest);
@@ -312,23 +324,66 @@ export function createGateway(opts: GatewayOptions): http.Server {
     });
   }
 
+  /** Policy gate on a model name (E4, E7): shared by provider routes and the factory model API. */
+  function modelDenial(ctx: RunContext, model: string): [number, string, Record<string, unknown>] | undefined {
+    const isTraining = ctx.agentState === 'TRAINING';
+    if (!isTraining && ctx.policy.models && !ctx.policy.models.includes(model)) return [403, 'model_not_allowed', { model }];
+    if (ctx.run.model && ctx.run.model !== model) return [403, 'model_pinned', { model, pinned: ctx.run.model }];
+    return undefined;
+  }
+
+  function throttled(ctx: RunContext): boolean {
+    const w = tpm.get(ctx.run.runId);
+    return ctx.policy.tokensPerMinute !== undefined && !!w && Date.now() - w.windowStart < 60_000 && w.tokens >= ctx.policy.tokensPerMinute;
+  }
+
+  /** Meter, count against the budget, and ledger one model call (E5). Never records prompt bodies. */
+  function recordUsage(
+    ctx: RunContext,
+    route: Route,
+    call: { usage: Usage; model: string | undefined; price: Price | undefined; request: unknown; requestId: string; action?: string; extra?: Record<string, unknown> },
+  ) {
+    const { usage, model, price } = call;
+    const cost = price ? costUsd(usage, price) : 0;
+    const attrs = { route: route.id, model: usage.model ?? model ?? 'unknown', agent: ctx.run.agentId };
+    m?.tokens.add(usage.input + usage.cacheRead + usage.cacheWrite, { ...attrs, direction: 'input' });
+    m?.tokens.add(usage.output, { ...attrs, direction: 'output' });
+    m?.cost.add(cost, attrs);
+    const tokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+    const cur = tpm.get(ctx.run.runId);
+    if (!cur || Date.now() - cur.windowStart >= 60_000) tpm.set(ctx.run.runId, { windowStart: Date.now(), tokens });
+    else cur.tokens += tokens;
+    const runId = ctx.run.runId;
+    unacked.set(runId, (unacked.get(runId) ?? 0) + cost);
+    void ledger(ctx, route, {
+      type: 'llm',
+      model: usage.model ?? model,
+      inputTokens: usage.input + usage.cacheRead + usage.cacheWrite,
+      outputTokens: usage.output,
+      costUsd: cost,
+      requestId: call.requestId,
+      payloadSha256: payloadHash(call.request),
+      ...(call.extra ?? {}),
+      ...(call.action ? { action: call.action } : {}),
+    }).then((accepted) => {
+      // Until the control plane has counted it, this spend keeps counting against the budget here.
+      if (!accepted) return;
+      unacked.set(runId, (unacked.get(runId) ?? 0) - cost);
+      ctxCache.delete(runId);
+    });
+  }
+
   async function handleLlm(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
     const provider = route.provider ?? 'openai';
     const parsed = tryJson(raw) as Record<string, unknown> | undefined;
     const model = typeof parsed?.model === 'string' ? parsed.model : undefined;
     if (req.method === 'POST' && parsed) {
       if (!model) return deny(res, ctx, route, 400, 'model_required');
-      const isTraining = ctx.agentState === 'TRAINING';
-      if (!isTraining && ctx.policy.models && !ctx.policy.models.includes(model)) {
-        return deny(res, ctx, route, 403, 'model_not_allowed', { model });
-      }
-      if (ctx.run.model && ctx.run.model !== model) return deny(res, ctx, route, 403, 'model_pinned', { model, pinned: ctx.run.model });
+      const denial = modelDenial(ctx, model);
+      if (denial) return deny(res, ctx, route, ...denial);
       if (!priceFor(opts.prices, model)) return deny(res, ctx, route, 403, 'unpriced_model', { model });
     }
-    const w = tpm.get(ctx.run.runId);
-    if (ctx.policy.tokensPerMinute !== undefined && w && Date.now() - w.windowStart < 60_000 && w.tokens >= ctx.policy.tokensPerMinute) {
-      return deny(res, ctx, route, 429, 'throttled');
-    }
+    if (throttled(ctx)) return deny(res, ctx, route, 429, 'throttled');
 
     let body = raw;
     const streaming = parsed?.stream === true;
@@ -366,32 +421,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
       action = 'METERING_GAP';
     }
     if (!usage) return;
-    const cost = price ? costUsd(usage, price) : 0;
-    const attrs = { route: route.id, model: usage.model ?? model ?? 'unknown', agent: ctx.run.agentId };
-    m?.tokens.add(usage.input + usage.cacheRead + usage.cacheWrite, { ...attrs, direction: 'input' });
-    m?.tokens.add(usage.output, { ...attrs, direction: 'output' });
-    m?.cost.add(cost, attrs);
-    const tokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-    const cur = tpm.get(ctx.run.runId);
-    if (!cur || Date.now() - cur.windowStart >= 60_000) tpm.set(ctx.run.runId, { windowStart: Date.now(), tokens });
-    else cur.tokens += tokens;
-    const runId = ctx.run.runId;
-    unacked.set(runId, (unacked.get(runId) ?? 0) + cost);
-    void ledger(ctx, route, {
-      type: 'llm',
-      model: usage.model ?? model,
-      inputTokens: usage.input + usage.cacheRead + usage.cacheWrite,
-      outputTokens: usage.output,
-      costUsd: cost,
-      requestId,
-      payloadSha256: payloadHash(parsed),
-      ...(action ? { action } : {}),
-    }).then((accepted) => {
-      // Until the control plane has counted it, this spend keeps counting against the budget here.
-      if (!accepted) return;
-      unacked.set(runId, (unacked.get(runId) ?? 0) - cost);
-      ctxCache.delete(runId);
-    });
+    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action });
     if (opts.traces?.enabled) {
       writeTrace(
         { ...opts.traces, dir: `${opts.traces.dir}/${ctx.run.agentId}` },
@@ -403,6 +433,80 @@ export function createGateway(opts: GatewayOptions): http.Server {
           request: parsed,
           response: meter ? meter.raw : tryJson(respBody!),
         },
+        secretValues,
+      );
+    }
+  }
+
+  /**
+   * Factory model API (§6.9 M1): `POST /models/v1/chat/completions` in OpenAI Chat Completions format.
+   * The catalog maps the neutral model name to a provider adapter; the gateway signs the upstream call
+   * with its own credentials and never forwards the run token.
+   */
+  async function handleModels(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
+    const catalog = opts.modelCatalog ?? {};
+    const path = rest.split('?')[0].replace(/\/$/, '');
+    if (req.method === 'GET' && path === '/v1/models') {
+      const offered = Object.keys(catalog).filter((name) => !modelDenial(ctx, name));
+      return send(res, 200, { object: 'list', data: offered.map((id) => ({ id, object: 'model', owned_by: 'factory' })) });
+    }
+    if (req.method !== 'POST' || path !== '/v1/chat/completions') return send(res, 404, { error: 'unknown_endpoint' });
+
+    const parsed = tryJson(raw) as Record<string, unknown> | undefined;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return deny(res, ctx, route, 400, 'invalid_json');
+    if (parsed.stream === true) return deny(res, ctx, route, 400, 'streaming_not_supported');
+    const model = typeof parsed.model === 'string' ? parsed.model : undefined;
+    if (!model) return deny(res, ctx, route, 400, 'model_required');
+    const entry = Object.hasOwn(catalog, model) ? catalog[model] : undefined;
+    if (!entry) return deny(res, ctx, route, 400, 'model_not_offered', { model });
+    const denial = modelDenial(ctx, model);
+    if (denial) return deny(res, ctx, route, ...denial);
+    const price = entry.price ?? priceFor(opts.prices, model);
+    if (!price) return deny(res, ctx, route, 403, 'unpriced_model', { model });
+    if (throttled(ctx)) return deny(res, ctx, route, 429, 'throttled');
+    const chat = parseChatRequest(parsed);
+    if (!chat.ok) return deny(res, ctx, route, 400, chat.error);
+    const adapter = Object.hasOwn(modelAdapters, entry.provider) ? modelAdapters[entry.provider] : undefined;
+    if (!adapter) return deny(res, ctx, route, 503, 'provider_unavailable', { provider: entry.provider });
+
+    const requestId = randomUUID();
+    const t0 = performance.now();
+    let result: ChatResult;
+    try {
+      result = await adapter.complete(entry, chat.req);
+    } catch (err) {
+      const e = err instanceof ModelUpstreamError ? err : new ModelUpstreamError(502, 'upstream_error', err instanceof Error ? err.message : String(err));
+      m?.requests.add(1, { route: route.id, outcome: e.code, agent: ctx.run.agentId });
+      console.error(`[gateway] models ${model} via ${entry.provider}: ${e.code} ${e.upstreamStatus ?? ''} ${e.message}`);
+      ledger(ctx, route, { type: 'action', action: 'MODEL_UPSTREAM_ERROR', model, provider: entry.provider, upstreamStatus: e.upstreamStatus, requestId });
+      return send(res, e.status, { error: e.code, message: redactSecrets(e.message, secretValues), ...(e.upstreamStatus ? { upstreamStatus: e.upstreamStatus } : {}) });
+    }
+    m?.requests.add(1, { route: route.id, outcome: '200' });
+    m?.latency.record((performance.now() - t0) / 1000, { route: route.id });
+
+    let usage: Usage;
+    let action: string | undefined;
+    if (result.usage) usage = { model, input: result.usage.input, output: result.usage.output, cacheRead: 0, cacheWrite: 0 };
+    else {
+      // No usage reported: charge the worst case the request allowed rather than nothing.
+      usage = { model, input: 0, output: chat.req.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
+      action = 'METERING_GAP';
+    }
+    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action, extra: { provider: entry.provider, upstreamModel: entry.id } });
+
+    const body = {
+      id: `chatcmpl-${requestId}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{ index: 0, message: { role: 'assistant', content: result.content }, finish_reason: result.finishReason }],
+      usage: { prompt_tokens: usage.input, completion_tokens: usage.output, total_tokens: usage.input + usage.output },
+    };
+    send(res, 200, body);
+    if (opts.traces?.enabled) {
+      writeTrace(
+        { ...opts.traces, dir: `${opts.traces.dir}/${ctx.run.agentId}` },
+        { timestamp: new Date().toISOString(), requestId, kind: 'llm', model, request: parsed, response: body },
         secretValues,
       );
     }
@@ -531,7 +635,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
       if (ctx.run.state === 'BLOCKED_UNHEALTHY') return deny(res, ctx, route, 503, 'unhealthy');
       if (!ctx.policy.routes.includes(route.id)) return deny(res, ctx, route, 403, 'route_not_allowed', { route: route.id });
       const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
-      if (route.kind === 'llm' && !isBuiltin) {
+      if ((route.kind === 'llm' || route.kind === 'models') && !isBuiltin) {
         const pending = unacked.get(ctx.run.runId) ?? 0;
         const spend = { run: ctx.spend.run + pending, day: ctx.spend.day + pending, month: ctx.spend.month + pending };
         const window = ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED' ? 'blocked' : overBudget(ctx.policy, spend);
@@ -540,6 +644,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
 
       const raw = await readBody(req, limit);
       if (route.kind === 'llm') return await handleLlm(req, res, ctx, route, rest, raw);
+      if (route.kind === 'models') return await handleModels(req, res, ctx, route, rest, raw);
       if (route.kind === 'mcp') return await handleMcp(req, res, ctx, route, rest, raw);
       const cred = await credential(route, ctx);
       if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
