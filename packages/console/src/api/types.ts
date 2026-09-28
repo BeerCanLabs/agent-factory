@@ -1,3 +1,4 @@
+// Must include every state the control plane sets (packages/control-plane/src/catalog.ts); a conformance test enforces this.
 export type AgentState =
   | 'DRAFT'
   | 'PENDING_BUDGET'
@@ -5,7 +6,14 @@ export type AgentState =
   | 'DEPLOYING'
   | 'SLEEPING'
   | 'RUNNING'
+  | 'WORKING'
+  | 'IDLE'
+  | 'TRAINING'
   | 'PAUSED'
+  | 'ISOLATED'
+  | 'BLOCKED_FOR_HUMAN'
+  | 'ERROR'
+  | 'OUT_OF_BUDGET'
   | 'RETIRED_PENDING_PURGE'
   | 'PURGED';
 
