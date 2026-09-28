@@ -116,3 +116,15 @@ variable "console_image" {
   description = "Docker image for Factory Dashboard 2D UI"
   default     = ""
 }
+
+variable "ledger_recover_seq" {
+  description = "LG2: set only for the deploy that archives a failed ledger; must equal the failing seq the control plane reports."
+  type        = string
+  default     = ""
+}
+
+variable "ledger_recover_reason" {
+  description = "LG2: why the ledger is being archived (recorded with the new segment). Required with ledger_recover_seq."
+  type        = string
+  default     = ""
+}
