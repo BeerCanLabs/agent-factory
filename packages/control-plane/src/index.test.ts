@@ -108,7 +108,7 @@ function makeState(overrides: Partial<FactoryState> = {}): FactoryState & { runt
 type RunBody = Run & { error?: string; missing?: string[] };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-describe.skip('catalog', () => {
+describe('catalog', () => {
   it('loads example cartridges from agents/', () => {
     const ids = loadCatalog(agentsRoot).map((a) => a.id);
     for (const id of ['echo-agent', 'finops-officer', 'med-doc']) assert.ok(ids.includes(id));
@@ -647,7 +647,7 @@ describe('control plane', { concurrency: false }, () => {
   });
 });
 
-describe.skip('restart reconciliation', () => {
+describe('restart reconciliation', () => {
   it('fails runs whose in-process task died with the control plane', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'runs-'));
     const before = makeState({ runs: new FileRunStore(dir) });
@@ -703,7 +703,7 @@ describe.skip('restart reconciliation', () => {
   });
 });
 
-describe.skip('hydrate through runtime store', () => {
+describe('hydrate through runtime store', () => {
   it('survives a kill of ephemeral disk', () => {
     const root = mkdtempSync(join(tmpdir(), 'rt-'));
     const store = { root: join(root, 'obj') };

@@ -1,0 +1,30 @@
+[
+  {
+    "rule": "E5",
+    "where": "landing-zones/aws/ecs.tf",
+    "detail": "bedrock-runtime.${var.aws_region}.amazonaws.com",
+    "gap": "GAP-026",
+    "why": "ae96332 allowlists Bedrock for CONNECT tunnels; model calls must use a metered provider route. Remove under TSK-021."
+  },
+  {
+    "rule": "M1",
+    "where": "landing-zones/aws/ecs.tf",
+    "detail": "${aws_s3_bucket.mind.bucket}.s3.amazonaws.com",
+    "gap": "GAP-027",
+    "why": "ae96332 lets cartridges reach the mind bucket; §6.6 says only the shim touches mind storage. Remove under TSK-021."
+  },
+  {
+    "rule": "M1",
+    "where": "landing-zones/aws/ecs.tf",
+    "detail": "${aws_s3_bucket.mind.bucket}.s3.${var.aws_region}.amazonaws.com",
+    "gap": "GAP-027",
+    "why": "Same as above (regional S3 endpoint form). Remove under TSK-021."
+  },
+  {
+    "rule": "S1",
+    "where": "packages/control-plane/src/aws/ecs.ts",
+    "detail": "valueFrom",
+    "gap": "GAP-031",
+    "why": "Agent task definitions inject real secret values into containers. Convert to gateway injection under TSK-024."
+  }
+]
