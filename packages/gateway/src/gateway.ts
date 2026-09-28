@@ -104,13 +104,21 @@ function readBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
   });
 }
 
-/** Run token from `Authorization: Bearer`, `x-api-key` (Anthropic SDKs), `Proxy-Authorization: Bearer`, or `x-factory-run-token`. */
+/**
+ * Run token from `Authorization: Bearer`, `x-api-key` (Anthropic SDKs), `Proxy-Authorization: Bearer`,
+ * `Proxy-Authorization: Basic` (password = token; what boto3/urllib send for `http://run:<token>@gw`), or `x-factory-run-token`.
+ */
 function presentedToken(req: http.IncomingMessage): string | undefined {
   const h = req.headers;
   if (typeof h['x-factory-run-token'] === 'string') return h['x-factory-run-token'];
   if (typeof h['x-api-key'] === 'string') return h['x-api-key'];
   const proxyAuth = h['proxy-authorization'];
   if (typeof proxyAuth === 'string' && proxyAuth.startsWith('Bearer ')) return proxyAuth.slice(7).trim();
+  if (typeof proxyAuth === 'string' && proxyAuth.startsWith('Basic ')) {
+    const decoded = Buffer.from(proxyAuth.slice(6).trim(), 'base64').toString('utf8');
+    const sep = decoded.indexOf(':');
+    return sep >= 0 ? decoded.slice(sep + 1) : undefined;
+  }
   const a = h.authorization;
   return a?.startsWith('Bearer ') ? a.slice(7).trim() : undefined;
 }

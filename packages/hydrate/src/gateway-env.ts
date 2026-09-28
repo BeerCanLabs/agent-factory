@@ -3,11 +3,14 @@ export function gatewayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const gw = env.FACTORY_GATEWAY_URL?.replace(/\/$/, '');
   const token = env.FACTORY_RUN_TOKEN;
   if (!gw || !token) return {};
+  // Credentials in the proxy URL make boto3/urllib send `Proxy-Authorization: Basic`, so the gateway can
+  // attribute, gate, and ledger every tunnelled call (e.g. Bedrock, S3) to this run.
+  const proxy = withCredentials(gw, token);
   const out: Record<string, string> = {
-    HTTP_PROXY: gw,
-    HTTPS_PROXY: gw,
-    http_proxy: gw,
-    https_proxy: gw,
+    HTTP_PROXY: proxy,
+    HTTPS_PROXY: proxy,
+    http_proxy: proxy,
+    https_proxy: proxy,
     NO_PROXY: 'localhost,127.0.0.1,.internal,169.254.169.254,169.254.170.2',
     no_proxy: 'localhost,127.0.0.1,.internal,169.254.169.254,169.254.170.2',
     ANTHROPIC_BASE_URL: `${gw}/anthropic`,
@@ -24,4 +27,11 @@ export function gatewayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   // An image that set its own values keeps them; the gateway still rejects anything but a run token.
   for (const k of Object.keys(out)) if (env[k]) delete out[k];
   return out;
+}
+
+function withCredentials(url: string, token: string): string {
+  const u = new URL(url);
+  u.username = 'run';
+  u.password = token;
+  return u.toString().replace(/\/$/, '');
 }
