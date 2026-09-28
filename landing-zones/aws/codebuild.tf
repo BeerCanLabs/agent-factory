@@ -64,7 +64,7 @@ resource "aws_iam_role_policy" "codebuild_policy" {
 # GIT_COMMIT (full 40-char SHA) and IMAGE_TAG (<agentId>-<commit[:12]>). It builds exactly that commit, refuses a
 # repository without tests, runs the agent's own tests, and pushes an image tagged by the commit, never a
 # mutable tag. Refusal reasons are exit codes that packages/control-plane/src/aws/codebuild.ts maps back:
-# 3 = no_tests, 4 = tests_failed, 5 = source_unavailable; any other failure maps from its phase.
+# 3 = no_tests, 4 = tests_failed, 5 = source_unavailable, 6 = hardcoded_secret; any other failure maps from its phase.
 resource "aws_codebuild_project" "factory_agent_builder" {
   name         = "factory-agent-builder"
   service_role = aws_iam_role.codebuild.arn
@@ -117,6 +117,12 @@ phases:
   pre_build:
     on-failure: ABORT
     commands:
+      # K1 / GAP-045: refuse a repository that hard-codes credentials (file:line only, never the value).
+      - |
+        KNOWN='github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|ntn_[A-Za-z0-9]{30,}|secret_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+        GENERIC='(secret|password|passwd|api_?key|token|client_secret)[A-Za-z0-9_]*["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_/+=.-]{20,}["'"'"']'
+        HITS="$(git ls-files -z | xargs -0 grep -nIE -i -- "$KNOWN|$GENERIC" 2>/dev/null | grep -v 'secret-scan:allow' | grep -E -- "$KNOWN|[\"'][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[\"']|[\"'][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[\"']" | grep -vE '(example|EXAMPLE|placeholder|your[-_]|changeme|<[a-z_]+>)' | cut -d: -f1,2 | sort -u)"
+        if [ -n "$HITS" ]; then echo "ADMISSION REFUSED (hardcoded_secret):"; echo "$HITS"; exit 6; fi
       - |
         if [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f setup.py ]; then KIND=python
         elif [ -f package.json ]; then KIND=node

@@ -252,6 +252,7 @@ describe('AWS admission build (CodeBuild)', () => {
   it('maps the buildspec exit codes and failed phase to refusal reasons', () => {
     const cases: Array<[string, string, AdmissionRefusal]> = [
       ['PRE_BUILD', 'Error while executing command: case "$KIND" in ... Reason: exit status 3', 'no_tests'],
+      ['PRE_BUILD', 'Error while executing command: KNOWN=... Reason: exit status 6', 'hardcoded_secret'],
       ['PRE_BUILD', 'Error while executing command: case "$KIND" in ... Reason: exit status 4', 'tests_failed'],
       ['INSTALL', 'Error while executing command: git clone. Reason: exit status 5', 'source_unavailable'],
       ['BUILD', 'Error while executing command: docker build. Reason: exit status 1', 'build_failed'],

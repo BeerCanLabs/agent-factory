@@ -29,7 +29,7 @@ class MockApprovalStore implements ApprovalConsumer {
 
 describe('Keymaster Subsystem', () => {
   const secretKey = 'PROD_DB_PASSWORD';
-  const secretVal = 'super-secret-db-pass-12345';
+  const secretVal = 'super-secret-db-pass-12345'; // secret-scan:allow (test fixture)
   const provider = envProvider({ [secretKey]: secretVal, UNGATED_SECRET: 'ungated-val' });
 
   it('unconsumed approval produces ephemeral lease and writes zero-knowledge transaction to ledger', async () => {
