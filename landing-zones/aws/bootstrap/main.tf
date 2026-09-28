@@ -24,9 +24,10 @@ variable "aws_region" {
   default = "us-east-1"
 }
 
+# The ops repo whose `main` branch may deploy (owner/name), e.g. your private deployment repo. Required: a
+# reference default would grant production deploy rights to whichever repo happens to be named here.
 variable "github_repo" {
-  type    = string
-  default = "BeerCanLabs/agent-factory"
+  type = string
 }
 
 provider "aws" {
