@@ -265,6 +265,19 @@ describe('egress gateway', { concurrency: false }, () => {
     assert.ok(ledger.some((e) => e.action === 'EGRESS_TUNNEL'));
   });
 
+  it('accepts the run token as Basic proxy credentials (boto3, urllib)', async () => {
+    ctx.policy = policy({ hosts: ['127.0.0.1'] });
+    const basic = Buffer.from(`run:${token}`).toString('base64');
+    const s = net.connect(port, '127.0.0.1', () => {
+      s.write(`CONNECT 127.0.0.1:${upPort} HTTP/1.1\r\nProxy-Authorization: Basic ${basic}\r\n\r\n`);
+    });
+    const data = await new Promise<string>((resolve) => {
+      s.once('data', (buf) => resolve(buf.toString()));
+    });
+    s.destroy();
+    assert.ok(data.startsWith('HTTP/1.1 200 Connection Established'));
+  });
+
   it('denies HTTPS CONNECT to unallowed hosts', async () => {
     ctx.policy = policy({ hosts: ['api.notion.com'] });
     const s = net.connect(port, '127.0.0.1', () => {

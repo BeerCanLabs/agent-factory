@@ -83,6 +83,12 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_PUBLIC_URL", value = local.cp_url },
         { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
+        # Platform services every agent may reach through the gateway tunnel (gated and ledgered per run).
+        { name = "FACTORY_EGRESS_HOSTS", value = join(",", [
+          "bedrock-runtime.${var.aws_region}.amazonaws.com",
+          "${aws_s3_bucket.mind.bucket}.s3.amazonaws.com",
+          "${aws_s3_bucket.mind.bucket}.s3.${var.aws_region}.amazonaws.com",
+        ]) },
         { name = "DOORMAN_URL", value = local.doorman_url },
         { name = "FACTORY_EVENT_BUS", value = "eventbridge:${aws_cloudwatch_event_bus.factory.name}" },
         { name = "MEMORY_STORE_DIR", value = "/tmp/mind" },

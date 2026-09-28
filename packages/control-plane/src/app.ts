@@ -39,6 +39,8 @@ export type FactoryState = {
   publicUrl?: string;
   /** URL agents use to reach the egress gateway; handed to every run as FACTORY_GATEWAY_URL. */
   gatewayUrl?: string;
+  /** Hosts every agent may tunnel to through the gateway (landing-zone platform services, e.g. the model API and mind bucket). */
+  egressHosts?: string[];
   /** Max wall-clock per run before it is stopped as TIMED_OUT. 0 disables. */
   idleMs: number;
   idleTimers: Map<string, ReturnType<typeof setTimeout>>;
@@ -413,6 +415,7 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
   const effHosts = Array.from(new Set([
     ...(curPolicy?.hosts ?? []),
     ...egress.hosts,
+    ...(state.egressHosts ?? []),
   ]));
   state.policies.set(agent.id, {
     ...curPolicy,
