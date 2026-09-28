@@ -1,0 +1,54 @@
+// DESIGN_AUTHORITY.md §6.3.2 (S1), §6.7 (enforcement), and cross-package contracts that have drifted before.
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { baseline, expectOnlyBaselined, files, read, registeredGaps } from './support.js';
+
+describe('S1 agents never hold real secrets', () => {
+  it('agent task definitions do not inject secret values', () => {
+    const found = files('packages', (p) => /\/src\/.*\.ts$/.test(p) && !p.endsWith('.test.ts'))
+      .filter((f) => /valueFrom/.test(read(f)) && /containerDefinitions|registerTaskDefinition|RegisterTaskDefinition/.test(read(f)))
+      .map((f) => ({ rule: 'S1', where: f, detail: 'valueFrom' }));
+    expectOnlyBaselined('S1', found);
+  });
+});
+
+describe('§6.7 enforcement', () => {
+  it('no test is skipped', () => {
+    const skipped = files('packages', (p) => /\.test\.ts$/.test(p))
+      .flatMap((f) => [...read(f).matchAll(/^.*\b(describe|it|test)\.(skip|todo)\(.*$/gm)].map((m) => `${f}: ${m[0].trim()}`));
+    assert.deepEqual(skipped, [], 'skipped tests hide regressions; fix them or delete them');
+  });
+
+  it('every baseline entry is owned by a registered gap', () => {
+    const gaps = registeredGaps();
+    for (const b of baseline) assert.ok(gaps.has(b.gap), `${b.rule} ${b.where}: ${b.gap} is not in the Gap Register`);
+  });
+
+  it('every LOCKED task names its owner and scope', () => {
+    const rows = read('DESIGN_AUTHORITY.md').split('\n').filter((l) => /^\| \*\*TSK-\d+\*\*/.test(l) && /`LOCKED`/.test(l));
+    for (const row of rows) {
+      const cells = row.split('|').map((c) => c.trim());
+      assert.ok(cells[5] && !/None/.test(cells[5]), `locked task without owner: ${cells[1]}`);
+      assert.ok(cells[6], `locked task without scope: ${cells[1]}`);
+    }
+  });
+
+  it('every gap a task references is registered', () => {
+    const gaps = registeredGaps();
+    const referenced = [...read('DESIGN_AUTHORITY.md').matchAll(/^\| \*\*TSK-\d+\*\* \| ([^|]+)\|/gm)].flatMap((m) => m[1].match(/GAP-\d+/g) ?? []);
+    assert.deepEqual([...new Set(referenced)].filter((g) => !gaps.has(g)), []);
+  });
+});
+
+describe('console mirrors control-plane contracts', () => {
+  const union = (src: string, anchor: RegExp) => {
+    const block = src.match(anchor)?.[0] ?? '';
+    return new Set([...block.matchAll(/'([A-Z_]+)'/g)].map((m) => m[1]));
+  };
+  it('the console knows every agent state the control plane sets', () => {
+    const cp = union(read('packages/control-plane/src/catalog.ts'), /\n\s+state:\s*\n([\s\S]*?);/);
+    const console_ = union(read('packages/console/src/api/types.ts'), /export type AgentState =[\s\S]*?;/);
+    assert.ok(cp.size > 5, 'could not read control-plane states');
+    assert.deepEqual([...cp].filter((s) => !console_.has(s)), []);
+  });
+});

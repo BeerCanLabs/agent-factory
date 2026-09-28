@@ -1,0 +1,20 @@
+{
+  "name": "@beercanlabs/factory-conformance",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Machine checks for DESIGN_AUTHORITY.md invariants (§6.7). A failure here means the code diverged from declared intent.",
+  "type": "module",
+  "scripts": {
+    "test": "tsx --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@beercanlabs/factory-auth": "0.1.0",
+    "@beercanlabs/factory-gateway": "0.1.0",
+    "@beercanlabs/factory-hydrate": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
