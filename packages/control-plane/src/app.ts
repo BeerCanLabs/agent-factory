@@ -1860,7 +1860,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         console.log(`[control-plane] Provisioning identity for ${agentId}...`);
         const { identity, executionIdentity } = await dp.provisionIdentity(agentId, agent.requires);
         console.log(`[control-plane] Registering compute for ${agentId} with ${imageUri}...`);
-        await dp.registerCompute(agentId, imageUri, agent.requires, identity, executionIdentity);
+        await dp.registerCompute(agentId, imageUri, agent.requires, identity, executionIdentity, agent.memoryPrefix ?? agentId);
 
         agent.artifact = imageUri;
         agent.deployedCommit = commit;
