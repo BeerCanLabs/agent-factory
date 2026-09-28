@@ -273,3 +273,18 @@ describe('GCS checkpoint sink', () => {
   });
 });
 
+
+describe('toLedgerEvent egress and commit fields (E3)', () => {
+  it('keeps a well-formed host, port and commit', () => {
+    const e = toLedgerEvent({ agentId: 'a', type: 'action', action: 'EGRESS_TUNNEL', host: 'API.Notion.com', port: 443, commit: 'a'.repeat(40) });
+    assert.equal(e.host, 'api.notion.com');
+    assert.equal(e.port, 443);
+    assert.equal(e.commit, 'a'.repeat(40));
+  });
+  it('drops malformed values so they cannot carry arbitrary text', () => {
+    const e = toLedgerEvent({ agentId: 'a', type: 'action', host: 'evil.com/path?secret=x', port: 70000, commit: 'main' });
+    assert.equal(e.host, undefined);
+    assert.equal(e.port, undefined);
+    assert.equal(e.commit, undefined);
+  });
+});
