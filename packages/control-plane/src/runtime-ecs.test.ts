@@ -69,6 +69,14 @@ describe('ecsRuntime', () => {
     assert.ok(calls.some((c) => c[1] === 'stop-task' && c.includes('arn:task/other')));
   });
 
+  it('runs an admitted deploy from its registered task definition, not the static task map', async () => {
+    const { rt, calls } = fake();
+    await rt.start({ ...echo, deployedCommit: 'a'.repeat(40) }, {}, { runId: 'run-3', runEnv: {} });
+    const args = calls[0];
+    assert.equal(args[args.indexOf('--task-definition') + 1], 'agent-echo-agent');
+    assert.ok(args[args.indexOf('--overrides') + 1].includes('"agent-container"'));
+  });
+
   it('throws when RunTask returns no task', async () => {
     const rt = ecsRuntime({
       cluster: 'c',

@@ -41,6 +41,12 @@ variable "gateway_image" {
   default = ""
 }
 
+variable "agent_source_token_secret_arn" {
+  type        = string
+  default     = ""
+  description = "Secrets Manager ARN of a read-only git token (e.g. a GitHub fine-grained PAT with Contents: read on the agent repositories) that the agent admission build uses to clone private agent repositories. Empty = public repositories only."
+}
+
 variable "agents" {
   description = "Cartridges to run as ECS task definitions. Each gets its own task role scoped to its mind prefix."
   type = map(object({

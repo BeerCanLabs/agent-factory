@@ -64,6 +64,8 @@ describe('KPF 1: Agent Registry & Lifecycle E2E', { concurrency: false }, () => 
       policies: new PolicyStore(),
       spend: new SpendTracker(),
       keymaster,
+      // Registration pins the repo's default-branch HEAD (§6.8 L3); never reach the network from a test.
+      resolveCommit: async () => '0'.repeat(40),
     };
 
     for (const b of BUILTIN_SYSTEM_AGENTS) {

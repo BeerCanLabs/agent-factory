@@ -74,6 +74,11 @@ export class PolicyStore {
     return structuredClone(this.policies.get(agentId) ?? this.fallback);
   }
 
+  /** True only for a policy set for this agent (not the fallback). */
+  has(agentId: string): boolean {
+    return this.policies.has(agentId);
+  }
+
   set(agentId: string, policy: AgentPolicy): void {
     this.policies.set(agentId, policy);
     if (!this.dir) return;
