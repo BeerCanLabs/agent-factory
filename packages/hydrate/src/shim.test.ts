@@ -17,6 +17,7 @@ describe('gatewayEnv', () => {
     assert.equal(env.HTTPS_PROXY, 'http://run:run-tok@gw:8081');
     assert.equal(env.ANTHROPIC_BASE_URL, 'http://gw:8081/anthropic');
     assert.equal(env.OPENAI_BASE_URL, 'http://gw:8081/openai/v1');
+    assert.equal(env.FACTORY_MODEL_BASE_URL, 'http://gw:8081/models/v1');
     assert.equal(env.DISCORD_BASE_URL, 'http://gw:8081/discord');
     assert.equal(env.DISCORD_API_BASE, 'http://gw:8081/discord');
     assert.equal(env.GOOGLE_CALENDAR_BASE_URL, 'http://gw:8081/google-calendar');

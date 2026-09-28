@@ -83,6 +83,9 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_LEDGER_PATH", value = "/data/ledger.jsonl" },
         { name = "FACTORY_LEDGER_WORM_URI", value = "s3://${aws_s3_bucket.ledger_worm.bucket}/ledger" },
         { name = "FACTORY_LEDGER_RETENTION_DAYS", value = tostring(var.ledger_retention_days) },
+        # LG2 recovery: empty except for the one deploy that archives a failed ledger (exact failing seq + reason).
+        { name = "FACTORY_LEDGER_RECOVER_SEQ", value = var.ledger_recover_seq },
+        { name = "FACTORY_LEDGER_RECOVER_REASON", value = var.ledger_recover_reason },
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_PUBLIC_URL", value = local.cp_url },
         { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
@@ -160,6 +163,7 @@ resource "aws_ecs_task_definition" "gateway" {
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_GATEWAY_ROUTES", value = var.gateway_routes },
         { name = "FACTORY_PRICES", value = var.gateway_prices },
+        { name = "FACTORY_MODEL_CATALOG", value = jsonencode({ for name, m in var.model_catalog : name => { for k, v in m : k => v if v != null } }) },
         { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
         { name = "FACTORY_TRACE_DIR", value = "/tmp/traces" },
       ])
