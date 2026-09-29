@@ -47,6 +47,7 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
   const responses: string[] = [];
   const logged: string[] = [];
   const reads: string[] = [];
+  const described: string[] = [];
   const writes: string[] = [];
 
   const provider: SecretProvider = {
@@ -54,6 +55,11 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     async get(n) {
       reads.push(n);
       return values.get(n);
+    },
+    // Metadata-only presence (like AWS DescribeSecret): never reads the value.
+    async has(n) {
+      described.push(n);
+      return Boolean(values.get(n));
     },
     async put(n, v) {
       writes.push(n);
@@ -166,25 +172,47 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     assert.equal(by.google.action.url, `${BASE}/api/v1/connections/donna/google/start`);
     assert.equal(by.google.action.available, false, 'consent waits for the OAuth client');
     assert.equal(by.GOOGLE_OAUTH_CLIENT.managedBy, 'platform');
-    assert.deepEqual(body.summary, { total: 7, outstanding: 5, present: 2 });
+    // The two gateway-held keys are platform credentials and, unset here, outstanding (K5: the Keymaster owns them).
+    assert.deepEqual(body.summary, { total: 7, outstanding: 7, present: 0 });
     assert.equal(body.credentials.every((c: { instructions: unknown }) => c.instructions === null || typeof c.instructions === 'object'), true);
   });
 
-  it('never requests gateway-held secrets: present, managed by the platform, not read, not submittable', async () => {
+  it('gateway-held keys are platform credentials: checked from metadata only, supplied through the platform channel', async () => {
     reads.length = 0;
     const body = await creds();
     for (const name of ['NOTION_API_KEY', 'ANTHROPIC_API_KEY']) {
       const c = body.credentials.find((x: { name: string }) => x.name === name);
-      assert.equal(c.status, 'present');
-      assert.equal(c.outstanding, false);
+      assert.equal(c.status, 'missing');
+      assert.equal(c.outstanding, true);
       assert.equal(c.managedBy, 'platform');
-      assert.equal(c.action.type, 'none');
-      assert.equal(reads.includes(name), false, `${name} is never read`);
+      assert.deepEqual(c.action, { type: 'submit', method: 'POST', path: `/api/v1/keymaster/platform/credentials/${name}` });
+      assert.equal(reads.includes(name), false, `${name} is never read, only described`);
     }
-    const res = await req('/api/v1/keymaster/agents/donna/credentials/NOTION_API_KEY', { method: 'POST', token: ADMIN, raw: 'example-fake-notion-secret' });
-    assert.equal(res.status, 409);
-    assert.equal(res.json().error, 'managed_by_platform');
+    // Not through the agent's endpoint: it points at the platform one and stores nothing.
+    const refused = await req('/api/v1/keymaster/agents/donna/credentials/NOTION_API_KEY', { method: 'POST', token: ADMIN, raw: 'example-fake-notion-secret' });
+    assert.equal(refused.status, 409);
+    assert.equal(refused.json().error, 'managed_by_platform');
+    assert.equal(refused.json().path, '/api/v1/keymaster/platform/credentials/NOTION_API_KEY');
     assert.equal(values.has('NOTION_API_KEY'), false);
+
+    // The platform view lists every gateway-held key; an admin supplies one write-only.
+    const list = await req('/api/v1/keymaster/platform/credentials', { token: ADMIN });
+    assert.equal(list.status, 200);
+    assert.deepEqual(list.json().credentials.map((c: { name: string; status: string }) => [c.name, c.status]), [['ANTHROPIC_API_KEY', 'missing'], ['NOTION_API_KEY', 'missing']]);
+    const before = ledger.query({}).length;
+    const set = await req('/api/v1/keymaster/platform/credentials/NOTION_API_KEY', { method: 'POST', token: ADMIN, raw: 'example-fake-notion-secret' });
+    assert.equal(set.status, 201);
+    assert.equal(set.text.includes('example-fake-notion-secret'), false);
+    assert.equal(values.get('NOTION_API_KEY'), 'example-fake-notion-secret');
+    const row = ledger.query({}).slice(before).find((e) => e.action === 'CREDENTIAL_SET');
+    assert.equal(row?.agentId, 'platform');
+    assert.equal(JSON.stringify(ledger.query({})).includes('example-fake-notion-secret'), false);
+    assert.equal((await req('/api/v1/keymaster/platform/credentials', { token: ADMIN })).json().credentials.find((c: { name: string }) => c.name === 'NOTION_API_KEY').status, 'present');
+    // Only gateway-held names; admin only.
+    assert.equal((await req('/api/v1/keymaster/platform/credentials/DISCORD_BOT_TOKEN', { method: 'POST', token: ADMIN, raw: FAKE_DISCORD })).status, 404);
+    assert.notEqual((await req('/api/v1/keymaster/platform/credentials')).status, 200);
+    values.delete('NOTION_API_KEY');
+    writes.length = 0;
   });
 
   it('refuses names the agent did not declare, and invalid names', async () => {
@@ -290,9 +318,9 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     const body = res.json();
     const donna = body.agents.find((a: { agentId: string }) => a.agentId === 'donna');
     const quiet = body.agents.find((a: { agentId: string }) => a.agentId === 'quiet');
-    assert.deepEqual({ total: donna.total, outstanding: donna.outstanding }, { total: 7, outstanding: 4 });
+    assert.deepEqual({ total: donna.total, outstanding: donna.outstanding }, { total: 7, outstanding: 6 });
     assert.deepEqual({ total: quiet.total, outstanding: quiet.outstanding }, { total: 0, outstanding: 0 });
-    assert.equal(body.outstanding, 4);
+    assert.equal(body.outstanding, 6);
     assert.equal(body.agents.some((a: { agentId: string }) => a.agentId === 'doorman'), false, 'built-in system agents are not listed');
   });
 

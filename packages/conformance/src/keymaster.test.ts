@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import { createGateway, type ControlClient, type Route } from '@beercanlabs/factory-gateway';
-import { files, read } from './support.js';
+import { expectOnlyBaselined, files, read } from './support.js';
 
 const GOOGLE_HOST = /(^|\.)(googleapis\.com|google\.com)$/;
 
@@ -124,10 +124,13 @@ function calls(code: string, callee: RegExp): string[] {
 describe('K5.3 credential values are write-only', () => {
   const file = 'packages/control-plane/src/credentials.ts';
   const code = codeOnly(read(file));
-  const submit = code.match(/async function submitCredential\([\s\S]*?\n\}\n/)?.[0] ?? '';
+  // Agent and platform submissions share one write-only path; the value exists only inside it.
+  const submit = code.match(/async function writeCredential\([\s\S]*?\n\}\n/)?.[0] ?? '';
 
   it('the submit handler exists and is the only place a value is read', () => {
-    assert.ok(submit.includes('submittedValue('), `${file}: submitCredential must read the value via submittedValue`);
+    assert.ok(submit.includes('submittedValue('), `${file}: writeCredential must read the value via submittedValue`);
+    assert.ok(/async function submitCredential\([\s\S]*?await writeCredential\(/.test(code), 'agent submissions go through writeCredential');
+    assert.ok(/const plat = path\.match\([\s\S]*?await writeCredential\(/.test(code), 'platform submissions go through writeCredential');
     assert.equal(code.split('submittedValue(').length - 1, 2, 'submittedValue is defined once and called once');
   });
 
@@ -135,7 +138,7 @@ describe('K5.3 credential values are write-only', () => {
     const uses = submit.split('\n').filter((l) => /\bvalue\b/.test(l)).map((l) => l.trim());
     const allowed = [/const value = submittedValue\(/, /!value\)/, /\bvalue\.length\b/, /secretValues\.add\(value\)/, /\.put\(name, value\)/];
     const unexpected = uses.filter((u) => !allowed.some((re) => re.test(u)));
-    assert.deepEqual(unexpected, [], `${file}: submitCredential may use the value only to validate, store, and redact it`);
+    assert.deepEqual(unexpected, [], `${file}: writeCredential may use the value only to validate, store, and redact it`);
     assert.ok(uses.some((u) => /\.put\(name, value\)/.test(u)), 'the value is written to the secret manager');
   });
 
@@ -143,5 +146,17 @@ describe('K5.3 credential values are write-only', () => {
     const sinks = [/\bjson/, /\bnoStore/, /console\.\w+/, /ledger\.append/, /res\.(end|write|setHeader|writeHead)/];
     const leaks = sinks.flatMap((re) => calls(code, re)).filter((c) => /\b(value|raw|body)\b/.test(c.replace(/^[^(]*\(/, '')));
     assert.deepEqual(leaks, []);
+  });
+});
+
+describe('K1/K5 infrastructure never creates secrets (GAP-050)', () => {
+  it('no landing zone declares a secret, a secret version, or a generated password', () => {
+    // The Keymaster creates and fills credentials (K5). A landing zone may reference secrets by name; it never
+    // creates them or holds their values (which would also put the values in infrastructure state).
+    const kinds = /^resource\s+"(aws_secretsmanager_secret(?:_version)?|google_secret_manager_secret(?:_version)?|azurerm_key_vault_secret|random_password)"\s+"([^"]+)"/gm;
+    const found = files('landing-zones', (p) => p.endsWith('.tf')).flatMap((f) =>
+      [...read(f).matchAll(kinds)].map((m) => ({ rule: 'K5', where: f, detail: `${m[1]}.${m[2]}` })),
+    );
+    expectOnlyBaselined('K5', found);
   });
 });

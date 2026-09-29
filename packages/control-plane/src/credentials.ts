@@ -5,13 +5,15 @@
  *   GET  /api/v1/keymaster/agents/:agentId/credentials         every declared credential: status, instructions, action
  *   POST /api/v1/keymaster/agents/:agentId/credentials/:name   write-only: the body is the value; never echoed or logged
  *   GET  /api/v1/keymaster/outstanding                         outstanding count per agent (fleet view)
+ *   GET  /api/v1/keymaster/platform/credentials                gateway-held platform keys: status, instructions, action
+ *   POST /api/v1/keymaster/platform/credentials/:name          write-only, as above; the control plane can write these but never read them
  *
  * Presence is checked without reading values where the backend allows it (secrets-bind `has`), and no value is ever
  * returned, logged, or ledgered. The ledger records only that a credential was set or rotated, by whom, and when.
  */
 import http from 'node:http';
 import { secretPresent, writableProvider } from '@beercanlabs/factory-secrets-bind';
-import { assessCredentials, submittableSecrets, summarize, type CredentialItem, type CredentialSummary } from '@beercanlabs/factory-keymaster';
+import { assessCredentials, assessPlatformCredentials, submittableSecrets, summarize, type CredentialItem, type CredentialSummary } from '@beercanlabs/factory-keymaster';
 import { authenticate, json, type FactoryState } from './app.js';
 import { BUILTIN_AGENT_IDS, declaredCredentials, type AgentRecord } from './catalog.js';
 import { consentUnavailable, getConnections } from './connections.js';
@@ -28,6 +30,8 @@ const summaries = new WeakMap<FactoryState, Map<string, { at: number; summary: C
 export function invalidateCredentials(state: FactoryState): void {
   summaries.delete(state);
 }
+
+const platformSubmitPath = (name: string) => `/api/v1/keymaster/platform/credentials/${encodeURIComponent(name)}`;
 
 /** Built-in system actors get their credentials from the platform's own deployment, not from an owner. */
 const isBuiltin = (a: AgentRecord) => Boolean(a.isBuiltin || a.category === 'builtin' || BUILTIN_AGENT_IDS.has(a.id));
@@ -47,6 +51,7 @@ export async function agentCredentials(state: FactoryState, agentId: string): Pr
     present: (name) => secretPresent(name, state.providers),
     grant: async (provider) => (await km.listGrants(agentId, [provider]))[0],
     submitPath: (name) => `/api/v1/keymaster/agents/${enc}/credentials/${encodeURIComponent(name)}`,
+    platformSubmitPath,
     consent: (provider) => {
       const path = `/api/v1/connections/${enc}/${encodeURIComponent(provider)}/start`;
       return { path, url: `${base}${path}` };
@@ -110,9 +115,18 @@ async function submitCredential(state: FactoryState, req: http.IncomingMessage, 
   if (isBuiltin(agent)) return noStore(res, 409, { error: 'builtin_agent', message: 'built-in system agents get their credentials from the platform deployment' });
   if (!SECRET_NAME.test(name)) return noStore(res, 400, { error: 'invalid_name', message: 'credential names are ENV-style (A-Z, 0-9, _)' });
   const held = state.gatewayHeldSecrets ?? new Set<string>();
-  if (held.has(name)) return noStore(res, 409, { error: 'managed_by_platform', name, message: 'the factory gateway holds this credential for every agent' });
+  if (held.has(name)) return noStore(res, 409, { error: 'managed_by_platform', name, message: 'the factory gateway holds this credential for every agent; supply it as a platform credential', path: platformSubmitPath(name) });
   const allowed = submittableSecrets({ secrets: declaredCredentials(agent), connections: agent.connections ?? [], gatewayHeld: held });
   if (!allowed.has(name)) return noStore(res, 404, { error: 'undeclared_credential', name, message: `${agentId} does not declare ${name}` });
+  await writeCredential(state, req, res, agentId, name, actor);
+}
+
+/**
+ * K5.3 write-only submission, shared by agent and platform credentials. The value exists only in `value` below: it
+ * goes to the secret manager and to the redaction set, and nowhere else. Responses and ledger rows carry the agent
+ * (or `platform`), the name, and the actor only.
+ */
+async function writeCredential(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, agentId: string, name: string, actor: string) {
   const writer = writableProvider(state.providers);
   if (!writer) return noStore(res, 503, { error: 'no_writable_secrets_backend' });
 
@@ -151,6 +165,28 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
     }));
     agents.sort((x, y) => x.agentId.localeCompare(y.agentId));
     noStore(res, 200, { agents, outstanding: agents.reduce((n, a) => n + a.outstanding, 0) });
+    return true;
+  }
+
+  if (path === '/api/v1/keymaster/platform/credentials' && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'admin'))) return true;
+    const items = await assessPlatformCredentials({
+      gatewayHeld: state.gatewayHeldSecrets ?? new Set(),
+      present: (name) => secretPresent(name, state.providers),
+      submitPath: platformSubmitPath,
+    });
+    noStore(res, 200, { summary: summarize(items), credentials: items });
+    return true;
+  }
+  const plat = path.match(/^\/api\/v1\/keymaster\/platform\/credentials\/([^/]+)$/);
+  if (plat && (req.method === 'POST' || req.method === 'PUT')) {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return true;
+    const name = decodeURIComponent(plat[1]);
+    if (!(state.gatewayHeldSecrets ?? new Set<string>()).has(name)) {
+      return noStore(res, 404, { error: 'not_a_platform_credential', name, message: `${name} is not held by the gateway` }), true;
+    }
+    await writeCredential(state, req, res, 'platform', name, principal.actor);
     return true;
   }
 

@@ -25,8 +25,8 @@ output "admin_token_secret" {
 }
 
 output "provider_secrets" {
-  description = "Set these values; only the gateway can read them."
-  value       = [for s in aws_secretsmanager_secret.provider : s.name]
+  description = "Gateway-held keys. Supply them as platform credentials through the Keymaster; only the gateway can read them."
+  value       = [for n in var.provider_secret_names : "factory/${var.environment}/${n}"]
 }
 
 output "agent_task_families" {

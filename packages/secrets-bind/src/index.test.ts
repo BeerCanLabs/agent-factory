@@ -145,19 +145,25 @@ describe('bindSecrets', () => {
     assert.ok(providers.some((p) => p.name === 'gcp-sm'));
   });
 
-  it('secretPresent answers without returning the value; AWS asks only for the length', async () => {
+  it('secretPresent answers without the value; AWS reads metadata only (DescribeSecret), never the value', async () => {
     const { secretPresent } = await import('./index.js');
     const calls: string[][] = [];
     const aws = awsSecretsManagerProvider('factory/prod/', async (args) => {
       calls.push(args);
-      if (args[args.indexOf('--secret-id') + 1] === 'factory/prod/HAVE') return '29\n';
-      if (args[args.indexOf('--secret-id') + 1] === 'factory/prod/EMPTY') return '0\n';
+      const id = args[args.indexOf('--secret-id') + 1];
+      if (id === 'factory/prod/HAVE') return '[true, true]\n';
+      if (id === 'factory/prod/EMPTY') return '[true, false]\n'; // entry exists, no value was ever set
+      if (id === 'factory/prod/DELETED') return '[false, true]\n'; // scheduled for deletion
       throw new Error('ResourceNotFoundException');
     });
     assert.equal(await secretPresent('HAVE', [aws]), true);
     assert.equal(await secretPresent('EMPTY', [aws]), false);
+    assert.equal(await secretPresent('DELETED', [aws]), false);
     assert.equal(await secretPresent('NOPE', [aws]), false);
-    for (const c of calls) assert.equal(c[c.indexOf('--query') + 1], 'length(SecretString)');
+    for (const c of calls) {
+      assert.equal(c[1], 'describe-secret');
+      assert.equal(c.includes('get-secret-value'), false);
+    }
     assert.equal(await secretPresent('A', [envProvider({ A: '' })]), false);
     assert.equal(await secretPresent('A', [envProvider({}), envProvider({ A: 'example-value' })]), true);
     const throwing = { name: 'broken', async get(): Promise<string | undefined> { throw new Error('down'); } };
