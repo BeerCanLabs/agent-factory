@@ -1,9 +1,11 @@
 import {
   IAMClient,
   CreateRoleCommand,
+  DeleteRolePolicyCommand,
   GetRoleCommand,
   PutRolePolicyCommand,
 } from "@aws-sdk/client-iam";
+import { agentContainerSecrets } from "./gateway-held.js";
 
 export async function provisionAgentRoles(
   agentId: string,
@@ -155,8 +157,10 @@ export async function provisionAgentRoles(
     })
   );
 
-  // 4. Attach Secrets Manager permissions to Execution Role if there are secrets
-  if (secrets && secrets.length > 0) {
+  // 4. Attach Secrets Manager permissions to Execution Role if there are secrets. Gateway-held secrets are
+  // never injected into the container (S1), so the agent's execution role is never granted them.
+  secrets = agentContainerSecrets(secrets ?? []);
+  if (secrets.length > 0) {
     const secretsPolicyDocument = JSON.stringify({
       Version: "2012-10-17",
       Statement: [
@@ -178,6 +182,13 @@ export async function provisionAgentRoles(
         PolicyDocument: secretsPolicyDocument,
       })
     );
+  } else {
+    // A redeploy that no longer injects any secret (e.g. its last one became gateway-held) revokes the old grant.
+    try {
+      await client.send(new DeleteRolePolicyCommand({ RoleName: executionRoleName, PolicyName: "SecretsAccess" }));
+    } catch (err: any) {
+      if (err.name !== "NoSuchEntityException" && err.name !== "NoSuchEntity" && err.Code !== "NoSuchEntity") throw err;
+    }
   }
 
   return {
