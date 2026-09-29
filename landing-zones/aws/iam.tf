@@ -224,6 +224,13 @@ resource "aws_iam_role_policy" "control_plane_paas" {
           "secretsmanager:DescribeSecret"
         ]
         Resource = "*"
+      },
+      {
+        # aws/iam.ts revokes an agent execution role's SecretsAccess when a redeploy no longer injects any secret
+        # (its last one became gateway-held, S1).
+        Effect   = "Allow"
+        Action   = ["iam:DeleteRolePolicy"]
+        Resource = "arn:aws:iam::${var.account_id}:role/factory-agent-exec-*"
       }
     ]
   })
