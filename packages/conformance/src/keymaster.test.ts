@@ -1,4 +1,5 @@
 // DESIGN_AUTHORITY.md §6.11 — Keymaster K1: OAuth grants and app client secrets are held only by the Keymaster.
+// K5.3: a credential supplied to the Keymaster is never displayed, echoed, logged, or ledgered.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { RunTokens } from '@beercanlabs/factory-auth';
@@ -93,5 +94,54 @@ describe('K1 the Keymaster owns OAuth grants and app secrets', () => {
   it('the gateway role cannot read grants in the AWS landing zone', () => {
     const gw = read('landing-zones/aws/iam.tf').match(/resource "aws_iam_role_policy" "gateway" \{[\s\S]*?\n\}/)?.[0] ?? '';
     assert.match(gw, /Sid\s*=\s*"NeverKeymasterGrants"[\s\S]*?Effect\s*=\s*"Deny"[\s\S]*?keymaster_grant_arns/);
+  });
+});
+
+/** Source with comments removed and string/template literal contents blanked, so only code is inspected. */
+function codeOnly(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+    .replace(/'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`/g, "''");
+}
+
+/** The text of every call to `callee(` in `code`, with balanced parentheses. */
+function calls(code: string, callee: RegExp): string[] {
+  const out: string[] = [];
+  for (const m of code.matchAll(new RegExp(callee.source + '\\s*\\(', 'g'))) {
+    let depth = 0;
+    for (let j = m.index! + m[0].length - 1; j < code.length; j++) {
+      if (code[j] === '(') depth++;
+      else if (code[j] === ')' && --depth === 0) {
+        out.push(code.slice(m.index!, j + 1));
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+describe('K5.3 credential values are write-only', () => {
+  const file = 'packages/control-plane/src/credentials.ts';
+  const code = codeOnly(read(file));
+  const submit = code.match(/async function submitCredential\([\s\S]*?\n\}\n/)?.[0] ?? '';
+
+  it('the submit handler exists and is the only place a value is read', () => {
+    assert.ok(submit.includes('submittedValue('), `${file}: submitCredential must read the value via submittedValue`);
+    assert.equal(code.split('submittedValue(').length - 1, 2, 'submittedValue is defined once and called once');
+  });
+
+  it('the value goes only to the secret manager and the redaction set', () => {
+    const uses = submit.split('\n').filter((l) => /\bvalue\b/.test(l)).map((l) => l.trim());
+    const allowed = [/const value = submittedValue\(/, /!value\)/, /\bvalue\.length\b/, /secretValues\.add\(value\)/, /\.put\(name, value\)/];
+    const unexpected = uses.filter((u) => !allowed.some((re) => re.test(u)));
+    assert.deepEqual(unexpected, [], `${file}: submitCredential may use the value only to validate, store, and redact it`);
+    assert.ok(uses.some((u) => /\.put\(name, value\)/.test(u)), 'the value is written to the secret manager');
+  });
+
+  it('no response, log line, or ledger row in the credentials API carries the value or the raw body', () => {
+    const sinks = [/\bjson/, /\bnoStore/, /console\.\w+/, /ledger\.append/, /res\.(end|write|setHeader|writeHead)/];
+    const leaks = sinks.flatMap((re) => calls(code, re)).filter((c) => /\b(value|raw|body)\b/.test(c.replace(/^[^(]*\(/, '')));
+    assert.deepEqual(leaks, []);
   });
 });

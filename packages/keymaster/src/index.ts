@@ -30,3 +30,7 @@ export type {
   TokenOutcome,
   ConnectionKeymasterOptions,
 } from './connections.js';
+export { INSTRUCTION_CATALOG, PENDING_REVIEW_LABEL, catalogEntry, catalogView, inferSource } from './catalog.js';
+export type { CatalogEntry, CatalogKind, CatalogView } from './catalog.js';
+export { assessCredentials, submittableSecrets, summarize } from './credentials.js';
+export type { AssessOptions, CredentialAction, CredentialItem, CredentialStatus, CredentialSummary } from './credentials.js';

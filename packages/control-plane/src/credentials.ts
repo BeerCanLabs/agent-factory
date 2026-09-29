@@ -1,0 +1,175 @@
+/**
+ * Keymaster credentials API (DESIGN_AUTHORITY.md §6.11 K5). The one flow every surface (dashboard, Garrison, API)
+ * uses to bring an agent to zero outstanding credentials. Admin-only until owner roles exist (TSK-027).
+ *
+ *   GET  /api/v1/keymaster/agents/:agentId/credentials         every declared credential: status, instructions, action
+ *   POST /api/v1/keymaster/agents/:agentId/credentials/:name   write-only: the body is the value; never echoed or logged
+ *   GET  /api/v1/keymaster/outstanding                         outstanding count per agent (fleet view)
+ *
+ * Presence is checked without reading values where the backend allows it (secrets-bind `has`), and no value is ever
+ * returned, logged, or ledgered. The ledger records only that a credential was set or rotated, by whom, and when.
+ */
+import http from 'node:http';
+import { secretPresent, writableProvider } from '@beercanlabs/factory-secrets-bind';
+import { assessCredentials, submittableSecrets, summarize, type CredentialItem, type CredentialSummary } from '@beercanlabs/factory-keymaster';
+import { authenticate, json, type FactoryState } from './app.js';
+import { BUILTIN_AGENT_IDS, declaredCredentials, type AgentRecord } from './catalog.js';
+import { consentUnavailable, getConnections } from './connections.js';
+
+const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
+const MAX_VALUE = 64 * 1024;
+const MIN_VALUE = 8;
+const SUMMARY_TTL_MS = 30_000;
+
+// Outstanding counts for the fleet view, per agent, so the fleet does not re-check every secret on each refresh.
+const summaries = new WeakMap<FactoryState, Map<string, { at: number; summary: CredentialSummary }>>();
+
+/** Forget cached credential state (after a credential is set or a grant changes). Shared credentials affect every agent. */
+export function invalidateCredentials(state: FactoryState): void {
+  summaries.delete(state);
+}
+
+/** Built-in system actors get their credentials from the platform's own deployment, not from an owner. */
+const isBuiltin = (a: AgentRecord) => Boolean(a.isBuiltin || a.category === 'builtin' || BUILTIN_AGENT_IDS.has(a.id));
+
+export async function agentCredentials(state: FactoryState, agentId: string): Promise<CredentialItem[] | undefined> {
+  const agent = state.agents.get(agentId);
+  if (!agent) return undefined;
+  if (isBuiltin(agent)) return [];
+  const km = getConnections(state);
+  const enc = encodeURIComponent(agentId);
+  const base = state.publicBaseUrl?.replace(/\/$/, '') ?? '';
+  const items = await assessCredentials({
+    agentId,
+    secrets: declaredCredentials(agent),
+    connections: agent.connections ?? [],
+    gatewayHeld: state.gatewayHeldSecrets ?? new Set(),
+    present: (name) => secretPresent(name, state.providers),
+    grant: async (provider) => (await km.listGrants(agentId, [provider]))[0],
+    submitPath: (name) => `/api/v1/keymaster/agents/${enc}/credentials/${encodeURIComponent(name)}`,
+    consent: (provider) => {
+      const path = `/api/v1/connections/${enc}/${encodeURIComponent(provider)}/start`;
+      return { path, url: `${base}${path}` };
+    },
+    consentUnavailable: consentUnavailable(state),
+  });
+  const cache = summaries.get(state) ?? new Map();
+  summaries.set(state, cache);
+  cache.set(agentId, { at: Date.now(), summary: summarize(items) });
+  return items;
+}
+
+async function summaryFor(state: FactoryState, agentId: string): Promise<CredentialSummary | undefined> {
+  const hit = summaries.get(state)?.get(agentId);
+  if (hit && Date.now() - hit.at < SUMMARY_TTL_MS) return hit.summary;
+  const items = await agentCredentials(state, agentId);
+  return items ? summarize(items) : undefined;
+}
+
+/** Reads the request body without ever putting it in an error message. */
+function readRaw(req: http.IncomingMessage): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    let body = '';
+    let over = false;
+    req.on('data', (c) => {
+      if (over) return;
+      body += c.toString();
+      if (body.length > MAX_VALUE + 1024) over = true;
+    });
+    req.on('end', () => resolve(over ? undefined : body));
+    req.on('error', () => resolve(undefined));
+  });
+}
+
+/** The submitted value: `{"value": "..."}` as JSON, or the raw body for any other content type. */
+function submittedValue(req: http.IncomingMessage, raw: string): string | undefined {
+  let value: unknown = raw;
+  if (/application\/json/i.test(String(req.headers['content-type'] ?? ''))) {
+    try {
+      value = (JSON.parse(raw) as { value?: unknown })?.value;
+    } catch {
+      return undefined;
+    }
+  }
+  return typeof value === 'string' ? value.trim() : undefined;
+}
+
+function noStore(res: http.ServerResponse, status: number, payload: unknown) {
+  res.setHeader('Cache-Control', 'no-store');
+  json(res, status, payload);
+}
+
+/**
+ * K5.3 write-only submission. The value exists only in `value` below: it goes to the secret manager and to the
+ * redaction set, and nowhere else. Responses and ledger rows carry the agent, the name, and the actor only.
+ * (A conformance check in packages/conformance/src/keymaster.test.ts holds this function to that.)
+ */
+async function submitCredential(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, agentId: string, name: string, actor: string) {
+  const agent = state.agents.get(agentId);
+  if (!agent) return noStore(res, 404, { error: 'not_found' });
+  if (isBuiltin(agent)) return noStore(res, 409, { error: 'builtin_agent', message: 'built-in system agents get their credentials from the platform deployment' });
+  if (!SECRET_NAME.test(name)) return noStore(res, 400, { error: 'invalid_name', message: 'credential names are ENV-style (A-Z, 0-9, _)' });
+  const held = state.gatewayHeldSecrets ?? new Set<string>();
+  if (held.has(name)) return noStore(res, 409, { error: 'managed_by_platform', name, message: 'the factory gateway holds this credential for every agent' });
+  const allowed = submittableSecrets({ secrets: declaredCredentials(agent), connections: agent.connections ?? [], gatewayHeld: held });
+  if (!allowed.has(name)) return noStore(res, 404, { error: 'undeclared_credential', name, message: `${agentId} does not declare ${name}` });
+  const writer = writableProvider(state.providers);
+  if (!writer) return noStore(res, 503, { error: 'no_writable_secrets_backend' });
+
+  const raw = await readRaw(req);
+  if (raw === undefined) return noStore(res, 413, { error: 'value_too_large', max: MAX_VALUE });
+  const value = submittedValue(req, raw);
+  if (!value) return noStore(res, 400, { error: 'value_required', message: 'send {"value": "..."} as JSON, or the value as the raw body' });
+  if (value.length < MIN_VALUE || value.length > MAX_VALUE) return noStore(res, 400, { error: 'value_invalid', message: `a value is ${MIN_VALUE} to ${MAX_VALUE} characters` });
+
+  // Redact it everywhere from now on (S1 backstop), before anything else can see it.
+  state.secretValues.add(value);
+  const existed = await secretPresent(name, state.providers);
+  try {
+    await writer.put(name, value);
+  } catch {
+    // The backend's error text is not trusted not to contain what was sent.
+    console.error(`[keymaster] writing ${name} for ${agentId} failed`);
+    return noStore(res, 502, { error: 'write_failed', name });
+  }
+  state.secretCache?.delete(name);
+  invalidateCredentials(state);
+  const action = existed ? 'CREDENTIAL_ROTATED' : 'CREDENTIAL_SET';
+  const at = new Date().toISOString();
+  state.ledger.append({ timestamp: at, agentId, type: 'action', action, actor, credential: name });
+  noStore(res, existed ? 200 : 201, { agentId, name, status: 'present', action, at });
+}
+
+/** Handles the credentials API. Returns false when the path is not one of its routes. */
+export async function handleCredentials(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
+  if (path === '/api/v1/keymaster/outstanding' && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'admin'))) return true;
+    const agents: Array<{ agentId: string; name: string } & CredentialSummary> = [];
+    await Promise.all([...state.agents.values()].filter((a) => !isBuiltin(a)).map(async (a) => {
+      const s = await summaryFor(state, a.id);
+      if (s) agents.push({ agentId: a.id, name: a.name, ...s });
+    }));
+    agents.sort((x, y) => x.agentId.localeCompare(y.agentId));
+    noStore(res, 200, { agents, outstanding: agents.reduce((n, a) => n + a.outstanding, 0) });
+    return true;
+  }
+
+  const one = path.match(/^\/api\/v1\/keymaster\/agents\/([^/]+)\/credentials(?:\/([^/]+))?$/);
+  if (!one) return false;
+  const agentId = decodeURIComponent(one[1]);
+  if (!one[2] && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'admin'))) return true;
+    const items = await agentCredentials(state, agentId);
+    if (!items) return noStore(res, 404, { error: 'not_found' }), true;
+    const builtin = isBuiltin(state.agents.get(agentId)!);
+    noStore(res, 200, { agentId, ...(builtin ? { builtin: true } : {}), summary: summarize(items), credentials: items });
+    return true;
+  }
+  if (one[2] && (req.method === 'POST' || req.method === 'PUT')) {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return true;
+    await submitCredential(state, req, res, agentId, decodeURIComponent(one[2]), principal.actor);
+    return true;
+  }
+  return false;
+}
