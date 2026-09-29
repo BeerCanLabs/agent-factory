@@ -336,7 +336,7 @@ Every invariant in §6 has a row. `checked`: its tests would catch a violation. 
 | L6 | `unchecked` | — | — | GAP-051 |
 | LG1 | `checked` | `packages/conformance/src/egress.test.ts`, `packages/ledger/src/lease.test.ts` | Stop-then-start deploy and the lease. | — |
 | LG2 | `checked` | `packages/ledger/src/segment.test.ts` | Archive and new segment, never repair. | — |
-| K1 | `partial` | `packages/conformance/src/keymaster.test.ts`, `packages/conformance/src/hygiene.test.ts`, `packages/contract/src/validate.test.ts` | Google routes and hard-coded credentials; infrastructure-created secrets were unchecked (GAP-050). | GAP-051 |
+| K1 | `partial` | `packages/conformance/src/keymaster.test.ts`, `packages/conformance/src/hygiene.test.ts`, `packages/contract/src/validate.test.ts` | Google routes, hard-coded credentials, and no secret resources in any landing zone (GAP-050 part b baselined). | GAP-051 |
 | K2 | `unchecked` | — | Consent flow is tested in the control plane, but no test is tied to K2. | GAP-051 |
 | K3 | `partial` | `packages/keymaster/src/connections.test.ts` | Refresh and rotation with a fake provider. | GAP-051 |
 | K4 | `partial` | `packages/keymaster/src/connections.test.ts` | invalid_grant only. | GAP-051 |
