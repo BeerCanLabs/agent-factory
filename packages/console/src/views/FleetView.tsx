@@ -13,6 +13,7 @@ import {
   CheckCircle2,
   Sliders,
   UploadCloud,
+  KeyRound,
 } from 'lucide-react';
 import type { AgentRecord, AgentState } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
@@ -22,9 +23,12 @@ interface FleetViewProps {
   agents: AgentRecord[];
   onSelectAgent: (agentId: string) => void;
   onRefresh: () => void;
+  /** Outstanding credentials per agent id (§6.11 K5); absent when the viewer cannot see them. */
+  outstandingCredentials?: Record<string, number>;
+  onOpenCredentials?: (agentId: string) => void;
 }
 
-export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onRefresh }) => {
+export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onRefresh, outstandingCredentials, onOpenCredentials }) => {
   const permissions = usePermissions();
   const [filterCategory, setFilterCategory] = useState<'USER' | 'BUILTIN' | 'ALL'>('USER');
   const [filterState, setFilterState] = useState<string>('ALL');
@@ -400,7 +404,23 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                         </span>
                       )}
                     </div>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">{agent.id}</p>
+                    <div className="flex items-center space-x-2">
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">{agent.id}</p>
+                      {outstandingCredentials && agent.id in outstandingCredentials && (
+                        <button
+                          onClick={() => onOpenCredentials?.(agent.id)}
+                          title="Open credentials"
+                          className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border flex items-center space-x-1 transition ${
+                            outstandingCredentials[agent.id] > 0
+                              ? 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-800 hover:bg-amber-100'
+                              : 'bg-slate-50 dark:bg-slate-900 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          <KeyRound className="w-3 h-3" />
+                          <span>{outstandingCredentials[agent.id] > 0 ? `${outstandingCredentials[agent.id]} outstanding` : 'credentials ok'}</span>
+                        </button>
+                      )}
+                    </div>
                   </td>
                   <td className="py-3 px-4 text-slate-700 dark:text-slate-300 font-medium">{agent.domain || 'Core'}</td>
                   <td className="py-3 px-4">{getStateBadge(agent.state)}</td>

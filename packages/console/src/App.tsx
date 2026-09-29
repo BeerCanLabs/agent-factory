@@ -10,15 +10,34 @@ import { FinOpsView } from './views/FinOpsView.js';
 import { LedgerView } from './views/LedgerView.js';
 import { TriageView } from './views/TriageView.js';
 import { StudioView } from './views/StudioView.js';
+import { CredentialsView } from './views/CredentialsView.js';
 import { factoryApi } from './api/client.js';
 import type { AgentRecord, ApprovalItem } from './api/types.js';
 
+/** Deep link, e.g. from the OAuth consent page: `/?view=credentials&agent=<id>`. */
+function initialLocation(): { screen: ScreenId; agentId?: string } {
+  const q = new URLSearchParams(window.location.search);
+  return { screen: q.get('view') === 'credentials' ? 'credentials' : 'fleet', agentId: q.get('agent') ?? undefined };
+}
+
 const MainLayout: React.FC = () => {
-  const [currentScreen, setCurrentScreen] = useState<ScreenId>('fleet');
+  const [initial] = useState(initialLocation);
+  const [currentScreen, setCurrentScreen] = useState<ScreenId>(initial.screen);
   const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [approvals, setApprovals] = useState<ApprovalItem[]>([]);
-  const [selectedAgentId, setSelectedAgentId] = useState<string>('higgins');
+  const [selectedAgentId, setSelectedAgentId] = useState<string>(initial.agentId ?? 'higgins');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [outstanding, setOutstanding] = useState<Record<string, number>>({});
+
+  // Outstanding credentials per agent (§6.11 K5). Admin-only on the API; others simply see no counts.
+  const loadOutstanding = async () => {
+    try {
+      const res = await factoryApi.getOutstandingCredentials();
+      setOutstanding(Object.fromEntries(res.agents.map((a) => [a.agentId, a.outstanding])));
+    } catch {
+      setOutstanding({});
+    }
+  };
 
   const loadData = async () => {
     setIsRefreshing(true);
@@ -45,6 +64,17 @@ const MainLayout: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    loadOutstanding();
+    const interval = setInterval(loadOutstanding, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleOpenCredentials = (agentId: string) => {
+    setSelectedAgentId(agentId);
+    setCurrentScreen('credentials');
+  };
+
   const handleSelectAgent = (agentId: string) => {
     setSelectedAgentId(agentId);
     setCurrentScreen('workbench');
@@ -63,11 +93,18 @@ const MainLayout: React.FC = () => {
           onSelectScreen={setCurrentScreen}
           pendingApprovalsCount={approvals.length}
           activeAgentsCount={activeAgentsCount}
+          outstandingCredentialsCount={Object.values(outstanding).reduce((n, c) => n + c, 0)}
         />
 
         <main className="flex-1 overflow-y-auto p-6 lg:p-8 max-w-7xl mx-auto w-full">
           {currentScreen === 'fleet' && (
-            <FleetView agents={agents} onSelectAgent={handleSelectAgent} onRefresh={loadData} />
+            <FleetView
+              agents={agents}
+              onSelectAgent={handleSelectAgent}
+              onRefresh={loadData}
+              outstandingCredentials={outstanding}
+              onOpenCredentials={handleOpenCredentials}
+            />
           )}
 
           {currentScreen === 'workbench' && selectedAgent && (
@@ -76,6 +113,15 @@ const MainLayout: React.FC = () => {
               agents={agents}
               onSelectAgent={setSelectedAgentId}
               onRefresh={loadData}
+            />
+          )}
+
+          {currentScreen === 'credentials' && selectedAgent && (
+            <CredentialsView
+              agents={agents}
+              agentId={selectedAgent.id}
+              onSelectAgent={setSelectedAgentId}
+              onChanged={loadOutstanding}
             />
           )}
 
