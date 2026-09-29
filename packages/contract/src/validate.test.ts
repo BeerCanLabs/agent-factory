@@ -316,3 +316,30 @@ compute:
   });
 });
 
+
+describe('typed credential declarations (§6.11 K5.1)', () => {
+  it('accepts an optional source and description on secrets.requires entries, and plain names still validate', async () => {
+    const { cartridgeSchema } = await import('./schema.js');
+    const base = { schemaVersion: '1.0', id: 'typed', triggers: [{ type: 'http', path: '/wake' }] };
+    assert.equal(cartridgeSchema.safeParse({ ...base, secrets: { requires: ['DISCORD_BOT_TOKEN', { name: 'API_KEY' }] } }).success, true);
+    const typed = cartridgeSchema.safeParse({
+      ...base,
+      secrets: { requires: [{ name: 'DISCORD_BOT_TOKEN', source: 'discord', description: 'Bot login' }] },
+    });
+    assert.equal(typed.success, true);
+    assert.equal(cartridgeSchema.safeParse({ ...base, secrets: { requires: [{ name: 'X_TOKEN', source: 'Not A Slug' }] } }).success, false);
+  });
+
+  it('secretDeclarations lists each declared secret once, with source and description', async () => {
+    const { secretDeclarations } = await import('./schema.js');
+    const out = secretDeclarations({
+      requires: ['GITHUB_TOKEN', { name: 'DISCORD_BOT_TOKEN', source: 'discord', description: 'Bot login' }, 'not valid'],
+      gated: [{ name: 'GITHUB_TOKEN', source: 'github', gate: 'gated' }],
+    });
+    assert.deepEqual(out, [
+      { name: 'GITHUB_TOKEN', source: 'github' },
+      { name: 'DISCORD_BOT_TOKEN', source: 'discord', description: 'Bot login' },
+    ]);
+    assert.deepEqual(secretDeclarations(undefined), []);
+  });
+});

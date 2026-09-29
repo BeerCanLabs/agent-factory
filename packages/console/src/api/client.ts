@@ -1,4 +1,4 @@
-import type { AgentRecord, ApprovalItem, FactoryMetrics, LedgerEvent, TriageIncident } from './types.js';
+import type { AgentCredentials, AgentRecord, ApprovalItem, FactoryMetrics, LedgerEvent, OutstandingCredentials, TriageIncident } from './types.js';
 
 const API_BASE = '/api/v1';
 
@@ -180,6 +180,27 @@ export const factoryApi = {
     } catch {
       return [];
     }
+  },
+
+  // Keymaster credentials (§6.11 K5). Values are write-only: nothing here ever reads one back.
+  async getCredentials(agentId: string): Promise<AgentCredentials> {
+    return request<AgentCredentials>(`/keymaster/agents/${encodeURIComponent(agentId)}/credentials`);
+  },
+
+  async getOutstandingCredentials(): Promise<OutstandingCredentials> {
+    return request<OutstandingCredentials>('/keymaster/outstanding');
+  },
+
+  async submitCredential(agentId: string, name: string, value: string): Promise<{ name: string; status: string; action: string; at: string }> {
+    return request(`/keymaster/agents/${encodeURIComponent(agentId)}/credentials/${encodeURIComponent(name)}`, {
+      method: 'POST',
+      body: JSON.stringify({ value }),
+    });
+  },
+
+  /** The consent start endpoint (same origin); the browser follows its redirect to the provider. */
+  connectUrl(path: string): string {
+    return path.startsWith(API_BASE) ? path : `${API_BASE}${path}`;
   },
 
   // Register New Cartridge

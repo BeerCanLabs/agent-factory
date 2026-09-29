@@ -12,6 +12,7 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { ConnectionKeymaster, connectionProvider, grantSecretName, type Grant } from '@beercanlabs/factory-keymaster';
 import { authenticate, json, readJson, type FactoryState } from './app.js';
 import { isTerminal } from './runs.js';
+import { invalidateCredentials } from './credentials.js';
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 const SLUG = /^[a-z0-9][a-z0-9_-]*$/i;
@@ -35,6 +36,19 @@ export function connectUrl(state: FactoryState, agentId: string, provider: strin
 }
 
 const callbackUrl = (base: string, provider: string) => `${base}/api/v1/connections/${provider}/callback`;
+
+/** The agent's credentials page in the console (K5.3), served under the factory's public base URL. */
+export function consoleCredentialsUrl(state: FactoryState, agentId: string): string | undefined {
+  const base = publicBase(state);
+  return base ? `${base}/?view=credentials&agent=${encodeURIComponent(agentId)}` : undefined;
+}
+
+/** Why a consent flow cannot start on this factory, or undefined when it can. */
+export function consentUnavailable(state: FactoryState): string | undefined {
+  if (!publicBase(state)) return 'FACTORY_PUBLIC_BASE_URL is not configured';
+  if (!stateKey(state)) return 'no factory signing key is configured';
+  return undefined;
+}
 
 // ---- signed consent state ----------------------------------------------------------------------
 
@@ -81,11 +95,17 @@ function redeem(nonce: string, exp: number): boolean {
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
-function page(res: http.ServerResponse, status: number, title: string, message: string) {
+function page(res: http.ServerResponse, status: number, title: string, message: string, link?: { href: string; text: string }) {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+  const back = link ? `<p><a href="${esc(link.href)}">${esc(link.text)}</a></p>` : '';
   res.end(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${esc(title)}</title></head>` +
-    `<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem"><h1>${esc(title)}</h1><p>${esc(message)}</p></body></html>`);
+    `<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem"><h1>${esc(title)}</h1><p>${esc(message)}</p>${back}</body></html>`);
 }
+
+const backLink = (state: FactoryState, agentId: string) => {
+  const href = consoleCredentialsUrl(state, agentId);
+  return href ? { href, text: 'Back to this agent\'s credentials' } : undefined;
+};
 
 function parseScopes(raw: string | null): string[] {
   return raw ? [...new Set(raw.split(/[\s,]+/).filter(Boolean))] : [];
@@ -182,7 +202,7 @@ async function callback(state: FactoryState, res: http.ServerResponse, provider:
   }
   if (url.searchParams.get('error')) {
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: parsed.agentId, type: 'action', action: 'CONNECTION_CONSENT_DECLINED', actor: parsed.actor, provider });
-    return page(res, 400, 'Connection not made', `${def.provider} did not grant access. Nothing was changed.`);
+    return page(res, 400, 'Connection not made', `${def.provider} did not grant access. Nothing was changed.`, backLink(state, parsed.agentId));
   }
   const code = url.searchParams.get('code');
   if (!code) return page(res, 400, 'Connection failed', 'The provider did not return an authorization code.');
@@ -193,7 +213,7 @@ async function callback(state: FactoryState, res: http.ServerResponse, provider:
   const out = await km.exchangeCode(provider, { code, redirectUri: callbackUrl(base, provider) });
   if (!out.ok) {
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: parsed.agentId, type: 'action', action: 'CONNECTION_CALLBACK_FAILED', actor: parsed.actor, provider });
-    return page(res, 502, 'Connection failed', `The token exchange failed (${out.error}). Start again from the factory.`);
+    return page(res, 502, 'Connection failed', `The token exchange failed (${out.error}). Start again from the factory.`, backLink(state, parsed.agentId));
   }
   const grant: Grant = {
     provider,
@@ -207,10 +227,12 @@ async function callback(state: FactoryState, res: http.ServerResponse, provider:
     status: 'active',
   };
   await km.saveGrant(parsed.agentId, grant);
+  invalidateCredentials(state);
   // K2: who granted what, and when. Never tokens.
   state.ledger.append({ timestamp: grant.obtainedAt, agentId: parsed.agentId, type: 'action', action: 'CONNECTION_GRANTED', actor: parsed.actor, provider, scopes: grant.scopes });
   const agentName = state.agents.get(parsed.agentId)?.name ?? parsed.agentId;
-  page(res, 200, `Connected ${def.provider === 'google' ? 'Google' : def.provider} for ${agentName}`, 'You can close this window.');
+  const back = backLink(state, parsed.agentId);
+  page(res, 200, `Connected ${def.provider === 'google' ? 'Google' : def.provider} for ${agentName}`, back ? 'The grant is stored with the Keymaster.' : 'You can close this window.', back);
 }
 
 type AuthorizedUser = { client_id?: string; client_secret?: string; refresh_token?: string; scopes?: string[] | string; scope?: string; token_uri?: string };
@@ -256,6 +278,7 @@ async function importGrant(state: FactoryState, res: http.ServerResponse, agentI
   }
   const grant: Grant = { provider, clientRef, refreshToken: cred.refresh_token, scopes, obtainedAt: new Date().toISOString(), grantedBy: actor, status: 'active' };
   await km.saveGrant(agentId, grant);
+  invalidateCredentials(state);
   state.ledger.append({ timestamp: grant.obtainedAt, agentId, type: 'action', action: 'CONNECTION_IMPORTED', actor, provider, scopes });
   json(res, 201, { agentId, ...ConnectionKeymaster.view(grant), clientRef });
 }

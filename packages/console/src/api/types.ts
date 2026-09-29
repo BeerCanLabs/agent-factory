@@ -112,3 +112,56 @@ export interface AuthUser {
   roles: Array<'viewer' | 'operator' | 'approver' | 'admin'>;
   provider: string;
 }
+
+// Keymaster credentials (DESIGN_AUTHORITY.md §6.11 K5). Mirrors packages/keymaster/src/{catalog,credentials}.ts.
+export type CredentialStatus = 'present' | 'missing' | 'needs_consent' | 'missing_scopes' | 'needs_reconsent';
+
+export interface CredentialInstructions {
+  id: string;
+  title: string;
+  kind: 'static' | 'oauth';
+  /** Markdown. */
+  instructions: string;
+  approved: { by: string; at: string } | null;
+  reviewState: 'approved' | 'pending_review';
+  label?: string;
+}
+
+export type CredentialAction =
+  | { type: 'submit'; method: 'POST'; path: string }
+  | { type: 'consent'; path: string; url: string; available: boolean; reason?: string }
+  | { type: 'none'; reason: string };
+
+export interface CredentialItem {
+  kind: 'static' | 'oauth';
+  name: string;
+  source?: string;
+  sourceInferred?: boolean;
+  description?: string;
+  status: CredentialStatus;
+  outstanding: boolean;
+  managedBy: 'agent' | 'platform';
+  shared?: boolean;
+  requiredBy?: string;
+  scopes?: { declared: string[]; granted: string[]; missing: string[] };
+  grant?: { grantedBy: string; obtainedAt: string };
+  instructions: CredentialInstructions | null;
+  action: CredentialAction;
+}
+
+export interface CredentialSummary {
+  total: number;
+  outstanding: number;
+  present: number;
+}
+
+export interface AgentCredentials {
+  agentId: string;
+  summary: CredentialSummary;
+  credentials: CredentialItem[];
+}
+
+export interface OutstandingCredentials {
+  agents: Array<{ agentId: string; name: string } & CredentialSummary>;
+  outstanding: number;
+}

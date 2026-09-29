@@ -8,6 +8,12 @@ export const secretName = z
 export const secretGate = z.enum(['ungated', 'gated']);
 export type SecretGate = z.infer<typeof secretGate>;
 
+/**
+ * Where a static credential comes from (§6.11 K5.1): an id in the Keymaster's instruction catalog, such as `discord`,
+ * `github`, `slack`, `notion`, `xai`, `anthropic`, or `home-assistant`. Optional so existing cartridges stay valid.
+ */
+export const credentialSource = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, 'secret source must be a catalog id slug (e.g. discord)');
+
 export const secretItem = z.union([
   secretName,
   z
@@ -15,9 +21,37 @@ export const secretItem = z.union([
       name: secretName,
       description: z.string().optional(),
       gate: secretGate.default('ungated'),
+      source: credentialSource.optional(),
     })
     .strict(),
 ]);
+
+/** A declared static credential (§6.11 K5.1): its secret name, and where it comes from when the cartridge says. */
+export type SecretDeclaration = { name: string; source?: string; description?: string };
+
+type SecretItemInput = string | { name: string; description?: string; gate?: SecretGate; source?: string };
+
+/**
+ * Every static secret a cartridge declares (requires, ungated, gated), once each, with its source and description.
+ * Invalid entries are dropped; the first declaration of a name that carries a source or description wins.
+ */
+export function secretDeclarations(secrets?: { requires?: unknown; ungated?: unknown; gated?: unknown }): SecretDeclaration[] {
+  const out = new Map<string, SecretDeclaration>();
+  if (!secrets || typeof secrets !== 'object') return [];
+  for (const list of [secrets.requires, secrets.ungated, secrets.gated]) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      const parsed = secretItem.safeParse(item);
+      if (!parsed.success) continue;
+      const d = typeof parsed.data === 'string' ? { name: parsed.data } : parsed.data;
+      const prev = out.get(d.name) ?? { name: d.name };
+      prev.source ??= 'source' in d ? d.source : undefined;
+      prev.description ??= 'description' in d ? d.description : undefined;
+      out.set(d.name, prev);
+    }
+  }
+  return [...out.values()].map((d) => ({ name: d.name, ...(d.source ? { source: d.source } : {}), ...(d.description ? { description: d.description } : {}) }));
+}
 
 export const secretsManifestSchema = z
   .object({
@@ -255,9 +289,9 @@ export type ClassifiedSecrets = {
 };
 
 export function classifySecrets(secrets?: {
-  requires?: Array<string | { name: string; description?: string; gate?: SecretGate }>;
-  ungated?: Array<string | { name: string; description?: string; gate?: SecretGate }>;
-  gated?: Array<string | { name: string; description?: string; gate?: SecretGate }>;
+  requires?: SecretItemInput[];
+  ungated?: SecretItemInput[];
+  gated?: SecretItemInput[];
 }): ClassifiedSecrets {
   const ungatedSet = new Set<string>();
   const gatedSet = new Set<string>();

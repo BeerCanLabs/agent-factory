@@ -28,6 +28,17 @@ describe('toLedgerEvent', () => {
     assert.equal(bad.scopes, undefined);
   });
 
+  it('keeps a Keymaster credential name (§6.11 K5.3) only when it is an ENV-style secret name, and never a value', () => {
+    const ok = toLedgerEvent({ agentId: 'donna', type: 'action', action: 'CREDENTIAL_SET', actor: 'admin', credential: 'DISCORD_BOT_TOKEN', value: 'example-fake-token-value' });
+    assert.equal(ok.credential, 'DISCORD_BOT_TOKEN');
+    assert.equal(ok.action, 'CREDENTIAL_SET');
+    assert.equal(JSON.stringify(ok).includes('example-fake-token-value'), false);
+    assert.equal((ok as Record<string, unknown>).value, undefined);
+    for (const credential of ['not a name', 'lowercase_name', 'X'.repeat(200), 42, 'A=b']) {
+      assert.equal(toLedgerEvent({ agentId: 'd', type: 'action', credential }).credential, undefined, String(credential));
+    }
+  });
+
   it('drops prompt/content and stores a payload hash', () => {
     const event = toLedgerEvent({
       agentId: 'echo',
