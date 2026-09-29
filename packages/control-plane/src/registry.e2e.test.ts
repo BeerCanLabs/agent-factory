@@ -203,6 +203,37 @@ describe('KPF 1: Agent Registry & Lifecycle E2E', { concurrency: false }, () => 
     assert.ok(actions.includes('MODEL_SWITCHED'));
   });
 
+  it('re-registering an agent keeps the policy its owner set; only a first registration gets the default (GAP-048)', async () => {
+    const reg = () => http_(cpPort, '/api/v1/registry/agents', 'POST', ADMIN, { id: 'sm-rereg-test', name: 'Re-register', repo: 'https://github.com/beercanlabs/SM-rereg-test' });
+    state.policies.set('__global__', { routes: ['default-route'], budgetUsd: { perDay: 1 } });
+    try {
+      const first = await reg();
+      assert.equal(first.status, 201);
+      assert.equal(first.body.state, 'PENDING_DEPLOY');
+      assert.deepEqual(state.policies.get('sm-rereg-test').routes, ['default-route'], 'a first registration gets the default');
+
+      const owned = { routes: ['discord', 'openai'], hosts: ['api.example.com'], budgetUsd: { perDay: 7, perMonth: 90 } };
+      assert.equal((await http_(cpPort, '/api/v1/agents/sm-rereg-test/policy', 'PUT', ADMIN, owned)).status, 200);
+
+      const again = await reg();
+      assert.equal(again.status, 201);
+      assert.equal(again.body.state, 'PENDING_DEPLOY');
+      const kept = state.policies.get('sm-rereg-test');
+      assert.deepEqual(kept.routes, owned.routes);
+      assert.deepEqual(kept.hosts, owned.hosts);
+      assert.deepEqual(kept.budgetUsd, owned.budgetUsd);
+      const approvals = state.ledger.query().filter((e) => e.agentId === 'sm-rereg-test' && e.action === 'BUDGET_APPROVED_BY_POLICY');
+      assert.equal(approvals.length, 1, 'the default is applied once');
+
+      // An owner's policy without a budget is kept too, and the agent still waits for one.
+      assert.equal((await http_(cpPort, '/api/v1/agents/sm-rereg-test/policy', 'PUT', ADMIN, { routes: ['discord'] })).status, 200);
+      assert.equal((await reg()).body.state, 'PENDING_BUDGET');
+      assert.deepEqual(state.policies.get('sm-rereg-test'), { routes: ['discord'] });
+    } finally {
+      state.policies.set('__global__', { routes: [] });
+    }
+  });
+
   it('exempts built-in system agents from budgets and kill switch constraints', async () => {
     // 1. Query doorman via GET /api/v1/registry/agents/doorman
     const getRes = await http_(cpPort, '/api/v1/registry/agents/doorman', 'GET', ADMIN);
