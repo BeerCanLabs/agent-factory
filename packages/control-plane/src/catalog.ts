@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { validateCartridge, classifySecrets, connectionSchema, type Surface, type Cartridge, type SecretsManifest, type Connection } from '@beercanlabs/factory-contract';
+import { validateCartridge, classifySecrets, connectionSchema, secretDeclarations, type Surface, type Cartridge, type SecretsManifest, type Connection, type SecretDeclaration } from '@beercanlabs/factory-contract';
 
 export type AgentCategory = 'user' | 'builtin';
 
@@ -167,7 +167,23 @@ export type AgentRecord = {
   admission?: { commit: string; status: 'building' | 'admitted' | 'refused'; reason?: string; phase?: string; message?: string; at: string };
   /** Connections the cartridge declares (§6.11 K1): provider plus scopes. A request shown to admins, not a grant. */
   connections?: Connection[];
+  /** Static credentials the cartridge declares (§6.11 K5.1): name, and source and description when given. */
+  credentials?: SecretDeclaration[];
 };
+
+/** The declared static credentials of a cartridge body (K5.1), when any carry a source or description. */
+export function credentialsOf(cartridge: { secrets?: unknown }): { credentials?: SecretDeclaration[] } {
+  const decl = secretDeclarations(cartridge.secrets as Parameters<typeof secretDeclarations>[0]);
+  return decl.some((d) => d.source || d.description) ? { credentials: decl } : {};
+}
+
+/** Every static credential an agent declares: its typed declarations, plus any other required secret by name. */
+export function declaredCredentials(agent: Pick<AgentRecord, 'requires' | 'credentials'>): SecretDeclaration[] {
+  const out = [...(agent.credentials ?? [])];
+  const names = new Set(out.map((d) => d.name));
+  for (const name of agent.requires ?? []) if (!names.has(name)) out.push({ name });
+  return out;
+}
 
 /** The declared connections of a cartridge body, validated; invalid entries are dropped. */
 export function connectionsOf(cartridge: { connections?: unknown }): { connections?: Connection[] } {
@@ -325,6 +341,7 @@ export function loadCatalog(agentsRoot: string, options: { includeRetired?: bool
         ? rawCartridge.approvedModels
         : [rawCartridge?.model || 'gemini-2.0-flash'],
       ...connectionsOf(rawCartridge ?? {}),
+      ...credentialsOf(rawCartridge ?? {}),
     });
   }
   return out;

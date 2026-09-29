@@ -98,6 +98,14 @@ resource "aws_iam_role_policy" "control_plane" {
         Resource = concat(local.keymaster_grant_arns, local.keymaster_app_arns)
       },
       {
+        # K5: owners supply an agent's static secrets through the Keymaster (write-only). Gateway-held provider
+        # keys stay out of reach: NeverProviderKeys below denies them.
+        Sid      = "KeymasterAgentSecrets"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:PutSecretValue", "secretsmanager:CreateSecret", "secretsmanager:DescribeSecret"]
+        Resource = "${local.secret_arn}/*"
+      },
+      {
         Sid      = "NeverProviderKeys"
         Effect   = "Deny"
         Action   = ["secretsmanager:*"]

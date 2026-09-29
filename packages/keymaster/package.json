@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/keymaster.test.ts src/connections.test.ts"
+    "test": "tsx --test src/keymaster.test.ts src/connections.test.ts src/credentials.test.ts"
   },
   "dependencies": {
     "@beercanlabs/factory-auth": "0.1.0",

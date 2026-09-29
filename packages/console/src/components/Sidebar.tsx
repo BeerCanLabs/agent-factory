@@ -9,16 +9,18 @@ import {
   Cpu,
   LogOut,
   ExternalLink,
+  KeyRound,
 } from 'lucide-react';
 import { useAuth } from '../auth/CloudflareAuth.js';
 
-export type ScreenId = 'fleet' | 'workbench' | 'approvals' | 'finops' | 'ledger' | 'triage' | 'studio';
+export type ScreenId = 'fleet' | 'workbench' | 'credentials' | 'approvals' | 'finops' | 'ledger' | 'triage' | 'studio';
 
 interface SidebarProps {
   currentScreen: ScreenId;
   onSelectScreen: (screen: ScreenId) => void;
   pendingApprovalsCount: number;
   activeAgentsCount: number;
+  outstandingCredentialsCount?: number;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -26,6 +28,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectScreen,
   pendingApprovalsCount,
   activeAgentsCount,
+  outstandingCredentialsCount = 0,
 }) => {
   const { activeRole } = useAuth();
 
@@ -41,6 +44,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'workbench',
       label: 'Agent Workbench',
       icon: <Terminal className="w-4 h-4" />,
+    },
+    {
+      id: 'credentials',
+      label: 'Credentials',
+      icon: <KeyRound className="w-4 h-4" />,
+      badge: outstandingCredentialsCount > 0 ? outstandingCredentialsCount : undefined,
+      badgeColor: 'bg-amber-950 text-amber-400 border border-amber-800/80',
     },
     {
       id: 'approvals',

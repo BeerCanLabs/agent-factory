@@ -12,7 +12,27 @@ export type SecretProvider = {
    * Used by the Keymaster to persist OAuth grants (§6.11 K2/K3). Never logs or echoes the value.
    */
   put?(secretName: string, value: string): Promise<void>;
+  /**
+   * Whether a secret with this name has a non-empty value, without returning it (§6.11 K5.2). Optional: providers
+   * without it are asked with `get`, and the value is discarded. See `secretPresent`.
+   */
+  has?(secretName: string): Promise<boolean>;
 };
+
+/**
+ * True when any provider holds a non-empty value for `name`. Never returns, logs, or keeps the value: providers that
+ * can answer without reading it (`has`) do; for the others the value from `get` is dropped immediately.
+ */
+export async function secretPresent(name: string, providers: SecretProvider[]): Promise<boolean> {
+  for (const p of providers) {
+    try {
+      if (p.has ? await p.has(name) : (await p.get(name)) !== undefined) return true;
+    } catch {
+      // an unreachable backend is not evidence of presence; try the next one
+    }
+  }
+  return false;
+}
 
 export class SecretWriteNotImplementedError extends Error {
   constructor(provider: string) {
@@ -40,6 +60,9 @@ export function envProvider(env: NodeJS.ProcessEnv = process.env): SecretProvide
       const v = env[secretName];
       return v === undefined || v === '' ? undefined : v;
     },
+    async has(secretName) {
+      return Boolean(env[secretName]);
+    },
   };
 }
 
@@ -52,6 +75,9 @@ export function fileProvider(filePath: string): SecretProvider {
       const map = parseEnvFile(readFileSync(filePath, 'utf8'));
       const v = map[secretName];
       return v === undefined || v === '' ? undefined : v;
+    },
+    async has(secretName) {
+      return existsSync(filePath) && Boolean(parseEnvFile(readFileSync(filePath, 'utf8'))[secretName]);
     },
   };
 }
@@ -125,6 +151,24 @@ export function awsSecretsManagerProvider(prefix: string, cli?: AwsCli): SecretP
       } catch (err) {
         if (!/ResourceNotFoundException/.test(err instanceof Error ? err.message : String(err))) throw err;
         await run(['secretsmanager', 'create-secret', '--name', id, '--secret-string', 'file:///dev/stdin'], value);
+      }
+    },
+    async has(secretName) {
+      // Only the length leaves Secrets Manager's CLI (a JMESPath query), never the value. Same permission as get.
+      try {
+        const out = await run([
+          'secretsmanager',
+          'get-secret-value',
+          '--secret-id',
+          `${prefix}${secretName}`,
+          '--query',
+          'length(SecretString)',
+          '--output',
+          'text',
+        ]);
+        return Number(out.trim()) > 0;
+      } catch {
+        return false;
       }
     },
     async get(secretName) {

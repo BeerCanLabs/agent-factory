@@ -17,5 +17,6 @@ export function usePermissions() {
     canRetire: hasRole('admin'),
     canPurge: hasRole('admin'),
     canApproveModel: hasRole('admin'),
+    canManageCredentials: hasRole('admin'),
   };
 }

@@ -8,7 +8,7 @@ import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanla
 import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
-import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, connectionsOf, type AgentCategory } from './catalog.js';
+import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, connectionsOf, credentialsOf, type AgentCategory } from './catalog.js';
 import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, type SourceRef } from './runtime.js';
 import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver } from './source.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
@@ -16,6 +16,7 @@ import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callba
 import { exceededWindow, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
+import { handleCredentials } from './credentials.js';
 import { ScheduleStore, type ScheduledAction } from './schedules.js';
 import { gatewayEnv } from '@beercanlabs/factory-hydrate';
 
@@ -850,6 +851,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gateway/connections/token') && (await handleConnections(state, req, res, path))) return;
+  if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
     json(res, 200, {
@@ -1517,11 +1519,13 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       ...(source ? { commit: source.commit } : {}),
     });
     
-    // Evaluate Policy Engine globally
+    // Only a first registration gets the global default; re-registering keeps the policy its owner set (GAP-048).
     const globalPolicy = state.policies.get('__global__');
     let stateResult: 'PENDING_BUDGET' | 'PENDING_DEPLOY' = 'PENDING_BUDGET';
-    
-    if (globalPolicy && globalPolicy.budgetUsd) {
+
+    if (state.policies.has(agentId)) {
+      if (state.policies.get(agentId).budgetUsd) stateResult = 'PENDING_DEPLOY';
+    } else if (globalPolicy && globalPolicy.budgetUsd) {
       state.policies.set(agentId, globalPolicy);
       stateResult = 'PENDING_DEPLOY';
       state.ledger.append({
@@ -1578,6 +1582,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       approvedModels,
       ...(source ? { repo: source.repo, commit: source.commit } : {}),
       ...connectionsOf(cartridge),
+      ...credentialsOf({ secrets: cartridge.secrets ?? (Array.isArray(body.secrets) ? { requires: body.secrets } : undefined) }),
     };
     state.agents.set(record.id, record);
 
