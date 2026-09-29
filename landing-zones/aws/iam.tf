@@ -35,7 +35,9 @@ resource "aws_iam_role_policy" "execution_secrets" {
 }
 
 locals {
-  provider_secret_arns = [for s in aws_secretsmanager_secret.provider : s.arn]
+  # By name, not by resource: the Keymaster creates these secrets (K5). `-??????` is the suffix AWS appends to
+  # a secret's ARN, so NOTION_API_KEY never also matches NOTION_API_KEY_OTHER.
+  provider_secret_arns = [for n in var.provider_secret_names : "${local.secret_arn}/${n}-??????"]
   # §6.11 K1: OAuth grants (one secret per agent x provider) and the app credentials they depend on. Only the
   # control plane's Keymaster reads or writes them; the gateway asks the control plane for access tokens.
   keymaster_grant_arns = ["${local.secret_arn}/connections/*"]
@@ -99,17 +101,18 @@ resource "aws_iam_role_policy" "control_plane" {
       },
       {
         # K5: owners supply an agent's static secrets through the Keymaster (write-only). Gateway-held provider
-        # keys stay out of reach: NeverProviderKeys below denies them.
+        # keys stay unreadable: NeverReadProviderKeys below denies reading them.
         Sid      = "KeymasterAgentSecrets"
         Effect   = "Allow"
         Action   = ["secretsmanager:PutSecretValue", "secretsmanager:CreateSecret", "secretsmanager:DescribeSecret"]
         Resource = "${local.secret_arn}/*"
       },
       {
-        Sid      = "NeverProviderKeys"
+        # The Keymaster (in the control plane) creates and writes gateway-held keys (K5) but never reads them (S1).
+        Sid      = "NeverReadProviderKeys"
         Effect   = "Deny"
-        Action   = ["secretsmanager:*"]
-        Resource = [for arn in local.provider_secret_arns : "${arn}*"]
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:BatchGetSecretValue"]
+        Resource = local.provider_secret_arns
       },
       {
         Sid      = "LedgerWormAppendOnly"
@@ -156,7 +159,7 @@ resource "aws_iam_role_policy" "gateway" {
         Sid      = "InjectProviderKeysOnly"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
-        Resource = concat([for arn in local.provider_secret_arns : "${arn}*"], ["${local.secret_arn}/*"])
+        Resource = concat(local.provider_secret_arns, ["${local.secret_arn}/*"])
       },
       {
         # K1/K3: the gateway never reads OAuth grants or app credentials; it gets short-lived tokens from the control plane.

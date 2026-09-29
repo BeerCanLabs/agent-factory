@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { KeyRound, Link2, RefreshCw, ShieldCheck, AlertTriangle, CheckCircle2, Save, Server } from 'lucide-react';
 import type { AgentCredentials, AgentRecord, CredentialItem, CredentialStatus } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
-import { factoryApi } from '../api/client.js';
+import { factoryApi, PLATFORM_CREDENTIALS } from '../api/client.js';
 
 // DESIGN_AUTHORITY.md §6.11 K5: a client of the Keymaster API only. It adds no logic of its own, and a credential
 // value typed here is sent once, write-only, and never shown again.
@@ -69,7 +69,8 @@ const StaticSecretInput: React.FC<{ agentId: string; item: CredentialItem; canWr
     setSaving(true);
     setError(null);
     try {
-      const res = await factoryApi.submitCredential(agentId, item.name, draft);
+      if (item.action.type !== 'submit') return;
+      const res = await factoryApi.submitCredential(item.action.path, draft);
       onSaved(`${item.name} ${res.action === 'CREDENTIAL_ROTATED' ? 'rotated' : 'saved'}.`);
     } catch (err: any) {
       setError(`Not saved: ${err.message}`);
@@ -128,7 +129,7 @@ const CredentialCard: React.FC<{ agentId: string; item: CredentialItem; canWrite
             {item.managedBy === 'platform' && (
               <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-400 border border-sky-200 dark:border-sky-800 flex items-center space-x-1">
                 <Server className="w-3 h-3" />
-                <span>{item.shared ? 'Platform · shared by every agent using it' : 'Managed by the platform'}</span>
+                <span>{item.shared ? 'Platform credential · shared; agents never see it' : 'Platform credential'}</span>
               </span>
             )}
           </div>
@@ -195,12 +196,13 @@ export const CredentialsView: React.FC<CredentialsViewProps> = ({ agents, agentI
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const agent = agents.find((a) => a.id === agentId);
+  const isPlatform = agentId === PLATFORM_CREDENTIALS;
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      setData(await factoryApi.getCredentials(agentId));
+      setData(await (isPlatform ? factoryApi.getPlatformCredentials() : factoryApi.getCredentials(agentId)));
     } catch (err: any) {
       setData(null);
       setError(err.message);
@@ -236,6 +238,7 @@ export const CredentialsView: React.FC<CredentialsViewProps> = ({ agents, agentI
               onChange={(e) => onSelectAgent(e.target.value)}
               className="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-white font-bold text-base rounded px-2 py-1 border border-slate-300 dark:border-slate-800 cursor-pointer focus:outline-none focus:border-emerald-500"
             >
+              <option value={PLATFORM_CREDENTIALS}>Platform (gateway-held keys)</option>
               {agents.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name} ({a.id})
@@ -243,7 +246,9 @@ export const CredentialsView: React.FC<CredentialsViewProps> = ({ agents, agentI
               ))}
             </select>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              Credentials {agent?.name ?? agentId} declares. Values are write-only and never shown back.
+              {isPlatform
+                ? 'Keys the gateway holds for every agent (model providers, shared integrations). Agents never see them.'
+                : <>Credentials {agent?.name ?? agentId} declares.</>}{' '}Values are write-only and never shown back.
             </p>
           </div>
         </div>
@@ -271,7 +276,7 @@ export const CredentialsView: React.FC<CredentialsViewProps> = ({ agents, agentI
       )}
       {notice && <div className="text-xs font-semibold text-emerald-800 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 rounded-lg px-3 py-2">{notice}</div>}
       {error && <div className="text-xs text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 rounded-lg px-3 py-2">Could not load credentials: {error}</div>}
-      {data && data.credentials.length === 0 && <p className="text-sm text-slate-500 dark:text-slate-400">This agent declares no credentials.</p>}
+      {data && data.credentials.length === 0 && <p className="text-sm text-slate-500 dark:text-slate-400">{isPlatform ? 'The gateway holds no platform keys.' : 'This agent declares no credentials.'}</p>}
 
       {outstanding.length > 0 && (
         <section className="space-y-3">

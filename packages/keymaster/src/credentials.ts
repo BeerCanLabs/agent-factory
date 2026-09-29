@@ -41,12 +41,14 @@ export type AssessOptions = {
   agentId: string;
   secrets: Array<{ name: string; source?: string; description?: string }>;
   connections: Array<{ provider: string; scopes: string[] }>;
-  /** Secrets the gateway holds for the whole platform (S1): satisfied, never requested per agent. */
+  /** Secrets the gateway holds for the whole platform (S1): supplied once, through the platform endpoint, never per agent. */
   gatewayHeld: ReadonlySet<string>;
   /** Presence of a secret by name. Must not return or log the value. */
   present: (name: string) => Promise<boolean>;
   grant: (provider: string) => Promise<GrantView | undefined>;
   submitPath: (name: string) => string;
+  /** Where a gateway-held (platform) credential is submitted. */
+  platformSubmitPath: (name: string) => string;
   consent: (provider: string) => { path: string; url: string };
   /** Why consent cannot start at all (e.g. the factory's public URL is not configured). */
   consentUnavailable?: string;
@@ -100,7 +102,17 @@ export async function assessCredentials(opts: AssessOptions): Promise<Credential
       ...extra,
     };
     if (opts.gatewayHeld.has(d.name)) {
-      return { ...base, status: 'present', outstanding: false, managedBy: 'platform', action: { type: 'none', reason: 'held by the factory gateway for every agent' } };
+      // Held by the gateway for every agent (S1). The Keymaster still owns it (K1/K5): it reports it from metadata
+      // and accepts it through the platform's write-only channel.
+      const present = await opts.present(d.name);
+      return {
+        ...base,
+        status: present ? 'present' : 'missing',
+        outstanding: !present,
+        managedBy: 'platform',
+        shared: true,
+        action: { type: 'submit', method: 'POST', path: opts.platformSubmitPath(d.name) },
+      };
     }
     const present = await opts.present(d.name);
     return {
@@ -162,6 +174,29 @@ export async function assessCredentials(opts: AssessOptions): Promise<Credential
     if (appItem) items.push(appItem);
   }
   return items;
+}
+
+/** Platform credentials (gateway-held keys) with their status, for the platform view. */
+export async function assessPlatformCredentials(opts: {
+  gatewayHeld: ReadonlySet<string>;
+  present: (name: string) => Promise<boolean>;
+  submitPath: (name: string) => string;
+}): Promise<CredentialItem[]> {
+  return Promise.all([...opts.gatewayHeld].sort().map(async (name) => {
+    const source = inferSource(name);
+    const present = await opts.present(name);
+    return {
+      kind: 'static' as const,
+      name,
+      ...(source ? { source, sourceInferred: true } : {}),
+      status: present ? ('present' as const) : ('missing' as const),
+      outstanding: !present,
+      managedBy: 'platform' as const,
+      shared: true,
+      instructions: instructionsFor(source),
+      action: { type: 'submit' as const, method: 'POST' as const, path: opts.submitPath(name) },
+    };
+  }));
 }
 
 export function summarize(items: CredentialItem[]): CredentialSummary {
