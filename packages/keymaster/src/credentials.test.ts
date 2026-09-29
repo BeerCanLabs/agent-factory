@@ -2,7 +2,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { INSTRUCTION_CATALOG, PENDING_REVIEW_LABEL, catalogView, inferSource } from './catalog.js';
-import { assessCredentials, submittableSecrets, summarize, type AssessOptions } from './credentials.js';
+import { assessCredentials, assessPlatformCredentials, submittableSecrets, summarize, type AssessOptions } from './credentials.js';
 import type { GrantView } from './connections.js';
 
 const CAL = 'https://www.googleapis.com/auth/calendar.readonly';
@@ -18,6 +18,7 @@ function opts(over: Partial<AssessOptions> & { have?: string[]; grants?: Record<
     present: async (n) => have.has(n),
     grant: async (p) => over.grants?.[p],
     submitPath: (n) => `/api/v1/keymaster/agents/donna/credentials/${n}`,
+    platformSubmitPath: (n) => `/api/v1/keymaster/platform/credentials/${n}`,
     consent: (p) => ({ path: `/api/v1/connections/donna/${p}/start`, url: `https://factory.example.test/api/v1/connections/donna/${p}/start` }),
     ...over,
   };
@@ -73,20 +74,34 @@ describe('assessCredentials (K5.2)', () => {
     assert.deepEqual(summarize(items), { total: 3, outstanding: 2, present: 1 });
   });
 
-  it('treats gateway-held secrets as present and managed by the platform, and never checks them', async () => {
+  it('reports gateway-held secrets as platform credentials: checked from metadata, supplied through the platform channel', async () => {
     const asked: string[] = [];
     const items = await assessCredentials(opts({
       secrets: [{ name: 'NOTION_API_KEY' }, { name: 'ANTHROPIC_API_KEY' }],
       gatewayHeld: new Set(['NOTION_API_KEY', 'ANTHROPIC_API_KEY']),
-      present: async (n) => (asked.push(n), false),
+      present: async (n) => (asked.push(n), n === 'ANTHROPIC_API_KEY'),
     }));
-    assert.deepEqual(asked, []);
+    assert.deepEqual(asked.sort(), ['ANTHROPIC_API_KEY', 'NOTION_API_KEY']);
+    const notion = items.find((i) => i.name === 'NOTION_API_KEY')!;
+    const anthropic = items.find((i) => i.name === 'ANTHROPIC_API_KEY')!;
+    assert.equal(notion.status, 'missing');
+    assert.equal(notion.outstanding, true);
+    assert.equal(anthropic.status, 'present');
     for (const i of items) {
-      assert.equal(i.status, 'present');
       assert.equal(i.managedBy, 'platform');
-      assert.equal(i.action.type, 'none');
+      assert.deepEqual(i.action, { type: 'submit', method: 'POST', path: `/api/v1/keymaster/platform/credentials/${i.name}` });
     }
+    // Never through the agent's own endpoint.
     assert.deepEqual([...submittableSecrets({ secrets: [{ name: 'NOTION_API_KEY' }, { name: 'X_TOKEN' }], connections: [], gatewayHeld: new Set(['NOTION_API_KEY']) })], ['X_TOKEN']);
+  });
+
+  it('lists every platform credential for the platform view', async () => {
+    const items = await assessPlatformCredentials({
+      gatewayHeld: new Set(['OPENAI_API_KEY', 'ANTHROPIC_API_KEY']),
+      present: async (n) => n === 'OPENAI_API_KEY',
+      submitPath: (n) => `/api/v1/keymaster/platform/credentials/${n}`,
+    });
+    assert.deepEqual(items.map((i) => [i.name, i.status, i.managedBy]), [['ANTHROPIC_API_KEY', 'missing', 'platform'], ['OPENAI_API_KEY', 'present', 'platform']]);
   });
 
   it('reports OAuth connections: needs_consent, missing_scopes, needs_reconsent, present', async () => {

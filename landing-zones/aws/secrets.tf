@@ -40,8 +40,12 @@ resource "aws_secretsmanager_secret_version" "factory_tokens" {
   ])
 }
 
-# Provider keys: created empty; an operator sets the value. Only the gateway role may read them.
-resource "aws_secretsmanager_secret" "provider" {
-  for_each = toset(var.provider_secret_names)
-  name     = "factory/${var.environment}/${each.key}"
+# Gateway-held keys (provider_secret_names) are owned by the Keymaster (§6.11 K1/K5), which creates and fills them
+# through its write-only channel. The landing zone never creates them; iam.tf controls who may read them by name.
+# Earlier versions created empty entries here; release them from state without deleting the secrets or their values.
+removed {
+  from = aws_secretsmanager_secret.provider
+  lifecycle {
+    destroy = false
+  }
 }

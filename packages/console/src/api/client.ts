@@ -2,6 +2,9 @@ import type { AgentCredentials, AgentRecord, ApprovalItem, FactoryMetrics, Ledge
 
 const API_BASE = '/api/v1';
 
+/** Pseudo-agent id for the platform credentials page (never a real agent id: agent ids are lowercase). */
+export const PLATFORM_CREDENTIALS = '__platform__';
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
   headers.set('Accept', 'application/json');
@@ -187,12 +190,19 @@ export const factoryApi = {
     return request<AgentCredentials>(`/keymaster/agents/${encodeURIComponent(agentId)}/credentials`);
   },
 
+  /** Gateway-held platform keys (model providers, shared integrations): created and filled through the Keymaster. */
+  async getPlatformCredentials(): Promise<AgentCredentials> {
+    const res = await request<Omit<AgentCredentials, 'agentId'>>('/keymaster/platform/credentials');
+    return { agentId: PLATFORM_CREDENTIALS, ...res };
+  },
+
   async getOutstandingCredentials(): Promise<OutstandingCredentials> {
     return request<OutstandingCredentials>('/keymaster/outstanding');
   },
 
-  async submitCredential(agentId: string, name: string, value: string): Promise<{ name: string; status: string; action: string; at: string }> {
-    return request(`/keymaster/agents/${encodeURIComponent(agentId)}/credentials/${encodeURIComponent(name)}`, {
+  /** Write-only submission to the path the Keymaster gave for this credential (agent or platform). */
+  async submitCredential(path: string, value: string): Promise<{ name: string; status: string; action: string; at: string }> {
+    return request(path.startsWith(API_BASE) ? path.slice(API_BASE.length) : path, {
       method: 'POST',
       body: JSON.stringify({ value }),
     });

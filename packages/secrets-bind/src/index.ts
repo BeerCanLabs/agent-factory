@@ -154,19 +154,21 @@ export function awsSecretsManagerProvider(prefix: string, cli?: AwsCli): SecretP
       }
     },
     async has(secretName) {
-      // Only the length leaves Secrets Manager's CLI (a JMESPath query), never the value. Same permission as get.
+      // Metadata only (DescribeSecret): the value is never fetched, so this works for secrets the caller may write
+      // but never read (gateway-held keys, §6.11 K5). Present means a current version exists and it is not deleted.
       try {
         const out = await run([
           'secretsmanager',
-          'get-secret-value',
+          'describe-secret',
           '--secret-id',
           `${prefix}${secretName}`,
           '--query',
-          'length(SecretString)',
+          "[DeletedDate == null, contains(values(VersionIdsToStages || `{}`)[], 'AWSCURRENT')]",
           '--output',
-          'text',
+          'json',
         ]);
-        return Number(out.trim()) > 0;
+        const [live, current] = JSON.parse(out) as [boolean, boolean];
+        return live === true && current === true;
       } catch {
         return false;
       }
