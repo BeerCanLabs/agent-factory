@@ -49,6 +49,7 @@ Every AI session (Claude, Grok, or Gemini) **must** follow this strict state mac
 1. **User Declares New Intent:**
    - The user describes a new feature, behavioral modification, or design correction.
 2. **AI Updates Design Authority & Confirms:**
+   - **First, cite what already applies.** Before proposing any new rule or design, the AI names the existing invariants (§6) and the user's recorded decisions (§7) that bear on it. If an existing invariant already covers the case, the work is to register and fix the violation, not to add a rule. A proposal that contradicts a recorded decision says so explicitly and asks.
    - The AI updates the *Declared Architectural Intent* section of this document.
    - The AI explicitly confirms this text update with the user before touching code.
 3. **AI Documents the Conflict or Gap:**
@@ -134,6 +135,7 @@ The following gaps exist between current repository code, `SPEC.md`, and the can
 | **GAP-047** | **No Alerting Design** | The factory has no designed way to notify a person when something needs them (an outstanding credential, a re-consent, a refused admission, a crash). Undesigned; not yet an invariant. | Medium |
 | **GAP-048** | **Re-registration Resets Policy** | Re-registering an existing agent replaces its policy with the global default (no routes), discarding what the policy owner set; found deploying Donna 2026-09-28. | High |
 | **GAP-049** | **Admission Builds Pull Anonymously from Docker Hub** | Admission builds pull base images anonymously from Docker Hub from CodeBuild's shared addresses and are refused at the pull limit (429); worked around per agent (SM-donna #6) instead of in the platform. | Medium |
+| **GAP-051** | **Invariants Without Complete Checks** | §6.7 requires every machine-checkable invariant to name its test, but most are unchecked or only partly checked, so CI passes code that violates them (GAP-048 and GAP-050 passed every gate). The coverage table in §6.7 lists each one; an independent audit proposes the checks to add. | High |
 | **GAP-031** | **Agents Hold Real Secrets** | ECS task definitions inject real secret values into agent containers (e.g. Discord bot tokens, `XAI_API_KEY`, `ANTHROPIC_API_KEY`, GitHub tokens, a username/password pair, GCP service-account JSON), violating S1. Since `6256fac` (2026-09-20) the control plane skips secret binding for non-local runtimes, so it neither pre-flights them (no 412) nor knows their values to redact them from results and the ledger. | Critical |
 
 ---
@@ -188,6 +190,7 @@ The following gaps exist between current repository code, `SPEC.md`, and the can
 | **TSK-038** | GAP-046 | Keymaster credential facilitation (K5): typed credential declarations in the cartridge, outstanding-credential API per agent, approved instruction catalog, write-only secret submission, dashboard credentials page (Garrison later on the same API); credentials declared once and usable by several agents, gated per agent by policy | `COMPLETED` | *None* (Released) | `packages/contract/*`, `packages/keymaster/*`, `packages/control-plane/src/{credentials,connections,catalog}*.ts`, `packages/control-plane/src/app.ts` (credential routes hook and registration only), `packages/control-plane/package.json` (test script), `packages/secrets-bind/src/*`, `packages/ledger/src/{sanitize.ts,index.test.ts}`, `packages/console/*`, `packages/conformance/src/keymaster.test.ts`, `DESIGN_AUTHORITY.md` (own rows), `landing-zones/aws/iam.tf` (Keymaster write permission) | An owner can bring a newly registered agent to zero outstanding credentials from the dashboard or the API alone, without a CLI, and no value is ever shown back. Done: typed `secrets.requires` (`source`, `description`); instruction catalog in `packages/keymaster/src/catalog.ts` (10 AI-drafted entries, all `approved: null`, shown with a pending-review label); `GET/POST /api/v1/keymaster/agents/:id/credentials[/:name]` and `GET /api/v1/keymaster/outstanding`; secrets-bind `has`/`secretPresent`; ledger `credential` field (`CREDENTIAL_SET`/`CREDENTIAL_ROTATED`); console Credentials view and fleet counts; consent success page links back to the console. Conformance: submit handler never echoes, logs, or ledgers the value. |
 | **TSK-039** | GAP-031 | First slice of TSK-024: Notion through the gateway. A `notion` route injects the shared `NOTION_API_KEY`; agents get `NOTION_BASE_URL`; the key is no longer injected into any agent container; every agent Notion skill uses the route; `api.notion.com` leaves agent host allowlists. 2026-09-28: code in review (agent-factory and the eight `SM-*` PRs): `notion` http route (Bearer injection, run token stripped); `NOTION_API_KEY` gateway-held via `provider_secret_names`, so it is dropped from agent task definitions (`aws/ecs.ts`, `aws/iam.ts`, terraform `var.agents`) and pre-flight skips it; hydrate sets `NOTION_BASE_URL`; the gateway no longer falls back to `DISCORD_BOT_TOKEN` for another route's unbound credential. Open until merged and the operator steps (secret import, policies, agent redeploys) are done and one Notion call is seen in the ledger | `LOCKED` | Claude (Opus 5.5) agent A - 2026-09-28 | `packages/gateway/*`, `packages/hydrate/src/*`, `packages/control-plane/src/aws/*`, `landing-zones/aws/{variables,ecs,iam}.tf`, `packages/control-plane/package.json` (test list), `packages/conformance/baseline.json`, `DESIGN_AUTHORITY.md` (own rows), Notion skill and cartridge in `SM-{archie,castle,donna,finley,geordi,higgins,rosie,switch}` | No agent container receives the Notion key; agent Notion calls succeed through the route and are ledgered; rotating the key touches no agent. |
 | **TSK-040** | GAP-048 | Re-registration keeps the policy the policy owner set (only a first registration gets the default) | `COMPLETED` | *None* (Released) | `packages/control-plane/src/app.ts` (registration only), its tests | Re-registering an agent with a policy leaves the policy unchanged. Done: registration applies the global default only when the agent has no policy; test in `registry.e2e.test.ts`. |
+| **TSK-042** | GAP-051 | Invariant coverage table in §6.7, enforced by `coverage.test.ts`; AI protocol step: cite existing invariants before proposing a rule; independent audit of all repos | `LOCKED` | Claude (Opus 5.5) | `DESIGN_AUTHORITY.md`, `packages/conformance/src/coverage.test.ts`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` | CI fails when an invariant lacks a row or a real test; audit findings are registered as gaps. |
 | **TSK-024** | GAP-031 | Convert every cartridge secret to gateway injection (S1): header-based secrets first, then exchange routes for key files and form logins | `PENDING` | *None* | `packages/gateway/*`, `packages/control-plane/*`, `landing-zones/aws/*`, `SM-*/*` | No agent task definition carries a real secret value. |
 
 
@@ -304,6 +307,39 @@ compute:
 * AI sessions run the conformance tests before any `git commit` or `git push` (Claude Code hook in `.claude/settings.json`); a failure blocks the commit.
 * Deploys ship only commits on `main` with green CI, tagged by commit SHA (never `:latest`). A deploy's definition of done includes one model call proven, by its ledger row, to have gone through a gateway provider route.
 
+
+#### Invariant coverage (machine-checked)
+
+Every invariant in §6 has a row. `checked`: its tests would catch a violation. `partial`: its tests cover only what the Scope column says. `unchecked`: nothing tests it. A `partial` or `unchecked` row names the gap that owns closing it. `packages/conformance/src/coverage.test.ts` fails CI if an invariant has no row, a row names a test that does not exist or does not cite the invariant in a `describe`/`it` title, or a row that is not `checked` has no registered gap.
+
+| Invariant | Status | Tests | Scope / limits | Gap |
+| :--- | :--- | :--- | :--- | :--- |
+| E1 | `partial` | `packages/conformance/src/egress.test.ts` | Only NO_PROXY and loopback exceptions; not agent code or policy hosts that route around the gateway. | GAP-051 |
+| E2 | `checked` | `packages/conformance/src/egress.test.ts` | Every gateway path rejects a request without a run token. | — |
+| E3 | `checked` | `packages/conformance/src/egress.test.ts`, `packages/ledger/src/index.test.ts` | Every allowed path writes an attributed ledger row. | — |
+| E4 | `checked` | `packages/conformance/src/egress.test.ts` | Denied and isolated egress is refused on every path. | — |
+| E5 | `partial` | `packages/conformance/src/egress.test.ts` | Only that no landing zone tunnels to a model host; not agent code calling a provider directly. | GAP-051 |
+| E6 | `partial` | `packages/conformance/src/egress.test.ts`, `packages/hydrate/src/index.test.ts` | AWS landing zone only. | GAP-051 |
+| E7 | `partial` | `packages/control-plane/src/index.test.ts`, `packages/gateway/src/models.test.ts` | Run start and the models route only; not every path that changes a policy (GAP-048 slipped past). | GAP-051 |
+| S1 | `partial` | `packages/conformance/src/hygiene.test.ts`, `packages/control-plane/src/aws/gateway-held.test.ts`, `packages/gateway/src/gateway.test.ts` | Agent task definitions still inject secrets (baselined, GAP-031). | GAP-051 |
+| M1 | `unchecked` | — | — | GAP-051 |
+| M2 | `unchecked` | — | — | GAP-051 |
+| M3 | `unchecked` | — | — | GAP-051 |
+| M4 | `unchecked` | — | — | GAP-051 |
+| L1 | `unchecked` | — | — | GAP-051 |
+| L2 | `unchecked` | — | The platform repo still holds agent copies (GAP-034). | GAP-051 |
+| L3 | `partial` | `packages/control-plane/src/admission.e2e.test.ts` | Control-plane behaviour with a fake builder; not the real buildspec. | GAP-051 |
+| L4 | `partial` | `packages/control-plane/src/admission.e2e.test.ts` | As L3. | GAP-051 |
+| L5 | `unchecked` | — | — | GAP-051 |
+| L6 | `unchecked` | — | — | GAP-051 |
+| LG1 | `checked` | `packages/conformance/src/egress.test.ts`, `packages/ledger/src/lease.test.ts` | Stop-then-start deploy and the lease. | — |
+| LG2 | `checked` | `packages/ledger/src/segment.test.ts` | Archive and new segment, never repair. | — |
+| K1 | `partial` | `packages/conformance/src/keymaster.test.ts`, `packages/conformance/src/hygiene.test.ts`, `packages/contract/src/validate.test.ts` | Google routes and hard-coded credentials; infrastructure-created secrets were unchecked (GAP-050). | GAP-051 |
+| K2 | `unchecked` | — | Consent flow is tested in the control plane, but no test is tied to K2. | GAP-051 |
+| K3 | `partial` | `packages/keymaster/src/connections.test.ts` | Refresh and rotation with a fake provider. | GAP-051 |
+| K4 | `partial` | `packages/keymaster/src/connections.test.ts` | invalid_grant only. | GAP-051 |
+| K5 | `partial` | `packages/conformance/src/keymaster.test.ts`, `packages/keymaster/src/credentials.test.ts`, `packages/control-plane/src/credentials.e2e.test.ts` | Write-only path and statuses; not the dashboard. | GAP-051 |
+
 ### 6.8 Two Lifecycles: Platform and Agents
 * **L1 – Platform.** Each deployment target (AWS, GCP, Azure, private cloud, …) has its own ops repository, which pins an exact `agent-factory` commit and deploys it through that repository's CI, run manually on its `main`. `agent-factory` knows nothing about any particular deployment. A platform deploy never adds, removes, or changes agents.
 * **L2 – No agents in the platform repo.**
@@ -388,3 +424,4 @@ compute:
 | 2026-09-28 | Claude (Opus 5.5) | Locked TSK-038 (K5) and TSK-040 (GAP-048) for agent B, and TSK-039 (Notion through the gateway, first slice of TSK-024) for agent A, run in parallel with disjoint file scopes at the user's request. | TSK-038, TSK-039, TSK-040 |
 | 2026-09-28 | Claude (Opus 5.5) agent A | TSK-039 code: Notion through the gateway. `notion` route injects the shared `NOTION_API_KEY` (K5.5); the key is gateway-held (`provider_secret_names`), never put in an agent task definition or granted to an agent execution role, and skipped by pre-flight; agents get `NOTION_BASE_URL`; every `SM-*` Notion worker calls the route with its run token (no direct fallback, E1). Fixed a gateway credential fallback that could send `DISCORD_BOT_TOKEN` to another route's upstream (negative-tested). Baseline unchanged: other secrets still use `valueFrom` (GAP-031). | TSK-039, GAP-031 |
 | 2026-09-28 | Claude (Opus 5.5) agent B | Completed TSK-038 (K5 credential facilitation: typed declarations, catalog pending human review, write-only credentials API, dashboard Credentials view) and TSK-040 (re-registration keeps the policy); widened TSK-038's lock to `secrets-bind`, the ledger sanitizer and the control-plane test script. | TSK-038, TSK-040, GAP-046, GAP-048 |
+| 2026-09-29 | Claude (Opus 5.5) | With user confirmation: invariant coverage table (§6.7) enforced by conformance; AI protocol requires citing existing invariants and recorded decisions before proposing a rule; independent audit (a different model) of all repos. Registered GAP-051, locked TSK-042. | GAP-051, TSK-042 |
