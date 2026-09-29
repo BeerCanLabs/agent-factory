@@ -230,8 +230,9 @@ export function createGateway(opts: GatewayOptions): http.Server {
         name,
         name.toLowerCase(),
         name.toLowerCase().replace(/_/g, '-'),
+        // A per-agent secret ({agent}_X) falls back to the shared X. Never to another route's secret: that would
+        // send one service's credential to a different upstream.
         route.credential.secret.replace(/\$\{agent\}|\{agent\}[_-]?/gi, ''),
-        'DISCORD_BOT_TOKEN',
       ];
       for (const cand of candidates) {
         if (!cand) continue;

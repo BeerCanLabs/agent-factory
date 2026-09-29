@@ -7,6 +7,7 @@ import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { createGateway, type Approval, type ControlClient, type Policy, type RunContext } from './gateway.js';
 
 const REAL_KEY = 'sk-real-provider-key-0000';
+const NOTION_KEY = 'fake-notion-integration-key-0000';
 const tokens = new RunTokens('gateway-test-run-token-key-0123456789');
 
 type Seen = { path: string; headers: http.IncomingHttpHeaders; body: string };
@@ -90,12 +91,13 @@ describe('egress gateway', { concurrency: false }, () => {
         secretFetches++;
         if (name === 'ECHO_AGENT_DISCORD_BOT_TOKEN') return 'bot-agent-secret';
         if (name === 'DISCORD_BOT_TOKEN') return 'bot-fallback-secret';
+        if (name === 'NOTION_API_KEY') return NOTION_KEY;
         return name === 'PROVIDER_KEY' ? REAL_KEY : undefined;
       },
     },
   ];
 
-  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['anthropic', 'openai', 'tools', 'discord', 'google-calendar'], ...p });
+  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['anthropic', 'openai', 'tools', 'discord', 'google-calendar', 'notion', 'notion-unbound'], ...p });
   const settle = () => new Promise((r) => setTimeout(r, 20));
   const lastLlm = () => ledger.filter((e) => e.type === 'llm').at(-1);
 
@@ -110,7 +112,7 @@ describe('egress gateway', { concurrency: false }, () => {
           res.writeHead(upstreamStatus, { 'content-type': 'application/json' });
           return res.end('{"error":"nope"}');
         }
-        if (req.url?.startsWith('/discord') || req.url?.startsWith('/gcal')) {
+        if (req.url?.startsWith('/discord') || req.url?.startsWith('/gcal') || req.url?.startsWith('/notion')) {
           res.writeHead(200, { 'content-type': 'application/json' });
           return res.end(JSON.stringify({ ok: true }));
         }
@@ -146,6 +148,8 @@ describe('egress gateway', { concurrency: false }, () => {
         { id: 'tools', kind: 'mcp', upstream: `http://127.0.0.1:${upPort}/mcp`, credential: { secret: 'PROVIDER_KEY', header: 'authorization', format: 'Bearer {}' } },
         { id: 'discord', kind: 'http', upstream: `http://127.0.0.1:${upPort}/discord`, credential: { secret: '{agent}_DISCORD_BOT_TOKEN', header: 'authorization', format: 'Bot {}' } },
         { id: 'google-calendar', kind: 'http', upstream: `http://127.0.0.1:${upPort}/gcal` },
+        { id: 'notion', kind: 'http', upstream: `http://127.0.0.1:${upPort}/notion`, credential: { secret: 'NOTION_API_KEY', header: 'authorization', format: 'Bearer {}' } },
+        { id: 'notion-unbound', kind: 'http', upstream: `http://127.0.0.1:${upPort}/notion`, credential: { secret: 'NOTION_MISSING_KEY', header: 'authorization', format: 'Bearer {}' } },
         { id: 'forbidden', kind: 'llm', provider: 'anthropic', upstream: `http://127.0.0.1:${upPort}` },
       ],
       prices: { 'test-*': { inputPerMTok: 3, outputPerMTok: 15 } },
@@ -236,6 +240,33 @@ describe('egress gateway', { concurrency: false }, () => {
     assert.equal(res.status, 200);
     assert.equal(seen[0].headers.authorization, 'Bot bot-agent-secret');
     assert.equal(JSON.parse(seen[0].body).content, 'hello discord');
+  });
+
+  it('injects the shared Notion key in place of the run token, keeps Notion-Version, and ledgers the call (S1, K5.5)', async () => {
+    const res = await call(port, '/notion/v1/pages', { token, headers: { 'notion-version': '2022-06-28' }, body: { parent: {} } });
+    assert.equal(res.status, 200, res.text);
+    assert.equal(seen[0].path, '/notion/v1/pages');
+    assert.equal(seen[0].headers.authorization, `Bearer ${NOTION_KEY}`);
+    assert.equal(seen[0].headers['notion-version'], '2022-06-28');
+    assert.equal(JSON.stringify(seen[0].headers).includes(token), false, 'the run token never goes upstream');
+    await settle();
+    const row = ledger.find((e) => e.action === 'EGRESS' && e.route === 'notion');
+    assert.ok(row, `no EGRESS ledger row for notion: ${JSON.stringify(ledger)}`);
+    assert.equal(row.runId, ctx.run.runId);
+    assert.equal(JSON.stringify(ledger).includes(NOTION_KEY), false, 'the key is never ledgered');
+  });
+
+  it('refuses the Notion route outside policy without contacting Notion', async () => {
+    ctx.policy = policy({ routes: ['anthropic'] });
+    assert.equal((await call(port, '/notion/v1/pages', { token, body: {} })).status, 403);
+    assert.equal(seen.length, 0);
+  });
+
+  it('an unbound credential is refused, never replaced by another route\'s secret', async () => {
+    const res = await call(port, '/notion-unbound/v1/pages', { token, body: {} });
+    assert.equal(res.status, 503);
+    assert.equal(res.json().error, 'credential_unbound');
+    assert.equal(seen.length, 0, 'nothing is sent upstream (in particular no Discord token)');
   });
 
   it('forwards caller authorization for uncredentialed HTTP route when x-factory-run-token is presented', async () => {
