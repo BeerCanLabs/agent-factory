@@ -8,13 +8,15 @@ resource "aws_lb" "factory" {
   drop_invalid_header_fields = true
 }
 
-resource "aws_vpc_security_group_ingress_rule" "alb_http_redirect" {
+# §6.12 A1: only the identity-aware proxy reaches the load balancer (443, and 80 which only redirects).
+resource "aws_vpc_security_group_ingress_rule" "alb_from_proxy" {
+  for_each          = { for p in setproduct([443, 80], var.ingress_cidrs) : "${p[0]} ${p[1]}" => p }
   security_group_id = aws_security_group.alb.id
   ip_protocol       = "tcp"
-  from_port         = 80
-  to_port           = 80
-  cidr_ipv4         = "0.0.0.0/0"
-  description       = "redirect to HTTPS"
+  from_port         = each.value[0]
+  to_port           = each.value[0]
+  cidr_ipv4         = each.value[1]
+  description       = "identity-aware proxy"
 }
 
 resource "aws_lb_target_group" "control" {

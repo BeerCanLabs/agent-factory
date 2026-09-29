@@ -17,6 +17,15 @@ variable "environment" {
   default = "prod"
 }
 
+variable "ingress_cidrs" {
+  type        = list(string)
+  description = "The only IPv4 sources allowed to reach the load balancer (§6.12 A1): the identity-aware proxy's published ranges, e.g. https://www.cloudflare.com/ips-v4. Required; never 0.0.0.0/0."
+  validation {
+    condition     = length(var.ingress_cidrs) > 0 && alltrue([for c in var.ingress_cidrs : can(cidrhost(c, 0)) && !can(regex("/0$", c))])
+    error_message = "ingress_cidrs must be a non-empty list of IPv4 CIDRs, none of them /0: only the identity-aware proxy may reach the load balancer."
+  }
+}
+
 variable "certificate_arn" {
   type        = string
   description = "ACM certificate for the control plane's HTTPS listener. There is no plain-HTTP listener."
