@@ -27,6 +27,8 @@ describe('gatewayEnv', () => {
     assert.equal(env.GOOGLE_DRIVE_UPLOAD_BASE_URL, 'http://gw:8081/google-drive-upload');
     assert.equal(env.GOOGLE_HEALTH_BASE_URL, 'http://gw:8081/google-health');
     assert.equal(env.GOOGLE_STORAGE_BASE_URL, 'http://gw:8081/google-storage');
+    assert.equal(env.NOTION_BASE_URL, 'http://gw:8081/notion');
+    assert.equal(env.NOTION_API_KEY, undefined, 'agents never get the Notion key (S1)');
     assert.equal(env.ANTHROPIC_API_KEY, 'run-tok');
     assert.deepEqual(gatewayEnv({ FACTORY_RUN_TOKEN: 'x' }), {});
     assert.equal(gatewayEnv({ FACTORY_GATEWAY_URL: 'http://gw', FACTORY_RUN_TOKEN: 't', ANTHROPIC_BASE_URL: 'mine' }).ANTHROPIC_BASE_URL, undefined);

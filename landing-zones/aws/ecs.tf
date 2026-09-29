@@ -94,7 +94,8 @@ resource "aws_ecs_task_definition" "control_plane" {
         # Where factory-registered agents keep their minds and send logs (aws/ecs.ts registers their task definitions).
         { name = "FACTORY_MIND_BUCKET", value = aws_s3_bucket.mind.bucket },
         { name = "FACTORY_LOG_GROUP", value = aws_cloudwatch_log_group.factory.name },
-        # Provider keys are gateway-held (S1): the control plane is denied them and pre-flight never reads them.
+        # Gateway-held secrets (S1): the control plane is denied them, pre-flight never reads them, and they are
+        # never put in an agent task definition (aws/ecs.ts).
         { name = "FACTORY_GATEWAY_HELD_SECRETS", value = join(",", var.provider_secret_names) },
         { name = "DOORMAN_URL", value = local.doorman_url },
         { name = "FACTORY_EVENT_BUS", value = "eventbridge:${aws_cloudwatch_event_bus.factory.name}" },
@@ -348,7 +349,8 @@ resource "aws_ecs_task_definition" "agent" {
       { name = "FACTORY_URL", value = local.cp_url },
       { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
     ]
-    secrets          = [for name in var.agents[each.key].secrets : { name = name, valueFrom = "${local.secret_arn}/${name}" }]
+    # S1: a secret the gateway holds (provider_secret_names) is injected at egress and never reaches an agent container.
+    secrets          = [for name in var.agents[each.key].secrets : { name = name, valueFrom = "${local.secret_arn}/${name}" } if !contains(var.provider_secret_names, name)]
     logConfiguration = local.log["agent"]
   }])
 }

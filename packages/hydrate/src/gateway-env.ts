@@ -34,6 +34,9 @@ export function gatewayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     // /upload/storage/v1 both live under it.
     GOOGLE_HEALTH_BASE_URL: `${gw}/google-health`,
     GOOGLE_STORAGE_BASE_URL: `${gw}/google-storage`,
+    // S1: the gateway's `notion` route injects the shared Notion integration key; agents call
+    // `$NOTION_BASE_URL/v1/...` with their run token and never hold the key.
+    NOTION_BASE_URL: `${gw}/notion`,
   };
   // An image that set its own values keeps them; the gateway still rejects anything but a run token.
   for (const k of Object.keys(out)) if (env[k]) delete out[k];
