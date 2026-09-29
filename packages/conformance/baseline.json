@@ -5,5 +5,40 @@
     "detail": "valueFrom",
     "gap": "GAP-031",
     "why": "Agent task definitions inject real secret values into containers. Convert to gateway injection under TSK-024."
+  },
+  {
+    "rule": "K5",
+    "where": "landing-zones/aws/secrets.tf",
+    "detail": "random_password.generated",
+    "gap": "GAP-050",
+    "why": "Part (b): Terraform generates the platform's own tokens and keeps their values in state. Awaiting a design decision (Keymaster bootstrap; rotates every platform token)."
+  },
+  {
+    "rule": "K5",
+    "where": "landing-zones/aws/secrets.tf",
+    "detail": "aws_secretsmanager_secret.generated",
+    "gap": "GAP-050",
+    "why": "Part (b): Terraform generates the platform's own tokens and keeps their values in state. Awaiting a design decision (Keymaster bootstrap; rotates every platform token)."
+  },
+  {
+    "rule": "K5",
+    "where": "landing-zones/aws/secrets.tf",
+    "detail": "aws_secretsmanager_secret_version.generated",
+    "gap": "GAP-050",
+    "why": "Part (b): Terraform generates the platform's own tokens and keeps their values in state. Awaiting a design decision (Keymaster bootstrap; rotates every platform token)."
+  },
+  {
+    "rule": "K5",
+    "where": "landing-zones/aws/secrets.tf",
+    "detail": "aws_secretsmanager_secret.factory_tokens",
+    "gap": "GAP-050",
+    "why": "Part (b): Terraform generates the platform's own tokens and keeps their values in state. Awaiting a design decision (Keymaster bootstrap; rotates every platform token)."
+  },
+  {
+    "rule": "K5",
+    "where": "landing-zones/aws/secrets.tf",
+    "detail": "aws_secretsmanager_secret_version.factory_tokens",
+    "gap": "GAP-050",
+    "why": "Part (b): Terraform generates the platform's own tokens and keeps their values in state. Awaiting a design decision (Keymaster bootstrap; rotates every platform token)."
   }
 ]
