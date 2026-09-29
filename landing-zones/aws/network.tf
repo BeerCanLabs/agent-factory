@@ -94,19 +94,18 @@ resource "aws_security_group" "efs" {
 }
 
 locals {
-  # [sg, port, source sg, description]
+  # [sg, port, source sg or "vpc", description]. Load balancer ingress is in alb.tf (§6.12 A1).
   ingress = {
-    alb_https         = [aws_security_group.alb.id, 443, null, "HTTPS from anywhere"]
     cp_from_alb       = [aws_security_group.control_plane.id, 8088, aws_security_group.alb.id, "API via ALB"]
     garrison_from_alb = [aws_security_group.control_plane.id, 3000, aws_security_group.alb.id, "Garrison via ALB"]
     cp_from_cp        = [aws_security_group.control_plane.id, 8088, aws_security_group.control_plane.id, "control plane from garrison/internal"]
     cp_from_ag        = [aws_security_group.control_plane.id, 8088, aws_security_group.agents.id, "run input/result/heartbeat"]
-    cp_from_gw  = [aws_security_group.control_plane.id, 8088, aws_security_group.gateway.id, "gateway run context + ledger"]
-    cp_from_dm  = [aws_security_group.control_plane.id, 8088, aws_security_group.doorman.id, "Doorman wake/handoff"]
-    gw_from_ag  = [aws_security_group.gateway.id, 8081, aws_security_group.agents.id, "agent egress"]
-    dm_from_cp  = [aws_security_group.doorman.id, 8090, aws_security_group.control_plane.id, "presence"]
-    efs_from_cp = [aws_security_group.efs.id, 2049, aws_security_group.control_plane.id, "ledger volume"]
-    ep_from_vpc = [aws_security_group.endpoints.id, 443, "vpc", "AWS APIs via endpoints"]
+    cp_from_gw        = [aws_security_group.control_plane.id, 8088, aws_security_group.gateway.id, "gateway run context + ledger"]
+    cp_from_dm        = [aws_security_group.control_plane.id, 8088, aws_security_group.doorman.id, "Doorman wake/handoff"]
+    gw_from_ag        = [aws_security_group.gateway.id, 8081, aws_security_group.agents.id, "agent egress"]
+    dm_from_cp        = [aws_security_group.doorman.id, 8090, aws_security_group.control_plane.id, "presence"]
+    efs_from_cp       = [aws_security_group.efs.id, 2049, aws_security_group.control_plane.id, "ledger volume"]
+    ep_from_vpc       = [aws_security_group.endpoints.id, 443, "vpc", "AWS APIs via endpoints"]
   }
 }
 
@@ -116,8 +115,8 @@ resource "aws_vpc_security_group_ingress_rule" "rules" {
   ip_protocol                  = "tcp"
   from_port                    = each.value[1]
   to_port                      = each.value[1]
-  referenced_security_group_id = each.value[2] == null || each.value[2] == "vpc" ? null : each.value[2]
-  cidr_ipv4                    = each.value[2] == null ? "0.0.0.0/0" : each.value[2] == "vpc" ? aws_vpc.factory.cidr_block : null
+  referenced_security_group_id = each.value[2] == "vpc" ? null : each.value[2]
+  cidr_ipv4                    = each.value[2] == "vpc" ? aws_vpc.factory.cidr_block : null
   description                  = each.value[3]
 }
 
