@@ -1,6 +1,6 @@
 import { ECSClient, RegisterTaskDefinitionCommand } from "@aws-sdk/client-ecs";
 import { SecretsManagerClient, DescribeSecretCommand } from "@aws-sdk/client-secrets-manager";
-import { agentContainerSecrets } from "./gateway-held.js";
+import { agentContainerSecrets } from "./gatekeeper-held.js";
 
 const ecsClient = new ECSClient({});
 const smClient = new SecretsManagerClient({});
@@ -32,7 +32,7 @@ export async function resolveSecretArn(secretNameOrArn: string, fallbackArn?: st
  * 
  * @param agentId - The unique identifier for the agent
  * @param imageUri - The container image URI
- * @param secrets - Array of AWS Secrets Manager secret names or ARNs (gateway-held ones are dropped, S1)
+ * @param secrets - Array of AWS Secrets Manager secret names or ARNs (gatekeeper-held ones are dropped, S1)
  * @param taskRoleArn - ARN for the task role
  * @param execRoleArn - ARN for the task execution role
  */
@@ -48,7 +48,7 @@ export async function registerAgentTaskDefinition(
   const mindBucket = process.env.FACTORY_MIND_BUCKET;
   const logGroup = process.env.FACTORY_LOG_GROUP;
   if (!mindBucket || !logGroup) throw new Error('FACTORY_MIND_BUCKET and FACTORY_LOG_GROUP must be set to register agent compute');
-  // S1: gateway-held secrets (e.g. NOTION_API_KEY) are injected at egress by the gateway, never into the container.
+  // S1: gatekeeper-held secrets (e.g. NOTION_API_KEY) are injected at egress by the gatekeeper-egress, never into the container.
   const resolvedSecrets = await Promise.all(
     agentContainerSecrets(secrets).map(async (secretNameOrArn, i) => {
       const arn = await resolveSecretArn(secretNameOrArn, taskRoleArn);

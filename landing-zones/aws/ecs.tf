@@ -7,7 +7,7 @@ resource "aws_ecs_cluster" "factory" {
 }
 
 locals {
-  log = { for svc in ["control-plane", "gateway", "doorman", "otel", "agent"] : svc => {
+  log = { for svc in ["control-plane", "gatekeeper-egress", "gatekeeper-ingress", "otel", "agent"] : svc => {
     logDriver = "awslogs"
     options = {
       "awslogs-group"         = aws_cloudwatch_log_group.factory.name
@@ -94,14 +94,14 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_PUBLIC_URL", value = local.cp_url },
         # §6.11: where people's browsers reach the factory (OAuth consent callbacks and reconnect links).
         { name = "FACTORY_PUBLIC_BASE_URL", value = var.factory_public_base_url },
-        { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
+        { name = "FACTORY_GATEKEEPER_EGRESS_URL", value = local.gatekeeper_egress_url },
         # Where factory-registered agents keep their minds and send logs (aws/ecs.ts registers their task definitions).
         { name = "FACTORY_MIND_BUCKET", value = aws_s3_bucket.mind.bucket },
         { name = "FACTORY_LOG_GROUP", value = aws_cloudwatch_log_group.factory.name },
-        # Gateway-held secrets (S1): the control plane is denied them, pre-flight never reads them, and they are
+        # Gatekeeper-held secrets (S1): the control plane is denied them, pre-flight never reads them, and they are
         # never put in an agent task definition (aws/ecs.ts).
-        { name = "FACTORY_GATEWAY_HELD_SECRETS", value = join(",", local.held_secret_names) },
-        { name = "DOORMAN_URL", value = local.doorman_url },
+        { name = "FACTORY_GATEKEEPER_EGRESS_HELD_SECRETS", value = join(",", local.held_secret_names) },
+        { name = "GATEKEEPER_INGRESS_URL", value = local.gatekeeper_ingress_url },
         { name = "FACTORY_EVENT_BUS", value = "eventbridge:${aws_cloudwatch_event_bus.factory.name}" },
         { name = "MEMORY_STORE_DIR", value = "/tmp/mind" },
         { name = "MEMORY_EPHEMERAL_DIR", value = "/tmp/ephemeral" },
@@ -110,7 +110,7 @@ resource "aws_ecs_task_definition" "control_plane" {
       secrets = [
         { name = "FACTORY_TOKEN", valueFrom = local.secret["FACTORY_TOKEN"] },
         { name = "FACTORY_TOKENS", valueFrom = aws_secretsmanager_secret.factory_tokens.arn },
-        { name = "DOORMAN_TOKEN", valueFrom = local.secret["DOORMAN_TOKEN"] },
+        { name = "GATEKEEPER_INGRESS_TOKEN", valueFrom = local.secret["GATEKEEPER_INGRESS_TOKEN"] },
         { name = "FACTORY_RUN_TOKEN_KEY", valueFrom = local.secret["FACTORY_RUN_TOKEN_KEY"] },
         { name = "FACTORY_CALLBACK_SIGNING_KEY", valueFrom = local.secret["FACTORY_CALLBACK_SIGNING_KEY"] },
       ]
@@ -149,21 +149,21 @@ resource "aws_ecs_service" "control_plane" {
   depends_on = [aws_lb_listener.https, aws_efs_mount_target.ledger]
 }
 
-# ---- gateway: the only route out for agents --------------------------------------------------
+# ---- gatekeeper-egress: the only route out for agents --------------------------------------------------
 
-resource "aws_ecs_task_definition" "gateway" {
+resource "aws_ecs_task_definition" "gatekeeper_egress" {
   count                    = local.images_ready ? 1 : 0
-  family                   = "${local.name}-gateway"
+  family                   = "${local.name}-gatekeeper-egress"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = "512"
   memory                   = "1024"
   execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn            = aws_iam_role.gateway.arn
+  task_role_arn            = aws_iam_role.gatekeeper_egress.arn
   container_definitions = jsonencode([
     {
-      name         = "gateway"
-      image        = var.gateway_image
+      name         = "gatekeeper-egress"
+      image        = var.gatekeeper_egress_image
       essential    = true
       portMappings = [{ containerPort = 8081 }]
       environment = concat(local.otel_env, [
@@ -171,70 +171,70 @@ resource "aws_ecs_task_definition" "gateway" {
         { name = "FACTORY_URL", value = local.cp_url },
       { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
-        { name = "FACTORY_GATEWAY_ROUTES", value = local.gateway_routes },
-        { name = "FACTORY_PRICES", value = var.gateway_prices },
+        { name = "FACTORY_GATEKEEPER_EGRESS_ROUTES", value = local.gatekeeper_egress_routes },
+        { name = "FACTORY_PRICES", value = var.gatekeeper_egress_prices },
         { name = "FACTORY_MODEL_CATALOG", value = jsonencode({ for name, m in var.model_catalog : name => { for k, v in m : k => v if v != null } }) },
         { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
         { name = "FACTORY_TRACE_DIR", value = "/tmp/traces" },
       ])
       secrets = [
-        { name = "FACTORY_GATEWAY_TOKEN", valueFrom = local.secret["GATEWAY_TOKEN"] },
+        { name = "FACTORY_GATEKEEPER_EGRESS_TOKEN", valueFrom = local.secret["GATEKEEPER_EGRESS_TOKEN"] },
         { name = "FACTORY_RUN_TOKEN_KEY", valueFrom = local.secret["FACTORY_RUN_TOKEN_KEY"] },
       ]
-      logConfiguration = local.log["gateway"]
+      logConfiguration = local.log["gatekeeper-egress"]
     },
     local.otel,
   ])
 }
 
-resource "aws_ecs_service" "gateway" {
+resource "aws_ecs_service" "gatekeeper_egress" {
   count           = local.images_ready ? 1 : 0
-  name            = "gateway"
+  name            = "gatekeeper-egress"
   cluster         = aws_ecs_cluster.factory.id
-  task_definition = aws_ecs_task_definition.gateway[0].arn
-  desired_count   = var.gateway_count
+  task_definition = aws_ecs_task_definition.gatekeeper_egress[0].arn
+  desired_count   = var.gatekeeper_egress_count
   capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"
     weight            = 1
   }
   network_configuration {
     subnets          = aws_subnet.service[*].id
-    security_groups  = [aws_security_group.gateway.id]
+    security_groups  = [aws_security_group.gatekeeper_egress.id]
     assign_public_ip = true
   }
   service_registries {
-    registry_arn = aws_service_discovery_service.svc["gateway"].arn
+    registry_arn = aws_service_discovery_service.svc["gatekeeper-egress"].arn
   }
 }
 
-# ---- doorman ---------------------------------------------------------------------------------
+# ---- gatekeeper-ingress ---------------------------------------------------------------------------------
 
-resource "aws_iam_role" "doorman" {
-  name               = "${local.name}-doorman"
+resource "aws_iam_role" "gatekeeper_ingress" {
+  name               = "${local.name}-gatekeeper-ingress"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
 }
 
-resource "aws_iam_role_policy" "doorman" {
+resource "aws_iam_role_policy" "gatekeeper_ingress" {
   name = "discord-token-only"
-  role = aws_iam_role.doorman.id
+  role = aws_iam_role.gatekeeper_ingress.id
   policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = "${local.secret_arn}/*DISCORD_BOT_TOKEN*" }]
   })
 }
 
-resource "aws_ecs_task_definition" "doorman" {
+resource "aws_ecs_task_definition" "gatekeeper_ingress" {
   count                    = local.images_ready ? 1 : 0
-  family                   = "${local.name}-doorman"
+  family                   = "${local.name}-gatekeeper-ingress"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = "256"
   memory                   = "512"
   execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn            = aws_iam_role.doorman.arn
+  task_role_arn            = aws_iam_role.gatekeeper_ingress.arn
   container_definitions = jsonencode([{
-    name         = "doorman"
-    image        = var.doorman_image
+    name         = "gatekeeper-ingress"
+    image        = var.gatekeeper_ingress_image
     essential    = true
     portMappings = [{ containerPort = 8090 }]
     environment = [
@@ -244,18 +244,18 @@ resource "aws_ecs_task_definition" "doorman" {
       { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
     ]
     secrets = [
-      { name = "FACTORY_TOKEN", valueFrom = local.secret["DOORMAN_OPERATOR_TOKEN"] },
-      { name = "DOORMAN_TOKEN", valueFrom = local.secret["DOORMAN_TOKEN"] },
+      { name = "FACTORY_TOKEN", valueFrom = local.secret["GATEKEEPER_INGRESS_OPERATOR_TOKEN"] },
+      { name = "GATEKEEPER_INGRESS_TOKEN", valueFrom = local.secret["GATEKEEPER_INGRESS_TOKEN"] },
     ]
-    logConfiguration = local.log["doorman"]
+    logConfiguration = local.log["gatekeeper-ingress"]
   }])
 }
 
-resource "aws_ecs_service" "doorman" {
+resource "aws_ecs_service" "gatekeeper_ingress" {
   count           = local.images_ready ? 1 : 0
-  name            = "doorman"
+  name            = "gatekeeper-ingress"
   cluster         = aws_ecs_cluster.factory.id
-  task_definition = aws_ecs_task_definition.doorman[0].arn
+  task_definition = aws_ecs_task_definition.gatekeeper_ingress[0].arn
   desired_count   = 1
   capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"
@@ -263,11 +263,11 @@ resource "aws_ecs_service" "doorman" {
   }
   network_configuration {
     subnets          = aws_subnet.service[*].id
-    security_groups  = [aws_security_group.doorman.id]
+    security_groups  = [aws_security_group.gatekeeper_ingress.id]
     assign_public_ip = true
   }
   service_registries {
-    registry_arn = aws_service_discovery_service.svc["doorman"].arn
+    registry_arn = aws_service_discovery_service.svc["gatekeeper-ingress"].arn
   }
 }
 
@@ -349,11 +349,11 @@ resource "aws_ecs_task_definition" "agent" {
       { name = "MEMORY_DIR", value = "/tmp/mind" },
       { name = "MEMORY_PREFIX", value = each.key },
       { name = "MEMORY_STORE_URI", value = "s3://${aws_s3_bucket.mind.bucket}" },
-      { name = "FACTORY_GATEWAY_URL", value = local.gateway_url },
+      { name = "FACTORY_GATEKEEPER_EGRESS_URL", value = local.gatekeeper_egress_url },
       { name = "FACTORY_URL", value = local.cp_url },
       { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
     ]
-    # S1: a secret the gateway holds (provider_secret_names) is injected at egress and never reaches an agent container.
+    # S1: a secret the gatekeeper-egress holds (provider_secret_names) is injected at egress and never reaches an agent container.
     secrets          = [for name in var.agents[each.key].secrets : { name = name, valueFrom = "${local.secret_arn}/${name}" } if !contains(local.held_secret_names, name)]
     logConfiguration = local.log["agent"]
   }])

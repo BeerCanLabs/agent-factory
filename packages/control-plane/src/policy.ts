@@ -99,7 +99,7 @@ function emptyWindow(): SpendWindow {
   return { usd: 0, calls: 0, inputTokens: 0, outputTokens: 0, byModel: {} };
 }
 
-/** The metered fields of a gateway `llm` ledger row. */
+/** The metered fields of a gatekeeper-egress `llm` ledger row. */
 export function spendDetail(e: { model?: unknown; inputTokens?: unknown; outputTokens?: unknown }): SpendDetail {
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined);
   return {
@@ -109,7 +109,7 @@ export function spendDetail(e: { model?: unknown; inputTokens?: unknown; outputT
   };
 }
 
-/** USD spend per agent, derived from gateway-attested `llm` ledger rows. */
+/** USD spend per agent, derived from gatekeeper-egress-attested `llm` ledger rows. */
 export class SpendTracker {
   private readonly rows: Array<{ agentId: string; runId?: string; ts: string; usd: number } & SpendDetail> = [];
 

@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@beercanlabs/factory-auth": "0.1.0",
-    "@beercanlabs/factory-gateway": "0.1.0",
+    "@beercanlabs/factory-gatekeeper-egress": "0.1.0",
     "@beercanlabs/factory-hydrate": "0.1.0"
   },
   "devDependencies": {

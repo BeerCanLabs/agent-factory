@@ -184,7 +184,7 @@ export const benchSchema = z
 
 /**
  * A connection the agent needs (§6.11 K1): provider plus scopes. A request shown at admission; the Keymaster holds
- * the credential and the gateway injects it. `google` is a person's OAuth grant; `google-service-account` is the
+ * the credential and the gatekeeper-egress injects it. `google` is a person's OAuth grant; `google-service-account` is the
  * factory's app credential.
  */
 export const connectionSchema = z

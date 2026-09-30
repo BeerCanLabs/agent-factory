@@ -13,7 +13,7 @@ triggers:
 secrets:
   requires:
     - name: HIGGINS_DISCORD_BOT_TOKEN
-      description: "Discord Bot Token for Higgins Doorman presence and butler commands"
+      description: "Discord Bot Token for Higgins gatekeeper-ingress presence and butler commands"
     - name: MOTION_API_KEY
       description: "Motion API key for Stephanie's task and schedule management"
     - name: CC_API_TOKEN

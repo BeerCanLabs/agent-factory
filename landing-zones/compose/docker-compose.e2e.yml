@@ -6,9 +6,9 @@ services:
     volumes:
       - ./e2e/mock-provider.mjs:/mock/mock-provider.mjs:ro
     networks: [egress]
-  gateway:
+  gatekeeper-egress:
     volumes:
-      - ./e2e/gateway.json:/config/gateway.json:ro
+      - ./e2e/gatekeeper-egress.json:/config/gatekeeper-egress.json:ro
       - ./e2e/secrets.env:/run/factory.secrets:ro
     depends_on: [mock-provider]
   control-plane:

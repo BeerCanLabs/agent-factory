@@ -235,26 +235,26 @@ describe('KPF 1: Agent Registry & Lifecycle E2E', { concurrency: false }, () => 
   });
 
   it('exempts built-in system agents from budgets and kill switch constraints', async () => {
-    // 1. Query doorman via GET /api/v1/registry/agents/doorman
-    const getRes = await http_(cpPort, '/api/v1/registry/agents/doorman', 'GET', ADMIN);
+    // 1. Query gatekeeper-ingress via GET /api/v1/registry/agents/gatekeeper-ingress
+    const getRes = await http_(cpPort, '/api/v1/registry/agents/gatekeeper-ingress', 'GET', ADMIN);
     assert.equal(getRes.status, 200);
-    assert.equal(getRes.body.id, 'doorman');
+    assert.equal(getRes.body.id, 'gatekeeper-ingress');
     assert.equal(getRes.body.isBuiltin, true);
     assert.equal(getRes.body.category, 'builtin');
     assert.equal(getRes.body.budgetExempt, true);
     assert.equal(getRes.body.spendLimitUsd, null);
     assert.equal(getRes.body.spendLimitMonthlyUsd, null);
 
-    // 2. Reject budget assignment via PUT /api/v1/registry/agents/doorman/budget
-    const regBudgetRes = await http_(cpPort, '/api/v1/registry/agents/doorman/budget', 'PUT', ADMIN, {
+    // 2. Reject budget assignment via PUT /api/v1/registry/agents/gatekeeper-ingress/budget
+    const regBudgetRes = await http_(cpPort, '/api/v1/registry/agents/gatekeeper-ingress/budget', 'PUT', ADMIN, {
       spendLimitUsd: 100,
       period: 'monthly',
     });
     assert.equal(regBudgetRes.status, 400);
     assert.equal(regBudgetRes.body.error, 'builtin_agents_exempt_from_budget');
 
-    // 3. Reject budget assignment via PUT /api/v1/agents/doorman/policy
-    const policyBudgetRes = await http_(cpPort, '/api/v1/agents/doorman/policy', 'PUT', ADMIN, {
+    // 3. Reject budget assignment via PUT /api/v1/agents/gatekeeper-ingress/policy
+    const policyBudgetRes = await http_(cpPort, '/api/v1/agents/gatekeeper-ingress/policy', 'PUT', ADMIN, {
       routes: ['openai'],
       budgetUsd: { perDay: 50 },
     });
@@ -262,7 +262,7 @@ describe('KPF 1: Agent Registry & Lifecycle E2E', { concurrency: false }, () => 
     assert.equal(policyBudgetRes.body.error, 'builtin_agents_exempt_from_budget');
 
     // 4. Reject killswitch PAUSE or ISOLATE on built-in core actors
-    const isolateRes = await http_(cpPort, '/api/v1/agents/doorman/isolate', 'POST', ADMIN);
+    const isolateRes = await http_(cpPort, '/api/v1/agents/gatekeeper-ingress/isolate', 'POST', ADMIN);
     assert.equal(isolateRes.status, 400);
     assert.equal(isolateRes.body.error, 'builtin_agents_exempt_from_killswitch');
   });

@@ -3,12 +3,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { RunTokens } from '@beercanlabs/factory-auth';
-import { createGateway, type ControlClient, type Route } from '@beercanlabs/factory-gateway';
+import { createGatekeeperEgress, type ControlClient, type Route } from '@beercanlabs/factory-gatekeeper-egress';
 import { expectOnlyBaselined, files, read } from './support.js';
 
 const GOOGLE_HOST = /(^|\.)(googleapis\.com|google\.com)$/;
 
-/** Every gateway route object declared anywhere in the landing zones (JSON, or JSON escaped inside an HCL string). */
+/** Every gatekeeper-egress route object declared anywhere in the landing zones (JSON, or JSON escaped inside an HCL string). */
 function landingZoneRoutes(): Array<{ where: string; route: Route }> {
   const out: Array<{ where: string; route: Route }> = [];
   for (const f of files('landing-zones', (p) => /\.(tf|json|ya?ml|env)$/.test(p))) {
@@ -55,7 +55,7 @@ describe('K1 the Keymaster owns OAuth grants and app secrets', () => {
     for (const id of ['google-calendar', 'google-gmail', 'google-drive', 'google-health', 'google-storage']) assert.ok(ids.includes(id), `missing route ${id}`);
   });
 
-  it('no gateway route to a Google API carries a static credential; API routes use a Keymaster connection', () => {
+  it('no gatekeeper-egress route to a Google API carries a static credential; API routes use a Keymaster connection', () => {
     const google = landingZoneRoutes().filter((r) => GOOGLE_HOST.test(hostOf(r.route.upstream)));
     assert.ok(google.length > 0);
     const withCredential = google.filter((r) => r.route.credential).map((r) => `${r.where}: ${r.route.id}`);
@@ -65,10 +65,10 @@ describe('K1 the Keymaster owns OAuth grants and app secrets', () => {
     assert.deepEqual(noConnection, []);
   });
 
-  it('the gateway refuses a route that mixes a connection with a static credential', () => {
+  it('the gatekeeper-egress refuses a route that mixes a connection with a static credential', () => {
     const control = {} as ControlClient;
     assert.throws(() =>
-      createGateway({
+      createGatekeeperEgress({
         routes: [{ id: 'g', kind: 'http', upstream: 'https://www.googleapis.com', connection: 'google', credential: { secret: 'X', header: 'authorization' } }],
         prices: {},
         runTokens: new RunTokens('conformance-run-token-key-0123456789'),
@@ -91,8 +91,8 @@ describe('K1 the Keymaster owns OAuth grants and app secrets', () => {
     assert.deepEqual(offenders, []);
   });
 
-  it('the gateway role cannot read grants in the AWS landing zone', () => {
-    const gw = read('landing-zones/aws/iam.tf').match(/resource "aws_iam_role_policy" "gateway" \{[\s\S]*?\n\}/)?.[0] ?? '';
+  it('the gatekeeper-egress role cannot read grants in the AWS landing zone', () => {
+    const gw = read('landing-zones/aws/iam.tf').match(/resource "aws_iam_role_policy" "gatekeeper_egress" \{[\s\S]*?\n\}/)?.[0] ?? '';
     assert.match(gw, /Sid\s*=\s*"NeverKeymasterGrants"[\s\S]*?Effect\s*=\s*"Deny"[\s\S]*?keymaster_grant_arns/);
   });
 });

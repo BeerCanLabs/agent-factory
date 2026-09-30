@@ -9,7 +9,7 @@ The solution is to decouple the two. The agent becomes a stateless "Cartridge" o
 But how do you actually build an execution engine that governs an agent without crippling its speed?
 
 ### The Latency Death Spiral
-The strongest argument against strict governance is latency. If your Cartridge has to make a network round-trip to a centralized corporate API Gateway for every single step of its reasoning loop (Think -> Tool -> Parse -> Think), the agent will crawl to a halt. A 5-step loop that takes 2 seconds in a monolith will take 30 seconds behind a traditional API gateway.
+The strongest argument against strict governance is latency. If your Cartridge has to make a network round-trip to a centralized corporate API Gateway for every single step of its reasoning loop (Think -> Tool -> Parse -> Think), the agent will crawl to a halt. A 5-step loop that takes 2 seconds in a monolith will take 30 seconds behind a traditional API gatekeeper-egress.
 
 You can't govern agents using 2015-era API Gateway patterns. You have to build a modern Factory. 
 

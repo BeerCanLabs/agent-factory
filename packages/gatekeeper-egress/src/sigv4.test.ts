@@ -38,7 +38,7 @@ describe('SigV4', () => {
   });
 });
 
-describe('gateway AWS credentials', () => {
+describe('gatekeeper-egress AWS credentials', () => {
   it('uses static env credentials when present', async () => {
     const creds = await awsCredentialsFromEnv({ AWS_ACCESS_KEY_ID: 'AK', AWS_SECRET_ACCESS_KEY: 'SK', AWS_SESSION_TOKEN: 'ST' }, async () => {
       throw new Error('must not call the endpoint');

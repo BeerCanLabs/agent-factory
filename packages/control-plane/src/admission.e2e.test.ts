@@ -156,9 +156,9 @@ describe('§6.8 L3/L4: pinned registration, admission build, and SHA-tagged depl
     assert.equal(cred.status, 400);
     assert.equal(cred.body.error, 'invalid_repo');
     assert.equal(checkRepoUrl('--upload-pack=touch /tmp/x'), undefined);
-    const builtin = await call('/api/v1/registry/agents', 'POST', { id: 'doorman', repo: REPO, commit: C1 });
+    const builtin = await call('/api/v1/registry/agents', 'POST', { id: 'gatekeeper-ingress', repo: REPO, commit: C1 });
     assert.equal(builtin.status, 409);
-    assert.equal(state.agents.get('doorman')?.name, 'Doorman');
+    assert.equal(state.agents.get('gatekeeper-ingress')?.name, 'gatekeeper-ingress');
   });
 
   it('deploy without the agent’s own policy (or with no routes) is refused 409 policy_required', async () => {

@@ -1,7 +1,7 @@
 # Two tiers.
-#   service subnets (public): ALB, control plane, gateway, Doorman. Internet via the IGW.
+#   service subnets (public): ALB, control plane, gatekeeper-egress, gatekeeper-ingress. Internet via the IGW.
 #   agent subnets (private):  agent tasks only. NO NAT, NO IGW route. Their reachable set is the
-#                             control plane, the gateway, and account-locked AWS endpoints needed to
+#                             control plane, the gatekeeper-egress, and account-locked AWS endpoints needed to
 #                             start a task (ECR, S3 layers + mind, Secrets Manager, Logs).
 resource "aws_vpc" "factory" {
   cidr_block           = "10.42.0.0/16"
@@ -68,13 +68,13 @@ resource "aws_security_group" "control_plane" {
   vpc_id = aws_vpc.factory.id
 }
 
-resource "aws_security_group" "gateway" {
-  name   = "${local.name}-gateway"
+resource "aws_security_group" "gatekeeper_egress" {
+  name   = "${local.name}-gatekeeper-egress"
   vpc_id = aws_vpc.factory.id
 }
 
-resource "aws_security_group" "doorman" {
-  name   = "${local.name}-doorman"
+resource "aws_security_group" "gatekeeper_ingress" {
+  name   = "${local.name}-gatekeeper-ingress"
   vpc_id = aws_vpc.factory.id
 }
 
@@ -100,10 +100,10 @@ locals {
     garrison_from_alb = [aws_security_group.control_plane.id, 3000, aws_security_group.alb.id, "Garrison via ALB"]
     cp_from_cp        = [aws_security_group.control_plane.id, 8088, aws_security_group.control_plane.id, "control plane from garrison/internal"]
     cp_from_ag        = [aws_security_group.control_plane.id, 8088, aws_security_group.agents.id, "run input/result/heartbeat"]
-    cp_from_gw        = [aws_security_group.control_plane.id, 8088, aws_security_group.gateway.id, "gateway run context + ledger"]
-    cp_from_dm        = [aws_security_group.control_plane.id, 8088, aws_security_group.doorman.id, "Doorman wake/handoff"]
-    gw_from_ag        = [aws_security_group.gateway.id, 8081, aws_security_group.agents.id, "agent egress"]
-    dm_from_cp        = [aws_security_group.doorman.id, 8090, aws_security_group.control_plane.id, "presence"]
+    cp_from_gw        = [aws_security_group.control_plane.id, 8088, aws_security_group.gatekeeper_egress.id, "gatekeeper-egress run context + ledger"]
+    cp_from_dm        = [aws_security_group.control_plane.id, 8088, aws_security_group.gatekeeper_ingress.id, "gatekeeper-ingress wake/handoff"]
+    gw_from_ag        = [aws_security_group.gatekeeper_egress.id, 8081, aws_security_group.agents.id, "agent egress"]
+    dm_from_cp        = [aws_security_group.gatekeeper_ingress.id, 8090, aws_security_group.control_plane.id, "presence"]
     efs_from_cp       = [aws_security_group.efs.id, 2049, aws_security_group.control_plane.id, "ledger volume"]
     ep_from_vpc       = [aws_security_group.endpoints.id, 443, "vpc", "AWS APIs via endpoints"]
   }
@@ -122,13 +122,13 @@ resource "aws_vpc_security_group_ingress_rule" "rules" {
 
 # Services talk to the internet (providers, AWS APIs, callbacks, Discord).
 resource "aws_vpc_security_group_egress_rule" "service_out" {
-  for_each          = { cp = aws_security_group.control_plane.id, gw = aws_security_group.gateway.id, dm = aws_security_group.doorman.id, alb = aws_security_group.alb.id }
+  for_each          = { cp = aws_security_group.control_plane.id, gw = aws_security_group.gatekeeper_egress.id, dm = aws_security_group.gatekeeper_ingress.id, alb = aws_security_group.alb.id }
   security_group_id = each.value
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
 }
 
-# Agents: only the control plane, the gateway, the endpoints, and S3 (mind + ECR layers).
+# Agents: only the control plane, the gatekeeper-egress, the endpoints, and S3 (mind + ECR layers).
 resource "aws_vpc_security_group_egress_rule" "agents_to_cp" {
   security_group_id            = aws_security_group.agents.id
   ip_protocol                  = "tcp"
@@ -137,12 +137,12 @@ resource "aws_vpc_security_group_egress_rule" "agents_to_cp" {
   referenced_security_group_id = aws_security_group.control_plane.id
 }
 
-resource "aws_vpc_security_group_egress_rule" "agents_to_gateway" {
+resource "aws_vpc_security_group_egress_rule" "agents_to_gatekeeper_egress" {
   security_group_id            = aws_security_group.agents.id
   ip_protocol                  = "tcp"
   from_port                    = 8081
   to_port                      = 8081
-  referenced_security_group_id = aws_security_group.gateway.id
+  referenced_security_group_id = aws_security_group.gatekeeper_egress.id
 }
 
 resource "aws_vpc_security_group_egress_rule" "agents_to_endpoints" {
@@ -248,7 +248,7 @@ resource "aws_service_discovery_private_dns_namespace" "factory" {
 }
 
 resource "aws_service_discovery_service" "svc" {
-  for_each = toset(["control-plane", "gateway", "doorman", "garrison"])
+  for_each = toset(["control-plane", "gatekeeper-egress", "gatekeeper-ingress", "garrison"])
   name     = each.key
   dns_config {
     namespace_id   = aws_service_discovery_private_dns_namespace.factory.id

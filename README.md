@@ -10,7 +10,7 @@ Canonical architecture: [POSITION_PAPER.md](./POSITION_PAPER.md).
 
 ## What this is
 
-A **harness**: wake from zero, bind secrets (names only), hydrate mind from object storage, intercept LLM/MCP egress, append-only ledger, MCP/HTTP console. Discord is an **optional mailbox** (Doorman). You do not need a Discord app to deploy the factory. You do not install Hermes or OpenClaw.
+A **harness**: wake from zero, bind secrets (names only), hydrate mind from object storage, intercept LLM/MCP egress, append-only ledger, MCP/HTTP console. Discord is an **optional mailbox** (gatekeeper-ingress). You do not need a Discord app to deploy the factory. You do not install Hermes or OpenClaw.
 
 Landing zone is a **Draftsman interview**: pick a baseline pattern in `.draft/sdp.yaml`, then bind Azure, AWS, GCP, or Compose. See `landing-zones/PATTERNS.md`. `landing-zones/aws` is one bind (orchestrated-tasks × AWS), not the factory.
 
@@ -20,8 +20,8 @@ Landing zone is a **Draftsman interview**: pick a baseline pattern in `.draft/sd
 
 | Always | Optional |
 |---|---|
-| Control plane REST + MCP | Discord (Doorman holds Gateway when a cartridge has a `discord` surface **and** a bot token is bound) |
-| Gateway intercept + kill-switch | Garrison or any other UI |
+| Control plane REST + MCP | Discord (gatekeeper-ingress holds gatekeeper-egress when a cartridge has a `discord` surface **and** a bot token is bound) |
+| gatekeeper-egress intercept + kill-switch | Garrison or any other UI |
 | Secret binding, S3/volume hydrate, ledger | Prompt traces in mind (`FACTORY_TRACE_PROMPTS`) |
 | Auth: JWKS-verified OIDC (Entra / Cloudflare / Google) + named service tokens, RBAC | |
 
@@ -50,7 +50,7 @@ docs/CARTRIDGE_DEVELOPER_GUIDE.md # Developer tutorial for building cartridges
 DESIGN_AUTHORITY.md               # SSOT architecture & AI locking board
 AGENTS.md                         # implementing-AI playbook
 POSITION_PAPER.md                 # Core manifesto
-packages/…                        # kernel (contract, control-plane, gateway, hydrate, etc.)
+packages/…                        # kernel (contract, control-plane, gatekeeper-egress, hydrate, etc.)
 agents/                           # example cartridges (starter-python, echo-agent, etc.)
 landing-zones/                    # PATTERNS.md + aws/azure/gcp/compose binds
 .draft/sdp.yaml                   # three baseline patterns + interview slots

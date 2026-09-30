@@ -1,5 +1,5 @@
 {
-  "name": "@beercanlabs/factory-doorman",
+  "name": "@beercanlabs/factory-gatekeeper-ingress",
   "version": "0.1.0",
   "private": true,
   "type": "module",

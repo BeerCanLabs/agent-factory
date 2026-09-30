@@ -19,12 +19,12 @@ variable "control_plane_image" {
   default     = ""
 }
 
-variable "gateway_image" {
+variable "gatekeeper_egress_image" {
   type    = string
   default = ""
 }
 
-variable "doorman_image" {
+variable "gatekeeper_ingress_image" {
   type    = string
   default = ""
 }
@@ -41,13 +41,13 @@ variable "agents" {
 }
 
 variable "provider_secret_names" {
-  description = "Names of provider API-key secrets in Secret Manager (e.g. ANTHROPIC_API_KEY). Only the gateway SA reads these."
+  description = "Names of provider API-key secrets in Secret Manager (e.g. ANTHROPIC_API_KEY). Only the gatekeeper-egress SA reads these."
   type        = list(string)
   default     = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
 }
 
 variable "discord_secret_name" {
-  description = "Name of the Discord bot token secret in Secret Manager. Leave empty to deploy Doorman in sleeping mode (no Discord app required at factory build)."
+  description = "Name of the Discord bot token secret in Secret Manager. Leave empty to deploy gatekeeper-ingress in sleeping mode (no Discord app required at factory build)."
   type        = string
   default     = ""
 }
@@ -78,13 +78,13 @@ variable "ledger_retention_days" {
   default = 365
 }
 
-variable "gateway_routes" {
-  description = "JSON or YAML gateway route config passed to FACTORY_GATEWAY_ROUTES."
+variable "gatekeeper_egress_routes" {
+  description = "JSON or YAML gatekeeper-egress route config passed to FACTORY_GATEKEEPER_EGRESS_ROUTES."
   type        = string
   default     = "[{\"id\":\"anthropic\",\"kind\":\"llm\",\"provider\":\"anthropic\",\"upstream\":\"https://api.anthropic.com\",\"credential\":{\"secret\":\"ANTHROPIC_API_KEY\",\"header\":\"x-api-key\"}},{\"id\":\"openai\",\"kind\":\"llm\",\"provider\":\"openai\",\"upstream\":\"https://api.openai.com\",\"credential\":{\"secret\":\"OPENAI_API_KEY\",\"header\":\"authorization\",\"format\":\"Bearer {}\"}},{\"id\":\"discord\",\"kind\":\"http\",\"upstream\":\"https://discord.com/api/v10\",\"credential\":{\"secret\":\"{agent}_DISCORD_BOT_TOKEN\",\"header\":\"authorization\",\"format\":\"Bot {}\"}},{\"id\":\"google-calendar\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/calendar/v3\",\"connection\":\"google\"},{\"id\":\"google-oauth\",\"kind\":\"http\",\"upstream\":\"https://oauth2.googleapis.com\"},{\"id\":\"google-gmail\",\"kind\":\"http\",\"upstream\":\"https://gmail.googleapis.com\",\"connection\":\"google\"},{\"id\":\"google-drive\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/drive/v3\",\"connection\":\"google\"}]"
 }
 
-variable "gateway_prices" {
+variable "gatekeeper_egress_prices" {
   description = "JSON price map for budget tracking."
   type        = string
   default     = ""

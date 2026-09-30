@@ -28,7 +28,7 @@ export type Run = {
   createdAt: string;
   updatedAt: string;
   input?: unknown;
-  /** Pins every LLM call in this run to one model (enforced by the gateway). */
+  /** Pins every LLM call in this run to one model (enforced by the gatekeeper-egress). */
   model?: string;
   callbackUrl?: string;
   taskHandle?: string;

@@ -35,8 +35,8 @@ resource "google_cloud_run_v2_service" "agent" {
       name  = "worker"
       image = var.worker_image
       env {
-        name  = "FACTORY_GATEWAY_URL"
-        value = var.gateway_url
+        name  = "FACTORY_GATEKEEPER_EGRESS_URL"
+        value = var.gatekeeper_egress_url
       }
       env {
         name  = "MEMORY_STORE_URI"

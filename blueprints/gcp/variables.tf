@@ -12,9 +12,9 @@ variable "worker_image" {
   type = string
 }
 
-variable "gateway_url" {
+variable "gatekeeper_egress_url" {
   type        = string
-  description = "Internal URL of the fleet egress gateway (the only egress for agents)"
+  description = "Internal URL of the fleet gatekeeper-egress (the only egress for agents)"
 }
 
 variable "secret_ids" {

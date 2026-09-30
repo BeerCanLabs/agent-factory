@@ -16,7 +16,7 @@ jobs:
       - run: npm run validate
 
   compose-proof:
-    # Proves the paper's claims against real containers: network isolation, run tokens, gateway
+    # Proves the paper's claims against real containers: network isolation, run tokens, gatekeeper-egress
     # metering and budget, harness, kill switch, ledger chain + WORM anchor, tamper refusal.
     needs: test
     runs-on: ubuntu-latest
@@ -27,7 +27,7 @@ jobs:
       - name: Build production images
         run: |
           set -e
-          for spec in packages/control-plane/Dockerfile: packages/gateway/Dockerfile: packages/doorman/Dockerfile: \
+          for spec in packages/control-plane/Dockerfile: packages/gatekeeper-egress/Dockerfile: packages/gatekeeper-ingress/Dockerfile: \
                       packages/console/Dockerfile: runtimes/generic/Dockerfile:examples/echo-agent \
                       runtimes/generic/Dockerfile:examples/llm-summarizer; do
             f="${spec%%:*}"; c="${spec#*:}"

@@ -12,7 +12,7 @@ A working factory on **whatever landing zone they actually have** (new Azure sub
 
 - Control plane REST + MCP up and authenticated
 - Agents wake from zero; shim in the same unit; mind on object storage; ledger metadata+hash
-- Doorman deployed **sleeping** (no Discord app required)
+- gatekeeper-ingress deployed **sleeping** (no Discord app required)
 - Kernel from this repo; cloud products from the pattern table, not from a hardcoded AWS module
 
 ## Interview (Draftsman baseline)
@@ -35,7 +35,7 @@ Example: Azure + serverless-containers → Container Apps + Blob + Key Vault + E
 
 ## Kernel (always)
 
-`packages/contract`, `auth`, `secrets-bind`, `hydrate`, `ledger`, `control-plane`, `doorman`, `telemetry/`. Example cartridges under `agents/` are not factory modules.
+`packages/contract`, `auth`, `secrets-bind`, `hydrate`, `ledger`, `control-plane`, `gatekeeper-ingress`, `telemetry/`. Example cartridges under `agents/` are not factory modules.
 
 ## Landing-zone examples (optional cargo-cult)
 
@@ -44,9 +44,9 @@ Example: Azure + serverless-containers → Container Apps + Blob + Key Vault + E
 - `landing-zones/gcp` — bind notes.
 - `landing-zones/compose` — compose-host.
 
-## Discord / Doorman
+## Discord / gatekeeper-ingress
 
-Always deploy Doorman. No bot token at factory build. Presence offline while the agent sleeps; available after handoff; do not drop the Gateway.
+Always deploy gatekeeper-ingress. No bot token at factory build. Presence offline while the agent sleeps; available after handoff; do not drop the gatekeeper-egress.
 
 ## Definition of done
 
@@ -54,7 +54,7 @@ Always deploy Doorman. No bot token at factory build. Presence offline while the
 2. Authenticated `GET /api/v1/agents` and `POST /mcp` `tools/list`
 3. Echo (or their cartridge) wake returns 200; compute actually starts on the chosen pattern; ledger has `RESUME`; mind prefix exists after sleeping
 4. Ledger has no secrets and no prompt bodies
-5. Doorman `/healthz` is `discord: sleeping` without a bot token
+5. gatekeeper-ingress `/healthz` is `discord: sleeping` without a bot token
 6. SDP `deploymentTarget` is no longer `drafting-interview-required`
 
 ## Secrets
@@ -68,4 +68,4 @@ Names only in git. Unbound required names → HTTP 412. Agents receive placehold
 3. **Run `npm install` once per clone.** It enables the git `pre-push` hook (`.githooks/pre-push`), which runs `scripts/conformance.sh`. Never bypass it (`--no-verify`) or weaken a check to make it pass.
 4. **Conformance failures are design violations, not flaky tests.** Fix the code. Only with the user's approval may a known violation be baselined, and only in `packages/conformance/baseline.json` with a registered gap.
 5. **Never skip tests** (`describe.skip`, `it.skip`). CI fails on any skip.
-6. **Egress and secrets (§6.3):** every agent connection goes through the gateway (E1–E6), every model call is metered through a gateway provider route (E5), and agents never hold real secrets (S1). There are no exceptions.
+6. **Egress and secrets (§6.3):** every agent connection goes through the gatekeeper-egress (E1–E6), every model call is metered through a gatekeeper-egress provider route (E5), and agents never hold real secrets (S1). There are no exceptions.

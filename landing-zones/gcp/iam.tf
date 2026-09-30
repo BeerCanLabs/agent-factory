@@ -76,45 +76,45 @@ resource "google_project_iam_member" "cp_sa_user" {
   member  = "serviceAccount:${google_service_account.control_plane.email}"
 }
 
-# ---- gateway ---------------------------------------------------------------------------------
-resource "google_service_account" "gateway" {
+# ---- gatekeeper-egress ---------------------------------------------------------------------------------
+resource "google_service_account" "gatekeeper_egress" {
   account_id   = "${local.name}-gw"
-  display_name = "Factory Gateway"
+  display_name = "Factory gatekeeper-egress"
 }
 
-# Gateway reads ONLY provider secrets (API keys injected into agent egress)
+# gatekeeper-egress reads ONLY provider secrets (API keys injected into agent egress)
 # Equivalent to AWS: only InjectProviderKeysOnly statement, no factory/* access
 resource "google_secret_manager_secret_iam_member" "gw_provider_secrets" {
   for_each  = toset(var.provider_secret_names)
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.gateway.email}"
+  member    = "serviceAccount:${google_service_account.gatekeeper_egress.email}"
 }
 
-# Gateway reads Discord bot tokens for perimeter credential injection
+# gatekeeper-egress reads Discord bot tokens for perimeter credential injection
 resource "google_project_iam_member" "gw_discord_tokens" {
   project = var.project_id
   role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${google_service_account.gateway.email}"
+  member  = "serviceAccount:${google_service_account.gatekeeper_egress.email}"
   condition {
     title       = "DiscordBotTokensOnly"
-    description = "Allows Gateway to read Discord bot tokens for perimeter credential injection"
+    description = "Allows gatekeeper-egress to read Discord bot tokens for perimeter credential injection"
     expression  = "resource.name.endsWith('DISCORD_BOT_TOKEN')"
   }
 }
 
-# ---- doorman ---------------------------------------------------------------------------------
-resource "google_service_account" "doorman" {
+# ---- gatekeeper-ingress ---------------------------------------------------------------------------------
+resource "google_service_account" "gatekeeper_ingress" {
   account_id   = "${local.name}-dm"
-  display_name = "Factory Doorman"
+  display_name = "Factory gatekeeper-ingress"
 }
 
-# Doorman reads only the Discord bot token secret
+# gatekeeper-ingress reads only the Discord bot token secret
 resource "google_secret_manager_secret_iam_member" "dm_discord_token" {
   count     = var.discord_secret_name != "" ? 1 : 0
   secret_id = var.discord_secret_name
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.doorman.email}"
+  member    = "serviceAccount:${google_service_account.gatekeeper_ingress.email}"
 }
 
 # ---- agents (one SA each, scoped to own mind prefix) -----------------------------------------

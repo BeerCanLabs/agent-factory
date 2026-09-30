@@ -24,7 +24,7 @@ export type CredentialItem = {
   description?: string;
   status: CredentialStatus;
   outstanding: boolean;
-  /** `platform`: supplied once for the whole factory (gateway-held keys, shared app credentials), not per agent. */
+  /** `platform`: supplied once for the whole factory (gatekeeper-held keys, shared app credentials), not per agent. */
   managedBy: 'agent' | 'platform';
   /** A platform app credential shared by every agent that uses the connection named in `requiredBy`. */
   shared?: boolean;
@@ -41,13 +41,13 @@ export type AssessOptions = {
   agentId: string;
   secrets: Array<{ name: string; source?: string; description?: string }>;
   connections: Array<{ provider: string; scopes: string[] }>;
-  /** Secrets the gateway holds for the whole platform (S1): supplied once, through the platform endpoint, never per agent. */
-  gatewayHeld: ReadonlySet<string>;
+  /** Secrets the gatekeeper-egress holds for the whole platform (S1): supplied once, through the platform endpoint, never per agent. */
+  gatekeeperEgressHeld: ReadonlySet<string>;
   /** Presence of a secret by name. Must not return or log the value. */
   present: (name: string) => Promise<boolean>;
   grant: (provider: string) => Promise<GrantView | undefined>;
   submitPath: (name: string) => string;
-  /** Where a gateway-held (platform) credential is submitted. */
+  /** Where a gatekeeper-held (platform) credential is submitted. */
   platformSubmitPath: (name: string) => string;
   consent: (provider: string) => { path: string; url: string };
   /** Why consent cannot start at all (e.g. the factory's public URL is not configured). */
@@ -64,15 +64,15 @@ function appCredentialOf(provider: string): { name: string; source: string } | u
 }
 
 /**
- * The secret names an owner may submit for this agent: its declared static secrets that the gateway does not hold,
+ * The secret names an owner may submit for this agent: its declared static secrets that the gatekeeper-egress does not hold,
  * plus the app credentials its declared connections depend on. Anything else is refused.
  */
-export function submittableSecrets(opts: Pick<AssessOptions, 'secrets' | 'connections' | 'gatewayHeld'>): Set<string> {
+export function submittableSecrets(opts: Pick<AssessOptions, 'secrets' | 'connections' | 'gatekeeperEgressHeld'>): Set<string> {
   const out = new Set<string>();
-  for (const s of opts.secrets) if (!opts.gatewayHeld.has(s.name)) out.add(s.name);
+  for (const s of opts.secrets) if (!opts.gatekeeperEgressHeld.has(s.name)) out.add(s.name);
   for (const c of opts.connections) {
     const app = appCredentialOf(c.provider);
-    if (app && !opts.gatewayHeld.has(app.name)) out.add(app.name);
+    if (app && !opts.gatekeeperEgressHeld.has(app.name)) out.add(app.name);
   }
   return out;
 }
@@ -101,8 +101,8 @@ export async function assessCredentials(opts: AssessOptions): Promise<Credential
       instructions: instructionsFor(source),
       ...extra,
     };
-    if (opts.gatewayHeld.has(d.name)) {
-      // Held by the gateway for every agent (S1). The Keymaster still owns it (K1/K5): it reports it from metadata
+    if (opts.gatekeeperEgressHeld.has(d.name)) {
+      // Held by the gatekeeper-egress for every agent (S1). The Keymaster still owns it (K1/K5): it reports it from metadata
       // and accepts it through the platform's write-only channel.
       const present = await opts.present(d.name);
       return {
@@ -176,13 +176,13 @@ export async function assessCredentials(opts: AssessOptions): Promise<Credential
   return items;
 }
 
-/** Platform credentials (gateway-held keys) with their status, for the platform view. */
+/** Platform credentials (gatekeeper-held keys) with their status, for the platform view. */
 export async function assessPlatformCredentials(opts: {
-  gatewayHeld: ReadonlySet<string>;
+  gatekeeperEgressHeld: ReadonlySet<string>;
   present: (name: string) => Promise<boolean>;
   submitPath: (name: string) => string;
 }): Promise<CredentialItem[]> {
-  return Promise.all([...opts.gatewayHeld].sort().map(async (name) => {
+  return Promise.all([...opts.gatekeeperEgressHeld].sort().map(async (name) => {
     const source = inferSource(name);
     const present = await opts.present(name);
     return {

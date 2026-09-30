@@ -1,6 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 
-/** Cloud credentials held by the gateway (never by agents, E5/S1). */
+/** Cloud credentials held by the gatekeeper-egress (never by agents, E5/S1). */
 export type AwsCredentials = { accessKeyId: string; secretAccessKey: string; sessionToken?: string; expiration?: Date };
 
 export type SignableRequest = {
@@ -71,7 +71,7 @@ export function signV4(
 type Fetch = typeof fetch;
 
 /**
- * The gateway's own AWS credentials: static env (local use) or the ECS container credentials
+ * The gatekeeper-egress's own AWS credentials: static env (local use) or the ECS container credentials
  * endpoint (Fargate task role), cached until five minutes before expiry.
  */
 export function awsCredentialsFromEnv(env: NodeJS.ProcessEnv = process.env, fetchImpl: Fetch = fetch): () => Promise<AwsCredentials> {
