@@ -104,7 +104,9 @@ resource "aws_ecr_repository" "repo" {
   for_each             = toset(concat(["control-plane", "gatekeeper-ingress", "gatekeeper-egress", "garrison"], [for id in keys(var.agents) : "agent-${id}"]))
   name                 = "factory-${each.key}"
   image_tag_mutability = "MUTABLE"
-  force_delete         = false
+  # Platform images are rebuilt from their commit SHA, so a repository removed from this set is deleted with its
+  # images instead of blocking the apply (a service rename replaces its repository, TSK-046).
+  force_delete         = true
   image_scanning_configuration {
     scan_on_push = true
   }
