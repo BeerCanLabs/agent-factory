@@ -68,6 +68,10 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_OIDC_ISSUER", value = var.oidc_issuer },
         { name = "FACTORY_OIDC_AUDIENCE", value = var.oidc_audience },
         { name = "FACTORY_OIDC_ROLES_CLAIM", value = var.oidc_roles_claim },
+        # §6.12 A2: identity only from the proxy's verified assertion; empty disables it.
+        { name = "FACTORY_ACCESS_TEAM_DOMAIN", value = var.access_team_domain },
+        { name = "FACTORY_ACCESS_AUD", value = var.access_aud },
+        { name = "FACTORY_ADMIN_EMAILS", value = var.admin_emails },
         { name = "FACTORY_RUNTIME", value = "ecs" },
         { name = "FACTORY_ECS_CLUSTER", value = aws_ecs_cluster.factory.name },
         { name = "FACTORY_ECS_SUBNETS", value = join(",", aws_subnet.agents[*].id) },
@@ -376,9 +380,7 @@ resource "aws_ecs_task_definition" "console" {
         { name = "FACTORY_CONTROL_PLANE_URL", value = "http://control-plane.factory.internal:8088" },
         { name = "PORT", value = "3000" }
       ]
-      secrets = [
-        { name = "FACTORY_TOKEN", valueFrom = local.secret["FACTORY_TOKEN"] }
-      ]
+      # §6.12 A2: no secrets. The console forwards each caller's own Access assertion; it holds no factory token.
       logConfiguration = {
         logDriver = "awslogs"
         options = {

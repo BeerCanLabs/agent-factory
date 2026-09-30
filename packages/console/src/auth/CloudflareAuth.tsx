@@ -9,24 +9,26 @@ interface AuthContextType {
   hasRole: (required: 'viewer' | 'operator' | 'approver' | 'admin') => boolean;
 }
 
-const DEFAULT_ADMIN: AuthUser = {
-  email: 'dale.sackrider@gmail.com',
-  name: 'Dale Sackrider',
-  roles: ['admin', 'operator', 'approver', 'viewer'],
-  provider: 'Cloudflare Access',
+// Until the control plane confirms who the caller is (/api/auth/me → /api/v1/whoami), show a viewer. The UI only
+// hides buttons; the control plane enforces every role (§6.12 A2).
+const ANONYMOUS: AuthUser = {
+  email: '',
+  name: 'Not signed in',
+  roles: ['viewer'],
+  provider: 'none',
 };
 
 const AuthContext = createContext<AuthContextType>({
-  user: DEFAULT_ADMIN,
-  activeRole: 'admin',
+  user: ANONYMOUS,
+  activeRole: 'viewer',
   setActiveRole: () => {},
   isLoading: false,
-  hasRole: () => true,
+  hasRole: (required) => required === 'viewer',
 });
 
 export const CloudflareAuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<AuthUser>(DEFAULT_ADMIN);
-  const [activeRole, setActiveRole] = useState<'viewer' | 'operator' | 'approver' | 'admin'>('admin');
+  const [user, setUser] = useState<AuthUser>(ANONYMOUS);
+  const [activeRole, setActiveRole] = useState<'viewer' | 'operator' | 'approver' | 'admin'>('viewer');
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {

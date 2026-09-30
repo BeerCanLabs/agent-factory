@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
-import { hasRole, type AuthProvider, type Principal, type Role } from '@beercanlabs/factory-auth';
+import { accessAssertionOf, hasRole, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, connectionsOf, credentialsOf, type AgentCategory } from './catalog.js';
@@ -25,6 +25,11 @@ export type FactoryState = {
   registryDir?: string;
   ledger: LedgerStore;
   auth: AuthProvider;
+  /**
+   * §6.12 A2: the identity-aware proxy's signed assertion, verified against its issuer, audience and keys. Absent:
+   * Access identity is disabled and only factory credentials (bearer tokens, OIDC, run tokens) authenticate.
+   */
+  access?: AccessAuth;
   version: string;
   providers: SecretProvider[];
   runtime: Runtime;
@@ -185,32 +190,36 @@ export async function readJson(req: http.IncomingMessage): Promise<Record<string
   return parsed as Record<string, unknown>;
 }
 
+/**
+ * §6.12 A2: who is calling, from a credential the factory verifies itself. The `Authorization` header (factory tokens,
+ * OIDC) first, then the identity-aware proxy's signed assertion (`cf-access-jwt-assertion` or the `CF_Authorization`
+ * cookie) when Access identity is configured. Unsigned identity headers (the proxy's plain email header) are never
+ * read.
+ */
+export async function identify(req: http.IncomingMessage, state: FactoryState): Promise<AuthResult> {
+  const reasons: string[] = [];
+  if (req.headers.authorization) {
+    const r = await state.auth.verify(req.headers.authorization);
+    if (r.ok) return r;
+    reasons.push(r.reason);
+  }
+  const assertion = accessAssertionOf(req.headers);
+  if (assertion && state.access) {
+    const r = await state.access.verify(assertion);
+    if (r.ok) return r;
+    reasons.push(`access: ${r.reason}`);
+  }
+  return { ok: false, reason: reasons.join('; ') || 'no credential' };
+}
+
 export async function authenticate(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   state: FactoryState,
   role: Role,
 ): Promise<Principal | null> {
-  const authHeader = req.headers.authorization || 
-    (req.headers['cf-access-jwt-assertion'] ? `Bearer ${req.headers['cf-access-jwt-assertion']}` : undefined);
-  const result = await state.auth.verify(authHeader);
+  const result = await identify(req, state);
   if (!result.ok) {
-    const cfEmail = (req.headers['cf-access-authenticated-user-email'] as string | undefined)?.toLowerCase().trim();
-    if (cfEmail) {
-      const adminEmails = (process.env.FACTORY_ADMIN_EMAILS || 'dale.sackrider@gmail.com')
-        .split(',')
-        .map((s) => s.trim().toLowerCase());
-      const isAdmin = adminEmails.includes(cfEmail);
-      const principal: Principal = {
-        actor: `cloudflare:${cfEmail}`,
-        roles: isAdmin ? ['admin', 'operator', 'approver', 'viewer', 'ingest'] : ['viewer'],
-      };
-      if (hasRole(principal, role)) {
-        return principal;
-      }
-      json(res, 403, { error: 'forbidden', required: role });
-      return null;
-    }
     json(res, 401, { error: 'unauthorized' });
     return null;
   }
@@ -221,35 +230,21 @@ export async function authenticate(
   return result.principal;
 }
 
+/** Schedules: a live run token (the agent acts for itself) or a verified principal who can at least view. */
 async function authenticateOperatorOrRun(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   state: FactoryState,
 ): Promise<{ actor: string; agentId?: string } | null> {
-  const cfEmail = (req.headers['cf-access-authenticated-user-email'] as string | undefined)?.toLowerCase().trim();
-  if (cfEmail) {
-    return { actor: `cloudflare:${cfEmail}` };
-  }
-  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  if (!token) {
-    json(res, 401, { error: 'unauthorized' });
-    return null;
-  }
-  const runPayload = await state.runTokens.verify(token);
+  const runPayload = await state.runTokens.verify(bearerOf(req));
   if (runPayload) {
     return {
       actor: `run:${runPayload.agentId}:${runPayload.runId}`,
       agentId: runPayload.agentId,
     };
   }
-  const authHeader = req.headers.authorization || 
-    (req.headers['cf-access-jwt-assertion'] ? `Bearer ${req.headers['cf-access-jwt-assertion']}` : undefined);
-  const result = await state.auth.verify(authHeader);
-  if (result.ok && (hasRole(result.principal, 'operator') || hasRole(result.principal, 'viewer'))) {
-    return { actor: result.principal.actor };
-  }
-  json(res, 401, { error: 'unauthorized' });
-  return null;
+  const principal = await authenticate(req, res, state, 'viewer');
+  return principal ? { actor: principal.actor } : null;
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -860,6 +855,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       uptime: Math.round((Date.now() - started) / 1000),
       timestamp: new Date().toISOString(),
     });
+    return;
+  }
+
+  // The caller's verified identity and roles (the dashboard shows what the factory will actually allow).
+  if (path === '/api/v1/whoami' && req.method === 'GET') {
+    const who = await identify(req, state);
+    if (!who.ok) return json(res, 401, { error: 'unauthorized' });
+    json(res, 200, { actor: who.principal.actor, roles: who.principal.roles });
     return;
   }
 

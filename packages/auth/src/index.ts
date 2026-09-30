@@ -1,7 +1,20 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { SignJWT, createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
 
-export const ROLES = ['viewer', 'operator', 'approver', 'ingest', 'gateway', 'admin'] as const;
+export {
+  accessAssertionOf,
+  accessAuthFromEnv,
+  accessPrincipal,
+  cloudflareAccessAuth,
+  normalizeTeamDomain,
+  type AccessAuth,
+  type AccessClaims,
+  type AccessOptions,
+  type AccessVerifyResult,
+  type JwksFetcher,
+} from './access.js';
+
+export const ROLES =['viewer', 'operator', 'approver', 'ingest', 'gateway', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
 
 export type Principal = { actor: string; roles: Role[] };
@@ -125,7 +138,8 @@ export function oidcAuth(opts: OidcOptions): AuthProvider {
       if (typeof payload.sub !== 'string' || !payload.sub) return { ok: false, reason: 'jwt has no sub' };
       const email = typeof payload.email === 'string' ? payload.email : undefined;
       const roles = asRoles(payload[claim], opts.roleMap);
-      const adminList = opts.adminEmails ?? ['dale.sackrider@gmail.com'];
+      // No built-in admins: only the deployment names them (FACTORY_ADMIN_EMAILS).
+      const adminList = opts.adminEmails ?? [];
       if (email && adminList.some((e) => e.toLowerCase() === email.toLowerCase())) {
         if (!roles.includes('admin')) roles.push('admin');
       }
@@ -196,9 +210,10 @@ export function authFromEnv(env: NodeJS.ProcessEnv = process.env): AuthProvider 
     if (!env.FACTORY_OIDC_ISSUER || !env.FACTORY_OIDC_AUDIENCE) {
       throw new Error('OIDC needs both FACTORY_OIDC_ISSUER and FACTORY_OIDC_AUDIENCE');
     }
-    const adminEmails = env.FACTORY_ADMIN_EMAILS
-      ? env.FACTORY_ADMIN_EMAILS.split(',').map((s) => s.trim().toLowerCase())
-      : ['dale.sackrider@gmail.com'];
+    const adminEmails = (env.FACTORY_ADMIN_EMAILS ?? '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
     providers.push(
       oidcAuth({
         issuer: env.FACTORY_OIDC_ISSUER,
