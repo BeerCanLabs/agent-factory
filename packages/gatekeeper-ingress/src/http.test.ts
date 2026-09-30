@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
-import { createDoorman, fakeGateway } from './index.js';
-import { createDoormanHttp } from './http.js';
+import { createGatekeeperIngress, fakeDiscordClient } from './index.js';
+import { createGatekeeperIngressHttp } from './http.js';
 
 function call(port: number, path: string, method = 'GET', token?: string, body?: unknown): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -23,8 +23,8 @@ function call(port: number, path: string, method = 'GET', token?: string, body?:
 }
 
 function serve(auth: ReturnType<typeof bearerAuth>) {
-  const door = createDoorman({ gateway: fakeGateway(), providers: [envProvider({})], wake: async () => {}, handoff: async () => {} });
-  return createDoormanHttp(door, auth);
+  const door = createGatekeeperIngress({ discord: fakeDiscordClient(), providers: [envProvider({})], wake: async () => {}, handoff: async () => {} });
+  return createGatekeeperIngressHttp(door, auth);
 }
 
 async function listen(server: http.Server): Promise<number> {
@@ -34,7 +34,7 @@ async function listen(server: http.Server): Promise<number> {
   return addr.port;
 }
 
-describe('doorman http', () => {
+describe('gatekeeper-ingress http', () => {
   let server: http.Server;
   let port = 0;
   before(async () => {
@@ -47,7 +47,7 @@ describe('doorman http', () => {
     assert.equal(await call(port, '/healthz'), 200);
   });
 
-  it('requires DOORMAN_TOKEN for presence changes', async () => {
+  it('requires GATEKEEPER_INGRESS_TOKEN for presence changes', async () => {
     const body = { agentId: 'echo-agent', presence: 'available' };
     assert.equal(await call(port, '/api/v1/presence', 'POST', undefined, body), 401);
     assert.equal(await call(port, '/api/v1/presence', 'POST', 'wrong', body), 401);

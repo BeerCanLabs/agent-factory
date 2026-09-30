@@ -12,7 +12,7 @@ import type { AgentRecord } from './catalog.js';
 const KEY = 'spend-e2e-run-token-key-0123456789abcdef';
 const ADMIN = 'admin-spend-e2e';
 const VIEWER = 'viewer-spend-e2e';
-const GATEWAY = 'gateway-spend-e2e';
+const GATEKEEPER_EGRESS = 'gatekeeper-egress-spend-e2e';
 
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -64,7 +64,7 @@ describe('GET /api/v1/spend (TSK-045, E7 explicit grant)', { concurrency: false 
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
-        { name: 'gateway', token: GATEWAY, roles: ['gateway'] },
+        { name: 'gatekeeper-egress', token: GATEKEEPER_EGRESS, roles: ['gatekeeper-egress'] },
       ]),
       version: '0.1.0-test',
       providers: [],
@@ -85,10 +85,10 @@ describe('GET /api/v1/spend (TSK-045, E7 explicit grant)', { concurrency: false 
     cp = createFactoryServer(state);
     port = await listen(cp);
 
-    // Two metered model calls by donna, attested by the gateway (the same path production uses).
+    // Two metered model calls by donna, attested by the gatekeeper-egress (the same path production uses).
     const { run } = await tokenFor('donna', 'WORKING');
     for (const [model, inT, outT, usd] of [['claude-sonnet-4-5', 1000, 200, 0.006], ['claude-haiku-4-5', 500, 100, 0.001]] as const) {
-      const r = await call(port, '/api/v1/ledger', 'POST', GATEWAY, {
+      const r = await call(port, '/api/v1/ledger', 'POST', GATEKEEPER_EGRESS, {
         agentId: 'donna', runId: run.runId, type: 'llm', actor: 'run:donna', model, inputTokens: inT, outputTokens: outT, costUsd: usd,
       });
       assert.ok(r.status < 300, r.text);

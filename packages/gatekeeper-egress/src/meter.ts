@@ -41,7 +41,7 @@ export function usageFromJson(provider: Provider, body: unknown): Usage | null {
 /**
  * Incremental SSE parser that extracts usage while bytes stream through to the client.
  * Anthropic: message_start carries input/cache usage, message_delta carries cumulative output.
- * OpenAI Chat: final chunk carries `usage` (the gateway forces stream_options.include_usage).
+ * OpenAI Chat: final chunk carries `usage` (the gatekeeper-egress forces stream_options.include_usage).
  * OpenAI Responses: `response.completed` carries response.usage.
  */
 export class SseMeter {

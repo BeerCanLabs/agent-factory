@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
-import { createGateway, type ControlClient, type RunContext } from './gateway.js';
+import { createGatekeeperEgress, type ControlClient, type RunContext } from './gatekeeper-egress.js';
 
 // TSK-045: per-agent GitHub tokens with no shared fallback, a header-only key (motion), and multipart bodies.
 const CASTLE_GH = 'fake-castle-github-token-0000';
@@ -34,11 +34,11 @@ function call(port: number, path: string, token: string, opts: { method?: string
   });
 }
 
-describe('TSK-045 gateway routes (S1)', { concurrency: false }, () => {
+describe('TSK-045 gatekeeper-egress routes (S1)', { concurrency: false }, () => {
   const seen: Seen[] = [];
   const ledger: Array<Record<string, any>> = [];
   let upstream: http.Server;
-  let gateway: http.Server;
+  let gatekeeperEgress: http.Server;
   let port = 0;
   let ctx: RunContext;
   let token = '';
@@ -87,7 +87,7 @@ describe('TSK-045 gateway routes (S1)', { concurrency: false }, () => {
       });
     });
     const upPort = await listen(upstream);
-    gateway = createGateway({
+    gatekeeperEgress = createGatekeeperEgress({
       routes: [
         { id: 'github', kind: 'http', upstream: `http://127.0.0.1:${upPort}/gh`, credential: { secret: '{agent}_GITHUB_TOKEN', header: 'authorization', format: 'Bearer {}', fallback: false } },
         { id: 'motion', kind: 'http', upstream: `http://127.0.0.1:${upPort}/motion/v1`, credential: { secret: 'MOTION_API_KEY', header: 'x-api-key' } },
@@ -98,11 +98,11 @@ describe('TSK-045 gateway routes (S1)', { concurrency: false }, () => {
       providers,
       contextTtlMs: 0,
     });
-    port = await listen(gateway);
+    port = await listen(gatekeeperEgress);
   });
 
   after(async () => {
-    await new Promise<void>((r) => gateway.close(() => r()));
+    await new Promise<void>((r) => gatekeeperEgress.close(() => r()));
     await new Promise<void>((r) => upstream.close(() => r()));
   });
 

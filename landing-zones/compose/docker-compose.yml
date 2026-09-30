@@ -2,9 +2,9 @@
 #
 # Networks enforce the paper, not configuration:
 #   agents   internal: no route off the host. Agent containers join only this network, so their
-#            only reachable peers are the control plane (run API) and the gateway (all egress).
-#   control  internal: control plane <-> docker API proxy, Doorman.
-#   egress   normal bridge: the gateway (providers), control plane (callbacks), Doorman (Discord).
+#            only reachable peers are the control plane (run API) and the gatekeeper-egress (all egress).
+#   control  internal: control plane <-> docker API proxy, gatekeeper-ingress.
+#   egress   normal bridge: the gatekeeper-egress (providers), control plane (callbacks), gatekeeper-ingress (Discord).
 #
 # Trust note: the control plane can create containers, which on a single host is equivalent to
 # root on that host. The socket proxy removes exec/image/volume/network APIs and the runtime hardens
@@ -38,12 +38,12 @@ services:
       AGENTS_ROOT: /app/agents
       # Dev-only tokens. Each service gets its own name and least role.
       FACTORY_TOKEN: dev-admin-token
-      FACTORY_TOKENS: '[{"name":"doorman","token":"dev-doorman-token","roles":["operator"]},{"name":"gateway","token":"dev-gateway-token","roles":["gateway"]}]'
-      DOORMAN_URL: http://doorman:8090
-      DOORMAN_TOKEN: dev-presence-token
+      FACTORY_TOKENS: '[{"name":"gatekeeper-ingress","token":"dev-gatekeeper-ingress-token","roles":["operator"]},{"name":"gatekeeper-egress","token":"dev-gatekeeper-egress-token","roles":["gatekeeper-egress"]}]'
+      GATEKEEPER_INGRESS_URL: http://gatekeeper-ingress:8090
+      GATEKEEPER_INGRESS_TOKEN: dev-presence-token
       FACTORY_CALLBACK_SIGNING_KEY: dev-callback-signing-key
       FACTORY_PUBLIC_URL: http://control-plane:8088
-      FACTORY_GATEWAY_URL: http://gateway:8081
+      FACTORY_GATEKEEPER_EGRESS_URL: http://gatekeeper-egress:8081
       FACTORY_LEDGER_PATH: /data/ledger.jsonl
       # Local anchor only; not write-once. Production binds an Object Lock / immutable bucket.
       FACTORY_LEDGER_WORM_URI: file:///data/worm
@@ -73,34 +73,34 @@ services:
     stop_grace_period: 20s
     restart: unless-stopped
 
-  gateway:
+  gatekeeper-egress:
     build:
       context: ../..
-      dockerfile: packages/gateway/Dockerfile
-    image: factory-gateway:dev
+      dockerfile: packages/gatekeeper-egress/Dockerfile
+    image: factory-gatekeeper-egress:dev
     environment:
       <<: *factory-keys
       FACTORY_URL: http://control-plane:8088
-      FACTORY_GATEWAY_TOKEN: dev-gateway-token
-      FACTORY_GATEWAY_CONFIG: /config/gateway.json
+      FACTORY_GATEKEEPER_EGRESS_TOKEN: dev-gatekeeper-egress-token
+      FACTORY_GATEKEEPER_EGRESS_CONFIG: /config/gatekeeper-egress.json
     volumes:
-      - ./gateway.json:/config/gateway.json:ro
+      - ./gatekeeper-egress.json:/config/gatekeeper-egress.json:ro
       - ../docker-secrets.env:/run/factory.secrets:ro
     networks: [agents, egress]
     depends_on:
       control-plane: { condition: service_healthy }
     restart: unless-stopped
 
-  doorman:
+  gatekeeper-ingress:
     build:
       context: ../..
-      dockerfile: packages/doorman/Dockerfile
-    image: factory-doorman:dev
+      dockerfile: packages/gatekeeper-ingress/Dockerfile
+    image: factory-gatekeeper-ingress:dev
     environment:
       PORT: 8090
       FACTORY_URL: http://control-plane:8088
-      FACTORY_TOKEN: dev-doorman-token
-      DOORMAN_TOKEN: dev-presence-token
+      FACTORY_TOKEN: dev-gatekeeper-ingress-token
+      GATEKEEPER_INGRESS_TOKEN: dev-presence-token
       FACTORY_SECRETS_FILE: /run/factory.secrets
     volumes:
       - ../docker-secrets.env:/run/factory.secrets:ro

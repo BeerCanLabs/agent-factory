@@ -13,7 +13,7 @@ triggers:
 secrets:
   requires:
     - name: GEORDI_DISCORD_BOT_TOKEN
-      description: "Discord Bot Token for Geordi Doorman presence and chat operations"
+      description: "Discord Bot Token for Geordi gatekeeper-ingress presence and chat operations"
     - name: GEORDI_GITHUB_TOKEN
       description: "GitHub Personal Access Token for engineering issues and repos"
     - name: NOTION_API_KEY

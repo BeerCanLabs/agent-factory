@@ -20,7 +20,7 @@ secrets:
     - name: GITHUB_WEBHOOK_SECRET
       description: "HMAC signing secret for incoming GitHub webhooks"
     - name: ARCHIE_DISCORD_BOT_TOKEN
-      description: "Discord Bot Token for Doorman presence and messaging"
+      description: "Discord Bot Token for gatekeeper-ingress presence and messaging"
     - name: NOTION_API_KEY
       description: "Notion API Key for The Submind Operations Board"
     - name: XAI_API_KEY

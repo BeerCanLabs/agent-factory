@@ -155,7 +155,7 @@ export function awsSecretsManagerProvider(prefix: string, cli?: AwsCli): SecretP
     },
     async has(secretName) {
       // Metadata only (DescribeSecret): the value is never fetched, so this works for secrets the caller may write
-      // but never read (gateway-held keys, §6.11 K5). Present means a current version exists and it is not deleted.
+      // but never read (gatekeeper-held keys, §6.11 K5). Present means a current version exists and it is not deleted.
       try {
         const out = await run([
           'secretsmanager',

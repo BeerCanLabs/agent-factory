@@ -133,7 +133,7 @@ egress:
                 <div>
                   <div className="font-semibold text-slate-900 dark:text-white">Dynamic Egress Policy Synthesis</div>
                   <p className="text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
-                    Outbound routes and external hosts declared in <code className="text-emerald-600 dark:text-emerald-400">cartridge.yaml</code> are automatically synced to gateway policy rules.
+                    Outbound routes and external hosts declared in <code className="text-emerald-600 dark:text-emerald-400">cartridge.yaml</code> are requests: an admin grants them in policy, never beyond what is declared (E7, E8).
                   </p>
                 </div>
               </div>

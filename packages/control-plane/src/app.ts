@@ -18,7 +18,7 @@ import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymas
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { ScheduleStore, type ScheduledAction } from './schedules.js';
-import { gatewayEnv } from '@beercanlabs/factory-hydrate';
+import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 
 export type FactoryState = {
   agents: Map<string, AgentRecord>;
@@ -53,14 +53,14 @@ export type FactoryState = {
   schedules?: ScheduleStore;
   /** URL agents use to reach the control plane (result reporting, input fetch). */
   publicUrl?: string;
-  /** URL agents use to reach the egress gateway; handed to every run as FACTORY_GATEWAY_URL. */
-  gatewayUrl?: string;
+  /** URL agents use to reach the gatekeeper-egress; handed to every run as FACTORY_GATEKEEPER_EGRESS_URL. */
+  gatekeeperEgressUrl?: string;
   /** Max wall-clock per run before it is stopped as TIMED_OUT. 0 disables. */
   idleMs: number;
   idleTimers: Map<string, ReturnType<typeof setTimeout>>;
-  doormanUrl?: string;
-  /** Presented to Doorman's presence API. */
-  doormanToken?: string;
+  gatekeeperIngressUrl?: string;
+  /** Presented to gatekeeper-ingress's presence API. */
+  gatekeeperIngressToken?: string;
   /** A run that has sent heartbeats is halted as BLOCKED_UNHEALTHY after this much silence. 0 disables. */
   heartbeatTimeoutMs?: number;
   /** Halt a run whose reported RSS exceeds this. 0 disables. */
@@ -71,8 +71,8 @@ export type FactoryState = {
   secretValues: Set<string>;
   /** Short-lived cache of bound secret values, so pre-flight and redaction do not hit the vault on every wake. */
   secretCache?: Map<string, { value: string; at: number }>;
-  /** Provider keys only the gateway holds (injected at egress, S1). Pre-flight treats them as satisfied and never reads them. */
-  gatewayHeldSecrets?: Set<string>;
+  /** Provider keys only the gatekeeper-egress holds (injected at egress, S1). Pre-flight treats them as satisfied and never reads them. */
+  gatekeeperEgressHeldSecrets?: Set<string>;
   /** Write-once copy of the ledger; `verify` checks the local chain against it. */
   ledgerSink?: CheckpointSink;
   /** In-memory mailboxes for running tasks to receive follow-up messages while warm. */
@@ -254,21 +254,21 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-async function notifyDoorman(state: FactoryState, agentId: string, presence: 'offline' | 'available') {
-  if (!state.doormanUrl) return;
+async function notifyGatekeeperIngress(state: FactoryState, agentId: string, presence: 'offline' | 'available') {
+  if (!state.gatekeeperIngressUrl) return;
   try {
-    const res = await fetch(`${state.doormanUrl.replace(/\/$/, '')}/api/v1/presence`, {
+    const res = await fetch(`${state.gatekeeperIngressUrl.replace(/\/$/, '')}/api/v1/presence`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(state.doormanToken ? { Authorization: `Bearer ${state.doormanToken}` } : {}),
+        ...(state.gatekeeperIngressToken ? { Authorization: `Bearer ${state.gatekeeperIngressToken}` } : {}),
       },
       body: JSON.stringify({ agentId, presence }),
     });
-    if (!res.ok) console.error(`[control-plane] doorman presence ${res.status}`);
+    if (!res.ok) console.error(`[control-plane] gatekeeper-ingress presence ${res.status}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[control-plane] doorman unreachable: ${message}`);
+    console.error(`[control-plane] gatekeeper-ingress unreachable: ${message}`);
   }
 }
 
@@ -319,7 +319,7 @@ async function bindAgentSecrets(state: FactoryState, names: string[]): Promise<{
   const now = Date.now();
   const env: Record<string, string> = {};
   const uncached: string[] = [];
-  for (const name of names.filter((n) => !state.gatewayHeldSecrets?.has(n))) {
+  for (const name of names.filter((n) => !state.gatekeeperEgressHeldSecrets?.has(n))) {
     const hit = cache.get(name);
     if (hit && now - hit.at < SECRET_CACHE_TTL_MS) env[name] = hit.value;
     else uncached.push(name);
@@ -355,7 +355,7 @@ function scheduleTimeout(state: FactoryState, run: Run) {
   state.idleTimers.set(run.agentId, t);
 }
 
-/** Park a live run. The task keeps running; the gateway refuses its egress until unblocked. */
+/** Park a live run. The task keeps running; the gatekeeper-egress refuses its egress until unblocked. */
 export function blockRun(state: FactoryState, runId: string, to: 'BLOCKED_BUDGET_EXCEEDED' | 'BLOCKED_FOR_HUMAN' | 'BLOCKED_UNHEALTHY', actor: string) {
   const run = state.runs.get(runId);
   if (!run || isTerminal(run.state) || run.state === to) return run;
@@ -377,7 +377,7 @@ export function unblockRun(state: FactoryState, runId: string, from: RunState, a
 
 export type CreateRunOptions = { actor: string; trigger: string; input?: unknown; callbackUrl?: string; model?: string };
 
-/** The single entry point for waking an agent: manual, webhook, cron, event route, Doorman. */
+/** The single entry point for waking an agent: manual, webhook, cron, event route, gatekeeper-ingress. */
 export async function createRun(state: FactoryState, agentId: string, opts: CreateRunOptions): Promise<Outcome<Run>> {
   const agent = state.agents.get(agentId);
   if (!agent) return { status: 404, body: { error: 'not_found' } };
@@ -459,9 +459,9 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
     FACTORY_RUN_TOKEN: runToken,
     ...(state.publicUrl ? { FACTORY_URL: state.publicUrl } : {}),
     ...(run.model ? { FACTORY_MODEL: run.model } : {}),
-    ...(state.gatewayUrl ? { FACTORY_GATEWAY_URL: state.gatewayUrl } : {}),
-    ...gatewayEnv({
-      FACTORY_GATEWAY_URL: state.gatewayUrl,
+    ...(state.gatekeeperEgressUrl ? { FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl } : {}),
+    ...gatekeeperEgressEnv({
+      FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl,
       FACTORY_RUN_TOKEN: runToken,
     }),
   };
@@ -477,7 +477,7 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
   agent.state = 'WORKING';
   record(state, cur, 'RUN_STARTED', run.actor);
   scheduleTimeout(state, cur);
-  await notifyDoorman(state, agent.id, 'available');
+  await notifyGatekeeperIngress(state, agent.id, 'available');
   return cur;
 }
 
@@ -526,7 +526,7 @@ export async function finishRun(
       }
     }
     if (agent.state === 'WORKING') agent.state = terminal === 'DONE' ? 'SLEEPING' : 'ERROR';
-    await notifyDoorman(state, agent.id, 'offline');
+    await notifyGatekeeperIngress(state, agent.id, 'offline');
   }
   if (terminal === 'FAILED' && done.agentId !== 'med-doc' && state.agents.has('med-doc')) {
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: done.agentId, runId, type: 'crash', actor: SYSTEM.runtime });
@@ -845,7 +845,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
-  if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gateway/connections/token') && (await handleConnections(state, req, res, path))) return;
+  if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
@@ -920,7 +920,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
-  // TSK-045: per-agent model spend (gateway-metered `llm` rows) for the current UTC day and month. Counts only:
+  // TSK-045: per-agent model spend (gatekeeper-egress-metered `llm` rows) for the current UTC day and month. Counts only:
   // no prompt bodies, no secrets. A verified viewer, or a live run whose agent's admin-set policy grants the
   // `factory-spend` tool (E7: never implied). Every read is ledgered.
   if (path === '/api/v1/spend' && req.method === 'GET') {
@@ -1290,23 +1290,23 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 400, { error: `type must be one of ${[...INGEST_TYPES].join(', ')}` });
       return;
     }
-    // The gateway verified the run token, so it may attest the run as the actor. Other writers may not.
-    const isGateway = hasRole({ ...principal, roles: principal.roles.filter((r) => r !== 'admin') }, 'gateway');
+    // The gatekeeper-egress verified the run token, so it may attest the run as the actor. Other writers may not.
+    const isGatekeeperEgress = hasRole({ ...principal, roles: principal.roles.filter((r) => r !== 'admin') }, 'gatekeeper-egress');
     const run = typeof event.runId === 'string' ? state.runs.get(event.runId) : undefined;
-    if (isGateway && event.runId !== undefined && (!run || run.agentId !== event.agentId)) {
+    if (isGatekeeperEgress && event.runId !== undefined && (!run || run.agentId !== event.agentId)) {
       json(res, 400, { error: 'runId does not belong to agentId' });
       return;
     }
-    const actor = isGateway && run && event.actor === `run:${run.agentId}` ? event.actor : principal.actor;
+    const actor = isGatekeeperEgress && run && event.actor === `run:${run.agentId}` ? event.actor : principal.actor;
     const stored = state.ledger.append({
       ...event,
-      ...(isGateway ? {} : { costUsd: undefined }),
+      ...(isGatekeeperEgress ? {} : { costUsd: undefined }),
       agentId: event.agentId,
       type: event.type,
       actor,
       timestamp: new Date().toISOString(),
     });
-    if (isGateway && stored.type === 'llm' && typeof stored.costUsd === 'number') {
+    if (isGatekeeperEgress && stored.type === 'llm' && typeof stored.costUsd === 'number') {
       const agent = state.agents.get(stored.agentId);
       const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(stored.agentId));
       const policy = state.policies.get(stored.agentId);
@@ -1380,9 +1380,9 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
-  const gwRun = path.match(/^\/api\/v1\/gateway\/runs\/([^/]+)$/);
+  const gwRun = path.match(/^\/api\/v1\/gatekeeper-egress\/runs\/([^/]+)$/);
   if (gwRun && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'gateway'))) return;
+    if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return;
     const run = state.runs.get(gwRun[1]);
     const agent = run ? state.agents.get(run.agentId) : undefined;
     if (!run || !agent) {
@@ -1401,8 +1401,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
-  if (path === '/api/v1/gateway/approvals' && req.method === 'POST') {
-    if (!(await authenticate(req, res, state, 'gateway'))) return;
+  if (path === '/api/v1/gatekeeper-egress/approvals' && req.method === 'POST') {
+    if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return;
     const b = await readJson(req);
     const run = typeof b.runId === 'string' ? state.runs.get(b.runId) : undefined;
     if (!run || isTerminal(run.state) || typeof b.route !== 'string' || typeof b.tool !== 'string' || typeof b.argsSha256 !== 'string') {
@@ -1434,20 +1434,20 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
-  const gwConsume = path.match(/^\/api\/v1\/gateway\/approvals\/([^/]+)\/consume$/);
+  const gwConsume = path.match(/^\/api\/v1\/gatekeeper-egress\/approvals\/([^/]+)\/consume$/);
   if (gwConsume && req.method === 'POST') {
-    if (!(await authenticate(req, res, state, 'gateway'))) return;
+    if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return;
     const consumed = state.approvals.consume(gwConsume[1]);
     json(res, consumed ? 200 : 409, consumed ?? { error: 'approval not approved or already used' });
     return;
   }
 
-  const kmCheckout = path === '/api/v1/keymaster/checkout' || path === '/api/v1/gateway/keymaster/checkout';
+  const kmCheckout = path === '/api/v1/keymaster/checkout' || path === '/api/v1/gatekeeper-egress/keymaster/checkout';
   if (kmCheckout && req.method === 'POST') {
-    const isGatewayPath = path.startsWith('/api/v1/gateway/');
+    const isGatekeeperEgressPath = path.startsWith('/api/v1/gatekeeper-egress/');
     let actor: string | undefined;
-    if (isGatewayPath) {
-      const principal = await authenticate(req, res, state, 'gateway');
+    if (isGatekeeperEgressPath) {
+      const principal = await authenticate(req, res, state, 'gatekeeper-egress');
       if (!principal) return;
       actor = principal.actor;
     }
@@ -1463,7 +1463,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
 
-    if (!isGatewayPath) {
+    if (!isGatekeeperEgressPath) {
       const run = await authenticateRun(req, res, state, runId);
       if (!run) return;
       actor = `run:${run.agentId}`;
@@ -1984,7 +1984,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     if (!agent.approvedModels.includes(targetModel)) {
       agent.approvedModels.push(targetModel);
     }
-    // Synchronize into egress policy so the Gateway immediately permits it
+    // Synchronize into egress policy so the gatekeeper-egress immediately permits it
     const currentPolicy = state.policies.get(agentId);
     const mergedModels = Array.from(new Set([...(currentPolicy.models || []), targetModel]));
     state.policies.set(agentId, {

@@ -10,7 +10,7 @@ If you are an implementing AI, provision every slot. A module that only starts a
 |---|---|
 | Ingress | HTTP/MCP. Discord Gateway is not this. |
 | Control plane | REST + MCP |
-| Doorman | Always on, idle without a bot token |
+| gatekeeper-ingress | Always on, idle without a bot token |
 | Shim + worker | Same task/revision; agents scale to zero |
 | Mind | Object storage |
 | Ledger | Append-only metadata+hash on durable store |

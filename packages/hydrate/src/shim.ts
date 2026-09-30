@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * Agent task entrypoint. No security role: the gateway enforces egress, the control plane owns state.
+ * Agent task entrypoint. No security role: the gatekeeper-egress enforces egress, the control plane owns state.
  * The shim only makes a stock worker image behave like a factory run:
- *   hydrate mind -> point SDKs at the gateway -> heartbeat -> run worker -> replicate mind -> report crash.
+ *   hydrate mind -> point SDKs at the gatekeeper-egress -> heartbeat -> run worker -> replicate mind -> report crash.
  */
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { pullMind, pushMind, type MindStore } from './index.js';
-import { gatewayEnv } from './gateway-env.js';
+import { gatekeeperEgressEnv } from './gatekeeper-egress-env.js';
 
-export { gatewayEnv };
+export { gatekeeperEgressEnv };
 
 function rssMb(pid: number | undefined): number | undefined {
   if (!pid) return undefined;
@@ -114,7 +114,7 @@ export async function main(argv: string[]): Promise<number> {
 
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
-    ...gatewayEnv(process.env),
+    ...gatekeeperEgressEnv(process.env),
     FACTORY_INPUT: inputVal,
   };
   if (inputFile) childEnv.FACTORY_INPUT_FILE = inputFile;

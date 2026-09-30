@@ -9,7 +9,7 @@ const src = (dir: string) => files(dir, (p) => /\.(ts|tsx)$/.test(p) && !/\.test
 
 describe('A2 identity is verified, not asserted', () => {
   it('no platform code reads an unsigned identity header', () => {
-    const offenders = [...src('packages/control-plane/src'), ...src('packages/auth/src'), ...src('packages/gateway/src'), 'packages/console/server.ts']
+    const offenders = [...src('packages/control-plane/src'), ...src('packages/auth/src'), ...src('packages/gatekeeper-egress/src'), 'packages/console/server.ts']
       .filter((f) => /cf-access-authenticated-user-email/i.test(read(f)));
     assert.deepEqual(offenders, []);
   });

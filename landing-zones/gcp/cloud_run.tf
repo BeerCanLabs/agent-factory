@@ -1,12 +1,12 @@
 # ============================================================================================
 # Cloud Run Services & Jobs — Agent Factory GCP Landing Zone
 # Equivalent to landing-zones/aws/ecs.tf.
-# Services: control-plane, gateway, doorman (always running, min-instances=1)
+# Services: control-plane, gatekeeper-egress, gatekeeper-ingress (always running, min-instances=1)
 # Jobs: agents (scale to 0; woken by control plane)
 # ============================================================================================
 
 locals {
-  images_ready   = var.control_plane_image != "" && var.doorman_image != "" && var.gateway_image != ""
+  images_ready   = var.control_plane_image != "" && var.gatekeeper_ingress_image != "" && var.gatekeeper_egress_image != ""
   ar_repo_prefix = "${var.region}-docker.pkg.dev/${var.project_id}/${local.name}-agents"
   # Map of agent IDs to their Cloud Run Job names (passed to FACTORY_GCP_JOBS env var)
   agent_job_map = join(",", [for id, _ in var.agents : "${id}:${local.name}-ag-${id}"])
@@ -152,10 +152,10 @@ resource "google_cloud_run_v2_service" "control_plane" {
         }
       }
       env {
-        name = "DOORMAN_TOKEN"
+        name = "GATEKEEPER_INGRESS_TOKEN"
         value_source {
           secret_key_ref {
-            secret  = "doorman-token"
+            secret  = "gatekeeper-ingress-token"
             version = "latest"
           }
         }
@@ -175,15 +175,15 @@ resource "google_cloud_run_v2_service" "control_plane" {
   depends_on = [google_artifact_registry_repository.dynamic_agents]
 }
 
-# ---- gateway -----------------------------------------------------------------
-resource "google_cloud_run_v2_service" "gateway" {
+# ---- gatekeeper-egress -----------------------------------------------------------------
+resource "google_cloud_run_v2_service" "gatekeeper_egress" {
   count    = local.images_ready ? 1 : 0
   name     = "${local.name}-gw"
   location = var.region
   ingress  = "INGRESS_TRAFFIC_INTERNAL_ONLY"
 
   template {
-    service_account = google_service_account.gateway.email
+    service_account = google_service_account.gatekeeper_egress.email
 
     scaling {
       min_instance_count = 1
@@ -199,7 +199,7 @@ resource "google_cloud_run_v2_service" "gateway" {
     }
 
     containers {
-      image = var.gateway_image
+      image = var.gatekeeper_egress_image
 
       ports {
         container_port = 8081
@@ -221,12 +221,12 @@ resource "google_cloud_run_v2_service" "gateway" {
         value = var.project_id
       }
       env {
-        name  = "FACTORY_GATEWAY_ROUTES"
-        value = var.gateway_routes
+        name  = "FACTORY_GATEKEEPER_EGRESS_ROUTES"
+        value = var.gatekeeper_egress_routes
       }
       env {
         name  = "FACTORY_PRICES"
-        value = var.gateway_prices
+        value = var.gatekeeper_egress_prices
       }
       env {
         name  = "FACTORY_TRACE_PROMPTS"
@@ -238,10 +238,10 @@ resource "google_cloud_run_v2_service" "gateway" {
       }
 
       env {
-        name = "FACTORY_GATEWAY_TOKEN"
+        name = "FACTORY_GATEKEEPER_EGRESS_TOKEN"
         value_source {
           secret_key_ref {
-            secret  = "gateway-token"
+            secret  = "gatekeeper-egress-token"
             version = "latest"
           }
         }
@@ -259,15 +259,15 @@ resource "google_cloud_run_v2_service" "gateway" {
   }
 }
 
-# ---- doorman -----------------------------------------------------------------
-resource "google_cloud_run_v2_service" "doorman" {
+# ---- gatekeeper-ingress -----------------------------------------------------------------
+resource "google_cloud_run_v2_service" "gatekeeper_ingress" {
   count    = local.images_ready ? 1 : 0
   name     = "${local.name}-dm"
   location = var.region
   ingress  = "INGRESS_TRAFFIC_INTERNAL_ONLY"
 
   template {
-    service_account = google_service_account.doorman.email
+    service_account = google_service_account.gatekeeper_ingress.email
 
     scaling {
       min_instance_count = 1
@@ -275,7 +275,7 @@ resource "google_cloud_run_v2_service" "doorman" {
     }
 
     containers {
-      image = var.doorman_image
+      image = var.gatekeeper_ingress_image
 
       ports {
         container_port = 8090
@@ -305,16 +305,16 @@ resource "google_cloud_run_v2_service" "doorman" {
         name = "FACTORY_TOKEN"
         value_source {
           secret_key_ref {
-            secret  = "doorman-operator-token"
+            secret  = "gatekeeper-ingress-operator-token"
             version = "latest"
           }
         }
       }
       env {
-        name = "DOORMAN_TOKEN"
+        name = "GATEKEEPER_INGRESS_TOKEN"
         value_source {
           secret_key_ref {
-            secret  = "doorman-token"
+            secret  = "gatekeeper-ingress-token"
             version = "latest"
           }
         }
@@ -379,31 +379,31 @@ resource "google_cloud_run_v2_job" "agents" {
         }
         env {
           name  = "DISCORD_BASE_URL"
-          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/discord" : ""
+          value = local.images_ready ? "${google_cloud_run_v2_service.gatekeeper_egress[0].uri}/discord" : ""
         }
         env {
           name  = "OPENAI_BASE_URL"
-          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/v1" : ""
+          value = local.images_ready ? "${google_cloud_run_v2_service.gatekeeper_egress[0].uri}/v1" : ""
         }
         env {
           name  = "ANTHROPIC_BASE_URL"
-          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/anthropic" : ""
+          value = local.images_ready ? "${google_cloud_run_v2_service.gatekeeper_egress[0].uri}/anthropic" : ""
         }
         env {
           name  = "GOOGLE_CALENDAR_BASE_URL"
-          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/google-calendar" : ""
+          value = local.images_ready ? "${google_cloud_run_v2_service.gatekeeper_egress[0].uri}/google-calendar" : ""
         }
         env {
           name  = "GOOGLE_OAUTH_BASE_URL"
-          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/google-oauth" : ""
+          value = local.images_ready ? "${google_cloud_run_v2_service.gatekeeper_egress[0].uri}/google-oauth" : ""
         }
         env {
           name  = "GMAIL_BASE_URL"
-          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/google-gmail" : ""
+          value = local.images_ready ? "${google_cloud_run_v2_service.gatekeeper_egress[0].uri}/google-gmail" : ""
         }
         env {
           name  = "GOOGLE_DRIVE_BASE_URL"
-          value = local.images_ready ? "${google_cloud_run_v2_service.gateway[0].uri}/google-drive" : ""
+          value = local.images_ready ? "${google_cloud_run_v2_service.gatekeeper_egress[0].uri}/google-drive" : ""
         }
         env {
           name  = "FACTORY_URL"
@@ -434,12 +434,12 @@ output "control_plane_url" {
   description = "Control plane Cloud Run service URL"
 }
 
-output "gateway_url" {
-  value       = local.images_ready ? google_cloud_run_v2_service.gateway[0].uri : ""
-  description = "Gateway Cloud Run service URL"
+output "gatekeeper_egress_url" {
+  value       = local.images_ready ? google_cloud_run_v2_service.gatekeeper_egress[0].uri : ""
+  description = "gatekeeper-egress Cloud Run service URL"
 }
 
-output "doorman_url" {
-  value       = local.images_ready ? google_cloud_run_v2_service.doorman[0].uri : ""
-  description = "Doorman Cloud Run service URL"
+output "gatekeeper_ingress_url" {
+  value       = local.images_ready ? google_cloud_run_v2_service.gatekeeper_ingress[0].uri : ""
+  description = "gatekeeper-ingress Cloud Run service URL"
 }

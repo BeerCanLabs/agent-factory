@@ -145,8 +145,8 @@ export function bedrockConverse(opts: BedrockConverseOptions = {}): ModelAdapter
       try {
         c = await creds();
       } catch (err) {
-        console.error(`[gateway] bedrock credentials: ${err instanceof Error ? err.message : String(err)}`);
-        throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gateway has no cloud credentials');
+        console.error(`[gatekeeper-egress] bedrock credentials: ${err instanceof Error ? err.message : String(err)}`);
+        throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no cloud credentials');
       }
       const url = new URL(`${endpoint(region).replace(/\/$/, '')}/model/${encodeURIComponent(entry.id)}/converse`);
       const body = JSON.stringify(toConverse(req));

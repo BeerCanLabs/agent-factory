@@ -5,7 +5,7 @@
  *   GET  /api/v1/connections/:provider/callback?code&state        provider redirect; the signed state is the auth
  *   POST /api/v1/connections/:agentId/:provider/import           admin: import an existing authorized-user credential
  *   GET  /api/v1/connections/:agentId                             viewer: connections, scopes, status (never tokens)
- *   POST /api/v1/gateway/connections/token                        gateway only: access token for a live run (K3/K4)
+ *   POST /api/v1/gatekeeper-egress/connections/token                        gatekeeper-egress only: access token for a live run (K3/K4)
  */
 import http from 'node:http';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -121,8 +121,8 @@ function declaredScopes(state: FactoryState, agentId: string, provider: string):
 export async function handleConnections(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
   const url = new URL(req.url ?? '/', 'http://factory.local');
 
-  if (path === '/api/v1/gateway/connections/token' && req.method === 'POST') {
-    await tokenForGateway(state, req, res);
+  if (path === '/api/v1/gatekeeper-egress/connections/token' && req.method === 'POST') {
+    await tokenForGatekeeperEgress(state, req, res);
     return true;
   }
 
@@ -283,11 +283,11 @@ async function importGrant(state: FactoryState, res: http.ServerResponse, agentI
   json(res, 201, { agentId, ...ConnectionKeymaster.view(grant), clientRef });
 }
 
-async function tokenForGateway(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
-  const principal = await authenticate(req, res, state, 'gateway');
+async function tokenForGatekeeperEgress(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
+  const principal = await authenticate(req, res, state, 'gatekeeper-egress');
   if (!principal) return;
-  // Only the gateway injects tokens (K3): an admin token is not enough.
-  if (!principal.roles.includes('gateway')) return json(res, 403, { error: 'forbidden', required: 'gateway' });
+  // Only the gatekeeper-egress injects tokens (K3): an admin token is not enough.
+  if (!principal.roles.includes('gatekeeper-egress')) return json(res, 403, { error: 'forbidden', required: 'gatekeeper-egress' });
   const b = await readJson(req);
   const runId = typeof b.runId === 'string' ? b.runId : undefined;
   const agentId = typeof b.agentId === 'string' ? b.agentId : undefined;

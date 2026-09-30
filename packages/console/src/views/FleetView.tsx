@@ -233,7 +233,7 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
             {filterCategory === 'USER'
               ? 'User-defined submind personas and autonomous operational agents.'
               : filterCategory === 'BUILTIN'
-              ? 'Core factory operational actors (Doorman, Keymaster, Doctor, Coach).'
+              ? 'Core factory operational actors (gatekeeper-ingress, Keymaster, Doctor, Coach).'
               : 'Complete unified view of all factory subminds and system actors.'}
           </p>
         </div>
@@ -331,7 +331,7 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
             </span>
           </div>
           <div className="text-sm font-semibold text-emerald-600 dark:text-emerald-400 mt-1">No Public IPs</div>
-          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Egress Routed via Gateway Only</div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Egress only via gatekeeper-egress</div>
         </div>
       </div>
 

@@ -14,7 +14,7 @@ function opts(over: Partial<AssessOptions> & { have?: string[]; grants?: Record<
     agentId: 'donna',
     secrets: [],
     connections: [],
-    gatewayHeld: new Set(),
+    gatekeeperEgressHeld: new Set(),
     present: async (n) => have.has(n),
     grant: async (p) => over.grants?.[p],
     submitPath: (n) => `/api/v1/keymaster/agents/donna/credentials/${n}`,
@@ -74,11 +74,11 @@ describe('assessCredentials (K5.2)', () => {
     assert.deepEqual(summarize(items), { total: 3, outstanding: 2, present: 1 });
   });
 
-  it('reports gateway-held secrets as platform credentials: checked from metadata, supplied through the platform channel', async () => {
+  it('reports gatekeeper-held secrets as platform credentials: checked from metadata, supplied through the platform channel', async () => {
     const asked: string[] = [];
     const items = await assessCredentials(opts({
       secrets: [{ name: 'NOTION_API_KEY' }, { name: 'ANTHROPIC_API_KEY' }],
-      gatewayHeld: new Set(['NOTION_API_KEY', 'ANTHROPIC_API_KEY']),
+      gatekeeperEgressHeld: new Set(['NOTION_API_KEY', 'ANTHROPIC_API_KEY']),
       present: async (n) => (asked.push(n), n === 'ANTHROPIC_API_KEY'),
     }));
     assert.deepEqual(asked.sort(), ['ANTHROPIC_API_KEY', 'NOTION_API_KEY']);
@@ -92,12 +92,12 @@ describe('assessCredentials (K5.2)', () => {
       assert.deepEqual(i.action, { type: 'submit', method: 'POST', path: `/api/v1/keymaster/platform/credentials/${i.name}` });
     }
     // Never through the agent's own endpoint.
-    assert.deepEqual([...submittableSecrets({ secrets: [{ name: 'NOTION_API_KEY' }, { name: 'X_TOKEN' }], connections: [], gatewayHeld: new Set(['NOTION_API_KEY']) })], ['X_TOKEN']);
+    assert.deepEqual([...submittableSecrets({ secrets: [{ name: 'NOTION_API_KEY' }, { name: 'X_TOKEN' }], connections: [], gatekeeperEgressHeld: new Set(['NOTION_API_KEY']) })], ['X_TOKEN']);
   });
 
   it('lists every platform credential for the platform view', async () => {
     const items = await assessPlatformCredentials({
-      gatewayHeld: new Set(['OPENAI_API_KEY', 'ANTHROPIC_API_KEY']),
+      gatekeeperEgressHeld: new Set(['OPENAI_API_KEY', 'ANTHROPIC_API_KEY']),
       present: async (n) => n === 'OPENAI_API_KEY',
       submitPath: (n) => `/api/v1/keymaster/platform/credentials/${n}`,
     });
@@ -139,7 +139,7 @@ describe('assessCredentials (K5.2)', () => {
     const action = by.google.action;
     assert.equal(action.type === 'consent' && action.available, false);
     assert.deepEqual(
-      [...submittableSecrets({ secrets: [], connections: [{ provider: 'google', scopes: [] }, { provider: 'google-service-account', scopes: [] }], gatewayHeld: new Set() })],
+      [...submittableSecrets({ secrets: [], connections: [{ provider: 'google', scopes: [] }, { provider: 'google-service-account', scopes: [] }], gatekeeperEgressHeld: new Set() })],
       ['GOOGLE_OAUTH_CLIENT', 'GOOGLE_SERVICE_ACCOUNT'],
     );
   });

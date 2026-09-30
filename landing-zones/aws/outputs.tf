@@ -25,7 +25,7 @@ output "admin_token_secret" {
 }
 
 output "provider_secrets" {
-  description = "Gateway-held keys. Supply them as platform credentials through the Keymaster; only the gateway can read them."
+  description = "Gatekeeper-held keys. Supply them as platform credentials through the Keymaster; only the gatekeeper-egress can read them."
   value       = [for n in local.held_secret_names : "factory/${var.environment}/${n}"]
 }
 

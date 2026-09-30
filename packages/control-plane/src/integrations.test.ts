@@ -33,7 +33,7 @@ function setup() {
     auth: bearerAuth([
       { name: 'viewer', token: 'viewer-token', roles: ['viewer'] },
       { name: 'operator', token: 'operator-token', roles: ['operator'] },
-      { name: 'gateway', token: 'ingest-token', roles: ['ingest'] },
+      { name: 'gatekeeper-egress', token: 'ingest-token', roles: ['ingest'] },
     ]),
     version: 'test',
     providers: [envProvider({ ECHO_WEBHOOK_SECRET: 'whsec' })],

@@ -43,7 +43,7 @@ mkdirSync(REGISTRY_DIR, { recursive: true });
 
 const staticAgents = loadCatalog(AGENTS_ROOT);
 const dynamicAgents = loadDynamicRegistry(REGISTRY_DIR);
-// Built-in system actors (Doorman, Keymaster, Doctor, Coach) are first-class system agents; a registry record
+// Built-in system actors (gatekeeper-ingress, Keymaster, Doctor, Coach) are first-class system agents; a registry record
 // replaces a baked static cartridge with the same id.
 const allAgents = mergeAgents(BUILTIN_SYSTEM_AGENTS, staticAgents, dynamicAgents);
 const secretValues = new Set<string>(secretValuesFromEnv());
@@ -125,11 +125,11 @@ const state: FactoryState = {
   deployProvider,
   policies: new PolicyStore(process.env.FACTORY_POLICIES_DIR || join(DATA_DIR, 'policies'), defaultPolicy()),
   approvals: new ApprovalStore(join(DATA_DIR, 'approvals')),
-  // Only the gateway can write costUsd (stripped for other writers), so every priced llm row counts.
+  // Only the gatekeeper-egress can write costUsd (stripped for other writers), so every priced llm row counts.
   spend: SpendTracker.fromLedger(ledger.query(), () => true),
   secretValues,
   ledgerSink,
-  doormanToken: process.env.DOORMAN_TOKEN,
+  gatekeeperIngressToken: process.env.GATEKEEPER_INGRESS_TOKEN,
   heartbeatTimeoutMs: parseInt(process.env.FACTORY_HEARTBEAT_TIMEOUT_MS || '90000', 10),
   maxRssMb: parseInt(process.env.FACTORY_MAX_RSS_MB || '0', 10),
   crashLoopThreshold: parseInt(process.env.FACTORY_CRASH_LOOP_THRESHOLD || '3', 10),
@@ -143,11 +143,11 @@ const state: FactoryState = {
   callbacks: callbackPolicyFromEnv(),
   publicBaseUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
   publicUrl: process.env.FACTORY_PUBLIC_URL || process.env.FACTORY_URL || 'http://control-plane.factory.internal:8088',
-  gatewayUrl: process.env.FACTORY_GATEWAY_URL,
-  gatewayHeldSecrets: new Set((process.env.FACTORY_GATEWAY_HELD_SECRETS ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
+  gatekeeperEgressUrl: process.env.FACTORY_GATEKEEPER_EGRESS_URL,
+  gatekeeperEgressHeldSecrets: new Set((process.env.FACTORY_GATEKEEPER_EGRESS_HELD_SECRETS ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
   idleMs: IDLE_MS,
   idleTimers: new Map(),
-  doormanUrl: process.env.DOORMAN_URL,
+  gatekeeperIngressUrl: process.env.GATEKEEPER_INGRESS_URL,
   runtime:
     process.env.FACTORY_RUNTIME === 'docker'
       ? dockerRuntime({

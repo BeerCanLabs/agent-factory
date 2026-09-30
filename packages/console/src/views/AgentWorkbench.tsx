@@ -43,9 +43,9 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
   const [isSwitchingModel, setIsSwitchingModel] = useState(false);
   const [logs, setLogs] = useState<string[]>([
     `[${new Date().toISOString()}] Agent ${agent.name} initialized in private VPC subnet.`,
-    `[${new Date().toISOString()}] Zero-Trust Egress: HTTP_PROXY and HTTPS_PROXY mapped to Gateway.`,
+    `[${new Date().toISOString()}] Zero-Trust Egress: HTTP_PROXY and HTTPS_PROXY mapped to gatekeeper-egress.`,
     `[${new Date().toISOString()}] Memory: Loaded SQLite notebook (${agent.sqliteSizeKb || 0} KB) from ${agent.mindPrefix || 'S3'}.`,
-    `[${new Date().toISOString()}] State: ${agent.state}. Waiting for Doorman ingress trigger or operator turn.`,
+    `[${new Date().toISOString()}] State: ${agent.state}. Waiting for gatekeeper-ingress ingress trigger or operator turn.`,
   ]);
 
   const handleSendPrompt = async () => {
@@ -85,7 +85,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
   };
 
   const handleRetire = async () => {
-    if (!confirm(`Are you sure you want to begin Stage 1 Soft-Retirement for ${agent.name}? This will sever Doorman ingress and start a 7-day holding countdown.`)) {
+    if (!confirm(`Are you sure you want to begin Stage 1 Soft-Retirement for ${agent.name}? This will sever gatekeeper-ingress ingress and start a 7-day holding countdown.`)) {
       return;
     }
     try {
@@ -274,7 +274,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
               </div>
               <div className="flex justify-between py-1.5 border-b border-slate-100 dark:border-slate-800/80">
                 <span className="text-slate-500 dark:text-slate-400">Egress Conduit:</span>
-                <span className="font-mono text-slate-700 dark:text-slate-200">http://factory-gateway:3001</span>
+                <span className="font-mono text-slate-700 dark:text-slate-200">http://factory-gatekeeper-egress:3001</span>
               </div>
               <div className="flex justify-between py-1.5 border-b border-slate-100 dark:border-slate-800/80">
                 <span className="text-slate-500 dark:text-slate-400">Warm-Down Timer:</span>
@@ -286,11 +286,11 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-4 shadow-sm transition-colors">
             <h4 className="text-sm font-bold text-slate-900 dark:text-white flex items-center space-x-2">
               <Clock className="w-4 h-4 text-blue-500" />
-              <span>Doorman Presence & Ingress</span>
+              <span>gatekeeper-ingress: presence &amp; triggers</span>
             </h4>
             <div className="space-y-2 text-xs">
               <div className="flex justify-between py-1.5 border-b border-slate-100 dark:border-slate-800/80">
-                <span className="text-slate-500 dark:text-slate-400">Doorman Gateway:</span>
+                <span className="text-slate-500 dark:text-slate-400">gatekeeper-ingress:</span>
                 <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Online (24/7 WebSocket)</span>
               </div>
               <div className="flex justify-between py-1.5 border-b border-slate-100 dark:border-slate-800/80">
@@ -406,7 +406,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
             <div>
               <h4 className="text-sm font-bold text-slate-900 dark:text-white">Active Production Model</h4>
-              <p className="text-xs text-slate-500 dark:text-slate-400">Hot-swap active reasoning engine at the Egress Gateway</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Hot-swap active reasoning engine at gatekeeper-egress</p>
             </div>
 
             <div className="flex items-center space-x-2">
@@ -483,7 +483,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                Immediately drops active compute to $0 and severs Doorman presence. Mind storage and vault secrets are preserved
+                Immediately drops active compute to $0 and severs its gatekeeper-ingress presence. Mind storage and vault secrets are preserved
                 during the 7-day holding period in case reinstatement is requested.
               </p>
               {agent.state === 'RETIRED_PENDING_PURGE' ? (

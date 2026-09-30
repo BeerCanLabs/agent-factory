@@ -15,7 +15,7 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
   3. **Policy Engine Evaluation (Budget):** To prevent FinOps admins from becoming a manual deployment bottleneck, the Factory executes an automated Policy Engine. Authorized `Factory.FinOps` users pre-define organizational constraints (e.g., "Default budget of $10/day for all new agents" or "Shared circuit-breaker for the Engineering Department"). When an agent is registered, the Policy Engine evaluates it. If it complies, it automatically transitions to the `PENDING_DEPLOY` state. Exceptions require a manual RBAC override.
   4. **Deployment (RBAC: `Factory.Deployer`):** An authorized user explicitly triggers the deployment. The Factory Control Plane transitions the agent to `DEPLOYING` and natively orchestrates the cloud provider (e.g., dynamically provisioning the ECS Task Definition and strict IAM Task Role in AWS) to push the agent into production (`SLEEPING`).
   5. **Retirement & Decommissioning (RBAC: `Factory.Deployer` / `Factory.Admin`):** When an agent reaches end-of-life, the Factory executes a two-stage retirement workflow designed to prevent accidental data destruction while guaranteeing zero ongoing cloud costs:
-     - **Stage 1 (Soft-Retire / "Scream Test"):** Triggering retirement immediately disables all ingress triggers, Doorman presence, and compute wakeups, dropping active compute and egress costs to $0. The agent enters `RETIRED_PENDING_PURGE` for a configurable holding period (default: 1 calendar week). Secrets and persistent memory remain preserved in case of accidental retirement. If an operator invokes reinstatement during this window, the agent returns to `SLEEPING`.
+     - **Stage 1 (Soft-Retire / "Scream Test"):** Triggering retirement immediately disables all ingress triggers, gatekeeper-ingress presence, and compute wakeups, dropping active compute and egress costs to $0. The agent enters `RETIRED_PENDING_PURGE` for a configurable holding period (default: 1 calendar week). Secrets and persistent memory remain preserved in case of accidental retirement. If an operator invokes reinstatement during this window, the agent returns to `SLEEPING`.
      - **Stage 2 (Permanent Purge & Archival):** Once the scream-test holding period expires (or upon explicit administrative purge), the Factory destroys cloud task definitions, revokes and purges the agent's secrets from the vault, and compresses/archives persistent mind storage to cold archive. The cryptographic execution ledger history remains immutable forever.
 - **Interface (REST API):**
   - `POST /api/v1/registry/agents` (Registers and validates the new Cartridge)
@@ -33,22 +33,22 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 ### 3. Cost Management & Policy Engine (FinOps & Kill-Switch)
 - **Description:** Real-time visibility into token burn and automated governance. The Factory intercepts all egress traffic, prices tokens, and evaluates them against the Policy Engine's rules. If an agent (or an overarching departmental budget) hits its circuit-breaker limit, the Factory automatically pauses egress.
 - **Interface (REST API):** 
-  - `GET /api/v1/gateway/runs/:runId` (UI pulls current spend)
+  - `GET /api/v1/gatekeeper-egress/runs/:runId` (UI pulls current spend)
   - `PUT /api/v1/policies/budget` (FinOps user sets organizational, departmental, or per-agent budget thresholds)
   - `POST /api/v1/agents/:id/pause` (UI manually triggers the kill-switch)
 
-### 4. LLM & MCP Gateway (Unified Egress & Tool Governance)
+### 4. LLM & MCP gatekeeper-egress (Unified Egress & Tool Governance)
 - **Description:** The network proxy that intercepts all outbound traffic from the Cartridges. It strips the agent's run-token and injects the real API keys (OpenAI, Anthropic, etc.), meters the token consumption, and allows the Factory to transparently reroute or downgrade models. It also intercepts Model Context Protocol (MCP) tool calls, enforcing allowlists and parking unauthorized calls for human approval.
 - **Interface (REST / WebSockets):**
   - `GET /api/v1/approvals?state=pending` (UI fetches held tool calls)
   - `POST /api/v1/approvals/:id` (UI approves or rejects the action)
   - `WebSocket /stream` (UI streams live tool execution logs directly to the user)
 
-### 5. Doorman (Presence & Real-Time Routing)
-- **Description:** Persistent, stateful connection manager and ingress routing actor (`packages/doorman`). Because AI Subminds scale to zero to save costs, they cannot hold WebSockets open. Doorman holds these connections (like Discord Gateway, Slack RTM, or Custom WebSockets) 24/7, manages the "Online/Offline" presence, and wakes the agent when an event occurs.
+### 5. gatekeeper-ingress (Presence & Real-Time Routing)
+- **Description:** Persistent, stateful connection manager and ingress routing actor (`packages/gatekeeper-ingress`). Because AI Subminds scale to zero to save costs, they cannot hold WebSockets open. gatekeeper-ingress holds these connections (like Discord Gateway, Slack RTM, or Custom WebSockets) 24/7, manages the "Online/Offline" presence, and wakes the agent when an event occurs.
 - **Interface (WebSockets / Webhooks):**
-  - Custom UI frontends establish a WebSocket connection directly with Doorman.
-  - Doorman uses an internal Webhook (`POST /wake`) to trigger the stateless Agent.
+  - Custom UI frontends establish a WebSocket connection directly with gatekeeper-ingress.
+  - gatekeeper-ingress uses an internal Webhook (`POST /wake`) to trigger the stateless Agent.
 
 ### 6. Doctor (Triage Function & Incident Engine)
 - **Description:** Built-in triage and diagnostic actor (`packages/triage`). A unified, append-only fault engine where all system faults converge. Whether an agent crashes from an Out-of-Memory error, lacks a secret during pre-flight, gets blocked by the LLM, or fails a task internally, Doctor diagnoses the failure, writes to the immutable ledger, and routes diagnostic alerts to operators.
@@ -87,7 +87,7 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 | **KPF 1: Agent Registry & Lifecycle** | Get Agent Details & Lifecycle State | 👤 Operator | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Assign / Update Agent Budget | 👤 FinOps Admin | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Provision Cloud Infrastructure (Deploy) | 👤 Release Engineer | REST / HTTPS |
-| **KPF 1: Agent Registry & Lifecycle** | Wake Agent / Dispatch Run | 🤖 Doorman | REST / HTTPS |
+| **KPF 1: Agent Registry & Lifecycle** | Wake Agent / Dispatch Run | 🤖 gatekeeper-ingress | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Cancel Active Run / Sleep Container | 👤 Operator | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Pause Agent (Operational Kill-Switch) | 👤 Operator | REST / HTTPS |
 | **KPF 1: Agent Registry & Lifecycle** | Resume Paused Agent | 👤 Operator | REST / HTTPS |
@@ -103,16 +103,16 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 | **KPF 3: Cost Management & FinOps** | Get Agent Policy & Spend Caps | 👤 FinOps Admin | REST / HTTPS |
 | **KPF 3: Cost Management & FinOps** | Update Org / Dept / Agent Budget Policy | 👤 FinOps Admin | REST / HTTPS |
 | **KPF 3: Cost Management & FinOps** | Emergency Egress Quarantine (Isolate) | 👤 Security Admin | REST / HTTPS |
-| **KPF 4: LLM & MCP Egress Gateway** | Egress LLM Request | ⚙️ Agent Runtime | HTTP Reverse Proxy |
-| **KPF 4: LLM & MCP Egress Gateway** | Egress Third-Party HTTP / API | ⚙️ Agent Runtime | HTTP Forward Proxy (`CONNECT`) |
-| **KPF 4: LLM & MCP Egress Gateway** | List Held Tool Calls (HITL Pending) | 👤 Approver | REST / HTTPS |
-| **KPF 4: LLM & MCP Egress Gateway** | Approve / Reject Held Tool Action | 👤 Approver | REST / HTTPS |
-| **KPF 4: LLM & MCP Egress Gateway** | Stream Live Execution Logs | 👤 Operator | WebSocket |
-| **KPF 5: Doorman (Presence & Routing)** | Receive External Ingress Event | 👤 End User | WebSocket / Inbound Webhook |
-| **KPF 5: Doorman (Presence & Routing)** | Trigger Ingress Wake | 🤖 Doorman | Internal HTTP Webhook |
-| **KPF 5: Doorman (Presence & Routing)** | Deliver Follow-Up Turn to Running Agent | 🤖 Doorman | REST / HTTPS |
-| **KPF 5: Doorman (Presence & Routing)** | Container Mailbox Retrieval | ⚙️ Agent Runtime | HTTP Long-Polling |
-| **KPF 5: Doorman (Presence & Routing)** | Agent Container Heartbeat | ⚙️ Agent Runtime | REST / HTTPS |
+| **KPF 4: LLM & MCP gatekeeper-egress** | Egress LLM Request | ⚙️ Agent Runtime | HTTP Reverse Proxy |
+| **KPF 4: LLM & MCP gatekeeper-egress** | Egress Third-Party HTTP / API | ⚙️ Agent Runtime | HTTP Forward Proxy (`CONNECT`) |
+| **KPF 4: LLM & MCP gatekeeper-egress** | List Held Tool Calls (HITL Pending) | 👤 Approver | REST / HTTPS |
+| **KPF 4: LLM & MCP gatekeeper-egress** | Approve / Reject Held Tool Action | 👤 Approver | REST / HTTPS |
+| **KPF 4: LLM & MCP gatekeeper-egress** | Stream Live Execution Logs | 👤 Operator | WebSocket |
+| **KPF 5: gatekeeper-ingress (Presence & Routing)** | Receive External Ingress Event | 👤 End User | WebSocket / Inbound Webhook |
+| **KPF 5: gatekeeper-ingress (Presence & Routing)** | Trigger Ingress Wake | 🤖 gatekeeper-ingress | Internal HTTP Webhook |
+| **KPF 5: gatekeeper-ingress (Presence & Routing)** | Deliver Follow-Up Turn to Running Agent | 🤖 gatekeeper-ingress | REST / HTTPS |
+| **KPF 5: gatekeeper-ingress (Presence & Routing)** | Container Mailbox Retrieval | ⚙️ Agent Runtime | HTTP Long-Polling |
+| **KPF 5: gatekeeper-ingress (Presence & Routing)** | Agent Container Heartbeat | ⚙️ Agent Runtime | REST / HTTPS |
 | **KPF 6: Triage & Fault Ledger (Doctor)** | Query Immutable Ledger Audit Trail | 👤 Auditor | REST / HTTPS |
 | **KPF 6: Triage & Fault Ledger (Doctor)** | Query Run State & Execution Errors | 👤 SRE | REST / HTTPS |
 | **KPF 6: Triage & Fault Ledger (Doctor)** | Report Run Exit / Crash Result | ⚙️ Agent Runtime | REST / HTTPS |
@@ -132,7 +132,7 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 These remain documented so they are not reintroduced as silent kernel scope.
 
 ### D1. Multi-channel identity and real-time voice/robotics streaming
-Voice transcript streaming and gesture clocks are overlay/runtime concerns, not factory kernel. Doorman can hold the connection, but the heavy lifting of streaming logic belongs in the Cartridge.
+Voice transcript streaming and gesture clocks are overlay/runtime concerns, not factory kernel. gatekeeper-ingress can hold the connection, but the heavy lifting of streaming logic belongs in the Cartridge.
 
 ### D2. Shared skills catalog execution
 The factory does not host a plug-and-play code library. MCP is for peripherals only.
