@@ -13,7 +13,7 @@ import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, typ
 import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver } from './source.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
-import { exceededWindow, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
+import { exceededWindow, spendDetail, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
@@ -920,6 +920,44 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
+  // TSK-045: per-agent model spend (gateway-metered `llm` rows) for the current UTC day and month. Counts only:
+  // no prompt bodies, no secrets. A verified viewer, or a live run whose agent's admin-set policy grants the
+  // `factory-spend` tool (E7: never implied). Every read is ledgered.
+  if (path === '/api/v1/spend' && req.method === 'GET') {
+    let actor: string;
+    let agentId = 'factory';
+    const claims = await state.runTokens.verify(bearerOf(req));
+    if (claims) {
+      const run = state.runs.get(claims.runId);
+      if (!run || run.agentId !== claims.agentId || isTerminal(run.state)) return json(res, 401, { error: 'invalid_run_token' });
+      // Only a policy an admin set for this agent counts; the factory fallback policy never grants it.
+      const granted = state.policies.has(claims.agentId) && Object.prototype.hasOwnProperty.call(state.policies.get(claims.agentId).tools ?? {}, 'factory-spend');
+      if (!granted) {
+        return json(res, 403, { error: 'forbidden', required: 'policy.tools.factory-spend' });
+      }
+      actor = `run:${claims.agentId}:${claims.runId}`;
+      agentId = claims.agentId;
+    } else {
+      const principal = await authenticate(req, res, state, 'viewer');
+      if (!principal) return;
+      actor = principal.actor;
+    }
+    const report = state.spend.report();
+    const round = <T extends { usd: number }>(w: T): T => ({ ...w, usd: Number(w.usd.toFixed(6)) });
+    const agents = Object.fromEntries(
+      Object.entries(report.agents).map(([id, a]) => [
+        id,
+        Object.fromEntries(
+          (['day', 'month'] as const).map((k) => [k, { ...round(a[k]), byModel: Object.fromEntries(Object.entries(a[k].byModel).map(([m, c]) => [m, round(c)])) }]),
+        ),
+      ]),
+    );
+    const total = (k: 'day' | 'month') => Number(Object.values(report.agents).reduce((n, a) => n + a[k].usd, 0).toFixed(6));
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'SPEND_READ', actor });
+    json(res, 200, { currency: 'USD', day: report.day, month: report.month, totalUsd: { day: total('day'), month: total('month') }, agents });
+    return;
+  }
+
   if (path === '/api/v1/triage' && req.method === 'GET') {
     if (!(await authenticate(req, res, state, 'viewer'))) return;
     const failedRuns = state.runs.list({}).filter((r) => r.state === 'FAILED' || r.error);
@@ -1274,7 +1312,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       const policy = state.policies.get(stored.agentId);
       // `before` must be read before the spend is added, or a crossing is never detected.
       const before = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
-      state.spend.add(stored.agentId, stored.runId, stored.costUsd, stored.timestamp);
+      state.spend.add(stored.agentId, stored.runId, stored.costUsd, stored.timestamp, spendDetail(stored));
       if (!isBuiltin) {
         const after = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
         // Alert once per crossing, even if the run already finished; block only a run that is still live.

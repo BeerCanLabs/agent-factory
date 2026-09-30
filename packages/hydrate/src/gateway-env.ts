@@ -37,6 +37,12 @@ export function gatewayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     // S1: the gateway's `notion` route injects the shared Notion integration key; agents call
     // `$NOTION_BASE_URL/v1/...` with their run token and never hold the key.
     NOTION_BASE_URL: `${gw}/notion`,
+    // TSK-045 (S1): the gateway injects the calling agent's own GitHub token (no shared fallback), the Motion
+    // key, and deployment-specific service tokens. `<ROUTE_ID>_BASE_URL` = `${gw}/<route-id>`.
+    GITHUB_BASE_URL: `${gw}/github`,
+    MOTION_BASE_URL: `${gw}/motion`,
+    CLOSING_CLIMB_BASE_URL: `${gw}/closing-climb`,
+    HOME_ASSISTANT_BASE_URL: `${gw}/home-assistant`,
   };
   // An image that set its own values keeps them; the gateway still rejects anything but a run token.
   for (const k of Object.keys(out)) if (env[k]) delete out[k];
