@@ -100,7 +100,7 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_LOG_GROUP", value = aws_cloudwatch_log_group.factory.name },
         # Gateway-held secrets (S1): the control plane is denied them, pre-flight never reads them, and they are
         # never put in an agent task definition (aws/ecs.ts).
-        { name = "FACTORY_GATEWAY_HELD_SECRETS", value = join(",", var.provider_secret_names) },
+        { name = "FACTORY_GATEWAY_HELD_SECRETS", value = join(",", local.held_secret_names) },
         { name = "DOORMAN_URL", value = local.doorman_url },
         { name = "FACTORY_EVENT_BUS", value = "eventbridge:${aws_cloudwatch_event_bus.factory.name}" },
         { name = "MEMORY_STORE_DIR", value = "/tmp/mind" },
@@ -171,7 +171,7 @@ resource "aws_ecs_task_definition" "gateway" {
         { name = "FACTORY_URL", value = local.cp_url },
       { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
-        { name = "FACTORY_GATEWAY_ROUTES", value = var.gateway_routes },
+        { name = "FACTORY_GATEWAY_ROUTES", value = local.gateway_routes },
         { name = "FACTORY_PRICES", value = var.gateway_prices },
         { name = "FACTORY_MODEL_CATALOG", value = jsonencode({ for name, m in var.model_catalog : name => { for k, v in m : k => v if v != null } }) },
         { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
@@ -354,7 +354,7 @@ resource "aws_ecs_task_definition" "agent" {
       { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
     ]
     # S1: a secret the gateway holds (provider_secret_names) is injected at egress and never reaches an agent container.
-    secrets          = [for name in var.agents[each.key].secrets : { name = name, valueFrom = "${local.secret_arn}/${name}" } if !contains(var.provider_secret_names, name)]
+    secrets          = [for name in var.agents[each.key].secrets : { name = name, valueFrom = "${local.secret_arn}/${name}" } if !contains(local.held_secret_names, name)]
     logConfiguration = local.log["agent"]
   }])
 }
