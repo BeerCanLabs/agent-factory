@@ -1,14 +1,14 @@
 {
-  "name": "@beercanlabs/factory-gateway",
+  "name": "@beercanlabs/factory-gatekeeper-egress",
   "version": "0.1.0",
   "private": true,
-  "description": "Fleet egress gateway: run-token auth, credential injection, metering, budget, tool allowlist and approvals",
+  "description": "Fleet gatekeeper-egress: run-token auth, credential injection, metering, budget, tool allowlist and approvals",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/main.js",
-    "test": "tsx --test src/meter.test.ts src/gateway.test.ts src/sigv4.test.ts src/models.test.ts src/connections.test.ts src/routes.test.ts"
+    "test": "tsx --test src/meter.test.ts src/gatekeeper-egress.test.ts src/sigv4.test.ts src/models.test.ts src/connections.test.ts src/routes.test.ts"
   },
   "dependencies": {
     "@beercanlabs/factory-auth": "0.1.0",

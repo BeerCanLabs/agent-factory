@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import { RunTokens } from '@beercanlabs/factory-auth';
-import { createGateway, type ControlClient, type RunContext } from '@beercanlabs/factory-gateway';
-import { gatewayEnv } from '@beercanlabs/factory-hydrate';
+import { createGatekeeperEgress, type ControlClient, type RunContext } from '@beercanlabs/factory-gatekeeper-egress';
+import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 import { expectOnlyBaselined, files, read, type Violation } from './support.js';
 
 const MODEL_HOSTS = [/bedrock-runtime\./, /api\.anthropic\.com/, /api\.openai\.com/, /api\.x\.ai/, /generativelanguage\.googleapis\.com/, /aiplatform\.googleapis\.com/, /openai\.azure\.com/];
@@ -24,19 +24,19 @@ function landingZoneEgressHosts(): Violation[] {
 }
 
 describe('E1 single egress path', () => {
-  it('agents may bypass the gateway only for loopback, .internal, and metadata addresses', () => {
-    const env = gatewayEnv({ FACTORY_GATEWAY_URL: 'http://gw:8081', FACTORY_RUN_TOKEN: 't' });
+  it('agents may bypass the gatekeeper-egress only for loopback, .internal, and metadata addresses', () => {
+    const env = gatekeeperEgressEnv({ FACTORY_GATEKEEPER_EGRESS_URL: 'http://gw:8081', FACTORY_RUN_TOKEN: 't' });
     for (const k of ['NO_PROXY', 'no_proxy']) {
       const extra = env[k].split(',').filter((e) => !ALLOWED_NO_PROXY.has(e));
-      assert.deepEqual(extra, [], `${k} lets agents bypass the gateway`);
+      assert.deepEqual(extra, [], `${k} lets agents bypass the gatekeeper-egress`);
     }
-    assert.ok(env.HTTPS_PROXY && env.HTTP_PROXY, 'agents must be pointed at the gateway');
+    assert.ok(env.HTTPS_PROXY && env.HTTP_PROXY, 'agents must be pointed at the gatekeeper-egress');
   });
 
   it('nothing else sets NO_PROXY for agents', () => {
     const offenders = files('packages', (p) => /\/src\/.*\.ts$/.test(p) && !p.endsWith('.test.ts'))
       .concat(files('landing-zones', (p) => /\.(tf|ya?ml)$/.test(p)))
-      .filter((f) => f !== 'packages/hydrate/src/gateway-env.ts' && /\bNO_PROXY\b/i.test(read(f)));
+      .filter((f) => f !== 'packages/hydrate/src/gatekeeper-egress-env.ts' && /\bNO_PROXY\b/i.test(read(f)));
     assert.deepEqual(offenders, []);
   });
 });
@@ -88,7 +88,7 @@ describe('LG1 single ledger writer (AWS landing zone)', () => {
   });
 });
 
-describe('E2–E4 the gateway attributes, ledgers, and gates every egress path', { concurrency: false }, () => {
+describe('E2–E4 the gatekeeper-egress attributes, ledgers, and gates every egress path', { concurrency: false }, () => {
   const tokens = new RunTokens('conformance-run-token-key-0123456789');
   const ledger: Array<Record<string, unknown>> = [];
   let ctx: RunContext;
@@ -96,7 +96,7 @@ describe('E2–E4 the gateway attributes, ledgers, and gates every egress path',
   let seq = 0;
   let upstream: http.Server;
   let upPort = 0;
-  let gateway: http.Server;
+  let gatekeeperEgress: http.Server;
   let port = 0;
 
   const control: ControlClient = {
@@ -141,7 +141,7 @@ describe('E2–E4 the gateway attributes, ledgers, and gates every egress path',
   before(async () => {
     upstream = http.createServer((_req, res) => res.end('{}'));
     upPort = await listen(upstream);
-    gateway = createGateway({
+    gatekeeperEgress = createGatekeeperEgress({
       routes: [{ id: 'svc', kind: 'http', upstream: `http://127.0.0.1:${upPort}` }],
       prices: {},
       runTokens: tokens,
@@ -149,10 +149,10 @@ describe('E2–E4 the gateway attributes, ledgers, and gates every egress path',
       providers: [],
       contextTtlMs: 0,
     });
-    port = await listen(gateway);
+    port = await listen(gatekeeperEgress);
   });
   after(async () => {
-    await new Promise<void>((r) => gateway.close(() => r()));
+    await new Promise<void>((r) => gatekeeperEgress.close(() => r()));
     await new Promise<void>((r) => upstream.close(() => r()));
   });
   beforeEach(async () => {

@@ -1,4 +1,4 @@
-// §6.11 K1–K4: factory consent flow, grant import, and the gateway token endpoint.
+// §6.11 K1–K4: factory consent flow, grant import, and the gatekeeper-egress token endpoint.
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -15,7 +15,7 @@ import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
 import type { AgentRecord } from './catalog.js';
 
 const ADMIN = 'admin-conn';
-const GATEWAY = 'gateway-conn';
+const GATEKEEPER_EGRESS = 'gatekeeper-egress-conn';
 const VIEWER = 'viewer-conn';
 const SIGNING = 'callback-signing-key-0123456789';
 const BASE = 'https://factory.example.test';
@@ -73,7 +73,7 @@ describe('Keymaster connections API (§6.11)', { concurrency: false }, () => {
       ledger,
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
-        { name: 'gateway', token: GATEWAY, roles: ['gateway'] },
+        { name: 'gatekeeper-egress', token: GATEKEEPER_EGRESS, roles: ['gatekeeper-egress'] },
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
       ]),
       version: 'test',
@@ -211,35 +211,35 @@ describe('Keymaster connections API (§6.11)', { concurrency: false }, () => {
     assert.deepEqual(JSON.parse(values.get('connections/donna/google-client')!), CLIENT);
   });
 
-  it('token endpoint: gateway role only, live run of the same agent only; 428 with connect link when there is no grant', async () => {
+  it('token endpoint: gatekeeper-egress role only, live run of the same agent only; 428 with connect link when there is no grant', async () => {
     const live = state.runs.create({ agentId: 'donna', state: 'WORKING', actor: 'test', trigger: 'test' });
     const done = state.runs.create({ agentId: 'donna', state: 'DONE', actor: 'test', trigger: 'test' });
     const body = { runId: live.runId, agentId: 'donna', connection: 'google' };
-    const path = '/api/v1/gateway/connections/token';
+    const path = '/api/v1/gatekeeper-egress/connections/token';
 
-    assert.equal((await req(path, { method: 'POST', token: ADMIN, body })).status, 403, 'admin is not the gateway');
+    assert.equal((await req(path, { method: 'POST', token: ADMIN, body })).status, 403, 'admin is not the gatekeeper-egress');
     assert.equal((await req(path, { method: 'POST', token: VIEWER, body })).status, 403);
 
-    const missing = await req(path, { method: 'POST', token: GATEWAY, body });
+    const missing = await req(path, { method: 'POST', token: GATEKEEPER_EGRESS, body });
     assert.equal(missing.status, 428);
     assert.deepEqual(missing.json(), { error: 'needs_reconsent', provider: 'google', connectUrl: `${BASE}/api/v1/connections/donna/google/start` });
 
     values.set(grantSecretName('donna', 'google'), JSON.stringify({ provider: 'google', clientRef: 'GOOGLE_OAUTH_CLIENT', refreshToken: '1//r', scopes: [CAL], obtainedAt: 'x', grantedBy: 'admin', status: 'active' }));
-    tokenReply = { status: 200, body: { access_token: 'ya29.for-gateway', expires_in: 3600 } };
-    const ok = await req(path, { method: 'POST', token: GATEWAY, body });
+    tokenReply = { status: 200, body: { access_token: 'ya29.for-egress', expires_in: 3600 } };
+    const ok = await req(path, { method: 'POST', token: GATEKEEPER_EGRESS, body });
     assert.equal(ok.status, 200, ok.text);
-    assert.equal(ok.json().accessToken, 'ya29.for-gateway');
+    assert.equal(ok.json().accessToken, 'ya29.for-egress');
     assert.ok(Date.parse(ok.json().expiresAt) > Date.now());
-    assert.ok(state.secretValues.has('ya29.for-gateway'), 'issued tokens are redacted from results');
+    assert.ok(state.secretValues.has('ya29.for-egress'), 'issued tokens are redacted from results');
 
-    assert.equal((await req(path, { method: 'POST', token: GATEWAY, body: { ...body, runId: done.runId } })).status, 403, 'terminal run');
-    assert.equal((await req(path, { method: 'POST', token: GATEWAY, body: { ...body, agentId: 'someone-else' } })).status, 403, 'run of another agent');
-    assert.equal((await req(path, { method: 'POST', token: GATEWAY, body: { ...body, runId: 'nope' } })).status, 403);
-    assert.equal((await req(path, { method: 'POST', token: GATEWAY, body: { ...body, connection: 'nope' } })).status, 400);
+    assert.equal((await req(path, { method: 'POST', token: GATEKEEPER_EGRESS, body: { ...body, runId: done.runId } })).status, 403, 'terminal run');
+    assert.equal((await req(path, { method: 'POST', token: GATEKEEPER_EGRESS, body: { ...body, agentId: 'someone-else' } })).status, 403, 'run of another agent');
+    assert.equal((await req(path, { method: 'POST', token: GATEKEEPER_EGRESS, body: { ...body, runId: 'nope' } })).status, 403);
+    assert.equal((await req(path, { method: 'POST', token: GATEKEEPER_EGRESS, body: { ...body, connection: 'nope' } })).status, 400);
 
     tokenReply = { status: 400, body: { error: 'invalid_grant' } };
     state.connections!.invalidate('donna', 'google');
-    const revoked = await req(path, { method: 'POST', token: GATEWAY, body });
+    const revoked = await req(path, { method: 'POST', token: GATEKEEPER_EGRESS, body });
     assert.equal(revoked.status, 428);
     assert.equal(revoked.json().connectUrl, `${BASE}/api/v1/connections/donna/google/start`);
     const list = await req('/api/v1/connections/donna', { token: VIEWER });

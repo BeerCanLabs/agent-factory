@@ -5,7 +5,7 @@
  *   GET  /api/v1/keymaster/agents/:agentId/credentials         every declared credential: status, instructions, action
  *   POST /api/v1/keymaster/agents/:agentId/credentials/:name   write-only: the body is the value; never echoed or logged
  *   GET  /api/v1/keymaster/outstanding                         outstanding count per agent (fleet view)
- *   GET  /api/v1/keymaster/platform/credentials                gateway-held platform keys: status, instructions, action
+ *   GET  /api/v1/keymaster/platform/credentials                gatekeeper-held platform keys: status, instructions, action
  *   POST /api/v1/keymaster/platform/credentials/:name          write-only, as above; the control plane can write these but never read them
  *
  * Presence is checked without reading values where the backend allows it (secrets-bind `has`), and no value is ever
@@ -47,7 +47,7 @@ export async function agentCredentials(state: FactoryState, agentId: string): Pr
     agentId,
     secrets: declaredCredentials(agent),
     connections: agent.connections ?? [],
-    gatewayHeld: state.gatewayHeldSecrets ?? new Set(),
+    gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets ?? new Set(),
     present: (name) => secretPresent(name, state.providers),
     grant: async (provider) => (await km.listGrants(agentId, [provider]))[0],
     submitPath: (name) => `/api/v1/keymaster/agents/${enc}/credentials/${encodeURIComponent(name)}`,
@@ -114,9 +114,9 @@ async function submitCredential(state: FactoryState, req: http.IncomingMessage, 
   if (!agent) return noStore(res, 404, { error: 'not_found' });
   if (isBuiltin(agent)) return noStore(res, 409, { error: 'builtin_agent', message: 'built-in system agents get their credentials from the platform deployment' });
   if (!SECRET_NAME.test(name)) return noStore(res, 400, { error: 'invalid_name', message: 'credential names are ENV-style (A-Z, 0-9, _)' });
-  const held = state.gatewayHeldSecrets ?? new Set<string>();
-  if (held.has(name)) return noStore(res, 409, { error: 'managed_by_platform', name, message: 'the factory gateway holds this credential for every agent; supply it as a platform credential', path: platformSubmitPath(name) });
-  const allowed = submittableSecrets({ secrets: declaredCredentials(agent), connections: agent.connections ?? [], gatewayHeld: held });
+  const held = state.gatekeeperEgressHeldSecrets ?? new Set<string>();
+  if (held.has(name)) return noStore(res, 409, { error: 'managed_by_platform', name, message: 'the factory gatekeeper-egress holds this credential for every agent; supply it as a platform credential', path: platformSubmitPath(name) });
+  const allowed = submittableSecrets({ secrets: declaredCredentials(agent), connections: agent.connections ?? [], gatekeeperEgressHeld: held });
   if (!allowed.has(name)) return noStore(res, 404, { error: 'undeclared_credential', name, message: `${agentId} does not declare ${name}` });
   await writeCredential(state, req, res, agentId, name, actor);
 }
@@ -171,7 +171,7 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
   if (path === '/api/v1/keymaster/platform/credentials' && req.method === 'GET') {
     if (!(await authenticate(req, res, state, 'admin'))) return true;
     const items = await assessPlatformCredentials({
-      gatewayHeld: state.gatewayHeldSecrets ?? new Set(),
+      gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets ?? new Set(),
       present: (name) => secretPresent(name, state.providers),
       submitPath: platformSubmitPath,
     });
@@ -183,8 +183,8 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
     const principal = await authenticate(req, res, state, 'admin');
     if (!principal) return true;
     const name = decodeURIComponent(plat[1]);
-    if (!(state.gatewayHeldSecrets ?? new Set<string>()).has(name)) {
-      return noStore(res, 404, { error: 'not_a_platform_credential', name, message: `${name} is not held by the gateway` }), true;
+    if (!(state.gatekeeperEgressHeldSecrets ?? new Set<string>()).has(name)) {
+      return noStore(res, 404, { error: 'not_a_platform_credential', name, message: `${name} is not held by the gatekeeper-egress` }), true;
     }
     await writeCredential(state, req, res, 'platform', name, principal.actor);
     return true;

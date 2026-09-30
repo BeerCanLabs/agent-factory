@@ -37,13 +37,13 @@ resource "aws_iam_role_policy" "execution_secrets" {
 locals {
   # By name, not by resource: the Keymaster creates these secrets (K5). `-??????` is the suffix AWS appends to
   # a secret's ARN, so NOTION_API_KEY never also matches NOTION_API_KEY_OTHER.
-  # Gateway-held secrets: the public defaults plus deployment-specific ones (TSK-045).
+  # Gatekeeper-held secrets: the public defaults plus deployment-specific ones (TSK-045).
   held_secret_names    = distinct(concat(var.provider_secret_names, var.extra_provider_secret_names))
   provider_secret_arns = [for n in local.held_secret_names : "${local.secret_arn}/${n}-??????"]
   # Deployment-specific routes are appended; validation refuses an id that would replace a public route.
-  gateway_routes = var.extra_gateway_routes == "[]" ? var.gateway_routes : jsonencode(concat(jsondecode(var.gateway_routes), jsondecode(var.extra_gateway_routes)))
+  gatekeeper_egress_routes = var.extra_gatekeeper_egress_routes == "[]" ? var.gatekeeper_egress_routes : jsonencode(concat(jsondecode(var.gatekeeper_egress_routes), jsondecode(var.extra_gatekeeper_egress_routes)))
   # §6.11 K1: OAuth grants (one secret per agent x provider) and the app credentials they depend on. Only the
-  # control plane's Keymaster reads or writes them; the gateway asks the control plane for access tokens.
+  # control plane's Keymaster reads or writes them; the gatekeeper-egress asks the control plane for access tokens.
   keymaster_grant_arns = ["${local.secret_arn}/connections/*"]
   keymaster_app_arns   = ["${local.secret_arn}/GOOGLE_OAUTH_CLIENT*", "${local.secret_arn}/GOOGLE_SERVICE_ACCOUNT*"]
   telemetry_statement = {
@@ -104,7 +104,7 @@ resource "aws_iam_role_policy" "control_plane" {
         Resource = concat(local.keymaster_grant_arns, local.keymaster_app_arns)
       },
       {
-        # K5: owners supply an agent's static secrets through the Keymaster (write-only). Gateway-held provider
+        # K5: owners supply an agent's static secrets through the Keymaster (write-only). Gatekeeper-held provider
         # keys stay unreadable: NeverReadProviderKeys below denies reading them.
         Sid      = "KeymasterAgentSecrets"
         Effect   = "Allow"
@@ -112,7 +112,7 @@ resource "aws_iam_role_policy" "control_plane" {
         Resource = "${local.secret_arn}/*"
       },
       {
-        # The Keymaster (in the control plane) creates and writes gateway-held keys (K5) but never reads them (S1).
+        # The Keymaster (in the control plane) creates and writes gatekeeper-held keys (K5) but never reads them (S1).
         Sid      = "NeverReadProviderKeys"
         Effect   = "Deny"
         Action   = ["secretsmanager:GetSecretValue", "secretsmanager:BatchGetSecretValue"]
@@ -146,16 +146,16 @@ resource "aws_iam_role_policy" "control_plane" {
   })
 }
 
-# ---- gateway ---------------------------------------------------------------------------------
+# ---- gatekeeper-egress ---------------------------------------------------------------------------------
 
-resource "aws_iam_role" "gateway" {
-  name               = "${local.name}-gateway"
+resource "aws_iam_role" "gatekeeper_egress" {
+  name               = "${local.name}-gatekeeper-egress"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
 }
 
-resource "aws_iam_role_policy" "gateway" {
-  name = "gateway"
-  role = aws_iam_role.gateway.id
+resource "aws_iam_role_policy" "gatekeeper_egress" {
+  name = "gatekeeper-egress"
+  role = aws_iam_role.gatekeeper_egress.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -166,14 +166,14 @@ resource "aws_iam_role_policy" "gateway" {
         Resource = concat(local.provider_secret_arns, ["${local.secret_arn}/*"])
       },
       {
-        # K1/K3: the gateway never reads OAuth grants or app credentials; it gets short-lived tokens from the control plane.
+        # K1/K3: the gatekeeper-egress never reads OAuth grants or app credentials; it gets short-lived tokens from the control plane.
         Sid      = "NeverKeymasterGrants"
         Effect   = "Deny"
         Action   = ["secretsmanager:*"]
         Resource = concat(local.keymaster_grant_arns, local.keymaster_app_arns)
       },
       {
-        # Factory model API (§6.9): the gateway, never an agent, calls Bedrock. Converse is authorized by
+        # Factory model API (§6.9): the gatekeeper-egress, never an agent, calls Bedrock. Converse is authorized by
         # bedrock:InvokeModel; cross-region inference profiles need both the profile and the foundation models.
         Sid    = "FactoryModelApiBedrock"
         Effect = "Allow"
@@ -242,7 +242,7 @@ resource "aws_iam_role_policy" "control_plane_paas" {
       },
       {
         # aws/iam.ts revokes an agent execution role's SecretsAccess when a redeploy no longer injects any secret
-        # (its last one became gateway-held, S1). aws/iam.ts names these roles AgentExecutionRole-<agent id>
+        # (its last one became gatekeeper-held, S1). aws/iam.ts names these roles AgentExecutionRole-<agent id>
         # (TSK-045: the old factory-agent-exec-* pattern matched no role it creates, so the revoke was AccessDenied).
         Effect   = "Allow"
         Action   = ["iam:DeleteRolePolicy"]

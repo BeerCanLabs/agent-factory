@@ -1,18 +1,18 @@
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth } from '@beercanlabs/factory-auth';
-import { createDoorman } from './index.js';
-import { createDoormanHttp } from './http.js';
-import { createDiscordGateway } from './discord.js';
+import { createGatekeeperIngress } from './index.js';
+import { createGatekeeperIngressHttp } from './http.js';
+import { createDiscordClient } from './discord.js';
 
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const FACTORY_URL = (process.env.FACTORY_URL || 'http://127.0.0.1:8088').replace(/\/$/, '');
 const FACTORY_TOKEN = process.env.FACTORY_TOKEN;
 const presenceAuth = bearerAuth(
-  process.env.DOORMAN_TOKEN ? [{ name: 'control-plane', token: process.env.DOORMAN_TOKEN, roles: ['operator'] }] : [],
+  process.env.GATEKEEPER_INGRESS_TOKEN ? [{ name: 'control-plane', token: process.env.GATEKEEPER_INGRESS_TOKEN, roles: ['operator'] }] : [],
 );
 
-const door = createDoorman({
-  gatewayFactory: createDiscordGateway,
+const door = createGatekeeperIngress({
+  discordFactory: createDiscordClient,
   providers: providersFromEnv(),
   wake: async (agentId, msg) => {
     const res = await fetch(`${FACTORY_URL}/api/v1/agents/${encodeURIComponent(agentId)}/wake`, {
@@ -23,7 +23,7 @@ const door = createDoorman({
       },
       body: msg ? JSON.stringify({ input: msg }) : undefined,
     });
-    if (!res.ok) console.error(`[doorman] wake ${agentId} ${res.status}`);
+    if (!res.ok) console.error(`[gatekeeper-ingress] wake ${agentId} ${res.status}`);
   },
   handoff: async (msg) => {
     const res = await fetch(`${FACTORY_URL}/api/v1/agents/${encodeURIComponent(msg.agentId)}/conversation`, {
@@ -34,7 +34,7 @@ const door = createDoorman({
       },
       body: JSON.stringify(msg),
     });
-    if (!res.ok) console.error(`[doorman] handoff ${msg.agentId} ${res.status}`);
+    if (!res.ok) console.error(`[gatekeeper-ingress] handoff ${msg.agentId} ${res.status}`);
   },
 });
 
@@ -67,16 +67,16 @@ async function reconcileFromFactory() {
     await door.reconcile(surfaces);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[doorman] reconcile: ${message}`);
+    console.error(`[gatekeeper-ingress] reconcile: ${message}`);
   } finally {
     isReconciling = false;
   }
 }
 
-const server = createDoormanHttp(door, presenceAuth);
+const server = createGatekeeperIngressHttp(door, presenceAuth);
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[doorman] idle mailbox on :${PORT} (no Discord app required to deploy)`);
+  console.log(`[gatekeeper-ingress] idle mailbox on :${PORT} (no Discord app required to deploy)`);
 });
 
 async function pollReconcile() {

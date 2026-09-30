@@ -1,12 +1,12 @@
-// §6.11 K3/K4: the gateway injects Keymaster connection tokens; agents never hold them.
+// §6.11 K3/K4: the gatekeeper-egress injects Keymaster connection tokens; agents never hold them.
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import { RunTokens } from '@beercanlabs/factory-auth';
-import { createGateway, type ConnectionTokenResult, type ControlClient, type RunContext } from './gateway.js';
+import { createGatekeeperEgress, type ConnectionTokenResult, type ControlClient, type RunContext } from './gatekeeper-egress.js';
 
-const tokens = new RunTokens('gateway-conn-test-run-token-key-0123456789');
+const tokens = new RunTokens('gatekeeper-egress-conn-test-run-token-key-0123456789');
 const GOOGLE_TOKEN = 'fake-google-access-token-for-donna';
 
 async function listen(server: http.Server): Promise<number> {
@@ -29,7 +29,7 @@ function call(port: number, path: string, headers: Record<string, string>, metho
   });
 }
 
-describe('gateway connection routes (§6.11)', { concurrency: false }, () => {
+describe('gatekeeper-egress connection routes (§6.11)', { concurrency: false }, () => {
   const seen: Array<{ path: string; headers: http.IncomingHttpHeaders; body: string }> = [];
   const ledger: Array<Record<string, any>> = [];
   const tokenRequests: Array<{ runId: string; agentId: string; connection: string; scopes?: string[] }> = [];
@@ -39,7 +39,7 @@ describe('gateway connection routes (§6.11)', { concurrency: false }, () => {
   let token = '';
   let runSeq = 0;
   let upstream: http.Server;
-  let gateway: http.Server;
+  let gatekeeperEgress: http.Server;
   let port = 0;
   let upPort = 0;
 
@@ -73,7 +73,7 @@ describe('gateway connection routes (§6.11)', { concurrency: false }, () => {
       });
     });
     upPort = await listen(upstream);
-    gateway = createGateway({
+    gatekeeperEgress = createGatekeeperEgress({
       routes: [
         { id: 'google-calendar', kind: 'http', upstream: `http://127.0.0.1:${upPort}/calendar/v3`, connection: 'google' },
         { id: 'google-health', kind: 'http', upstream: `http://127.0.0.1:${upPort}`, connection: 'google' },
@@ -85,11 +85,11 @@ describe('gateway connection routes (§6.11)', { concurrency: false }, () => {
       providers: [],
       contextTtlMs: 0,
     });
-    port = await listen(gateway);
+    port = await listen(gatekeeperEgress);
   });
 
   after(async () => {
-    await new Promise<void>((r) => gateway.close(() => r()));
+    await new Promise<void>((r) => gatekeeperEgress.close(() => r()));
     await new Promise<void>((r) => upstream.close(() => r()));
   });
 
@@ -100,7 +100,7 @@ describe('gateway connection routes (§6.11)', { concurrency: false }, () => {
     upstreamStatus = 200;
     tokenResult = { ok: true, accessToken: GOOGLE_TOKEN, expiresAt: new Date(Date.now() + 3600_000).toISOString() };
     const runId = `run-${++runSeq}`;
-    // A distinct agent per test keeps the gateway's token cache from leaking between cases.
+    // A distinct agent per test keeps the gatekeeper-egress's token cache from leaking between cases.
     const agentId = `donna-${runSeq}`;
     ctx = {
       run: { runId, agentId, state: 'WORKING', live: true },
@@ -201,7 +201,7 @@ describe('gateway connection routes (§6.11)', { concurrency: false }, () => {
 
   it('refuses a route that carries both a connection and a static credential', () => {
     assert.throws(() =>
-      createGateway({
+      createGatekeeperEgress({
         routes: [{ id: 'bad', kind: 'http', upstream: 'https://example.com', connection: 'google', credential: { secret: 'X', header: 'authorization' } }],
         prices: {},
         runTokens: tokens,

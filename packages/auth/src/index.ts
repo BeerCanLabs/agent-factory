@@ -14,7 +14,7 @@ export {
   type JwksFetcher,
 } from './access.js';
 
-export const ROLES =['viewer', 'operator', 'approver', 'ingest', 'gateway', 'admin'] as const;
+export const ROLES =['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
 
 export type Principal = { actor: string; roles: Role[] };
@@ -26,12 +26,12 @@ export type AuthProvider = {
   verify(authorization: string | undefined): Promise<AuthResult>;
 };
 
-/** admin implies everything; operator and approver imply viewer; gateway implies ingest. */
+/** admin implies everything; operator and approver imply viewer; gatekeeper-egress implies ingest. */
 export function hasRole(principal: Principal, role: Role): boolean {
   const r = principal.roles;
   if (r.includes('admin') || r.includes(role)) return true;
   if (role === 'viewer') return r.includes('operator') || r.includes('approver');
-  if (role === 'ingest') return r.includes('gateway');
+  if (role === 'ingest') return r.includes('gatekeeper-egress');
   return false;
 }
 
@@ -232,8 +232,8 @@ export function authFromEnv(env: NodeJS.ProcessEnv = process.env): AuthProvider 
 }
 
 /**
- * Short-lived credential an agent run presents to the factory and its egress gateway.
- * HS256 over FACTORY_RUN_TOKEN_KEY, shared by the control plane (mint) and gateway (verify).
+ * Short-lived credential an agent run presents to the factory and its gatekeeper-egress.
+ * HS256 over FACTORY_RUN_TOKEN_KEY, shared by the control plane (mint) and gatekeeper-egress (verify).
  * Signature and expiry only; the holder must also confirm the run is still live.
  */
 export class RunTokens {

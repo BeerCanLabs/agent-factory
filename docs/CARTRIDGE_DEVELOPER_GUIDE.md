@@ -19,7 +19,7 @@ The Agent Factory solves this with a strict separation: **The Console vs. The Ca
 │  - Ingress: Listens to Discord, Slack, Webhooks, APIs, and Cron schedules                   │
 │  - Identity: Binds secrets from AWS Secrets Mgr / Azure KeyVault / Vault at boot            │
 │  - Filing Cabinet: Hydrates and syncs persistent mind from S3/GCS/Blob storage              │
-│  - Egress Gateway: Meters every token, enforces budget circuit breakers, logs audit ledger   │
+│  - gatekeeper-egress: Meters every token, enforces budget circuit breakers, logs audit ledger   │
 └──────────────────────────────────────────────┬──────────────────────────────────────────────┘
                                                │ Runs in sandbox
                                                ▼
@@ -173,11 +173,11 @@ When the Factory Console wakes your cartridge:
 1. **Input Payload:** Injected via the `FACTORY_INPUT` environment variable and written to `/tmp/factory-input.json`.
 2. **Secrets:** Injected into `os.environ` using the exact names declared in `cartridge.yaml`.
 3. **Memory Directory:** The Console hydrates previous state into `os.environ["MEMORY_DIR"]` (defaults to `/memory`).
-4. **Egress Interception & Credential Injection:** The Console enforces a **Zero-Trust Network Perimeter** (no public IP, no default internet gateway route `0.0.0.0/0`). Outbound traffic to LLMs and third-party APIs (such as Discord) egresses exclusively through the **Factory Egress Gateway** via standard Base URL variables:
-   - `ANTHROPIC_BASE_URL` (`${GATEWAY_URL}/anthropic`)
-   - `OPENAI_BASE_URL` (`${GATEWAY_URL}/v1`)
-   - `DISCORD_BASE_URL` (`${GATEWAY_URL}/discord`)
-   Agents authenticate to the gateway using their ephemeral `FACTORY_RUN_TOKEN`. The Gateway verifies run lifecycle and egress policy, meters the call, injects the real provider key or bot token (`Bot <token>`), and proxies to the upstream service.
+4. **Egress Interception & Credential Injection:** The Console enforces a **Zero-Trust Network Perimeter** (no public IP, no default internet gateway route `0.0.0.0/0`). Outbound traffic to LLMs and third-party APIs (such as Discord) egresses exclusively through the **gatekeeper-egress** via standard Base URL variables:
+   - `ANTHROPIC_BASE_URL` (`${GATEKEEPER_EGRESS_URL}/anthropic`)
+   - `OPENAI_BASE_URL` (`${GATEKEEPER_EGRESS_URL}/v1`)
+   - `DISCORD_BASE_URL` (`${GATEKEEPER_EGRESS_URL}/discord`)
+   Agents authenticate to the gatekeeper-egress using their ephemeral `FACTORY_RUN_TOKEN`. The gatekeeper-egress verifies run lifecycle and egress policy, meters the call, injects the real provider key or bot token (`Bot <token>`), and proxies to the upstream service.
 5. **Portability Fallback:** Cartridges remain 100% portable. If `DISCORD_BASE_URL` is unset, code defaults to `https://discord.com/api/v10` and uses local secrets (`DISCORD_BOT_TOKEN`).
 6. **Output Delivery:** The agent simply writes its JSON response to `/tmp/factory-result.json` and exits `0`.
 
@@ -258,7 +258,7 @@ def main():
     db = get_db(memory_dir)
 
     # Standard, unmodified Anthropic SDK!
-    # Factory Egress Gateway automatically meters tokens, enforces budget limits,
+    # gatekeeper-egress automatically meters tokens, enforces budget limits,
     # and records execution to the immutable audit ledger.
     client = Anthropic()
 
@@ -293,7 +293,7 @@ if __name__ == "__main__":
 ```
 
 ### Calling models
-Agents call models through the gateway using the **factory model API**: the OpenAI Chat Completions request format (DESIGN_AUTHORITY §6.9). You never hold a provider key, never import a provider or cloud SDK (`boto3`, `anthropic`, …) for inference, and never call a provider directly. The gateway meters and ledgers every call, enforces your policy and budget, and translates the request to whichever provider operations has configured (Bedrock, Anthropic, Vertex, …).
+Agents call models through the gatekeeper-egress using the **factory model API**: the OpenAI Chat Completions request format (DESIGN_AUTHORITY §6.9). You never hold a provider key, never import a provider or cloud SDK (`boto3`, `anthropic`, …) for inference, and never call a provider directly. The gatekeeper-egress meters and ledgers every call, enforces your policy and budget, and translates the request to whichever provider operations has configured (Bedrock, Anthropic, Vertex, …).
 
 **Request.** `POST ${FACTORY_MODEL_BASE_URL}/chat/completions` with header `Authorization: Bearer ${FACTORY_RUN_TOKEN}` and a JSON body:
 
@@ -313,7 +313,7 @@ Streaming is not supported yet: `"stream": true` returns `400 {"error": "streami
  "usage": {"prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500}}
 ```
 
-**Which model you get is decided by policy, not by your code.** Your cartridge declares a *preferred* model; an admin's policy decides which models your agent may use (deny by default, E7), and operations decides which models the factory offers. If the factory sets `FACTORY_MODEL` for a run, use it; the gateway refuses any other model for that run. `GET ${FACTORY_MODEL_BASE_URL}/models` lists the models your policy currently allows.
+**Which model you get is decided by policy, not by your code.** Your cartridge declares a *preferred* model; an admin's policy decides which models your agent may use (deny by default, E7), and operations decides which models the factory offers. If the factory sets `FACTORY_MODEL` for a run, use it; the gatekeeper-egress refuses any other model for that run. `GET ${FACTORY_MODEL_BASE_URL}/models` lists the models your policy currently allows.
 
 | Status | `error` | Meaning |
 |---|---|---|
@@ -363,7 +363,7 @@ For interactive agents (e.g., Discord or Slack chatbots), agents often stay warm
 4. When the idle window expires without further messages, call `write_result()` and exit `0` to scale back to zero.
 
 ### Egress to External APIs (e.g. Discord, Slack)
-Because cartridges operate inside a zero-trust VPC with no public IP or direct internet egress route, third-party API communication uses perimeter credential injection through the Gateway:
+Because cartridges operate inside a zero-trust VPC with no public IP or direct internet egress route, third-party API communication uses perimeter credential injection through the gatekeeper-egress:
 
 ```python
 import os
@@ -373,13 +373,13 @@ import json
 def reply_discord(channel_id: str, content: str):
     base_url = os.environ.get("DISCORD_BASE_URL", "https://discord.com/api/v10").rstrip("/")
     run_token = os.environ.get("FACTORY_RUN_TOKEN")
-    is_gateway = "discord.com" not in base_url
+    is_gatekeeper_egress = "discord.com" not in base_url
 
-    # In the Factory: send run token. The Gateway attaches the real Bot token.
+    # In the Factory: send run token. The gatekeeper-egress attaches the real Bot token.
     # Standalone: use local DISCORD_BOT_TOKEN directly.
     auth_header = (
         f"Bearer {run_token}"
-        if (is_gateway and run_token)
+        if (is_gatekeeper_egress and run_token)
         else f"Bot {os.environ.get('DISCORD_BOT_TOKEN', '')}"
     )
 
@@ -391,7 +391,7 @@ def reply_discord(channel_id: str, content: str):
     )
     urllib.request.urlopen(req, timeout=10)
 ```
-When running in production, the Factory Gateway intercepts the request, validates the cartridge's policy, strips `FACTORY_RUN_TOKEN`, resolves the agent-specific credential (`{agent}_DISCORD_BOT_TOKEN`), and forwards the call to `discord.com`. When running standalone, it connects directly using local tokens. Cartridge code never needs to hardcode environment-specific endpoints.
+When running in production, the Factory gatekeeper-egress intercepts the request, validates the cartridge's policy, strips `FACTORY_RUN_TOKEN`, resolves the agent-specific credential (`{agent}_DISCORD_BOT_TOKEN`), and forwards the call to `discord.com`. When running standalone, it connects directly using local tokens. Cartridge code never needs to hardcode environment-specific endpoints.
 
 ---
 
@@ -513,5 +513,5 @@ The Cartridge model handles any autonomous agent workload. Here is how four prod
 1. **Think Like a Hiring Manager:** Fill out the Job Description (`soul.md`), Contract (`cartridge.yaml`), and Performance Rubric (`bench.yaml`).
 2. **Never Hardcode Secrets:** Declare variable names in `cartridge.yaml`; let the Factory Console inject them at runtime.
 3. **Bring Lightweight Memory:** Use local SQLite or JSON in `$MEMORY_DIR` for personal agent memory. The Factory takes care of cloud syncing.
-4. **Use Standard LLM SDKs:** Call `anthropic` or `openai` normally. The Factory Egress Gateway intercepts, meters, and protects your cloud budget automatically.
+4. **Use Standard LLM SDKs:** Call `anthropic` or `openai` normally. The gatekeeper-egress intercepts, meters, and protects your cloud budget automatically.
 5. **Sleep at Zero:** Your agent only runs when a trigger fires, keeping cloud costs strictly at zero when idle.

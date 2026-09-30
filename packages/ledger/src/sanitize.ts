@@ -27,7 +27,7 @@ export type LedgerEvent = {
   port?: number;
   /** Full git commit SHA (admission and deploys, §6.8). */
   commit?: string;
-  /** Upstream HTTP status of a gateway route call (E3). */
+  /** Upstream HTTP status of a gatekeeper-egress route call (E3). */
   status?: number;
   /** Keymaster connection (§6.11): provider or connection name, and the scopes granted. Never tokens. */
   provider?: string;

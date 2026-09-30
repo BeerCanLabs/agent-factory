@@ -33,11 +33,11 @@ resource "random_id" "suffix" {
 locals {
   name         = "factory-${var.environment}"
   azs          = slice(data.aws_availability_zones.available.names, 0, 2)
-  images_ready = var.control_plane_image != "" && var.doorman_image != "" && var.gateway_image != ""
+  images_ready = var.control_plane_image != "" && var.gatekeeper_ingress_image != "" && var.gatekeeper_egress_image != ""
   ns           = "factory.internal"
   cp_url       = "http://control-plane.${local.ns}:8088"
-  gateway_url  = "http://gateway.${local.ns}:8081"
-  doorman_url  = "http://doorman.${local.ns}:8090"
+  gatekeeper_egress_url  = "http://gatekeeper-egress.${local.ns}:8081"
+  gatekeeper_ingress_url  = "http://gatekeeper-ingress.${local.ns}:8090"
   secret_arn   = "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:factory/${var.environment}"
   agent_images = { for id, a in var.agents : id => a.image if a.image != "" }
 }

@@ -1,8 +1,8 @@
 cases:
   - id: names-the-subject
-    input: { text: "The factory gateway meters every token and enforces budgets before each call." }
+    input: { text: "The factory gatekeeper-egress meters every token and enforces budgets before each call." }
     expect:
-      contains: ["gateway"]
+      contains: ["gatekeeper-egress"]
   - id: stays-short
     input: { text: "Agents wake from zero, do their work, and scale back to zero." }
     expect:

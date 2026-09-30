@@ -11,8 +11,8 @@ describe('grade', () => {
     assert.equal(grade(c({ status: 'DONE' }), run('FAILED')).pass, false);
     assert.equal(grade(c({ status: 'DONE', equals: { a: 1 } }), run('DONE', { a: 1 })).pass, true);
     assert.equal(grade(c({ status: 'DONE', equals: { a: 1 } }), run('DONE', { a: 2 })).pass, false);
-    assert.equal(grade(c({ status: 'DONE', contains: ['Gateway'] }), run('DONE', 'the gateway meters')).pass, true);
-    assert.equal(grade(c({ status: 'DONE', contains: ['budget'] }), run('DONE', 'the gateway meters')).pass, false);
+    assert.equal(grade(c({ status: 'DONE', contains: ['gatekeeper-egress'] }), run('DONE', 'the gatekeeper-egress meters')).pass, true);
+    assert.equal(grade(c({ status: 'DONE', contains: ['budget'] }), run('DONE', 'the gatekeeper-egress meters')).pass, false);
     assert.equal(grade(c({ status: 'DONE', matches: '^.{1,5}$' }), run('DONE', 'too long text')).pass, false);
     assert.equal(grade(c({ status: 'FAILED' }), run('FAILED')).pass, true);
   });
@@ -52,10 +52,10 @@ function fakeClient(script: Record<string, { states: string[]; result?: unknown;
 describe('runBench', () => {
   it('runs every case for every model, pinning the model, and collects cost', async () => {
     const client = fakeClient({
-      big: { states: ['WORKING', 'DONE'], result: 'mentions gateway', cost: 0.02 },
+      big: { states: ['WORKING', 'DONE'], result: 'mentions gatekeeper-egress', cost: 0.02 },
       small: { states: ['WORKING', 'DONE'], result: 'nope', cost: 0.002 },
     });
-    const suite = { cases: [c({ status: 'DONE', contains: ['gateway'] }, 'a'), c({ status: 'DONE' }, 'b')] };
+    const suite = { cases: [c({ status: 'DONE', contains: ['gatekeeper-egress'] }, 'a'), c({ status: 'DONE' }, 'b')] };
     const results = await runBench(client, 'agent', suite, ['big', 'small'], { pollMs: 1 });
     assert.equal(client.runs.length, 4);
     assert.ok(client.runs[0].startsWith('big:'));

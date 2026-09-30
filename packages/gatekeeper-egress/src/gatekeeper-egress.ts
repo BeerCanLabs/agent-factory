@@ -24,7 +24,7 @@ export type Route = {
    */
   credential?: { secret: string; header: string; format?: string; fallback?: boolean };
   /**
-   * Keymaster connection (§6.11 K3): the gateway asks the control plane for a current access token for
+   * Keymaster connection (§6.11 K3): the gatekeeper-egress asks the control plane for a current access token for
    * (agent, connection) and injects it as `Authorization: Bearer`. Never combined with `credential`.
    */
   connection?: string;
@@ -56,7 +56,7 @@ export type RunContext = {
 
 export type Approval = { approvalId: string; state: 'pending' | 'approved' | 'rejected' | 'consumed' };
 
-/** How the gateway talks to the control plane. HTTP in production, in-memory in tests. */
+/** How the gatekeeper-egress talks to the control plane. HTTP in production, in-memory in tests. */
 export type ControlClient = {
   runContext(runId: string): Promise<RunContext | null>;
   requestApproval(req: { runId: string; route: string; tool: string; argsSha256: string }): Promise<Approval>;
@@ -68,7 +68,7 @@ export type ControlClient = {
   ledgerAvailable?(): boolean;
 };
 
-export type GatewayOptions = {
+export type GatekeeperEgressOptions = {
   routes: Route[];
   prices: Record<string, Price>;
   runTokens: RunTokens;
@@ -84,7 +84,7 @@ export type GatewayOptions = {
   modelAdapters?: Record<string, ModelAdapter>;
 };
 
-const BUILTIN_AGENT_IDS = new Set(['doorman', 'keymaster', 'doctor', 'coach']);
+const BUILTIN_AGENT_IDS = new Set(['gatekeeper-ingress', 'keymaster', 'doctor', 'coach']);
 
 const STRIP = new Set([
   'host',
@@ -152,7 +152,7 @@ function isHostAllowed(policy: Policy, routes: Map<string, Route>, destHost: str
   const allowed = new Set(policy.hosts ?? []);
   for (const rId of policy.routes) {
     const r = routes.get(rId);
-    // Connection routes are reachable only through the gateway's token injection, never as a raw tunnel host.
+    // Connection routes are reachable only through the gatekeeper-egress's token injection, never as a raw tunnel host.
     if (r?.upstream && !r.connection) {
       try {
         allowed.add(new URL(r.upstream).hostname);
@@ -188,7 +188,7 @@ function overBudget(policy: Policy, spend: RunContext['spend']): string | undefi
 
 type JsonRpc = { jsonrpc?: string; id?: unknown; method?: string; params?: { name?: unknown; arguments?: unknown } };
 
-export function createGateway(opts: GatewayOptions): http.Server {
+export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Server {
   for (const r of opts.routes) {
     if (r.connection && r.credential) throw new Error(`route ${r.id}: a connection route must not also carry a static credential`);
     if (r.connection && r.kind !== 'http') throw new Error(`route ${r.id}: connections are supported on http routes only`);
@@ -207,10 +207,10 @@ export function createGateway(opts: GatewayOptions): http.Server {
   const modelAdapters = opts.modelAdapters ?? defaultModelAdapters();
   const m = opts.meter
     ? {
-        requests: opts.meter.createCounter('factory.gateway.requests', { description: 'Egress requests by route and outcome' }),
-        latency: opts.meter.createHistogram('factory.gateway.upstream.duration', { unit: 's' }),
-        tokens: opts.meter.createCounter('factory.gateway.tokens', { description: 'Metered LLM tokens' }),
-        cost: opts.meter.createCounter('factory.gateway.cost', { unit: 'USD' }),
+        requests: opts.meter.createCounter('factory.gatekeeper-egress.requests', { description: 'Egress requests by route and outcome' }),
+        latency: opts.meter.createHistogram('factory.gatekeeper-egress.upstream.duration', { unit: 's' }),
+        tokens: opts.meter.createCounter('factory.gatekeeper-egress.tokens', { description: 'Metered LLM tokens' }),
+        cost: opts.meter.createCounter('factory.gatekeeper-egress.cost', { unit: 'USD' }),
       }
     : undefined;
 
@@ -279,7 +279,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
     try {
       tok = await connectionToken(route, ctx);
     } catch (err) {
-      console.error(`[gateway] connection token ${route.id}: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`[gatekeeper-egress] connection token ${route.id}: ${err instanceof Error ? err.message : String(err)}`);
       tok = { ok: false, status: 503, error: 'connection_unavailable' };
     }
     if (!tok.ok) {
@@ -311,7 +311,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
       .then(
         () => true,
         (err) => {
-          console.error(`[gateway] ledger write failed: ${err instanceof Error ? err.message : String(err)}`);
+          console.error(`[gatekeeper-egress] ledger write failed: ${err instanceof Error ? err.message : String(err)}`);
           return false;
         },
       );
@@ -389,7 +389,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
         });
       });
       up.on('error', (err) => {
-        console.error(`[gateway] upstream ${route.id}: ${err.message}`);
+        console.error(`[gatekeeper-egress] upstream ${route.id}: ${err.message}`);
         send(res, 502, { error: 'upstream_unreachable' });
         resolve(502);
       });
@@ -514,7 +514,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
 
   /**
    * Factory model API (§6.9 M1): `POST /models/v1/chat/completions` in OpenAI Chat Completions format.
-   * The catalog maps the neutral model name to a provider adapter; the gateway signs the upstream call
+   * The catalog maps the neutral model name to a provider adapter; the gatekeeper-egress signs the upstream call
    * with its own credentials and never forwards the run token.
    */
   async function handleModels(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
@@ -551,7 +551,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
     } catch (err) {
       const e = err instanceof ModelUpstreamError ? err : new ModelUpstreamError(502, 'upstream_error', err instanceof Error ? err.message : String(err));
       m?.requests.add(1, { route: route.id, outcome: e.code, agent: ctx.run.agentId });
-      console.error(`[gateway] models ${model} via ${entry.provider}: ${e.code} ${e.upstreamStatus ?? ''} ${e.message}`);
+      console.error(`[gatekeeper-egress] models ${model} via ${entry.provider}: ${e.code} ${e.upstreamStatus ?? ''} ${e.message}`);
       ledger(ctx, route, { type: 'action', action: 'MODEL_UPSTREAM_ERROR', model, provider: entry.provider, upstreamStatus: e.upstreamStatus, requestId });
       return send(res, e.status, { error: e.code, message: redactSecrets(e.message, secretValues), ...(e.upstreamStatus ? { upstreamStatus: e.upstreamStatus } : {}) });
     }
@@ -798,7 +798,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
       });
 
       upstreamSocket.on('error', (err) => {
-        console.warn(`[gateway] connect error to ${destHost}:${destPort}: ${err.message}`);
+        console.warn(`[gatekeeper-egress] connect error to ${destHost}:${destPort}: ${err.message}`);
         clientSocket.destroy();
       });
       clientSocket.on('error', () => {

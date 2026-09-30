@@ -20,7 +20,7 @@ export const ApprovalsView: React.FC<ApprovalsViewProps> = ({ approvals, onRefre
     setIsProcessing(true);
     try {
       await factoryApi.decideApproval(selectedApproval.id, decision, decisionNotes);
-      alert(`Approval ${selectedApproval.id} has been ${decision}. Gateway route released.`);
+      alert(`Approval ${selectedApproval.id} has been ${decision}. gatekeeper-egress route released.`);
       setDecisionNotes('');
       onRefresh();
     } catch (err: any) {
@@ -65,7 +65,7 @@ export const ApprovalsView: React.FC<ApprovalsViewProps> = ({ approvals, onRefre
             <span>Human-in-the-Loop (HITL) Approvals</span>
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Outbound tool actions held by the Egress Gateway requiring explicit human authorization.
+            Outbound tool actions held by gatekeeper-egress, requiring explicit human authorization.
           </p>
         </div>
 

@@ -1,5 +1,5 @@
 import { Client, GatewayIntentBits, Partials, Events, ActivityType } from 'discord.js';
-import type { Gateway, Conversation, Presence } from './index.js';
+import type { DiscordClient, Conversation, Presence } from './index.js';
 
 interface StandbySession {
   messageId: string;
@@ -8,7 +8,7 @@ interface StandbySession {
   failTimer: NodeJS.Timeout;
 }
 
-export function createDiscordGateway(): Gateway {
+export function createDiscordClient(): DiscordClient {
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -80,7 +80,7 @@ export function createDiscordGateway(): Gateway {
         if (first) seenMessageIds.delete(first);
       }
 
-      console.log(`[doorman] Discord message received in channel ${message.channelId} from ${message.author.id}`);
+      console.log(`[gatekeeper-ingress] Discord message received in channel ${message.channelId} from ${message.author.id}`);
 
       // If the agent is currently offline (sleeping), start standby session with recurring typing and timers
       if (currentPresence === 'offline' && !standbySessions.has(message.channelId)) {
@@ -107,12 +107,12 @@ export function createDiscordGateway(): Gateway {
                 }
               }
             } catch (err) {
-              console.warn('[doorman] Failed to update 30s standby message:', err);
+              console.warn('[gatekeeper-ingress] Failed to update 30s standby message:', err);
             }
           }, 30_000);
 
-          // 3. Failure trigger (default 180s, configurable via DOORMAN_STANDBY_TIMEOUT_MS) if agent completely fails to load
-          const failureTimeoutMs = Number(process.env.DOORMAN_STANDBY_TIMEOUT_MS) || 180_000;
+          // 3. Failure trigger (default 180s, configurable via GATEKEEPER_INGRESS_STANDBY_TIMEOUT_MS) if agent completely fails to load
+          const failureTimeoutMs = Number(process.env.GATEKEEPER_INGRESS_STANDBY_TIMEOUT_MS) || 180_000;
           const failTimer = setTimeout(async () => {
             try {
               const current = standbySessions.get(message.channelId);
@@ -123,7 +123,7 @@ export function createDiscordGateway(): Gateway {
                 }
               }
             } catch (err) {
-              console.warn('[doorman] Failed to update failure standby message:', err);
+              console.warn('[gatekeeper-ingress] Failed to update failure standby message:', err);
             }
             clearStandbySession(message.channelId);
             client.user?.setPresence({ activities: [] });
@@ -136,7 +136,7 @@ export function createDiscordGateway(): Gateway {
             failTimer,
           });
         } catch (err) {
-          console.warn('[doorman] Failed to start standby session:', err);
+          console.warn('[gatekeeper-ingress] Failed to start standby session:', err);
         }
       } else {
         // Keep typing indicator active if already in a session or active conversation
@@ -155,7 +155,7 @@ export function createDiscordGateway(): Gateway {
   });
 
   client.on(Events.ClientReady, () => {
-    console.log(`[doorman] Discord gateway ready as ${client.user?.tag}`);
+    console.log(`[gatekeeper-ingress] Discord ready as ${client.user?.tag}`);
     client.user?.setStatus(currentPresence === 'offline' ? 'invisible' : 'online');
   });
 

@@ -44,7 +44,7 @@ describe('loadCatalog', () => {
         deployedCommit: commit,
       };
       writeFileSync(join(dir, 'donna.json'), JSON.stringify(registered));
-      writeFileSync(join(dir, 'doorman.json'), JSON.stringify({ ...registered, id: 'doorman', name: 'Impostor' }));
+      writeFileSync(join(dir, 'gatekeeper-ingress.json'), JSON.stringify({ ...registered, id: 'gatekeeper-ingress', name: 'Impostor' }));
       const staticAgents = loadCatalog(agentsRoot);
       assert.ok(staticAgents.some((a) => a.id === 'donna'), 'static catalog still carries donna');
       const merged = mergeAgents(BUILTIN_SYSTEM_AGENTS, staticAgents, loadDynamicRegistry(dir));
@@ -55,7 +55,7 @@ describe('loadCatalog', () => {
       assert.equal(donnas[0].repo, 'https://github.com/BeerCanLabs/SM-donna.git');
       // The other static agents are untouched.
       assert.equal(merged.find((a) => a.id === 'archie')?.dir, staticAgents.find((a) => a.id === 'archie')?.dir);
-      assert.equal(merged.find((a) => a.id === 'doorman')?.name, 'Doorman');
+      assert.equal(merged.find((a) => a.id === 'gatekeeper-ingress')?.name, 'gatekeeper-ingress');
     } finally {
       rmSync(dir, { recursive: true });
     }

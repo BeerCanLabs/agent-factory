@@ -4,7 +4,7 @@
     "where": "packages/control-plane/src/aws/ecs.ts",
     "detail": "valueFrom",
     "gap": "GAP-031",
-    "why": "Agent task definitions inject real secret values into containers. Convert to gateway injection under TSK-024."
+    "why": "Agent task definitions inject real secret values into containers. Convert to gatekeeper-egress injection under TSK-024."
   },
   {
     "rule": "K5",

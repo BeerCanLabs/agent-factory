@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
-import { createGateway, type ControlClient } from '@beercanlabs/factory-gateway';
+import { createGatekeeperEgress, type ControlClient } from '@beercanlabs/factory-gatekeeper-egress';
 import { loadCatalog } from './catalog.js';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
@@ -17,7 +17,7 @@ import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
 const agentsRoot = fileURLToPath(new URL('../test-fixtures/agents', import.meta.url));
 const KEY = 'e2e-run-token-key-0123456789abcdefghij';
 const ADMIN = 'admin-e2e';
-const GATEWAY = 'gateway-e2e';
+const GATEKEEPER_EGRESS = 'gatekeeper-egress-e2e';
 const APPROVER = 'approver-e2e';
 const PROVIDER_KEY = 'sk-provider-e2e-key';
 
@@ -41,7 +41,7 @@ async function http_(port: number, path: string, method = 'GET', token?: string,
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
 
-describe('control plane + gateway, over HTTP', { concurrency: false }, () => {
+describe('control plane + gatekeeper-egress, over HTTP', { concurrency: false }, () => {
   let upstream: http.Server;
   let cp: http.Server;
   let gw: http.Server;
@@ -72,7 +72,7 @@ describe('control plane + gateway, over HTTP', { concurrency: false }, () => {
       ledger: new MemoryLedger(),
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
-        { name: 'gateway', token: GATEWAY, roles: ['gateway'] },
+        { name: 'gatekeeper-egress', token: GATEKEEPER_EGRESS, roles: ['gatekeeper-egress'] },
         { name: 'dale', token: APPROVER, roles: ['approver'] },
       ]),
       version: 'e2e',
@@ -92,23 +92,23 @@ describe('control plane + gateway, over HTTP', { concurrency: false }, () => {
     cpPort = await listen(cp);
 
     const call = async (method: string, path: string, body?: unknown) => {
-      const r = await http_(cpPort, path, method, GATEWAY, body);
+      const r = await http_(cpPort, path, method, GATEKEEPER_EGRESS, body);
       if (r.status >= 500) throw new Error(`cp ${r.status}`);
       return r;
     };
     const control: ControlClient = {
       runContext: async (runId) => {
-        const r = await call('GET', `/api/v1/gateway/runs/${runId}`);
+        const r = await call('GET', `/api/v1/gatekeeper-egress/runs/${runId}`);
         return r.status === 200 ? r.body : null;
       },
-      requestApproval: async (req) => (await call('POST', '/api/v1/gateway/approvals', req)).body,
-      consumeApproval: async (id) => (await call('POST', `/api/v1/gateway/approvals/${id}/consume`)).status === 200,
+      requestApproval: async (req) => (await call('POST', '/api/v1/gatekeeper-egress/approvals', req)).body,
+      consumeApproval: async (id) => (await call('POST', `/api/v1/gatekeeper-egress/approvals/${id}/consume`)).status === 200,
       ledger: async (event) => {
         const r = await call('POST', '/api/v1/ledger', event);
         if (r.status !== 201) throw new Error(`ledger ${r.status}`);
       },
     };
-    gw = createGateway({
+    gw = createGatekeeperEgress({
       routes: [
         { id: 'anthropic', kind: 'llm', provider: 'anthropic', upstream: `http://127.0.0.1:${upPort}`, credential: { secret: 'ANTHROPIC_API_KEY', header: 'x-api-key' } },
         { id: 'deployer', kind: 'mcp', upstream: `http://127.0.0.1:${upPort}/mcp` },

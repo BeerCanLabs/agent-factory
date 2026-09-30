@@ -6,13 +6,13 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gatewayEnv } from './shim.js';
+import { gatekeeperEgressEnv } from './shim.js';
 
 const shim = fileURLToPath(new URL('./shim.ts', import.meta.url));
 
-describe('gatewayEnv', () => {
-  it('points stock SDKs at the gateway with the run token as their key', () => {
-    const env = gatewayEnv({ FACTORY_GATEWAY_URL: 'http://gw:8081/', FACTORY_RUN_TOKEN: 'run-tok' });
+describe('gatekeeperEgressEnv', () => {
+  it('points stock SDKs at the gatekeeper-egress with the run token as their key', () => {
+    const env = gatekeeperEgressEnv({ FACTORY_GATEKEEPER_EGRESS_URL: 'http://gw:8081/', FACTORY_RUN_TOKEN: 'run-tok' });
     assert.equal(env.HTTP_PROXY, 'http://run:run-tok@gw:8081');
     assert.equal(env.HTTPS_PROXY, 'http://run:run-tok@gw:8081');
     assert.equal(env.ANTHROPIC_BASE_URL, 'http://gw:8081/anthropic');
@@ -30,8 +30,8 @@ describe('gatewayEnv', () => {
     assert.equal(env.NOTION_BASE_URL, 'http://gw:8081/notion');
     assert.equal(env.NOTION_API_KEY, undefined, 'agents never get the Notion key (S1)');
     assert.equal(env.ANTHROPIC_API_KEY, 'run-tok');
-    assert.deepEqual(gatewayEnv({ FACTORY_RUN_TOKEN: 'x' }), {});
-    assert.equal(gatewayEnv({ FACTORY_GATEWAY_URL: 'http://gw', FACTORY_RUN_TOKEN: 't', ANTHROPIC_BASE_URL: 'mine' }).ANTHROPIC_BASE_URL, undefined);
+    assert.deepEqual(gatekeeperEgressEnv({ FACTORY_RUN_TOKEN: 'x' }), {});
+    assert.equal(gatekeeperEgressEnv({ FACTORY_GATEKEEPER_EGRESS_URL: 'http://gw', FACTORY_RUN_TOKEN: 't', ANTHROPIC_BASE_URL: 'mine' }).ANTHROPIC_BASE_URL, undefined);
   });
 });
 
@@ -73,7 +73,7 @@ describe('shim process', () => {
         FACTORY_URL: `http://127.0.0.1:${port}`,
         FACTORY_RUN_ID: 'run-9',
         FACTORY_RUN_TOKEN: 'run-token-9',
-        FACTORY_GATEWAY_URL: 'http://gw.internal:8081',
+        FACTORY_GATEKEEPER_EGRESS_URL: 'http://gw.internal:8081',
         FACTORY_HEARTBEAT_SECONDS: '0.05',
         ...extraEnv,
       },
@@ -86,7 +86,7 @@ describe('shim process', () => {
     return { out, root, store };
   }
 
-  it('hydrates, heartbeats, exposes gateway env, and replicates mind on exit', async () => {
+  it('hydrates, heartbeats, exposes gatekeeper-egress env, and replicates mind on exit', async () => {
     const { out, store } = await run(`
       import { readFileSync, writeFileSync } from 'node:fs';
       const dir = process.env.MEMORY_DIR;

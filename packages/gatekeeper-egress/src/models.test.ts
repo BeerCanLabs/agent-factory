@@ -2,12 +2,12 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { RunTokens } from '@beercanlabs/factory-auth';
-import { createGateway, type ControlClient, type Policy, type RunContext } from './gateway.js';
+import { createGatekeeperEgress, type ControlClient, type Policy, type RunContext } from './gatekeeper-egress.js';
 import { bedrockConverse, parseModelCatalog, toConverse, type ModelCatalog } from './models.js';
 import { signV4 } from './sigv4.js';
 
 const tokens = new RunTokens('models-test-run-token-key-0123456789');
-const AWS = { accessKeyId: 'AKIDGATEWAY', secretAccessKey: 'gateway-secret-key', sessionToken: 'gateway-session' };
+const AWS = { accessKeyId: 'AKIDGATEKEEPER', secretAccessKey: 'gatekeeper-egress-secret-key', sessionToken: 'gatekeeper-egress-session' };
 const SONNET_ID = 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
 
 async function listen(server: http.Server): Promise<number> {
@@ -41,7 +41,7 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
   let upstreamUsage = true;
   let upstream: http.Server;
   let upPort = 0;
-  let gateway: http.Server;
+  let gatekeeperEgress: http.Server;
   let port = 0;
   const ledger: Array<Record<string, any>> = [];
   let ctx: RunContext;
@@ -110,7 +110,7 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       });
     });
     upPort = await listen(upstream);
-    gateway = createGateway({
+    gatekeeperEgress = createGatekeeperEgress({
       routes: [{ id: 'models', kind: 'models' }],
       prices: {},
       runTokens: tokens,
@@ -122,11 +122,11 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
         'bedrock-converse': bedrockConverse({ credentials: async () => AWS, endpoint: (region) => `http://127.0.0.1:${upPort}/${region}` }),
       },
     });
-    port = await listen(gateway);
+    port = await listen(gatekeeperEgress);
   });
 
   after(async () => {
-    await new Promise<void>((r) => gateway.close(() => r()));
+    await new Promise<void>((r) => gatekeeperEgress.close(() => r()));
     await new Promise<void>((r) => upstream.close(() => r()));
   });
 
@@ -140,7 +140,7 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
     token = await tokens.mint({ runId, agentId: 'donna' });
   });
 
-  it('translates to Bedrock Converse, signs with the gateway credentials, and answers in OpenAI shape', async () => {
+  it('translates to Bedrock Converse, signs with the gatekeeper-egress credentials, and answers in OpenAI shape', async () => {
     const res = await call(port, '/models/v1/chat/completions', { token, body: chat() });
     assert.equal(res.status, 200, res.text);
     const out = res.json();
@@ -170,8 +170,8 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       { contentSha256Header: true },
     );
     assert.equal(up.headers.authorization, expected.authorization);
-    assert.match(String(up.headers.authorization), /^AWS4-HMAC-SHA256 Credential=AKIDGATEWAY\/\d{8}\/us-east-1\/bedrock\/aws4_request/);
-    assert.equal(up.headers['x-amz-security-token'], 'gateway-session');
+    assert.match(String(up.headers.authorization), /^AWS4-HMAC-SHA256 Credential=AKIDGATEKEEPER\/\d{8}\/us-east-1\/bedrock\/aws4_request/);
+    assert.equal(up.headers['x-amz-security-token'], 'gatekeeper-egress-session');
   });
 
   it('never forwards the run token upstream', async () => {

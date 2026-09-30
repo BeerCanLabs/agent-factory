@@ -38,11 +38,11 @@ We do not govern agent logic. We govern agent behavior strictly via ingress and 
 
 ### Defending the Perimeter (The Performance Trade-off)
 
-The industry's defense for monolithic agents is latency. They argue that forcing every reasoning loop across a network gateway for governance will cause a "latency death spiral." 
+The industry's defense for monolithic agents is latency. They argue that forcing every reasoning loop across a network gatekeeper-egress for governance will cause a "latency death spiral." 
 
 That is only true if you build the Console using 2015-era API Gateways. The Factory destroys the latency argument using modern infrastructure:
 
-1. **Zero-Trust Egress Gateway (Sub-Millisecond Governance):** Rather than running heavy, credential-bearing sidecars inside every ephemeral container, the Factory governs Cartridges via a hardened, internal Egress Gateway service. The Factory shim injects standard provider base URLs (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`) directly into the agent environment. Outbound calls route through the internal VPC network with sub-millisecond latency. The agent executes standard open-source SDKs, but the Factory maintains absolute perimeter control.
+1. **Zero-Trust gatekeeper-egress (Sub-Millisecond Governance):** Rather than running heavy, credential-bearing sidecars inside every ephemeral container, the Factory governs Cartridges via a hardened, internal gatekeeper-egress service. The Factory shim injects standard provider base URLs (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`) directly into the agent environment. Outbound calls route through the internal VPC network with sub-millisecond latency. The agent executes standard open-source SDKs, but the Factory maintains absolute perimeter control.
 2. **Warm Pools:** For real-time, user-facing agents, the Factory uses Provisioned Concurrency. We don't scale to zero; we keep a baseline of idle Cartridges running. You get monolithic speeds without sacrificing the perimeter.
 3. **Asynchronous Delegation:** We must stop treating enterprise agents like chatbots. If an agent is auditing 500 records, the task takes 5 minutes. A 30-second cold start is irrelevant. The user delegates the task, gets an immediate acknowledgment, and walks away.
 
@@ -50,7 +50,7 @@ That is only true if you build the Console using 2015-era API Gateways. The Fact
 
 If you let developers hardcode API keys into their agent's code, you instantly fail enterprise security audits. 
 
-In the Factory, the code is blind. The enterprise stores the master keys in their existing Bring-Your-Own Secret Manager (AWS, Vault). Cartridges never receive master provider keys. Instead, the Factory issues a temporary, short-lived Run Token to the agent container. When the agent calls an LLM provider, the internal Egress Gateway validates the Run Token, checks policy and real-time budgets, strips the token, injects the master key at the perimeter, and streams the response. 
+In the Factory, the code is blind. The enterprise stores the master keys in their existing Bring-Your-Own Secret Manager (AWS, Vault). Cartridges never receive master provider keys. Instead, the Factory issues a temporary, short-lived Run Token to the agent container. When the agent calls an LLM provider, the internal gatekeeper-egress validates the Run Token, checks policy and real-time budgets, strips the token, injects the master key at the perimeter, and streams the response. 
 
 If an agent container is compromised, the attacker finds zero provider keys. When the enterprise rotates master keys, zero agent containers need to be touched.
 
@@ -60,7 +60,7 @@ To operationalize the Console/Cartridge paradigm, the Factory is built on three 
 
 1. **The Assembly Line (Build & Registry):** Agents are not deployed; they are registered. The Assembly Line validates the manifest (the agent's contract for inputs/outputs) and publishes the Cartridge (Manifest + Soul + Skills) to a secure artifact store.
 2. **The Execution Engine (The Console):** The runtime that binds the Cartridge to the environment. It injects scoped secrets, manages the warm pools, and acts as the secure boundary between the agent and the corporate network.
-3. **The Observability Plane (FinOps & Audit):** The internal Egress Gateway that intercepts all outbound provider traffic. It enforces hard-stop circuit breakers on budgets and logs immutable audit trails for every token burned and tool invoked.
+3. **The Observability Plane (FinOps & Audit):** The internal gatekeeper-egress that intercepts all outbound provider traffic. It enforces hard-stop circuit breakers on budgets and logs immutable audit trails for every token burned and tool invoked.
 
 ***
 

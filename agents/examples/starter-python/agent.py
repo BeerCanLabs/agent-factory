@@ -5,7 +5,7 @@ Demonstrates the 'New Hire' pattern:
 - Reads input turn from FACTORY_INPUT or /tmp/factory-input.json
 - Accesses secrets from environment (e.g. ALERT_WEBHOOK_SECRET)
 - Uses persistent memory in MEMORY_DIR via local SQLite
-- Interacts with LLM via standard SDK (metered by Factory Egress Gateway)
+- Interacts with LLM via standard SDK (metered by Factory Egress GatekeeperEgress)
 - Emits results to /tmp/factory-result.json
 """
 

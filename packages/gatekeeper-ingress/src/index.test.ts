@@ -1,14 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
-import { createDoorman, fakeGateway } from './index.js';
+import { createGatekeeperIngress, fakeDiscordClient } from './index.js';
 
-describe('doorman', () => {
+describe('gatekeeper-ingress', () => {
   it('stays idle when no Discord token is bound', async () => {
-    const gw = fakeGateway();
+    const gw = fakeDiscordClient();
     const woken: string[] = [];
-    const door = createDoorman({
-      gateway: gw,
+    const door = createGatekeeperIngress({
+      discord: gw,
       providers: [envProvider({})],
       wake: async (id) => {
         woken.push(id);
@@ -22,11 +22,11 @@ describe('doorman', () => {
   });
 
   it('connects offline, wakes and becomes available on message, offline on idle', async () => {
-    const gw = fakeGateway();
+    const gw = fakeDiscordClient();
     const woken: string[] = [];
     const handed: string[] = [];
-    const door = createDoorman({
-      gateway: gw,
+    const door = createGatekeeperIngress({
+      discord: gw,
       providers: [envProvider({ DISCORD_BOT_TOKEN: 'bot-token' })],
       wake: async (id) => {
         woken.push(id);

@@ -1,9 +1,9 @@
 import http from 'node:http';
 import type { AuthProvider } from '@beercanlabs/factory-auth';
-import type { Doorman } from './index.js';
+import type { GatekeeperIngress } from './index.js';
 
-/** Health is public; presence changes come only from the control plane (DOORMAN_TOKEN). */
-export function createDoormanHttp(door: Doorman, presenceAuth: AuthProvider): http.Server {
+/** Health is public; presence changes come only from the control plane (GATEKEEPER_INGRESS_TOKEN). */
+export function createGatekeeperIngressHttp(door: GatekeeperIngress, presenceAuth: AuthProvider): http.Server {
   return http.createServer(async (req, res) => {
     const path = (req.url ?? '/').split('?')[0];
     if (path === '/healthz' && req.method === 'GET') {

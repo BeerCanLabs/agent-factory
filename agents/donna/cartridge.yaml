@@ -18,7 +18,7 @@ triggers:
 secrets:
   requires:
     - name: DONNA_DISCORD_BOT_TOKEN
-      description: "Discord Bot Token for Doorman presence and executive messaging"
+      description: "Discord Bot Token for gatekeeper-ingress presence and executive messaging"
     - name: XAI_API_KEY
       description: "xAI API Key for Donna LLM inference"
     - name: NOTION_API_KEY

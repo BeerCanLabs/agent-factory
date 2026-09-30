@@ -13,7 +13,7 @@ triggers:
 secrets:
   requires:
     - name: ROSIE_DISCORD_BOT_TOKEN
-      description: "Discord Bot Token for Doorman presence and home automation commands"
+      description: "Discord Bot Token for gatekeeper-ingress presence and home automation commands"
     - name: HA_LONG_LIVED_TOKEN
       description: "Long-lived access token for Home Assistant REST API"
     - name: HASS_URL

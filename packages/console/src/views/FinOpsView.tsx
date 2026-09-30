@@ -18,11 +18,11 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
   const [isUpdating, setIsUpdating] = useState(false);
 
   const isBuiltinAgent = (a: AgentRecord) => Boolean(
-    a.isBuiltin || a.category === 'builtin' || a.budgetExempt || ['doorman', 'keymaster', 'doctor', 'coach'].includes(a.id)
+    a.isBuiltin || a.category === 'builtin' || a.budgetExempt || ['gatekeeper-ingress', 'keymaster', 'doctor', 'coach'].includes(a.id)
   );
 
   // FinOps is exclusively for autonomous submind agents with budget allocations.
-  // Core system actors (Doorman, Keymaster, Doctor, Coach) are infrastructure and excluded from FinOps.
+  // Core system actors (gatekeeper-ingress, Keymaster, Doctor, Coach) are infrastructure and excluded from FinOps.
   const submindAgents = agents.filter((a) => !isBuiltinAgent(a));
 
   // Compute spend and budget totals strictly for submind autonomous agents
@@ -120,7 +120,7 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
 
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-2 shadow-sm transition-colors">
           <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">Pricing Rate Engine</span>
-          <div className="text-lg font-bold text-emerald-600 dark:text-emerald-400">Gateway Metered</div>
+          <div className="text-lg font-bold text-emerald-600 dark:text-emerald-400">Metered by gatekeeper-egress</div>
           <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
             All tokens priced synchronously at outbound proxy layer before upstream forwarding. 
             Zero unmetered LLM egress permitted.
@@ -131,8 +131,8 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
           <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">Automated Circuit Breakers</span>
           <div className="text-lg font-bold text-slate-900 dark:text-white">Active (Multi-Window)</div>
           <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-            When a submind agent reaches 100% of its spend ceiling, egress gateway returns 402 Payment Required 
-            and freezes execution. Core platform actors (Doorman, Keymaster, Doctor, Coach) are exempt.
+            When a submind agent reaches 100% of its spend ceiling, gatekeeper-egress returns 402 Payment Required 
+            and freezes execution. Core platform actors (gatekeeper-ingress, Keymaster, Doctor, Coach) are exempt.
           </p>
         </div>
       </div>

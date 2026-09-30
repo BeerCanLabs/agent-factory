@@ -10,7 +10,7 @@ export type Conversation = {
   authorId: string;
 };
 
-export type Gateway = {
+export type DiscordClient = {
   connected: boolean;
   presence: Presence;
   login(token: string): Promise<void>;
@@ -20,7 +20,7 @@ export type Gateway = {
   destroy(): Promise<void>;
 };
 
-export function fakeGateway(): Gateway {
+export function fakeDiscordClient(): DiscordClient {
   const handlers: Array<(msg: Omit<Conversation, 'agentId'>) => void> = [];
   return {
     connected: false,
@@ -50,7 +50,7 @@ export type DiscordSurface = {
   initialPresence?: Presence;
 };
 
-export type Doorman = {
+export type GatekeeperIngress = {
   status(): { discord: 'idle' | 'connected'; presence: Presence; agentId?: string };
   reconcile(surfaces: DiscordSurface[]): Promise<void>;
   /** Inbound Discord activity: wake factory, mark available, hand off. */
@@ -60,25 +60,25 @@ export type Doorman = {
   onAgentWorking(agentId: string): Promise<void>;
 };
 
-export function createDoorman(opts: {
-  gateway?: Gateway;
-  gatewayFactory?: () => Gateway;
+export function createGatekeeperIngress(opts: {
+  discord?: DiscordClient;
+  discordFactory?: () => DiscordClient;
   providers: SecretProvider[];
   wake: (agentId: string, msg?: unknown) => Promise<void>;
   handoff: (msg: Conversation) => Promise<void>;
-}): Doorman {
-  const agents = new Map<string, { ref: string; gateway: Gateway }>();
+}): GatekeeperIngress {
+  const agents = new Map<string, { ref: string; discord: DiscordClient }>();
   const connecting = new Set<string>();
   let isReconciling = false;
 
-  const doorman: Doorman = {
+  const gatekeeperIngress: GatekeeperIngress = {
     status() {
       // Just returning the status of the first one for backwards compatibility of the healthcheck format
       // In a real app we'd want to return a list of agent statuses
       const first = [...agents.values()][0];
       return {
-        discord: first?.gateway.connected ? 'connected' : 'idle',
-        presence: first?.gateway.presence || 'offline',
+        discord: first?.discord.connected ? 'connected' : 'idle',
+        presence: first?.discord.presence || 'offline',
         agentId: agents.keys().next().value,
       };
     },
@@ -88,15 +88,15 @@ export function createDoorman(opts: {
       try {
         const desiredAgents = new Set(surfaces.map(s => s.agentId));
         
-        // Destroy gateways for agents no longer requested
+        // Destroy Discord clients for agents no longer requested
         for (const [agentId, state] of agents) {
           if (!desiredAgents.has(agentId)) {
-            await state.gateway.destroy().catch(() => {});
+            await state.discord.destroy().catch(() => {});
             agents.delete(agentId);
           }
         }
 
-        // Create and login new gateways
+        // Create and login new Discord clients
         for (const surface of surfaces) {
           if (agents.has(surface.agentId) || connecting.has(surface.agentId)) {
             continue;
@@ -105,7 +105,7 @@ export function createDoorman(opts: {
 
           const bound = await bindSecrets([surface.secretRef], opts.providers);
           if (!bound.ok || !bound.env[surface.secretRef]) {
-            console.warn(`[doorman] failed to bind secret ${surface.secretRef} for ${surface.agentId}`);
+            console.warn(`[gatekeeper-ingress] failed to bind secret ${surface.secretRef} for ${surface.agentId}`);
             connecting.delete(surface.agentId);
             continue;
           }
@@ -115,23 +115,23 @@ export function createDoorman(opts: {
             continue;
           }
 
-          const gateway = opts.gatewayFactory ? opts.gatewayFactory() : (opts.gateway || fakeGateway());
-          if (surface.name && gateway.setAgentName) {
-            gateway.setAgentName(surface.name);
+          const discord = opts.discordFactory ? opts.discordFactory() : (opts.discord || fakeDiscordClient());
+          if (surface.name && discord.setAgentName) {
+            discord.setAgentName(surface.name);
           }
           
           try {
-            await gateway.login(bound.env[surface.secretRef]);
-            await gateway.setPresence(surface.initialPresence ?? 'offline');
+            await discord.login(bound.env[surface.secretRef]);
+            await discord.setPresence(surface.initialPresence ?? 'offline');
             
-            gateway.onMessage((msg) => {
-              void doorman.receive({ ...msg, agentId: surface.agentId });
+            discord.onMessage((msg) => {
+              void gatekeeperIngress.receive({ ...msg, agentId: surface.agentId });
             });
-            agents.set(surface.agentId, { ref: surface.secretRef, gateway });
-            console.log(`[doorman] connected Discord gateway for ${surface.agentId} (presence: ${surface.initialPresence ?? 'offline'})`);
+            agents.set(surface.agentId, { ref: surface.secretRef, discord });
+            console.log(`[gatekeeper-ingress] connected Discord for ${surface.agentId} (presence: ${surface.initialPresence ?? 'offline'})`);
           } catch (err) {
-            console.error(`[doorman] Discord login failed for ${surface.agentId}:`, err);
-            await gateway.destroy().catch(() => {});
+            console.error(`[gatekeeper-ingress] Discord login failed for ${surface.agentId}:`, err);
+            await discord.destroy().catch(() => {});
             agents.delete(surface.agentId);
           } finally {
             connecting.delete(surface.agentId);
@@ -143,9 +143,9 @@ export function createDoorman(opts: {
     },
     async receive(msg) {
       const state = agents.get(msg.agentId);
-      if (!state || !state.gateway.connected) return;
-      if (state.gateway.presence === 'offline') {
-        await state.gateway.setPresence('available');
+      if (!state || !state.discord.connected) return;
+      if (state.discord.presence === 'offline') {
+        await state.discord.setPresence('available');
         await opts.wake(msg.agentId, msg);
       } else {
         await opts.handoff(msg);
@@ -153,15 +153,15 @@ export function createDoorman(opts: {
     },
     async onAgentIdle(agentId) {
       const state = agents.get(agentId);
-      if (!state || !state.gateway.connected) return;
-      await state.gateway.setPresence('offline');
+      if (!state || !state.discord.connected) return;
+      await state.discord.setPresence('offline');
     },
     async onAgentWorking(agentId) {
       const state = agents.get(agentId);
-      if (!state || !state.gateway.connected) return;
-      await state.gateway.setPresence('available');
+      if (!state || !state.discord.connected) return;
+      await state.discord.setPresence('available');
     },
   };
   
-  return doorman;
+  return gatekeeperIngress;
 }
