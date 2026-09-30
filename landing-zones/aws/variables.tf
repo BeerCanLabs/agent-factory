@@ -70,13 +70,29 @@ variable "agents" {
 variable "provider_secret_names" {
   description = "Credentials the gateway injects (S1; values set in Secrets Manager by an operator): model provider keys and shared workspace integrations such as Notion (§6.11 K5.5). Only the gateway can read them; they are never put in an agent task definition."
   type        = list(string)
-  default     = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "NOTION_API_KEY"]
+  default     = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "NOTION_API_KEY", "MOTION_API_KEY"]
+}
+
+variable "extra_provider_secret_names" {
+  description = "Deployment-specific gateway-held secrets (e.g. a private service's API token), merged with provider_secret_names. Same rules: only the gateway reads them, never an agent task definition."
+  type        = list(string)
+  default     = []
 }
 
 variable "gateway_routes" {
-  description = "JSON array of gateway routes. `notion` injects the shared NOTION_API_KEY (a gateway-held secret, see provider_secret_names). Google routes name a Keymaster `connection` (§6.11): the gateway injects the access token the control plane's Keymaster issues; no Google credential is configured here or held by agents."
+  description = "JSON array of gateway routes. `github` injects the calling agent's own {AGENT}_GITHUB_TOKEN with no shared fallback (`fallback: false`); `motion` injects the gateway-held MOTION_API_KEY. `notion` injects the shared NOTION_API_KEY (a gateway-held secret, see provider_secret_names). Google routes name a Keymaster `connection` (§6.11): the gateway injects the access token the control plane's Keymaster issues; no Google credential is configured here or held by agents."
   type        = string
-  default     = "[{\"id\":\"anthropic\",\"kind\":\"llm\",\"provider\":\"anthropic\",\"upstream\":\"https://api.anthropic.com\",\"credential\":{\"secret\":\"ANTHROPIC_API_KEY\",\"header\":\"x-api-key\"}},{\"id\":\"openai\",\"kind\":\"llm\",\"provider\":\"openai\",\"upstream\":\"https://api.openai.com\",\"credential\":{\"secret\":\"OPENAI_API_KEY\",\"header\":\"authorization\",\"format\":\"Bearer {}\"}},{\"id\":\"discord\",\"kind\":\"http\",\"upstream\":\"https://discord.com/api/v10\",\"credential\":{\"secret\":\"{agent}_DISCORD_BOT_TOKEN\",\"header\":\"authorization\",\"format\":\"Bot {}\"}},{\"id\":\"notion\",\"kind\":\"http\",\"upstream\":\"https://api.notion.com\",\"credential\":{\"secret\":\"NOTION_API_KEY\",\"header\":\"authorization\",\"format\":\"Bearer {}\"}},{\"id\":\"google-calendar\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/calendar/v3\",\"connection\":\"google\"},{\"id\":\"google-oauth\",\"kind\":\"http\",\"upstream\":\"https://oauth2.googleapis.com\"},{\"id\":\"google-gmail\",\"kind\":\"http\",\"upstream\":\"https://gmail.googleapis.com\",\"connection\":\"google\"},{\"id\":\"google-drive\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/drive/v3\",\"connection\":\"google\"},{\"id\":\"google-drive-upload\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/upload/drive/v3\",\"connection\":\"google\"},{\"id\":\"google-health\",\"kind\":\"http\",\"upstream\":\"https://health.googleapis.com\",\"connection\":\"google\"},{\"id\":\"google-storage\",\"kind\":\"http\",\"upstream\":\"https://storage.googleapis.com\",\"connection\":\"google-service-account\",\"scopes\":[\"https://www.googleapis.com/auth/devstorage.read_write\"]},{\"id\":\"models\",\"kind\":\"models\"}]"
+  default     = "[{\"id\":\"anthropic\",\"kind\":\"llm\",\"provider\":\"anthropic\",\"upstream\":\"https://api.anthropic.com\",\"credential\":{\"secret\":\"ANTHROPIC_API_KEY\",\"header\":\"x-api-key\"}},{\"id\":\"openai\",\"kind\":\"llm\",\"provider\":\"openai\",\"upstream\":\"https://api.openai.com\",\"credential\":{\"secret\":\"OPENAI_API_KEY\",\"header\":\"authorization\",\"format\":\"Bearer {}\"}},{\"id\":\"discord\",\"kind\":\"http\",\"upstream\":\"https://discord.com/api/v10\",\"credential\":{\"secret\":\"{agent}_DISCORD_BOT_TOKEN\",\"header\":\"authorization\",\"format\":\"Bot {}\"}},{\"id\":\"notion\",\"kind\":\"http\",\"upstream\":\"https://api.notion.com\",\"credential\":{\"secret\":\"NOTION_API_KEY\",\"header\":\"authorization\",\"format\":\"Bearer {}\"}},{\"id\":\"google-calendar\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/calendar/v3\",\"connection\":\"google\"},{\"id\":\"google-oauth\",\"kind\":\"http\",\"upstream\":\"https://oauth2.googleapis.com\"},{\"id\":\"google-gmail\",\"kind\":\"http\",\"upstream\":\"https://gmail.googleapis.com\",\"connection\":\"google\"},{\"id\":\"google-drive\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/drive/v3\",\"connection\":\"google\"},{\"id\":\"google-drive-upload\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/upload/drive/v3\",\"connection\":\"google\"},{\"id\":\"google-health\",\"kind\":\"http\",\"upstream\":\"https://health.googleapis.com\",\"connection\":\"google\"},{\"id\":\"google-storage\",\"kind\":\"http\",\"upstream\":\"https://storage.googleapis.com\",\"connection\":\"google-service-account\",\"scopes\":[\"https://www.googleapis.com/auth/devstorage.read_write\"]},{\"id\":\"github\",\"kind\":\"http\",\"upstream\":\"https://api.github.com\",\"credential\":{\"secret\":\"{agent}_GITHUB_TOKEN\",\"header\":\"authorization\",\"format\":\"Bearer {}\",\"fallback\":false}},{\"id\":\"motion\",\"kind\":\"http\",\"upstream\":\"https://api.usemotion.com/v1\",\"credential\":{\"secret\":\"MOTION_API_KEY\",\"header\":\"x-api-key\"}},{\"id\":\"models\",\"kind\":\"models\"}]"
+}
+
+variable "extra_gateway_routes" {
+  description = "JSON array of deployment-specific gateway routes (private upstreams that do not belong in this public repo), appended to gateway_routes. Their credentials should be listed in extra_provider_secret_names. An id already in gateway_routes is refused."
+  type        = string
+  default     = "[]"
+  validation {
+    condition     = can(tolist(jsondecode(var.extra_gateway_routes))) && alltrue([for r in jsondecode(var.extra_gateway_routes) : can(r.id) && !contains([for b in jsondecode(var.gateway_routes) : b.id], r.id)])
+    error_message = "extra_gateway_routes must be a JSON array of routes, each with an id not already in gateway_routes."
+  }
 }
 
 variable "gateway_prices" {

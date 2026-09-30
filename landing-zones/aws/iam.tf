@@ -37,7 +37,11 @@ resource "aws_iam_role_policy" "execution_secrets" {
 locals {
   # By name, not by resource: the Keymaster creates these secrets (K5). `-??????` is the suffix AWS appends to
   # a secret's ARN, so NOTION_API_KEY never also matches NOTION_API_KEY_OTHER.
-  provider_secret_arns = [for n in var.provider_secret_names : "${local.secret_arn}/${n}-??????"]
+  # Gateway-held secrets: the public defaults plus deployment-specific ones (TSK-045).
+  held_secret_names    = distinct(concat(var.provider_secret_names, var.extra_provider_secret_names))
+  provider_secret_arns = [for n in local.held_secret_names : "${local.secret_arn}/${n}-??????"]
+  # Deployment-specific routes are appended; validation refuses an id that would replace a public route.
+  gateway_routes = var.extra_gateway_routes == "[]" ? var.gateway_routes : jsonencode(concat(jsondecode(var.gateway_routes), jsondecode(var.extra_gateway_routes)))
   # §6.11 K1: OAuth grants (one secret per agent x provider) and the app credentials they depend on. Only the
   # control plane's Keymaster reads or writes them; the gateway asks the control plane for access tokens.
   keymaster_grant_arns = ["${local.secret_arn}/connections/*"]
@@ -238,10 +242,11 @@ resource "aws_iam_role_policy" "control_plane_paas" {
       },
       {
         # aws/iam.ts revokes an agent execution role's SecretsAccess when a redeploy no longer injects any secret
-        # (its last one became gateway-held, S1).
+        # (its last one became gateway-held, S1). aws/iam.ts names these roles AgentExecutionRole-<agent id>
+        # (TSK-045: the old factory-agent-exec-* pattern matched no role it creates, so the revoke was AccessDenied).
         Effect   = "Allow"
         Action   = ["iam:DeleteRolePolicy"]
-        Resource = "arn:aws:iam::${var.account_id}:role/factory-agent-exec-*"
+        Resource = "arn:aws:iam::${var.account_id}:role/AgentExecutionRole-*"
       }
     ]
   })
