@@ -112,6 +112,8 @@ export async function provisionAgentRoles(
 
   // 2. Create Execution Role
   let executionRoleArn = "";
+  // A role created just now has no inline policies, so there is no SecretsAccess to revoke below.
+  let executionRoleCreated = false;
   try {
     const createExecutionRoleResponse = await client.send(
       new CreateRoleCommand({
@@ -121,6 +123,7 @@ export async function provisionAgentRoles(
       })
     );
     executionRoleArn = createExecutionRoleResponse.Role?.Arn as string;
+    executionRoleCreated = true;
   } catch (err: any) {
     if (err.name === "EntityAlreadyExistsException" || err.name === "EntityAlreadyExists" || err.Code === "EntityAlreadyExists") {
       const getRoleRes = await client.send(new GetRoleCommand({ RoleName: executionRoleName }));
@@ -182,7 +185,7 @@ export async function provisionAgentRoles(
         PolicyDocument: secretsPolicyDocument,
       })
     );
-  } else {
+  } else if (!executionRoleCreated) {
     // A redeploy that no longer injects any secret (e.g. its last one became gateway-held) revokes the old grant.
     try {
       await client.send(new DeleteRolePolicyCommand({ RoleName: executionRoleName, PolicyName: "SecretsAccess" }));

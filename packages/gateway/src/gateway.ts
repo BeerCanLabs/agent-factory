@@ -17,7 +17,12 @@ export type Route = {
   kind: 'llm' | 'mcp' | 'http' | 'models';
   provider?: Provider;
   upstream?: string;
-  credential?: { secret: string; header: string; format?: string };
+  /**
+   * `{agent}` in `secret` expands to the calling agent (`CASTLE_GITHUB_TOKEN` for castle). `fallback: false` means
+   * the per-agent secret is the only candidate: an agent without its own gets `credential_unbound`, never the
+   * shared unprefixed secret. Omitted (the default) keeps the shared fallback (discord).
+   */
+  credential?: { secret: string; header: string; format?: string; fallback?: boolean };
   /**
    * Keymaster connection (§6.11 K3): the gateway asks the control plane for a current access token for
    * (agent, connection) and injects it as `Authorization: Bearer`. Never combined with `credential`.
@@ -232,7 +237,7 @@ export function createGateway(opts: GatewayOptions): http.Server {
         name.toLowerCase().replace(/_/g, '-'),
         // A per-agent secret ({agent}_X) falls back to the shared X. Never to another route's secret: that would
         // send one service's credential to a different upstream.
-        route.credential.secret.replace(/\$\{agent\}|\{agent\}[_-]?/gi, ''),
+        ...(route.credential.fallback === false ? [] : [route.credential.secret.replace(/\$\{agent\}|\{agent\}[_-]?/gi, '')]),
       ];
       for (const cand of candidates) {
         if (!cand) continue;
