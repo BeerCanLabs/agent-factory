@@ -58,6 +58,14 @@ Agents call models at `${FACTORY_MODEL_BASE_URL}/chat/completions` (OpenAI Chat 
 1. Set `model_catalog` to the models this factory offers (default: `claude-sonnet-4-5` and `claude-haiku-4-5` via US cross-region inference profiles). Enable model access for them in the Bedrock console.
 2. `PUT /api/v1/agents/<id>/policy {"routes":["models"], "models":["claude-sonnet-4-5"], "budgetUsd":{"perDay":5}}`.
 
+## Operator identity (Cloudflare Access)
+
+The control plane takes a person's identity only from the Access assertion it verifies itself (Design Authority §6.12 A2): an RS256 JWT in `cf-access-jwt-assertion` or the `CF_Authorization` cookie, checked against `https://<access_team_domain>/cdn-cgi/access/certs`, issuer `https://<access_team_domain>`, and `access_aud`. The `cf-access-authenticated-user-email` header grants nothing. The dashboard adds no token; it forwards each caller's assertion.
+
+- `access_team_domain`, `access_aud`: both empty (default) disables Access identity, so only factory tokens work and the dashboard cannot act for anyone. List every Access application that fronts the dashboard or the control plane in `access_aud` (comma-separated).
+- `admin_emails`: verified emails that get the admin roles; every other verified user is a viewer. Empty: no admins through Access.
+- Access service tokens authenticate as `cloudflare-service:<common name>` with no roles; machine callers also send a factory bearer token.
+
 ## Cost notes
 
 There are no NAT gateways. Fixed costs are the ALB, the four interface endpoints (billed hourly per AZ, two AZs), EFS, and the always-on control plane, gateway and Doorman tasks. Agents cost nothing while idle.
