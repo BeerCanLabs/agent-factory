@@ -129,6 +129,26 @@ variable "oidc_roles_claim" {
   default = ""
 }
 
+# §6.12 A2: the identity-aware proxy's signed assertion. Both empty (the default) disables Access identity: only
+# factory tokens authenticate, and nobody reaches the control plane as themselves through the dashboard.
+variable "access_team_domain" {
+  type        = string
+  default     = ""
+  description = "Cloudflare Access team domain, e.g. example.cloudflareaccess.com (issuer https://<domain>; keys from /cdn-cgi/access/certs). Empty disables Access identity."
+}
+
+variable "access_aud" {
+  type        = string
+  default     = ""
+  description = "Cloudflare Access application audience tag(s), comma-separated; the assertion's aud must contain one. Empty disables Access identity."
+}
+
+variable "admin_emails" {
+  type        = string
+  default     = ""
+  description = "Comma-separated emails that get the admin roles when they arrive with a verified Access assertion. Empty: no admins through Access."
+}
+
 variable "ledger_retention_days" {
   type        = number
   default     = 365

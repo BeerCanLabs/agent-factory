@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Checkpointer, FileLedger, LedgerLease, LeaseHeldError, archiveAndStartSegment, checkpointSinkFromEnv, readSegment, secretValuesFromEnv, segmentWormUri } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
-import { authFromEnv } from '@beercanlabs/factory-auth';
+import { accessAuthFromEnv, authFromEnv } from '@beercanlabs/factory-auth';
 import { loadCatalog, loadDynamicRegistry, mergeAgents, BUILTIN_SYSTEM_AGENTS } from './catalog.js';
 import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, factoryMetrics, finishRun, reconcileRuns, SYSTEM } from './app.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
@@ -134,6 +134,8 @@ const state: FactoryState = {
   maxRssMb: parseInt(process.env.FACTORY_MAX_RSS_MB || '0', 10),
   crashLoopThreshold: parseInt(process.env.FACTORY_CRASH_LOOP_THRESHOLD || '3', 10),
   auth: authFromEnv(),
+  // §6.12 A2: FACTORY_ACCESS_TEAM_DOMAIN + FACTORY_ACCESS_AUD; unset disables Access identity (bearer tokens only).
+  access: accessAuthFromEnv(),
   version: VERSION,
   providers: providersFromEnv(),
   runs: Object.assign(new FileRunStore(RUNS_DIR), { onChange: (run: Parameters<typeof runEvent>[0]) => hub.publish(runEvent(run)) }),
