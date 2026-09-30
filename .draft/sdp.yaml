@@ -4,7 +4,7 @@ type: software_deployment_pattern
 name: BeerCanLabs Agent Factory
 description: >-
   Headless factory for portable agent cartridges. The kernel is cloud-agnostic
-  (contract, control plane, shim, secret bind, mind hydrate, ledger, idle Doorman).
+  (contract, control plane, shim, secret bind, mind hydrate, ledger, idle gatekeeper-ingress).
   Where it lands is a Draftsman interview: pick one of three baseline patterns,
   then bind AWS, Azure, GCP, or a VM to the slots. Garrison is a client, not kernel.
 version: 1.1.0
@@ -25,28 +25,28 @@ businessContext:
   productFamily: Skippy / Agent Factory
 notes:
   availabilityRequirement: >-
-    Mailboxes (ingress, control plane, Doorman) are always reachable. Agent compute
+    Mailboxes (ingress, control plane, gatekeeper-ingress) are always reachable. Agent compute
     is zero when idle. Availability of "the fleet" is the mailbox, not warm agents.
   dataClassification: Confidential — ledger is metadata+hash only; mind is adopter data.
   failureDomain:
     scope: service-group
     description: >-
       Loss of control plane blocks wake/MCP. Loss of one agent task does not take
-      down the factory. Doorman failure affects Discord only.
+      down the factory. gatekeeper-ingress failure affects Discord only.
   patternDeviations: >-
     Preferred RA is Serverless Event-Driven for *agents* (no sticky instance).
-    Control plane + Doorman may stay warm (orchestrated-tasks pattern) because they
+    Control plane + gatekeeper-ingress may stay warm (orchestrated-tasks pattern) because they
     are mailboxes, not cartridges. Compose pattern runs kernel on one host for CI/dev.
   architecturalBaseline: >-
     These questions are answered by the kernel, not by the cloud. Draftsman binds
     provider products onto the slots in `baselinePatterns`.
-    1. What is always on? Ingress + control plane + Doorman. Not agents.
+    1. What is always on? Ingress + control plane + gatekeeper-ingress. Not agents.
     2. How do agents run? Scale-to-zero on wake from surface.yaml.
     3. Where is mind? Object storage; local disk is disposable.
     4. Where are secrets? Adopter BYO manager; factory binds names only.
     5. How is spend observed? Sidecar intercept, not agent-coded telemetry.
     6. What is the audit log? Append-only metadata + payloadSha256; optional TTL traces in mind.
-    7. Is Discord required? No. Doorman is installed idle.
+    7. Is Discord required? No. gatekeeper-ingress is installed idle.
   baselinePatterns:
     - id: serverless-containers
       name: Serverless containers
@@ -59,7 +59,7 @@ notes:
       name: Orchestrated tasks
       follows: 01KV0REFAR-CMSV
       when: >-
-        Control plane + Doorman run as always-on services; agents are Jobs/RunTask
+        Control plane + gatekeeper-ingress run as always-on services; agents are Jobs/RunTask
         with a shim in the same task. Use when the org standard is AKS/ECS/GKE.
     - id: compose-host
       name: Compose on a host
@@ -75,7 +75,7 @@ networkZones:
   - id: mailbox
     name: Mailbox
     tier: application
-    description: Control plane and Doorman. Cheap, always reachable.
+    description: Control plane and gatekeeper-ingress. Cheap, always reachable.
   - id: agents
     name: Agent compute
     tier: application
@@ -96,7 +96,7 @@ serviceGroups:
         diagramTier: application
         intent: ha
         notes: REST + MCP. Headless console.
-      - ref: factory-doorman
+      - ref: factory-gatekeeper-ingress
         networkZone: mailbox
         diagramTier: utility
         intent: standalone
@@ -123,7 +123,7 @@ serviceGroups:
     deploymentTarget: drafting-interview-required
     notes: One task = worker + shim. No 24/7 service for agents.
     deployableObjects:
-      - ref: factory-gateway
+      - ref: factory-gatekeeper-egress
         networkZone: agents
         diagramTier: application
         intent: standalone
@@ -149,7 +149,7 @@ tierVariants:
 decisionRecords:
   - ref: local-baseline-mailbox-not-agent
     key: always-on
-    notes: Always-on is the mailbox (ingress, control plane, Doorman). Agents are not always on.
+    notes: Always-on is the mailbox (ingress, control plane, gatekeeper-ingress). Agents are not always on.
   - ref: local-baseline-object-mind
     key: persistent-mind
     notes: Mind is object storage. Local disk is disposable.
@@ -157,8 +157,8 @@ decisionRecords:
     key: secret-binding
     notes: Factory binds names from the adopter vault. Factory is not a vault.
   - ref: local-baseline-discord-optional
-    key: doorman
-    notes: Discord is a choice. Doorman is installed empty. Gateway is not a load balancer.
+    key: gatekeeper-ingress
+    notes: Discord is a choice. gatekeeper-ingress is installed empty. gatekeeper-egress is not a load balancer.
   - ref: local-baseline-provider-interview
     key: deploymentTargets
     notes: >-

@@ -1,7 +1,7 @@
 # Example agent on Cloud Run under the factory shim. The worker has no provider keys: the shim points
-# stock SDKs at the fleet egress gateway and uses the run token (injected per run by the control plane)
+# stock SDKs at the fleet gatekeeper-egress and uses the run token (injected per run by the control plane)
 # as their API key. Pair with Direct VPC egress "all-traffic" on a subnet with no Cloud NAT, so the
-# gateway is the only route out.
+# gatekeeper-egress is the only route out.
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
@@ -23,8 +23,8 @@ spec:
           value: "example-agent"
         - name: FACTORY_URL
           value: "https://factory.internal"
-        - name: FACTORY_GATEWAY_URL
-          value: "http://gateway.factory.internal:8081"
+        - name: FACTORY_GATEKEEPER_EGRESS_URL
+          value: "http://gatekeeper-egress.factory.internal:8081"
         - name: MEMORY_DIR
           value: "/tmp/mind"
         - name: MEMORY_PREFIX

@@ -58,7 +58,7 @@ export type ConnectionProvider = UserOAuthProvider | JwtBearerProvider;
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 
-/** Connections the Keymaster knows how to serve. A connection name is what cartridges and gateway routes declare. */
+/** Connections the Keymaster knows how to serve. A connection name is what cartridges and gatekeeper-egress routes declare. */
 export const CONNECTION_PROVIDERS: Record<string, ConnectionProvider> = {
   google: {
     kind: 'oauth-user',

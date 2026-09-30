@@ -190,7 +190,7 @@ export const factoryApi = {
     return request<AgentCredentials>(`/keymaster/agents/${encodeURIComponent(agentId)}/credentials`);
   },
 
-  /** Gateway-held platform keys (model providers, shared integrations): created and filled through the Keymaster. */
+  /** Gatekeeper-held platform keys (model providers, shared integrations): created and filled through the Keymaster. */
   async getPlatformCredentials(): Promise<AgentCredentials> {
     const res = await request<Omit<AgentCredentials, 'agentId'>>('/keymaster/platform/credentials');
     return { agentId: PLATFORM_CREDENTIALS, ...res };

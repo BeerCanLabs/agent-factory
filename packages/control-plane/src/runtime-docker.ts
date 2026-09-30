@@ -41,7 +41,7 @@ export type DockerRuntimeOptions = {
   api: DockerApi;
   /** agentId -> image. Agents not listed cannot be started. */
   images: Record<string, string>;
-  /** The internal-only network agents join; its only exits are the control plane and the gateway. */
+  /** The internal-only network agents join; its only exits are the control plane and the gatekeeper-egress. */
   network: string;
   /** Named volume holding every agent's mind; each run mounts only its own subpath. */
   mindVolume?: string;

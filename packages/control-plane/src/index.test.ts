@@ -71,7 +71,7 @@ const TOKENS = {
   viewer: 'viewer-token',
   operator: 'operator-token',
   ingest: 'ingest-token',
-  gateway: 'gateway-token',
+  gatekeeperEgress: 'gatekeeper-egress-token',
   approver: 'approver-token',
 };
 const SIGNING_KEY = 'callback-signing-key-for-tests';
@@ -85,8 +85,8 @@ function makeState(overrides: Partial<FactoryState> = {}): FactoryState & { runt
       { name: 'admin', token: TOKENS.admin, roles: ['admin'] },
       { name: 'viewer', token: TOKENS.viewer, roles: ['viewer'] },
       { name: 'operator', token: TOKENS.operator, roles: ['operator'] },
-      { name: 'gateway', token: TOKENS.ingest, roles: ['ingest'] },
-      { name: 'gateway', token: TOKENS.gateway, roles: ['gateway'] },
+      { name: 'gatekeeper-egress', token: TOKENS.ingest, roles: ['ingest'] },
+      { name: 'gatekeeper-egress', token: TOKENS.gatekeeperEgress, roles: ['gatekeeper-egress'] },
       { name: 'dale', token: TOKENS.approver, roles: ['approver'] },
     ]),
     policies: new PolicyStore(),
@@ -207,7 +207,7 @@ describe('control plane', { concurrency: false }, () => {
         token: TOKENS.ingest,
         body: { agentId: 'echo-agent', type: 'action', action: 'SPOOF', actor: 'oidc:ceo@example.com' },
       });
-      assert.deepEqual(actions('echo-agent').filter((e) => e.action === 'SPOOF').map((e) => e.actor), ['token:gateway']);
+      assert.deepEqual(actions('echo-agent').filter((e) => e.action === 'SPOOF').map((e) => e.actor), ['token:gatekeeper-egress']);
       assert.equal((await request(port, '/api/v1/agents', { token: TOKENS.ingest })).status, 403);
       assert.equal(
         (await request(port, '/api/v1/ledger', { method: 'POST', token: TOKENS.ingest, body: { agentId: 'echo-agent', type: 'approval' } })).status,
@@ -265,28 +265,28 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal(started?.runId, run.runId);
     });
 
-    it('pins a run to a model and hands it to the agent and gateway', async () => {
+    it('pins a run to a model and hands it to the agent and gatekeeper-egress', async () => {
       const run = (await wake('echo-agent', { model: 'test-model-1' })).json as RunBody;
       assert.equal(state.runtime.started.at(-1)?.runEnv.FACTORY_MODEL, 'test-model-1');
-      const ctx = (await request(port, `/api/v1/gateway/runs/${run.runId}`, { token: TOKENS.gateway })).json as { run: { model: string } };
+      const ctx = (await request(port, `/api/v1/gatekeeper-egress/runs/${run.runId}`, { token: TOKENS.gatekeeperEgress })).json as { run: { model: string } };
       assert.equal(ctx.run.model, 'test-model-1');
       assert.equal((await wake('echo-agent', { model: 'bad model; rm -rf' })).status, 400);
     });
 
-    it('pre-flight never reads gateway-held provider keys (S1, GAP-040)', async () => {
+    it('pre-flight never reads gatekeeper-held provider keys (S1, GAP-040)', async () => {
       const prevProviders = state.providers;
       const asked: string[] = [];
       // Like the landing zone's NeverProviderKeys deny: reading the key fails.
       state.providers = [{ name: 'deny', async get(n: string) { asked.push(n); if (n === 'ECHO_WEBHOOK_SECRET') throw new Error('AccessDenied'); return undefined; } }];
       state.secretCache = new Map();
-      state.gatewayHeldSecrets = new Set(['ECHO_WEBHOOK_SECRET']);
+      state.gatekeeperEgressHeldSecrets = new Set(['ECHO_WEBHOOK_SECRET']);
       try {
         const res = await wake('echo-agent');
         assert.equal(res.status, 202, JSON.stringify(res.json));
-        assert.equal(asked.includes('ECHO_WEBHOOK_SECRET'), false, 'control plane asked for a gateway-held key');
+        assert.equal(asked.includes('ECHO_WEBHOOK_SECRET'), false, 'control plane asked for a gatekeeper-held key');
       } finally {
         state.providers = prevProviders;
-        state.gatewayHeldSecrets = undefined;
+        state.gatekeeperEgressHeldSecrets = undefined;
         state.secretCache = new Map();
       }
     });
@@ -494,7 +494,7 @@ describe('control plane', { concurrency: false }, () => {
   describe('policy, budget, approvals', () => {
     const put = (agent: string, body: unknown, token = TOKENS.admin) =>
       request(port, `/api/v1/agents/${agent}/policy`, { method: 'PUT', token, body });
-    const llm = (run: RunBody, costUsd: number, token = TOKENS.gateway) =>
+    const llm = (run: RunBody, costUsd: number, token = TOKENS.gatekeeperEgress) =>
       request(port, '/api/v1/ledger', {
         method: 'POST',
         token,
@@ -510,11 +510,11 @@ describe('control plane', { concurrency: false }, () => {
       assert.ok(actions('echo-agent').some((e) => e.action === 'POLICY_UPDATED' && e.actor === 'token:admin'));
     });
 
-    it('the gateway gets run context, including spend', async () => {
+    it('the gatekeeper-egress gets run context, including spend', async () => {
       const run = (await wake()).json as RunBody;
-      assert.equal((await request(port, `/api/v1/gateway/runs/${run.runId}`, { token: TOKENS.operator })).status, 403);
+      assert.equal((await request(port, `/api/v1/gatekeeper-egress/runs/${run.runId}`, { token: TOKENS.operator })).status, 403);
       await llm(run, 0.25);
-      const ctx = (await request(port, `/api/v1/gateway/runs/${run.runId}`, { token: TOKENS.gateway })).json as {
+      const ctx = (await request(port, `/api/v1/gatekeeper-egress/runs/${run.runId}`, { token: TOKENS.gatekeeperEgress })).json as {
         run: { live: boolean };
         spend: { run: number };
       };
@@ -522,18 +522,18 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal(ctx.spend.run, 0.25);
     });
 
-    it('only the gateway may attest a run actor or report cost', async () => {
+    it('only the gatekeeper-egress may attest a run actor or report cost', async () => {
       const run = (await wake()).json as RunBody;
       await llm(run, 5, TOKENS.ingest);
       const rows = state.ledger.query({ agent: 'echo-agent' }).filter((e) => e.type === 'llm');
-      assert.equal(rows.at(-1)?.actor, 'token:gateway');
+      assert.equal(rows.at(-1)?.actor, 'token:gatekeeper-egress');
       assert.equal(rows.at(-1)?.costUsd, undefined);
       assert.equal(state.spend.get('echo-agent', run.runId).run, 0);
       await llm(run, 0.1);
       assert.equal(state.ledger.query({ agent: 'echo-agent' }).filter((e) => e.type === 'llm').at(-1)?.actor, 'run:echo-agent');
       const wrongAgent = await request(port, '/api/v1/ledger', {
         method: 'POST',
-        token: TOKENS.gateway,
+        token: TOKENS.gatekeeperEgress,
         body: { agentId: 'med-doc', runId: run.runId, type: 'llm', costUsd: 1 },
       });
       assert.equal(wrongAgent.status, 400);
@@ -569,20 +569,20 @@ describe('control plane', { concurrency: false }, () => {
     it('approvals: request blocks the run, approver decides, one consume per approval', async () => {
       const run = (await wake()).json as RunBody;
       const req = { runId: run.runId, route: 'tools', tool: 'deploy', argsSha256: 'abc' };
-      const first = await request(port, '/api/v1/gateway/approvals', { method: 'POST', token: TOKENS.gateway, body: req });
+      const first = await request(port, '/api/v1/gatekeeper-egress/approvals', { method: 'POST', token: TOKENS.gatekeeperEgress, body: req });
       assert.equal(first.status, 201);
       const approval = first.json as { approvalId: string; state: string };
       assert.equal(state.runs.get(run.runId)?.state, 'BLOCKED_FOR_HUMAN');
-      const again = await request(port, '/api/v1/gateway/approvals', { method: 'POST', token: TOKENS.gateway, body: req });
+      const again = await request(port, '/api/v1/gatekeeper-egress/approvals', { method: 'POST', token: TOKENS.gatekeeperEgress, body: req });
       assert.equal((again.json as { approvalId: string }).approvalId, approval.approvalId, 'idempotent');
 
       assert.equal((await request(port, `/api/v1/approvals/${approval.approvalId}`, { method: 'POST', token: TOKENS.operator, body: { decision: 'approve' } })).status, 403);
-      assert.equal((await request(port, `/api/v1/gateway/approvals/${approval.approvalId}/consume`, { method: 'POST', token: TOKENS.gateway })).status, 409);
+      assert.equal((await request(port, `/api/v1/gatekeeper-egress/approvals/${approval.approvalId}/consume`, { method: 'POST', token: TOKENS.gatekeeperEgress })).status, 409);
       const decided = await request(port, `/api/v1/approvals/${approval.approvalId}`, { method: 'POST', token: TOKENS.approver, body: { decision: 'approve' } });
       assert.equal(decided.status, 200);
       assert.equal(state.runs.get(run.runId)?.state, 'WORKING');
-      assert.equal((await request(port, `/api/v1/gateway/approvals/${approval.approvalId}/consume`, { method: 'POST', token: TOKENS.gateway })).status, 200);
-      assert.equal((await request(port, `/api/v1/gateway/approvals/${approval.approvalId}/consume`, { method: 'POST', token: TOKENS.gateway })).status, 409);
+      assert.equal((await request(port, `/api/v1/gatekeeper-egress/approvals/${approval.approvalId}/consume`, { method: 'POST', token: TOKENS.gatekeeperEgress })).status, 200);
+      assert.equal((await request(port, `/api/v1/gatekeeper-egress/approvals/${approval.approvalId}/consume`, { method: 'POST', token: TOKENS.gatekeeperEgress })).status, 409);
 
       const trail = actions('echo-agent').filter((e) => e.action?.startsWith('APPROVAL_'));
       assert.deepEqual(trail.map((e) => [e.action, e.actor]), [

@@ -20,7 +20,7 @@ The **Agent Factory** is hosting, plumbing, governance, and lifecycle. **Agent G
 │  ├── Scale-to-zero compute + wake routing                                   │
 │  ├── Secret binding (BYO Vault / AWS SM / GCP SM)                           │
 │  ├── Persistent mind (object-storage hydrate / replicate)                   │
-│  ├── Egress gateway (only route out: meter, budget, tools, credentials)     │
+│  ├── Egress gatekeeper-egress (only route out: meter, budget, tools, credentials)     │
 │  └── Immutable execution ledger                                             │
 └──────────────────────────────────────▲──────────────────────────────────────┘
                                        │ hosts, does not author
@@ -75,20 +75,20 @@ Local disk is disposable. On cold start the factory hydrates memory from object 
 
 ### 3.3 Secret binding, not secret storage
 
-The cartridge declares names. The factory fetches values from the adopter’s secrets manager and injects them at boot. The factory is not a vault. An MCP gateway must not store API credentials.
+The cartridge declares names. The factory fetches values from the adopter’s secrets manager and injects them at boot. The factory is not a vault. An MCP gatekeeper-egress must not store API credentials.
 
 ### 3.4 Agent shim and health
 
 There is no sidecar container. Every agent image runs under the factory shim (`packages/hydrate/dist/shim.js`, the entrypoint of `runtimes/generic`), which has no security role:
 
 - hydrates mind from object storage, replicates it every `FACTORY_MIND_SYNC_SECONDS` and on exit;
-- points stock SDKs at the gateway (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `DISCORD_BASE_URL`) with the run token as their API key;
+- points stock SDKs at the gatekeeper-egress (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `DISCORD_BASE_URL`) with the run token as their API key;
 - heartbeats `POST /api/v1/runs/:id/heartbeat` with worker RSS every `FACTORY_HEARTBEAT_SECONDS`;
 - reports `failed` if the worker exits non-zero without reporting.
 
 A run that has sent a heartbeat and then goes silent for `FACTORY_HEARTBEAT_TIMEOUT_MS`, or reports RSS over `FACTORY_MAX_RSS_MB`, has its compute halted and is parked in `BLOCKED_UNHEALTHY`, with a `crash` event routed to MedDoc. `FACTORY_CRASH_LOOP_THRESHOLD` consecutive failed runs within 10 minutes pause the agent until an operator resumes it.
 
-Health and throughput are OpenTelemetry metrics (`factory.runs.*`, `factory.run.duration`, `factory.health.events`, `factory.gateway.*`) exported over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. They are never written to the ledger. Overlays such as Garrison poll the REST surface; the factory does not push to them.
+Health and throughput are OpenTelemetry metrics (`factory.runs.*`, `factory.run.duration`, `factory.health.events`, `factory.gatekeeper-egress.*`) exported over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. They are never written to the ledger. Overlays such as Garrison poll the REST surface; the factory does not push to them.
 
 ### 3.5 Tamper-evident execution ledger
 
@@ -130,8 +130,8 @@ The control plane is the only ingress point to the factory kernel. Routes expect
 | GET/PUT | `/api/v1/agents/:id/policy` | viewer / admin | egress policy (routes, models, tools, per-agent budget, TPM) |
 | GET | `/api/v1/approvals?state=pending` | viewer | held tool calls |
 | POST | `/api/v1/approvals/:id` | approver | `{decision: approve\|reject}` |
-| GET | `/api/v1/gateway/runs/:runId` | gateway | run state, agent kill-switch state, policy, spend |
-| POST | `/api/v1/gateway/approvals`, `.../:id/consume` | gateway | open / use a one-shot approval |
+| GET | `/api/v1/gatekeeper-egress/runs/:runId` | gatekeeper-egress | run state, agent kill-switch state, policy, spend |
+| POST | `/api/v1/gatekeeper-egress/approvals`, `.../:id/consume` | gatekeeper-egress | open / use a one-shot approval |
 
 **Policy Payload Schema:**
 The `PUT /api/v1/policies/budget` and `PUT /api/v1/agents/:id/policy` endpoints expect a JSON object:
@@ -148,7 +148,7 @@ The `PUT /api/v1/policies/budget` and `PUT /api/v1/agents/:id/policy` endpoints 
 }
 ```
 
-**Runs.** Every wake (manual, webhook, cron, event route, Doorman) creates a run: `QUEUED → STARTING → WORKING →` one of `DONE`, `FAILED`, `TIMED_OUT`, `CANCELLED`, or `PRE_FLIGHT_MISSING_SECRET`. One run per agent executes at a time; others queue. Runs persist on disk (`FACTORY_RUNS_DIR`) and are reconciled on restart: remote tasks (ECS) are re-adopted or finished from DescribeTasks, in-process tasks are marked `FAILED`. The agent receives `FACTORY_RUN_ID`, `FACTORY_URL` and a short-lived `FACTORY_RUN_TOKEN` (HS256, `FACTORY_RUN_TOKEN_KEY`) valid only while its run is live. On a terminal state the factory POSTs to `callbackUrl` (https, public addresses only) with `x-factory-signature: t=<unix>,v1=hex(HMAC-SHA256(FACTORY_CALLBACK_SIGNING_KEY, "<t>.<body>"))`. On ECS, cartridge secrets come from the task definition's Secrets Manager `secrets` block under `factory/<env>/<NAME>`, the same names pre-flight checks via `FACTORY_SECRETS_AWS_PREFIX`; RunTask overrides carry only run metadata.
+**Runs.** Every wake (manual, webhook, cron, event route, gatekeeper-ingress) creates a run: `QUEUED → STARTING → WORKING →` one of `DONE`, `FAILED`, `TIMED_OUT`, `CANCELLED`, or `PRE_FLIGHT_MISSING_SECRET`. One run per agent executes at a time; others queue. Runs persist on disk (`FACTORY_RUNS_DIR`) and are reconciled on restart: remote tasks (ECS) are re-adopted or finished from DescribeTasks, in-process tasks are marked `FAILED`. The agent receives `FACTORY_RUN_ID`, `FACTORY_URL` and a short-lived `FACTORY_RUN_TOKEN` (HS256, `FACTORY_RUN_TOKEN_KEY`) valid only while its run is live. On a terminal state the factory POSTs to `callbackUrl` (https, public addresses only) with `x-factory-signature: t=<unix>,v1=hex(HMAC-SHA256(FACTORY_CALLBACK_SIGNING_KEY, "<t>.<body>"))`. On ECS, cartridge secrets come from the task definition's Secrets Manager `secrets` block under `factory/<env>/<NAME>`, the same names pre-flight checks via `FACTORY_SECRETS_AWS_PREFIX`; RunTask overrides carry only run metadata.
 
 The same surface is exposed as MCP tools. Per-container fake `/v1/mcp/agents` JSON is not MCP and is not the factory catalog.
 
@@ -162,7 +162,7 @@ The same surface is exposed as MCP tools. Per-container fake `/v1/mcp/agents` JS
 | `ingest` | `POST /api/v1/ledger` only (actor forced to the token's name, server timestamp) |
 | `admin` | everything |
 
-Every ledger action row records the authenticated principal as `actor` (`oidc:<email>`, `token:<name>`, `webhook:<agent>`, or `factory:<subsystem>` for self-initiated actions). Webhooks authenticate with the cartridge's `secretRef` (header `x-factory-secret`), not a factory bearer. Doorman's presence API requires `DOORMAN_TOKEN`; the gateway command API requires `GATEWAY_TOKEN`, and both fail closed.
+Every ledger action row records the authenticated principal as `actor` (`oidc:<email>`, `token:<name>`, `webhook:<agent>`, or `factory:<subsystem>` for self-initiated actions). Webhooks authenticate with the cartridge's `secretRef` (header `x-factory-secret`), not a factory bearer. gatekeeper-ingress's presence API requires `GATEKEEPER_INGRESS_TOKEN`; the gatekeeper-egress command API requires `GATEKEEPER_EGRESS_TOKEN`, and both fail closed.
 
 Discovery payload (control plane):
 
@@ -184,29 +184,29 @@ Discovery payload (control plane):
 
 Budgets, model and route allowlists, tool allowlists and approval requirements are admin-set per agent (`PUT /api/v1/agents/:id/policy`) and enforced by the factory. Policy is deny-by-default: an agent with no policy has no egress. Cartridges such as FinOps and MedDoc *consume* factory events (`budget.alert`, `crash`) to recommend and diagnose; they are not the enforcement point.
 
-### 3.8 Egress gateway and network isolation
+### 3.8 Egress gatekeeper-egress and network isolation
 
 For complete specification of the zero-trust perimeter, dual reverse/forward proxy, and egress schema, see [docs/NETWORK_ISOLATION_AND_EGRESS.md](./docs/NETWORK_ISOLATION_AND_EGRESS.md).
 
-One fleet-wide gateway (`packages/gateway`) is the only route out of the agent network. The gateway operates as both a **reverse proxy** (via Base URL rewrites for LLMs and Discord) and a **forward proxy** (via `HTTP_PROXY`/`HTTPS_PROXY` with HTTP `CONNECT` tunneling for arbitrary external APIs like GitHub, Notion, etc.). Agents authenticate using their run token (`x-api-key`, `Authorization: Bearer`, `x-factory-run-token`, or `Proxy-Authorization`).
+One fleet-wide gatekeeper-egress (`packages/gatekeeper-egress`) is the only route out of the agent network. The gatekeeper-egress operates as both a **reverse proxy** (via Base URL rewrites for LLMs and Discord) and a **forward proxy** (via `HTTP_PROXY`/`HTTPS_PROXY` with HTTP `CONNECT` tunneling for arbitrary external APIs like GitHub, Notion, etc.). Agents authenticate using their run token (`x-api-key`, `Authorization: Bearer`, `x-factory-run-token`, or `Proxy-Authorization`).
 
-The gateway:
+The gatekeeper-egress:
 
 - verifies the run token (HS256, shared `FACTORY_RUN_TOKEN_KEY`) and asks the control plane whether the run is live, the agent is paused/isolated, and what its policy and spend are (cached ≤1s);
-- strips the run token and injects the real credential for the route from the adopter's secret manager — **agents never hold provider keys**; for HTTP routes (such as Discord), the gateway dynamically resolves agent-specific tokens (e.g., `{agent}_DISCORD_BOT_TOKEN`) with fallback to global secrets; an upstream 401 purges the cached credential and records `RUNTIME_AUTH_FAILURE`;
+- strips the run token and injects the real credential for the route from the adopter's secret manager — **agents never hold provider keys**; for HTTP routes (such as Discord), the gatekeeper-egress dynamically resolves agent-specific tokens (e.g., `{agent}_DISCORD_BOT_TOKEN`) with fallback to global secrets; an upstream 401 purges the cached credential and records `RUNTIME_AUTH_FAILURE`;
 - proxies arbitrary HTTP routes (`type: "http"`, e.g. `/discord/*` to `https://discord.com/api/v10/*`), injecting configured headers (`Authorization: Bot <token>`) so agents in zero-egress VPC subnets communicate outbound without public IPs or IGW routes;
 - handles HTTP `CONNECT` requests for HTTPS tunneling, matching the destination authority against the agent's policy `hosts` allowlist (supporting wildcards, e.g. `*.github.com`), establishing raw TCP tunnels, and recording `EGRESS_TUNNEL` events in the audit ledger;
 - meters LLM usage from JSON and SSE (Anthropic Messages, OpenAI Chat and Responses; forces `stream_options.include_usage`), prices it from the operator's price table (unpriced models are refused), and writes `llm` ledger rows with `costUsd` attested as `run:<agent>`. A response with no usage is charged at its `max_tokens` and marked `METERING_GAP`;
 - enforces budgets **before** each call using control-plane spend plus spend not yet acknowledged; the control plane moves the run to `BLOCKED_BUDGET_EXCEEDED` when a settled call crosses a limit. Overshoot is therefore bounded by one in-flight request per replica;
 - governs MCP `tools/call`: tools outside the route's allowlist are refused without contacting the server; `requireApproval` tools return JSON-RPC error `-32003` with an `approvalId`, park the run in `BLOCKED_FOR_HUMAN`, and are released exactly once — for the same arguments — after an `approver` decides.
 
-Route and price configuration: `FACTORY_GATEWAY_CONFIG` (JSON `{routes, prices}`) or `FACTORY_GATEWAY_ROUTES` + `FACTORY_PRICES`. Prices are USD per million tokens and are the operator's responsibility; the factory ships none.
+Route and price configuration: `FACTORY_GATEKEEPER_EGRESS_CONFIG` (JSON `{routes, prices}`) or `FACTORY_GATEKEEPER_EGRESS_ROUTES` + `FACTORY_PRICES`. Prices are USD per million tokens and are the operator's responsibility; the factory ships none.
 
 ---
 
 ### 3.9 Benchmark harness (cost vs quality)
 
-Every cartridge ships `bench.yaml`: cases with an `input` and deterministic expectations (`status`, `equals`, `contains`, `matches`). Running it is optional. `factory-bench --cartridge <dir> --models a,b` runs each case as a real run through the factory with the run **pinned** to the model (`POST /runs {model}`; the gateway refuses any other model for that run), reads each run's cost from the ledger, and prints the Cost vs Quality Matrix projected to `--runs-per-month`. It recommends the cheapest model meeting `--min-pass` with a per-run budget of 2× the most expensive observed case; `--apply` writes that into the agent's policy (admin). No LLM judge: grading is reproducible.
+Every cartridge ships `bench.yaml`: cases with an `input` and deterministic expectations (`status`, `equals`, `contains`, `matches`). Running it is optional. `factory-bench --cartridge <dir> --models a,b` runs each case as a real run through the factory with the run **pinned** to the model (`POST /runs {model}`; the gatekeeper-egress refuses any other model for that run), reads each run's cost from the ledger, and prints the Cost vs Quality Matrix projected to `--runs-per-month`. It recommends the cheapest model meeting `--min-pass` with a per-run budget of 2× the most expensive observed case; `--apply` writes that into the agent's policy (admin). No LLM judge: grading is reproducible.
 
 ## 4. Foundational example cartridges
 
@@ -226,12 +226,12 @@ Shipped under `agents/` as portable examples. Factory code must not import them.
 
 These appear in earlier drafts. They are **not** required to satisfy the position paper and must not be implemented as kernel:
 
-1. **Doorman (module, not a deploy-time Discord app).** Always installed, idle until a cartridge declares `type: discord` and `DISCORD_BOT_TOKEN` (or `secretRef`) binds. Gateway stays up; presence is offline while the agent sleeps and available after conversation handoff. Slack RTM and true TCP socket transfer remain deferred.
+1. **gatekeeper-ingress (module, not a deploy-time Discord app).** Always installed, idle until a cartridge declares `type: discord` and `DISCORD_BOT_TOKEN` (or `secretRef`) binds. gatekeeper-egress stays up; presence is offline while the agent sleeps and available after conversation handoff. Slack RTM and true TCP socket transfer remain deferred.
 2. **Cloud OAuth broker** — factory-stored OBO refresh tokens.
-3. **LiteLLM-as-product** — a model-router SKU. A network-enforced egress gateway *is* kernel; a routing marketplace is not.
+3. **LiteLLM-as-product** — a model-router SKU. A network-enforced gatekeeper-egress *is* kernel; a routing marketplace is not.
 4. **Shared skills catalog / capability triage bot** — contradicts “skills live in the artifact.”
-5. **Voice / robotics streaming gateway.**
-6. **MCP tool gateway as credential vault** — contradicts secret binding.
+5. **Voice / robotics streaming gatekeeper-egress.**
+6. **MCP tool gatekeeper-egress as credential vault** — contradicts secret binding.
 
 Daemon vs on-behalf-of identity (`identity.yaml`) may land later as optional cartridge metadata. It is not required for the kernel contract.
 
@@ -244,10 +244,10 @@ Daemon vs on-behalf-of identity (`identity.yaml`) may land later as optional car
 | Cartridge schema + validator | `packages/contract` + `npm run validate` |
 | Auth + RBAC | `packages/auth` — JWKS-verified OIDC, named service tokens, run tokens |
 | Control plane REST + MCP, runs, policy, approvals, health | `packages/control-plane` |
-| Egress gateway | `packages/gateway` |
+| Egress gatekeeper-egress | `packages/gatekeeper-egress` |
 | Ledger (hash chain + WORM checkpoints) | `packages/ledger` |
 | Secret binding | `packages/secrets-bind` (env, file, HTTP vault, AWS Secrets Manager) |
 | Mind hydration + agent shim | `packages/hydrate` + `runtimes/generic` |
 | Metrics | `packages/telemetry` (OTLP) |
-| Doorman | `packages/doorman` — idle without a bot token |
+| gatekeeper-ingress | `packages/gatekeeper-ingress` — idle without a bot token |
 | Landing zones | Compose and AWS (ECS) binds; Azure/GCP slot notes |

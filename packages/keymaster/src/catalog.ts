@@ -34,7 +34,7 @@ export const INSTRUCTION_CATALOG: readonly CatalogEntry[] = [
     approved: null,
     instructions: `1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and sign in with the account that should own the bot.
 2. Choose **New Application**, name it after the agent, and accept the terms.
-3. Open the **Bot** tab. Under **Privileged Gateway Intents**, turn on only what the agent needs (usually **Message Content Intent**).
+3. Open the **Bot** tab. Under **Privileged GatekeeperEgress Intents**, turn on only what the agent needs (usually **Message Content Intent**).
 4. Choose **Reset Token**, confirm, and copy the token. Discord shows it once.
 5. To add the bot to your server: **OAuth2** → **URL Generator**, tick the \`bot\` scope and the permissions the agent needs, open the generated URL, and pick the server.
 6. ${SUPPLY}
@@ -79,7 +79,7 @@ If the token is ever exposed, choose **Reset Token** again and save the new one 
 5. Share each page or database the integration may use: on the page, open **•••** → **Connections** → add the integration.
 6. ${SUPPLY}
 
-When the factory's gateway holds the Notion secret for the whole platform, agents never need their own; this page then shows it as managed by the platform.`,
+When the factory's gatekeeper-egress holds the Notion secret for the whole platform, agents never need their own; this page then shows it as managed by the platform.`,
   },
   {
     id: 'xai',
@@ -91,7 +91,7 @@ When the factory's gateway holds the Notion secret for the whole platform, agent
 3. Copy the key (it starts with \`xai-\`). It is shown once.
 4. ${SUPPLY}
 
-Model provider keys are normally held by the factory's gateway for every agent (E5, S1) and are then shown as managed by the platform.`,
+Model provider keys are normally held by the factory's gatekeeper-egress for every agent (E5, S1) and are then shown as managed by the platform.`,
   },
   {
     id: 'anthropic',
@@ -103,7 +103,7 @@ Model provider keys are normally held by the factory's gateway for every agent (
 3. Copy the key (it starts with \`sk-ant-\`). It is shown once.
 4. ${SUPPLY}
 
-Model provider keys are normally held by the factory's gateway for every agent (E5, S1) and are then shown as managed by the platform.`,
+Model provider keys are normally held by the factory's gatekeeper-egress for every agent (E5, S1) and are then shown as managed by the platform.`,
   },
   {
     id: 'home-assistant',

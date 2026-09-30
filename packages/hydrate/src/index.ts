@@ -14,7 +14,7 @@ const PROXY_VARS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'A
 
 /**
  * Environment for the shim's own mind sync. Mind sync is platform traffic (DESIGN_AUTHORITY.md E6): it uses the
- * private object-storage endpoint with the agent's own role, so it must not go through the gateway proxy that the
+ * private object-storage endpoint with the agent's own role, so it must not go through the gatekeeper-egress proxy that the
  * agent's code is pointed at. The agent process itself keeps the proxy.
  */
 export function platformEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -82,4 +82,4 @@ export function pushMind(store: MindStore, prefix: string, src: string, sync: Sy
   cpSync(src, dest, { recursive: true });
 }
 
-export { gatewayEnv } from './gateway-env.js';
+export { gatekeeperEgressEnv } from './gatekeeper-egress-env.js';

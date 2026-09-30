@@ -14,7 +14,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "test": "tsx --test src/catalog.test.ts src/index.test.ts src/integrations.test.ts src/runtime-ecs.test.ts src/runtime-docker.test.ts src/gateway.e2e.test.ts src/bench.e2e.test.ts src/keymaster.e2e.test.ts src/registry.e2e.test.ts src/admission.e2e.test.ts src/connections.e2e.test.ts src/aws/gateway-held.test.ts src/credentials.e2e.test.ts src/access.e2e.test.ts src/aws/iam.test.ts src/spend.e2e.test.ts"
+    "test": "tsx --test src/catalog.test.ts src/index.test.ts src/integrations.test.ts src/runtime-ecs.test.ts src/runtime-docker.test.ts src/gatekeeper-egress.e2e.test.ts src/bench.e2e.test.ts src/keymaster.e2e.test.ts src/registry.e2e.test.ts src/admission.e2e.test.ts src/connections.e2e.test.ts src/aws/gatekeeper-held.test.ts src/credentials.e2e.test.ts src/access.e2e.test.ts src/aws/iam.test.ts src/spend.e2e.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-codebuild": "^3.1136.0",
@@ -39,7 +39,7 @@
   },
   "devDependencies": {
     "@beercanlabs/factory-bench": "0.1.0",
-    "@beercanlabs/factory-gateway": "0.1.0",
+    "@beercanlabs/factory-gatekeeper-egress": "0.1.0",
     "@opentelemetry/sdk-metrics": "^2.11.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",

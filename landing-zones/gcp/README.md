@@ -14,7 +14,7 @@ Equivalent in architecture to `landing-zones/aws/` but using GCP-native services
 | Secrets Manager | **Secret Manager** | Runtime secrets |
 | S3 (mind bucket) | **Cloud Storage** (mind bucket) | Agent working memory |
 | S3 (ledger WORM, Object Lock) | **Cloud Storage** with retention policy | Immutable ledger checkpoints |
-| ECS Cluster + ALB | **Cloud Run** Services | Control plane, gateway, doorman |
+| ECS Cluster + ALB | **Cloud Run** Services | Control plane, gatekeeper-egress, gatekeeper-ingress |
 | EventBridge | Cloud Audit Logs / Pub/Sub | (Future) Event routing |
 
 ## Terraform Files
@@ -86,35 +86,35 @@ Enabled automatically by `main.tf`:
 factory-token               # Control plane bearer token
 factory-run-token-key       # JWT signing key for run tokens
 factory-callback-signing-key # Callback HMAC key
-doorman-token               # Doorman ↔ Control plane token
-doorman-operator-token      # Doorman operator token
+gatekeeper-ingress-token               # gatekeeper-ingress ↔ Control plane token
+gatekeeper-ingress-operator-token      # gatekeeper-ingress operator token
 factory-tokens              # Multi-token map
-gateway-token               # Gateway bearer token
+gatekeeper-egress-token               # gatekeeper-egress bearer token
 ```
 
 > [!NOTE]
-> Doorman deploys **sleeping** — no Discord bot token is required at `terraform apply`. Add `DISCORD_BOT_TOKEN` to Secret Manager and set `discord_secret_name` variable to go live.
+> gatekeeper-ingress deploys **sleeping** — no Discord bot token is required at `terraform apply`. Add `DISCORD_BOT_TOKEN` to Secret Manager and set `discord_secret_name` variable to go live.
 
 ## Zero-Trust Network Perimeter & Egress Architecture
 
 Equivalent to the AWS security boundary, GCP isolates agent cartridges from direct internet access:
 - **`factory-vpc` Network:** Configured with two distinct subnets:
-  - `services` (`10.0.1.0/24`): Hosts Control Plane, Gateway, and Doorman with Cloud NAT enabled for outbound provider communication.
+  - `services` (`10.0.1.0/24`): Hosts Control Plane, gatekeeper-egress, and gatekeeper-ingress with Cloud NAT enabled for outbound provider communication.
   - `agents` (`10.0.2.0/24`): Hosts all cartridge Cloud Run Jobs with **Zero Cloud NAT** and `egress = "ALL_TRAFFIC"`.
 - **Egress Dropped at Perimeter:** Cartridge containers cannot reach `0.0.0.0/0` directly; any raw outbound connection to public internet is dropped by GCP routing.
 - **Base URL Reverse Proxy & Credential Injection:**
-  The Factory Gateway sits in the `services` subnet and acts as an internal HTTP reverse proxy (`INGRESS_TRAFFIC_INTERNAL_ONLY`).
-  Agent jobs receive environment variables pointing to the Gateway:
-  - `DISCORD_BASE_URL` (`https://<gateway-internal-uri>/discord`)
-  - `OPENAI_BASE_URL` (`https://<gateway-internal-uri>/v1`)
-  - `ANTHROPIC_BASE_URL` (`https://<gateway-internal-uri>/anthropic`)
-  Agents authenticate requests to the Gateway using short-lived `FACTORY_RUN_TOKEN`. The Gateway validates policy, strips the run token, resolves `{agent}_DISCORD_BOT_TOKEN` or provider API keys from Secret Manager, and forwards to the upstream service.
+  The Factory gatekeeper-egress sits in the `services` subnet and acts as an internal HTTP reverse proxy (`INGRESS_TRAFFIC_INTERNAL_ONLY`).
+  Agent jobs receive environment variables pointing to the gatekeeper-egress:
+  - `DISCORD_BASE_URL` (`https://<gatekeeper-egress-internal-uri>/discord`)
+  - `OPENAI_BASE_URL` (`https://<gatekeeper-egress-internal-uri>/v1`)
+  - `ANTHROPIC_BASE_URL` (`https://<gatekeeper-egress-internal-uri>/anthropic`)
+  Agents authenticate requests to the gatekeeper-egress using short-lived `FACTORY_RUN_TOKEN`. The gatekeeper-egress validates policy, strips the run token, resolves `{agent}_DISCORD_BOT_TOKEN` or provider API keys from Secret Manager, and forwards to the upstream service.
 
 ## Zero-Trust IAM Model
 
 - **Control plane SA**: can invoke/admin Cloud Run Jobs, trigger Cloud Build, create SAs, read factory secrets.
-- **Gateway SA**: reads ONLY provider API-key secrets (Anthropic, OpenAI, etc.) and Discord bot tokens (`DISCORD_BOT_TOKEN`). Cannot read factory tokens.
-- **Doorman SA**: reads ONLY the Discord bot token secret (conditional on `discord_secret_name`).
+- **gatekeeper-egress SA**: reads ONLY provider API-key secrets (Anthropic, OpenAI, etc.) and Discord bot tokens (`DISCORD_BOT_TOKEN`). Cannot read factory tokens.
+- **gatekeeper-ingress SA**: reads ONLY the Discord bot token secret (conditional on `discord_secret_name`).
 - **Agent SAs** (one per agent): reads/writes ONLY their own `<agentId>/` prefix in the mind bucket. Reads only their declared `requires` secrets.
 
 ## Registering a GCP Agent via API

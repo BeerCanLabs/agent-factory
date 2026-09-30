@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Reference LLM cartridge: plain fetch, no SDK, no provider key. The shim (or local runtime)
-// sets ANTHROPIC_BASE_URL to the gateway and ANTHROPIC_API_KEY to this run's token.
+// sets ANTHROPIC_BASE_URL to the gatekeeper-egress and ANTHROPIC_API_KEY to this run's token.
 const { FACTORY_URL, FACTORY_RUN_ID, FACTORY_RUN_TOKEN, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, FACTORY_MODEL } = process.env;
 const run = `${FACTORY_URL.replace(/\/$/, '')}/api/v1/runs/${FACTORY_RUN_ID}`;
 const auth = { Authorization: `Bearer ${FACTORY_RUN_TOKEN}`, 'Content-Type': 'application/json' };

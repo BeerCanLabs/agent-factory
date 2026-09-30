@@ -7,7 +7,7 @@ export type AgentCategory = 'user' | 'builtin';
 
 // Operational Built-in System Actors
 export const BUILTIN_AGENT_IDS = new Set([
-  'doorman',
+  'gatekeeper-ingress',
   'keymaster',
   'doctor',
   'coach',
@@ -27,24 +27,24 @@ export function isBuiltinCartridge(id: string, _dir?: string): boolean {
 
 export const BUILTIN_SYSTEM_AGENTS: AgentRecord[] = [
   {
-    id: 'doorman',
-    name: 'Doorman',
-    role: 'Ingress Gateway, Routing & Agent Presence Controller',
+    id: 'gatekeeper-ingress',
+    name: 'gatekeeper-ingress',
+    role: 'gatekeeper-ingress, Routing & Agent Presence Controller',
     state: 'WORKING',
     category: 'builtin',
     isBuiltin: true,
     provider: 'cloud',
-    artifact: 'factory-doorman:latest',
-    requires: ['DOORMAN_SECRET', 'FACTORY_API_TOKEN'],
-    ungated: ['DOORMAN_SECRET', 'FACTORY_API_TOKEN'],
+    artifact: 'factory-gatekeeper-ingress:latest',
+    requires: ['GATEKEEPER_INGRESS_SECRET', 'FACTORY_API_TOKEN'],
+    ungated: ['GATEKEEPER_INGRESS_SECRET', 'FACTORY_API_TOKEN'],
     gated: [],
     triggers: [
       { type: 'http', path: '/api/v1/presence' },
       { type: 'webhook', path: '/hooks/ingress' },
     ],
-    memoryPrefix: 'system-doorman',
+    memoryPrefix: 'system-gatekeeper-ingress',
     warmDownSeconds: 0,
-    dir: '/app/packages/doorman',
+    dir: '/app/packages/gatekeeper-ingress',
     model: 'deterministic',
     requestedModels: [],
     approvedModels: [],

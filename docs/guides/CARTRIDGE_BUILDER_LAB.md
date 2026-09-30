@@ -10,8 +10,8 @@ Whether you are building manually, instructing an AI assistant (Antigravity `agy
 
 In the Agent Factory ecosystem:
 * **The Cartridge is Independent:** An agent never lives inside the Factory repository. Each agent lives in its own standalone repository (e.g. `github.com/dalesackrider/SM-donna` or `github.com/dalesackrider/SM-finley`).
-* **The Factory is the Host Platform:** The Factory handles RBAC, cryptographic ledgering (WORM), BYO secrets injection, egress metering/FinOps, Doorman presence, and automated cloud provisioning.
-* **Scale-to-Zero:** Agents do not hold open 24/7 WebSockets or idle compute. Doorman maintains presence (Discord, Slack) and wakes the agent on demand.
+* **The Factory is the Host Platform:** The Factory handles RBAC, cryptographic ledgering (WORM), BYO secrets injection, egress metering/FinOps, gatekeeper-ingress presence, and automated cloud provisioning.
+* **Scale-to-Zero:** Agents do not hold open 24/7 WebSockets or idle compute. gatekeeper-ingress maintains presence (Discord, Slack) and wakes the agent on demand.
 * **Declarative Manifest:** The agent's identity, triggers, compute requirements, and secrets are declared in a root [`cartridge.yaml`](#2-the-cartridgeyaml-specification).
 
 ---
@@ -92,7 +92,7 @@ Your container must listen on the port specified by the `$PORT` environment vari
 ### Environment Variables Provided by Factory:
 * `PORT`: HTTP port to bind (e.g. `8080`).
 * `FACTORY_URL`: Factory Control Plane internal URL (`http://control-plane.factory.internal:8088`).
-* `FACTORY_GATEWAY_URL`: Factory Egress Gateway (`http://gateway.factory.internal:8089`). All outbound LLM and MCP calls **must** route through this URL for token metering and secret injection.
+* `FACTORY_GATEKEEPER_EGRESS_URL`: gatekeeper-egress (`http://gatekeeper-egress.factory.internal:8089`). All outbound LLM and MCP calls **must** route through this URL for token metering and secret injection.
 * `AGENT_ID`: The unique identifier of this cartridge.
 * `MEMORY_STORE_URI`: Path/bucket for long-term memory.
 
@@ -103,7 +103,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 
 PORT = int(os.environ.get("PORT", 8080))
-GATEWAY_URL = os.environ.get("FACTORY_GATEWAY_URL", "http://localhost:8089")
+GATEKEEPER_EGRESS_URL = os.environ.get("FACTORY_GATEKEEPER_EGRESS_URL", "http://localhost:8089")
 
 class AgentHandler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -182,7 +182,7 @@ stateDiagram-v2
     DEPLOYING --> SLEEPING: ECS Task Provisioned (Scale to Zero)
     
     state "Active Production" as Active {
-        SLEEPING --> WORKING: Doorman / Wake Trigger
+        SLEEPING --> WORKING: gatekeeper-ingress / Wake Trigger
         WORKING --> IDLE: Turn Completed (Warm Window)
         IDLE --> SLEEPING: Warm Window Expired
         WORKING --> TRAINING: Benchmark / Gym Invocation
@@ -204,7 +204,7 @@ stateDiagram-v2
 | `/api/v1/registry/agents/:id` | `GET` | `viewer` | **Query State:** Returns current lifecycle state (`PENDING_BUDGET`, `SLEEPING`, etc.), spend, and timestamps. |
 | `/api/v1/registry/agents/:id/budget` | `PUT` | `admin` | **Assign Budget:** Sets daily/monthly USD budget. Moves agent from `PENDING_BUDGET` → `PENDING_DEPLOY`. |
 | `/api/v1/registry/agents/:id/deploy` | `POST` | `admin` | **Deploy:** Builds container and provisions cloud ECS task definition (`DEPLOYING` → `SLEEPING`). |
-| `/api/v1/registry/agents/:id/retire` | `POST` | `admin` | **Soft-Retire (Scream Test):** Cuts compute and Doorman presence ($0 cost). Enters `RETIRED_PENDING_PURGE` for 7 days. |
+| `/api/v1/registry/agents/:id/retire` | `POST` | `admin` | **Soft-Retire (Scream Test):** Cuts compute and gatekeeper-ingress presence ($0 cost). Enters `RETIRED_PENDING_PURGE` for 7 days. |
 | `/api/v1/registry/agents/:id/reinstate` | `POST` | `admin` | **Reinstate:** Aborts retirement and returns agent to `SLEEPING`. |
 | `/api/v1/registry/agents/:id/purge` | `POST` | `admin` | **Permanent Purge:** Destroys task definitions, deletes secrets, archives memory. |
 

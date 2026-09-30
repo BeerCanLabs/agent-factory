@@ -12,7 +12,7 @@ import type { AgentRecord } from './catalog.js';
 
 const KEY = 'e2e-run-token-key-0123456789abcdefghij';
 const ADMIN = 'admin-e2e';
-const GATEWAY = 'gateway-e2e';
+const GATEKEEPER_EGRESS = 'gatekeeper-egress-e2e';
 const APPROVER = 'approver-e2e';
 
 async function listen(server: http.Server): Promise<number> {
@@ -56,7 +56,7 @@ describe('Keymaster Subsystem E2E & Secrets Gating', { concurrency: false }, () 
       ledger,
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
-        { name: 'gateway', token: GATEWAY, roles: ['gateway'] },
+        { name: 'gatekeeper-egress', token: GATEKEEPER_EGRESS, roles: ['gatekeeper-egress'] },
         { name: 'approver', token: APPROVER, roles: ['approver'] },
       ]),
       version: '0.1.0-test',
@@ -148,10 +148,10 @@ describe('Keymaster Subsystem E2E & Secrets Gating', { concurrency: false }, () 
     const runId = runRes.body.runId;
     const runToken = await runTokens.mint({ runId, agentId: 'secure-agent' });
 
-    // 2. Request approval via gateway / control-plane
+    // 2. Request approval via gatekeeper-egress / control-plane
     const turnId = 'turn-101';
     const proofHash = payloadHash({ secret: 'SECURE_VAULT_KEY', turn: turnId });
-    const appReq = await http_(cpPort, '/api/v1/gateway/approvals', 'POST', GATEWAY, {
+    const appReq = await http_(cpPort, '/api/v1/gatekeeper-egress/approvals', 'POST', GATEKEEPER_EGRESS, {
       runId,
       route: 'keymaster',
       tool: 'checkout:SECURE_VAULT_KEY',
@@ -202,7 +202,7 @@ describe('Keymaster Subsystem E2E & Secrets Gating', { concurrency: false }, () 
     const runToken = await runTokens.mint({ runId, agentId: 'secure-agent' });
 
     // 2. Request and approve
-    const appReq = await http_(cpPort, '/api/v1/gateway/approvals', 'POST', GATEWAY, {
+    const appReq = await http_(cpPort, '/api/v1/gatekeeper-egress/approvals', 'POST', GATEKEEPER_EGRESS, {
       runId,
       route: 'keymaster',
       tool: 'checkout:SECURE_VAULT_KEY',
@@ -253,7 +253,7 @@ describe('Keymaster Subsystem E2E & Secrets Gating', { concurrency: false }, () 
     assert.equal(fakeRes.body.error, 'approval_not_found');
 
     // 2. Pending approval (not approved yet)
-    const pendingReq = await http_(cpPort, '/api/v1/gateway/approvals', 'POST', GATEWAY, {
+    const pendingReq = await http_(cpPort, '/api/v1/gatekeeper-egress/approvals', 'POST', GATEKEEPER_EGRESS, {
       runId,
       route: 'keymaster',
       tool: 'checkout:SECURE_VAULT_KEY',
@@ -284,7 +284,7 @@ describe('Keymaster Subsystem E2E & Secrets Gating', { concurrency: false }, () 
     assert.equal(rejectedCheckout.body.error, 'approval_rejected');
 
     // 4. Hash mismatch on approved approval
-    const okReq = await http_(cpPort, '/api/v1/gateway/approvals', 'POST', GATEWAY, {
+    const okReq = await http_(cpPort, '/api/v1/gatekeeper-egress/approvals', 'POST', GATEKEEPER_EGRESS, {
       runId,
       route: 'keymaster',
       tool: 'checkout:SECURE_VAULT_KEY',
@@ -309,7 +309,7 @@ describe('Keymaster Subsystem E2E & Secrets Gating', { concurrency: false }, () 
     const runId = runRes.body.runId;
     const runToken = await runTokens.mint({ runId, agentId: 'secure-agent' });
 
-    const appReq = await http_(cpPort, '/api/v1/gateway/approvals', 'POST', GATEWAY, {
+    const appReq = await http_(cpPort, '/api/v1/gatekeeper-egress/approvals', 'POST', GATEKEEPER_EGRESS, {
       runId,
       route: 'keymaster',
       tool: 'checkout:PUBLIC_TOKEN',

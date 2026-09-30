@@ -4,11 +4,11 @@ import http from 'node:http';
 import net from 'node:net';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
-import { createGateway, type Approval, type ControlClient, type Policy, type RunContext } from './gateway.js';
+import { createGatekeeperEgress, type Approval, type ControlClient, type Policy, type RunContext } from './gatekeeper-egress.js';
 
 const REAL_KEY = 'sk-real-provider-key-0000';
 const NOTION_KEY = 'fake-notion-integration-key-0000';
-const tokens = new RunTokens('gateway-test-run-token-key-0123456789');
+const tokens = new RunTokens('gatekeeper-egress-test-run-token-key-0123456789');
 
 type Seen = { path: string; headers: http.IncomingHttpHeaders; body: string };
 
@@ -42,12 +42,12 @@ function call(
   });
 }
 
-describe('egress gateway', { concurrency: false }, () => {
+describe('gatekeeper-egress', { concurrency: false }, () => {
   const seen: Seen[] = [];
   let upstreamStatus = 200;
   let upstream: http.Server;
   let upPort = 0;
-  let gateway: http.Server;
+  let gatekeeperEgress: http.Server;
   let port = 0;
 
   // In-memory control plane
@@ -141,7 +141,7 @@ describe('egress gateway', { concurrency: false }, () => {
       });
     });
     upPort = await listen(upstream);
-    gateway = createGateway({
+    gatekeeperEgress = createGatekeeperEgress({
       routes: [
         { id: 'anthropic', kind: 'llm', provider: 'anthropic', upstream: `http://127.0.0.1:${upPort}`, credential: { secret: 'PROVIDER_KEY', header: 'x-api-key' } },
         { id: 'openai', kind: 'llm', provider: 'openai', upstream: `http://127.0.0.1:${upPort}`, credential: { secret: 'PROVIDER_KEY', header: 'authorization', format: 'Bearer {}' } },
@@ -158,11 +158,11 @@ describe('egress gateway', { concurrency: false }, () => {
       providers,
       contextTtlMs: 0,
     });
-    port = await listen(gateway);
+    port = await listen(gatekeeperEgress);
   });
 
   after(async () => {
-    await new Promise<void>((r) => gateway.close(() => r()));
+    await new Promise<void>((r) => gatekeeperEgress.close(() => r()));
     await new Promise<void>((r) => upstream.close(() => r()));
   });
 

@@ -5,7 +5,7 @@ import {
   GetRoleCommand,
   PutRolePolicyCommand,
 } from "@aws-sdk/client-iam";
-import { agentContainerSecrets } from "./gateway-held.js";
+import { agentContainerSecrets } from "./gatekeeper-held.js";
 
 export async function provisionAgentRoles(
   agentId: string,
@@ -160,7 +160,7 @@ export async function provisionAgentRoles(
     })
   );
 
-  // 4. Attach Secrets Manager permissions to Execution Role if there are secrets. Gateway-held secrets are
+  // 4. Attach Secrets Manager permissions to Execution Role if there are secrets. Gatekeeper-held secrets are
   // never injected into the container (S1), so the agent's execution role is never granted them.
   secrets = agentContainerSecrets(secrets ?? []);
   if (secrets.length > 0) {
@@ -186,7 +186,7 @@ export async function provisionAgentRoles(
       })
     );
   } else if (!executionRoleCreated) {
-    // A redeploy that no longer injects any secret (e.g. its last one became gateway-held) revokes the old grant.
+    // A redeploy that no longer injects any secret (e.g. its last one became gatekeeper-held) revokes the old grant.
     try {
       await client.send(new DeleteRolePolicyCommand({ RoleName: executionRoleName, PolicyName: "SecretsAccess" }));
     } catch (err: any) {
