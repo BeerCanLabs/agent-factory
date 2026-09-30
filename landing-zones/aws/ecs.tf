@@ -257,10 +257,9 @@ resource "aws_ecs_service" "gatekeeper_ingress" {
   cluster         = aws_ecs_cluster.factory.id
   task_definition = aws_ecs_task_definition.gatekeeper_ingress[0].arn
   desired_count   = 1
-  capacity_provider_strategy {
-    capacity_provider = "FARGATE_SPOT"
-    weight            = 1
-  }
+  # On-demand, not Spot: this one task holds every agent's Discord presence, so a Spot reclaim would drop all of them
+  # at once (a reclaim killed it during a deploy on 2026-09-30).
+  launch_type     = "FARGATE"
   network_configuration {
     subnets          = aws_subnet.service[*].id
     security_groups  = [aws_security_group.gatekeeper_ingress.id]
