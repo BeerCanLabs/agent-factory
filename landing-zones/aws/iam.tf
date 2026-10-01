@@ -133,8 +133,8 @@ resource "aws_iam_role_policy" "control_plane" {
         Resource = [aws_s3_bucket.ledger_worm.arn, "${aws_s3_bucket.ledger_worm.arn}/*"]
       },
       {
-        # §6.14 SK3: the configuration store reads every version on start (sync) and writes new versions. No delete:
-        # versions are immutable, and restore is an operator action on the versioned bucket.
+        # §6.14 SK3: the configuration store reads every version on start (sync) and writes new versions. Versions are
+        # immutable, and restore is an operator action on the versioned bucket.
         Sid      = "ConfigStoreList"
         Effect   = "Allow"
         Action   = ["s3:ListBucket"]
@@ -144,6 +144,15 @@ resource "aws_iam_role_policy" "control_plane" {
         Sid      = "ConfigStoreReadWrite"
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject"]
+        Resource = "${aws_s3_bucket.config.arn}/*"
+      },
+      {
+        # GAP-060: removing an agent's configuration records (orphans, purged agents) is `s3 rm --recursive` of its
+        # prefix. The bucket is versioned, so a plain DeleteObject only adds a delete marker: every version stays
+        # recoverable for the non-current retention period (R1). Objects only, never s3:DeleteObjectVersion.
+        Sid      = "ConfigStoreRemove"
+        Effect   = "Allow"
+        Action   = ["s3:DeleteObject"]
         Resource = "${aws_s3_bucket.config.arn}/*"
       },
       {
