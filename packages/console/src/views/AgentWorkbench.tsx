@@ -5,7 +5,6 @@ import {
   Database,
   Clock,
   Send,
-  CheckCircle,
   Play,
   Square,
   Pause,
@@ -22,6 +21,7 @@ import type { AgentRecord } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
 import { factoryApi } from '../api/client.js';
 import { PolicyEditor } from '../components/PolicyEditor.js';
+import { ModelsView } from '../components/ModelsView.js';
 
 interface AgentWorkbenchProps {
   agent: AgentRecord;
@@ -40,8 +40,6 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
   const [activeTab, setActiveTab] = useState<'runtime' | 'terminal' | 'memory' | 'models' | 'policy' | 'lifecycle'>('runtime');
   const [convoPrompt, setConvoPrompt] = useState('');
   const [isSendingConvo, setIsSendingConvo] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(agent.model);
-  const [isSwitchingModel, setIsSwitchingModel] = useState(false);
   const [logs, setLogs] = useState<string[]>([
     `[${new Date().toISOString()}] Agent ${agent.name} initialized in private VPC subnet.`,
     `[${new Date().toISOString()}] Zero-Trust Egress: HTTP_PROXY and HTTPS_PROXY mapped to gatekeeper-egress.`,
@@ -66,22 +64,6 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
       setLogs((prev) => [...prev, `[ERROR] Failed to deliver turn: ${err.message}`]);
     } finally {
       setIsSendingConvo(false);
-    }
-  };
-
-  const handleModelSwitch = async () => {
-    setIsSwitchingModel(true);
-    try {
-      await factoryApi.switchModel(agent.id, selectedModel);
-      setLogs((prev) => [
-        ...prev,
-        `[${new Date().toISOString()}] Model hot-swapped to ${selectedModel}. Recorded to immutable ledger.`,
-      ]);
-      onRefresh();
-    } catch (err: any) {
-      alert(`Model switch failed: ${err.message}`);
-    } finally {
-      setIsSwitchingModel(false);
     }
   };
 
@@ -234,7 +216,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
           { id: 'runtime', label: 'Runtime & Health', icon: <Cpu className="w-3.5 h-3.5" /> },
           { id: 'terminal', label: 'Live Mailbox & Terminal', icon: <Terminal className="w-3.5 h-3.5" /> },
           { id: 'memory', label: 'Memory & Persistence', icon: <Database className="w-3.5 h-3.5" /> },
-          { id: 'models', label: 'Models & Scorecard', icon: <Layers className="w-3.5 h-3.5" /> },
+          { id: 'models', label: 'Models', icon: <Layers className="w-3.5 h-3.5" /> },
           { id: 'policy', label: 'Policy', icon: <Shield className="w-3.5 h-3.5" /> },
           { id: 'lifecycle', label: 'Lifecycle & Decommission', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
         ].map((tab) => (
@@ -402,70 +384,13 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
         </div>
       )}
 
-      {/* Tab 4: Models & Scorecard */}
-      {activeTab === 'models' && (
-        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-5 shadow-sm transition-colors">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
-            <div>
-              <h4 className="text-sm font-bold text-slate-900 dark:text-white">Active Production Model</h4>
-              <p className="text-xs text-slate-500 dark:text-slate-400">Hot-swap active reasoning engine at gatekeeper-egress</p>
-            </div>
+      {/* Tab 4: Models (read-only; models are granted in the Policy tab, GAP-062) */}
+      {activeTab === 'models' && <ModelsView agent={agent} onOpenPolicy={() => setActiveTab('policy')} />}
 
-            <div className="flex items-center space-x-2">
-              <select
-                value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
-                className="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-white font-mono text-xs rounded-lg px-3 py-2 border border-slate-300 dark:border-slate-800 focus:outline-none focus:border-emerald-500"
-              >
-                {(agent.approvedModels || [agent.model]).map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-              <button
-                onClick={handleModelSwitch}
-                disabled={isSwitchingModel || !permissions.canSwitchModel || selectedModel === agent.model}
-                className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition"
-              >
-                {isSwitchingModel ? 'Switching...' : 'Apply Model'}
-              </button>
-            </div>
-          </div>
-
-          <div>
-            <h5 className="text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-2">
-              Approved Model Candidates & Benchmark Rubric
-            </h5>
-            <div className="space-y-2">
-              {(agent.approvedModels || [agent.model]).map((m) => (
-                <div
-                  key={m}
-                  className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg p-3 flex items-center justify-between text-xs"
-                >
-                  <div className="flex items-center space-x-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                    <span className="font-mono font-bold text-slate-900 dark:text-white">{m}</span>
-                    {m === agent.model && (
-                      <span className="text-[10px] bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-300 dark:border-emerald-800">
-                        ACTIVE
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center space-x-4">
-                    <span className="text-slate-500 dark:text-slate-400 text-[11px]">Bench Score: <strong className="text-slate-800 dark:text-slate-200">100%</strong> (15/15)</span>
-                    <span className="text-slate-500 dark:text-slate-400 text-[11px]">Avg Cost: <strong className="text-slate-800 dark:text-slate-200">$0.021/turn</strong></span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Tab 5: Lifecycle & Decommission */}
+      {/* Tab 5: Policy */}
       {activeTab === 'policy' && <PolicyEditor agent={agent} canEdit={permissions.canSetPolicy} />}
 
+      {/* Tab 6: Lifecycle & Decommission */}
       {activeTab === 'lifecycle' && (
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-6 shadow-sm transition-colors">
           <div>
