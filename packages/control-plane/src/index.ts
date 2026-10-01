@@ -18,6 +18,7 @@ import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
 import { agentsDueForCron } from './scheduler.js';
 import { ScheduleStore } from './schedules.js';
+import { VersionedConfigStore, configBackendFromEnv, migrateConfigs } from './config-store.js';
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
 const AGENTS_ROOT = process.env.AGENTS_ROOT || fileURLToPath(new URL('../../../agents', import.meta.url));
@@ -218,6 +219,18 @@ if (state.runTokens.ephemeral) {
 
 const telemetry = initTelemetry('factory-control-plane', VERSION);
 state.metrics = factoryMetrics(telemetry.meter, () => state);
+
+// §6.14 SK3, §6.13 R1: the deployment configuration store is read once here and written only on change; API reads are
+// served from memory. If it cannot be read, the factory runs as before without it (the API reports it unavailable)
+// rather than starting empty and re-numbering versions that already exist.
+try {
+  const backend = configBackendFromEnv(process.env.FACTORY_CONFIG_STORE_URI, join(DATA_DIR, 'config'));
+  state.configs = await VersionedConfigStore.open(backend);
+  const migrated = await migrateConfigs(state, [...dynamicAgents.map((a) => a.id), ...state.policies.ids()]);
+  console.log(`[control-plane] configuration store ${backend.description}: ${state.configs.agentIds().length} agents, ${migrated.length} migrated`);
+} catch (err) {
+  console.error(`[control-plane] configuration store unavailable: ${err instanceof Error ? err.message : String(err)}`);
+}
 
 await reconcileRuns(state);
 setInterval(() => void checkHealth(state), 15_000).unref();
