@@ -128,3 +128,22 @@ and decides when to upgrade (SK5).
 
 The configuration store and adoption are delivered by TSK-052, TSK-054 and TSK-055. This registry provides what they
 build on: approved, pinned versions.
+
+## Who can register, and what counts as the same skill
+
+- Any authenticated user can register a skill. Registering never makes it usable: an admin approves each version.
+- A skill is its source. Every version of a skill id comes from the same repository and path. A different repository
+  or path is a different skill, so register it under a different id.
+
+## Revoking a version
+
+An admin can revoke an approved version (`POST /api/v1/registry/skills/:id/versions/:version/reject`). If any agent's
+deployed configuration uses that version, the factory refuses (`409 skill_in_use`) and lists those agents: redeploy
+them without the skill first. An admin may override with `{"force": true}`, which revokes the version at once and
+pauses every agent using it until it is redeployed without it.
+
+## Checks before approval
+
+Like a pull request that merges only when its required checks pass, a skill version can be approved only after the
+factory has built it, run its tests and checked its code: no secrets, no direct hosts, no provider SDKs. Until then
+approval returns `409 checks_pending`; if the checks fail it returns `409 checks_failed` with the reasons.
