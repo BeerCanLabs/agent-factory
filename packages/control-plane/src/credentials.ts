@@ -12,7 +12,7 @@
  * returned, logged, or ledgered. The ledger records only that a credential was set or rotated, by whom, and when.
  */
 import http from 'node:http';
-import { secretPresent, writableProvider } from '@beercanlabs/factory-secrets-bind';
+import { secretPresent, writableProvider, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { assessCredentials, assessPlatformCredentials, submittableSecrets, summarize, type CredentialItem, type CredentialSummary } from '@beercanlabs/factory-keymaster';
 import { authenticate, json, type FactoryState } from './app.js';
 import { BUILTIN_AGENT_IDS, declaredCredentials, type AgentRecord } from './catalog.js';
@@ -36,6 +36,7 @@ const presence = new WeakMap<FactoryState, Map<string, { at: number; present: Pr
 export function invalidateCredentials(state: FactoryState): void {
   summaries.delete(state);
   presence.delete(state);
+  for (const p of state.providers) listings.delete(p);
 }
 
 /** Cached presence check; concurrent callers share one lookup, and a failed lookup is not cached. */
@@ -44,10 +45,37 @@ function cachedPresent(state: FactoryState, name: string): Promise<boolean> {
   presence.set(state, cache);
   const hit = cache.get(name);
   if (hit && Date.now() - hit.at < CREDENTIAL_TTL_MS) return hit.present;
-  const present = secretPresent(name, state.providers);
+  const present = lookupPresent(state, name);
   cache.set(name, { at: Date.now(), present });
   present.catch(() => cache.delete(name));
   return present;
+}
+
+// One listing per provider that can list (one secret-manager call, metadata only) instead of one call per secret.
+const listings = new WeakMap<SecretProvider, { at: number; names: Promise<Set<string>> }>();
+
+function listing(p: SecretProvider): Promise<Set<string>> {
+  const hit = listings.get(p);
+  if (hit && Date.now() - hit.at < CREDENTIAL_TTL_MS) return hit.names;
+  const names = p.present!();
+  listings.set(p, { at: Date.now(), names });
+  names.catch(() => listings.delete(p));
+  return names;
+}
+
+async function lookupPresent(state: FactoryState, name: string): Promise<boolean> {
+  for (const p of state.providers) {
+    if (p.present) {
+      try {
+        if ((await listing(p)).has(name)) return true;
+        continue;
+      } catch {
+        // listing failed: fall back to asking this provider by name
+      }
+    }
+    if (await secretPresent(name, [p])) return true;
+  }
+  return false;
 }
 
 const platformSubmitPath = (name: string) => `/api/v1/keymaster/platform/credentials/${encodeURIComponent(name)}`;
