@@ -18,7 +18,7 @@ import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
 import { agentsDueForCron } from './scheduler.js';
 import { ScheduleStore } from './schedules.js';
-import { VersionedConfigStore, configBackendFromEnv, migrateConfigs } from './config-store.js';
+import { VersionedConfigStore, checkRegistry, configBackendFromEnv, migrateConfigs, pruneOrphans } from './config-store.js';
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
 const AGENTS_ROOT = process.env.AGENTS_ROOT || fileURLToPath(new URL('../../../agents', import.meta.url));
@@ -226,10 +226,23 @@ state.metrics = factoryMetrics(telemetry.meter, () => state);
 try {
   const backend = configBackendFromEnv(process.env.FACTORY_CONFIG_STORE_URI, join(DATA_DIR, 'config'));
   state.configs = await VersionedConfigStore.open(backend);
-  const migrated = await migrateConfigs(state, [...dynamicAgents.map((a) => a.id), ...state.policies.ids()]);
-  console.log(`[control-plane] configuration store ${backend.description}: ${state.configs.agentIds().length} agents, ${migrated.length} migrated`);
 } catch (err) {
   console.error(`[control-plane] configuration store unavailable: ${err instanceof Error ? err.message : String(err)}`);
+}
+// GAP-060: archive policies and remove configuration records of ids that are not agents, before migration can copy
+// them. Refused (nothing touched) unless the registry was read in full and the known agents look complete.
+try {
+  await pruneOrphans(state, { builtinIds: BUILTIN_SYSTEM_AGENTS.map((a) => a.id), registry: checkRegistry(REGISTRY_DIR) });
+} catch (err) {
+  console.error(`[control-plane] orphan prune failed: ${err instanceof Error ? err.message : String(err)}`);
+}
+if (state.configs) {
+  try {
+    const migrated = await migrateConfigs(state, [...dynamicAgents.map((a) => a.id), ...state.policies.ids()]);
+    console.log(`[control-plane] configuration store ${state.configs.description}: ${state.configs.agentIds().length} agents, ${migrated.length} migrated`);
+  } catch (err) {
+    console.error(`[control-plane] configuration migration failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 await reconcileRuns(state);
