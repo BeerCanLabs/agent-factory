@@ -169,7 +169,20 @@ export type AgentRecord = {
   connections?: Connection[];
   /** Static credentials the cartridge declares (§6.11 K5.1): name, and source and description when given. */
   credentials?: SecretDeclaration[];
+  /** Egress the cartridge declares (E7 request, E8 ceiling). Shown to the admin who sets policy; never a grant. */
+  egress?: { routes: string[]; hosts: string[] };
 };
+
+const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string' && s.length > 0) : []);
+
+/** The egress a cartridge body declares (`egress.routes`, `egress.hosts`), when it declares any. */
+export function egressOf(cartridge: { egress?: unknown }): { egress?: { routes: string[]; hosts: string[] } } {
+  const e = cartridge.egress;
+  if (!e || typeof e !== 'object') return {};
+  const routes = strings((e as { routes?: unknown }).routes);
+  const hosts = strings((e as { hosts?: unknown }).hosts);
+  return routes.length || hosts.length ? { egress: { routes, hosts } } : {};
+}
 
 /** The declared static credentials of a cartridge body (K5.1), when any carry a source or description. */
 export function credentialsOf(cartridge: { secrets?: unknown }): { credentials?: SecretDeclaration[] } {

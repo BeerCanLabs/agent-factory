@@ -8,7 +8,7 @@ import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanla
 import { accessAssertionOf, hasRole, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
-import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, connectionsOf, credentialsOf, type AgentCategory } from './catalog.js';
+import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, connectionsOf, credentialsOf, egressOf, type AgentCategory } from './catalog.js';
 import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, type SourceRef } from './runtime.js';
 import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver } from './source.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
@@ -22,6 +22,8 @@ import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 
 export type FactoryState = {
   agents: Map<string, AgentRecord>;
+  /** Models the factory offers (§6.9 M3, FACTORY_MODEL_CATALOG), by neutral name. */
+  modelCatalog?: Record<string, { provider: string; price?: { inputPerMTok: number; outputPerMTok: number } }>;
   registryDir?: string;
   ledger: LedgerStore;
   auth: AuthProvider;
@@ -1338,6 +1340,16 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
+  // §6.9 M3: the models this factory offers (operations config), for the admin choosing an agent's models. Names,
+  // providers and prices only; provider model ids and regions stay with gatekeeper-egress.
+  if (path === '/api/v1/models' && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    json(res, 200, {
+      models: Object.entries(state.modelCatalog ?? {}).map(([name, m]) => ({ name, provider: m.provider, ...(m.price ? { price: m.price } : {}) })),
+    });
+    return;
+  }
+
   const policyMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/policy$/);
   if (policyMatch && (req.method === 'GET' || req.method === 'PUT')) {
     const principal = await authenticate(req, res, state, req.method === 'GET' ? 'viewer' : 'admin');
@@ -1597,8 +1609,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       : undefined;
 
     const model = typeof cartridge.model === 'string' ? cartridge.model : (typeof body.model === 'string' ? body.model : 'gemini-2.0-flash');
+    // M2: the models the cartridge was built for, preferred first. A request shown to the admin, never a grant.
     const requestedModels = Array.isArray(cartridge.requestedModels)
       ? cartridge.requestedModels
+      : Array.isArray(cartridge.models)
+      ? cartridge.models
       : (Array.isArray(body.requestedModels) ? body.requestedModels : (Array.isArray(body.models) ? body.models : []));
     const approvedModels = Array.isArray(cartridge.approvedModels) && cartridge.approvedModels.length > 0
       ? cartridge.approvedModels
@@ -1624,6 +1639,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       ...(source ? { repo: source.repo, commit: source.commit } : {}),
       ...connectionsOf(cartridge),
       ...credentialsOf({ secrets: cartridge.secrets ?? (Array.isArray(body.secrets) ? { requires: body.secrets } : undefined) }),
+      ...egressOf(cartridge),
     };
     state.agents.set(record.id, record);
 
