@@ -301,6 +301,7 @@ async function tokenForGatekeeperEgress(state: FactoryState, req: http.IncomingM
   const out = await getConnections(state).accessToken(agentId, connection, scopes);
   if (out.ok) return json(res, 200, { accessToken: out.accessToken, expiresAt: out.expiresAt });
   if (out.error === 'needs_reconsent') {
+    invalidateCredentials(state); // the grant just changed state; owners must see it now (K4)
     return json(res, 428, { error: 'needs_reconsent', provider: out.provider, connectUrl: connectUrl(state, agentId, out.provider) });
   }
   console.error(`[keymaster] ${agentId}/${connection}: ${out.error}: ${out.message}`);

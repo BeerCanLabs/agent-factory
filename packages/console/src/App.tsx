@@ -58,17 +58,11 @@ const MainLayout: React.FC = () => {
     }
   };
 
-  useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 15000);
-    return () => clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
-    loadOutstanding();
-    const interval = setInterval(loadOutstanding, 60000);
-    return () => clearInterval(interval);
-  }, []);
+  // Polling is light on purpose (GAP-056): the fleet every minute, credential counts every 10 minutes (they change
+  // only when someone acts, and the control plane caches them), and nothing while the tab is hidden. Every action
+  // in the console reloads what it changed.
+  useEffect(() => poll(loadData, FLEET_POLL_MS), []);
+  useEffect(() => poll(loadOutstanding, CREDENTIALS_POLL_MS), []);
 
   const handleOpenCredentials = (agentId: string) => {
     setSelectedAgentId(agentId);
@@ -143,6 +137,25 @@ const MainLayout: React.FC = () => {
     </div>
   );
 };
+
+
+const FLEET_POLL_MS = 60_000;
+const CREDENTIALS_POLL_MS = 10 * 60_000;
+
+/** Runs `load` now and every `ms` while the page is visible, and once more when it becomes visible again. */
+function poll(load: () => void, ms: number): () => void {
+  load();
+  const tick = () => {
+    if (document.visibilityState === 'visible') load();
+  };
+  const interval = setInterval(tick, ms);
+  const onVisible = () => tick();
+  document.addEventListener('visibilitychange', onVisible);
+  return () => {
+    clearInterval(interval);
+    document.removeEventListener('visibilitychange', onVisible);
+  };
+}
 
 export const App: React.FC = () => {
   return (
