@@ -115,7 +115,7 @@ describe('benchmark harness against a live factory', { concurrency: false }, () 
     const put = await fetch(`http://127.0.0.1:${cpPort}/api/v1/agents/llm-summarizer/policy`, {
       method: 'PUT',
       headers: { Authorization: `Bearer ${ADMIN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ routes: ['anthropic'] }),
+      body: JSON.stringify({ routes: ['anthropic'], models: ['test-big', 'test-small'] }),
     });
     assert.equal(put.status, 200);
   });

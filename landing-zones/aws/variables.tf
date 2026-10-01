@@ -219,3 +219,9 @@ variable "factory_public_base_url" {
   type        = string
   default     = ""
 }
+
+variable "default_model" {
+  description = "The model an agent gets when its policy names none (DESIGN_AUTHORITY M2). Must be in model_catalog."
+  type        = string
+  default     = "claude-haiku-4-5"
+}
