@@ -13,7 +13,7 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
-import { approvedSkill, loadSkills, skillRegistry } from './skills.js';
+import { approvedSkill, loadSkills, recordSkillChecks, setSkillUsage, skillRegistry } from './skills.js';
 
 const ADMIN = 'admin-skills-token';
 const OPERATOR = 'operator-skills-token';
@@ -128,12 +128,16 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     assert.equal((await call(port, '/api/v1/registry/skills/discord-progress/versions/1.0.0/approve', 'POST', VIEWER, {})).status, 403);
     assert.equal((await call(port, '/api/v1/registry/skills/discord-progress/versions/1.0.0/approve', 'POST', OPERATOR, {})).status, 403);
     assert.equal((await call(port, '/api/v1/registry/skills/discord-progress/versions/1.0.0/approve', 'POST')).status, 401);
-    assert.equal((await call(port, '/api/v1/registry/skills', 'POST', VIEWER, { repo: REPO, path: '.', commit: SHA1, manifest: manifest('9.9.9') })).status, 403);
     assert.equal(approvedSkill(state, 'discord-progress', '1.0.0'), undefined);
     assert.equal(actions().filter((e) => e.action === 'SKILL_APPROVED').length, 0);
   });
 
   it('SK1 an admin approves the version: it is the latest approved and adoptable, and the decision is ledgered', async () => {
+    // SK1: like a pull request, approval waits for the factory's checks on the code.
+    const early = await call(port, '/api/v1/registry/skills/discord-progress/versions/1.0.0/approve', 'POST', ADMIN, { reason: 'reviewed' });
+    assert.equal(early.status, 409);
+    assert.equal(early.body.error, 'checks_pending');
+    recordSkillChecks(state, 'discord-progress', '1.0.0', { passed: true });
     const ok = await call(port, '/api/v1/registry/skills/discord-progress/versions/1.0.0/approve', 'POST', ADMIN, { reason: 'reviewed' });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     assert.equal(ok.body.status, 'approved');
@@ -200,9 +204,8 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
   });
 
   it('SK1 a rejected version is not adoptable, and the latest approved stays the previous one', async () => {
-    const reg = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, { repo: REPO, path: 'skills/discord-progress/', commit: SHA2, manifest: manifest('1.2.0') });
+    const reg = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, { repo: REPO, path: '.', commit: SHA2, manifest: manifest('1.2.0') });
     assert.equal(reg.status, 201, JSON.stringify(reg.body));
-    assert.equal(reg.body.path, 'skills/discord-progress');
     const rej = await call(port, '/api/v1/registry/skills/discord-progress/versions/1.2.0/reject', 'POST', ADMIN, { reason: 'posts tokens to the channel' });
     assert.equal(rej.status, 200);
     assert.equal(rej.body.status, 'rejected');
@@ -230,5 +233,56 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     assert.equal(approvedSkill(fresh, 'discord-progress', '1.0.0')?.commit, SHA1);
     assert.equal(approvedSkill(fresh, 'discord-progress', '1.2.0'), undefined);
     assert.equal(skillRegistry(fresh).versions('discord-progress').length, 2);
+  });
+
+  it('SK1 any authenticated user may register a skill (a viewer), and a folder path is normalised; it still needs approval', async () => {
+    const m = { ...manifest('0.1.0'), id: 'viewer-skill' };
+    const reg = await call(port, '/api/v1/registry/skills', 'POST', VIEWER, { repo: 'https://github.com/example/skills', path: 'skills/viewer-skill/', commit: SHA1, manifest: m });
+    assert.equal(reg.status, 201, JSON.stringify(reg.body));
+    assert.equal(reg.body.path, 'skills/viewer-skill');
+    assert.equal(reg.body.status, 'pending');
+    assert.equal(approvedSkill(state, 'viewer-skill', '0.1.0'), undefined);
+    assert.equal((await call(port, '/api/v1/registry/skills', 'POST', undefined, { repo: REPO, path: '.', commit: SHA1, manifest: m })).status, 401);
+  });
+
+  it('SK1 a different repository or path is a different skill, never a new version of an existing one', async () => {
+    const otherRepo = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, { repo: 'https://github.com/someone-else/discord-progress', path: '.', commit: SHA2, manifest: manifest('9.0.0') });
+    assert.equal(otherRepo.status, 422);
+    assert.ok(otherRepo.body.reasons.some((r: string) => /different skill/.test(r)), JSON.stringify(otherRepo.body));
+    const otherPath = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, { repo: REPO, path: 'elsewhere', commit: SHA2, manifest: manifest('9.0.1') });
+    assert.equal(otherPath.status, 422);
+  });
+
+  it('SK1 revoking an approved version in use is refused until its agents are redeployed without it; an admin override pauses them', async () => {
+    state.agents.set('ada', { id: 'ada', name: 'Ada', role: 'Test', state: 'SLEEPING', provider: 'cloud', artifact: 'x', requires: [], ungated: [], gated: [], triggers: [], dir: '/tmp/ada' } as never);
+    let users: string[] = [];
+    setSkillUsage(state, (id, version) => (id === 'discord-progress' && version === '1.0.0' ? users : []));
+
+    users = ['ada'];
+    const blocked = await call(port, '/api/v1/registry/skills/discord-progress/versions/1.0.0/reject', 'POST', ADMIN, { reason: 'leaks' });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.error, 'skill_in_use');
+    assert.deepEqual(blocked.body.agents, ['ada']);
+    assert.ok(approvedSkill(state, 'discord-progress', '1.0.0'), 'still approved');
+
+    const forced = await call(port, '/api/v1/registry/skills/discord-progress/versions/1.0.0/reject', 'POST', ADMIN, { reason: 'leaks', force: true });
+    assert.equal(forced.status, 200, JSON.stringify(forced.body));
+    assert.deepEqual(forced.body.paused, ['ada']);
+    assert.equal(state.agents.get('ada')?.state, 'PAUSED');
+    assert.equal(approvedSkill(state, 'discord-progress', '1.0.0'), undefined);
+    assert.ok(actions().some((e) => e.action === 'SKILL_REVOKED_FORCED' && e.actor === 'token:admin'));
+    assert.ok(ledger.query().some((e) => e.action === 'PAUSE' && e.agentId === 'ada' && e.actor === 'token:admin'), 'the pause is ledgered');
+  });
+
+  it('SK1 a version whose checks failed cannot be approved; the failures are shown and ledgered', async () => {
+    const reg = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, { repo: REPO, path: '.', commit: SHA2, manifest: manifest('2.0.0') });
+    assert.equal(reg.status, 201, JSON.stringify(reg.body));
+    recordSkillChecks(state, 'discord-progress', '2.0.0', { passed: false, failures: ['imports boto3 (provider SDK)'] });
+    const res = await call(port, '/api/v1/registry/skills/discord-progress/versions/2.0.0/approve', 'POST', ADMIN, {});
+    assert.equal(res.status, 409);
+    assert.equal(res.body.error, 'checks_failed');
+    assert.deepEqual(res.body.failures, ['imports boto3 (provider SDK)']);
+    assert.equal(approvedSkill(state, 'discord-progress', '2.0.0'), undefined);
+    assert.ok(actions().some((e) => e.action === 'SKILL_CHECKS_FAILED' && e.actor === 'factory:admission'));
   });
 });
