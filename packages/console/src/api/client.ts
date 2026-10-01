@@ -1,4 +1,4 @@
-import type { AgentCredentials, AgentRecord, ApprovalItem, FactoryMetrics, LedgerEvent, OutstandingCredentials, TriageIncident } from './types.js';
+import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, LedgerEvent, OfferedModel, OutstandingCredentials, TriageIncident } from './types.js';
 
 const API_BASE = '/api/v1';
 
@@ -80,6 +80,20 @@ export const factoryApi = {
     return request<{ ok: boolean }>(`/registry/agents/${id}/deploy`, {
       method: 'POST',
     });
+  },
+
+  // The company's policy for an agent (E7): routes, models, hosts, tools, budget. Admin-only to change.
+  async getPolicy(id: string): Promise<AgentPolicy> {
+    return request<AgentPolicy>(`/agents/${encodeURIComponent(id)}/policy`);
+  },
+
+  async setPolicy(id: string, policy: AgentPolicy): Promise<AgentPolicy> {
+    return request<AgentPolicy>(`/agents/${encodeURIComponent(id)}/policy`, { method: 'PUT', body: JSON.stringify(policy) });
+  },
+
+  // The models this factory offers (M3).
+  async listModels(): Promise<OfferedModel[]> {
+    return (await request<{ models: OfferedModel[] }>('/models')).models;
   },
 
   async setAgentBudget(id: string, spendLimitUsd: number, period: string = 'daily'): Promise<{ ok: boolean }> {
