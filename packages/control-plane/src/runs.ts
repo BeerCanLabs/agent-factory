@@ -38,6 +38,8 @@ export type Run = {
   missing?: string[];
   startedAt?: string;
   lastHeartbeatAt?: string;
+  /** When the run first showed it can take a turn (first heartbeat or mailbox poll); presence goes available then. */
+  readyAt?: string;
   rssMb?: number;
 };
 
