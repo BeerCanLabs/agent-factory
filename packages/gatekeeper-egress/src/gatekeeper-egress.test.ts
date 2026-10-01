@@ -638,20 +638,30 @@ describe('§6.5 run progress: gatekeeper-egress reports each call it handles for
   });
 
   it('§6.5 a slow or failing control plane never delays a proxied call', async () => {
+    const timed = async (n: number) => {
+      const t0 = performance.now();
+      for (let i = 0; i < n; i++) assert.equal((await call(port, '/discord/x', { token, body: {} })).status, 200);
+      return performance.now() - t0;
+    };
     await settle(); // let earlier tests' batches drain first
-    sinkCalls = 0;
-    sinkMode = 'hang';
-    const t0 = performance.now();
-    for (let i = 0; i < 5; i++) assert.equal((await call(port, '/discord/x', { token, body: {} })).status, 200);
-    const hung = performance.now() - t0;
+
+    // Failing: every batch is refused; calls are unaffected and the batches are dropped.
     sinkMode = 'fail';
-    const t1 = performance.now();
-    for (let i = 0; i < 5; i++) assert.equal((await call(port, '/discord/x', { token, body: {} })).status, 200);
-    const failing = performance.now() - t1;
-    assert.ok(hung < 1000 && failing < 1000, `calls took ${hung.toFixed(0)} ms / ${failing.toFixed(0)} ms`);
-    // The hung send stays the only one in flight: progress adds at most one request at a time to the control plane.
+    sinkCalls = 0;
+    const failing = await timed(5);
+    await settle();
+    assert.ok(sinkCalls >= 1, 'the failing control plane was tried');
+
+    // Hung: the first batch never returns. Calls are unaffected, and no second request piles up behind it.
+    sinkMode = 'hang';
+    sinkCalls = 0;
+    const hungFirst = await timed(5);
     await settle();
     assert.equal(sinkCalls, 1);
+    const hungAfter = await timed(5);
+    await settle();
+    assert.equal(sinkCalls, 1, 'progress adds at most one request at a time to the control plane');
+    for (const ms of [failing, hungFirst, hungAfter]) assert.ok(ms < 1000, `5 calls took ${ms.toFixed(0)} ms`);
   });
 });
 
