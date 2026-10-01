@@ -99,6 +99,7 @@ describe('E7 M3 the factory owns policy; the agent only declares (TSK-048)', { c
       { name: 'claude-haiku-4-5', provider: 'bedrock', price: { inputPerMTok: 1, outputPerMTok: 5 } },
       { name: 'claude-sonnet-4-5', provider: 'bedrock' },
     ]);
+    assert.equal(res.body.default, 'claude-haiku-4-5', 'M2: the factory default when a policy names no models');
     assert.equal((await call(port, '/api/v1/models', 'GET')).status, 401);
   });
 

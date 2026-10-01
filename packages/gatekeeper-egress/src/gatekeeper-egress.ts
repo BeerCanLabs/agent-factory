@@ -10,6 +10,9 @@ import { SseMeter, costUsd, priceFor, usageFromJson, type Price, type Provider, 
 import { writeTrace, type TraceConfig } from './traces.js';
 import { ModelUpstreamError, defaultModelAdapters, parseChatRequest, type ChatResult, type ModelAdapter, type ModelCatalog } from './models.js';
 import type { Meter } from '@opentelemetry/api';
+
+/** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
+export const DEFAULT_MODEL = 'claude-haiku-4-5';
 import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from './progress.js';
 
 export type Route = {
@@ -86,6 +89,11 @@ export type GatekeeperEgressOptions = {
   meter?: Meter;
   /** Offered models for the `models` route (operations config, M3). */
   modelCatalog?: ModelCatalog;
+  /**
+   * The model an agent gets when its policy names none (M2, E7): operations config, default `claude-haiku-4-5`. A policy
+   * with no `models` grants exactly this model, never every model.
+   */
+  defaultModel?: string;
   /** Adapters by catalog `provider`; defaults to the built-in ones. */
   modelAdapters?: Record<string, ModelAdapter>;
   /** Batching for run progress events (defaults: every 250 ms, 50 per batch, at most 1000 queued). */
@@ -434,7 +442,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   /** Policy gate on a model name (E4, E7): shared by provider routes and the factory model API. */
   function modelDenial(ctx: RunContext, model: string): [number, string, Record<string, unknown>] | undefined {
     const isTraining = ctx.agentState === 'TRAINING';
-    if (!isTraining && ctx.policy.models && !ctx.policy.models.includes(model)) return [403, 'model_not_allowed', { model }];
+    const allowed = ctx.policy.models ?? [opts.defaultModel ?? DEFAULT_MODEL];
+    if (!isTraining && !allowed.includes(model)) return [403, 'model_not_allowed', { model }];
     if (ctx.run.model && ctx.run.model !== model) return [403, 'model_pinned', { model, pinned: ctx.run.model }];
     return undefined;
   }

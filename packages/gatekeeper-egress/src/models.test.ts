@@ -75,7 +75,9 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       'future-model': { provider: 'vertex', id: 'x', price: { inputPerMTok: 1, outputPerMTok: 1 } },
     }),
   );
-  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['models'], ...p });
+  // Fixtures name the models they use: a policy without `models` grants only the factory default (M2).
+  const TEST_MODELS = ['claude-sonnet-4-5', 'claude-haiku-4-5', 'gpt-9', 'future-model'];
+  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['models'], models: TEST_MODELS, ...p });
   const settle = () => new Promise((r) => setTimeout(r, 20));
   const lastLlm = () => ledger.filter((e) => e.type === 'llm').at(-1);
   const chat = (model = 'claude-sonnet-4-5', extra: Record<string, unknown> = {}) => ({
@@ -216,6 +218,15 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
     assert.equal(seen.length, 0);
     await settle();
     assert.ok(ledger.some((e) => e.action === 'EGRESS_DENIED_ROUTE_NOT_ALLOWED' && e.route === 'models'));
+  });
+
+  it('M2 E7 a policy that names no models grants only the factory default, Claude Haiku 4.5', async () => {
+    ctx.policy = { routes: ['models'] };
+    const denied = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5') });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.json().error, 'model_not_allowed');
+    assert.equal(seen.length, 0, 'nothing reached a provider');
+    assert.equal((await call(port, '/models/v1/chat/completions', { token, body: chat('claude-haiku-4-5') })).status, 200);
   });
 
   it('denies a model the policy does not list', async () => {
