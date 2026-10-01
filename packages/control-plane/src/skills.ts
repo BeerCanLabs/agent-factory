@@ -22,11 +22,12 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, exists
 import { dirname, join } from 'node:path';
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, type SkillManifest, type SkillRequires } from '@beercanlabs/factory-contract';
-import { authenticate, json, readJson, type FactoryState } from './app.js';
+import { applyKillSwitch, authenticate, json, readJson, type FactoryState } from './app.js';
 import { FULL_SHA } from './runtime.js';
 import { checkRepoUrl } from './source.js';
 
 export type SkillStatus = 'pending' | 'approved' | 'rejected';
+export type SkillChecks = 'pending-build' | 'passed' | 'failed';
 
 export type SkillVersionRecord = {
   id: string;
@@ -37,8 +38,13 @@ export type SkillVersionRecord = {
   commit: string;
   manifest: SkillManifest;
   status: SkillStatus;
-  /** The skill's own tests and build run in the build step (TSK-054); until then admission records the gap. */
-  tests: 'pending-build';
+  /**
+   * The factory's checks on the skill's code (SK1): build, the skill's own tests, and the design rules (no secrets, no
+   * direct hosts, no provider SDKs). Run by the build step (TSK-054) and recorded with `recordSkillChecks`. A version
+   * can be approved only once they have passed, as a pull request merges only when its required checks are green.
+   */
+  tests: SkillChecks;
+  checks?: { at: string; failures?: string[] };
   registeredBy: string;
   registeredAt: string;
   decidedBy?: string;
@@ -213,7 +219,8 @@ function ledgerKey(id: unknown, version?: unknown): string {
 }
 
 async function register(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const principal = await authenticate(req, res, state, 'operator');
+  // SK1: any authenticated user may register a skill; nothing is adoptable until an admin approves it.
+  const principal = await authenticate(req, res, state, 'viewer');
   if (!principal) return;
   const body = await readJson(req);
   const registry = skillRegistry(state);
@@ -239,6 +246,11 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
       manifest = checked.manifest;
       if (registry.get(manifest.id, manifest.version)) {
         reasons.push(`version: ${manifest.id}@${manifest.version} is already registered; versions are immutable, register a new version`);
+      }
+      // SK1: a skill is its source. A different repository or path is a different skill, never a new version of this one.
+      const existing = registry.versions(manifest.id)[0];
+      if (existing && repo && path && (existing.repo !== repo || existing.path !== path)) {
+        reasons.push(`id: ${manifest.id} is registered from ${existing.repo} (${existing.path}); a different repository or path is a different skill, so give it a different id`);
       }
       for (const i of skillDesignIssues(manifest, { gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets })) {
         reasons.push(`manifest.${i.path}: ${i.message}`);
@@ -314,9 +326,40 @@ async function decide(
     return;
   }
   const status: SkillStatus = decision === 'approve' ? 'approved' : 'rejected';
+  // SK1: like a pull request, a version is approved only after the factory's checks on its code have passed.
+  if (decision === 'approve' && rec.tests !== 'passed') {
+    json(res, 409, {
+      error: rec.tests === 'failed' ? 'checks_failed' : 'checks_pending',
+      id,
+      version,
+      tests: rec.tests,
+      ...(rec.checks?.failures ? { failures: rec.checks.failures } : {}),
+      message: 'a skill version can be approved only after the factory has built it, run its tests and checked its code',
+    });
+    return;
+  }
   if (rec.status === status) {
     json(res, 409, { error: `already_${status}`, id, version });
     return;
+  }
+  // SK1 revocation: an approved version in use cannot be revoked until every agent using it is redeployed without it.
+  // An admin override (force) revokes now and pauses each of those agents until they are redeployed without it.
+  const revoking = decision === 'reject' && rec.status === 'approved';
+  const users = revoking ? skillUsers(state, id, version) : [];
+  if (users.length && body.force !== true) {
+    json(res, 409, {
+      error: 'skill_in_use',
+      id,
+      version,
+      agents: users,
+      message: 'redeploy these agents without this skill version first, or revoke with "force": true to pause them until they are',
+    });
+    return;
+  }
+  const paused: string[] = [];
+  for (const agentId of users) {
+    const out = await applyKillSwitch(state, agentId, 'PAUSE', principal.actor);
+    if (out.status === 200) paused.push(agentId);
   }
   const now = new Date().toISOString();
   const next: SkillVersionRecord = { ...rec, status, decidedBy: principal.actor, decidedAt: now };
@@ -333,12 +376,51 @@ async function decide(
     timestamp: now,
     agentId: ledgerKey(id, version),
     type: 'action',
-    action: decision === 'approve' ? 'SKILL_APPROVED' : 'SKILL_REJECTED',
+    action: decision === 'approve' ? 'SKILL_APPROVED' : revoking ? (users.length ? 'SKILL_REVOKED_FORCED' : 'SKILL_REVOKED') : 'SKILL_REJECTED',
     actor: principal.actor,
     commit: rec.commit,
     ...(next.reason ? { payloadSha256: payloadHash(next.reason) } : {}),
   });
-  json(res, 200, next);
+  json(res, 200, users.length ? { ...next, paused } : next);
+}
+
+/**
+ * SK1: record the outcome of the factory's checks on a version's code (build, tests, design rules). Called by the build
+ * step (TSK-054). Ledgered as SKILL_CHECKS_PASSED or SKILL_CHECKS_FAILED; failures are short reasons, never code.
+ */
+export function recordSkillChecks(state: FactoryState, id: string, version: string, outcome: { passed: boolean; failures?: string[] }): SkillVersionRecord | undefined {
+  const registry = skillRegistry(state);
+  const rec = registry.get(id, version);
+  if (!rec) return undefined;
+  const at = new Date().toISOString();
+  const next: SkillVersionRecord = {
+    ...rec,
+    tests: outcome.passed ? 'passed' : 'failed',
+    checks: { at, ...(outcome.passed || !outcome.failures?.length ? {} : { failures: outcome.failures.slice(0, 50) }) },
+  };
+  registry.save(next);
+  state.ledger.append({
+    timestamp: at,
+    agentId: ledgerKey(id, version),
+    type: 'action',
+    action: outcome.passed ? 'SKILL_CHECKS_PASSED' : 'SKILL_CHECKS_FAILED',
+    actor: 'factory:admission',
+    commit: rec.commit,
+    ...(outcome.failures?.length ? { payloadSha256: payloadHash(outcome.failures) } : {}),
+  });
+  return next;
+}
+
+/**
+ * Which agents' deployed configuration uses a skill version (SK3, SK4). The deployment configuration and composed
+ * admission (TSK-052, TSK-054) provide the answer; until they do, no agent can have adopted a skill.
+ */
+const usage = new WeakMap<FactoryState, (id: string, version: string) => string[]>();
+export function setSkillUsage(state: FactoryState, fn: (id: string, version: string) => string[]): void {
+  usage.set(state, fn);
+}
+function skillUsers(state: FactoryState, id: string, version: string): string[] {
+  return usage.get(state)?.(id, version) ?? [];
 }
 
 const DECISION = /^\/api\/v1\/registry\/skills\/([^/]+)\/versions\/([^/]+)\/(approve|reject)$/;
