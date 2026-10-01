@@ -121,20 +121,6 @@ export const factoryApi = {
     });
   },
 
-  async switchModel(id: string, model: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/registry/agents/${id}/model`, {
-      method: 'POST',
-      body: JSON.stringify({ model }),
-    });
-  },
-
-  async approveModel(id: string, model: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/registry/agents/${id}/models/approve`, {
-      method: 'POST',
-      body: JSON.stringify({ model }),
-    });
-  },
-
   // Approvals (Human-in-the-Loop)
   async listApprovals(): Promise<ApprovalItem[]> {
     try {
