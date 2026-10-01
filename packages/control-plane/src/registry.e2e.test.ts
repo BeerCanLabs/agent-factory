@@ -15,6 +15,7 @@ import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
 import { Keymaster } from '@beercanlabs/factory-keymaster';
 
 const ADMIN = 'admin-e2e-token';
+const OPERATOR = 'operator-e2e-token';
 
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -55,7 +56,7 @@ describe('KPF 1: Agent Registry & Lifecycle E2E', { concurrency: false }, () => 
       agents: new Map(),
       registryDir: regDir,
       ledger,
-      auth: bearerAuth([{ name: 'admin', token: ADMIN, roles: ['admin'] }]),
+      auth: bearerAuth([{ name: 'admin', token: ADMIN, roles: ['admin'] }, { name: 'operator', token: OPERATOR, roles: ['operator'] }]),
       version: '0.1.0',
       providers: [envProvider({})],
       runtime,
@@ -150,57 +151,59 @@ describe('KPF 1: Agent Registry & Lifecycle E2E', { concurrency: false }, () => 
     assert.ok(actions.includes('AGENT_PURGED'));
   });
 
-  it('governs model approval and active model switching', async () => {
-    // 1. Register agent with requestedModels and default approvedModel
+  it('an agent\'s models are set only in its policy; the old approve and hot-swap endpoints are refused (GAP-062)', async () => {
+    // 1. Register an agent that declares a preferred model and no approved list (archie's case)
     const regRes = await http_(cpPort, '/api/v1/registry/agents', 'POST', ADMIN, {
       id: 'sm-model-test',
       name: 'Model Test Agent',
       model: 'claude-3-5-sonnet',
       requestedModels: ['claude-3-5-sonnet', 'gemini-2.0-flash'],
-      approvedModels: ['claude-3-5-sonnet'],
     });
     assert.equal(regRes.status, 201);
     assert.equal(regRes.body.model, 'claude-3-5-sonnet');
-    assert.deepEqual(regRes.body.approvedModels, ['claude-3-5-sonnet']);
     assert.deepEqual(regRes.body.requestedModels, ['claude-3-5-sonnet', 'gemini-2.0-flash']);
     // E7 deny-by-default: registration grants no egress, whatever the cartridge requests
     assert.deepEqual(state.policies.get('sm-model-test').routes, []);
-    assert.equal(state.policies.get('sm-model-test').hosts, undefined);
+    assert.equal(state.policies.get('sm-model-test').models, undefined);
 
-    // 2. Attempt to switch to an unapproved model -> fails 400
-    const failSwitch = await http_(cpPort, '/api/v1/registry/agents/sm-model-test/model', 'POST', ADMIN, {
-      model: 'gemini-2.0-flash',
-    });
-    assert.equal(failSwitch.status, 400);
-    assert.equal(failSwitch.body.error, 'model_not_approved');
+    // 2. The policy grants one model: the one place models are chosen
+    const granted = await http_(cpPort, '/api/v1/agents/sm-model-test/policy', 'PUT', ADMIN, { routes: [], models: ['claude-3-5-sonnet'] });
+    assert.equal(granted.status, 200);
+    assert.deepEqual(state.policies.get('sm-model-test').models, ['claude-3-5-sonnet']);
 
-    // 3. Approve model (e.g. following Gym training results) -> succeeds
-    const approveRes = await http_(cpPort, '/api/v1/registry/agents/sm-model-test/models/approve', 'POST', ADMIN, {
-      model: 'gemini-2.0-flash',
-    });
-    assert.equal(approveRes.status, 200);
-    assert.ok(approveRes.body.approvedModels.includes('gemini-2.0-flash'));
+    // 3. Hot-swapping outside the policy is refused and changes nothing
+    for (const method of ['POST', 'PUT'] as const) {
+      const outside = await http_(cpPort, '/api/v1/registry/agents/sm-model-test/model', method, ADMIN, { model: 'gemini-2.0-flash' });
+      assert.equal(outside.status, 410);
+      assert.equal(outside.body.error, 'models_set_in_policy');
+    }
+    // ...and so is "switching" to a model the policy already grants: there is no second picker
+    const within = await http_(cpPort, '/api/v1/registry/agents/sm-model-test/model', 'POST', ADMIN, { model: 'claude-3-5-sonnet' });
+    assert.equal(within.status, 410);
 
-    // 4. Verify policy store was updated with approved model
-    const policy = state.policies.get('sm-model-test');
-    assert.ok(policy.models?.includes('gemini-2.0-flash'));
+    // 4. Approving a model outside the policy is refused; the policy is untouched
+    const approve = await http_(cpPort, '/api/v1/registry/agents/sm-model-test/models/approve', 'POST', ADMIN, { model: 'gemini-2.0-flash' });
+    assert.equal(approve.status, 410);
+    assert.match(approve.body.message, /PUT \/api\/v1\/agents\/sm-model-test\/policy/);
+    assert.deepEqual(state.policies.get('sm-model-test').models, ['claude-3-5-sonnet']);
 
-    // 5. Now switch active model to newly approved model -> succeeds
-    const successSwitch = await http_(cpPort, '/api/v1/registry/agents/sm-model-test/model', 'POST', ADMIN, {
-      model: 'gemini-2.0-flash',
-    });
-    assert.equal(successSwitch.status, 200);
-    assert.equal(successSwitch.body.activeModel, 'gemini-2.0-flash');
+    // 5. The declared preferred model is the agent's own and is not rewritten
+    const after = await http_(cpPort, '/api/v1/registry/agents/sm-model-test', 'GET', ADMIN);
+    assert.equal(after.body.model, 'claude-3-5-sonnet');
 
-    // 6. Confirm agent record has active model updated
-    const afterSwitch = await http_(cpPort, '/api/v1/registry/agents/sm-model-test', 'GET', ADMIN);
-    assert.equal(afterSwitch.body.model, 'gemini-2.0-flash');
+    // 6. Changing granted models goes through the policy, and that is ledgered
+    const regrant = await http_(cpPort, '/api/v1/agents/sm-model-test/policy', 'PUT', ADMIN, { routes: [], models: ['claude-3-5-sonnet', 'gemini-2.0-flash'] });
+    assert.equal(regrant.status, 200);
+    assert.deepEqual(state.policies.get('sm-model-test').models, ['claude-3-5-sonnet', 'gemini-2.0-flash']);
+    const actions = state.ledger.query().filter((e) => e.agentId === 'sm-model-test').map((e) => (e as { action?: string }).action);
+    assert.equal(actions.filter((a) => a === 'POLICY_UPDATED').length, 2);
+    assert.ok(!actions.includes('MODEL_APPROVED'));
+    assert.ok(!actions.includes('MODEL_SWITCHED'));
+  });
 
-    // 7. Verify ledger recorded MODEL_APPROVED and MODEL_SWITCHED
-    const ledgerEvents = state.ledger.query().filter((e) => e.agentId === 'sm-model-test');
-    const actions = ledgerEvents.map((e) => (e as { action?: string }).action);
-    assert.ok(actions.includes('MODEL_APPROVED'));
-    assert.ok(actions.includes('MODEL_SWITCHED'));
+  it('only an admin reaches the retired model endpoints', async () => {
+    const res = await http_(cpPort, '/api/v1/registry/agents/sm-model-test/models/approve', 'POST', OPERATOR, { model: 'x' });
+    assert.equal(res.status, 403);
   });
 
   it('re-registering an agent keeps the policy its owner set; only a first registration gets the default (GAP-048)', async () => {
