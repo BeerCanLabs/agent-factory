@@ -57,7 +57,11 @@ r="$(curl -sS -X POST -H 'x-factory-secret: e2e-echo-webhook' -H 'content-type: 
 run="$(wait_run "$(head -1 <<<"$r" | jq -r .runId)")"
 [ "$(jq -r .state <<<"$run")" = DONE ] || die "echo run: $run"
 [ "$(jq -c .result <<<"$run")" = '{"echo":{"hello":"compose"}}' ] || die "echo result: $(jq -c .result <<<"$run")"
-[ -z "$(docker ps -aq --filter label=factory.run="$(jq -r .runId <<<"$run")")" ] || die "run container not removed"
+# The run is DONE before its container is stopped and removed (finishRun), so allow cleanup a few seconds.
+gone=""; for _ in $(seq 1 15); do
+  [ -z "$(docker ps -aq --filter label=factory.run="$(jq -r .runId <<<"$run")")" ] && { gone=1; break; }; sleep 1
+done
+[ -n "$gone" ] || die "run container not removed within 15 s of DONE"
 ok "webhook -> 202 -> container -> input/result via run token -> DONE -> container removed"
 
 echo "== integration surfaces: WebSocket stream and event bus"
