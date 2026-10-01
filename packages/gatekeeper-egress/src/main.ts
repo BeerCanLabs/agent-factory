@@ -105,6 +105,7 @@ const server = createGatekeeperEgress({
   traces: traceConfigFromEnv(),
   meter: initTelemetry('factory-gatekeeper-egress', '0.1.0').meter,
   modelCatalog,
+  defaultModel: process.env.FACTORY_DEFAULT_MODEL || undefined,
 });
 
 const port = parseInt(process.env.PORT || '8081', 10);

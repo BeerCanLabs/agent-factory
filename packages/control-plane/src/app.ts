@@ -28,6 +28,8 @@ export type FactoryState = {
   agents: Map<string, AgentRecord>;
   /** Models the factory offers (§6.9 M3, FACTORY_MODEL_CATALOG), by neutral name. */
   modelCatalog?: Record<string, { provider: string; price?: { inputPerMTok: number; outputPerMTok: number } }>;
+  /** The model a policy that names none grants (M2; FACTORY_DEFAULT_MODEL, default claude-haiku-4-5). */
+  defaultModel?: string;
   registryDir?: string;
   ledger: LedgerStore;
   auth: AuthProvider;
@@ -1381,6 +1383,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     if (!(await authenticate(req, res, state, 'viewer'))) return;
     json(res, 200, {
       models: Object.entries(state.modelCatalog ?? {}).map(([name, m]) => ({ name, provider: m.provider, ...(m.price ? { price: m.price } : {}) })),
+      // M2: what an agent gets when its policy names no models.
+      default: state.defaultModel ?? 'claude-haiku-4-5',
     });
     return;
   }
