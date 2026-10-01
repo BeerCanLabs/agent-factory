@@ -17,8 +17,8 @@ id: discord-progress            # kebab-case, unique in the factory
 version: 1.0.0                  # semantic version; each version is registered and approved separately
 name: Discord progress
 description: Renders a run's progress events as one live status message in the channel that asked.
-language: node                  # e.g. node, python
-entry: src/index.ts             # a module or a path inside the skill folder
+language: python                # the factory checks python skills (section 4)
+entry: discord_progress/render.py  # a module or a path inside the skill folder
 requires:                       # all optional; each list defaults to empty
   routes: [discord]             # gatekeeper-egress route ids the skill calls
   connections:                  # Keymaster connections (provider plus scopes, §6.11 K1)
@@ -70,8 +70,9 @@ curl -X POST "$FACTORY_URL/api/v1/registry/skills" \
   }"
 ```
 
-Registration needs the `operator` role. A successful registration returns `201` with the version's record:
-`{ id, version, repo, path, commit, manifest, status: "pending", tests: "pending-build", registeredBy, registeredAt }`.
+Any authenticated user can register. A successful registration returns `201` with the version's record:
+`{ id, version, repo, path, commit, manifest, status: "pending", tests: "pending-build", checkRun, registeredBy,
+registeredAt }`. Registering also starts the factory's checks on the code (section 4).
 
 ### Admission checks
 
@@ -85,10 +86,105 @@ A registration is refused with `422 { "error": "skill_refused", "reasons": [...]
 
 The ledger records every refusal (`SKILL_REFUSED`), along with who made the request and the commit.
 
-Running the skill's own tests and building it happens in the factory's build step (TSK-054). Until that step runs for a
-version, its record says `tests: "pending-build"`.
+## 4. The factory's checks on your code
 
-## 4. Approval: every version, by an admin
+Like a pull request that merges only when its required checks pass, a version can be approved only after the factory
+has fetched it at its pinned commit, checked its code and run its tests (§6.14 SK1). The checks start when the version is
+registered. The version's record shows where they are:
+
+| Field | Meaning |
+|---|---|
+| `tests` | `pending-build` while the checks run, then `passed` or `failed` |
+| `checkRun` | the run in progress: `{ id, checker, startedAt, startedBy }` |
+| `checks.at`, `checks.run` | when the last run ended, and which run it was |
+| `checks.failures` | short reasons when it failed (a file and line, never a value) |
+
+### What is checked
+
+The checks run in the skill's folder at the pinned commit, on Python 3.11 or later:
+
+1. **The manifest.** `skill.yaml` at that commit must match the manifest you registered. Empty lists are the same as
+   absent ones.
+2. **No committed secrets (S1).** The patterns of the factory's own secret scan (`scripts/secret-scan.sh`): known token
+   formats, private keys, and secret-like names assigned long literal values. Every file counts, tests and docs included,
+   and a skill can't opt a line out. Build test credentials at test time instead of committing them.
+3. **No provider SDKs (E1, E5).** No import of `boto3`, `botocore`, `aiobotocore`, `anthropic`, `openai`, `xai`/`xai_sdk`,
+   `vertexai`, `google.cloud`, `google.genai`, `google.generativeai` or `google.ai.generativelanguage`, by `import`,
+   `from … import`, `__import__` or `importlib.import_module`. None of those as a dependency either, in
+   `requirements*.txt` or `pyproject.toml` (project, optional and dependency groups, and Poetry). A skill reaches a
+   provider through a gatekeeper-egress route, which meters model calls and injects credentials.
+4. **No hard-coded hosts (E1).** Code may not name an external host or URL (`https://discord.com/...`,
+   `api.openai.com`, a public IP address). Read the route's address from its `*_BASE_URL` environment variable, or
+   `FACTORY_URL` for the factory itself. Loopback, `.internal` names and `example.com` are fine. Docs (`*.md`, `*.rst`,
+   `*.txt`, `docs/`, `examples/`), docstrings and tests may hold example URLs, and so may package metadata
+   (`pyproject.toml`, `setup.cfg`).
+5. **It builds.** Every `.py` file parses, and the manifest's `entry` exists, either as a file or as a module.
+6. **Its tests pass.** For `python`, the factory installs `requirements.txt`, `requirements-dev.txt` and
+   `requirements-test.txt` if present, then runs `python -m unittest discover` in the skill's folder. If a pytest
+   configuration exists (`pytest.ini`, `conftest.py`, `[tool.pytest.ini_options]` in `pyproject.toml`, `[tool:pytest]`
+   in `setup.cfg` or `[pytest]` in `tox.ini`), it also runs `pytest`. Your tests run without the factory's cloud
+   credentials or source token.
+
+The only language checked so far is `python`. Any other language is refused until the factory can check it.
+
+### Making your tests discoverable
+
+`unittest discover` finds files named `test*.py` in importable folders, starting from the skill's folder:
+
+```
+skill.yaml
+discord_progress/__init__.py
+discord_progress/render.py
+tests/__init__.py          # required: makes tests/ importable
+tests/test_render.py       # class ...(unittest.TestCase)
+```
+
+Run `python3 -m unittest discover` in the skill's folder before you register. If it prints `Ran 0 tests`, the factory
+finds none either. Prefer the standard library. If you use pytest, add a pytest configuration so the factory runs it.
+
+### Failure messages
+
+| Failure | What to do |
+|---|---|
+| `manifest: skill.yaml at this commit does not match the registered manifest (version, requires.routes)` | Register the manifest that is committed at that commit, or commit the one you registered (as a new version). |
+| `manifest: no skill.yaml in the skill folder at this commit` | Check `path` and `commit`. |
+| `secrets: tools/client.py:12 looks like a hard-coded credential` | Remove it, rotate it, and declare the credential by name in `requires.credentials`. |
+| `provider SDK: skill/llm.py:3 imports anthropic` | Call the model through the gatekeeper-egress provider route and declare the model in `requires.models`. |
+| `provider SDK: requirements.txt:2 depends on boto3` | Remove the dependency and use a gatekeeper-egress route. |
+| `hosts: skill/post.py:8 hard-codes discord.com` | Read the base URL from `DISCORD_BASE_URL` (or the route's `*_BASE_URL`) and declare the route. |
+| `build: skill/x.py:4 does not parse as Python (...)`, `build: entry ... is not a file or module in the skill folder` | Fix the code or the manifest's `entry`. |
+| `build: pip could not install requirements.txt` | Pin installable versions. |
+| `tests: no tests found (unittest discovers test*.py files in importable folders)` | Add tests (see above). |
+| `tests: python -m unittest discover failed (FAILED (failures=1))`, `tests: pytest failed (...)` | Run them locally; the check log has the output. |
+| `language: node is not supported by the factory checks yet (supported: python)` | Only Python skills can be approved for now. |
+| `source: could not fetch the repository at the pinned commit` | The repository must be reachable by the factory's source token, and the commit must be pushed. |
+| `checks: the check run ended FAILED in INSTALL without a result: ...` | The check itself failed to run. Ask an admin to re-run it. |
+
+At most 20 reasons are recorded, in at most 1000 characters. The rest are counted (`... and 3 more`) and appear in the
+check log.
+
+### Where the checks run, and re-running them
+
+On AWS, each check is a build of the `factory-skill-checker` CodeBuild project (`landing-zones/aws/codebuild.tf`). Like
+agent admission, it clones the pinned commit with the factory's read-only source token, has no access to the factory's
+network, and reports its result when the build ends. The control plane follows the build in the background, as it does
+for admission builds, and resumes following it after a restart. `FACTORY_SKILL_CHECKER` selects the checker:
+`codebuild` (the default where admission uses CodeBuild), `local` (development: runs on the control plane's machine and
+needs `git` and `python3`), or `none` (the default elsewhere: versions stay `pending-build`).
+
+An admin can re-run the checks on a version that isn't approved, for example after a transient failure:
+
+```bash
+curl -X POST "$FACTORY_URL/api/v1/registry/skills/discord-progress/versions/1.0.0/checks" \
+  -H "Authorization: Bearer $FACTORY_ADMIN_TOKEN"
+```
+
+The response is `202` with the record back at `pending-build`. A newer run supersedes an older one, and only the newest
+run's outcome is recorded. Errors: `404` (unknown version), `409 already_approved` (an approved version's checks are
+settled), `501 checker_not_configured`, `502 start_failed`. Each run is ledgered (`SKILL_CHECKS_STARTED`, then
+`SKILL_CHECKS_PASSED` or `SKILL_CHECKS_FAILED` with a hash of the reasons).
+
+## 5. Approval: every version, by an admin
 
 A new version is `pending`. A factory admin reviews it (the commit, the code, the requirements) and approves or rejects
 it:
@@ -106,19 +202,19 @@ curl -X POST "$FACTORY_URL/api/v1/registry/skills/discord-progress/versions/1.1.
 Each decision is ledgered with the admin's identity (`SKILL_APPROVED`, `SKILL_REJECTED`). **Only approved versions can
 be adopted.** An approved earlier version doesn't make later versions approved: every version goes through approval.
 
-## 5. The catalog
+## 6. The catalog
 
 Any viewer can read the catalog:
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/v1/skills` | every skill: name, description, `latestApproved` (or `null`), its requirements, and each version with its status and pin |
+| `GET /api/v1/skills` | every skill: name, description, `latestApproved` (or `null`), its requirements, and each version with its status, pin and checks |
 | `GET /api/v1/skills/:id` | one skill, with every version's full record |
 | `GET /api/v1/skills/:id/versions/:version` | one version's record |
 
 `requires` in the catalog is the latest approved version's, or the newest registered version's if none is approved yet.
 
-## 6. Adoption is deployment configuration
+## 7. Adoption is deployment configuration
 
 An agent adopts a skill by configuration in the factory, not by a pull request or a code change (§6.14 SK3). The
 agent's configuration record lists each adopted skill pinned to an approved version. When the configuration is applied,
@@ -138,12 +234,11 @@ build on: approved, pinned versions.
 ## Revoking a version
 
 An admin can revoke an approved version (`POST /api/v1/registry/skills/:id/versions/:version/reject`). If any agent's
-deployed configuration uses that version, the factory refuses (`409 skill_in_use`) and lists those agents: redeploy
+configuration pins that version in its `skills` list (the factory reads its configuration store), the factory refuses (`409 skill_in_use`) and lists those agents: redeploy
 them without the skill first. An admin may override with `{"force": true}`, which revokes the version at once and
 pauses every agent using it until it is redeployed without it.
 
 ## Checks before approval
 
-Like a pull request that merges only when its required checks pass, a skill version can be approved only after the
-factory has built it, run its tests and checked its code: no secrets, no direct hosts, no provider SDKs. Until then
-approval returns `409 checks_pending`; if the checks fail it returns `409 checks_failed` with the reasons.
+Approval returns `409 checks_pending` while the checks run (or when no checker is configured), and `409 checks_failed`
+with the reasons when they failed. See section 4.
