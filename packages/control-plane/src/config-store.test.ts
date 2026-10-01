@@ -104,7 +104,7 @@ describe('filesystem configuration store', () => {
     try {
       const store = await VersionedConfigStore.open(new FileConfigBackend(dir));
       await assert.rejects(store.put(content({ agentId: '../escape' }), meta), /cannot name a configuration record/);
-      const failing = await VersionedConfigStore.open({ description: 'broken', loadAll: async () => [], write: async () => { throw new Error('disk full'); } });
+      const failing = await VersionedConfigStore.open({ description: 'broken', loadAll: async () => [], write: async () => { throw new Error('disk full'); }, remove: async () => undefined });
       await assert.rejects(failing.put(content(), meta), /disk full/);
       assert.equal(failing.current('ada'), undefined);
       await assert.rejects(failing.put(content(), meta), /disk full/, 'a failed write does not wedge the queue');
@@ -124,7 +124,7 @@ describe('S3 configuration store (AWS CLI, no SDK)', () => {
       if (i >= 0) bodies.push(readFileSync(args[i + 1], 'utf8'));
       return '';
     });
-    const store = await VersionedConfigStore.open({ description: backend.description, loadAll: async () => [], write: (r) => backend.write(r) });
+    const store = await VersionedConfigStore.open({ description: backend.description, loadAll: async () => [], write: (r) => backend.write(r), remove: (id, m) => backend.remove(id, m) });
     const { record } = await store.put(content(), meta);
 
     assert.equal(calls.length, 2);
@@ -176,7 +176,7 @@ describe('S3 configuration store (AWS CLI, no SDK)', () => {
       if (args.includes('--if-none-match')) throw new Error('PreconditionFailed');
       return '';
     });
-    const store = await VersionedConfigStore.open({ description: backend.description, loadAll: async () => [], write: (r) => backend.write(r) });
+    const store = await VersionedConfigStore.open({ description: backend.description, loadAll: async () => [], write: (r) => backend.write(r), remove: (id, m) => backend.remove(id, m) });
     await assert.rejects(store.put(content(), meta), /PreconditionFailed/);
     assert.equal(store.current('ada'), undefined);
   });
