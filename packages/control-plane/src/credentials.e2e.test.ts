@@ -379,4 +379,23 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     assert.equal((await item('GITHUB_TOKEN')).status, 'present');
     assert.ok(described.length > firstScan, 'a change triggers a fresh check');
   });
+
+  it('K5 a provider that can list is asked once per scan, never per secret (GAP-056)', async () => {
+    let listed = 0;
+    provider.present = async () => {
+      listed += 1;
+      return new Set([...values.entries()].filter(([, v]) => v).map(([k]) => k));
+    };
+    try {
+      await req('/api/v1/keymaster/agents/donna/credentials/GITHUB_TOKEN', { method: 'POST', token: ADMIN, body: { value: FAKE_GITHUB } });
+      described.length = 0;
+      await Promise.all([req('/api/v1/keymaster/outstanding', { token: ADMIN }), req('/api/v1/keymaster/outstanding', { token: ADMIN })]);
+      await req('/api/v1/keymaster/outstanding', { token: ADMIN });
+      assert.equal(listed, 1, 'one listing serves every agent and every view');
+      assert.equal(described.length, 0, 'no per-secret lookups');
+      assert.equal((await item('GITHUB_TOKEN')).status, 'present');
+    } finally {
+      delete provider.present;
+    }
+  });
 });
