@@ -79,6 +79,11 @@ export class PolicyStore {
     return this.policies.has(agentId);
   }
 
+  /** Every id with a policy set (including `__global__`). */
+  ids(): string[] {
+    return [...this.policies.keys()];
+  }
+
   set(agentId: string, policy: AgentPolicy): void {
     this.policies.set(agentId, policy);
     if (!this.dir) return;

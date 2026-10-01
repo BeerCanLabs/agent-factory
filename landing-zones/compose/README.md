@@ -14,4 +14,6 @@ Requires Docker Engine 26+ (volume subpaths). Fill `../docker-secrets.env` with 
 
 **Ledger anchor.** `FACTORY_LEDGER_WORM_URI=file:///data/worm` is a local anchor, not write-once. Point it at an Object Lock / immutable bucket for compliance.
 
+**Deployment configuration.** `FACTORY_CONFIG_STORE_URI=/data/config` keeps each agent's versioned configuration (source, adopted skills, policy; §6.14 SK3) on the `factory-data` volume as `<agentId>/<n>.json`. Back the volume up to restore it; the AWS landing zone uses a versioned S3 bucket instead.
+
 **Proof.** `../../scripts/compose-e2e.sh` stands the stack up with a mock provider (`docker-compose.e2e.yml`) and checks every claim end to end.
