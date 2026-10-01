@@ -138,7 +138,7 @@ describe('control plane + gatekeeper-egress, over HTTP', { concurrency: false },
 
   it('meters, attributes, and enforces a per-run budget end to end', async () => {
     // each call: 100k in * $3/M + 20k out * $15/M = $0.60
-    await http_(cpPort, '/api/v1/agents/echo-agent/policy', 'PUT', ADMIN, { routes: ['anthropic'], budgetUsd: { perRun: 1 } });
+    await http_(cpPort, '/api/v1/agents/echo-agent/policy', 'PUT', ADMIN, { routes: ['anthropic'], models: ['test-model'], budgetUsd: { perRun: 1 } });
     const { run, token } = await startRun();
 
     assert.equal((await llm(token)).status, 200);
@@ -154,12 +154,12 @@ describe('control plane + gatekeeper-egress, over HTTP', { concurrency: false },
     assert.equal(rows.length, 2);
     assert.ok(rows.every((e) => e.actor === 'run:echo-agent' && e.runId === run.runId && e.costUsd === 0.6));
 
-    await http_(cpPort, '/api/v1/agents/echo-agent/policy', 'PUT', ADMIN, { routes: ['anthropic'], budgetUsd: { perRun: 10 } });
+    await http_(cpPort, '/api/v1/agents/echo-agent/policy', 'PUT', ADMIN, { routes: ['anthropic'], models: ['test-model'], budgetUsd: { perRun: 10 } });
     assert.equal((await llm(token)).status, 200, 'raising the budget unblocks');
   });
 
   it('isolating the agent cuts its egress within one context fetch', async () => {
-    await http_(cpPort, '/api/v1/agents/echo-agent/policy', 'PUT', ADMIN, { routes: ['anthropic'] });
+    await http_(cpPort, '/api/v1/agents/echo-agent/policy', 'PUT', ADMIN, { routes: ['anthropic'], models: ['test-model'] });
     const { token } = await startRun();
     assert.equal((await llm(token)).status, 200);
     await http_(cpPort, '/api/v1/agents/echo-agent/isolate', 'POST', ADMIN);
