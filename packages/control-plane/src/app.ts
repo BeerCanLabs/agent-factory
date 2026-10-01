@@ -17,6 +17,7 @@ import { exceededWindow, spendDetail, validatePolicy, type ApprovalStore, type P
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
+import { changeReason, handleConfig, recordConfig, type ConfigStore } from './config-store.js';
 import { ScheduleStore, type ScheduledAction } from './schedules.js';
 import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 
@@ -43,6 +44,8 @@ export type FactoryState = {
   runTokens: RunTokens;
   callbacks: CallbackPolicy;
   policies: PolicyStore;
+  /** §6.14 SK3: every agent's versioned deployment configuration, held in memory and written through on change. */
+  configs?: ConfigStore;
   spend: SpendTracker;
   approvals: ApprovalStore;
   keymaster?: Keymaster;
@@ -849,6 +852,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
+  if (await handleConfig(state, req, res, path)) return;
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
     json(res, 200, {
@@ -1383,6 +1387,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     state.policies.set(agentId, checked.policy);
     state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'POLICY_UPDATED', actor: principal.actor });
+    await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, 'policy updated') });
     for (const run of state.runs.list({ agentId, active: true })) {
       if (run.state === 'BLOCKED_BUDGET_EXCEEDED' && !exceededWindow(checked.policy, state.spend.get(agentId, run.runId))) {
         unblockRun(state, run.runId, 'BLOCKED_BUDGET_EXCEEDED', principal.actor);
@@ -1654,6 +1659,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         console.warn(`[control-plane] failed to persist dynamic agent ${record.id}:`, err);
       }
     }
+    await recordConfig(state, record.id, { actor: principal.actor, reason: changeReason(req, state.configs?.current(record.id) ? 're-registered' : 'registered') });
     json(res, 201, record);
     return;
   }
@@ -1723,6 +1729,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       action: 'BUDGET_APPROVED',
       actor: principal.actor,
     });
+    await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, 'budget updated') });
     if (state.registryDir) {
       try {
         mkdirSync(state.registryDir, { recursive: true });
@@ -1892,6 +1899,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     agent.state = 'DEPLOYING';
     agent.admission = { commit, status: 'building', at: new Date().toISOString() };
     persistAgent(state, agent);
+    await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, `deploy of ${commit}`) });
     json(res, 202, agent);
 
     void (async () => {
@@ -2015,6 +2023,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       actor: principal.actor,
       model: targetModel,
     });
+    await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, `model ${targetModel} approved`) });
     if (state.registryDir) {
       try {
         mkdirSync(state.registryDir, { recursive: true });
