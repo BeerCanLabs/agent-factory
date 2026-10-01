@@ -144,6 +144,7 @@ const state: FactoryState = {
   agents: new Map(allAgents.map((a) => [a.id, a])),
   // §6.9 M3: the same catalog gatekeeper-egress serves, so the admin chooses from what is actually offered.
   modelCatalog: modelCatalogFromEnv(process.env.FACTORY_MODEL_CATALOG),
+  defaultModel: process.env.FACTORY_DEFAULT_MODEL || undefined,
   registryDir: REGISTRY_DIR,
   ledger,
   deployProvider,

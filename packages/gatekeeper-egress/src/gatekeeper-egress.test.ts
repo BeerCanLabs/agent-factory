@@ -99,7 +99,9 @@ describe('gatekeeper-egress', { concurrency: false }, () => {
     },
   ];
 
-  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['anthropic', 'openai', 'tools', 'discord', 'google-calendar', 'notion', 'notion-unbound'], ...p });
+  // Fixtures name the models they use: a policy without `models` grants only the factory default (M2).
+  const TEST_MODELS = ['test-claude', 'test-gpt', 'test-other', 'test-nousage', 'unpriced-model', 'claude-sonnet', 'claude-sonnet-4-5', 'claude-haiku-4-5'];
+  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['anthropic', 'openai', 'tools', 'discord', 'google-calendar', 'notion', 'notion-unbound'], models: TEST_MODELS, ...p });
   const settle = () => new Promise((r) => setTimeout(r, 20));
   const lastLlm = () => ledger.filter((e) => e.type === 'llm').at(-1);
 

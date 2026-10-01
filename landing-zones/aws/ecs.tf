@@ -80,6 +80,7 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_DEFAULT_POLICY", value = jsonencode({ routes = ["anthropic", "openai", "discord", "google-calendar", "google-oauth", "google-gmail", "google-drive"] }) },
         # §6.9 M3: the models gatekeeper-egress offers, so an admin sets an agent's models from what exists.
         { name = "FACTORY_MODEL_CATALOG", value = jsonencode({ for name, m in var.model_catalog : name => { for k, v in m : k => v if v != null } }) },
+        { name = "FACTORY_DEFAULT_MODEL", value = var.default_model },
         { name = "AWS_REGION", value = var.aws_region },
         { name = "AWS_DEFAULT_REGION", value = var.aws_region },
         { name = "FACTORY_ECS_TASKS", value = local.agent_task_map },
@@ -178,6 +179,7 @@ resource "aws_ecs_task_definition" "gatekeeper_egress" {
         { name = "FACTORY_GATEKEEPER_EGRESS_ROUTES", value = local.gatekeeper_egress_routes },
         { name = "FACTORY_PRICES", value = var.gatekeeper_egress_prices },
         { name = "FACTORY_MODEL_CATALOG", value = jsonencode({ for name, m in var.model_catalog : name => { for k, v in m : k => v if v != null } }) },
+        { name = "FACTORY_DEFAULT_MODEL", value = var.default_model },
         { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
         { name = "FACTORY_TRACE_DIR", value = "/tmp/traces" },
       ])

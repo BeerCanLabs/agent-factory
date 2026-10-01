@@ -11,15 +11,17 @@ import { factoryApi } from '../api/client.js';
 export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void }> = ({ agent, onOpenPolicy }) => {
   const [policy, setPolicy] = useState<AgentPolicy | null>(null);
   const [offered, setOffered] = useState<OfferedModel[]>([]);
+  const [factoryDefault, setFactoryDefault] = useState('claude-haiku-4-5');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setPolicy(null);
     setError(null);
-    Promise.all([factoryApi.getPolicy(agent.id), factoryApi.listModels()])
-      .then(([p, m]) => {
+    Promise.all([factoryApi.getPolicy(agent.id), factoryApi.modelCatalog()])
+      .then(([p, c]) => {
         setPolicy(p);
-        setOffered(m);
+        setOffered(c.models);
+        setFactoryDefault(c.default);
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [agent.id]);
@@ -27,7 +29,9 @@ export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void
   const preferred = agent.requestedModels?.[0] ?? agent.model;
   const alsoDeclared = (agent.requestedModels ?? []).filter((m) => m !== preferred);
   const offeredByName = new Map(offered.map((m) => [m.name, m]));
-  const granted = policy?.models;
+  // M2: a policy that names no models grants the factory default model, nothing more.
+  const usesDefault = Boolean(policy && !policy.models);
+  const granted = policy ? policy.models ?? [factoryDefault] : undefined;
 
   const card = 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-3 shadow-sm';
   const heading = 'text-sm font-bold text-slate-900 dark:text-white';
@@ -47,8 +51,12 @@ export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void
   );
 
   const runModel = (): { tone: 'ok' | 'warn'; text: React.ReactNode } => {
-    if (!granted) {
-      return { tone: 'warn', text: <>The policy names no models, so runs are not limited by model. Grant the models this agent may use.</> };
+    if (!granted) return { tone: 'warn', text: <>Loading…</> };
+    if (usesDefault && preferred !== factoryDefault) {
+      return {
+        tone: 'warn',
+        text: <>The policy names no models, so this agent gets the factory default, <span className="font-mono font-semibold">{factoryDefault}</span>; calls to its preferred model are refused. Grant models in Policy to change that.</>,
+      };
     }
     if (granted.length === 0) return { tone: 'warn', text: <>No models are granted, so every model call is refused.</> };
     if (preferred && granted.includes(preferred)) {
@@ -112,7 +120,7 @@ export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void
           <h4 className={heading}>Granted models</h4>
           <p className={hint}>From the agent's policy.</p>
           {!policy && !error && <p className={hint}>Loading policy…</p>}
-          {policy && !granted && <p className={hint}>The policy names no models.</p>}
+          {usesDefault && <p className={hint}>The policy names no models, so the factory default applies.</p>}
           {granted && granted.length === 0 && <p className={hint}>None.</p>}
           {granted?.map((m) => {
             const price = offeredByName.get(m)?.price;
