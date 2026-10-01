@@ -76,6 +76,16 @@ resource "aws_efs_file_system" "ledger" {
   tags      = { Name = "${local.name}-ledger" }
 }
 
+# §6.13 R1: everything only the factory holds (agent registrations, policies, approvals, schedules, runs) is backed up.
+# EFS automatic backups: daily, 35-day retention, in the account's default EFS backup vault, restorable to a new file
+# system or to a directory on this one.
+resource "aws_efs_backup_policy" "ledger" {
+  file_system_id = aws_efs_file_system.ledger.id
+  backup_policy {
+    status = "ENABLED"
+  }
+}
+
 resource "aws_efs_mount_target" "ledger" {
   count           = 2
   file_system_id  = aws_efs_file_system.ledger.id
