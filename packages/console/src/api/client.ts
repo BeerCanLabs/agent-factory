@@ -96,6 +96,12 @@ export const factoryApi = {
     return (await request<{ models: OfferedModel[] }>('/models')).models;
   },
 
+  // The offered models and the factory default an agent gets when its policy names none (M2).
+  async modelCatalog(): Promise<{ models: OfferedModel[]; default: string }> {
+    const r = await request<{ models: OfferedModel[]; default?: string }>('/models');
+    return { models: r.models, default: r.default ?? 'claude-haiku-4-5' };
+  },
+
   async setAgentBudget(id: string, spendLimitUsd: number, period: string = 'daily'): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>(`/registry/agents/${id}/budget`, {
       method: 'PUT',
