@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after, afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
@@ -647,6 +647,66 @@ describe('control plane', { concurrency: false }, () => {
       const names = exporter.getMetrics().flatMap((rm) => rm.scopeMetrics.flatMap((sm) => sm.metrics.map((m) => m.descriptor.name)));
       for (const n of ['factory.runs.finished', 'factory.run.duration', 'factory.runs.active']) assert.ok(names.includes(n), n);
       await provider.shutdown();
+    });
+  });
+
+  describe('P1 presence reports readiness', () => {
+    let ingress: http.Server;
+    let seen: Array<{ agentId: string; presence: string; auth?: string }>;
+    beforeEach(async () => {
+      seen = [];
+      ingress = http.createServer(async (req, res) => {
+        let body = '';
+        for await (const c of req) body += c;
+        seen.push({ ...(JSON.parse(body) as { agentId: string; presence: string }), auth: req.headers.authorization });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{}');
+      });
+      const ingressPort = await listen(ingress);
+      state.gatekeeperIngressUrl = `http://127.0.0.1:${ingressPort}`;
+      state.gatekeeperIngressToken = 'ingress-token';
+    });
+    afterEach(() => new Promise<void>((r) => { ingress.close(() => r()); ingress.closeAllConnections(); }));
+    const presences = () => seen.filter((s) => s.agentId === 'echo-agent').map((s) => s.presence);
+    const settle = async (want: string[]) => {
+      for (let i = 0; i < 100 && presences().length < want.length; i++) await sleep(5);
+      await sleep(20);
+      assert.deepEqual(presences(), want);
+    };
+
+    it('P1: a wake shows starting, not available; the first heartbeat makes the agent available, once', async () => {
+      const run = (await request(port, '/api/v1/agents/echo-agent/wake', { method: 'POST', token: TOKENS.operator, body: { input: { content: 'hi' } } }))
+        .json as RunBody;
+      assert.equal(state.runs.get(run.runId)?.state, 'WORKING', 'the task was started');
+      await settle(['starting']);
+      assert.equal(state.runs.get(run.runId)?.readyAt, undefined, 'a started task is not a ready agent');
+      assert.equal(seen[0].auth, 'Bearer ingress-token');
+
+      const beat = () => request(port, `/api/v1/runs/${run.runId}/heartbeat`, { method: 'POST', token: tokenFor(run.runId), body: {} });
+      assert.equal((await beat()).status, 200);
+      await settle(['starting', 'available']);
+      assert.ok(state.runs.get(run.runId)?.readyAt, 'readiness recorded on the run');
+      assert.ok(actions('echo-agent').some((e) => e.action === 'RUN_READY' && e.runId === run.runId && e.actor === 'run:echo-agent'));
+
+      await beat();
+      await settle(['starting', 'available']);
+
+      await request(port, `/api/v1/runs/${run.runId}/result`, { method: 'POST', token: tokenFor(run.runId), body: { status: 'succeeded' } });
+      await settle(['starting', 'available', 'offline']);
+    });
+
+    it('P1: a run that polls its mailbox before any heartbeat is ready', async () => {
+      const run = (await wake()).json as RunBody;
+      await settle(['starting']);
+      const polled = await request(port, `/api/v1/runs/${run.runId}/mailbox?timeout=0`, { token: tokenFor(run.runId) });
+      assert.equal(polled.status, 200);
+      await settle(['starting', 'available']);
+    });
+
+    it('P1: a run that fails before it is ready never shows available', async () => {
+      const run = (await wake()).json as RunBody;
+      await request(port, `/api/v1/runs/${run.runId}/result`, { method: 'POST', token: tokenFor(run.runId), body: { status: 'failed', error: 'boom' } });
+      await settle(['starting', 'offline']);
     });
   });
 

@@ -1,6 +1,11 @@
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 
-export type Presence = 'offline' | 'available';
+/**
+ * offline: asleep (Discord invisible). starting: a wake is in progress but the agent cannot take a turn yet
+ * (Discord idle). available: the agent's run is ready to take a turn (Discord online). Only the control plane's
+ * readiness signal (the run's first heartbeat or mailbox poll) makes an agent available.
+ */
+export type Presence = 'offline' | 'starting' | 'available';
 
 export type Conversation = {
   agentId: string;
@@ -53,10 +58,13 @@ export type DiscordSurface = {
 export type GatekeeperIngress = {
   status(): { discord: 'idle' | 'connected'; presence: Presence; agentId?: string };
   reconcile(surfaces: DiscordSurface[]): Promise<void>;
-  /** Inbound Discord activity: wake factory, mark available, hand off. */
+  /** Inbound Discord activity: wake a sleeping agent (presence `starting`), otherwise hand off to its run. */
   receive(msg: Conversation): Promise<void>;
   /** Control plane tells us the agent scaled to zero. Keep the socket. */
   onAgentIdle(agentId: string): Promise<void>;
+  /** Control plane tells us a run is starting for the agent; it cannot take a turn yet. */
+  onAgentStarting(agentId: string): Promise<void>;
+  /** Control plane tells us the agent's run is ready to take a turn. */
   onAgentWorking(agentId: string): Promise<void>;
 };
 
@@ -64,6 +72,7 @@ export function createGatekeeperIngress(opts: {
   discord?: DiscordClient;
   discordFactory?: () => DiscordClient;
   providers: SecretProvider[];
+  /** Rejects if the factory did not accept the wake, so presence falls back to offline. */
   wake: (agentId: string, msg?: unknown) => Promise<void>;
   handoff: (msg: Conversation) => Promise<void>;
 }): GatekeeperIngress {
@@ -144,17 +153,33 @@ export function createGatekeeperIngress(opts: {
     async receive(msg) {
       const state = agents.get(msg.agentId);
       if (!state || !state.discord.connected) return;
-      if (state.discord.presence === 'offline') {
-        await state.discord.setPresence('available');
-        await opts.wake(msg.agentId, msg);
-      } else {
+      if (state.discord.presence !== 'offline') {
+        // Starting or available: the agent has a run, so the message goes to it (its mailbox holds the message
+        // until the run polls). Waking again would queue a second run behind the one that is starting.
         await opts.handoff(msg);
+        return;
+      }
+      // A wake request is not readiness: show starting until the control plane reports the run ready.
+      await state.discord.setPresence('starting');
+      try {
+        await opts.wake(msg.agentId, msg);
+      } catch (err) {
+        console.error(`[gatekeeper-ingress] wake ${msg.agentId} failed: ${err instanceof Error ? err.message : String(err)}`);
+        // Re-read: the control plane may have moved presence on while the wake was in flight.
+        if ((state.discord.presence as Presence) === 'starting') await state.discord.setPresence('offline');
       }
     },
     async onAgentIdle(agentId) {
       const state = agents.get(agentId);
       if (!state || !state.discord.connected) return;
       await state.discord.setPresence('offline');
+    },
+    async onAgentStarting(agentId) {
+      const state = agents.get(agentId);
+      if (!state || !state.discord.connected) return;
+      // Never downgrade a ready agent: a late starting notice must not hide a run that already reported ready.
+      if (state.discord.presence === 'available') return;
+      await state.discord.setPresence('starting');
     },
     async onAgentWorking(agentId) {
       const state = agents.get(agentId);
