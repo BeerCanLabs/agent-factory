@@ -18,7 +18,8 @@ import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymas
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { changeReason, handleConfig, recordConfig, removeConfig, type ConfigStore } from './config-store.js';
-import { handleSkills } from './skills.js';
+import { handleSkills, resumeSkillChecks } from './skills.js';
+import type { SkillChecker } from './skill-checks.js';
 import { handleRunProgress } from './events.js';
 import { ScheduleStore, type ScheduledAction } from './schedules.js';
 import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
@@ -48,6 +49,11 @@ export type FactoryState = {
   policies: PolicyStore;
   /** §6.14 SK3: every agent's versioned deployment configuration, held in memory and written through on change. */
   configs?: ConfigStore;
+  /**
+   * §6.14 SK1: runs the factory's checks on a registered skill version's code. Unset: chosen from the environment
+   * (skill-checks.ts `skillCheckerFromEnv`); null: none.
+   */
+  skillChecker?: SkillChecker | null;
   spend: SpendTracker;
   approvals: ApprovalStore;
   keymaster?: Keymaster;
@@ -849,6 +855,8 @@ export function getKeymaster(state: FactoryState): Keymaster {
 import { UI_HTML } from './ui.js';
 
 export function createFactoryServer(state: FactoryState): http.Server {
+  // SK1: follow skill checks a previous control plane started and did not see end.
+  void resumeSkillChecks(state).catch((err) => console.warn('[control-plane] could not resume skill checks:', err));
   return http.createServer(async (req, res) => {
     try {
       await route(state, req, res);
