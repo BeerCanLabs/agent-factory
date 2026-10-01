@@ -21,6 +21,7 @@ import {
 import type { AgentRecord } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
 import { factoryApi } from '../api/client.js';
+import { PolicyEditor } from '../components/PolicyEditor.js';
 
 interface AgentWorkbenchProps {
   agent: AgentRecord;
@@ -36,7 +37,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
   onRefresh,
 }) => {
   const permissions = usePermissions();
-  const [activeTab, setActiveTab] = useState<'runtime' | 'terminal' | 'memory' | 'models' | 'lifecycle'>('runtime');
+  const [activeTab, setActiveTab] = useState<'runtime' | 'terminal' | 'memory' | 'models' | 'policy' | 'lifecycle'>('runtime');
   const [convoPrompt, setConvoPrompt] = useState('');
   const [isSendingConvo, setIsSendingConvo] = useState(false);
   const [selectedModel, setSelectedModel] = useState(agent.model);
@@ -234,6 +235,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
           { id: 'terminal', label: 'Live Mailbox & Terminal', icon: <Terminal className="w-3.5 h-3.5" /> },
           { id: 'memory', label: 'Memory & Persistence', icon: <Database className="w-3.5 h-3.5" /> },
           { id: 'models', label: 'Models & Scorecard', icon: <Layers className="w-3.5 h-3.5" /> },
+          { id: 'policy', label: 'Policy', icon: <Shield className="w-3.5 h-3.5" /> },
           { id: 'lifecycle', label: 'Lifecycle & Decommission', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
         ].map((tab) => (
           <button
@@ -462,6 +464,8 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
       )}
 
       {/* Tab 5: Lifecycle & Decommission */}
+      {activeTab === 'policy' && <PolicyEditor agent={agent} canEdit={permissions.canSetPolicy} />}
+
       {activeTab === 'lifecycle' && (
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-6 shadow-sm transition-colors">
           <div>

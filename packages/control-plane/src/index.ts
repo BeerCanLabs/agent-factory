@@ -118,8 +118,31 @@ if (deployProviderType === 'aws') {
   }
 }
 
+/** Model names, providers and prices from FACTORY_MODEL_CATALOG; unset or malformed means none offered. */
+function modelCatalogFromEnv(json: string | undefined): FactoryState['modelCatalog'] {
+  if (!json?.trim()) return {};
+  try {
+    const raw = JSON.parse(json) as Record<string, { provider?: unknown; price?: { inputPerMTok?: unknown; outputPerMTok?: unknown } }>;
+    const out: NonNullable<FactoryState['modelCatalog']> = {};
+    for (const [name, m] of Object.entries(raw ?? {})) {
+      if (!m || typeof m.provider !== 'string') continue;
+      const p = m.price;
+      out[name] = {
+        provider: m.provider,
+        ...(p && typeof p.inputPerMTok === 'number' && typeof p.outputPerMTok === 'number' ? { price: { inputPerMTok: p.inputPerMTok, outputPerMTok: p.outputPerMTok } } : {}),
+      };
+    }
+    return out;
+  } catch (err) {
+    console.warn('[control-plane] FACTORY_MODEL_CATALOG is not valid JSON; no models offered:', err);
+    return {};
+  }
+}
+
 const state: FactoryState = {
   agents: new Map(allAgents.map((a) => [a.id, a])),
+  // §6.9 M3: the same catalog gatekeeper-egress serves, so the admin chooses from what is actually offered.
+  modelCatalog: modelCatalogFromEnv(process.env.FACTORY_MODEL_CATALOG),
   registryDir: REGISTRY_DIR,
   ledger,
   deployProvider,

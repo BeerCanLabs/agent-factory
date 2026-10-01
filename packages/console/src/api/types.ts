@@ -29,7 +29,11 @@ export interface AgentRecord {
   isBuiltin?: boolean;
   budgetExempt?: boolean;
   model: string;
+  /** Models the agent's repo was built for, preferred first (M2). A request, not a grant. */
+  requestedModels?: string[];
   approvedModels?: string[];
+  /** Egress the agent's repo declares (E7 request, E8 ceiling). Not a grant. */
+  egress?: { routes: string[]; hosts: string[] };
   spendLimitUsd?: number;
   spendLimitMonthlyUsd?: number;
   currentSpendUsd?: number;
@@ -164,4 +168,21 @@ export interface AgentCredentials {
 export interface OutstandingCredentials {
   agents: Array<{ agentId: string; name: string } & CredentialSummary>;
   outstanding: number;
+}
+
+/** An agent's policy: what the company grants it (E7). Set only by an admin, in the factory. */
+export interface AgentPolicy {
+  routes: string[];
+  models?: string[];
+  hosts?: string[];
+  tools?: Record<string, unknown>;
+  budgetUsd?: { perRun?: number; perDay?: number; perMonth?: number };
+  tokensPerMinute?: number;
+}
+
+/** A model this factory offers (M3). */
+export interface OfferedModel {
+  name: string;
+  provider: string;
+  price?: { inputPerMTok: number; outputPerMTok: number };
 }
