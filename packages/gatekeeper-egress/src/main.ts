@@ -70,6 +70,13 @@ const control: ControlClient = {
       connectUrl: typeof body.connectUrl === 'string' ? body.connectUrl : undefined,
     };
   },
+  // Run progress (§6.5): best effort, batched by the emitter, one request in flight. Never touches the ledger
+  // circuit breaker: a lost progress batch is not a lost audit row.
+  async progress(events) {
+    const res = await call('POST', '/api/v1/gatekeeper-egress/progress', { events });
+    if (!res.ok) throw new Error(`control plane ${res.status}`);
+    await res.body?.cancel();
+  },
   async ledger(event) {
     try {
       const res = await call('POST', '/api/v1/ledger', event);
