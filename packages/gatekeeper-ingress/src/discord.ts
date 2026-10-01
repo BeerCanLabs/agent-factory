@@ -24,6 +24,8 @@ export function createDiscordClient(): DiscordClient {
   let currentPresence: Presence = 'offline';
   let agentName = 'your agent';
   const seenMessageIds = new Set<string>();
+  /** Discord shows starting as idle (yellow): a wake is in progress, the agent cannot take a turn yet. */
+  const discordStatus = (p: Presence) => (p === 'offline' ? 'invisible' : p === 'starting' ? 'idle' : 'online');
 
   function clearStandbySession(channelId: string) {
     const session = standbySessions.get(channelId);
@@ -57,7 +59,7 @@ export function createDiscordClient(): DiscordClient {
         }
       }
       client.user?.setPresence({
-        status: currentPresence === 'offline' ? 'invisible' : 'online',
+        status: discordStatus(currentPresence),
         activities: [],
       });
       return;
@@ -82,8 +84,9 @@ export function createDiscordClient(): DiscordClient {
 
       console.log(`[gatekeeper-ingress] Discord message received in channel ${message.channelId} from ${message.author.id}`);
 
-      // If the agent is currently offline (sleeping), start standby session with recurring typing and timers
-      if (currentPresence === 'offline' && !standbySessions.has(message.channelId)) {
+      // If the agent cannot take a turn yet (asleep or still starting), start a standby session with recurring
+      // typing and timers; the agent's first reply in the channel clears it.
+      if (currentPresence !== 'available' && !standbySessions.has(message.channelId)) {
         try {
           // 1. Immediately trigger typing indicator and repeat every 7s so it doesn't expire
           void message.channel.sendTyping().catch(() => {});
@@ -156,7 +159,7 @@ export function createDiscordClient(): DiscordClient {
 
   client.on(Events.ClientReady, () => {
     console.log(`[gatekeeper-ingress] Discord ready as ${client.user?.tag}`);
-    client.user?.setStatus(currentPresence === 'offline' ? 'invisible' : 'online');
+    client.user?.setStatus(discordStatus(currentPresence));
   });
 
   return {
@@ -176,7 +179,7 @@ export function createDiscordClient(): DiscordClient {
     async setPresence(status: Presence) {
       currentPresence = status;
       if (!client.isReady()) return;
-      client.user?.setStatus(status === 'offline' ? 'invisible' : 'online');
+      client.user?.setStatus(discordStatus(status));
       if (status === 'offline') {
         client.user?.setPresence({ activities: [] });
       }

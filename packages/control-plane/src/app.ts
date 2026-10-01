@@ -259,7 +259,7 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-async function notifyGatekeeperIngress(state: FactoryState, agentId: string, presence: 'offline' | 'available') {
+async function notifyGatekeeperIngress(state: FactoryState, agentId: string, presence: 'offline' | 'starting' | 'available') {
   if (!state.gatekeeperIngressUrl) return;
   try {
     const res = await fetch(`${state.gatekeeperIngressUrl.replace(/\/$/, '')}/api/v1/presence`, {
@@ -269,6 +269,7 @@ async function notifyGatekeeperIngress(state: FactoryState, agentId: string, pre
         ...(state.gatekeeperIngressToken ? { Authorization: `Bearer ${state.gatekeeperIngressToken}` } : {}),
       },
       body: JSON.stringify({ agentId, presence }),
+      signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) console.error(`[control-plane] gatekeeper-ingress presence ${res.status}`);
   } catch (err) {
@@ -458,6 +459,8 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
   // E7 deny-by-default: starting a run never changes the agent's policy; only admin actions do.
 
   let cur = state.runs.update(run.runId, { state: 'STARTING' });
+  // P1: a started task is not a ready agent. Presence shows starting now and available only on markRunReady.
+  await notifyGatekeeperIngress(state, agent.id, 'starting');
   const runToken = await state.runTokens.mint(run);
   const runEnv: Record<string, string> = {
     FACTORY_RUN_ID: run.runId,
@@ -482,8 +485,22 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
   agent.state = 'WORKING';
   record(state, cur, 'RUN_STARTED', run.actor);
   scheduleTimeout(state, cur);
-  await notifyGatekeeperIngress(state, agent.id, 'available');
   return cur;
+}
+
+/**
+ * P1 readiness: the run's first heartbeat or mailbox poll is the earliest signal from inside the container that the
+ * agent process is running and can take a turn (the shim heartbeats right after it spawns the worker; a
+ * conversational worker polls its mailbox for the next turn). Only then does presence go available.
+ */
+async function markRunReady(state: FactoryState, runId: string) {
+  // Synchronous up to the notification, so the run is marked ready before the caller answers; the notification
+  // itself never delays the run's heartbeat or mailbox reply.
+  const run = state.runs.get(runId);
+  if (!run || run.readyAt || run.state !== 'WORKING') return;
+  const ready = state.runs.update(runId, { readyAt: new Date().toISOString() });
+  record(state, ready, 'RUN_READY', `run:${run.agentId}`);
+  await notifyGatekeeperIngress(state, run.agentId, 'available');
 }
 
 export async function finishRun(
@@ -1027,6 +1044,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       const rssMb = typeof hb.rssMb === 'number' && Number.isFinite(hb.rssMb) ? hb.rssMb : undefined;
       state.runs.update(run.runId, { lastHeartbeatAt: new Date().toISOString(), ...(rssMb !== undefined ? { rssMb } : {}) });
       if (state.maxRssMb && rssMb !== undefined && rssMb > state.maxRssMb) await haltUnhealthy(state, run.runId, 'MEMORY_CEILING');
+      void markRunReady(state, run.runId);
       json(res, 200, { ok: true, state: state.runs.get(run.runId)?.state });
       return;
     }
@@ -1045,6 +1063,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     if (runSelf[2] === 'mailbox') {
+      void markRunReady(state, run.runId);
       // Polling is not activity: refreshing the timeout here let a looping agent keep itself alive forever.
       // Only a delivered conversation turn extends the idle window (see the conversation handler).
       if (!state.mailboxes) state.mailboxes = new Map();

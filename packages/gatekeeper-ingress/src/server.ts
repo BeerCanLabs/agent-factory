@@ -23,7 +23,7 @@ const door = createGatekeeperIngress({
       },
       body: msg ? JSON.stringify({ input: msg }) : undefined,
     });
-    if (!res.ok) console.error(`[gatekeeper-ingress] wake ${agentId} ${res.status}`);
+    if (!res.ok) throw new Error(`factory answered ${res.status}`);
   },
   handoff: async (msg) => {
     const res = await fetch(`${FACTORY_URL}/api/v1/agents/${encodeURIComponent(msg.agentId)}/conversation`, {
