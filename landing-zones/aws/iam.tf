@@ -133,6 +133,20 @@ resource "aws_iam_role_policy" "control_plane" {
         Resource = [aws_s3_bucket.ledger_worm.arn, "${aws_s3_bucket.ledger_worm.arn}/*"]
       },
       {
+        # §6.14 SK3: the configuration store reads every version on start (sync) and writes new versions. No delete:
+        # versions are immutable, and restore is an operator action on the versioned bucket.
+        Sid      = "ConfigStoreList"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.config.arn
+      },
+      {
+        Sid      = "ConfigStoreReadWrite"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject"]
+        Resource = "${aws_s3_bucket.config.arn}/*"
+      },
+      {
         Effect   = "Allow"
         Action   = ["elasticfilesystem:ClientMount", "elasticfilesystem:ClientWrite"]
         Resource = [aws_efs_file_system.ledger.arn, aws_efs_access_point.ledger.arn]
