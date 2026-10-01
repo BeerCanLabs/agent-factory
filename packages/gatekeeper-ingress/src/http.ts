@@ -28,6 +28,7 @@ export function createGatekeeperIngressHttp(door: GatekeeperIngress, presenceAut
         return;
       }
       if (payload.agentId && payload.presence === 'offline') await door.onAgentIdle(payload.agentId);
+      if (payload.agentId && payload.presence === 'starting') await door.onAgentStarting(payload.agentId);
       if (payload.agentId && payload.presence === 'available') await door.onAgentWorking(payload.agentId);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(door.status()));
