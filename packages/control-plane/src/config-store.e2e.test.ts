@@ -45,6 +45,7 @@ function counting(inner: ConfigBackend) {
     description: inner.description,
     loadAll: () => { calls.loadAll += 1; return inner.loadAll(); },
     write: (r) => { calls.write += 1; return inner.write(r); },
+    remove: (id, m) => inner.remove(id, m),
   };
   return { backend, calls };
 }
@@ -197,7 +198,7 @@ describe('SK3 deployment configuration store (TSK-052)', { concurrency: false },
     const failing = mkdtempSync(join(tmpdir(), 'cp-config-fail-'));
     const l = new MemoryLedger();
     const s = baseState(failing, l);
-    s.configs = await VersionedConfigStore.open({ description: 'broken', loadAll: async () => [], write: async () => { throw new Error('bucket unreachable'); } });
+    s.configs = await VersionedConfigStore.open({ description: 'broken', loadAll: async () => [], write: async () => { throw new Error('bucket unreachable'); }, remove: async () => undefined });
     const server = createFactoryServer(s);
     const p = await listen(server);
     try {
@@ -226,11 +227,15 @@ describe('SK3 migration on start (TSK-052)', () => {
       writeFileSync(join(policiesDir, 'donna.json'), JSON.stringify({ routes: ['discord'] }));
       writeFileSync(join(policiesDir, 'finley.json'), JSON.stringify({ routes: ['models'], budgetUsd: { perDay: 2 } }));
       writeFileSync(join(policiesDir, '__global__.json'), JSON.stringify({ routes: [], budgetUsd: { perDay: 1 } }));
+      // GAP-060: a policy whose id is not a known agent never becomes a configuration record.
+      writeFileSync(join(policiesDir, '6f1c2a9e-1b7d-4c55-9d0e-3a8b7c6d5e4f.json'), JSON.stringify({ budgetUsd: { perDay: 100 }, routes: [] }));
 
       const ledger = new MemoryLedger();
       const state = baseState(dir, ledger, new PolicyStore(policiesDir));
       const registry = loadDynamicRegistry(registryDir);
       for (const a of registry) state.agents.set(a.id, a);
+      // finley is a known agent (a baked cartridge) with a policy but no registry record.
+      state.agents.set('finley', { id: 'finley', name: 'Finley', role: 'Agent', state: 'SLEEPING', provider: 'local', artifact: '', requires: [], ungated: [], gated: [], triggers: [], dir: '/agents/finley' });
       const configDir = join(dir, 'config');
       state.configs = await VersionedConfigStore.open(new FileConfigBackend(configDir));
 
@@ -241,6 +246,7 @@ describe('SK3 migration on start (TSK-052)', () => {
       assert.deepEqual(state.configs.current('finley')?.source, {});
       assert.deepEqual(state.configs.current('finley')?.policy, { routes: ['models'], budgetUsd: { perDay: 2 } });
       assert.equal(state.configs.current('__global__'), undefined, 'the global default is not an agent');
+      assert.equal(state.configs.current('6f1c2a9e-1b7d-4c55-9d0e-3a8b7c6d5e4f'), undefined, 'an unknown id is never migrated');
       assert.equal(ledger.query().filter((e) => e.action === 'CONFIG_VERSIONED' && e.actor === 'migration').length, 2);
 
       // Idempotent, including across a restart.

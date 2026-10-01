@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import type { LedgerEvent } from '@beercanlabs/factory-ledger';
 
 export type ToolRule = { allow: string[] | '*'; requireApproval?: string[] };
@@ -16,6 +16,30 @@ export type AgentPolicy = {
 };
 
 const EMPTY: AgentPolicy = { routes: [] };
+
+/** The factory-wide default policy (`PUT /api/v1/policies/budget`). Not an agent; never archived. */
+export const GLOBAL_POLICY_ID = '__global__';
+
+/** Ids starting `__` are the factory's own (`__global__`), never an agent's, so they are never orphans. */
+export function isReservedPolicyId(id: string): boolean {
+  return id.startsWith('__');
+}
+
+/** A filesystem-safe UTC timestamp for archive folders: `2026-10-01T12-00-00-000Z`. */
+export function archiveStamp(now = new Date()): string {
+  return now.toISOString().replace(/[:.]/g, '-');
+}
+
+/** Moves a file, falling back to copy-then-unlink across filesystems. Never deletes without a copy. */
+function moveFile(from: string, to: string): void {
+  try {
+    renameSync(from, to);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+    copyFileSync(from, to);
+    unlinkSync(from);
+  }
+}
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === 'string' && x.length > 0);
@@ -82,6 +106,35 @@ export class PolicyStore {
   /** Every id with a policy set (including `__global__`). */
   ids(): string[] {
     return [...this.policies.keys()];
+  }
+
+  /**
+   * GAP-060: moves these ids' policy files to `<parent of the policy dir>/policies-orphaned/<timestamp>/` (moved, never
+   * deleted) and stops serving them. Reserved ids (`__global__`) and ids without a policy are skipped. Returns the ids
+   * archived and where; a file that cannot be moved stays where it is and keeps being served.
+   */
+  archive(ids: Iterable<string>, now = new Date()): { archived: string[]; to?: string } {
+    const archived: string[] = [];
+    let to: string | undefined;
+    for (const id of new Set(ids)) {
+      if (isReservedPolicyId(id) || !this.policies.has(id)) continue;
+      if (this.dir) {
+        const from = join(this.dir, `${id}.json`);
+        if (existsSync(from)) {
+          to ??= join(dirname(this.dir), 'policies-orphaned', archiveStamp(now));
+          try {
+            mkdirSync(to, { recursive: true });
+            moveFile(from, join(to, `${id}.json`));
+          } catch (err) {
+            console.error(`[control-plane] policy ${id} not archived: ${err instanceof Error ? err.message : String(err)}`);
+            continue;
+          }
+        }
+      }
+      this.policies.delete(id);
+      archived.push(id);
+    }
+    return { archived, ...(to && archived.length ? { to } : {}) };
   }
 
   set(agentId: string, policy: AgentPolicy): void {
