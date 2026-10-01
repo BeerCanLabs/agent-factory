@@ -112,6 +112,14 @@ resource "aws_iam_role_policy" "control_plane" {
         Resource = "${local.secret_arn}/*"
       },
       {
+        # K5.2: which credentials exist, in one metadata call per scan (names and version stages, never values), so
+        # checking outstanding credentials does not cost one call per secret (GAP-056). ListSecrets has no resource scope.
+        Sid      = "KeymasterListSecretNames"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:ListSecrets"]
+        Resource = "*"
+      },
+      {
         # The Keymaster (in the control plane) creates and writes gatekeeper-held keys (K5) but never reads them (S1).
         Sid      = "NeverReadProviderKeys"
         Effect   = "Deny"

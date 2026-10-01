@@ -87,6 +87,19 @@ describe('bindSecrets', () => {
     assert.deepEqual(asked, ['my-project/MY_GCP_SECRET', 'my-project/UNSET_SECRET']);
   });
 
+  it('lists which AWS secrets exist in one metadata call, never reading a value (GAP-056)', async () => {
+    const calls: string[][] = [];
+    const provider = awsSecretsManagerProvider('factory/prod/', async (args) => {
+      calls.push(args);
+      return JSON.stringify(['factory/prod/NOTION_API_KEY', 'factory/prod/connections/donna/google', 'factory/staging/OTHER']);
+    });
+    assert.deepEqual([...(await provider.present!())].sort(), ['NOTION_API_KEY', 'connections/donna/google']);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][1], 'list-secrets');
+    assert.deepEqual(calls[0].slice(2, 4), ['--filters', 'Key=name,Values=factory/prod/']);
+    assert.ok(!calls[0].some((a) => /get-secret-value|SecretString/.test(a)), 'metadata only');
+  });
+
   it('writes AWS secrets over stdin, creating the secret when it does not exist yet', async () => {
     const calls: Array<{ args: string[]; input?: string }> = [];
     const existing = new Set<string>();
