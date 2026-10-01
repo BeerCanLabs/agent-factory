@@ -1,0 +1,400 @@
+/**
+ * Skill registry (DESIGN_AUTHORITY.md §6.14 SK1, SK2).
+ *
+ * A skill is registered by naming a repository, a path inside it and a full commit, with its parsed `skill.yaml`.
+ * Admission pins the commit and checks the manifest (schema, a new version, the design rules); running the skill's
+ * tests and building it is the build step (TSK-054), recorded as `tests: 'pending-build'` until then. Every version is
+ * approved or rejected by a factory admin; only approved versions can be adopted (`approvedSkill`). Registration,
+ * refusals and decisions are ledgered.
+ *
+ *   POST /api/v1/registry/skills                                     operator: { repo, path, commit, manifest }
+ *   POST /api/v1/registry/skills/:id/versions/:version/approve       admin: { reason? }
+ *   POST /api/v1/registry/skills/:id/versions/:version/reject        admin: { reason? }
+ *   GET  /api/v1/skills                                              viewer: the catalog
+ *   GET  /api/v1/skills/:id                                          viewer: one skill and every version
+ *   GET  /api/v1/skills/:id/versions/:version                        viewer: one version's record
+ *
+ * Records live in `<data dir>/skills/<id>/<version>.json` (the control plane's backed-up volume, R1). They are read
+ * once, when the registry is first used, and served from memory: no request reads the disk or the network (GAP-056).
+ */
+import http from 'node:http';
+import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { payloadHash } from '@beercanlabs/factory-ledger';
+import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, type SkillManifest, type SkillRequires } from '@beercanlabs/factory-contract';
+import { authenticate, json, readJson, type FactoryState } from './app.js';
+import { FULL_SHA } from './runtime.js';
+import { checkRepoUrl } from './source.js';
+
+export type SkillStatus = 'pending' | 'approved' | 'rejected';
+
+export type SkillVersionRecord = {
+  id: string;
+  version: string;
+  repo: string;
+  /** The skill's folder inside the repository; `.` is the repository root. */
+  path: string;
+  commit: string;
+  manifest: SkillManifest;
+  status: SkillStatus;
+  /** The skill's own tests and build run in the build step (TSK-054); until then admission records the gap. */
+  tests: 'pending-build';
+  registeredBy: string;
+  registeredAt: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  reason?: string;
+};
+
+export type SkillSummary = {
+  id: string;
+  name: string;
+  description: string;
+  /** The highest approved version (semver precedence), or null when none is approved yet. */
+  latestApproved: string | null;
+  /** Requirements of the latest approved version, or of the newest registered version when none is approved. */
+  requires: SkillRequires;
+  versions: Array<Pick<SkillVersionRecord, 'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt'>>;
+};
+
+/** Semver precedence (semver.org §11): -1, 0 or 1. Build metadata is ignored. */
+export function compareSemver(a: string, b: string): number {
+  const parse = (v: string) => {
+    const [core, pre] = v.split('+')[0].split(/-(.*)/s);
+    return { nums: core.split('.').map(Number), pre: pre ? pre.split('.') : [] };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < 3; i++) if (x.nums[i] !== y.nums[i]) return x.nums[i] < y.nums[i] ? -1 : 1;
+  if (!x.pre.length || !y.pre.length) return x.pre.length === y.pre.length ? 0 : x.pre.length ? -1 : 1;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) < Number(q) ? -1 : 1;
+    if (pn !== qn) return pn ? -1 : 1;
+    return p < q ? -1 : 1;
+  }
+  return 0;
+}
+
+/** The registry: every version of every skill, in memory, written through to one JSON file per version. */
+export class SkillRegistry {
+  private readonly skills = new Map<string, Map<string, SkillVersionRecord>>();
+
+  constructor(private readonly dir?: string) {
+    if (!dir || !existsSync(dir)) return;
+    for (const id of readdirSync(dir)) {
+      if (!SKILL_ID.test(id)) continue;
+      let files: string[];
+      try {
+        files = readdirSync(join(dir, id));
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        if (!file.endsWith('.json')) continue;
+        try {
+          const rec = JSON.parse(readFileSync(join(dir, id, file), 'utf8')) as SkillVersionRecord;
+          if (rec.id !== id || `${rec.version}.json` !== file) throw new Error('record does not match its file name');
+          this.put(rec);
+        } catch (err) {
+          console.warn(`[control-plane] skipping unreadable skill record ${join(dir, id, file)}:`, err);
+        }
+      }
+    }
+  }
+
+  private put(rec: SkillVersionRecord): void {
+    const versions = this.skills.get(rec.id) ?? new Map<string, SkillVersionRecord>();
+    versions.set(rec.version, rec);
+    this.skills.set(rec.id, versions);
+  }
+
+  /** Persists first, then serves: a record the volume does not hold is never reported as registered. */
+  save(rec: SkillVersionRecord): void {
+    if (this.dir) {
+      const folder = join(this.dir, rec.id);
+      mkdirSync(folder, { recursive: true });
+      const path = join(folder, `${rec.version}.json`);
+      const tmp = `${path}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(rec, null, 2), 'utf8');
+      renameSync(tmp, path);
+    }
+    this.put(rec);
+  }
+
+  get(id: string, version: string): SkillVersionRecord | undefined {
+    const rec = this.skills.get(id)?.get(version);
+    return rec ? structuredClone(rec) : undefined;
+  }
+
+  ids(): string[] {
+    return [...this.skills.keys()].sort();
+  }
+
+  /** Every version of a skill, oldest to newest by semver precedence. */
+  versions(id: string): SkillVersionRecord[] {
+    return [...(this.skills.get(id)?.values() ?? [])].sort((a, b) => compareSemver(a.version, b.version)).map((r) => structuredClone(r));
+  }
+}
+
+const registries = new WeakMap<FactoryState, SkillRegistry>();
+
+/** The control plane's data directory, as `index.ts` derives it (the ledger's directory), plus `skills`. */
+function defaultSkillsDir(): string {
+  if (process.env.FACTORY_SKILLS_DIR) return process.env.FACTORY_SKILLS_DIR;
+  return join(dirname(process.env.FACTORY_LEDGER_PATH || join(process.cwd(), 'data', 'ledger.jsonl')), 'skills');
+}
+
+/** Opens the registry at `dir` (or the default data directory) and loads it into memory. Call once at start. */
+export function loadSkills(state: FactoryState, dir: string | undefined = defaultSkillsDir()): SkillRegistry {
+  const registry = new SkillRegistry(dir);
+  registries.set(state, registry);
+  return registry;
+}
+
+/** The loaded registry; loaded from the default data directory on first use if `loadSkills` was not called. */
+export function skillRegistry(state: FactoryState): SkillRegistry {
+  return registries.get(state) ?? loadSkills(state);
+}
+
+/** SK1: a version an agent may adopt. Only approved versions; anything else (unknown, pending, rejected) is undefined. */
+export function approvedSkill(state: FactoryState, id: string, version: string): SkillVersionRecord | undefined {
+  const rec = skillRegistry(state).get(id, version);
+  return rec?.status === 'approved' ? rec : undefined;
+}
+
+export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummary | undefined {
+  const versions = registry.versions(id);
+  if (!versions.length) return undefined;
+  const approved = versions.filter((v) => v.status === 'approved');
+  const latestApproved = approved.at(-1);
+  const shown = latestApproved ?? versions.at(-1)!;
+  return {
+    id,
+    name: shown.manifest.name,
+    description: shown.manifest.description,
+    latestApproved: latestApproved?.version ?? null,
+    requires: shown.manifest.requires,
+    versions: versions.map((v) => ({
+      version: v.version,
+      status: v.status,
+      repo: v.repo,
+      path: v.path,
+      commit: v.commit,
+      tests: v.tests,
+      registeredBy: v.registeredBy,
+      registeredAt: v.registeredAt,
+      ...(v.decidedBy ? { decidedBy: v.decidedBy, decidedAt: v.decidedAt } : {}),
+    })),
+  };
+}
+
+/** The skill's folder inside the repository: relative, normalized, never outside the repository. */
+function checkSkillPath(raw: unknown): string | undefined {
+  if (raw === undefined || raw === '' || raw === '.' || raw === './') return '.';
+  if (typeof raw !== 'string' || raw.length > 512) return undefined;
+  if (raw.startsWith('/') || raw.includes('\\') || /[\s\0]/.test(raw)) return undefined;
+  const parts = raw.replace(/^\.\//, '').replace(/\/+$/, '').split('/');
+  if (parts.some((p) => p === '' || p === '.' || p === '..')) return undefined;
+  return parts.join('/');
+}
+
+/** Ledger key for a skill version: the ledger is keyed by agent, so skills are `skill:<id>@<version>`. */
+function ledgerKey(id: unknown, version?: unknown): string {
+  const safeId = typeof id === 'string' && SKILL_ID.test(id) && id.length <= 64 ? id : '(invalid)';
+  const safeVersion = typeof version === 'string' && SEMVER.test(version) && version.length <= 64 ? `@${version}` : '';
+  return `skill:${safeId}${safeVersion}`;
+}
+
+async function register(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const principal = await authenticate(req, res, state, 'operator');
+  if (!principal) return;
+  const body = await readJson(req);
+  const registry = skillRegistry(state);
+  const reasons: string[] = [];
+
+  const repo = checkRepoUrl(body.repo);
+  if (!repo) reasons.push('repo: must be an https git URL without embedded credentials');
+  const commit = typeof body.commit === 'string' && FULL_SHA.test(body.commit) ? body.commit : undefined;
+  if (!commit) reasons.push('commit: must be a full 40-character lowercase git SHA (admission pins the commit, never a branch)');
+  const path = checkSkillPath(body.path);
+  if (!path) reasons.push('path: must be a relative folder inside the repository (no "..", no leading "/")');
+
+  const rawManifest = body.manifest;
+  const raw = rawManifest && typeof rawManifest === 'object' && !Array.isArray(rawManifest) ? (rawManifest as Record<string, unknown>) : undefined;
+  let manifest: SkillManifest | undefined;
+  if (!raw) {
+    reasons.push('manifest: the parsed skill.yaml is required');
+  } else {
+    const checked = validateSkillManifest(raw);
+    if (!checked.ok) {
+      for (const i of checked.issues) reasons.push(`manifest.${i.path}: ${i.message}`);
+    } else {
+      manifest = checked.manifest;
+      if (registry.get(manifest.id, manifest.version)) {
+        reasons.push(`version: ${manifest.id}@${manifest.version} is already registered; versions are immutable, register a new version`);
+      }
+      for (const i of skillDesignIssues(manifest, { gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets })) {
+        reasons.push(`manifest.${i.path}: ${i.message}`);
+      }
+    }
+  }
+
+  const now = new Date().toISOString();
+  if (reasons.length || !manifest || !repo || !commit || !path) {
+    state.ledger.append({
+      timestamp: now,
+      agentId: ledgerKey(raw?.id, raw?.version),
+      type: 'action',
+      action: 'SKILL_REFUSED',
+      actor: principal.actor,
+      ...(commit ? { commit } : {}),
+      payloadSha256: payloadHash(reasons),
+    });
+    json(res, 422, { error: 'skill_refused', reasons });
+    return;
+  }
+
+  const rec: SkillVersionRecord = {
+    id: manifest.id,
+    version: manifest.version,
+    repo,
+    path,
+    commit,
+    manifest,
+    status: 'pending',
+    tests: 'pending-build',
+    registeredBy: principal.actor,
+    registeredAt: now,
+  };
+  try {
+    registry.save(rec);
+  } catch (err) {
+    console.warn(`[control-plane] failed to persist skill ${rec.id}@${rec.version}:`, err);
+    json(res, 500, { error: 'persist_failed', message: 'the skill record could not be written; nothing was registered' });
+    return;
+  }
+  state.ledger.append({
+    timestamp: now,
+    agentId: ledgerKey(rec.id, rec.version),
+    type: 'action',
+    action: 'SKILL_REGISTERED',
+    actor: principal.actor,
+    commit,
+    payloadSha256: payloadHash(manifest),
+  });
+  json(res, 201, rec);
+}
+
+async function decide(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  id: string,
+  version: string,
+  decision: 'approve' | 'reject',
+): Promise<void> {
+  const principal = await authenticate(req, res, state, 'admin');
+  if (!principal) return;
+  const body = await readJson(req);
+  if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 2000)) {
+    json(res, 400, { error: 'invalid_reason', message: 'reason must be a string of at most 2000 characters' });
+    return;
+  }
+  const registry = skillRegistry(state);
+  const rec = registry.get(id, version);
+  if (!rec) {
+    json(res, 404, { error: 'not_found', id, version });
+    return;
+  }
+  const status: SkillStatus = decision === 'approve' ? 'approved' : 'rejected';
+  if (rec.status === status) {
+    json(res, 409, { error: `already_${status}`, id, version });
+    return;
+  }
+  const now = new Date().toISOString();
+  const next: SkillVersionRecord = { ...rec, status, decidedBy: principal.actor, decidedAt: now };
+  if (typeof body.reason === 'string' && body.reason.trim()) next.reason = body.reason.trim();
+  else delete next.reason;
+  try {
+    registry.save(next);
+  } catch (err) {
+    console.warn(`[control-plane] failed to persist skill decision ${id}@${version}:`, err);
+    json(res, 500, { error: 'persist_failed', message: 'the decision could not be written; nothing changed' });
+    return;
+  }
+  state.ledger.append({
+    timestamp: now,
+    agentId: ledgerKey(id, version),
+    type: 'action',
+    action: decision === 'approve' ? 'SKILL_APPROVED' : 'SKILL_REJECTED',
+    actor: principal.actor,
+    commit: rec.commit,
+    ...(next.reason ? { payloadSha256: payloadHash(next.reason) } : {}),
+  });
+  json(res, 200, next);
+}
+
+const DECISION = /^\/api\/v1\/registry\/skills\/([^/]+)\/versions\/([^/]+)\/(approve|reject)$/;
+const ONE_SKILL = /^\/api\/v1\/skills\/([^/]+)$/;
+const ONE_VERSION = /^\/api\/v1\/skills\/([^/]+)\/versions\/([^/]+)$/;
+
+function decode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return '';
+  }
+}
+
+/** Handles the skill registry and catalog routes. Returns false for any other path or method. */
+export async function handleSkills(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
+  if (path === '/api/v1/registry/skills' && req.method === 'POST') {
+    await register(state, req, res);
+    return true;
+  }
+
+  const decision = path.match(DECISION);
+  if (decision && req.method === 'POST') {
+    await decide(state, req, res, decode(decision[1]), decode(decision[2]), decision[3] as 'approve' | 'reject');
+    return true;
+  }
+
+  if (req.method !== 'GET') return false;
+
+  if (path === '/api/v1/skills') {
+    if (!(await authenticate(req, res, state, 'viewer'))) return true;
+    const registry = skillRegistry(state);
+    json(res, 200, registry.ids().map((id) => summarizeSkill(registry, id)).filter(Boolean));
+    return true;
+  }
+
+  const one = path.match(ONE_SKILL);
+  if (one) {
+    if (!(await authenticate(req, res, state, 'viewer'))) return true;
+    const registry = skillRegistry(state);
+    const id = decode(one[1]);
+    const summary = summarizeSkill(registry, id);
+    if (!summary) return json(res, 404, { error: 'not_found', id }), true;
+    json(res, 200, { ...summary, versions: registry.versions(id) });
+    return true;
+  }
+
+  const ver = path.match(ONE_VERSION);
+  if (ver) {
+    if (!(await authenticate(req, res, state, 'viewer'))) return true;
+    const [id, version] = [decode(ver[1]), decode(ver[2])];
+    const rec = skillRegistry(state).get(id, version);
+    if (!rec) return json(res, 404, { error: 'not_found', id, version }), true;
+    json(res, 200, rec);
+    return true;
+  }
+
+  return false;
+}
