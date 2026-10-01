@@ -21,14 +21,33 @@ import { consentUnavailable, getConnections } from './connections.js';
 const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
 const MAX_VALUE = 64 * 1024;
 const MIN_VALUE = 8;
-const SUMMARY_TTL_MS = 30_000;
+// Credential state changes only when someone supplies or rotates a credential, or a grant changes, and each of those
+// clears the cache (invalidateCredentials). Polling dashboards must not re-check the secret manager: every check is a
+// secret-manager call, and a fleet scan on each poll once starved the control plane of CPU so that live runs'
+// token refreshes timed out (GAP-056).
+const CREDENTIAL_TTL_MS = 10 * 60_000;
 
-// Outstanding counts for the fleet view, per agent, so the fleet does not re-check every secret on each refresh.
-const summaries = new WeakMap<FactoryState, Map<string, { at: number; summary: CredentialSummary }>>();
+// Outstanding counts for the fleet view, per agent.
+const summaries = new WeakMap<FactoryState, Map<string, { at: number; summary: Promise<CredentialSummary | undefined> }>>();
+// Whether a secret exists, by name: shared by every agent that declares it (most share the same platform keys).
+const presence = new WeakMap<FactoryState, Map<string, { at: number; present: Promise<boolean> }>>();
 
 /** Forget cached credential state (after a credential is set or a grant changes). Shared credentials affect every agent. */
 export function invalidateCredentials(state: FactoryState): void {
   summaries.delete(state);
+  presence.delete(state);
+}
+
+/** Cached presence check; concurrent callers share one lookup, and a failed lookup is not cached. */
+function cachedPresent(state: FactoryState, name: string): Promise<boolean> {
+  const cache = presence.get(state) ?? new Map<string, { at: number; present: Promise<boolean> }>();
+  presence.set(state, cache);
+  const hit = cache.get(name);
+  if (hit && Date.now() - hit.at < CREDENTIAL_TTL_MS) return hit.present;
+  const present = secretPresent(name, state.providers);
+  cache.set(name, { at: Date.now(), present });
+  present.catch(() => cache.delete(name));
+  return present;
 }
 
 const platformSubmitPath = (name: string) => `/api/v1/keymaster/platform/credentials/${encodeURIComponent(name)}`;
@@ -48,7 +67,7 @@ export async function agentCredentials(state: FactoryState, agentId: string): Pr
     secrets: declaredCredentials(agent),
     connections: agent.connections ?? [],
     gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets ?? new Set(),
-    present: (name) => secretPresent(name, state.providers),
+    present: (name) => cachedPresent(state, name),
     grant: async (provider) => (await km.listGrants(agentId, [provider]))[0],
     submitPath: (name) => `/api/v1/keymaster/agents/${enc}/credentials/${encodeURIComponent(name)}`,
     platformSubmitPath,
@@ -60,15 +79,20 @@ export async function agentCredentials(state: FactoryState, agentId: string): Pr
   });
   const cache = summaries.get(state) ?? new Map();
   summaries.set(state, cache);
-  cache.set(agentId, { at: Date.now(), summary: summarize(items) });
+  cache.set(agentId, { at: Date.now(), summary: Promise.resolve(summarize(items)) });
   return items;
 }
 
-async function summaryFor(state: FactoryState, agentId: string): Promise<CredentialSummary | undefined> {
-  const hit = summaries.get(state)?.get(agentId);
-  if (hit && Date.now() - hit.at < SUMMARY_TTL_MS) return hit.summary;
-  const items = await agentCredentials(state, agentId);
-  return items ? summarize(items) : undefined;
+function summaryFor(state: FactoryState, agentId: string): Promise<CredentialSummary | undefined> {
+  const cache = summaries.get(state) ?? new Map<string, { at: number; summary: Promise<CredentialSummary | undefined> }>();
+  summaries.set(state, cache);
+  const hit = cache.get(agentId);
+  if (hit && Date.now() - hit.at < CREDENTIAL_TTL_MS) return hit.summary;
+  // Concurrent fleet views share one assessment per agent.
+  const summary = agentCredentials(state, agentId).then((items) => (items ? summarize(items) : undefined));
+  cache.set(agentId, { at: Date.now(), summary });
+  summary.catch(() => cache.delete(agentId));
+  return summary;
 }
 
 /** Reads the request body without ever putting it in an error message. */
@@ -172,7 +196,7 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
     if (!(await authenticate(req, res, state, 'admin'))) return true;
     const items = await assessPlatformCredentials({
       gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets ?? new Set(),
-      present: (name) => secretPresent(name, state.providers),
+      present: (name) => cachedPresent(state, name),
       submitPath: platformSubmitPath,
     });
     noStore(res, 200, { summary: summarize(items), credentials: items });
