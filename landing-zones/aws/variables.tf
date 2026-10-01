@@ -171,6 +171,16 @@ variable "ledger_retention_days" {
   description = "COMPLIANCE-mode retention for ledger checkpoints. Cannot be shortened once objects are written."
 }
 
+variable "config_noncurrent_retention_days" {
+  type        = number
+  default     = 365
+  description = "§6.13 R1: how long the configuration bucket keeps superseded or deleted object versions for point-in-time restore."
+  validation {
+    condition     = var.config_noncurrent_retention_days >= 90
+    error_message = "Keep non-current configuration versions for at least 90 days."
+  }
+}
+
 variable "trace_prompts" {
   type    = bool
   default = false

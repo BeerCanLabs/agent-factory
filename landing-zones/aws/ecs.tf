@@ -89,6 +89,8 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_LEDGER_PATH", value = "/data/ledger.jsonl" },
         { name = "FACTORY_LEDGER_WORM_URI", value = "s3://${aws_s3_bucket.ledger_worm.bucket}/ledger" },
         { name = "FACTORY_LEDGER_RETENTION_DAYS", value = tostring(var.ledger_retention_days) },
+        # §6.14 SK3: versioned deployment configuration (source, skills, policy) per agent.
+        { name = "FACTORY_CONFIG_STORE_URI", value = "s3://${aws_s3_bucket.config.bucket}/config" },
         # LG2 recovery: empty except for the one deploy that archives a failed ledger (exact failing seq + reason).
         { name = "FACTORY_LEDGER_RECOVER_SEQ", value = var.ledger_recover_seq },
         { name = "FACTORY_LEDGER_RECOVER_REASON", value = var.ledger_recover_reason },
