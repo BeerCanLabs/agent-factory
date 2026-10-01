@@ -22,9 +22,9 @@ function call(port: number, path: string, method = 'GET', token?: string, body?:
   });
 }
 
-function serve(auth: ReturnType<typeof bearerAuth>) {
-  const door = createGatekeeperIngress({ discord: fakeDiscordClient(), providers: [envProvider({})], wake: async () => {}, handoff: async () => {} });
-  return createGatekeeperIngressHttp(door, auth);
+function serve(auth: ReturnType<typeof bearerAuth>, discord = fakeDiscordClient(), providers = [envProvider({})]) {
+  const door = createGatekeeperIngress({ discord, providers, wake: async () => {}, handoff: async () => {} });
+  return { server: createGatekeeperIngressHttp(door, auth), door };
 }
 
 async function listen(server: http.Server): Promise<number> {
@@ -38,7 +38,7 @@ describe('gatekeeper-ingress http', () => {
   let server: http.Server;
   let port = 0;
   before(async () => {
-    server = serve(bearerAuth([{ name: 'control-plane', token: 'presence-token', roles: ['operator'] }]));
+    server = serve(bearerAuth([{ name: 'control-plane', token: 'presence-token', roles: ['operator'] }])).server;
     port = await listen(server);
   });
   after(() => new Promise<void>((r) => server.close(() => r())));
@@ -55,12 +55,33 @@ describe('gatekeeper-ingress http', () => {
   });
 
   it('fails closed when no token is configured', async () => {
-    const open = serve(bearerAuth([]));
+    const open = serve(bearerAuth([])).server;
     const p = await listen(open);
     try {
       assert.equal(await call(p, '/api/v1/presence', 'POST', 'anything', { agentId: 'x', presence: 'offline' }), 401);
     } finally {
       await new Promise<void>((r) => open.close(() => r()));
+    }
+  });
+  it('P1: the control plane drives presence offline, starting and available', async () => {
+    const discord = fakeDiscordClient();
+    const { server: s, door } = serve(
+      bearerAuth([{ name: 'control-plane', token: 'presence-token', roles: ['operator'] }]),
+      discord,
+      [envProvider({ DISCORD_BOT_TOKEN: 'bot-token' })],
+    );
+    await door.reconcile([{ agentId: 'echo-agent', secretRef: 'DISCORD_BOT_TOKEN' }]);
+    const p = await listen(s);
+    try {
+      const set = (presence: string) => call(p, '/api/v1/presence', 'POST', 'presence-token', { agentId: 'echo-agent', presence });
+      assert.equal(await set('starting'), 200);
+      assert.equal(discord.presence, 'starting');
+      assert.equal(await set('available'), 200);
+      assert.equal(discord.presence, 'available');
+      assert.equal(await set('offline'), 200);
+      assert.equal(discord.presence, 'offline');
+    } finally {
+      await new Promise<void>((r) => s.close(() => r()));
     }
   });
 });
