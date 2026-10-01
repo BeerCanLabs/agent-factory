@@ -18,6 +18,11 @@
  *   GET /api/v1/agents/:id/config/history         every version, oldest first (viewer)
  *   GET /api/v1/agents/:id/config/versions/:n     one version (viewer)
  *   GET /api/v1/config/export                     every agent's full history (admin; ledgered)
+ *
+ * GAP-060: no configuration record exists for an agent that does not exist. On start, records for ids that are neither
+ * a known agent nor have a policy are removed (`pruneOrphans`), and migration never creates one for an unknown id.
+ * Removal is recoverable: on S3 it leaves delete markers in the versioned bucket (restorable for the non-current
+ * retention period, R1); on a directory it moves the agent's folder to `_removed/<timestamp>/`.
  */
 import http from 'node:http';
 import { execFile } from 'node:child_process';
@@ -27,7 +32,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { authenticate, json, type FactoryState } from './app.js';
-import type { AgentPolicy } from './policy.js';
+import { archiveStamp, isReservedPolicyId, type AgentPolicy } from './policy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -66,6 +71,8 @@ export interface ConfigStore {
   agentIds(): string[];
   /** Creates the next version unless the content is unchanged (then returns the current one, `created: false`). */
   put(content: ConfigContent, meta: { updatedBy: string; reason: string }): Promise<{ record: ConfigRecord; created: boolean }>;
+  /** Removes every version of the agent's record from the backend (recoverably). Undefined when it had none. */
+  remove(agentId: string, by: string, reason: string, now?: Date): Promise<ConfigRecord | undefined>;
   exportAll(): ConfigExport;
 }
 
@@ -75,6 +82,8 @@ export interface ConfigBackend {
   loadAll(): Promise<ConfigRecord[]>;
   /** Writes `<agentId>/<version>.json` (refusing to overwrite) and then the agent's current pointer. */
   write(record: ConfigRecord): Promise<void>;
+  /** Removes `<agentId>/` recoverably: delete markers in a versioned bucket, or a move to `_removed/<timestamp>/`. */
+  remove(agentId: string, meta: { removedBy: string; reason: string; now?: Date }): Promise<void>;
 }
 
 /** Keys sorted at every level, undefined dropped: the same content always yields the same bytes. */
@@ -166,6 +175,19 @@ export class FileConfigBackend implements ConfigBackend {
     writeFileSync(tmp, pointer(record));
     renameSync(tmp, current);
   }
+
+  /** Moves `<dir>/<agentId>` to `<dir>/_removed/<timestamp>/<agentId>` (never deleted) with a note of who and why. */
+  async remove(agentId: string, meta: { removedBy: string; reason: string; now?: Date }): Promise<void> {
+    checkAgentId(agentId);
+    const from = join(this.dir, agentId);
+    if (!existsSync(from)) return;
+    const now = meta.now ?? new Date();
+    const into = join(this.dir, '_removed', archiveStamp(now));
+    mkdirSync(into, { recursive: true });
+    const to = join(into, agentId);
+    renameSync(from, to);
+    writeFileSync(join(to, 'removed.json'), `${JSON.stringify({ agentId, removedAt: now.toISOString(), removedBy: meta.removedBy, reason: meta.reason })}\n`);
+  }
 }
 
 export type AwsCli = (args: string[]) => Promise<string>;
@@ -234,6 +256,15 @@ export class S3ConfigBackend implements ConfigBackend {
       rmSync(dir, { recursive: true, force: true });
     }
   }
+
+  /**
+   * `s3 rm --recursive` of the agent's prefix (with its trailing slash, so `ada/` never matches `adam/`). The bucket is
+   * versioned, so this only adds delete markers: every version stays restorable for the non-current retention period.
+   */
+  async remove(agentId: string, _meta?: { removedBy: string; reason: string; now?: Date }): Promise<void> {
+    checkAgentId(agentId);
+    await this.cli(['s3', 'rm', `s3://${this.bucket}/${this.prefix}${agentId}/`, '--recursive', '--only-show-errors']);
+  }
 }
 
 /** `FACTORY_CONFIG_STORE_URI`: `s3://bucket/prefix`, `file:///path` or a plain path. Unset: `fallbackDir`. */
@@ -290,6 +321,19 @@ export class VersionedConfigStore implements ConfigStore {
   put(content: ConfigContent, meta: { updatedBy: string; reason: string }): Promise<{ record: ConfigRecord; created: boolean }> {
     // One write at a time, so version numbers are assigned in order.
     const next = this.queue.then(() => this.write(content, meta));
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
+  remove(agentId: string, by: string, reason: string, now?: Date): Promise<ConfigRecord | undefined> {
+    const next = this.queue.then(async () => {
+      checkAgentId(agentId);
+      const latest = this.current(agentId);
+      if (!latest) return undefined;
+      await this.backend.remove(agentId, { removedBy: by, reason, ...(now ? { now } : {}) });
+      this.versions.delete(agentId);
+      return latest;
+    });
     this.queue = next.catch(() => undefined);
     return next;
   }
@@ -375,8 +419,28 @@ function ledgerVersion(state: FactoryState, record: ConfigRecord, actor: string)
 }
 
 /**
- * Migration on start: every agent with registry or policy state but no configuration record gets version 1 from
- * what exists (`updatedBy: 'migration'`). Agents that already have a record are untouched, so it is idempotent.
+ * GAP-060: removes the agent's configuration record and ledgers it (`CONFIG_REMOVED`: agent, the removed record's last
+ * hash; never the policy). Unlike `recordConfig` it raises, so a caller can report what was not removed.
+ */
+export async function removeConfig(state: FactoryState, agentId: string, change: { actor: string; reason: string; now?: Date }): Promise<ConfigRecord | undefined> {
+  const removed = await state.configs?.remove(agentId, change.actor, change.reason, change.now);
+  if (!removed) return undefined;
+  state.ledger.append({
+    timestamp: new Date().toISOString(),
+    agentId,
+    type: 'action',
+    action: 'CONFIG_REMOVED',
+    actor: change.actor,
+    requestId: `config:${agentId}:removed:v${removed.version}`,
+    payloadSha256: removed.hash,
+  });
+  return removed;
+}
+
+/**
+ * Migration on start: every known agent with registry or policy state but no configuration record gets version 1 from
+ * what exists (`updatedBy: 'migration'`). Agents that already have a record are untouched, so it is idempotent. An id
+ * that is not a known agent never gets a record (GAP-060).
  */
 export async function migrateConfigs(state: FactoryState, candidates: Iterable<string>): Promise<ConfigRecord[]> {
   const store = state.configs;
@@ -384,6 +448,10 @@ export async function migrateConfigs(state: FactoryState, candidates: Iterable<s
   const created: ConfigRecord[] = [];
   for (const agentId of new Set(candidates)) {
     if (agentId.startsWith('__') || store.current(agentId)) continue;
+    if (!state.agents.has(agentId)) {
+      console.warn(`[control-plane] configuration migration skipped ${JSON.stringify(agentId)}: not a known agent`);
+      continue;
+    }
     if (!AGENT_ID.test(agentId)) {
       console.warn(`[control-plane] configuration migration skipped ${JSON.stringify(agentId)}: not a valid record name`);
       continue;
@@ -392,6 +460,85 @@ export async function migrateConfigs(state: FactoryState, candidates: Iterable<s
     if (record) created.push(record);
   }
   return created;
+}
+
+/** Whether the agent registry was read in full: every `*.json` in it parsed and named an agent. */
+export type RegistryCheck = { ok: true; records: number } | { ok: false; reason: string };
+
+export function checkRegistry(dir: string): RegistryCheck {
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((n) => n.endsWith('.json'));
+  } catch (err) {
+    return { ok: false, reason: `registry ${dir} unreadable: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  for (const n of names) {
+    try {
+      const data = JSON.parse(readFileSync(join(dir, n), 'utf8')) as { id?: unknown };
+      if (!data || typeof data.id !== 'string' || !data.id) return { ok: false, reason: `registry record ${n} names no agent` };
+    } catch (err) {
+      return { ok: false, reason: `registry record ${n} unreadable: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+  return { ok: true, records: names.length };
+}
+
+/**
+ * Why pruning must not run, if it must not: an agent list that may be incomplete would make real agents look like
+ * orphans. Refused when the registry was not read in full, when the known set is empty, smaller than the built-ins or
+ * missing one of them, or when it holds nothing beyond the built-ins (an empty or unmounted registry).
+ */
+export function pruneRefusal(known: ReadonlySet<string>, builtinIds: readonly string[], registry: RegistryCheck): string | undefined {
+  if (!registry.ok) return registry.reason;
+  if (known.size === 0) return 'no agents are known';
+  if (known.size < builtinIds.length) return `only ${known.size} agents are known, fewer than the ${builtinIds.length} built-ins`;
+  const missing = builtinIds.filter((id) => !known.has(id));
+  if (missing.length) return `built-in agents missing from the known set: ${missing.join(', ')}`;
+  if (![...known].some((id) => !builtinIds.includes(id))) return 'no agents are known beyond the built-ins';
+  return undefined;
+}
+
+export type PruneResult = { refused?: string; archived: string[]; archivedTo?: string; removed: string[]; failed: string[] };
+
+/**
+ * GAP-060, on start: (1) policy files for ids that are not known agents (reserved ids such as `__global__` excepted)
+ * are moved to `policies-orphaned/<timestamp>/` and stop being served, one `POLICY_ORPHAN_ARCHIVED` row each; then
+ * (2) configuration records for ids that are neither known agents nor have a policy are removed, one `CONFIG_REMOVED`
+ * row each. Nothing is touched when `pruneRefusal` refuses. Idempotent: a second run finds nothing.
+ */
+export async function pruneOrphans(
+  state: FactoryState,
+  opts: { builtinIds: readonly string[]; registry: RegistryCheck; actor?: string; now?: Date },
+): Promise<PruneResult> {
+  const actor = opts.actor ?? 'system:orphan-prune';
+  const now = opts.now ?? new Date();
+  const known = new Set(state.agents.keys());
+  const refused = pruneRefusal(known, opts.builtinIds, opts.registry);
+  if (refused) {
+    console.warn(`[control-plane] orphan prune refused, nothing archived or removed: ${refused}`);
+    return { refused, archived: [], removed: [], failed: [] };
+  }
+  const orphans = state.policies.ids().filter((id) => !isReservedPolicyId(id) && !known.has(id));
+  const { archived, to } = state.policies.archive(orphans, now);
+  const failed = orphans.filter((id) => !archived.includes(id));
+  for (const agentId of archived) {
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'POLICY_ORPHAN_ARCHIVED', actor });
+  }
+  const removed: string[] = [];
+  for (const agentId of state.configs?.agentIds() ?? []) {
+    if (known.has(agentId) || state.policies.has(agentId)) continue;
+    try {
+      if (await removeConfig(state, agentId, { actor, reason: 'orphaned: not a known agent (GAP-060)', now })) removed.push(agentId);
+    } catch (err) {
+      failed.push(agentId);
+      console.error(`[control-plane] configuration for ${agentId} not removed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  console.log(
+    `[control-plane] orphan prune: ${archived.length} policies archived${to ? ` to ${to}` : ''}, ${removed.length} configuration records removed` +
+      (failed.length ? `, ${failed.length} failed (${failed.join(', ')})` : ''),
+  );
+  return { archived, ...(to ? { archivedTo: to } : {}), removed, failed };
 }
 
 /** Who changed it and why: the principal, and an optional `X-Change-Reason` header over the default. */

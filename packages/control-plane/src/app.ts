@@ -17,7 +17,7 @@ import { exceededWindow, spendDetail, validatePolicy, type ApprovalStore, type P
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
-import { changeReason, handleConfig, recordConfig, type ConfigStore } from './config-store.js';
+import { changeReason, handleConfig, recordConfig, removeConfig, type ConfigStore } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
 import type { SkillChecker } from './skill-checks.js';
 import { handleRunProgress } from './events.js';
@@ -1391,6 +1391,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     if (!principal) return;
     const agentId = policyMatch[1];
     const agent = state.agents.get(agentId);
+    // GAP-060: a policy exists only for a known agent. `__global__` is not an agent: it is set through
+    // PUT /api/v1/policies/budget, never here.
     if (!agent) {
       json(res, 404, { error: 'not_found' });
       return;
@@ -1719,6 +1721,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     if (!principal) return;
     const agentId = budgetMatch[1];
     const agent = state.agents.get(agentId);
+    // GAP-060: never a budget (a policy) for an id that is not a known agent.
     if (!agent) {
       json(res, 404, { error: 'not_found' });
       return;
@@ -1870,6 +1873,16 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       action: 'AGENT_PURGED',
       actor: principal.actor,
     });
+    // GAP-060: a purged agent leaves no policy or configuration record behind. Both are recoverable: the policy file is
+    // moved to policies-orphaned/, the configuration removal is versioned (R1).
+    for (const id of state.policies.archive([agentId]).archived) {
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'POLICY_ORPHAN_ARCHIVED', actor: principal.actor });
+    }
+    try {
+      await removeConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, 'agent purged') });
+    } catch (err) {
+      console.error(`[control-plane] configuration for ${agentId} not removed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     json(res, 200, { ok: true, id: agentId, action: 'purged' });
     return;
   }
