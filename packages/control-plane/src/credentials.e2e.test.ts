@@ -358,4 +358,25 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     const body = await creds('typed-agent');
     assert.deepEqual(body.credentials.map((c: { name: string; source?: string }) => [c.name, c.source]), [['SLACK_BOT_TOKEN', 'slack'], ['PLAIN_SECRET', undefined]]);
   });
+
+  it('K5 repeated dashboard polls do not re-check the secret manager; a change shows at once (GAP-056)', async () => {
+    const outstanding = () => req('/api/v1/keymaster/outstanding', { token: ADMIN });
+    await req('/api/v1/keymaster/agents/donna/credentials/GITHUB_TOKEN', { method: 'POST', token: ADMIN, body: { value: FAKE_GITHUB } });
+    described.length = 0;
+
+    // Concurrent fleet views share one check per secret, and later polls are served from the cache.
+    await Promise.all([outstanding(), outstanding(), outstanding()]);
+    const firstScan = described.length;
+    assert.ok(firstScan > 0, 'the first poll checks the secret manager');
+    assert.equal(new Set(described).size, firstScan, 'each secret is checked once, however many views ask');
+    await outstanding();
+    await outstanding();
+    assert.equal(described.length, firstScan, 'polling again does not touch the secret manager');
+
+    // Supplying a credential clears the cache: the next view is current.
+    values.delete('GITHUB_TOKEN');
+    await req('/api/v1/keymaster/agents/donna/credentials/GITHUB_TOKEN', { method: 'POST', token: ADMIN, body: { value: FAKE_GITHUB } });
+    assert.equal((await item('GITHUB_TOKEN')).status, 'present');
+    assert.ok(described.length > firstScan, 'a change triggers a fresh check');
+  });
 });
