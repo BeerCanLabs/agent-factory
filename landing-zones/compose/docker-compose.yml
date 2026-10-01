@@ -47,6 +47,7 @@ services:
       FACTORY_LEDGER_PATH: /data/ledger.jsonl
       # Local anchor only; not write-once. Production binds an Object Lock / immutable bucket.
       FACTORY_LEDGER_WORM_URI: file:///data/worm
+      FACTORY_CONFIG_STORE_URI: /data/config
       FACTORY_LEDGER_CHECKPOINT_SECONDS: 60
       FACTORY_EVENT_BUS: file:///data/events.ndjson
       FACTORY_RUNTIME: docker
