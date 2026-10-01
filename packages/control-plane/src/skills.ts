@@ -2,14 +2,16 @@
  * Skill registry (DESIGN_AUTHORITY.md §6.14 SK1, SK2).
  *
  * A skill is registered by naming a repository, a path inside it and a full commit, with its parsed `skill.yaml`.
- * Admission pins the commit and checks the manifest (schema, a new version, the design rules); running the skill's
- * tests and building it is the build step (TSK-054), recorded as `tests: 'pending-build'` until then. Every version is
- * approved or rejected by a factory admin; only approved versions can be adopted (`approvedSkill`). Registration,
- * refusals and decisions are ledgered.
+ * Admission pins the commit and checks the manifest (schema, a new version, the design rules). Registering a version
+ * starts the factory's checks on its code (skill-checks.ts, TSK-054): `tests: 'pending-build'` until they end, then
+ * `passed` or `failed` with short reasons. Every version is approved or rejected by a factory admin, and approval waits
+ * for the checks to pass; only approved versions can be adopted (`approvedSkill`). Registration, refusals, checks and
+ * decisions are ledgered.
  *
- *   POST /api/v1/registry/skills                                     operator: { repo, path, commit, manifest }
+ *   POST /api/v1/registry/skills                                     any user: { repo, path, commit, manifest }
+ *   POST /api/v1/registry/skills/:id/versions/:version/checks        admin: re-run the checks
  *   POST /api/v1/registry/skills/:id/versions/:version/approve       admin: { reason? }
- *   POST /api/v1/registry/skills/:id/versions/:version/reject        admin: { reason? }
+ *   POST /api/v1/registry/skills/:id/versions/:version/reject        admin: { reason?, force? }
  *   GET  /api/v1/skills                                              viewer: the catalog
  *   GET  /api/v1/skills/:id                                          viewer: one skill and every version
  *   GET  /api/v1/skills/:id/versions/:version                        viewer: one version's record
@@ -25,6 +27,7 @@ import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, type SkillM
 import { applyKillSwitch, authenticate, json, readJson, type FactoryState } from './app.js';
 import { FULL_SHA } from './runtime.js';
 import { checkRepoUrl } from './source.js';
+import { cleanFailure, skillCheckerFromEnv, type SkillChecker, type SkillCheckOutcome } from './skill-checks.js';
 
 export type SkillStatus = 'pending' | 'approved' | 'rejected';
 export type SkillChecks = 'pending-build' | 'passed' | 'failed';
@@ -44,7 +47,10 @@ export type SkillVersionRecord = {
    * can be approved only once they have passed, as a pull request merges only when its required checks are green.
    */
   tests: SkillChecks;
-  checks?: { at: string; failures?: string[] };
+  /** The last finished check: when it ended, its run, and its failures (absent when it passed). */
+  checks?: { at: string; run?: string; failures?: string[] };
+  /** The check in progress, while `tests` is `pending-build`. A newer run supersedes it (an admin re-run). */
+  checkRun?: { id: string; checker: string; startedAt: string; startedBy: string };
   registeredBy: string;
   registeredAt: string;
   decidedBy?: string;
@@ -60,7 +66,7 @@ export type SkillSummary = {
   latestApproved: string | null;
   /** Requirements of the latest approved version, or of the newest registered version when none is approved. */
   requires: SkillRequires;
-  versions: Array<Pick<SkillVersionRecord, 'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt'>>;
+  versions: Array<Pick<SkillVersionRecord, 'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt'>>;
 };
 
 /** Semver precedence (semver.org §11): -1, 0 or 1. Build metadata is ignored. */
@@ -194,6 +200,7 @@ export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummar
       path: v.path,
       commit: v.commit,
       tests: v.tests,
+      ...(v.checks ? { checks: v.checks } : {}),
       registeredBy: v.registeredBy,
       registeredAt: v.registeredAt,
       ...(v.decidedBy ? { decidedBy: v.decidedBy, decidedAt: v.decidedAt } : {}),
@@ -301,7 +308,9 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     commit,
     payloadSha256: payloadHash(manifest),
   });
-  json(res, 201, rec);
+  // SK1: registering a version starts the factory's checks on its code; approval waits for them.
+  const started = await startSkillChecks(state, rec.id, rec.version, principal.actor);
+  json(res, 201, started.record ?? rec);
 }
 
 async function decide(
@@ -388,16 +397,25 @@ async function decide(
  * SK1: record the outcome of the factory's checks on a version's code (build, tests, design rules). Called by the build
  * step (TSK-054). Ledgered as SKILL_CHECKS_PASSED or SKILL_CHECKS_FAILED; failures are short reasons, never code.
  */
-export function recordSkillChecks(state: FactoryState, id: string, version: string, outcome: { passed: boolean; failures?: string[] }): SkillVersionRecord | undefined {
+export function recordSkillChecks(
+  state: FactoryState,
+  id: string,
+  version: string,
+  outcome: { passed: boolean; failures?: string[]; run?: string },
+): SkillVersionRecord | undefined {
   const registry = skillRegistry(state);
   const rec = registry.get(id, version);
   if (!rec) return undefined;
+  // A run an admin has since superseded with a re-run reports nothing: only the latest run decides.
+  if (outcome.run !== undefined && rec.checkRun?.id !== outcome.run) return undefined;
   const at = new Date().toISOString();
+  const failures = (outcome.failures ?? []).map(cleanFailure).filter(Boolean).slice(0, 50);
   const next: SkillVersionRecord = {
     ...rec,
     tests: outcome.passed ? 'passed' : 'failed',
-    checks: { at, ...(outcome.passed || !outcome.failures?.length ? {} : { failures: outcome.failures.slice(0, 50) }) },
+    checks: { at, ...(outcome.run ? { run: outcome.run } : {}), ...(outcome.passed || !failures.length ? {} : { failures }) },
   };
+  delete next.checkRun;
   registry.save(next);
   state.ledger.append({
     timestamp: at,
@@ -406,23 +424,138 @@ export function recordSkillChecks(state: FactoryState, id: string, version: stri
     action: outcome.passed ? 'SKILL_CHECKS_PASSED' : 'SKILL_CHECKS_FAILED',
     actor: 'factory:admission',
     commit: rec.commit,
-    ...(outcome.failures?.length ? { payloadSha256: payloadHash(outcome.failures) } : {}),
+    ...(failures.length ? { payloadSha256: payloadHash(failures) } : {}),
   });
   return next;
 }
 
+const envCheckers = new WeakMap<FactoryState, Promise<SkillChecker | undefined>>();
+
+/** `state.skillChecker` when set (null: none), else the deployment's checker from the environment, chosen once. */
+async function checkerFor(state: FactoryState): Promise<SkillChecker | undefined> {
+  if (state.skillChecker !== undefined) return state.skillChecker ?? undefined;
+  let checker = envCheckers.get(state);
+  if (!checker) {
+    checker = skillCheckerFromEnv().catch((err) => {
+      console.warn('[control-plane] skill checker unavailable; skill checks are off:', err);
+      return undefined;
+    });
+    envCheckers.set(state, checker);
+  }
+  return checker;
+}
+
+/** Waits for a run in the background (the checker polls its build service, never an API request) and records it. */
+function watchSkillChecks(state: FactoryState, checker: SkillChecker, id: string, version: string, runId: string): void {
+  void checker
+    .result(runId)
+    .catch((err): SkillCheckOutcome => ({ passed: false, failures: [`checks: the check run could not be followed (${err instanceof Error ? err.message : String(err)})`] }))
+    .then((outcome) => recordSkillChecks(state, id, version, { ...outcome, run: runId }))
+    .catch((err) => console.warn(`[control-plane] failed to record skill checks for ${id}@${version}:`, err));
+}
+
+export type StartChecksResult = {
+  record?: SkillVersionRecord;
+  error?: 'not_found' | 'already_approved' | 'checker_not_configured' | 'start_failed';
+  message?: string;
+};
+
 /**
- * Which agents' deployed configuration uses a skill version (SK3, SK4). The deployment configuration and composed
- * admission (TSK-052, TSK-054) provide the answer; until they do, no agent can have adopted a skill.
+ * SK1: starts the factory's checks on a version's code (at registration, or an admin re-run). The version goes back to
+ * `pending-build` with the new run; its outcome is recorded by `recordSkillChecks` when the run ends. An approved
+ * version's checks are settled and are not re-run.
+ */
+export async function startSkillChecks(state: FactoryState, id: string, version: string, actor: string): Promise<StartChecksResult> {
+  const registry = skillRegistry(state);
+  const rec = registry.get(id, version);
+  if (!rec) return { error: 'not_found' };
+  if (rec.status === 'approved') return { record: rec, error: 'already_approved', message: 'an approved version has passed its checks; they are not re-run' };
+  const checker = await checkerFor(state);
+  if (!checker) {
+    return { record: rec, error: 'checker_not_configured', message: 'no skill checker is configured (FACTORY_SKILL_CHECKER); the version stays pending-build' };
+  }
+  let runId: string;
+  try {
+    runId = await checker.start({ id, version, repo: rec.repo, path: rec.path, commit: rec.commit, manifest: rec.manifest });
+  } catch (err) {
+    const message = `the check run could not be started: ${err instanceof Error ? err.message : String(err)}`;
+    console.warn(`[control-plane] skill checks for ${id}@${version}: ${message}`);
+    return { record: rec, error: 'start_failed', message };
+  }
+  const latest = registry.get(id, version) ?? rec;
+  if (latest.status === 'approved') return { record: latest, error: 'already_approved', message: 'the version was approved while its checks started' };
+  const startedAt = new Date().toISOString();
+  const next: SkillVersionRecord = { ...latest, tests: 'pending-build', checkRun: { id: runId, checker: checker.name, startedAt, startedBy: actor } };
+  delete next.checks;
+  registry.save(next);
+  state.ledger.append({
+    timestamp: startedAt,
+    agentId: ledgerKey(id, version),
+    type: 'action',
+    action: 'SKILL_CHECKS_STARTED',
+    actor,
+    commit: rec.commit,
+  });
+  watchSkillChecks(state, checker, id, version, runId);
+  return { record: next };
+}
+
+/**
+ * Follows the runs a previous control plane started and did not see end (a deploy or restart during a check). Runs of
+ * another checker, or none, stay pending until an admin re-runs them. Returns how many it follows.
+ */
+export async function resumeSkillChecks(state: FactoryState): Promise<number> {
+  const checker = await checkerFor(state);
+  if (!checker) return 0;
+  const registry = skillRegistry(state);
+  let n = 0;
+  for (const id of registry.ids()) {
+    for (const rec of registry.versions(id)) {
+      if (rec.tests !== 'pending-build' || rec.checkRun?.checker !== checker.name) continue;
+      watchSkillChecks(state, checker, id, rec.version, rec.checkRun.id);
+      n++;
+    }
+  }
+  return n;
+}
+
+async function rerunChecks(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, id: string, version: string): Promise<void> {
+  const principal = await authenticate(req, res, state, 'admin');
+  if (!principal) return;
+  const out = await startSkillChecks(state, id, version, principal.actor);
+  if (out.error === 'not_found') return json(res, 404, { error: 'not_found', id, version });
+  if (out.error === 'already_approved') return json(res, 409, { error: 'already_approved', id, version, message: out.message });
+  if (out.error === 'checker_not_configured') return json(res, 501, { error: 'checker_not_configured', id, version, message: out.message });
+  if (out.error === 'start_failed') return json(res, 502, { error: 'start_failed', id, version, message: out.message });
+  json(res, 202, out.record);
+}
+
+/**
+ * Which agents' deployed configuration uses a skill version (SK1 revocation, SK3, SK4). By default the configuration
+ * store answers (`configStoreSkillUsage`); `setSkillUsage` replaces it (tests, or a later source of deployed state).
  */
 const usage = new WeakMap<FactoryState, (id: string, version: string) => string[]>();
 export function setSkillUsage(state: FactoryState, fn: (id: string, version: string) => string[]): void {
   usage.set(state, fn);
 }
-function skillUsers(state: FactoryState, id: string, version: string): string[] {
-  return usage.get(state)?.(id, version) ?? [];
+
+/** SK3: an agent uses a skill version when its current configuration's `skills` list pins that version. */
+export function configStoreSkillUsage(state: FactoryState): (id: string, version: string) => string[] {
+  return (id, version) => {
+    const store = state.configs;
+    if (!store) return [];
+    return store
+      .agentIds()
+      .filter((agentId) => store.current(agentId)?.skills.some((s) => s.id === id && s.version === version))
+      .sort();
+  };
 }
 
+function skillUsers(state: FactoryState, id: string, version: string): string[] {
+  return (usage.get(state) ?? configStoreSkillUsage(state))(id, version);
+}
+
+const CHECKS = /^\/api\/v1\/registry\/skills\/([^/]+)\/versions\/([^/]+)\/checks$/;
 const DECISION = /^\/api\/v1\/registry\/skills\/([^/]+)\/versions\/([^/]+)\/(approve|reject)$/;
 const ONE_SKILL = /^\/api\/v1\/skills\/([^/]+)$/;
 const ONE_VERSION = /^\/api\/v1\/skills\/([^/]+)\/versions\/([^/]+)$/;
@@ -439,6 +572,12 @@ function decode(s: string): string {
 export async function handleSkills(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
   if (path === '/api/v1/registry/skills' && req.method === 'POST') {
     await register(state, req, res);
+    return true;
+  }
+
+  const checks = path.match(CHECKS);
+  if (checks && req.method === 'POST') {
+    await rerunChecks(state, req, res, decode(checks[1]), decode(checks[2]));
     return true;
   }
 
