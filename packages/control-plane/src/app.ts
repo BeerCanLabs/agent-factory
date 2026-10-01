@@ -20,7 +20,7 @@ import { handleCredentials } from './credentials.js';
 import { changeReason, handleConfig, recordConfig, type ConfigStore } from './config-store.js';
 import { handleSkills } from './skills.js';
 import { handleRunProgress } from './events.js';
-import { ScheduleStore, type ScheduledAction } from './schedules.js';
+import { handleSchedules, type ScheduleStore } from './schedules.js';
 import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 
 export type FactoryState = {
@@ -235,23 +235,6 @@ export async function authenticate(
     return null;
   }
   return result.principal;
-}
-
-/** Schedules: a live run token (the agent acts for itself) or a verified principal who can at least view. */
-async function authenticateOperatorOrRun(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  state: FactoryState,
-): Promise<{ actor: string; agentId?: string } | null> {
-  const runPayload = await state.runTokens.verify(bearerOf(req));
-  if (runPayload) {
-    return {
-      actor: `run:${runPayload.agentId}:${runPayload.runId}`,
-      agentId: runPayload.agentId,
-    };
-  }
-  const principal = await authenticate(req, res, state, 'viewer');
-  return principal ? { actor: principal.actor } : null;
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -874,6 +857,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (await handleConfig(state, req, res, path)) return;
   if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills')) && (await handleSkills(state, req, res, path))) return;
   if (await handleRunProgress(state, req, res, path)) return;
+  if (path.startsWith('/api/v1/schedules') && (await handleSchedules(state, req, res, path))) return;
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
     json(res, 200, {
@@ -1227,60 +1211,6 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       content: payload,
     });
     json(res, 202, { ok: true });
-    return;
-  }
-
-  // Schedules: dynamic scheduled actions
-  if (path === '/api/v1/schedules' && req.method === 'GET') {
-    const caller = await authenticateOperatorOrRun(req, res, state);
-    if (!caller) return;
-    const url = new URL(req.url ?? '/', 'http://factory.local');
-    const agentFilter = url.searchParams.get('agent') || undefined;
-    json(res, 200, { schedules: state.schedules?.list(agentFilter ? { agentId: agentFilter } : undefined) ?? [] });
-    return;
-  }
-
-  if (path === '/api/v1/schedules' && req.method === 'POST') {
-    const caller = await authenticateOperatorOrRun(req, res, state);
-    if (!caller) return;
-    const body = await readJson(req);
-    const agentId = (body.agentId as string) || caller.agentId;
-    if (!agentId || !state.agents.has(agentId)) {
-      json(res, 400, { error: 'invalid_or_missing_agent' });
-      return;
-    }
-    if (!body.cron || typeof body.cron !== 'string') {
-      json(res, 400, { error: 'missing_cron' });
-      return;
-    }
-    if (!body.prompt || typeof body.prompt !== 'string') {
-      json(res, 400, { error: 'missing_prompt' });
-      return;
-    }
-
-    const schedule: ScheduledAction = {
-      id: (body.id as string) || `sched-${randomUUID()}`,
-      agentId,
-      name: (body.name as string) || `Scheduled action for ${agentId}`,
-      cron: (body.cron as string).trim(),
-      timezone: (body.timezone as string) || 'America/Los_Angeles',
-      channelId: (body.channelId as string) || (body.channel_id as string),
-      prompt: body.prompt as string,
-      enabled: body.enabled !== false,
-      createdAt: new Date().toISOString(),
-    };
-
-    state.schedules?.save(schedule);
-    json(res, 200, { ok: true, schedule });
-    return;
-  }
-
-  const schedDelete = path.match(/^\/api\/v1\/schedules\/([^/]+)$/);
-  if (schedDelete && req.method === 'DELETE') {
-    const caller = await authenticateOperatorOrRun(req, res, state);
-    if (!caller) return;
-    const deleted = state.schedules?.delete(schedDelete[1]);
-    json(res, 200, { ok: true, deleted: Boolean(deleted) });
     return;
   }
 
