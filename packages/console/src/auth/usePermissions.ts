@@ -13,6 +13,7 @@ export function usePermissions() {
     canApproveTool: hasRole('approver'),
     canDeploy: hasRole('admin'),
     canSetBudget: hasRole('admin'),
+    canSetPolicy: hasRole('admin'),
     canQuarantine: hasRole('admin'),
     canRetire: hasRole('admin'),
     canPurge: hasRole('admin'),

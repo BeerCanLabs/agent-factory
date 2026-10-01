@@ -78,6 +78,8 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_ECS_SECURITY_GROUPS", value = aws_security_group.agents.id },
         { name = "FACTORY_ECS_ASSIGN_PUBLIC_IP", value = "false" },
         { name = "FACTORY_DEFAULT_POLICY", value = jsonencode({ routes = ["anthropic", "openai", "discord", "google-calendar", "google-oauth", "google-gmail", "google-drive"] }) },
+        # §6.9 M3: the models gatekeeper-egress offers, so an admin sets an agent's models from what exists.
+        { name = "FACTORY_MODEL_CATALOG", value = jsonencode({ for name, m in var.model_catalog : name => { for k, v in m : k => v if v != null } }) },
         { name = "AWS_REGION", value = var.aws_region },
         { name = "AWS_DEFAULT_REGION", value = var.aws_region },
         { name = "FACTORY_ECS_TASKS", value = local.agent_task_map },
