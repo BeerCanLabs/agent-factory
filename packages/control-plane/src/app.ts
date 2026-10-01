@@ -2021,103 +2021,17 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
-  // Model Governance: Approve candidate model for production use
-  const approveModelMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/models\/approve$/);
-  if (approveModelMatch && req.method === 'POST') {
+  // GAP-062 (M2, E7): one place chooses an agent's models, its policy (`PUT /api/v1/agents/:id/policy`, the
+  // console's Policy tab). The old approve and hot-swap endpoints granted models outside that editor and rewrote
+  // the agent's declared preferred model, which no run reads. They are gone; a caller is told where to go instead.
+  const retiredModelMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/(model|models\/approve)$/);
+  if (retiredModelMatch && (req.method === 'POST' || req.method === 'PUT')) {
     const principal = await authenticate(req, res, state, 'admin');
     if (!principal) return;
-    const agentId = approveModelMatch[1];
-    const agent = state.agents.get(agentId);
-    if (!agent) {
-      json(res, 404, { error: 'not_found' });
-      return;
-    }
-    const b = await readJson(req);
-    if (typeof b.model !== 'string' || !b.model.trim()) {
-      json(res, 400, { error: 'model_required', message: 'A model identifier string is required' });
-      return;
-    }
-    const targetModel = b.model.trim();
-    if (!agent.approvedModels) {
-      agent.approvedModels = [agent.model || 'gemini-2.0-flash'];
-    }
-    if (!agent.approvedModels.includes(targetModel)) {
-      agent.approvedModels.push(targetModel);
-    }
-    // Synchronize into egress policy so the gatekeeper-egress immediately permits it
-    const currentPolicy = state.policies.get(agentId);
-    const mergedModels = Array.from(new Set([...(currentPolicy.models || []), targetModel]));
-    state.policies.set(agentId, {
-      ...currentPolicy,
-      models: mergedModels,
+    json(res, 410, {
+      error: 'models_set_in_policy',
+      message: `An agent's models are granted only in its policy: PUT /api/v1/agents/${retiredModelMatch[1]}/policy with "models".`,
     });
-    state.ledger.append({
-      timestamp: new Date().toISOString(),
-      agentId,
-      type: 'action',
-      action: 'MODEL_APPROVED',
-      actor: principal.actor,
-      model: targetModel,
-    });
-    await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, `model ${targetModel} approved`) });
-    if (state.registryDir) {
-      try {
-        mkdirSync(state.registryDir, { recursive: true });
-        writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
-      } catch (err) {
-        console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
-      }
-    }
-    json(res, 200, { success: true, agent, approvedModels: agent.approvedModels });
-    return;
-  }
-
-  // Model Governance: Switch active production model (strictly guarded by approvedModels)
-  const switchModelMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/model$/);
-  if (switchModelMatch && (req.method === 'POST' || req.method === 'PUT')) {
-    const principal = await authenticate(req, res, state, 'admin');
-    if (!principal) return;
-    const agentId = switchModelMatch[1];
-    const agent = state.agents.get(agentId);
-    if (!agent) {
-      json(res, 404, { error: 'not_found' });
-      return;
-    }
-    const b = await readJson(req);
-    if (typeof b.model !== 'string' || !b.model.trim()) {
-      json(res, 400, { error: 'model_required', message: 'A model identifier string is required' });
-      return;
-    }
-    const targetModel = b.model.trim();
-    const approved = agent.approvedModels && agent.approvedModels.length > 0
-      ? agent.approvedModels
-      : [agent.model || 'gemini-2.0-flash'];
-    if (!approved.includes(targetModel)) {
-      json(res, 400, {
-        error: 'model_not_approved',
-        message: `Model "${targetModel}" has not been approved for this agent. Approve it first via training validation.`,
-        approvedModels: approved,
-      });
-      return;
-    }
-    agent.model = targetModel;
-    state.ledger.append({
-      timestamp: new Date().toISOString(),
-      agentId,
-      type: 'action',
-      action: 'MODEL_SWITCHED',
-      actor: principal.actor,
-      activeModel: targetModel,
-    });
-    if (state.registryDir) {
-      try {
-        mkdirSync(state.registryDir, { recursive: true });
-        writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
-      } catch (err) {
-        console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
-      }
-    }
-    json(res, 200, { success: true, agent, activeModel: targetModel });
     return;
   }
   // --- END REGISTRY SERVICE ---

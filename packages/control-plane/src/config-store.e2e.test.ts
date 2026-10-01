@@ -176,11 +176,12 @@ describe('SK3 deployment configuration store (TSK-052)', { concurrency: false },
     assert.equal(ledger.query().filter((e) => e.action === 'CONFIG_EXPORTED' && e.actor === 'token:admin').length, 1);
   });
 
-  it('budget, model approval and policy edits are versioned too', async () => {
+  it('budget and policy edits (including granted models) are versioned too', async () => {
     await call(port, '/api/v1/registry/agents/bob/budget', 'PUT', ADMIN, { spendLimitUsd: 3 });
-    await call(port, '/api/v1/registry/agents/bob/models/approve', 'POST', ADMIN, { model: 'claude-haiku-4-5' });
+    const current = (await call(port, '/api/v1/agents/bob/policy', 'GET', ADMIN)).body;
+    await call(port, '/api/v1/agents/bob/policy', 'PUT', ADMIN, { ...current, models: ['claude-haiku-4-5'] });
     const hist = state.configs!.history('bob');
-    assert.deepEqual(hist.map((r) => r.reason), ['registered', 'budget updated', 'model claude-haiku-4-5 approved']);
+    assert.deepEqual(hist.map((r) => r.reason), ['registered', 'budget updated', 'policy updated']);
     assert.deepEqual(hist[2].policy?.models, ['claude-haiku-4-5']);
   });
 
