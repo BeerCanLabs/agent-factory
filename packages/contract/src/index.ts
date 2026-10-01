@@ -43,3 +43,13 @@ export type {
 export { validateCartridge } from './validate.js';
 export type { ValidationIssue, ValidationResult } from './validate.js';
 
+export {
+  SEMVER,
+  SKILL_ID,
+  skillManifestSchema,
+  skillRequiresSchema,
+  skillCredentialSchema,
+  validateSkillManifest,
+  skillDesignIssues,
+} from './skill.js';
+export type { SkillManifest, SkillRequires, SkillCredential, SkillIssue, SkillValidation, SkillDesignOptions } from './skill.js';
