@@ -19,6 +19,7 @@ import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { changeReason, handleConfig, recordConfig, type ConfigStore } from './config-store.js';
 import { handleSkills } from './skills.js';
+import { handleRunProgress } from './events.js';
 import { ScheduleStore, type ScheduledAction } from './schedules.js';
 import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 
@@ -872,6 +873,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleConfig(state, req, res, path)) return;
   if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills')) && (await handleSkills(state, req, res, path))) return;
+  if (await handleRunProgress(state, req, res, path)) return;
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
     json(res, 200, {

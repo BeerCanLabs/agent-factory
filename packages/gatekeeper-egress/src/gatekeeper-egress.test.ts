@@ -5,6 +5,8 @@ import net from 'node:net';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { createGatekeeperEgress, type Approval, type ControlClient, type Policy, type RunContext } from './gatekeeper-egress.js';
+import { ModelUpstreamError } from './models.js';
+import { ProgressEmitter, type ProgressEvent } from './progress.js';
 
 const REAL_KEY = 'sk-real-provider-key-0000';
 const NOTION_KEY = 'fake-notion-integration-key-0000';
@@ -461,5 +463,251 @@ describe('gatekeeper-egress', { concurrency: false }, () => {
       assert.equal(res[1].error.code, -32001);
       assert.equal(seen.length, 0);
     });
+  });
+});
+
+describe('§6.5 run progress: gatekeeper-egress reports each call it handles for a run', { concurrency: false }, () => {
+  const BOT_CREDENTIAL = 'progress-bot-credential-value';
+  const CONN_TOKEN = 'progress-connection-access-value';
+  let upstream: http.Server;
+  let upPort = 0;
+  let gk: http.Server;
+  let port = 0;
+  let ctx: RunContext;
+  let token = '';
+  let runSeq = 0;
+  let upstreamDelayMs = 0;
+  let modelBehaviour: 'ok' | 'timeout' = 'ok';
+  /** What the control plane receives; `sinkMode` makes it slow or failing. */
+  const delivered: ProgressEvent[] = [];
+  let sinkMode: 'ok' | 'fail' | 'hang' = 'ok';
+  let sinkCalls = 0;
+
+  const control: ControlClient = {
+    async runContext(runId) {
+      return runId === ctx.run.runId ? structuredClone(ctx) : null;
+    },
+    async requestApproval() {
+      return { approvalId: 'a', state: 'pending' };
+    },
+    async consumeApproval() {
+      return false;
+    },
+    async ledger() {},
+    async connectionToken() {
+      return { ok: true, accessToken: CONN_TOKEN, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+    },
+    async progress(events) {
+      sinkCalls++;
+      if (sinkMode === 'fail') throw new Error('control plane 503');
+      if (sinkMode === 'hang') return new Promise<void>(() => {});
+      delivered.push(...events);
+    },
+  };
+
+  const settle = (ms = 80) => new Promise((r) => setTimeout(r, ms));
+  const eventsFor = (route: string) => delivered.filter((e) => e.runId === ctx.run.runId && e.route === route);
+
+  before(async () => {
+    upstream = http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () =>
+        setTimeout(() => {
+          res.writeHead(req.url?.startsWith('/gmail/missing') ? 404 : 200, { 'content-type': 'application/json' });
+          res.end('{"ok":true}');
+        }, upstreamDelayMs),
+      );
+    });
+    upPort = await listen(upstream);
+    gk = createGatekeeperEgress({
+      routes: [
+        { id: 'discord', kind: 'http', upstream: `http://127.0.0.1:${upPort}/discord`, credential: { secret: 'DISCORD_BOT_TOKEN', header: 'authorization', format: 'Bot {}' } },
+        { id: 'google-gmail', kind: 'http', upstream: `http://127.0.0.1:${upPort}/gmail`, connection: 'google' },
+        { id: 'models', kind: 'models' },
+      ],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: [{ name: 'test', async get(name) { return name === 'DISCORD_BOT_TOKEN' ? BOT_CREDENTIAL : undefined; } }],
+      contextTtlMs: 0,
+      modelCatalog: { 'claude-sonnet': { provider: 'fake', id: 'fake-sonnet', price: { inputPerMTok: 3, outputPerMTok: 15 } } },
+      modelAdapters: {
+        fake: {
+          async complete() {
+            if (modelBehaviour === 'timeout') throw new ModelUpstreamError(502, 'upstream_unreachable', 'The operation was aborted due to timeout');
+            return { content: 'hello', finishReason: 'stop', usage: { input: 10, output: 5 } };
+          },
+        },
+      },
+      progress: { flushMs: 20 },
+    });
+    port = await listen(gk);
+  });
+
+  after(async () => {
+    await new Promise<void>((r) => gk.close(() => r()));
+    await new Promise<void>((r) => upstream.close(() => r()));
+  });
+
+  beforeEach(async () => {
+    delivered.length = 0;
+    sinkMode = 'ok';
+    sinkCalls = 0;
+    upstreamDelayMs = 0;
+    modelBehaviour = 'ok';
+    const runId = `progress-run-${++runSeq}`;
+    ctx = {
+      run: { runId, agentId: 'donna', state: 'WORKING', live: true },
+      agentState: 'WORKING',
+      policy: { routes: ['discord', 'google-gmail', 'models'], models: ['claude-sonnet'] },
+      spend: { run: 0, day: 0, month: 0 },
+    };
+    token = await tokens.mint({ runId, agentId: 'donna' });
+  });
+
+  it('§6.5 a proxied call emits call.start then call.end with route, status, duration and outcome', async () => {
+    upstreamDelayMs = 30;
+    const r = await call(port, '/google-gmail/gmail/v1/users/me/messages?q=from%3Astephanie', { token, method: 'GET' });
+    assert.equal(r.status, 200);
+    await settle();
+    const evs = eventsFor('google-gmail');
+    assert.deepEqual(evs.map((e) => e.kind), ['call.start', 'call.end']);
+    const [start, end] = evs;
+    assert.equal(start.callId, end.callId);
+    assert.equal(start.agentId, 'donna');
+    assert.ok(!Number.isNaN(Date.parse(start.at)));
+    assert.equal(end.status, 200);
+    assert.equal(end.outcome, 'ok');
+    assert.ok(typeof end.durationMs === 'number' && end.durationMs >= 25, `durationMs ${end.durationMs}`);
+  });
+
+  it('§6.5 the models route reports the model on start and end', async () => {
+    const r = await call(port, '/models/v1/chat/completions', { token, body: { model: 'claude-sonnet', messages: [{ role: 'user', content: 'private prompt text' }] } });
+    assert.equal(r.status, 200);
+    await settle();
+    const evs = eventsFor('models');
+    assert.deepEqual(evs.map((e) => [e.kind, e.model]), [['call.start', 'claude-sonnet'], ['call.end', 'claude-sonnet']]);
+    assert.equal(evs[1].outcome, 'ok');
+  });
+
+  it('E3 S1 progress events carry only metadata: no bodies, query strings, headers or secrets', async () => {
+    await call(port, '/discord/channels/1/messages?token=abc', { token, body: { content: 'private message body' } });
+    await call(port, '/google-gmail/gmail/v1/users/me/messages?q=secret-query', { token, method: 'GET' });
+    await call(port, '/models/v1/chat/completions', { token, body: { model: 'claude-sonnet', messages: [{ role: 'user', content: 'private prompt text' }] } });
+    await settle();
+    assert.ok(delivered.length >= 6);
+    const allowed = new Set(['runId', 'agentId', 'at', 'kind', 'callId', 'route', 'model', 'status', 'durationMs', 'outcome']);
+    for (const e of delivered) for (const k of Object.keys(e)) assert.ok(allowed.has(k), `unexpected field ${k}`);
+    const wire = JSON.stringify(delivered);
+    for (const leak of [BOT_CREDENTIAL, CONN_TOKEN, token, 'private message body', 'private prompt text', 'secret-query', '?', '/channels', 'authorization']) {
+      assert.ok(!wire.includes(leak), `progress leaked ${leak}`);
+    }
+  });
+
+  it('§6.5 a denied call reports outcome denied', async () => {
+    ctx.policy = { routes: ['discord'], models: [] };
+    assert.equal((await call(port, '/google-gmail/gmail/v1/users/me/messages', { token, method: 'GET' })).status, 403);
+    assert.equal((await call(port, '/discord/x', { token, body: {} })).status, 200);
+    ctx.policy = { routes: ['models'], models: ['other-model'] };
+    assert.equal((await call(port, '/models/v1/chat/completions', { token, body: { model: 'claude-sonnet', messages: [{ role: 'user', content: 'x' }] } })).status, 403);
+    await settle();
+    const gmail = eventsFor('google-gmail');
+    assert.deepEqual(gmail.map((e) => e.kind), ['call.start', 'call.end']);
+    assert.equal(gmail[1].outcome, 'denied');
+    assert.equal(gmail[1].status, 403);
+    assert.equal(eventsFor('models')[1].outcome, 'denied');
+  });
+
+  it('§6.5 an upstream timeout reports outcome timeout, and an upstream error reports error', async () => {
+    modelBehaviour = 'timeout';
+    await call(port, '/models/v1/chat/completions', { token, body: { model: 'claude-sonnet', messages: [{ role: 'user', content: 'x' }] } });
+    assert.equal((await call(port, '/google-gmail/missing', { token, method: 'GET' })).status, 404);
+    await settle();
+    assert.equal(eventsFor('models')[1].outcome, 'timeout');
+    const gmailEnd = eventsFor('google-gmail')[1];
+    assert.equal(gmailEnd.outcome, 'error');
+    assert.equal(gmailEnd.status, 404);
+  });
+
+  it('E2 a call without a valid live run token emits nothing', async () => {
+    await call(port, '/discord/x', { body: {} });
+    const forged = await new RunTokens('a-different-key-0123456789abcdefghij').mint({ runId: ctx.run.runId, agentId: 'donna' });
+    await call(port, '/discord/x', { token: forged, body: {} });
+    await settle();
+    assert.equal(delivered.filter((e) => e.runId === ctx.run.runId).length, 0);
+  });
+
+  it('§6.5 a slow or failing control plane never delays a proxied call', async () => {
+    const timed = async (n: number) => {
+      const t0 = performance.now();
+      for (let i = 0; i < n; i++) assert.equal((await call(port, '/discord/x', { token, body: {} })).status, 200);
+      return performance.now() - t0;
+    };
+    await settle(); // let earlier tests' batches drain first
+
+    // Failing: every batch is refused; calls are unaffected and the batches are dropped.
+    sinkMode = 'fail';
+    sinkCalls = 0;
+    const failing = await timed(5);
+    await settle();
+    assert.ok(sinkCalls >= 1, 'the failing control plane was tried');
+
+    // Hung: the first batch never returns. Calls are unaffected, and no second request piles up behind it.
+    sinkMode = 'hang';
+    sinkCalls = 0;
+    const hungFirst = await timed(5);
+    await settle();
+    assert.equal(sinkCalls, 1);
+    const hungAfter = await timed(5);
+    await settle();
+    assert.equal(sinkCalls, 1, 'progress adds at most one request at a time to the control plane');
+    for (const ms of [failing, hungFirst, hungAfter]) assert.ok(ms < 1000, `5 calls took ${ms.toFixed(0)} ms`);
+  });
+});
+
+describe('§6.5 progress emitter: bounded, batched, best effort', () => {
+  const ev = (i: number): ProgressEvent => ({ runId: 'r', agentId: 'a', at: new Date().toISOString(), kind: 'call.start', callId: `c${i}`, route: 'discord' });
+
+  it('§6.5 batches events into one send per flush', async () => {
+    const sends: number[] = [];
+    const em = new ProgressEmitter(async (b) => void sends.push(b.length), { flushMs: 60_000, batchSize: 50 });
+    for (let i = 0; i < 7; i++) em.emit(ev(i));
+    await em.flush();
+    em.stop();
+    assert.deepEqual(sends, [7]);
+  });
+
+  it('§6.5 the queue is bounded and drops beyond it with a log line', async () => {
+    const warn = console.warn;
+    const lines: string[] = [];
+    console.warn = (m: string) => void lines.push(m);
+    try {
+      const em = new ProgressEmitter(async () => {}, { flushMs: 60_000, batchSize: 1000, maxQueue: 10 });
+      for (let i = 0; i < 25; i++) em.emit(ev(i));
+      assert.equal(em.pending, 10);
+      await em.flush();
+      em.stop();
+      assert.ok(lines.some((l) => l.includes('dropped 15')), lines.join('\n'));
+    } finally {
+      console.warn = warn;
+    }
+  });
+
+  it('§6.5 a failed send drops the batch with a log line and never throws', async () => {
+    const warn = console.warn;
+    const lines: string[] = [];
+    console.warn = (m: string) => void lines.push(m);
+    try {
+      const em = new ProgressEmitter(async () => {
+        throw new Error('control plane 500');
+      }, { flushMs: 60_000 });
+      em.emit(ev(1));
+      await em.flush();
+      em.stop();
+      assert.equal(em.pending, 0);
+      assert.ok(lines.some((l) => l.includes('dropped 1 event') && l.includes('control plane 500')));
+    } finally {
+      console.warn = warn;
+    }
   });
 });
