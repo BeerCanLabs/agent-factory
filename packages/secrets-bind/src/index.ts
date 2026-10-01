@@ -17,6 +17,11 @@ export type SecretProvider = {
    * without it are asked with `get`, and the value is discarded. See `secretPresent`.
    */
   has?(secretName: string): Promise<boolean>;
+  /**
+   * Every secret name this provider holds a current value for, from metadata in one call (never values). Optional:
+   * lets a caller checking many secrets ask once instead of once per secret (GAP-056).
+   */
+  present?(): Promise<Set<string>>;
 };
 
 /**
@@ -152,6 +157,22 @@ export function awsSecretsManagerProvider(prefix: string, cli?: AwsCli): SecretP
         if (!/ResourceNotFoundException/.test(err instanceof Error ? err.message : String(err))) throw err;
         await run(['secretsmanager', 'create-secret', '--name', id, '--secret-string', 'file:///dev/stdin'], value);
       }
+    },
+    async present() {
+      // One ListSecrets call (metadata only, never values) for every secret under the prefix that has a current
+      // version; secrets scheduled for deletion are not listed. Cheaper than a DescribeSecret per name.
+      const out = await run([
+        'secretsmanager',
+        'list-secrets',
+        '--filters',
+        `Key=name,Values=${prefix}`,
+        '--query',
+        "SecretList[?contains(values(SecretVersionsToStages || `{}`)[], 'AWSCURRENT')].Name",
+        '--output',
+        'json',
+      ]);
+      const names = JSON.parse(out || '[]') as string[];
+      return new Set(names.filter((n) => n.startsWith(prefix)).map((n) => n.slice(prefix.length)));
     },
     async has(secretName) {
       // Metadata only (DescribeSecret): the value is never fetched, so this works for secrets the caller may write
