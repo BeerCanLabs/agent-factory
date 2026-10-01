@@ -10,6 +10,7 @@ import { SseMeter, costUsd, priceFor, usageFromJson, type Price, type Provider, 
 import { writeTrace, type TraceConfig } from './traces.js';
 import { ModelUpstreamError, defaultModelAdapters, parseChatRequest, type ChatResult, type ModelAdapter, type ModelCatalog } from './models.js';
 import type { Meter } from '@opentelemetry/api';
+import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from './progress.js';
 
 export type Route = {
   id: string;
@@ -66,6 +67,11 @@ export type ControlClient = {
   ledger(event: Record<string, unknown>): Promise<void>;
   /** Circuit breaker: returns false when the ledger endpoint is known-unreachable. */
   ledgerAvailable?(): boolean;
+  /**
+   * Run progress (§6.5): a batch of call start/end events. Best effort: called off the request path, failures are
+   * logged and the batch dropped. Absent: no progress is reported.
+   */
+  progress?(events: ProgressEvent[]): Promise<void>;
 };
 
 export type GatekeeperEgressOptions = {
@@ -82,6 +88,8 @@ export type GatekeeperEgressOptions = {
   modelCatalog?: ModelCatalog;
   /** Adapters by catalog `provider`; defaults to the built-in ones. */
   modelAdapters?: Record<string, ModelAdapter>;
+  /** Batching for run progress events (defaults: every 250 ms, 50 per batch, at most 1000 queued). */
+  progress?: ProgressOptions;
 };
 
 const BUILTIN_AGENT_IDS = new Set(['gatekeeper-ingress', 'keymaster', 'doctor', 'coach']);
@@ -205,6 +213,28 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   const connCache = new Map<string, { token: string; expiresAtMs: number }>();
   const secretValues = new Set<string>();
   const modelAdapters = opts.modelAdapters ?? defaultModelAdapters();
+  const progress = opts.control.progress ? new ProgressEmitter((events) => opts.control.progress!(events), opts.progress) : undefined;
+  /** The progress record of the call each response answers (§6.5). */
+  const calls = new WeakMap<http.ServerResponse, ProgressCall>();
+
+  /** Report this call's start now (or when its model is known) and its end when the response finishes. */
+  function track(res: http.ServerResponse, ctx: RunContext, routeId: string): ProgressCall | undefined {
+    if (!progress) return undefined;
+    const call = new ProgressCall(progress, ctx.run.runId, ctx.run.agentId, routeId);
+    calls.set(res, call);
+    res.once('finish', () => call.end(res.statusCode));
+    res.once('close', () => {
+      // Closed before the response finished: the caller went away or the upstream broke mid-stream.
+      if (!res.writableFinished) call.outcome ??= 'error';
+      call.end(res.statusCode);
+    });
+    return call;
+  }
+
+  function markOutcome(res: http.ServerResponse, outcome: 'denied' | 'timeout' | 'error') {
+    const call = calls.get(res);
+    if (call && !call.outcome) call.outcome = outcome;
+  }
   const m = opts.meter
     ? {
         requests: opts.meter.createCounter('factory.gatekeeper-egress.requests', { description: 'Egress requests by route and outcome' }),
@@ -318,6 +348,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   }
 
   function deny(res: http.ServerResponse, ctx: RunContext, route: Route, status: number, reason: string, extra: Record<string, unknown> = {}) {
+    markOutcome(res, 'denied');
     m?.requests.add(1, { route: route.id, outcome: reason, agent: ctx.run.agentId });
     ledger(ctx, route, { type: 'action', action: `EGRESS_DENIED_${reason.toUpperCase()}` });
     send(res, status, { error: reason, ...extra });
@@ -389,6 +420,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         });
       });
       up.on('error', (err) => {
+        const code = (err as NodeJS.ErrnoException).code ?? '';
+        markOutcome(res, code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT' || /timed? ?out/i.test(err.message) ? 'timeout' : 'error');
         console.error(`[gatekeeper-egress] upstream ${route.id}: ${err.message}`);
         send(res, 502, { error: 'upstream_unreachable' });
         resolve(502);
@@ -451,6 +484,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const provider = route.provider ?? 'openai';
     const parsed = tryJson(raw) as Record<string, unknown> | undefined;
     const model = typeof parsed?.model === 'string' ? parsed.model : undefined;
+    calls.get(res)?.start(model);
     if (req.method === 'POST' && parsed) {
       if (!model) return deny(res, ctx, route, 400, 'model_required');
       const denial = modelDenial(ctx, model);
@@ -530,6 +564,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return deny(res, ctx, route, 400, 'invalid_json');
     if (parsed.stream === true) return deny(res, ctx, route, 400, 'streaming_not_supported');
     const model = typeof parsed.model === 'string' ? parsed.model : undefined;
+    calls.get(res)?.start(model);
     if (!model) return deny(res, ctx, route, 400, 'model_required');
     const entry = Object.hasOwn(catalog, model) ? catalog[model] : undefined;
     if (!entry) return deny(res, ctx, route, 400, 'model_not_offered', { model });
@@ -550,6 +585,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       result = await adapter.complete(entry, chat.req);
     } catch (err) {
       const e = err instanceof ModelUpstreamError ? err : new ModelUpstreamError(502, 'upstream_error', err instanceof Error ? err.message : String(err));
+      markOutcome(res, /timeout|timed out/i.test(`${e.code} ${e.message}`) ? 'timeout' : 'error');
       m?.requests.add(1, { route: route.id, outcome: e.code, agent: ctx.run.agentId });
       console.error(`[gatekeeper-egress] models ${model} via ${entry.provider}: ${e.code} ${e.upstreamStatus ?? ''} ${e.message}`);
       ledger(ctx, route, { type: 'action', action: 'MODEL_UPSTREAM_ERROR', model, provider: entry.provider, upstreamStatus: e.upstreamStatus, requestId });
@@ -665,11 +701,15 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         if (!claims) return send(res, 401, { error: 'invalid_run_token' });
         const ctx = await context(claims.runId);
         if (!ctx || ctx.run.agentId !== claims.agentId || !ctx.run.live) return send(res, 401, { error: 'run_not_live' });
+        const proxyCall = track(res, ctx, `proxy-${parsed.hostname}`);
+        proxyCall?.start();
+        if (ctx.agentState === 'ISOLATED' || ctx.agentState === 'PAUSED' || ctx.run.state === 'BLOCKED_UNHEALTHY') markOutcome(res, 'denied');
         if (ctx.agentState === 'ISOLATED') return send(res, 403, { error: 'isolated' });
         if (ctx.agentState === 'PAUSED') return send(res, 503, { error: 'paused' });
         if (ctx.run.state === 'BLOCKED_UNHEALTHY') return send(res, 503, { error: 'unhealthy' });
 
         if (!isHostAllowed(ctx.policy, routes, parsed.hostname)) {
+          markOutcome(res, 'denied');
           void opts.control.ledger({
             agentId: ctx.run.agentId,
             runId: ctx.run.runId,
@@ -703,6 +743,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (!claims) return send(res, 401, { error: 'invalid_run_token' });
       const ctx = await context(claims.runId);
       if (!ctx || ctx.run.agentId !== claims.agentId || !ctx.run.live) return send(res, 401, { error: 'run_not_live' });
+      // Attributed to the run only once its token is verified and live (E2): nobody else can write into its progress.
+      const call = track(res, ctx, route.id);
 
       if (ctx.agentState === 'ISOLATED') return deny(res, ctx, route, 403, 'isolated');
       if (ctx.agentState === 'PAUSED') return deny(res, ctx, route, 503, 'paused');
@@ -717,6 +759,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
 
       const raw = await readBody(req, limit);
+      // Model routes report their start once the model is known (handleLlm, handleModels).
+      if (route.kind !== 'llm' && route.kind !== 'models') call?.start();
       if (route.kind === 'llm') return await handleLlm(req, res, ctx, route, rest, raw);
       if (route.kind === 'models') return await handleModels(req, res, ctx, route, rest, raw);
       if (route.kind === 'mcp') return await handleMcp(req, res, ctx, route, rest, raw);
@@ -754,19 +798,19 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         clientSocket.destroy();
         return;
       }
-      if (ctx.agentState === 'ISOLATED' || ctx.agentState === 'PAUSED' || ctx.run.state === 'BLOCKED_UNHEALTHY') {
-        clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-        clientSocket.destroy();
-        return;
-      }
-
       const [destHost, portStr] = (req.url ?? '').split(':');
       const destPort = parseInt(portStr || '443', 10);
-      if (!destHost || isNaN(destPort)) {
-        clientSocket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+      const tunnel = progress && destHost ? new ProgressCall(progress, ctx.run.runId, ctx.run.agentId, `tunnel-${destHost}`) : undefined;
+      tunnel?.start();
+      const refuse = (line: string, status: number) => {
+        if (tunnel) tunnel.outcome = 'denied';
+        tunnel?.end(status);
+        clientSocket.write(`HTTP/1.1 ${line}\r\n\r\n`);
         clientSocket.destroy();
-        return;
-      }
+      };
+      if (ctx.agentState === 'ISOLATED' || ctx.agentState === 'PAUSED' || ctx.run.state === 'BLOCKED_UNHEALTHY') return refuse('403 Forbidden', 403);
+
+      if (!destHost || isNaN(destPort)) return refuse('400 Bad Request', 400);
 
       if (!isHostAllowed(ctx.policy, routes, destHost)) {
         void opts.control.ledger({
@@ -776,9 +820,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           type: 'action',
           action: `EGRESS_DENIED_HOST_${destHost}`,
         }).catch(() => {});
-        clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-        clientSocket.destroy();
-        return;
+        return refuse('403 Forbidden', 403);
       }
 
       const upstreamSocket = net.connect(destPort, destHost, () => {
@@ -797,7 +839,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         }).catch(() => {});
       });
 
+      let tunnelStatus = 502;
+      upstreamSocket.once('connect', () => (tunnelStatus = 200));
+      clientSocket.once('close', () => tunnel?.end(tunnelStatus));
       upstreamSocket.on('error', (err) => {
+        if (tunnel && !tunnel.outcome) tunnel.outcome = (err as NodeJS.ErrnoException).code === 'ETIMEDOUT' ? 'timeout' : 'error';
         console.warn(`[gatekeeper-egress] connect error to ${destHost}:${destPort}: ${err.message}`);
         clientSocket.destroy();
       });
@@ -809,5 +855,6 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     }
   });
 
+  server.on('close', () => progress?.stop());
   return server;
 }
