@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateCartridge } from './validate.js';
 import { cartridgeSchema } from './schema.js';
+import './system.test.js';
+
 
 describe('cartridge connections (§6.11 K1)', () => {
   it('accepts declared provider connections with scopes and rejects unknown keys', () => {

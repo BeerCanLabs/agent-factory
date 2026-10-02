@@ -256,3 +256,48 @@ export interface SkillSummary {
   requires: SkillRequires;
   versions: SkillVersion[];
 }
+
+export type SystemStatus = 'proposed' | 'approved' | 'rejected';
+
+export interface SystemDefinition {
+  id: string;
+  name: string;
+  description?: string;
+  kind: 'http' | 'mcp';
+  upstream: string;
+  credential?: {
+    secret: string;
+    header: string;
+    format?: string;
+    fallback?: boolean;
+  };
+  connection?: string;
+  scopes?: string[];
+  hold?: {
+    methods: string[];
+    preview?: string;
+  };
+  stripSignInLinks?: boolean;
+  version: number;
+  status: SystemStatus;
+  proposedBy: string;
+  proposedAt: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  reason?: string;
+  hash: string;
+}
+
+export interface SystemSummary {
+  id: string;
+  name: string;
+  description?: string;
+  kind: 'http' | 'mcp';
+  upstream: string;
+  status: SystemStatus;
+  latestVersion: number;
+  approvedVersion: number | null;
+  activeDefinition: SystemDefinition | null;
+  versions: SystemDefinition[];
+}
+
