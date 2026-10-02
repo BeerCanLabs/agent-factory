@@ -59,6 +59,7 @@ export const SystemsView: React.FC = () => {
   const [secretHeader, setSecretHeader] = useState('authorization');
   const [secretFormat, setSecretFormat] = useState('Bearer {}');
   const [secretFallback, setSecretFallback] = useState(true);
+  const [secretBasic, setSecretBasic] = useState(false);
   const [connectionName, setConnectionName] = useState('');
   const [connectionScopes, setConnectionScopes] = useState('');
   const [holdPost, setHoldPost] = useState(false);
@@ -108,6 +109,7 @@ export const SystemsView: React.FC = () => {
         setSecretHeader(active.credential.header);
         setSecretFormat(active.credential.format || 'Bearer {}');
         setSecretFallback(active.credential.fallback ?? true);
+        setSecretBasic(active.credential.encoding === 'basic');
       } else {
         setCredKind('none');
       }
@@ -125,6 +127,7 @@ export const SystemsView: React.FC = () => {
       setSecretHeader('authorization');
       setSecretFormat('Bearer {}');
       setSecretFallback(true);
+      setSecretBasic(false);
       setConnectionName('');
       setConnectionScopes('');
       setHoldPost(false);
@@ -154,6 +157,7 @@ export const SystemsView: React.FC = () => {
         header: secretHeader.trim(),
         format: secretFormat.trim() || undefined,
         fallback: secretFallback,
+        ...(secretBasic ? { encoding: 'basic' } : {}),
       };
     } else if (credKind === 'connection') {
       payload.connection = connectionName.trim();
@@ -564,6 +568,14 @@ export const SystemsView: React.FC = () => {
                         onChange={(e) => setSecretFallback(e.target.checked)}
                       />
                       Shared Secret Fallback
+                    </label>
+                    <label className="flex items-center gap-1.5 text-xs cursor-pointer ml-4" title="Send the formatted value as HTTP Basic credentials (git over HTTPS uses x-access-token:{})">
+                      <input
+                        type="checkbox"
+                        checked={secretBasic}
+                        onChange={(e) => setSecretBasic(e.target.checked)}
+                      />
+                      HTTP Basic
                     </label>
                   </div>
                 </div>

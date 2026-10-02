@@ -13,4 +13,17 @@ describe('gatekeeperEgressEnv TSK-045 routes (S1)', () => {
     assert.equal(env.GITHUB_TOKEN, undefined);
     assert.equal(env.MOTION_API_KEY, undefined);
   });
+
+  it('E10: every granted route gets <ROUTE_ID>_BASE_URL, without changing the existing names', () => {
+    const env = gatekeeperEgressEnv({
+      FACTORY_GATEKEEPER_EGRESS_URL: 'http://gw:8081/',
+      FACTORY_RUN_TOKEN: 'run-tok',
+      FACTORY_EGRESS_ROUTES: 'github-git,google-gmail,new-system,bad id,../x',
+    });
+    assert.equal(env.GITHUB_GIT_BASE_URL, 'http://gw:8081/github-git');
+    assert.equal(env.NEW_SYSTEM_BASE_URL, 'http://gw:8081/new-system');
+    assert.equal(env.GMAIL_BASE_URL, 'http://gw:8081/google-gmail');
+    assert.equal(env.GOOGLE_GMAIL_BASE_URL, 'http://gw:8081/google-gmail');
+    assert.ok(!Object.keys(env).some((k) => /BAD|\.\./.test(k)));
+  });
 });
