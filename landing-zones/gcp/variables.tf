@@ -78,6 +78,12 @@ variable "ledger_retention_days" {
   default = 365
 }
 
+variable "systems_import" {
+  description = "TRANSITIONAL (GAP-068, TSK-066): the non-model routes this landing zone used to give the gatekeeper-egress, imported once into the factory's systems store as approved systems (an existing system is never overwritten). Removed once every deployment has imported them."
+  type        = string
+  default     = "[{\"id\":\"discord\",\"kind\":\"http\",\"upstream\":\"https://discord.com/api/v10\",\"credential\":{\"secret\":\"{agent}_DISCORD_BOT_TOKEN\",\"header\":\"authorization\",\"format\":\"Bot {}\"}},{\"id\":\"google-calendar\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/calendar/v3\",\"connection\":\"google\"},{\"id\":\"google-oauth\",\"kind\":\"http\",\"upstream\":\"https://oauth2.googleapis.com\"},{\"id\":\"google-gmail\",\"kind\":\"http\",\"upstream\":\"https://gmail.googleapis.com\",\"connection\":\"google\"},{\"id\":\"google-drive\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/drive/v3\",\"connection\":\"google\"}]"
+}
+
 variable "gatekeeper_egress_routes" {
   description = "JSON gatekeeper-egress model route config passed to FACTORY_GATEKEEPER_EGRESS_ROUTES. Non-model routes are factory data (§6.3.1 E10), maintained in the control plane."
   type        = string

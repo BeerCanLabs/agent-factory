@@ -136,6 +136,8 @@ export type GatekeeperEgressOptions = {
   progress?: ProgressOptions;
   /** How often to refresh routes from control plane (ms); default 10_000. */
   routeRefreshIntervalMs?: number;
+  /** Tests only: accept factory systems with an http upstream (production systems must be https). */
+  allowHttpSystems?: boolean;
 };
 
 
@@ -245,30 +247,77 @@ function overBudget(policy: Policy, spend: RunContext['spend']): string | undefi
 
 type JsonRpc = { jsonrpc?: string; id?: unknown; method?: string; params?: { name?: unknown; arguments?: unknown } };
 
+/**
+ * Why a route cannot be served, or undefined. A factory system (E10) is also limited to `http`/`mcp` over https:
+ * model calls go only through landing-zone provider routes (E5).
+ */
+export function routeProblem(r: Route, system = false, allowHttp = false): string | undefined {
+  if (!r || typeof r.id !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(r.id)) return 'invalid id';
+  if (r.connection && r.credential) return 'a connection route must not also carry a static credential';
+  if (r.connection && r.kind !== 'http') return 'connections are supported on http routes only';
+  if (!system) return undefined;
+  if (r.kind !== 'http' && r.kind !== 'mcp') return `kind ${String(r.kind)} is not a system kind (model routes belong to the landing zone, E5)`;
+  if (typeof r.upstream !== 'string' || !(allowHttp ? /^https?:\/\/[^/]/ : /^https:\/\/[^/]/).test(r.upstream)) return 'upstream must be an https URL';
+  if (MODEL_PROVIDER_HOST.test(new URL(r.upstream).hostname)) return 'upstream is a model provider (E5: model calls use provider routes)';
+  return undefined;
+}
+
+/** Model provider hosts (E5): reachable only through landing-zone provider routes, never as a factory system. */
+const MODEL_PROVIDER_HOST = /(^|\.)(api\.anthropic\.com|api\.openai\.com|api\.x\.ai|generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com|openai\.azure\.com)$|^bedrock(-runtime)?[.-]/;
+
 export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Server {
   for (const r of opts.routes) {
-    if (r.connection && r.credential) throw new Error(`route ${r.id}: a connection route must not also carry a static credential`);
-    if (r.connection && r.kind !== 'http') throw new Error(`route ${r.id}: connections are supported on http routes only`);
+    const problem = routeProblem(r);
+    if (problem) throw new Error(`route ${r.id}: ${problem}`);
   }
-  const routes = new Map(opts.routes.map((r) => [r.id, r]));
+  /** Landing-zone routes (model routes, §6.9): fixed for this process. Factory systems (E10) never replace one. */
+  const staticRoutes = new Map(opts.routes.map((r) => [r.id, r]));
+  /** Static routes plus the factory's approved systems, rebuilt whole on every refresh so a removed system stops at once. */
+  const routes = new Map(staticRoutes);
   let lastRouteRefresh = 0;
+  let lastMissRefresh = 0;
   const ROUTE_REFRESH_INTERVAL_MS = opts.routeRefreshIntervalMs ?? 10_000;
+  /** An unknown route id refreshes at most this often, so unknown ids cannot flood the control plane (GAP-056). */
+  const MISS_REFRESH_INTERVAL_MS = Math.min(2_000, ROUTE_REFRESH_INTERVAL_MS);
 
+  let inflight: Promise<void> | undefined;
+  /** Refresh factory systems when stale or on an unknown id; concurrent callers share one fetch. */
   async function ensureRoutes(targetRouteId?: string): Promise<void> {
     if (!opts.control.systemRoutes) return;
-    const now = Date.now();
-    const needsRefresh = (targetRouteId && !routes.has(targetRouteId)) || now - lastRouteRefresh > ROUTE_REFRESH_INTERVAL_MS;
-    if (!needsRefresh) return;
-    try {
-      const remote = await opts.control.systemRoutes();
-      if (Array.isArray(remote)) {
-        for (const r of remote) {
-          routes.set(r.id, r);
-        }
-        lastRouteRefresh = Date.now();
-      }
-    } catch {}
+    if (inflight) return inflight;
+    inflight = refreshRoutes(targetRouteId).finally(() => (inflight = undefined));
+    return inflight;
   }
+
+  async function refreshRoutes(targetRouteId?: string): Promise<void> {
+    if (!opts.control.systemRoutes) return;
+    const now = Date.now();
+    const miss = Boolean(targetRouteId && !routes.has(targetRouteId) && now - lastMissRefresh > MISS_REFRESH_INTERVAL_MS);
+    if (!miss && now - lastRouteRefresh <= ROUTE_REFRESH_INTERVAL_MS) return;
+    if (miss) lastMissRefresh = now;
+    let remote: Route[];
+    try {
+      remote = await opts.control.systemRoutes();
+    } catch (err) {
+      // Keep the last known systems: a control-plane restart must not cut every agent off.
+      console.error(`[gatekeeper-egress] system routes refresh: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    if (!Array.isArray(remote)) return;
+    routes.clear();
+    for (const [id, r] of staticRoutes) routes.set(id, r);
+    for (const r of remote) {
+      const problem = staticRoutes.has(r?.id) ? 'id is a landing-zone route' : routeProblem(r, true, opts.allowHttpSystems === true);
+      if (problem) {
+        console.error(`[gatekeeper-egress] system ${String(r?.id)} ignored: ${problem}`);
+        continue;
+      }
+      routes.set(r.id, r);
+    }
+    lastRouteRefresh = Date.now();
+  }
+
+  void ensureRoutes();
 
   const ttl = opts.contextTtlMs ?? 1000;
 
@@ -875,11 +924,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
 
       const m = url.match(/^\/([A-Za-z0-9_.-]+)(\/.*)?$/);
-      if (m && !routes.has(m[1]) && opts.control.systemRoutes) {
-        await ensureRoutes(m[1]);
-      } else if (opts.control.systemRoutes && Date.now() - lastRouteRefresh > ROUTE_REFRESH_INTERVAL_MS) {
-        void ensureRoutes();
-      }
+      if (m) await ensureRoutes(m[1]);
       const route = m ? routes.get(m[1]) : undefined;
       if (!route) return send(res, 404, { error: 'unknown_route' });
 

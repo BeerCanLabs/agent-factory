@@ -50,6 +50,11 @@ resource "google_cloud_run_v2_service" "control_plane" {
         name  = "FACTORY_RUNTIME"
         value = "cloudrun"
       }
+      # GAP-068 migration (TSK-066): imported once into the systems store; existing systems are never overwritten.
+      env {
+        name  = "FACTORY_SYSTEMS_IMPORT"
+        value = var.systems_import
+      }
       env {
         name  = "FACTORY_GCP_PROJECT"
         value = var.project_id

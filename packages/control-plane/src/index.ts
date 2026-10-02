@@ -252,6 +252,12 @@ if (state.configs) {
 const SYSTEMS_DIR = process.env.FACTORY_SYSTEMS_DIR || join(DATA_DIR, 'systems');
 try {
   state.systems = await SystemsStore.open(SYSTEMS_DIR, ledger);
+  // GAP-068 migration: the deployment's existing routes, recorded once as approved systems (never overwrites).
+  if (process.env.FACTORY_SYSTEMS_IMPORT) {
+    const { imported, skipped } = await state.systems.importRoutes(JSON.parse(process.env.FACTORY_SYSTEMS_IMPORT), 'migration:landing-zone');
+    if (imported.length) console.log(`[control-plane] systems imported from the deployment: ${imported.join(', ')}`);
+    for (const s of skipped) console.error(`[control-plane] system not imported: ${s}`);
+  }
   console.log(`[control-plane] systems store: ${state.systems.list().length} systems available`);
 } catch (err) {
   console.error(`[control-plane] systems store initialization failed: ${err instanceof Error ? err.message : String(err)}`);

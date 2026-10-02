@@ -10,6 +10,21 @@ import { z } from 'zod';
 
 export const SYSTEM_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+/** Model provider hosts (E5): model calls use landing-zone provider routes, never a factory system. */
+export const MODEL_PROVIDER_HOST = /(^|\.)(api\.anthropic\.com|api\.openai\.com|api\.x\.ai|generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com|openai\.azure\.com)$|^bedrock(-runtime)?[.-]/;
+
+const systemUpstream = z
+  .string()
+  .url('upstream must be a valid https URL')
+  .refine((u) => u.startsWith('https://'), 'upstream must be an https URL')
+  .refine((u) => {
+    try {
+      return !MODEL_PROVIDER_HOST.test(new URL(u).hostname);
+    } catch {
+      return false;
+    }
+  }, 'a model provider is not a system (E5: model calls use provider routes)');
+
 export const systemCredentialSchema = z
   .object({
     secret: z.string().min(1),
@@ -32,7 +47,7 @@ export const systemProposalSchema = z
     name: z.string().min(1),
     description: z.string().optional(),
     kind: z.enum(['http', 'mcp']).default('http'),
-    upstream: z.string().url('upstream must be a valid HTTP/HTTPS URL'),
+    upstream: systemUpstream,
     credential: systemCredentialSchema.optional(),
     connection: z.string().min(1).optional(),
     scopes: z.array(z.string().min(1)).optional(),
@@ -55,7 +70,7 @@ export const systemDefinitionSchema = z
     name: z.string().min(1),
     description: z.string().optional(),
     kind: z.enum(['http', 'mcp']).default('http'),
-    upstream: z.string().url('upstream must be a valid HTTP/HTTPS URL'),
+    upstream: systemUpstream,
     credential: systemCredentialSchema.optional(),
     connection: z.string().min(1).optional(),
     scopes: z.array(z.string().min(1)).optional(),

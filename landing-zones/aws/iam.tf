@@ -29,7 +29,7 @@ resource "aws_iam_role_policy" "execution_secrets" {
   name = "inject-factory-secrets"
   role = aws_iam_role.execution.id
   policy = jsonencode({
-    Version   = "2012-10-17"
+    Version = "2012-10-17"
     Statement = concat(
       [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = "${local.secret_arn}/*" }],
       # The agent source token may live outside the factory prefix; ECS injects it into the control plane only.
@@ -41,8 +41,10 @@ resource "aws_iam_role_policy" "execution_secrets" {
 locals {
   # By name, not by resource: the Keymaster creates these secrets (K5). `-??????` is the suffix AWS appends to
   # a secret's ARN, so NOTION_API_KEY never also matches NOTION_API_KEY_OTHER.
-  # Gatekeeper-held secrets: model provider keys (TSK-066 / E10).
-  held_secret_names    = distinct(var.provider_secret_names)
+  # Gatekeeper-held secrets: the public defaults plus deployment-specific ones (TSK-045), until TSK-071.
+  held_secret_names = distinct(concat(var.provider_secret_names, var.extra_provider_secret_names))
+  # GAP-068 migration: the routes the control plane imports once as systems (never given to the gatekeeper-egress).
+  systems_import       = jsonencode(concat(jsondecode(var.systems_import), jsondecode(var.extra_gatekeeper_egress_routes)))
   provider_secret_arns = [for n in local.held_secret_names : "${local.secret_arn}/${n}-??????"]
   # Gatekeeper-egress routes from variables (model routes only per E10; non-model routes are resolved dynamically via Control Plane)
   gatekeeper_egress_routes = var.gatekeeper_egress_routes

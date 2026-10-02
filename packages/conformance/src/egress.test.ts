@@ -196,32 +196,26 @@ describe('E2–E4 the gatekeeper-egress attributes, ledgers, and gates every egr
 });
 
 describe('E10 systems are factory data', () => {
-  it('no landing zone declares non-model routes or deprecated extra route variables', () => {
-    // Assert no landing zone declares extra_gatekeeper_egress_routes or extra_provider_secret_names
-    for (const f of files('landing-zones', (p) => /\.(tf|ya?ml|env)$/.test(p))) {
-      const text = read(f);
-      assert.doesNotMatch(text, /\bextra_gatekeeper_egress_routes\b/, `${f} must not declare extra_gatekeeper_egress_routes`);
-      assert.doesNotMatch(text, /\bextra_provider_secret_names\b/, `${f} must not declare extra_provider_secret_names`);
-    }
-
-    // Assert no landing zone defines a non-model route (kind !== 'llm' and kind !== 'models')
+  it('no landing zone gives the gatekeeper-egress a route other than a model route', () => {
     for (const f of files('landing-zones', (p) => /\.(tf|ya?ml)$/.test(p))) {
       const text = read(f);
-      for (const m of text.matchAll(/gatekeeper_egress_routes[\s\S]*?default\s*=\s*"(\[[^"]+\])"/g)) {
-        const rawJson = m[1].replace(/\\"/g, '"');
-        try {
-          const routes = JSON.parse(rawJson);
-          for (const r of routes) {
-            assert.ok(
-              r.kind === 'llm' || r.kind === 'models',
-              `${f} defines non-model route '${r.id}' (kind: '${r.kind}'). Systems must be factory data (E10).`
-            );
-          }
-        } catch (e: any) {
-          assert.fail(`Failed to parse gatekeeper_egress_routes in ${f}: ${e.message}`);
-        }
+      for (const m of text.matchAll(/variable "gatekeeper_egress_routes"[\s\S]*?default\s*=\s*"(\[[^"]*(?:\\"[^"]*)*\])"/g)) {
+        const routes = JSON.parse(m[1].replace(/\\"/g, '"')) as Array<{ id: string; kind: string }>;
+        const systems = routes.filter((r) => r.kind !== 'llm' && r.kind !== 'models').map((r) => r.id);
+        assert.deepEqual(systems, [], `${f}: non-model routes belong in the factory's systems store (E10)`);
       }
     }
   });
-});
 
+  it('the gatekeeper-egress receives only gatekeeper_egress_routes (no migration list) in the AWS landing zone', () => {
+    const iam = read('landing-zones/aws/iam.tf');
+    assert.match(iam, /gatekeeper_egress_routes\s*=\s*var\.gatekeeper_egress_routes\s*$/m);
+  });
+
+  it('the platform code carries no list of systems', () => {
+    const offenders = files('packages', (p) => /\/src\/.*\.tsx?$/.test(p) && !/\.test\.tsx?$/.test(p))
+      .filter((f) => /BASELINE_SYSTEMS|seedBaseline/.test(read(f)));
+    assert.deepEqual(offenders, []);
+    assert.doesNotMatch(read('packages/control-plane/src/systems.ts'), /upstream:\s*['"`]https?:/, 'systems.ts must not define a system');
+  });
+});

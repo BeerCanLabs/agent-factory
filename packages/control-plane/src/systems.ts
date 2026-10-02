@@ -50,124 +50,6 @@ export type EgressRoute = {
   stripSignInLinks?: boolean;
 };
 
-export const BASELINE_SYSTEMS: SystemProposal[] = [
-  {
-    id: 'discord',
-    name: 'Discord API',
-    kind: 'http',
-    upstream: 'https://discord.com/api/v10',
-    credential: {
-      secret: '{agent}_DISCORD_BOT_TOKEN',
-      header: 'authorization',
-      format: 'Bot {}',
-    },
-    stripSignInLinks: true,
-  },
-  {
-    id: 'notion',
-    name: 'Notion API',
-    kind: 'http',
-    upstream: 'https://api.notion.com',
-    credential: {
-      secret: 'NOTION_API_KEY',
-      header: 'authorization',
-      format: 'Bearer {}',
-    },
-  },
-  {
-    id: 'google-calendar',
-    name: 'Google Calendar API',
-    kind: 'http',
-    upstream: 'https://www.googleapis.com/calendar/v3',
-    connection: 'google',
-  },
-  {
-    id: 'google-oauth',
-    name: 'Google OAuth API',
-    kind: 'http',
-    upstream: 'https://oauth2.googleapis.com',
-  },
-  {
-    id: 'google-gmail',
-    name: 'Google Gmail API',
-    kind: 'http',
-    upstream: 'https://gmail.googleapis.com',
-    connection: 'google',
-  },
-  {
-    id: 'google-drive',
-    name: 'Google Drive API',
-    kind: 'http',
-    upstream: 'https://www.googleapis.com/drive/v3',
-    connection: 'google',
-  },
-  {
-    id: 'google-drive-upload',
-    name: 'Google Drive Upload API',
-    kind: 'http',
-    upstream: 'https://www.googleapis.com/upload/drive/v3',
-    connection: 'google',
-  },
-  {
-    id: 'google-health',
-    name: 'Google Health API',
-    kind: 'http',
-    upstream: 'https://health.googleapis.com',
-    connection: 'google',
-  },
-  {
-    id: 'google-storage',
-    name: 'Google Cloud Storage API',
-    kind: 'http',
-    upstream: 'https://storage.googleapis.com',
-    connection: 'google-service-account',
-    scopes: ['https://www.googleapis.com/auth/devstorage.read_write'],
-  },
-  {
-    id: 'github',
-    name: 'GitHub API',
-    kind: 'http',
-    upstream: 'https://api.github.com',
-    credential: {
-      secret: '{agent}_GITHUB_TOKEN',
-      header: 'authorization',
-      format: 'Bearer {}',
-      fallback: false,
-    },
-  },
-  {
-    id: 'motion',
-    name: 'Motion API',
-    kind: 'http',
-    upstream: 'https://api.usemotion.com/v1',
-    credential: {
-      secret: 'MOTION_API_KEY',
-      header: 'x-api-key',
-    },
-  },
-  {
-    id: 'linkedin',
-    name: 'LinkedIn API',
-    kind: 'http',
-    upstream: 'https://api.linkedin.com',
-    connection: 'linkedin',
-    hold: {
-      methods: ['POST', 'PUT', 'PATCH', 'DELETE'],
-      preview: 'linkedin-post',
-    },
-  },
-  {
-    id: 'closing-climb',
-    name: 'Closing Climb API',
-    kind: 'http',
-    upstream: 'https://app.closingclimb.com/api',
-    credential: {
-      secret: 'CC_API_TOKEN',
-      header: 'authorization',
-      format: 'Bearer {}',
-    },
-  },
-];
 
 export class SystemsStore {
   private readonly versions = new Map<string, SystemDefinition[]>();
@@ -211,17 +93,43 @@ export class SystemsStore {
       }
     }
 
-    // Seed baseline systems if missing
-    for (const base of BASELINE_SYSTEMS) {
-      if (!store.versions.has(base.id)) {
-        await store.seedBaseline(base);
-      }
-    }
-
     return store;
   }
 
-  private async seedBaseline(proposal: SystemProposal): Promise<SystemDefinition> {
+  /**
+   * GAP-068 migration: record a deployment's existing gatekeeper-egress routes as approved systems, once. A system
+   * the store already has is never touched (an admin's edits win), so re-running on every boot is safe. The routes
+   * come from the deployment (`FACTORY_SYSTEMS_IMPORT`), never from this code. Model routes stay landing-zone routes.
+   */
+  async importRoutes(raw: unknown, actor: string): Promise<{ imported: string[]; skipped: string[] }> {
+    const imported: string[] = [];
+    const skipped: string[] = [];
+    if (!Array.isArray(raw)) return { imported, skipped };
+    for (const r of raw as Array<Record<string, unknown>>) {
+      const id = typeof r?.id === 'string' ? r.id : '';
+      if (!id || r.kind === 'llm' || r.kind === 'models' || this.versions.has(id)) continue;
+      const v = validateSystemProposal({
+        id,
+        name: typeof r.name === 'string' ? r.name : id,
+        kind: r.kind,
+        upstream: r.upstream,
+        credential: r.credential,
+        connection: r.connection,
+        scopes: r.scopes,
+        hold: r.hold,
+        stripSignInLinks: r.stripSignInLinks,
+      });
+      if (!v.ok) {
+        skipped.push(`${id}: ${v.issues.map((i) => i.message).join('; ')}`);
+        continue;
+      }
+      await this.record(v.proposal, actor);
+      imported.push(id);
+    }
+    return { imported, skipped };
+  }
+
+  private async record(proposal: SystemProposal, actor: string): Promise<SystemDefinition> {
     const content = {
       id: proposal.id,
       name: proposal.name,
@@ -235,37 +143,32 @@ export class SystemsStore {
       stripSignInLinks: proposal.stripSignInLinks,
     };
     const hash = payloadHash(content);
+    const at = new Date().toISOString();
     const def: SystemDefinition = {
       ...content,
       version: 1,
       status: 'approved',
-      proposedBy: 'system:migration',
-      proposedAt: new Date().toISOString(),
-      decidedBy: 'system:migration',
-      decidedAt: new Date().toISOString(),
-      reason: 'Baseline migration from landing zone and ops configuration',
+      proposedBy: actor,
+      proposedAt: at,
+      decidedBy: actor,
+      decidedAt: at,
+      reason: 'imported from the deployment\'s gatekeeper-egress routes (GAP-068)',
       hash,
     };
-
     const sysDir = join(this.dir, proposal.id);
     mkdirSync(sysDir, { recursive: true });
     writeFileSync(join(sysDir, '1.json'), JSON.stringify(def, null, 2));
-    writeFileSync(join(sysDir, 'current.json'), JSON.stringify(def, null, 2));
-
     this.versions.set(proposal.id, [def]);
     this.current.set(proposal.id, def);
-
     this.ledger?.append({
-      timestamp: new Date().toISOString(),
+      timestamp: at,
       agentId: `system:${proposal.id}@1`,
       type: 'action',
-      action: 'SYSTEM_APPROVED',
-      actor: 'system:migration',
+      action: 'SYSTEM_IMPORTED',
+      actor,
       route: proposal.id,
       payloadSha256: hash,
     });
-
-
     return def;
   }
 
