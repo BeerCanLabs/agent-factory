@@ -321,3 +321,41 @@ export interface SystemSummary {
   versions: SystemDefinition[];
 }
 
+export type ModelStatus = 'proposed' | 'approved' | 'rejected';
+
+export interface ModelProposal {
+  name: string;
+  provider: string;
+  id: string;
+  region?: string;
+  price: { inputPerMTok: number; outputPerMTok: number };
+  description?: string;
+  isDefault?: boolean;
+}
+
+export interface ModelDefinition extends ModelProposal {
+  version: number;
+  status: ModelStatus;
+  proposedBy: string;
+  proposedAt: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  reason?: string;
+  hash?: string;
+}
+
+export interface ModelSummary {
+  name: string;
+  provider: string;
+  id: string;
+  region?: string;
+  price: { inputPerMTok: number; outputPerMTok: number };
+  description?: string;
+  isDefault?: boolean;
+  status: ModelStatus;
+  latestVersion: number;
+  approvedVersion: number | null;
+  activeDefinition: ModelDefinition | null;
+  versions: ModelDefinition[];
+}
+

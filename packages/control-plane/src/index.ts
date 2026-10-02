@@ -20,6 +20,7 @@ import { agentsDueForCron } from './scheduler.js';
 import { ScheduleStore } from './schedules.js';
 import { VersionedConfigStore, checkRegistry, configBackendFromEnv, migrateConfigs, pruneOrphans } from './config-store.js';
 import { SystemsStore } from './systems.js';
+import { ModelsStore } from './models.js';
 
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
@@ -255,6 +256,21 @@ try {
   console.log(`[control-plane] systems store: ${state.systems.list().length} systems available`);
 } catch (err) {
   console.error(`[control-plane] systems store initialization failed: ${err instanceof Error ? err.message : String(err)}`);
+}
+
+// §6.9 M3, §6.13 R1: Models as factory data
+const MODELS_DIR = process.env.FACTORY_MODELS_DIR || join(DATA_DIR, 'models');
+try {
+  state.models = await ModelsStore.open(MODELS_DIR, ledger);
+  console.log(`[control-plane] models store: ${state.models.list().length} models available (default: ${state.models.getDefaultModel()})`);
+  if (!state.modelCatalog || Object.keys(state.modelCatalog).length === 0) {
+    const catalog = state.models.getApprovedCatalog();
+    state.modelCatalog = Object.fromEntries(
+      Object.entries(catalog).map(([name, m]) => [name, { provider: m.provider, price: m.price }])
+    );
+  }
+} catch (err) {
+  console.error(`[control-plane] models store initialization failed: ${err instanceof Error ? err.message : String(err)}`);
 }
 
 await reconcileRuns(state);

@@ -78,8 +78,6 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_ECS_SECURITY_GROUPS", value = aws_security_group.agents.id },
         { name = "FACTORY_ECS_ASSIGN_PUBLIC_IP", value = "false" },
         { name = "FACTORY_DEFAULT_POLICY", value = jsonencode({ routes = ["anthropic", "openai", "discord", "google-calendar", "google-oauth", "google-gmail", "google-drive"] }) },
-        # §6.9 M3: the models gatekeeper-egress offers, so an admin sets an agent's models from what exists.
-        { name = "FACTORY_MODEL_CATALOG", value = jsonencode({ for name, m in var.model_catalog : name => { for k, v in m : k => v if v != null } }) },
         { name = "FACTORY_DEFAULT_MODEL", value = var.default_model },
         { name = "AWS_REGION", value = var.aws_region },
         { name = "AWS_DEFAULT_REGION", value = var.aws_region },
@@ -185,7 +183,6 @@ resource "aws_ecs_task_definition" "gatekeeper_egress" {
         # K4 (GAP-067): the only host a sign-in link in an agent's message may point at.
         { name = "FACTORY_PUBLIC_BASE_URL", value = var.factory_public_base_url },
         { name = "FACTORY_PRICES", value = var.gatekeeper_egress_prices },
-        { name = "FACTORY_MODEL_CATALOG", value = jsonencode({ for name, m in var.model_catalog : name => { for k, v in m : k => v if v != null } }) },
         { name = "FACTORY_DEFAULT_MODEL", value = var.default_model },
         { name = "FACTORY_TRACE_PROMPTS", value = var.trace_prompts ? "on" : "off" },
         { name = "FACTORY_TRACE_DIR", value = "/tmp/traces" },

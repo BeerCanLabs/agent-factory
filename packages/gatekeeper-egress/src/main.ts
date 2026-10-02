@@ -19,7 +19,7 @@ const config = process.env.FACTORY_GATEKEEPER_EGRESS_CONFIG
   ? (JSON.parse(readFileSync(process.env.FACTORY_GATEKEEPER_EGRESS_CONFIG, 'utf8')) as { routes?: Route[]; prices?: Record<string, Price>; models?: ModelCatalog })
   : { routes: JSON.parse(process.env.FACTORY_GATEKEEPER_EGRESS_ROUTES ?? '[]') as Route[], prices: JSON.parse(process.env.FACTORY_PRICES ?? '{}') as Record<string, Price> };
 // Offered models (§6.9 M3): FACTORY_MODEL_CATALOG wins over a config file's `models`.
-const modelCatalog = process.env.FACTORY_MODEL_CATALOG ? parseModelCatalog(process.env.FACTORY_MODEL_CATALOG) : parseModelCatalog(JSON.stringify(config.models ?? {}));
+let modelCatalog = process.env.FACTORY_MODEL_CATALOG ? parseModelCatalog(process.env.FACTORY_MODEL_CATALOG) : parseModelCatalog(JSON.stringify(config.models ?? {}));
 
 async function call(method: string, path: string, body?: unknown): Promise<Response> {
   return fetch(`${FACTORY_URL}${path}`, {
@@ -88,6 +88,12 @@ const control: ControlClient = {
     const body = (await res.json()) as { routes?: Route[] };
     return body.routes ?? [];
   },
+  async models() {
+    const res = await call('GET', '/api/v1/gatekeeper-egress/models');
+    if (!res.ok) throw new Error(`control plane models ${res.status}`);
+    const body = (await res.json()) as { catalog?: ModelCatalog };
+    return body.catalog ?? {};
+  },
   async ledger(event) {
     try {
       const res = await call('POST', '/api/v1/ledger', event);
@@ -120,6 +126,19 @@ try {
   }
 } catch (err) {
   console.warn(`[gatekeeper-egress] initial system routes fetch: ${err instanceof Error ? err.message : String(err)}`);
+}
+
+// Initial fetch of approved models (§6.9 M3)
+try {
+  const initialModels = await control.models?.();
+  if (initialModels && typeof initialModels === 'object') {
+    const catalog = ('catalog' in initialModels && initialModels.catalog ? initialModels.catalog : initialModels) as ModelCatalog;
+    if (catalog && typeof catalog === 'object') {
+      modelCatalog = { ...modelCatalog, ...catalog };
+    }
+  }
+} catch (err) {
+  console.warn(`[gatekeeper-egress] initial models fetch: ${err instanceof Error ? err.message : String(err)}`);
 }
 
 

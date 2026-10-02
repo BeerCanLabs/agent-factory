@@ -86,30 +86,6 @@ variable "gatekeeper_egress_prices" {
   default     = "{}"
 }
 
-variable "model_catalog" {
-  description = "Models the factory model API offers (§6.9 M3): neutral name -> provider adapter, provider model id, region, and USD per million tokens. Passed to the gatekeeper-egress as FACTORY_MODEL_CATALOG."
-  type = map(object({
-    provider = string
-    id       = string
-    region   = optional(string)
-    price    = object({ inputPerMTok = number, outputPerMTok = number })
-  }))
-  default = {
-    "claude-sonnet-4-5" = {
-      provider = "bedrock-converse"
-      id       = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-      region   = "us-east-1"
-      price    = { inputPerMTok = 3, outputPerMTok = 15 }
-    }
-    "claude-haiku-4-5" = {
-      provider = "bedrock-converse"
-      id       = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-      region   = "us-east-1"
-      price    = { inputPerMTok = 1, outputPerMTok = 5 }
-    }
-  }
-}
-
 variable "gatekeeper_egress_count" {
   type    = number
   default = 1
@@ -206,7 +182,7 @@ variable "factory_public_base_url" {
 }
 
 variable "default_model" {
-  description = "The model an agent gets when its policy names none (DESIGN_AUTHORITY M2). Must be in model_catalog."
+  description = "The model an agent gets when its policy names none (DESIGN_AUTHORITY M2). Must be an offered model in factory data (M3)."
   type        = string
   default     = "claude-haiku-4-5"
 }

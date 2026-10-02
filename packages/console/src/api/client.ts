@@ -1,4 +1,4 @@
-import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, LedgerEvent, OfferedModel, OutstandingCredentials, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
+import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, LedgerEvent, ModelDefinition, ModelProposal, ModelSummary, OfferedModel, OutstandingCredentials, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
 
 
 const API_BASE = '/api/v1';
@@ -306,6 +306,37 @@ export const factoryApi = {
 
   async rejectSystem(id: string, version?: number, reason?: string): Promise<{ system: SystemDefinition }> {
     return request<{ system: SystemDefinition }>(`/systems/${encodeURIComponent(id)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ ...(version !== undefined ? { version } : {}), ...(reason ? { reason } : {}) }),
+    });
+  },
+
+  // §6.9 M3: Model offerings as factory data
+  async listModelDefinitions(): Promise<ModelSummary[]> {
+    const res = await request<{ models: ModelSummary[] }>('/models/definitions');
+    return res.models ?? [];
+  },
+
+  async getModelDefinition(name: string): Promise<ModelSummary> {
+    return request<ModelSummary>(`/models/definitions/${encodeURIComponent(name)}`);
+  },
+
+  async proposeModel(payload: ModelProposal): Promise<ModelDefinition> {
+    return request<ModelDefinition>('/models/propose', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async approveModel(name: string, version?: number): Promise<ModelDefinition> {
+    return request<ModelDefinition>(`/models/${encodeURIComponent(name)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify(version !== undefined ? { version } : {}),
+    });
+  },
+
+  async rejectModel(name: string, version?: number, reason?: string): Promise<ModelDefinition> {
+    return request<ModelDefinition>(`/models/${encodeURIComponent(name)}/reject`, {
       method: 'POST',
       body: JSON.stringify({ ...(version !== undefined ? { version } : {}), ...(reason ? { reason } : {}) }),
     });

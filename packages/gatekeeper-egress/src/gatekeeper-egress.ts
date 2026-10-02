@@ -8,7 +8,7 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { SseMeter, costUsd, priceFor, usageFromJson, type Price, type Provider, type Usage } from './meter.js';
 import { writeTrace, type TraceConfig } from './traces.js';
-import { ModelUpstreamError, defaultModelAdapters, parseChatRequest, type ChatResult, type ModelAdapter, type ModelCatalog } from './models.js';
+import { ModelUpstreamError, defaultModelAdapters, parseChatRequest, type CatalogEntry, type ChatResult, type ModelAdapter, type ModelCatalog } from './models.js';
 import type { Meter } from '@opentelemetry/api';
 
 /** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
@@ -108,6 +108,8 @@ export type ControlClient = {
   progress?(events: ProgressEvent[]): Promise<void>;
   /** E10: resolve non-model routes from the factory. Cached, refreshed on change, no redeploy. */
   systemRoutes?(): Promise<Route[]>;
+  /** M3: resolve model offering from the factory. Cached, refreshed on change, no redeploy. */
+  models?(): Promise<{ catalog?: ModelCatalog; default?: string } | ModelCatalog>;
 };
 
 
@@ -136,6 +138,8 @@ export type GatekeeperEgressOptions = {
   progress?: ProgressOptions;
   /** How often to refresh routes from control plane (ms); default 10_000. */
   routeRefreshIntervalMs?: number;
+  /** How often to refresh models from control plane (ms); default 10_000. */
+  modelRefreshIntervalMs?: number;
 };
 
 
@@ -266,6 +270,29 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           routes.set(r.id, r);
         }
         lastRouteRefresh = Date.now();
+      }
+    } catch {}
+  }
+
+  const models = new Map<string, CatalogEntry>(Object.entries(opts.modelCatalog ?? {}));
+  let lastModelRefresh = 0;
+  const MODEL_REFRESH_INTERVAL_MS = opts.modelRefreshIntervalMs ?? 10_000;
+
+  async function ensureModels(targetModelName?: string): Promise<void> {
+    if (!opts.control.models) return;
+    const now = Date.now();
+    const needsRefresh = (targetModelName && !models.has(targetModelName)) || now - lastModelRefresh > MODEL_REFRESH_INTERVAL_MS;
+    if (!needsRefresh) return;
+    try {
+      const remote = await opts.control.models();
+      const catalog = remote && typeof remote === 'object' && 'catalog' in remote ? remote.catalog : remote;
+      if (catalog && typeof catalog === 'object') {
+        for (const [name, entry] of Object.entries(catalog)) {
+          if (entry && typeof entry === 'object') {
+            models.set(name, entry as CatalogEntry);
+          }
+        }
+        lastModelRefresh = Date.now();
       }
     } catch {}
   }
@@ -635,7 +662,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
    * with its own credentials and never forwards the run token.
    */
   async function handleModels(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
-    const catalog = opts.modelCatalog ?? {};
+    await ensureModels();
+    const catalog: ModelCatalog = Object.fromEntries(models.entries());
     const path = rest.split('?')[0].replace(/\/$/, '');
     if (req.method === 'GET' && path === '/v1/models') {
       const offered = Object.keys(catalog).filter((name) => !modelDenial(ctx, name));
@@ -649,7 +677,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const model = typeof parsed.model === 'string' ? parsed.model : undefined;
     calls.get(res)?.start(model);
     if (!model) return deny(res, ctx, route, 400, 'model_required');
-    const entry = Object.hasOwn(catalog, model) ? catalog[model] : undefined;
+    if (!models.has(model)) {
+      await ensureModels(model);
+    }
+    const entry = models.get(model);
     if (!entry) return deny(res, ctx, route, 400, 'model_not_offered', { model });
     const denial = modelDenial(ctx, model);
     if (denial) return deny(res, ctx, route, ...denial);
