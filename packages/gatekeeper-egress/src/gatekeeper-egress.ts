@@ -295,13 +295,26 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     return ctx;
   }
 
-  async function credential(route: Route, ctx?: RunContext): Promise<string | undefined> {
-    if (!route.credential) return undefined;
+  function credentialSecretName(route: Route, ctx?: RunContext): string {
+    if (!route.credential) return '';
     let name = route.credential.secret;
     if (ctx && (name.includes('{agent}') || name.includes('${agent}'))) {
       const agentVar = ctx.run.agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_');
       name = name.replace(/\$\{agent\}|\{agent\}/gi, agentVar);
     }
+    return name;
+  }
+
+  function evictCredential(route: Route, ctx?: RunContext) {
+    if (!route.credential) return;
+    const name = credentialSecretName(route, ctx);
+    if (name) credCache.delete(name);
+    credCache.delete(route.credential.secret);
+  }
+
+  async function credential(route: Route, ctx?: RunContext): Promise<string | undefined> {
+    if (!route.credential) return undefined;
+    const name = credentialSecretName(route, ctx);
     let value = credCache.get(name);
     if (!value) {
       const candidates = [
@@ -556,7 +569,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     });
 
     if (status === 401) {
-      credCache.delete(route.credential?.secret ?? '');
+      evictCredential(route, ctx);
       ledger(ctx, route, { type: 'action', action: 'RUNTIME_AUTH_FAILURE' });
       return;
     }
@@ -760,7 +773,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
     const status = await forward(req, res, route, rest, raw, cred);
     if (status === 401) {
-      credCache.delete(route.credential?.secret ?? '');
+      evictCredential(route, ctx);
       ledger(ctx, route, { type: 'action', action: 'RUNTIME_AUTH_FAILURE' });
     }
     for (const c of calls) {
@@ -873,7 +886,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
       const status = await forward(req, res, route, rest, raw, cred);
       ledger(ctx, route, { type: 'action', action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS' });
-      if (status === 401) credCache.delete(route.credential?.secret ?? '');
+      if (status === 401) evictCredential(route, ctx);
     } catch (err) {
       const status = (err as { status?: number }).status ?? 500;
       send(res, status, { error: redactSecrets(err instanceof Error ? err.message : String(err), secretValues) });
