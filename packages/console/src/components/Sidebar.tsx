@@ -60,7 +60,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       id: 'approvals',
-      label: 'Approvals (HITL)',
+      label: 'Approvals',
       icon: <CheckSquare className="w-4 h-4" />,
       badge: pendingApprovalsCount > 0 ? pendingApprovalsCount : undefined,
       badgeColor: 'bg-amber-950 text-amber-400 border border-amber-800/80 animate-pulse',

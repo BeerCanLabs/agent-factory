@@ -34,7 +34,30 @@ export type Route = {
   connection?: string;
   /** Scopes to request for this route's connection (service-account connections; user grants use what was granted). */
   scopes?: string[];
+  /**
+   * E9: requests that act in a person's name. A request with one of these methods is held for an approver, never
+   * forwarded on first sight; the identical request is released once after approval. Operations config, not policy.
+   * `preview` tells the console how to render the held copy (e.g. `linkedin-post`).
+   */
+  hold?: { methods: string[]; preview?: string };
 };
+
+/** E9: what the gatekeeper-egress sends the control plane about a held request (the credential is never part of it). */
+export type HoldRequest = {
+  runId: string;
+  route: string;
+  argsSha256: string;
+  request: { method: string; path: string; headers: Record<string, string>; body: string; bodyEncoding: 'utf8' | 'base64'; preview?: string };
+};
+export type HoldOutcome = { approvalId: string; state: 'pending' | 'approved' | 'rejected' | 'consumed'; notes?: string };
+
+/**
+ * E9: the request headers that change what a held request does, so they are part of the reviewed copy and its hash
+ * (an approved body cannot be re-sent as another operation). Everything else is transport.
+ */
+export const HELD_HEADERS = ['content-type', 'x-restli-method', 'x-http-method-override', 'x-http-method', 'x-method-override', 'linkedin-version'];
+/** E9: the largest request the gatekeeper-egress will hold for review. */
+export const HELD_BODY_LIMIT = 192 * 1024;
 
 export type ConnectionTokenResult =
   | { ok: true; accessToken: string; expiresAt: string }
@@ -65,6 +88,8 @@ export type ControlClient = {
   runContext(runId: string): Promise<RunContext | null>;
   requestApproval(req: { runId: string; route: string; tool: string; argsSha256: string }): Promise<Approval>;
   consumeApproval(approvalId: string): Promise<boolean>;
+  /** E9: hold a request for review, or find the hold for the identical request. Absent: held routes refuse every hold. */
+  holdRequest?(req: HoldRequest): Promise<HoldOutcome>;
   /** Keymaster access token for a live run's agent connection (§6.11). */
   connectionToken?(req: { runId: string; agentId: string; connection: string; scopes?: string[] }): Promise<ConnectionTokenResult>;
   ledger(event: Record<string, unknown>): Promise<void>;
@@ -120,6 +145,8 @@ const STRIP = new Set([
   'accept-encoding',
   'cookie',
 ]);
+
+const isText = (contentType: string | undefined) => !contentType || /^(text\/|application\/(json|x-www-form-urlencoded|[\w.+-]*\+json))/i.test(contentType);
 
 function send(res: http.ServerResponse, status: number, body: unknown) {
   if (res.headersSent) return res.end();
@@ -653,6 +680,54 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     };
   }
 
+  /**
+   * E9: hold a request made in a person's name, or release the identical request once it is approved. Returns true when
+   * it answered the request itself (held, refused); false means approved and consumed: forward it now.
+   */
+  async function holdOrRelease(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer): Promise<boolean> {
+    const method = (req.method ?? 'GET').toUpperCase();
+    if (!opts.control.holdRequest) return deny(res, ctx, route, 503, 'hold_unavailable'), true;
+    if (raw.length > HELD_BODY_LIMIT) return deny(res, ctx, route, 413, 'held_request_too_large', { limit: HELD_BODY_LIMIT }), true;
+    const headers: Record<string, string> = {};
+    for (const h of HELD_HEADERS) {
+      const v = req.headers[h];
+      if (typeof v === 'string') headers[h] = v;
+    }
+    const text = isText(headers['content-type']) && Buffer.from(raw.toString('utf8'), 'utf8').equals(raw);
+    const body = text ? raw.toString('utf8') : raw.toString('base64');
+    const argsSha256 = payloadHash({ method, path: rest, headers, body: raw.toString('base64') });
+    let held: HoldOutcome;
+    try {
+      held = await opts.control.holdRequest({
+        runId: ctx.run.runId,
+        route: route.id,
+        argsSha256,
+        request: { method, path: rest, headers, body, bodyEncoding: text ? 'utf8' : 'base64', ...(route.hold?.preview ? { preview: route.hold.preview } : {}) },
+      });
+    } catch (err) {
+      console.error(`[gatekeeper-egress] hold ${route.id}: ${err instanceof Error ? err.message : String(err)}`);
+      return deny(res, ctx, route, 503, 'hold_unavailable'), true;
+    }
+    if (held.state === 'approved') {
+      if (!(await opts.control.consumeApproval(held.approvalId))) return deny(res, ctx, route, 409, 'approval_already_used', { approvalId: held.approvalId }), true;
+      ledger(ctx, route, { type: 'action', action: 'HELD_REQUEST_RELEASED', approvalId: held.approvalId, payloadSha256: argsSha256 });
+      return false;
+    }
+    if (held.state === 'rejected') {
+      markOutcome(res, 'denied');
+      ledger(ctx, route, { type: 'action', action: 'HELD_REQUEST_REJECTED', approvalId: held.approvalId, payloadSha256: argsSha256 });
+      send(res, 403, { error: 'rejected_by_approver', approvalId: held.approvalId, ...(held.notes ? { notes: held.notes } : {}) });
+      return true;
+    }
+    ledger(ctx, route, { type: 'action', action: 'HELD_FOR_APPROVAL', approvalId: held.approvalId, payloadSha256: argsSha256 });
+    send(res, 202, {
+      status: 'held',
+      approvalId: held.approvalId,
+      message: 'Held for approval (E9): nothing was sent. The decision arrives in your mailbox or as a new run; once approved, send the identical request again to release it.',
+    });
+    return true;
+  }
+
   async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
     const parsed = tryJson(raw) as JsonRpc | JsonRpc[] | undefined;
     const calls = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
@@ -773,6 +848,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (route.kind === 'llm') return await handleLlm(req, res, ctx, route, rest, raw);
       if (route.kind === 'models') return await handleModels(req, res, ctx, route, rest, raw);
       if (route.kind === 'mcp') return await handleMcp(req, res, ctx, route, rest, raw);
+      if (route.hold?.methods.some((h) => h.toUpperCase() === (req.method ?? 'GET').toUpperCase()) && (await holdOrRelease(req, res, ctx, route, rest, raw))) return;
       if (route.connection) return await handleConnection(req, res, ctx, route, rest, raw);
       const cred = await credential(route, ctx);
       if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');

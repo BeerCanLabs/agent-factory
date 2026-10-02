@@ -30,7 +30,8 @@ export type CredentialItem = {
   shared?: boolean;
   requiredBy?: string;
   scopes?: { declared: string[]; granted: string[]; missing: string[] };
-  grant?: { grantedBy: string; obtainedAt: string };
+  /** `endsAt`: the grant ends then and must be reconnected (providers without refresh tokens, K4). */
+  grant?: { grantedBy: string; obtainedAt: string; endsAt?: string };
   instructions: CatalogView | null;
   action: CredentialAction;
 };
@@ -52,6 +53,7 @@ export type AssessOptions = {
   consent: (provider: string) => { path: string; url: string };
   /** Why consent cannot start at all (e.g. the factory's public URL is not configured). */
   consentUnavailable?: string;
+  now?: () => number;
 };
 
 /** Keymaster-held app credentials a declared connection depends on (§6.11 K1). */
@@ -156,7 +158,9 @@ export async function assessCredentials(opts: AssessOptions): Promise<Credential
     const grant = await opts.grant(c.provider);
     const granted = grant?.scopes ?? [];
     const missing = declared.filter((s) => !granted.includes(s));
-    const status: CredentialStatus = !grant ? 'needs_consent' : grant.status === 'needs_reconsent' ? 'needs_reconsent' : missing.length ? 'missing_scopes' : 'present';
+    // A grant past its end needs re-consent even before the Keymaster has been asked for a token (K4).
+    const ended = grant?.endsAt !== undefined && Date.parse(grant.endsAt) <= (opts.now ?? Date.now)();
+    const status: CredentialStatus = !grant ? 'needs_consent' : grant.status === 'needs_reconsent' || ended ? 'needs_reconsent' : missing.length ? 'missing_scopes' : 'present';
     const clientMissing = appItem ? appItem.status !== 'present' : false;
     const reason = opts.consentUnavailable ?? (clientMissing ? `supply ${app!.name} first (the factory's OAuth client)` : undefined);
     items.push({
@@ -167,7 +171,7 @@ export async function assessCredentials(opts: AssessOptions): Promise<Credential
       outstanding: status !== 'present',
       managedBy: 'agent',
       scopes: { declared, granted, missing },
-      ...(grant ? { grant: { grantedBy: grant.grantedBy, obtainedAt: grant.obtainedAt } } : {}),
+      ...(grant ? { grant: { grantedBy: grant.grantedBy, obtainedAt: grant.obtainedAt, ...(grant.endsAt ? { endsAt: grant.endsAt } : {}) } } : {}),
       instructions: instructionsFor(c.provider),
       action: { type: 'consent', ...opts.consent(c.provider), available: !reason, ...(reason ? { reason } : {}) },
     });

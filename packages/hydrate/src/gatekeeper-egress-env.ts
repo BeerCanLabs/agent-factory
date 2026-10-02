@@ -42,6 +42,8 @@ export function gatekeeperEgressEnv(env: NodeJS.ProcessEnv): Record<string, stri
     GITHUB_BASE_URL: `${gw}/github`,
     MOTION_BASE_URL: `${gw}/motion`,
     CLOSING_CLIMB_BASE_URL: `${gw}/closing-climb`,
+    // Keymaster LinkedIn connection; every write is held for the person's approval (E9).
+    LINKEDIN_BASE_URL: `${gw}/linkedin`,
     HOME_ASSISTANT_BASE_URL: `${gw}/home-assistant`,
   };
   // An image that set its own values keeps them; the gatekeeper-egress still rejects anything but a run token.

@@ -189,4 +189,42 @@ describe('Keymaster connections (§6.11)', () => {
     assert.ok(secretValues.has('refresh-from-code') && secretValues.has('access-from-code') && secretValues.has('client-secret-value'));
     assert.deepEqual(await km.exchangeCode('google', { code: 'bad', redirectUri: 'x' }), { ok: false, error: 'invalid_grant' });
   });
+
+  it('K4 LinkedIn: a grant without a refresh token is the access token, says when it ends, and ends then', async () => {
+    let now = Date.parse('2026-10-01T00:00:00.000Z');
+    const LI_CLIENT = JSON.stringify({ client_id: 'linkedin-client-id', client_secret: 'linkedin-client-secret' });
+    const mem = memoryProvider({ LINKEDIN_OAUTH_CLIENT: LI_CLIENT });
+    const ledger = new MemoryLedger();
+    const tok = fakeTokenEndpoint(() => ({ status: 200, body: { access_token: 'linkedin-access-1', expires_in: 5_184_000, scope: 'openid,profile,w_member_social' } }));
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, now: () => now, ledger });
+
+    const out = await km.exchangeCode('linkedin', { code: 'li-code', redirectUri: 'https://f.example/api/v1/connections/linkedin/callback' });
+    assert.ok(out.ok);
+    if (!out.ok) return;
+    assert.equal(tok.calls[0].url, 'https://www.linkedin.com/oauth/v2/accessToken');
+    assert.equal(out.refreshToken, '');
+    assert.deepEqual(out.scopes, ['openid', 'profile', 'w_member_social'], 'LinkedIn separates granted scopes with commas');
+    const ends = new Date(now + 5_184_000_000).toISOString();
+    assert.equal(out.expiresAt, ends);
+    await km.saveGrant('castle', { provider: 'linkedin', clientRef: out.clientRef, refreshToken: out.refreshToken, accessToken: out.accessToken, expiresAt: out.expiresAt, scopes: out.scopes, obtainedAt: new Date(now).toISOString(), grantedBy: 'dale', status: 'active' });
+
+    const [view] = await km.listGrants('castle', ['linkedin']);
+    assert.equal(view.endsAt, ends, 'the grant says when it ends');
+    assert.deepEqual(await km.accessToken('castle', 'linkedin'), { ok: true, accessToken: 'linkedin-access-1', expiresAt: ends });
+
+    now += 5_184_000_000;
+    const fresh = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, now: () => now, ledger });
+    const ended = await fresh.accessToken('castle', 'linkedin');
+    assert.deepEqual(ended, { ok: false, error: 'needs_reconsent', provider: 'linkedin', reason: 'grant_ended' });
+    assert.equal(tok.calls.length, 1, 'no refresh is attempted');
+    assert.equal(JSON.parse(mem.values.get(grantSecretName('castle', 'linkedin'))!).status, 'needs_reconsent');
+    assert.ok(ledger.query({}).some((e) => e.action === 'CONNECTION_MARKED_NEEDS_RECONSENT'));
+  });
+
+  it('K4 a provider that must send a refresh token and does not is refused', async () => {
+    const mem = memoryProvider({ GOOGLE_OAUTH_CLIENT: CLIENT });
+    const tok = fakeTokenEndpoint(() => ({ status: 200, body: { access_token: 'access-only', expires_in: 3600 } }));
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn });
+    assert.deepEqual(await km.exchangeCode('google', { code: 'c', redirectUri: 'x' }), { ok: false, error: 'no_refresh_token' });
+  });
 });
