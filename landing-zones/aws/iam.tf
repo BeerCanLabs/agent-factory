@@ -30,7 +30,11 @@ resource "aws_iam_role_policy" "execution_secrets" {
   role = aws_iam_role.execution.id
   policy = jsonencode({
     Version   = "2012-10-17"
-    Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = "${local.secret_arn}/*" }]
+    Statement = concat(
+      [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = "${local.secret_arn}/*" }],
+      # The agent source token may live outside the factory prefix; ECS injects it into the control plane only.
+      var.agent_source_token_secret_arn == "" ? [] : [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = var.agent_source_token_secret_arn }],
+    )
   })
 }
 
