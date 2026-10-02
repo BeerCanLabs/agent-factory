@@ -12,15 +12,17 @@ import { TriageView } from './views/TriageView.js';
 import { StudioView } from './views/StudioView.js';
 import { CredentialsView } from './views/CredentialsView.js';
 import { SkillsView } from './views/SkillsView.js';
+import { SystemsView } from './views/SystemsView.js';
 import { factoryApi } from './api/client.js';
 import type { AgentRecord, ApprovalItem } from './api/types.js';
 
-/** Deep link, e.g. from the OAuth consent page: `/?view=credentials&agent=<id>`, or `/?view=skills`. */
+/** Deep link, e.g. from the OAuth consent page: `/?view=credentials&agent=<id>`, or `/?view=skills`, `/?view=systems`. */
 function initialLocation(): { screen: ScreenId; agentId?: string } {
   const q = new URLSearchParams(window.location.search);
   const view = q.get('view');
-  return { screen: view === 'credentials' || view === 'skills' ? view : 'fleet', agentId: q.get('agent') ?? undefined };
+  return { screen: view === 'credentials' || view === 'skills' || view === 'systems' ? view : 'fleet', agentId: q.get('agent') ?? undefined };
 }
+
 
 const MainLayout: React.FC = () => {
   const [initial] = useState(initialLocation);
@@ -122,8 +124,10 @@ const MainLayout: React.FC = () => {
           )}
 
           {currentScreen === 'skills' && <SkillsView />}
+          {currentScreen === 'systems' && <SystemsView />}
 
           {currentScreen === 'approvals' && (
+
             <ApprovalsView approvals={approvals} onRefresh={loadData} />
           )}
 

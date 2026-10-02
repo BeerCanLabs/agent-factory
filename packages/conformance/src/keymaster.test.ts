@@ -50,19 +50,26 @@ const hostOf = (u?: string) => {
 };
 
 describe('K1 the Keymaster owns OAuth grants and app secrets', () => {
-  it('the AWS landing zone declares its Google routes', () => {
-    const ids = landingZoneRoutes().filter((r) => r.where === 'landing-zones/aws/variables.tf').map((r) => r.route.id);
-    for (const id of ['google-calendar', 'google-gmail', 'google-drive', 'google-health', 'google-storage']) assert.ok(ids.includes(id), `missing route ${id}`);
+  it('the factory defines its Google systems with Keymaster connection', () => {
+    const systemsSrc = read('packages/control-plane/src/systems.ts');
+    for (const id of ['google-calendar', 'google-gmail', 'google-drive', 'google-health', 'google-storage']) {
+      assert.ok(systemsSrc.includes(`id: '${id}'`), `missing system ${id}`);
+    }
   });
 
-  it('no gatekeeper-egress route to a Google API carries a static credential; API routes use a Keymaster connection', () => {
-    const google = landingZoneRoutes().filter((r) => GOOGLE_HOST.test(hostOf(r.route.upstream)));
-    assert.ok(google.length > 0);
-    const withCredential = google.filter((r) => r.route.credential).map((r) => `${r.where}: ${r.route.id}`);
-    assert.deepEqual(withCredential, [], 'Google routes must not inject a static credential (use `connection`)');
-    // Every Google API route except the legacy token endpoint must be a connection route.
-    const noConnection = google.filter((r) => !r.route.connection && hostOf(r.route.upstream) !== 'oauth2.googleapis.com').map((r) => `${r.where}: ${r.route.id}`);
-    assert.deepEqual(noConnection, []);
+  it('no route or system definition to a Google API carries a static credential; API routes use a Keymaster connection', () => {
+    // Landing zone routes should have no Google routes (they are non-model routes per E10)
+    const googleLz = landingZoneRoutes().filter((r) => GOOGLE_HOST.test(hostOf(r.route.upstream)));
+    assert.equal(googleLz.length, 0, 'landing zones must not declare Google routes (E10)');
+
+    // In systems.ts, Google API systems must not have static credentials and must use connection: 'google'
+    const systemsSrc = read('packages/control-plane/src/systems.ts');
+    for (const id of ['google-calendar', 'google-gmail', 'google-drive', 'google-health', 'google-storage']) {
+      const match = systemsSrc.match(new RegExp(`{\\s*id:\\s*'${id}'[\\s\\S]*?}`));
+      assert.ok(match, `system ${id} definition found`);
+      assert.doesNotMatch(match[0], /credential:/, `${id} must not carry a static credential`);
+      assert.match(match[0], /connection:\s*'google(-service-account)?'/, `${id} must use a Keymaster google connection`);
+    }
   });
 
   it('the gatekeeper-egress refuses a route that mixes a connection with a static credential', () => {
