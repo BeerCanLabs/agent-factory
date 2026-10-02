@@ -21,6 +21,20 @@ describe('§6.7 enforcement', () => {
     assert.deepEqual(skipped, [], 'skipped tests hide regressions; fix them or delete them');
   });
 
+  it('every test file runs: each package test script names it or a glob that matches it', () => {
+    const unrun: string[] = [];
+    for (const pkgJson of files('packages', (p) => /^packages\/[^/]+\/package\.json$/.test(p))) {
+      const dir = pkgJson.slice(0, -'/package.json'.length);
+      const script = String((JSON.parse(read(pkgJson)) as { scripts?: Record<string, string> }).scripts?.test ?? '');
+      const globs = script.split(/\s+/).filter((t) => t.includes('*')).map((g) => new RegExp(`^${g.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*')}$`));
+      for (const f of files(dir, (p) => /\/src\/.*\.test\.tsx?$/.test(p))) {
+        const rel = f.slice(dir.length + 1);
+        if (!script.split(/\s+/).includes(rel) && !globs.some((g) => g.test(rel))) unrun.push(f);
+      }
+    }
+    assert.deepEqual(unrun, [], 'test files no package test script runs (CI passes without them)');
+  });
+
   it('every baseline entry is owned by a registered gap', () => {
     const gaps = registeredGaps();
     for (const b of baseline) assert.ok(gaps.has(b.gap), `${b.rule} ${b.where}: ${b.gap} is not in the Gap Register`);

@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/validate.test.ts",
+    "test": "tsx --test src/validate.test.ts src/system.test.ts",
     "validate": "tsx src/cli.ts validate"
   },
   "dependencies": {

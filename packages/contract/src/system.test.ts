@@ -81,4 +81,13 @@ describe('system definition schemas', () => {
     const parsed = systemDefinitionSchema.safeParse(def);
     assert.equal(parsed.success, true);
   });
+
+  it('refuses a non-https upstream and a model provider as a system (E10, E5)', () => {
+    const base = { id: 'x', name: 'X', kind: 'http' };
+    assert.equal(validateSystemProposal({ ...base, upstream: 'http://example.com' }).ok, false);
+    assert.equal(validateSystemProposal({ ...base, upstream: 'file:///etc/passwd' }).ok, false);
+    assert.equal(validateSystemProposal({ ...base, upstream: 'https://api.openai.com/v1' }).ok, false);
+    assert.equal(validateSystemProposal({ ...base, upstream: 'https://bedrock-runtime.us-east-1.amazonaws.com' }).ok, false);
+    assert.equal(validateSystemProposal({ ...base, upstream: 'https://api.x.com/2' }).ok, true);
+  });
 });
