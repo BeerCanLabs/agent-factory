@@ -1,9 +1,21 @@
-import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, LedgerEvent, OfferedModel, OutstandingCredentials, TriageIncident } from './types.js';
+import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, LedgerEvent, OfferedModel, OutstandingCredentials, SkillSummary, SkillVersion, TriageIncident } from './types.js';
 
 const API_BASE = '/api/v1';
 
 /** Pseudo-agent id for the platform credentials page (never a real agent id: agent ids are lowercase). */
 export const PLATFORM_CREDENTIALS = '__platform__';
+
+/** A failed call: the HTTP status and the control plane's JSON body (reasons, agents, ...), when it sent one. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly body: Record<string, any> | null,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
@@ -19,13 +31,15 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     let errMessage = `HTTP ${res.status} ${res.statusText}`;
+    let body: Record<string, any> | null = null;
     try {
       const errJson = await res.json();
+      if (errJson && typeof errJson === 'object') body = errJson;
       if (errJson && errJson.error) errMessage = errJson.error;
     } catch {
       // ignore
     }
-    throw new Error(errMessage);
+    throw new ApiError(errMessage, res.status, body);
   }
 
   return (await res.json()) as T;
@@ -217,6 +231,43 @@ export const factoryApi = {
   /** The consent start endpoint (same origin); the browser follows its redirect to the provider. */
   connectUrl(path: string): string {
     return path.startsWith(API_BASE) ? path : `${API_BASE}${path}`;
+  },
+
+  // Skill registry and catalog (§6.14 SK1). Any signed-in user reads and registers; an admin decides.
+  async listSkills(): Promise<SkillSummary[]> {
+    return request<SkillSummary[]>('/skills');
+  },
+
+  async getSkill(id: string): Promise<SkillSummary> {
+    return request<SkillSummary>(`/skills/${encodeURIComponent(id)}`);
+  },
+
+  async getSkillVersion(id: string, version: string): Promise<SkillVersion> {
+    return request<SkillVersion>(`/skills/${encodeURIComponent(id)}/versions/${encodeURIComponent(version)}`);
+  },
+
+  /** No manifest: the control plane reads skill.yaml at the pin itself, and resolves a branch or tag to its SHA. */
+  async registerSkill(payload: { repo: string; path: string; commit: string }): Promise<SkillVersion> {
+    return request<SkillVersion>('/registry/skills', { method: 'POST', body: JSON.stringify(payload) });
+  },
+
+  async approveSkill(id: string, version: string, reason?: string): Promise<SkillVersion> {
+    return request<SkillVersion>(`/registry/skills/${encodeURIComponent(id)}/versions/${encodeURIComponent(version)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
+    });
+  },
+
+  /** Reject, or revoke when approved. `force` revokes a version in use and pauses its agents (SK1). */
+  async rejectSkill(id: string, version: string, reason: string, force = false): Promise<SkillVersion> {
+    return request<SkillVersion>(`/registry/skills/${encodeURIComponent(id)}/versions/${encodeURIComponent(version)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ reason, ...(force ? { force: true } : {}) }),
+    });
+  },
+
+  async rerunSkillChecks(id: string, version: string): Promise<SkillVersion> {
+    return request<SkillVersion>(`/registry/skills/${encodeURIComponent(id)}/versions/${encodeURIComponent(version)}/checks`, { method: 'POST' });
   },
 
   // Register New Cartridge

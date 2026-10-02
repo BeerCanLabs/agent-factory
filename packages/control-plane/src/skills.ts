@@ -1,14 +1,17 @@
 /**
  * Skill registry (DESIGN_AUTHORITY.md §6.14 SK1, SK2).
  *
- * A skill is registered by naming a repository, a path inside it and a full commit, with its parsed `skill.yaml`.
+ * A skill is registered by naming a repository, a path inside it and a commit. The caller either sends the parsed
+ * `skill.yaml` with a full commit SHA, or omits it and the control plane reads `skill.yaml` at that path and commit itself
+ * with the factory's read-only source token (TSK-055); then `commit` may be a branch or tag, which is resolved here to
+ * the full SHA it points at and recorded as that SHA, so the pin never moves.
  * Admission pins the commit and checks the manifest (schema, a new version, the design rules). Registering a version
  * starts the factory's checks on its code (skill-checks.ts, TSK-054): `tests: 'pending-build'` until they end, then
  * `passed` or `failed` with short reasons. Every version is approved or rejected by a factory admin, and approval waits
  * for the checks to pass; only approved versions can be adopted (`approvedSkill`). Registration, refusals, checks and
  * decisions are ledgered.
  *
- *   POST /api/v1/registry/skills                                     any user: { repo, path, commit, manifest }
+ *   POST /api/v1/registry/skills                                     any user: { repo, path, commit, manifest? }
  *   POST /api/v1/registry/skills/:id/versions/:version/checks        admin: re-run the checks
  *   POST /api/v1/registry/skills/:id/versions/:version/approve       admin: { reason? }
  *   POST /api/v1/registry/skills/:id/versions/:version/reject        admin: { reason?, force? }
@@ -26,7 +29,8 @@ import { payloadHash } from '@beercanlabs/factory-ledger';
 import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, type SkillManifest, type SkillRequires } from '@beercanlabs/factory-contract';
 import { applyKillSwitch, authenticate, json, readJson, type FactoryState } from './app.js';
 import { FULL_SHA } from './runtime.js';
-import { checkRepoUrl } from './source.js';
+import { parse as parseYaml } from 'yaml';
+import { checkRefName, checkRepoUrl, gitSkillSource, SourceError, type SkillSource } from './source.js';
 import { cleanFailure, skillCheckerFromEnv, type SkillChecker, type SkillCheckOutcome } from './skill-checks.js';
 
 export type SkillStatus = 'pending' | 'approved' | 'rejected';
@@ -56,6 +60,8 @@ export type SkillVersionRecord = {
   decidedBy?: string;
   decidedAt?: string;
   reason?: string;
+  /** Set when the rejection revoked a version that had been approved (SK1 revocation). */
+  revoked?: boolean;
 };
 
 export type SkillSummary = {
@@ -66,7 +72,12 @@ export type SkillSummary = {
   latestApproved: string | null;
   /** Requirements of the latest approved version, or of the newest registered version when none is approved. */
   requires: SkillRequires;
-  versions: Array<Pick<SkillVersionRecord, 'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt'>>;
+  versions: Array<
+    Pick<
+      SkillVersionRecord,
+      'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'checkRun' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt' | 'reason' | 'revoked'
+    >
+  >;
 };
 
 /** Semver precedence (semver.org §11): -1, 0 or 1. Build metadata is ignored. */
@@ -201,9 +212,12 @@ export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummar
       commit: v.commit,
       tests: v.tests,
       ...(v.checks ? { checks: v.checks } : {}),
+      ...(v.checkRun ? { checkRun: v.checkRun } : {}),
       registeredBy: v.registeredBy,
       registeredAt: v.registeredAt,
       ...(v.decidedBy ? { decidedBy: v.decidedBy, decidedAt: v.decidedAt } : {}),
+      ...(v.reason ? { reason: v.reason } : {}),
+      ...(v.revoked ? { revoked: true } : {}),
     })),
   };
 }
@@ -235,17 +249,31 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
 
   const repo = checkRepoUrl(body.repo);
   if (!repo) reasons.push('repo: must be an https git URL without embedded credentials');
-  const commit = typeof body.commit === 'string' && FULL_SHA.test(body.commit) ? body.commit : undefined;
-  if (!commit) reasons.push('commit: must be a full 40-character lowercase git SHA (admission pins the commit, never a branch)');
   const path = checkSkillPath(body.path);
   if (!path) reasons.push('path: must be a relative folder inside the repository (no "..", no leading "/")');
+  let commit = typeof body.commit === 'string' && FULL_SHA.test(body.commit) ? body.commit : undefined;
+  let resolvedFrom: string | undefined;
 
-  const rawManifest = body.manifest;
-  const raw = rawManifest && typeof rawManifest === 'object' && !Array.isArray(rawManifest) ? (rawManifest as Record<string, unknown>) : undefined;
-  let manifest: SkillManifest | undefined;
-  if (!raw) {
-    reasons.push('manifest: the parsed skill.yaml is required');
+  let raw: Record<string, unknown> | undefined;
+  if (body.manifest === undefined || body.manifest === null) {
+    // TSK-055: no manifest sent. The factory reads skill.yaml at the pin itself; a branch or tag is resolved to its SHA now.
+    const ref = commit ? undefined : checkRefName(body.commit);
+    if (!commit && !ref) reasons.push('commit: must be a full 40-character git SHA, or a branch or tag name that the factory resolves to one');
+    if (repo && path && (commit || ref)) {
+      const fetched = await fetchManifest(skillSourceFor(state), repo, path, commit, ref);
+      reasons.push(...fetched.reasons);
+      commit = fetched.commit;
+      resolvedFrom = fetched.commit && ref ? ref : undefined;
+      raw = fetched.raw;
+    }
   } else {
+    if (!commit) reasons.push('commit: must be a full 40-character lowercase git SHA when a manifest is sent (omit the manifest to register a branch or tag; the factory resolves it)');
+    const rawManifest = body.manifest;
+    raw = typeof rawManifest === 'object' && !Array.isArray(rawManifest) ? (rawManifest as Record<string, unknown>) : undefined;
+    if (!raw) reasons.push('manifest: must be the parsed skill.yaml (an object), or omitted for the factory to read it');
+  }
+  let manifest: SkillManifest | undefined;
+  if (raw) {
     const checked = validateSkillManifest(raw);
     if (!checked.ok) {
       for (const i of checked.issues) reasons.push(`manifest.${i.path}: ${i.message}`);
@@ -310,7 +338,65 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
   });
   // SK1: registering a version starts the factory's checks on its code; approval waits for them.
   const started = await startSkillChecks(state, rec.id, rec.version, principal.actor);
-  json(res, 201, started.record ?? rec);
+  json(res, 201, { ...(started.record ?? rec), ...(resolvedFrom ? { resolvedFrom } : {}) });
+}
+
+/** The source registration reads `skill.yaml` from: `state.skillSource`, else git with the factory's source token. */
+const defaultSources = new WeakMap<FactoryState, SkillSource>();
+function skillSourceFor(state: FactoryState): SkillSource {
+  if (state.skillSource) return state.skillSource;
+  let source = defaultSources.get(state);
+  if (!source) defaultSources.set(state, (source = gitSkillSource()));
+  return source;
+}
+
+/**
+ * TSK-055: resolves `ref` (when no full SHA was given) and reads `<path>/skill.yaml` at that commit. Every failure is a
+ * reason the caller can act on: the repository is unreachable with the factory's token, the branch or tag or commit does
+ * not exist, or there is no readable `skill.yaml` there.
+ */
+async function fetchManifest(
+  source: SkillSource,
+  repo: string,
+  path: string,
+  sha: string | undefined,
+  ref: string | undefined,
+): Promise<{ commit?: string; raw?: Record<string, unknown>; reasons: string[] }> {
+  const file = path === '.' ? 'skill.yaml' : `${path}/skill.yaml`;
+  let commit = sha;
+  try {
+    if (!commit && ref) {
+      commit = await source.resolveRef(repo, ref);
+      if (!commit) return { reasons: [`commit: ${repo} has no branch or tag named "${ref}"`] };
+      if (!FULL_SHA.test(commit)) return { reasons: [`commit: "${ref}" did not resolve to a full commit SHA`] };
+    }
+    if (!commit) return { reasons: [] };
+    const text = await source.readFile(repo, commit, file);
+    if (text === undefined) {
+      return { commit, reasons: [`skill.yaml: there is no skill.yaml at "${path}" in ${repo} at ${commit.slice(0, 12)}; check the path and the commit`] };
+    }
+    let parsed: unknown;
+    try {
+      parsed = parseYaml(text, { maxAliasCount: 50 });
+    } catch (err) {
+      const why = err instanceof Error ? err.message.split('\n')[0] : String(err);
+      return { commit, reasons: [`skill.yaml: ${file} at ${commit.slice(0, 12)} is not valid YAML (${cleanFailure(why)})`] };
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { commit, reasons: [`skill.yaml: ${file} at ${commit.slice(0, 12)} is not a mapping of keys to values`] };
+    }
+    return { commit, raw: parsed as Record<string, unknown>, reasons: [] };
+  } catch (err) {
+    if (err instanceof SourceError && err.kind === 'no_commit') return { reasons: [`commit: ${cleanFailure(err.message)}`] };
+    if (err instanceof SourceError && err.kind === 'ambiguous') return { reasons: [`commit: ${cleanFailure(err.message)}`] };
+    if (err instanceof SourceError && err.kind === 'too_large') return { commit, reasons: [`skill.yaml: ${cleanFailure(err.message)}`] };
+    console.warn(`[control-plane] could not read skill source ${repo}:`, err instanceof Error ? err.message : err);
+    return {
+      reasons: [
+        `repo: cannot fetch ${repo}; check that the factory's source token can read this repository (a private repository must grant it read access)`,
+      ],
+    };
+  }
 }
 
 async function decide(
@@ -372,6 +458,8 @@ async function decide(
   }
   const now = new Date().toISOString();
   const next: SkillVersionRecord = { ...rec, status, decidedBy: principal.actor, decidedAt: now };
+  if (revoking) next.revoked = true;
+  else delete next.revoked;
   if (typeof body.reason === 'string' && body.reason.trim()) next.reason = body.reason.trim();
   else delete next.reason;
   try {
