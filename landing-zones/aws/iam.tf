@@ -41,11 +41,11 @@ resource "aws_iam_role_policy" "execution_secrets" {
 locals {
   # By name, not by resource: the Keymaster creates these secrets (K5). `-??????` is the suffix AWS appends to
   # a secret's ARN, so NOTION_API_KEY never also matches NOTION_API_KEY_OTHER.
-  # Gatekeeper-held secrets: the public defaults plus deployment-specific ones (TSK-045).
-  held_secret_names    = distinct(concat(var.provider_secret_names, var.extra_provider_secret_names))
+  # Gatekeeper-held secrets: model provider keys (TSK-066 / E10).
+  held_secret_names    = distinct(var.provider_secret_names)
   provider_secret_arns = [for n in local.held_secret_names : "${local.secret_arn}/${n}-??????"]
-  # Deployment-specific routes are appended; validation refuses an id that would replace a public route.
-  gatekeeper_egress_routes = var.extra_gatekeeper_egress_routes == "[]" ? var.gatekeeper_egress_routes : jsonencode(concat(jsondecode(var.gatekeeper_egress_routes), jsondecode(var.extra_gatekeeper_egress_routes)))
+  # Gatekeeper-egress routes from variables (model routes only per E10; non-model routes are resolved dynamically via Control Plane)
+  gatekeeper_egress_routes = var.gatekeeper_egress_routes
   # §6.11 K1: OAuth grants (one secret per agent x provider) and the app credentials they depend on. Only the
   # control plane's Keymaster reads or writes them; the gatekeeper-egress asks the control plane for access tokens.
   keymaster_grant_arns = ["${local.secret_arn}/connections/*"]

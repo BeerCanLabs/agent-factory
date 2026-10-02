@@ -11,10 +11,12 @@ import {
   ExternalLink,
   KeyRound,
   Puzzle,
+  Server,
 } from 'lucide-react';
 import { useAuth } from '../auth/CloudflareAuth.js';
 
-export type ScreenId = 'fleet' | 'workbench' | 'credentials' | 'skills' | 'approvals' | 'finops' | 'ledger' | 'triage' | 'studio';
+export type ScreenId = 'fleet' | 'workbench' | 'credentials' | 'skills' | 'systems' | 'approvals' | 'finops' | 'ledger' | 'triage' | 'studio';
+
 
 interface SidebarProps {
   currentScreen: ScreenId;
@@ -57,6 +59,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'skills',
       label: 'Skills',
       icon: <Puzzle className="w-4 h-4" />,
+    },
+    {
+      id: 'systems',
+      label: 'Systems',
+      icon: <Server className="w-4 h-4" />,
     },
     {
       id: 'approvals',

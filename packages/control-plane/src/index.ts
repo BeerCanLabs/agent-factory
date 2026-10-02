@@ -19,6 +19,8 @@ import { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
 import { agentsDueForCron } from './scheduler.js';
 import { ScheduleStore } from './schedules.js';
 import { VersionedConfigStore, checkRegistry, configBackendFromEnv, migrateConfigs, pruneOrphans } from './config-store.js';
+import { SystemsStore } from './systems.js';
+
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
 const AGENTS_ROOT = process.env.AGENTS_ROOT || fileURLToPath(new URL('../../../agents', import.meta.url));
@@ -246,7 +248,17 @@ if (state.configs) {
   }
 }
 
+// §6.3.1 E10, §6.13 R1: Systems as factory data
+const SYSTEMS_DIR = process.env.FACTORY_SYSTEMS_DIR || join(DATA_DIR, 'systems');
+try {
+  state.systems = await SystemsStore.open(SYSTEMS_DIR, ledger);
+  console.log(`[control-plane] systems store: ${state.systems.list().length} systems available`);
+} catch (err) {
+  console.error(`[control-plane] systems store initialization failed: ${err instanceof Error ? err.message : String(err)}`);
+}
+
 await reconcileRuns(state);
+
 setInterval(() => void checkHealth(state), 15_000).unref();
 if (state.runtime.status) {
   setInterval(() => void reconcileRuns(state), 15_000).unref();
