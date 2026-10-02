@@ -219,5 +219,33 @@ describe('systems as factory data (E10)', () => {
     assert.equal(res.status, 400);
     assert.equal(res.body.error, 'invalid_system_proposal');
   });
+
+  it('resolves OAuth connection providers from approved system definitions (TSK-067)', async () => {
+    const store = state.systems!;
+    const google = store.getConnectionProvider('google');
+    assert.ok(google);
+    assert.equal(google?.kind, 'oauth-user');
+    assert.equal(google?.provider, 'google');
+    assert.equal(google?.clientSecret, 'GOOGLE_OAUTH_CLIENT');
+    assert.equal(google?.authUrl, 'https://accounts.google.com/o/oauth2/v2/auth');
+
+    const linkedin = store.getConnectionProvider('linkedin');
+    assert.ok(linkedin);
+    assert.equal(linkedin?.kind, 'oauth-user');
+    assert.equal(linkedin?.provider, 'linkedin');
+    assert.equal(linkedin?.clientSecret, 'LINKEDIN_OAUTH_CLIENT');
+    assert.equal(linkedin?.refresh, false);
+
+    const sa = store.getConnectionProvider('google-service-account');
+    assert.ok(sa);
+    assert.equal(sa?.kind, 'jwt-bearer');
+    assert.equal(sa?.provider, 'google-service-account');
+    assert.equal(sa?.keySecret, 'GOOGLE_SERVICE_ACCOUNT');
+    assert.deepEqual(sa?.defaultScopes, ['https://www.googleapis.com/auth/devstorage.read_write']);
+
+    // Non-existent or non-oauth system
+    assert.equal(store.getConnectionProvider('discord'), undefined);
+    assert.equal(store.getConnectionProvider('nonexistent'), undefined);
+  });
 });
 

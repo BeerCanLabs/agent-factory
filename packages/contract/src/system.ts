@@ -26,6 +26,32 @@ export const systemHoldSchema = z
   })
   .strict();
 
+export const systemOAuthUserSchema = z
+  .object({
+    kind: z.literal('oauth-user').default('oauth-user'),
+    authUrl: z.string().url('authUrl must be a valid URL'),
+    tokenUrl: z.string().url('tokenUrl must be a valid URL'),
+    clientSecret: z.string().min(1),
+    authParams: z.record(z.string()).optional(),
+    refresh: z.boolean().optional(),
+    defaultScopes: z.array(z.string().min(1)).optional(),
+  })
+  .strict();
+
+export const systemJwtBearerSchema = z
+  .object({
+    kind: z.literal('jwt-bearer'),
+    tokenUrl: z.string().url('tokenUrl must be a valid URL'),
+    keySecret: z.string().min(1),
+    defaultScopes: z.array(z.string().min(1)).optional(),
+  })
+  .strict();
+
+export const systemOAuthSchema = z.discriminatedUnion('kind', [
+  systemOAuthUserSchema,
+  systemJwtBearerSchema,
+]);
+
 export const systemProposalSchema = z
   .object({
     id: z.string().max(64).regex(SYSTEM_ID, 'system id must be kebab-case (e.g. github, discord, closing-climb)'),
@@ -36,6 +62,7 @@ export const systemProposalSchema = z
     credential: systemCredentialSchema.optional(),
     connection: z.string().min(1).optional(),
     scopes: z.array(z.string().min(1)).optional(),
+    oauth: systemOAuthSchema.optional(),
     hold: systemHoldSchema.optional(),
     stripSignInLinks: z.boolean().optional(),
   })
@@ -45,8 +72,16 @@ export const systemProposalSchema = z
     { message: 'a system definition cannot combine a static credential and a Keymaster connection', path: ['connection'] },
   )
   .refine(
+    (data) => !(data.credential && data.oauth),
+    { message: 'a system definition cannot combine a static credential and OAuth provider configuration', path: ['oauth'] },
+  )
+  .refine(
     (data) => !(data.connection && data.kind !== 'http'),
     { message: 'Keymaster connections are supported on http systems only', path: ['connection'] },
+  )
+  .refine(
+    (data) => !(data.oauth && data.kind !== 'http'),
+    { message: 'OAuth providers are supported on http systems only', path: ['oauth'] },
   );
 
 export const systemDefinitionSchema = z
@@ -59,6 +94,7 @@ export const systemDefinitionSchema = z
     credential: systemCredentialSchema.optional(),
     connection: z.string().min(1).optional(),
     scopes: z.array(z.string().min(1)).optional(),
+    oauth: systemOAuthSchema.optional(),
     hold: systemHoldSchema.optional(),
     stripSignInLinks: z.boolean().optional(),
     version: z.number().int().positive(),
@@ -76,12 +112,23 @@ export const systemDefinitionSchema = z
     { message: 'a system definition cannot combine a static credential and a Keymaster connection', path: ['connection'] },
   )
   .refine(
+    (data) => !(data.credential && data.oauth),
+    { message: 'a system definition cannot combine a static credential and OAuth provider configuration', path: ['oauth'] },
+  )
+  .refine(
     (data) => !(data.connection && data.kind !== 'http'),
     { message: 'Keymaster connections are supported on http systems only', path: ['connection'] },
+  )
+  .refine(
+    (data) => !(data.oauth && data.kind !== 'http'),
+    { message: 'OAuth providers are supported on http systems only', path: ['oauth'] },
   );
 
 export type SystemCredential = z.infer<typeof systemCredentialSchema>;
 export type SystemHold = z.infer<typeof systemHoldSchema>;
+export type SystemOAuthUser = z.infer<typeof systemOAuthUserSchema>;
+export type SystemJwtBearer = z.infer<typeof systemJwtBearerSchema>;
+export type SystemOAuth = z.infer<typeof systemOAuthSchema>;
 export type SystemProposal = z.infer<typeof systemProposalSchema>;
 export type SystemDefinition = z.infer<typeof systemDefinitionSchema>;
 

@@ -65,6 +65,16 @@ export const SystemsView: React.FC = () => {
   const [holdPreview, setHoldPreview] = useState('');
   const [stripLinks, setStripLinks] = useState(false);
 
+  // OAuth Provider configuration state (TSK-067)
+  const [oauthEnabled, setOauthEnabled] = useState(false);
+  const [oauthKind, setOauthKind] = useState<'oauth-user' | 'jwt-bearer'>('oauth-user');
+  const [oauthAuthUrl, setOauthAuthUrl] = useState('');
+  const [oauthTokenUrl, setOauthTokenUrl] = useState('');
+  const [oauthClientSecret, setOauthClientSecret] = useState('');
+  const [oauthKeySecret, setOauthKeySecret] = useState('');
+  const [oauthRefresh, setOauthRefresh] = useState(true);
+  const [oauthDefaultScopes, setOauthDefaultScopes] = useState('');
+
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
@@ -114,6 +124,33 @@ export const SystemsView: React.FC = () => {
       setHoldPost(Boolean(active?.hold?.methods?.includes('POST')));
       setHoldPreview(active?.hold?.preview || '');
       setStripLinks(Boolean(active?.stripSignInLinks));
+
+      if (active?.oauth) {
+        setOauthEnabled(true);
+        setOauthKind(active.oauth.kind);
+        setOauthTokenUrl(active.oauth.tokenUrl);
+        setOauthDefaultScopes((active.oauth.defaultScopes || []).join(', '));
+        if (active.oauth.kind === 'oauth-user') {
+          setOauthAuthUrl(active.oauth.authUrl);
+          setOauthClientSecret(active.oauth.clientSecret);
+          setOauthRefresh(active.oauth.refresh !== false);
+          setOauthKeySecret('');
+        } else {
+          setOauthKeySecret(active.oauth.keySecret);
+          setOauthAuthUrl('');
+          setOauthClientSecret('');
+          setOauthRefresh(true);
+        }
+      } else {
+        setOauthEnabled(false);
+        setOauthKind('oauth-user');
+        setOauthAuthUrl('');
+        setOauthTokenUrl('');
+        setOauthClientSecret('');
+        setOauthKeySecret('');
+        setOauthRefresh(true);
+        setOauthDefaultScopes('');
+      }
     } else {
       setFormId('');
       setFormName('');
@@ -130,6 +167,14 @@ export const SystemsView: React.FC = () => {
       setHoldPost(false);
       setHoldPreview('');
       setStripLinks(false);
+      setOauthEnabled(false);
+      setOauthKind('oauth-user');
+      setOauthAuthUrl('');
+      setOauthTokenUrl('');
+      setOauthClientSecret('');
+      setOauthKeySecret('');
+      setOauthRefresh(true);
+      setOauthDefaultScopes('');
     }
     setActionError(null);
     setIsProposeOpen(true);
@@ -171,6 +216,26 @@ export const SystemsView: React.FC = () => {
 
     if (stripLinks) {
       payload.stripSignInLinks = true;
+    }
+
+    if (oauthEnabled) {
+      if (oauthKind === 'oauth-user') {
+        payload.oauth = {
+          kind: 'oauth-user',
+          authUrl: oauthAuthUrl.trim(),
+          tokenUrl: oauthTokenUrl.trim(),
+          clientSecret: oauthClientSecret.trim(),
+          refresh: oauthRefresh,
+          ...(oauthDefaultScopes.trim() ? { defaultScopes: oauthDefaultScopes.split(',').map((s) => s.trim()).filter(Boolean) } : {}),
+        };
+      } else {
+        payload.oauth = {
+          kind: 'jwt-bearer',
+          tokenUrl: oauthTokenUrl.trim(),
+          keySecret: oauthKeySecret.trim(),
+          ...(oauthDefaultScopes.trim() ? { defaultScopes: oauthDefaultScopes.split(',').map((s) => s.trim()).filter(Boolean) } : {}),
+        };
+      }
     }
 
     try {
@@ -287,7 +352,12 @@ export const SystemsView: React.FC = () => {
                         {sys.upstream}
                       </td>
                       <td className="py-3 px-4 text-xs">
-                        {active?.connection ? (
+                        {active?.oauth ? (
+                          <div className="flex items-center gap-1.5 text-purple-600 dark:text-purple-400 font-medium">
+                            <Lock className="w-3.5 h-3.5" />
+                            OAuth Provider ({active.oauth.kind})
+                          </div>
+                        ) : active?.connection ? (
                           <div className="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 font-medium">
                             <Lock className="w-3.5 h-3.5" />
                             OAuth: {active.connection}
@@ -367,6 +437,11 @@ export const SystemsView: React.FC = () => {
                                     {ver.status}
                                   </span>
                                   <span className="font-mono text-slate-500 truncate max-w-xs">{ver.upstream}</span>
+                                  {ver.oauth && (
+                                    <span className="px-2 py-0.5 rounded text-[11px] bg-purple-50 dark:bg-purple-950 text-purple-700 dark:text-purple-300 border border-purple-300 dark:border-purple-800 font-mono">
+                                      OAuth ({ver.oauth.kind})
+                                    </span>
+                                  )}
                                   {ver.reason && <span className="text-slate-500 italic">"{ver.reason}"</span>}
                                 </div>
                                 <div className="flex items-center gap-3 text-slate-400">
@@ -589,6 +664,128 @@ export const SystemsView: React.FC = () => {
                       placeholder="e.g. read, write"
                       value={connectionScopes}
                       onChange={(e) => setConnectionScopes(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-slate-300 dark:border-slate-700 rounded font-mono"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-slate-200 dark:border-slate-800 pt-3">
+              <label className="flex items-center gap-2 text-xs font-medium cursor-pointer mb-2">
+                <input
+                  type="checkbox"
+                  checked={oauthEnabled}
+                  onChange={(e) => setOauthEnabled(e.target.checked)}
+                />
+                Define Keymaster OAuth Provider (TSK-067)
+              </label>
+
+              {oauthEnabled && (
+                <div className="space-y-3 p-3 bg-purple-50/50 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-800 rounded-lg">
+                  <div className="flex gap-4">
+                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                      <input
+                        type="radio"
+                        name="oauthKind"
+                        checked={oauthKind === 'oauth-user'}
+                        onChange={() => setOauthKind('oauth-user')}
+                      />
+                      User OAuth (Authorization Code)
+                    </label>
+                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                      <input
+                        type="radio"
+                        name="oauthKind"
+                        checked={oauthKind === 'jwt-bearer'}
+                        onChange={() => setOauthKind('jwt-bearer')}
+                      />
+                      Service Account (JWT Bearer)
+                    </label>
+                  </div>
+
+                  {oauthKind === 'oauth-user' && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-500 mb-1">Authorization URL</label>
+                        <input
+                          type="url"
+                          required
+                          placeholder="https://accounts.google.com/o/oauth2/v2/auth"
+                          value={oauthAuthUrl}
+                          onChange={(e) => setOauthAuthUrl(e.target.value)}
+                          className="w-full px-2 py-1 text-xs border border-slate-300 dark:border-slate-700 rounded font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-500 mb-1">Token URL</label>
+                        <input
+                          type="url"
+                          required
+                          placeholder="https://oauth2.googleapis.com/token"
+                          value={oauthTokenUrl}
+                          onChange={(e) => setOauthTokenUrl(e.target.value)}
+                          className="w-full px-2 py-1 text-xs border border-slate-300 dark:border-slate-700 rounded font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-500 mb-1">Client Secret Name</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="GOOGLE_OAUTH_CLIENT"
+                          value={oauthClientSecret}
+                          onChange={(e) => setOauthClientSecret(e.target.value)}
+                          className="w-full px-2 py-1 text-xs border border-slate-300 dark:border-slate-700 rounded font-mono"
+                        />
+                      </div>
+                      <div className="flex items-center pt-4">
+                        <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={oauthRefresh}
+                            onChange={(e) => setOauthRefresh(e.target.checked)}
+                          />
+                          Issues Refresh Tokens
+                        </label>
+                      </div>
+                    </div>
+                  )}
+
+                  {oauthKind === 'jwt-bearer' && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-500 mb-1">Token URL</label>
+                        <input
+                          type="url"
+                          required
+                          placeholder="https://oauth2.googleapis.com/token"
+                          value={oauthTokenUrl}
+                          onChange={(e) => setOauthTokenUrl(e.target.value)}
+                          className="w-full px-2 py-1 text-xs border border-slate-300 dark:border-slate-700 rounded font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-500 mb-1">Service Account Key Secret Name</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="GOOGLE_SERVICE_ACCOUNT"
+                          value={oauthKeySecret}
+                          onChange={(e) => setOauthKeySecret(e.target.value)}
+                          className="w-full px-2 py-1 text-xs border border-slate-300 dark:border-slate-700 rounded font-mono"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-500 mb-1">Default Scopes (comma-separated)</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. https://www.googleapis.com/auth/devstorage.read_write"
+                      value={oauthDefaultScopes}
+                      onChange={(e) => setOauthDefaultScopes(e.target.value)}
                       className="w-full px-2 py-1 text-xs border border-slate-300 dark:border-slate-700 rounded font-mono"
                     />
                   </div>

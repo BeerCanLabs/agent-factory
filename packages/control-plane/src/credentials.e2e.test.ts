@@ -3,12 +3,16 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { ConnectionKeymaster, grantSecretName, type Grant } from '@beercanlabs/factory-keymaster';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { signConsentState } from './connections.js';
+import { SystemsStore } from './systems.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
@@ -87,6 +91,7 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
   const origLog = console.log;
   const origErr = console.error;
   const origWarn = console.warn;
+  let systemsDir = '';
 
   before(async () => {
     const capture = (orig: (...a: unknown[]) => void) => (...a: unknown[]) => {
@@ -97,6 +102,7 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     console.error = capture(origErr);
     console.warn = capture(origWarn);
     const secretValues = new Set<string>();
+    systemsDir = mkdtempSync(join(tmpdir(), 'systems-cred-test-'));
     state = {
       agents: new Map<string, AgentRecord>(),
       ledger,
@@ -118,7 +124,14 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
       secretValues,
       publicBaseUrl: BASE,
       gatekeeperEgressHeldSecrets: new Set(['NOTION_API_KEY', 'ANTHROPIC_API_KEY']),
+      systems: await SystemsStore.open(systemsDir, ledger),
     };
+    state.connections = new ConnectionKeymaster({
+      providers: [provider],
+      ledger,
+      secretValues: state.secretValues,
+      getProvider: (name) => state.systems?.getConnectionProvider(name),
+    });
     state.agents.set('donna', agent({
       id: 'donna',
       name: 'Donna',
@@ -137,11 +150,17 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     console.error = origErr;
     console.warn = origWarn;
     await new Promise<void>((r) => cp.close(() => r()));
+    if (systemsDir) rmSync(systemsDir, { recursive: true, force: true });
   });
 
   beforeEach(() => {
     values.clear();
-    state.connections = new ConnectionKeymaster({ providers: [provider], ledger, secretValues: state.secretValues });
+    state.connections = new ConnectionKeymaster({
+      providers: [provider],
+      ledger,
+      secretValues: state.secretValues,
+      getProvider: (name) => state.systems?.getConnectionProvider(name),
+    });
   });
 
   it('is admin-only', async () => {
