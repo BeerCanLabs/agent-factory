@@ -33,7 +33,19 @@ async function call(port: number, path: string, method = 'GET', token?: string, 
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
 
+/** A deployment's existing gatekeeper-egress routes, as FACTORY_SYSTEMS_IMPORT would carry them (GAP-068). */
+const DEPLOYMENT_ROUTES = [
+  { id: 'anthropic', kind: 'llm', provider: 'anthropic', upstream: 'https://api.anthropic.com', credential: { secret: 'ANTHROPIC_API_KEY', header: 'x-api-key' } },
+  { id: 'models', kind: 'models' },
+  { id: 'discord', kind: 'http', upstream: 'https://discord.com/api/v10', credential: { secret: '{agent}_DISCORD_BOT_TOKEN', header: 'authorization', format: 'Bot {}' }, stripSignInLinks: true },
+  { id: 'github', kind: 'http', upstream: 'https://api.github.com', credential: { secret: '{agent}_GITHUB_TOKEN', header: 'authorization', format: 'Bearer {}', fallback: false } },
+  { id: 'linkedin', kind: 'http', upstream: 'https://api.linkedin.com', connection: 'linkedin', hold: { methods: ['POST', 'PUT', 'PATCH', 'DELETE'], preview: 'linkedin-post' } },
+  { id: 'private-service', kind: 'http', upstream: 'https://private.example.com', credential: { secret: 'PRIVATE_TOKEN', header: 'x-api-token' } },
+  { id: 'broken', kind: 'http', upstream: 'http://insecure.example.com' },
+];
+
 describe('systems as factory data (E10)', () => {
+  let importResult: { imported: string[]; skipped: string[] };
   let tmp: string;
   let server: http.Server;
   let port: number;
@@ -45,6 +57,7 @@ describe('systems as factory data (E10)', () => {
     ledger = new MemoryLedger();
     const systemsDir = join(tmp, 'systems');
     const store = await SystemsStore.open(systemsDir, ledger);
+    importResult = await store.importRoutes(DEPLOYMENT_ROUTES, 'migration:landing-zone');
 
     state = {
       agents: new Map(),
@@ -76,20 +89,30 @@ describe('systems as factory data (E10)', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('auto-seeds baseline definitions on open', async () => {
+  it('imports the deployment\'s non-model routes once, as approved and ledgered systems (GAP-068)', async () => {
+    assert.deepEqual(importResult.imported, ['discord', 'github', 'linkedin', 'private-service']);
+    assert.equal(importResult.skipped.length, 1);
+    assert.match(importResult.skipped[0], /^broken: /);
     const res = await call(port, '/api/v1/systems', 'GET', VIEWER);
     assert.equal(res.status, 200);
     const systems = res.body.systems as Array<{ id: string; status: string }>;
-    assert.ok(systems.length >= 13, `expected at least 13 baseline systems, got ${systems.length}`);
-    const discord = systems.find((s) => s.id === 'discord');
-    assert.ok(discord);
-    assert.equal(discord?.status, 'approved');
-    const github = systems.find((s) => s.id === 'github');
-    assert.ok(github);
-    assert.equal(github?.status, 'approved');
-    const closingClimb = systems.find((s) => s.id === 'closing-climb');
-    assert.ok(closingClimb);
-    assert.equal(closingClimb?.status, 'approved');
+    assert.deepEqual(systems.map((x) => x.id).sort(), ['discord', 'github', 'linkedin', 'private-service']);
+    assert.ok(systems.every((x) => x.status === 'approved'));
+    const rows = ledger.events.filter((e) => e.action === 'SYSTEM_IMPORTED');
+    assert.equal(rows.length, 4);
+    assert.ok(rows.every((e) => e.actor === 'migration:landing-zone'));
+  });
+
+  it('re-importing never overwrites a system the store already has (E10)', async () => {
+    const store = state.systems!;
+    const again = await store.importRoutes([{ id: 'discord', kind: 'http', upstream: 'https://evil.example.com' }], 'migration:landing-zone');
+    assert.deepEqual(again.imported, []);
+    assert.equal(store.get('discord')?.upstream, 'https://discord.com/api/v10');
+  });
+
+  it('a store opened without an import holds no systems: the platform code carries none (E10)', async () => {
+    const empty = await SystemsStore.open(join(tmp, 'empty-systems'));
+    assert.deepEqual(empty.list(), []);
   });
 
   it('serves active routes to gatekeeper-egress via /api/v1/gatekeeper-egress/routes', async () => {
@@ -99,7 +122,7 @@ describe('systems as factory data (E10)', () => {
     assert.ok(routes.some((r) => r.id === 'discord' && r.upstream === 'https://discord.com/api/v10'));
     assert.ok(routes.some((r) => r.id === 'github' && r.credential?.secret === '{agent}_GITHUB_TOKEN'));
     assert.ok(routes.some((r) => r.id === 'linkedin' && r.hold?.methods?.includes('POST')));
-    assert.ok(routes.some((r) => r.id === 'closing-climb'));
+    assert.ok(routes.some((r) => r.id === 'private-service'));
   });
 
   it('proposes a new system definition and allows admin approval', async () => {

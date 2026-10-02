@@ -107,6 +107,8 @@ resource "aws_ecs_task_definition" "control_plane" {
         # Gatekeeper-held secrets (S1): the control plane is denied them, pre-flight never reads them, and they are
         # never put in an agent task definition (aws/ecs.ts).
         { name = "FACTORY_GATEKEEPER_EGRESS_HELD_SECRETS", value = join(",", local.held_secret_names) },
+        # GAP-068 migration (TSK-066): imported once into the systems store; existing systems are never overwritten.
+        { name = "FACTORY_SYSTEMS_IMPORT", value = local.systems_import },
         { name = "GATEKEEPER_INGRESS_URL", value = local.gatekeeper_ingress_url },
         { name = "FACTORY_EVENT_BUS", value = "eventbridge:${aws_cloudwatch_event_bus.factory.name}" },
         { name = "MEMORY_STORE_DIR", value = "/tmp/mind" },
@@ -179,7 +181,7 @@ resource "aws_ecs_task_definition" "gatekeeper_egress" {
       environment = concat(local.otel_env, [
         { name = "PORT", value = "8081" },
         { name = "FACTORY_URL", value = local.cp_url },
-      { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
+        { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_GATEKEEPER_EGRESS_ROUTES", value = local.gatekeeper_egress_routes },
         # K4 (GAP-067): the only host a sign-in link in an agent's message may point at.
@@ -272,7 +274,7 @@ resource "aws_ecs_service" "gatekeeper_ingress" {
   desired_count   = 1
   # On-demand, not Spot: this one task holds every agent's Discord presence, so a Spot reclaim would drop all of them
   # at once (a reclaim killed it during a deploy on 2026-09-30).
-  launch_type     = "FARGATE"
+  launch_type = "FARGATE"
   network_configuration {
     subnets          = aws_subnet.service[*].id
     security_groups  = [aws_security_group.gatekeeper_ingress.id]

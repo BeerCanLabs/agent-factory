@@ -107,24 +107,7 @@ const control: ControlClient = {
   },
 };
 
-// Initial fetch of approved system routes (§6.3.1 E10)
-try {
-  const initialRoutes = await control.systemRoutes?.();
-  if (initialRoutes && Array.isArray(initialRoutes)) {
-    if (!config.routes) config.routes = [];
-    for (const r of initialRoutes) {
-      if (!config.routes.some((cr) => cr.id === r.id)) {
-        config.routes.push(r);
-      }
-    }
-  }
-} catch (err) {
-  console.warn(`[gatekeeper-egress] initial system routes fetch: ${err instanceof Error ? err.message : String(err)}`);
-}
-
-
 const server = createGatekeeperEgress({
-
   factoryPublicUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
   routes: config.routes ?? [],
   prices: config.prices ?? {},
