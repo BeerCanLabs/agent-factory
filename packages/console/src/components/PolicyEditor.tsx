@@ -47,7 +47,8 @@ export const PolicyEditor: React.FC<{ agent: AgentRecord; canEdit: boolean }> = 
 
   // Everything declared (or offered), plus anything the saved policy grants that is not, so it can be seen and
   // removed. Rows come from the saved policy, not the edit in progress, so unticking one never makes it vanish.
-  const routeRows = useMemo(() => [...new Set([...declaredRoutes, ...(policy?.routes ?? [])])], [declaredRoutes, policy]);
+  // E7: the factory model API (`models`) comes with this policy; models are chosen below, not as a route.
+  const routeRows = useMemo(() => [...new Set([...declaredRoutes, ...(policy?.routes ?? [])])].filter((r) => r !== 'models'), [declaredRoutes, policy]);
   const hostRows = useMemo(() => [...new Set([...declaredHosts, ...(policy?.hosts ?? [])])], [declaredHosts, policy]);
   const modelRows = useMemo(() => [...new Set([...offered.map((m) => m.name), ...(policy?.models ?? [])])], [offered, policy]);
   const offeredNames = new Set(offered.map((m) => m.name));
@@ -158,6 +159,7 @@ export const PolicyEditor: React.FC<{ agent: AgentRecord; canEdit: boolean }> = 
 
         <div className={card}>
           <h4 className={heading}>Models</h4>
+          <p className={hint}>Granting models gives the agent the factory model API; there is no separate route to check.</p>
           {modelRows.length === 0 && <p className={hint}>This factory offers no models.</p>}
           {modelRows.map((m) => {
             const price = offered.find((o) => o.name === m)?.price;
