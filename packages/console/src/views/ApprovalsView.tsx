@@ -34,7 +34,10 @@ function bodyJson(req: HeldRequestCopy): Record<string, any> | undefined {
 }
 
 /** LinkedIn "little text": reserved characters arrive backslash-escaped; show them as the reader will see them. */
-const unescapeLittleText = (s: string) => s.replace(/\\([\\|{}@[\]()<>#*_~])/g, '$1');
+const unescapeLittleText = (s: string) =>
+  s
+    .replace(/\{hashtag\|\\?#\|([^}]+)\}/g, '#$1')
+    .replace(/\\([\\|{}@[\]()<>#*_~])/g, '$1');
 
 const describe = (a: ApprovalItem) =>
   a.request?.preview === 'linkedin-post' ? 'LinkedIn post' : a.kind === 'held' ? `${a.request?.method ?? ''} ${a.route}` : a.tool;
