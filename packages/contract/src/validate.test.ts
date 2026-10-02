@@ -345,4 +345,55 @@ describe('typed credential declarations (§6.11 K5.1)', () => {
     ]);
     assert.deepEqual(secretDeclarations(undefined), []);
   });
+
+  it('rejects a cartridge that declares secret names prefixed with its agent id or cloud paths (K5.1)', () => {
+    const dir = fixture({
+      'soul.md': '# Persona',
+      'cartridge.yaml': `schemaVersion: "1.0"
+id: castle
+name: Castle
+triggers:
+  - type: discord
+    secretRef: CASTLE_DISCORD_BOT_TOKEN
+secrets:
+  requires:
+    - name: CASTLE_GITHUB_TOKEN
+      source: github
+`,
+    });
+    try {
+      const res = validateCartridge(dir);
+      assert.equal(res.ok, false);
+      assert.ok(res.issues.some((i) => i.message.includes('CASTLE_GITHUB_TOKEN')));
+      assert.ok(res.issues.some((i) => i.message.includes('CASTLE_DISCORD_BOT_TOKEN')));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('accepts a cartridge that declares logical names for secrets and triggers (K5.1)', () => {
+    const dir = fixture({
+      'soul.md': '# Persona',
+      'cartridge.yaml': `schemaVersion: "1.0"
+id: castle
+name: Castle
+triggers:
+  - type: discord
+    secretRef: bot_token
+secrets:
+  requires:
+    - name: bot_token
+      source: discord
+    - name: token
+      source: github
+`,
+    });
+    try {
+      const res = validateCartridge(dir);
+      assert.equal(res.ok, true);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
 });
+

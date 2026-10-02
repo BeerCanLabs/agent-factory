@@ -9,15 +9,20 @@ triggers:
     path: /wake
   - type: webhook
     path: /hooks/ops-alerts
-    secretRef: ALERT_WEBHOOK_SECRET
+    secretRef: webhook_secret
   - type: discord
-    secretRef: STARTER_PYTHON_DISCORD_BOT_TOKEN
+    secretRef: bot_token
 
 secrets:
   requires:
-    - name: ALERT_WEBHOOK_SECRET
+    - name: webhook_secret
+      system: webhook
       description: "HMAC signing secret for inbound webhook verification"
+    - name: bot_token
+      system: discord
+      description: "Discord bot token for operations assistant"
     - name: OPS_NOTIFY_WEBHOOK
+      system: webhook
       description: "Webhook URL to send high-severity alerts to the team"
 
 persistence:

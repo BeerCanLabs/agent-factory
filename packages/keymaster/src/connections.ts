@@ -12,6 +12,7 @@
 import { createSign, randomUUID } from 'node:crypto';
 import type { LedgerStore } from '@beercanlabs/factory-ledger';
 import { writableProvider, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
+import { keymasterSharedSecretPath } from './credentials.js';
 
 export type GrantStatus = 'active' | 'needs_reconsent';
 
@@ -160,6 +161,19 @@ export class ConnectionKeymaster {
     for (const p of this.providers) {
       const v = await p.get(name);
       if (v !== undefined) return v;
+    }
+    const candidates = [
+      keymasterSharedSecretPath('google', name),
+      keymasterSharedSecretPath('google-oauth-client', name),
+      keymasterSharedSecretPath('linkedin', name),
+      keymasterSharedSecretPath('linkedin-oauth-client', name),
+      `shared/default/${name.toLowerCase().replace(/[^a-z0-9_.-]/g, '_')}`,
+    ];
+    for (const cand of candidates) {
+      for (const p of this.providers) {
+        const v = await p.get(cand);
+        if (v !== undefined) return v;
+      }
     }
     return undefined;
   }

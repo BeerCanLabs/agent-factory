@@ -8,17 +8,23 @@ triggers:
   - type: http
     path: /wake
   - type: discord
-    secretRef: CASTLE_DISCORD_BOT_TOKEN
+    secretRef: bot_token
 
 secrets:
   requires:
-    - name: CASTLE_DISCORD_BOT_TOKEN
+    - name: bot_token
+      system: discord
       description: "Discord Bot Token for Castle editorial chat"
-    - name: CASTLE_GITHUB_TOKEN
+    - name: token
+      system: github
       description: "GitHub Token for blog repository publishing and commits"
     - name: NOTION_API_KEY
+      system: notion
+      shared: true
       description: "Notion API Key for Submind Operations Board"
     - name: XAI_API_KEY
+      system: xai
+      shared: true
       description: "xAI API Key for Grok LLM inference"
 
 persistence:

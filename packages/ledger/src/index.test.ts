@@ -37,6 +37,9 @@ describe('toLedgerEvent', () => {
     for (const credential of ['not a name', 'lowercase_name', 'X'.repeat(200), 42, 'A=b']) {
       assert.equal(toLedgerEvent({ agentId: 'd', type: 'action', credential }).credential, undefined, String(credential));
     }
+    for (const path of ['agents/castle/github/token', 'shared/motion/api_key', 'agents/donna/discord/bot_token']) {
+      assert.equal(toLedgerEvent({ agentId: 'd', type: 'action', credential: path }).credential, path);
+    }
   });
 
   it('drops prompt/content and stores a payload hash', () => {

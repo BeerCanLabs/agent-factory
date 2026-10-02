@@ -13,12 +13,12 @@
  */
 import http from 'node:http';
 import { secretPresent, writableProvider, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
-import { assessCredentials, assessPlatformCredentials, submittableSecrets, summarize, type CredentialItem, type CredentialSummary } from '@beercanlabs/factory-keymaster';
+import { assessCredentials, assessPlatformCredentials, inferSource, keymasterAgentSecretPath, keymasterSharedSecretPath, submittableSecrets, summarize, type CredentialItem, type CredentialSummary } from '@beercanlabs/factory-keymaster';
 import { authenticate, json, type FactoryState } from './app.js';
 import { BUILTIN_AGENT_IDS, declaredCredentials, type AgentRecord } from './catalog.js';
 import { consentUnavailable, getConnections } from './connections.js';
 
-const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
+const SECRET_NAME = /^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/;
 const MAX_VALUE = 64 * 1024;
 const MIN_VALUE = 8;
 // Credential state changes only when someone supplies or rotates a credential, or a grant changes, and each of those
@@ -166,7 +166,7 @@ async function submitCredential(state: FactoryState, req: http.IncomingMessage, 
   const agent = state.agents.get(agentId);
   if (!agent) return noStore(res, 404, { error: 'not_found' });
   if (isBuiltin(agent)) return noStore(res, 409, { error: 'builtin_agent', message: 'built-in system agents get their credentials from the platform deployment' });
-  if (!SECRET_NAME.test(name)) return noStore(res, 400, { error: 'invalid_name', message: 'credential names are ENV-style (A-Z, 0-9, _)' });
+  if (!SECRET_NAME.test(name)) return noStore(res, 400, { error: 'invalid_name', message: 'credential names start with a letter and contain only letters, numbers, _, ., and -' });
   const held = state.gatekeeperEgressHeldSecrets ?? new Set<string>();
   if (held.has(name)) return noStore(res, 409, { error: 'managed_by_platform', name, message: 'the factory gatekeeper-egress holds this credential for every agent; supply it as a platform credential', path: platformSubmitPath(name) });
   const allowed = submittableSecrets({
@@ -176,7 +176,31 @@ async function submitCredential(state: FactoryState, req: http.IncomingMessage, 
     getProvider: (name) => state.systems?.getConnectionProvider(name),
   });
   if (!allowed.has(name)) return noStore(res, 404, { error: 'undeclared_credential', name, message: `${agentId} does not declare ${name}` });
-  await writeCredential(state, req, res, agentId, name, actor);
+
+  const decl = declaredCredentials(agent).find((d) => d.name === name);
+  let storagePath: string;
+  if (decl) {
+    const inferred = (decl.system || decl.source) ? undefined : inferSource(decl.name);
+    const system = decl.system ?? decl.source ?? inferred ?? 'default';
+    storagePath = decl.shared
+      ? keymasterSharedSecretPath(system, name)
+      : keymasterAgentSecretPath(agentId, system, name);
+  } else {
+    let appSystem = 'default';
+    for (const c of agent.connections ?? []) {
+      const def = state.systems?.getConnectionProvider(c.provider);
+      if (def) {
+        const appName = def.kind === 'oauth-user' ? def.clientSecret : def.keySecret;
+        if (appName === name) {
+          appSystem = c.provider;
+          break;
+        }
+      }
+    }
+    storagePath = keymasterSharedSecretPath(appSystem, name);
+  }
+
+  await writeCredential(state, req, res, agentId, storagePath, actor, name);
 }
 
 /**
@@ -184,7 +208,7 @@ async function submitCredential(state: FactoryState, req: http.IncomingMessage, 
  * goes to the secret manager and to the redaction set, and nowhere else. Responses and ledger rows carry the agent
  * (or `platform`), the name, and the actor only.
  */
-async function writeCredential(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, agentId: string, name: string, actor: string) {
+async function writeCredential(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, agentId: string, name: string, actor: string, logicalName?: string) {
   const writer = writableProvider(state.providers);
   if (!writer) return noStore(res, 503, { error: 'no_writable_secrets_backend' });
 
@@ -205,11 +229,12 @@ async function writeCredential(state: FactoryState, req: http.IncomingMessage, r
     return noStore(res, 502, { error: 'write_failed', name });
   }
   state.secretCache?.delete(name);
+  if (logicalName) state.secretCache?.delete(logicalName);
   invalidateCredentials(state);
   const action = existed ? 'CREDENTIAL_ROTATED' : 'CREDENTIAL_SET';
   const at = new Date().toISOString();
   state.ledger.append({ timestamp: at, agentId, type: 'action', action, actor, credential: name });
-  noStore(res, existed ? 200 : 201, { agentId, name, status: 'present', action, at });
+  noStore(res, existed ? 200 : 201, { agentId, name: logicalName ?? name, status: 'present', action, at });
 }
 
 /** Handles the credentials API. Returns false when the path is not one of its routes. */

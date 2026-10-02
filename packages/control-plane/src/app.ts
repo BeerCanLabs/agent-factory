@@ -17,7 +17,7 @@ import { exceededWindow, spendDetail, validatePolicy, type Approval, type Approv
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
 const HELD_BODY_LIMIT = 256 * 1024;
-import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
+import { Keymaster, keymasterAgentSecretPath, keymasterSharedSecretPath, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { changeReason, handleConfig, recordConfig, removeConfig, type ConfigStore } from './config-store.js';
@@ -1066,9 +1066,23 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     let actor: string;
     if (trigger.secretRef) {
-      const bound = await bindSecrets([trigger.secretRef], state.providers);
+      const candidates = [
+        trigger.secretRef,
+        keymasterAgentSecretPath(agent.id, 'webhook', trigger.secretRef),
+        keymasterAgentSecretPath(agent.id, 'webhook', 'webhook_secret'),
+        keymasterSharedSecretPath('webhook', trigger.secretRef),
+        `${agent.id.toUpperCase()}_WEBHOOK_SECRET`,
+      ];
+      let secretValue: string | undefined;
+      for (const cand of [...new Set(candidates)]) {
+        const bound = await bindSecrets([cand], state.providers);
+        if (bound.ok && bound.env[cand]) {
+          secretValue = bound.env[cand];
+          break;
+        }
+      }
       const provided = (req.headers['x-factory-secret'] as string | undefined) ?? '';
-      if (!bound.ok || !provided || !safeEqual(provided, bound.env[trigger.secretRef] ?? '')) {
+      if (!secretValue || !provided || !safeEqual(provided, secretValue)) {
         json(res, 401, { error: 'bad_webhook_secret' });
         return;
       }

@@ -181,3 +181,55 @@ describe('K1/K5 infrastructure never creates secrets (GAP-050)', () => {
     expectOnlyBaselined('K5', found);
   });
 });
+
+describe('K5.1 Keymaster-named credential entries (GAP-073)', () => {
+  it('no agent cartridge declaration names a secret-manager entry or cloud path', () => {
+    // K5.1: agents declare logical names (bot_token, token, etc.). Declarations must not start with the agent prefix
+    // or name cloud secret-manager entries or paths (e.g. AGENT_X, agents/..., shared/...).
+    const yamlFiles = files('agents', (p) => p.endsWith('cartridge.yaml'));
+    const violations: Array<{ file: string; issue: string }> = [];
+    for (const f of yamlFiles) {
+      const content = read(f);
+      const idMatch = content.match(/^id:\s*([a-zA-Z0-9_-]+)/m);
+      if (!idMatch) continue;
+      const agentId = idMatch[1];
+      const prefix = `${agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_`;
+
+      // Check requires
+      const requiresSection = content.match(/secrets:\s*\n\s*requires:\s*\n([\s\S]*?)(?:\n\w+:|$)/);
+      if (requiresSection) {
+        const names = [...requiresSection[1].matchAll(/-\s*name:\s*([^\s\n]+)/g)].map((m) => m[1]);
+        for (const name of names) {
+          if (name.toUpperCase().startsWith(prefix)) {
+            violations.push({ file: f, issue: `secret name "${name}" starts with agent prefix ${prefix}` });
+          }
+          if (name.includes('/') || name.startsWith('agents/') || name.startsWith('shared/')) {
+            violations.push({ file: f, issue: `secret name "${name}" names a secret path` });
+          }
+        }
+      }
+
+      // Check trigger secretRefs
+      const triggersSection = content.match(/triggers:\s*\n([\s\S]*?)(?:\n\w+:|$)/);
+      if (triggersSection) {
+        const refs = [...triggersSection[1].matchAll(/secretRef:\s*([^\s\n]+)/g)].map((m) => m[1]);
+        for (const ref of refs) {
+          if (ref.toUpperCase().startsWith(prefix)) {
+            violations.push({ file: f, issue: `trigger secretRef "${ref}" starts with agent prefix ${prefix}` });
+          }
+          if (ref.includes('/') || ref.startsWith('agents/') || ref.startsWith('shared/')) {
+            violations.push({ file: f, issue: `trigger secretRef "${ref}" names a secret path` });
+          }
+        }
+      }
+    }
+    assert.deepEqual(violations, [], 'all agents in agents/ must declare logical secret names');
+  });
+
+  it('Keymaster stores credentials under agents/<agent>/<system>/<name> and shared/<system>/<name>', () => {
+    // K5.1: The Keymaster creates and names every entry itself
+    const credSrc = read('packages/keymaster/src/credentials.ts');
+    assert.ok(credSrc.includes('agents/${normAgent}/${normSystem}/${normName}'));
+    assert.ok(credSrc.includes('shared/${normSystem}/${normName}'));
+  });
+});

@@ -8,21 +8,29 @@ triggers:
   - type: http
     path: /wake
   - type: discord
-    secretRef: GEORDI_DISCORD_BOT_TOKEN
+    secretRef: bot_token
 
 secrets:
   requires:
-    - name: GEORDI_DISCORD_BOT_TOKEN
+    - name: bot_token
+      system: discord
       description: "Discord Bot Token for Geordi gatekeeper-ingress presence and chat operations"
-    - name: GEORDI_GITHUB_TOKEN
+    - name: token
+      system: github
       description: "GitHub Personal Access Token for engineering issues and repos"
     - name: NOTION_API_KEY
+      system: notion
+      shared: true
       description: "Notion API Key for The Submind Operations Board"
     - name: CLOUDFLARE_API_TOKEN
+      system: cloudflare
       description: "Cloudflare API Token for edge DNS and proxy management"
     - name: DREAMHOST_DNS_API_KEY
+      system: dreamhost
       description: "DreamHost DNS API Key for zone automation"
     - name: XAI_API_KEY
+      system: xai
+      shared: true
       description: "xAI API Key for Grok LLM inference"
 
 persistence:

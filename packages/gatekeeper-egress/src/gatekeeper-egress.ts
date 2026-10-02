@@ -18,6 +18,7 @@ import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions
 
 export type Route = {
   id: string;
+  system?: string;
   /** `models` is the factory model API (§6.9): no fixed upstream; the model catalog routes each call. */
   kind: 'llm' | 'mcp' | 'http' | 'models';
   provider?: Provider;
@@ -363,6 +364,23 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const name = credentialSecretName(route, ctx);
     if (name) credCache.delete(name);
     credCache.delete(route.credential.secret);
+    if (ctx) {
+      const agentId = ctx.run.agentId.toLowerCase();
+      const system = (route.system ?? route.id).toLowerCase();
+      const stripped = route.credential.secret.replace(/\$\{agent\}|\{agent\}[_-]?/gi, '');
+      for (const k of [
+        `agents/${agentId}/${system}/${stripped.toLowerCase()}`,
+        `agents/${agentId}/${system}/${stripped}`,
+        `agents/${agentId}/${system}/token`,
+        `agents/${agentId}/${system}/api_key`,
+        `shared/${system}/${stripped.toLowerCase()}`,
+        `shared/${system}/${stripped}`,
+        `shared/${system}/token`,
+        `shared/${system}/api_key`,
+      ]) {
+        credCache.delete(k);
+      }
+    }
   }
 
   async function credential(route: Route, ctx?: RunContext): Promise<string | undefined> {
@@ -370,13 +388,36 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const name = credentialSecretName(route, ctx);
     let value = credCache.get(name);
     if (!value) {
+      const system = (route.system ?? route.id).toLowerCase();
+      const keymasterCandidates: string[] = [];
+      const stripped = route.credential.secret.replace(/\$\{agent\}|\{agent\}[_-]?/gi, '');
+      const cleanName = stripped.toLowerCase();
+      if (ctx) {
+        const agentId = ctx.run.agentId.toLowerCase();
+        keymasterCandidates.push(
+          `agents/${agentId}/${system}/${cleanName}`,
+          `agents/${agentId}/${system}/${stripped}`,
+          `agents/${agentId}/${system}/token`,
+          `agents/${agentId}/${system}/api_key`,
+          `agents/${agentId}/${system}/api_token`,
+          `agents/${agentId}/${system}/bot_token`,
+        );
+      }
+      keymasterCandidates.push(
+        `shared/${system}/${cleanName}`,
+        `shared/${system}/${stripped}`,
+        `shared/${system}/token`,
+        `shared/${system}/api_key`,
+        `shared/${system}/api_token`,
+      );
       const candidates = [
         name,
+        ...keymasterCandidates,
         name.toLowerCase(),
         name.toLowerCase().replace(/_/g, '-'),
         // A per-agent secret ({agent}_X) falls back to the shared X. Never to another route's secret: that would
         // send one service's credential to a different upstream.
-        ...(route.credential.fallback === false ? [] : [route.credential.secret.replace(/\$\{agent\}|\{agent\}[_-]?/gi, '')]),
+        ...(route.credential.fallback === false ? [] : [stripped]),
       ];
       for (const cand of candidates) {
         if (!cand) continue;
@@ -384,6 +425,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         if (bound.ok && bound.env[cand]) {
           value = bound.env[cand];
           credCache.set(name, value);
+          credCache.set(cand, value);
           if (value.length >= 4) secretValues.add(value);
           break;
         }

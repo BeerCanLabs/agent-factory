@@ -8,15 +8,19 @@ triggers:
   - type: http
     path: /wake
   - type: discord
-    secretRef: NICK_DISCORD_BOT_TOKEN
+    secretRef: bot_token
 
 secrets:
   requires:
-    - name: NICK_DISCORD_BOT_TOKEN
+    - name: bot_token
+      system: discord
       description: "Discord Bot Token for Nick Burns webmaster and client support chat"
-    - name: ALC_SUPPORT_GITHUB_TOKEN
+    - name: alc_token
+      system: github
       description: "GitHub Token for American Lutheran Church Kellogg repository management"
     - name: XAI_API_KEY
+      system: xai
+      shared: true
       description: "xAI API key for inference and vision analysis"
 
 persistence:
