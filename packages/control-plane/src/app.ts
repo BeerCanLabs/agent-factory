@@ -1434,6 +1434,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state), ...(run.model ? { model: run.model } : {}) },
       agentState: agent.state,
       isBuiltin,
+      // E7: a policy set for this agent implies the factory model API; the global fallback never does.
+      policySet: state.policies.has(run.agentId),
       policy: isBuiltin ? { ...pol, budgetUsd: undefined } : pol,
       spend: state.spend.get(run.agentId, run.runId),
     });
