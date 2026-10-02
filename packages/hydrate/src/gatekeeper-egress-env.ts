@@ -46,6 +46,13 @@ export function gatekeeperEgressEnv(env: NodeJS.ProcessEnv): Record<string, stri
     LINKEDIN_BASE_URL: `${gw}/linkedin`,
     HOME_ASSISTANT_BASE_URL: `${gw}/home-assistant`,
   };
+  // E10: every route the run's policy grants gets `<ROUTE_ID>_BASE_URL` (`github-git` -> `GITHUB_GIT_BASE_URL`), so a
+  // new factory system needs no change here. The names above stay as aliases for agents that already use them.
+  for (const id of (env.FACTORY_EGRESS_ROUTES ?? '').split(',').map((r) => r.trim())) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id)) continue;
+    const name = `${id.toUpperCase().replace(/-/g, '_')}_BASE_URL`;
+    if (!(name in out)) out[name] = `${gw}/${id}`;
+  }
   // An image that set its own values keeps them; the gatekeeper-egress still rejects anything but a run token.
   for (const k of Object.keys(out)) if (env[k]) delete out[k];
   return out;

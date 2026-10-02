@@ -91,6 +91,7 @@ describe('TSK-045 gatekeeper-egress routes (S1)', { concurrency: false }, () => 
       routes: [
         { id: 'github', kind: 'http', upstream: `http://127.0.0.1:${upPort}/gh`, credential: { secret: '{agent}_GITHUB_TOKEN', header: 'authorization', format: 'Bearer {}', fallback: false } },
         { id: 'motion', kind: 'http', upstream: `http://127.0.0.1:${upPort}/motion/v1`, credential: { secret: 'MOTION_API_KEY', header: 'x-api-key' } },
+        { id: 'github-git', kind: 'http', upstream: `http://127.0.0.1:${upPort}/git`, credential: { secret: '{agent}_GITHUB_TOKEN', header: 'authorization', format: 'x-access-token:{}', encoding: 'basic', fallback: false } },
       ],
       prices: {},
       runTokens: tokens,
@@ -120,6 +121,30 @@ describe('TSK-045 gatekeeper-egress routes (S1)', { concurrency: false }, () => 
     assert.equal(seen[0].headers.authorization, `Bearer ${CASTLE_GH}`);
     assert.ok(!JSON.stringify(seen[0].headers).includes(token), 'run token reached the upstream');
     assert.equal(ledger.at(-1)?.action, 'EGRESS');
+  });
+
+  it("TSK-074 github-git: git's own request carries the agent's token as HTTP Basic, never the run token", async () => {
+    await as('castle', ['github-git']);
+    // git sends the run token through http.extraHeader (SM-switch skills/github_gatekeeper_egress.py).
+    const r = await call(port, '/github-git/BeerCanLabs/x.git/info/refs?service=git-upload-pack', token, { headers: { 'user-agent': 'git/2.47.0' } });
+    assert.equal(r.status, 200);
+    assert.equal(seen[0].path, '/git/BeerCanLabs/x.git/info/refs?service=git-upload-pack');
+    assert.equal(seen[0].headers.authorization, `Basic ${Buffer.from(`x-access-token:${CASTLE_GH}`).toString('base64')}`);
+    assert.ok(!JSON.stringify(seen[0].headers).includes(token), 'run token reached the upstream');
+    assert.equal(ledger.at(-1)?.action, 'EGRESS');
+  });
+
+  it('TSK-074 github-git: a push body reaches GitHub unchanged', async () => {
+    await as('castle', ['github-git']);
+    const pack = Buffer.from([0x30, 0x30, 0x30, 0x30, 0x50, 0x41, 0x43, 0x4b, 0x00, 0xff]);
+    const r = await call(port, '/github-git/BeerCanLabs/x.git/git-receive-pack', token, {
+      method: 'POST',
+      body: pack,
+      headers: { 'content-type': 'application/x-git-receive-pack-request' },
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(seen[0].body, pack);
+    assert.equal(seen[0].headers['content-type'], 'application/x-git-receive-pack-request');
   });
 
   it('github with fallback:false: an agent without its own token gets credential_unbound, not the shared token', async () => {

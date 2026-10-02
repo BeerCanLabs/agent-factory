@@ -27,7 +27,7 @@ export type Route = {
    * the per-agent secret is the only candidate: an agent without its own gets `credential_unbound`, never the
    * shared unprefixed secret. Omitted (the default) keeps the shared fallback (discord).
    */
-  credential?: { secret: string; header: string; format?: string; fallback?: boolean };
+  credential?: { secret: string; header: string; format?: string; fallback?: boolean; encoding?: 'basic' };
   /**
    * Keymaster connection (§6.11 K3): the gatekeeper-egress asks the control plane for a current access token for
    * (agent, connection) and injects it as `Authorization: Bearer`. Never combined with `credential`.
@@ -412,7 +412,9 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
     }
     if (!value) return undefined;
-    return (route.credential.format ?? '{}').replace('{}', value);
+    const formatted = (route.credential.format ?? '{}').replace('{}', value);
+    // HTTP Basic (git over HTTPS): `x-access-token:{}` becomes `Basic base64(x-access-token:<token>)`.
+    return route.credential.encoding === 'basic' ? `Basic ${Buffer.from(formatted).toString('base64')}` : formatted;
   }
 
   async function connectionToken(route: Route, ctx: RunContext): Promise<ConnectionTokenResult> {
