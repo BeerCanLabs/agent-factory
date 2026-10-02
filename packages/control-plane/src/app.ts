@@ -10,7 +10,7 @@ import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, connectionsOf, credentialsOf, egressOf, type AgentCategory } from './catalog.js';
 import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, type SourceRef } from './runtime.js';
-import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver } from './source.js';
+import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver, type SkillSource } from './source.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { exceededWindow, spendDetail, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
@@ -56,6 +56,11 @@ export type FactoryState = {
    * (skill-checks.ts `skillCheckerFromEnv`); null: none.
    */
   skillChecker?: SkillChecker | null;
+  /**
+   * §6.14 SK1, TSK-055: where registration reads a skill's `skill.yaml` when the caller sends none, and resolves a
+   * branch or tag to its commit. Unset: git with the factory's read-only source token (`gitSkillSource`).
+   */
+  skillSource?: SkillSource;
   spend: SpendTracker;
   approvals: ApprovalStore;
   keymaster?: Keymaster;
