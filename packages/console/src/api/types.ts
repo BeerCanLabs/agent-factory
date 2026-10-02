@@ -64,16 +64,31 @@ export interface RunRecord {
   };
 }
 
+/** E9: the reviewable copy of a held request, exactly what will be sent on release (never the credential). */
+export interface HeldRequestCopy {
+  method: string;
+  path: string;
+  headers: Record<string, string>;
+  body: string;
+  bodyEncoding: 'utf8' | 'base64';
+  /** How to render it, e.g. `linkedin-post`. */
+  preview?: string;
+}
+
+/** `GET /api/v1/approvals`: an MCP tool call waiting on its run, or a held request in a person's name (E9). */
 export interface ApprovalItem {
-  id: string;
+  approvalId: string;
   agentId: string;
   runId: string;
+  route: string;
   tool: string;
-  host?: string;
-  input: Record<string, any>;
-  risk: 'LOW' | 'MEDIUM' | 'HIGH';
-  status: 'pending' | 'approved' | 'rejected';
+  argsSha256: string;
+  state: 'pending' | 'approved' | 'rejected' | 'consumed';
   requestedAt: string;
+  kind?: 'held';
+  request?: HeldRequestCopy;
+  decidedBy?: string;
+  decidedAt?: string;
   notes?: string;
 }
 

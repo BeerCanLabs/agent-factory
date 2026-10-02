@@ -131,6 +131,30 @@ If Google says the app is unverified or blocks the sign-in, the factory's OAuth 
 Reconnect whenever this page shows missing scopes or "needs re-consent". You can revoke access at any time at [Google Account → Third-party connections](https://myaccount.google.com/connections).`,
   },
   {
+    id: 'linkedin',
+    title: 'LinkedIn account (OAuth consent)',
+    kind: 'oauth',
+    approved: null,
+    instructions: `1. Choose **Connect** (or **Reconnect**). You are sent to LinkedIn's own sign-in page; the factory never sees your password.
+2. Sign in with the LinkedIn account the agent should act for.
+3. Review the access LinkedIn lists. It is exactly the scopes the agent declares. Choose **Allow**.
+4. LinkedIn returns you to the factory, which stores the grant for this agent only.
+
+LinkedIn issues no refresh token to standard apps: the grant ends after 60 days. This page shows when it ends; reconnect before then. Anything the agent posts in your name waits for your approval on the **Approvals** page first (E9). You can revoke access at any time in LinkedIn under **Settings → Data privacy → Permitted services**.`,
+  },
+  {
+    id: 'linkedin-oauth-client',
+    title: 'LinkedIn OAuth client (platform)',
+    kind: 'static',
+    approved: null,
+    instructions: `The factory's LinkedIn app, shared by every agent that connects a LinkedIn account. Only needed once per factory.
+
+1. In the [LinkedIn developer portal](https://www.linkedin.com/developers/apps), open the factory's app (or create one, associated with your company page).
+2. Under **Products**, add **Sign In with LinkedIn using OpenID Connect** and **Share on LinkedIn**.
+3. Under **Auth** → **OAuth 2.0 settings**, add the redirect URL \`<the factory's public URL>/api/v1/connections/linkedin/callback\`.
+4. Paste \`{"client_id": "<Client ID>", "client_secret": "<Primary Client Secret>"}\` (both from the **Auth** tab) into the write-only field on this page and save. It is never shown again.`,
+  },
+  {
     id: 'google-oauth-client',
     title: 'Google OAuth client (platform)',
     kind: 'static',
