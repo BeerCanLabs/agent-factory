@@ -24,6 +24,10 @@ import {
   type SystemDefinition,
   type SystemProposal,
 } from '@beercanlabs/factory-contract';
+import {
+  connectionProviderFromSystem,
+  type ConnectionProvider,
+} from '@beercanlabs/factory-keymaster';
 import { authenticate, json, readJson, type FactoryState } from './app.js';
 
 export type SystemSummary = {
@@ -72,6 +76,31 @@ export const BASELINE_SYSTEMS: SystemProposal[] = [
       secret: 'NOTION_API_KEY',
       header: 'authorization',
       format: 'Bearer {}',
+    },
+  },
+  {
+    id: 'google',
+    name: 'Google Accounts',
+    kind: 'http',
+    upstream: 'https://accounts.google.com',
+    oauth: {
+      kind: 'oauth-user',
+      authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+      tokenUrl: 'https://oauth2.googleapis.com/token',
+      clientSecret: 'GOOGLE_OAUTH_CLIENT',
+      authParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
+    },
+  },
+  {
+    id: 'google-service-account',
+    name: 'Google Cloud Service Account',
+    kind: 'http',
+    upstream: 'https://oauth2.googleapis.com',
+    oauth: {
+      kind: 'jwt-bearer',
+      tokenUrl: 'https://oauth2.googleapis.com/token',
+      keySecret: 'GOOGLE_SERVICE_ACCOUNT',
+      defaultScopes: ['https://www.googleapis.com/auth/devstorage.read_write'],
     },
   },
   {
@@ -155,6 +184,14 @@ export const BASELINE_SYSTEMS: SystemProposal[] = [
       methods: ['POST', 'PUT', 'PATCH', 'DELETE'],
       preview: 'linkedin-post',
     },
+    oauth: {
+      kind: 'oauth-user',
+      authUrl: 'https://www.linkedin.com/oauth/v2/authorization',
+      tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken',
+      clientSecret: 'LINKEDIN_OAUTH_CLIENT',
+      authParams: {},
+      refresh: false,
+    },
   },
   {
     id: 'closing-climb',
@@ -233,6 +270,7 @@ export class SystemsStore {
       scopes: proposal.scopes,
       hold: proposal.hold,
       stripSignInLinks: proposal.stripSignInLinks,
+      oauth: proposal.oauth,
     };
     const hash = payloadHash(content);
     const def: SystemDefinition = {
@@ -284,6 +322,7 @@ export class SystemsStore {
       scopes: proposal.scopes,
       hold: proposal.hold,
       stripSignInLinks: proposal.stripSignInLinks,
+      oauth: proposal.oauth,
     };
     const hash = payloadHash(content);
     const def: SystemDefinition = {
@@ -444,6 +483,21 @@ export class SystemsStore {
       });
     }
     return routes;
+  }
+
+  getConnectionProvider(id: string): ConnectionProvider | undefined {
+    const sys = this.current.get(id);
+    if (!sys || !sys.oauth) return undefined;
+    return connectionProviderFromSystem(sys);
+  }
+
+  getConnectionProviders(): ConnectionProvider[] {
+    const out: ConnectionProvider[] = [];
+    for (const sys of this.current.values()) {
+      const p = connectionProviderFromSystem(sys);
+      if (p) out.push(p);
+    }
+    return out;
   }
 }
 

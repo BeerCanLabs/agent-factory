@@ -56,6 +56,8 @@ export type UserOAuthProvider = {
    * ends when it expires; the Keymaster marks it needs re-consent then (K4).
    */
   refresh?: false;
+  /** Optional default scopes when none requested. */
+  defaultScopes?: string[];
 };
 
 export type JwtBearerProvider = {
@@ -69,38 +71,30 @@ export type JwtBearerProvider = {
 
 export type ConnectionProvider = UserOAuthProvider | JwtBearerProvider;
 
-const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+export type ProviderResolver = (name: string) => Promise<ConnectionProvider | undefined> | ConnectionProvider | undefined;
 
-/** Connections the Keymaster knows how to serve. A connection name is what cartridges and gatekeeper-egress routes declare. */
-export const CONNECTION_PROVIDERS: Record<string, ConnectionProvider> = {
-  google: {
+/** Converts an approved system definition with an oauth block to a Keymaster ConnectionProvider. */
+export function connectionProviderFromSystem(sys: { id: string; oauth?: any }): ConnectionProvider | undefined {
+  if (!sys.oauth) return undefined;
+  if (sys.oauth.kind === 'jwt-bearer') {
+    return {
+      kind: 'jwt-bearer',
+      provider: sys.id,
+      tokenUrl: sys.oauth.tokenUrl,
+      keySecret: sys.oauth.keySecret,
+      defaultScopes: Array.isArray(sys.oauth.defaultScopes) ? sys.oauth.defaultScopes : [],
+    };
+  }
+  return {
     kind: 'oauth-user',
-    provider: 'google',
-    authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
-    tokenUrl: GOOGLE_TOKEN_URL,
-    clientSecret: 'GOOGLE_OAUTH_CLIENT',
-    authParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
-  },
-  linkedin: {
-    kind: 'oauth-user',
-    provider: 'linkedin',
-    authUrl: 'https://www.linkedin.com/oauth/v2/authorization',
-    tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken',
-    clientSecret: 'LINKEDIN_OAUTH_CLIENT',
-    authParams: {},
-    refresh: false,
-  },
-  'google-service-account': {
-    kind: 'jwt-bearer',
-    provider: 'google-service-account',
-    tokenUrl: GOOGLE_TOKEN_URL,
-    keySecret: 'GOOGLE_SERVICE_ACCOUNT',
-    defaultScopes: ['https://www.googleapis.com/auth/devstorage.read_write'],
-  },
-};
-
-export function connectionProvider(name: string): ConnectionProvider | undefined {
-  return Object.hasOwn(CONNECTION_PROVIDERS, name) ? CONNECTION_PROVIDERS[name] : undefined;
+    provider: sys.id,
+    authUrl: sys.oauth.authUrl,
+    tokenUrl: sys.oauth.tokenUrl,
+    clientSecret: sys.oauth.clientSecret,
+    authParams: sys.oauth.authParams ?? {},
+    refresh: sys.oauth.refresh === false ? false : undefined,
+    defaultScopes: sys.oauth.defaultScopes,
+  };
 }
 
 export const grantSecretName = (agentId: string, provider: string) => `connections/${agentId}/${provider}`;
@@ -114,6 +108,7 @@ export type TokenOutcome =
 
 export type ConnectionKeymasterOptions = {
   providers: SecretProvider[];
+  getProvider?: ProviderResolver;
   ledger?: LedgerStore;
   /** Every token value the Keymaster sees is added here so the factory can redact it (S1 backstop). */
   secretValues?: Set<string>;
@@ -128,6 +123,7 @@ type CachedToken = { accessToken: string; expiresAtMs: number; scopes?: string[]
 
 export class ConnectionKeymaster {
   private readonly providers: SecretProvider[];
+  private providerResolver?: ProviderResolver;
   private readonly ledger?: LedgerStore;
   private readonly secretValues: Set<string>;
   private readonly fetchFn: typeof fetch;
@@ -138,11 +134,24 @@ export class ConnectionKeymaster {
 
   constructor(opts: ConnectionKeymasterOptions) {
     this.providers = opts.providers;
+    this.providerResolver = opts.getProvider;
     this.ledger = opts.ledger;
     this.secretValues = opts.secretValues ?? new Set();
     this.fetchFn = opts.fetch ?? fetch;
     this.now = opts.now ?? Date.now;
     this.skewMs = opts.skewMs ?? 60_000;
+  }
+
+  hasProviderResolver(): boolean {
+    return Boolean(this.providerResolver);
+  }
+
+  setProviderResolver(resolver: ProviderResolver): void {
+    this.providerResolver = resolver;
+  }
+
+  async resolveProvider(name: string): Promise<ConnectionProvider | undefined> {
+    return this.providerResolver ? await this.providerResolver(name) : undefined;
   }
 
   // ---- secret storage ------------------------------------------------------------------------
@@ -190,17 +199,19 @@ export class ConnectionKeymaster {
     }
   }
 
-  static view(g: Grant): GrantView {
-    const def = connectionProvider(g.provider);
+  static view(g: Grant, def?: ConnectionProvider): GrantView {
     const ends = def?.kind === 'oauth-user' && def.refresh === false && g.status === 'active' ? g.expiresAt : undefined;
     return { provider: g.provider, scopes: g.scopes, status: g.status, obtainedAt: g.obtainedAt, grantedBy: g.grantedBy, ...(ends ? { endsAt: ends } : {}) };
   }
 
-  async listGrants(agentId: string, providers: string[] = Object.keys(CONNECTION_PROVIDERS)): Promise<GrantView[]> {
+  async listGrants(agentId: string, providers: string[] = []): Promise<GrantView[]> {
     const out: GrantView[] = [];
     for (const p of providers) {
       const g = await this.getGrant(agentId, p);
-      if (g) out.push(ConnectionKeymaster.view(g));
+      if (g) {
+        const def = await this.resolveProvider(p);
+        out.push(ConnectionKeymaster.view(g, def));
+      }
     }
     return out;
   }
@@ -224,7 +235,7 @@ export class ConnectionKeymaster {
 
   /** A current access token for an agent's connection, refreshing (and persisting rotations) as needed. */
   async accessToken(agentId: string, connection: string, scopes: string[] = []): Promise<TokenOutcome> {
-    const def = connectionProvider(connection);
+    const def = await this.resolveProvider(connection);
     if (!def) return { ok: false, error: 'unknown_connection', message: `unknown connection "${connection}"` };
     const wanted = [...new Set(scopes.length ? scopes : def.kind === 'jwt-bearer' ? def.defaultScopes : [])].sort();
     // Service-account tokens are app-level: one cache entry per scope set, shared by agents allowed to use it.
@@ -245,10 +256,8 @@ export class ConnectionKeymaster {
 
   /** Drop a cached token (e.g. the upstream rejected it). */
   invalidate(agentId: string, connection: string): void {
-    const def = connectionProvider(connection);
-    if (!def) return;
     for (const k of this.cache.keys()) {
-      if (def.kind === 'jwt-bearer' ? k.startsWith(`*\u0000${connection}\u0000`) : k.startsWith(`${agentId}\u0000${def.provider}\u0000`)) this.cache.delete(k);
+      if (k.includes(`\u0000${connection}\u0000`)) this.cache.delete(k);
     }
   }
 
@@ -385,7 +394,7 @@ export class ConnectionKeymaster {
     connection: string,
     params: { code: string; redirectUri: string; clientRef?: string },
   ): Promise<{ ok: true; refreshToken: string; accessToken?: string; expiresAt?: string; scopes: string[]; clientRef: string } | { ok: false; error: string }> {
-    const def = connectionProvider(connection);
+    const def = await this.resolveProvider(connection);
     if (!def || def.kind !== 'oauth-user') return { ok: false, error: 'unknown_connection' };
     const clientRef = params.clientRef ?? def.clientSecret;
     const client = await this.oauthClient(clientRef);

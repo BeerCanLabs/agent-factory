@@ -259,6 +259,25 @@ export interface SkillSummary {
 
 export type SystemStatus = 'proposed' | 'approved' | 'rejected';
 
+export type SystemOAuthUser = {
+  kind: 'oauth-user';
+  authUrl: string;
+  tokenUrl: string;
+  clientSecret: string;
+  authParams?: Record<string, string>;
+  refresh?: boolean;
+  defaultScopes?: string[];
+};
+
+export type SystemJwtBearer = {
+  kind: 'jwt-bearer';
+  tokenUrl: string;
+  keySecret: string;
+  defaultScopes?: string[];
+};
+
+export type SystemOAuth = SystemOAuthUser | SystemJwtBearer;
+
 export interface SystemDefinition {
   id: string;
   name: string;
@@ -278,6 +297,7 @@ export interface SystemDefinition {
     preview?: string;
   };
   stripSignInLinks?: boolean;
+  oauth?: SystemOAuth;
   version: number;
   status: SystemStatus;
   proposedBy: string;

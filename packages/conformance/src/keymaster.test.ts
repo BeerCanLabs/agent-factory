@@ -57,6 +57,20 @@ describe('K1 the Keymaster owns OAuth grants and app secrets', () => {
     }
   });
 
+  it('K1/E10 OAuth providers are defined as system definitions and CONNECTION_PROVIDERS is removed (TSK-067)', () => {
+    const kmFiles = files('packages/keymaster', (p) => /\.(ts|js)$/.test(p) && !p.includes('.test.'));
+    const cpFiles = files('packages/control-plane', (p) => /\.(ts|js)$/.test(p) && !p.includes('.test.'));
+    for (const f of [...kmFiles, ...cpFiles]) {
+      const src = read(f);
+      assert.doesNotMatch(src, /\bCONNECTION_PROVIDERS\b/, `${f} must not reference hardcoded CONNECTION_PROVIDERS`);
+    }
+
+    const systemsSrc = read('packages/control-plane/src/systems.ts');
+    for (const id of ['google', 'linkedin', 'google-service-account']) {
+      assert.match(systemsSrc, new RegExp(`id:\\s*'${id}'[\\s\\S]*?oauth:\\s*\\{`), `${id} must define an oauth block`);
+    }
+  });
+
   it('no route or system definition to a Google API carries a static credential; API routes use a Keymaster connection', () => {
     // Landing zone routes should have no Google routes (they are non-model routes per E10)
     const googleLz = landingZoneRoutes().filter((r) => GOOGLE_HOST.test(hostOf(r.route.upstream)));

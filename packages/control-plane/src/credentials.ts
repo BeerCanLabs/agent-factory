@@ -94,6 +94,7 @@ export async function agentCredentials(state: FactoryState, agentId: string): Pr
     agentId,
     secrets: declaredCredentials(agent),
     connections: agent.connections ?? [],
+    getProvider: (name) => state.systems?.getConnectionProvider(name),
     gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets ?? new Set(),
     present: (name) => cachedPresent(state, name),
     grant: async (provider) => (await km.listGrants(agentId, [provider]))[0],
@@ -168,7 +169,12 @@ async function submitCredential(state: FactoryState, req: http.IncomingMessage, 
   if (!SECRET_NAME.test(name)) return noStore(res, 400, { error: 'invalid_name', message: 'credential names are ENV-style (A-Z, 0-9, _)' });
   const held = state.gatekeeperEgressHeldSecrets ?? new Set<string>();
   if (held.has(name)) return noStore(res, 409, { error: 'managed_by_platform', name, message: 'the factory gatekeeper-egress holds this credential for every agent; supply it as a platform credential', path: platformSubmitPath(name) });
-  const allowed = submittableSecrets({ secrets: declaredCredentials(agent), connections: agent.connections ?? [], gatekeeperEgressHeld: held });
+  const allowed = submittableSecrets({
+    secrets: declaredCredentials(agent),
+    connections: agent.connections ?? [],
+    gatekeeperEgressHeld: held,
+    getProvider: (name) => state.systems?.getConnectionProvider(name),
+  });
   if (!allowed.has(name)) return noStore(res, 404, { error: 'undeclared_credential', name, message: `${agentId} does not declare ${name}` });
   await writeCredential(state, req, res, agentId, name, actor);
 }
