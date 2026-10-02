@@ -1,0 +1,13 @@
+# DESIGN_AUTHORITY.md §6.7, GAP-074 (TSK-073): the factory's intent, the checks that enforce it, and the instructions
+# AI sessions follow change only with the owner's review. Branch protection must require code-owner review.
+/DESIGN_AUTHORITY.md          @dsackr
+/CLAUDE.md                    @dsackr
+/GEMINI.md                    @dsackr
+/AGENTS.md                    @dsackr
+/packages/conformance/        @dsackr
+/.github/                     @dsackr
+/.githooks/                   @dsackr
+/.claude/                     @dsackr
+/scripts/conformance.sh       @dsackr
+/scripts/conformance-hook.sh  @dsackr
+/scripts/secret-scan.sh       @dsackr
