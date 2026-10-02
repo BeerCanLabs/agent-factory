@@ -270,6 +270,7 @@ export interface SystemDefinition {
     header: string;
     format?: string;
     fallback?: boolean;
+    encoding?: 'basic';
   };
   connection?: string;
   scopes?: string[];
