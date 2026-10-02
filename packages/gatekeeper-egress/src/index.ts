@@ -1,5 +1,5 @@
-export { createGatekeeperEgress } from './gatekeeper-egress.js';
-export type { ControlClient, ConnectionTokenResult, Policy, Route, RunContext, ToolRule, Approval } from './gatekeeper-egress.js';
+export { createGatekeeperEgress, HELD_BODY_LIMIT, HELD_HEADERS } from './gatekeeper-egress.js';
+export type { ControlClient, ConnectionTokenResult, HoldOutcome, HoldRequest, Policy, Route, RunContext, ToolRule, Approval } from './gatekeeper-egress.js';
 export { SseMeter, costUsd, priceFor, usageFromJson } from './meter.js';
 export type { Price, Provider, Usage } from './meter.js';
 export { bedrockConverse, defaultModelAdapters, parseModelCatalog, parseChatRequest, toConverse, fromConverse, ModelUpstreamError } from './models.js';

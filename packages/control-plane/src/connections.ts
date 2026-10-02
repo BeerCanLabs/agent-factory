@@ -232,8 +232,10 @@ async function callback(state: FactoryState, res: http.ServerResponse, provider:
   state.ledger.append({ timestamp: grant.obtainedAt, agentId: parsed.agentId, type: 'action', action: 'CONNECTION_GRANTED', actor: parsed.actor, provider, scopes: grant.scopes });
   const agentName = state.agents.get(parsed.agentId)?.name ?? parsed.agentId;
   const back = backLink(state, parsed.agentId);
-  page(res, 200, `Connected ${def.provider === 'google' ? 'Google' : def.provider} for ${agentName}`, back ? 'The grant is stored with the Keymaster.' : 'You can close this window.', back);
+  page(res, 200, `Connected ${PROVIDER_NAMES[def.provider] ?? def.provider} for ${agentName}`, back ? 'The grant is stored with the Keymaster.' : 'You can close this window.', back);
 }
+
+const PROVIDER_NAMES: Record<string, string> = { google: 'Google', linkedin: 'LinkedIn' };
 
 type AuthorizedUser = { client_id?: string; client_secret?: string; refresh_token?: string; scopes?: string[] | string; scope?: string; token_uri?: string };
 

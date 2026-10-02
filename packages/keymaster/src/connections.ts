@@ -29,7 +29,15 @@ export type Grant = {
 };
 
 /** What callers may see about a grant. Never tokens. */
-export type GrantView = { provider: string; scopes: string[]; status: GrantStatus; obtainedAt: string; grantedBy: string };
+export type GrantView = {
+  provider: string;
+  scopes: string[];
+  status: GrantStatus;
+  obtainedAt: string;
+  grantedBy: string;
+  /** When the grant ends, for providers that issue no refresh token (K4): the person reconnects before then. */
+  endsAt?: string;
+};
 
 export type OAuthClient = { client_id: string; client_secret: string };
 
@@ -43,6 +51,11 @@ export type UserOAuthProvider = {
   clientSecret: string;
   /** Extra authorization-request parameters (e.g. offline access). */
   authParams: Record<string, string>;
+  /**
+   * `false`: the provider issues no refresh token (LinkedIn standard apps). The grant is the access token itself and
+   * ends when it expires; the Keymaster marks it needs re-consent then (K4).
+   */
+  refresh?: false;
 };
 
 export type JwtBearerProvider = {
@@ -67,6 +80,15 @@ export const CONNECTION_PROVIDERS: Record<string, ConnectionProvider> = {
     tokenUrl: GOOGLE_TOKEN_URL,
     clientSecret: 'GOOGLE_OAUTH_CLIENT',
     authParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
+  },
+  linkedin: {
+    kind: 'oauth-user',
+    provider: 'linkedin',
+    authUrl: 'https://www.linkedin.com/oauth/v2/authorization',
+    tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken',
+    clientSecret: 'LINKEDIN_OAUTH_CLIENT',
+    authParams: {},
+    refresh: false,
   },
   'google-service-account': {
     kind: 'jwt-bearer',
@@ -169,7 +191,9 @@ export class ConnectionKeymaster {
   }
 
   static view(g: Grant): GrantView {
-    return { provider: g.provider, scopes: g.scopes, status: g.status, obtainedAt: g.obtainedAt, grantedBy: g.grantedBy };
+    const def = connectionProvider(g.provider);
+    const ends = def?.kind === 'oauth-user' && def.refresh === false && g.status === 'active' ? g.expiresAt : undefined;
+    return { provider: g.provider, scopes: g.scopes, status: g.status, obtainedAt: g.obtainedAt, grantedBy: g.grantedBy, ...(ends ? { endsAt: ends } : {}) };
   }
 
   async listGrants(agentId: string, providers: string[] = Object.keys(CONNECTION_PROVIDERS)): Promise<GrantView[]> {
@@ -239,6 +263,12 @@ export class ConnectionKeymaster {
     if (grant.accessToken && grant.expiresAt && Date.parse(grant.expiresAt) - this.skewMs > this.now()) {
       this.cache.set(key, { accessToken: grant.accessToken, expiresAtMs: Date.parse(grant.expiresAt), scopes: grant.scopes });
       return { ok: true, accessToken: grant.accessToken, expiresAt: grant.expiresAt };
+    }
+
+    // No refresh token (K4): the grant ended with its access token. The person reconnects; nothing is worked around.
+    if (def.refresh === false || !grant.refreshToken) {
+      await this.markNeedsReconsent(agentId, grant);
+      return { ok: false, error: 'needs_reconsent', provider: def.provider, reason: 'grant_ended' };
     }
 
     const client = await this.oauthClient(grant.clientRef || def.clientSecret);
@@ -380,12 +410,15 @@ export class ConnectionKeymaster {
       return { ok: false, error: 'token_endpoint_unreachable' };
     }
     if (!res.ok) return { ok: false, error: typeof body.error === 'string' ? body.error : `http_${res.status}` };
-    if (typeof body.refresh_token !== 'string' || !body.refresh_token) return { ok: false, error: 'no_refresh_token' };
     const accessToken = typeof body.access_token === 'string' ? body.access_token : undefined;
-    this.remember(body.refresh_token, accessToken);
+    const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token : '';
+    // A provider without refresh tokens grants the access token alone; every other provider must send one.
+    if (def.refresh === false ? !accessToken : !refreshToken) return { ok: false, error: def.refresh === false ? 'no_access_token' : 'no_refresh_token' };
+    this.remember(refreshToken, accessToken);
     const expiresAt = accessToken ? new Date(this.now() + (typeof body.expires_in === 'number' ? body.expires_in : 3600) * 1000).toISOString() : undefined;
-    const scopes = typeof body.scope === 'string' ? body.scope.split(/\s+/).filter(Boolean) : [];
-    return { ok: true, refreshToken: body.refresh_token, accessToken, expiresAt, scopes, clientRef };
+    // Google separates granted scopes with spaces, LinkedIn with commas.
+    const scopes = typeof body.scope === 'string' ? body.scope.split(/[\s,]+/).filter(Boolean) : [];
+    return { ok: true, refreshToken, accessToken, expiresAt, scopes, clientRef };
   }
 }
 
