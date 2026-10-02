@@ -106,7 +106,10 @@ export type ControlClient = {
    * logged and the batch dropped. Absent: no progress is reported.
    */
   progress?(events: ProgressEvent[]): Promise<void>;
+  /** E10: resolve non-model routes from the factory. Cached, refreshed on change, no redeploy. */
+  systemRoutes?(): Promise<Route[]>;
 };
+
 
 export type GatekeeperEgressOptions = {
   routes: Route[];
@@ -131,7 +134,10 @@ export type GatekeeperEgressOptions = {
   factoryPublicUrl?: string;
   /** Batching for run progress events (defaults: every 250 ms, 50 per batch, at most 1000 queued). */
   progress?: ProgressOptions;
+  /** How often to refresh routes from control plane (ms); default 10_000. */
+  routeRefreshIntervalMs?: number;
 };
+
 
 const BUILTIN_AGENT_IDS = new Set(['gatekeeper-ingress', 'keymaster', 'doctor', 'coach']);
 
@@ -245,7 +251,27 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (r.connection && r.kind !== 'http') throw new Error(`route ${r.id}: connections are supported on http routes only`);
   }
   const routes = new Map(opts.routes.map((r) => [r.id, r]));
+  let lastRouteRefresh = 0;
+  const ROUTE_REFRESH_INTERVAL_MS = opts.routeRefreshIntervalMs ?? 10_000;
+
+  async function ensureRoutes(targetRouteId?: string): Promise<void> {
+    if (!opts.control.systemRoutes) return;
+    const now = Date.now();
+    const needsRefresh = (targetRouteId && !routes.has(targetRouteId)) || now - lastRouteRefresh > ROUTE_REFRESH_INTERVAL_MS;
+    if (!needsRefresh) return;
+    try {
+      const remote = await opts.control.systemRoutes();
+      if (Array.isArray(remote)) {
+        for (const r of remote) {
+          routes.set(r.id, r);
+        }
+        lastRouteRefresh = Date.now();
+      }
+    } catch {}
+  }
+
   const ttl = opts.contextTtlMs ?? 1000;
+
   const limit = opts.maxBodyBytes ?? 10 * 1024 * 1024;
   const ctxCache = new Map<string, { at: number; ctx: RunContext }>();
   /** Spend settled here whose ledger write the control plane has not yet acknowledged. */
@@ -791,7 +817,12 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   const server = http.createServer(async (req, res) => {
     try {
       const url = req.url ?? '/';
-      if (url === '/healthz') return send(res, 200, { status: 'ok', routes: [...routes.keys()] });
+      if (url === '/healthz') {
+        if (opts.control.systemRoutes && Date.now() - lastRouteRefresh > ROUTE_REFRESH_INTERVAL_MS) {
+          await ensureRoutes();
+        }
+        return send(res, 200, { status: 'ok', routes: [...routes.keys()] });
+      }
 
       // Circuit breaker: refuse to proxy if the ledger is unreachable.
       // Agents must not egress without an audit trail.
@@ -812,6 +843,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         if (ctx.agentState === 'ISOLATED') return send(res, 403, { error: 'isolated' });
         if (ctx.agentState === 'PAUSED') return send(res, 503, { error: 'paused' });
         if (ctx.run.state === 'BLOCKED_UNHEALTHY') return send(res, 503, { error: 'unhealthy' });
+
+        if (opts.control.systemRoutes && Date.now() - lastRouteRefresh > ROUTE_REFRESH_INTERVAL_MS) {
+          await ensureRoutes();
+        }
 
         if (!isHostAllowed(ctx.policy, routes, parsed.hostname)) {
           markOutcome(res, 'denied');
@@ -840,8 +875,14 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
 
       const m = url.match(/^\/([A-Za-z0-9_.-]+)(\/.*)?$/);
+      if (m && !routes.has(m[1]) && opts.control.systemRoutes) {
+        await ensureRoutes(m[1]);
+      } else if (opts.control.systemRoutes && Date.now() - lastRouteRefresh > ROUTE_REFRESH_INTERVAL_MS) {
+        void ensureRoutes();
+      }
       const route = m ? routes.get(m[1]) : undefined;
       if (!route) return send(res, 404, { error: 'unknown_route' });
+
       const rest = m![2] ?? '/';
 
       const claims = await opts.runTokens.verify(presentedToken(req));
@@ -929,7 +970,12 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
 
       if (!destHost || isNaN(destPort)) return refuse('400 Bad Request', 400);
 
+      if (opts.control.systemRoutes && Date.now() - lastRouteRefresh > ROUTE_REFRESH_INTERVAL_MS) {
+        await ensureRoutes();
+      }
+
       if (!isHostAllowed(ctx.policy, routes, destHost)) {
+
         void opts.control.ledger({
           agentId: ctx.run.agentId,
           runId: ctx.run.runId,

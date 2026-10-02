@@ -53,3 +53,21 @@ export {
   skillDesignIssues,
 } from './skill.js';
 export type { SkillManifest, SkillRequires, SkillCredential, SkillIssue, SkillValidation, SkillDesignOptions } from './skill.js';
+
+export {
+  SYSTEM_ID,
+  systemCredentialSchema,
+  systemHoldSchema,
+  systemProposalSchema,
+  systemDefinitionSchema,
+  validateSystemProposal,
+} from './system.js';
+export type {
+  SystemCredential,
+  SystemHold,
+  SystemProposal,
+  SystemDefinition,
+  SystemIssue,
+  SystemValidation,
+} from './system.js';
+
