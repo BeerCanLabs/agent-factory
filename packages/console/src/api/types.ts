@@ -186,3 +186,58 @@ export interface OfferedModel {
   provider: string;
   price?: { inputPerMTok: number; outputPerMTok: number };
 }
+
+/** What a skill declares it needs (SK2): a request, never a grant. */
+export interface SkillRequires {
+  routes: string[];
+  connections: Array<{ provider: string; scopes: string[] }>;
+  credentials: Array<{ name: string; source?: string; description?: string }>;
+  models: string[];
+}
+
+export interface SkillManifest {
+  id: string;
+  version: string;
+  name: string;
+  description: string;
+  language: string;
+  entry: string;
+  requires: SkillRequires;
+}
+
+export type SkillStatus = 'pending' | 'approved' | 'rejected';
+export type SkillChecksState = 'pending-build' | 'passed' | 'failed';
+
+/** One registered version of a skill (SK1), as the registry records it. */
+export interface SkillVersion {
+  id: string;
+  version: string;
+  repo: string;
+  path: string;
+  commit: string;
+  manifest?: SkillManifest;
+  status: SkillStatus;
+  tests: SkillChecksState;
+  checks?: { at: string; run?: string; failures?: string[] };
+  checkRun?: { id: string; checker: string; startedAt: string; startedBy: string };
+  registeredBy: string;
+  registeredAt: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  reason?: string;
+  revoked?: boolean;
+  /** Only on a registration response: the branch or tag the commit was resolved from. */
+  resolvedFrom?: string;
+  /** Only on a forced revocation response: the agents that were paused. */
+  paused?: string[];
+}
+
+/** A skill in the catalog: `versions` are summaries in the list, full records for one skill. */
+export interface SkillSummary {
+  id: string;
+  name: string;
+  description: string;
+  latestApproved: string | null;
+  requires: SkillRequires;
+  versions: SkillVersion[];
+}

@@ -53,22 +53,49 @@ are refused, so a manifest can't carry a secret value.
 
 ## 3. Registering a version
 
-Register by naming the repository, the skill's folder (`.` for the repository root), the full 40-character commit, and
-the parsed `skill.yaml`. The factory pins that commit. A branch name or a short SHA is refused.
+Register by naming the repository, the skill's folder (`.` for the repository root) and the commit. The factory reads
+`skill.yaml` itself and pins the commit.
+
+### From the dashboard
+
+Open **Skills** in the console's sidebar and choose **Register a skill**. Enter:
+
+- **Repository URL**: `https://github.com/your-org/skill-discord-progress`;
+- **Path**: the skill's folder (`.` for the repository root, `skills/notes` in a monorepo);
+- **Commit, branch or tag**: a full SHA, or a branch or tag name such as `main` or `v1.2.0`.
+
+The factory reads `skill.yaml` in that folder at that commit with its own read-only source token, so you don't paste
+the manifest. A branch or tag is resolved now to the full SHA it points at, and the version is recorded at that SHA:
+the pin never moves, even if the branch does. If something is wrong, the form shows the reasons (section "Admission
+checks").
+
+### From the command line (Claude Code, scripts)
+
+The same endpoint, without a manifest. Behind Cloudflare Access, sign in once with `cloudflared` and send your Access
+token, so the factory records the registration under your own identity (§6.12 A2):
 
 ```bash
-# Convert skill.yaml to JSON (yq, or any YAML parser) and post it with the pin.
-MANIFEST=$(yq -o=json skill.yaml)
-curl -X POST "$FACTORY_URL/api/v1/registry/skills" \
-  -H "Authorization: Bearer $FACTORY_TOKEN" \
+cloudflared access login https://<factory>
+curl -X POST "https://<factory>/api/v1/registry/skills" \
+  -H "cf-access-token: $(cloudflared access token -app=https://<factory>)" \
   -H "Content-Type: application/json" \
-  -d "{
-    \"repo\": \"https://github.com/your-org/skill-discord-progress\",
-    \"path\": \".\",
-    \"commit\": \"$(git rev-parse HEAD)\",
-    \"manifest\": $MANIFEST
-  }"
+  -d '{"repo": "https://github.com/your-org/skill-discord-progress", "path": ".", "commit": "main"}'
 ```
+
+The response is the version's record. When you give a branch or tag, it also says which one (`"resolvedFrom": "main"`);
+`commit` is the full SHA. This is how an engineer using Claude Code registers a skill as themselves: Claude runs the two
+commands above in their terminal.
+
+You can still send the parsed manifest yourself (`"manifest": { ... }`, for example from `yq -o=json skill.yaml`). Then
+`commit` must be a full 40-character SHA: a branch is resolved only when the factory reads `skill.yaml` itself.
+
+### The factory's source token
+
+When no manifest is sent, the control plane fetches the one commit with git and reads `<path>/skill.yaml`. It
+authenticates with the factory's read-only source token, `FACTORY_AGENT_SOURCE_TOKEN` (the same token admission builds
+use), and sends it only over https to the hosts in `FACTORY_AGENT_SOURCE_TOKEN_HOSTS` (comma-separated, default
+`github.com`), never to a host a caller typed. Without a token, public repositories still work. A private repository
+must grant the token read access.
 
 Any authenticated user can register. A successful registration returns `201` with the version's record:
 `{ id, version, repo, path, commit, manifest, status: "pending", tests: "pending-build", checkRun, registeredBy,
@@ -78,7 +105,11 @@ registeredAt }`. Registering also starts the factory's checks on the code (secti
 
 A registration is refused with `422 { "error": "skill_refused", "reasons": [...] }` when:
 
-- the repository isn't an https git URL, the commit isn't a full SHA, or the path leaves the repository;
+- the repository isn't an https git URL, the commit isn't a full SHA (or, without a manifest, a branch or tag), or the
+  path leaves the repository;
+- without a manifest: the factory can't fetch the repository (`repo: cannot fetch ...; check that the factory's source
+  token can read this repository`), the branch, tag or commit doesn't exist, there is no `skill.yaml` at that path and
+  commit, or it isn't valid YAML;
 - the manifest doesn't match the schema;
 - that version is already registered for this id (versions are immutable, so bump the version);
 - the manifest breaks a design rule: a raw host as a route, a model that isn't a plain name, a gatekeeper-held
@@ -187,7 +218,25 @@ settled), `501 checker_not_configured`, `502 start_failed`. Each run is ledgered
 ## 5. Approval: every version, by an admin
 
 A new version is `pending`. A factory admin reviews it (the commit, the code, the requirements) and approves or rejects
-it:
+it.
+
+### From the dashboard
+
+**Skills** lists every skill with its versions, newest first. Each version shows its status (pending, checks running,
+checks passed, checks failed, approved, rejected or revoked), the check results with their failure reasons, what it
+requires (routes, connections with scopes, credentials, models), the repository, path and commit (linked), who
+registered it and when, and who decided it, when and why. The skill shows its latest approved version. Everyone signed
+in can see this; the actions below are shown to admins only.
+
+- **Approve** is enabled only when the checks passed. Add a reason if you like, then confirm.
+- **Reject** (a pending version) or **Revoke** (an approved one) asks for a reason. If agents use the version, the
+  factory refuses and the dialog lists them. **Revoke anyway and pause these agents** asks once more, naming the agents,
+  before it revokes and pauses them (see "Revoking a version").
+- **Re-run checks** starts the checks again; the version shows "checks running" and updates when they end.
+
+The screen refreshes the catalog once a minute while it is open.
+
+### From the API
 
 ```bash
 curl -X POST "$FACTORY_URL/api/v1/registry/skills/discord-progress/versions/1.0.0/approve" \
@@ -208,7 +257,7 @@ Any viewer can read the catalog:
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/v1/skills` | every skill: name, description, `latestApproved` (or `null`), its requirements, and each version with its status, pin and checks |
+| `GET /api/v1/skills` | every skill: name, description, `latestApproved` (or `null`), its requirements, and each version with its status, pin, checks (and the run in progress), and its decision (`decidedBy`, `decidedAt`, `reason`, `revoked`) |
 | `GET /api/v1/skills/:id` | one skill, with every version's full record |
 | `GET /api/v1/skills/:id/versions/:version` | one version's record |
 
@@ -236,7 +285,7 @@ build on: approved, pinned versions.
 An admin can revoke an approved version (`POST /api/v1/registry/skills/:id/versions/:version/reject`). If any agent's
 configuration pins that version in its `skills` list (the factory reads its configuration store), the factory refuses (`409 skill_in_use`) and lists those agents: redeploy
 them without the skill first. An admin may override with `{"force": true}`, which revokes the version at once and
-pauses every agent using it until it is redeployed without it.
+pauses every agent using it until it is redeployed without it. A revoked version's record is `rejected` with `revoked: true`.
 
 ## Checks before approval
 

@@ -10,10 +10,11 @@ import {
   LogOut,
   ExternalLink,
   KeyRound,
+  Puzzle,
 } from 'lucide-react';
 import { useAuth } from '../auth/CloudflareAuth.js';
 
-export type ScreenId = 'fleet' | 'workbench' | 'credentials' | 'approvals' | 'finops' | 'ledger' | 'triage' | 'studio';
+export type ScreenId = 'fleet' | 'workbench' | 'credentials' | 'skills' | 'approvals' | 'finops' | 'ledger' | 'triage' | 'studio';
 
 interface SidebarProps {
   currentScreen: ScreenId;
@@ -51,6 +52,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: <KeyRound className="w-4 h-4" />,
       badge: outstandingCredentialsCount > 0 ? outstandingCredentialsCount : undefined,
       badgeColor: 'bg-amber-950 text-amber-400 border border-amber-800/80',
+    },
+    {
+      id: 'skills',
+      label: 'Skills',
+      icon: <Puzzle className="w-4 h-4" />,
     },
     {
       id: 'approvals',
