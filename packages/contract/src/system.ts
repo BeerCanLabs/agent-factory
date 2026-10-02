@@ -31,6 +31,8 @@ export const systemCredentialSchema = z
     header: z.string().min(1),
     format: z.string().optional(),
     fallback: z.boolean().optional(),
+    /** `basic`: the formatted value is sent as HTTP Basic credentials (base64), e.g. git over HTTPS (`x-access-token:{}`). */
+    encoding: z.enum(['basic']).optional(),
   })
   .strict();
 

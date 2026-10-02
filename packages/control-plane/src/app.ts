@@ -476,6 +476,7 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
     ...gatekeeperEgressEnv({
       FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl,
       FACTORY_RUN_TOKEN: runToken,
+      FACTORY_EGRESS_ROUTES: (state.policies.has(agent.id) ? state.policies.get(agent.id).routes ?? [] : []).join(','),
     }),
   };
   try {
