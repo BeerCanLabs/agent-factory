@@ -25,9 +25,11 @@ import { handleSkills, resumeSkillChecks } from './skills.js';
 import type { SkillChecker } from './skill-checks.js';
 import { handleRunProgress } from './events.js';
 import { handleSchedules, type ScheduleStore } from './schedules.js';
+import { handleSystems, type SystemsStore } from './systems.js';
 import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 
 export type FactoryState = {
+
   agents: Map<string, AgentRecord>;
   /** Models the factory offers (§6.9 M3, FACTORY_MODEL_CATALOG), by neutral name. */
   modelCatalog?: Record<string, { provider: string; price?: { inputPerMTok: number; outputPerMTok: number } }>;
@@ -74,6 +76,8 @@ export type FactoryState = {
   /** Signs OAuth consent state. Defaults to the callback signing key. */
   connectionStateKey?: string;
   schedules?: ScheduleStore;
+  /** Systems as factory data (§6.3.1 E10): approved external system definitions. */
+  systems?: SystemsStore;
   /** URL agents use to reach the control plane (result reporting, input fetch). */
   publicUrl?: string;
   /** URL agents use to reach the gatekeeper-egress; handed to every run as FACTORY_GATEKEEPER_EGRESS_URL. */
@@ -916,8 +920,10 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills')) && (await handleSkills(state, req, res, path))) return;
   if (await handleRunProgress(state, req, res, path)) return;
   if (path.startsWith('/api/v1/schedules') && (await handleSchedules(state, req, res, path))) return;
+  if ((path.startsWith('/api/v1/systems') || path === '/api/v1/gatekeeper-egress/routes') && (await handleSystems(state, req, res, path))) return;
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
+
     json(res, 200, {
       status: 'ok',
       version: state.version,

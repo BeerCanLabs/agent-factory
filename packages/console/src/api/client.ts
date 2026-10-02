@@ -1,4 +1,5 @@
-import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, LedgerEvent, OfferedModel, OutstandingCredentials, SkillSummary, SkillVersion, TriageIncident } from './types.js';
+import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, LedgerEvent, OfferedModel, OutstandingCredentials, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
+
 
 const API_BASE = '/api/v1';
 
@@ -278,4 +279,36 @@ export const factoryApi = {
       body: JSON.stringify(payload),
     });
   },
+
+  // Systems as Factory Data (§6.3.1 E10)
+  async listSystems(): Promise<SystemSummary[]> {
+    const res = await request<{ systems: SystemSummary[] }>('/systems');
+    return res.systems ?? [];
+  },
+
+  async getSystem(id: string): Promise<{ id: string; active: SystemDefinition | null; history: SystemDefinition[] }> {
+    return request<{ id: string; active: SystemDefinition | null; history: SystemDefinition[] }>(`/systems/${encodeURIComponent(id)}`);
+  },
+
+  async proposeSystem(payload: unknown): Promise<{ system: SystemDefinition }> {
+    return request<{ system: SystemDefinition }>('/systems', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async approveSystem(id: string, version?: number, reason?: string): Promise<{ system: SystemDefinition }> {
+    return request<{ system: SystemDefinition }>(`/systems/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ ...(version !== undefined ? { version } : {}), ...(reason ? { reason } : {}) }),
+    });
+  },
+
+  async rejectSystem(id: string, version?: number, reason?: string): Promise<{ system: SystemDefinition }> {
+    return request<{ system: SystemDefinition }>(`/systems/${encodeURIComponent(id)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ ...(version !== undefined ? { version } : {}), ...(reason ? { reason } : {}) }),
+    });
+  },
 };
+
