@@ -213,6 +213,11 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     const list = await call(port, '/api/v1/skills', 'GET', VIEWER);
     assert.equal(list.body[0].latestApproved, '1.0.0');
     assert.deepEqual(list.body[0].versions.map((v: { version: string; status: string }) => `${v.version}:${v.status}`), ['1.0.0:approved', '1.2.0:rejected']);
+    // TSK-055: the catalog carries what the console shows for each decision: who, when, and why; a rejection is not a revocation.
+    const rejected = list.body[0].versions.find((v: { version: string }) => v.version === '1.2.0');
+    assert.equal(rejected.reason, 'posts tokens to the channel');
+    assert.equal(rejected.decidedBy, 'token:admin');
+    assert.equal(rejected.revoked, undefined);
     const row = actions().find((e) => e.action === 'SKILL_REJECTED');
     assert.equal(row?.actor, 'token:admin');
     assert.equal(row?.commit, SHA2);
@@ -268,6 +273,7 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     const forced = await call(port, '/api/v1/registry/skills/discord-progress/versions/1.0.0/reject', 'POST', ADMIN, { reason: 'leaks', force: true });
     assert.equal(forced.status, 200, JSON.stringify(forced.body));
     assert.deepEqual(forced.body.paused, ['ada']);
+    assert.equal(forced.body.revoked, true, 'a rejection of an approved version is recorded as a revocation');
     assert.equal(state.agents.get('ada')?.state, 'PAUSED');
     assert.equal(approvedSkill(state, 'discord-progress', '1.0.0'), undefined);
     assert.ok(actions().some((e) => e.action === 'SKILL_REVOKED_FORCED' && e.actor === 'token:admin'));
