@@ -152,8 +152,9 @@ export const factoryApi = {
     }
   },
 
-  async decideApproval(id: string, decision: 'approved' | 'rejected', notes?: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/approvals/${id}`, {
+  /** E9: `delivered` says how the agent heard (its live run's mailbox, or a new run). */
+  async decideApproval(id: string, decision: 'approve' | 'reject', notes?: string): Promise<ApprovalItem & { delivered?: 'mailbox' | 'run' | 'not_delivered' }> {
+    return request<ApprovalItem & { delivered?: 'mailbox' | 'run' | 'not_delivered' }>(`/approvals/${encodeURIComponent(id)}`, {
       method: 'POST',
       body: JSON.stringify({ decision, notes }),
     });

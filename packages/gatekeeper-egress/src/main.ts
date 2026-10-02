@@ -53,6 +53,11 @@ const control: ControlClient = {
     if (!res.ok) throw new Error(`approval request ${res.status}`);
     return res.json() as never;
   },
+  async holdRequest(req) {
+    const res = await call('POST', '/api/v1/gatekeeper-egress/holds', req);
+    if (!res.ok) throw new Error(`hold request ${res.status}`);
+    return res.json() as never;
+  },
   async consumeApproval(id) {
     return (await call('POST', `/api/v1/gatekeeper-egress/approvals/${encodeURIComponent(id)}/consume`)).ok;
   },

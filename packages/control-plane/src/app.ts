@@ -13,7 +13,10 @@ import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, typ
 import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver, type SkillSource } from './source.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
-import { exceededWindow, spendDetail, validatePolicy, type ApprovalStore, type PolicyStore, type SpendTracker } from './policy.js';
+import { exceededWindow, spendDetail, validatePolicy, type Approval, type ApprovalStore, type HeldRequest, type PolicyStore, type SpendTracker } from './policy.js';
+
+/** E9: the largest held request body the control plane keeps (characters, base64 included). */
+const HELD_BODY_LIMIT = 256 * 1024;
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
@@ -734,7 +737,7 @@ const TOOLS: ToolSpec[] = [
     name: 'decide_approval',
     description: 'Approve or reject a held tool call',
     role: 'approver',
-    args: { approvalId: { type: 'string' }, decision: { type: 'string' } },
+    args: { approvalId: { type: 'string' }, decision: { type: 'string' }, notes: { type: 'string' } },
     required: ['approvalId', 'decision'],
   },
 ];
@@ -779,7 +782,7 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'query_ledger') return state.ledger.query({ agent: args.agent });
   if (name === 'get_run') return state.runs.get(args.runId) ?? { error: 'not_found' };
   if (name === 'list_approvals') return state.approvals.list({ state: 'pending' });
-  if (name === 'decide_approval') return decideApproval(state, args.approvalId, args.decision, actor).body;
+  if (name === 'decide_approval') return (await decideApproval(state, args.approvalId, args.decision, actor, args.notes)).body;
   const id = args.id;
   if (!id) return { error: 'id required' };
   if (name === 'wake_agent') return (await createRun(state, id, { actor, trigger: 'mcp' })).body;
@@ -789,9 +792,11 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   return { error: `unknown tool ${name}` };
 }
 
-function decideApproval(state: FactoryState, id: string, decision: string, actor: string): Outcome<unknown> {
+async function decideApproval(state: FactoryState, id: string, decision: unknown, actor: string, notes?: unknown): Promise<Outcome<unknown>> {
   if (decision !== 'approve' && decision !== 'reject') return { status: 400, body: { error: 'decision must be approve or reject' } };
-  const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor);
+  if (notes !== undefined && notes !== null && (typeof notes !== 'string' || notes.length > 4000)) return { status: 400, body: { error: 'notes must be text, at most 4000 characters' } };
+  const note = typeof notes === 'string' && notes.trim() ? notes.trim() : undefined;
+  const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor, note);
   if (!decided) return { status: 409, body: { error: 'approval not pending' } };
   state.ledger.append({
     timestamp: new Date().toISOString(),
@@ -804,10 +809,48 @@ function decideApproval(state: FactoryState, id: string, decision: string, actor
     mcpName: decided.tool,
     route: decided.route,
   });
+  if (decided.kind === 'held') {
+    // E9: the decision goes to the agent; no run waited for it.
+    const delivered = await deliverDecision(state, decided, actor);
+    return { status: 200, body: { ...decided, delivered } };
+  }
   if (!state.approvals.list({ state: 'pending', runId: decided.runId }).length) {
     unblockRun(state, decided.runId, 'BLOCKED_FOR_HUMAN', actor);
   }
   return { status: 200, body: decided };
+}
+
+/**
+ * E9: tell the agent what was decided about its held request: into the mailbox of its live run, or as the input of a new
+ * run. Approved: send the identical request again to release it. Rejected: nothing was sent; `notes` say why.
+ */
+async function deliverDecision(state: FactoryState, a: Approval, actor: string): Promise<'mailbox' | 'run' | 'not_delivered'> {
+  const payload = {
+    type: 'approval',
+    approvalId: a.approvalId,
+    route: a.route,
+    request: a.request ? { method: a.request.method, path: a.request.path } : undefined,
+    decision: a.state === 'approved' ? 'approved' : 'rejected',
+    ...(a.notes ? { notes: a.notes } : {}),
+    decidedBy: a.decidedBy,
+    decidedAt: a.decidedAt,
+  };
+  if (activeRun(state, a.agentId)) {
+    deliverToMailbox(state, a.agentId, payload);
+    return 'mailbox';
+  }
+  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input: payload });
+  if (out.status < 300) return 'run';
+  state.ledger.append({
+    timestamp: new Date().toISOString(),
+    agentId: a.agentId,
+    type: 'action',
+    action: 'APPROVAL_DECISION_UNDELIVERED',
+    actor,
+    approvalId: a.approvalId,
+    route: a.route,
+  });
+  return 'not_delivered';
 }
 
 function bearerOf(req: http.IncomingMessage): string | undefined {
@@ -1423,6 +1466,56 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
+  if (path === '/api/v1/gatekeeper-egress/holds' && req.method === 'POST') {
+    if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return;
+    const b = await readJson(req);
+    const run = typeof b.runId === 'string' ? state.runs.get(b.runId) : undefined;
+    const r = b.request as Record<string, unknown> | undefined;
+    const valid =
+      run && !isTerminal(run.state) && typeof b.route === 'string' && typeof b.argsSha256 === 'string' && /^[0-9a-f]{64}$/.test(b.argsSha256) &&
+      r && typeof r.method === 'string' && typeof r.path === 'string' && typeof r.body === 'string' && (r.bodyEncoding === 'utf8' || r.bodyEncoding === 'base64') &&
+      r.body.length <= HELD_BODY_LIMIT && (r.headers === undefined || (typeof r.headers === 'object' && r.headers !== null && !Array.isArray(r.headers)));
+    if (!valid || !run || !r) {
+      json(res, 400, { error: 'live runId, route, argsSha256 and request {method, path, body, bodyEncoding} required' });
+      return;
+    }
+    const headers = Object.fromEntries(Object.entries((r.headers ?? {}) as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === 'string'));
+    // S1 backstop: the copy is shown to people, so every known secret value is masked in it.
+    const text = (v: string) => redactSecrets(v, state.secretValues);
+    const request: HeldRequest = {
+      method: String(r.method).toUpperCase(),
+      path: text(String(r.path)),
+      headers: Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, text(v)])),
+      body: r.bodyEncoding === 'utf8' ? text(String(r.body)) : String(r.body),
+      bodyEncoding: r.bodyEncoding as 'utf8' | 'base64',
+      ...(typeof r.preview === 'string' ? { preview: r.preview } : {}),
+    };
+    const { approval, created } = state.approvals.hold({
+      runId: run.runId,
+      agentId: run.agentId,
+      route: String(b.route),
+      tool: `${request.method} ${request.path.split('?')[0]}`,
+      argsSha256: String(b.argsSha256),
+      request,
+    });
+    if (created) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: run.agentId,
+        runId: run.runId,
+        type: 'action',
+        action: 'REQUEST_HELD',
+        actor: `run:${run.agentId}`,
+        approvalId: approval.approvalId,
+        route: approval.route,
+        mcpName: approval.tool,
+        payloadSha256: approval.argsSha256,
+      });
+    }
+    json(res, created ? 201 : 200, { approvalId: approval.approvalId, state: approval.state, ...(approval.notes ? { notes: approval.notes } : {}) });
+    return;
+  }
+
   const gwConsume = path.match(/^\/api\/v1\/gatekeeper-egress\/approvals\/([^/]+)\/consume$/);
   if (gwConsume && req.method === 'POST') {
     if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return;
@@ -1484,7 +1577,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const principal = await authenticate(req, res, state, 'approver');
     if (!principal) return;
     const b = await readJson(req);
-    const out = decideApproval(state, decideMatch[1], String(b.decision ?? ''), principal.actor);
+    const out = await decideApproval(state, decideMatch[1], b.decision, principal.actor, b.notes);
     json(res, out.status, out.body);
     return;
   }
