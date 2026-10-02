@@ -13,6 +13,7 @@ import type { Meter } from '@opentelemetry/api';
 
 /** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
 export const DEFAULT_MODEL = 'claude-haiku-4-5';
+import { stripSignInLinksFromJson } from './signin-links.js';
 import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from './progress.js';
 
 export type Route = {
@@ -40,6 +41,11 @@ export type Route = {
    * `preview` tells the console how to render the held copy (e.g. `linkedin-post`).
    */
   hold?: { methods: string[]; preview?: string };
+  /**
+   * K4 (GAP-067): a message route (e.g. `discord`). Sign-in or authorization URLs in a JSON body that do not point at
+   * the factory's public host are replaced before forwarding, so no agent can send a person to sign in elsewhere.
+   */
+  stripSignInLinks?: boolean;
 };
 
 /** E9: what the gatekeeper-egress sends the control plane about a held request (the credential is never part of it). */
@@ -121,6 +127,8 @@ export type GatekeeperEgressOptions = {
   defaultModel?: string;
   /** Adapters by catalog `provider`; defaults to the built-in ones. */
   modelAdapters?: Record<string, ModelAdapter>;
+  /** The factory's public URL (K4): the only host a sign-in link in a message may point at. */
+  factoryPublicUrl?: string;
   /** Batching for run progress events (defaults: every 250 ms, 50 per batch, at most 1000 queued). */
   progress?: ProgressOptions;
 };
@@ -842,7 +850,18 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         if (window) return deny(res, ctx, route, 402, 'budget_exceeded', { window });
       }
 
-      const raw = await readBody(req, limit);
+      let raw = await readBody(req, limit);
+      if (route.stripSignInLinks && raw.length && /json/i.test(String(req.headers['content-type'] ?? ''))) {
+        const parsed = tryJson(raw);
+        if (parsed !== undefined) {
+          const r = stripSignInLinksFromJson(parsed, opts.factoryPublicUrl);
+          if (r.removed) {
+            raw = Buffer.from(JSON.stringify(r.value));
+            // Never the URLs themselves: only that links were removed, and how many.
+            ledger(ctx, route, { type: 'action', action: 'SIGN_IN_LINK_REMOVED', count: r.removed });
+          }
+        }
+      }
       // Model routes report their start once the model is known (handleLlm, handleModels).
       if (route.kind !== 'llm' && route.kind !== 'models') call?.start();
       if (route.kind === 'llm') return await handleLlm(req, res, ctx, route, rest, raw);

@@ -8,3 +8,4 @@ export { signV4, awsCredentialsFromEnv } from './sigv4.js';
 export type { AwsCredentials } from './sigv4.js';
 export { ProgressCall, ProgressEmitter, safeIdent } from './progress.js';
 export type { ProgressEvent, ProgressOptions, ProgressOutcome, ProgressSink } from './progress.js';
+export { stripSignInLinksFromJson, stripSignInLinksFromText } from './signin-links.js';
