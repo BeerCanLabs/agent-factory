@@ -77,3 +77,18 @@ export type {
   SystemValidation,
 } from './system.js';
 
+export {
+  MODEL_NAME_REGEX,
+  modelPriceSchema,
+  modelProposalSchema,
+  modelDefinitionSchema,
+  validateModelProposal,
+  validateModelDefinition,
+} from './model.js';
+export type {
+  ModelPrice,
+  ModelProposal,
+  ModelDefinition,
+  ModelStatus,
+} from './model.js';
+

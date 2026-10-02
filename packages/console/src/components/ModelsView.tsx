@@ -105,7 +105,16 @@ export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void
           <h4 className={heading}>Preferred model</h4>
           <p className={hint}>From the agent's declaration.</p>
           {preferred ? (
-            <div className="font-mono text-xs font-bold text-slate-900 dark:text-white">{preferred}</div>
+            <div>
+              <div className="font-mono text-xs font-bold text-slate-900 dark:text-white">{preferred}</div>
+              {!offeredByName.has(preferred) && (
+                <div className="mt-1.5 flex items-center space-x-1.5">
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300 border border-amber-300 dark:border-amber-800/80">
+                    Requested (not offered)
+                  </span>
+                </div>
+              )}
+            </div>
           ) : (
             <p className={hint}>None declared.</p>
           )}

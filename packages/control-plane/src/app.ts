@@ -26,11 +26,14 @@ import type { SkillChecker } from './skill-checks.js';
 import { handleRunProgress } from './events.js';
 import { handleSchedules, type ScheduleStore } from './schedules.js';
 import { handleSystems, type SystemsStore } from './systems.js';
+import { handleModels, type ModelsStore } from './models.js';
 import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 
 export type FactoryState = {
 
   agents: Map<string, AgentRecord>;
+  /** Factory data store for model offerings (§6.9 M3). */
+  models?: ModelsStore;
   /** Models the factory offers (§6.9 M3, FACTORY_MODEL_CATALOG), by neutral name. */
   modelCatalog?: Record<string, { provider: string; price?: { inputPerMTok: number; outputPerMTok: number } }>;
   /** The model a policy that names none grants (M2; FACTORY_DEFAULT_MODEL, default claude-haiku-4-5). */
@@ -921,6 +924,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (await handleRunProgress(state, req, res, path)) return;
   if (path.startsWith('/api/v1/schedules') && (await handleSchedules(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/systems') || path === '/api/v1/gatekeeper-egress/routes') && (await handleSystems(state, req, res, path))) return;
+  if ((path === '/api/v1/models' || path.startsWith('/api/v1/models/') || path === '/api/v1/gatekeeper-egress/models') && (await handleModels(state, req, res, path))) return;
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
 
