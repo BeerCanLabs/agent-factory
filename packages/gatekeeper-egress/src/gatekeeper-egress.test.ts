@@ -411,6 +411,24 @@ describe('gatekeeper-egress', { concurrency: false }, () => {
     assert.equal(secretFetches, before + 1, 'credential cache was purged');
   });
 
+  it('on upstream 401 for per-agent secret, evicts the expanded credential name and re-fetches (GAP-072)', async () => {
+    const res1 = await call(port, '/discord/channels/1/messages', { token, body: { content: 'hello' } });
+    assert.equal(res1.status, 200);
+    assert.equal(seen.at(-1)?.headers.authorization, 'Bot bot-agent-secret');
+    const before = secretFetches;
+
+    upstreamStatus = 401;
+    const res401 = await call(port, '/discord/channels/1/messages', { token, body: { content: 'hello' } });
+    assert.equal(res401.status, 401);
+    await settle();
+    assert.ok(ledger.some((e) => e.action === 'RUNTIME_AUTH_FAILURE'));
+
+    upstreamStatus = 200;
+    const res2 = await call(port, '/discord/channels/1/messages', { token, body: { content: 'hello' } });
+    assert.equal(res2.status, 200);
+    assert.equal(secretFetches, before + 1, 'per-agent credential cache was purged under expanded name');
+  });
+
   it('cannot be steered to another origin through the path', async () => {
     const res = await call(port, '/anthropic//evil.example/v1/messages', { token, body: messages() });
     assert.ok(seen.every((s) => !s.headers.host?.includes('evil')));
