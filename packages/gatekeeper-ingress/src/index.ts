@@ -112,9 +112,26 @@ export function createGatekeeperIngress(opts: {
           }
           connecting.add(surface.agentId);
 
-          const bound = await bindSecrets([surface.secretRef], opts.providers);
-          if (!bound.ok || !bound.env[surface.secretRef]) {
-            console.warn(`[gatekeeper-ingress] failed to bind secret ${surface.secretRef} for ${surface.agentId}`);
+          const upperAgent = surface.agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+          const candidates = [
+            surface.secretRef,
+            `agents/${surface.agentId.toLowerCase()}/discord/${surface.secretRef.toLowerCase()}`,
+            `agents/${surface.agentId.toLowerCase()}/discord/bot_token`,
+            `shared/discord/${surface.secretRef.toLowerCase()}`,
+            `${upperAgent}_DISCORD_BOT_TOKEN`,
+            `${upperAgent}_${surface.secretRef.toUpperCase()}`,
+          ];
+          const uniqueCandidates = [...new Set(candidates)];
+          let token: string | undefined;
+          for (const cand of uniqueCandidates) {
+            const bound = await bindSecrets([cand], opts.providers);
+            if (bound.ok && bound.env[cand]) {
+              token = bound.env[cand];
+              break;
+            }
+          }
+          if (!token) {
+            console.warn(`[gatekeeper-ingress] failed to bind secret for ${surface.agentId} (tried: ${uniqueCandidates.join(', ')})`);
             connecting.delete(surface.agentId);
             continue;
           }
@@ -130,7 +147,7 @@ export function createGatekeeperIngress(opts: {
           }
           
           try {
-            await discord.login(bound.env[surface.secretRef]);
+            await discord.login(token);
             await discord.setPresence(surface.initialPresence ?? 'offline');
             
             discord.onMessage((msg) => {

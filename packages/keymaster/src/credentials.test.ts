@@ -177,4 +177,35 @@ describe('assessCredentials (K5.2)', () => {
     assert.equal(item.status, 'missing');
     assert.equal(item.action.type, 'none');
   });
+
+  it('generates canonical Keymaster paths and candidate fallbacks (§6.11 K5.1)', async () => {
+    const { keymasterAgentSecretPath, keymasterSharedSecretPath, credentialCandidates } = await import('./credentials.js');
+    assert.equal(keymasterAgentSecretPath('castle', 'github', 'token'), 'agents/castle/github/token');
+    assert.equal(keymasterAgentSecretPath('donna', 'discord', 'bot_token'), 'agents/donna/discord/bot_token');
+    assert.equal(keymasterSharedSecretPath('motion', 'api_key'), 'shared/motion/api_key');
+
+    const cands = credentialCandidates('castle', 'github', 'token');
+    assert.ok(cands.includes('agents/castle/github/token'));
+    assert.ok(cands.includes('CASTLE_GITHUB_TOKEN'));
+    assert.ok(cands.includes('GITHUB_TOKEN'));
+  });
+
+  it('assessCredentials resolves secrets from canonical Keymaster path and legacy candidates (§6.11 K5.1)', async () => {
+    const items = await assessCredentials(opts({
+      secrets: [
+        { name: 'token', source: 'github' },
+        { name: 'bot_token', source: 'discord' },
+      ],
+      have: [
+        'agents/donna/github/token',
+        'DONNA_DISCORD_BOT_TOKEN', // legacy candidate for bot_token
+      ],
+    }));
+    const token = items.find((i) => i.name === 'token')!;
+    const bot = items.find((i) => i.name === 'bot_token')!;
+    assert.equal(token.status, 'present');
+    assert.equal(token.keymasterPath, 'agents/donna/github/token');
+    assert.equal(bot.status, 'present');
+    assert.equal(bot.keymasterPath, 'agents/donna/discord/bot_token');
+  });
 });

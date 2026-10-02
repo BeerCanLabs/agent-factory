@@ -9,21 +9,28 @@ triggers:
     path: /wake
   - type: webhook
     path: /hooks/github
-    secretRef: GITHUB_WEBHOOK_SECRET
+    secretRef: webhook_secret
   - type: discord
-    secretRef: SWITCH_DISCORD_BOT_TOKEN
+    secretRef: bot_token
 
 secrets:
   requires:
-    - name: GITHUB_TOKEN
+    - name: token
+      system: github
       description: "GitHub PAT for repository inspection, PR review, and issue triage"
-    - name: GITHUB_WEBHOOK_SECRET
+    - name: webhook_secret
+      system: webhook
       description: "HMAC signing secret for incoming GitHub webhooks"
-    - name: SWITCH_DISCORD_BOT_TOKEN
+    - name: bot_token
+      system: discord
       description: "Discord Bot Token for gatekeeper-ingress presence and chat"
     - name: NOTION_API_KEY
+      system: notion
+      shared: true
       description: "Notion API Key for The Submind Operations Board"
     - name: XAI_API_KEY
+      system: xai
+      shared: true
       description: "xAI API Key for Switch LLM inference"
 
 persistence:

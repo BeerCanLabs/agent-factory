@@ -8,19 +8,27 @@ triggers:
   - type: http
     path: /wake
   - type: discord
-    secretRef: FINLEY_DISCORD_BOT_TOKEN
+    secretRef: bot_token
 
 secrets:
   requires:
-    - name: FINLEY_DISCORD_BOT_TOKEN
+    - name: bot_token
+      system: discord
       description: "Discord Bot Token for Chuck Finley presence and FinOps operations"
     - name: NOTION_API_KEY
+      system: notion
+      shared: true
       description: "Notion API Key for The Submind Operations Board"
     - name: XAI_API_KEY
+      system: xai
+      shared: true
       description: "xAI API Key for Grok LLM inference"
     - name: ANTHROPIC_API_KEY
+      system: anthropic
+      shared: true
       description: "Anthropic API Key for Claude spend audits"
-    - name: FINLEY_GCP_CREDENTIALS
+    - name: gcp_credentials
+      system: gcp
       description: "GCP Service Account credentials for Google Cloud and Vertex AI billing audits"
 
 persistence:

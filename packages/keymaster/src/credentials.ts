@@ -19,6 +19,8 @@ export type CredentialItem = {
   /** Secret name (static) or connection provider (OAuth). */
   name: string;
   source?: string;
+  system?: string;
+  keymasterPath?: string;
   /** The source was guessed from the secret name because the cartridge does not declare one. */
   sourceInferred?: boolean;
   description?: string;
@@ -40,9 +42,55 @@ export type CredentialSummary = { total: number; outstanding: number; present: n
 
 export type ProviderLookup = (provider: string) => ConnectionProvider | undefined;
 
+/**
+ * Canonical Keymaster storage paths (§6.11 K5.1):
+ * - Agent-specific: agents/<agent>/<system>/<name>
+ * - Shared / platform: shared/<system>/<name>
+ */
+export function keymasterAgentSecretPath(agentId: string, system: string, logicalName: string): string {
+  const normAgent = agentId.toLowerCase();
+  const normSystem = system.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+  const normName = logicalName.toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
+  return `agents/${normAgent}/${normSystem}/${normName}`;
+}
+
+export function keymasterSharedSecretPath(system: string, logicalName: string): string {
+  const normSystem = system.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+  const normName = logicalName.toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
+  return `shared/${normSystem}/${normName}`;
+}
+
+export function credentialCandidates(agentId: string, system: string, name: string): string[] {
+  const agentPath = keymasterAgentSecretPath(agentId, system, name);
+  const sharedPath = keymasterSharedSecretPath(system, name);
+  const upperAgent = agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+  const upperName = name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+  const upperSystem = system.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+
+  const set = new Set<string>([
+    agentPath,
+    `agents/${agentId}/${system}/${name}`,
+    sharedPath,
+    `shared/${system}/${name}`,
+    // Legacy per-agent candidates
+    `${upperAgent}_${upperName}`,
+    `${upperAgent}_${upperSystem}_${upperName}`,
+    // Specific legacy mapping for well-known tokens
+    ...(system === 'closing-climb' || upperName === 'API_TOKEN' ? ['CC_API_TOKEN'] : []),
+    ...(system === 'github' && (upperName === 'TOKEN' || upperName === 'GITHUB_TOKEN') ? [`${upperAgent}_GITHUB_TOKEN`, 'ALC_SUPPORT_GITHUB_TOKEN'] : []),
+    ...(system === 'discord' && (upperName === 'BOT_TOKEN' || upperName === 'TOKEN') ? [`${upperAgent}_DISCORD_BOT_TOKEN`] : []),
+    ...(system === 'webhook' && (upperName === 'WEBHOOK_SECRET' || upperName === 'SECRET') ? [`${upperAgent}_WEBHOOK_SECRET`] : []),
+    // Legacy direct candidates
+    name,
+    upperName,
+    `${upperSystem}_${upperName}`,
+  ]);
+  return [...set];
+}
+
 export type AssessOptions = {
   agentId: string;
-  secrets: Array<{ name: string; source?: string; description?: string }>;
+  secrets: Array<{ name: string; source?: string; system?: string; description?: string }>;
   connections: Array<{ provider: string; scopes: string[] }>;
   getProvider?: ProviderLookup;
   /** Secrets the gatekeeper-egress holds for the whole platform (S1): supplied once, through the platform endpoint, never per agent. */
@@ -60,12 +108,12 @@ export type AssessOptions = {
 };
 
 /** Keymaster-held app credentials a declared connection depends on (§6.11 K1). */
-function appCredentialOf(provider: string, getProvider?: ProviderLookup): { name: string; source: string } | undefined {
+function appCredentialOf(provider: string, getProvider?: ProviderLookup): { name: string; source: string; system: string } | undefined {
   const def = getProvider ? getProvider(provider) : undefined;
   if (!def) return undefined;
   return def.kind === 'oauth-user'
-    ? { name: def.clientSecret, source: `${def.provider}-oauth-client` }
-    : { name: def.keySecret, source: def.provider };
+    ? { name: def.clientSecret, source: `${def.provider}-oauth-client`, system: def.provider }
+    : { name: def.keySecret, source: def.provider, system: def.provider };
 }
 
 /**
@@ -94,15 +142,23 @@ export async function assessCredentials(opts: AssessOptions): Promise<Credential
   const seen = new Set<string>();
 
   const staticItem = async (
-    d: { name: string; source?: string; description?: string },
+    d: { name: string; source?: string; system?: string; description?: string },
     extra: Partial<CredentialItem> = {},
   ): Promise<CredentialItem> => {
-    const inferred = d.source ? undefined : inferSource(d.name);
-    const source = d.source ?? inferred;
+    const inferred = (d.system || d.source) ? undefined : inferSource(d.name);
+    const system = d.system ?? d.source ?? inferred ?? 'default';
+    const source = d.source ?? d.system ?? inferred;
+    const isPlatform = extra.managedBy === 'platform' || opts.gatekeeperEgressHeld.has(d.name);
+    const keymasterPath = isPlatform
+      ? keymasterSharedSecretPath(system, d.name)
+      : keymasterAgentSecretPath(opts.agentId, system, d.name);
+
     const base = {
       kind: 'static' as const,
       name: d.name,
       ...(source ? { source } : {}),
+      ...(system ? { system } : {}),
+      keymasterPath,
       ...(inferred ? { sourceInferred: true } : {}),
       ...(d.description ? { description: d.description } : {}),
       instructions: instructionsFor(source),
@@ -121,7 +177,14 @@ export async function assessCredentials(opts: AssessOptions): Promise<Credential
         action: { type: 'submit', method: 'POST', path: opts.platformSubmitPath(d.name) },
       };
     }
-    const present = await opts.present(d.name);
+    const candidates = credentialCandidates(opts.agentId, system, d.name);
+    let present = false;
+    for (const cand of candidates) {
+      if (await opts.present(cand)) {
+        present = true;
+        break;
+      }
+    }
     return {
       managedBy: 'agent',
       ...base,
@@ -193,11 +256,14 @@ export async function assessPlatformCredentials(opts: {
 }): Promise<CredentialItem[]> {
   return Promise.all([...opts.gatekeeperEgressHeld].sort().map(async (name) => {
     const source = inferSource(name);
-    const present = await opts.present(name);
+    const system = source ?? 'default';
+    const keymasterPath = keymasterSharedSecretPath(system, name);
+    const present = (await opts.present(name)) || (await opts.present(keymasterPath));
     return {
       kind: 'static' as const,
       name,
-      ...(source ? { source, sourceInferred: true } : {}),
+      keymasterPath,
+      ...(source ? { source, system: source, sourceInferred: true } : {}),
       status: present ? ('present' as const) : ('missing' as const),
       outstanding: !present,
       managedBy: 'platform' as const,

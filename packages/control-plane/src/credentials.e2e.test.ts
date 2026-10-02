@@ -240,7 +240,7 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
       assert.equal(res.status, 404, `${agentId}/${name}`);
       assert.equal(res.json().error, 'undeclared_credential');
     }
-    assert.equal((await req('/api/v1/keymaster/agents/donna/credentials/lower_case', { method: 'POST', token: ADMIN, raw: FAKE_DISCORD })).status, 400);
+    assert.equal((await req('/api/v1/keymaster/agents/donna/credentials/123_invalid', { method: 'POST', token: ADMIN, raw: FAKE_DISCORD })).status, 400);
     assert.equal((await req('/api/v1/keymaster/agents/nobody/credentials/DISCORD_BOT_TOKEN', { method: 'POST', token: ADMIN, raw: FAKE_DISCORD })).status, 404);
     assert.equal(values.size, 0);
     assert.equal(writes.length, 0);
@@ -253,18 +253,18 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     assert.deepEqual(Object.keys(set.json()).sort(), ['action', 'agentId', 'at', 'name', 'status']);
     assert.equal(set.json().action, 'CREDENTIAL_SET');
     assert.equal(set.headers.get('cache-control'), 'no-store');
-    assert.equal(values.get('DISCORD_BOT_TOKEN'), FAKE_DISCORD, 'stored trimmed, at the declared name');
+    assert.equal(values.get('agents/donna/discord/discord_bot_token'), FAKE_DISCORD, 'stored trimmed, at the Keymaster storage path');
     assert.equal((await item('DISCORD_BOT_TOKEN')).status, 'present');
 
     const rotated = await req('/api/v1/keymaster/agents/donna/credentials/DISCORD_BOT_TOKEN', { method: 'POST', token: ADMIN, raw: FAKE_ROTATED });
     assert.equal(rotated.status, 200);
     assert.equal(rotated.json().action, 'CREDENTIAL_ROTATED');
-    assert.equal(values.get('DISCORD_BOT_TOKEN'), FAKE_ROTATED);
+    assert.equal(values.get('agents/donna/discord/discord_bot_token'), FAKE_ROTATED);
 
     const rows = ledger.query({}).slice(before).filter((e) => e.action?.startsWith('CREDENTIAL_'));
     assert.deepEqual(rows.map((r) => ({ action: r.action, agentId: r.agentId, credential: r.credential, actor: r.actor })), [
-      { action: 'CREDENTIAL_SET', agentId: 'donna', credential: 'DISCORD_BOT_TOKEN', actor: 'token:admin' },
-      { action: 'CREDENTIAL_ROTATED', agentId: 'donna', credential: 'DISCORD_BOT_TOKEN', actor: 'token:admin' },
+      { action: 'CREDENTIAL_SET', agentId: 'donna', credential: 'agents/donna/discord/discord_bot_token', actor: 'token:admin' },
+      { action: 'CREDENTIAL_ROTATED', agentId: 'donna', credential: 'agents/donna/discord/discord_bot_token', actor: 'token:admin' },
     ]);
     assert.ok(state.secretValues.has(FAKE_DISCORD) && state.secretValues.has(FAKE_ROTATED), 'redacted from now on (S1 backstop)');
 
@@ -364,6 +364,25 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     assert.equal(res.status, 200, res.text);
     assert.ok(res.text.includes(`href="${BASE}/?view=credentials&amp;agent=donna"`), res.text);
     assert.equal((await item('google')).status, 'present');
+  });
+
+  it('supports submitting clean logical credential names (K5.1)', async () => {
+    state.agents.set('archie', agent({
+      id: 'archie',
+      name: 'Archie',
+      credentials: [{ name: 'bot_token', system: 'discord', description: 'Archie Discord bot token' }],
+    }));
+    const res = await req('/api/v1/keymaster/agents/archie/credentials/bot_token', {
+      method: 'POST',
+      token: ADMIN,
+      raw: 'example-archie-bot-token-value',
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.json().name, 'bot_token');
+    assert.equal(values.get('agents/archie/discord/bot_token'), 'example-archie-bot-token-value');
+    const archieCreds = await creds('archie');
+    const botTokenItem = archieCreds.credentials.find((c: { name: string }) => c.name === 'bot_token');
+    assert.equal(botTokenItem.status, 'present');
   });
 
   it('registration keeps typed declarations (source, description) on the agent record', async () => {

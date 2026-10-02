@@ -9,6 +9,7 @@ import {
   memorySchema,
   benchSchema,
   secretsManifestSchema,
+  secretDeclarations,
   skillsSchema,
   surfaceSchema,
 } from './schema.js';
@@ -103,6 +104,29 @@ export function validateCartridge(dir: string): ValidationResult {
           if (!soul) issue(issues, join(dir, 'soul.md'), 'soul.md is empty');
         } else {
           issue(issues, manifestPath, 'missing soul.md or cartridge.yaml prompt definition');
+        }
+
+        // §6.11 K5.1: No agent declaration names a secret-manager entry
+        const decls = secretDeclarations(parsed.data.secrets);
+        const agentId = parsed.data.id ?? basename(dir);
+        const agentPrefix = `${agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_`;
+        for (const decl of decls) {
+          if (decl.name.toUpperCase().startsWith(agentPrefix)) {
+            issue(issues, manifestPath, `declared secret "${decl.name}" names a secret-manager entry; cartridges declare logical names under §6.11 K5.1`);
+          }
+          if (decl.name.includes('/') || decl.name.startsWith('agents/') || decl.name.startsWith('shared/')) {
+            issue(issues, manifestPath, `declared secret "${decl.name}" names a secret-manager path; cartridges declare logical names under §6.11 K5.1`);
+          }
+        }
+        for (const t of parsed.data.triggers ?? []) {
+          if ('secretRef' in t && typeof t.secretRef === 'string') {
+            if (t.secretRef.toUpperCase().startsWith(agentPrefix)) {
+              issue(issues, manifestPath, `trigger secretRef "${t.secretRef}" names a secret-manager entry; cartridges declare logical names under §6.11 K5.1`);
+            }
+            if (t.secretRef.includes('/') || t.secretRef.startsWith('agents/') || t.secretRef.startsWith('shared/')) {
+              issue(issues, manifestPath, `trigger secretRef "${t.secretRef}" names a secret-manager path; cartridges declare logical names under §6.11 K5.1`);
+            }
+          }
         }
       }
     }

@@ -170,8 +170,14 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
     const scopes = raw.scopes.filter((s): s is string => typeof s === 'string' && /^[A-Za-z0-9._:/#-]{1,200}$/.test(s)).slice(0, 64);
     if (scopes.length) event.scopes = scopes;
   }
-  // An ENV-style secret name (as cartridges declare them), never free text: a value pasted here is dropped.
-  if (typeof raw.credential === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(raw.credential)) event.credential = raw.credential;
+  // An ENV-style secret name or Keymaster path (agents/... or shared/..., §6.11 K5.1), never free text: a value pasted here is dropped.
+  if (
+    typeof raw.credential === 'string' &&
+    (/^[A-Z][A-Z0-9_]{0,127}$/.test(raw.credential) ||
+      /^(?:agents\/[a-z0-9_-]+\/[a-z0-9_-]+\/[a-zA-Z0-9_.-]{1,128}|shared\/[a-z0-9_-]+\/[a-zA-Z0-9_.-]{1,128})$/.test(raw.credential))
+  ) {
+    event.credential = raw.credential;
+  }
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);

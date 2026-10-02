@@ -9,31 +9,42 @@ triggers:
     path: /wake
   - type: webhook
     path: /hooks/donna-triage
-    secretRef: DONNA_WEBHOOK_SECRET
+    secretRef: webhook_secret
   - type: cron
     schedule: "0 15 * * 1-5"
   - type: discord
-    secretRef: DONNA_DISCORD_BOT_TOKEN
+    secretRef: bot_token
 
 secrets:
   requires:
-    - name: DONNA_DISCORD_BOT_TOKEN
+    - name: bot_token
+      system: discord
       description: "Discord Bot Token for gatekeeper-ingress presence and executive messaging"
     - name: XAI_API_KEY
+      system: xai
+      shared: true
       description: "xAI API Key for Donna LLM inference"
     - name: NOTION_API_KEY
+      system: notion
+      shared: true
       description: "Notion API Key for The Submind Operations Board"
-    - name: DONNA_WEBHOOK_SECRET
+    - name: webhook_secret
+      system: webhook
       description: "HMAC signing secret for incoming webhook triage"
     - name: GOOGLE_CALENDAR_CREDENTIALS
+      system: google-calendar
       description: "Service account or credentials JSON for Google Calendar API writes"
     - name: REACHY_DAEMON_SECRET
+      system: reachy
       description: "Optional auth token for Reachy Mini Wireless daemon"
     - name: GMAIL_CREDENTIALS
+      system: gmail
       description: "Google OAuth token with Gmail read/draft/send scopes"
-    - name: DONNA_GCP_CREDENTIALS
+    - name: gcp_credentials
+      system: gcp
       description: "GCP service account credentials for GCS print queue and Google Drive access"
-    - name: DONNA_FITBIT_TOKENS
+    - name: fitbit_tokens
+      system: fitbit
       description: "OAuth tokens for Fitbit / Google Health steps, activity, and sleep"
 
 persistence:

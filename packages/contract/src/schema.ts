@@ -3,7 +3,7 @@ import { z } from 'zod';
 export const secretName = z
   .string()
   .min(1)
-  .regex(/^[A-Z][A-Z0-9_]*$/, 'secret names must be ENV-style (A-Z, 0-9, _)');
+  .regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/, 'credential names must be valid identifiers (alphanumeric, _, -, .)');
 
 export const secretGate = z.enum(['ungated', 'gated']);
 export type SecretGate = z.infer<typeof secretGate>;
@@ -22,14 +22,23 @@ export const secretItem = z.union([
       description: z.string().optional(),
       gate: secretGate.default('ungated'),
       source: credentialSource.optional(),
+      system: credentialSource.optional(),
+      shared: z.boolean().optional(),
     })
     .strict(),
 ]);
 
-/** A declared static credential (§6.11 K5.1): its secret name, and where it comes from when the cartridge says. */
-export type SecretDeclaration = { name: string; source?: string; description?: string };
+/** A declared static credential (§6.11 K5.1): its logical name, and source system when the cartridge says. */
+export type SecretDeclaration = {
+  name: string;
+  source?: string;
+  system?: string;
+  description?: string;
+  gate?: SecretGate;
+  shared?: boolean;
+};
 
-type SecretItemInput = string | { name: string; description?: string; gate?: SecretGate; source?: string };
+type SecretItemInput = string | { name: string; description?: string; gate?: SecretGate; source?: string; system?: string; shared?: boolean };
 
 /**
  * Every static secret a cartridge declares (requires, ungated, gated), once each, with its source and description.
@@ -45,12 +54,23 @@ export function secretDeclarations(secrets?: { requires?: unknown; ungated?: unk
       if (!parsed.success) continue;
       const d = typeof parsed.data === 'string' ? { name: parsed.data } : parsed.data;
       const prev = out.get(d.name) ?? { name: d.name };
-      prev.source ??= 'source' in d ? d.source : undefined;
-      prev.description ??= 'description' in d ? d.description : undefined;
+      if ('source' in d && d.source) prev.source ??= d.source;
+      if ('system' in d && d.system) {
+        prev.system ??= d.system;
+        prev.source ??= d.system;
+      }
+      if ('description' in d && d.description) prev.description ??= d.description;
+      if ('gate' in d && d.gate && d.gate !== 'ungated') prev.gate ??= d.gate;
+      if ('shared' in d && d.shared !== undefined) prev.shared ??= d.shared;
       out.set(d.name, prev);
     }
   }
-  return [...out.values()].map((d) => ({ name: d.name, ...(d.source ? { source: d.source } : {}), ...(d.description ? { description: d.description } : {}) }));
+  return [...out.values()].map((d) => ({
+    name: d.name,
+    ...(d.source ? { source: d.source } : {}),
+    ...(d.system ? { system: d.system } : {}),
+    ...(d.description ? { description: d.description } : {}),
+  }));
 }
 
 export const secretsManifestSchema = z

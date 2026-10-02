@@ -8,19 +8,26 @@ triggers:
   - type: http
     path: /wake
   - type: discord
-    secretRef: ROSIE_DISCORD_BOT_TOKEN
+    secretRef: bot_token
 
 secrets:
   requires:
-    - name: ROSIE_DISCORD_BOT_TOKEN
+    - name: bot_token
+      system: discord
       description: "Discord Bot Token for gatekeeper-ingress presence and home automation commands"
     - name: HA_LONG_LIVED_TOKEN
+      system: home-assistant
       description: "Long-lived access token for Home Assistant REST API"
     - name: HASS_URL
+      system: home-assistant
       description: "Home Assistant base URL"
     - name: NOTION_API_KEY
+      system: notion
+      shared: true
       description: "Notion API Key for The Submind Operations Board"
     - name: XAI_API_KEY
+      system: xai
+      shared: true
       description: "xAI Grok API key for robotic intelligence and tool execution"
 
 persistence:

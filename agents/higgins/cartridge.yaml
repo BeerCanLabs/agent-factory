@@ -8,33 +8,48 @@ triggers:
   - type: http
     path: /wake
   - type: discord
-    secretRef: HIGGINS_DISCORD_BOT_TOKEN
+    secretRef: bot_token
 
 secrets:
   requires:
-    - name: HIGGINS_DISCORD_BOT_TOKEN
+    - name: bot_token
+      system: discord
       description: "Discord Bot Token for Higgins gatekeeper-ingress presence and butler commands"
     - name: MOTION_API_KEY
+      system: motion
       description: "Motion API key for Stephanie's task and schedule management"
     - name: CC_API_TOKEN
+      system: closing-climb
       description: "Closing Climb API token for Buffini Referral Maker pipeline"
     - name: REFERRAL_MAKER_USERNAME
+      system: referral-maker
       description: "Buffini Referral Maker login username"
     - name: REFERRAL_MAKER_PASSWORD
+      system: referral-maker
       description: "Buffini Referral Maker login password"
-    - name: HIGGINS_GITHUB_TOKEN
+    - name: token
+      system: github
       description: "GitHub token for issue filing and repository updates"
     - name: HA_LONG_LIVED_TOKEN
+      system: home-assistant
       description: "Home Assistant REST API token"
     - name: HASS_URL
+      system: home-assistant
       description: "Home Assistant URL"
     - name: NOTION_API_KEY
+      system: notion
+      shared: true
       description: "Notion API key"
     - name: XAI_API_KEY
+      system: xai
+      shared: true
       description: "xAI Grok API key for butler intelligence"
     - name: ANTHROPIC_API_KEY
+      system: anthropic
+      shared: true
       description: "Anthropic Claude API key for reasoning"
     - name: GOOGLE_CALENDAR_CREDENTIALS
+      system: google-calendar
       description: "Google Calendar OAuth credentials for Stephanie's schedule sync"
 
 persistence:
