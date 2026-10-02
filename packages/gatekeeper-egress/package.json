@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/main.js",
-    "test": "tsx --test src/meter.test.ts src/gatekeeper-egress.test.ts src/sigv4.test.ts src/models.test.ts src/connections.test.ts src/routes.test.ts src/held.test.ts"
+    "test": "tsx --test src/meter.test.ts src/gatekeeper-egress.test.ts src/sigv4.test.ts src/models.test.ts src/connections.test.ts src/routes.test.ts src/held.test.ts src/signin-links.test.ts"
   },
   "dependencies": {
     "@beercanlabs/factory-auth": "0.1.0",
