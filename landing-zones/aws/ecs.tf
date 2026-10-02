@@ -182,6 +182,8 @@ resource "aws_ecs_task_definition" "gatekeeper_egress" {
       { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_GATEKEEPER_EGRESS_ROUTES", value = local.gatekeeper_egress_routes },
+        # K4 (GAP-067): the only host a sign-in link in an agent's message may point at.
+        { name = "FACTORY_PUBLIC_BASE_URL", value = var.factory_public_base_url },
         { name = "FACTORY_PRICES", value = var.gatekeeper_egress_prices },
         { name = "FACTORY_MODEL_CATALOG", value = jsonencode({ for name, m in var.model_catalog : name => { for k, v in m : k => v if v != null } }) },
         { name = "FACTORY_DEFAULT_MODEL", value = var.default_model },

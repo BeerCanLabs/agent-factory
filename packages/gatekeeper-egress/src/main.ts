@@ -102,6 +102,7 @@ const control: ControlClient = {
 };
 
 const server = createGatekeeperEgress({
+  factoryPublicUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
   routes: config.routes ?? [],
   prices: config.prices ?? {},
   runTokens: new RunTokens(required('FACTORY_RUN_TOKEN_KEY')),
