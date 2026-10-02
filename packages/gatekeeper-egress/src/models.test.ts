@@ -113,7 +113,7 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
     });
     upPort = await listen(upstream);
     gatekeeperEgress = createGatekeeperEgress({
-      routes: [{ id: 'models', kind: 'models' }],
+      routes: [{ id: 'models', kind: 'models' }, { id: 'anthropic', kind: 'llm', provider: 'anthropic', upstream: `http://127.0.0.1:${upPort}/anthropic` }],
       prices: {},
       runTokens: tokens,
       control,
@@ -218,6 +218,32 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
     assert.equal(seen.length, 0);
     await settle();
     assert.ok(ledger.some((e) => e.action === 'EGRESS_DENIED_ROUTE_NOT_ALLOWED' && e.route === 'models'));
+  });
+
+  it('E7 an admin-set policy that grants a model needs no separate models route', async () => {
+    ctx.policySet = true;
+    ctx.policy = { routes: [], models: ['claude-haiku-4-5'] };
+    const ok = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-haiku-4-5') });
+    assert.equal(ok.status, 200);
+    // The route is implied; which models is still the policy's list (M2).
+    const denied = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5') });
+    assert.equal(denied.json().error, 'model_not_allowed');
+  });
+
+  it('E7 the global fallback policy implies no model access', async () => {
+    ctx.policySet = false;
+    ctx.policy = { routes: [], models: ['claude-haiku-4-5'] };
+    const res = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-haiku-4-5') });
+    assert.equal(res.status, 403);
+    assert.equal(res.json().error, 'route_not_allowed');
+  });
+
+  it('E7 M4 an admin-set policy does not imply provider-native routes', async () => {
+    ctx.policySet = true;
+    ctx.policy = { routes: [], models: ['claude-haiku-4-5'] };
+    const res = await call(port, '/anthropic/v1/messages', { token, body: { model: 'x', messages: [] } });
+    assert.equal(res.status, 403);
+    assert.equal(res.json().error, 'route_not_allowed');
   });
 
   it('M2 E7 a policy that names no models grants only the factory default, Claude Haiku 4.5', async () => {

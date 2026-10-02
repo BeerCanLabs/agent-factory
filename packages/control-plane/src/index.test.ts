@@ -522,6 +522,14 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal(ctx.spend.run, 0.25);
     });
 
+    it('E7 run context says whether the agent has its own policy (a model grant implies the models route only then)', async () => {
+      const run = (await wake()).json as RunBody;
+      const ctxOf = async () => (await request(port, `/api/v1/gatekeeper-egress/runs/${run.runId}`, { token: TOKENS.gatekeeperEgress })).json as { policySet: boolean };
+      assert.equal((await ctxOf()).policySet, state.policies.has('echo-agent'));
+      assert.equal((await put('echo-agent', { routes: [], models: ['test-model'] })).status, 200);
+      assert.equal((await ctxOf()).policySet, true);
+    });
+
     it('only the gatekeeper-egress may attest a run actor or report cost', async () => {
       const run = (await wake()).json as RunBody;
       await llm(run, 5, TOKENS.ingest);

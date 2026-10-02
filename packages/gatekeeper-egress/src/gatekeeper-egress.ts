@@ -83,6 +83,11 @@ export type RunContext = {
   run: { runId: string; agentId: string; state: string; live: boolean; model?: string };
   agentState: string;
   isBuiltin?: boolean;
+  /**
+   * E7: the agent has an admin-set policy of its own (not only the global fallback). Granting models is an admin action,
+   * so such an agent may reach the factory model API (`models` route); which models is decided by `policy.models` (M2).
+   */
+  policySet?: boolean;
   policy: Policy;
   spend: { run: number; day: number; month: number };
 };
@@ -292,8 +297,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   async function refreshRoutes(targetRouteId?: string): Promise<void> {
     if (!opts.control.systemRoutes) return;
     const now = Date.now();
-    const miss = Boolean(targetRouteId && !routes.has(targetRouteId) && now - lastMissRefresh > MISS_REFRESH_INTERVAL_MS);
-    if (!miss && now - lastRouteRefresh <= ROUTE_REFRESH_INTERVAL_MS) return;
+    const miss = Boolean(targetRouteId && !routes.has(targetRouteId) && now - lastMissRefresh >= MISS_REFRESH_INTERVAL_MS);
+    if (!miss && now - lastRouteRefresh < ROUTE_REFRESH_INTERVAL_MS) return;
     if (miss) lastMissRefresh = now;
     let remote: Route[];
     try {
@@ -942,7 +947,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (ctx.agentState === 'ISOLATED') return deny(res, ctx, route, 403, 'isolated');
       if (ctx.agentState === 'PAUSED') return deny(res, ctx, route, 503, 'paused');
       if (ctx.run.state === 'BLOCKED_UNHEALTHY') return deny(res, ctx, route, 503, 'unhealthy');
-      if (!ctx.policy.routes.includes(route.id)) return deny(res, ctx, route, 403, 'route_not_allowed', { route: route.id });
+      const modelsImplied = route.kind === 'models' && ctx.policySet === true;
+      if (!modelsImplied && !ctx.policy.routes.includes(route.id)) return deny(res, ctx, route, 403, 'route_not_allowed', { route: route.id });
       const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
       if ((route.kind === 'llm' || route.kind === 'models') && !isBuiltin) {
         const pending = unacked.get(ctx.run.runId) ?? 0;
