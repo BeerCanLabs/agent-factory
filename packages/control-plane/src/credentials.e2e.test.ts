@@ -3,12 +3,29 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { ConnectionKeymaster, grantSecretName, type Grant } from '@beercanlabs/factory-keymaster';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { signConsentState } from './connections.js';
+import { SystemsStore } from './systems.js';
+
+/** Providers as a deployment imports them (TSK-067): data, never platform code. */
+const TEST_PROVIDERS = [
+  { id: 'google', name: 'Google (OAuth)', kind: 'http', upstream: 'https://accounts.google.com', oauth: { kind: 'oauth-user', authUrl: 'https://accounts.google.com/o/oauth2/v2/auth', tokenUrl: 'https://oauth2.googleapis.com/token', clientSecret: 'GOOGLE_OAUTH_CLIENT', authParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' } } },
+  { id: 'linkedin', name: 'LinkedIn', kind: 'http', upstream: 'https://api.linkedin.com', connection: 'linkedin', oauth: { kind: 'oauth-user', authUrl: 'https://www.linkedin.com/oauth/v2/authorization', tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken', clientSecret: 'LINKEDIN_OAUTH_CLIENT', authParams: {}, refresh: false } },
+  { id: 'google-service-account', name: 'Google service account', kind: 'http', upstream: 'https://oauth2.googleapis.com', oauth: { kind: 'jwt-bearer', tokenUrl: 'https://oauth2.googleapis.com/token', keySecret: 'GOOGLE_SERVICE_ACCOUNT', defaultScopes: ['https://www.googleapis.com/auth/devstorage.read_write'] } },
+];
+
+async function openSystems(dir: string, ledger: Parameters<typeof SystemsStore.open>[1]) {
+  const store = await SystemsStore.open(dir, ledger);
+  await store.importRoutes(TEST_PROVIDERS, 'migration:test');
+  return store;
+}
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
@@ -87,6 +104,7 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
   const origLog = console.log;
   const origErr = console.error;
   const origWarn = console.warn;
+  let systemsDir = '';
 
   before(async () => {
     const capture = (orig: (...a: unknown[]) => void) => (...a: unknown[]) => {
@@ -97,6 +115,7 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     console.error = capture(origErr);
     console.warn = capture(origWarn);
     const secretValues = new Set<string>();
+    systemsDir = mkdtempSync(join(tmpdir(), 'systems-cred-test-'));
     state = {
       agents: new Map<string, AgentRecord>(),
       ledger,
@@ -118,7 +137,14 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
       secretValues,
       publicBaseUrl: BASE,
       gatekeeperEgressHeldSecrets: new Set(['NOTION_API_KEY', 'ANTHROPIC_API_KEY']),
+      systems: await openSystems(systemsDir, ledger),
     };
+    state.connections = new ConnectionKeymaster({
+      providers: [provider],
+      ledger,
+      secretValues: state.secretValues,
+      getProvider: (name) => state.systems?.getConnectionProvider(name),
+    });
     state.agents.set('donna', agent({
       id: 'donna',
       name: 'Donna',
@@ -137,11 +163,17 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     console.error = origErr;
     console.warn = origWarn;
     await new Promise<void>((r) => cp.close(() => r()));
+    if (systemsDir) rmSync(systemsDir, { recursive: true, force: true });
   });
 
   beforeEach(() => {
     values.clear();
-    state.connections = new ConnectionKeymaster({ providers: [provider], ledger, secretValues: state.secretValues });
+    state.connections = new ConnectionKeymaster({
+      providers: [provider],
+      ledger,
+      secretValues: state.secretValues,
+      getProvider: (name) => state.systems?.getConnectionProvider(name),
+    });
   });
 
   it('is admin-only', async () => {
@@ -253,6 +285,32 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     await req('/api/v1/keymaster/outstanding', { token: ADMIN });
     const everything = [...responses, ...logged, JSON.stringify(ledger.query({}))].join('\n');
     for (const v of [FAKE_DISCORD, FAKE_ROTATED]) assert.equal(everything.includes(v), false, 'a value never appears in any response, log line, or ledger row');
+  });
+
+  it('K5 TSK-067 an OAuth provider client is write-only, admin-only, Keymaster-named, and never echoed, logged or ledgered', async () => {
+    // A new provider defined without a client entry name: the Keymaster names it shared/<id>/oauth-client.
+    await state.systems!.importRoutes([{ id: 'microsoft', name: 'Microsoft', kind: 'http', upstream: 'https://login.microsoftonline.com',
+      oauth: { kind: 'oauth-user', authUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize', tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token' } }], 'migration:test');
+    const SECRET = 'example-fake-microsoft-client-value';
+    const status = async () => (await req('/api/v1/keymaster/providers/microsoft/client', { token: ADMIN })).json();
+    assert.deepEqual(await status(), { system: 'microsoft', kind: 'oauth-user', name: 'shared/microsoft/oauth-client', present: false });
+
+    const notAdmin = await req('/api/v1/keymaster/providers/microsoft/client', { method: 'POST', token: VIEWER, body: { client_id: 'abc', client_secret: SECRET } });
+    assert.equal(notAdmin.status, 403);
+    assert.equal((await req('/api/v1/keymaster/providers/microsoft/client', { method: 'POST', token: ADMIN, body: { client_id: 'abc' } })).status, 400);
+    assert.equal((await req('/api/v1/keymaster/providers/discord/client', { method: 'POST', token: ADMIN, body: { client_id: 'a', client_secret: SECRET } })).status, 404);
+
+    const before = ledger.query({}).length;
+    const set = await req('/api/v1/keymaster/providers/microsoft/client', { method: 'POST', token: ADMIN, body: { client_id: '347b5707-0000', client_secret: SECRET } });
+    assert.equal(set.status, 201, set.text);
+    assert.equal(set.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(JSON.parse(values.get('shared/microsoft/oauth-client')!), { client_id: '347b5707-0000', client_secret: SECRET });
+    assert.equal((await status()).present, true);
+    const rows = ledger.query({}).slice(before);
+    assert.deepEqual(rows.map((r) => [r.action, r.provider, r.actor]), [['OAUTH_CLIENT_SET', 'microsoft', 'token:admin']]);
+    assert.ok(state.secretValues.has(SECRET), 'redacted from now on (S1 backstop)');
+    const everything = [...responses, ...logged, JSON.stringify(ledger.query({}))].join('\n');
+    assert.equal(everything.includes(SECRET), false, 'the client secret never appears in a response, log line, or ledger row');
   });
 
   it('rejects empty, short, and malformed submissions without echoing them', async () => {

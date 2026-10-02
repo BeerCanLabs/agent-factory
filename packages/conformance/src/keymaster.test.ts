@@ -51,12 +51,20 @@ const hostOf = (u?: string) => {
 
 describe('K1 the Keymaster owns OAuth grants and app secrets', () => {
   it('no landing-zone route or migrated system to a Google API carries a static credential; API routes use a Keymaster connection', () => {
-    const google = landingZoneRoutes().filter((r) => GOOGLE_HOST.test(hostOf(r.route.upstream)));
+    // Provider definitions (an `oauth` block: sign-in and token URLs) are how Google is reached, not API routes.
+    const google = landingZoneRoutes().filter((r) => GOOGLE_HOST.test(hostOf(r.route.upstream)) && !(r.route as { oauth?: unknown }).oauth);
     const withCredential = google.filter((r) => r.route.credential).map((r) => `${r.where}: ${r.route.id}`);
     assert.deepEqual(withCredential, [], 'Google routes must not inject a static credential (use `connection`)');
     // Every Google API route except the legacy token endpoint must be a connection route.
     const noConnection = google.filter((r) => !r.route.connection && hostOf(r.route.upstream) !== 'oauth2.googleapis.com').map((r) => `${r.where}: ${r.route.id}`);
     assert.deepEqual(noConnection, []);
+  });
+
+  it('E10 K1 no OAuth provider is defined in platform code (TSK-067)', () => {
+    const offenders = files('packages', (p) => /\/src\/.*\.tsx?$/.test(p) && !/\.test\.tsx?$/.test(p))
+      .filter((f) => /CONNECTION_PROVIDERS|authUrl:\s*['"`]https:/.test(read(f)))
+      .filter((f) => !f.startsWith('packages/console/'));
+    assert.deepEqual(offenders, [], 'OAuth providers are approved system definitions, entered as factory data');
   });
 
   it('the gatekeeper-egress refuses a route that mixes a connection with a static credential', () => {

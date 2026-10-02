@@ -43,6 +43,41 @@ export const systemHoldSchema = z
   })
   .strict();
 
+const httpsUrl = (field: string) =>
+  z.string().url(`${field} must be a valid URL`).refine((u) => u.startsWith('https://'), `${field} must be an https URL`);
+
+/** Keymaster-named entries for a provider's own credentials (K5.1): no one chooses a secret-manager name. */
+export const oauthClientSecretName = (systemId: string) => `shared/${systemId}/oauth-client`;
+export const serviceAccountKeyName = (systemId: string) => `shared/${systemId}/service-account-key`;
+
+export const systemOAuthUserSchema = z
+  .object({
+    kind: z.literal('oauth-user').default('oauth-user'),
+    authUrl: httpsUrl('authUrl'),
+    tokenUrl: httpsUrl('tokenUrl'),
+    /** Where the Keymaster keeps this provider's OAuth client. Omitted: `shared/<system id>/oauth-client` (K5.1). */
+    clientSecret: z.string().min(1).optional(),
+    authParams: z.record(z.string()).optional(),
+    refresh: z.boolean().optional(),
+    defaultScopes: z.array(z.string().min(1)).optional(),
+  })
+  .strict();
+
+export const systemJwtBearerSchema = z
+  .object({
+    kind: z.literal('jwt-bearer'),
+    tokenUrl: httpsUrl('tokenUrl'),
+    /** Where the Keymaster keeps the service-account key. Omitted: `shared/<system id>/service-account-key` (K5.1). */
+    keySecret: z.string().min(1).optional(),
+    defaultScopes: z.array(z.string().min(1)).optional(),
+  })
+  .strict();
+
+export const systemOAuthSchema = z.discriminatedUnion('kind', [
+  systemOAuthUserSchema,
+  systemJwtBearerSchema,
+]);
+
 export const systemProposalSchema = z
   .object({
     id: z.string().max(64).regex(SYSTEM_ID, 'system id must be kebab-case (e.g. github, discord, closing-climb)'),
@@ -53,6 +88,7 @@ export const systemProposalSchema = z
     credential: systemCredentialSchema.optional(),
     connection: z.string().min(1).optional(),
     scopes: z.array(z.string().min(1)).optional(),
+    oauth: systemOAuthSchema.optional(),
     hold: systemHoldSchema.optional(),
     stripSignInLinks: z.boolean().optional(),
   })
@@ -62,8 +98,16 @@ export const systemProposalSchema = z
     { message: 'a system definition cannot combine a static credential and a Keymaster connection', path: ['connection'] },
   )
   .refine(
+    (data) => !(data.credential && data.oauth),
+    { message: 'a system definition cannot combine a static credential and OAuth provider configuration', path: ['oauth'] },
+  )
+  .refine(
     (data) => !(data.connection && data.kind !== 'http'),
     { message: 'Keymaster connections are supported on http systems only', path: ['connection'] },
+  )
+  .refine(
+    (data) => !(data.oauth && data.kind !== 'http'),
+    { message: 'OAuth providers are supported on http systems only', path: ['oauth'] },
   );
 
 export const systemDefinitionSchema = z
@@ -76,6 +120,7 @@ export const systemDefinitionSchema = z
     credential: systemCredentialSchema.optional(),
     connection: z.string().min(1).optional(),
     scopes: z.array(z.string().min(1)).optional(),
+    oauth: systemOAuthSchema.optional(),
     hold: systemHoldSchema.optional(),
     stripSignInLinks: z.boolean().optional(),
     version: z.number().int().positive(),
@@ -93,12 +138,23 @@ export const systemDefinitionSchema = z
     { message: 'a system definition cannot combine a static credential and a Keymaster connection', path: ['connection'] },
   )
   .refine(
+    (data) => !(data.credential && data.oauth),
+    { message: 'a system definition cannot combine a static credential and OAuth provider configuration', path: ['oauth'] },
+  )
+  .refine(
     (data) => !(data.connection && data.kind !== 'http'),
     { message: 'Keymaster connections are supported on http systems only', path: ['connection'] },
+  )
+  .refine(
+    (data) => !(data.oauth && data.kind !== 'http'),
+    { message: 'OAuth providers are supported on http systems only', path: ['oauth'] },
   );
 
 export type SystemCredential = z.infer<typeof systemCredentialSchema>;
 export type SystemHold = z.infer<typeof systemHoldSchema>;
+export type SystemOAuthUser = z.infer<typeof systemOAuthUserSchema>;
+export type SystemJwtBearer = z.infer<typeof systemJwtBearerSchema>;
+export type SystemOAuth = z.infer<typeof systemOAuthSchema>;
 export type SystemProposal = z.infer<typeof systemProposalSchema>;
 export type SystemDefinition = z.infer<typeof systemDefinitionSchema>;
 

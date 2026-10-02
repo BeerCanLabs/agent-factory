@@ -94,6 +94,7 @@ export async function agentCredentials(state: FactoryState, agentId: string): Pr
     agentId,
     secrets: declaredCredentials(agent),
     connections: agent.connections ?? [],
+    getProvider: (name) => state.systems?.getConnectionProvider(name),
     gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets ?? new Set(),
     present: (name) => cachedPresent(state, name),
     grant: async (provider) => (await km.listGrants(agentId, [provider]))[0],
@@ -168,7 +169,12 @@ async function submitCredential(state: FactoryState, req: http.IncomingMessage, 
   if (!SECRET_NAME.test(name)) return noStore(res, 400, { error: 'invalid_name', message: 'credential names are ENV-style (A-Z, 0-9, _)' });
   const held = state.gatekeeperEgressHeldSecrets ?? new Set<string>();
   if (held.has(name)) return noStore(res, 409, { error: 'managed_by_platform', name, message: 'the factory gatekeeper-egress holds this credential for every agent; supply it as a platform credential', path: platformSubmitPath(name) });
-  const allowed = submittableSecrets({ secrets: declaredCredentials(agent), connections: agent.connections ?? [], gatekeeperEgressHeld: held });
+  const allowed = submittableSecrets({
+    secrets: declaredCredentials(agent),
+    connections: agent.connections ?? [],
+    gatekeeperEgressHeld: held,
+    getProvider: (name) => state.systems?.getConnectionProvider(name),
+  });
   if (!allowed.has(name)) return noStore(res, 404, { error: 'undeclared_credential', name, message: `${agentId} does not declare ${name}` });
   await writeCredential(state, req, res, agentId, name, actor);
 }
@@ -206,8 +212,72 @@ async function writeCredential(state: FactoryState, req: http.IncomingMessage, r
   noStore(res, existed ? 200 : 201, { agentId, name, status: 'present', action, at });
 }
 
+/**
+ * TSK-067, K5.3: an OAuth provider's app credentials, write-only. The admin sends the client the provider issued
+ * (`{client_id, client_secret}`, or a service-account key for a jwt-bearer provider); the Keymaster stores it under the
+ * name the provider's approved system definition gives (`shared/<id>/oauth-client` by default). The value goes to the
+ * secret manager and the redaction set only; responses and the ledger carry the system, the name and the actor.
+ */
+async function submitProviderClient(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, systemId: string, actor: string) {
+  const def = state.systems?.getConnectionProvider(systemId);
+  if (!def) return noStore(res, 404, { error: 'not_an_oauth_provider', system: systemId, message: `${systemId} is not an approved system with an oauth block` });
+  const name = def.kind === 'oauth-user' ? def.clientSecret : def.keySecret;
+  const writer = writableProvider(state.providers);
+  if (!writer) return noStore(res, 503, { error: 'no_writable_secrets_backend' });
+  const raw = await readRaw(req);
+  if (raw === undefined) return noStore(res, 413, { error: 'value_too_large', max: MAX_VALUE });
+  let body: Record<string, unknown> = {};
+  try {
+    body = JSON.parse(raw || '{}') as Record<string, unknown>;
+  } catch {
+    return noStore(res, 400, { error: 'json_required' });
+  }
+  let value: string;
+  if (def.kind === 'oauth-user') {
+    const id = typeof body.client_id === 'string' ? body.client_id.trim() : '';
+    const secret = typeof body.client_secret === 'string' ? body.client_secret.trim() : '';
+    if (!id || !secret) return noStore(res, 400, { error: 'client_required', message: 'send {"client_id": "...", "client_secret": "..."}' });
+    value = JSON.stringify({ client_id: id, client_secret: secret });
+    state.secretValues.add(secret);
+  } else {
+    const key = typeof body.value === 'string' ? body.value : '';
+    if (!key) return noStore(res, 400, { error: 'value_required', message: 'send {"value": "<service-account key JSON>"}' });
+    value = key;
+    state.secretValues.add(key);
+  }
+  const existed = await secretPresent(name, state.providers);
+  try {
+    await writer.put(name, value);
+  } catch {
+    console.error(`[keymaster] writing the OAuth client for ${systemId} failed`);
+    return noStore(res, 502, { error: 'write_failed', name });
+  }
+  state.secretCache?.delete(name);
+  invalidateCredentials(state);
+  const action = existed ? 'OAUTH_CLIENT_ROTATED' : 'OAUTH_CLIENT_SET';
+  const at = new Date().toISOString();
+  // The ledger names the provider; its Keymaster-named entry follows from it (shared/<id>/oauth-client).
+  state.ledger.append({ timestamp: at, agentId: 'platform', type: 'action', action, actor, provider: systemId });
+  noStore(res, existed ? 200 : 201, { system: systemId, name, status: 'present', action, at });
+}
+
 /** Handles the credentials API. Returns false when the path is not one of its routes. */
 export async function handleCredentials(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
+  const providerClient = path.match(/^\/api\/v1\/keymaster\/providers\/([a-z0-9-]+)\/client$/);
+  if (providerClient && req.method === 'GET') {
+    if (!(await authenticate(req, res, state, 'viewer'))) return true;
+    const def = state.systems?.getConnectionProvider(providerClient[1]);
+    if (!def) return noStore(res, 404, { error: 'not_an_oauth_provider', system: providerClient[1] }), true;
+    const name = def.kind === 'oauth-user' ? def.clientSecret : def.keySecret;
+    return noStore(res, 200, { system: providerClient[1], kind: def.kind, name, present: await secretPresent(name, state.providers) }), true;
+  }
+  if (providerClient && req.method === 'POST') {
+    const principal = await authenticate(req, res, state, 'admin');
+    if (!principal) return true;
+    await submitProviderClient(state, req, res, providerClient[1], principal.actor);
+    return true;
+  }
+
   if (path === '/api/v1/keymaster/outstanding' && req.method === 'GET') {
     if (!(await authenticate(req, res, state, 'admin'))) return true;
     const agents: Array<{ agentId: string; name: string } & CredentialSummary> = [];

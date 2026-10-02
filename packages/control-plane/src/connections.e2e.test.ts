@@ -3,12 +3,29 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { ConnectionKeymaster, grantSecretName, type Grant } from '@beercanlabs/factory-keymaster';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { signConsentState, verifyConsentState } from './connections.js';
+import { SystemsStore } from './systems.js';
+
+/** Providers as a deployment imports them (TSK-067): data, never platform code. */
+const TEST_PROVIDERS = [
+  { id: 'google', name: 'Google (OAuth)', kind: 'http', upstream: 'https://accounts.google.com', oauth: { kind: 'oauth-user', authUrl: 'https://accounts.google.com/o/oauth2/v2/auth', tokenUrl: 'https://oauth2.googleapis.com/token', clientSecret: 'GOOGLE_OAUTH_CLIENT', authParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' } } },
+  { id: 'linkedin', name: 'LinkedIn', kind: 'http', upstream: 'https://api.linkedin.com', connection: 'linkedin', oauth: { kind: 'oauth-user', authUrl: 'https://www.linkedin.com/oauth/v2/authorization', tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken', clientSecret: 'LINKEDIN_OAUTH_CLIENT', authParams: {}, refresh: false } },
+  { id: 'google-service-account', name: 'Google service account', kind: 'http', upstream: 'https://oauth2.googleapis.com', oauth: { kind: 'jwt-bearer', tokenUrl: 'https://oauth2.googleapis.com/token', keySecret: 'GOOGLE_SERVICE_ACCOUNT', defaultScopes: ['https://www.googleapis.com/auth/devstorage.read_write'] } },
+];
+
+async function openSystems(dir: string, ledger: Parameters<typeof SystemsStore.open>[1]) {
+  const store = await SystemsStore.open(dir, ledger);
+  await store.importRoutes(TEST_PROVIDERS, 'migration:test');
+  return store;
+}
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
@@ -65,9 +82,11 @@ describe('Keymaster connections API (§6.11)', { concurrency: false }, () => {
   };
   const stateKey = () => createHmac('sha256', SIGNING).update('factory:keymaster:connection-state:v1').digest();
   const rows = () => ledger.query({});
+  let systemsDir = '';
 
   before(async () => {
     const secretValues = new Set<string>();
+    systemsDir = mkdtempSync(join(tmpdir(), 'systems-conn-test-'));
     state = {
       agents: new Map<string, AgentRecord>(),
       ledger,
@@ -89,8 +108,15 @@ describe('Keymaster connections API (§6.11)', { concurrency: false }, () => {
       idleTimers: new Map(),
       secretValues,
       publicBaseUrl: BASE,
+      systems: await openSystems(systemsDir, ledger),
     };
-    state.connections = new ConnectionKeymaster({ providers: [provider], ledger, secretValues, fetch: fakeFetch });
+    state.connections = new ConnectionKeymaster({
+      providers: [provider],
+      ledger,
+      secretValues,
+      fetch: fakeFetch,
+      getProvider: (name) => state.systems?.getConnectionProvider(name),
+    });
     state.agents.set('donna', {
       id: 'donna',
       name: 'Donna',
@@ -111,13 +137,20 @@ describe('Keymaster connections API (§6.11)', { concurrency: false }, () => {
 
   after(async () => {
     await new Promise<void>((r) => cp.close(() => r()));
+    if (systemsDir) rmSync(systemsDir, { recursive: true, force: true });
   });
 
   beforeEach(() => {
     values.clear();
     values.set('GOOGLE_OAUTH_CLIENT', JSON.stringify(CLIENT));
     tokenCalls.length = 0;
-    state.connections = new ConnectionKeymaster({ providers: [provider], ledger, secretValues: state.secretValues, fetch: fakeFetch });
+    state.connections = new ConnectionKeymaster({
+      providers: [provider],
+      ledger,
+      secretValues: state.secretValues,
+      fetch: fakeFetch,
+      getProvider: (name) => state.systems?.getConnectionProvider(name),
+    });
   });
 
   it('start redirects to Google consent with offline access, the declared scopes, and a signed state', async () => {

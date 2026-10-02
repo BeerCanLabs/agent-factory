@@ -90,4 +90,66 @@ describe('system definition schemas', () => {
     assert.equal(validateSystemProposal({ ...base, upstream: 'https://bedrock-runtime.us-east-1.amazonaws.com' }).ok, false);
     assert.equal(validateSystemProposal({ ...base, upstream: 'https://api.x.com/2' }).ok, true);
   });
+
+  it('validates an OAuth user provider system proposal', () => {
+    const res = validateSystemProposal({
+      id: 'google',
+      name: 'Google OAuth Provider',
+      upstream: 'https://oauth2.googleapis.com',
+      oauth: {
+        kind: 'oauth-user',
+        authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+        tokenUrl: 'https://oauth2.googleapis.com/token',
+        clientSecret: 'GOOGLE_OAUTH_CLIENT',
+        authParams: { access_type: 'offline', prompt: 'consent' },
+      },
+    });
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.proposal.oauth?.kind, 'oauth-user');
+    }
+  });
+
+  it('validates a JWT bearer service account system proposal', () => {
+    const res = validateSystemProposal({
+      id: 'google-service-account',
+      name: 'Google Service Account',
+      upstream: 'https://oauth2.googleapis.com',
+      oauth: {
+        kind: 'jwt-bearer',
+        tokenUrl: 'https://oauth2.googleapis.com/token',
+        keySecret: 'GOOGLE_SERVICE_ACCOUNT',
+        defaultScopes: ['https://www.googleapis.com/auth/devstorage.read_write'],
+      },
+    });
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.proposal.oauth?.kind, 'jwt-bearer');
+    }
+  });
+
+  it('rejects an OAuth system proposal that also provides a static credential', () => {
+    const res = validateSystemProposal({
+      id: 'bad-oauth',
+      name: 'Bad OAuth',
+      upstream: 'https://oauth2.googleapis.com',
+      credential: { secret: 'SEC', header: 'authorization' },
+      oauth: {
+        kind: 'oauth-user',
+        authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+        tokenUrl: 'https://oauth2.googleapis.com/token',
+        clientSecret: 'SEC',
+      },
+    });
+    assert.equal(res.ok, false);
+  });
+
+  it('TSK-067 provider sign-in and token URLs are https; entry names are optional (the Keymaster names them)', () => {
+    const base = { id: 'microsoft', name: 'Microsoft', kind: 'http', upstream: 'https://login.microsoftonline.com' };
+    const ok = validateSystemProposal({ ...base, oauth: { kind: 'oauth-user', authUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize', tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token' } });
+    assert.equal(ok.ok, true);
+    const plain = validateSystemProposal({ ...base, oauth: { kind: 'oauth-user', authUrl: 'http://evil.example/auth', tokenUrl: 'https://login.microsoftonline.com/t' } });
+    assert.equal(plain.ok, false);
+  });
 });
+
