@@ -225,3 +225,9 @@ variable "default_model" {
   type        = string
   default     = "claude-haiku-4-5"
 }
+
+variable "agent_source_token_hosts" {
+  type        = list(string)
+  default     = ["github.com"]
+  description = "Hosts the agent source token may be sent to. Admission and skill-check builds, and the control plane's skill.yaml fetch, clone any other host without it, so a registration can never send the token elsewhere."
+}

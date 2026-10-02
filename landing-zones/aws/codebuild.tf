@@ -88,6 +88,10 @@ resource "aws_codebuild_project" "factory_agent_builder" {
       name  = "GIT_TOKEN_SECRET_ID"
       value = var.agent_source_token_secret_arn
     }
+    environment_variable {
+      name  = "SOURCE_TOKEN_HOSTS"
+      value = join(" ", var.agent_source_token_hosts)
+    }
   }
 
   source {
@@ -106,7 +110,11 @@ phases:
       - '[[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ && "$IMAGE_TAG" == "$AGENT_ID-$(echo $GIT_COMMIT | cut -c1-12)" ]] || exit 5'
       - |
         AUTH=()
-        if [ -n "$GIT_TOKEN_SECRET_ID" ]; then
+        # The source token goes only to an allowed source host (var.agent_source_token_hosts); any other repo is cloned
+        # without it, so a registration can never send the token somewhere else.
+        host="$(printf '%s' "$REPO_URL" | sed -E 's#^https://([^/@]+)/.*#\1#' | tr 'A-Z' 'a-z')"; allowed=""
+        for h in $SOURCE_TOKEN_HOSTS; do [ "$host" = "$h" ] && allowed=1; done
+        if [ -n "$GIT_TOKEN_SECRET_ID" ] && [ -n "$allowed" ]; then
           GIT_TOKEN="$(aws secretsmanager get-secret-value --secret-id "$GIT_TOKEN_SECRET_ID" --query SecretString --output text)" || exit 5
           AUTH=(-c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 -w0)")
           unset GIT_TOKEN
@@ -234,6 +242,10 @@ resource "aws_codebuild_project" "factory_skill_checker" {
     environment_variable {
       name  = "GIT_TOKEN_SECRET_ID"
       value = var.agent_source_token_secret_arn
+    }
+    environment_variable {
+      name  = "SOURCE_TOKEN_HOSTS"
+      value = join(" ", var.agent_source_token_hosts)
     }
   }
 
@@ -741,7 +753,10 @@ phases:
           SKILL_CHECK_RESULT='{"passed":false,"failures":["source: the pin must be a full commit and a folder inside the repository"]}'
         else
           AUTH=()
-          if [ -n "$GIT_TOKEN_SECRET_ID" ]; then
+          # The source token goes only to an allowed source host; any other repo is cloned without it.
+          host="$(printf '%s' "$REPO_URL" | sed -E 's#^https://([^/@]+)/.*#\1#' | tr 'A-Z' 'a-z')"; allowed=""
+          for h in $SOURCE_TOKEN_HOSTS; do [ "$host" = "$h" ] && allowed=1; done
+          if [ -n "$GIT_TOKEN_SECRET_ID" ] && [ -n "$allowed" ]; then
             GIT_TOKEN="$(aws secretsmanager get-secret-value --secret-id "$GIT_TOKEN_SECRET_ID" --query SecretString --output text)" || GIT_TOKEN=""
             [ -n "$GIT_TOKEN" ] && AUTH=(-c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 -w0)")
             unset GIT_TOKEN
