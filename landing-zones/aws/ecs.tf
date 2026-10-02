@@ -87,6 +87,7 @@ resource "aws_ecs_task_definition" "control_plane" {
         # Agent admission builds (§6.8 L3/L4) push <agentId>-<commit[:12]> images here.
         { name = "FACTORY_ECR_REPO_URI", value = aws_ecr_repository.dynamic_agents.repository_url },
         { name = "FACTORY_AGENT_BUILDER_PROJECT", value = aws_codebuild_project.factory_agent_builder.name },
+        { name = "FACTORY_AGENT_SOURCE_TOKEN_HOSTS", value = join(",", var.agent_source_token_hosts) },
         { name = "FACTORY_LEDGER_PATH", value = "/data/ledger.jsonl" },
         { name = "FACTORY_LEDGER_WORM_URI", value = "s3://${aws_s3_bucket.ledger_worm.bucket}/ledger" },
         { name = "FACTORY_LEDGER_RETENTION_DAYS", value = tostring(var.ledger_retention_days) },
@@ -112,13 +113,17 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "MEMORY_EPHEMERAL_DIR", value = "/tmp/ephemeral" },
         { name = "FACTORY_IDLE_MS", value = "3600000" },
       ])
-      secrets = [
+      secrets = concat([
         { name = "FACTORY_TOKEN", valueFrom = local.secret["FACTORY_TOKEN"] },
         { name = "FACTORY_TOKENS", valueFrom = aws_secretsmanager_secret.factory_tokens.arn },
         { name = "GATEKEEPER_INGRESS_TOKEN", valueFrom = local.secret["GATEKEEPER_INGRESS_TOKEN"] },
         { name = "FACTORY_RUN_TOKEN_KEY", valueFrom = local.secret["FACTORY_RUN_TOKEN_KEY"] },
         { name = "FACTORY_CALLBACK_SIGNING_KEY", valueFrom = local.secret["FACTORY_CALLBACK_SIGNING_KEY"] },
-      ]
+        ], var.agent_source_token_secret_arn == "" ? [] : [
+        # Registration reads skill.yaml from the named repository (TSK-055); the token is sent only to
+        # var.agent_source_token_hosts (FACTORY_AGENT_SOURCE_TOKEN_HOSTS).
+        { name = "FACTORY_AGENT_SOURCE_TOKEN", valueFrom = var.agent_source_token_secret_arn },
+      ])
       mountPoints      = [{ sourceVolume = "data", containerPath = "/data" }]
       stopTimeout      = 30
       logConfiguration = local.log["control-plane"]
