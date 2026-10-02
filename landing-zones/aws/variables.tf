@@ -129,6 +129,12 @@ variable "model_catalog" {
       region   = "us-east-1"
       price    = { inputPerMTok = 1, outputPerMTok = 5 }
     }
+    "claude-opus-4-6" = {
+      provider = "bedrock-converse"
+      id       = "us.anthropic.claude-opus-4-6-v1"
+      region   = "us-east-1"
+      price    = { inputPerMTok = 5, outputPerMTok = 25 }
+    }
   }
 }
 
