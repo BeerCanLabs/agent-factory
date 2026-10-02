@@ -26,6 +26,21 @@ describe('§6.7 enforcement', () => {
     for (const b of baseline) assert.ok(gaps.has(b.gap), `${b.rule} ${b.where}: ${b.gap} is not in the Gap Register`);
   });
 
+  it('intent, its checks and AI instructions have a code owner (GAP-074)', () => {
+    const owned = new Set(
+      read('.github/CODEOWNERS')
+        .split('\n')
+        .map((l) => l.trim().split(/\s+/))
+        .filter((f) => f[0] && !f[0].startsWith('#') && f.length > 1 && f.slice(1).every((o) => o.startsWith('@')))
+        .map((f) => f[0]),
+    );
+    const required = [
+      '/DESIGN_AUTHORITY.md', '/CLAUDE.md', '/GEMINI.md', '/AGENTS.md', '/packages/conformance/', '/.github/', '/.githooks/',
+      '/.claude/', '/scripts/conformance.sh', '/scripts/conformance-hook.sh', '/scripts/secret-scan.sh',
+    ];
+    assert.deepEqual(required.filter((p) => !owned.has(p)), [], 'paths without a code owner in .github/CODEOWNERS');
+  });
+
   it('every LOCKED task names its owner and scope', () => {
     const rows = read('DESIGN_AUTHORITY.md').split('\n').filter((l) => /^\| \*\*TSK-\d+\*\*/.test(l) && /`LOCKED`/.test(l));
     for (const row of rows) {
