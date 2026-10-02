@@ -73,6 +73,28 @@ variable "provider_secret_names" {
   default     = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "NOTION_API_KEY", "MOTION_API_KEY"]
 }
 
+variable "extra_provider_secret_names" {
+  description = "Deployment-specific gatekeeper-held secrets (e.g. a private service's API token), merged with provider_secret_names. Same rules: only the gatekeeper-egress reads them, never an agent task definition. Until the Keymaster names every entry (TSK-071, GAP-073)."
+  type        = list(string)
+  default     = []
+}
+
+variable "systems_import" {
+  description = "TRANSITIONAL (GAP-068, TSK-066): the non-model routes this landing zone used to give the gatekeeper-egress, imported once into the factory's systems store as approved systems (actor migration:landing-zone; an existing system is never overwritten). The gatekeeper-egress no longer receives them. Removed once every deployment has imported them."
+  type        = string
+  default     = "[{\"id\":\"discord\",\"kind\":\"http\",\"upstream\":\"https://discord.com/api/v10\",\"credential\":{\"secret\":\"{agent}_DISCORD_BOT_TOKEN\",\"header\":\"authorization\",\"format\":\"Bot {}\"},\"stripSignInLinks\":true},{\"id\":\"notion\",\"kind\":\"http\",\"upstream\":\"https://api.notion.com\",\"credential\":{\"secret\":\"NOTION_API_KEY\",\"header\":\"authorization\",\"format\":\"Bearer {}\"}},{\"id\":\"google-calendar\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/calendar/v3\",\"connection\":\"google\"},{\"id\":\"google-oauth\",\"kind\":\"http\",\"upstream\":\"https://oauth2.googleapis.com\"},{\"id\":\"google-gmail\",\"kind\":\"http\",\"upstream\":\"https://gmail.googleapis.com\",\"connection\":\"google\"},{\"id\":\"google-drive\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/drive/v3\",\"connection\":\"google\"},{\"id\":\"google-drive-upload\",\"kind\":\"http\",\"upstream\":\"https://www.googleapis.com/upload/drive/v3\",\"connection\":\"google\"},{\"id\":\"google-health\",\"kind\":\"http\",\"upstream\":\"https://health.googleapis.com\",\"connection\":\"google\"},{\"id\":\"google-storage\",\"kind\":\"http\",\"upstream\":\"https://storage.googleapis.com\",\"connection\":\"google-service-account\",\"scopes\":[\"https://www.googleapis.com/auth/devstorage.read_write\"]},{\"id\":\"github\",\"kind\":\"http\",\"upstream\":\"https://api.github.com\",\"credential\":{\"secret\":\"{agent}_GITHUB_TOKEN\",\"header\":\"authorization\",\"format\":\"Bearer {}\",\"fallback\":false}},{\"id\":\"motion\",\"kind\":\"http\",\"upstream\":\"https://api.usemotion.com/v1\",\"credential\":{\"secret\":\"MOTION_API_KEY\",\"header\":\"x-api-key\"}},{\"id\":\"linkedin\",\"kind\":\"http\",\"upstream\":\"https://api.linkedin.com\",\"connection\":\"linkedin\",\"hold\":{\"methods\":[\"POST\",\"PUT\",\"PATCH\",\"DELETE\"],\"preview\":\"linkedin-post\"}}]"
+}
+
+variable "extra_gatekeeper_egress_routes" {
+  description = "TRANSITIONAL (GAP-068, TSK-066): a deployment's own routes, imported once into the factory's systems store with systems_import. Never given to the gatekeeper-egress. Removed once imported."
+  type        = string
+  default     = "[]"
+  validation {
+    condition     = can(tolist(jsondecode(var.extra_gatekeeper_egress_routes)))
+    error_message = "extra_gatekeeper_egress_routes must be a JSON array of routes."
+  }
+}
+
 variable "gatekeeper_egress_routes" {
   description = "JSON array of model gatekeeper-egress routes (anthropic, openai, models). Non-model routes are factory data (§6.3.1 E10), maintained in the control plane."
   type        = string

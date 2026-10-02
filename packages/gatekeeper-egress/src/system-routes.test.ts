@@ -71,6 +71,8 @@ describe('gatekeeper-egress dynamic system route resolution (E10)', () => {
       runTokens: tokens,
       control,
       providers: [],
+      allowHttpSystems: true,
+      routeRefreshIntervalMs: 0,
     });
     egressPort = await listen(egressServer);
   });
@@ -102,5 +104,86 @@ describe('gatekeeper-egress dynamic system route resolution (E10)', () => {
     const r2 = await call(egressPort, '/new-service/ping', token);
     assert.equal(r2.status, 200);
     assert.deepEqual(JSON.parse(r2.text), { ok: true });
+  });
+
+  it('a system the factory no longer serves stops at once (E10)', async () => {
+    const at = dynamicRoutes.findIndex((r) => r.id === 'new-service');
+    const [removed] = dynamicRoutes.splice(at, 1);
+    try {
+      const res = await call(egressPort, '/new-service/ping', token);
+      assert.equal(res.status, 404);
+    } finally {
+      dynamicRoutes.push(removed);
+    }
+  });
+});
+
+describe('gatekeeper-egress refuses unsafe factory systems (E10, E5)', () => {
+  let upstream: http.Server;
+  let upPort = 0;
+  let egressServer: http.Server;
+  let egressPort = 0;
+  let token = '';
+  let modelHits = 0;
+  const offered: Route[] = [];
+
+  before(async () => {
+    token = await tokens.mint({ runId: 'run-2', agentId: 'test-agent' });
+    upstream = http.createServer((req, res) => {
+      if (req.url?.startsWith('/static')) modelHits++;
+      res.end(JSON.stringify({ ok: true, path: req.url }));
+    });
+    upPort = await listen(upstream);
+    offered.push(
+      // Tries to replace the landing zone's model route.
+      { id: 'anthropic', kind: 'http', upstream: `http://127.0.0.1:${upPort}/hijack` },
+      // A model provider as a system: model calls must use provider routes.
+      { id: 'sneaky-model', kind: 'http', upstream: 'https://api.openai.com' },
+      // Not a system kind.
+      { id: 'llm-system', kind: 'llm', upstream: 'https://example.com' } as Route,
+      // Mixed credential and connection.
+      { id: 'mixed', kind: 'http', upstream: 'https://example.com', connection: 'google', credential: { secret: 'X', header: 'x' } },
+    );
+    egressServer = createGatekeeperEgress({
+      routes: [{ id: 'anthropic', kind: 'http', upstream: `http://127.0.0.1:${upPort}/static` }],
+      prices: {},
+      runTokens: tokens,
+      providers: [],
+      routeRefreshIntervalMs: 0,
+      control: {
+        async runContext() {
+          return {
+            run: { runId: 'run-2', agentId: 'test-agent', state: 'WORKING', live: true },
+            agentState: 'WORKING',
+            policy: { routes: ['anthropic', 'sneaky-model', 'llm-system', 'mixed'], hosts: [] },
+            spend: { run: 0, day: 0, month: 0 },
+          };
+        },
+        async requestApproval() { throw new Error('unused'); },
+        async consumeApproval() { return false; },
+        async ledger() {},
+        async systemRoutes() { return [...offered]; },
+      },
+    });
+    egressPort = await listen(egressServer);
+  });
+
+  after(async () => {
+    await new Promise<void>((r) => egressServer.close(() => r()));
+    await new Promise<void>((r) => upstream.close(() => r()));
+  });
+
+  it('a factory system never replaces a landing-zone route (E10)', async () => {
+    const res = await call(egressPort, '/anthropic/v1/x', token);
+    assert.equal(res.status, 200);
+    assert.match(JSON.parse(res.text).path, /^\/static/);
+    assert.equal(modelHits, 1);
+  });
+
+  it('model providers, non-system kinds and mixed credentials are not served as systems (E5, E10)', async () => {
+    for (const id of ['sneaky-model', 'llm-system', 'mixed']) {
+      const res = await call(egressPort, `/${id}/x`, token);
+      assert.equal(res.status, 404, id);
+    }
   });
 });
