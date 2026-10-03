@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { createGatekeeperEgress, type ControlClient, type Route } from './gatekeeper-egress.js';
-import type { Price } from './meter.js';
+import type { Price } from '@beercanlabs/factory-budget';
 import { parseModelCatalog, type ModelCatalog } from './models.js';
 import { traceConfigFromEnv } from './traces.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
