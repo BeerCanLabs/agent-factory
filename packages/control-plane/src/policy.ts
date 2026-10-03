@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import type { Spend } from '@beercanlabs/factory-budget';
 import type { LedgerEvent } from '@beercanlabs/factory-ledger';
 
 export type ToolRule = { allow: string[] | '*'; requireApproval?: string[] };
@@ -147,8 +148,6 @@ export class PolicyStore {
   }
 }
 
-export type Spend = { run: number; day: number; month: number };
-
 export type SpendDetail = { model?: string; inputTokens?: number; outputTokens?: number };
 type SpendCounts = { usd: number; calls: number; inputTokens: number; outputTokens: number };
 export type SpendWindow = SpendCounts & { byModel: Record<string, SpendCounts> };
@@ -220,16 +219,6 @@ export class SpendTracker {
     }
     return out;
   }
-}
-
-/** The first budget window that is at or over its limit, if any. */
-export function exceededWindow(policy: AgentPolicy, spend: Spend): 'perRun' | 'perDay' | 'perMonth' | undefined {
-  const b = policy.budgetUsd;
-  if (!b) return undefined;
-  if (b.perRun !== undefined && spend.run >= b.perRun) return 'perRun';
-  if (b.perDay !== undefined && spend.day >= b.perDay) return 'perDay';
-  if (b.perMonth !== undefined && spend.month >= b.perMonth) return 'perMonth';
-  return undefined;
 }
 
 export type ApprovalState = 'pending' | 'approved' | 'rejected' | 'consumed';

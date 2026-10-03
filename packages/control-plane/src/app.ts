@@ -13,7 +13,8 @@ import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, typ
 import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver, type SkillSource } from './source.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
-import { exceededWindow, spendDetail, validatePolicy, type Approval, type ApprovalStore, type HeldRequest, type PolicyStore, type SpendTracker } from './policy.js';
+import { exceededWindow } from '@beercanlabs/factory-budget';
+import { spendDetail, validatePolicy, type Approval, type ApprovalStore, type HeldRequest, type PolicyStore, type SpendTracker } from './policy.js';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
 const HELD_BODY_LIMIT = 256 * 1024;
@@ -1336,10 +1337,10 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(stored.agentId));
       const policy = state.policies.get(stored.agentId);
       // `before` must be read before the spend is added, or a crossing is never detected.
-      const before = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
+      const before = exceededWindow(policy?.budgetUsd, state.spend.get(stored.agentId, stored.runId));
       state.spend.add(stored.agentId, stored.runId, stored.costUsd, stored.timestamp, spendDetail(stored));
       if (!isBuiltin) {
-        const after = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
+        const after = exceededWindow(policy?.budgetUsd, state.spend.get(stored.agentId, stored.runId));
         // Alert once per crossing, even if the run already finished; block only a run that is still live.
         if (after && after !== before) {
           const alert = state.ledger.append({
@@ -1412,7 +1413,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'POLICY_UPDATED', actor: principal.actor });
     await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, 'policy updated') });
     for (const run of state.runs.list({ agentId, active: true })) {
-      if (run.state === 'BLOCKED_BUDGET_EXCEEDED' && !exceededWindow(checked.policy, state.spend.get(agentId, run.runId))) {
+      if (run.state === 'BLOCKED_BUDGET_EXCEEDED' && !exceededWindow(checked.policy?.budgetUsd, state.spend.get(agentId, run.runId))) {
         unblockRun(state, run.runId, 'BLOCKED_BUDGET_EXCEEDED', principal.actor);
       }
     }

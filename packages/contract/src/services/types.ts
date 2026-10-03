@@ -69,7 +69,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'treasurer',
     title: 'Treasurer',
     role: 'Spend governance, real-time token pricing, and budget circuit-breakers (E5, M3)',
-    hostedIn: ['packages/gatekeeper-egress', 'packages/control-plane'],
+    hostedIn: ['packages/budget', 'packages/gatekeeper-egress', 'packages/control-plane'],
   },
   bouncer: {
     name: 'bouncer',
@@ -119,7 +119,6 @@ export interface PackageClassification {
  * Kept out of `hostedIn` so an empty directory cannot satisfy SV1.
  */
 export const RESERVED_PACKAGES: Record<string, FactoryServiceName> = {
-  budget: 'treasurer',
   triage: 'seer',
 };
 
