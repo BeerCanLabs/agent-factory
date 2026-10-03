@@ -711,6 +711,15 @@ describe('control plane', { concurrency: false }, () => {
       await settle(['starting', 'available']);
     });
 
+    it('P1: a run that fetches its input before any heartbeat is ready', async () => {
+      const run = (await wake()).json as RunBody;
+      await settle(['starting']);
+      const input = await request(port, `/api/v1/runs/${run.runId}/input`, { token: tokenFor(run.runId) });
+      assert.equal(input.status, 200);
+      await settle(['starting', 'available']);
+      assert.ok(state.runs.get(run.runId)?.readyAt, 'readiness recorded on input fetch');
+    });
+
     it('P1: a run that fails before it is ready never shows available', async () => {
       const run = (await wake()).json as RunBody;
       await request(port, `/api/v1/runs/${run.runId}/result`, { method: 'POST', token: tokenFor(run.runId), body: { status: 'failed', error: 'boom' } });
