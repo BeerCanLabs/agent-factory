@@ -345,3 +345,42 @@ describe('typed credential declarations (§6.11 K5.1)', () => {
     assert.deepEqual(secretDeclarations(undefined), []);
   });
 });
+
+describe('skills & triad governance declarations', () => {
+  it('validates enriched skills with system, secretRef, hold, and injection', async () => {
+    const { cartridgeSchema } = await import('./schema.js');
+    const base = {
+      schemaVersion: '1.0',
+      id: 'triad-agent',
+      triggers: [{ type: 'http', path: '/wake' }],
+    };
+    const res = cartridgeSchema.safeParse({
+      ...base,
+      skills: [
+        {
+          id: 'feature-request',
+          name: 'Feature Request Filing',
+          description: 'Structured GitHub issue creation',
+          system: 'GitHub Issues',
+          secretRef: 'GITHUB_TOKEN',
+          hold: 'none',
+          injection: 'gatekeeper-egress',
+        },
+        {
+          id: 'email-triage',
+          name: 'Email Triage & Send',
+          description: 'Draft and send emails',
+          system: 'Microsoft Graph API',
+          secretRef: 'HOTMAIL_OAUTH',
+          hold: 'Required for sending; drafting is autonomous',
+        },
+        {
+          id: 'legacy-skill',
+          description: 'Compact format skill without triad metadata',
+        },
+      ],
+    });
+    assert.equal(res.success, true);
+  });
+});
+

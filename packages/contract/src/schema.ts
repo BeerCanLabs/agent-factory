@@ -122,14 +122,21 @@ export const artifactSchema = z
   })
   .strict();
 
-export const mcpEntry = z
+export const skillEntry = z
   .object({
     id: z.string().min(1),
+    name: z.string().optional(),
     description: z.string().optional(),
     url: z.string().url().optional(),
     gate: secretGate.default('ungated'),
+    system: z.string().optional(),
+    secretRef: z.string().min(1).optional(),
+    hold: z.union([z.enum(['none', 'required']), z.string()]).default('none'),
+    injection: z.string().optional(),
   })
   .strict();
+
+export const mcpEntry = skillEntry;
 
 export const skillsSchema = z
   .object({
@@ -344,7 +351,8 @@ export function classifySecrets(secrets?: {
   return { all, ungated, gated };
 }
 
-export type McpCapability = z.infer<typeof mcpEntry>;
+export type SkillEntry = z.infer<typeof skillEntry>;
+export type McpCapability = SkillEntry;
 
 export type ClassifiedCapabilities = {
   all: McpCapability[];
