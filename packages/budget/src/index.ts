@@ -25,3 +25,5 @@ export { spendDetail, SpendTracker } from './spend.js';
 export type { Price, TokenUsage } from './pricing.js';
 export { costUsd, priceFor } from './pricing.js';
 export { validateBudgetLimits } from './limits.js';
+export type { StandingDenied, StandingOk, StandingRequest, StandingResult } from './standing.js';
+export { checkStanding } from './standing.js';
