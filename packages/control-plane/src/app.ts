@@ -415,6 +415,29 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
     }
   }
 
+  // No run exists yet, so perRun does not apply. Built-ins stay exempt, same predicate as ledger ingest.
+  const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
+  if (!isBuiltin) {
+    const budget = state.policies.get(agentId).budgetUsd;
+    const standing = checkStanding({
+      limits: budget ? { perDay: budget.perDay, perMonth: budget.perMonth } : undefined,
+      spend: state.spend.get(agentId, undefined),
+    });
+    if (!standing.inGoodStanding) {
+      // A queue message is left for SQS to redeliver, so a refusal row on every visibility timeout would flood the ledger.
+      if (opts.trigger !== 'queue') {
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId,
+          type: 'action',
+          action: 'WAKE_REFUSED_BUDGET_EXCEEDED',
+          actor: SYSTEM.policy,
+        });
+      }
+      return { status: 402, body: { error: 'budget_exceeded', window: standing.window } };
+    }
+  }
+
   // S1 backstop, every runtime: pre-flight required secrets (412) and learn their values so they are redacted
   // from results and ledger rows. Cloud runtimes ignore the values; their platform injects its own.
   const bound = await bindAgentSecrets(state, agent.ungated ?? agent.requires);
