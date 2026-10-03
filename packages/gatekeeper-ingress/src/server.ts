@@ -3,6 +3,7 @@ import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createGatekeeperIngress } from './index.js';
 import { createGatekeeperIngressHttp } from './http.js';
 import { createDiscordClient } from './discord.js';
+import { wakeFailure } from './wake.js';
 
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const FACTORY_URL = (process.env.FACTORY_URL || 'http://127.0.0.1:8088').replace(/\/$/, '');
@@ -23,7 +24,7 @@ const door = createGatekeeperIngress({
       },
       body: msg ? JSON.stringify({ input: msg }) : undefined,
     });
-    if (!res.ok) throw new Error(`factory answered ${res.status}`);
+    if (!res.ok) throw wakeFailure(res.status, await res.text().catch(() => ''));
   },
   handoff: async (msg) => {
     const res = await fetch(`${FACTORY_URL}/api/v1/agents/${encodeURIComponent(msg.agentId)}/conversation`, {

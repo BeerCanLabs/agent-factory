@@ -8,7 +8,8 @@ import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
-import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
+import { SpendTracker } from '@beercanlabs/factory-budget';
+import { ApprovalStore, PolicyStore } from './policy.js';
 
 const VIEWER = 'viewer-held-e2e';
 const APPROVER = 'approver-held-e2e';

@@ -10,7 +10,8 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { BUILTIN_SYSTEM_AGENTS } from './catalog.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore, RunTokens } from './runs.js';
-import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
+import { SpendTracker } from '@beercanlabs/factory-budget';
+import { ApprovalStore, PolicyStore } from './policy.js';
 import { ScheduleStore } from './schedules.js';
 
 const TEAM = 'team.example.cloudflareaccess.com';

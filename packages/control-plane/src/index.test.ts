@@ -18,7 +18,8 @@ import { cronMatches } from './scheduler.js';
 import { ScheduleStore } from './schedules.js';
 import { FileRunStore, MemoryRunStore, RunTokens, type Run } from './runs.js';
 import { checkCallbackUrl, deliverCallback } from './callbacks.js';
-import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
+import { SpendTracker } from '@beercanlabs/factory-budget';
+import { ApprovalStore, PolicyStore } from './policy.js';
 
 const agentsRoot = fileURLToPath(new URL('../test-fixtures/agents', import.meta.url));
 

@@ -8,6 +8,7 @@ RUN npm run build -w @beercanlabs/factory-contract \
   -w @beercanlabs/factory-secrets-bind \
   -w @beercanlabs/factory-hydrate \
   -w @beercanlabs/factory-ledger \
+  -w @beercanlabs/factory-budget \
   -w @beercanlabs/factory-keymaster \
   -w @beercanlabs/factory-telemetry \
   -w @beercanlabs/factory-control-plane
@@ -22,6 +23,7 @@ COPY packages/secrets-bind/package.json ./packages/secrets-bind/package.json
 COPY packages/hydrate/package.json ./packages/hydrate/package.json
 COPY packages/keymaster/package.json ./packages/keymaster/package.json
 COPY packages/ledger/package.json ./packages/ledger/package.json
+COPY packages/budget/package.json ./packages/budget/package.json
 COPY packages/telemetry/package.json ./packages/telemetry/package.json
 COPY packages/control-plane/package.json ./packages/control-plane/package.json
 RUN npm install --omit=dev -w @beercanlabs/factory-control-plane
@@ -31,6 +33,7 @@ COPY --from=builder /app/packages/secrets-bind/dist ./packages/secrets-bind/dist
 COPY --from=builder /app/packages/hydrate/dist ./packages/hydrate/dist
 COPY --from=builder /app/packages/keymaster/dist ./packages/keymaster/dist
 COPY --from=builder /app/packages/ledger/dist ./packages/ledger/dist
+COPY --from=builder /app/packages/budget/dist ./packages/budget/dist
 COPY --from=builder /app/packages/telemetry/dist ./packages/telemetry/dist
 COPY --from=builder /app/packages/control-plane/dist ./packages/control-plane/dist
 COPY agents ./agents

@@ -109,10 +109,12 @@ api -X PUT -d "{\"routes\":[\"anthropic\"],\"models\":[\"test-big\",\"test-small
 first="$(wait_run "$(api -X POST -d '{"model":"test-big","input":{"text":"one"}}' $CP/api/v1/agents/llm-summarizer/runs | jq -r .runId)")"
 [ "$(jq -r .state <<<"$first")" = DONE ] || die "under-budget run: $(jq -c '{state,error}' <<<"$first")"
 sleep 1
-second="$(wait_run "$(api -X POST -d '{"model":"test-big","input":{"text":"two"}}' $CP/api/v1/agents/llm-summarizer/runs | jq -r .runId)")"
-[ "$(jq -r .state <<<"$second")" = FAILED ] && grep -q 402 <<<"$(jq -r .error <<<"$second")" || die "over-budget call not refused: $(jq -c '{state,error}' <<<"$second")"
+second_body="$(mktemp)"
+second_code="$(api -X POST -d '{"model":"test-big","input":{"text":"two"}}' -o "$second_body" -w '%{http_code}' $CP/api/v1/agents/llm-summarizer/runs)"
+[ "$second_code" = 402 ] && [ "$(jq -r .error "$second_body")" = budget_exceeded ] && [ "$(jq -r .window "$second_body")" = perDay ] || die "over-budget wake not refused: $second_code $(cat "$second_body")"
 api "$CP/api/v1/ledger?agent=llm-summarizer" | jq -e '[.[] | select(.type=="budget.alert" and .action=="BUDGET_PERDAY_EXCEEDED")] | length == 1' >/dev/null || die "expected one budget.alert"
-ok "day cap \$$cap: crossing call completes (bounded overshoot), next call refused 402, one budget.alert"
+api "$CP/api/v1/ledger?agent=llm-summarizer" | jq -e '[.[] | select(.action=="WAKE_REFUSED_BUDGET_EXCEEDED")] | length == 1' >/dev/null || die "expected one wake refusal in the ledger"
+ok "day cap \$$cap: crossing call completes (bounded overshoot), next wake refused 402 before any run starts, one budget.alert, one wake refusal"
 
 echo "== kill switch"
 api -X PUT -d '{"routes":["anthropic"],"models":["test-big","test-small"]}' $CP/api/v1/agents/llm-summarizer/policy >/dev/null
