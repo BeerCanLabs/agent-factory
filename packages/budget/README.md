@@ -1,9 +1,7 @@
-# Factory Kernel Module: Budget
+# Treasurer (`@beercanlabs/factory-budget`)
 
-This module is part of the core Factory infrastructure (Console). It is a deterministic worker, not a Cartridge.
+The budget-window rule lives here, once.
 
-## Purpose
-It aggregates the immutable ledger exhaust produced by the `gatekeeper-egress`. It tallies token counts and calculates real-time spend across the fleet.
+`exceededWindow(limits, spend)` returns the first window whose spend is at or over its limit, in the order `perRun`, `perDay`, `perMonth`. An unset limit is not enforced. A missing `limits` object means the agent is not over budget.
 
-## Circuit Breakers
-If an agent exceeds its daily budget threshold (configured via `PUT /api/v1/agents/:id/policy`), this module will call the Control Plane to execute a hard stop on that agent's tasks and block its future proxy egress.
+Callers pass `policy.budgetUsd` (or `undefined`). The control plane and the gatekeeper-egress both call this function; neither keeps a copy of the comparison.
