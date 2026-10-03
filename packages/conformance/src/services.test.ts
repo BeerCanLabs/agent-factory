@@ -13,10 +13,6 @@ import {
   getPackageClassification,
 } from '@beercanlabs/factory-contract';
 
-/**
- * Validates that a list of package directory names are all intentionally attributed
- * to canonical services or declared platform tooling.
- */
 export function assertPackagesAttributed(packageDirNames: string[]): void {
   for (const pkg of packageDirNames) {
     const classification = getPackageClassification(pkg);

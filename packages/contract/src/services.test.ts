@@ -1,4 +1,6 @@
 import { describe, it } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import {
   FACTORY_SERVICE_NAMES,
@@ -6,23 +8,23 @@ import {
   factoryServiceNameSchema,
 } from './index.js';
 
+const designAuthorityPath = fileURLToPath(new URL('../../../DESIGN_AUTHORITY.md', import.meta.url));
+
+/** Bold names under the §6.15 cast heading, in document order. */
+function castNames(): string[] {
+  const doc = readFileSync(designAuthorityPath, 'utf8');
+  const heading = '#### The 11 Factory Services (The Cast):';
+  const start = doc.indexOf(heading);
+  assert.notEqual(start, -1, `missing heading: ${heading}`);
+  const rest = doc.slice(start + heading.length);
+  const end = rest.search(/\n#### /);
+  const section = end === -1 ? rest : rest.slice(0, end);
+  return [...section.matchAll(/^\d+\. \*\*([A-Za-z]+)/gm)].map((m) => m[1].toLowerCase());
+}
+
 describe('Factory Services (The Cast)', () => {
-  it('defines exactly the 11 canonical services from DESIGN_AUTHORITY.md §6.15', () => {
-    assert.equal(FACTORY_SERVICE_NAMES.length, 11);
-    const expected = [
-      'gatekeeper',
-      'keymaster',
-      'tinman',
-      'secretary',
-      'landlord',
-      'auditor',
-      'treasurer',
-      'bouncer',
-      'timekeeper',
-      'registrar',
-      'seer',
-    ];
-    assert.deepEqual([...FACTORY_SERVICE_NAMES].sort(), expected.sort());
+  it('SV1 names match the cast in DESIGN_AUTHORITY.md §6.15', () => {
+    assert.deepEqual([...FACTORY_SERVICE_NAMES], castNames());
   });
 
   it('validates service names via schema', () => {
