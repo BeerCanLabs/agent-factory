@@ -49,6 +49,9 @@ export function createDiscordClient(): DiscordClient {
         // This is the real reply from the agent container!
         const standbyId = session.messageId;
         clearStandbySession(message.channelId);
+        if (currentPresence === 'starting') {
+          currentPresence = 'available';
+        }
         try {
           const standbyMsg = await message.channel.messages.fetch(standbyId);
           if (standbyMsg) {

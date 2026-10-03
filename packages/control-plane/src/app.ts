@@ -495,9 +495,9 @@ async function startRun(state: FactoryState, run: Run, secrets?: Record<string, 
 }
 
 /**
- * P1 readiness: the run's first heartbeat or mailbox poll is the earliest signal from inside the container that the
- * agent process is running and can take a turn (the shim heartbeats right after it spawns the worker; a
- * conversational worker polls its mailbox for the next turn). Only then does presence go available.
+ * P1 readiness: the run's first input fetch, heartbeat or mailbox poll is the earliest signal from inside the
+ * container that the agent process is running and can take a turn (a conversational worker fetches input on boot
+ * or polls its mailbox for follow-ups; the shim heartbeats after spawning). Only then does presence go available.
  */
 async function markRunReady(state: FactoryState, runId: string) {
   // Synchronous up to the notification, so the run is marked ready before the caller answers; the notification
@@ -1102,6 +1102,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     if (runSelf[2] === 'input') {
+      void markRunReady(state, run.runId);
       const now = new Date();
       json(res, 200, {
         runId: run.runId,
