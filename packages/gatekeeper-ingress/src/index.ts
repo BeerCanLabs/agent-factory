@@ -1,4 +1,5 @@
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
+import { WakeRefusedError } from './wake.js';
 
 /**
  * offline: asleep (Discord invisible). starting: a wake is in progress but the agent cannot take a turn yet
@@ -21,16 +22,22 @@ export type DiscordClient = {
   login(token: string): Promise<void>;
   setPresence(status: Presence): Promise<void>;
   setAgentName?(name: string): void;
+  /** The factory refused to wake the agent over budget: tell the channel why, replacing the standby message. */
+  refuseWake?(channelId: string, window: string): Promise<void>;
   onMessage(handler: (msg: Omit<Conversation, 'agentId'>) => void): void;
   destroy(): Promise<void>;
 };
 
-export function fakeDiscordClient(): DiscordClient {
+export function fakeDiscordClient(): DiscordClient & { refusals: Array<{ channelId: string; window: string }> } {
   const handlers: Array<(msg: Omit<Conversation, 'agentId'>) => void> = [];
   return {
     connected: false,
     presence: 'offline',
+    refusals: [] as Array<{ channelId: string; window: string }>,
     setAgentName(_name) {},
+    async refuseWake(channelId, window) {
+      this.refusals.push({ channelId, window });
+    },
     async login() {
       this.connected = true;
       this.presence = 'offline';
@@ -165,6 +172,7 @@ export function createGatekeeperIngress(opts: {
         await opts.wake(msg.agentId, msg);
       } catch (err) {
         console.error(`[gatekeeper-ingress] wake ${msg.agentId} failed: ${err instanceof Error ? err.message : String(err)}`);
+        if (err instanceof WakeRefusedError) await state.discord.refuseWake?.(msg.channelId, err.window).catch(() => {});
         // Re-read: the control plane may have moved presence on while the wake was in flight.
         if ((state.discord.presence as Presence) === 'starting') await state.discord.setPresence('offline');
       }

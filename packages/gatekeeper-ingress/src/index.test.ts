@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { createGatekeeperIngress, fakeDiscordClient } from './index.js';
+import { WakeRefusedError } from './wake.js';
 
 describe('gatekeeper-ingress', () => {
   it('stays idle when no Discord token is bound', async () => {
@@ -106,5 +107,20 @@ describe('gatekeeper-ingress', () => {
     await door.receive(msg('m2', 'hello again'));
     assert.deepEqual(woken, ['echo-agent', 'echo-agent']);
     assert.equal(gw.presence, 'starting');
+  });
+
+  it('a wake refused over budget tells the channel once and shows offline; other failures do not', async () => {
+    let failure: Error = new WakeRefusedError('perDay');
+    const { gw, door } = await connected(async () => {
+      throw failure;
+    });
+    await door.receive(msg('m1', 'hello'));
+    assert.deepEqual(gw.refusals, [{ channelId: 'c1', window: 'perDay' }]);
+    assert.equal(gw.presence, 'offline');
+
+    failure = new Error('factory answered 412');
+    await door.receive(msg('m2', 'hello again'));
+    assert.equal(gw.refusals.length, 1, 'a generic failure keeps the existing path');
+    assert.equal(gw.presence, 'offline');
   });
 });

@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.." || exit 1
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 if npm run build -w @beercanlabs/factory-contract -w @beercanlabs/factory-auth -w @beercanlabs/factory-ledger \
+    -w @beercanlabs/factory-budget \
     -w @beercanlabs/factory-secrets-bind -w @beercanlabs/factory-telemetry -w @beercanlabs/factory-hydrate \
     -w @beercanlabs/factory-gatekeeper-egress >"$log" 2>&1 \
   && npm test -w @beercanlabs/factory-conformance >>"$log" 2>&1; then

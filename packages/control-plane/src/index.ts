@@ -9,7 +9,8 @@ import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, f
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { FileRunStore, RunTokens } from './runs.js';
 import { callbackPolicyFromEnv } from './callbacks.js';
-import { ApprovalStore, PolicyStore, SpendTracker, validatePolicy } from './policy.js';
+import { SpendTracker } from '@beercanlabs/factory-budget';
+import { ApprovalStore, PolicyStore, validatePolicy } from './policy.js';
 import { EventHub, attachBus, busSinkFromEnv, runEvent, tapLedger } from './events.js';
 import { attachEventStream } from './stream.js';
 import { startQueuePollers } from './queues.js';

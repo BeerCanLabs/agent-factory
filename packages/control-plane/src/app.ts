@@ -13,7 +13,8 @@ import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, typ
 import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver, type SkillSource } from './source.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
-import { exceededWindow, spendDetail, validatePolicy, type Approval, type ApprovalStore, type HeldRequest, type PolicyStore, type SpendTracker } from './policy.js';
+import { checkStanding, spendDetail, type SpendTracker } from '@beercanlabs/factory-budget';
+import { validatePolicy, type Approval, type ApprovalStore, type HeldRequest, type PolicyStore } from './policy.js';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
 const HELD_BODY_LIMIT = 256 * 1024;
@@ -411,6 +412,29 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
       if (existing) {
         return { status: 200, body: existing };
       }
+    }
+  }
+
+  // No run exists yet, so perRun does not apply. Built-ins stay exempt, same predicate as ledger ingest.
+  const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
+  if (!isBuiltin) {
+    const budget = state.policies.get(agentId).budgetUsd;
+    const standing = checkStanding({
+      limits: budget ? { perDay: budget.perDay, perMonth: budget.perMonth } : undefined,
+      spend: state.spend.get(agentId, undefined),
+    });
+    if (!standing.inGoodStanding) {
+      // A queue message is left for SQS to redeliver, so a refusal row on every visibility timeout would flood the ledger.
+      if (opts.trigger !== 'queue') {
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId,
+          type: 'action',
+          action: 'WAKE_REFUSED_BUDGET_EXCEEDED',
+          actor: SYSTEM.policy,
+        });
+      }
+      return { status: 402, body: { error: 'budget_exceeded', window: standing.window } };
     }
   }
 
@@ -1336,10 +1360,12 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(stored.agentId));
       const policy = state.policies.get(stored.agentId);
       // `before` must be read before the spend is added, or a crossing is never detected.
-      const before = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
+      const beforeStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(stored.agentId, stored.runId) });
+      const before = beforeStanding.inGoodStanding ? undefined : beforeStanding.window;
       state.spend.add(stored.agentId, stored.runId, stored.costUsd, stored.timestamp, spendDetail(stored));
       if (!isBuiltin) {
-        const after = exceededWindow(policy, state.spend.get(stored.agentId, stored.runId));
+        const afterStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(stored.agentId, stored.runId) });
+        const after = afterStanding.inGoodStanding ? undefined : afterStanding.window;
         // Alert once per crossing, even if the run already finished; block only a run that is still live.
         if (after && after !== before) {
           const alert = state.ledger.append({
@@ -1412,7 +1438,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'POLICY_UPDATED', actor: principal.actor });
     await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, 'policy updated') });
     for (const run of state.runs.list({ agentId, active: true })) {
-      if (run.state === 'BLOCKED_BUDGET_EXCEEDED' && !exceededWindow(checked.policy, state.spend.get(agentId, run.runId))) {
+      if (run.state === 'BLOCKED_BUDGET_EXCEEDED' && checkStanding({ limits: checked.policy?.budgetUsd, spend: state.spend.get(agentId, run.runId) }).inGoodStanding) {
         unblockRun(state, run.runId, 'BLOCKED_BUDGET_EXCEEDED', principal.actor);
       }
     }

@@ -13,7 +13,8 @@ import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore, RunTokens } from './runs.js';
-import { ApprovalStore, PolicyStore, SpendTracker, archiveStamp } from './policy.js';
+import { SpendTracker } from '@beercanlabs/factory-budget';
+import { ApprovalStore, PolicyStore, archiveStamp } from './policy.js';
 import { BUILTIN_SYSTEM_AGENTS, loadDynamicRegistry, mergeAgents } from './catalog.js';
 import {
   FileConfigBackend,
