@@ -9,7 +9,7 @@
  */
 import http from 'node:http';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import { ConnectionKeymaster, connectionProvider, grantSecretName, type Grant } from '@beercanlabs/factory-keymaster';
+import { ConnectionKeymaster, grantSecretName, type Grant } from '@beercanlabs/factory-keymaster';
 import { authenticate, json, readJson, type FactoryState } from './app.js';
 import { isTerminal } from './runs.js';
 import { invalidateCredentials } from './credentials.js';
@@ -19,7 +19,14 @@ const SLUG = /^[a-z0-9][a-z0-9_-]*$/i;
 
 export function getConnections(state: FactoryState): ConnectionKeymaster {
   if (!state.connections) {
-    state.connections = new ConnectionKeymaster({ providers: state.providers, ledger: state.ledger, secretValues: state.secretValues });
+    state.connections = new ConnectionKeymaster({
+      providers: state.providers,
+      ledger: state.ledger,
+      secretValues: state.secretValues,
+      getProvider: (name) => state.systems?.getConnectionProvider(name),
+    });
+  } else if (!state.connections.hasProviderResolver()) {
+    state.connections.setProviderResolver((name) => state.systems?.getConnectionProvider(name));
   }
   return state.connections;
 }
@@ -29,7 +36,9 @@ function publicBase(state: FactoryState): string | undefined {
   return state.publicBaseUrl?.replace(/\/$/, '') || undefined;
 }
 
-export function connectUrl(state: FactoryState, agentId: string, provider: string): string {
+export function connectUrl(state: FactoryState, agentId: string, provider: string): string | undefined {
+  const def = state.systems?.getConnectionProvider(provider);
+  if (!def || def.kind !== 'oauth-user') return undefined;
   const path = `/api/v1/connections/${encodeURIComponent(agentId)}/${encodeURIComponent(provider)}/start`;
   const base = publicBase(state);
   return base ? `${base}${path}` : path;
@@ -137,7 +146,7 @@ export async function handleConnections(state: FactoryState, req: http.IncomingM
     const principal = await authenticate(req, res, state, 'admin');
     if (!principal) return true;
     const [agentId, provider] = [decodeURIComponent(start[1]), decodeURIComponent(start[2])];
-    const def = connectionProvider(provider);
+    const def = state.systems?.getConnectionProvider(provider);
     if (!def || def.kind !== 'oauth-user') return json(res, 404, { error: 'unknown_provider', provider }), true;
     if (!state.agents.has(agentId)) return json(res, 404, { error: 'not_found' }), true;
     const base = publicBase(state);
@@ -178,11 +187,23 @@ export async function handleConnections(state: FactoryState, req: http.IncomingM
     const agentId = decodeURIComponent(list[1]);
     const agent = state.agents.get(agentId);
     if (!agent) return json(res, 404, { error: 'not_found' }), true;
-    const connections = await getConnections(state).listGrants(agentId);
+    const providers = [
+      ...new Set([
+        ...(state.systems?.getConnectionProviders().map((p) => p.provider) ?? []),
+        ...(agent.connections?.map((c) => c.provider) ?? []),
+      ]),
+    ];
+    const connections = await getConnections(state).listGrants(agentId, providers);
     json(res, 200, {
       agentId,
       declared: agent.connections ?? [],
-      connections: connections.map((c) => ({ ...c, ...(c.status === 'needs_reconsent' ? { connectUrl: connectUrl(state, agentId, c.provider) } : {}) })),
+      connections: connections.map((c) => {
+        const url = connectUrl(state, agentId, c.provider);
+        return {
+          ...c,
+          ...(c.status === 'needs_reconsent' && url ? { connectUrl: url } : {}),
+        };
+      }),
     });
     return true;
   }
@@ -193,7 +214,7 @@ export async function handleConnections(state: FactoryState, req: http.IncomingM
 async function callback(state: FactoryState, res: http.ServerResponse, provider: string, url: URL) {
   const key = stateKey(state);
   const base = publicBase(state);
-  const def = connectionProvider(provider);
+  const def = state.systems?.getConnectionProvider(provider);
   if (!key || !base || !def || def.kind !== 'oauth-user') return page(res, 404, 'Not found', 'Unknown connection provider.');
   const parsed = verifyConsentState(key, url.searchParams.get('state') ?? '');
   if (!parsed || parsed.provider !== provider) {
@@ -240,7 +261,7 @@ const PROVIDER_NAMES: Record<string, string> = { google: 'Google', linkedin: 'Li
 type AuthorizedUser = { client_id?: string; client_secret?: string; refresh_token?: string; scopes?: string[] | string; scope?: string; token_uri?: string };
 
 async function importGrant(state: FactoryState, res: http.ServerResponse, agentId: string, provider: string, body: Record<string, unknown>, actor: string) {
-  const def = connectionProvider(provider);
+  const def = state.systems?.getConnectionProvider(provider);
   if (!def || def.kind !== 'oauth-user') return json(res, 404, { error: 'unknown_provider', provider });
   if (!state.agents.has(agentId) || !SLUG.test(agentId)) return json(res, 404, { error: 'not_found' });
   const secretRef = typeof body.secretRef === 'string' ? body.secretRef : undefined;
@@ -298,13 +319,14 @@ async function tokenForGatekeeperEgress(state: FactoryState, req: http.IncomingM
   if (!runId || !agentId || !connection) return json(res, 400, { error: 'runId, agentId, connection required' });
   const run = state.runs.get(runId);
   if (!run || run.agentId !== agentId || isTerminal(run.state)) return json(res, 403, { error: 'run_not_live' });
-  const def = connectionProvider(connection);
+  const def = state.systems?.getConnectionProvider(connection);
   if (!def) return json(res, 400, { error: 'unknown_connection', connection });
   const out = await getConnections(state).accessToken(agentId, connection, scopes);
   if (out.ok) return json(res, 200, { accessToken: out.accessToken, expiresAt: out.expiresAt });
   if (out.error === 'needs_reconsent') {
     invalidateCredentials(state); // the grant just changed state; owners must see it now (K4)
-    return json(res, 428, { error: 'needs_reconsent', provider: out.provider, connectUrl: connectUrl(state, agentId, out.provider) });
+    const url = connectUrl(state, agentId, out.provider);
+    return json(res, 428, { error: 'needs_reconsent', provider: out.provider, ...(url ? { connectUrl: url } : {}) });
   }
   console.error(`[keymaster] ${agentId}/${connection}: ${out.error}: ${out.message}`);
   return json(res, out.error === 'connection_unavailable' ? 502 : 503, { error: out.error });

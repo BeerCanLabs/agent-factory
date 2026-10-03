@@ -3,7 +3,35 @@ import assert from 'node:assert/strict';
 import { createVerify, generateKeyPairSync } from 'node:crypto';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
-import { ConnectionKeymaster, grantSecretName, type Grant } from './connections.js';
+import { ConnectionKeymaster, grantSecretName, type Grant, type ConnectionProvider } from './connections.js';
+
+const TEST_PROVIDERS: Record<string, ConnectionProvider> = {
+  google: {
+    kind: 'oauth-user',
+    provider: 'google',
+    authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+    tokenUrl: 'https://oauth2.googleapis.com/token',
+    clientSecret: 'GOOGLE_OAUTH_CLIENT',
+    authParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
+  },
+  linkedin: {
+    kind: 'oauth-user',
+    provider: 'linkedin',
+    authUrl: 'https://www.linkedin.com/oauth/v2/authorization',
+    tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken',
+    clientSecret: 'LINKEDIN_OAUTH_CLIENT',
+    authParams: {},
+    refresh: false,
+  },
+  'google-service-account': {
+    kind: 'jwt-bearer',
+    provider: 'google-service-account',
+    tokenUrl: 'https://oauth2.googleapis.com/token',
+    keySecret: 'GOOGLE_SERVICE_ACCOUNT',
+    defaultScopes: ['https://www.googleapis.com/auth/devstorage.read_write'],
+  },
+};
+const testResolver = (name: string) => TEST_PROVIDERS[name];
 
 /** In-memory writable secrets backend. */
 function memoryProvider(seed: Record<string, string> = {}) {
@@ -53,7 +81,7 @@ describe('Keymaster connections (§6.11)', () => {
     const mem = memoryProvider({ GOOGLE_OAUTH_CLIENT: CLIENT, [grantSecretName('donna', 'google')]: JSON.stringify(grant()) });
     let n = 0;
     const tok = fakeTokenEndpoint(() => ({ status: 200, body: { access_token: `at-${++n}`, expires_in: 3600 } }));
-    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, now: () => now });
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, now: () => now, getProvider: testResolver });
 
     const a = await km.accessToken('donna', 'google');
     assert.deepEqual(a, { ok: true, accessToken: 'at-1', expiresAt: new Date(now + 3600_000).toISOString() });
@@ -75,7 +103,7 @@ describe('Keymaster connections (§6.11)', () => {
   it('shares one refresh between concurrent callers', async () => {
     const mem = memoryProvider({ GOOGLE_OAUTH_CLIENT: CLIENT, [grantSecretName('donna', 'google')]: JSON.stringify(grant()) });
     const tok = fakeTokenEndpoint(() => ({ status: 200, body: { access_token: 'at', expires_in: 3600 } }));
-    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn });
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, getProvider: testResolver });
     const out = await Promise.all([km.accessToken('donna', 'google'), km.accessToken('donna', 'google'), km.accessToken('donna', 'google')]);
     assert.ok(out.every((o) => o.ok));
     assert.equal(tok.calls.length, 1);
@@ -86,7 +114,7 @@ describe('Keymaster connections (§6.11)', () => {
     const mem = memoryProvider({ GOOGLE_OAUTH_CLIENT: CLIENT, [name]: JSON.stringify(grant()) });
     const tok = fakeTokenEndpoint(() => ({ status: 200, body: { access_token: 'at-new', expires_in: 3600, refresh_token: 'refresh-token-2' } }));
     const ledger = new MemoryLedger();
-    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, ledger });
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, ledger, getProvider: testResolver });
     assert.ok((await km.accessToken('donna', 'google')).ok);
     assert.deepEqual(mem.writes, [name]);
     const stored = JSON.parse(mem.values.get(name)!) as Grant;
@@ -103,7 +131,7 @@ describe('Keymaster connections (§6.11)', () => {
     const mem = memoryProvider({ GOOGLE_OAUTH_CLIENT: CLIENT, [name]: JSON.stringify(grant()) });
     const tok = fakeTokenEndpoint(() => ({ status: 400, body: { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' } }));
     const ledger = new MemoryLedger();
-    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, ledger });
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, ledger, getProvider: testResolver });
     const r = await km.accessToken('donna', 'google');
     assert.deepEqual(r, { ok: false, error: 'needs_reconsent', provider: 'google', reason: 'invalid_grant' });
     assert.equal((JSON.parse(mem.values.get(name)!) as Grant).status, 'needs_reconsent');
@@ -116,7 +144,7 @@ describe('Keymaster connections (§6.11)', () => {
   it('reports needs_reconsent when there is no grant or the grant lacks a requested scope', async () => {
     const mem = memoryProvider({ GOOGLE_OAUTH_CLIENT: CLIENT, [grantSecretName('donna', 'google')]: JSON.stringify(grant()) });
     const tok = fakeTokenEndpoint(() => ({ status: 200, body: { access_token: 'at', expires_in: 3600 } }));
-    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn });
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, getProvider: testResolver });
     assert.deepEqual(await km.accessToken('nobody', 'google'), { ok: false, error: 'needs_reconsent', provider: 'google', reason: 'no_grant' });
     assert.ok((await km.accessToken('donna', 'google')).ok);
     const r = await km.accessToken('donna', 'google', ['https://www.googleapis.com/auth/gmail.modify']);
@@ -127,7 +155,7 @@ describe('Keymaster connections (§6.11)', () => {
   it('other token endpoint failures are unavailable, not needs_reconsent', async () => {
     const mem = memoryProvider({ GOOGLE_OAUTH_CLIENT: CLIENT, [grantSecretName('donna', 'google')]: JSON.stringify(grant()) });
     const tok = fakeTokenEndpoint(() => ({ status: 503, body: { error: 'backend_error' } }));
-    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn });
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, getProvider: testResolver });
     const r = await km.accessToken('donna', 'google');
     assert.equal(!r.ok && r.error, 'connection_unavailable');
     assert.equal((JSON.parse(mem.values.get(grantSecretName('donna', 'google'))!) as Grant).status, 'active');
@@ -145,7 +173,7 @@ describe('Keymaster connections (§6.11)', () => {
     const mem = memoryProvider({ GOOGLE_SERVICE_ACCOUNT: JSON.stringify(sa) });
     const now = 1_700_000_000_000;
     const tok = fakeTokenEndpoint(() => ({ status: 200, body: { access_token: 'sa-token', expires_in: 3599, token_type: 'Bearer' } }));
-    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, now: () => now });
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, now: () => now, getProvider: testResolver });
 
     const r = await km.accessToken('donna', 'google-service-account');
     assert.ok(r.ok && r.accessToken === 'sa-token');
@@ -181,7 +209,7 @@ describe('Keymaster connections (§6.11)', () => {
         ? { status: 200, body: { access_token: 'access-from-code', refresh_token: 'refresh-from-code', expires_in: 3600, scope: 'openid https://www.googleapis.com/auth/calendar' } }
         : { status: 400, body: { error: 'invalid_grant' } },
     );
-    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, secretValues });
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, secretValues, getProvider: testResolver });
     const ok = await km.exchangeCode('google', { code: 'good-code', redirectUri: 'https://f.example/cb' });
     assert.ok(ok.ok);
     if (ok.ok) assert.deepEqual(ok.scopes, ['openid', 'https://www.googleapis.com/auth/calendar']);
@@ -196,7 +224,7 @@ describe('Keymaster connections (§6.11)', () => {
     const mem = memoryProvider({ LINKEDIN_OAUTH_CLIENT: LI_CLIENT });
     const ledger = new MemoryLedger();
     const tok = fakeTokenEndpoint(() => ({ status: 200, body: { access_token: 'linkedin-access-1', expires_in: 5_184_000, scope: 'openid,profile,w_member_social' } }));
-    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, now: () => now, ledger });
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, now: () => now, ledger, getProvider: testResolver });
 
     const out = await km.exchangeCode('linkedin', { code: 'li-code', redirectUri: 'https://f.example/api/v1/connections/linkedin/callback' });
     assert.ok(out.ok);
@@ -213,7 +241,7 @@ describe('Keymaster connections (§6.11)', () => {
     assert.deepEqual(await km.accessToken('castle', 'linkedin'), { ok: true, accessToken: 'linkedin-access-1', expiresAt: ends });
 
     now += 5_184_000_000;
-    const fresh = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, now: () => now, ledger });
+    const fresh = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, now: () => now, ledger, getProvider: testResolver });
     const ended = await fresh.accessToken('castle', 'linkedin');
     assert.deepEqual(ended, { ok: false, error: 'needs_reconsent', provider: 'linkedin', reason: 'grant_ended' });
     assert.equal(tok.calls.length, 1, 'no refresh is attempted');
@@ -224,7 +252,7 @@ describe('Keymaster connections (§6.11)', () => {
   it('K4 a provider that must send a refresh token and does not is refused', async () => {
     const mem = memoryProvider({ GOOGLE_OAUTH_CLIENT: CLIENT });
     const tok = fakeTokenEndpoint(() => ({ status: 200, body: { access_token: 'access-only', expires_in: 3600 } }));
-    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn });
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, getProvider: testResolver });
     assert.deepEqual(await km.exchangeCode('google', { code: 'c', redirectUri: 'x' }), { ok: false, error: 'no_refresh_token' });
   });
 });

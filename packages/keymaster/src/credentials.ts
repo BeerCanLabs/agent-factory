@@ -3,7 +3,7 @@
  * what is outstanding. Pure logic: callers supply presence checks and grant lookups, so this never sees a value.
  */
 import { catalogEntry, catalogView, inferSource, type CatalogView } from './catalog.js';
-import { connectionProvider, type GrantView } from './connections.js';
+import { type ConnectionProvider, type GrantView } from './connections.js';
 
 export type CredentialStatus = 'present' | 'missing' | 'needs_consent' | 'missing_scopes' | 'needs_reconsent';
 
@@ -38,10 +38,13 @@ export type CredentialItem = {
 
 export type CredentialSummary = { total: number; outstanding: number; present: number };
 
+export type ProviderLookup = (provider: string) => ConnectionProvider | undefined;
+
 export type AssessOptions = {
   agentId: string;
   secrets: Array<{ name: string; source?: string; description?: string }>;
   connections: Array<{ provider: string; scopes: string[] }>;
+  getProvider?: ProviderLookup;
   /** Secrets the gatekeeper-egress holds for the whole platform (S1): supplied once, through the platform endpoint, never per agent. */
   gatekeeperEgressHeld: ReadonlySet<string>;
   /** Presence of a secret by name. Must not return or log the value. */
@@ -57,8 +60,8 @@ export type AssessOptions = {
 };
 
 /** Keymaster-held app credentials a declared connection depends on (§6.11 K1). */
-function appCredentialOf(provider: string): { name: string; source: string } | undefined {
-  const def = connectionProvider(provider);
+function appCredentialOf(provider: string, getProvider?: ProviderLookup): { name: string; source: string } | undefined {
+  const def = getProvider ? getProvider(provider) : undefined;
   if (!def) return undefined;
   return def.kind === 'oauth-user'
     ? { name: def.clientSecret, source: `${def.provider}-oauth-client` }
@@ -69,11 +72,13 @@ function appCredentialOf(provider: string): { name: string; source: string } | u
  * The secret names an owner may submit for this agent: its declared static secrets that the gatekeeper-egress does not hold,
  * plus the app credentials its declared connections depend on. Anything else is refused.
  */
-export function submittableSecrets(opts: Pick<AssessOptions, 'secrets' | 'connections' | 'gatekeeperEgressHeld'>): Set<string> {
+export function submittableSecrets(
+  opts: Pick<AssessOptions, 'secrets' | 'connections' | 'gatekeeperEgressHeld'> & { getProvider?: ProviderLookup },
+): Set<string> {
   const out = new Set<string>();
   for (const s of opts.secrets) if (!opts.gatekeeperEgressHeld.has(s.name)) out.add(s.name);
   for (const c of opts.connections) {
-    const app = appCredentialOf(c.provider);
+    const app = appCredentialOf(c.provider, opts.getProvider);
     if (app && !opts.gatekeeperEgressHeld.has(app.name)) out.add(app.name);
   }
   return out;
@@ -134,8 +139,8 @@ export async function assessCredentials(opts: AssessOptions): Promise<Credential
   }
 
   for (const c of opts.connections) {
-    const def = connectionProvider(c.provider);
-    const app = appCredentialOf(c.provider);
+    const def = opts.getProvider ? opts.getProvider(c.provider) : undefined;
+    const app = appCredentialOf(c.provider, opts.getProvider);
     let appItem: CredentialItem | undefined;
     if (app && !seen.has(app.name)) {
       seen.add(app.name);
