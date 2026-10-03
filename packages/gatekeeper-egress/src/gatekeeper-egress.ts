@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import type { RunTokens } from '@beercanlabs/factory-auth';
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
-import { costUsd, exceededWindow, priceFor, type Price } from '@beercanlabs/factory-budget';
+import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { SseMeter, usageFromJson, type Provider, type Usage } from './meter.js';
 import { writeTrace, type TraceConfig } from './traces.js';
 import { ModelUpstreamError, defaultModelAdapters, parseChatRequest, type ChatResult, type ModelAdapter, type ModelCatalog } from './models.js';
@@ -943,10 +943,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (!modelsImplied && !ctx.policy.routes.includes(route.id)) return deny(res, ctx, route, 403, 'route_not_allowed', { route: route.id });
       const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
       if ((route.kind === 'llm' || route.kind === 'models') && !isBuiltin) {
-        const pending = unacked.get(ctx.run.runId) ?? 0;
-        const spend = { run: ctx.spend.run + pending, day: ctx.spend.day + pending, month: ctx.spend.month + pending };
-        const window = ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED' ? 'blocked' : exceededWindow(ctx.policy.budgetUsd, spend);
-        if (window) return deny(res, ctx, route, 402, 'budget_exceeded', { window });
+        if (ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED') return deny(res, ctx, route, 402, 'budget_exceeded', { window: 'blocked' });
+        const standing = checkStanding({
+          limits: ctx.policy.budgetUsd,
+          spend: ctx.spend,
+          pendingUsd: unacked.get(ctx.run.runId) ?? 0,
+        });
+        if (!standing.inGoodStanding) return deny(res, ctx, route, 402, 'budget_exceeded', { window: standing.window });
       }
 
       let raw = await readBody(req, limit);
