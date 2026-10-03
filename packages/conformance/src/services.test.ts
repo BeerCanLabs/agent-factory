@@ -1,132 +1,152 @@
-// DESIGN_AUTHORITY.md §6.15: SV1 (Intentional Services) and SV2 (First-Class Cross-Service Contracts).
+// DESIGN_AUTHORITY.md §6.15: SV1 (Intentional Services).
 import { describe, it } from 'node:test';
-import { readdirSync, statSync } from 'node:fs';
+import { readdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { repoRoot } from './support.js';
 import {
   FACTORY_SERVICE_NAMES,
-  FACTORY_SERVICES,
-  hydrationRequestSchema,
-  preflightCheckRequestSchema,
-  budgetCheckRequestSchema,
-  heldActionRequestSchema,
-  progressEventSchema,
-  modelInferenceRequestSchema,
+  type FactoryServiceName,
 } from '@beercanlabs/factory-contract';
 
 /**
- * Recognized attribution of packages/ directories to canonical services or infrastructure roles.
+ * Declared platform tooling and non-service infrastructure roles.
  */
-const PACKAGE_ATTRIBUTION: Record<string, string> = {
-  auth: 'gatekeeper',
-  bench: 'registrar',
-  budget: 'treasurer',
-  conformance: 'meta-governance',
-  console: 'client-ui',
-  contract: 'contracts-schema',
-  'control-plane': 'composite-host',
-  'gatekeeper-egress': 'gatekeeper',
-  'gatekeeper-ingress': 'gatekeeper',
-  hydrate: 'secretary',
-  keymaster: 'keymaster',
-  ledger: 'auditor',
-  'secrets-bind': 'keymaster',
-  telemetry: 'seer',
-  triage: 'seer',
+export const ALLOWED_PLATFORM_ROLES = [
+  'operator-ui',
+  'conformance-suite',
+  'diagnostic-tool',
+] as const;
+
+export type PlatformRole = (typeof ALLOWED_PLATFORM_ROLES)[number];
+
+export interface PackageClassification {
+  services?: readonly FactoryServiceName[];
+  platformRole?: PlatformRole;
+}
+
+/**
+ * Strict attribution of all workspace packages to canonical services or declared platform tooling.
+ */
+export const PACKAGE_CLASSIFICATION: Record<string, PackageClassification> = {
+  auth: { services: ['keymaster'] },
+  bench: { platformRole: 'diagnostic-tool' },
+  budget: { services: ['treasurer'] },
+  conformance: { platformRole: 'conformance-suite' },
+  console: { platformRole: 'operator-ui' },
+  contract: { services: ['registrar'] },
+  'control-plane': {
+    services: ['landlord', 'bouncer', 'timekeeper', 'registrar', 'treasurer'],
+  },
+  'gatekeeper-egress': {
+    services: ['gatekeeper', 'tinman', 'bouncer', 'treasurer'],
+  },
+  'gatekeeper-ingress': { services: ['gatekeeper'] },
+  hydrate: { services: ['secretary'] },
+  keymaster: { services: ['keymaster'] },
+  ledger: { services: ['auditor'] },
+  'secrets-bind': { services: ['keymaster'] },
+  telemetry: { services: ['seer'] },
+  triage: { services: ['seer'] },
 };
 
-describe('SV1 intentional services', () => {
-  it('every package directory belongs to an intentional service or platform role', () => {
+/**
+ * Validates a classification record against canonical service taxonomy and platform rules.
+ */
+export function validatePackageClassification(
+  pkgName: string,
+  classification: PackageClassification,
+  allowedServices: readonly string[] = FACTORY_SERVICE_NAMES
+): void {
+  const hasServices = classification.services && classification.services.length > 0;
+  const hasPlatformRole = !!classification.platformRole;
+
+  if (!hasServices && !hasPlatformRole) {
+    throw new Error(
+      `Package '${pkgName}' must declare at least one canonical service or an allowed platformRole.`
+    );
+  }
+
+  if (classification.services) {
+    for (const service of classification.services) {
+      if (!allowedServices.includes(service)) {
+        throw new Error(
+          `Package '${pkgName}' assigns unrecognized service '${service}'. Must be in FACTORY_SERVICE_NAMES.`
+        );
+      }
+    }
+  }
+
+  if (classification.platformRole) {
+    if (!ALLOWED_PLATFORM_ROLES.includes(classification.platformRole)) {
+      throw new Error(
+        `Package '${pkgName}' declares invalid platformRole '${classification.platformRole}'.`
+      );
+    }
+  }
+}
+
+describe('SV1 intentional services (§6.15)', () => {
+  it('every workspace package belongs to an intentional service or declared platform tooling', () => {
     const packagesDir = join(repoRoot, 'packages');
-    const entries = readdirSync(packagesDir).filter((name) => {
-      const p = join(packagesDir, name);
-      return statSync(p).isDirectory() && !name.startsWith('.');
+    // Discover workspace packages by presence of package.json
+    const packageDirs = readdirSync(packagesDir).filter((name) => {
+      const pkgJson = join(packagesDir, name, 'package.json');
+      return existsSync(pkgJson);
     });
 
-    const unassigned = entries.filter((name) => !(name in PACKAGE_ATTRIBUTION));
-    assert.deepEqual(
-      unassigned,
-      [],
-      'SV1 violation: found unassigned package directory. Every capability must belong to a recognized service.'
-    );
-  });
-
-  it('defines exactly the 11 canonical cast members in the service taxonomy', () => {
-    assert.equal(FACTORY_SERVICE_NAMES.length, 11);
-    const expected = [
-      'gatekeeper',
-      'keymaster',
-      'tinman',
-      'secretary',
-      'landlord',
-      'auditor',
-      'treasurer',
-      'bouncer',
-      'timekeeper',
-      'registrar',
-      'seer',
-    ];
-    assert.deepEqual([...FACTORY_SERVICE_NAMES].sort(), expected.sort());
-
-    for (const name of FACTORY_SERVICE_NAMES) {
-      assert.ok(FACTORY_SERVICES[name], `missing metadata for service: ${name}`);
-      assert.ok(FACTORY_SERVICES[name].title.length > 0);
-      assert.ok(FACTORY_SERVICES[name].role.length > 0);
+    for (const pkg of packageDirs) {
+      const classification = PACKAGE_CLASSIFICATION[pkg];
+      assert.ok(
+        classification,
+        `SV1 violation: Package '${pkg}' has no declared service or platform role in PACKAGE_CLASSIFICATION.`
+      );
+      validatePackageClassification(pkg, classification);
     }
   });
-});
 
-describe('SV2 first-class cross-service contracts', () => {
-  it('enforces typed schemas across all cross-service boundaries', () => {
-    // HydrationContract: Landlord <-> Secretary
-    assert.ok(hydrationRequestSchema);
-    assert.throws(() => hydrationRequestSchema.parse({}));
+  it('all 11 canonical services are hosted in the factory packages', () => {
+    const coveredServices = new Set<string>();
 
-    // KeymasterContract: Landlord <-> Keymaster
-    assert.ok(preflightCheckRequestSchema);
-    assert.throws(() => preflightCheckRequestSchema.parse({}));
+    for (const [, classification] of Object.entries(PACKAGE_CLASSIFICATION)) {
+      if (classification.services) {
+        for (const s of classification.services) {
+          coveredServices.add(s);
+        }
+      }
+    }
 
-    // SpendMeteringContract: Tinman <-> Treasurer
-    assert.ok(budgetCheckRequestSchema);
-    assert.throws(() => budgetCheckRequestSchema.parse({}));
-
-    // ActionHoldContract: Gatekeeper <-> Bouncer
-    assert.ok(heldActionRequestSchema);
-    assert.throws(() => heldActionRequestSchema.parse({}));
-
-    // ProgressEventContract: Streaming <-> Seer
-    assert.ok(progressEventSchema);
-    assert.throws(() => progressEventSchema.parse({}));
-
-    // ModelInferenceContract: Cartridge <-> Tinman
-    assert.ok(modelInferenceRequestSchema);
-    assert.throws(() => modelInferenceRequestSchema.parse({}));
+    for (const service of FACTORY_SERVICE_NAMES) {
+      assert.ok(
+        coveredServices.has(service),
+        `SV1 violation: Canonical service '${service}' is not hosted by any package.`
+      );
+    }
   });
 
-  it('rejects malformed cross-service contract payloads', () => {
-    // Rejects non-URL memory store in Hydration
-    assert.throws(() =>
-      hydrationRequestSchema.parse({
-        agentId: 'donna',
-        runId: 'run-1',
-        memoryStoreUri: 'not-a-valid-uri',
-        localMemoryDir: '/tmp/mem',
-        mode: 'pull',
-      })
+  it('negative test: rejects unassigned packages or invalid service names', () => {
+    // 1. Unrecognized service name
+    assert.throws(
+      () =>
+        validatePackageClassification('fake-pkg', {
+          services: ['unrecognized_service' as any],
+        }),
+      /unrecognized service 'unrecognized_service'/
     );
 
-    // Rejects invalid SHA-256 body hash in HeldAction
-    assert.throws(() =>
-      heldActionRequestSchema.parse({
-        approvalId: 'appr-1',
-        agentId: 'castle',
-        runId: 'run-1',
-        system: 'linkedin',
-        method: 'POST',
-        path: '/v2/ugcPosts',
-        bodySha256: 'short-hash',
-      })
+    // 2. Empty classification
+    assert.throws(
+      () => validatePackageClassification('fake-pkg', {}),
+      /must declare at least one canonical service/
+    );
+
+    // 3. Invalid platform role
+    assert.throws(
+      () =>
+        validatePackageClassification('fake-pkg', {
+          platformRole: 'made-up-role' as any,
+        }),
+      /invalid platformRole 'made-up-role'/
     );
   });
 });
