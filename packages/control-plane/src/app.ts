@@ -13,8 +13,8 @@ import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, typ
 import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver, type SkillSource } from './source.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
-import { exceededWindow } from '@beercanlabs/factory-budget';
-import { spendDetail, validatePolicy, type Approval, type ApprovalStore, type HeldRequest, type PolicyStore, type SpendTracker } from './policy.js';
+import { exceededWindow, spendDetail, type SpendTracker } from '@beercanlabs/factory-budget';
+import { validatePolicy, type Approval, type ApprovalStore, type HeldRequest, type PolicyStore } from './policy.js';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
 const HELD_BODY_LIMIT = 256 * 1024;

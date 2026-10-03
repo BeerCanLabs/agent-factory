@@ -12,7 +12,8 @@ import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
-import { ApprovalStore, PolicyStore, SpendTracker } from './policy.js';
+import { SpendTracker } from '@beercanlabs/factory-budget';
+import { ApprovalStore, PolicyStore } from './policy.js';
 
 const ADMIN = 'admin-policy-token';
 const VIEWER = 'viewer-policy-token';

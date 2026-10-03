@@ -7,7 +7,10 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/index.test.ts"
+    "test": "tsx --test src/index.test.ts src/spend.test.ts"
+  },
+  "dependencies": {
+    "@beercanlabs/factory-ledger": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
