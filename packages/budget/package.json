@@ -2,11 +2,19 @@
   "name": "@beercanlabs/factory-budget",
   "version": "0.1.0",
   "private": true,
-  "description": "Deterministic cost aggregation and circuit-breaker enforcement for the Factory",
+  "description": "Treasurer: spend governance, pricing, and circuit-breaker enforcement for the Factory",
+  "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "echo 'No build yet'",
-    "test": "echo 'No tests yet'"
+    "build": "tsc",
+    "test": "tsx --test src/*.test.ts"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@beercanlabs/factory-contract": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
 }
