@@ -1,5 +1,6 @@
 import { Client, GatewayIntentBits, Partials, Events, ActivityType } from 'discord.js';
 import type { DiscordClient, Conversation, Presence } from './index.js';
+import { wakeRefusedText } from './wake.js';
 
 interface StandbySession {
   messageId: string;
@@ -179,6 +180,20 @@ export function createDiscordClient(): DiscordClient {
     async login(token: string) {
       if (client.isReady()) return;
       await client.login(token);
+    },
+    async refuseWake(channelId: string, window: string) {
+      const session = standbySessions.get(channelId);
+      clearStandbySession(channelId);
+      const text = wakeRefusedText(agentName, window);
+      try {
+        const channel = await client.channels.fetch(channelId);
+        if (channel && 'send' in channel && 'messages' in channel) {
+          if (session) await (await channel.messages.fetch(session.messageId)).edit(text);
+          else await channel.send(text);
+        }
+      } catch (err) {
+        console.warn('[gatekeeper-ingress] Failed to post the wake refusal:', err);
+      }
     },
     async setPresence(status: Presence) {
       currentPresence = status;
