@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { validateBudgetLimits } from '@beercanlabs/factory-budget';
 export type ToolRule = { allow: string[] | '*'; requireApproval?: string[] };
 
 /** Admin-set egress policy for one agent. Deny by default: no routes, no tools. */
@@ -57,12 +58,8 @@ export function validatePolicy(raw: unknown): { ok: true; policy: AgentPolicy } 
   if (r.hosts !== undefined && !isStringArray(r.hosts)) return { ok: false, error: 'hosts must be an array of hostnames' };
   if (r.tokensPerMinute !== undefined && !positive(r.tokensPerMinute)) return { ok: false, error: 'tokensPerMinute must be >= 0' };
   if (r.budgetUsd !== undefined) {
-    const b = r.budgetUsd as Record<string, unknown>;
-    if (!b || typeof b !== 'object') return { ok: false, error: 'budgetUsd must be an object' };
-    for (const [k, v] of Object.entries(b)) {
-      if (!['perRun', 'perDay', 'perMonth'].includes(k)) return { ok: false, error: `unknown budget window ${k}` };
-      if (!positive(v)) return { ok: false, error: `budgetUsd.${k} must be >= 0` };
-    }
+    const budget = validateBudgetLimits(r.budgetUsd);
+    if (!budget.ok) return budget;
   }
   if (r.tools !== undefined) {
     if (!r.tools || typeof r.tools !== 'object') return { ok: false, error: 'tools must be an object keyed by route id' };
