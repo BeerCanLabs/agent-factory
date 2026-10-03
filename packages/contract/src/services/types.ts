@@ -21,9 +21,6 @@ export type FactoryServiceName = (typeof FACTORY_SERVICE_NAMES)[number];
 
 export const factoryServiceNameSchema = z.enum(FACTORY_SERVICE_NAMES);
 
-/**
- * Service metadata description.
- */
 export interface FactoryServiceMetadata {
   name: FactoryServiceName;
   title: string;
@@ -137,7 +134,6 @@ export const PLATFORM_TOOL_PACKAGES: Record<string, PlatformRole> = {
 
 /**
  * Derives the canonical package classification from FACTORY_SERVICES and PLATFORM_TOOL_PACKAGES.
- * Single Source of Truth (SSOT): no duplicate mappings across repositories.
  */
 export function getPackageClassification(pkgName: string): PackageClassification | undefined {
   if (pkgName in PLATFORM_TOOL_PACKAGES) {
