@@ -290,6 +290,16 @@ export const factoryApi = {
     return request<{ id: string; active: SystemDefinition | null; history: SystemDefinition[] }>(`/systems/${encodeURIComponent(id)}`);
   },
 
+  /** TSK-067: whether an OAuth provider's app client is set (never its value). */
+  async getProviderClient(id: string): Promise<{ system: string; kind: string; name: string; present: boolean }> {
+    return request(`/keymaster/providers/${encodeURIComponent(id)}/client`);
+  },
+
+  /** TSK-067, K5.3: write-only. The value goes to the Keymaster and is never returned. */
+  async setProviderClient(id: string, body: { client_id: string; client_secret: string } | { value: string }): Promise<{ status: string }> {
+    return request(`/keymaster/providers/${encodeURIComponent(id)}/client`, { method: 'POST', body: JSON.stringify(body) });
+  },
+
   async proposeSystem(payload: unknown): Promise<{ system: SystemDefinition }> {
     return request<{ system: SystemDefinition }>('/systems', {
       method: 'POST',

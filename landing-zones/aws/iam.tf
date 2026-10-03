@@ -51,7 +51,8 @@ locals {
   # §6.11 K1: OAuth grants (one secret per agent x provider) and the app credentials they depend on. Only the
   # control plane's Keymaster reads or writes them; the gatekeeper-egress asks the control plane for access tokens.
   keymaster_grant_arns = ["${local.secret_arn}/connections/*"]
-  keymaster_app_arns   = ["${local.secret_arn}/GOOGLE_OAUTH_CLIENT*", "${local.secret_arn}/GOOGLE_SERVICE_ACCOUNT*", "${local.secret_arn}/LINKEDIN_OAUTH_CLIENT*"]
+  # Legacy app-credential names (migrated providers), then the Keymaster-named entries for every provider (K5.1, TSK-067).
+  keymaster_app_arns = ["${local.secret_arn}/GOOGLE_OAUTH_CLIENT*", "${local.secret_arn}/GOOGLE_SERVICE_ACCOUNT*", "${local.secret_arn}/LINKEDIN_OAUTH_CLIENT*", "${local.secret_arn}/shared/*/oauth-client-??????", "${local.secret_arn}/shared/*/service-account-key-??????"]
   telemetry_statement = {
     Sid      = "OtelToCloudWatch"
     Effect   = "Allow"

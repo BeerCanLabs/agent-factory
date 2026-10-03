@@ -24,6 +24,10 @@ import {
   type SystemDefinition,
   type SystemProposal,
 } from '@beercanlabs/factory-contract';
+import {
+  connectionProviderFromSystem,
+  type ConnectionProvider,
+} from '@beercanlabs/factory-keymaster';
 import { authenticate, json, readJson, type FactoryState } from './app.js';
 
 export type SystemSummary = {
@@ -107,7 +111,12 @@ export class SystemsStore {
     if (!Array.isArray(raw)) return { imported, skipped };
     for (const r of raw as Array<Record<string, unknown>>) {
       const id = typeof r?.id === 'string' ? r.id : '';
-      if (!id || r.kind === 'llm' || r.kind === 'models' || this.versions.has(id)) continue;
+      if (!id || r.kind === 'llm' || r.kind === 'models') continue;
+      const existing = this.current.get(id);
+      // TSK-067: OAuth provider facts move from code into the store once. A system only the migration ever wrote
+      // gains its `oauth` block; one an admin has changed is never touched.
+      const addOAuth = Boolean(existing && r.oauth && !existing.oauth && (this.versions.get(id) ?? []).every((d) => d.proposedBy.startsWith('migration:')));
+      if (this.versions.has(id) && !addOAuth) continue;
       const v = validateSystemProposal({
         id,
         name: typeof r.name === 'string' ? r.name : id,
@@ -118,6 +127,7 @@ export class SystemsStore {
         scopes: r.scopes,
         hold: r.hold,
         stripSignInLinks: r.stripSignInLinks,
+        oauth: r.oauth,
       });
       if (!v.ok) {
         skipped.push(`${id}: ${v.issues.map((i) => i.message).join('; ')}`);
@@ -130,6 +140,8 @@ export class SystemsStore {
   }
 
   private async record(proposal: SystemProposal, actor: string): Promise<SystemDefinition> {
+    const prior = this.versions.get(proposal.id) ?? [];
+    const version = prior.length ? prior[prior.length - 1].version + 1 : 1;
     const content = {
       id: proposal.id,
       name: proposal.name,
@@ -141,12 +153,13 @@ export class SystemsStore {
       scopes: proposal.scopes,
       hold: proposal.hold,
       stripSignInLinks: proposal.stripSignInLinks,
+      oauth: proposal.oauth,
     };
     const hash = payloadHash(content);
     const at = new Date().toISOString();
     const def: SystemDefinition = {
       ...content,
-      version: 1,
+      version,
       status: 'approved',
       proposedBy: actor,
       proposedAt: at,
@@ -157,12 +170,12 @@ export class SystemsStore {
     };
     const sysDir = join(this.dir, proposal.id);
     mkdirSync(sysDir, { recursive: true });
-    writeFileSync(join(sysDir, '1.json'), JSON.stringify(def, null, 2));
-    this.versions.set(proposal.id, [def]);
+    writeFileSync(join(sysDir, `${version}.json`), JSON.stringify(def, null, 2));
+    this.versions.set(proposal.id, [...prior, def]);
     this.current.set(proposal.id, def);
     this.ledger?.append({
       timestamp: at,
-      agentId: `system:${proposal.id}@1`,
+      agentId: `system:${proposal.id}@${version}`,
       type: 'action',
       action: 'SYSTEM_IMPORTED',
       actor,
@@ -187,6 +200,7 @@ export class SystemsStore {
       scopes: proposal.scopes,
       hold: proposal.hold,
       stripSignInLinks: proposal.stripSignInLinks,
+      oauth: proposal.oauth,
     };
     const hash = payloadHash(content);
     const def: SystemDefinition = {
@@ -347,6 +361,21 @@ export class SystemsStore {
       });
     }
     return routes;
+  }
+
+  getConnectionProvider(id: string): ConnectionProvider | undefined {
+    const sys = this.current.get(id);
+    if (!sys || !sys.oauth) return undefined;
+    return connectionProviderFromSystem(sys);
+  }
+
+  getConnectionProviders(): ConnectionProvider[] {
+    const out: ConnectionProvider[] = [];
+    for (const sys of this.current.values()) {
+      const p = connectionProviderFromSystem(sys);
+      if (p) out.push(p);
+    }
+    return out;
   }
 }
 
