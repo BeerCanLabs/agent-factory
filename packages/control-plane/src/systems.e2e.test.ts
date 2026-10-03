@@ -242,5 +242,42 @@ describe('systems as factory data (E10)', () => {
     assert.equal(res.status, 400);
     assert.equal(res.body.error, 'invalid_system_proposal');
   });
+
+  it('TSK-067 OAuth providers come from the deployment once: new ones imported, imported-only systems gain oauth, admin-edited ones untouched', async () => {
+    const store = state.systems!;
+    assert.equal(store.getConnectionProvider('google'), undefined, 'no provider exists until a deployment defines one');
+    const LI_OAUTH = { kind: 'oauth-user', authUrl: 'https://www.linkedin.com/oauth/v2/authorization', tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken', clientSecret: 'LINKEDIN_OAUTH_CLIENT', authParams: {}, refresh: false };
+    // An admin edits github (a new approved version), so a later import may not change it.
+    const edited = await call(port, '/api/v1/systems', 'POST', ADMIN, { id: 'github', name: 'GitHub', kind: 'http', upstream: 'https://api.github.com', credential: { secret: '{agent}_GITHUB_TOKEN', header: 'authorization', format: 'Bearer {}', fallback: false } });
+    assert.equal(edited.status, 201);
+    assert.equal((await call(port, '/api/v1/systems/github/approve', 'POST', ADMIN, {})).status, 200);
+    const result = await store.importRoutes([
+      { id: 'google', name: 'Google (OAuth)', kind: 'http', upstream: 'https://accounts.google.com', oauth: { kind: 'oauth-user', authUrl: 'https://accounts.google.com/o/oauth2/v2/auth', tokenUrl: 'https://oauth2.googleapis.com/token', clientSecret: 'GOOGLE_OAUTH_CLIENT' } },
+      { ...DEPLOYMENT_ROUTES.find((r) => r.id === 'linkedin')!, oauth: LI_OAUTH },
+      { ...DEPLOYMENT_ROUTES.find((r) => r.id === 'github')!, oauth: LI_OAUTH },
+    ], 'migration:landing-zone');
+    assert.deepEqual(result.imported.sort(), ['google', 'linkedin']);
+    assert.equal(store.getConnectionProvider('google')?.clientSecret, 'GOOGLE_OAUTH_CLIENT');
+    const linkedin = store.getConnectionProvider('linkedin');
+    assert.equal(linkedin?.kind, 'oauth-user');
+    assert.equal(linkedin?.kind === 'oauth-user' && linkedin.refresh, false);
+    assert.equal(store.history('linkedin').length, 2, 'the provider facts are a new, ledgered version');
+    assert.equal(store.get('linkedin')?.hold?.methods.includes('POST'), true, 'the route settings are kept');
+    assert.equal(store.get('github')?.oauth, undefined, 'a system an admin changed is never touched by an import');
+    assert.equal(store.getConnectionProvider('discord'), undefined);
+  });
+
+  it('TSK-067 a provider defined without entry names gets Keymaster-named ones (K5.1)', async () => {
+    const store = state.systems!;
+    await store.importRoutes([
+      { id: 'microsoft', name: 'Microsoft', kind: 'http', upstream: 'https://login.microsoftonline.com', oauth: { kind: 'oauth-user', authUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize', tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token' } },
+      { id: 'acme-sa', name: 'Acme', kind: 'http', upstream: 'https://auth.acme.example', oauth: { kind: 'jwt-bearer', tokenUrl: 'https://auth.acme.example/token' } },
+    ], 'migration:test');
+    const ms = store.getConnectionProvider('microsoft');
+    assert.equal(ms?.kind === 'oauth-user' && ms.clientSecret, 'shared/microsoft/oauth-client');
+    const sa = store.getConnectionProvider('acme-sa');
+    assert.equal(sa?.kind === 'jwt-bearer' && sa.keySecret, 'shared/acme-sa/service-account-key');
+  });
+
 });
 

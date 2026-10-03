@@ -3,7 +3,34 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { INSTRUCTION_CATALOG, PENDING_REVIEW_LABEL, catalogView, inferSource } from './catalog.js';
 import { assessCredentials, assessPlatformCredentials, submittableSecrets, summarize, type AssessOptions } from './credentials.js';
-import type { GrantView } from './connections.js';
+import type { ConnectionProvider, GrantView } from './connections.js';
+
+const TEST_PROVIDERS: Record<string, ConnectionProvider> = {
+  google: {
+    kind: 'oauth-user',
+    provider: 'google',
+    authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+    tokenUrl: 'https://oauth2.googleapis.com/token',
+    clientSecret: 'GOOGLE_OAUTH_CLIENT',
+    authParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
+  },
+  linkedin: {
+    kind: 'oauth-user',
+    provider: 'linkedin',
+    authUrl: 'https://www.linkedin.com/oauth/v2/authorization',
+    tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken',
+    clientSecret: 'LINKEDIN_OAUTH_CLIENT',
+    authParams: {},
+    refresh: false,
+  },
+  'google-service-account': {
+    kind: 'jwt-bearer',
+    provider: 'google-service-account',
+    tokenUrl: 'https://oauth2.googleapis.com/token',
+    keySecret: 'GOOGLE_SERVICE_ACCOUNT',
+    defaultScopes: ['https://www.googleapis.com/auth/devstorage.read_write'],
+  },
+};
 
 const CAL = 'https://www.googleapis.com/auth/calendar.readonly';
 const GMAIL = 'https://www.googleapis.com/auth/gmail.readonly';
@@ -14,6 +41,7 @@ function opts(over: Partial<AssessOptions> & { have?: string[]; grants?: Record<
     agentId: 'donna',
     secrets: [],
     connections: [],
+    getProvider: (p: string) => TEST_PROVIDERS[p],
     gatekeeperEgressHeld: new Set(),
     present: async (n) => have.has(n),
     grant: async (p) => over.grants?.[p],
@@ -139,7 +167,7 @@ describe('assessCredentials (K5.2)', () => {
     const action = by.google.action;
     assert.equal(action.type === 'consent' && action.available, false);
     assert.deepEqual(
-      [...submittableSecrets({ secrets: [], connections: [{ provider: 'google', scopes: [] }, { provider: 'google-service-account', scopes: [] }], gatekeeperEgressHeld: new Set() })],
+      [...submittableSecrets({ secrets: [], connections: [{ provider: 'google', scopes: [] }, { provider: 'google-service-account', scopes: [] }], gatekeeperEgressHeld: new Set(), getProvider: (p) => TEST_PROVIDERS[p] })],
       ['GOOGLE_OAUTH_CLIENT', 'GOOGLE_SERVICE_ACCOUNT'],
     );
   });
