@@ -94,12 +94,13 @@ export function createDiscordClient(): DiscordClient {
             void message.channel.sendTyping().catch(() => {});
           }, 7000);
 
-          client.user?.setActivity(`Getting ${agentName} (~30s)...`, { type: ActivityType.Custom });
+          client.user?.setActivity(`Getting ${agentName} (up to 90s)...`, { type: ActivityType.Custom });
           const sent = await message.channel.send(
-            `⏳ *Standby while I get ${agentName} for you — should take about 30 seconds...*`
+            `⏳ *Standby while I get ${agentName} for you — this can take up to 90 seconds...*`
           );
 
-          // 2. Warning trigger at 30 seconds if agent has not yet responded
+          // 2. Warning at 90 seconds if the agent has not yet responded. A cold wake measured 40-50 s on 2026-10-02
+          // (Fargate provisioning, image pull, memory download, first model call), so 30 s warned on every wake.
           const warnTimer = setTimeout(async () => {
             try {
               const current = standbySessions.get(message.channelId);
@@ -110,9 +111,9 @@ export function createDiscordClient(): DiscordClient {
                 }
               }
             } catch (err) {
-              console.warn('[gatekeeper-ingress] Failed to update 30s standby message:', err);
+              console.warn('[gatekeeper-ingress] Failed to update 90s standby message:', err);
             }
-          }, 30_000);
+          }, 90_000);
 
           // 3. Failure trigger (default 180s, configurable via GATEKEEPER_INGRESS_STANDBY_TIMEOUT_MS) if agent completely fails to load
           const failureTimeoutMs = Number(process.env.GATEKEEPER_INGRESS_STANDBY_TIMEOUT_MS) || 180_000;
