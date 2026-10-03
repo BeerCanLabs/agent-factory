@@ -72,7 +72,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'treasurer',
     title: 'Treasurer',
     role: 'Spend governance, real-time token pricing, and budget circuit-breakers (E5, M3)',
-    hostedIn: ['packages/budget', 'packages/gatekeeper-egress', 'packages/control-plane'],
+    hostedIn: ['packages/gatekeeper-egress', 'packages/control-plane'],
   },
   bouncer: {
     name: 'bouncer',
@@ -96,7 +96,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'seer',
     title: 'Seer',
     role: 'Telemetry, live run progress event streaming, and error diagnosis (§6.5)',
-    hostedIn: ['packages/telemetry', 'packages/triage'],
+    hostedIn: ['packages/telemetry', 'packages/control-plane', 'packages/gatekeeper-egress'],
   },
 };
 
@@ -114,7 +114,17 @@ export type PlatformRole = (typeof ALLOWED_PLATFORM_ROLES)[number];
 export interface PackageClassification {
   services?: readonly FactoryServiceName[];
   platformRole?: PlatformRole;
+  reservedFor?: FactoryServiceName;
 }
+
+/**
+ * Packages reserved for a service that do not host it yet.
+ * Kept out of `hostedIn` so an empty directory cannot satisfy SV1.
+ */
+export const RESERVED_PACKAGES: Record<string, FactoryServiceName> = {
+  budget: 'treasurer',
+  triage: 'seer',
+};
 
 /**
  * Declared non-service platform tooling packages.
@@ -145,6 +155,10 @@ export function getPackageClassification(pkgName: string): PackageClassification
 
   if (services.length > 0) {
     return { services };
+  }
+
+  if (pkgName in RESERVED_PACKAGES) {
+    return { reservedFor: RESERVED_PACKAGES[pkgName] };
   }
 
   return undefined;
