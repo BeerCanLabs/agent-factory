@@ -14,8 +14,7 @@ export type {
 } from './keymaster.js';
 export {
   ConnectionKeymaster,
-  CONNECTION_PROVIDERS,
-  connectionProvider,
+  connectionProviderFromSystem,
   grantSecretName,
   signJwtRs256,
 } from './connections.js';
@@ -27,6 +26,7 @@ export type {
   ConnectionProvider,
   UserOAuthProvider,
   JwtBearerProvider,
+  ProviderResolver,
   TokenOutcome,
   ConnectionKeymasterOptions,
 } from './connections.js';
