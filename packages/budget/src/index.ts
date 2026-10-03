@@ -19,3 +19,6 @@ export function exceededWindow(limits: BudgetLimits | undefined, spend: Spend): 
   if (b.perMonth !== undefined && spend.month >= b.perMonth) return 'perMonth';
   return undefined;
 }
+
+export type { SpendDetail, SpendWindow } from './spend.js';
+export { spendDetail, SpendTracker } from './spend.js';
