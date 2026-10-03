@@ -49,7 +49,7 @@ Every AI session (Claude, Grok, or Gemini) **must** follow this strict state mac
 1. **User Declares New Intent:**
    - The user describes a new feature, behavioral modification, or design correction.
 2. **AI Updates Design Authority & Confirms:**
-   - **First, cite what already applies.** Before proposing any new rule or design, the AI names the existing invariants (§6) and the user's recorded decisions (§7) that bear on it. If an existing invariant already covers the case, the work is to register and fix the violation, not to add a rule. A proposal that contradicts a recorded decision says so explicitly and asks.
+   - **First, cite what already applies and test the boundary.** Before proposing any new rule or design, the AI names the existing invariants (§6) and the user's recorded decisions (§7) that bear on it. If an existing invariant already covers the case, the work is to register and fix the violation, not to add a rule. A proposal that contradicts a recorded decision says so explicitly and asks. Crucially, the AI applies **The Donna Test (Cartridge vs. Factory Boundary Gate)**: verify whether the reported defect is a cartridge concern (an agent's reasoning, chat memory, or tool execution) versus a factory concern (compute lifecycle, network perimeter, secrets binding, or mind storage sync). If another agent (like Donna) already succeeds at the behavior, the platform already supports it; the fix belongs in the cartridge or agent template, never in factory kernel packages.
    - The AI updates the *Declared Architectural Intent* section of this document.
    - The AI explicitly confirms this text update with the user before touching code.
 3. **AI Documents the Conflict or Gap:**
