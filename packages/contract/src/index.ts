@@ -14,6 +14,7 @@ export {
   secretItem,
   secretGate,
   mcpEntry,
+  skillEntry,
   classifySecrets,
   classifyCapabilities,
   egressSchema,
@@ -38,6 +39,7 @@ export type {
   ClassifiedSecrets,
   ClassifiedCapabilities,
   McpCapability,
+  SkillEntry,
   SecretDeclaration,
 } from './schema.js';
 export { validateCartridge } from './validate.js';
