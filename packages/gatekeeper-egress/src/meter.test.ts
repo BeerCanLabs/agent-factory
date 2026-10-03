@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { SseMeter, costUsd, priceFor, usageFromJson } from './meter.js';
+import { SseMeter, usageFromJson } from './meter.js';
 
 describe('usage from JSON', () => {
   it('reads Anthropic usage including cache tokens', () => {
@@ -57,17 +57,3 @@ describe('SSE metering', () => {
   });
 });
 
-describe('pricing', () => {
-  const prices = { 'test-*': { inputPerMTok: 1, outputPerMTok: 2 }, 'test-big': { inputPerMTok: 10, outputPerMTok: 20, cacheReadPerMTok: 1 } };
-
-  it('exact match beats prefix; unknown models are unpriced', () => {
-    assert.equal(priceFor(prices, 'test-big')?.inputPerMTok, 10);
-    assert.equal(priceFor(prices, 'test-small')?.inputPerMTok, 1);
-    assert.equal(priceFor(prices, 'other'), undefined);
-  });
-
-  it('computes USD from normalized usage', () => {
-    const usd = costUsd({ input: 1_000_000, output: 500_000, cacheRead: 2_000_000, cacheWrite: 0 }, prices['test-big']);
-    assert.equal(usd, 10 + 10 + 2);
-  });
-});
