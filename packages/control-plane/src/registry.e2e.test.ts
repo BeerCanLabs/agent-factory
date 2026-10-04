@@ -12,7 +12,8 @@ import { BUILTIN_SYSTEM_AGENTS } from './catalog.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
-import { ApprovalStore, PolicyStore } from './policy.js';
+import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { PolicyStore } from './policy.js';
 import { Keymaster } from '@beercanlabs/factory-keymaster';
 
 const ADMIN = 'admin-e2e-token';

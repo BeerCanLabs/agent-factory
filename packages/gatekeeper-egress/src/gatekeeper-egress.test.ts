@@ -4,7 +4,8 @@ import http from 'node:http';
 import net from 'node:net';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
-import { createGatekeeperEgress, type Approval, type ControlClient, type Policy, type RunContext } from './gatekeeper-egress.js';
+import type { ApprovalOutcome } from '@beercanlabs/factory-bouncer';
+import { createGatekeeperEgress, type ControlClient, type Policy, type RunContext } from './gatekeeper-egress.js';
 import { ModelUpstreamError } from './models.js';
 import { ProgressEmitter, type ProgressEvent } from './progress.js';
 
@@ -54,7 +55,7 @@ describe('gatekeeper-egress', { concurrency: false }, () => {
 
   // In-memory control plane
   const ledger: Array<Record<string, any>> = [];
-  const approvals = new Map<string, Approval & { key: string }>();
+  const approvals = new Map<string, ApprovalOutcome & { key: string }>();
   let ctx: RunContext;
   let token = '';
   let runSeq = 0;

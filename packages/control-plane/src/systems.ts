@@ -28,7 +28,7 @@ import {
   connectionProviderFromSystem,
   type ConnectionProvider,
 } from '@beercanlabs/factory-keymaster';
-import { authenticate, json, readJson, type FactoryState } from './app.js';
+import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 
 export type SystemSummary = {
   id: string;
@@ -394,7 +394,7 @@ export async function handleSystems(
 ): Promise<boolean> {
   // Gatekeeper-egress non-model route resolution (§6.3.1 E10)
   if (path === '/api/v1/gatekeeper-egress/routes' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'egress.routes.read'))) return true;
     const store = systemsStore(state);
     json(res, 200, { routes: store.activeRoutes() });
     return true;
@@ -402,7 +402,7 @@ export async function handleSystems(
 
   // System catalog list
   if (path === '/api/v1/systems' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'systems.read'))) return true;
     const store = systemsStore(state);
     json(res, 200, { systems: store.list() });
     return true;
@@ -410,7 +410,7 @@ export async function handleSystems(
 
   // Propose a new system or edit
   if (path === '/api/v1/systems' && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'viewer');
+    const principal = await requirePrivilege(req, res, state, 'systems.propose');
     if (!principal) return true;
     const body = await readJson(req);
     const validation = validateSystemProposal(body);
@@ -427,7 +427,7 @@ export async function handleSystems(
   // System details & versions
   const mSys = path.match(/^\/api\/v1\/systems\/([a-z0-9-]+)$/);
   if (mSys && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'systems.read'))) return true;
     const id = mSys[1];
     const store = systemsStore(state);
     const history = store.history(id);
@@ -447,7 +447,7 @@ export async function handleSystems(
   // Approve a system
   const mApprove = path.match(/^\/api\/v1\/systems\/([a-z0-9-]+)\/approve$/);
   if (mApprove && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'systems.decide');
     if (!principal) return true;
     const id = mApprove[1];
     const body = await readJson(req);
@@ -466,7 +466,7 @@ export async function handleSystems(
   // Reject a system
   const mReject = path.match(/^\/api\/v1\/systems\/([a-z0-9-]+)\/reject$/);
   if (mReject && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'systems.decide');
     if (!principal) return true;
     const id = mReject[1];
     const body = await readJson(req);

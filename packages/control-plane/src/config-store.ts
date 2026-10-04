@@ -31,7 +31,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { authenticate, json, type FactoryState } from './app.js';
+import { requirePrivilege, json, type FactoryState } from './app.js';
 import { archiveStamp, isReservedPolicyId, type AgentPolicy } from './policy.js';
 
 const execFileAsync = promisify(execFile);
@@ -554,7 +554,7 @@ const AGENT_CONFIG = /^\/api\/v1\/agents\/([^/]+)\/config(?:\/(history|versions\
 export async function handleConfig(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
   if (req.method !== 'GET') return false;
   if (path === '/api/v1/config/export') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'config.export');
     if (!principal) return true;
     if (!state.configs) {
       json(res, 503, { error: 'config_store_unavailable' });
@@ -567,7 +567,7 @@ export async function handleConfig(state: FactoryState, req: http.IncomingMessag
   }
   const m = path.match(AGENT_CONFIG);
   if (!m) return false;
-  if (!(await authenticate(req, res, state, 'viewer'))) return true;
+  if (!(await requirePrivilege(req, res, state, 'config.read'))) return true;
   if (!state.configs) {
     json(res, 503, { error: 'config_store_unavailable' });
     return true;

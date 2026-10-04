@@ -1,7 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { Keymaster, type Approval, type ApprovalConsumer } from './keymaster.js';
+import type { Approval } from '@beercanlabs/factory-bouncer';
+import { Keymaster, type ApprovalConsumer } from './keymaster.js';
 import { MemoryLedger, payloadHash } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { RunTokens } from '@beercanlabs/factory-auth';
