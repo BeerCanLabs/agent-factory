@@ -27,6 +27,65 @@ Landing zone is a **Draftsman interview**: pick a baseline pattern in `.draft/sd
 
 ---
 
+## The Cast: Factory Services & First-Class Contracts
+
+Agent Factory is architected around **11 canonical services ("The Cast of Characters")** defined in [`DESIGN_AUTHORITY.md` §6.15](DESIGN_AUTHORITY.md#615-factory-service-architecture-the-cast-of-characters--first-class-contracts). Every workspace package belongs to one of these 11 intentional services (SV1) or declared platform tooling.
+
+### The 11 Cast Members
+
+1. **Gatekeeper (Perimeter Security):**
+   - **Role:** Owns inbound presence, wakes, webhooks, front-door authentication verification (A1, A2), and zero-trust outbound proxying (E1, E6) with credential injection (S1). Composed of `gatekeeper-ingress` and `gatekeeper-egress`.
+   - **Contract:** Inbound webhook & presence protocol, token-authenticated egress proxy (`<ROUTE>_BASE_URL`), and run-token authorization. Relays wake refusals (such as budget caps) directly to callers.
+
+2. **Keymaster (Credential Facilitation):**
+   - **Role:** Owns OAuth connections, consent flows, token refreshes (K1–K4), write-only static secret onboarding (K5), and vault mapping.
+   - **Contract:** Zero-knowledge credential evaluation, ephemeral leases, token rotation events, and write-only platform secrets onboarding without exposing plaintext credentials to agents.
+
+3. **Tinman (Model Service / Inference Provider):**
+   - **Role:** Provides a uniform OpenAI-compatible Chat Completions API (M1), translates calls across model providers (Bedrock, OpenAI, Anthropic, xAI), enforces model policy routing (M2), and counts tokens (E5).
+   - **Contract:** Translates provider formats, normalizes token usage (`input`, `output`, `cacheRead`, `cacheWrite`), and reports usage to the Treasurer for pricing.
+
+4. **Secretary (Hydration & State Store):**
+   - **Role:** Enforces "The Safe" (§6.6); syncs local SQLite databases in `$MEMORY_DIR` with cloud object storage on wake and sleep.
+   - **Contract:** Pre-flight pull and post-run push/flush hooks. Ensures cartridges never require cloud storage SDKs.
+
+5. **Landlord (Compute Lifecycle & Turn Broker):**
+   - **Role:** Manages serverless min=0 compute, wake-from-zero, warm-down windows, operational pause/kill-switches, turn coordination via `/mailbox` long-polling, and two-stage retirement (§6.4).
+   - **Contract:** Run state machine lifecycle, pre-flight standing verification with the Treasurer before starting runs (`createRun`), and runtime container task supervision.
+
+6. **Auditor (Immutable Ledger):**
+   - **Role:** Owns the cryptographic append-only WORM audit trail of runs, spend, credential actions, and perimeter decisions (LG1, LG2).
+   - **Contract:** Single-writer leased file ledger with SHA-256 hash chaining, WORM checkpointing (S3 Object Lock / GCS retention), and automated secret and prompt redaction.
+
+7. **Treasurer (Spend Governance & FinOps):**
+   - **Role:** Spend governance, real-time token pricing, and budget circuit-breakers (E5, M3). Resides in `packages/budget`.
+   - **Contract:** Exposes `checkStanding({ limits, spend, pendingUsd? })` returning `{ inGoodStanding: true }` or `{ inGoodStanding: false, window }`. Gatekeeper-egress checks standing before every model call, and the Landlord checks before waking an agent.
+
+8. **Bouncer (Governance & Approvals):**
+   - **Role:** Intercepts and holds sensitive actions (writes in a person's name, sensitive tools) until explicit human sign-off is granted (E4, E9).
+   - **Contract:** Role-based authorization and held action lifecycle (`Approval` records with tool argument visibility).
+
+9. **Timekeeper (Scheduling & Timers):**
+   - **Role:** Manages agent-scoped cron schedules and one-shot wakeup timers without persistent in-container daemon processes (§6.15).
+   - **Contract:** Agent-scoped `ScheduleStore`, cron evaluation, and scheduled wake dispatch.
+
+10. **Registrar (Admissions & Catalog):**
+    - **Role:** Evaluates cartridge and skill manifests, runs mandatory test suites and secret scans, enforces commit pinning (L3–L4), approves reusable skills (SK1–SK5), and manages the versioned configuration store.
+    - **Contract:** Validates `cartridge.yaml` and `skills.yaml` against canonical schemas; hashes and registers immutable configuration snapshots.
+
+11. **Seer (Observability, Telemetry & Triage):**
+    - **Role:** Emits live run progress event streams (e.g., `discord-progress`), exports headless operational metrics (`/metrics`), and routes crash diagnostics to alerting.
+    - **Contract:** Headless OTel metric instruments, SSE progress event streaming, and triage diagnostic capture.
+
+### Contracts as Designed: Architectural Invariants
+
+- **First-Class Cross-Service Contracts (SV2):** Services communicate across package boundaries strictly through explicit, typed contracts wired directly into real call sites. Direct backdoor access to another service's private persistence, tables, or internal modules is strictly forbidden.
+- **Entry-Point Locking & No Deep Imports (D1-C, D3):** Each service exports its typed contract only from its package root (`exports: { ".": ... }`). Subpath imports into package internals are rejected by machine checks.
+- **The Cartridge vs. Factory Boundary ("The Donna Test"):** Never modify Factory kernel code to alter an agent's reasoning, memory, or conversational behavior. Cartridges (the employees) own business logic, prompts, persona, and cognitive reasoning loops; the Factory provides the utilities (compute, memory safe, model service, perimeter).
+- **The Console vs. Factory Boundary (Headless Principle):** Web Consoles (Console, Garrison) are headless client overlays (§6.5). They own zero service logic, zero secrets, and zero persistence.
+
+---
+
 ## Known Gaps (As Designed)
 
 The architecture is opinionated and accepts certain limits by design:
