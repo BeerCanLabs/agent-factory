@@ -6,3 +6,7 @@ export type { DescribedHold, ParsedHold } from './hold.js';
 export { describeHeldRequest, heldCopyOf, heldToolName, parseHoldRequest } from './hold.js';
 export type { HoldCheck, HoldDecision, HoldRule, ToolApprovalCheck, ToolApprovalDecision } from './decisions.js';
 export { checkHold, checkToolApproval } from './decisions.js';
+export type { Privilege } from './privileges.js';
+export { PRIVILEGES } from './privileges.js';
+export type { AuthorizeRequest, AuthorizeResult } from './authorize.js';
+export { authorize } from './authorize.js';
