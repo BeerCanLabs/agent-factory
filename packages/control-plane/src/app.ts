@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
-import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal } from '@beercanlabs/factory-auth';
+import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, connectionsOf, credentialsOf, egressOf, type AgentCategory } from './catalog.js';
@@ -21,11 +21,12 @@ import { validatePolicy, type PolicyStore } from './policy.js';
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
-import { changeReason, handleConfig, recordConfig, removeConfig, type ConfigStore } from './config-store.js';
+import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig, type ConfigStore } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
 import type { SkillChecker } from './skill-checks.js';
 import { handleRunProgress } from './events.js';
 import { handleSchedules, type ScheduleStore } from './schedules.js';
+import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 
@@ -77,6 +78,8 @@ export type FactoryState = {
   /** Signs OAuth consent state. Defaults to the callback signing key. */
   connectionStateKey?: string;
   schedules?: ScheduleStore;
+  /** GAP-088: which person a Discord user is, set by an admin. Absent: nobody is linked. */
+  identityLinks?: IdentityLinkStore;
   /** Systems as factory data (§6.3.1 E10): approved external system definitions. */
   systems?: SystemsStore;
   /** URL agents use to reach the control plane (result reporting, input fetch). */
@@ -249,13 +252,18 @@ export async function requirePrivilege(
   res: http.ServerResponse,
   state: FactoryState,
   privilege: Privilege,
+  resource?: { agentId: string },
 ): Promise<Principal | null> {
   const result = await identify(req, state);
   if (!result.ok) {
     json(res, 401, { error: 'unauthorized' });
     return null;
   }
-  const decision = authorize({ principal: result.principal, privilege });
+  const decision = authorize({
+    principal: result.principal,
+    privilege,
+    ...(resource ? { resource: { agentId: resource.agentId, owners: ownersOf(state, resource.agentId) } } : {}),
+  });
   if (!decision.allowed) {
     json(res, 403, { error: 'forbidden', required: decision.required });
     return null;
@@ -408,7 +416,7 @@ export function unblockRun(state: FactoryState, runId: string, from: RunState, a
   return next;
 }
 
-export type CreateRunOptions = { actor: string; trigger: string; input?: unknown; callbackUrl?: string; model?: string };
+export type CreateRunOptions = { actor: string; trigger: string; input?: unknown; callbackUrl?: string; model?: string; requestedBy?: { provider: string; id: string } };
 
 /** The single entry point for waking an agent: manual, webhook, cron, event route, gatekeeper-ingress. */
 export async function createRun(state: FactoryState, agentId: string, opts: CreateRunOptions): Promise<Outcome<Run>> {
@@ -469,6 +477,7 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
       actor: opts.actor,
       trigger: opts.trigger,
       callbackUrl: opts.callbackUrl,
+      ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
       missing: bound.missing,
     });
     record(state, run, 'PRE_FLIGHT_MISSING_SECRET', opts.actor);
@@ -484,6 +493,7 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
     trigger: opts.trigger,
     input: opts.input,
     callbackUrl: opts.callbackUrl,
+    ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
     ...(opts.model ? { model: opts.model } : {}),
   });
   record(state, run, 'RUN_QUEUED', opts.actor);
@@ -822,18 +832,19 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
     if (!decision.allowed) {
       return { jsonrpc: '2.0', id, error: { code: -32001, message: `forbidden: requires ${decision.required}` } };
     }
-    const result = await dispatchTool(state, spec.name, params.arguments ?? {}, principal.actor);
+    const result = await dispatchTool(state, spec.name, params.arguments ?? {}, principal);
     return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }] } };
   }
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method ${String(method)}` } };
 }
 
-async function dispatchTool(state: FactoryState, name: string, args: Record<string, string>, actor: string): Promise<unknown> {
+async function dispatchTool(state: FactoryState, name: string, args: Record<string, string>, principal: Principal): Promise<unknown> {
+  const actor = principal.actor;
   if (name === 'list_agents') return [...state.agents.values()];
   if (name === 'query_ledger') return state.ledger.query({ agent: args.agent });
   if (name === 'get_run') return state.runs.get(args.runId) ?? { error: 'not_found' };
   if (name === 'list_approvals') return state.approvals.list({ state: 'pending' });
-  if (name === 'decide_approval') return (await decideApproval(state, args.approvalId, args.decision, actor, args.notes)).body;
+  if (name === 'decide_approval') return (await decideApproval(state, args.approvalId, args.decision, principal, args.notes)).body;
   const id = args.id;
   if (!id) return { error: 'id required' };
   if (name === 'wake_agent') return (await createRun(state, id, { actor, trigger: 'mcp' })).body;
@@ -843,7 +854,34 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   return { error: `unknown tool ${name}` };
 }
 
-async function decideApproval(state: FactoryState, id: string, decision: unknown, actor: string, notes?: unknown): Promise<Outcome<unknown>> {
+/**
+ * E9, E4: who may decide what an agent did. The global `admin` and `approver` roles decide any agent's; otherwise the
+ * requesting user of the run decides, or, when the run has no requesting user, any owner of the agent. A requester whose
+ * Discord id is not linked to a person lets no owner decide. This runs before anything changes, and a caller who may
+ * not decide is refused whether or not the approval exists.
+ */
+function mayDecide(state: FactoryState, principal: Principal, approvalId: string): { ok: true } | { ok: false; required: Role } {
+  const global = authorize({ principal, privilege: 'approvals.decide' });
+  if (global.allowed) return { ok: true };
+  const approval = state.approvals.get(approvalId);
+  if (!approval) return { ok: false, required: global.required };
+  const run = state.runs.get(approval.runId);
+  // The run is the record of who asked. If it is gone nobody can say, so no owner or requester decides (fail closed);
+  // an admin or approver already passed above.
+  if (!run) return { ok: false, required: global.required };
+  const requester = run.requestedBy ? { actor: state.identityLinks?.resolve(run.requestedBy.provider, run.requestedBy.id) } : undefined;
+  const scoped = authorize({
+    principal,
+    privilege: 'approvals.decide',
+    resource: { agentId: approval.agentId, owners: ownersOf(state, approval.agentId), ...(requester ? { requester } : {}) },
+  });
+  return scoped.allowed ? { ok: true } : { ok: false, required: scoped.required };
+}
+
+async function decideApproval(state: FactoryState, id: string, decision: unknown, principal: Principal, notes?: unknown): Promise<Outcome<unknown>> {
+  const actor = principal.actor;
+  const may = mayDecide(state, principal, id);
+  if (!may.ok) return { status: 403, body: { error: 'forbidden', required: may.required } };
   if (decision !== 'approve' && decision !== 'reject') return { status: 400, body: { error: 'decision must be approve or reject' } };
   if (notes !== undefined && notes !== null && (typeof notes !== 'string' || notes.length > 4000)) return { status: 400, body: { error: 'notes must be text, at most 4000 characters' } };
   const note = typeof notes === 'string' && notes.trim() ? notes.trim() : undefined;
@@ -967,6 +1005,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills')) && (await handleSkills(state, req, res, path))) return;
   if (await handleRunProgress(state, req, res, path)) return;
   if (path.startsWith('/api/v1/schedules') && (await handleSchedules(state, req, res, path))) return;
+  if (path.startsWith('/api/v1/identity-links') && (await handleIdentityLinks(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/systems') || path === '/api/v1/gatekeeper-egress/routes') && (await handleSystems(state, req, res, path))) return;
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
@@ -1231,7 +1270,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const runCreate = path.match(/^\/api\/v1\/agents\/([^/]+)\/(runs|wake)$/);
   if (runCreate && req.method === 'POST') {
-    const principal = await requirePrivilege(req, res, state, 'agents.wake');
+    const principal = await requirePrivilege(req, res, state, 'agents.wake', { agentId: runCreate[1] });
     if (!principal) return;
     const body = await readJson(req);
     if (body.callbackUrl !== undefined && typeof body.callbackUrl !== 'string') {
@@ -1242,12 +1281,30 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 400, { error: 'model must be a model id' });
       return;
     }
+    // Only a caller allowed to say who asked (the ingress) may name the requester. `input.authorId` is whatever the
+    // caller wrote and is never an identity.
+    let requestedBy: { provider: string; id: string } | undefined;
+    if (body.requestedBy !== undefined) {
+      const attest = authorize({ principal, privilege: 'runs.attest-requester' });
+      if (!attest.allowed) {
+        json(res, 403, { error: 'forbidden', required: attest.required });
+        return;
+      }
+      const rb = body.requestedBy as Record<string, unknown> | null;
+      const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 128;
+      if (!rb || typeof rb !== 'object' || Array.isArray(rb) || !text(rb.provider) || !text(rb.id)) {
+        json(res, 400, { error: 'requestedBy must be { provider, id }, each a string of at most 128 characters' });
+        return;
+      }
+      requestedBy = { provider: rb.provider, id: rb.id };
+    }
     const out = await createRun(state, runCreate[1], {
       actor: principal.actor,
       trigger: runCreate[2] === 'wake' ? 'manual' : 'api',
       input: body.input,
       callbackUrl: body.callbackUrl as string | undefined,
       model: body.model as string | undefined,
+      ...(requestedBy ? { requestedBy } : {}),
     });
     json(res, out.status, out.body);
     return;
@@ -1255,7 +1312,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const killMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/(pause|resume|isolate)$/);
   if (killMatch && req.method === 'POST') {
-    const principal = await requirePrivilege(req, res, state, killMatch[2] === 'pause' ? 'agents.pause' : killMatch[2] === 'resume' ? 'agents.resume' : 'agents.isolate');
+    const principal = await requirePrivilege(req, res, state, killMatch[2] === 'pause' ? 'agents.pause' : killMatch[2] === 'resume' ? 'agents.resume' : 'agents.isolate', { agentId: killMatch[1] });
     if (!principal) return;
     const out = await applyKillSwitch(state, killMatch[1], killMatch[2].toUpperCase() as 'PAUSE' | 'RESUME' | 'ISOLATE', principal.actor);
     json(res, out.status, out.body);
@@ -1632,10 +1689,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const decideMatch = path.match(/^\/api\/v1\/approvals\/([^/]+)$/);
   if (decideMatch && req.method === 'POST') {
-    const principal = await requirePrivilege(req, res, state, 'approvals.decide');
-    if (!principal) return;
+    // Who may decide depends on the approval, so authenticate here and let `decideApproval` authorize.
+    const who = await identify(req, state);
+    if (!who.ok) return json(res, 401, { error: 'unauthorized' });
     const b = await readJson(req);
-    const out = await decideApproval(state, decideMatch[1], b.decision, principal.actor, b.notes);
+    const out = await decideApproval(state, decideMatch[1], b.decision, who.principal, b.notes);
     json(res, out.status, out.body);
     return;
   }

@@ -316,7 +316,7 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
   if (!one) return false;
   const agentId = decodeURIComponent(one[1]);
   if (!one[2] && req.method === 'GET') {
-    if (!(await requirePrivilege(req, res, state, 'credentials.agent.read'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'credentials.agent.read', { agentId }))) return true;
     const items = await agentCredentials(state, agentId);
     if (!items) return noStore(res, 404, { error: 'not_found' }), true;
     const builtin = isBuiltin(state.agents.get(agentId)!);
@@ -324,7 +324,7 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
     return true;
   }
   if (one[2] && (req.method === 'POST' || req.method === 'PUT')) {
-    const principal = await requirePrivilege(req, res, state, 'credentials.agent.set');
+    const principal = await requirePrivilege(req, res, state, 'credentials.agent.set', { agentId });
     if (!principal) return true;
     await submitCredential(state, req, res, agentId, decodeURIComponent(one[2]), principal.actor);
     return true;

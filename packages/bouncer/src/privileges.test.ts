@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
 import { PRIVILEGES, authorize, type Privilege } from './index.js';
 
-const ROLES: readonly Role[] = ['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'admin'];
+const ROLES: readonly Role[] = ['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'];
 
 // The census in DESIGN_AUTHORITY.md: the role each route names today. A literal copy, so this proof does not depend on `auth`.
 const CENSUS: Record<string, Role> = {
@@ -34,6 +34,7 @@ const CENSUS: Record<string, Role> = {
   'agents.converse': 'operator',
   'hooks.invoke': 'operator',
   'schedules.write': 'operator',
+  'runs.attest-requester': 'gatekeeper-ingress',
   'approvals.decide': 'approver',
   'ledger.ingest': 'ingest',
   'ledger.attest-run-actor': 'gatekeeper-egress',
@@ -55,6 +56,10 @@ const CENSUS: Record<string, Role> = {
   'policy.set': 'admin',
   'policy.budget.set': 'admin',
   'config.export': 'admin',
+  'config.export.agent': 'admin',
+  'agents.owners.set': 'admin',
+  'identity.links.read': 'admin',
+  'identity.links.set': 'admin',
   'credentials.outstanding.read': 'admin',
   'credentials.platform.read': 'admin',
   'credentials.platform.set': 'admin',
@@ -67,7 +72,13 @@ const CENSUS: Record<string, Role> = {
   'skills.decide': 'admin',
   'skills.checks.run': 'admin',
 };
-const EXCLUSIVE = new Set(['ledger.attest-run-actor', 'egress.connections.token']);
+// Held by one service role alone; an admin does not hold them. `runs.attest-requester` moved from `operator` to
+// `gatekeeper-ingress` (TSK-111): the old rule no longer matches it, so the proof below reads it from here.
+const EXCLUSIVE: Record<string, Role> = {
+  'ledger.attest-run-actor': 'gatekeeper-egress',
+  'egress.connections.token': 'gatekeeper-egress',
+  'runs.attest-requester': 'gatekeeper-ingress',
+};
 
 // The old rule (`hasRole` in auth), copied.
 function oldHasRole(roles: Role[], role: Role): boolean {
@@ -79,7 +90,7 @@ function oldHasRole(roles: Role[], role: Role): boolean {
 
 // The old call site: the role a route names, plus the inline test for the two exclusive privileges.
 function oldAllowed(roles: Role[], privilege: string): boolean {
-  if (EXCLUSIVE.has(privilege)) return roles.includes('gatekeeper-egress');
+  if (EXCLUSIVE[privilege]) return roles.includes(EXCLUSIVE[privilege]);
   return oldHasRole(roles, CENSUS[privilege]);
 }
 
@@ -90,12 +101,12 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 59);
+    assert.equal(PRIVILEGES.length, 64);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 
-  it('matches the old rule for each of the 64 role sets and each privilege', () => {
-    assert.equal(subsets.length, 64);
+  it('matches the old rule for each of the 128 role sets and each privilege', () => {
+    assert.equal(subsets.length, 128);
     for (const roles of subsets) {
       for (const privilege of PRIVILEGES) {
         assert.equal(authorize({ principal: principal(roles), privilege }).allowed, oldAllowed(roles, privilege), `[${roles}] ${privilege}`);
@@ -112,11 +123,16 @@ describe('authorize', () => {
     }
   });
 
-  it('an admin does not pass the two exclusive privileges', () => {
-    for (const p of EXCLUSIVE) {
-      assert.deepEqual(authorize({ principal: principal(['admin']), privilege: p as Privilege }), { allowed: false, required: 'gatekeeper-egress' });
-      assert.deepEqual(authorize({ principal: principal(['gatekeeper-egress']), privilege: p as Privilege }), { allowed: true });
+  it('an admin does not pass the exclusive privileges; only their service role does', () => {
+    for (const [p, role] of Object.entries(EXCLUSIVE)) {
+      assert.deepEqual(authorize({ principal: principal(['admin']), privilege: p as Privilege }), { allowed: false, required: role });
+      assert.deepEqual(authorize({ principal: principal([role]), privilege: p as Privilege }), { allowed: true });
     }
+  });
+
+  it('an operator, even with every other role, cannot name the requester of a run', () => {
+    const everyoneButIngress = ROLES.filter((r) => r !== 'gatekeeper-ingress');
+    assert.deepEqual(authorize({ principal: principal([...everyoneButIngress]), privilege: 'runs.attest-requester' }), { allowed: false, required: 'gatekeeper-ingress' });
   });
 
   it('keeps the five hasRole assertions from auth, for equivalent privileges', () => {

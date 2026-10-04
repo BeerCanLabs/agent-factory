@@ -32,6 +32,7 @@ export const PRIVILEGES = [
   'agents.converse',
   'hooks.invoke',
   'schedules.write',
+  'runs.attest-requester',
   'approvals.decide',
   'ledger.ingest',
   'ledger.attest-run-actor',
@@ -53,6 +54,10 @@ export const PRIVILEGES = [
   'policy.set',
   'policy.budget.set',
   'config.export',
+  'config.export.agent',
+  'agents.owners.set',
+  'identity.links.read',
+  'identity.links.set',
   'credentials.outstanding.read',
   'credentials.platform.read',
   'credentials.platform.set',
@@ -150,7 +155,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
   ingest: [
     'ledger.ingest',
   ],
-  // The egress holds the ingest privileges too. The last two are exclusive: an admin does not hold them.
+  // The egress holds the ingest privileges too. Two of these are exclusive: an admin does not hold them.
   'gatekeeper-egress': [
     'ledger.ingest',
     'ledger.attest-run-actor',
@@ -163,7 +168,13 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'egress.routes.read',
     'egress.connections.token',
   ],
-  // Everything except the two exclusive privileges.
+  // The ingress is the one party that sees who sent a message, so it alone may say who asked (Dale, 2026-10-04: an
+  // operator or admin must not be able to name the requester). Its token also carries `operator`, which it needs to
+  // wake agents and hand off messages.
+  'gatekeeper-ingress': [
+    'runs.attest-requester',
+  ],
+  // Everything except the exclusive privileges.
   admin: [
     'agents.read',
     'policy.read',
@@ -211,6 +222,10 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'policy.set',
     'policy.budget.set',
     'config.export',
+    'config.export.agent',
+    'agents.owners.set',
+    'identity.links.read',
+    'identity.links.set',
     'credentials.outstanding.read',
     'credentials.platform.read',
     'credentials.platform.set',
@@ -223,4 +238,44 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'skills.decide',
     'skills.checks.run',
   ],
+};
+
+/**
+ * Privileges that act on one agent, so a route can pass that agent as the resource. Only these can be held through
+ * ownership or as the requester; every other privilege is fleet-wide and is held by roles alone.
+ */
+export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
+  'agents.wake',
+  'agents.pause',
+  'agents.resume',
+  'config.read',
+  'config.export.agent',
+  'credentials.agent.read',
+  'credentials.agent.set',
+  'connections.start',
+  'connections.import',
+  'approvals.decide',
+]);
+
+/** The roles that are derived from data about one agent or run, never read from a credential or a claim. */
+export type DerivedRole = 'agent-owner' | 'requester';
+
+/**
+ * What a derived role holds, on its own agent only (Dale, 2026-10-03). `approvals.decide` is held by an owner only
+ * when the run has no requesting user (see `authorize`); the requester holds it for its own run.
+ */
+export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> = {
+  'agent-owner': [
+    'config.read',
+    'config.export.agent',
+    'credentials.agent.read',
+    'credentials.agent.set',
+    'connections.start',
+    'connections.import',
+    'agents.wake',
+    'agents.pause',
+    'agents.resume',
+    'approvals.decide',
+  ],
+  requester: ['approvals.decide'],
 };

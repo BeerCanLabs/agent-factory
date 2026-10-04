@@ -38,7 +38,7 @@ services:
       AGENTS_ROOT: /app/agents
       # Dev-only tokens. Each service gets its own name and least role.
       FACTORY_TOKEN: dev-admin-token
-      FACTORY_TOKENS: '[{"name":"gatekeeper-ingress","token":"dev-gatekeeper-ingress-token","roles":["operator"]},{"name":"gatekeeper-egress","token":"dev-gatekeeper-egress-token","roles":["gatekeeper-egress"]}]'
+      FACTORY_TOKENS: '[{"name":"gatekeeper-ingress","token":"dev-gatekeeper-ingress-token","roles":["operator","gatekeeper-ingress"]},{"name":"gatekeeper-egress","token":"dev-gatekeeper-egress-token","roles":["gatekeeper-egress"]}]'
       GATEKEEPER_INGRESS_URL: http://gatekeeper-ingress:8090
       GATEKEEPER_INGRESS_TOKEN: dev-presence-token
       FACTORY_CALLBACK_SIGNING_KEY: dev-callback-signing-key

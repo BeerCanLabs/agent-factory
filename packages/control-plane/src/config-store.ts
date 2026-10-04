@@ -17,7 +17,8 @@
  *   GET /api/v1/agents/:id/config                 the current version (viewer)
  *   GET /api/v1/agents/:id/config/history         every version, oldest first (viewer)
  *   GET /api/v1/agents/:id/config/versions/:n     one version (viewer)
- *   GET /api/v1/config/export                     every agent's full history (admin; ledgered)
+ *   GET /api/v1/config/export[?agent=<id>]        every agent's full history (admin), or one agent's (admin or its owner); ledgered
+ *   PUT /api/v1/agents/:id/owners                 set, replace or clear the agent's owners (admin; a new version)
  *
  * GAP-060: no configuration record exists for an agent that does not exist. On start, records for ids that are neither
  * a known agent nor have a policy are removed (`pruneOrphans`), and migration never creates one for an unknown id.
@@ -31,7 +32,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { requirePrivilege, json, type FactoryState } from './app.js';
+import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
+import { parseActor } from './identity-links.js';
 import { archiveStamp, isReservedPolicyId, type AgentPolicy } from './policy.js';
 
 const execFileAsync = promisify(execFile);
@@ -45,6 +47,8 @@ export type ConfigContent = {
   skills: ConfigSkill[];
   /** The admin-set policy; null when none is set (E7: the agent has no egress of its own). */
   policy: AgentPolicy | null;
+  /** SK3, GAP-088: who owns the agent, as principal actors (`cloudflare:`, `oidc:`, `token:`). Absent when none, never `[]`. */
+  owners?: string[];
 };
 
 export type ConfigRecord = ConfigContent & {
@@ -105,7 +109,8 @@ function sortValue(value: unknown): unknown {
 }
 
 export function configHash(c: ConfigContent): string {
-  const content: ConfigContent = { agentId: c.agentId, source: c.source, skills: c.skills, policy: c.policy };
+  // `owners` only when set, so the hash of every record that has none is what it was before owners existed.
+  const content: ConfigContent = { agentId: c.agentId, source: c.source, skills: c.skills, policy: c.policy, ...(c.owners ? { owners: c.owners } : {}) };
   return createHash('sha256').update(canonicalJson(content)).digest('hex');
 }
 
@@ -349,6 +354,7 @@ export class VersionedConfigStore implements ConfigStore {
       source: structuredClone(content.source),
       skills: structuredClone(content.skills),
       policy: structuredClone(content.policy),
+      ...(content.owners ? { owners: [...content.owners] } : {}),
       updatedAt: new Date().toISOString(),
       updatedBy: meta.updatedBy,
       reason: meta.reason,
@@ -373,7 +379,10 @@ export class VersionedConfigStore implements ConfigStore {
   }
 }
 
-/** The agent's configuration as the factory holds it now. Adopted skills carry forward until skill adoption exists. */
+/**
+ * The agent's configuration as the factory holds it now. Adopted skills and owners carry forward: a registration, a
+ * policy change and a deploy never drop them.
+ */
 export function configOf(state: FactoryState, agentId: string): ConfigContent {
   const agent = state.agents.get(agentId);
   const previous = state.configs?.current(agentId);
@@ -382,7 +391,29 @@ export function configOf(state: FactoryState, agentId: string): ConfigContent {
     source: { ...(agent?.repo ? { repo: agent.repo } : {}), ...(agent?.commit ? { commit: agent.commit } : {}) },
     skills: previous?.skills ?? [],
     policy: state.policies.has(agentId) ? state.policies.get(agentId) : null,
+    ...(previous?.owners ? { owners: previous.owners } : {}),
   };
+}
+
+/** The agent's owners. No store or no record means no owners: it fails closed. */
+export function ownersOf(state: FactoryState, agentId: string): string[] {
+  return state.configs?.current(agentId)?.owners ?? [];
+}
+
+export const MAX_OWNERS = 10;
+
+/** A list of owners as stored: lower-case principal actors, sorted, unique, at most ten. `[]` is "none". */
+export function parseOwners(value: unknown): { ok: true; owners: string[] } | { ok: false; error: string } {
+  if (!Array.isArray(value)) return { ok: false, error: 'owners must be an array of principal actors' };
+  const owners: string[] = [];
+  for (const v of value) {
+    const actor = parseActor(v);
+    if (!actor) return { ok: false, error: 'each owner must be a principal actor such as cloudflare:alice@example.com, oidc:... or token:...' };
+    owners.push(actor);
+  }
+  const unique = [...new Set(owners)].sort();
+  if (unique.length > MAX_OWNERS) return { ok: false, error: `an agent has at most ${MAX_OWNERS} owners` };
+  return { ok: true, owners: unique };
 }
 
 /**
@@ -548,26 +579,75 @@ export function changeReason(req: http.IncomingMessage, fallback: string): strin
   return given ? given.slice(0, 500) : fallback;
 }
 
+const AGENT_OWNERS = /^\/api\/v1\/agents\/([^/]+)\/owners$/;
 const AGENT_CONFIG = /^\/api\/v1\/agents\/([^/]+)\/config(?:\/(history|versions\/([^/]+)))?$/;
+
+/**
+ * `PUT /api/v1/agents/:id/owners` `{ owners }` (admin): sets, replaces or (with `[]`) clears the agent's owners as a new
+ * configuration version. It goes through `put` and raises: a change that was not stored must not look stored.
+ */
+async function handleOwners(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, agentId: string): Promise<boolean> {
+  const principal = await requirePrivilege(req, res, state, 'agents.owners.set');
+  if (!principal) return true;
+  if (!state.configs) {
+    json(res, 503, { error: 'config_store_unavailable' });
+    return true;
+  }
+  if (agentId.startsWith('__')) {
+    json(res, 400, { error: 'reserved_agent_id' });
+    return true;
+  }
+  if (!state.agents.has(agentId)) {
+    json(res, 404, { error: 'not_found' });
+    return true;
+  }
+  const checked = parseOwners((await readJson(req)).owners);
+  if (!checked.ok) {
+    json(res, 400, { error: checked.error });
+    return true;
+  }
+  const { owners: _previous, ...content } = configOf(state, agentId);
+  try {
+    const { record, created } = await state.configs.put(
+      { ...content, ...(checked.owners.length ? { owners: checked.owners } : {}) },
+      { updatedBy: principal.actor, reason: changeReason(req, 'owners changed') },
+    );
+    if (created) ledgerVersion(state, record, principal.actor);
+    json(res, 200, record);
+  } catch (err) {
+    console.error(`[control-plane] owners for ${agentId} not stored: ${err instanceof Error ? err.message : String(err)}`);
+    json(res, 500, { error: 'owners_not_stored' });
+  }
+  return true;
+}
 
 /** The configuration API. Returns false for any path it does not own. Reads never touch the backend. */
 export async function handleConfig(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
+  const ownersPath = path.match(AGENT_OWNERS);
+  if (ownersPath && req.method === 'PUT') return handleOwners(state, req, res, decodeURIComponent(ownersPath[1]));
   if (req.method !== 'GET') return false;
   if (path === '/api/v1/config/export') {
-    const principal = await requirePrivilege(req, res, state, 'config.export');
+    // `?agent=<id>` exports that one agent (its owner may); without it, every agent (admin only).
+    const agent = new URL(req.url ?? '/', 'http://factory.local').searchParams.get('agent') || undefined;
+    const principal = await requirePrivilege(req, res, state, agent ? 'config.export.agent' : 'config.export', agent ? { agentId: agent } : undefined);
     if (!principal) return true;
     if (!state.configs) {
       json(res, 503, { error: 'config_store_unavailable' });
       return true;
     }
-    const out = state.configs.exportAll();
-    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'factory', type: 'action', action: 'CONFIG_EXPORTED', actor: principal.actor });
+    const all = state.configs.exportAll();
+    const out = agent ? { ...all, agents: all.agents.filter((a) => a.agentId === agent) } : all;
+    if (agent && !out.agents.length) {
+      json(res, 404, { error: state.agents.has(agent) ? 'no_config' : 'not_found' });
+      return true;
+    }
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent ?? 'factory', type: 'action', action: 'CONFIG_EXPORTED', actor: principal.actor });
     json(res, 200, out);
     return true;
   }
   const m = path.match(AGENT_CONFIG);
   if (!m) return false;
-  if (!(await requirePrivilege(req, res, state, 'config.read'))) return true;
+  if (!(await requirePrivilege(req, res, state, 'config.read', { agentId: decodeURIComponent(m[1]) }))) return true;
   if (!state.configs) {
     json(res, 503, { error: 'config_store_unavailable' });
     return true;

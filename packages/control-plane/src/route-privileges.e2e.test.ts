@@ -16,7 +16,7 @@ import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
 
-const ROLES: Role[] = ['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'admin'];
+const ROLES: Role[] = ['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'];
 const TOKEN = (r: Role) => `${r}-route-privileges-e2e`;
 type Credential = Role | 'none';
 const CREDENTIALS: Credential[] = ['none', ...ROLES];
@@ -40,6 +40,8 @@ type RouteRow = {
   firstRole?: Role;
   /** `gatekeeper-egress` only: an admin gets a 403 after authentication. */
   exclusive?: boolean;
+  /** Asked after `role`, and held by this service role alone: no single-role credential passes, so the credentials that pass `role` are named this role. The requester.e2e test covers the credential that passes both. */
+  thenExclusive?: Role;
   body?: unknown;
 };
 
@@ -86,6 +88,7 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/agents/nope/isolate', privilege: 'agents.isolate', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/runs/nope/cancel', privilege: 'runs.cancel', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/conversation', privilege: 'agents.converse', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/wake', privilege: 'runs.attest-requester', role: 'operator', thenExclusive: 'gatekeeper-ingress', body: { requestedBy: { provider: 'discord', id: '1' } } },
   { method: 'POST', path: '/api/v1/hooks/hooked', privilege: 'hooks.invoke', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/schedules', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
   { method: 'DELETE', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer' },
@@ -115,6 +118,11 @@ const ROUTES: RouteRow[] = [
   { method: 'PUT', path: '/api/v1/agents/nope/policy', privilege: 'policy.set', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/policies/budget', privilege: 'policy.budget.set', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/config/export', privilege: 'config.export', role: 'admin' },
+  { method: 'GET', path: '/api/v1/identity-links', privilege: 'identity.links.read', role: 'admin' },
+  { method: 'PUT', path: '/api/v1/identity-links/discord/1', privilege: 'identity.links.set', role: 'admin', body: { actor: 'token:x' } },
+  { method: 'DELETE', path: '/api/v1/identity-links/discord/1', privilege: 'identity.links.set', role: 'admin' },
+  { method: 'GET', path: '/api/v1/config/export?agent=castle', privilege: 'config.export.agent', role: 'admin' },
+  { method: 'PUT', path: '/api/v1/agents/nope/owners', privilege: 'agents.owners.set', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/keymaster/outstanding', privilege: 'credentials.outstanding.read', role: 'admin' },
   { method: 'GET', path: '/api/v1/keymaster/platform/credentials', privilege: 'credentials.platform.read', role: 'admin' },
   { method: 'POST', path: '/api/v1/keymaster/platform/credentials/n', privilege: 'credentials.platform.set', role: 'admin', body: {} },
@@ -234,8 +242,8 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
           if (r.status !== 401) failures.push(`${label} (want 401)`);
           continue;
         }
-        const allowed = row.exclusive ? cred === 'gatekeeper-egress' : oldHasRole(roles, row.role);
-        const named = row.firstRole && !oldHasRole(roles, row.firstRole) ? row.firstRole : row.role;
+        const allowed = row.thenExclusive ? false : row.exclusive ? cred === 'gatekeeper-egress' : oldHasRole(roles, row.role);
+        const named = row.firstRole && !oldHasRole(roles, row.firstRole) ? row.firstRole : row.thenExclusive && oldHasRole(roles, row.role) ? row.thenExclusive : row.role;
         if (allowed) {
           if (r.status === 401 || r.status === 403) failures.push(`${label} (want it to pass)`);
         } else if (r.status !== 403 || r.body?.error !== 'forbidden' || r.body?.required !== named) {
