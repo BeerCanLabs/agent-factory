@@ -9,7 +9,8 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
-import { ApprovalStore, PolicyStore } from './policy.js';
+import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { PolicyStore } from './policy.js';
 
 const VIEWER = 'viewer-held-e2e';
 const APPROVER = 'approver-held-e2e';

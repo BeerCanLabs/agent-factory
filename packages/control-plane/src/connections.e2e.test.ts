@@ -29,7 +29,8 @@ async function openSystems(dir: string, ledger: Parameters<typeof SystemsStore.o
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
-import { ApprovalStore, PolicyStore } from './policy.js';
+import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { PolicyStore } from './policy.js';
 import type { AgentRecord } from './catalog.js';
 
 const ADMIN = 'admin-conn';

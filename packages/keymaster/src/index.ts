@@ -6,9 +6,7 @@ export type {
   EphemeralLease,
   GatedDispatchParams,
   GatedDispatchOutcome,
-  Approval,
   ApprovalConsumer,
-  ApprovalState,
   AgentInfo,
   RunInfo,
 } from './keymaster.js';

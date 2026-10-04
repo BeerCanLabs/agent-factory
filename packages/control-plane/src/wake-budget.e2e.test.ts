@@ -10,7 +10,8 @@ import { createFactoryServer, createRun, SYSTEM, type FactoryState } from './app
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
-import { ApprovalStore, PolicyStore } from './policy.js';
+import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { PolicyStore } from './policy.js';
 import { pollQueueOnce } from './queues.js';
 import { ScheduleStore } from './schedules.js';
 import { agentsDueForCron } from './scheduler.js';

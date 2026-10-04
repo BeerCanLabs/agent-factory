@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { promisify } from 'node:util';
 import type http from 'node:http';
 import type { ChainedEvent, LedgerStore } from '@beercanlabs/factory-ledger';
-import { authenticate, json, readJson, type FactoryState } from './app.js';
+import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { isTerminal, type Run } from './runs.js';
 
 const execFileAsync = promisify(execFile);
@@ -301,7 +301,7 @@ function bearer(req: http.IncomingMessage): string | undefined {
  */
 export async function handleRunProgress(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
   if (path === '/api/v1/gatekeeper-egress/progress' && req.method === 'POST') {
-    if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'egress.progress.report'))) return true;
     const body = await readJson(req);
     const batch = Array.isArray(body.events) ? body.events.slice(0, 500) : [];
     const progress = progressOf(state);

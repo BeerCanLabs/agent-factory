@@ -10,7 +10,7 @@
 import http from 'node:http';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { ConnectionKeymaster, grantSecretName, type Grant } from '@beercanlabs/factory-keymaster';
-import { authenticate, json, readJson, type FactoryState } from './app.js';
+import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { isTerminal } from './runs.js';
 import { invalidateCredentials } from './credentials.js';
 
@@ -143,7 +143,7 @@ export async function handleConnections(state: FactoryState, req: http.IncomingM
 
   const start = path.match(/^\/api\/v1\/connections\/([^/]+)\/([^/]+)\/start$/);
   if (start && req.method === 'GET') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'connections.start');
     if (!principal) return true;
     const [agentId, provider] = [decodeURIComponent(start[1]), decodeURIComponent(start[2])];
     const def = state.systems?.getConnectionProvider(provider);
@@ -175,7 +175,7 @@ export async function handleConnections(state: FactoryState, req: http.IncomingM
 
   const imp = path.match(/^\/api\/v1\/connections\/([^/]+)\/([^/]+)\/import$/);
   if (imp && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'connections.import');
     if (!principal) return true;
     await importGrant(state, res, decodeURIComponent(imp[1]), decodeURIComponent(imp[2]), await readJson(req), principal.actor);
     return true;
@@ -183,7 +183,7 @@ export async function handleConnections(state: FactoryState, req: http.IncomingM
 
   const list = path.match(/^\/api\/v1\/connections\/([^/]+)$/);
   if (list && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'connections.read'))) return true;
     const agentId = decodeURIComponent(list[1]);
     const agent = state.agents.get(agentId);
     if (!agent) return json(res, 404, { error: 'not_found' }), true;
@@ -307,10 +307,9 @@ async function importGrant(state: FactoryState, res: http.ServerResponse, agentI
 }
 
 async function tokenForGatekeeperEgress(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
-  const principal = await authenticate(req, res, state, 'gatekeeper-egress');
+  const principal = await requirePrivilege(req, res, state, 'egress.connections.token');
   if (!principal) return;
-  // Only the gatekeeper-egress injects tokens (K3): an admin token is not enough.
-  if (!principal.roles.includes('gatekeeper-egress')) return json(res, 403, { error: 'forbidden', required: 'gatekeeper-egress' });
+  // Only the gatekeeper-egress injects tokens (K3): `egress.connections.token` is exclusive, an admin token is not enough.
   const b = await readJson(req);
   const runId = typeof b.runId === 'string' ? b.runId : undefined;
   const agentId = typeof b.agentId === 'string' ? b.agentId : undefined;

@@ -75,7 +75,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'bouncer',
     title: 'Bouncer',
     role: 'Governance and human-in-the-loop approvals for sensitive held actions (E4, E9)',
-    hostedIn: ['packages/control-plane', 'packages/gatekeeper-egress'],
+    hostedIn: ['packages/bouncer', 'packages/control-plane', 'packages/gatekeeper-egress'],
   },
   timekeeper: {
     name: 'timekeeper',

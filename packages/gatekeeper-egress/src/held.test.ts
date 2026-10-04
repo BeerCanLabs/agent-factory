@@ -4,7 +4,8 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { RunTokens } from '@beercanlabs/factory-auth';
-import { createGatekeeperEgress, HELD_BODY_LIMIT, type ControlClient, type HoldOutcome, type HoldRequest, type RunContext } from './gatekeeper-egress.js';
+import { HELD_BODY_LIMIT, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
+import { createGatekeeperEgress, type ControlClient, type RunContext } from './gatekeeper-egress.js';
 
 const tokens = new RunTokens('gatekeeper-egress-held-test-run-token-key-0123');
 const ACCESS = 'linkedin-access-value-for-tests';
@@ -45,7 +46,7 @@ describe('E9 held requests: the gatekeeper-egress holds what an agent sends in a
   let token = '';
   let seq = 0;
 
-  // The control plane's hold semantics (policy.ts ApprovalStore.hold), in memory.
+  // The control plane's hold semantics (bouncer approvals.ts ApprovalStore.hold), in memory.
   const control: ControlClient = {
     async runContext(runId) {
       return runId === ctx.run.runId ? structuredClone(ctx) : null;
