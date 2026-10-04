@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
-import { accessAssertionOf, hasRole, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
+import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, connectionsOf, credentialsOf, egressOf, type AgentCategory } from './catalog.js';
@@ -238,24 +238,6 @@ export async function identify(req: http.IncomingMessage, state: FactoryState): 
     reasons.push(`access: ${r.reason}`);
   }
   return { ok: false, reason: reasons.join('; ') || 'no credential' };
-}
-
-export async function authenticate(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  state: FactoryState,
-  role: Role,
-): Promise<Principal | null> {
-  const result = await identify(req, state);
-  if (!result.ok) {
-    json(res, 401, { error: 'unauthorized' });
-    return null;
-  }
-  if (!hasRole(result.principal, role)) {
-    json(res, 403, { error: 'forbidden', required: role });
-    return null;
-  }
-  return result.principal;
 }
 
 /**

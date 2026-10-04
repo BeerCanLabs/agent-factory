@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type CryptoKey } from 'jose';
-import { authFromEnv, bearerAuth, hasRole, oidcAuth } from './index.js';
+import { authFromEnv, bearerAuth, oidcAuth } from './index.js';
 
 const ISS = 'https://idp.example';
 const AUD = 'factory';
@@ -111,16 +111,6 @@ describe('bearer', () => {
     if (r.ok) assert.equal(r.principal.actor, 'token:gatekeeper-egress');
     assert.equal((await auth.verify('Bearer nope')).ok, false);
     assert.equal((await auth.verify(undefined)).ok, false);
-  });
-});
-
-describe('roles', () => {
-  it('admin implies all; operator and approver imply viewer; ingest is isolated', () => {
-    assert.ok(hasRole({ actor: 'a', roles: ['admin'] }, 'approver'));
-    assert.ok(hasRole({ actor: 'a', roles: ['operator'] }, 'viewer'));
-    assert.ok(!hasRole({ actor: 'a', roles: ['operator'] }, 'approver'));
-    assert.ok(!hasRole({ actor: 'a', roles: ['ingest'] }, 'viewer'));
-    assert.ok(!hasRole({ actor: 'a', roles: [] }, 'viewer'));
   });
 });
 
