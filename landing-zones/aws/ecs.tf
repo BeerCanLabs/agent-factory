@@ -158,7 +158,9 @@ resource "aws_ecs_service" "control_plane" {
   service_registries {
     registry_arn = aws_service_discovery_service.svc["control-plane"].arn
   }
-  depends_on = [aws_lb_listener.https, aws_efs_mount_target.ledger]
+  # The control plane reads FACTORY_TOKENS when a task starts, and the ingress token's roles must already be in it
+  # (TSK-111): a new control plane against the old roles refuses every wake that names a requester with 403.
+  depends_on = [aws_lb_listener.https, aws_efs_mount_target.ledger, aws_secretsmanager_secret_version.factory_tokens]
 }
 
 # ---- gatekeeper-egress: the only route out for agents --------------------------------------------------
