@@ -27,7 +27,7 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, exists
 import { dirname, join } from 'node:path';
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, type SkillManifest, type SkillRequires } from '@beercanlabs/factory-contract';
-import { applyKillSwitch, authenticate, json, readJson, type FactoryState } from './app.js';
+import { applyKillSwitch, json, readJson, requirePrivilege, type FactoryState } from './app.js';
 import { FULL_SHA } from './runtime.js';
 import { parse as parseYaml } from 'yaml';
 import { checkRefName, checkRepoUrl, gitSkillSource, SourceError, type SkillSource } from './source.js';
@@ -241,7 +241,7 @@ function ledgerKey(id: unknown, version?: unknown): string {
 
 async function register(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   // SK1: any authenticated user may register a skill; nothing is adoptable until an admin approves it.
-  const principal = await authenticate(req, res, state, 'viewer');
+  const principal = await requirePrivilege(req, res, state, 'skills.register');
   if (!principal) return;
   const body = await readJson(req);
   const registry = skillRegistry(state);
@@ -407,7 +407,7 @@ async function decide(
   version: string,
   decision: 'approve' | 'reject',
 ): Promise<void> {
-  const principal = await authenticate(req, res, state, 'admin');
+  const principal = await requirePrivilege(req, res, state, 'skills.decide');
   if (!principal) return;
   const body = await readJson(req);
   if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 2000)) {
@@ -608,7 +608,7 @@ export async function resumeSkillChecks(state: FactoryState): Promise<number> {
 }
 
 async function rerunChecks(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, id: string, version: string): Promise<void> {
-  const principal = await authenticate(req, res, state, 'admin');
+  const principal = await requirePrivilege(req, res, state, 'skills.checks.run');
   if (!principal) return;
   const out = await startSkillChecks(state, id, version, principal.actor);
   if (out.error === 'not_found') return json(res, 404, { error: 'not_found', id, version });
@@ -678,7 +678,7 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
   if (req.method !== 'GET') return false;
 
   if (path === '/api/v1/skills') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'skills.read'))) return true;
     const registry = skillRegistry(state);
     json(res, 200, registry.ids().map((id) => summarizeSkill(registry, id)).filter(Boolean));
     return true;
@@ -686,7 +686,7 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
 
   const one = path.match(ONE_SKILL);
   if (one) {
-    if (!(await authenticate(req, res, state, 'viewer'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'skills.read'))) return true;
     const registry = skillRegistry(state);
     const id = decode(one[1]);
     const summary = summarizeSkill(registry, id);
@@ -697,7 +697,7 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
 
   const ver = path.match(ONE_VERSION);
   if (ver) {
-    if (!(await authenticate(req, res, state, 'viewer'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'skills.read'))) return true;
     const [id, version] = [decode(ver[1]), decode(ver[2])];
     const rec = skillRegistry(state).get(id, version);
     if (!rec) return json(res, 404, { error: 'not_found', id, version }), true;

@@ -14,7 +14,7 @@
 import http from 'node:http';
 import { secretPresent, writableProvider, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { assessCredentials, assessPlatformCredentials, submittableSecrets, summarize, type CredentialItem, type CredentialSummary } from '@beercanlabs/factory-keymaster';
-import { authenticate, json, type FactoryState } from './app.js';
+import { requirePrivilege, json, type FactoryState } from './app.js';
 import { BUILTIN_AGENT_IDS, declaredCredentials, type AgentRecord } from './catalog.js';
 import { consentUnavailable, getConnections } from './connections.js';
 
@@ -265,21 +265,21 @@ async function submitProviderClient(state: FactoryState, req: http.IncomingMessa
 export async function handleCredentials(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
   const providerClient = path.match(/^\/api\/v1\/keymaster\/providers\/([a-z0-9-]+)\/client$/);
   if (providerClient && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'credentials.provider.read'))) return true;
     const def = state.systems?.getConnectionProvider(providerClient[1]);
     if (!def) return noStore(res, 404, { error: 'not_an_oauth_provider', system: providerClient[1] }), true;
     const name = def.kind === 'oauth-user' ? def.clientSecret : def.keySecret;
     return noStore(res, 200, { system: providerClient[1], kind: def.kind, name, present: await secretPresent(name, state.providers) }), true;
   }
   if (providerClient && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'credentials.provider.set');
     if (!principal) return true;
     await submitProviderClient(state, req, res, providerClient[1], principal.actor);
     return true;
   }
 
   if (path === '/api/v1/keymaster/outstanding' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'admin'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'credentials.outstanding.read'))) return true;
     const agents: Array<{ agentId: string; name: string } & CredentialSummary> = [];
     await Promise.all([...state.agents.values()].filter((a) => !isBuiltin(a)).map(async (a) => {
       const s = await summaryFor(state, a.id);
@@ -291,7 +291,7 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
   }
 
   if (path === '/api/v1/keymaster/platform/credentials' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'admin'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'credentials.platform.read'))) return true;
     const items = await assessPlatformCredentials({
       gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets ?? new Set(),
       present: (name) => cachedPresent(state, name),
@@ -302,7 +302,7 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
   }
   const plat = path.match(/^\/api\/v1\/keymaster\/platform\/credentials\/([^/]+)$/);
   if (plat && (req.method === 'POST' || req.method === 'PUT')) {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'credentials.platform.set');
     if (!principal) return true;
     const name = decodeURIComponent(plat[1]);
     if (!(state.gatekeeperEgressHeldSecrets ?? new Set<string>()).has(name)) {
@@ -316,7 +316,7 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
   if (!one) return false;
   const agentId = decodeURIComponent(one[1]);
   if (!one[2] && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'admin'))) return true;
+    if (!(await requirePrivilege(req, res, state, 'credentials.agent.read'))) return true;
     const items = await agentCredentials(state, agentId);
     if (!items) return noStore(res, 404, { error: 'not_found' }), true;
     const builtin = isBuiltin(state.agents.get(agentId)!);
@@ -324,7 +324,7 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
     return true;
   }
   if (one[2] && (req.method === 'POST' || req.method === 'PUT')) {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'credentials.agent.set');
     if (!principal) return true;
     await submitCredential(state, req, res, agentId, decodeURIComponent(one[2]), principal.actor);
     return true;

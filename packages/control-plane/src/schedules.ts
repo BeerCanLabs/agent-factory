@@ -11,9 +11,10 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { hasRole } from '@beercanlabs/factory-auth';
+import type { Role } from '@beercanlabs/factory-auth';
+import { authorize } from '@beercanlabs/factory-bouncer';
 import { payloadHash } from '@beercanlabs/factory-ledger';
-import { authenticate, json, readJson, type FactoryState } from './app.js';
+import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
 import { isTerminal } from './runs.js';
 import { cronMatches, type ZonedTimeParts } from './scheduler.js';
 
@@ -218,7 +219,7 @@ export function isTimeZone(tz: string): boolean {
 /** Who is calling the schedules API: a live run (acting for its own agent only) or a verified principal. */
 export type ScheduleCaller =
   | { kind: 'run'; actor: string; agentId: string; runId: string }
-  | { kind: 'principal'; actor: string; operator: boolean };
+  | { kind: 'principal'; actor: string; operator: boolean; required: Role };
 
 function bearer(req: http.IncomingMessage): string | undefined {
   const h = req.headers.authorization;
@@ -243,15 +244,16 @@ export async function authenticateOperatorOrRun(
     }
     return { kind: 'run', actor: `run:${claims.agentId}:${claims.runId}`, agentId: claims.agentId, runId: claims.runId };
   }
-  const principal = await authenticate(req, res, state, 'viewer');
+  const principal = await requirePrivilege(req, res, state, 'schedules.read');
   if (!principal) return null;
-  return { kind: 'principal', actor: principal.actor, operator: hasRole(principal, 'operator') };
+  const write = authorize({ principal, privilege: 'schedules.write' });
+  return { kind: 'principal', actor: principal.actor, operator: write.allowed, required: write.allowed ? 'operator' : write.required };
 }
 
 /** Creating or deleting on behalf of the fleet needs the operator role; a run acts for itself. */
 function canWrite(caller: ScheduleCaller, res: http.ServerResponse): boolean {
   if (caller.kind === 'run' || caller.operator) return true;
-  json(res, 403, { error: 'forbidden', required: 'operator' });
+  json(res, 403, { error: 'forbidden', required: caller.required });
   return false;
 }
 
