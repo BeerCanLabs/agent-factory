@@ -85,6 +85,7 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/agents/nope/wake', privilege: 'agents.wake', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/pause', privilege: 'agents.pause', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/resume', privilege: 'agents.resume', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/reset', privilege: 'agents.reset', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/isolate', privilege: 'agents.isolate', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/runs/nope/cancel', privilege: 'runs.cancel', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/conversation', privilege: 'agents.converse', role: 'operator', body: {} },

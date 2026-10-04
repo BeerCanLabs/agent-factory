@@ -79,6 +79,13 @@ export const factoryApi = {
     });
   },
 
+  /** Ends the agent's stuck or stale runs and returns it to SLEEPING. Budget, policy and memory are untouched. */
+  async resetAgent(id: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/agents/${id}/reset`, {
+      method: 'POST',
+    });
+  },
+
   async resumeAgent(id: string): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>(`/agents/${id}/resume`, {
       method: 'POST',

@@ -4,6 +4,7 @@ import {
   Square,
   Pause,
   RotateCcw,
+  RefreshCw,
   Search,
   ExternalLink,
   Zap,
@@ -118,6 +119,18 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
       onRefresh();
     } catch (err: any) {
       alert(`Failed to pause agent: ${err.message}`);
+    }
+  };
+
+  const handleReset = async (agent: AgentRecord) => {
+    const live = agent.state === 'WORKING' || agent.state === 'RUNNING';
+    if (live && !window.confirm(`Reset ${agent.name}? This ends the task it is running now.`)) return;
+    try {
+      await factoryApi.resetAgent(agent.id);
+      setActionMessage(`Agent ${agent.name} reset. It is asleep and its budget and memory are unchanged.`);
+      onRefresh();
+    } catch (err: any) {
+      alert(`Failed to reset agent: ${err.message}`);
     }
   };
 
@@ -485,6 +498,18 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                         >
                           <Square className="w-3 h-3 fill-current text-amber-500 dark:text-amber-400" />
                           <span>Sleep</span>
+                        </button>
+                      )}
+
+                      {(agent.state === 'ERROR' || agent.state === 'OUT_OF_BUDGET' || agent.state === 'WORKING' || agent.state === 'RUNNING') && (
+                        <button
+                          onClick={() => handleReset(agent)}
+                          disabled={!permissions.canReset}
+                          title="Reset: end stuck runs and return the agent to sleep (budget and memory unchanged)"
+                          className="px-2 py-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded font-medium text-xs flex items-center space-x-1 border border-slate-300 dark:border-slate-700 transition disabled:opacity-40"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          <span>Reset</span>
                         </button>
                       )}
 
