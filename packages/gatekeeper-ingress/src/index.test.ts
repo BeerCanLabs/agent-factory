@@ -115,12 +115,43 @@ describe('gatekeeper-ingress', () => {
       throw failure;
     });
     await door.receive(msg('m1', 'hello'));
-    assert.deepEqual(gw.refusals, [{ channelId: 'c1', window: 'perDay' }]);
+    assert.deepEqual(gw.refusals, [{ channelId: 'c1', window: 'perDay', kind: 'wake' }]);
     assert.equal(gw.presence, 'offline');
 
     failure = new Error('factory answered 412');
     await door.receive(msg('m2', 'hello again'));
     assert.equal(gw.refusals.length, 1, 'a generic failure keeps the existing path');
     assert.equal(gw.presence, 'offline');
+  });
+
+  it('a message into a live run that is refused over budget is answered by the Gatekeeper, and presence is unchanged', async () => {
+    const gw = fakeDiscordClient();
+    const door = createGatekeeperIngress({
+      discord: gw,
+      providers: [envProvider({ DISCORD_BOT_TOKEN: 'bot-token' })],
+      wake: async () => {},
+      handoff: async () => {
+        throw new WakeRefusedError('perDay', 'handoff');
+      },
+    });
+    await door.reconcile([{ agentId: 'echo-agent', secretRef: 'DISCORD_BOT_TOKEN', initialPresence: 'available' }]);
+    await door.receive(msg('m1', 'how many steps did I get?'));
+    assert.deepEqual(gw.refusals, [{ channelId: 'c1', window: 'perDay', kind: 'handoff' }]);
+    assert.equal(gw.presence, 'available');
+  });
+
+  it('a failed handoff that is not a budget refusal says nothing in the channel', async () => {
+    const gw = fakeDiscordClient();
+    const door = createGatekeeperIngress({
+      discord: gw,
+      providers: [envProvider({ DISCORD_BOT_TOKEN: 'bot-token' })],
+      wake: async () => {},
+      handoff: async () => {
+        throw new Error('network down');
+      },
+    });
+    await door.reconcile([{ agentId: 'echo-agent', secretRef: 'DISCORD_BOT_TOKEN', initialPresence: 'available' }]);
+    await door.receive(msg('m2', 'hello'));
+    assert.deepEqual(gw.refusals, []);
   });
 });

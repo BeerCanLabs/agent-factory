@@ -181,10 +181,10 @@ export function createDiscordClient(): DiscordClient {
       if (client.isReady()) return;
       await client.login(token);
     },
-    async refuseWake(channelId: string, window: string) {
+    async refuseWake(channelId: string, window: string, kind: 'wake' | 'handoff' = 'wake') {
       const session = standbySessions.get(channelId);
       clearStandbySession(channelId);
-      const text = wakeRefusedText(agentName, window);
+      const text = wakeRefusedText(agentName, window, kind);
       try {
         const channel = await client.channels.fetch(channelId);
         if (channel && 'send' in channel && 'messages' in channel) {
