@@ -397,7 +397,7 @@ export function unblockRun(state: FactoryState, runId: string, from: RunState, a
   return next;
 }
 
-export type CreateRunOptions = { actor: string; trigger: string; input?: unknown; callbackUrl?: string; model?: string };
+export type CreateRunOptions = { actor: string; trigger: string; input?: unknown; callbackUrl?: string; model?: string; requestedBy?: { provider: string; id: string } };
 
 /** The single entry point for waking an agent: manual, webhook, cron, event route, gatekeeper-ingress. */
 export async function createRun(state: FactoryState, agentId: string, opts: CreateRunOptions): Promise<Outcome<Run>> {
@@ -458,6 +458,7 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
       actor: opts.actor,
       trigger: opts.trigger,
       callbackUrl: opts.callbackUrl,
+      ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
       missing: bound.missing,
     });
     record(state, run, 'PRE_FLIGHT_MISSING_SECRET', opts.actor);
@@ -473,6 +474,7 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
     trigger: opts.trigger,
     input: opts.input,
     callbackUrl: opts.callbackUrl,
+    ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
     ...(opts.model ? { model: opts.model } : {}),
   });
   record(state, run, 'RUN_QUEUED', opts.actor);
@@ -1231,12 +1233,30 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 400, { error: 'model must be a model id' });
       return;
     }
+    // Only a caller allowed to say who asked (the ingress) may name the requester. `input.authorId` is whatever the
+    // caller wrote and is never an identity.
+    let requestedBy: { provider: string; id: string } | undefined;
+    if (body.requestedBy !== undefined) {
+      const attest = authorize({ principal, privilege: 'runs.attest-requester' });
+      if (!attest.allowed) {
+        json(res, 403, { error: 'forbidden', required: attest.required });
+        return;
+      }
+      const rb = body.requestedBy as Record<string, unknown> | null;
+      const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 128;
+      if (!rb || typeof rb !== 'object' || Array.isArray(rb) || !text(rb.provider) || !text(rb.id)) {
+        json(res, 400, { error: 'requestedBy must be { provider, id }, each a string of at most 128 characters' });
+        return;
+      }
+      requestedBy = { provider: rb.provider, id: rb.id };
+    }
     const out = await createRun(state, runCreate[1], {
       actor: principal.actor,
       trigger: runCreate[2] === 'wake' ? 'manual' : 'api',
       input: body.input,
       callbackUrl: body.callbackUrl as string | undefined,
       model: body.model as string | undefined,
+      ...(requestedBy ? { requestedBy } : {}),
     });
     json(res, out.status, out.body);
     return;

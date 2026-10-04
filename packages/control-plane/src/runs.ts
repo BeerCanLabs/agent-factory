@@ -28,6 +28,8 @@ export type Run = {
   createdAt: string;
   updatedAt: string;
   input?: unknown;
+  /** GAP-088: who asked for this run, as the Gatekeeper's ingress verified it. Set only by a caller allowed to say so. */
+  requestedBy?: { provider: string; id: string };
   /** Pins every LLM call in this run to one model (enforced by the gatekeeper-egress). */
   model?: string;
   callbackUrl?: string;
