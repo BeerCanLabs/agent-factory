@@ -16,7 +16,7 @@ describe('A2 identity is verified, not asserted', () => {
 
   it('the control plane authenticates only through verifiers (no identity from headers in authenticate)', () => {
     const app = read('packages/control-plane/src/app.ts');
-    const fn = app.slice(app.indexOf('export async function identify('), app.indexOf('export async function authenticate('));
+    const fn = app.slice(app.indexOf('export async function identify('), app.indexOf('export async function requirePrivilege('));
     assert.ok(fn.length > 0, 'identify() not found in app.ts');
     assert.match(fn, /state\.auth\.verify\(/);
     assert.match(fn, /state\.access\.verify\(/);
