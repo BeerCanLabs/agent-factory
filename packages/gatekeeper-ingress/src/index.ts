@@ -23,20 +23,20 @@ export type DiscordClient = {
   setPresence(status: Presence): Promise<void>;
   setAgentName?(name: string): void;
   /** The factory refused to wake the agent over budget: tell the channel why, replacing the standby message. */
-  refuseWake?(channelId: string, window: string): Promise<void>;
+  refuseWake?(channelId: string, window: string, kind?: 'wake' | 'handoff'): Promise<void>;
   onMessage(handler: (msg: Omit<Conversation, 'agentId'>) => void): void;
   destroy(): Promise<void>;
 };
 
-export function fakeDiscordClient(): DiscordClient & { refusals: Array<{ channelId: string; window: string }> } {
+export function fakeDiscordClient(): DiscordClient & { refusals: Array<{ channelId: string; window: string; kind: 'wake' | 'handoff' }> } {
   const handlers: Array<(msg: Omit<Conversation, 'agentId'>) => void> = [];
   return {
     connected: false,
     presence: 'offline',
-    refusals: [] as Array<{ channelId: string; window: string }>,
+    refusals: [] as Array<{ channelId: string; window: string; kind: 'wake' | 'handoff' }>,
     setAgentName(_name) {},
-    async refuseWake(channelId, window) {
-      this.refusals.push({ channelId, window });
+    async refuseWake(channelId, window, kind = 'wake') {
+      this.refusals.push({ channelId, window, kind });
     },
     async login() {
       this.connected = true;
@@ -163,7 +163,13 @@ export function createGatekeeperIngress(opts: {
       if (state.discord.presence !== 'offline') {
         // Starting or available: the agent has a run, so the message goes to it (its mailbox holds the message
         // until the run polls). Waking again would queue a second run behind the one that is starting.
-        await opts.handoff(msg);
+        try {
+          await opts.handoff(msg);
+        } catch (err) {
+          // The agent is out of budget: say so from the Gatekeeper; the agent never sees the message.
+          if (err instanceof WakeRefusedError) await state.discord.refuseWake?.(msg.channelId, err.window, err.kind).catch(() => {});
+          else console.error(`[gatekeeper-ingress] handoff ${msg.agentId} failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
         return;
       }
       // A wake request is not readiness: show starting until the control plane reports the run ready.
@@ -172,7 +178,7 @@ export function createGatekeeperIngress(opts: {
         await opts.wake(msg.agentId, msg);
       } catch (err) {
         console.error(`[gatekeeper-ingress] wake ${msg.agentId} failed: ${err instanceof Error ? err.message : String(err)}`);
-        if (err instanceof WakeRefusedError) await state.discord.refuseWake?.(msg.channelId, err.window).catch(() => {});
+        if (err instanceof WakeRefusedError) await state.discord.refuseWake?.(msg.channelId, err.window, err.kind).catch(() => {});
         // Re-read: the control plane may have moved presence on while the wake was in flight.
         if ((state.discord.presence as Presence) === 'starting') await state.discord.setPresence('offline');
       }
