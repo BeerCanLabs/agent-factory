@@ -76,7 +76,11 @@ describe('gatekeeper-egress connection routes (§6.11)', { concurrency: false },
     gatekeeperEgress = createGatekeeperEgress({
       routes: [
         { id: 'google-calendar', kind: 'http', upstream: `http://127.0.0.1:${upPort}/calendar/v3`, connection: 'google' },
-        { id: 'google-health', kind: 'http', upstream: `http://127.0.0.1:${upPort}`, connection: 'google' },
+        { id: 'google-health', kind: 'http', upstream: `http://127.0.0.1:${upPort}`, connection: 'google', scopes: [
+          'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly',
+          'https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly',
+          'https://www.googleapis.com/auth/googlehealth.sleep.readonly',
+        ] },
         { id: 'google-storage', kind: 'http', upstream: `http://127.0.0.1:${upPort}`, connection: 'google-service-account', scopes: ['https://www.googleapis.com/auth/devstorage.read_write'] },
       ],
       prices: {},
@@ -143,6 +147,16 @@ describe('gatekeeper-egress connection routes (§6.11)', { concurrency: false },
     upstreamStatus = 200;
     await call(port, '/google-calendar/d', { authorization: `Bearer ${token}` });
     assert.equal(tokenRequests.length, 2, 'an upstream 401 drops the cached token');
+  });
+
+  it('K4: a Google Health call asks the Keymaster for the Health scopes, so a grant without them is reported as needs_reconsent with the link', async () => {
+    tokenResult = { ok: false, status: 428, error: 'needs_reconsent', provider: 'google', connectUrl: 'https://factory.example/api/v1/connections/donna/google/start' };
+    const res = await call(port, '/google-health/v4/users/me/dataTypes/steps/dataPoints', { authorization: `Bearer ${token}` });
+    assert.equal(res.status, 428);
+    assert.equal(seen.length, 0, 'nothing is sent to Google without the scopes');
+    assert.equal(res.json().connectUrl, 'https://factory.example/api/v1/connections/donna/google/start');
+    assert.equal(tokenRequests[0].scopes?.length, 3);
+    assert.ok(tokenRequests[0].scopes?.every((x) => x.includes('/auth/googlehealth.')));
   });
 
   it('passes the route scopes for service-account connections', async () => {
