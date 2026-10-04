@@ -226,3 +226,41 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'skills.checks.run',
   ],
 };
+
+/**
+ * Privileges that act on one agent, so a route can pass that agent as the resource. Only these can be held through
+ * ownership or as the requester; every other privilege is fleet-wide and is held by roles alone.
+ */
+export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
+  'agents.wake',
+  'agents.pause',
+  'agents.resume',
+  'config.read',
+  'credentials.agent.read',
+  'credentials.agent.set',
+  'connections.start',
+  'connections.import',
+  'approvals.decide',
+]);
+
+/** The roles that are derived from data about one agent or run, never read from a credential or a claim. */
+export type DerivedRole = 'agent-owner' | 'requester';
+
+/**
+ * What a derived role holds, on its own agent only (Dale, 2026-10-03). `approvals.decide` is held by an owner only
+ * when the run has no requesting user (see `authorize`); the requester holds it for its own run.
+ */
+export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> = {
+  'agent-owner': [
+    'config.read',
+    'credentials.agent.read',
+    'credentials.agent.set',
+    'connections.start',
+    'connections.import',
+    'agents.wake',
+    'agents.pause',
+    'agents.resume',
+    'approvals.decide',
+  ],
+  requester: ['approvals.decide'],
+};
