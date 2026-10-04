@@ -4,6 +4,7 @@ import net from 'node:net';
 import stream from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import type { RunTokens } from '@beercanlabs/factory-auth';
+import { HELD_BODY_LIMIT, HELD_HEADERS, type ApprovalOutcome, type ApprovalRequest, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
@@ -49,23 +50,6 @@ export type Route = {
   stripSignInLinks?: boolean;
 };
 
-/** E9: what the gatekeeper-egress sends the control plane about a held request (the credential is never part of it). */
-export type HoldRequest = {
-  runId: string;
-  route: string;
-  argsSha256: string;
-  request: { method: string; path: string; headers: Record<string, string>; body: string; bodyEncoding: 'utf8' | 'base64'; preview?: string };
-};
-export type HoldOutcome = { approvalId: string; state: 'pending' | 'approved' | 'rejected' | 'consumed'; notes?: string };
-
-/**
- * E9: the request headers that change what a held request does, so they are part of the reviewed copy and its hash
- * (an approved body cannot be re-sent as another operation). Everything else is transport.
- */
-export const HELD_HEADERS = ['content-type', 'x-restli-method', 'x-http-method-override', 'x-http-method', 'x-method-override', 'linkedin-version'];
-/** E9: the largest request the gatekeeper-egress will hold for review. */
-export const HELD_BODY_LIMIT = 192 * 1024;
-
 export type ConnectionTokenResult =
   | { ok: true; accessToken: string; expiresAt: string }
   | { ok: false; status: number; error: string; provider?: string; connectUrl?: string };
@@ -93,12 +77,10 @@ export type RunContext = {
   spend: { run: number; day: number; month: number };
 };
 
-export type Approval = { approvalId: string; state: 'pending' | 'approved' | 'rejected' | 'consumed' };
-
 /** How the gatekeeper-egress talks to the control plane. HTTP in production, in-memory in tests. */
 export type ControlClient = {
   runContext(runId: string): Promise<RunContext | null>;
-  requestApproval(req: { runId: string; route: string; tool: string; argsSha256: string }): Promise<Approval>;
+  requestApproval(req: ApprovalRequest): Promise<ApprovalOutcome>;
   consumeApproval(approvalId: string): Promise<boolean>;
   /** E9: hold a request for review, or find the hold for the identical request. Absent: held routes refuse every hold. */
   holdRequest?(req: HoldRequest): Promise<HoldOutcome>;

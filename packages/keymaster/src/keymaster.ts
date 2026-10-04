@@ -1,22 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { RunTokens } from '@beercanlabs/factory-auth';
+import type { Approval } from '@beercanlabs/factory-bouncer';
 import type { LedgerStore } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
-
-export type ApprovalState = 'pending' | 'approved' | 'rejected' | 'consumed';
-
-export type Approval = {
-  approvalId: string;
-  runId: string;
-  agentId: string;
-  route: string;
-  tool: string;
-  argsSha256: string;
-  state: ApprovalState;
-  requestedAt: string;
-  decidedBy?: string;
-  decidedAt?: string;
-};
 
 export type ApprovalConsumer = {
   get(approvalId: string): Approval | undefined | Promise<Approval | undefined>;
