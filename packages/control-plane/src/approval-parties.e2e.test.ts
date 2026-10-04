@@ -167,10 +167,11 @@ describe('who decides what an agent did (TSK-108)', { concurrency: false }, () =
     assert.equal((await decide(id, OWNER)).status, 403);
   });
 
-  it('a run that is gone counts as no requester, so an owner decides', async () => {
+  it('a run that is gone lets no owner decide, because nobody can say who asked; an approver still can', async () => {
     const run = state.runs.create({ agentId: 'ada', state: 'DONE', actor: 'token:operator', trigger: 'manual' });
     const { approval } = state.approvals.request({ runId: `${run.runId}-gone`, agentId: 'ada', route: 'r', tool: 't', argsSha256: 'a'.repeat(64) });
-    assert.equal((await decide(approval.approvalId, OWNER)).status, 200);
+    assert.equal((await decide(approval.approvalId, OWNER)).status, 403);
+    assert.equal((await decide(approval.approvalId, APPROVER)).status, 200);
   });
 
   it('an unknown id is 409 for a caller who may decide and 403 for one who may not', async () => {

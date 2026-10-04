@@ -129,7 +129,6 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'agents.converse',
     'hooks.invoke',
     'schedules.write',
-    'runs.attest-requester',
   ],
   approver: [
     'agents.read',
@@ -156,7 +155,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
   ingest: [
     'ledger.ingest',
   ],
-  // The egress holds the ingest privileges too. The last two are exclusive: an admin does not hold them.
+  // The egress holds the ingest privileges too. Two of these are exclusive: an admin does not hold them.
   'gatekeeper-egress': [
     'ledger.ingest',
     'ledger.attest-run-actor',
@@ -169,7 +168,13 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'egress.routes.read',
     'egress.connections.token',
   ],
-  // Everything except the two exclusive privileges.
+  // The ingress is the one party that sees who sent a message, so it alone may say who asked (Dale, 2026-10-04: an
+  // operator or admin must not be able to name the requester). Its token also carries `operator`, which it needs to
+  // wake agents and hand off messages.
+  'gatekeeper-ingress': [
+    'runs.attest-requester',
+  ],
+  // Everything except the exclusive privileges.
   admin: [
     'agents.read',
     'policy.read',
@@ -198,7 +203,6 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'agents.converse',
     'hooks.invoke',
     'schedules.write',
-    'runs.attest-requester',
     'approvals.decide',
     'ledger.ingest',
     'egress.run.read',

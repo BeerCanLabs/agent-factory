@@ -14,7 +14,7 @@ export {
   type JwksFetcher,
 } from './access.js';
 
-export const ROLES =['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'admin'] as const;
+export const ROLES =['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
 
 export type Principal = { actor: string; roles: Role[] };

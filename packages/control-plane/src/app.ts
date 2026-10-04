@@ -850,7 +850,10 @@ function mayDecide(state: FactoryState, principal: Principal, approvalId: string
   const approval = state.approvals.get(approvalId);
   if (!approval) return { ok: false, required: global.required };
   const run = state.runs.get(approval.runId);
-  const requester = run?.requestedBy ? { actor: state.identityLinks?.resolve(run.requestedBy.provider, run.requestedBy.id) } : undefined;
+  // The run is the record of who asked. If it is gone nobody can say, so no owner or requester decides (fail closed);
+  // an admin or approver already passed above.
+  if (!run) return { ok: false, required: global.required };
+  const requester = run.requestedBy ? { actor: state.identityLinks?.resolve(run.requestedBy.provider, run.requestedBy.id) } : undefined;
   const scoped = authorize({
     principal,
     privilege: 'approvals.decide',
