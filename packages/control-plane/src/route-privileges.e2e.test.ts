@@ -115,6 +115,7 @@ const ROUTES: RouteRow[] = [
   { method: 'PUT', path: '/api/v1/agents/nope/policy', privilege: 'policy.set', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/policies/budget', privilege: 'policy.budget.set', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/config/export', privilege: 'config.export', role: 'admin' },
+  { method: 'GET', path: '/api/v1/config/export?agent=castle', privilege: 'config.export.agent', role: 'admin' },
   { method: 'PUT', path: '/api/v1/agents/nope/owners', privilege: 'agents.owners.set', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/keymaster/outstanding', privilege: 'credentials.outstanding.read', role: 'admin' },
   { method: 'GET', path: '/api/v1/keymaster/platform/credentials', privilege: 'credentials.platform.read', role: 'admin' },

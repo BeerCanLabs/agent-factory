@@ -6,6 +6,7 @@ import { AGENT_SCOPED, DERIVED_ROLE_PRIVILEGES } from './privileges.js';
 
 const OWNER_RIGHTS: Privilege[] = [
   'config.read',
+  'config.export.agent',
   'credentials.agent.read',
   'credentials.agent.set',
   'connections.start',
