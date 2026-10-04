@@ -88,7 +88,7 @@ factory-run-token-key       # JWT signing key for run tokens
 factory-callback-signing-key # Callback HMAC key
 gatekeeper-ingress-token               # gatekeeper-ingress ↔ Control plane token
 gatekeeper-ingress-operator-token      # gatekeeper-ingress operator token
-factory-tokens              # Multi-token map
+factory-tokens              # Multi-token map; the gatekeeper-ingress entry must carry roles ["operator", "gatekeeper-ingress"] (TSK-111), or Discord wakes that name an author get 403
 gatekeeper-egress-token               # gatekeeper-egress bearer token
 ```
 

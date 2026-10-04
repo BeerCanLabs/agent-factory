@@ -7,7 +7,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/approvals.test.ts src/wire.test.ts src/hold.test.ts src/decisions.test.ts src/privileges.test.ts"
+    "test": "tsx --test src/approvals.test.ts src/wire.test.ts src/hold.test.ts src/decisions.test.ts src/privileges.test.ts src/roles.test.ts"
   },
   "dependencies": {
     "@beercanlabs/factory-auth": "0.1.0",

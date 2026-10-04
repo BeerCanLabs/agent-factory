@@ -1,4 +1,15 @@
 /**
+ * The body of the wake call to the control plane: the message as the agent's input, and who asked. The author id is
+ * what Discord verified; the control plane records it as `requestedBy` only for a caller allowed to say so, and never
+ * reads `input.authorId` as an identity.
+ */
+export function wakeBody(msg?: unknown): string | undefined {
+  if (!msg) return undefined;
+  const authorId = (msg as { authorId?: unknown }).authorId;
+  return JSON.stringify({ input: msg, ...(typeof authorId === 'string' && authorId ? { requestedBy: { provider: 'discord', id: authorId } } : {}) });
+}
+
+/**
  * The control plane refused because the agent is over its budget (HTTP 402 `budget_exceeded`): a wake that would have
  * started it, or a message that would have gone into its live run (`handoff`).
  */

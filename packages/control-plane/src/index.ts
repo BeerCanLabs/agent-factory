@@ -11,6 +11,7 @@ import { FileRunStore, RunTokens } from './runs.js';
 import { callbackPolicyFromEnv } from './callbacks.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from './policy.js';
 import { EventHub, attachBus, busSinkFromEnv, runEvent, tapLedger } from './events.js';
 import { attachEventStream } from './stream.js';
@@ -154,6 +155,7 @@ const state: FactoryState = {
   deployProvider,
   policies: new PolicyStore(process.env.FACTORY_POLICIES_DIR || join(DATA_DIR, 'policies'), defaultPolicy()),
   approvals: new ApprovalStore(join(DATA_DIR, 'approvals')),
+  identityLinks: new IdentityLinkStore(join(DATA_DIR, 'identity-links')),
   // Only the gatekeeper-egress can write costUsd (stripped for other writers), so every priced llm row counts.
   spend: SpendTracker.fromLedger(ledger.query(), () => true),
   secretValues,

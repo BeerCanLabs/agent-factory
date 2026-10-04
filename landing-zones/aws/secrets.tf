@@ -35,7 +35,7 @@ resource "aws_secretsmanager_secret" "factory_tokens" {
 resource "aws_secretsmanager_secret_version" "factory_tokens" {
   secret_id = aws_secretsmanager_secret.factory_tokens.id
   secret_string = jsonencode([
-    { name = "gatekeeper-ingress", token = random_password.generated["GATEKEEPER_INGRESS_OPERATOR_TOKEN"].result, roles = ["operator"] },
+    { name = "gatekeeper-ingress", token = random_password.generated["GATEKEEPER_INGRESS_OPERATOR_TOKEN"].result, roles = ["operator", "gatekeeper-ingress"] },
     { name = "gatekeeper-egress", token = random_password.generated["GATEKEEPER_EGRESS_TOKEN"].result, roles = ["gatekeeper-egress"] },
   ])
 }

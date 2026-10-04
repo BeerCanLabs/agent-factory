@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { WakeRefusedError, wakeFailure, wakeRefusedText } from './wake.js';
+import { WakeRefusedError, wakeBody, wakeFailure, wakeRefusedText } from './wake.js';
 
 describe('wake refusal', () => {
   it('a 402 budget_exceeded body becomes a typed refusal carrying the window', () => {
@@ -29,5 +29,18 @@ describe('wake refusal', () => {
     assert.equal((err as WakeRefusedError).kind, 'handoff');
     assert.equal(wakeRefusedText('Donna', 'perMonth', 'handoff'), '🚫 *Donna is over its monthly budget (perMonth), so your message was not delivered.*');
     assert.equal(wakeRefusedText('Donna', 'blocked', 'handoff'), '🚫 *Donna is over its budget, so your message was not delivered.*');
+  });
+});
+
+describe('wake body', () => {
+  const msg = { agentId: 'castle', channelId: 'c1', messageId: 'm1', content: 'hello', authorId: '42' };
+
+  it('carries the message as input and the Discord author as the requester', () => {
+    assert.deepEqual(JSON.parse(wakeBody(msg)!), { input: msg, requestedBy: { provider: 'discord', id: '42' } });
+  });
+
+  it('has no body without a message, and no requester without an author', () => {
+    assert.equal(wakeBody(undefined), undefined);
+    assert.deepEqual(JSON.parse(wakeBody({ content: 'hi' })!), { input: { content: 'hi' } });
   });
 });
