@@ -32,6 +32,7 @@ export const PRIVILEGES = [
   'agents.converse',
   'hooks.invoke',
   'schedules.write',
+  'runs.attest-requester',
   'approvals.decide',
   'ledger.ingest',
   'ledger.attest-run-actor',
@@ -126,6 +127,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'agents.converse',
     'hooks.invoke',
     'schedules.write',
+    'runs.attest-requester',
   ],
   approver: [
     'agents.read',
@@ -194,6 +196,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'agents.converse',
     'hooks.invoke',
     'schedules.write',
+    'runs.attest-requester',
     'approvals.decide',
     'ledger.ingest',
     'egress.run.read',
