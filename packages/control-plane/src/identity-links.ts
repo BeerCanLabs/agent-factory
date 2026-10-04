@@ -36,8 +36,13 @@ export class IdentityLinkStore {
     mkdirSync(dir, { recursive: true });
     for (const name of readdirSync(dir)) {
       if (!name.endsWith('.json')) continue;
-      const l = JSON.parse(readFileSync(join(dir, name), 'utf8')) as IdentityLink;
-      this.items.set(key(l.provider, l.id), l);
+      try {
+        const l = JSON.parse(readFileSync(join(dir, name), 'utf8')) as IdentityLink;
+        this.items.set(key(l.provider, l.id), l);
+      } catch (err) {
+        // A truncated or hand-edited file must not stop the control plane. Skipping it grants nothing (fail closed).
+        console.error(`[control-plane] identity link file ${name} skipped: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
 
@@ -55,8 +60,9 @@ export class IdentityLinkStore {
     const current = this.items.get(key(provider, id));
     if (current?.actor === actor) return { link: { ...current }, changed: false };
     const link: IdentityLink = { provider, id, actor, linkedBy: by, linkedAt: new Date().toISOString() };
-    this.items.set(key(provider, id), link);
+    // Write first: a link grants the right to decide approvals, so a failed write must not leave one live in memory.
     this.save(link);
+    this.items.set(key(provider, id), link);
     return { link: { ...link }, changed: true };
   }
 

@@ -3,7 +3,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
@@ -141,5 +141,34 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
     assert.equal((await call('/api/v1/identity-links', 'GET', ADMIN)).status, 503);
     assert.equal((await call('/api/v1/identity-links/discord/1', 'PUT', ADMIN, { actor: 'token:x' })).status, 503);
     state.identityLinks = saved;
+  });
+});
+
+describe('the identity link store keeps memory and disk in step', () => {
+  it('a link whose write fails is not live in memory', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'links-'));
+    try {
+      const store = new IdentityLinkStore(join(dir, 'links'));
+      rmSync(join(dir, 'links'), { recursive: true });
+      writeFileSync(join(dir, 'links'), 'not a directory');
+      assert.throws(() => store.link('discord', '42', 'cloudflare:a@example.com', 'admin'));
+      assert.equal(store.resolve('discord', '42'), undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a corrupt file is skipped and the other links still load', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'links-'));
+    try {
+      const first = new IdentityLinkStore(dir);
+      first.link('discord', '7', 'cloudflare:b@example.com', 'admin');
+      writeFileSync(join(dir, 'discord__broken.json'), '{"provider":"disc');
+      const again = new IdentityLinkStore(dir);
+      assert.equal(again.resolve('discord', '7'), 'cloudflare:b@example.com');
+      assert.equal(again.list().length, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
