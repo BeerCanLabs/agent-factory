@@ -304,6 +304,22 @@ export function activeRun(state: FactoryState, agentId: string): Run | undefined
   return state.runs.list({ agentId, active: true }).find((r) => r.state !== 'QUEUED');
 }
 
+/**
+ * The Treasurer, before a message goes into a live run (GAP-091): the same standing the wake asks and the egress asks
+ * on every model call. Returns the refused window, or undefined when the agent may take the message. A run already
+ * flagged BLOCKED_BUDGET_EXCEEDED reports `blocked`, as the egress does. `perRun` counts only when a run exists.
+ */
+export function handoffRefusal(state: FactoryState, agent: AgentRecord): string | undefined {
+  const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
+  if (isBuiltin) return undefined;
+  const run = activeRun(state, agent.id);
+  if (run?.state === 'BLOCKED_BUDGET_EXCEEDED') return 'blocked';
+  const budget = state.policies.get(agent.id).budgetUsd;
+  const limits = budget ? (run ? budget : { perDay: budget.perDay, perMonth: budget.perMonth }) : undefined;
+  const standing = checkStanding({ limits, spend: state.spend.get(agent.id, run?.runId) });
+  return standing.inGoodStanding ? undefined : standing.window;
+}
+
 export function enrichAgent(state: FactoryState, a: AgentRecord) {
   const s = state.spend.get(a.id, undefined);
   const pol = state.policies.get(a.id);
@@ -1285,6 +1301,19 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const agent = state.agents.get(convoMatch[1]);
     if (!agent) {
       json(res, 404, { error: 'not_found' });
+      return;
+    }
+    const refused = handoffRefusal(state, agent);
+    if (refused) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: agent.id,
+        runId: activeRun(state, agent.id)?.runId,
+        type: 'action',
+        action: 'CONVERSATION_REFUSED_BUDGET_EXCEEDED',
+        actor: SYSTEM.policy,
+      });
+      json(res, 402, { error: 'budget_exceeded', window: refused });
       return;
     }
     const payload = await readJson(req);
