@@ -4,7 +4,7 @@ import net from 'node:net';
 import stream from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import type { RunTokens } from '@beercanlabs/factory-auth';
-import { HELD_BODY_LIMIT, HELD_HEADERS, type ApprovalOutcome, type ApprovalRequest, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
+import { describeHeldRequest, type ApprovalOutcome, type ApprovalRequest, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
@@ -150,7 +150,6 @@ const STRIP = new Set([
   'cookie',
 ]);
 
-const isText = (contentType: string | undefined) => !contentType || /^(text\/|application\/(json|x-www-form-urlencoded|[\w.+-]*\+json))/i.test(contentType);
 
 function send(res: http.ServerResponse, status: number, body: unknown) {
   if (res.headersSent) return res.end();
@@ -764,22 +763,16 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   async function holdOrRelease(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer): Promise<boolean> {
     const method = (req.method ?? 'GET').toUpperCase();
     if (!opts.control.holdRequest) return deny(res, ctx, route, 503, 'hold_unavailable'), true;
-    if (raw.length > HELD_BODY_LIMIT) return deny(res, ctx, route, 413, 'held_request_too_large', { limit: HELD_BODY_LIMIT }), true;
-    const headers: Record<string, string> = {};
-    for (const h of HELD_HEADERS) {
-      const v = req.headers[h];
-      if (typeof v === 'string') headers[h] = v;
-    }
-    const text = isText(headers['content-type']) && Buffer.from(raw.toString('utf8'), 'utf8').equals(raw);
-    const body = text ? raw.toString('utf8') : raw.toString('base64');
-    const argsSha256 = payloadHash({ method, path: rest, headers, body: raw.toString('base64') });
+    const described = describeHeldRequest({ method, path: rest, headers: req.headers, raw });
+    if (!described.ok) return deny(res, ctx, route, 413, 'held_request_too_large', { limit: described.limit }), true;
+    const { argsSha256, request } = described;
     let held: HoldOutcome;
     try {
       held = await opts.control.holdRequest({
         runId: ctx.run.runId,
         route: route.id,
         argsSha256,
-        request: { method, path: rest, headers, body, bodyEncoding: text ? 'utf8' : 'base64', ...(route.hold?.preview ? { preview: route.hold.preview } : {}) },
+        request: { ...request, ...(route.hold?.preview ? { preview: route.hold.preview } : {}) },
       });
     } catch (err) {
       console.error(`[gatekeeper-egress] hold ${route.id}: ${err instanceof Error ? err.message : String(err)}`);
