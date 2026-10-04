@@ -14,7 +14,7 @@ import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver, type SkillSourc
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { checkStanding, spendDetail, type SpendTracker } from '@beercanlabs/factory-budget';
-import { HELD_STORED_BODY_LIMIT, type Approval, type ApprovalStore, type HeldRequest } from '@beercanlabs/factory-bouncer';
+import { heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { validatePolicy, type PolicyStore } from './policy.js';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
@@ -1506,32 +1506,19 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return;
     const b = await readJson(req);
     const run = typeof b.runId === 'string' ? state.runs.get(b.runId) : undefined;
-    const r = b.request as Record<string, unknown> | undefined;
-    const valid =
-      run && !isTerminal(run.state) && typeof b.route === 'string' && typeof b.argsSha256 === 'string' && /^[0-9a-f]{64}$/.test(b.argsSha256) &&
-      r && typeof r.method === 'string' && typeof r.path === 'string' && typeof r.body === 'string' && (r.bodyEncoding === 'utf8' || r.bodyEncoding === 'base64') &&
-      r.body.length <= HELD_STORED_BODY_LIMIT && (r.headers === undefined || (typeof r.headers === 'object' && r.headers !== null && !Array.isArray(r.headers)));
-    if (!valid || !run || !r) {
+    const parsed = parseHoldRequest(b);
+    if (!run || isTerminal(run.state) || !parsed) {
       json(res, 400, { error: 'live runId, route, argsSha256 and request {method, path, body, bodyEncoding} required' });
       return;
     }
-    const headers = Object.fromEntries(Object.entries((r.headers ?? {}) as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === 'string'));
     // S1 backstop: the copy is shown to people, so every known secret value is masked in it.
-    const text = (v: string) => redactSecrets(v, state.secretValues);
-    const request: HeldRequest = {
-      method: String(r.method).toUpperCase(),
-      path: text(String(r.path)),
-      headers: Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, text(v)])),
-      body: r.bodyEncoding === 'utf8' ? text(String(r.body)) : String(r.body),
-      bodyEncoding: r.bodyEncoding as 'utf8' | 'base64',
-      ...(typeof r.preview === 'string' ? { preview: r.preview } : {}),
-    };
+    const request = heldCopyOf(parsed, (v) => redactSecrets(v, state.secretValues));
     const { approval, created } = state.approvals.hold({
       runId: run.runId,
       agentId: run.agentId,
-      route: String(b.route),
-      tool: `${request.method} ${request.path.split('?')[0]}`,
-      argsSha256: String(b.argsSha256),
+      route: parsed.route,
+      tool: heldToolName(request),
+      argsSha256: parsed.argsSha256,
       request,
     });
     if (created) {
