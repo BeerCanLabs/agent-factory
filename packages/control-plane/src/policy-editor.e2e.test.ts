@@ -13,7 +13,8 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
-import { ApprovalStore, PolicyStore } from './policy.js';
+import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { PolicyStore } from './policy.js';
 
 const ADMIN = 'admin-policy-token';
 const VIEWER = 'viewer-policy-token';

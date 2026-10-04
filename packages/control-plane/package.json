@@ -26,6 +26,7 @@
     "@beercanlabs/factory-hydrate": "0.1.0",
     "@beercanlabs/factory-keymaster": "0.1.0",
     "@beercanlabs/factory-budget": "0.1.0",
+    "@beercanlabs/factory-bouncer": "0.1.0",
     "@beercanlabs/factory-ledger": "0.1.0",
     "@beercanlabs/factory-secrets-bind": "0.1.0",
     "@beercanlabs/factory-telemetry": "0.1.0",

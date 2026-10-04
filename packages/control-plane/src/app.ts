@@ -14,7 +14,8 @@ import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver, type SkillSourc
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { checkStanding, spendDetail, type SpendTracker } from '@beercanlabs/factory-budget';
-import { validatePolicy, type Approval, type ApprovalStore, type HeldRequest, type PolicyStore } from './policy.js';
+import type { Approval, ApprovalStore, HeldRequest } from '@beercanlabs/factory-bouncer';
+import { validatePolicy, type PolicyStore } from './policy.js';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
 const HELD_BODY_LIMIT = 256 * 1024;

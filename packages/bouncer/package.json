@@ -1,0 +1,17 @@
+{
+  "name": "@beercanlabs/factory-bouncer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bouncer: the approval record. Who may do what, and what waits for a person.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test src/approvals.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
