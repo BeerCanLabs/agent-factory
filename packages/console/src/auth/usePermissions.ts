@@ -8,6 +8,7 @@ export function usePermissions() {
     canSleep: hasRole('operator'),
     canPause: hasRole('operator'),
     canResume: hasRole('operator'),
+    canReset: hasRole('operator'),
     canDispatchPrompt: hasRole('operator'),
     canSwitchModel: hasRole('operator'),
     canApproveTool: hasRole('approver'),
