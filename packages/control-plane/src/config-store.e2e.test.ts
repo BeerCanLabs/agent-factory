@@ -13,7 +13,8 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore, RunTokens } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
-import { ApprovalStore, PolicyStore } from './policy.js';
+import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { PolicyStore } from './policy.js';
 import { loadDynamicRegistry } from './catalog.js';
 import { FileConfigBackend, VersionedConfigStore, configHash, migrateConfigs, type ConfigBackend, type ConfigRecord } from './config-store.js';
 

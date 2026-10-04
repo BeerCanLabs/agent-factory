@@ -11,7 +11,8 @@ import { BUILTIN_SYSTEM_AGENTS } from './catalog.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore, RunTokens } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
-import { ApprovalStore, PolicyStore } from './policy.js';
+import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { PolicyStore } from './policy.js';
 import { ScheduleStore } from './schedules.js';
 
 const TEAM = 'team.example.cloudflareaccess.com';
