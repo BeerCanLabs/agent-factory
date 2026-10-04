@@ -11,7 +11,8 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore, type Run } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
-import { ApprovalStore, PolicyStore } from './policy.js';
+import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { PolicyStore } from './policy.js';
 
 // Test fixtures, where echo-agent is a user agent: these tests prove user-agent governance (budget, isolate),
 // which built-in agents are exempt from.

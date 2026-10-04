@@ -26,15 +26,6 @@ export type AuthProvider = {
   verify(authorization: string | undefined): Promise<AuthResult>;
 };
 
-/** admin implies everything; operator and approver imply viewer; gatekeeper-egress implies ingest. */
-export function hasRole(principal: Principal, role: Role): boolean {
-  const r = principal.roles;
-  if (r.includes('admin') || r.includes(role)) return true;
-  if (role === 'viewer') return r.includes('operator') || r.includes('approver');
-  if (role === 'ingest') return r.includes('gatekeeper-egress');
-  return false;
-}
-
 function asRoles(values: unknown, roleMap?: Record<string, Role>): Role[] {
   const list = Array.isArray(values) ? values : typeof values === 'string' ? values.split(/[\s,]+/) : [];
   const out = new Set<Role>();
