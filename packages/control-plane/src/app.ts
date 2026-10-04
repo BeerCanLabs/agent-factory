@@ -26,6 +26,7 @@ import { handleSkills, resumeSkillChecks } from './skills.js';
 import type { SkillChecker } from './skill-checks.js';
 import { handleRunProgress } from './events.js';
 import { handleSchedules, type ScheduleStore } from './schedules.js';
+import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 
@@ -77,6 +78,8 @@ export type FactoryState = {
   /** Signs OAuth consent state. Defaults to the callback signing key. */
   connectionStateKey?: string;
   schedules?: ScheduleStore;
+  /** GAP-088: which person a Discord user is, set by an admin. Absent: nobody is linked. */
+  identityLinks?: IdentityLinkStore;
   /** Systems as factory data (§6.3.1 E10): approved external system definitions. */
   systems?: SystemsStore;
   /** URL agents use to reach the control plane (result reporting, input fetch). */
@@ -958,6 +961,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills')) && (await handleSkills(state, req, res, path))) return;
   if (await handleRunProgress(state, req, res, path)) return;
   if (path.startsWith('/api/v1/schedules') && (await handleSchedules(state, req, res, path))) return;
+  if (path.startsWith('/api/v1/identity-links') && (await handleIdentityLinks(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/systems') || path === '/api/v1/gatekeeper-egress/routes') && (await handleSystems(state, req, res, path))) return;
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {

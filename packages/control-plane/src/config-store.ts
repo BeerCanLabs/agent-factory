@@ -33,6 +33,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
+import { parseActor } from './identity-links.js';
 import { archiveStamp, isReservedPolicyId, type AgentPolicy } from './policy.js';
 
 const execFileAsync = promisify(execFile);
@@ -399,7 +400,6 @@ export function ownersOf(state: FactoryState, agentId: string): string[] {
   return state.configs?.current(agentId)?.owners ?? [];
 }
 
-const OWNER_ACTOR = /^(cloudflare|oidc|token):\S+$/;
 export const MAX_OWNERS = 10;
 
 /** A list of owners as stored: lower-case principal actors, sorted, unique, at most ten. `[]` is "none". */
@@ -407,8 +407,8 @@ export function parseOwners(value: unknown): { ok: true; owners: string[] } | { 
   if (!Array.isArray(value)) return { ok: false, error: 'owners must be an array of principal actors' };
   const owners: string[] = [];
   for (const v of value) {
-    const actor = typeof v === 'string' ? v.trim().toLowerCase() : '';
-    if (!OWNER_ACTOR.test(actor) || actor.length > 256) return { ok: false, error: 'each owner must be a principal actor such as cloudflare:alice@example.com, oidc:... or token:...' };
+    const actor = parseActor(v);
+    if (!actor) return { ok: false, error: 'each owner must be a principal actor such as cloudflare:alice@example.com, oidc:... or token:...' };
     owners.push(actor);
   }
   const unique = [...new Set(owners)].sort();
