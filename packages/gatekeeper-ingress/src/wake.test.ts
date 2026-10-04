@@ -22,6 +22,14 @@ describe('wake refusal', () => {
     assert.match(wakeRefusedText('Donna', 'perMonth'), /monthly budget \(perMonth\)/);
     assert.doesNotMatch(wakeRefusedText('Donna', 'perDay'), /\$|\d/);
   });
+
+  it('a refused handoff is typed as a handoff and says the message was not delivered', () => {
+    const err = wakeFailure(402, JSON.stringify({ error: 'budget_exceeded', window: 'blocked' }), 'handoff');
+    assert.ok(err instanceof WakeRefusedError);
+    assert.equal((err as WakeRefusedError).kind, 'handoff');
+    assert.equal(wakeRefusedText('Donna', 'perMonth', 'handoff'), '🚫 *Donna is over its monthly budget (perMonth), so your message was not delivered.*');
+    assert.equal(wakeRefusedText('Donna', 'blocked', 'handoff'), '🚫 *Donna is over its budget, so your message was not delivered.*');
+  });
 });
 
 describe('wake body', () => {

@@ -9,20 +9,25 @@ export function wakeBody(msg?: unknown): string | undefined {
   return JSON.stringify({ input: msg, ...(typeof authorId === 'string' && authorId ? { requestedBy: { provider: 'discord', id: authorId } } : {}) });
 }
 
-/** The control plane refused a wake because the agent is over its budget (HTTP 402 `budget_exceeded`). */
+/**
+ * The control plane refused because the agent is over its budget (HTTP 402 `budget_exceeded`): a wake that would have
+ * started it, or a message that would have gone into its live run (`handoff`).
+ */
+export type RefusedKind = 'wake' | 'handoff';
+
 export class WakeRefusedError extends Error {
-  constructor(readonly window: string) {
+  constructor(readonly window: string, readonly kind: RefusedKind = 'wake') {
     super(`budget_exceeded: ${window}`);
     this.name = 'WakeRefusedError';
   }
 }
 
 /** The error for a wake the control plane did not accept; only a budget refusal is typed. */
-export function wakeFailure(status: number, body: string): Error {
+export function wakeFailure(status: number, body: string, kind: RefusedKind = 'wake'): Error {
   if (status === 402) {
     try {
       const parsed = JSON.parse(body) as { error?: unknown; window?: unknown };
-      if (parsed.error === 'budget_exceeded' && typeof parsed.window === 'string') return new WakeRefusedError(parsed.window);
+      if (parsed.error === 'budget_exceeded' && typeof parsed.window === 'string') return new WakeRefusedError(parsed.window, kind);
     } catch {
       /* not a budget refusal body */
     }
@@ -31,7 +36,7 @@ export function wakeFailure(status: number, body: string): Error {
 }
 
 /** One sentence for the channel: which window, no spend figures. */
-export function wakeRefusedText(agentName: string, window: string): string {
+export function wakeRefusedText(agentName: string, window: string, kind: RefusedKind = 'wake'): string {
   const label = window === 'perDay' ? 'daily budget (perDay)' : window === 'perMonth' ? 'monthly budget (perMonth)' : 'budget';
-  return `🚫 *${agentName} is over its ${label}, so it was not started.*`;
+  return `🚫 *${agentName} is over its ${label}, so ${kind === 'wake' ? 'it was not started' : 'your message was not delivered'}.*`;
 }
