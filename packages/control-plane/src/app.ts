@@ -14,11 +14,10 @@ import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver, type SkillSourc
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { checkStanding, spendDetail, type SpendTracker } from '@beercanlabs/factory-budget';
-import type { Approval, ApprovalStore, HeldRequest } from '@beercanlabs/factory-bouncer';
+import { HELD_STORED_BODY_LIMIT, type Approval, type ApprovalStore, type HeldRequest } from '@beercanlabs/factory-bouncer';
 import { validatePolicy, type PolicyStore } from './policy.js';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
-const HELD_BODY_LIMIT = 256 * 1024;
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
@@ -1511,7 +1510,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const valid =
       run && !isTerminal(run.state) && typeof b.route === 'string' && typeof b.argsSha256 === 'string' && /^[0-9a-f]{64}$/.test(b.argsSha256) &&
       r && typeof r.method === 'string' && typeof r.path === 'string' && typeof r.body === 'string' && (r.bodyEncoding === 'utf8' || r.bodyEncoding === 'base64') &&
-      r.body.length <= HELD_BODY_LIMIT && (r.headers === undefined || (typeof r.headers === 'object' && r.headers !== null && !Array.isArray(r.headers)));
+      r.body.length <= HELD_STORED_BODY_LIMIT && (r.headers === undefined || (typeof r.headers === 'object' && r.headers !== null && !Array.isArray(r.headers)));
     if (!valid || !run || !r) {
       json(res, 400, { error: 'live runId, route, argsSha256 and request {method, path, body, bodyEncoding} required' });
       return;
