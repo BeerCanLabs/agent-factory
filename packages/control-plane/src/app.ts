@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
-import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal } from '@beercanlabs/factory-auth';
+import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, connectionsOf, credentialsOf, egressOf, type AgentCategory } from './catalog.js';
@@ -816,18 +816,19 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
     if (!decision.allowed) {
       return { jsonrpc: '2.0', id, error: { code: -32001, message: `forbidden: requires ${decision.required}` } };
     }
-    const result = await dispatchTool(state, spec.name, params.arguments ?? {}, principal.actor);
+    const result = await dispatchTool(state, spec.name, params.arguments ?? {}, principal);
     return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }] } };
   }
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method ${String(method)}` } };
 }
 
-async function dispatchTool(state: FactoryState, name: string, args: Record<string, string>, actor: string): Promise<unknown> {
+async function dispatchTool(state: FactoryState, name: string, args: Record<string, string>, principal: Principal): Promise<unknown> {
+  const actor = principal.actor;
   if (name === 'list_agents') return [...state.agents.values()];
   if (name === 'query_ledger') return state.ledger.query({ agent: args.agent });
   if (name === 'get_run') return state.runs.get(args.runId) ?? { error: 'not_found' };
   if (name === 'list_approvals') return state.approvals.list({ state: 'pending' });
-  if (name === 'decide_approval') return (await decideApproval(state, args.approvalId, args.decision, actor, args.notes)).body;
+  if (name === 'decide_approval') return (await decideApproval(state, args.approvalId, args.decision, principal, args.notes)).body;
   const id = args.id;
   if (!id) return { error: 'id required' };
   if (name === 'wake_agent') return (await createRun(state, id, { actor, trigger: 'mcp' })).body;
@@ -837,7 +838,31 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   return { error: `unknown tool ${name}` };
 }
 
-async function decideApproval(state: FactoryState, id: string, decision: unknown, actor: string, notes?: unknown): Promise<Outcome<unknown>> {
+/**
+ * E9, E4: who may decide what an agent did. The global `admin` and `approver` roles decide any agent's; otherwise the
+ * requesting user of the run decides, or, when the run has no requesting user, any owner of the agent. A requester whose
+ * Discord id is not linked to a person lets no owner decide. This runs before anything changes, and a caller who may
+ * not decide is refused whether or not the approval exists.
+ */
+function mayDecide(state: FactoryState, principal: Principal, approvalId: string): { ok: true } | { ok: false; required: Role } {
+  const global = authorize({ principal, privilege: 'approvals.decide' });
+  if (global.allowed) return { ok: true };
+  const approval = state.approvals.get(approvalId);
+  if (!approval) return { ok: false, required: global.required };
+  const run = state.runs.get(approval.runId);
+  const requester = run?.requestedBy ? { actor: state.identityLinks?.resolve(run.requestedBy.provider, run.requestedBy.id) } : undefined;
+  const scoped = authorize({
+    principal,
+    privilege: 'approvals.decide',
+    resource: { agentId: approval.agentId, owners: ownersOf(state, approval.agentId), ...(requester ? { requester } : {}) },
+  });
+  return scoped.allowed ? { ok: true } : { ok: false, required: scoped.required };
+}
+
+async function decideApproval(state: FactoryState, id: string, decision: unknown, principal: Principal, notes?: unknown): Promise<Outcome<unknown>> {
+  const actor = principal.actor;
+  const may = mayDecide(state, principal, id);
+  if (!may.ok) return { status: 403, body: { error: 'forbidden', required: may.required } };
   if (decision !== 'approve' && decision !== 'reject') return { status: 400, body: { error: 'decision must be approve or reject' } };
   if (notes !== undefined && notes !== null && (typeof notes !== 'string' || notes.length > 4000)) return { status: 400, body: { error: 'notes must be text, at most 4000 characters' } };
   const note = typeof notes === 'string' && notes.trim() ? notes.trim() : undefined;
@@ -1632,10 +1657,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const decideMatch = path.match(/^\/api\/v1\/approvals\/([^/]+)$/);
   if (decideMatch && req.method === 'POST') {
-    const principal = await requirePrivilege(req, res, state, 'approvals.decide');
-    if (!principal) return;
+    // Who may decide depends on the approval, so authenticate here and let `decideApproval` authorize.
+    const who = await identify(req, state);
+    if (!who.ok) return json(res, 401, { error: 'unauthorized' });
     const b = await readJson(req);
-    const out = await decideApproval(state, decideMatch[1], b.decision, principal.actor, b.notes);
+    const out = await decideApproval(state, decideMatch[1], b.decision, who.principal, b.notes);
     json(res, out.status, out.body);
     return;
   }
