@@ -13,7 +13,7 @@ import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, typ
 import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver, type SkillSource } from './source.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
-import { checkStanding, spendDetail, type SpendTracker } from '@beercanlabs/factory-budget';
+import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
 import { authorize, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type Privilege } from '@beercanlabs/factory-bouncer';
 import { validatePolicy, type PolicyStore } from './policy.js';
 
@@ -645,6 +645,47 @@ async function fireCallback(state: FactoryState, run: Run) {
 }
 
 /** Kill-switch only. Waking is createRun. */
+/**
+ * Lets a run that was flagged BLOCKED_BUDGET_EXCEEDED go again once the agent is back inside its limits. Every route
+ * that can change a budget calls this, so the console's budget field and the policy editor behave the same way.
+ */
+function unblockAffordableRuns(state: FactoryState, agentId: string, limits: BudgetLimits | undefined, actor: string) {
+  for (const run of state.runs.list({ agentId, active: true })) {
+    if (run.state === 'BLOCKED_BUDGET_EXCEEDED' && checkStanding({ limits, spend: state.spend.get(agentId, run.runId) }).inGoodStanding) {
+      unblockRun(state, run.runId, 'BLOCKED_BUDGET_EXCEEDED', actor);
+    }
+  }
+}
+
+/**
+ * Recovery for an agent that is stuck: ends every run it still has (a stopped container, a result that never arrived,
+ * a run left blocked), stops the task, tells the ingress it is offline, and puts the agent back to SLEEPING. It does
+ * not touch the budget, the policy or the agent's memory, and the next wake is still checked like any other. A paused,
+ * isolated, deploying or retired agent is refused: those have their own controls.
+ */
+export async function resetAgent(state: FactoryState, id: string, actor: string): Promise<Outcome<AgentRecord>> {
+  const agent = state.agents.get(id);
+  if (!agent) return { status: 404, body: { error: 'not_found' } };
+  if (agent.state !== 'WORKING' && agent.state !== 'SLEEPING' && agent.state !== 'ERROR') {
+    return { status: 409, body: { error: `agent_${String(agent.state).toLowerCase()}` } as any };
+  }
+  for (const run of state.runs.list({ agentId: id, active: true })) {
+    await finishRun(state, run.runId, 'CANCELLED', { actor, error: `reset by ${actor}` });
+  }
+  agent.state = 'SLEEPING';
+  await notifyGatekeeperIngress(state, id, 'offline');
+  state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_RESET', actor });
+  if (state.registryDir) {
+    try {
+      const filePath = join(state.registryDir, `${id}.json`);
+      if (existsSync(filePath)) writeFileSync(filePath, JSON.stringify(agent, null, 2), 'utf8');
+    } catch (err) {
+      console.warn(`[control-plane] failed to persist dynamic agent state ${id}:`, err);
+    }
+  }
+  return { status: 200, body: agent };
+}
+
 export async function applyKillSwitch(
   state: FactoryState,
   id: string,
@@ -1338,6 +1379,15 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
+  const resetMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/reset$/);
+  if (resetMatch && req.method === 'POST') {
+    const principal = await requirePrivilege(req, res, state, 'agents.reset');
+    if (!principal) return;
+    const out = await resetAgent(state, resetMatch[1], principal.actor);
+    json(res, out.status, out.body);
+    return;
+  }
+
   const runCancel = path.match(/^\/api\/v1\/runs\/([^/]+)\/cancel$/);
   if (runCancel && req.method === 'POST') {
     const principal = await requirePrivilege(req, res, state, 'runs.cancel');
@@ -1529,11 +1579,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     state.policies.set(agentId, checked.policy);
     state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'POLICY_UPDATED', actor: principal.actor });
     await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, 'policy updated') });
-    for (const run of state.runs.list({ agentId, active: true })) {
-      if (run.state === 'BLOCKED_BUDGET_EXCEEDED' && checkStanding({ limits: checked.policy?.budgetUsd, spend: state.spend.get(agentId, run.runId) }).inGoodStanding) {
-        unblockRun(state, run.runId, 'BLOCKED_BUDGET_EXCEEDED', principal.actor);
-      }
-    }
+    unblockAffordableRuns(state, agentId, checked.policy?.budgetUsd, principal.actor);
     json(res, 200, checked.policy);
     return;
   }
@@ -1901,6 +1947,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     state.policies.set(agentId, checked.policy);
+    unblockAffordableRuns(state, agentId, checked.policy?.budgetUsd, principal.actor);
     if (agent.state === 'PENDING_BUDGET') {
       agent.state = 'PENDING_DEPLOY';
     }
