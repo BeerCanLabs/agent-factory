@@ -143,7 +143,7 @@ export async function handleConnections(state: FactoryState, req: http.IncomingM
 
   const start = path.match(/^\/api\/v1\/connections\/([^/]+)\/([^/]+)\/start$/);
   if (start && req.method === 'GET') {
-    const principal = await requirePrivilege(req, res, state, 'connections.start');
+    const principal = await requirePrivilege(req, res, state, 'connections.start', { agentId: decodeURIComponent(start[1]) });
     if (!principal) return true;
     const [agentId, provider] = [decodeURIComponent(start[1]), decodeURIComponent(start[2])];
     const def = state.systems?.getConnectionProvider(provider);
@@ -175,7 +175,7 @@ export async function handleConnections(state: FactoryState, req: http.IncomingM
 
   const imp = path.match(/^\/api\/v1\/connections\/([^/]+)\/([^/]+)\/import$/);
   if (imp && req.method === 'POST') {
-    const principal = await requirePrivilege(req, res, state, 'connections.import');
+    const principal = await requirePrivilege(req, res, state, 'connections.import', { agentId: decodeURIComponent(imp[1]) });
     if (!principal) return true;
     await importGrant(state, res, decodeURIComponent(imp[1]), decodeURIComponent(imp[2]), await readJson(req), principal.actor);
     return true;

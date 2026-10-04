@@ -53,6 +53,7 @@ export const PRIVILEGES = [
   'policy.set',
   'policy.budget.set',
   'config.export',
+  'config.export.agent',
   'agents.owners.set',
   'credentials.outstanding.read',
   'credentials.platform.read',
@@ -212,6 +213,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'policy.set',
     'policy.budget.set',
     'config.export',
+    'config.export.agent',
     'agents.owners.set',
     'credentials.outstanding.read',
     'credentials.platform.read',
@@ -236,6 +238,7 @@ export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
   'agents.pause',
   'agents.resume',
   'config.read',
+  'config.export.agent',
   'credentials.agent.read',
   'credentials.agent.set',
   'connections.start',
@@ -253,6 +256,7 @@ export type DerivedRole = 'agent-owner' | 'requester';
 export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> = {
   'agent-owner': [
     'config.read',
+    'config.export.agent',
     'credentials.agent.read',
     'credentials.agent.set',
     'connections.start',

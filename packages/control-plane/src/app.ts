@@ -21,7 +21,7 @@ import { validatePolicy, type PolicyStore } from './policy.js';
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
-import { changeReason, handleConfig, recordConfig, removeConfig, type ConfigStore } from './config-store.js';
+import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig, type ConfigStore } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
 import type { SkillChecker } from './skill-checks.js';
 import { handleRunProgress } from './events.js';
@@ -249,13 +249,18 @@ export async function requirePrivilege(
   res: http.ServerResponse,
   state: FactoryState,
   privilege: Privilege,
+  resource?: { agentId: string },
 ): Promise<Principal | null> {
   const result = await identify(req, state);
   if (!result.ok) {
     json(res, 401, { error: 'unauthorized' });
     return null;
   }
-  const decision = authorize({ principal: result.principal, privilege });
+  const decision = authorize({
+    principal: result.principal,
+    privilege,
+    ...(resource ? { resource: { agentId: resource.agentId, owners: ownersOf(state, resource.agentId) } } : {}),
+  });
   if (!decision.allowed) {
     json(res, 403, { error: 'forbidden', required: decision.required });
     return null;
@@ -1215,7 +1220,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const runCreate = path.match(/^\/api\/v1\/agents\/([^/]+)\/(runs|wake)$/);
   if (runCreate && req.method === 'POST') {
-    const principal = await requirePrivilege(req, res, state, 'agents.wake');
+    const principal = await requirePrivilege(req, res, state, 'agents.wake', { agentId: runCreate[1] });
     if (!principal) return;
     const body = await readJson(req);
     if (body.callbackUrl !== undefined && typeof body.callbackUrl !== 'string') {
@@ -1239,7 +1244,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const killMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/(pause|resume|isolate)$/);
   if (killMatch && req.method === 'POST') {
-    const principal = await requirePrivilege(req, res, state, killMatch[2] === 'pause' ? 'agents.pause' : killMatch[2] === 'resume' ? 'agents.resume' : 'agents.isolate');
+    const principal = await requirePrivilege(req, res, state, killMatch[2] === 'pause' ? 'agents.pause' : killMatch[2] === 'resume' ? 'agents.resume' : 'agents.isolate', { agentId: killMatch[1] });
     if (!principal) return;
     const out = await applyKillSwitch(state, killMatch[1], killMatch[2].toUpperCase() as 'PAUSE' | 'RESUME' | 'ISOLATE', principal.actor);
     json(res, out.status, out.body);

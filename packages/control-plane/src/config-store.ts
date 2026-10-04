@@ -17,7 +17,7 @@
  *   GET /api/v1/agents/:id/config                 the current version (viewer)
  *   GET /api/v1/agents/:id/config/history         every version, oldest first (viewer)
  *   GET /api/v1/agents/:id/config/versions/:n     one version (viewer)
- *   GET /api/v1/config/export                     every agent's full history (admin; ledgered)
+ *   GET /api/v1/config/export[?agent=<id>]        every agent's full history (admin), or one agent's (admin or its owner); ledgered
  *   PUT /api/v1/agents/:id/owners                 set, replace or clear the agent's owners (admin; a new version)
  *
  * GAP-060: no configuration record exists for an agent that does not exist. On start, records for ids that are neither
@@ -627,20 +627,27 @@ export async function handleConfig(state: FactoryState, req: http.IncomingMessag
   if (ownersPath && req.method === 'PUT') return handleOwners(state, req, res, decodeURIComponent(ownersPath[1]));
   if (req.method !== 'GET') return false;
   if (path === '/api/v1/config/export') {
-    const principal = await requirePrivilege(req, res, state, 'config.export');
+    // `?agent=<id>` exports that one agent (its owner may); without it, every agent (admin only).
+    const agent = new URL(req.url ?? '/', 'http://factory.local').searchParams.get('agent') || undefined;
+    const principal = await requirePrivilege(req, res, state, agent ? 'config.export.agent' : 'config.export', agent ? { agentId: agent } : undefined);
     if (!principal) return true;
     if (!state.configs) {
       json(res, 503, { error: 'config_store_unavailable' });
       return true;
     }
-    const out = state.configs.exportAll();
-    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'factory', type: 'action', action: 'CONFIG_EXPORTED', actor: principal.actor });
+    const all = state.configs.exportAll();
+    const out = agent ? { ...all, agents: all.agents.filter((a) => a.agentId === agent) } : all;
+    if (agent && !out.agents.length) {
+      json(res, 404, { error: state.agents.has(agent) ? 'no_config' : 'not_found' });
+      return true;
+    }
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent ?? 'factory', type: 'action', action: 'CONFIG_EXPORTED', actor: principal.actor });
     json(res, 200, out);
     return true;
   }
   const m = path.match(AGENT_CONFIG);
   if (!m) return false;
-  if (!(await requirePrivilege(req, res, state, 'config.read'))) return true;
+  if (!(await requirePrivilege(req, res, state, 'config.read', { agentId: decodeURIComponent(m[1]) }))) return true;
   if (!state.configs) {
     json(res, 503, { error: 'config_store_unavailable' });
     return true;
