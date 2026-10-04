@@ -14,7 +14,7 @@ import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver, type SkillSourc
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { checkStanding, spendDetail, type SpendTracker } from '@beercanlabs/factory-budget';
-import { heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { authorize, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type Privilege } from '@beercanlabs/factory-bouncer';
 import { validatePolicy, type PolicyStore } from './policy.js';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
@@ -253,6 +253,29 @@ export async function authenticate(
   }
   if (!hasRole(result.principal, role)) {
     json(res, 403, { error: 'forbidden', required: role });
+    return null;
+  }
+  return result.principal;
+}
+
+/**
+ * A2, E4: authenticate (the Gatekeeper's verification of who the caller is), then ask the Bouncer whether this caller
+ * may do this. Answers 401 or 403 and returns null when not; the 403 names the role that holds the privilege.
+ */
+export async function requirePrivilege(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  state: FactoryState,
+  privilege: Privilege,
+): Promise<Principal | null> {
+  const result = await identify(req, state);
+  if (!result.ok) {
+    json(res, 401, { error: 'unauthorized' });
+    return null;
+  }
+  const decision = authorize({ principal: result.principal, privilege });
+  if (!decision.allowed) {
+    json(res, 403, { error: 'forbidden', required: decision.required });
     return null;
   }
   return result.principal;
@@ -751,21 +774,21 @@ export async function reconcileRuns(state: FactoryState): Promise<void> {
   }
 }
 
-type ToolSpec = { name: string; description: string; role: Role; args: Record<string, { type: string }>; required?: string[] };
+type ToolSpec = { name: string; description: string; privilege: Privilege; args: Record<string, { type: string }>; required?: string[] };
 
 const TOOLS: ToolSpec[] = [
-  { name: 'list_agents', description: 'List factory cartridges', role: 'viewer', args: {} },
-  { name: 'query_ledger', description: 'Read the execution ledger', role: 'viewer', args: { agent: { type: 'string' } } },
-  { name: 'get_run', description: 'Get a run by id', role: 'viewer', args: { runId: { type: 'string' } }, required: ['runId'] },
-  { name: 'wake_agent', description: 'Start a run (202 semantics: returns the queued/started run)', role: 'operator', args: { id: { type: 'string' } }, required: ['id'] },
-  { name: 'pause_agent', description: 'Pause agent egress', role: 'operator', args: { id: { type: 'string' } }, required: ['id'] },
-  { name: 'resume_agent', description: 'Resume agent egress', role: 'operator', args: { id: { type: 'string' } }, required: ['id'] },
-  { name: 'isolate_agent', description: 'Isolate agent egress', role: 'operator', args: { id: { type: 'string' } }, required: ['id'] },
-  { name: 'list_approvals', description: 'List pending tool-call approvals', role: 'viewer', args: {} },
+  { name: 'list_agents', description: 'List factory cartridges', privilege: 'agents.read', args: {} },
+  { name: 'query_ledger', description: 'Read the execution ledger', privilege: 'ledger.read', args: { agent: { type: 'string' } } },
+  { name: 'get_run', description: 'Get a run by id', privilege: 'runs.read', args: { runId: { type: 'string' } }, required: ['runId'] },
+  { name: 'wake_agent', description: 'Start a run (202 semantics: returns the queued/started run)', privilege: 'agents.wake', args: { id: { type: 'string' } }, required: ['id'] },
+  { name: 'pause_agent', description: 'Pause agent egress', privilege: 'agents.pause', args: { id: { type: 'string' } }, required: ['id'] },
+  { name: 'resume_agent', description: 'Resume agent egress', privilege: 'agents.resume', args: { id: { type: 'string' } }, required: ['id'] },
+  { name: 'isolate_agent', description: 'Isolate agent egress', privilege: 'agents.isolate', args: { id: { type: 'string' } }, required: ['id'] },
+  { name: 'list_approvals', description: 'List pending tool-call approvals', privilege: 'approvals.read', args: {} },
   {
     name: 'decide_approval',
     description: 'Approve or reject a held tool call',
-    role: 'approver',
+    privilege: 'approvals.decide',
     args: { approvalId: { type: 'string' }, decision: { type: 'string' }, notes: { type: 'string' } },
     required: ['approvalId', 'decision'],
   },
@@ -786,7 +809,7 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
     };
   }
   if (method === 'tools/list') {
-    const tools = TOOLS.filter((t) => hasRole(principal, t.role)).map((t) => ({
+    const tools = TOOLS.filter((t) => authorize({ principal, privilege: t.privilege }).allowed).map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: { type: 'object', properties: t.args, ...(t.required ? { required: t.required } : {}) },
@@ -797,8 +820,9 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
     const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, string> };
     const spec = TOOLS.find((t) => t.name === params.name);
     if (!spec) return { jsonrpc: '2.0', id, error: { code: -32602, message: `unknown tool ${String(params.name)}` } };
-    if (!hasRole(principal, spec.role)) {
-      return { jsonrpc: '2.0', id, error: { code: -32001, message: `forbidden: requires ${spec.role}` } };
+    const decision = authorize({ principal, privilege: spec.privilege });
+    if (!decision.allowed) {
+      return { jsonrpc: '2.0', id, error: { code: -32001, message: `forbidden: requires ${decision.required}` } };
     }
     const result = await dispatchTool(state, spec.name, params.arguments ?? {}, principal.actor);
     return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }] } };
@@ -967,7 +991,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if ((path === '/api/v1/metrics' || path === '/metrics') && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    if (!(await requirePrivilege(req, res, state, 'metrics.read'))) return;
     const activeRuns = state.runs.list({ active: true });
     const runCounts: Record<string, number> = {};
     for (const r of activeRuns) runCounts[r.state] = (runCounts[r.state] ?? 0) + 1;
@@ -1038,7 +1062,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       actor = `run:${claims.agentId}:${claims.runId}`;
       agentId = claims.agentId;
     } else {
-      const principal = await authenticate(req, res, state, 'viewer');
+      const principal = await requirePrivilege(req, res, state, 'spend.read');
       if (!principal) return;
       actor = principal.actor;
     }
@@ -1059,7 +1083,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/triage' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    if (!(await requirePrivilege(req, res, state, 'triage.read'))) return;
     const failedRuns = state.runs.list({}).filter((r) => r.state === 'FAILED' || r.error);
     const incidents = failedRuns.map((r) => ({
       id: `inc-${r.runId.slice(0, 8)}`,
@@ -1095,7 +1119,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       }
       actor = `webhook:${agent.id}`;
     } else {
-      const principal = await authenticate(req, res, state, 'operator');
+      const principal = await requirePrivilege(req, res, state, 'hooks.invoke');
       if (!principal) return;
       actor = principal.actor;
     }
@@ -1202,14 +1226,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/agents' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    if (!(await requirePrivilege(req, res, state, 'agents.read'))) return;
     json(res, 200, [...state.agents.values()].map((a) => enrichAgent(state, a)));
     return;
   }
 
   const runCreate = path.match(/^\/api\/v1\/agents\/([^/]+)\/(runs|wake)$/);
   if (runCreate && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'operator');
+    const principal = await requirePrivilege(req, res, state, 'agents.wake');
     if (!principal) return;
     const body = await readJson(req);
     if (body.callbackUrl !== undefined && typeof body.callbackUrl !== 'string') {
@@ -1233,7 +1257,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const killMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/(pause|resume|isolate)$/);
   if (killMatch && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'operator');
+    const principal = await requirePrivilege(req, res, state, `agents.${killMatch[2] as 'pause' | 'resume' | 'isolate'}` as const);
     if (!principal) return;
     const out = await applyKillSwitch(state, killMatch[1], killMatch[2].toUpperCase() as 'PAUSE' | 'RESUME' | 'ISOLATE', principal.actor);
     json(res, out.status, out.body);
@@ -1241,7 +1265,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/runs' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    if (!(await requirePrivilege(req, res, state, 'runs.read'))) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
     const runs = state.runs.list({ agentId: url.searchParams.get('agent'), active: url.searchParams.get('active') === 'true' });
     const limit = url.searchParams.has('limit') ? Math.max(1, Math.min(1000, parseInt(url.searchParams.get('limit')!, 10) || 50)) : undefined;
@@ -1253,7 +1277,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const runGet = path.match(/^\/api\/v1\/runs\/([^/]+)$/);
   if (runGet && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    if (!(await requirePrivilege(req, res, state, 'runs.read'))) return;
     const run = state.runs.get(runGet[1]);
     json(res, run ? 200 : 404, run ?? { error: 'not_found' });
     return;
@@ -1261,7 +1285,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const runCancel = path.match(/^\/api\/v1\/runs\/([^/]+)\/cancel$/);
   if (runCancel && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'operator');
+    const principal = await requirePrivilege(req, res, state, 'runs.cancel');
     if (!principal) return;
     const run = state.runs.get(runCancel[1]);
     if (!run) {
@@ -1274,7 +1298,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const convoMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/conversation$/);
   if (convoMatch && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'operator');
+    const principal = await requirePrivilege(req, res, state, 'agents.converse');
     if (!principal) return;
     const agent = state.agents.get(convoMatch[1]);
     if (!agent) {
@@ -1305,7 +1329,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/ledger/verify' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    if (!(await requirePrivilege(req, res, state, 'ledger.read'))) return;
     const anchors = state.ledgerSink ? await state.ledgerSink.list() : [];
     const result = state.ledger.verify(anchors);
     json(res, result.ok ? 200 : 409, { ...result, worm: Boolean(state.ledgerSink) });
@@ -1313,7 +1337,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/ledger' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    if (!(await requirePrivilege(req, res, state, 'ledger.read'))) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
     const rows = state.ledger.query({
       agent: url.searchParams.get('agent') || url.searchParams.get('agentId') || undefined,
@@ -1328,7 +1352,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/ledger' && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'ingest');
+    const principal = await requirePrivilege(req, res, state, 'ledger.ingest');
     if (!principal) return;
     const event = (await readJson(req)) as { agentId?: string; type?: string; [k: string]: unknown };
     if (!event.agentId || !event.type) {
@@ -1340,7 +1364,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     // The gatekeeper-egress verified the run token, so it may attest the run as the actor. Other writers may not.
-    const isGatekeeperEgress = hasRole({ ...principal, roles: principal.roles.filter((r) => r !== 'admin') }, 'gatekeeper-egress');
+    const isGatekeeperEgress = authorize({ principal, privilege: 'ledger.attest-run-actor' }).allowed;
     const run = typeof event.runId === 'string' ? state.runs.get(event.runId) : undefined;
     if (isGatekeeperEgress && event.runId !== undefined && (!run || run.agentId !== event.agentId)) {
       json(res, 400, { error: 'runId does not belong to agentId' });
@@ -1392,7 +1416,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   // §6.9 M3: the models this factory offers (operations config), for the admin choosing an agent's models. Names,
   // providers and prices only; provider model ids and regions stay with gatekeeper-egress.
   if (path === '/api/v1/models' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    if (!(await requirePrivilege(req, res, state, 'models.read'))) return;
     json(res, 200, {
       models: Object.entries(state.modelCatalog ?? {}).map(([name, m]) => ({ name, provider: m.provider, ...(m.price ? { price: m.price } : {}) })),
       // M2: what an agent gets when its policy names no models.
@@ -1403,7 +1427,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const policyMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/policy$/);
   if (policyMatch && (req.method === 'GET' || req.method === 'PUT')) {
-    const principal = await authenticate(req, res, state, req.method === 'GET' ? 'viewer' : 'admin');
+    const principal = await requirePrivilege(req, res, state, req.method === 'GET' ? 'policy.read' : 'policy.set');
     if (!principal) return;
     const agentId = policyMatch[1];
     const agent = state.agents.get(agentId);
@@ -1448,7 +1472,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const gwRun = path.match(/^\/api\/v1\/gatekeeper-egress\/runs\/([^/]+)$/);
   if (gwRun && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return;
+    if (!(await requirePrivilege(req, res, state, 'egress.run.read'))) return;
     const run = state.runs.get(gwRun[1]);
     const agent = run ? state.agents.get(run.agentId) : undefined;
     if (!run || !agent) {
@@ -1470,7 +1494,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/gatekeeper-egress/approvals' && req.method === 'POST') {
-    if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return;
+    if (!(await requirePrivilege(req, res, state, 'egress.approvals.request'))) return;
     const b = await readJson(req);
     const run = typeof b.runId === 'string' ? state.runs.get(b.runId) : undefined;
     if (!run || isTerminal(run.state) || typeof b.route !== 'string' || typeof b.tool !== 'string' || typeof b.argsSha256 !== 'string') {
@@ -1503,7 +1527,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/gatekeeper-egress/holds' && req.method === 'POST') {
-    if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return;
+    if (!(await requirePrivilege(req, res, state, 'egress.holds.create'))) return;
     const b = await readJson(req);
     const run = typeof b.runId === 'string' ? state.runs.get(b.runId) : undefined;
     const parsed = parseHoldRequest(b);
@@ -1541,7 +1565,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const gwConsume = path.match(/^\/api\/v1\/gatekeeper-egress\/approvals\/([^/]+)\/consume$/);
   if (gwConsume && req.method === 'POST') {
-    if (!(await authenticate(req, res, state, 'gatekeeper-egress'))) return;
+    if (!(await requirePrivilege(req, res, state, 'egress.approvals.consume'))) return;
     const consumed = state.approvals.consume(gwConsume[1]);
     json(res, consumed ? 200 : 409, consumed ?? { error: 'approval not approved or already used' });
     return;
@@ -1552,7 +1576,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const isGatekeeperEgressPath = path.startsWith('/api/v1/gatekeeper-egress/');
     let actor: string | undefined;
     if (isGatekeeperEgressPath) {
-      const principal = await authenticate(req, res, state, 'gatekeeper-egress');
+      const principal = await requirePrivilege(req, res, state, 'egress.keymaster.checkout');
       if (!principal) return;
       actor = principal.actor;
     }
@@ -1588,7 +1612,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/approvals' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    if (!(await requirePrivilege(req, res, state, 'approvals.read'))) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
     const st = url.searchParams.get('state') as 'pending' | null;
     json(res, 200, state.approvals.list({ ...(st ? { state: st } : {}), ...(url.searchParams.get('runId') ? { runId: url.searchParams.get('runId')! } : {}) }));
@@ -1597,7 +1621,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const decideMatch = path.match(/^\/api\/v1\/approvals\/([^/]+)$/);
   if (decideMatch && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'approver');
+    const principal = await requirePrivilege(req, res, state, 'approvals.decide');
     if (!principal) return;
     const b = await readJson(req);
     const out = await decideApproval(state, decideMatch[1], b.decision, principal.actor, b.notes);
@@ -1606,7 +1630,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/mcp' && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'viewer');
+    const principal = await requirePrivilege(req, res, state, 'mcp.use');
     if (!principal) return;
     json(res, 200, await handleMcp(state, await readJson(req), principal));
     return;
@@ -1614,7 +1638,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   // --- REGISTRY SERVICE ---
   if (path === '/api/v1/registry/agents' && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'registry.register');
     if (!principal) return;
     const body = await readJson(req);
     const cartridge = (body.cartridge && typeof body.cartridge === 'object' ? body.cartridge : body) as Record<string, unknown>;
@@ -1753,14 +1777,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
   
   if (path === '/api/v1/registry/agents' && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    if (!(await requirePrivilege(req, res, state, 'agents.read'))) return;
     json(res, 200, Array.from(state.agents.values()).map((a) => enrichAgent(state, a)));
     return;
   }
 
   const regAgentMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)$/);
   if (regAgentMatch && req.method === 'GET') {
-    if (!(await authenticate(req, res, state, 'viewer'))) return;
+    if (!(await requirePrivilege(req, res, state, 'agents.read'))) return;
     const agent = state.agents.get(regAgentMatch[1]);
     if (!agent) {
       json(res, 404, { error: 'not_found' });
@@ -1772,7 +1796,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const budgetMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/budget$/);
   if (budgetMatch && req.method === 'PUT') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'registry.budget.set');
     if (!principal) return;
     const agentId = budgetMatch[1];
     const agent = state.agents.get(agentId);
@@ -1833,7 +1857,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const retireMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/retire$/);
   if (retireMatch && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'registry.retire');
     if (!principal) return;
     const agentId = retireMatch[1];
     const agent = state.agents.get(agentId);
@@ -1866,7 +1890,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const reinstateMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/reinstate$/);
   if (reinstateMatch && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'registry.reinstate');
     if (!principal) return;
     const agentId = reinstateMatch[1];
     const agent = state.agents.get(agentId);
@@ -1902,7 +1926,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const purgeMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/purge$/);
   if (purgeMatch && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'registry.purge');
     if (!principal) return;
     const agentId = purgeMatch[1];
     const agent = state.agents.get(agentId);
@@ -1944,7 +1968,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   
   const deployMatch = path.match(/^\/api\/v1\/registry\/agents\/([^\/]+)\/deploy$/);
   if (deployMatch && req.method === 'POST') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'registry.deploy');
     if (!principal) return;
     const agentId = deployMatch[1];
     const agent = state.agents.get(agentId);
@@ -2072,7 +2096,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/policies/budget' && req.method === 'PUT') {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'policy.budget.set');
     if (!principal) return;
     const checked = validatePolicy(await readJson(req));
     if (!checked.ok) {
@@ -2089,7 +2113,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   // the agent's declared preferred model, which no run reads. They are gone; a caller is told where to go instead.
   const retiredModelMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/(model|models\/approve)$/);
   if (retiredModelMatch && (req.method === 'POST' || req.method === 'PUT')) {
-    const principal = await authenticate(req, res, state, 'admin');
+    const principal = await requirePrivilege(req, res, state, 'registry.model.set');
     if (!principal) return;
     json(res, 410, {
       error: 'models_set_in_policy',
