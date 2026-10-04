@@ -29,6 +29,7 @@ const CENSUS: Record<string, Role> = {
   'agents.wake': 'operator',
   'agents.pause': 'operator',
   'agents.resume': 'operator',
+  'agents.reset': 'operator',
   'agents.isolate': 'operator',
   'runs.cancel': 'operator',
   'agents.converse': 'operator',
@@ -101,7 +102,7 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 64);
+    assert.equal(PRIVILEGES.length, 65);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 
