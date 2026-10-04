@@ -14,7 +14,8 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore, RunTokens } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
-import { ApprovalStore, PolicyStore, archiveStamp } from './policy.js';
+import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { PolicyStore, archiveStamp } from './policy.js';
 import { BUILTIN_SYSTEM_AGENTS, loadDynamicRegistry, mergeAgents } from './catalog.js';
 import {
   FileConfigBackend,
