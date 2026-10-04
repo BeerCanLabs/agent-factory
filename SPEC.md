@@ -129,7 +129,11 @@ The control plane is the only ingress point to the factory kernel. Routes expect
 | GET/PUT | `/api/v1/policies/budget` | admin | Manage global and departmental Policy Engine limits. |
 | GET/PUT | `/api/v1/agents/:id/policy` | viewer / admin | egress policy (routes, models, tools, per-agent budget, TPM) |
 | GET | `/api/v1/approvals?state=pending` | viewer | held tool calls |
-| POST | `/api/v1/approvals/:id` | approver | `{decision: approve\|reject}` |
+| POST | `/api/v1/approvals/:id` | approver, the run's requesting user, or an owner of the agent (see Roles) | `{decision: approve\|reject}` |
+| PUT | `/api/v1/agents/:id/owners` | admin | `{owners: ["cloudflare:alice@example.com", ...]}` the agent's owners, a new configuration version |
+| GET | `/api/v1/config/export[?agent=:id]` | admin; an owner for its own agent | configuration history, all agents or one |
+| GET | `/api/v1/identity-links` | admin | Discord ids linked to people |
+| PUT/DELETE | `/api/v1/identity-links/:provider/:id` | admin | `{actor}` link or unlink a Discord id to a principal (ledgered) |
 | GET | `/api/v1/gatekeeper-egress/runs/:runId` | gatekeeper-egress | run state, agent kill-switch state, policy, spend |
 | POST | `/api/v1/gatekeeper-egress/approvals`, `.../:id/consume` | gatekeeper-egress | open / use a one-shot approval |
 
@@ -160,7 +164,11 @@ The same surface is exposed as MCP tools. Per-container fake `/v1/mcp/agents` JS
 | `operator` | viewer + wake/pause/resume/isolate, conversation handoff |
 | `approver` | viewer + approve held actions |
 | `ingest` | `POST /api/v1/ledger` only (actor forced to the token's name, server timestamp) |
-| `admin` | everything |
+| `admin` | everything except the two gatekeeper-egress-only privileges |
+| `agent-owner` | on its own agents only: wake, pause and resume; read and export the configuration; supply credentials and start or import connections; decide held actions when the run has no requesting user. Derived from the agent's `owners`, never read from a token or a claim |
+| `requester` | decide held actions and tool approvals of the run it started (the Discord author the ingress reported, linked to a person by an admin). Derived, never read from a credential |
+
+Roles map to privileges, never a user to a privilege. The table is built into `packages/bouncer`, which every control-plane route asks through one named privilege; the Gatekeeper authenticates and the Bouncer authorizes. The global `admin` and `approver` roles decide any agent's held action; the requester and the owners are added on top.
 
 Every ledger action row records the authenticated principal as `actor` (`oidc:<email>`, `token:<name>`, `webhook:<agent>`, or `factory:<subsystem>` for self-initiated actions). Webhooks authenticate with the cartridge's `secretRef` (header `x-factory-secret`), not a factory bearer. gatekeeper-ingress's presence API requires `GATEKEEPER_INGRESS_TOKEN`; the gatekeeper-egress command API requires `GATEKEEPER_EGRESS_TOKEN`, and both fail closed.
 
