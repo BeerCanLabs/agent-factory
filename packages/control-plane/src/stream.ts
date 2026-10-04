@@ -1,6 +1,6 @@
 import type http from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { hasRole } from '@beercanlabs/factory-auth';
+import { authorize } from '@beercanlabs/factory-bouncer';
 import type { FactoryState } from './app.js';
 import type { EventHub } from './events.js';
 
@@ -23,7 +23,7 @@ export function attachEventStream(server: http.Server, state: FactoryState, hub:
       .map((s) => s.trim());
     const fromProtocol = protocols[0] === 'bearer' && protocols[1] ? `Bearer ${protocols[1]}` : undefined;
     const result = await state.auth.verify(req.headers.authorization ?? fromProtocol);
-    if (!result.ok || !hasRole(result.principal, 'viewer')) {
+    if (!result.ok || !authorize({ principal: result.principal, privilege: 'events.subscribe' }).allowed) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
