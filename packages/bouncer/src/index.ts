@@ -4,3 +4,5 @@ export type { ApprovalOutcome, ApprovalRequest, HoldOutcome, HoldRequest } from 
 export { HELD_BODY_LIMIT, HELD_HEADERS, HELD_STORED_BODY_LIMIT } from './wire.js';
 export type { DescribedHold, ParsedHold } from './hold.js';
 export { describeHeldRequest, heldCopyOf, heldToolName, parseHoldRequest } from './hold.js';
+export type { HoldCheck, HoldDecision, HoldRule, ToolApprovalCheck, ToolApprovalDecision } from './decisions.js';
+export { checkHold, checkToolApproval } from './decisions.js';

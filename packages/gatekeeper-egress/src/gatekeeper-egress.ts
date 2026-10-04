@@ -4,7 +4,7 @@ import net from 'node:net';
 import stream from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import type { RunTokens } from '@beercanlabs/factory-auth';
-import { describeHeldRequest, type ApprovalOutcome, type ApprovalRequest, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
+import { checkHold, checkToolApproval, describeHeldRequest, type HoldRule, type ApprovalOutcome, type ApprovalRequest, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
@@ -42,7 +42,7 @@ export type Route = {
    * forwarded on first sight; the identical request is released once after approval. Operations config, not policy.
    * `preview` tells the console how to render the held copy (e.g. `linkedin-post`).
    */
-  hold?: { methods: string[]; preview?: string };
+  hold?: HoldRule;
   /**
    * K4 (GAP-067): a message route (e.g. `discord`). Sign-in or authorization URLs in a JSON body that do not point at
    * the factory's public host are replaced before forwarding, so no agent can send a person to sign in elsewhere.
@@ -741,7 +741,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       ledger(ctx, route, { type: 'mcp', mcpMethod: 'tools/call', mcpName: tool, action: 'TOOL_DENIED' });
       return { ok: false, code: -32001, message: `tool not allowed: ${tool}` };
     }
-    if (!rule.requireApproval?.includes(tool)) return { ok: true };
+    if (!checkToolApproval({ requireApproval: rule.requireApproval, tool }).approvalRequired) return { ok: true };
     const argsSha256 = payloadHash(call.params?.arguments ?? {});
     const approval = await opts.control.requestApproval({ runId: ctx.run.runId, route: route.id, tool, argsSha256 });
     if (approval.state === 'approved') return { ok: true, consume: approval.approvalId };
@@ -944,7 +944,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (route.kind === 'llm') return await handleLlm(req, res, ctx, route, rest, raw);
       if (route.kind === 'models') return await handleModels(req, res, ctx, route, rest, raw);
       if (route.kind === 'mcp') return await handleMcp(req, res, ctx, route, rest, raw);
-      if (route.hold?.methods.some((h) => h.toUpperCase() === (req.method ?? 'GET').toUpperCase()) && (await holdOrRelease(req, res, ctx, route, rest, raw))) return;
+      if (checkHold({ hold: route.hold, method: req.method ?? 'GET' }).held && (await holdOrRelease(req, res, ctx, route, rest, raw))) return;
       if (route.connection) return await handleConnection(req, res, ctx, route, rest, raw);
       const cred = await credential(route, ctx);
       if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
