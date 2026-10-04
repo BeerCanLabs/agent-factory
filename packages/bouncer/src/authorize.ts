@@ -2,7 +2,7 @@ import type { Principal, Role } from '@beercanlabs/factory-auth';
 import { AGENT_SCOPED, DERIVED_ROLE_PRIVILEGES, ROLE_PRIVILEGES, type Privilege } from './privileges.js';
 
 /** The order `required` is found in: the least powerful role that holds the privilege comes first. */
-const ROLE_ORDER: readonly Role[] = ['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'admin'];
+const ROLE_ORDER: readonly Role[] = ['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'];
 
 /**
  * The agent a privilege is asked for, and what the Bouncer needs to know about it. `owners` are the agent's owners

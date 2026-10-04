@@ -19,6 +19,7 @@ import { FileConfigBackend, VersionedConfigStore } from './config-store.js';
 
 const ADMIN = 'admin-requester';
 const OPERATOR = 'operator-requester';
+const INGRESS = 'ingress-requester'; // the Gatekeeper's ingress: operator, to wake agents, plus the one role that may say who asked
 const ALICE = 'alice-requester'; // viewer; owns ada, so may wake it, but may not say who asked
 const SHA = '1'.repeat(40);
 
@@ -45,6 +46,7 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
         { name: 'operator', token: OPERATOR, roles: ['operator'] },
+        { name: 'gatekeeper-ingress', token: INGRESS, roles: ['operator', 'gatekeeper-ingress'] },
         { name: 'alice', token: ALICE, roles: ['viewer'] },
       ]),
       version: '0.1.0',
@@ -86,24 +88,28 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
   const wake = (token: string, body: unknown) => api('/api/v1/agents/ada/wake', 'POST', token, body);
   const discord = (id: string) => ({ provider: 'discord', id });
 
-  it('an operator (the ingress) names the requester and the run records it', async () => {
-    const r = await wake(OPERATOR, { input: { messageId: 'm1', content: 'hi', authorId: '42' }, requestedBy: discord('42') });
+  it('the ingress names the requester and the run records it', async () => {
+    const r = await wake(INGRESS, { input: { messageId: 'm1', content: 'hi', authorId: '42' }, requestedBy: discord('42') });
     assert.equal(r.status, 202, JSON.stringify(r.body));
     assert.deepEqual(r.body.requestedBy, discord('42'));
     const got = await api(`/api/v1/runs/${r.body.runId}`, 'GET', ADMIN);
     assert.deepEqual(got.body.requestedBy, discord('42'));
   });
 
-  it('an admin may name the requester too', async () => {
-    const r = await wake(ADMIN, { input: { messageId: 'm-admin' }, requestedBy: discord('7') });
-    assert.equal(r.status, 202);
-    assert.deepEqual(r.body.requestedBy, discord('7'));
+  it('an operator or an admin may not name the requester, so no one can approve their own request by claiming to be someone', async () => {
+    for (const token of [OPERATOR, ADMIN]) {
+      const r = await wake(token, { input: { messageId: `m-${token}` }, requestedBy: discord('7') });
+      assert.equal(r.status, 403, token);
+      assert.equal(r.body.required, 'gatekeeper-ingress');
+    }
+    const plain = await wake(OPERATOR, { input: { messageId: 'm-operator-plain' } });
+    assert.equal(plain.status, 202, 'an operator can still wake an agent without naming a requester');
   });
 
   it('a caller who may wake but not say who asked gets 403 only when it sends requestedBy', async () => {
     const refused = await wake(ALICE, { input: { messageId: 'm2' }, requestedBy: discord('42') });
     assert.equal(refused.status, 403);
-    assert.equal(refused.body.required, 'operator');
+    assert.equal(refused.body.required, 'gatekeeper-ingress');
     const plain = await wake(ALICE, { input: { messageId: 'm3' } });
     assert.ok(plain.status !== 401 && plain.status !== 403, `plain wake: ${plain.status}`);
     assert.equal('requestedBy' in plain.body, false);
@@ -116,9 +122,9 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
   });
 
   it('a replayed message returns the first run and keeps its first requester', async () => {
-    const first = await wake(OPERATOR, { input: { messageId: 'm5' }, requestedBy: discord('1') });
+    const first = await wake(INGRESS, { input: { messageId: 'm5' }, requestedBy: discord('1') });
     assert.equal(first.status, 202);
-    const replay = await wake(OPERATOR, { input: { messageId: 'm5' }, requestedBy: discord('2') });
+    const replay = await wake(INGRESS, { input: { messageId: 'm5' }, requestedBy: discord('2') });
     assert.equal(replay.status, 200);
     assert.equal(replay.body.runId, first.body.runId);
     assert.deepEqual(replay.body.requestedBy, discord('1'));
@@ -126,7 +132,7 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
 
   it('a malformed requestedBy is a 400', async () => {
     for (const bad of ['42', [], {}, { provider: 'discord' }, { provider: 'discord', id: '' }, { provider: 'discord', id: 7 }, { provider: 'd'.repeat(129), id: '1' }, null]) {
-      const r = await wake(OPERATOR, { input: { messageId: 'bad' }, requestedBy: bad });
+      const r = await wake(INGRESS, { input: { messageId: 'bad' }, requestedBy: bad });
       assert.equal(r.status, 400, JSON.stringify(bad));
     }
   });
