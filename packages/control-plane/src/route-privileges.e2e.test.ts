@@ -32,6 +32,8 @@ function oldHasRole(roles: Role[], role: Role): boolean {
 type RouteRow = {
   method: string;
   path: string;
+  /** The privilege the route asks the Bouncer for (the census). */
+  privilege: string;
   /** The role the route names today. */
   role: Role;
   /** A role the route asks for first, before `role` (the schedule routes ask for a viewer, then for an operator). */
@@ -41,89 +43,93 @@ type RouteRow = {
   body?: unknown;
 };
 
+// Asked outside a row: the WebSocket upgrade and the ledger's attestation of the run as the actor.
+const WEBSOCKET = { privilege: 'events.subscribe', role: 'viewer' as Role };
+const ATTESTATION = { privilege: 'ledger.attest-run-actor', role: 'gatekeeper-egress' as Role };
+
 const SKILL = 'x';
 const ROUTES: RouteRow[] = [
   // viewer
-  { method: 'GET', path: '/api/v1/agents', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/registry/agents', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/registry/agents/castle', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/agents/castle/policy', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/agents/castle/config', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/agents/castle/config/history', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/agents/castle/config/versions/1', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/runs', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/runs/nope', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/ledger', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/ledger/verify', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/models', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/metrics', role: 'viewer' },
-  { method: 'GET', path: '/metrics', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/triage', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/spend', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/approvals', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/skills', role: 'viewer' },
-  { method: 'GET', path: `/api/v1/skills/${SKILL}`, role: 'viewer' },
-  { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1`, role: 'viewer' },
-  { method: 'POST', path: '/api/v1/registry/skills', role: 'viewer', body: {} },
-  { method: 'GET', path: '/api/v1/systems', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/systems/nope', role: 'viewer' },
-  { method: 'POST', path: '/api/v1/systems', role: 'viewer', body: {} },
-  { method: 'GET', path: '/api/v1/connections/castle', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/keymaster/providers/p/client', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/schedules', role: 'viewer' },
-  { method: 'POST', path: '/mcp', role: 'viewer', body: { jsonrpc: '2.0', id: 1, method: 'ping' } },
+  { method: 'GET', path: '/api/v1/agents', privilege: 'agents.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/registry/agents', privilege: 'agents.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/registry/agents/castle', privilege: 'agents.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/agents/castle/policy', privilege: 'policy.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/agents/castle/config', privilege: 'config.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/agents/castle/config/history', privilege: 'config.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/agents/castle/config/versions/1', privilege: 'config.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/runs', privilege: 'runs.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/runs/nope', privilege: 'runs.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/ledger', privilege: 'ledger.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/ledger/verify', privilege: 'ledger.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/models', privilege: 'models.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/metrics', privilege: 'metrics.read', role: 'viewer' },
+  { method: 'GET', path: '/metrics', privilege: 'metrics.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/triage', privilege: 'triage.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/spend', privilege: 'spend.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/approvals', privilege: 'approvals.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/skills', privilege: 'skills.read', role: 'viewer' },
+  { method: 'GET', path: `/api/v1/skills/${SKILL}`, privilege: 'skills.read', role: 'viewer' },
+  { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1`, privilege: 'skills.read', role: 'viewer' },
+  { method: 'POST', path: '/api/v1/registry/skills', privilege: 'skills.register', role: 'viewer', body: {} },
+  { method: 'GET', path: '/api/v1/systems', privilege: 'systems.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/systems/nope', privilege: 'systems.read', role: 'viewer' },
+  { method: 'POST', path: '/api/v1/systems', privilege: 'systems.propose', role: 'viewer', body: {} },
+  { method: 'GET', path: '/api/v1/connections/castle', privilege: 'connections.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/keymaster/providers/p/client', privilege: 'credentials.provider.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/schedules', privilege: 'schedules.read', role: 'viewer' },
+  { method: 'POST', path: '/mcp', privilege: 'mcp.use', role: 'viewer', body: { jsonrpc: '2.0', id: 1, method: 'ping' } },
   // operator
-  { method: 'POST', path: '/api/v1/agents/nope/runs', role: 'operator', body: {} },
-  { method: 'POST', path: '/api/v1/agents/nope/wake', role: 'operator', body: {} },
-  { method: 'POST', path: '/api/v1/agents/nope/pause', role: 'operator', body: {} },
-  { method: 'POST', path: '/api/v1/agents/nope/resume', role: 'operator', body: {} },
-  { method: 'POST', path: '/api/v1/agents/nope/isolate', role: 'operator', body: {} },
-  { method: 'POST', path: '/api/v1/runs/nope/cancel', role: 'operator', body: {} },
-  { method: 'POST', path: '/api/v1/agents/nope/conversation', role: 'operator', body: {} },
-  { method: 'POST', path: '/api/v1/hooks/hooked', role: 'operator', body: {} },
-  { method: 'POST', path: '/api/v1/schedules', role: 'operator', firstRole: 'viewer', body: {} },
-  { method: 'DELETE', path: '/api/v1/schedules/nope', role: 'operator', firstRole: 'viewer' },
+  { method: 'POST', path: '/api/v1/agents/nope/runs', privilege: 'agents.wake', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/wake', privilege: 'agents.wake', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/pause', privilege: 'agents.pause', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/resume', privilege: 'agents.resume', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/isolate', privilege: 'agents.isolate', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/runs/nope/cancel', privilege: 'runs.cancel', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/conversation', privilege: 'agents.converse', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/hooks/hooked', privilege: 'hooks.invoke', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/schedules', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
+  { method: 'DELETE', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer' },
   // approver
-  { method: 'POST', path: '/api/v1/approvals/nope', role: 'approver', body: { decision: 'approved' } },
+  { method: 'POST', path: '/api/v1/approvals/nope', privilege: 'approvals.decide', role: 'approver', body: { decision: 'approved' } },
   // ingest
-  { method: 'POST', path: '/api/v1/ledger', role: 'ingest', body: {} },
+  { method: 'POST', path: '/api/v1/ledger', privilege: 'ledger.ingest', role: 'ingest', body: {} },
   // gatekeeper-egress
-  { method: 'GET', path: '/api/v1/gatekeeper-egress/runs/nope', role: 'gatekeeper-egress' },
-  { method: 'POST', path: '/api/v1/gatekeeper-egress/approvals', role: 'gatekeeper-egress', body: {} },
-  { method: 'POST', path: '/api/v1/gatekeeper-egress/holds', role: 'gatekeeper-egress', body: {} },
-  { method: 'POST', path: '/api/v1/gatekeeper-egress/approvals/nope/consume', role: 'gatekeeper-egress', body: {} },
-  { method: 'POST', path: '/api/v1/gatekeeper-egress/keymaster/checkout', role: 'gatekeeper-egress', body: {} },
-  { method: 'POST', path: '/api/v1/gatekeeper-egress/progress', role: 'gatekeeper-egress', body: {} },
-  { method: 'GET', path: '/api/v1/gatekeeper-egress/routes', role: 'gatekeeper-egress' },
-  { method: 'POST', path: '/api/v1/gatekeeper-egress/connections/token', role: 'gatekeeper-egress', exclusive: true, body: {} },
+  { method: 'GET', path: '/api/v1/gatekeeper-egress/runs/nope', privilege: 'egress.run.read', role: 'gatekeeper-egress' },
+  { method: 'POST', path: '/api/v1/gatekeeper-egress/approvals', privilege: 'egress.approvals.request', role: 'gatekeeper-egress', body: {} },
+  { method: 'POST', path: '/api/v1/gatekeeper-egress/holds', privilege: 'egress.holds.create', role: 'gatekeeper-egress', body: {} },
+  { method: 'POST', path: '/api/v1/gatekeeper-egress/approvals/nope/consume', privilege: 'egress.approvals.consume', role: 'gatekeeper-egress', body: {} },
+  { method: 'POST', path: '/api/v1/gatekeeper-egress/keymaster/checkout', privilege: 'egress.keymaster.checkout', role: 'gatekeeper-egress', body: {} },
+  { method: 'POST', path: '/api/v1/gatekeeper-egress/progress', privilege: 'egress.progress.report', role: 'gatekeeper-egress', body: {} },
+  { method: 'GET', path: '/api/v1/gatekeeper-egress/routes', privilege: 'egress.routes.read', role: 'gatekeeper-egress' },
+  { method: 'POST', path: '/api/v1/gatekeeper-egress/connections/token', privilege: 'egress.connections.token', role: 'gatekeeper-egress', exclusive: true, body: {} },
   // admin
-  { method: 'POST', path: '/api/v1/registry/agents', role: 'admin', body: {} },
-  { method: 'PUT', path: '/api/v1/registry/agents/nope/budget', role: 'admin', body: {} },
-  { method: 'POST', path: '/api/v1/registry/agents/nope/retire', role: 'admin', body: {} },
-  { method: 'POST', path: '/api/v1/registry/agents/nope/reinstate', role: 'admin', body: {} },
-  { method: 'POST', path: '/api/v1/registry/agents/nope/purge', role: 'admin', body: {} },
-  { method: 'POST', path: '/api/v1/registry/agents/nope/deploy', role: 'admin', body: {} },
-  { method: 'POST', path: '/api/v1/registry/agents/nope/model', role: 'admin', body: {} },
-  { method: 'PUT', path: '/api/v1/registry/agents/nope/model', role: 'admin', body: {} },
-  { method: 'POST', path: '/api/v1/registry/agents/nope/models/approve', role: 'admin', body: {} },
-  { method: 'PUT', path: '/api/v1/agents/nope/policy', role: 'admin', body: {} },
-  { method: 'PUT', path: '/api/v1/policies/budget', role: 'admin', body: {} },
-  { method: 'GET', path: '/api/v1/config/export', role: 'admin' },
-  { method: 'GET', path: '/api/v1/keymaster/outstanding', role: 'admin' },
-  { method: 'GET', path: '/api/v1/keymaster/platform/credentials', role: 'admin' },
-  { method: 'POST', path: '/api/v1/keymaster/platform/credentials/n', role: 'admin', body: {} },
-  { method: 'PUT', path: '/api/v1/keymaster/platform/credentials/n', role: 'admin', body: {} },
-  { method: 'GET', path: '/api/v1/keymaster/agents/castle/credentials', role: 'admin' },
-  { method: 'POST', path: '/api/v1/keymaster/agents/castle/credentials/n', role: 'admin', body: {} },
-  { method: 'PUT', path: '/api/v1/keymaster/agents/castle/credentials/n', role: 'admin', body: {} },
-  { method: 'POST', path: '/api/v1/keymaster/providers/p/client', role: 'admin', body: {} },
-  { method: 'GET', path: '/api/v1/connections/castle/p/start', role: 'admin' },
-  { method: 'POST', path: '/api/v1/connections/castle/p/import', role: 'admin', body: {} },
-  { method: 'POST', path: '/api/v1/systems/nope/approve', role: 'admin', body: {} },
-  { method: 'POST', path: '/api/v1/systems/nope/reject', role: 'admin', body: {} },
-  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/approve`, role: 'admin', body: {} },
-  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/reject`, role: 'admin', body: {} },
-  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/checks`, role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/registry/agents', privilege: 'registry.register', role: 'admin', body: {} },
+  { method: 'PUT', path: '/api/v1/registry/agents/nope/budget', privilege: 'registry.budget.set', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/registry/agents/nope/retire', privilege: 'registry.retire', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/registry/agents/nope/reinstate', privilege: 'registry.reinstate', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/registry/agents/nope/purge', privilege: 'registry.purge', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/registry/agents/nope/deploy', privilege: 'registry.deploy', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/registry/agents/nope/model', privilege: 'registry.model.set', role: 'admin', body: {} },
+  { method: 'PUT', path: '/api/v1/registry/agents/nope/model', privilege: 'registry.model.set', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/registry/agents/nope/models/approve', privilege: 'registry.model.set', role: 'admin', body: {} },
+  { method: 'PUT', path: '/api/v1/agents/nope/policy', privilege: 'policy.set', role: 'admin', body: {} },
+  { method: 'PUT', path: '/api/v1/policies/budget', privilege: 'policy.budget.set', role: 'admin', body: {} },
+  { method: 'GET', path: '/api/v1/config/export', privilege: 'config.export', role: 'admin' },
+  { method: 'GET', path: '/api/v1/keymaster/outstanding', privilege: 'credentials.outstanding.read', role: 'admin' },
+  { method: 'GET', path: '/api/v1/keymaster/platform/credentials', privilege: 'credentials.platform.read', role: 'admin' },
+  { method: 'POST', path: '/api/v1/keymaster/platform/credentials/n', privilege: 'credentials.platform.set', role: 'admin', body: {} },
+  { method: 'PUT', path: '/api/v1/keymaster/platform/credentials/n', privilege: 'credentials.platform.set', role: 'admin', body: {} },
+  { method: 'GET', path: '/api/v1/keymaster/agents/castle/credentials', privilege: 'credentials.agent.read', role: 'admin' },
+  { method: 'POST', path: '/api/v1/keymaster/agents/castle/credentials/n', privilege: 'credentials.agent.set', role: 'admin', body: {} },
+  { method: 'PUT', path: '/api/v1/keymaster/agents/castle/credentials/n', privilege: 'credentials.agent.set', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/keymaster/providers/p/client', privilege: 'credentials.provider.set', role: 'admin', body: {} },
+  { method: 'GET', path: '/api/v1/connections/castle/p/start', privilege: 'connections.start', role: 'admin' },
+  { method: 'POST', path: '/api/v1/connections/castle/p/import', privilege: 'connections.import', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/systems/nope/approve', privilege: 'systems.decide', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/systems/nope/reject', privilege: 'systems.decide', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/approve`, privilege: 'skills.decide', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/reject`, privilege: 'skills.decide', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/checks`, privilege: 'skills.checks.run', role: 'admin', body: {} },
 ];
 
 async function listen(server: http.Server): Promise<number> {
@@ -243,7 +249,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
   it('the WebSocket upgrade needs a viewer, an operator, an approver or an admin', async () => {
     for (const cred of CREDENTIALS) {
       const status = await upgrade(port, cred);
-      const expected = cred !== 'none' && oldHasRole([cred], 'viewer') ? 101 : 401;
+      const expected = cred !== 'none' && oldHasRole([cred], WEBSOCKET.role) ? 101 : 401;
       assert.equal(status, expected, `/api/v1/events as ${cred}`);
     }
   });
@@ -299,10 +305,10 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     assert.equal((await rpc('viewer', 'tools/call', { name: 'list_agents' })).error, undefined);
   });
 
-  it('only the gatekeeper-egress role may attest the run as the actor on a ledger write; an admin may not', async () => {
+  it(`only the ${ATTESTATION.role} role may attest the run as the actor on a ledger write; an admin may not`, async () => {
     const run = state.runs.create({ agentId: 'castle', state: 'WORKING', actor: 'test', trigger: 'discord' });
     const event = { agentId: 'castle', type: 'action', action: 'ATTEST_TEST', runId: run.runId, actor: 'run:castle' };
-    const asEgress = await call(port, 'POST', '/api/v1/ledger', 'gatekeeper-egress', event);
+    const asEgress = await call(port, 'POST', '/api/v1/ledger', ATTESTATION.role, event);
     assert.ok(asEgress.status < 300, `egress: ${asEgress.status}`);
     const asAdmin = await call(port, 'POST', '/api/v1/ledger', 'admin', event);
     assert.ok(asAdmin.status < 300, `admin: ${asAdmin.status}`);

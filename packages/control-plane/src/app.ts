@@ -1239,7 +1239,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const killMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/(pause|resume|isolate)$/);
   if (killMatch && req.method === 'POST') {
-    const principal = await requirePrivilege(req, res, state, `agents.${killMatch[2] as 'pause' | 'resume' | 'isolate'}` as const);
+    const principal = await requirePrivilege(req, res, state, killMatch[2] === 'pause' ? 'agents.pause' : killMatch[2] === 'resume' ? 'agents.resume' : 'agents.isolate');
     if (!principal) return;
     const out = await applyKillSwitch(state, killMatch[1], killMatch[2].toUpperCase() as 'PAUSE' | 'RESUME' | 'ISOLATE', principal.actor);
     json(res, out.status, out.body);
