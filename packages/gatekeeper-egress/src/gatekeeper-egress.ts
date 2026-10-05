@@ -48,6 +48,13 @@ export type Route = {
    * the factory's public host are replaced before forwarding, so no agent can send a person to sign in elsewhere.
    */
   stripSignInLinks?: boolean;
+  /**
+   * A message route whose destination rejects a long `content` (Discord: 2000 characters). A JSON body whose `content`
+   * is longer is not forwarded: the agent gets 422 `message_too_long` with the limit and the length, and splits its own
+   * message. The gatekeeper-egress never splits, truncates or retries for an agent. Operations config on a
+   * landing-zone route; a route defined as a Systems-store system does not carry it.
+   */
+  maxContentChars?: number;
 };
 
 export type ConnectionTokenResult =
@@ -233,6 +240,7 @@ export function routeProblem(r: Route, system = false, allowHttp = false): strin
   if (!r || typeof r.id !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(r.id)) return 'invalid id';
   if (r.connection && r.credential) return 'a connection route must not also carry a static credential';
   if (r.connection && r.kind !== 'http') return 'connections are supported on http routes only';
+  if (r.maxContentChars !== undefined && !(Number.isInteger(r.maxContentChars) && r.maxContentChars > 0)) return 'maxContentChars must be a positive integer';
   if (!system) return undefined;
   if (r.kind !== 'http' && r.kind !== 'mcp') return `kind ${String(r.kind)} is not a system kind (model routes belong to the landing zone, E5)`;
   if (typeof r.upstream !== 'string' || !(allowHttp ? /^https?:\/\/[^/]/ : /^https:\/\/[^/]/).test(r.upstream)) return 'upstream must be an https URL';
@@ -937,6 +945,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
             // Never the URLs themselves: only that links were removed, and how many.
             ledger(ctx, route, { type: 'action', action: 'SIGN_IN_LINK_REMOVED', count: r.removed });
           }
+        }
+      }
+      if (route.maxContentChars && raw.length && /json/i.test(String(req.headers['content-type'] ?? ''))) {
+        const content = (tryJson(raw) as { content?: unknown } | undefined)?.content;
+        // UTF-16 units: never fewer than the destination's own count of characters, so an over-long message is never let through.
+        if (typeof content === 'string' && content.length > route.maxContentChars) {
+          return deny(res, ctx, route, 422, 'message_too_long', { field: 'content', limit: route.maxContentChars, length: content.length });
         }
       }
       // Model routes report their start once the model is known (handleLlm, handleModels).
