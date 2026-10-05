@@ -91,6 +91,7 @@ export const systemProposalSchema = z
     oauth: systemOAuthSchema.optional(),
     hold: systemHoldSchema.optional(),
     stripSignInLinks: z.boolean().optional(),
+    maxContentChars: z.number().int().positive().optional(),
   })
   .strict()
   .refine(
@@ -123,6 +124,7 @@ export const systemDefinitionSchema = z
     oauth: systemOAuthSchema.optional(),
     hold: systemHoldSchema.optional(),
     stripSignInLinks: z.boolean().optional(),
+    maxContentChars: z.number().int().positive().optional(),
     version: z.number().int().positive(),
     status: z.enum(['proposed', 'approved', 'rejected']),
     proposedBy: z.string().min(1),

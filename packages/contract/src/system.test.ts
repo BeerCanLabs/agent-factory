@@ -82,6 +82,14 @@ describe('system definition schemas', () => {
     assert.equal(parsed.success, true);
   });
 
+  it('accepts a message limit that is a positive whole number, and nothing else', () => {
+    const base = { id: 'discord', name: 'Discord', kind: 'http', upstream: 'https://discord.com/api/v10' };
+    assert.equal(validateSystemProposal({ ...base, maxContentChars: 2000 }).ok, true);
+    for (const bad of [0, -5, 1.5, '2000', null]) {
+      assert.equal(validateSystemProposal({ ...base, maxContentChars: bad as number }).ok, false, String(bad));
+    }
+  });
+
   it('refuses a non-https upstream and a model provider as a system (E10, E5)', () => {
     const base = { id: 'x', name: 'X', kind: 'http' };
     assert.equal(validateSystemProposal({ ...base, upstream: 'http://example.com' }).ok, false);
