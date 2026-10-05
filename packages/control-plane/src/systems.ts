@@ -52,6 +52,7 @@ export type EgressRoute = {
   scopes?: string[];
   hold?: { methods: string[]; preview?: string };
   stripSignInLinks?: boolean;
+  maxContentChars?: number;
 };
 
 
@@ -127,6 +128,7 @@ export class SystemsStore {
         scopes: r.scopes,
         hold: r.hold,
         stripSignInLinks: r.stripSignInLinks,
+        maxContentChars: r.maxContentChars,
         oauth: r.oauth,
       });
       if (!v.ok) {
@@ -153,6 +155,7 @@ export class SystemsStore {
       scopes: proposal.scopes,
       hold: proposal.hold,
       stripSignInLinks: proposal.stripSignInLinks,
+      maxContentChars: proposal.maxContentChars,
       oauth: proposal.oauth,
     };
     const hash = payloadHash(content);
@@ -200,6 +203,7 @@ export class SystemsStore {
       scopes: proposal.scopes,
       hold: proposal.hold,
       stripSignInLinks: proposal.stripSignInLinks,
+      maxContentChars: proposal.maxContentChars,
       oauth: proposal.oauth,
     };
     const hash = payloadHash(content);
@@ -358,6 +362,7 @@ export class SystemsStore {
         scopes: def.scopes,
         hold: def.hold,
         stripSignInLinks: def.stripSignInLinks,
+        maxContentChars: def.maxContentChars,
       });
     }
     return routes;

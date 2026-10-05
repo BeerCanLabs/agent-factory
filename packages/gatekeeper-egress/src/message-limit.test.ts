@@ -137,3 +137,47 @@ describe('the limit is validated when the route is loaded', () => {
   });
 });
 
+describe('a route that comes from the factory (a Systems-store system) carries the limit too', () => {
+  it('refuses a long content on a system route and forwards a short one', async () => {
+    const seen: string[] = [];
+    const upstream = http.createServer((req, res) => {
+      let b = '';
+      req.on('data', (c) => (b += c));
+      req.on('end', () => {
+        seen.push(b);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    const up = await listen(upstream);
+    const sysTokens = new RunTokens('message-limit-system-run-token-key-0123456789');
+    const control: ControlClient = {
+      async runContext() {
+        return { run: { runId: 'sys-run', agentId: 'donna', state: 'WORKING', live: true }, agentState: 'WORKING', policy: { routes: ['discord'] }, spend: { run: 0, day: 0, month: 0 } };
+      },
+      async requestApproval() {
+        return { approvalId: 'unused', state: 'pending' };
+      },
+      async consumeApproval() {
+        return false;
+      },
+      async ledger() {},
+      async systemRoutes() {
+        return [{ id: 'discord', kind: 'http', upstream: `http://127.0.0.1:${up}/discord`, maxContentChars: 2000 }];
+      },
+    };
+    const server = createGatekeeperEgress({ routes: [], prices: {}, runTokens: sysTokens, control, providers: [], contextTtlMs: 0, allowHttpSystems: true });
+    const port = await listen(server);
+    try {
+      const t = await sysTokens.mint({ runId: 'sys-run', agentId: 'donna' });
+      const long = await post(port, '/discord/channels/1/messages', t, { content: 'x'.repeat(2500) });
+      assert.equal(long.status, 422);
+      assert.equal(long.body.error, 'message_too_long');
+      assert.equal(seen.length, 0);
+      assert.equal((await post(port, '/discord/channels/1/messages', t, { content: 'short' })).status, 200);
+    } finally {
+      for (const s of [server, upstream]) await new Promise<void>((r) => s.close(() => r()));
+    }
+  });
+});
+
