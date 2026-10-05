@@ -39,7 +39,7 @@ async function call(port: number, path: string, method = 'GET', token?: string, 
 const DEPLOYMENT_ROUTES = [
   { id: 'anthropic', kind: 'llm', provider: 'anthropic', upstream: 'https://api.anthropic.com', credential: { secret: 'ANTHROPIC_API_KEY', header: 'x-api-key' } },
   { id: 'models', kind: 'models' },
-  { id: 'discord', kind: 'http', upstream: 'https://discord.com/api/v10', credential: { secret: '{agent}_DISCORD_BOT_TOKEN', header: 'authorization', format: 'Bot {}' }, stripSignInLinks: true },
+  { id: 'discord', kind: 'http', upstream: 'https://discord.com/api/v10', credential: { secret: '{agent}_DISCORD_BOT_TOKEN', header: 'authorization', format: 'Bot {}' }, stripSignInLinks: true, maxContentChars: 2000 },
   { id: 'github', kind: 'http', upstream: 'https://api.github.com', credential: { secret: '{agent}_GITHUB_TOKEN', header: 'authorization', format: 'Bearer {}', fallback: false } },
   { id: 'linkedin', kind: 'http', upstream: 'https://api.linkedin.com', connection: 'linkedin', hold: { methods: ['POST', 'PUT', 'PATCH', 'DELETE'], preview: 'linkedin-post' } },
   { id: 'private-service', kind: 'http', upstream: 'https://private.example.com', credential: { secret: 'PRIVATE_TOKEN', header: 'x-api-token' } },
@@ -120,8 +120,10 @@ describe('systems as factory data (E10)', () => {
   it('serves active routes to gatekeeper-egress via /api/v1/gatekeeper-egress/routes', async () => {
     const res = await call(port, '/api/v1/gatekeeper-egress/routes', 'GET', EGRESS);
     assert.equal(res.status, 200);
-    const routes = res.body.routes as Array<{ id: string; upstream?: string; credential?: any; hold?: any }>;
+    const routes = res.body.routes as Array<{ id: string; upstream?: string; credential?: any; hold?: any; maxContentChars?: number }>;
     assert.ok(routes.some((r) => r.id === 'discord' && r.upstream === 'https://discord.com/api/v10'));
+    assert.equal(routes.find((r) => r.id === 'discord')?.maxContentChars, 2000, 'the message limit reaches the gatekeeper-egress');
+    assert.equal(routes.find((r) => r.id === 'github')?.maxContentChars, undefined, 'a route without a limit has none');
     assert.ok(routes.some((r) => r.id === 'github' && r.credential?.secret === '{agent}_GITHUB_TOKEN'));
     assert.ok(routes.some((r) => r.id === 'linkedin' && r.hold?.methods?.includes('POST')));
     assert.ok(routes.some((r) => r.id === 'private-service'));

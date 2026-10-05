@@ -298,6 +298,8 @@ export interface SystemDefinition {
     preview?: string;
   };
   stripSignInLinks?: boolean;
+  /** A message route's longest `content` in characters (Discord: 2000); a longer message is refused, never split. */
+  maxContentChars?: number;
   oauth?: SystemOAuth;
   version: number;
   status: SystemStatus;

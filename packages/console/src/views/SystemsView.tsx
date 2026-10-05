@@ -65,6 +65,7 @@ export const SystemsView: React.FC = () => {
   const [holdPost, setHoldPost] = useState(false);
   const [holdPreview, setHoldPreview] = useState('');
   const [stripLinks, setStripLinks] = useState(false);
+  const [maxContent, setMaxContent] = useState('');
 
   // OAuth Provider configuration state (TSK-067)
   const [oauthEnabled, setOauthEnabled] = useState(false);
@@ -126,6 +127,7 @@ export const SystemsView: React.FC = () => {
       setHoldPost(Boolean(active?.hold?.methods?.includes('POST')));
       setHoldPreview(active?.hold?.preview || '');
       setStripLinks(Boolean(active?.stripSignInLinks));
+      setMaxContent(active?.maxContentChars ? String(active.maxContentChars) : '');
 
       if (active?.oauth) {
         setOauthEnabled(true);
@@ -170,6 +172,7 @@ export const SystemsView: React.FC = () => {
       setHoldPost(false);
       setHoldPreview('');
       setStripLinks(false);
+      setMaxContent('');
       setOauthEnabled(false);
       setOauthKind('oauth-user');
       setOauthAuthUrl('');
@@ -220,6 +223,15 @@ export const SystemsView: React.FC = () => {
 
     if (stripLinks) {
       payload.stripSignInLinks = true;
+    }
+
+    if (maxContent.trim()) {
+      const n = Number(maxContent);
+      if (!Number.isInteger(n) || n <= 0) {
+        alert('Maximum message length must be a positive whole number of characters (Discord: 2000), or empty for no limit.');
+        return;
+      }
+      payload.maxContentChars = n;
     }
 
     if (oauthEnabled) {
@@ -388,6 +400,13 @@ export const SystemsView: React.FC = () => {
                           </span>
                         ) : (
                           <span className="text-slate-400">Direct</span>
+                        )}
+                        {active?.maxContentChars && (
+                          <div>
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                              Max {active.maxContentChars} chars
+                            </span>
+                          </div>
                         )}
                         {active?.stripSignInLinks && (
                           <div>
@@ -838,6 +857,18 @@ export const SystemsView: React.FC = () => {
                   onChange={(e) => setStripLinks(e.target.checked)}
                 />
                 K4 Strip Sign-In Links (rewrites third-party OAuth links to factory host)
+              </label>
+
+              <label className="flex items-center gap-2 text-xs font-medium">
+                Max message length (characters; a longer message is refused, never split; Discord is 2000)
+                <input
+                  type="number"
+                  min={1}
+                  value={maxContent}
+                  onChange={(e) => setMaxContent(e.target.value)}
+                  className="w-24 px-2 py-1 border rounded text-xs"
+                  placeholder="none"
+                />
               </label>
             </div>
           </form>
