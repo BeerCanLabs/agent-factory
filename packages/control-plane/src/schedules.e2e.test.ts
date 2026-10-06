@@ -12,7 +12,8 @@ import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import { ScheduleStore, scheduleLedgerHash, type ScheduledAction } from './schedules.js';
+import { ScheduleStore, type ScheduledAction } from '@beercanlabs/factory-timekeeper';
+import { scheduleLedgerHash } from './schedules.js';
 
 const KEY = 'schedules-e2e-run-token-key-0123456789abcdef';
 const OPERATOR = 'operator-schedules-e2e'; // secret-scan:allow (test fixture)
