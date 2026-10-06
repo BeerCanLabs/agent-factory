@@ -2,7 +2,7 @@
 import { describe, it } from 'node:test';
 import { mkdtempSync, mkdirSync, readdirSync, existsSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import assert from 'node:assert/strict';
 import { repoRoot } from './support.js';
 import {
@@ -10,6 +10,10 @@ import {
   FACTORY_SERVICES,
   ALLOWED_PLATFORM_ROLES,
   RESERVED_PACKAGES,
+  SHARED_PACKAGES,
+  SPLIT_FILES,
+  COMPOSITION_ROOT_FILES,
+  PLATFORM_FILES,
   getPackageClassification,
 } from '@beercanlabs/factory-contract';
 
@@ -171,5 +175,115 @@ describe('SV1 intentional services (§6.15)', () => {
       () => assertPackagesAttributed(['auth', 'unassigned-stealth-service']),
       /SV1 violation: Package 'unassigned-stealth-service' has no declared service/
     );
+  });
+});
+
+type FileMap = {
+  members: Record<string, readonly string[]>;
+  hostedIn: Record<string, readonly string[]>;
+  split: readonly string[];
+  roots: readonly string[];
+  platform: readonly string[];
+  shared: readonly string[];
+};
+
+function sourceFiles(root: string, pkg: string): string[] {
+  const out: string[] = [];
+  const walk = (abs: string): void => {
+    for (const name of readdirSync(abs)) {
+      if (name === 'node_modules' || name === 'dist' || name.startsWith('.')) continue;
+      const p = join(abs, name);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (isImplementationFile(name)) out.push(relative(root, p).split(sep).join('/'));
+    }
+  };
+  const src = join(root, pkg, 'src');
+  if (existsSync(src)) walk(src);
+  return out;
+}
+
+/** Returns every way the file-to-member map disagrees with the source tree (empty when it agrees). */
+export function fileMapViolations(root: string, map: FileMap): string[] {
+  const problems: string[] = [];
+  const claims = new Map<string, string[]>();
+  const claim = (file: string, who: string) => claims.set(file, [...(claims.get(file) ?? []), who]);
+  for (const [member, files] of Object.entries(map.members)) for (const f of files) claim(f, member);
+  for (const f of map.roots) claim(f, 'composition root');
+  for (const f of map.platform) claim(f, 'platform');
+
+  for (const [file, who] of claims) {
+    if (!existsSync(join(root, file))) problems.push(`'${file}' is claimed by ${who.join(', ')} but does not exist.`);
+    if (who.length > 1 && !map.split.includes(file)) {
+      problems.push(`'${file}' is claimed by ${who.join(', ')} but is not marked split.`);
+    }
+  }
+  for (const file of map.split) {
+    if ((claims.get(file)?.length ?? 0) < 2) problems.push(`'${file}' is marked split but is claimed by fewer than two owners.`);
+  }
+  for (const pkg of map.shared) {
+    for (const file of sourceFiles(root, pkg)) {
+      if (!claims.has(file)) problems.push(`'${file}' in shared package '${pkg}' is owned by no member.`);
+    }
+  }
+  for (const [member, files] of Object.entries(map.members)) {
+    for (const f of files) {
+      const pkg = map.shared.find((p) => f.startsWith(`${p}/`));
+      if (pkg && !map.hostedIn[member]?.includes(pkg)) {
+        problems.push(`'${member}' owns '${f}' but does not list '${pkg}' in hostedIn.`);
+      }
+    }
+  }
+  for (const [member, hosted] of Object.entries(map.hostedIn)) {
+    for (const pkg of hosted.filter((h) => map.shared.includes(h))) {
+      if (!(map.members[member] ?? []).some((f) => f.startsWith(`${pkg}/`))) {
+        problems.push(`'${member}' lists '${pkg}' in hostedIn but owns no file there.`);
+      }
+    }
+  }
+  return problems;
+}
+
+function repoFileMap(): FileMap {
+  return {
+    members: Object.fromEntries(FACTORY_SERVICE_NAMES.map((n) => [n, FACTORY_SERVICES[n].owns ?? []])),
+    hostedIn: Object.fromEntries(FACTORY_SERVICE_NAMES.map((n) => [n, FACTORY_SERVICES[n].hostedIn])),
+    split: SPLIT_FILES,
+    roots: COMPOSITION_ROOT_FILES,
+    platform: Object.keys(PLATFORM_FILES),
+    shared: SHARED_PACKAGES,
+  };
+}
+
+describe('SV1 file-to-member map (§6.15, TSK-093)', () => {
+  it('every source file in a shared package has one owner or an explicit split, and hosts agree', () => {
+    assert.deepEqual(fileMapViolations(repoRoot, repoFileMap()), []);
+  });
+
+  it('rejects an unowned file, an unmarked double claim, a missing file, an empty split, and a host the map contradicts either way', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sv1-map-'));
+    try {
+      const src = join(root, 'packages', 'shared', 'src');
+      mkdirSync(src, { recursive: true });
+      for (const f of ['a.ts', 'b.ts', 'orphan.ts']) writeFileSync(join(src, f), 'export {};\n');
+      writeFileSync(join(src, 'a.test.ts'), 'export {};\n');
+      const base: FileMap = {
+        members: { one: ['packages/shared/src/a.ts', 'packages/shared/src/b.ts'] },
+        hostedIn: { one: ['packages/shared'] },
+        split: [],
+        roots: [],
+        platform: [],
+        shared: ['packages/shared'],
+      };
+      const bad = (m: Partial<FileMap>) => fileMapViolations(root, { ...base, ...m });
+
+      assert.deepEqual(bad({}), ["'packages/shared/src/orphan.ts' in shared package 'packages/shared' is owned by no member."]);
+      assert.match(bad({ members: { ...base.members, two: ['packages/shared/src/a.ts'] }, hostedIn: { ...base.hostedIn, two: ['packages/shared'] } }).join('\n'), /claimed by one, two but is not marked split/);
+      assert.match(bad({ members: { one: ['packages/shared/src/gone.ts'] } }).join('\n'), /does not exist/);
+      assert.match(bad({ split: ['packages/shared/src/a.ts'] }).join('\n'), /marked split but is claimed by fewer than two/);
+      assert.match(bad({ hostedIn: { one: [] } }).join('\n'), /does not list 'packages\/shared' in hostedIn/);
+      assert.match(bad({ members: { one: [], two: ['packages/shared/src/a.ts', 'packages/shared/src/b.ts'] }, hostedIn: { one: ['packages/shared'], two: ['packages/shared'] } }).join('\n'), /'one' lists 'packages\/shared' in hostedIn but owns no file there/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
