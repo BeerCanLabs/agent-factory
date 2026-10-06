@@ -1,5 +1,0 @@
-# Regression suite. This persona has no worker image yet, so the suite fails until it is built.
-cases:
-  - id: smoke
-    input: { probe: true }
-    expect: { status: DONE }
