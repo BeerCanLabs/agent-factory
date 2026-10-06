@@ -11,7 +11,7 @@ import { FileRunStore, RunTokens } from './runs.js';
 import { callbackPolicyFromEnv } from './callbacks.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { ScheduleStore } from '@beercanlabs/factory-timekeeper';
+import { ScheduleStore, agentsDueForCron } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from './policy.js';
 import { EventHub, attachBus, busSinkFromEnv, runEvent, tapLedger } from './events.js';
@@ -20,7 +20,6 @@ import { startQueuePollers } from './queues.js';
 import { memoryRuntime, type DeployProvider } from './runtime.js';
 import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
-import { agentsDueForCron } from './scheduler.js';
 import { VersionedConfigStore, checkRegistry, configBackendFromEnv, migrateConfigs, pruneOrphans } from './config-store.js';
 import { SystemsStore } from './systems.js';
 
