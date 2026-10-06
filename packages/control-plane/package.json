@@ -30,6 +30,7 @@
     "@beercanlabs/factory-ledger": "0.1.0",
     "@beercanlabs/factory-secrets-bind": "0.1.0",
     "@beercanlabs/factory-telemetry": "0.1.0",
+    "@beercanlabs/factory-timekeeper": "0.1.0",
     "@google-cloud/cloudbuild": "^4.8.1",
     "@google-cloud/iam-credentials": "^4.2.2",
     "@google-cloud/run": "^2.3.0",

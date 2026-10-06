@@ -12,6 +12,7 @@ RUN npm run build -w @beercanlabs/factory-contract \
   -w @beercanlabs/factory-bouncer \
   -w @beercanlabs/factory-keymaster \
   -w @beercanlabs/factory-telemetry \
+  -w @beercanlabs/factory-timekeeper \
   -w @beercanlabs/factory-control-plane
 
 FROM node:22-alpine
@@ -27,6 +28,7 @@ COPY packages/ledger/package.json ./packages/ledger/package.json
 COPY packages/budget/package.json ./packages/budget/package.json
 COPY packages/bouncer/package.json ./packages/bouncer/package.json
 COPY packages/telemetry/package.json ./packages/telemetry/package.json
+COPY packages/timekeeper/package.json ./packages/timekeeper/package.json
 COPY packages/control-plane/package.json ./packages/control-plane/package.json
 RUN npm install --omit=dev -w @beercanlabs/factory-control-plane
 COPY --from=builder /app/packages/contract/dist ./packages/contract/dist
@@ -38,6 +40,7 @@ COPY --from=builder /app/packages/ledger/dist ./packages/ledger/dist
 COPY --from=builder /app/packages/budget/dist ./packages/budget/dist
 COPY --from=builder /app/packages/bouncer/dist ./packages/bouncer/dist
 COPY --from=builder /app/packages/telemetry/dist ./packages/telemetry/dist
+COPY --from=builder /app/packages/timekeeper/dist ./packages/timekeeper/dist
 COPY --from=builder /app/packages/control-plane/dist ./packages/control-plane/dist
 COPY agents ./agents
 RUN mkdir -p /data/mind && chown -R node:node /data
