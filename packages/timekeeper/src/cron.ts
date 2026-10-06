@@ -46,6 +46,20 @@ function fieldMatches(field: string, value: number): boolean {
   return Number(field) === value;
 }
 
+/** The agents with a cron trigger that matches `date`, once per matching trigger, as the caller's own records. */
+export function agentsDueForCron<T extends { id: string; triggers: ReadonlyArray<{ type: string; schedule?: string }> }>(
+  agents: Iterable<T>,
+  date = new Date(),
+): T[] {
+  const due: T[] = [];
+  for (const agent of agents) {
+    for (const trigger of agent.triggers) {
+      if (trigger.type === 'cron' && trigger.schedule !== undefined && cronMatches(trigger.schedule, date)) due.push(agent);
+    }
+  }
+  return due;
+}
+
 export const DEFAULT_TIMEZONE = 'America/Los_Angeles';
 
 const WEEKDAYS: Record<string, number> = {

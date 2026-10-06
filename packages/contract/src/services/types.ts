@@ -135,7 +135,6 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/control-plane', 'packages/timekeeper'],
     owns: [
       'packages/control-plane/src/app.ts',
-      'packages/control-plane/src/scheduler.ts',
       'packages/control-plane/src/schedules.ts',
     ],
   },
