@@ -1,8 +1,9 @@
 # Timekeeper (`@beercanlabs/factory-timekeeper`)
 
-The Timekeeper decides when an agent is due. This package holds the cron rule and the record and store of dynamic schedules; the rest of the Timekeeper still lives in `packages/control-plane` (`scheduler.ts`, and the `/api/v1/schedules` handler in `schedules.ts`, which stays there) and the cartridge-cron selection moves here in a later step (DESIGN_AUTHORITY.md, Timekeeper flow work stream).
+The Timekeeper decides when an agent is due. This package holds the cron rule and the record and store of dynamic schedules; the `/api/v1/schedules` handler stays in `packages/control-plane/src/schedules.ts`, and the clock that fires what is due is wired in later steps (DESIGN_AUTHORITY.md, Timekeeper flow work stream).
 
 - `cronMatches(schedule, dateOrParts?)`: whether a 5-field cron matches a `Date` (read in the process's local time) or a `ZonedTimeParts`. Each field is `*`, a number, a range `a-b`, a step `*/n`, or a comma list of those. Day of week `7` is Sunday.
+- `agentsDueForCron(agents, date?)`: the agents with a cron trigger that matches `date`, once per matching trigger. Typed over a structural agent (`id` and `triggers` of `{ type, schedule? }`), so the package does not import the Registrar's record, and the result keeps the caller's own record type.
 - `getZonedTimeParts(date?, timeZone?)`: the wall-clock parts of a `Date` in an IANA time zone (default `DEFAULT_TIMEZONE`); falls back to local time when the zone is unknown.
 - `isTimeZone(tz)`: true when the runtime knows the IANA time zone.
 - `cronIssue(expr)`: why a cron is refused, or `null` when it is valid. It accepts exactly what `cronMatches` evaluates.
