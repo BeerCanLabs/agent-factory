@@ -26,6 +26,11 @@ export interface FactoryServiceMetadata {
   title: string;
   role: string;
   hostedIn: readonly string[];
+  /**
+   * Repo-relative source files this member owns in the shared packages (SHARED_PACKAGES); a file several members list must be in SPLIT_FILES.
+   * A file is a member's when its own code is in it; calling another member's contract does not make the caller a co-owner.
+   */
+  owns?: readonly string[];
 }
 
 export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata> = {
@@ -33,19 +38,38 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'gatekeeper',
     title: 'Gatekeeper',
     role: 'Perimeter defense, ingress presence, front-door authentication verification (A1, A2), wakes, and outbound routing with credential injection',
-    hostedIn: ['packages/gatekeeper-ingress', 'packages/gatekeeper-egress', 'packages/auth'],
+    hostedIn: ['packages/gatekeeper-ingress', 'packages/gatekeeper-egress', 'packages/auth', 'packages/control-plane'],
+    owns: [
+      'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/identity-links.ts',
+      'packages/control-plane/src/policy.ts',
+      'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
+      'packages/gatekeeper-egress/src/main.ts',
+    ],
   },
   keymaster: {
     name: 'keymaster',
     title: 'Keymaster',
     role: 'Credential facilitation, OAuth connection lifecycle, and vault mapping (K1–K5)',
-    hostedIn: ['packages/keymaster', 'packages/secrets-bind'],
+    hostedIn: ['packages/keymaster', 'packages/secrets-bind', 'packages/control-plane', 'packages/gatekeeper-egress'],
+    owns: [
+      'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/connections.ts',
+      'packages/control-plane/src/credentials.ts',
+      'packages/gatekeeper-egress/src/signin-links.ts',
+    ],
   },
   tinman: {
     name: 'tinman',
     title: 'Tinman',
     role: 'Model service and uniform inference provider with token and cost metering (M1–M4, E5)',
     hostedIn: ['packages/gatekeeper-egress'],
+    owns: [
+      'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
+      'packages/gatekeeper-egress/src/meter.ts',
+      'packages/gatekeeper-egress/src/models.ts',
+      'packages/gatekeeper-egress/src/sigv4.ts',
+    ],
   },
   secretary: {
     name: 'secretary',
@@ -58,42 +82,91 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     title: 'Landlord',
     role: 'Compute lifecycle management, wake-from-zero, warm-down, and turn mailbox delivery (L1–L6)',
     hostedIn: ['packages/control-plane'],
+    owns: [
+      'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/callbacks.ts',
+      'packages/control-plane/src/queues.ts',
+      'packages/control-plane/src/runs.ts',
+      'packages/control-plane/src/runtime.ts',
+      'packages/control-plane/src/runtime-docker.ts',
+      'packages/control-plane/src/runtime-ecs.ts',
+      'packages/control-plane/src/aws/codebuild.ts',
+      'packages/control-plane/src/aws/deploy.ts',
+      'packages/control-plane/src/aws/ecs.ts',
+      'packages/control-plane/src/aws/gatekeeper-held.ts',
+      'packages/control-plane/src/aws/iam.ts',
+      'packages/control-plane/src/gcp/cloudbuild.ts',
+      'packages/control-plane/src/gcp/cloudrun.ts',
+      'packages/control-plane/src/gcp/deploy.ts',
+      'packages/control-plane/src/gcp/iam.ts',
+    ],
   },
   auditor: {
     name: 'auditor',
     title: 'Auditor',
     role: 'Immutable append-only WORM execution ledger and cryptographic non-repudiation (LG1, LG2)',
-    hostedIn: ['packages/ledger'],
+    hostedIn: ['packages/ledger', 'packages/control-plane'],
+    owns: [
+      'packages/control-plane/src/app.ts',
+    ],
   },
   treasurer: {
     name: 'treasurer',
     title: 'Treasurer',
     role: 'Spend governance, real-time token pricing, and budget circuit-breakers (E5, M3)',
-    hostedIn: ['packages/budget', 'packages/gatekeeper-egress', 'packages/control-plane'],
+    hostedIn: ['packages/budget', 'packages/control-plane'],
+    owns: [
+      'packages/control-plane/src/app.ts',
+    ],
   },
   bouncer: {
     name: 'bouncer',
     title: 'Bouncer',
     role: 'Authorization (roles to privileges, owners, requesters) and human-in-the-loop approvals for sensitive held actions (E4, E9)',
     hostedIn: ['packages/bouncer', 'packages/control-plane'],
+    owns: [
+      'packages/control-plane/src/app.ts',
+    ],
   },
   timekeeper: {
     name: 'timekeeper',
     title: 'Timekeeper',
     role: 'Agent-scoped cron scheduling and one-shot wakeup timers (§6.15)',
     hostedIn: ['packages/control-plane'],
+    owns: [
+      'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/scheduler.ts',
+      'packages/control-plane/src/schedules.ts',
+    ],
   },
   registrar: {
     name: 'registrar',
     title: 'Registrar',
     role: 'Cartridge and skill manifest validation, admissions testing, and config store (L3, SK1–SK5)',
     hostedIn: ['packages/contract', 'packages/control-plane'],
+    owns: [
+      'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/aws/codebuild.ts',
+      'packages/control-plane/src/catalog.ts',
+      'packages/control-plane/src/config-store.ts',
+      'packages/control-plane/src/skill-checks.ts',
+      'packages/control-plane/src/skills.ts',
+      'packages/control-plane/src/source.ts',
+      'packages/control-plane/src/systems.ts',
+    ],
   },
   seer: {
     name: 'seer',
     title: 'Seer',
     role: 'Telemetry, live run progress event streaming, and error diagnosis (§6.5)',
     hostedIn: ['packages/telemetry', 'packages/control-plane', 'packages/gatekeeper-egress'],
+    owns: [
+      'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/events.ts',
+      'packages/control-plane/src/stream.ts',
+      'packages/gatekeeper-egress/src/progress.ts',
+      'packages/gatekeeper-egress/src/traces.ts',
+    ],
   },
 };
 
@@ -113,6 +186,34 @@ export interface PackageClassification {
   platformRole?: PlatformRole;
   reservedFor?: FactoryServiceName;
 }
+
+/**
+ * Packages whose source several members share (§6.15). Every non-test source file under their `src/` has an owner:
+ * a member's `owns`, COMPOSITION_ROOT_FILES or PLATFORM_FILES. SV1 and `owns` must agree (a member that owns a file
+ * in a package lists that package in `hostedIn`).
+ */
+export const SHARED_PACKAGES = ['packages/control-plane', 'packages/gatekeeper-egress'] as const;
+
+/**
+ * Files several members share until they are broken up (§6.15). The conformance test requires each to be claimed by
+ * more than one member, and rejects a second claimant for any file not listed here.
+ */
+export const SPLIT_FILES: readonly string[] = [
+  'packages/control-plane/src/app.ts',
+  'packages/control-plane/src/aws/codebuild.ts',
+  'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
+];
+
+/** Entry points that wire the members together; they belong to no one member. */
+export const COMPOSITION_ROOT_FILES: readonly string[] = [
+  'packages/control-plane/src/index.ts',
+  'packages/gatekeeper-egress/src/index.ts',
+];
+
+/** Operator-facing files in a shared package that serve a declared platform role rather than a member. */
+export const PLATFORM_FILES: Record<string, PlatformRole> = {
+  'packages/control-plane/src/ui.ts': 'operator-ui',
+};
 
 /**
  * Packages reserved for a service that do not host it yet.
