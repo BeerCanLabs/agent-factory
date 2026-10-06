@@ -5,6 +5,12 @@
   "description": "Bouncer: the approval record. Who may do what, and what waits for a person.",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "tsx --test src/approvals.test.ts src/wire.test.ts src/hold.test.ts src/decisions.test.ts src/privileges.test.ts src/roles.test.ts"

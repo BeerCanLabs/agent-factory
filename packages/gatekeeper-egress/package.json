@@ -5,6 +5,12 @@
   "description": "Fleet gatekeeper-egress: run-token auth, credential injection, metering, budget, tool allowlist and approvals",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/main.js",

@@ -5,6 +5,12 @@
   "description": "OpenTelemetry metrics for factory services; no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "tsx --test src/index.test.ts"

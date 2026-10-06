@@ -5,6 +5,12 @@
   "description": "Treasurer: the budget-window rule. Spend is over a limit when it is at or over that limit.",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "tsx --test src/index.test.ts src/spend.test.ts src/pricing.test.ts src/limits.test.ts src/standing.test.ts"
