@@ -11,7 +11,7 @@ picking the work up; it is self-contained, and everything in it can be checked a
 **When a person tells their agent to schedule something, or asks what is scheduled, the agent does exactly what was
 asked and the person can tell that it did.** That means the right time in the person's own time zone, a way to say
 "once" as well as "every", an answer to "when does it next run", a schedule that fires or tells the person why it did
-not, and one way for an agent to do all of this.
+not.
 
 ## What happens today (checked 2026-10-06)
 
@@ -19,8 +19,8 @@ not, and one way for an agent to do all of this.
 
 1. The person's message reaches the agent through the Gatekeeper's ingress and the agent gets a run.
 2. The model calls the agent's schedule tool with a cron, a prompt it writes to itself, a name and optionally a time
-   zone. The agent's code adds the channel the message came from. (SM-donna has its own tools, `create_scheduled_action`
-   in `agent.py`; the shared skill `factory-schedules` has `schedule_create`.)
+   zone; the agent's code adds the channel the message came from. (The shared skill `factory-schedules` offers this as
+   `schedule_create`, `schedule_list` and `schedule_delete`.)
 3. The agent calls `POST $FACTORY_URL/api/v1/schedules` with its run token. The control plane
    (`packages/control-plane/src/schedules.ts`) scopes the token to the agent's own schedules, checks the agent, cron,
    prompt and time zone, saves the schedule in `schedules.json` and ledgers `SCHEDULE_CREATED` with the run as actor.
@@ -40,8 +40,7 @@ turn comes. The Donna Test applies to each: say whether the fix is the Factory's
 
 ### 1. A time zone nobody chose is applied silently
 
-`DEFAULT_TIMEZONE` is `America/Los_Angeles` in the control plane (`schedules.ts`) and again in SM-donna's tool
-description ("cron ... in Pacific Time"). If the model does not pass a zone, a person in New York who asks for "6am"
+`DEFAULT_TIMEZONE` is `America/Los_Angeles` in the control plane (`schedules.ts`). If the model does not pass a zone, a person in New York who asks for "6am"
 gets 6am Pacific, with no error and no mention in the reply. Nothing knows the person's own zone.
 *Factory or cartridge:* both. The Factory has no notion of an agent owner's zone to default to; the cartridge decides
 whether to ask. Open decision: does the owner (or the person) have a time zone the Factory stores, or must the agent
@@ -49,12 +48,11 @@ ask every time?
 
 ### 2. Only "every", never "once"
 
-The Timekeeper's role in §6.15 names "one-shot wakeup timers", and SM-donna's cartridge says it schedules "recurring
-and one-off executive actions" (`action-scheduling` in `cartridge.yaml`). No one-shot timer exists in code, route,
-store, test or console. "Remind me tomorrow at 3" has to become a cron that the agent later deletes; nothing deletes
+The Timekeeper's role in §6.15 names "one-shot wakeup timers". No one-shot timer exists in code, route, store, test or
+console. "Remind me tomorrow at 3" has to become a cron that the agent later deletes; nothing deletes
 it, so it can fire again. Registered in `DESIGN_AUTHORITY.md` as GAP-096 (the role text promises what is not there).
 *Factory:* a one-shot is a Timekeeper capability. Open decision: build it, or remove the words from §6.15 and from
-the cartridges that repeat them.
+any cartridge text that repeats them.
 
 ### 3. "When does it run next?" has no answer from the Factory
 
@@ -91,20 +89,11 @@ for a person to know what is scheduled is to ask the agent, and the only record 
 ledger row naming the run, not the person. *Factory:* a schedules view for the owner, the route in `SPEC.md`, and a
 decision on whether a schedule records the person who asked.
 
-### 8. Two ways to schedule, and the better one is not used by the agent that needs it
-
-SM-donna carries its own copy of the schedule tools (`factory_create_schedule` and friends) while the shared skill
-`factory-schedules` (repository `skill-factory-schedules`) also parses phrases such as "weekdays at 7:30" and refuses
-ambiguous times such as "daily at 7". Donna's tool takes a raw cron string and relies on the model to convert the
-person's words. *Cartridge or skill, not the Factory* (the Donna Test): a cartridge should use the shared skill. The
-Factory's part is to make sure the skill is offered and works for every agent.
-
 ## Order of work
 
 1. Finish the extraction (TSK-117 to TSK-123). Every gap above is easier once the Timekeeper is one package with one
    contract, and none is solved by it.
-2. Cheap and independent: gap 3 (a next-run time in the list), gap 7's `SPEC.md` line, and gap 8 (move SM-donna to the
-   shared skill).
+2. Cheap and independent: gap 3 (a next-run time in the list) and gap 7's `SPEC.md` line.
 3. Decide, with Dale, the open questions: gap 1 (whose time zone), gap 2 (build one-shots or remove the words),
    gap 4 (catch-up or visible miss), gap 5 (who tells the person).
 4. Then build in this order: one-shot timers, update and pause, the owner's schedules view, the person-facing refusal,
