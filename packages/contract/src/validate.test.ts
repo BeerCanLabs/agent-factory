@@ -216,7 +216,7 @@ compute:
 });
 
 describe('repo example cartridges', () => {
-  const ids = ['librarian', 'factory-mechanic', 'compliance-officer', 'examples/echo-agent'];
+  const ids = ['examples/echo-agent', 'examples/llm-summarizer', 'examples/starter-python'];
 
   for (const id of ids) {
     it(`validates agents/${id}`, () => {
