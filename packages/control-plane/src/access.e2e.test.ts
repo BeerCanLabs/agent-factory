@@ -13,7 +13,7 @@ import { MemoryRunStore, RunTokens } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import { ScheduleStore } from './schedules.js';
+import { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 
 const TEAM = 'team.example.cloudflareaccess.com';
 const AUD = 'aud-tag-e2e';

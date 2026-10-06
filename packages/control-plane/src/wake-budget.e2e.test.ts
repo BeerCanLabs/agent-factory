@@ -13,7 +13,7 @@ import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
 import { pollQueueOnce } from './queues.js';
-import { ScheduleStore } from './schedules.js';
+import { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { agentsDueForCron } from './scheduler.js';
 
 const agentsRoot = fileURLToPath(new URL('../../../agents', import.meta.url));

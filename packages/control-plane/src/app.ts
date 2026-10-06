@@ -25,10 +25,11 @@ import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig, type 
 import { handleSkills, resumeSkillChecks } from './skills.js';
 import type { SkillChecker } from './skill-checks.js';
 import { handleRunProgress } from './events.js';
-import { handleSchedules, type ScheduleStore } from './schedules.js';
+import { handleSchedules } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
+import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 
 export type FactoryState = {
 
