@@ -21,6 +21,26 @@ const OPERATOR = 'operator-token';
 function setup() {
   const runtime = noopRuntime();
   const agents = new Map(loadCatalog(agentsRoot, { includeRetired: true }).map((a) => [a.id, a]));
+  if (!agents.has('donna')) {
+    agents.set('donna', {
+      id: 'donna',
+      name: 'Donna',
+      role: 'Executive Assistant',
+      state: 'SLEEPING',
+      provider: 'local',
+      artifact: '',
+      requires: [],
+      ungated: [],
+      gated: [],
+      triggers: [],
+      memoryPrefix: 'donna',
+      warmDownSeconds: 300,
+      dir: '/tmp/donna',
+      model: 'deterministic',
+      requestedModels: [],
+      approvedModels: [],
+    });
+  }
   const state = {
     agents,
     ledger: new MemoryLedger(),
