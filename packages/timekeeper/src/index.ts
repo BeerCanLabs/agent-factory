@@ -8,3 +8,10 @@ export {
   type ZonedTimeParts,
 } from './cron.js';
 export { ScheduleStore, type ScheduledAction } from './schedules.js';
+export {
+  createTimekeeper,
+  type CronAgent,
+  type FireRequest,
+  type Timekeeper,
+  type TimekeeperOptions,
+} from './timekeeper.js';
