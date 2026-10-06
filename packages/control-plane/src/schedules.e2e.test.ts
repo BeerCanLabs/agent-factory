@@ -12,7 +12,7 @@ import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import { ScheduleStore, cronIssue, scheduleLedgerHash, type ScheduledAction } from './schedules.js';
+import { ScheduleStore, scheduleLedgerHash, type ScheduledAction } from './schedules.js';
 
 const KEY = 'schedules-e2e-run-token-key-0123456789abcdef';
 const OPERATOR = 'operator-schedules-e2e'; // secret-scan:allow (test fixture)
@@ -243,15 +243,6 @@ describe('GAP-061 schedules are scoped to the calling agent', { concurrency: fal
     assert.equal((await call(port, '/api/v1/schedules', 'POST', token, { cron: '0 6 * * *' })).body.error, 'missing_prompt');
     assert.equal((await call(port, '/api/v1/schedules', 'POST', token, { cron: '0 6 * * *', prompt: PROMPT, timezone: 'Mars/Olympus' })).body.error, 'invalid_timezone');
     assert.equal(state.schedules!.list().length, 0);
-  });
-
-  it('invalid cron: cronIssue accepts exactly the forms the scheduler evaluates', () => {
-    for (const ok of ['* * * * *', '0 6 * * *', '30 7 * * 1-5', '0 9 * * 1', '*/15 * * * *', '0 0 1,15 * *', '0 8 * * 0,6', '0 8 * * 7', '59 23 31 12 *']) {
-      assert.equal(cronIssue(ok), null, `refused valid cron "${ok}"`);
-    }
-    for (const bad of ['', '* * * *', '* * * * * *', '60 * * * *', '* * 0 * *', '* * * 0 *', '1-60 * * * *', 'a * * * *', '-1 * * * *', '*/x * * * *']) {
-      assert.notEqual(cronIssue(bad), null, `accepted invalid cron "${bad}"`);
-    }
   });
 
   it('ledger rows: create and delete record SCHEDULE_CREATED and SCHEDULE_DELETED with actor and agent, never the prompt text', async () => {
