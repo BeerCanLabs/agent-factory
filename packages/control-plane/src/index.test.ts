@@ -14,7 +14,7 @@ import { loadCatalog } from './catalog.js';
 import { checkHealth, createFactoryServer, FactoryState, factoryMetrics, handleMcp, reconcileRuns } from './app.js';
 import { AggregationTemporality, InMemoryMetricExporter, MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { noopRuntime, type Runtime } from './runtime.js';
-import { ScheduleStore } from './schedules.js';
+import { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { FileRunStore, MemoryRunStore, RunTokens, type Run } from './runs.js';
 import { checkCallbackUrl, deliverCallback } from './callbacks.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
