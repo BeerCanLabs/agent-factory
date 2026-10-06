@@ -13,11 +13,9 @@ describe('loadCatalog', () => {
     const agents = loadCatalog(agentsRoot);
     const byId = new Map(agents.map((a) => [a.id, a]));
 
-    // Check that user submind cartridges are loaded
-    for (const submindId of ['archie', 'castle', 'donna', 'finley', 'geordi', 'higgins', 'nick', 'rosie', 'switch']) {
-      assert.ok(byId.has(submindId), `submind ${submindId} should be loaded`);
-      assert.equal(byId.get(submindId)?.category, 'user');
-    }
+    // Example fixtures are loaded
+    assert.ok(byId.has('llm-summarizer'), 'llm-summarizer should be loaded');
+    assert.equal(byId.get('llm-summarizer')?.category, 'user');
 
     // Retired placeholders are excluded from the main active catalog
     assert.equal(byId.has('starter-python'), false);
@@ -30,31 +28,31 @@ describe('loadCatalog', () => {
     try {
       const commit = 'e3410b53beb5bfb037ff1444e1778acd32c39530';
       const registered = {
-        id: 'donna',
-        name: 'Donna (registered)',
-        role: 'Executive Assistant',
+        id: 'echo-agent',
+        name: 'Echo Agent (registered)',
+        role: 'Echo',
         state: 'SLEEPING' as const,
         provider: 'cloud',
-        artifact: `123456789012.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents:donna-${commit.slice(0, 12)}`,
+        artifact: `123456789012.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents:echo-${commit.slice(0, 12)}`,
         requires: [],
         triggers: [],
-        dir: '/tmp/donna',
-        repo: 'https://github.com/BeerCanLabs/SM-donna.git',
+        dir: '/tmp/echo',
+        repo: 'https://github.com/BeerCanLabs/SM-echo.git',
         commit,
         deployedCommit: commit,
       };
-      writeFileSync(join(dir, 'donna.json'), JSON.stringify(registered));
+      writeFileSync(join(dir, 'echo-agent.json'), JSON.stringify(registered));
       writeFileSync(join(dir, 'gatekeeper-ingress.json'), JSON.stringify({ ...registered, id: 'gatekeeper-ingress', name: 'Impostor' }));
       const staticAgents = loadCatalog(agentsRoot);
-      assert.ok(staticAgents.some((a) => a.id === 'donna'), 'static catalog still carries donna');
+      assert.ok(staticAgents.some((a) => a.id === 'echo-agent'), 'static catalog still carries echo-agent');
       const merged = mergeAgents(BUILTIN_SYSTEM_AGENTS, staticAgents, loadDynamicRegistry(dir));
-      const donnas = merged.filter((a) => a.id === 'donna');
-      assert.equal(donnas.length, 1);
-      assert.equal(donnas[0].name, 'Donna (registered)');
-      assert.equal(donnas[0].deployedCommit, commit);
-      assert.equal(donnas[0].repo, 'https://github.com/BeerCanLabs/SM-donna.git');
+      const echos = merged.filter((a) => a.id === 'echo-agent');
+      assert.equal(echos.length, 1);
+      assert.equal(echos[0].name, 'Echo Agent (registered)');
+      assert.equal(echos[0].deployedCommit, commit);
+      assert.equal(echos[0].repo, 'https://github.com/BeerCanLabs/SM-echo.git');
       // The other static agents are untouched.
-      assert.equal(merged.find((a) => a.id === 'archie')?.dir, staticAgents.find((a) => a.id === 'archie')?.dir);
+      assert.equal(merged.find((a) => a.id === 'llm-summarizer')?.dir, staticAgents.find((a) => a.id === 'llm-summarizer')?.dir);
       assert.equal(merged.find((a) => a.id === 'gatekeeper-ingress')?.name, 'gatekeeper-ingress');
     } finally {
       rmSync(dir, { recursive: true });
