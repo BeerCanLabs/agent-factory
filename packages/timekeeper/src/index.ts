@@ -1,5 +1,6 @@
 export {
   DEFAULT_TIMEZONE,
+  agentsDueForCron,
   cronIssue,
   cronMatches,
   getZonedTimeParts,
