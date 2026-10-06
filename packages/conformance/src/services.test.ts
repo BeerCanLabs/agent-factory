@@ -233,6 +233,13 @@ export function fileMapViolations(root: string, map: FileMap): string[] {
       }
     }
   }
+  for (const [member, hosted] of Object.entries(map.hostedIn)) {
+    for (const pkg of hosted.filter((h) => map.shared.includes(h))) {
+      if (!(map.members[member] ?? []).some((f) => f.startsWith(`${pkg}/`))) {
+        problems.push(`'${member}' lists '${pkg}' in hostedIn but owns no file there.`);
+      }
+    }
+  }
   return problems;
 }
 
@@ -252,7 +259,7 @@ describe('SV1 file-to-member map (§6.15, TSK-093)', () => {
     assert.deepEqual(fileMapViolations(repoRoot, repoFileMap()), []);
   });
 
-  it('rejects an unowned file, an unmarked double claim, a missing file, an empty split and a host the map contradicts', () => {
+  it('rejects an unowned file, an unmarked double claim, a missing file, an empty split, and a host the map contradicts either way', () => {
     const root = mkdtempSync(join(tmpdir(), 'sv1-map-'));
     try {
       const src = join(root, 'packages', 'shared', 'src');
@@ -274,6 +281,7 @@ describe('SV1 file-to-member map (§6.15, TSK-093)', () => {
       assert.match(bad({ members: { one: ['packages/shared/src/gone.ts'] } }).join('\n'), /does not exist/);
       assert.match(bad({ split: ['packages/shared/src/a.ts'] }).join('\n'), /marked split but is claimed by fewer than two/);
       assert.match(bad({ hostedIn: { one: [] } }).join('\n'), /does not list 'packages\/shared' in hostedIn/);
+      assert.match(bad({ members: { one: [], two: ['packages/shared/src/a.ts', 'packages/shared/src/b.ts'] }, hostedIn: { one: ['packages/shared'], two: ['packages/shared'] } }).join('\n'), /'one' lists 'packages\/shared' in hostedIn but owns no file there/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
