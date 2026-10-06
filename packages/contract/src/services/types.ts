@@ -26,7 +26,10 @@ export interface FactoryServiceMetadata {
   title: string;
   role: string;
   hostedIn: readonly string[];
-  /** Repo-relative source files this member owns in the shared packages (SHARED_PACKAGES); a file several members list must be in SPLIT_FILES. */
+  /**
+   * Repo-relative source files this member owns in the shared packages (SHARED_PACKAGES); a file several members list must be in SPLIT_FILES.
+   * A file is a member's when its own code is in it; calling another member's contract does not make the caller a co-owner.
+   */
   owns?: readonly string[];
 }
 
@@ -53,7 +56,6 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/connections.ts',
       'packages/control-plane/src/credentials.ts',
-      'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
       'packages/gatekeeper-egress/src/signin-links.ts',
     ],
   },
@@ -115,17 +117,15 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/budget', 'packages/gatekeeper-egress', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
-      'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
     ],
   },
   bouncer: {
     name: 'bouncer',
     title: 'Bouncer',
     role: 'Authorization (roles to privileges, owners, requesters) and human-in-the-loop approvals for sensitive held actions (E4, E9)',
-    hostedIn: ['packages/bouncer', 'packages/control-plane', 'packages/gatekeeper-egress'],
+    hostedIn: ['packages/bouncer', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
-      'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
     ],
   },
   timekeeper: {
@@ -164,7 +164,6 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/events.ts',
       'packages/control-plane/src/stream.ts',
-      'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
       'packages/gatekeeper-egress/src/progress.ts',
       'packages/gatekeeper-egress/src/traces.ts',
     ],
