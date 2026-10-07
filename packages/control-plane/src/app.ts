@@ -1,7 +1,5 @@
 import http from 'node:http';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
@@ -10,6 +8,7 @@ import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import {
   AgentRecord,
+  AgentRegistry,
   BUILTIN_AGENT_IDS,
   FULL_SHA,
   checkRepoUrl,
@@ -195,15 +194,9 @@ const MAX_BODY = 256 * 1024;
 
 type Outcome<T> = { status: number; body: T | { error: string; [k: string]: unknown } };
 
-/** Writes a registry record so it survives a restart (and, being a registry record, wins over the static catalog). */
-function persistAgent(state: FactoryState, agent: AgentRecord): void {
-  if (!state.registryDir) return;
-  try {
-    mkdirSync(state.registryDir, { recursive: true });
-    writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
-  } catch (err) {
-    console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
-  }
+/** The agent registry's records on disk (`registryDir`); with none configured nothing is written. */
+function registryOf(state: FactoryState): AgentRegistry {
+  return new AgentRegistry(state.registryDir, (message, err) => console.warn(`[control-plane] ${message}`, err));
 }
 
 export function json(res: http.ServerResponse, status: number, body: unknown) {
@@ -688,14 +681,7 @@ export async function resetAgent(state: FactoryState, id: string, actor: string)
   agent.state = 'SLEEPING';
   await notifyGatekeeperIngress(state, id, 'offline');
   state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_RESET', actor });
-  if (state.registryDir) {
-    try {
-      const filePath = join(state.registryDir, `${id}.json`);
-      if (existsSync(filePath)) writeFileSync(filePath, JSON.stringify(agent, null, 2), 'utf8');
-    } catch (err) {
-      console.warn(`[control-plane] failed to persist dynamic agent state ${id}:`, err);
-    }
-  }
+  registryOf(state).update(agent);
   return { status: 200, body: agent };
 }
 
@@ -721,16 +707,7 @@ export async function applyKillSwitch(
   else if (command === 'ISOLATE') agent.state = 'ISOLATED';
   else agent.state = activeRun(state, id) ? 'WORKING' : 'SLEEPING';
   state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: command, actor });
-  if (state.registryDir) {
-    try {
-      const filePath = join(state.registryDir, `${id}.json`);
-      if (existsSync(filePath)) {
-        writeFileSync(filePath, JSON.stringify(agent, null, 2), 'utf8');
-      }
-    } catch (err) {
-      console.warn(`[control-plane] failed to persist dynamic agent state ${id}:`, err);
-    }
-  }
+  registryOf(state).update(agent);
   if (command === 'RESUME' && !activeRun(state, id)) {
     const next = state.runs.list({ agentId: id, active: true }).find((r) => r.state === 'QUEUED');
     if (next) await startRun(state, next);
@@ -1891,14 +1868,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     // E7 deny-by-default: registration grants nothing. The cartridge's declared egress is a request an admin
     // reviews; routes, hosts, and budgets come only from the policy API.
 
-    if (state.registryDir) {
-      try {
-        mkdirSync(state.registryDir, { recursive: true });
-        writeFileSync(join(state.registryDir, `${record.id}.json`), JSON.stringify(record, null, 2), 'utf8');
-      } catch (err) {
-        console.warn(`[control-plane] failed to persist dynamic agent ${record.id}:`, err);
-      }
-    }
+    registryOf(state).save(record);
     await recordConfig(state, record.id, { actor: principal.actor, reason: changeReason(req, state.configs?.current(record.id) ? 're-registered' : 'registered') });
     json(res, 201, record);
     return;
@@ -1972,14 +1942,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       actor: principal.actor,
     });
     await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, 'budget updated') });
-    if (state.registryDir) {
-      try {
-        mkdirSync(state.registryDir, { recursive: true });
-        writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
-      } catch (err) {
-        console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
-      }
-    }
+    registryOf(state).save(agent);
     json(res, 200, enrichAgent(state, agent));
     return;
   }
@@ -2005,14 +1968,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       action: 'AGENT_RETIRED_PENDING_PURGE',
       actor: principal.actor,
     });
-    if (state.registryDir) {
-      try {
-        mkdirSync(state.registryDir, { recursive: true });
-        writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
-      } catch (err) {
-        console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
-      }
-    }
+    registryOf(state).save(agent);
     json(res, 200, agent);
     return;
   }
@@ -2041,14 +1997,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       action: 'AGENT_REINSTATED',
       actor: principal.actor,
     });
-    if (state.registryDir) {
-      try {
-        mkdirSync(state.registryDir, { recursive: true });
-        writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent, null, 2), 'utf8');
-      } catch (err) {
-        console.warn(`[control-plane] failed to persist dynamic agent ${agent.id}:`, err);
-      }
-    }
+    registryOf(state).save(agent);
     json(res, 200, agent);
     return;
   }
@@ -2064,16 +2013,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     state.agents.delete(agentId);
-    if (state.registryDir) {
-      try {
-        const filePath = join(state.registryDir, `${agentId}.json`);
-        if (existsSync(filePath)) {
-          unlinkSync(filePath);
-        }
-      } catch (err) {
-        console.warn(`[control-plane] failed to delete dynamic agent file ${agentId}:`, err);
-      }
-    }
+    registryOf(state).remove(agentId);
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId,
@@ -2150,7 +2090,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     agent.commit = commit;
     agent.state = 'DEPLOYING';
     agent.admission = { commit, status: 'building', at: new Date().toISOString() };
-    persistAgent(state, agent);
+    registryOf(state).save(agent);
     await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, `deploy of ${commit}`) });
     json(res, 202, agent);
 
@@ -2168,7 +2108,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         agent.admission = { commit, status: 'refused', reason, phase: refused ? err.phase : undefined, message, at: new Date().toISOString() };
         // A refused new version leaves the running version in place.
         agent.state = agent.deployedCommit ? (previousState === 'ERROR' ? 'SLEEPING' : previousState) : 'ERROR';
-        persistAgent(state, agent);
+        registryOf(state).save(agent);
         state.ledger.append({
           timestamp: new Date().toISOString(),
           agentId,
@@ -2198,7 +2138,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         agent.deployedCommit = commit;
         agent.provider = 'cloud';
         agent.state = 'SLEEPING'; // Officially online
-        persistAgent(state, agent);
+        registryOf(state).save(agent);
         state.ledger.append({
           timestamp: new Date().toISOString(),
           agentId,
@@ -2210,7 +2150,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       } catch (err) {
         console.error(`[control-plane] Deploy failed for ${agentId}:`, err);
         agent.state = 'ERROR';
-        persistAgent(state, agent);
+        registryOf(state).save(agent);
         state.ledger.append({
           timestamp: new Date().toISOString(),
           agentId,
