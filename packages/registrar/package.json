@@ -1,0 +1,27 @@
+{
+  "name": "@beercanlabs/factory-registrar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Registrar: the agent record and catalog, source pinning and the skill checks.",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test src/catalog.test.ts"
+  },
+  "dependencies": {
+    "@beercanlabs/factory-contract": "0.1.0",
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

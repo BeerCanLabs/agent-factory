@@ -10,7 +10,7 @@ import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import type { AgentRecord } from './catalog.js';
+import type { AgentRecord } from '@beercanlabs/factory-registrar';
 
 const KEY = 'e2e-run-token-key-0123456789abcdefghij';
 const ADMIN = 'admin-e2e';

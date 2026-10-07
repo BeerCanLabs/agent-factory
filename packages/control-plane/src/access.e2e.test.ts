@@ -7,7 +7,7 @@ import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, cloudflareAccessAuth } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { BUILTIN_SYSTEM_AGENTS } from './catalog.js';
+import { BUILTIN_SYSTEM_AGENTS } from '@beercanlabs/factory-registrar';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore, RunTokens } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';

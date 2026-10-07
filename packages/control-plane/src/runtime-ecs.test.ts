@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
-import type { AgentRecord } from './catalog.js';
+import type { AgentRecord } from '@beercanlabs/factory-registrar';
 
 const echo: AgentRecord = {
   id: 'echo-agent',

@@ -12,7 +12,7 @@ import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { benchSchema } from '@beercanlabs/factory-contract';
 import { createGatekeeperEgress, type ControlClient } from '@beercanlabs/factory-gatekeeper-egress';
 import { httpClient, matrix, recommend, runBench, summarize } from '@beercanlabs/factory-bench';
-import { loadCatalog } from './catalog.js';
+import { loadCatalog } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, finishRun, SYSTEM, type FactoryState } from './app.js';
 import { memoryRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';

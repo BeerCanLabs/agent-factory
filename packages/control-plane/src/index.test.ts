@@ -10,7 +10,7 @@ import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { pullMind, pushMind } from '@beercanlabs/factory-hydrate';
-import { loadCatalog } from './catalog.js';
+import { loadCatalog } from '@beercanlabs/factory-registrar';
 import { checkHealth, createFactoryServer, FactoryState, factoryMetrics, handleMcp, reconcileRuns } from './app.js';
 import { AggregationTemporality, InMemoryMetricExporter, MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { noopRuntime, type Runtime } from './runtime.js';

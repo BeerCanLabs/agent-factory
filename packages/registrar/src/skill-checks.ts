@@ -21,7 +21,8 @@
  *     (landing-zones/aws/codebuild.tf), which embeds this same script; a test keeps the two identical.
  *   - `localSkillChecker`: clones and runs the script on this machine (development; needs git and python3).
  *   - `fakeSkillChecker`: for tests.
- * Selection (`skillCheckerFromEnv`): FACTORY_SKILL_CHECKER=codebuild|local|none; by default `codebuild` where agent
+ * Selection (`skillCheckerFromEnv`, in packages/control-plane/src/skills.ts: it loads the Landlord's CodeBuild checker, which
+ * this package must not import): FACTORY_SKILL_CHECKER=codebuild|local|none; by default `codebuild` where agent
  * admission uses CodeBuild (FACTORY_DEPLOY_PROVIDER=aws, or FACTORY_RUNTIME=ecs), otherwise none: versions stay
  * `pending-build` until a checker is configured.
  */
@@ -179,22 +180,6 @@ export function localSkillChecker(opts: { python?: string; git?: string; timeout
 }
 
 /**
- * The checker this deployment uses (see the header). Called once per control plane; `undefined` means none is
- * configured. The CodeBuild checker is loaded only when selected, so the kernel does not load a cloud SDK otherwise.
- */
-export async function skillCheckerFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<SkillChecker | undefined> {
-  const provider = env.FACTORY_DEPLOY_PROVIDER || (env.FACTORY_RUNTIME === 'ecs' ? 'aws' : undefined);
-  const kind = env.FACTORY_SKILL_CHECKER || (provider === 'aws' ? 'codebuild' : 'none');
-  if (kind === 'codebuild') {
-    const { codeBuildSkillChecker } = await import('./aws/codebuild.js');
-    return codeBuildSkillChecker();
-  }
-  if (kind === 'local') return localSkillChecker();
-  if (kind !== 'none') console.warn(`[control-plane] FACTORY_SKILL_CHECKER=${kind} is not a checker (codebuild, local, none); skill checks are off`);
-  return undefined;
-}
-
-/**
  * The check script. Run as `python3 skill_check.py --dir <skill folder> --manifest-b64 <registered manifest> --out
  * <file>`. It prints `SKILL_CHECK_RESULT=<json>` and writes the JSON (at most 1000 characters) to `--out`.
  * landing-zones/aws/codebuild.tf (`factory-skill-checker`) embeds exactly this text; skill-checks.test.ts compares them.
@@ -205,7 +190,7 @@ export const SKILL_CHECK_SCRIPT = String.raw`
 
 Runs inside the skill's folder at the pinned commit. Prints one result line, SKILL_CHECK_RESULT=<json>, and writes the
 same JSON to --out: {"passed": bool, "failures": [short reasons]}. Failures name a file and line, never a value.
-Generated from packages/control-plane/src/skill-checks.ts (SKILL_CHECK_SCRIPT); keep landing-zones/aws/codebuild.tf
+Generated from packages/registrar/src/skill-checks.ts (SKILL_CHECK_SCRIPT); keep landing-zones/aws/codebuild.tf
 in step (a test compares them).
 """
 import argparse
