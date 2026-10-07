@@ -10,15 +10,16 @@ import {
   AgentRecord,
   AgentRegistry,
   BUILTIN_AGENT_IDS,
-  FULL_SHA,
   checkRepoUrl,
   connectionsOf,
   credentialsOf,
   egressOf,
+  FULL_SHA,
   gitLsRemoteResolver,
   isBuiltinCartridge,
   type AgentCategory,
   type CommitResolver,
+  type ConfigStore,
   type SkillChecker,
   type SkillSource,
 } from '@beercanlabs/factory-registrar';
@@ -33,7 +34,7 @@ import { validatePolicy, type PolicyStore } from './policy.js';
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
-import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig, type ConfigStore } from './config-store.js';
+import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
 import { handleRunProgress } from './events.js';
 import { handleSchedules } from './schedules.js';
