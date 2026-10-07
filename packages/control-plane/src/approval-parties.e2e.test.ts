@@ -16,7 +16,7 @@ import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { PolicyStore } from './policy.js';
 import { IdentityLinkStore } from './identity-links.js';
-import { VersionedConfigStore, type ConfigBackend, type ConfigRecord } from './config-store.js';
+import { VersionedConfigStore, type ConfigBackend, type ConfigRecord } from '@beercanlabs/factory-registrar';
 
 const T = (n: string) => `${n}-approval-parties`;
 const ALICE = T('alice'); // viewer; linked to Discord 42: the requester

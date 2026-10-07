@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { validateBudgetLimits } from '@beercanlabs/factory-budget';
+import { archiveStamp } from '@beercanlabs/factory-registrar';
 export type ToolRule = { allow: string[] | '*'; requireApproval?: string[] };
 
 /** Admin-set egress policy for one agent. Deny by default: no routes, no tools. */
@@ -22,11 +23,6 @@ export const GLOBAL_POLICY_ID = '__global__';
 /** Ids starting `__` are the factory's own (`__global__`), never an agent's, so they are never orphans. */
 export function isReservedPolicyId(id: string): boolean {
   return id.startsWith('__');
-}
-
-/** A filesystem-safe UTC timestamp for archive folders: `2026-10-01T12-00-00-000Z`. */
-export function archiveStamp(now = new Date()): string {
-  return now.toISOString().replace(/[:.]/g, '-');
 }
 
 /** Moves a file, falling back to copy-then-unlink across filesystems. Never deletes without a copy. */
