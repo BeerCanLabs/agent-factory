@@ -31,7 +31,7 @@ import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import type { AgentRecord } from './catalog.js';
+import type { AgentRecord } from '@beercanlabs/factory-registrar';
 
 const ADMIN = 'admin-conn';
 const GATEKEEPER_EGRESS = 'gatekeeper-egress-conn';

@@ -6,7 +6,7 @@ import http from 'node:http';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { BUILTIN_SYSTEM_AGENTS, type AgentRecord } from './catalog.js';
+import { BUILTIN_SYSTEM_AGENTS, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';

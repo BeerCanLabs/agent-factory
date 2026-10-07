@@ -6,7 +6,7 @@
  * with the factory's read-only source token (TSK-055); then `commit` may be a branch or tag, which is resolved here to
  * the full SHA it points at and recorded as that SHA, so the pin never moves.
  * Admission pins the commit and checks the manifest (schema, a new version, the design rules). Registering a version
- * starts the factory's checks on its code (skill-checks.ts, TSK-054): `tests: 'pending-build'` until they end, then
+ * starts the factory's checks on its code (the Registrar's skill checks, TSK-054): `tests: 'pending-build'` until they end, then
  * `passed` or `failed` with short reasons. Every version is approved or rejected by a factory admin, and approval waits
  * for the checks to pass; only approved versions can be adopted (`approvedSkill`). Registration, refusals, checks and
  * decisions are ledgered.
@@ -28,10 +28,36 @@ import { dirname, join } from 'node:path';
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, type SkillManifest, type SkillRequires } from '@beercanlabs/factory-contract';
 import { applyKillSwitch, json, readJson, requirePrivilege, type FactoryState } from './app.js';
-import { FULL_SHA } from './runtime.js';
 import { parse as parseYaml } from 'yaml';
-import { checkRefName, checkRepoUrl, gitSkillSource, SourceError, type SkillSource } from './source.js';
-import { cleanFailure, skillCheckerFromEnv, type SkillChecker, type SkillCheckOutcome } from './skill-checks.js';
+
+import {
+  FULL_SHA,
+  SourceError,
+  checkRefName,
+  checkRepoUrl,
+  cleanFailure,
+  gitSkillSource,
+  localSkillChecker,
+  type SkillCheckOutcome,
+  type SkillChecker,
+  type SkillSource,
+} from '@beercanlabs/factory-registrar';
+
+/**
+ * The checker this deployment uses (see the header). Called once per control plane; `undefined` means none is
+ * configured. The CodeBuild checker is loaded only when selected, so the kernel does not load a cloud SDK otherwise.
+ */
+export async function skillCheckerFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<SkillChecker | undefined> {
+  const provider = env.FACTORY_DEPLOY_PROVIDER || (env.FACTORY_RUNTIME === 'ecs' ? 'aws' : undefined);
+  const kind = env.FACTORY_SKILL_CHECKER || (provider === 'aws' ? 'codebuild' : 'none');
+  if (kind === 'codebuild') {
+    const { codeBuildSkillChecker } = await import('./aws/codebuild.js');
+    return codeBuildSkillChecker();
+  }
+  if (kind === 'local') return localSkillChecker();
+  if (kind !== 'none') console.warn(`[control-plane] FACTORY_SKILL_CHECKER=${kind} is not a checker (codebuild, local, none); skill checks are off`);
+  return undefined;
+}
 
 export type SkillStatus = 'pending' | 'approved' | 'rejected';
 export type SkillChecks = 'pending-build' | 'passed' | 'failed';

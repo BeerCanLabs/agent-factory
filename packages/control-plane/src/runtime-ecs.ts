@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { AgentRecord } from './catalog.js';
+import type { AgentRecord } from '@beercanlabs/factory-registrar';
 import type { Runtime, TaskStatus } from './runtime.js';
 
 const execFileAsync = promisify(execFile);

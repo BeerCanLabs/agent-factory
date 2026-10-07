@@ -10,7 +10,7 @@ import { WebSocket } from 'ws';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
-import { loadCatalog } from './catalog.js';
+import { loadCatalog } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, createRun, finishRun, SYSTEM, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';

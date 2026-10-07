@@ -8,9 +8,22 @@ import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanla
 import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
 import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
-import { AgentRecord, isBuiltinCartridge, BUILTIN_AGENT_IDS, connectionsOf, credentialsOf, egressOf, type AgentCategory } from './catalog.js';
-import { AdmissionRefusedError, FULL_SHA, type DeployProvider, type Runtime, type SourceRef } from './runtime.js';
-import { checkRepoUrl, gitLsRemoteResolver, type CommitResolver, type SkillSource } from './source.js';
+import {
+  AgentRecord,
+  BUILTIN_AGENT_IDS,
+  FULL_SHA,
+  checkRepoUrl,
+  connectionsOf,
+  credentialsOf,
+  egressOf,
+  gitLsRemoteResolver,
+  isBuiltinCartridge,
+  type AgentCategory,
+  type CommitResolver,
+  type SkillChecker,
+  type SkillSource,
+} from '@beercanlabs/factory-registrar';
+import { AdmissionRefusedError, type DeployProvider, type Runtime, type SourceRef } from './runtime.js';
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
@@ -23,7 +36,6 @@ import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig, type ConfigStore } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
-import type { SkillChecker } from './skill-checks.js';
 import { handleRunProgress } from './events.js';
 import { handleSchedules } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
@@ -61,7 +73,7 @@ export type FactoryState = {
   configs?: ConfigStore;
   /**
    * §6.14 SK1: runs the factory's checks on a registered skill version's code. Unset: chosen from the environment
-   * (skill-checks.ts `skillCheckerFromEnv`); null: none.
+   * (the Registrar's `skillCheckerFromEnv`); null: none.
    */
   skillChecker?: SkillChecker | null;
   /**

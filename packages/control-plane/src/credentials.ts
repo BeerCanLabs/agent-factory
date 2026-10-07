@@ -15,7 +15,7 @@ import http from 'node:http';
 import { secretPresent, writableProvider, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { assessCredentials, assessPlatformCredentials, submittableSecrets, summarize, type CredentialItem, type CredentialSummary } from '@beercanlabs/factory-keymaster';
 import { requirePrivilege, json, type FactoryState } from './app.js';
-import { BUILTIN_AGENT_IDS, declaredCredentials, type AgentRecord } from './catalog.js';
+import { BUILTIN_AGENT_IDS, declaredCredentials, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { consentUnavailable, getConnections } from './connections.js';
 
 const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;

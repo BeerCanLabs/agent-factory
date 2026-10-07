@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { dockerRuntime, parseImageMap, type DockerApi } from './runtime-docker.js';
-import type { AgentRecord } from './catalog.js';
+import type { AgentRecord } from '@beercanlabs/factory-registrar';
 
 const agent: AgentRecord = { id: 'echo-agent', name: 'Echo', role: 'r', state: 'IDLE', provider: 'local', artifact: '', requires: [], triggers: [], memoryPrefix: 'echo-agent', dir: '/tmp' };
 

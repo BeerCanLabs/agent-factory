@@ -220,7 +220,7 @@ resource "aws_iam_role_policy" "codebuild_skill_checker" {
 # SKILL_MANIFEST_B64 (the registered manifest). The build clones exactly that commit with the agent builder's source
 # token handling, runs the check script in the skill's folder, and exports SKILL_CHECK_RESULT
 # ({"passed": bool, "failures": [...]}), which the control plane reads from BatchGetBuilds when the build ends.
-# The script is packages/control-plane/src/skill-checks.ts SKILL_CHECK_SCRIPT, embedded verbatim; skill-checks.test.ts
+# The script is packages/registrar/src/skill-checks.ts SKILL_CHECK_SCRIPT, embedded verbatim; skill-checks.test.ts
 # fails if the two differ. The skill's tests run without the build's cloud credentials or the source token. Like
 # factory-agent-builder, it runs in CodeBuild's own network (it needs the git host and the Python package index), never
 # inside the factory VPC, and it is not privileged: it builds no image.

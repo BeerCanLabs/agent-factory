@@ -77,7 +77,7 @@ describe('console mirrors control-plane contracts', () => {
     return new Set([...block.matchAll(/'([A-Z_]+)'/g)].map((m) => m[1]));
   };
   it('the console knows every agent state the control plane sets', () => {
-    const cp = union(read('packages/control-plane/src/catalog.ts'), /\n\s+state:\s*\n([\s\S]*?);/);
+    const cp = union(read('packages/registrar/src/catalog.ts'), /\n\s+state:\s*\n([\s\S]*?);/);
     const console_ = union(read('packages/console/src/api/types.ts'), /export type AgentState =[\s\S]*?;/);
     assert.ok(cp.size > 5, 'could not read control-plane states');
     assert.deepEqual([...cp].filter((s) => !console_.has(s)), []);

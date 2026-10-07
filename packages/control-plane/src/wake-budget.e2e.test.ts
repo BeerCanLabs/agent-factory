@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
-import { loadCatalog, BUILTIN_SYSTEM_AGENTS } from './catalog.js';
+import { loadCatalog, BUILTIN_SYSTEM_AGENTS } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, createRun, SYSTEM, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';

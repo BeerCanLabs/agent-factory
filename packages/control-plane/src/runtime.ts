@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { gatekeeperEgressEnv, pullMind, pushMind, type MindStore } from '@beercanlabs/factory-hydrate';
-import type { AgentRecord } from './catalog.js';
+import type { AgentRecord } from '@beercanlabs/factory-registrar';
 
 /** `runEnv` is non-secret run metadata (FACTORY_RUN_ID, FACTORY_URL, ...) plus the short-lived run token. */
 export type RunContext = { runId: string; runEnv: Record<string, string> };
@@ -104,8 +104,6 @@ export function noopRuntime(): Runtime & { started: NoopStart[] } {
 
 /** A pinned agent source: a git repository at one exact commit (L3/L4). Never a branch or "latest". */
 export type SourceRef = { repo: string; commit: string };
-
-export const FULL_SHA = /^[0-9a-f]{40}$/;
 
 /** The immutable image tag for one admitted commit: `<agentId>-<commit[:12]>`. */
 export function imageTagFor(agentId: string, commit: string): string {
