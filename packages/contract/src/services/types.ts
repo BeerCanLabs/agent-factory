@@ -133,10 +133,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     title: 'Timekeeper',
     role: 'Agent-scoped cron scheduling and one-shot wakeup timers (§6.15)',
     hostedIn: ['packages/control-plane', 'packages/timekeeper'],
-    owns: [
-      'packages/control-plane/src/app.ts',
-      'packages/control-plane/src/schedules.ts',
-    ],
+    owns: ['packages/control-plane/src/schedules.ts'],
   },
   registrar: {
     name: 'registrar',

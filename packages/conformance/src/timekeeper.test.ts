@@ -18,7 +18,7 @@ const CLOCK_START = /(?<!function\s)\bcreateTimekeeper\s*\(/;
 const matches = (src: string, patterns: RegExp[]) =>
   src.split('\n').flatMap((line, i) => (patterns.some((re) => re.test(line)) ? [`${i + 1}: ${line.trim()}`] : []));
 
-/** The packages that must not carry their own copy: where `schedules.ts`, the old `scheduler.ts` and the loop lived. */
+/** The packages that must not carry their own copy: where the cron rule, the schedule store and the firing loop used to live. */
 const GUARDED = /^packages\/(control-plane|gatekeeper-egress|gatekeeper-ingress)\/src\/.*\.ts$/;
 const CLOCK_OWNER = 'packages/control-plane/src/index.ts';
 

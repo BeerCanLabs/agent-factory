@@ -1,6 +1,6 @@
 /**
  * Dynamic scheduled actions: an agent (or an operator) asks the factory to wake an agent on a cron with a stored
- * prompt. The scheduler in `index.ts` fires them; the Timekeeper's package stores them and this module serves `/api/v1/schedules`.
+ * prompt. The Timekeeper (`@beercanlabs/factory-timekeeper`, started in `index.ts`) stores and fires them; this module serves `/api/v1/schedules`.
  *
  * Scoping (DESIGN_AUTHORITY.md GAP-061, TSK-058; E7, S1): a run token acts only for its own agent. It creates, lists
  * and deletes that agent's schedules and nothing else; another agent's schedule is indistinguishable from a missing
