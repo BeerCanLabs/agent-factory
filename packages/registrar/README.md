@@ -8,6 +8,9 @@ This package is being extracted in steps (the Registrar flow work stream, TSK-12
 - `source.ts`: source pinning (L3): `FULL_SHA` (a commit is a full 40-character SHA, never a branch), `checkRepoUrl`, `gitLsRemoteResolver`, and the skill source (`SkillSource`, `gitSkillSource`, `SourceError`, `checkRefName`, `gitTokenEnv`).
 - `skill-checks.ts`: the factory's checks on a skill's code (SK1): the `SkillChecker` contract, `localSkillChecker`, `fakeSkillChecker` and `SKILL_CHECK_SCRIPT` (the script the AWS landing zone's CodeBuild project embeds verbatim). `skillCheckerFromEnv`, which picks the deployment's checker, stays in `packages/control-plane/src/skills.ts` because it loads the Landlord's CodeBuild checker.
 
-Still in `packages/control-plane` and moving in later tasks: the registry store, the configuration store, the skill registry, the systems store and the admission decision. The HTTP handlers stay in the control plane.
+- `registry.ts`: `AgentRegistry`, the agent registry's records on disk (`<dir>/<agentId>.json`): `save`, `update` (only a record that exists) and `remove`; a failed write goes to the caller's `warn` and never fails the request.
+- `config-store.ts`: the deployment configuration store (SK3, R1): `ConfigContent` and `ConfigRecord` (the part the content hash covers), `configHash` and `canonicalJson`, `VersionedConfigStore` over a `ConfigBackend` (`FileConfigBackend`, `S3ConfigBackend` through the AWS CLI, `configBackendFromEnv`), `AGENT_ID`, and `archiveStamp` (the timestamp of a recoverable archive folder, also used by the control plane's policy store). It never reads the policy it stores, so the policy is any JSON object (`ConfigPolicy`).
+
+Still in `packages/control-plane` and moving in later tasks (or staying, for the handlers): the skill registry, the systems store and the admission decision. The HTTP handlers stay in the control plane.
 
 The package imports nothing from `control-plane`.

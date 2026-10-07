@@ -17,7 +17,7 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { PolicyStore } from './policy.js';
-import { FileConfigBackend, VersionedConfigStore } from './config-store.js';
+import { FileConfigBackend, VersionedConfigStore } from '@beercanlabs/factory-registrar';
 
 const ADMIN = 'admin-owner-access';
 const OPERATOR = 'operator-owner-access';

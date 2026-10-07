@@ -15,19 +15,19 @@ import { noopRuntime } from './runtime.js';
 import { MemoryRunStore, RunTokens } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { PolicyStore, archiveStamp } from './policy.js';
-import { BUILTIN_SYSTEM_AGENTS, loadDynamicRegistry, mergeAgents } from '@beercanlabs/factory-registrar';
+import { PolicyStore } from './policy.js';
 import {
+  archiveStamp,
+  BUILTIN_SYSTEM_AGENTS,
+  configHash,
   FileConfigBackend,
+  loadDynamicRegistry,
+  mergeAgents,
   S3ConfigBackend,
   VersionedConfigStore,
-  checkRegistry,
-  configHash,
-  migrateConfigs,
-  pruneOrphans,
-  pruneRefusal,
   type ConfigRecord,
-} from './config-store.js';
+} from '@beercanlabs/factory-registrar';
+import { checkRegistry, migrateConfigs, pruneOrphans, pruneRefusal } from './config-store.js';
 
 const ADMIN = 'admin-orphan-token';
 const SHA = '1'.repeat(40);
