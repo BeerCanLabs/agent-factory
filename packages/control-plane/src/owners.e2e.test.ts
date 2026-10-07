@@ -17,7 +17,8 @@ import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { PolicyStore } from './policy.js';
 import type { DeployProvider } from './aws/deploy.js';
-import { FileConfigBackend, VersionedConfigStore, configHash, ownersOf, type ConfigBackend } from './config-store.js';
+import { FileConfigBackend, VersionedConfigStore, configHash, type ConfigBackend } from '@beercanlabs/factory-registrar';
+import { ownersOf } from './config-store.js';
 
 const ADMIN = 'admin-owners-token';
 const OPERATOR = 'operator-owners-token';

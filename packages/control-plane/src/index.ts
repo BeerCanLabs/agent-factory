@@ -4,7 +4,14 @@ import { dirname, join } from 'node:path';
 import { Checkpointer, FileLedger, LedgerLease, LeaseHeldError, archiveAndStartSegment, checkpointSinkFromEnv, readSegment, secretValuesFromEnv, segmentWormUri } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { accessAuthFromEnv, authFromEnv } from '@beercanlabs/factory-auth';
-import { loadCatalog, loadDynamicRegistry, mergeAgents, BUILTIN_SYSTEM_AGENTS } from '@beercanlabs/factory-registrar';
+import {
+  BUILTIN_SYSTEM_AGENTS,
+  configBackendFromEnv,
+  loadCatalog,
+  loadDynamicRegistry,
+  mergeAgents,
+  VersionedConfigStore,
+} from '@beercanlabs/factory-registrar';
 import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, factoryMetrics, finishRun, reconcileRuns, SYSTEM } from './app.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { FileRunStore, RunTokens } from './runs.js';
@@ -20,7 +27,7 @@ import { startQueuePollers } from './queues.js';
 import { memoryRuntime, type DeployProvider } from './runtime.js';
 import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
-import { VersionedConfigStore, checkRegistry, configBackendFromEnv, migrateConfigs, pruneOrphans } from './config-store.js';
+import { checkRegistry, migrateConfigs, pruneOrphans } from './config-store.js';
 import { SystemsStore } from './systems.js';
 
 
