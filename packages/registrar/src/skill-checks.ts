@@ -190,7 +190,7 @@ export const SKILL_CHECK_SCRIPT = String.raw`
 
 Runs inside the skill's folder at the pinned commit. Prints one result line, SKILL_CHECK_RESULT=<json>, and writes the
 same JSON to --out: {"passed": bool, "failures": [short reasons]}. Failures name a file and line, never a value.
-Generated from packages/control-plane/src/skill-checks.ts (SKILL_CHECK_SCRIPT); keep landing-zones/aws/codebuild.tf
+Generated from packages/registrar/src/skill-checks.ts (SKILL_CHECK_SCRIPT); keep landing-zones/aws/codebuild.tf
 in step (a test compares them).
 """
 import argparse
