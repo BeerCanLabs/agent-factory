@@ -17,7 +17,7 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
 import { FileConfigBackend, VersionedConfigStore } from './config-store.js';
 import { approvedSkill, configStoreSkillUsage, loadSkills, resumeSkillChecks, skillRegistry, type SkillVersionRecord } from './skills.js';
-import { fakeSkillChecker, type SkillCheckOutcome, type SkillCheckRequest, type SkillChecker } from './skill-checks.js';
+import { fakeSkillChecker, type SkillCheckOutcome, type SkillCheckRequest, type SkillChecker } from '@beercanlabs/factory-registrar';
 
 const ADMIN = 'admin-skill-checks-token';
 const OPERATOR = 'operator-skill-checks-token';

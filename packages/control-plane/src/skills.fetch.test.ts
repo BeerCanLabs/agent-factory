@@ -18,7 +18,7 @@ import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
 import { loadSkills, skillRegistry } from './skills.js';
-import { checkRefName, gitSkillSource, gitTokenEnv, SourceError, type SkillSource } from './source.js';
+import { checkRefName, gitSkillSource, gitTokenEnv, SourceError, type SkillSource } from '@beercanlabs/factory-registrar';
 
 const USER = 'user-fetch-token';
 const REPO = 'https://github.com/BeerCanLabs/skills';

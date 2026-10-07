@@ -9,13 +9,12 @@ import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { BUILTIN_SYSTEM_AGENTS } from './catalog.js';
+import { BUILTIN_SYSTEM_AGENTS, checkRepoUrl } from '@beercanlabs/factory-registrar';
 import { AdmissionRefusedError, imageTagFor, noopRuntime, type AdmissionRefusal, type DeployProvider, type SourceRef } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import { checkRepoUrl } from './source.js';
 import { admissionFailure, buildAgentImage } from './aws/codebuild.js';
 
 const ADMIN = 'admin-admission-token';

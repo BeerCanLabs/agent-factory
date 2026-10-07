@@ -1,4 +1,4 @@
-// Must include every state the control plane sets (packages/control-plane/src/catalog.ts); a conformance test enforces this.
+// Must include every state the control plane sets (packages/registrar/src/catalog.ts); a conformance test enforces this.
 export type AgentState =
   | 'DRAFT'
   | 'PENDING_BUDGET'

@@ -1,5 +1,5 @@
 import http from 'node:http';
-import type { AgentRecord } from './catalog.js';
+import type { AgentRecord } from '@beercanlabs/factory-registrar';
 import type { Runtime, TaskStatus } from './runtime.js';
 
 export type DockerApi = (method: string, path: string, body?: unknown) => Promise<{ status: number; body: any }>;

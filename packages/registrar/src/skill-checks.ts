@@ -21,7 +21,8 @@
  *     (landing-zones/aws/codebuild.tf), which embeds this same script; a test keeps the two identical.
  *   - `localSkillChecker`: clones and runs the script on this machine (development; needs git and python3).
  *   - `fakeSkillChecker`: for tests.
- * Selection (`skillCheckerFromEnv`): FACTORY_SKILL_CHECKER=codebuild|local|none; by default `codebuild` where agent
+ * Selection (`skillCheckerFromEnv`, in packages/control-plane/src/skills.ts: it loads the Landlord's CodeBuild checker, which
+ * this package must not import): FACTORY_SKILL_CHECKER=codebuild|local|none; by default `codebuild` where agent
  * admission uses CodeBuild (FACTORY_DEPLOY_PROVIDER=aws, or FACTORY_RUNTIME=ecs), otherwise none: versions stay
  * `pending-build` until a checker is configured.
  */
@@ -176,22 +177,6 @@ export function localSkillChecker(opts: { python?: string; git?: string; timeout
       }
     },
   };
-}
-
-/**
- * The checker this deployment uses (see the header). Called once per control plane; `undefined` means none is
- * configured. The CodeBuild checker is loaded only when selected, so the kernel does not load a cloud SDK otherwise.
- */
-export async function skillCheckerFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<SkillChecker | undefined> {
-  const provider = env.FACTORY_DEPLOY_PROVIDER || (env.FACTORY_RUNTIME === 'ecs' ? 'aws' : undefined);
-  const kind = env.FACTORY_SKILL_CHECKER || (provider === 'aws' ? 'codebuild' : 'none');
-  if (kind === 'codebuild') {
-    const { codeBuildSkillChecker } = await import('./aws/codebuild.js');
-    return codeBuildSkillChecker();
-  }
-  if (kind === 'local') return localSkillChecker();
-  if (kind !== 'none') console.warn(`[control-plane] FACTORY_SKILL_CHECKER=${kind} is not a checker (codebuild, local, none); skill checks are off`);
-  return undefined;
 }
 
 /**
