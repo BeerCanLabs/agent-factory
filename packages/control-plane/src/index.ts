@@ -11,7 +11,7 @@ import { FileRunStore, RunTokens } from './runs.js';
 import { callbackPolicyFromEnv } from './callbacks.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { ScheduleStore, agentsDueForCron } from '@beercanlabs/factory-timekeeper';
+import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from './policy.js';
 import { EventHub, attachBus, busSinkFromEnv, runEvent, tapLedger } from './events.js';
@@ -294,7 +294,8 @@ const busSink = busSinkFromEnv();
 if (busSink) attachBus(hub, busSink);
 
 const schedulesPath = process.env.FACTORY_SCHEDULES_PATH || join(DATA_DIR, 'schedules.json');
-state.schedules = new ScheduleStore(schedulesPath);
+const schedules = new ScheduleStore(schedulesPath);
+state.schedules = schedules;
 
 const server = createFactoryServer(state);
 attachEventStream(server, state, hub);
@@ -304,31 +305,29 @@ server.listen(PORT, '0.0.0.0', () => {
 });
 
 if (process.env.FACTORY_CRON !== '0') {
-  setInterval(() => {
-    // 1. Static cartridge crons
-    const due = agentsDueForCron(state.agents.values());
-    for (const agent of due) {
-      if (!activeRun(state, agent.id)) void createRun(state, agent.id, { actor: SYSTEM.scheduler, trigger: 'cron' });
-    }
-
-    // 2. Dynamic action schedules
-    if (state.schedules) {
-      const dueSchedules = state.schedules.checkDue(new Date());
-      for (const sched of dueSchedules) {
-        console.log(`[scheduler] Firing dynamic schedule "${sched.name}" (${sched.id}) for agent ${sched.agentId}`);
-        void createRun(state, sched.agentId, {
-          actor: SYSTEM.scheduler,
-          trigger: 'schedule',
-          input: {
-            content: sched.prompt,
-            message: sched.prompt,
-            channelId: sched.channelId,
-            scheduleId: sched.id,
-            scheduleName: sched.name,
-            source: 'schedule',
-          },
-        });
+  createTimekeeper({
+    agents: () => state.agents.values(),
+    schedules,
+    fire: (request) => {
+      if (request.kind === 'cartridge') {
+        // Skipping a cartridge cron while the agent is running is the Landlord's rule, not the Timekeeper's.
+        if (!activeRun(state, request.agentId)) void createRun(state, request.agentId, { actor: SYSTEM.scheduler, trigger: 'cron' });
+        return;
       }
-    }
-  }, 60_000);
+      const sched = request.schedule;
+      console.log(`[scheduler] Firing dynamic schedule "${sched.name}" (${sched.id}) for agent ${sched.agentId}`);
+      void createRun(state, sched.agentId, {
+        actor: SYSTEM.scheduler,
+        trigger: 'schedule',
+        input: {
+          content: sched.prompt,
+          message: sched.prompt,
+          channelId: sched.channelId,
+          scheduleId: sched.id,
+          scheduleName: sched.name,
+          source: 'schedule',
+        },
+      });
+    },
+  }).start();
 }
