@@ -20,7 +20,7 @@ agent picking the work up; it is self-contained, and everything in it can be che
 ## What the code does today (checked 2026-10-05)
 
 - The cartridge declares `model:` and an optional `models:` list in `cartridge.yaml`. The Factory stores the list as
-  `requestedModels` (`packages/control-plane/src/catalog.ts`, `app.ts` registry route).
+  `requestedModels` (`packages/registrar/src/catalog.ts`, `app.ts` registry route).
 - The owner's control is the policy's `models` list (`packages/control-plane/src/policy.ts`; edited in
   `packages/console/src/components/PolicyEditor.tsx`). It is an allow-list. There is no field for a primary or a
   secondary, and the console cannot name a fallback.

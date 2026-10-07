@@ -15,7 +15,7 @@ import { MemoryRunStore, RunTokens } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import { loadDynamicRegistry } from './catalog.js';
+import { loadDynamicRegistry } from '@beercanlabs/factory-registrar';
 import { FileConfigBackend, VersionedConfigStore, configHash, migrateConfigs, type ConfigBackend, type ConfigRecord } from './config-store.js';
 
 const ADMIN = 'admin-config-token';

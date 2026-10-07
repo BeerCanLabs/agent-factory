@@ -3,9 +3,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { FULL_SHA } from './runtime.js';
-
 const execFileAsync = promisify(execFile);
+
+/** A commit is pinned by its full SHA (L3, L4): never a branch, a tag or "latest". */
+export const FULL_SHA = /^[0-9a-f]{40}$/;
 
 /** Resolves a repository's default-branch HEAD to a full commit SHA, once, at registration (L3 pinning). */
 export type CommitResolver = (repo: string) => Promise<string>;
