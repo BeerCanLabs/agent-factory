@@ -1,6 +1,6 @@
 // TSK-127 (GAP-098): the skill registry's records on disk, the skill folder rule and reading skill.yaml at a commit,
 // exactly as the control plane did them before the move. The control plane's e2e tests cover the routes.
-import { describe, it } from 'node:test';
+import { describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -89,6 +89,21 @@ describe('skill registry store', () => {
       assert.match(warnings[0][0], /^skipping unreadable skill record .*2\.0\.0\.json:$/);
       assert.match(warnings[1][0], /3\.0\.0\.json:$/);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('with no warn given, an unreadable record is logged with a [registrar] prefix', () => {
+    const dir = tmp();
+    const warn = mock.method(console, 'warn', () => {});
+    try {
+      new SkillRegistry(dir).save(record('1.0.0'));
+      writeFileSync(join(dir, 'discord-progress', '2.0.0.json'), '{ not json');
+      new SkillRegistry(dir);
+      assert.equal(warn.mock.callCount(), 1);
+      assert.match(String(warn.mock.calls[0].arguments[0]), /^\[registrar\] skipping unreadable skill record /);
+    } finally {
+      warn.mock.restore();
       rmSync(dir, { recursive: true, force: true });
     }
   });

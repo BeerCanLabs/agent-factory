@@ -91,7 +91,7 @@ export class SkillRegistry {
 
   constructor(
     private readonly dir?: string,
-    private readonly warn: (message: string, err: unknown) => void = (message, err) => console.warn(message, err),
+    private readonly warn: (message: string, err: unknown) => void = (message, err) => console.warn(`[registrar] ${message}`, err),
   ) {
     if (!dir || !existsSync(dir)) return;
     for (const id of readdirSync(dir)) {
@@ -200,7 +200,7 @@ export async function fetchManifest(
   path: string,
   sha: string | undefined,
   ref: string | undefined,
-  warn: (message: string, err: unknown) => void = (message, err) => console.warn(message, err),
+  warn: (message: string, err: unknown) => void = (message, err) => console.warn(`[registrar] ${message}`, err),
 ): Promise<{ commit?: string; raw?: Record<string, unknown>; reasons: string[] }> {
   const file = path === '.' ? 'skill.yaml' : `${path}/skill.yaml`;
   let commit = sha;
