@@ -29,6 +29,8 @@ import { ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 import { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
 import { checkRegistry, migrateConfigs, pruneOrphans } from './config-store.js';
 import { SystemsStore } from './systems.js';
+import { checkFactoryBudgets, createTreasury } from './spend.js';
+import { AwsComputeSource, AwsCostSource } from './aws/treasurer.js';
 
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
@@ -303,6 +305,30 @@ if (busSink) attachBus(hub, busSink);
 const schedulesPath = process.env.FACTORY_SCHEDULES_PATH || join(DATA_DIR, 'schedules.json');
 const schedules = new ScheduleStore(schedulesPath);
 state.schedules = schedules;
+
+// §6.15 Treasurer: cloud spend, ECS compute inventory, and factory budgets.
+const budgetsPath = process.env.FACTORY_BUDGETS_PATH || join(DATA_DIR, 'budgets.json');
+const treasurerRoleArn = process.env.FACTORY_TREASURER_ROLE_ARN;
+const ecsCluster = process.env.FACTORY_ECS_CLUSTER;
+
+let cloudSource: AwsCostSource | undefined;
+let computeSource: AwsComputeSource | undefined;
+if (treasurerRoleArn) {
+  try {
+    cloudSource = AwsCostSource.fromRole(treasurerRoleArn);
+    if (ecsCluster) {
+      computeSource = AwsComputeSource.fromRole(treasurerRoleArn, ecsCluster);
+    }
+  } catch (err) {
+    console.error(`[control-plane] treasurer initialization failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+const treasury = createTreasury({ cloud: cloudSource, compute: computeSource, budgetsPath });
+if (!treasury.budgets.current()) {
+  treasury.budgets.set({ totalMonthUsd: 300 }, SYSTEM.policy);
+}
+state.treasury = treasury;
+setInterval(() => void checkFactoryBudgets(state).catch((e) => console.error(`[treasurer] budget check: ${e instanceof Error ? e.message : String(e)}`)), 60 * 60_000).unref();
 
 const server = createFactoryServer(state);
 attachEventStream(server, state, hub);
