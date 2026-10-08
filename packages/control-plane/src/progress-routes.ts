@@ -1,19 +1,7 @@
 import type http from 'node:http';
-import { PROGRESS_MAX_WAIT_MS, RunProgress, hubOf, sanitizeProgress } from '@beercanlabs/factory-inspector';
+import { PROGRESS_MAX_WAIT_MS } from '@beercanlabs/factory-inspector';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { isTerminal } from './runs.js';
-
-const progressStores = new WeakMap<object, RunProgress>();
-
-/** The control plane's progress rings (one per factory state). */
-export function progressOf(state: FactoryState): RunProgress {
-  let p = progressStores.get(state);
-  if (!p) {
-    p = new RunProgress();
-    progressStores.set(state, p);
-  }
-  return p;
-}
 
 function bearer(req: http.IncomingMessage): string | undefined {
   const h = req.headers.authorization;
@@ -30,19 +18,11 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
     if (!(await requirePrivilege(req, res, state, 'egress.progress.report'))) return true;
     const body = await readJson(req);
     const batch = Array.isArray(body.events) ? body.events.slice(0, 500) : [];
-    const progress = progressOf(state);
-    const hub = hubOf(state.ledger);
-    let accepted = 0;
-    for (const raw of batch) {
-      const e = sanitizeProgress(raw);
-      if (!e) continue;
-      // Attribution comes from the run itself: an event naming another agent is not this run's.
+    // Attribution comes from the run itself: an event naming another agent is not this run's.
+    const accepted = state.inspector.reportProgress(batch, (e) => {
       const run = state.runs.get(e.runId);
-      if (!run || run.agentId !== e.agentId || isTerminal(run.state)) continue;
-      const stored = progress.append(e);
-      hub?.publish({ kind: 'progress', agentId: stored.agentId, progress: stored });
-      accepted++;
-    }
+      return Boolean(run) && run!.agentId === e.agentId && !isTerminal(run!.state);
+    });
     json(res, 200, { accepted });
     return true;
   }
@@ -64,7 +44,7 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
     const waitMs = Number.isFinite(waitRaw) ? Math.min(Math.max(waitRaw, 0), PROGRESS_MAX_WAIT_MS) : PROGRESS_MAX_WAIT_MS;
     const abort = new AbortController();
     res.on('close', () => abort.abort());
-    const out = await progressOf(state).wait(runId, after, after === undefined ? 0 : waitMs, abort.signal);
+    const out = await state.inspector.readProgress(runId, after, after === undefined ? 0 : waitMs, abort.signal);
     if (!res.writableEnded && !res.destroyed) json(res, 200, { runId, ...out });
     return true;
   }

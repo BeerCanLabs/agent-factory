@@ -2,14 +2,14 @@ import type http from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { authorize } from '@beercanlabs/factory-bouncer';
 import type { FactoryState } from './app.js';
-import type { EventHub } from '@beercanlabs/factory-inspector';
+import type { Inspector } from '@beercanlabs/factory-inspector';
 
 /**
  * WebSocket event stream at /api/v1/events (viewer). Pushes metadata-only ledger rows and run state
  * changes as they happen, optionally filtered by ?agent=. Auth: `Authorization: Bearer <token>`, or
  * for browsers the subprotocol pair `bearer, <token>`.
  */
-export function attachEventStream(server: http.Server, state: FactoryState, hub: EventHub): WebSocketServer {
+export function attachEventStream(server: http.Server, state: FactoryState, events: Pick<Inspector, 'subscribe'>): WebSocketServer {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });
 
   server.on('upgrade', async (req, socket, head) => {
@@ -30,7 +30,7 @@ export function attachEventStream(server: http.Server, state: FactoryState, hub:
     }
     const agent = url.searchParams.get('agent');
     wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-      const off = hub.subscribe((e) => {
+      const off = events.subscribe((e) => {
         if (agent && e.agentId !== agent) return;
         if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(e));
       });
