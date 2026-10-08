@@ -47,6 +47,7 @@ import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js
 import { handleSystems, type SystemsStore } from './systems.js';
 import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
+import { handleSpend, type Treasury } from './spend.js';
 
 export type FactoryState = {
 
@@ -87,6 +88,8 @@ export type FactoryState = {
    */
   skillSource?: SkillSource;
   spend: SpendTracker;
+  /** The Treasurer's cloud and compute sources, and factory budget store (§6.15). */
+  treasury?: Treasury;
   approvals: ApprovalStore;
   keymaster?: Keymaster;
   /** Keymaster connections (§6.11): OAuth grants and app credentials. Created on first use. */
@@ -775,7 +778,7 @@ export async function checkHealth(state: FactoryState, now = Date.now()) {
   }
 }
 
-async function routeEvents(state: FactoryState, event: { type: string; agentId: string; runId?: string }) {
+export async function routeEvents(state: FactoryState, event: { type: string; agentId: string; runId?: string }) {
   if (event.type === 'crash' && event.agentId !== 'med-doc' && state.agents.has('med-doc')) {
     await createRun(state, 'med-doc', { actor: SYSTEM.router, trigger: 'event:crash', input: { agentId: event.agentId, runId: event.runId } });
   }
@@ -979,7 +982,7 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
   return 'not_delivered';
 }
 
-function bearerOf(req: http.IncomingMessage): string | undefined {
+export function bearerOf(req: http.IncomingMessage): string | undefined {
   const h = req.headers.authorization;
   return h?.startsWith('Bearer ') ? h.slice(7).trim() : undefined;
 }
@@ -1044,6 +1047,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (path.startsWith('/api/v1/schedules') && (await handleSchedules(state, req, res, path))) return;
   if (path.startsWith('/api/v1/identity-links') && (await handleIdentityLinks(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/systems') || path === '/api/v1/gatekeeper-egress/routes') && (await handleSystems(state, req, res, path))) return;
+  if (path.startsWith('/api/v1/spend/') && (await handleSpend(state, req, res, path))) return;
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
 

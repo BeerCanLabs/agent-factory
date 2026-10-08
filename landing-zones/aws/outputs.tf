@@ -36,3 +36,8 @@ output "agent_task_families" {
 output "event_bus" {
   value = aws_cloudwatch_event_bus.factory.name
 }
+
+output "treasurer_role_arn" {
+  description = "The Treasurer IAM role for Cost Explorer and ECS inventory."
+  value       = aws_iam_role.treasurer.arn
+}

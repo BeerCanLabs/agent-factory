@@ -179,7 +179,67 @@ resource "aws_iam_role_policy" "control_plane" {
         Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
         Resource = "arn:aws:sqs:${var.aws_region}:${var.account_id}:${local.name}-*"
       },
+      {
+        Sid      = "AssumeTreasurerRole"
+        Effect   = "Allow"
+        Action   = ["sts:AssumeRole"]
+        Resource = aws_iam_role.treasurer.arn
+      },
       local.telemetry_statement,
+    ]
+  })
+}
+
+# §6.15 Treasurer: read-only access to Cost Explorer and ECS inventory.
+# The control plane assumes this role; agents never hold credentials or reach Cost Explorer directly.
+resource "aws_iam_role" "treasurer" {
+  name = "${local.name}-treasurer"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          AWS = aws_iam_role.control_plane.arn
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "treasurer" {
+  name = "treasurer"
+  role = aws_iam_role.treasurer.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "CostExplorerReadOnly"
+        Effect   = "Allow"
+        Action   = [
+          "ce:GetCostAndUsage",
+          "ce:GetCostForecast",
+          "ce:GetDimensionValues",
+        ]
+        Resource = "*"
+      },
+      {
+        Sid      = "EcsInventoryReadOnly"
+        Effect   = "Allow"
+        Action   = [
+          "ecs:ListServices",
+          "ecs:DescribeServices",
+          "ecs:ListTasks",
+          "ecs:DescribeTasks",
+        ]
+        Resource = "*"
+        Condition = {
+          ArnEquals = {
+            "ecs:cluster" = aws_ecs_cluster.factory.arn
+          }
+        }
+      }
     ]
   })
 }

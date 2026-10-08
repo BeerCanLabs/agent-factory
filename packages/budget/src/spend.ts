@@ -60,6 +60,13 @@ export class SpendTracker {
     return { day, month, agents };
   }
 
+  /** Model spend per agent for one UTC month (`YYYY-MM`), e.g. the previous month for the spend report. */
+  monthByAgent(month: string): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const r of this.rows) if (r.ts.startsWith(month)) out[r.agentId] = (out[r.agentId] ?? 0) + r.usd;
+    return out;
+  }
+
   get(agentId: string, runId: string | undefined, now = new Date()): Spend {
     const day = now.toISOString().slice(0, 10);
     const month = day.slice(0, 7);
