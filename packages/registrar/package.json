@@ -13,10 +13,11 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/catalog.test.ts src/registry.test.ts src/config-store.test.ts src/skills.test.ts src/admission.test.ts"
+    "test": "tsx --test src/catalog.test.ts src/registry.test.ts src/config-store.test.ts src/skills.test.ts src/admission.test.ts src/systems.test.ts"
   },
   "dependencies": {
     "@beercanlabs/factory-contract": "0.1.0",
+    "@beercanlabs/factory-ledger": "0.1.0",
     "yaml": "^2.6.1"
   },
   "devDependencies": {
