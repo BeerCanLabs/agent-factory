@@ -13,6 +13,8 @@ import { files, read } from './support.js';
 //    gatekeeper-egress and gatekeeper-ingress source, because nothing else uses those words today. A future unrelated
 //    feature that needs one as a status of its own should narrow the pattern (to the admission record's other keys),
 //    not delete the check.
+//  - A `class SystemsStore` is forbidden unless it `extends` something: the control plane's subclass of the Registrar's store
+//    (it adds the two Keymaster-derived methods) is the intended one, a standalone copy is not.
 //  - It does NOT guard `invalid_repo` or `invalid_commit`, on purpose (GAP-101). The registration route legitimately
 //    uses the same codes for its own checks, so no pattern separates the deploy rule's from registration's. Do not add
 //    them back without first moving registration onto the Registrar's contract. `commit_required` is deploy-only, so it
@@ -32,7 +34,7 @@ const SECOND_COPY: Array<{ what: string; re: RegExp }> = [
   },
   {
     what: 'a record or store type the Registrar owns, defined again',
-    re: /\b(?:interface|class)\s+(?:AgentRecord|AgentRegistry|ConfigStore|SkillSource|SkillRegistry|VersionedConfigStore)\b|\btype\s+(?:AgentRecord|ConfigStore|SkillSource)\s*(?:<[^>]*>)?\s*=/,
+    re: /\b(?:interface|class)\s+(?:AgentRecord|AgentRegistry|ConfigStore|SkillSource|SkillRegistry|VersionedConfigStore)\b|\bclass\s+SystemsStore\b(?!\s+extends\b)|\btype\s+(?:AgentRecord|ConfigStore|SkillSource)\s*(?:<[^>]*>)?\s*=/,
   },
   { what: 'a path built inside the registry directory', re: new RegExp(`\\bjoin\\(\\s*(?:state\\.)?${REGISTRY_DIR}\\b`) },
   { what: 'a write or delete on the registry directory', re: new RegExp(`\\b${FS_WRITE}\\b[^\\n]*\\b${REGISTRY_DIR}\\b|\\b${REGISTRY_DIR}\\b[^\\n]*\\b${FS_WRITE}\\b`) },
@@ -56,6 +58,7 @@ describe('Registrar: one copy of the admission, pinning, record and configuratio
       'export class AgentRegistry {',
       'export type AgentRecord = {',
       'interface SkillSource {',
+      'export class SystemsStore {',
       'type ConfigStore<T> = {',
       "writeFileSync(join(state.registryDir, `${agent.id}.json`), JSON.stringify(agent), 'utf8');",
       'const filePath = join(state.registryDir, `${id}.json`);',
@@ -69,6 +72,7 @@ describe('Registrar: one copy of the admission, pinning, record and configuratio
       "import { BUILTIN_AGENT_IDS, declaredCredentials, type AgentRecord } from '@beercanlabs/factory-registrar';",
       '  type SkillSource,',
       '  type ConfigStore,',
+      'export class SystemsStore extends RegistrarSystemsStore {',
       'const pin = pinSource(agent, body);',
       "if (outcome.status === 'refused') {",
       "json(res, pin.error === 'commit_required' ? 409 : 400, { error: pin.error, message: pin.message });",
@@ -90,6 +94,7 @@ describe('Registrar: one copy of the admission, pinning, record and configuratio
       ['packages/registrar/src/registry.ts', 'AgentRegistry'],
       ['packages/registrar/src/skills.ts', 'compareSemver'],
       ['packages/registrar/src/config-store.ts', 'archiveStamp'],
+      ['packages/registrar/src/systems.ts', 'SystemsStore'],
     ];
     for (const [file, name] of originals) {
       assert.ok(matches(read(file)).some((m) => m.includes(name)), `${file} no longer defines ${name} where the guard looks for it`);
