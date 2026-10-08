@@ -152,13 +152,11 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'inspector',
     title: 'Inspector',
     role: 'Telemetry, live run progress event streaming, and error diagnosis (§6.5)',
-    hostedIn: ['packages/telemetry', 'packages/control-plane', 'packages/gatekeeper-egress'],
+    hostedIn: ['packages/inspector', 'packages/telemetry', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/events.ts',
       'packages/control-plane/src/stream.ts',
-      'packages/gatekeeper-egress/src/progress.ts',
-      'packages/gatekeeper-egress/src/traces.ts',
     ],
   },
 };
