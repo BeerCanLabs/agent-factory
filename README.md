@@ -74,8 +74,8 @@ Agent Factory is architected around **11 canonical services ("The Cast of Charac
     - **Contract:** `packages/registrar` exports the agent record and registry store, `pinSource` and `admit` (a source and the Landlord's build callback in, admitted or refused out; it changes no record and cannot deploy), the skill registry, and the configuration store (`VersionedConfigStore`, `configHash`). A new commit alerting an admin, who admits it before it is deployed (L5), is on the roadmap in `docs/registrar-roadmap.md`.
 
 11. **Inspector (Observability, Telemetry & Triage):**
-    - **Role:** Emits live run progress event streams (e.g., `discord-progress`), exports headless operational metrics (`/metrics`), and routes crash diagnostics to alerting.
-    - **Contract:** Headless OTel metric instruments, SSE progress event streaming, and triage diagnostic capture.
+    - **Role:** Watches the factory and says what it sees: emits live run progress and event streams (e.g., `discord-progress`, the WebSocket stream, the enterprise bus), registers the headless run metrics instruments, writes prompt traces, and derives the triage incident list (`/api/v1/triage`). It decides nothing, and the HTTP handlers stay in the control plane. Routing crash diagnostics to an alerting tool is not built (GAP-107).
+    - **Contract:** `packages/inspector` exports `createInspector` (publish and subscribe to events, tap the ledger, attach an enterprise bus, report and read run progress), the progress emitter and prompt traces the egress uses, `factoryMetrics`, and `incidentsFromRuns`. `packages/telemetry` (`initTelemetry`) is a separate package it hosts.
 
 ### Contracts as Designed: Architectural Invariants
 
