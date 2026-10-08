@@ -8,7 +8,7 @@ import http from 'node:http';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth, RunTokens, type Role } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { EventHub } from './events.js';
+import { EventHub } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';

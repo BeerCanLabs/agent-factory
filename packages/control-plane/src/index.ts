@@ -21,7 +21,7 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from './policy.js';
-import { EventHub, attachBus, busSinkFromEnv, runEvent, tapLedger } from './events.js';
+import { EventHub, attachBus, busSinkFromEnv, runEvent, tapLedger } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
 import { startQueuePollers } from './queues.js';
 import { memoryRuntime, type DeployProvider } from './runtime.js';

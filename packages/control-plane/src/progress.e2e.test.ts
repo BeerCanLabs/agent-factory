@@ -9,7 +9,7 @@ import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import { EventHub, RunProgress, isBusWorthy, tapLedger, type FactoryEvent } from './events.js';
+import { EventHub, RunProgress, isBusWorthy, tapLedger, type FactoryEvent } from '@beercanlabs/factory-inspector';
 
 const KEY = 'progress-e2e-run-token-key-0123456789abcdef';
 const VIEWER = 'viewer-progress-e2e';
