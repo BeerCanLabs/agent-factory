@@ -255,4 +255,39 @@ describe('Keymaster connections (§6.11)', () => {
     const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, getProvider: testResolver });
     assert.deepEqual(await km.exchangeCode('google', { code: 'c', redirectUri: 'x' }), { ok: false, error: 'no_refresh_token' });
   });
+
+  it('downscopes user OAuth tokens when specific scopes are requested and partitions cache by scopes', async () => {
+    const mem = memoryProvider({
+      GOOGLE_OAUTH_CLIENT: CLIENT,
+      [grantSecretName('donna', 'google')]: JSON.stringify(grant({
+        scopes: [
+          'https://www.googleapis.com/auth/calendar',
+          'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly',
+        ],
+      })),
+    });
+    const tok = fakeTokenEndpoint((form) => {
+      const scope = form.get('scope') || 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly';
+      return { status: 200, body: { access_token: `token-for-${scope.replace(/\s+/g, ',')}`, expires_in: 3600, scope } };
+    });
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, getProvider: testResolver });
+
+    // 1. Request health scope specifically: passes scope in form and returns downscoped token
+    const health = await km.accessToken('donna', 'google', ['https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly']);
+    assert.ok(health.ok);
+    assert.equal(tok.calls[0].form.get('scope'), 'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly');
+    assert.equal(health.accessToken, 'token-for-https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly');
+
+    // 2. Health scope is cached: second call does not call endpoint
+    const healthAgain = await km.accessToken('donna', 'google', ['https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly']);
+    assert.ok(healthAgain.ok);
+    assert.equal(tok.calls.length, 1);
+
+    // 3. Requesting different scopes (e.g. omnibus / no scopes requested) calls endpoint with no downscoping and caches separately
+    const omnibus = await km.accessToken('donna', 'google');
+    assert.ok(omnibus.ok);
+    assert.equal(tok.calls.length, 2);
+    assert.equal(tok.calls[1].form.get('scope'), null);
+    assert.notEqual(omnibus.accessToken, health.accessToken);
+  });
 });

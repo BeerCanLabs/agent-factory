@@ -155,6 +155,13 @@ describe('system definition store', () => {
       assert.deepEqual(again.imported, [], 're-running on every boot is safe');
       assert.equal(store.history('notion').length, 1);
       assert.deepEqual(await store.importRoutes('not an array', 'x'), { imported: [], skipped: [] });
+
+      // Updating scopes on a migration-created system imports a new approved version
+      const withScopes = [{ id: 'notion', kind: 'http', upstream: 'https://api.notion.com', scopes: ['notion:read'] }];
+      const updated = await store.importRoutes(withScopes, 'migration:boot');
+      assert.deepEqual(updated.imported, ['notion']);
+      assert.equal(store.get('notion')?.version, 2);
+      assert.deepEqual(store.get('notion')?.scopes, ['notion:read']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

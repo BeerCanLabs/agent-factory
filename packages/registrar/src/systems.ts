@@ -107,8 +107,15 @@ export class SystemsStore {
       const existing = this.current.get(id);
       // TSK-067: OAuth provider facts move from code into the store once. A system only the migration ever wrote
       // gains its `oauth` block; one an admin has changed is never touched.
-      const addOAuth = Boolean(existing && r.oauth && !existing.oauth && (this.versions.get(id) ?? []).every((d) => d.proposedBy.startsWith('migration:')));
-      if (this.versions.has(id) && !addOAuth) continue;
+      const isMigrationOnly = (this.versions.get(id) ?? []).every((d) => d.proposedBy.startsWith('migration:'));
+      const addOAuth = Boolean(existing && r.oauth && !existing.oauth && isMigrationOnly);
+      const updateScopes = Boolean(
+        existing &&
+        Array.isArray(r.scopes) &&
+        JSON.stringify(r.scopes) !== JSON.stringify(existing.scopes ?? []) &&
+        isMigrationOnly,
+      );
+      if (this.versions.has(id) && !addOAuth && !updateScopes) continue;
       const v = validateSystemProposal({
         id,
         name: typeof r.name === 'string' ? r.name : id,
