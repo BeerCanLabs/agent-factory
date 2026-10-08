@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { skillDesignIssues, skillManifestSchema, validateSkillManifest, type SkillManifest } from '@beercanlabs/factory-contract';
-import { compareSemver } from './skills.js';
+import { compareSemver } from '@beercanlabs/factory-registrar';
 
 const base = {
   id: 'discord-progress',

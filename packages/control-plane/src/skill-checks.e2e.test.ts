@@ -22,8 +22,9 @@ import {
   type SkillChecker,
   type SkillCheckOutcome,
   type SkillCheckRequest,
+  type SkillVersionRecord,
 } from '@beercanlabs/factory-registrar';
-import { approvedSkill, configStoreSkillUsage, loadSkills, resumeSkillChecks, skillRegistry, type SkillVersionRecord } from './skills.js';
+import { approvedSkill, configStoreSkillUsage, loadSkills, resumeSkillChecks, skillRegistry } from './skills.js';
 
 const ADMIN = 'admin-skill-checks-token';
 const OPERATOR = 'operator-skill-checks-token';

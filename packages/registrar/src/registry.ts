@@ -14,7 +14,7 @@ export type RegistryWarn = (message: string, err: unknown) => void;
 export class AgentRegistry {
   constructor(
     private readonly dir: string | undefined,
-    private readonly warn: RegistryWarn = (message, err) => console.warn(message, err),
+    private readonly warn: RegistryWarn = (message, err) => console.warn(`[registrar] ${message}`, err),
   ) {}
 
   /** Creates or replaces the agent's record, creating the directory when needed. */
