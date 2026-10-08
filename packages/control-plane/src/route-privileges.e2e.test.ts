@@ -15,6 +15,7 @@ import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
+import { createTreasury } from './spend.js';
 
 const ROLES: Role[] = ['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'];
 const TOKEN = (r: Role) => `${r}-route-privileges-e2e`;
@@ -68,6 +69,9 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/metrics', privilege: 'metrics.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/triage', privilege: 'triage.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/spend', privilege: 'spend.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/spend/report', privilege: 'spend.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/spend/compute', privilege: 'spend.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/spend/budgets', privilege: 'spend.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/approvals', privilege: 'approvals.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/skills', privilege: 'skills.read', role: 'viewer' },
   { method: 'GET', path: `/api/v1/skills/${SKILL}`, privilege: 'skills.read', role: 'viewer' },
@@ -118,6 +122,7 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/registry/agents/nope/models/approve', privilege: 'registry.model.set', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/agents/nope/policy', privilege: 'policy.set', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/policies/budget', privilege: 'policy.budget.set', role: 'admin', body: {} },
+  { method: 'PUT', path: '/api/v1/spend/budgets', privilege: 'spend.budget.set', role: 'admin', body: { totalMonthUsd: 300 } },
   { method: 'GET', path: '/api/v1/config/export', privilege: 'config.export', role: 'admin' },
   { method: 'GET', path: '/api/v1/identity-links', privilege: 'identity.links.read', role: 'admin' },
   { method: 'PUT', path: '/api/v1/identity-links/discord/1', privilege: 'identity.links.set', role: 'admin', body: { actor: 'token:x' } },
@@ -210,6 +215,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       callbacks: { allowedProtocols: ['http:', 'https:'], allowedHostnames: ['127.0.0.1'], allowPrivateIps: true },
       policies: new PolicyStore(),
       spend: new SpendTracker(),
+      treasury: createTreasury(),
       approvals: new ApprovalStore(),
       idleMs: 0,
       idleTimers: new Map(),

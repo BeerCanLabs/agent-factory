@@ -70,6 +70,7 @@ export const PRIVILEGES = [
   'systems.decide',
   'skills.decide',
   'skills.checks.run',
+  'spend.budget.set',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -240,6 +241,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'systems.decide',
     'skills.decide',
     'skills.checks.run',
+    'spend.budget.set',
   ],
 };
 
