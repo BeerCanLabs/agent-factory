@@ -238,8 +238,8 @@ export class ConnectionKeymaster {
     const def = await this.resolveProvider(connection);
     if (!def) return { ok: false, error: 'unknown_connection', message: `unknown connection "${connection}"` };
     const wanted = [...new Set(scopes.length ? scopes : def.kind === 'jwt-bearer' ? def.defaultScopes : [])].sort();
-    // Service-account tokens are app-level: one cache entry per scope set, shared by agents allowed to use it.
-    const key = def.kind === 'jwt-bearer' ? cacheKey('*', connection, wanted) : cacheKey(agentId, def.provider, []);
+    // Service-account tokens are app-level; user grants are per-agent. Both partitioned by wanted scopes.
+    const key = def.kind === 'jwt-bearer' ? cacheKey('*', connection, wanted) : cacheKey(agentId, def.provider, wanted);
     const hit = this.cache.get(key);
     const covered = !hit?.scopes || wanted.every((s) => hit.scopes!.includes(s));
     if (hit && covered && hit.expiresAtMs - this.skewMs > this.now()) {
@@ -268,8 +268,9 @@ export class ConnectionKeymaster {
     const missing = wanted.filter((s) => !grant.scopes.includes(s));
     if (missing.length) return { ok: false, error: 'needs_reconsent', provider: def.provider, reason: 'scopes_not_granted' };
 
-    // A stored access token (from consent or import) is still usable after a restart.
-    if (grant.accessToken && grant.expiresAt && Date.parse(grant.expiresAt) - this.skewMs > this.now()) {
+    // A stored access token (from consent or import) is still usable after a restart if scopes match or none requested.
+    const storedMatches = !wanted.length || (grant.scopes.length === wanted.length && wanted.every((s) => grant.scopes.includes(s)));
+    if (storedMatches && grant.accessToken && grant.expiresAt && Date.parse(grant.expiresAt) - this.skewMs > this.now()) {
       this.cache.set(key, { accessToken: grant.accessToken, expiresAtMs: Date.parse(grant.expiresAt), scopes: grant.scopes });
       return { ok: true, accessToken: grant.accessToken, expiresAt: grant.expiresAt };
     }
@@ -283,13 +284,23 @@ export class ConnectionKeymaster {
     const client = await this.oauthClient(grant.clientRef || def.clientSecret);
     if (!client) return { ok: false, error: 'connection_unconfigured', message: `OAuth client secret ${grant.clientRef || def.clientSecret} is not set` };
 
+    const form: Record<string, string> = {
+      grant_type: 'refresh_token',
+      refresh_token: grant.refreshToken,
+      client_id: client.client_id,
+      client_secret: client.client_secret,
+    };
+    if (wanted.length) {
+      form.scope = wanted.join(' ');
+    }
+
     let res: Response;
     let body: Record<string, unknown>;
     try {
       res = await this.fetchFn(def.tokenUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-        body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: grant.refreshToken, client_id: client.client_id, client_secret: client.client_secret }).toString(),
+        body: new URLSearchParams(form).toString(),
         signal: AbortSignal.timeout(15_000),
       });
       body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -307,12 +318,17 @@ export class ConnectionKeymaster {
     }
     const accessToken = body.access_token;
     const expiresAtMs = this.now() + (typeof body.expires_in === 'number' ? body.expires_in : 3600) * 1000;
+    const grantedScopes = typeof body.scope === 'string' ? body.scope.split(/[\s,]+/).filter(Boolean) : (wanted.length ? wanted : grant.scopes);
     this.remember(accessToken);
-    this.cache.set(key, { accessToken, expiresAtMs, scopes: grant.scopes });
+    this.cache.set(key, { accessToken, expiresAtMs, scopes: grantedScopes });
     // K3: a rotated refresh token must be persisted at once, or the grant is lost on the next restart.
     if (typeof body.refresh_token === 'string' && body.refresh_token && body.refresh_token !== grant.refreshToken) {
       this.remember(body.refresh_token);
-      const rotated: Grant = { ...grant, refreshToken: body.refresh_token, accessToken, expiresAt: new Date(expiresAtMs).toISOString() };
+      const rotated: Grant = {
+        ...grant,
+        refreshToken: body.refresh_token,
+        ...(wanted.length ? {} : { accessToken, expiresAt: new Date(expiresAtMs).toISOString() }),
+      };
       await this.writeSecret(grantSecretName(agentId, def.provider), JSON.stringify(rotated));
       this.ledger?.append({
         timestamp: new Date(this.now()).toISOString(),
