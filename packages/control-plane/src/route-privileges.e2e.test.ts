@@ -8,7 +8,7 @@ import http from 'node:http';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth, RunTokens, type Role } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { EventHub } from '@beercanlabs/factory-inspector';
+import { createInspector } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
 import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
@@ -206,6 +206,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     state = {
       agents: new Map(),
       ledger: new MemoryLedger(),
+      inspector: createInspector(),
       auth: bearerAuth(ROLES.map((r) => ({ name: r, token: TOKEN(r), roles: [r] }))),
       version: '0.1.0-test',
       providers: [],
@@ -225,7 +226,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     state.agents.set('hooked', { id: 'hooked', name: 'Hooked', role: 'Agent', state: 'SLEEPING', provider: 'local', artifact: '', requires: [], ungated: [], gated: [], triggers: [{ type: 'webhook' }], dir: '/agents/hooked' } as never);
     state.agents.set('secret-hook', { id: 'secret-hook', name: 'Secret hook', role: 'Agent', state: 'SLEEPING', provider: 'local', artifact: '', requires: [], ungated: [], gated: [], triggers: [{ type: 'webhook', secretRef: 'HOOK_SECRET' }], dir: '/agents/secret-hook' } as never);
     cp = createFactoryServer(state);
-    attachEventStream(cp, state, new EventHub());
+    attachEventStream(cp, state, state.inspector);
     port = await listen(cp);
   });
 

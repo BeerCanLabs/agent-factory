@@ -21,7 +21,7 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from './policy.js';
-import { EventHub, attachBus, busSinkFromEnv, factoryMetrics, runEvent, tapLedger } from '@beercanlabs/factory-inspector';
+import { busSinkFromEnv, createInspector, factoryMetrics } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
 import { startQueuePollers } from './queues.js';
 import { memoryRuntime, type DeployProvider } from './runtime.js';
@@ -82,7 +82,7 @@ ledgerLease.keepAlive();
 process.on('exit', () => ledgerLease.release());
 console.log(`[control-plane] ledger lease held by ${ledgerLease.holder}`);
 
-const hub = new EventHub();
+const inspector = createInspector();
 // LG2: each segment has its own genesis and its own write-once checkpoint prefix.
 const openSegment = () => {
   const segment = readSegment(LEDGER_PATH);
@@ -111,7 +111,7 @@ let opened = openSegment();
     console.warn('[control-plane] FACTORY_LEDGER_RECOVER_SEQ is set but the ledger verifies; ignoring it (remove the setting)');
   }
 }
-const ledger = tapLedger(opened.store, hub);
+const ledger = inspector.tapLedger(opened.store);
 const ledgerSink = opened.sink;
 
 let deployProvider: DeployProvider | undefined;
@@ -160,6 +160,7 @@ const state: FactoryState = {
   defaultModel: process.env.FACTORY_DEFAULT_MODEL || undefined,
   registryDir: REGISTRY_DIR,
   ledger,
+  inspector,
   deployProvider,
   policies: new PolicyStore(process.env.FACTORY_POLICIES_DIR || join(DATA_DIR, 'policies'), defaultPolicy()),
   approvals: new ApprovalStore(join(DATA_DIR, 'approvals')),
@@ -177,7 +178,7 @@ const state: FactoryState = {
   access: accessAuthFromEnv(),
   version: VERSION,
   providers: providersFromEnv(),
-  runs: Object.assign(new FileRunStore(RUNS_DIR), { onChange: (run: Parameters<typeof runEvent>[0]) => hub.publish(runEvent(run)) }),
+  runs: Object.assign(new FileRunStore(RUNS_DIR), { onChange: (run: Parameters<typeof inspector.publishRun>[0]) => inspector.publishRun(run) }),
   runTokens: new RunTokens(process.env.FACTORY_RUN_TOKEN_KEY),
   callbacks: callbackPolicyFromEnv(),
   publicBaseUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
@@ -300,7 +301,7 @@ if (ledgerSink) {
 }
 
 const busSink = busSinkFromEnv();
-if (busSink) attachBus(hub, busSink);
+if (busSink) inspector.attachBus(busSink);
 
 const schedulesPath = process.env.FACTORY_SCHEDULES_PATH || join(DATA_DIR, 'schedules.json');
 const schedules = new ScheduleStore(schedulesPath);
@@ -331,7 +332,7 @@ state.treasury = treasury;
 setInterval(() => void checkFactoryBudgets(state).catch((e) => console.error(`[treasurer] budget check: ${e instanceof Error ? e.message : String(e)}`)), 60 * 60_000).unref();
 
 const server = createFactoryServer(state);
-attachEventStream(server, state, hub);
+attachEventStream(server, state, inspector);
 startQueuePollers(state);
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[control-plane] listening on :${PORT} with ${state.agents.size} cartridges`);
