@@ -70,8 +70,8 @@ Agent Factory is architected around **11 canonical services ("The Cast of Charac
    - **Contract:** Agent-scoped `ScheduleStore`, cron evaluation, and scheduled wake dispatch.
 
 10. **Registrar (Admissions & Catalog):**
-    - **Role:** Evaluates cartridge and skill manifests, runs mandatory test suites and secret scans, enforces commit pinning (L3–L4), approves reusable skills (SK1–SK5), and manages the versioned configuration store.
-    - **Contract:** Validates `cartridge.yaml` and `skills.yaml` against canonical schemas; hashes and registers immutable configuration snapshots.
+    - **Role:** Decides what is admitted and what is recorded about it: the agent record and registry, commit pinning and admission (L3–L4), the skill registry and its checks (SK1–SK5), and the versioned configuration store. It never builds an image or serves a request; the Landlord builds, and the control plane's handlers meet the request.
+    - **Contract:** `packages/registrar` exports the agent record and registry store, `pinSource` and `admit` (a source and the Landlord's build callback in, admitted or refused out; it changes no record and cannot deploy), the skill registry, and the configuration store (`VersionedConfigStore`, `configHash`). A new commit alerting an admin, who admits it before it is deployed (L5), is on the roadmap in `docs/registrar-roadmap.md`.
 
 11. **Seer (Observability, Telemetry & Triage):**
     - **Role:** Emits live run progress event streams (e.g., `discord-progress`), exports headless operational metrics (`/metrics`), and routes crash diagnostics to alerting.

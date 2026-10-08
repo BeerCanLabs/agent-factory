@@ -138,7 +138,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
   registrar: {
     name: 'registrar',
     title: 'Registrar',
-    role: 'Cartridge and skill manifest validation, admissions testing, and config store (L3, SK1–SK5)',
+    role: 'Agent record and registry, commit pinning and admission, skill registry and checks, and the deployment configuration store (L3, L4, SK1–SK5)',
     hostedIn: ['packages/contract', 'packages/control-plane', 'packages/registrar'],
     owns: [
       'packages/control-plane/src/app.ts',
