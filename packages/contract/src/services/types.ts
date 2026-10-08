@@ -170,6 +170,7 @@ export const ALLOWED_PLATFORM_ROLES = [
   'operator-ui',
   'conformance-suite',
   'diagnostic-tool',
+  'builtin-agent',
 ] as const;
 
 export type PlatformRole = (typeof ALLOWED_PLATFORM_ROLES)[number];
@@ -212,9 +213,7 @@ export const PLATFORM_FILES: Record<string, PlatformRole> = {
  * Packages reserved for a service that do not host it yet.
  * Kept out of `hostedIn` so an empty directory cannot satisfy SV1.
  */
-export const RESERVED_PACKAGES: Record<string, FactoryServiceName> = {
-  triage: 'inspector',
-};
+export const RESERVED_PACKAGES: Record<string, FactoryServiceName> = {};
 
 /**
  * Declared non-service platform tooling packages.
@@ -223,6 +222,8 @@ export const PLATFORM_TOOL_PACKAGES: Record<string, PlatformRole> = {
   bench: 'diagnostic-tool',
   conformance: 'conformance-suite',
   console: 'operator-ui',
+  // The `system-doctor` built-in agent (a cartridge the Registrar lists), not Inspector code (D-B, GAP-107).
+  triage: 'builtin-agent',
 };
 
 /**
