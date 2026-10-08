@@ -17,7 +17,7 @@ import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import { EventHub, attachBus, eventBridgeSink, fileSink, runEvent, tapLedger, type FactoryEvent } from '@beercanlabs/factory-inspector';
+import { createInspector, eventBridgeSink, fileSink, type FactoryEvent } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
 import { pollQueueOnce } from './queues.js';
 
@@ -26,12 +26,13 @@ const agentsRoot = fileURLToPath(new URL('../../../agents', import.meta.url));
 const TOKENS = { operator: 'operator-token', viewer: 'viewer-token' };
 
 function setup() {
-  const hub = new EventHub();
+  const inspector = createInspector();
   const runs = new MemoryRunStore();
-  runs.onChange = (r) => hub.publish(runEvent(r));
+  runs.onChange = (r) => inspector.publishRun(r);
   const state = {
     agents: new Map(loadCatalog(agentsRoot, { includeRetired: true }).map((a) => [a.id, a])),
-    ledger: tapLedger(new MemoryLedger(), hub),
+    ledger: inspector.tapLedger(new MemoryLedger()),
+    inspector,
     auth: bearerAuth([
       { name: 'viewer', token: 'viewer-token', roles: ['viewer'] },
       { name: 'operator', token: 'operator-token', roles: ['operator'] },
@@ -50,16 +51,16 @@ function setup() {
     idleTimers: new Map(),
     secretValues: new Set<string>(),
   } as unknown as FactoryState;
-  return { hub, state };
+  return { inspector, state };
 }
 
 describe('WebSocket event stream', () => {
-  const { hub, state } = setup();
+  const { inspector, state } = setup();
   let server: http.Server;
   let port = 0;
   before(async () => {
     server = createFactoryServer(state);
-    attachEventStream(server, state, hub);
+    attachEventStream(server, state, inspector);
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     port = (server.address() as { port: number }).port;
   });
@@ -108,9 +109,9 @@ describe('WebSocket event stream', () => {
 
 describe('event bus', () => {
   it('ships only bus-worthy events to the sink, in batches', async () => {
-    const { hub, state } = setup();
+    const { inspector, state } = setup();
     const path = join(mkdtempSync(join(tmpdir(), 'bus-')), 'events.ndjson');
-    const bus = attachBus(hub, fileSink(path), 60_000);
+    const bus = inspector.attachBus(fileSink(path), 60_000);
     const run = (await createRun(state, 'echo-agent', { actor: 'token:x', trigger: 'api' })).body as { runId: string };
     await finishRun(state, run.runId, 'DONE', { actor: SYSTEM.runtime });
     state.ledger.append({ agentId: 'echo-agent', type: 'budget.alert', action: 'BUDGET_PERDAY_EXCEEDED', actor: 'factory:policy' });
@@ -129,10 +130,10 @@ describe('event bus', () => {
       calls.push(entries);
       return JSON.stringify({ FailedEntryCount: fail ? 1 : 0 });
     });
-    const hub = new EventHub();
-    const bus = attachBus(hub, sink, 60_000);
+    const inspector = createInspector();
+    const bus = inspector.attachBus(sink, 60_000);
     for (let i = 0; i < 12; i++) {
-      hub.publish({ kind: 'run', agentId: 'a', run: { runId: `r${i}`, agentId: 'a', state: 'DONE', trigger: 'api', updatedAt: '' } });
+      inspector.publish({ kind: 'run', agentId: 'a', run: { runId: `r${i}`, agentId: 'a', state: 'DONE', trigger: 'api', updatedAt: '' } });
     }
     await bus.flush();
     fail = false;

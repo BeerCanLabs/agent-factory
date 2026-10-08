@@ -12,6 +12,7 @@ This package is being extracted in steps (the Inspector flow work stream, TSK-13
 
 The routes that serve these (`progress-routes.ts`, `stream.ts`) stay in `packages/control-plane`, because they own the Bouncer privilege calls and the run-token rule. - `metrics.ts`: the run instruments (`factoryMetrics`, `FactoryMetrics`): `factory.runs.active` (an observable gauge of non-terminal runs by state, read through the injected `activeRunStates`), `factory.runs.finished`, `factory.run.duration` (seconds) and `factory.health.events`. The Landlord and the health code record into them; the instruments are the Inspector's.
 
-The triage rule is still in `packages/control-plane` and moves in a later task. `packages/telemetry` (`initTelemetry`) stays a separate package that the Inspector hosts (D-A).
+- `triage.ts`: `incidentsFromRuns`, the incidents the `/api/v1/triage` route lists: every run that failed or carries an error, with a severity (`CRITICAL` only when the error mentions OOM) and a category (`SECRET_MISSING`, else `TIMEOUT`, else `CRASH_LOOP`). Moved as it is; GAP-108 records how blunt it is.
+- `inspector.ts`: the contract, `createInspector` (`Inspector`): `publish`, `publishRun`, `subscribe`, `tapLedger`, `attachBus`, `reportProgress` (sanitizes a batch from gatekeeper-egress and keeps what the caller's `isLive` accepts), `readProgress` and `stop`. The Inspector does no authorization and never looks at a run: the control plane passes in who may ask and which runs are live. `packages/telemetry` (`initTelemetry`) stays a separate package that the Inspector hosts (D-A).
 
 The package imports nothing from `control-plane` or a gatekeeper.
