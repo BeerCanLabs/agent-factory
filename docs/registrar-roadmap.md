@@ -34,9 +34,9 @@ decision (Dale, chat, 2026-10-07) is that it alerts, and an admin chooses to adm
    re-pin the record to another exact commit, runs admission (`admission.status` goes `building`, then `admitted` or
    `refused`, on the agent record, `packages/registrar/src/catalog.ts`), and deploys an admitted commit as an image tagged
    by its SHA. There is no way to admit without deploying.
-3. **Only an admin can deploy.** `registry.deploy` is held by the `admin` role alone (`packages/bouncer/src/privileges.ts`);
-   the derived `agent-owner` role holds wake, pause, resume, config, credentials and connections on its own agent, and not
-   deploy. The console's Deploy button (`packages/console/src/views/FleetView.tsx`) shows only for an agent in
+3. **Only an admin can deploy.** `registry.deploy` is held by the `admin` role alone (the `admin` entry of `ROLE_PRIVILEGES` in
+   `packages/bouncer/src/privileges.ts`); the derived `agent-owner` role (`DERIVED_ROLE_PRIVILEGES`) holds wake, pause,
+   resume, config, credentials and connections on its own agent, and not deploy. The console's Deploy button (`packages/console/src/views/FleetView.tsx`) shows only for an agent in
    `PENDING_DEPLOY`, and is enabled only for `admin` (`usePermissions.canDeploy`). A deployed agent has no way to be
    deployed at a newer commit from the console.
 4. **No "new version available".** The agent record has no field for an offered commit, nothing alerts, and L5 is
