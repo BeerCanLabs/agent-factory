@@ -57,7 +57,12 @@ export type AdmissionOutcome =
 export type AdmitOptions = {
   /** The Landlord's image build for the pinned source. Returns the SHA-tagged image; throws when the commit cannot be built. */
   build: (source: AdmissionSource) => Promise<string>;
-  /** Whether a thrown error is a refusal that names its reason (the Landlord's `AdmissionRefusedError`). Any other error is `build_failed`. */
+  /**
+   * Whether a thrown error is a refusal that names its reason. The guard promises the error carries `reason` (a string
+   * the record keeps) and, optionally, `phase`; the control plane passes `err instanceof AdmissionRefusedError` (the
+   * Landlord's class, which the Registrar does not import). Without it, or for any other error, the reason is
+   * `build_failed`.
+   */
   isRefusal?: (err: unknown) => err is { reason: string; phase?: string };
   /** Removes secret values from a message before it is kept (S1). */
   redact?: (message: string) => string;
