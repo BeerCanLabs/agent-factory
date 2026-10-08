@@ -4,7 +4,7 @@ import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { createGatekeeperEgress, type ControlClient, type Route } from './gatekeeper-egress.js';
 import type { Price } from '@beercanlabs/factory-budget';
 import { parseModelCatalog, type ModelCatalog } from './models.js';
-import { traceConfigFromEnv } from './traces.js';
+import { traceConfigFromEnv } from '@beercanlabs/factory-inspector';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 
 function required(name: string): string {

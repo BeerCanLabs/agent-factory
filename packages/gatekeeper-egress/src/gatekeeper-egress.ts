@@ -9,14 +9,14 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { SseMeter, usageFromJson, type Provider, type Usage } from './meter.js';
-import { writeTrace, type TraceConfig } from './traces.js';
+import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
 import { ModelUpstreamError, defaultModelAdapters, parseChatRequest, type ChatResult, type ModelAdapter, type ModelCatalog } from './models.js';
 import type { Meter } from '@opentelemetry/api';
 
 /** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
 export const DEFAULT_MODEL = 'claude-haiku-4-5';
 import { stripSignInLinksFromJson } from './signin-links.js';
-import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from './progress.js';
+import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from '@beercanlabs/factory-inspector';
 
 export type Route = {
   id: string;
