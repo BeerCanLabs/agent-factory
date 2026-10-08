@@ -170,7 +170,6 @@ export const ALLOWED_PLATFORM_ROLES = [
   'operator-ui',
   'conformance-suite',
   'diagnostic-tool',
-  'builtin-agent',
 ] as const;
 
 export type PlatformRole = (typeof ALLOWED_PLATFORM_ROLES)[number];
@@ -222,8 +221,6 @@ export const PLATFORM_TOOL_PACKAGES: Record<string, PlatformRole> = {
   bench: 'diagnostic-tool',
   conformance: 'conformance-suite',
   console: 'operator-ui',
-  // The `system-doctor` built-in agent (a cartridge the Registrar lists), not Inspector code (D-B, GAP-107).
-  triage: 'builtin-agent',
 };
 
 /**
