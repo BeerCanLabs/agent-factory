@@ -10,6 +10,9 @@ import {
   AgentRecord,
   AgentRegistry,
   BUILTIN_AGENT_IDS,
+  admissionOf,
+  admit,
+  beginAdmission,
   checkRepoUrl,
   connectionsOf,
   credentialsOf,
@@ -17,6 +20,8 @@ import {
   FULL_SHA,
   gitLsRemoteResolver,
   isBuiltinCartridge,
+  pinSource,
+  stateAfterRefusal,
   type AgentCategory,
   type CommitResolver,
   type ConfigStore,
@@ -2056,23 +2061,15 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
 
     // A deploy request may re-pin the registered source to another exact commit (it is then admitted afresh).
-    const body = await readJson(req);
-    const repo = body.repo !== undefined ? checkRepoUrl(body.repo) : agent.repo;
-    if (body.repo !== undefined && !repo) {
-      json(res, 400, { error: 'invalid_repo', message: 'repo must be an https git URL without embedded credentials' });
-      return;
-    }
-    const commit = body.commit !== undefined ? body.commit : agent.commit;
-    if (body.commit !== undefined && (typeof commit !== 'string' || !FULL_SHA.test(commit))) {
-      json(res, 400, { error: 'invalid_commit', message: 'commit must be a full 40-character lowercase git SHA' });
-      return;
-    }
     // L4: only an admitted commit deploys, as an image tagged by its SHA. A record without a pinned source, or
-    // whose image is a mutable tag, is refused rather than built from "latest".
-    if (!repo || typeof commit !== 'string' || !FULL_SHA.test(commit)) {
-      json(res, 409, { error: 'commit_required', message: 'Register the agent with "repo" (and optionally "commit") before deploying; the factory deploys only a pinned, admitted commit' });
+    // whose image is a mutable tag, is refused rather than built from "latest" (the Registrar's rule).
+    const body = await readJson(req);
+    const pin = pinSource(agent, body);
+    if (!pin.ok) {
+      json(res, pin.error === 'commit_required' ? 409 : 400, { error: pin.error, message: pin.message });
       return;
     }
+    const { repo, commit } = pin.source;
 
     // L4 / E7: a policy owner must have set this agent's own policy, with at least one route, before it deploys.
     if (!state.policies.has(agentId) || state.policies.get(agentId).routes.length === 0) {
@@ -2090,38 +2087,38 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     agent.repo = repo;
     agent.commit = commit;
     agent.state = 'DEPLOYING';
-    agent.admission = { commit, status: 'building', at: new Date().toISOString() };
+    agent.admission = beginAdmission(commit);
     registryOf(state).save(agent);
     await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, `deploy of ${commit}`) });
     json(res, 202, agent);
 
     void (async () => {
       const dp = state.deployProvider!;
-      let imageUri: string;
-      try {
-        console.log(`[control-plane] Admission build for ${agentId} at ${commit}...`);
-        imageUri = await dp.buildImage(agentId, source);
-      } catch (err) {
-        const refused = err instanceof AdmissionRefusedError;
-        const reason = refused ? err.reason : 'build_failed';
-        const message = redactSecrets(err instanceof Error ? err.message : String(err), state.secretValues ?? []);
-        console.error(`[control-plane] Admission refused ${agentId}@${commit}: ${reason}: ${message}`);
-        agent.admission = { commit, status: 'refused', reason, phase: refused ? err.phase : undefined, message, at: new Date().toISOString() };
+      console.log(`[control-plane] Admission build for ${agentId} at ${commit}...`);
+      const outcome = await admit(source, {
+        build: (src) => dp.buildImage(agentId, src),
+        isRefusal: (err): err is AdmissionRefusedError => err instanceof AdmissionRefusedError,
+        redact: (message) => redactSecrets(message, state.secretValues ?? []),
+      });
+      if (outcome.status === 'refused') {
+        console.error(`[control-plane] Admission refused ${agentId}@${commit}: ${outcome.reason}: ${outcome.message}`);
+        agent.admission = admissionOf(outcome);
         // A refused new version leaves the running version in place.
-        agent.state = agent.deployedCommit ? (previousState === 'ERROR' ? 'SLEEPING' : previousState) : 'ERROR';
+        agent.state = stateAfterRefusal(agent, previousState);
         registryOf(state).save(agent);
         state.ledger.append({
           timestamp: new Date().toISOString(),
           agentId,
           type: 'action',
-          action: `AGENT_ADMISSION_REFUSED:${reason}`,
+          action: `AGENT_ADMISSION_REFUSED:${outcome.reason}`,
           actor: principal.actor,
           commit,
         });
         return;
       }
+      const imageUri = outcome.imageUri;
       try {
-        agent.admission = { commit, status: 'admitted', at: new Date().toISOString() };
+        agent.admission = admissionOf(outcome);
         state.ledger.append({
           timestamp: new Date().toISOString(),
           agentId,
