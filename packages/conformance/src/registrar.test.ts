@@ -5,6 +5,19 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { files, read } from './support.js';
 
+// What this guard does not do, so the next reader does not mistake it for more:
+//  - It is line-based and keys on the literal names `registryDir` and `REGISTRY_DIR`. A write through an alias
+//    (`const dir = state.registryDir; writeFileSync(join(dir, ...))`) passes. `join(state.registryDir` catches the common
+//    form, and the store being the only code that needs the path is what keeps it rare.
+//  - It bans `status: 'building' | 'admitted' | 'refused'` as an object property in all of control-plane,
+//    gatekeeper-egress and gatekeeper-ingress source, because nothing else uses those words today. A future unrelated
+//    feature that needs one as a status of its own should narrow the pattern (to the admission record's other keys),
+//    not delete the check.
+//  - It does NOT guard `invalid_repo` or `invalid_commit`, on purpose (GAP-101). The registration route legitimately
+//    uses the same codes for its own checks, so no pattern separates the deploy rule's from registration's. Do not add
+//    them back without first moving registration onto the Registrar's contract. `commit_required` is deploy-only, so it
+//    is guarded.
+
 const FS_WRITE = '(?:writeFileSync|unlinkSync|rmSync|renameSync|copyFileSync)';
 const REGISTRY_DIR = '(?:registryDir|REGISTRY_DIR)';
 
