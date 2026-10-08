@@ -1,5 +1,5 @@
 // TSK-125 (GAP-098): the agent registry's records on disk, exactly as the control plane wrote them before the move.
-import { describe, it } from 'node:test';
+import { describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -80,6 +80,21 @@ describe('agent registry store', () => {
       assert.deepEqual(warnings, []);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('with no warn given, a failed write is logged with a [registrar] prefix', () => {
+    const root = tmp();
+    const warn = mock.method(console, 'warn', () => {});
+    try {
+      const notADir = join(root, 'file');
+      writeFileSync(notADir, 'x');
+      new AgentRegistry(notADir).save(agent());
+      assert.equal(warn.mock.callCount(), 1);
+      assert.equal(warn.mock.calls[0].arguments[0], '[registrar] failed to persist dynamic agent ada:');
+    } finally {
+      warn.mock.restore();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
