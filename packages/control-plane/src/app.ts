@@ -4,7 +4,6 @@ import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
 import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
-import type { Meter } from '@opentelemetry/api';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import {
   AgentRecord,
@@ -41,7 +40,8 @@ import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
-import { handleRunProgress } from './events.js';
+import { handleRunProgress } from './progress-routes.js';
+import type { FactoryMetrics } from '@beercanlabs/factory-inspector';
 import { handleSchedules } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleSystems, type SystemsStore } from './systems.js';
@@ -176,27 +176,6 @@ export const SYSTEM = {
   health: 'factory:health',
   policy: 'factory:policy',
 } as const;
-
-export type FactoryMetrics = {
-  runs: ReturnType<Meter['createCounter']>;
-  runSeconds: ReturnType<Meter['createHistogram']>;
-  health: ReturnType<Meter['createCounter']>;
-};
-
-export function factoryMetrics(meter: Meter, state: () => FactoryState): FactoryMetrics {
-  meter
-    .createObservableGauge('factory.runs.active', { description: 'Non-terminal runs by state' })
-    .addCallback((obs) => {
-      const counts = new Map<string, number>();
-      for (const r of state().runs.list({ active: true })) counts.set(r.state, (counts.get(r.state) ?? 0) + 1);
-      for (const [st, n] of counts) obs.observe(n, { state: st });
-    });
-  return {
-    runs: meter.createCounter('factory.runs.finished', { description: 'Runs reaching a terminal or blocked state' }),
-    runSeconds: meter.createHistogram('factory.run.duration', { unit: 's', description: 'Wall-clock from start to terminal state' }),
-    health: meter.createCounter('factory.health.events', { description: 'Health interventions (unhealthy halts, crash-loop pauses)' }),
-  };
-}
 
 const INGEST_TYPES = new Set(['llm', 'mcp', 'action', 'crash', 'budget.alert']);
 const MAX_BODY = 256 * 1024;
