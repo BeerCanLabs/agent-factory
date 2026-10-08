@@ -663,6 +663,7 @@ compute:
 * **Private Agent Memory Isolation:**
   - Cartridge memory is **strictly private** to each agent. Agents never share SQLite databases or object storage mind prefixes.
   - Cross-agent collaboration and knowledge sharing is strictly conducted via the gatekeeper-ingress (MCP) (`talk_to_agent`), preserving encapsulation, provenance, and auditability.
+* **Architecture Specification:** See [`docs/architecture/agent-memory-models.md`](docs/architecture/agent-memory-models.md) for the complete specification covering the 3 Agent Archetypes, The Storage Triad, avoiding the "Decoder Ring" anti-pattern, and Multi-User Isolation.
 
 ### 6.7 Enforcement (This Document Is Checked by Machines)
 * Every machine-checkable invariant in this document names its conformance test; the tests live in `packages/conformance` and run in CI.
