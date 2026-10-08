@@ -6,3 +6,5 @@ export { EventHub, attachBus, busSinkFromEnv, eventBridgeSink, fileSink, hubOf, 
 export type { AwsCli, BusSink, FactoryEvent, RunSnapshot } from './events.js';
 export { PROGRESS_MAX_WAIT_MS, PROGRESS_RING, PROGRESS_RUNS, RunProgress, sanitizeProgress } from './run-progress.js';
 export type { RunProgressEvent } from './run-progress.js';
+export { factoryMetrics } from './metrics.js';
+export type { FactoryMetrics } from './metrics.js';
