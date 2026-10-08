@@ -17,7 +17,7 @@ import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import { EventHub, attachBus, eventBridgeSink, fileSink, runEvent, tapLedger, type FactoryEvent } from './events.js';
+import { EventHub, attachBus, eventBridgeSink, fileSink, runEvent, tapLedger, type FactoryEvent } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
 import { pollQueueOnce } from './queues.js';
 

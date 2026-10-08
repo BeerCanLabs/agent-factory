@@ -2,7 +2,7 @@ import type http from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { authorize } from '@beercanlabs/factory-bouncer';
 import type { FactoryState } from './app.js';
-import type { EventHub } from './events.js';
+import type { EventHub } from '@beercanlabs/factory-inspector';
 
 /**
  * WebSocket event stream at /api/v1/events (viewer). Pushes metadata-only ledger rows and run state
