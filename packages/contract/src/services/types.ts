@@ -157,7 +157,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/inspector', 'packages/telemetry', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
-      'packages/control-plane/src/events.ts',
+      'packages/control-plane/src/progress-routes.ts',
       'packages/control-plane/src/stream.ts',
     ],
   },

@@ -12,7 +12,7 @@ import {
   mergeAgents,
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
-import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, factoryMetrics, finishRun, reconcileRuns, SYSTEM } from './app.js';
+import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, finishRun, reconcileRuns, SYSTEM } from './app.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { FileRunStore, RunTokens } from './runs.js';
 import { callbackPolicyFromEnv } from './callbacks.js';
@@ -21,7 +21,7 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from './policy.js';
-import { EventHub, attachBus, busSinkFromEnv, runEvent, tapLedger } from './events.js';
+import { EventHub, attachBus, busSinkFromEnv, factoryMetrics, runEvent, tapLedger } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
 import { startQueuePollers } from './queues.js';
 import { memoryRuntime, type DeployProvider } from './runtime.js';
@@ -233,7 +233,7 @@ if (state.runTokens.ephemeral) {
 }
 
 const telemetry = initTelemetry('factory-control-plane', VERSION);
-state.metrics = factoryMetrics(telemetry.meter, () => state);
+state.metrics = factoryMetrics(telemetry.meter, () => state.runs.list({ active: true }).map((r) => r.state));
 
 // §6.14 SK3, §6.13 R1: the deployment configuration store is read once here and written only on change; API reads are
 // served from memory. If it cannot be read, the factory runs as before without it (the API reports it unavailable)
