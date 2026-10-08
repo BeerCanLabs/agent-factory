@@ -117,6 +117,8 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/budget', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/spend.ts',
+      'packages/control-plane/src/aws/treasurer.ts',
     ],
   },
   bouncer: {

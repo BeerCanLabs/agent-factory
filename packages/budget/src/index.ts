@@ -27,3 +27,38 @@ export { costUsd, priceFor } from './pricing.js';
 export { validateBudgetLimits } from './limits.js';
 export type { StandingDenied, StandingOk, StandingRequest, StandingResult } from './standing.js';
 export { checkStanding } from './standing.js';
+export type {
+  BudgetStatus,
+  CloudCostSnapshot,
+  CloudCostSource,
+  CloudSummary,
+  ComputeInventory,
+  ComputePrice,
+  ComputeService,
+  ComputeSource,
+  ComputeTask,
+  CostLine,
+  FactoryBudgetScope,
+  FactoryBudgets,
+  Period,
+  PeriodWindow,
+  RunInterval,
+  SpendReportInput,
+  TaskSize,
+  UsageLine,
+} from './cloud.js';
+export {
+  DEFAULT_ALERT_AT,
+  FARGATE_US_EAST_1,
+  HOURS_PER_MONTH,
+  MODEL_SERVICE,
+  TtlCache,
+  attributeCompute,
+  budgetCrossings,
+  budgetStatus,
+  buildSpendReport,
+  hourlyUsd,
+  periodWindow,
+  summarizeCloud,
+  validateFactoryBudgets,
+} from './cloud.js';
