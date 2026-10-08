@@ -14,7 +14,7 @@ export const FACTORY_SERVICE_NAMES = [
   'bouncer',
   'timekeeper',
   'registrar',
-  'seer',
+  'inspector',
 ] as const;
 
 export type FactoryServiceName = (typeof FACTORY_SERVICE_NAMES)[number];
@@ -148,17 +148,15 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/systems.ts',
     ],
   },
-  seer: {
-    name: 'seer',
-    title: 'Seer',
+  inspector: {
+    name: 'inspector',
+    title: 'Inspector',
     role: 'Telemetry, live run progress event streaming, and error diagnosis (§6.5)',
-    hostedIn: ['packages/telemetry', 'packages/control-plane', 'packages/gatekeeper-egress'],
+    hostedIn: ['packages/inspector', 'packages/telemetry', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/events.ts',
       'packages/control-plane/src/stream.ts',
-      'packages/gatekeeper-egress/src/progress.ts',
-      'packages/gatekeeper-egress/src/traces.ts',
     ],
   },
 };
@@ -213,7 +211,7 @@ export const PLATFORM_FILES: Record<string, PlatformRole> = {
  * Kept out of `hostedIn` so an empty directory cannot satisfy SV1.
  */
 export const RESERVED_PACKAGES: Record<string, FactoryServiceName> = {
-  triage: 'seer',
+  triage: 'inspector',
 };
 
 /**
