@@ -1,0 +1,173 @@
+// TSK-127 (GAP-098): the skill registry's records on disk, the skill folder rule and reading skill.yaml at a commit,
+// exactly as the control plane did them before the move. The control plane's e2e tests cover the routes.
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { SkillManifest } from '@beercanlabs/factory-contract';
+import { SkillRegistry, checkSkillPath, compareSemver, fetchManifest, summarizeSkill, type SkillVersionRecord } from './skills.js';
+import { SourceError, type SkillSource } from './source.js';
+
+const SHA = 'c'.repeat(40);
+
+function tmp(): string {
+  return mkdtempSync(join(tmpdir(), 'registrar-skills-'));
+}
+
+const manifest = (version: string): SkillManifest =>
+  ({
+    id: 'discord-progress',
+    version,
+    name: 'Discord progress',
+    description: 'Renders run progress.',
+    language: 'node',
+    entry: 'src/index.ts',
+    requires: { routes: [], connections: [], credentials: [], models: [] },
+  }) as unknown as SkillManifest;
+
+const record = (version: string, over: Partial<SkillVersionRecord> = {}): SkillVersionRecord => ({
+  id: 'discord-progress',
+  version,
+  repo: 'https://github.com/x/skill',
+  path: '.',
+  commit: SHA,
+  manifest: manifest(version),
+  status: 'pending',
+  tests: 'pending-build',
+  registeredBy: 'admin',
+  registeredAt: '2026-10-08T00:00:00.000Z',
+  ...over,
+});
+
+describe('skill registry store', () => {
+  it('writes <id>/<version>.json as two-space JSON and leaves no temp file', () => {
+    const dir = tmp();
+    try {
+      const rec = record('1.0.0');
+      new SkillRegistry(dir).save(rec);
+      assert.equal(readFileSync(join(dir, 'discord-progress', '1.0.0.json'), 'utf8'), JSON.stringify(rec, null, 2));
+      assert.deepEqual(readdirSync(join(dir, 'discord-progress')), ['1.0.0.json']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a new registry over the same directory reads every record back, newest last by semver', () => {
+    const dir = tmp();
+    try {
+      const first = new SkillRegistry(dir);
+      first.save(record('1.10.0'));
+      first.save(record('1.2.0', { status: 'approved' }));
+      first.save(record('1.2.0-rc.1'));
+      const again = new SkillRegistry(dir);
+      assert.deepEqual(again.ids(), ['discord-progress']);
+      assert.deepEqual(again.versions('discord-progress').map((r) => r.version), ['1.2.0-rc.1', '1.2.0', '1.10.0']);
+      assert.equal(again.get('discord-progress', '1.2.0')?.status, 'approved');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('serves copies, so a caller cannot change a stored record', () => {
+    const registry = new SkillRegistry();
+    registry.save(record('1.0.0'));
+    registry.get('discord-progress', '1.0.0')!.status = 'approved';
+    assert.equal(registry.get('discord-progress', '1.0.0')?.status, 'pending');
+  });
+
+  it('skips an unreadable record and says so through warn, keeping the others', () => {
+    const dir = tmp();
+    const warnings: Array<[string, unknown]> = [];
+    try {
+      new SkillRegistry(dir).save(record('1.0.0'));
+      writeFileSync(join(dir, 'discord-progress', '2.0.0.json'), '{ not json');
+      writeFileSync(join(dir, 'discord-progress', '3.0.0.json'), JSON.stringify(record('9.9.9')));
+      const again = new SkillRegistry(dir, (message, err) => warnings.push([message, err]));
+      assert.deepEqual(again.versions('discord-progress').map((r) => r.version), ['1.0.0']);
+      assert.equal(warnings.length, 2);
+      assert.match(warnings[0][0], /^skipping unreadable skill record .*2\.0\.0\.json:$/);
+      assert.match(warnings[1][0], /3\.0\.0\.json:$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores a folder that is not a skill id, and a missing directory is an empty registry', () => {
+    const dir = tmp();
+    try {
+      mkdirSync(join(dir, 'Not_A_Skill'));
+      writeFileSync(join(dir, 'Not_A_Skill', '1.0.0.json'), JSON.stringify(record('1.0.0')));
+      assert.deepEqual(new SkillRegistry(dir).ids(), []);
+      assert.deepEqual(new SkillRegistry(join(dir, 'nope')).ids(), []);
+      assert.equal(existsSync(join(dir, 'nope')), false, 'reading never creates the directory');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('skill summary and semver precedence', () => {
+  it('SK5 the latest approved version is the highest approved by semver, not the newest registered', () => {
+    const registry = new SkillRegistry();
+    registry.save(record('1.0.0', { status: 'approved' }));
+    registry.save(record('1.10.0', { status: 'approved' }));
+    registry.save(record('2.0.0'));
+    const summary = summarizeSkill(registry, 'discord-progress')!;
+    assert.equal(summary.latestApproved, '1.10.0');
+    assert.deepEqual(summary.versions.map((v) => v.version), ['1.0.0', '1.10.0', '2.0.0']);
+    assert.equal(summarizeSkill(registry, 'unknown'), undefined);
+  });
+
+  it('orders pre-releases below their release and ignores build metadata', () => {
+    assert.equal(compareSemver('1.0.0-rc.1', '1.0.0'), -1);
+    assert.equal(compareSemver('1.0.0+a', '1.0.0+b'), 0);
+    assert.equal(compareSemver('1.2.0', '1.10.0'), -1);
+  });
+});
+
+describe('skill folder rule', () => {
+  it('accepts the repository root and a relative folder, and refuses anything that leaves the repository', () => {
+    assert.equal(checkSkillPath(undefined), '.');
+    assert.equal(checkSkillPath('./'), '.');
+    assert.equal(checkSkillPath('skills/progress/'), 'skills/progress');
+    for (const bad of ['/etc', '../x', 'a/../b', 'a//b', 'a\\b', 'a b', 42]) assert.equal(checkSkillPath(bad), undefined, String(bad));
+  });
+});
+
+describe('reading skill.yaml at a commit', () => {
+  const source = (over: Partial<SkillSource>): SkillSource => ({
+    resolveRef: async () => SHA,
+    readFile: async () => 'id: x\n',
+    ...over,
+  });
+
+  it('resolves a branch or tag, reads <path>/skill.yaml and returns the parsed mapping', async () => {
+    const seen: string[] = [];
+    const out = await fetchManifest(source({ readFile: async (_r, c, f) => (seen.push(`${c.slice(0, 7)} ${f}`), 'id: x\nversion: 1.0.0\n') }), 'https://h/r', 'skills/a', undefined, 'main');
+    assert.deepEqual(out, { commit: SHA, raw: { id: 'x', version: '1.0.0' }, reasons: [] });
+    assert.deepEqual(seen, ['ccccccc skills/a/skill.yaml']);
+  });
+
+  it('gives a reason the caller can act on for each failure', async () => {
+    const noRef = await fetchManifest(source({ resolveRef: async () => undefined }), 'https://h/r', '.', undefined, 'nope');
+    assert.match(noRef.reasons[0], /^commit: https:\/\/h\/r has no branch or tag named "nope"$/);
+    const none = await fetchManifest(source({ readFile: async () => undefined }), 'https://h/r', '.', SHA, undefined);
+    assert.match(none.reasons[0], /^skill\.yaml: there is no skill\.yaml at "\." in https:\/\/h\/r at ccccccccccc/);
+    const badYaml = await fetchManifest(source({ readFile: async () => 'a: [unclosed' }), 'https://h/r', '.', SHA, undefined);
+    assert.match(badYaml.reasons[0], /is not valid YAML/);
+    const list = await fetchManifest(source({ readFile: async () => '- a\n- b\n' }), 'https://h/r', '.', SHA, undefined);
+    assert.match(list.reasons[0], /is not a mapping of keys to values/);
+    const nothing = await fetchManifest(source({}), 'https://h/r', '.', undefined, undefined);
+    assert.deepEqual(nothing, { reasons: [] });
+  });
+
+  it('maps a source error to its reason, and reports an unreachable repository through warn', async () => {
+    const tooLarge = await fetchManifest(source({ readFile: async () => { throw new SourceError('too_large', 'skill.yaml is too large'); } }), 'https://h/r', '.', SHA, undefined);
+    assert.match(tooLarge.reasons[0], /^skill\.yaml: /);
+    const warnings: string[] = [];
+    const unreachable = await fetchManifest(source({ readFile: async () => { throw new Error('boom'); } }), 'https://h/r', '.', SHA, undefined, (m) => warnings.push(m));
+    assert.match(unreachable.reasons[0], /^repo: cannot fetch https:\/\/h\/r;/);
+    assert.deepEqual(warnings, ['could not read skill source https://h/r:']);
+  });
+});

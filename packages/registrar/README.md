@@ -10,7 +10,8 @@ This package is being extracted in steps (the Registrar flow work stream, TSK-12
 
 - `registry.ts`: `AgentRegistry`, the agent registry's records on disk (`<dir>/<agentId>.json`): `save`, `update` (only a record that exists) and `remove`; a failed write goes to the caller's `warn` and never fails the request.
 - `config-store.ts`: the deployment configuration store (SK3, R1): `ConfigContent` and `ConfigRecord` (the part the content hash covers), `configHash` and `canonicalJson`, `VersionedConfigStore` over a `ConfigBackend` (`FileConfigBackend`, `S3ConfigBackend` through the AWS CLI, `configBackendFromEnv`), `AGENT_ID`, and `archiveStamp` (the timestamp of a recoverable archive folder, also used by the control plane's policy store). It never reads the policy it stores, so the policy is any JSON object (`ConfigPolicy`).
+- `skills.ts`: the skill registry (SK1, SK5): `SkillRegistry` (every version of every skill in memory, written through to `<dir>/<id>/<version>.json`), `SkillVersionRecord` and `SkillSummary`, `summarizeSkill`, `compareSemver` (semver precedence), `checkSkillPath` (the skill's folder rule) and `fetchManifest` (reads a skill's `skill.yaml` at a pinned commit through a `SkillSource`). The registry held per control plane, approval and its ledger rows, the checks it starts (`skillCheckerFromEnv` picks the deployment's checker) and the routes stay in `packages/control-plane/src/skills.ts`. A log line goes to an injected `warn`, which the control plane gives its `[control-plane]` prefix.
 
-Still in `packages/control-plane` and moving in later tasks (or staying, for the handlers): the skill registry, the systems store and the admission decision. The HTTP handlers stay in the control plane.
+Still in `packages/control-plane` and moving in later tasks (or staying, for the handlers): the systems store and the admission decision. The HTTP handlers stay in the control plane.
 
 The package imports nothing from `control-plane`.
