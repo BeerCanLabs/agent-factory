@@ -44,6 +44,8 @@ export type EgressRoute = {
 
 
 export class SystemsStore {
+  // `protected`, not private, for one reader: the control plane's subclass (packages/control-plane/src/systems.ts), which
+  // walks `current` to derive Keymaster connection providers. Nothing else should read these; use get, history and list.
   protected readonly versions = new Map<string, SystemDefinition[]>();
   protected readonly current = new Map<string, SystemDefinition>();
 
