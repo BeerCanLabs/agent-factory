@@ -157,7 +157,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/inspector', 'packages/telemetry', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
-      'packages/control-plane/src/events.ts',
+      'packages/control-plane/src/progress-routes.ts',
       'packages/control-plane/src/stream.ts',
     ],
   },
@@ -212,9 +212,7 @@ export const PLATFORM_FILES: Record<string, PlatformRole> = {
  * Packages reserved for a service that do not host it yet.
  * Kept out of `hostedIn` so an empty directory cannot satisfy SV1.
  */
-export const RESERVED_PACKAGES: Record<string, FactoryServiceName> = {
-  triage: 'inspector',
-};
+export const RESERVED_PACKAGES: Record<string, FactoryServiceName> = {};
 
 /**
  * Declared non-service platform tooling packages.

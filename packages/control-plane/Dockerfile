@@ -12,6 +12,7 @@ RUN npm run build -w @beercanlabs/factory-contract \
   -w @beercanlabs/factory-bouncer \
   -w @beercanlabs/factory-keymaster \
   -w @beercanlabs/factory-telemetry \
+  -w @beercanlabs/factory-inspector \
   -w @beercanlabs/factory-timekeeper \
   -w @beercanlabs/factory-registrar \
   -w @beercanlabs/factory-control-plane
@@ -29,6 +30,7 @@ COPY packages/ledger/package.json ./packages/ledger/package.json
 COPY packages/budget/package.json ./packages/budget/package.json
 COPY packages/bouncer/package.json ./packages/bouncer/package.json
 COPY packages/telemetry/package.json ./packages/telemetry/package.json
+COPY packages/inspector/package.json ./packages/inspector/package.json
 COPY packages/timekeeper/package.json ./packages/timekeeper/package.json
 COPY packages/registrar/package.json ./packages/registrar/package.json
 COPY packages/control-plane/package.json ./packages/control-plane/package.json
@@ -42,6 +44,7 @@ COPY --from=builder /app/packages/ledger/dist ./packages/ledger/dist
 COPY --from=builder /app/packages/budget/dist ./packages/budget/dist
 COPY --from=builder /app/packages/bouncer/dist ./packages/bouncer/dist
 COPY --from=builder /app/packages/telemetry/dist ./packages/telemetry/dist
+COPY --from=builder /app/packages/inspector/dist ./packages/inspector/dist
 COPY --from=builder /app/packages/timekeeper/dist ./packages/timekeeper/dist
 COPY --from=builder /app/packages/registrar/dist ./packages/registrar/dist
 COPY --from=builder /app/packages/control-plane/dist ./packages/control-plane/dist

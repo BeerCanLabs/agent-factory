@@ -11,7 +11,8 @@ import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { pullMind, pushMind } from '@beercanlabs/factory-hydrate';
 import { loadCatalog } from '@beercanlabs/factory-registrar';
-import { checkHealth, createFactoryServer, FactoryState, factoryMetrics, handleMcp, reconcileRuns } from './app.js';
+import { checkHealth, createFactoryServer, FactoryState, handleMcp, reconcileRuns } from './app.js';
+import { factoryMetrics } from '@beercanlabs/factory-inspector';
 import { AggregationTemporality, InMemoryMetricExporter, MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { noopRuntime, type Runtime } from './runtime.js';
 import { ScheduleStore } from '@beercanlabs/factory-timekeeper';
@@ -635,7 +636,7 @@ describe('control plane', { concurrency: false }, () => {
       const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
       const reader = new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 60_000 });
       const provider = new MeterProvider({ readers: [reader] });
-      state.metrics = factoryMetrics(provider.getMeter('test'), () => state);
+      state.metrics = factoryMetrics(provider.getMeter('test'), () => state.runs.list({ active: true }).map((r) => r.state));
       const run = (await wake()).json as RunBody;
       await reader.forceFlush();
       await request(port, `/api/v1/runs/${run.runId}/result`, { method: 'POST', token: tokenFor(run.runId), body: { status: 'succeeded' } });

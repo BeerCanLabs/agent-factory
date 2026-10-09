@@ -9,7 +9,7 @@ import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import { EventHub, RunProgress, isBusWorthy, tapLedger, type FactoryEvent } from './events.js';
+import { RunProgress, createInspector, isBusWorthy, type FactoryEvent } from '@beercanlabs/factory-inspector';
 
 const KEY = 'progress-e2e-run-token-key-0123456789abcdef';
 const VIEWER = 'viewer-progress-e2e';
@@ -36,7 +36,7 @@ describe('§6.5 run progress events: run-scoped, bounded, headless', { concurren
   let cp: http.Server;
   let port = 0;
   let state: FactoryState;
-  const hub = new EventHub();
+  const inspector = createInspector();
   const published: FactoryEvent[] = [];
   const runTokens = new RunTokens(KEY);
 
@@ -58,7 +58,8 @@ describe('§6.5 run progress events: run-scoped, bounded, headless', { concurren
   before(async () => {
     state = {
       agents: new Map(),
-      ledger: tapLedger(new MemoryLedger(), hub),
+      ledger: inspector.tapLedger(new MemoryLedger()),
+      inspector,
       auth: bearerAuth([
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
         { name: 'gatekeeper-egress', token: GATEKEEPER_EGRESS, roles: ['gatekeeper-egress'] },
@@ -76,7 +77,7 @@ describe('§6.5 run progress events: run-scoped, bounded, headless', { concurren
       idleTimers: new Map(),
       secretValues: new Set<string>(),
     } as FactoryState;
-    hub.subscribe((e) => published.push(e));
+    inspector.subscribe((e) => published.push(e));
     cp = createFactoryServer(state);
     port = await listen(cp);
   });

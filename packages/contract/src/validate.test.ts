@@ -384,7 +384,7 @@ describe('skills & triad governance declarations', () => {
   });
 });
 
-describe('memory archetype declarations (§GAP-111, §TSK-029)', () => {
+describe('memory archetype declarations (§GAP-115, §TSK-029)', () => {
   it('accepts valid memory archetypes (ephemeral, episodic, workspace)', () => {
     assert.equal(memoryArchetype.safeParse('ephemeral').success, true);
     assert.equal(memoryArchetype.safeParse('episodic').success, true);
