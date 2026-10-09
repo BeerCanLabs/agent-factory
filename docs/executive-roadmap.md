@@ -1,6 +1,6 @@
-# Tinman roadmap: model selection
+# Executive roadmap: model selection
 
-Status: **intent recorded, not started.** Plan and build when the Tinman's turn comes in the Cast extraction roadmap
+Status: **intent recorded, not started.** Plan and build when the Executive's turn comes in the Cast extraction roadmap
 (`DESIGN_AUTHORITY.md` §6.15, step 6). Owner of the intent: Dale (chat, 2026-10-05). This file is for any person or AI
 agent picking the work up; it is self-contained, and everything in it can be checked against the code paths named below.
 
@@ -14,7 +14,7 @@ agent picking the work up; it is self-contained, and everything in it can be che
    cartridge update.
 3. **Skills hint too.** A skill can say which model it is optimized for, and an agent executing that skill can run it on
    a different model than the agent's primary.
-4. **The Tinman serves.** The Tinman (the Factory's model service) applies the owner's selection: it serves the primary,
+4. **The Executive serves.** The Executive (the Factory's model service) applies the owner's selection: it serves the primary,
    fails over to the secondary, and records which model actually served each call.
 
 ## What the code does today (checked 2026-10-05)
@@ -50,8 +50,8 @@ whose cartridge named other models.
 | :--- | :--- |
 | Hints | `cartridge.yaml` keeps `model:` as a hint; `skill.yaml` gains an optional model hint. Hints are advice shown to the owner, never a requirement. |
 | Owner selection | The policy gains an owner-chosen primary and secondary model, picked in the console from the offered catalog. The allow-list and the selection stay consistent. |
-| Per-skill model | When an agent executes a skill, the model call carries which skill it is for, and the Tinman may choose a model for that skill (the skill's hint, subject to the policy) instead of the agent's primary. |
-| The Tinman serves | One resolution rule: skill choice, then the owner's primary, then the owner's secondary, then the factory default, only among models the policy allows. The ledger records the requested and the served model. |
+| Per-skill model | When an agent executes a skill, the model call carries which skill it is for, and the Executive may choose a model for that skill (the skill's hint, subject to the policy) instead of the agent's primary. |
+| The Executive serves | One resolution rule: skill choice, then the owner's primary, then the owner's secondary, then the factory default, only among models the policy allows. The ledger records the requested and the served model. |
 
 ## Open decisions for Dale (not answered yet)
 
@@ -75,10 +75,10 @@ Follow the shape of the Treasurer and Bouncer extractions in `DESIGN_AUTHORITY.m
 behavior-preserving moves first, new behavior as separate later tasks, decisions written as "Confirmed by Dale" before
 anything is handed to an executor, and the plan checked against the code by someone other than its author.
 
-1. **Extract the Tinman** into its own package behind a typed contract (moves only): provider translation, token
+1. **Extract the Executive** into its own package behind a typed contract (moves only): provider translation, token
    counting, model catalog and the model-policy check currently inside `gatekeeper-egress`. Pricing is already the
    Treasurer's (`packages/budget`).
-2. **The resolution contract**: a pure function `resolveModel({ policy, hint, skill })` in the Tinman package that
+2. **The resolution contract**: a pure function `resolveModel({ policy, hint, skill })` in the Executive package that
    returns the model to serve and why, with the rule above. Unit tests cover every branch.
 3. **Policy fields**: primary and secondary in the policy, with validation and a migration so existing policies keep
    the behavior they have now.

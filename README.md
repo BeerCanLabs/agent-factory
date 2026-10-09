@@ -41,7 +41,7 @@ Agent Factory is architected around **11 canonical services ("The Cast of Charac
    - **Role:** Owns OAuth connections, consent flows, token refreshes (K1–K4), write-only static secret onboarding (K5), and vault mapping.
    - **Contract:** Zero-knowledge credential evaluation, ephemeral leases, token rotation events, and write-only platform secrets onboarding without exposing plaintext credentials to agents.
 
-3. **Tinman (Model Service / Inference Provider):**
+3. **Executive (Model Service / Inference Provider):**
    - **Role:** Provides a uniform OpenAI-compatible Chat Completions API (M1), translates calls across model providers (Bedrock, OpenAI, Anthropic, xAI), enforces model policy routing (M2), and counts tokens (E5).
    - **Contract:** Translates provider formats, normalizes token usage (`input`, `output`, `cacheRead`, `cacheWrite`), and reports usage to the Treasurer for pricing.
 

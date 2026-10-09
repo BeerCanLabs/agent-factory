@@ -12,7 +12,7 @@ import { files, read } from './support.js';
 //  - It does NOT guard `'TIMEOUT'`: the Cloud Build status set in `control-plane/src/gcp/cloudbuild.ts` uses the same
 //    word. The triage category is caught by `'SECRET_MISSING'` and `'CRASH_LOOP'`, which nothing else uses.
 //  - It does NOT guard the egress's own instruments (`factory.gatekeeper-egress.*`, GAP-109): they belong to the
-//    Gatekeeper, the Tinman and the Treasurer and stay in `gatekeeper-egress.ts` until those members are extracted.
+//    Gatekeeper, the Executive and the Treasurer and stay in `gatekeeper-egress.ts` until those members are extracted.
 //  - `createInspector(` may be called from the control plane's composition root only. A second Inspector would be a
 //    second hub: events published to one would not reach subscribers of the other.
 
