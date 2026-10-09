@@ -177,13 +177,14 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
     const rows = ledger.query({ agentId: 'factory' }).slice(before);
     assert.deepEqual(rows.map((r) => r.action), ['IDENTITY_LINKED', 'IDENTITY_UNLINKED']);
     assert.ok(rows.every((r) => r.actor === 'token:admin' && /^[0-9a-f]{64}$/.test(String(r.payloadSha256))));
+    assert.equal(JSON.stringify(rows).includes(DISCORD_ID), false);
   });
 
   it('rejects non-admin caller attempting to grant agentRoles with 403 privilege_escalation', async () => {
     // OPERATOR token has operator role, not admin
     const res = await call('/api/v1/identity-links/discord/555', 'PUT', OPERATOR, {
       actor: 'token:user555',
-      agentRoles: { switch: ['Owner'] },
+      agentRoles: { switch: ['Operator'] },
     });
     // First, check if operator even has identity.links.set (requires admin)
     // If operator has no identity.links.set privilege, it fails with 403 at privilege check.
@@ -191,24 +192,33 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
     assert.equal(res.status, 403);
   });
 
+  it('rejects reserved Owner role in agentRoles with 400 invalid_agent_roles', async () => {
+    const res = await call('/api/v1/identity-links/discord/555', 'PUT', ADMIN, {
+      actor: 'token:user555',
+      agentRoles: { switch: ['Owner'] },
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_agent_roles');
+  });
+
   it('rejects invalid agent IDs and prototype keys in agentRoles with 400', async () => {
     const protoRes = await call(
       '/api/v1/identity-links/discord/556',
       'PUT',
       ADMIN,
-      JSON.parse('{"actor":"token:user556","agentRoles":{"__proto__":["Owner"]}}'),
+      JSON.parse('{"actor":"token:user556","agentRoles":{"__proto__":["Operator"]}}'),
     );
     assert.equal(protoRes.status, 400);
 
     const ctorRes = await call('/api/v1/identity-links/discord/556', 'PUT', ADMIN, {
       actor: 'token:user556',
-      agentRoles: { 'constructor': ['Owner'] },
+      agentRoles: { 'constructor': ['Operator'] },
     });
     assert.equal(ctorRes.status, 400);
 
     const badSlugRes = await call('/api/v1/identity-links/discord/556', 'PUT', ADMIN, {
       actor: 'token:user556',
-      agentRoles: { 'bad/agent/slug': ['Owner'] },
+      agentRoles: { 'bad/agent/slug': ['Operator'] },
     });
     assert.equal(badSlugRes.status, 400);
   });
@@ -227,10 +237,10 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
       actor: 'cloudflare:aiden@sackrider.org',
       name: 'Aiden',
       roles: ['operator'],
-      agentRoles: { switch: ['Owner', 'Maintainer'] },
+      agentRoles: { switch: ['Operator', 'Maintainer'] },
     });
     assert.equal(put.status, 200);
-    assert.deepEqual(put.body.agentRoles, { switch: ['Owner', 'Maintainer'] });
+    assert.deepEqual(put.body.agentRoles, { switch: ['Operator', 'Maintainer'] });
 
     // Verify ledger row was created
     const rows = ledger.query({ agentId: 'factory' }).slice(before);
@@ -245,11 +255,11 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
     });
     assert.equal(patch.status, 200);
     assert.equal(patch.body.name, 'Aiden Sackrider');
-    assert.deepEqual(patch.body.agentRoles, { switch: ['Owner', 'Maintainer'] });
+    assert.deepEqual(patch.body.agentRoles, { switch: ['Operator', 'Maintainer'] });
 
     // Verify resolved link in store also preserved agentRoles
     const resolved = state.identityLinks!.resolveLink('discord', '558');
-    assert.deepEqual(resolved?.agentRoles, { switch: ['Owner', 'Maintainer'] });
+    assert.deepEqual({ ...resolved?.agentRoles }, { switch: ['Operator', 'Maintainer'] });
   });
 
   it('without a store the routes answer 503 after the admin check', async () => {

@@ -143,6 +143,9 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
         if (typeof r !== 'string' || !ROLE_NAME_REGEX.test(r)) {
           return json(res, 400, { error: `invalid role name in '${agentId}': must be 1-64 alphanumeric characters, dash or underscore` }), true;
         }
+        if (r.toLowerCase() === 'owner') {
+          return json(res, 400, { error: 'invalid_agent_roles', message: `role 'Owner' in '${agentId}' is reserved and derived strictly from agent ownership` }), true;
+        }
         cleanedRoles.push(r);
       }
       map[agentId] = [...new Set(cleanedRoles)];

@@ -1365,7 +1365,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         agentId: runCreate[1],
         privilege: 'agents.wake',
         owners: ownersOf(state, runCreate[1]),
-        link: link ? { actor: link.actor, name: link.name, roles: link.roles, agentRoles: link.agentRoles } : undefined,
+        link,
         adminEmails,
         isIngressCaller: isIngress,
       });
@@ -1522,7 +1522,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         agentId: agent.id,
         privilege: 'agents.converse',
         owners: ownersOf(state, agent.id),
-        link: link ? { actor: link.actor, name: link.name, roles: link.roles, agentRoles: link.agentRoles } : undefined,
+        link,
         adminEmails,
         isIngressCaller: isIngress,
       });
