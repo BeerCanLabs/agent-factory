@@ -8,6 +8,7 @@ export {
   skillsSchema,
   identitySchema,
   memorySchema,
+  memoryArchetype,
   benchSchema,
   triggerSchema,
   secretName,

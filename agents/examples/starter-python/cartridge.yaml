@@ -19,9 +19,18 @@ secrets:
       description: "HMAC signing secret for inbound webhook verification"
     - name: OPS_NOTIFY_WEBHOOK
       description: "Webhook URL to send high-severity alerts to the team"
+    - name: STARTER_PYTHON_DISCORD_BOT_TOKEN
+      description: "Discord Bot Token for gatekeeper-ingress presence and conversational ingress"
 
 persistence:
+  enabled: true
   prefix: starter-python-state
+
+memory:
+  archetype: episodic
+  retentionDays: 30
+  maxMessages: 20
+  maxChars: 24000
 
 compute:
   kind: oci
@@ -29,3 +38,17 @@ compute:
   localCommand:
     - python3
     - agent.py
+
+skills:
+  - id: discord-reply
+    name: "Discord Conversational Reply"
+    description: "Deliver conversational turn responses to Discord channels"
+    system: "Discord REST API"
+    secretRef: STARTER_PYTHON_DISCORD_BOT_TOKEN
+    hold: "none"
+  - id: ops-notify
+    name: "Ops Notification Dispatch"
+    description: "Send high-severity alerts to the team webhook"
+    system: "Webhook Endpoint"
+    secretRef: OPS_NOTIFY_WEBHOOK
+    hold: "none"

@@ -47,7 +47,7 @@ Agent Factory is architected around **11 canonical services ("The Cast of Charac
 
 4. **Secretary (Hydration & State Store):**
    - **Role:** Enforces "The Safe" (§6.6); syncs local SQLite databases in `$MEMORY_DIR` with cloud object storage on wake and sleep.
-   - **Contract:** Pre-flight pull and post-run push/flush hooks. Ensures cartridges never require cloud storage SDKs.
+   - **Contract:** Pre-flight pull and post-run push/flush hooks. Ensures cartridges never require cloud storage SDKs. See [Agent Memory Architecture Guide](docs/architecture/agent-memory-models.md).
 
 5. **Landlord (Compute Lifecycle & Turn Broker):**
    - **Role:** Manages serverless min=0 compute, wake-from-zero, warm-down windows, operational pause/kill-switches, turn coordination via `/mailbox` long-polling, and two-stage retirement (§6.4).
@@ -99,12 +99,14 @@ The architecture is opinionated and accepts certain limits by design:
 
 ## Documentation & Layout
 
+- **[Agent Memory Models Guide](docs/architecture/agent-memory-models.md)** — Architectural specification for the 3 Agent Archetypes, the Storage Triad (Whiteboard vs. Notebook vs. Safe), FTS5 episodic state, and multi-user isolation.
 - **[Cartridge Developer Guide](docs/CARTRIDGE_DEVELOPER_GUIDE.md)** — Step-by-step guide to building, testing, and packaging an Agent Cartridge using the "New Hire" model.
 - **[DESIGN_AUTHORITY.md](DESIGN_AUTHORITY.md)** — The Single Source of Truth (SSOT) for architectural intent, component contracts, and AI governance.
 - **[POSITION_PAPER.md](POSITION_PAPER.md)** — The foundational manifesto: Console vs. Cartridge.
 - **[AGENTS.md](AGENTS.md)** — Instructions for implementing AIs deploying the Factory.
 
 ```
+docs/architecture/agent-memory-models.md # Agent memory models & storage triad spec
 docs/CARTRIDGE_DEVELOPER_GUIDE.md # Developer tutorial for building cartridges
 DESIGN_AUTHORITY.md               # SSOT architecture & AI locking board
 AGENTS.md                         # implementing-AI playbook

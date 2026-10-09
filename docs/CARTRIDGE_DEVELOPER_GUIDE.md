@@ -172,7 +172,7 @@ The agent application contains your tools and reasoning loop.
 When the Factory Console wakes your cartridge:
 1. **Input Payload:** Injected via the `FACTORY_INPUT` environment variable and written to `/tmp/factory-input.json`.
 2. **Secrets:** Injected into `os.environ` using the exact names declared in `cartridge.yaml`.
-3. **Memory Directory:** The Console hydrates previous state into `os.environ["MEMORY_DIR"]` (defaults to `/memory`).
+3. **Memory Directory:** The Console hydrates previous state into `os.environ["MEMORY_DIR"]` (defaults to `/memory`). For architectural depth on Agent Archetypes, the Storage Triad (Whiteboard vs. Notebook vs. Safe), FTS5 episodic search, and avoiding the decoder ring anti-pattern, see the [Agent Memory Architecture Guide](architecture/agent-memory-models.md).
 4. **Egress Interception & Credential Injection:** The Console enforces a **Zero-Trust Network Perimeter** (no public IP, no default internet gateway route `0.0.0.0/0`). Outbound traffic to LLMs and third-party APIs (such as Discord) egresses exclusively through the **gatekeeper-egress** via standard Base URL variables:
    - `ANTHROPIC_BASE_URL` (`${GATEKEEPER_EGRESS_URL}/anthropic`)
    - `OPENAI_BASE_URL` (`${GATEKEEPER_EGRESS_URL}/v1`)
@@ -512,6 +512,6 @@ The Cartridge model handles any autonomous agent workload. Here is how four prod
 
 1. **Think Like a Hiring Manager:** Fill out the Job Description (`soul.md`), Contract (`cartridge.yaml`), and Performance Rubric (`bench.yaml`).
 2. **Never Hardcode Secrets:** Declare variable names in `cartridge.yaml`; let the Factory Console inject them at runtime.
-3. **Bring Lightweight Memory:** Use local SQLite or JSON in `$MEMORY_DIR` for personal agent memory. The Factory takes care of cloud syncing.
+3. **Bring Lightweight Memory:** Use local SQLite or JSON in `$MEMORY_DIR` for personal agent memory. The Factory takes care of cloud syncing. See the [Agent Memory Architecture Guide](architecture/agent-memory-models.md) for complete details.
 4. **Use Standard LLM SDKs:** Call `anthropic` or `openai` normally. The gatekeeper-egress intercepts, meters, and protects your cloud budget automatically.
 5. **Sleep at Zero:** Your agent only runs when a trigger fires, keeping cloud costs strictly at zero when idle.
