@@ -1,7 +1,6 @@
 # Agent Memory Architecture Guide: Archetypes, The Storage Triad, and State Isolation
 
-> **BeerCanLabs Agent Factory — Canonical Architectural Specification**  
-> **Status:** Canonical Standard  
+> **BeerCanLabs Agent Factory — Architectural Reference Guide**  
 > **Authority:** Aligned with [DESIGN_AUTHORITY.md](../../DESIGN_AUTHORITY.md) (§6.6 "The Notebook & Safe", §6.3 Perimeter Invariants)  
 > **Audience:** Cartridge Developers, Platform Architects, Submind Engineers
 
@@ -13,27 +12,27 @@ In the BeerCanLabs Agent Factory, agent state is not an afterthought, nor is it 
 
 1. **The Cartridge vs. Factory Boundary ("The Donna Test"):** Cartridges (the employees) own cognitive reasoning, prompts, personal workflows, and domain-specific knowledge models. The Factory provides the utilities (compute isolation, state hydration, model routing, perimeter egress, secret redaction).
 2. **Zero Cloud SDKs in Cartridges:** Cartridges strictly interact with local embedded filesystems (SQLite) located in `$MEMORY_DIR`. They **never** import cloud storage SDKs (`boto3`, `@google-cloud/storage`, Azure Blob SDK), never manage cloud credentials, and have no awareness of S3 buckets or remote storage URIs.
-3. **The Single-Writer Local File Standard:** To preserve sub-second container startup, eliminate distributed lock contention, and enable instant burst scaling, each agent instance operates on a dedicated local SQLite database checkpointed cleanly to cloud object storage by the Factory Secretary shim (`packages/hydrate/src/shim.ts`).
+3. **The Single-Writer Local File Standard:** To preserve fast container startup, eliminate distributed lock contention, and enable clean state synchronization, each agent instance operates on a dedicated local SQLite database checkpointed cleanly to cloud object storage by the Factory shim (`packages/hydrate/src/shim.ts`).
 
-This guide details the three fundamental agent archetypes, codifies the **Storage Triad** (Whiteboard vs. Notebook vs. Safe), eliminates the **"Decoder Ring" anti-pattern** in favor of deterministic LLM tool calling, and establishes enterprise patterns for **Multi-User Isolation & Entitlements**.
+This guide details the three canonical agent archetypes, codifies the **Storage Triad** (Whiteboard vs. Notebook vs. Safe), eliminates the **"Decoder Ring" anti-pattern** in favor of deterministic LLM tool calling, and establishes enterprise patterns for **Multi-User Isolation & Entitlements**.
 
 ---
 
 ## 2. The 3 Agent Archetypes
 
-Different cognitive tasks demand fundamentally distinct memory models. The Factory formalizes three distinct agent archetypes.
+Different cognitive tasks demand fundamentally distinct memory models. The Factory formalizes three canonical agent memory archetypes: **Ephemeral**, **Episodic**, and **Workspace**.
 
 ```mermaid
 flowchart TD
-    subgraph Type1["Type 1: Ephemeral Knowledge Bot"]
+    subgraph Ephemeral["Ephemeral Archetype (Stateless / Knowledge)"]
         direction TB
         T1_In["Inbound Query"] --> T1_WB["In-Memory Whiteboard (RAM)"]
         T1_WB --> T1_RAG["Stateless RAG / Docs Retrieval"]
         T1_RAG --> T1_Out["Direct Answer"]
-        T1_Sync["Zero S3 Sync (persistence.enabled: false)"]
+        T1_Sync["Zero S3 State Footprint"]
     end
 
-    subgraph Type2["Type 2: Personal / Principal Agent"]
+    subgraph Episodic["Episodic Archetype (Personal / Principal)"]
         direction TB
         T2_In["Inbound Turn (Principal / Guest)"] --> T2_WB["Sliding-Window Whiteboard"]
         T2_WB --> T2_NB["User-Partitioned SQLite + FTS5"]
@@ -41,52 +40,53 @@ flowchart TD
         T2_NB --> T2_Intents["Session Management (/new, /resume)"]
     end
 
-    subgraph Type3["Type 3: Multi-User / Coding Worker"]
+    subgraph Workspace["Workspace Archetype (Project / Coding Worker)"]
         direction TB
-        T3_In["Job / Issue / Webhook"] --> T3_Scratch["Task Workspace Cache (Ephemeral Disk)"]
-        T3_Scratch --> T3_Burst["Horizontal Burst Scaling (N Replicas)"]
-        T3_Burst --> T3_SoR["Git / Issue Tracker (System of Record)"]
+        T3_In["Job / Issue / Webhook"] --> T3_Scratch["Project-Scoped Task Cache & AST Symbols"]
+        T3_Scratch --> T3_Queue["Task Execution & Checkpoints"]
+        T3_Queue --> T3_SoR["Git / Issue Tracker (System of Record)"]
     end
 ```
 
-### 2.1 Type 1: Ephemeral Knowledge Bot
+### 2.1 Ephemeral Archetype
 * **Core Mental Model:** The Reference Librarian / Search Kiosk.
 * **Purpose:** Single-shot query answering, documentation lookup, compliance checks, or stateless webhook triage.
 * **Memory Lifecycle:**
-  * **Whiteboard Only:** The agent maintains state only within the current LLM context window (prompt buffer). Once the response is emitted, the execution container terminates or cleans its working memory.
+  * **Whiteboard Only:** The agent maintains state only within transient process memory (in-RAM prompt buffer). Once the response is emitted, the execution container terminates without saving conversational history.
   * **Stateless Retrieval:** Knowledge is retrieved on demand via tools (RAG search, vector index query, or external documentation endpoints routed via the `gatekeeper-egress`).
-  * **Zero S3 Sync:** In `cartridge.yaml`, `persistence.enabled` is set to `false`. The Factory Secretary shim bypasses mind synchronization entirely.
+  * **Zero SQLite Footprint:** In `cartridge.yaml`, `memory.archetype` is set to `ephemeral`. The agent writes no on-disk database files in `$MEMORY_DIR`, bypassing local state persistence and remote storage synchronization.
 * **Operational Characteristics:**
-  * **Cold Start:** Sub-100ms startup since no remote storage hydration is required.
-  * **Concurrency:** Unlimited horizontal scaling with zero state locking.
-  * **Cost:** Minimal disk and zero object storage footprint.
+  * **Cold Start:** Fast startup since no database tables are created or restored.
+  * **Concurrency:** Highly scalable statelessly with zero database lock contention.
+  * **Cost:** Minimal disk and zero persistent object storage footprint.
 * **Reference Agents:** `SM-nick` (research/query mode), documentation Q&A cartridges, automated security triage bots.
 
-### 2.2 Type 2: Personal / Principal Agent
+### 2.2 Episodic Archetype
 * **Core Mental Model:** The Trusted Executive Partner & Thought Collaborator.
 * **Purpose:** Continuous, multi-session collaborative work with an executive Principal (e.g., Dale) and designated collaborators. Manages drafts, editorial preferences, project context, and conversational continuity across days or months.
 * **Memory Lifecycle:**
   * **Sliding-Window Whiteboard:** Assembles working memory dynamically per turn with character and message budgets (e.g., 20 messages / 24,000 characters). When older context falls outside the window, dynamic awareness banners alert the agent that historical context can be retrieved.
-  * **Episodic SQLite Notebook with FTS5:** High-speed local database (`<agent>_state.db`) in `$MEMORY_DIR` indexing conversation turns with SQLite Full-Text Search (FTS5 BM25 with LIKE fallback).
-  * **S3 Safe Hydration:** Fully integrated with the Factory Secretary shim. Hydrated from cloud storage on container boot, checkpointed with `PRAGMA wal_checkpoint(TRUNCATE)` on container sleep, and synced back to S3.
+  * **Episodic SQLite Notebook with FTS5:** Local database (`<agent>_state.db`) in `$MEMORY_DIR` indexing conversation turns with SQLite Full-Text Search (FTS5 BM25 with LIKE fallback).
+  * **S3 Safe Hydration:** Fully integrated with the Factory shim (`packages/hydrate/src/shim.ts`). Hydrated from cloud storage on container boot, checkpointed with `PRAGMA wal_checkpoint(TRUNCATE)` on container sleep, and synced back to S3.
   * **Session Intents:** Built-in protocol for managing sessions: starting fresh (`/new`), naming sessions (`/name`), switching active contexts (`/resume`), listing history (`/sessions`), and exporting transcripts (`/export`).
   * **Rolling Retention Pruning:** Raw chat turns older than a retention threshold (e.g., 14 to 30 days) are pruned on wake, while permanent assets (drafts, preferences, facts) persist indefinitely.
 * **Operational Characteristics:**
   * **Single-Writer Safety:** Container execution is bound to a single active replica per agent to prevent write conflicts.
-  * **Compact Storage:** Aggressive pruning keeps the local SQLite notebook under 10MB, ensuring sub-second S3 hydration.
+  * **Compact Storage:** Aggressive pruning keeps the local SQLite notebook under 10MB, ensuring fast S3 hydration.
 * **Reference Agents:** `SM-castle` (Editorial Partner), `SM-donna` (Executive Assistant), `SM-higgins` (Chief of Staff).
 
-### 2.3 Type 3: Multi-User / Coding Worker
+### 2.3 Workspace Archetype
 * **Core Mental Model:** The Dedicated Engineering Contractor.
 * **Purpose:** Autonomous software engineering, issue triage, automated refactoring, code reviews, and CI failure resolution.
 * **Memory Lifecycle:**
-  * **Workspace Cache:** The container spins up with an ephemeral scratch workspace or shared build cache (`node_modules`, AST indexes, compilation caches) in local scratch storage (`/tmp` or dedicated cache volumes).
-  * **Git & Issue Trackers as System of Record (SoR):** The coding worker does **not** rely on an internal SQLite database as its primary truth. Git branches, commits, pull requests, and ticketing systems (GitHub Issues, Linear, Jira) are the definitive System of Record.
-  * **Horizontal Burst Elasticity:** When 20 GitHub issues or PR webhooks arrive simultaneously, 20 worker containers spin up in parallel across the compute cluster. Because state is committed directly to Git/GitHub, workers experience zero database lock contention.
+  * **Project & Task Workspace Memory:** Rather than maintaining user conversational chat turns, the workspace engine (`memory/workspace.py`) maintains dedicated project-scoped and task-scoped state caches: AST symbols, active git branches/diffs, test execution logs, and checkpoint key-values.
+  * **Project-Level Isolation:** To prevent cross-project memory contamination, task and state records are partitioned strictly by project ID (or separate per-project database files, `workspace_{project_id}.db`). The model is never permitted to supply or alter the project scope in tool calls.
+  * **Git & Issue Trackers as System of Record (SoR):** The coding worker does **not** rely on an internal SQLite database as its permanent multi-team source of truth. Git branches, commits, pull requests, and ticketing systems (GitHub Issues, Linear, Jira) are the definitive System of Record.
+  * **Execution & Concurrency Model:** Under the Factory's current Landlord architecture, invocations for a single agent queue sequentially behind an active run (`activeRun` check in `createRun`, returning 202 when busy). The workspace memory archetype is engineered with task-isolated state caches so that as the Landlord roadmap evolves toward task-partitioned concurrency, workspace tasks can execute in parallel across tasks without database deadlocks.
   * **Ephemeral Task Reporting:** The worker records execution progress to `/tmp/factory-result.json`, commits and pushes its code changes via the `gatekeeper-egress`, and terminates cleanly.
 * **Operational Characteristics:**
-  * **Elastic Scaling:** Scales from 0 to N instantly based on webhook triggers.
-  * **Zero Long-Term Lock Contention:** Eliminates distributed database deadlocks by delegating state concurrency to Git.
+  * **Task Isolation:** State is scoped strictly to the current project and task ID.
+  * **Zero Long-Term Lock Contention:** Eliminates distributed database deadlocks by delegating durable multi-user state concurrency to Git.
 * **Reference Agents:** `SM-switch` (Autonomous Software Engineer), `SM-archie` (Head of Engineering & Infrastructure Architect), `SM-geordi` (DevOps / SRE).
 
 ---
@@ -99,7 +99,7 @@ The BeerCanLabs memory model divides storage into three distinct physical and co
 sequenceDiagram
     autonumber
     participant GK as Gatekeeper-Ingress
-    participant Shim as Factory Secretary Shim
+    participant Shim as Factory Shim
     participant S3 as The Safe (Cloud Storage)
     participant FS as The Notebook (Local SQLite)
     participant LLM as The Whiteboard (Prompt Buffer)
@@ -140,7 +140,7 @@ sequenceDiagram
 | **Access Latency** | Instantaneous (within inference forward pass) | Sub-millisecond (Local NVMe/SSD SQLite) | Network-bound (100ms–1s pull/push) |
 | **Capacity Limit** | Model Context Budget (e.g., 20 turns / 24KB) | Compact single file (<10MB target) | Multi-gigabyte scalable |
 | **Engine / Format** | Tokenized Prompt Array (`messages: [...]`) | SQLite 3 (`WAL` mode + FTS5 BM25) | Compressed directory / Tarball / Object Prefix |
-| **Ownership** | Cartridge Reasoning Loop | Cartridge Application Process | Factory Secretary Shim (`shim.ts`) |
+| **Ownership** | Cartridge Reasoning Loop | Cartridge Application Process | Factory Shim (`packages/hydrate/src/shim.ts`) |
 | **Cloud SDKs Needed** | None | None | Factory platform only (Never in cartridge) |
 
 ### 3.2 Tier 1: The Whiteboard (Working Memory)
@@ -175,7 +175,7 @@ The Notebook is the agent's private, persistent SQLite database located at `$MEM
 The Safe represents the remote object storage bucket backing the agent's memory.
 * **Enforced by Factory Shim:** Managed by `packages/hydrate/src/shim.ts`.
   * **On Wake:** Pulls remote storage (`MEMORY_STORE_URI` + `MEMORY_PREFIX`) into `$MEMORY_DIR`.
-  * **Periodic Sync:** Flushes local state to S3 periodically (default every 60 seconds) as a safeguard against unexpected host eviction.
+  * **Periodic Sync:** Flushes local state to S3 periodically (default every 60 seconds) as a safeguard against unexpected host eviction. Note: Periodic background synchronization captures filesystem snapshots while the database may be in flight; deterministic transactional consistency is established on clean container shutdown after `PRAGMA wal_checkpoint(TRUNCATE)`.
   * **On Sleep:** Checkpoints local state and syncs the directory back to S3 upon exit.
 * **Security & Isolation:** Cartridges never possess IAM credentials for object storage. All cloud authorization is handled exclusively by the Factory platform perimeter.
 
@@ -324,18 +324,18 @@ These are literal control-plane commands, not natural language conversations. If
 
 ## 5. Multi-User Isolation & Entitlement Patterns
 
-When a Type 2 or Type 3 agent operates on a multi-user communication surface (e.g., a shared Discord guild, a Slack workspace, or an internal enterprise webhook), it must enforce strict tenant boundaries.
+When an agent operates on a multi-user communication surface (e.g., a shared Discord guild, a Slack workspace, or an internal enterprise webhook), it must enforce strict tenant boundaries.
 
 ```mermaid
 flowchart TD
     subgraph Ingress["Ingress Perimeter (Gatekeeper-Ingress)"]
-        UserMsg["User Message"] --> Metadata["Cryptographic Identity Tagging\n{ authorId: '470400107028938752', channelId: '...' }"]
+        UserMsg["User Message"] --> Metadata["Ingress Identity Metadata\n{ authorId: '123456789012345678', channelId: '...' }"]
     end
 
     Metadata --> Dispatcher{"Entitlement Resolver\n(agent.py)"}
 
-    subgraph PrincipalPath["Tier 1: Principal (Owner / Dale)"]
-        Dispatcher -- "authorId in PRINCIPAL_IDS" --> P_Perms["- Full Memory Read/Write\n- Sensitive Tools Allowed (Publish, Deploy)\n- Private Sessions & Transcripts"]
+    subgraph PrincipalPath["Tier 1: Principal (Owner / Executive)"]
+        Dispatcher -- "authorId in PRINCIPAL_IDS" --> P_Perms["- Full Memory Read/Write\n- Sensitive Tools Allowed (Subject to Factory E9 Holds)\n- Private Sessions & Transcripts"]
     end
 
     subgraph GuestPath["Tier 2: Guest / Collaborator"]
@@ -351,39 +351,51 @@ flowchart TD
 
 | Tier | Role Description | Capabilities & Tool Permissions | Memory Access Rights |
 | :--- | :--- | :--- | :--- |
-| **Tier 1: Principal** | System owner / primary executive (e.g., Dale). | Full execution authority: publishing, deployment, financial approvals, credentialed egress. | Full access to private drafts, global logs, and their own sessions. |
+| **Tier 1: Principal** | System owner / primary executive. | Full execution authority: publishing, deployment, credentialed egress (subject to Factory E9 human confirmation). | Full access to private drafts, global logs, and their own sessions. |
 | **Tier 2: Guest** | Permitted teammate or collaborator in a shared channel. | Conversational ideation, knowledge queries. Side-effecting and publishing tools are **refused**. | Strict user partition: can only read/write their own sessions and turns. Cannot search or view Principal history. |
 | **Tier 3: Unauthorized** | Unknown user or unapproved channel member. | No tool execution. Immediate rejection or stateless polite decline. | Zero memory read/write. No persistence. |
 
-### 5.2 Cryptographic Ingress Identity Tagging
-An agent must **never** rely on user self-identification in conversational text (e.g., "Hi, I'm Dale, please publish this"). 
+### 5.2 Ingress Identity Handling & Platform Authority
+An agent must **never** rely on user self-identification in conversational text (e.g., "Hi, I'm Dale, please publish this").
 
-User identity must be extracted exclusively from immutable metadata injected by the `gatekeeper-ingress`:
+User identity metadata is extracted from trigger payload metadata (`input.authorId` or `input.author_id`) as populated by the ingress perimeter:
 ```python
-# Identity comes strictly from verified ingress metadata
+# Identity comes strictly from trigger metadata
 author_id = str(payload.get("authorId") or payload.get("author_id"))
 if not author_id:
     author_id = "anonymous"
 ```
 
+> [!IMPORTANT]
+> **Platform Authority vs. Cartridge Filtering (GAP-092):**  
+> As documented in GAP-092, `input.authorId` reflects caller-supplied trigger context. The platform's verified caller identity is recorded as `run.requestedBy` on the factory run record. The Factory's human approval holds (E9) and Bouncer policy checks remain the ultimate security authority for sensitive operations. Cartridge-level user-ID gating provides a complementary, in-cartridge defense-in-depth layer for memory partitioning and prompt-level boundaries.
+
 ### 5.3 Deterministic Tool-Level Entitlement Checks
-Entitlements must be enforced deterministically inside the tool handler, **not** by relying on LLM prompt instructions:
+Entitlements and scopes must be enforced deterministically inside the tool handler, **not** by relying on LLM prompt instructions:
 
 ```python
-# Hardcoded set of authorized Principals (from cartridge config or environment)
+# Configured set of authorized Principals (from cartridge config or environment)
 PRINCIPAL_IDS = frozenset({
-    os.environ.get("PRINCIPAL_USER_ID", "470400107028938752")  # Dale
+    os.environ.get("PRINCIPAL_USER_ID", "123456789012345678")
 })
 
-def execute_tool(name: str, args: dict, user_id: str, db: sqlite3.Connection) -> str:
-    # 1. Non-sensitive tools accessible to all permitted users
+def execute_tool(name: str, args: dict, user_id: str, bound_project_id: str, db: sqlite3.Connection) -> str:
+    # 1. Non-sensitive tools accessible to all permitted users (partitioned by user)
     if name == "recall_conversation":
         query = args.get("query", "")
         # Strictly partition memory search to the caller's user_id!
         results = recall_conversation(db, user_id=user_id, query=query)
         return format_recall_results(results)
 
-    # 2. Sensitive / Side-effecting tools restricted to Principal
+    # 2. Workspace memory recall (strictly bound to the verified project_id, NOT supplied by LLM)
+    if name == "recall_workspace_task":
+        query = args.get("query", "")
+        task_id = args.get("task_id")
+        # project_id is bound programmatically from the execution context to prevent cross-project prompt injection leaks!
+        results = recall_task_memory(db, project_id=bound_project_id, query=query, task_id=task_id)
+        return format_workspace_results(results)
+
+    # 3. Sensitive / Side-effecting tools restricted to Principal
     if name in ("publish_blog_post", "publish_to_x", "deploy_infrastructure"):
         if user_id not in PRINCIPAL_IDS:
             # Deterministic refusal: No side effect occurs

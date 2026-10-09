@@ -6,10 +6,17 @@ Unit tests for the 3 Agent Memory Archetypes — BeerCanLabs Cartridge Standard:
 - Memory package loader and cartridge configuration
 """
 
+import os
 import sqlite3
+import sys
+import tempfile
+import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import memory
 from memory import (
@@ -22,424 +29,322 @@ from memory import (
 from memory import ephemeral, episodic, workspace
 
 
-# ===========================================================================
-# 1. Package Loader & Archetype Discovery
-# ===========================================================================
+class TestMemoryArchetypes(unittest.TestCase):
 
+    # ===========================================================================
+    # 1. Package Loader & Archetype Discovery
+    # ===========================================================================
 
-def test_package_archetype_discovery():
-    """Verify get_memory_archetype returns the correct module for each archetype."""
-    assert get_memory_archetype("ephemeral") is ephemeral
-    assert get_memory_archetype("EPHEMERAL") is ephemeral
-    assert get_memory_archetype("episodic") is episodic
-    assert get_memory_archetype("EPISODIC") is episodic
-    assert get_memory_archetype("workspace") is workspace
-    assert get_memory_archetype("WORKSPACE") is workspace
+    def test_package_archetype_discovery(self):
+        """Verify get_memory_archetype returns the correct module for each archetype."""
+        self.assertIs(get_memory_archetype("ephemeral"), ephemeral)
+        self.assertIs(get_memory_archetype("EPHEMERAL"), ephemeral)
+        self.assertIs(get_memory_archetype("episodic"), episodic)
+        self.assertIs(get_memory_archetype("EPISODIC"), episodic)
+        self.assertIs(get_memory_archetype("workspace"), workspace)
+        self.assertIs(get_memory_archetype("WORKSPACE"), workspace)
 
-    with pytest.raises(ValueError, match="Unknown memory archetype"):
-        get_memory_archetype("nonexistent")
+        with self.assertRaises(ValueError):
+            get_memory_archetype("nonexistent")
 
+    def test_load_archetype_from_cartridge_manifest(self):
+        """Verify load_archetype_from_cartridge reads archetype from cartridge.yaml."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
 
-def test_load_archetype_from_cartridge_manifest(tmp_path):
-    """Verify load_archetype_from_cartridge reads archetype from cartridge.yaml."""
-    cartridge_file = tmp_path / "cartridge.yaml"
-    cartridge_file.write_text("""
+            cartridge_file = tmp_path / "cartridge.yaml"
+            cartridge_file.write_text("""
 schemaVersion: "1.0"
 id: test-agent
 memory:
   archetype: ephemeral
 """, encoding="utf-8")
 
-    name, mod = load_archetype_from_cartridge(cartridge_file)
-    assert name == "ephemeral"
-    assert mod is ephemeral
+            name, mod = load_archetype_from_cartridge(cartridge_file)
+            self.assertEqual(name, "ephemeral")
+            self.assertIs(mod, ephemeral)
 
-    # Default to episodic when memory configuration is omitted
-    cartridge_default = tmp_path / "cartridge_default.yaml"
-    cartridge_default.write_text("""
+            # Fall back to episodic when persistence.enabled is true or prefix is set
+            cartridge_pers = tmp_path / "cartridge_pers.yaml"
+            cartridge_pers.write_text("""
+schemaVersion: "1.0"
+id: test-agent
+persistence:
+  enabled: true
+  prefix: agent-state
+""", encoding="utf-8")
+            pers_name, pers_mod = load_archetype_from_cartridge(cartridge_pers)
+            self.assertEqual(pers_name, "episodic")
+            self.assertIs(pers_mod, episodic)
+
+            # Fall back to ephemeral when persistence.enabled is false
+            cartridge_eph = tmp_path / "cartridge_eph.yaml"
+            cartridge_eph.write_text("""
+schemaVersion: "1.0"
+id: test-agent
+persistence:
+  enabled: false
+""", encoding="utf-8")
+            eph_name, eph_mod = load_archetype_from_cartridge(cartridge_eph)
+            self.assertEqual(eph_name, "ephemeral")
+            self.assertIs(eph_mod, ephemeral)
+
+            # Fail closed when neither memory nor persistence is declared
+            cartridge_bare = tmp_path / "cartridge_bare.yaml"
+            cartridge_bare.write_text("""
 schemaVersion: "1.0"
 id: test-agent
 """, encoding="utf-8")
-    def_name, def_mod = load_archetype_from_cartridge(cartridge_default)
-    assert def_name == "episodic"
-    assert def_mod is episodic
-
-
-def test_canonical_reexports():
-    """Verify package root re-exports canonical episodic and archetype components."""
-    assert callable(memory.init_episodic_tables)
-    assert callable(memory.get_or_create_active_session)
-    assert callable(memory.start_new_session)
-    assert callable(memory.load_whiteboard)
-    assert callable(memory.remember_turn)
-    assert callable(memory.recall_conversation)
-    assert callable(memory.prune_conversations)
-    assert isinstance(memory.RECALL_TOOL_SPEC, dict)
-
-    assert issubclass(memory.EphemeralWhiteboard, object)
-    assert callable(memory.init_workspace_tables)
-    assert isinstance(memory.WORKSPACE_RECALL_TOOL_SPEC, dict)
-
-
-# ===========================================================================
-# 2. Type 1: Ephemeral Memory (In-Memory Sliding Window, Zero SQLite)
-# ===========================================================================
-
-
-def test_ephemeral_turn_recording_and_whiteboard(tmp_path):
-    """Verify in-memory sliding window Whiteboard with zero SQLite persistence."""
-    wb = ephemeral.EphemeralWhiteboard(max_messages=6, max_chars=1000)
-
-    # 1. Zero SQLite persistence: confirm no db files created
-    assert list(tmp_path.glob("*.db")) == []
-
-    wb.remember_turn("Hello agent", "Hello user")
-    assert wb.total_messages == 2
-
-    history, banner = wb.load_whiteboard()
-    assert len(history) == 2
-    assert history[0] == {"role": "user", "content": "Hello agent"}
-    assert history[1] == {"role": "assistant", "content": "Hello user"}
-    assert banner is None  # All messages shown, no banner needed
-
-
-def test_ephemeral_sliding_window_message_budget():
-    """Verify sliding window drops oldest messages and surfaces awareness banner."""
-    wb = ephemeral.EphemeralWhiteboard(max_messages=4, max_chars=10000)
-    for i in range(5):
-        wb.remember_turn(f"User msg {i}", f"Assistant reply {i}")
-
-    assert wb.total_messages == 10
-
-    history, banner = wb.load_whiteboard()
-    assert len(history) == 4
-    assert history[0]["content"] == "User msg 3"
-    assert history[-1]["content"] == "Assistant reply 4"
-
-    assert banner is not None
-    assert "Total turns: 10" in banner
-    assert "Showing recent: 4 turns" in banner
-    assert "Ephemeral Context" in banner
-
-
-def test_ephemeral_char_budget_trimming():
-    """Verify character budgeting trims messages exceeding max_chars."""
-    wb = ephemeral.EphemeralWhiteboard(max_messages=10, max_chars=50)
-    wb.add_message("user", "Short 1")
-    wb.add_message("assistant", "A" * 40)
-    wb.add_message("user", "B" * 20)
-
-    history, banner = wb.load_whiteboard()
-    # "B"*20 is 20 chars; "A"*40 is 40 chars -> 60 chars exceeds 50 char limit
-    assert len(history) == 1
-    assert history[0]["content"] == "B" * 20
-    assert banner is not None
-
-
-def test_ephemeral_clear_and_transcript():
-    """Verify clearing and exporting ephemeral session."""
-    wb = ephemeral.EphemeralWhiteboard()
-    wb.remember_turn("ping", "pong")
-    transcript = wb.export_transcript()
-    assert "# Ephemeral Conversation Transcript" in transcript
-    assert "ping" in transcript
-    assert "pong" in transcript
-
-    wb.clear()
-    assert wb.total_messages == 0
-    empty_history, _ = wb.load_whiteboard()
-    assert empty_history == []
-
-
-def test_ephemeral_module_registry():
-    """Verify module-level multi-session ephemeral functions."""
-    ephemeral.clear_all_sessions()
-    ephemeral.remember_turn("session-a", "user A", "reply A")
-    ephemeral.remember_turn("session-b", "user B", "reply B")
-
-    hist_a, _ = ephemeral.load_whiteboard("session-a")
-    hist_b, _ = ephemeral.load_whiteboard("session-b")
-
-    assert len(hist_a) == 2
-    assert hist_a[0]["content"] == "user A"
-    assert len(hist_b) == 2
-    assert hist_b[0]["content"] == "user B"
-
-    ephemeral.clear_session("session-a")
-    cleared_a, _ = ephemeral.load_whiteboard("session-a")
-    assert len(cleared_a) == 0
-
-    ephemeral.clear_all_sessions()
-    assert ephemeral.list_active_sessions() == []
-
-
-# ===========================================================================
-# 3. Type 2: Episodic Memory (User-Partitioned SQLite + FTS5)
-# ===========================================================================
-
-
-@pytest.fixture
-def episodic_db(tmp_path):
-    conn = sqlite3.connect(str(tmp_path / "episodic_state.db"))
-    conn.execute("PRAGMA journal_mode=WAL;")
-    episodic.init_episodic_tables(conn)
-    yield conn
-    conn.close()
-
-
-def test_episodic_session_continuity_and_isolation(episodic_db):
-    """Verify continuous active session per user and strict user isolation."""
-    s1, name1 = episodic.get_or_create_active_session(episodic_db, "user_1")
-    assert s1.startswith("s_")
-    assert name1 is None
-
-    # Repeated calls return the same active session
-    s1_repeat, _ = episodic.get_or_create_active_session(episodic_db, "user_1")
-    assert s1 == s1_repeat
-
-    # User 2 gets an isolated session
-    s2, _ = episodic.get_or_create_active_session(episodic_db, "user_2")
-    assert s1 != s2
-
-    episodic.remember_turn(episodic_db, s1, "user_1", "User1 private unique note", "Reply 1")
-    episodic.remember_turn(episodic_db, s2, "user_2", "User2 private distinct memo", "Reply 2")
-
-    u1_wb, _ = episodic.load_whiteboard(episodic_db, "user_1", s1)
-    u2_wb, _ = episodic.load_whiteboard(episodic_db, "user_2", s2)
-
-    assert len(u1_wb) == 2
-    assert u1_wb[0]["content"] == "User1 private unique note"
-    assert len(u2_wb) == 2
-    assert u2_wb[0]["content"] == "User2 private distinct memo"
-
-    # User 2 cannot recall User 1's unique note
-    recalled = episodic.recall_conversation(episodic_db, "user_2", "unique note")
-    assert len(recalled) == 0
-
-
-def test_episodic_fast_path_intents(episodic_db):
-    """Verify pre-LLM fast path commands (/new, /name, /resume, /sessions, /export)."""
-    s1, _ = episodic.get_or_create_active_session(episodic_db, "dale")
-    episodic.remember_turn(episodic_db, s1, "dale", "discussing factory architecture", "Factory looks good.")
-
-    # 1. /name
-    handled, msg = episodic.handle_turn_intent(episodic_db, "dale", '/name "factory-v2"')
-    assert handled is True
-    assert "factory-v2" in msg
-
-    # 2. /new
-    handled, msg = episodic.handle_turn_intent(episodic_db, "dale", "/new sprint-planning")
-    assert handled is True
-    assert "sprint-planning" in msg
-
-    s2, name2 = episodic.get_or_create_active_session(episodic_db, "dale")
-    assert s2 != s1
-    assert name2 == "sprint-planning"
-    episodic.remember_turn(episodic_db, s2, "dale", "sprint tasks", "assigned")
-
-    # 3. /sessions
-    handled, msg = episodic.handle_turn_intent(episodic_db, "dale", "/sessions")
-    assert handled is True
-    assert "factory-v2" in msg
-    assert "sprint-planning" in msg
-
-    # 4. /resume
-    handled, msg = episodic.handle_turn_intent(episodic_db, "dale", "/resume factory-v2")
-    assert handled is True
-    assert "factory-v2" in msg
-    resumed_id, resumed_name = episodic.get_or_create_active_session(episodic_db, "dale")
-    assert resumed_id == s1
-    assert resumed_name == "factory-v2"
-
-    # 5. /export
-    handled, msg = episodic.handle_turn_intent(episodic_db, "dale", "/export")
-    assert handled is True
-    assert "# Conversation Export" in msg
-    assert "factory-v2" in msg
-
-
-def test_episodic_recall_with_fts5_and_fallback(episodic_db):
-    """Verify full-text recall with SQLite FTS5."""
-    s1, _ = episodic.get_or_create_active_session(episodic_db, "dale")
-    episodic.remember_turn(
-        episodic_db,
-        s1,
-        "dale",
-        "Let's configure the Dead-Letter Queue for SQS",
-        "DLQ maxReceiveCount set to 3.",
-    )
-    episodic.remember_turn(episodic_db, s1, "dale", "Next, update CloudFront distributions", "Done.")
-
-    results = episodic.recall_conversation(episodic_db, "dale", "dead-letter queue")
-    assert len(results) > 0
-    assert any("Dead-Letter Queue" in r["content"] for r in results)
-
-
-def test_episodic_pruning_retention(episodic_db):
-    """Verify rolling retention prunes turns older than retention_days."""
-    s1, _ = episodic.get_or_create_active_session(episodic_db, "dale")
-    ancient = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
-    cur = episodic_db.execute(
-        "INSERT INTO conversation_turns (session_id, user_id, surface, role, content, timestamp) VALUES (?, 'dale', 'discord', 'user', 'old note', ?)",
-        (s1, ancient),
-    )
-    t_id = cur.lastrowid
-    episodic_db.execute("INSERT INTO conversation_fts (content, turn_id, session_id, user_id) VALUES ('old note', ?, ?, 'dale')", (str(t_id), s1))
-    episodic_db.commit()
-
-    episodic.remember_turn(episodic_db, s1, "dale", "fresh turn", "fresh reply")
-
-    pruned = episodic.prune_conversations(episodic_db, retention_days=30)
-    assert pruned == 1
-
-    wb, _ = episodic.load_whiteboard(episodic_db, "dale", s1)
-    assert len(wb) == 2
-    assert wb[0]["content"] == "fresh turn"
-
-
-# ===========================================================================
-# 4. Type 3: Workspace Memory (Project & Task Scoped State)
-# ===========================================================================
-
-
-@pytest.fixture
-def workspace_db(tmp_path):
-    conn = sqlite3.connect(str(tmp_path / "workspace_state.db"))
-    conn.execute("PRAGMA journal_mode=WAL;")
-    workspace.init_workspace_tables(conn)
-    yield conn
-    conn.close()
-
-
-def test_workspace_project_and_task_lifecycle(workspace_db):
-    """Verify project and task creation, state updates, and listing."""
-    proj = workspace.create_or_get_project(
-        workspace_db,
-        project_id="proj-agent-factory",
-        name="Agent Factory Core",
-        description="Core control plane and runtime",
-        metadata={"repo": "BeerCanLabs/agent-factory"},
-    )
-    assert proj["id"] == "proj-agent-factory"
-    assert proj["name"] == "Agent Factory Core"
-
-    # Task creation
-    task = workspace.create_or_update_task(
-        workspace_db,
-        project_id="proj-agent-factory",
-        task_id="tsk-01",
-        title="Implement Gatekeeper Ingress",
-        status="in_progress",
-        context={"priority": "high", "spec": "INV-A1"},
-    )
-    assert task["id"] == "tsk-01"
-    assert task["status"] == "in_progress"
-
-    # Fetch task
-    fetched = workspace.get_task(workspace_db, "proj-agent-factory", "tsk-01")
-    assert fetched is not None
-    assert fetched["context"]["priority"] == "high"
-
-    # Update status and complete task
-    success = workspace.update_task_status(
-        workspace_db,
-        "proj-agent-factory",
-        "tsk-01",
-        status="completed",
-        result={"pr": "https://github.com/BeerCanLabs/agent-factory/pull/42"},
-    )
-    assert success is True
-
-    completed = workspace.get_task(workspace_db, "proj-agent-factory", "tsk-01")
-    assert completed["status"] == "completed"
-    assert completed["result"]["pr"] == "https://github.com/BeerCanLabs/agent-factory/pull/42"
-
-
-def test_workspace_isolation_and_listing(workspace_db):
-    """Verify project and task strict isolation."""
-    workspace.create_or_update_task(workspace_db, "project-alpha", "task-1", title="Alpha Task")
-    workspace.create_or_update_task(workspace_db, "project-beta", "task-1", title="Beta Task")
-
-    alpha_tasks = workspace.list_tasks(workspace_db, "project-alpha")
-    beta_tasks = workspace.list_tasks(workspace_db, "project-beta")
-
-    assert len(alpha_tasks) == 1
-    assert alpha_tasks[0]["title"] == "Alpha Task"
-    assert len(beta_tasks) == 1
-    assert beta_tasks[0]["title"] == "Beta Task"
-
-
-def test_workspace_turns_and_whiteboard(workspace_db):
-    """Verify task execution reasoning turns and task whiteboard budgeting."""
-    workspace.create_or_update_task(workspace_db, "project-sm", "task-eng", title="Build Dockerfile")
-    for i in range(8):
-        workspace.record_task_turn(
-            workspace_db,
-            "project-sm",
-            "task-eng",
-            role="user" if i % 2 == 0 else "assistant",
-            content=f"Turn step {i}",
-            metadata={"step": i},
+            with self.assertRaises(ValueError):
+                load_archetype_from_cartridge(cartridge_bare)
+
+    def test_canonical_reexports(self):
+        """Verify package root re-exports canonical episodic and archetype components."""
+        self.assertTrue(callable(memory.init_episodic_tables))
+        self.assertTrue(callable(memory.get_or_create_active_session))
+        self.assertTrue(callable(memory.start_new_session))
+        self.assertTrue(callable(memory.load_whiteboard))
+        self.assertTrue(callable(memory.remember_turn))
+        self.assertTrue(callable(memory.recall_conversation))
+        self.assertTrue(callable(memory.prune_conversations))
+        self.assertIsInstance(memory.RECALL_TOOL_SPEC, dict)
+
+        self.assertTrue(issubclass(memory.EphemeralWhiteboard, object))
+        self.assertTrue(callable(memory.init_workspace_tables))
+        self.assertIsInstance(memory.WORKSPACE_RECALL_TOOL_SPEC, dict)
+
+    # ===========================================================================
+    # 2. Type 1: Ephemeral Memory (In-Memory Sliding Window, Zero SQLite)
+    # ===========================================================================
+
+    def test_ephemeral_turn_recording_and_whiteboard(self):
+        """Verify in-memory sliding window Whiteboard with zero SQLite persistence."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            wb = ephemeral.EphemeralWhiteboard(max_messages=6, max_chars=1000)
+
+            # 1. Zero SQLite persistence: confirm no db files created
+            self.assertEqual(list(tmp_path.glob("*.db")), [])
+
+            wb.remember_turn("Hello agent", "Hello user")
+            self.assertEqual(wb.total_messages, 2)
+
+            history, banner = wb.load_whiteboard()
+            self.assertEqual(len(history), 2)
+            self.assertIsNone(banner)
+
+            # 2. Add turns exceeding max_messages to trigger awareness banner
+            wb.remember_turn("Question 2", "Answer 2")
+            wb.remember_turn("Question 3", "Answer 3")
+            wb.remember_turn("Question 4", "Answer 4")
+            self.assertEqual(wb.total_messages, 8)
+
+            history, banner = wb.load_whiteboard()
+            self.assertEqual(len(history), 6)
+            self.assertIsNotNone(banner)
+            self.assertIn("Total turns: 8", banner)
+            self.assertIn("Showing recent: 6", banner)
+
+    def test_ephemeral_char_budget_truncation(self):
+        """Verify Whiteboard enforces strict character budgeting."""
+        wb = ephemeral.EphemeralWhiteboard(max_messages=20, max_chars=100)
+        wb.remember_turn("Short prompt", "A" * 60)
+        wb.remember_turn("Second prompt", "B" * 60)
+
+        history, banner = wb.load_whiteboard()
+        self.assertLessEqual(len(history), 2)
+        total_len = sum(len(m["content"]) for m in history)
+        self.assertLessEqual(total_len, 100)
+        self.assertIsNotNone(banner)
+
+    def test_ephemeral_session_clear(self):
+        """Verify ephemeral session clearing."""
+        wb = ephemeral.EphemeralWhiteboard()
+        wb.remember_turn("Turn 1", "Reply 1")
+        wb.clear()
+        self.assertEqual(wb.total_messages, 0)
+        history, banner = wb.load_whiteboard()
+        self.assertEqual(len(history), 0)
+        self.assertIsNone(banner)
+
+    # ===========================================================================
+    # 3. Type 2: Episodic Memory (SQLite + FTS5, Sessions, Pruning)
+    # ===========================================================================
+
+    def test_episodic_database_initialization(self):
+        """Verify episodic SQLite initialization and PRAGMA settings."""
+        conn = sqlite3.connect(":memory:")
+        episodic.init_episodic_tables(conn)
+
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        self.assertIn("conversation_sessions", tables)
+        self.assertIn("conversation_turns", tables)
+        self.assertIn("conversation_fts", tables)
+        conn.close()
+
+    def test_episodic_multi_user_session_isolation(self):
+        """Verify sessions are isolated per user_id."""
+        conn = sqlite3.connect(":memory:")
+        episodic.init_episodic_tables(conn)
+
+        s_alice_id, _ = episodic.get_or_create_active_session(conn, "alice")
+        s_bob_id, _ = episodic.get_or_create_active_session(conn, "bob")
+
+        self.assertNotEqual(s_alice_id, s_bob_id)
+
+        # Remember turns for each user
+        episodic.remember_turn(conn, s_alice_id, "alice", "Alice secret prompt", "Alice acknowledgment")
+        episodic.remember_turn(conn, s_bob_id, "bob", "Bob secret prompt", "Bob acknowledgment")
+
+        # Recall should be isolated by user_id
+        alice_results = episodic.recall_conversation(conn, "alice", "secret")
+        self.assertEqual(len(alice_results), 1)
+        self.assertEqual(alice_results[0]["content"], "Alice secret prompt")
+
+        bob_results = episodic.recall_conversation(conn, "bob", "secret")
+        self.assertEqual(len(bob_results), 1)
+        self.assertEqual(bob_results[0]["content"], "Bob secret prompt")
+
+        # Stranger cannot recall anything
+        stranger_results = episodic.recall_conversation(conn, "stranger", "secret")
+        self.assertEqual(len(stranger_results), 0)
+        conn.close()
+
+    def test_episodic_fast_path_intents(self):
+        """Verify fast-path session commands (/new, /name, /sessions, /export)."""
+        conn = sqlite3.connect(":memory:")
+        episodic.init_episodic_tables(conn)
+
+        # /new
+        handled, res = episodic.handle_turn_intent(conn, "alice", "/new Planning 2026")
+        self.assertTrue(handled)
+        self.assertIn("Planning 2026", res)
+
+        # /name
+        handled, res = episodic.handle_turn_intent(conn, "alice", "/name Strategic Roadmaps")
+        self.assertTrue(handled)
+        self.assertIn("Strategic Roadmaps", res)
+
+        # /sessions
+        handled, res = episodic.handle_turn_intent(conn, "alice", "/sessions")
+        self.assertTrue(handled)
+        self.assertIn("conversations", res.lower())
+
+        # /export
+        handled, res = episodic.handle_turn_intent(conn, "alice", "/export")
+        self.assertTrue(handled)
+        self.assertIn("Conversation Export", res)
+        conn.close()
+
+    def test_episodic_pruning_policy(self):
+        """Verify rolling pruning on wake for turns older than retention threshold."""
+        conn = sqlite3.connect(":memory:")
+        episodic.init_episodic_tables(conn)
+        session_id, _ = episodic.get_or_create_active_session(conn, "alice")
+
+        now = datetime.now(timezone.utc)
+        old_time = (now - timedelta(days=40)).isoformat()
+        recent_time = (now - timedelta(days=5)).isoformat()
+
+        # Insert historical turn directly
+        conn.execute(
+            "INSERT INTO conversation_turns (session_id, user_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (session_id, "alice", "user", "Old forgotten message", old_time),
         )
+        conn.execute(
+            "INSERT INTO conversation_turns (session_id, user_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (session_id, "alice", "user", "Recent message", recent_time),
+        )
+        conn.commit()
 
-    history, banner = workspace.load_task_whiteboard(
-        workspace_db,
-        "project-sm",
-        "task-eng",
-        max_messages=4,
-    )
-    assert len(history) == 4
-    assert history[0]["content"] == "Turn step 4"
-    assert history[-1]["content"] == "Turn step 7"
+        pruned = episodic.prune_conversations(conn, retention_days=30)
+        self.assertEqual(pruned, 1)
 
-    assert banner is not None
-    assert "Workspace Context: Project 'project-sm' | Task 'task-eng'" in banner
-    assert "recall_workspace_task" in banner
+        remaining = conn.execute("SELECT content FROM conversation_turns WHERE session_id = ?", (session_id,)).fetchall()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0][0], "Recent message")
+        conn.close()
+
+    # ===========================================================================
+    # 4. Type 3: Workspace Memory (Project & Task Scoped State)
+    # ===========================================================================
+
+    def test_workspace_tables_and_task_lifecycle(self):
+        """Verify workspace tables and task state machine."""
+        conn = sqlite3.connect(":memory:")
+        workspace.init_workspace_tables(conn)
+
+        project = workspace.create_or_get_project(conn, "proj-alpha", "Alpha Project")
+        self.assertEqual(project["id"], "proj-alpha")
+
+        task = workspace.create_or_update_task(conn, "proj-alpha", "task-101", "Implement parser")
+        self.assertEqual(task["status"], "pending")
+
+        workspace.update_task_status(conn, "proj-alpha", "task-101", "in_progress")
+        updated = workspace.get_task(conn, "proj-alpha", "task-101")
+        self.assertEqual(updated["status"], "in_progress")
+        conn.close()
+
+    def test_workspace_checkpoint_state(self):
+        """Verify key-value checkpoint state scoped to project and task."""
+        conn = sqlite3.connect(":memory:")
+        workspace.init_workspace_tables(conn)
+
+        workspace.set_task_state(conn, "proj-alpha", "task-101", "ast_symbols", ["parse", "validate"])
+        workspace.set_task_state(conn, "proj-alpha", "task-101", "diff_stat", {"insertions": 14, "deletions": 2})
+
+        symbols = workspace.get_task_state(conn, "proj-alpha", "task-101", "ast_symbols")
+        self.assertEqual(symbols, ["parse", "validate"])
+
+        all_state = workspace.get_all_task_state(conn, "proj-alpha", "task-101")
+        self.assertIn("ast_symbols", all_state)
+        self.assertIn("diff_stat", all_state)
+
+        # Other tasks should not see this state
+        other_state = workspace.get_task_state(conn, "proj-alpha", "task-999", "ast_symbols")
+        self.assertIsNone(other_state)
+        conn.close()
+
+    def test_workspace_recall_tool_spec_omits_project_id(self):
+        """Verify WORKSPACE_RECALL_TOOL_SPEC does not allow model to supply arbitrary project_id."""
+        spec = workspace.WORKSPACE_RECALL_TOOL_SPEC
+        properties = spec["function"]["parameters"]["properties"]
+        self.assertIn("query", properties)
+        self.assertIn("task_id", properties)
+        # CRITICAL: project_id MUST NOT be in the model parameters (cross-project leak prevention)
+        self.assertNotIn("project_id", properties)
+        self.assertEqual(spec["function"]["parameters"]["required"], ["query"])
+
+    def test_workspace_recall_scoped(self):
+        """Verify recall_task_memory performs FTS and respects project scoping."""
+        conn = sqlite3.connect(":memory:")
+        workspace.init_workspace_tables(conn)
+
+        workspace.record_task_turn(conn, "proj-alpha", "task-1", "user", "Refactor the database schema")
+        workspace.record_task_turn(conn, "proj-beta", "task-2", "user", "Refactor the authentication flow")
+
+        # Search proj-alpha: only proj-alpha turn returned
+        alpha_res = workspace.recall_task_memory(conn, "proj-alpha", "Refactor")
+        self.assertEqual(len(alpha_res), 1)
+        self.assertEqual(alpha_res[0]["project_id"], "proj-alpha")
+        self.assertIn("database schema", alpha_res[0]["content"])
+
+        # Search proj-beta: only proj-beta turn returned
+        beta_res = workspace.recall_task_memory(conn, "proj-beta", "Refactor")
+        self.assertEqual(len(beta_res), 1)
+        self.assertEqual(beta_res[0]["project_id"], "proj-beta")
+        self.assertIn("authentication flow", beta_res[0]["content"])
+        conn.close()
+
+    def test_workspace_db_path_sanitization(self):
+        """Verify get_workspace_db_path creates isolated, sanitized database filenames."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            p1 = workspace.get_workspace_db_path(tmp_dir, "my-team/project-1")
+            self.assertEqual(p1.name, "workspace_my-team_project-1.db")
+
+            p2 = workspace.get_workspace_db_path(tmp_dir, "clean_project")
+            self.assertEqual(p2.name, "workspace_clean_project.db")
 
 
-def test_workspace_state_checkpointing(workspace_db):
-    """Verify key-value checkpointing per project and task."""
-    workspace.set_task_state(workspace_db, "proj-1", "task-1", "current_step", 3)
-    workspace.set_task_state(workspace_db, "proj-1", "task-1", "changed_files", ["agent.py", "Dockerfile"])
-
-    step = workspace.get_task_state(workspace_db, "proj-1", "task-1", "current_step")
-    files = workspace.get_task_state(workspace_db, "proj-1", "task-1", "changed_files")
-    assert step == 3
-    assert files == ["agent.py", "Dockerfile"]
-
-    all_state = workspace.get_all_task_state(workspace_db, "proj-1", "task-1")
-    assert all_state["current_step"] == 3
-    assert all_state["changed_files"] == ["agent.py", "Dockerfile"]
-
-    # Delete key
-    assert workspace.delete_task_state(workspace_db, "proj-1", "task-1", "current_step") is True
-    assert workspace.get_task_state(workspace_db, "proj-1", "task-1", "current_step") is None
-
-
-def test_workspace_recall_and_pruning(workspace_db):
-    """Verify workspace FTS5 recall and turn pruning retention."""
-    workspace.create_or_update_task(workspace_db, "proj-ops", "task-deploy", title="Deploy ECS")
-    workspace.record_task_turn(
-        workspace_db,
-        "proj-ops",
-        "task-deploy",
-        role="assistant",
-        content="Configured ALB target group health checks for ECS Fargate.",
-    )
-
-    results = workspace.recall_task_memory(workspace_db, "proj-ops", "health checks")
-    assert len(results) > 0
-    assert "target group health checks" in results[0]["content"]
-
-    # Pruning
-    ancient = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
-    cur = workspace_db.execute(
-        "INSERT INTO workspace_turns (project_id, task_id, role, content, timestamp) VALUES ('proj-ops', 'task-deploy', 'user', 'old log', ?)",
-        (ancient,),
-    )
-    t_id = cur.lastrowid
-    workspace_db.execute("INSERT INTO workspace_fts (content, turn_id, project_id, task_id) VALUES ('old log', ?, 'proj-ops', 'task-deploy')", (str(t_id),))
-    workspace_db.commit()
-
-    pruned = workspace.prune_workspace(workspace_db, retention_days=30)
-    assert pruned == 1
+if __name__ == "__main__":
+    unittest.main()

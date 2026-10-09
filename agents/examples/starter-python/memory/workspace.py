@@ -14,6 +14,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Any
 
 DEFAULT_MAX_MESSAGES = 20
@@ -26,7 +27,7 @@ WORKSPACE_RECALL_TOOL_SPEC = {
         "name": "recall_workspace_task",
         "description": (
             "Search previous workspace tasks, turns, decisions, or code notes "
-            "within the current project or specific task."
+            "within the active project workspace."
         ),
         "parameters": {
             "type": "object",
@@ -35,19 +36,22 @@ WORKSPACE_RECALL_TOOL_SPEC = {
                     "type": "string",
                     "description": "Keywords or search phrase to find historical task information.",
                 },
-                "project_id": {
-                    "type": "string",
-                    "description": "The project ID to search within.",
-                },
                 "task_id": {
                     "type": "string",
-                    "description": "Optional: search a specific task ID. If omitted, searches across all tasks in the project.",
+                    "description": "Optional: search a specific task ID. If omitted, searches across all tasks in the active project.",
                 },
             },
-            "required": ["query", "project_id"],
+            "required": ["query"],
         },
     },
 }
+
+
+def get_workspace_db_path(memory_dir: Path | str, project_id: str) -> Path:
+    """Return isolated per-project database path to prevent multi-team state co-mingling."""
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", project_id.strip()) or "default"
+    return Path(memory_dir) / f"workspace_{safe_id}.db"
+
 
 
 def init_workspace_tables(conn: sqlite3.Connection):

@@ -10,7 +10,6 @@ Standardizes the 3 Agent Memory Archetypes:
 import os
 from pathlib import Path
 from typing import Any
-import yaml
 
 from . import ephemeral
 from . import episodic
@@ -32,6 +31,41 @@ _ARCHETYPE_MODULES = {
     ARCHETYPE_EPISODIC: episodic,
     ARCHETYPE_WORKSPACE: workspace,
 }
+
+
+def _parse_yaml_scalar(val: str) -> Any:
+    val = val.strip()
+    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+        return val[1:-1]
+    if val.lower() == "true":
+        return True
+    if val.lower() == "false":
+        return False
+    if val.isdigit():
+        return int(val)
+    return val
+
+
+def _parse_manifest(text: str) -> dict:
+    """Standard-library parser for cartridge manifest memory and persistence blocks."""
+    result = {}
+    current_key = None
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0 and ":" in stripped:
+            k, v = stripped.split(":", 1)
+            k, v = k.strip(), v.strip()
+            current_key = k
+            result[k] = _parse_yaml_scalar(v) if v else {}
+            continue
+        if current_key and isinstance(result.get(current_key), dict) and ":" in stripped:
+            nk, nv = stripped.split(":", 1)
+            result[current_key][nk.strip()] = _parse_yaml_scalar(nv)
+    return result
 
 
 def get_memory_archetype(name: str):
@@ -56,7 +90,7 @@ def get_memory_archetype(name: str):
 def load_archetype_from_cartridge(cartridge_path: Path | str | None = None) -> tuple[str, Any]:
     """Inspect cartridge.yaml to determine and return the configured memory archetype.
 
-    Defaults to 'episodic' if cartridge.yaml is absent or does not declare memory.archetype.
+    Fails closed: raises RuntimeError or ValueError on corrupt/invalid manifests.
     """
     path = Path(cartridge_path) if cartridge_path else Path("cartridge.yaml")
     if not path.is_absolute() and not path.exists():
@@ -67,20 +101,37 @@ def load_archetype_from_cartridge(cartridge_path: Path | str | None = None) -> t
                 path = candidate
                 break
 
-    archetype_name = ARCHETYPE_EPISODIC
-    if path.exists():
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            memory_conf = data.get("memory")
-            if isinstance(memory_conf, dict):
-                declared = memory_conf.get("archetype")
-                if declared:
-                    archetype_name = declared.strip().lower()
-            elif isinstance(memory_conf, str):
-                archetype_name = memory_conf.strip().lower()
-        except Exception:
-            pass
+    if not path.exists():
+        raise FileNotFoundError(f"Cartridge manifest not found at {path}")
+
+    try:
+        content = path.read_text("utf-8")
+        data = _parse_manifest(content)
+    except Exception as e:
+        raise RuntimeError(f"Failed to read cartridge manifest at {path}: {e}") from e
+
+    archetype_name = None
+    memory_conf = data.get("memory")
+    if isinstance(memory_conf, dict):
+        declared = memory_conf.get("archetype")
+        if declared:
+            archetype_name = str(declared).strip().lower()
+    elif isinstance(memory_conf, str):
+        archetype_name = memory_conf.strip().lower()
+
+    if not archetype_name:
+        # Fall back to persistence settings if memory.archetype is omitted
+        pers_conf = data.get("persistence")
+        if isinstance(pers_conf, dict):
+            if pers_conf.get("enabled") is False:
+                archetype_name = ARCHETYPE_EPHEMERAL
+            elif pers_conf.get("enabled") is True or "prefix" in pers_conf:
+                archetype_name = ARCHETYPE_EPISODIC
+
+    if not archetype_name:
+        raise ValueError(
+            f"Cartridge manifest at {path} does not declare memory.archetype or persistence configuration."
+        )
 
     return archetype_name, get_memory_archetype(archetype_name)
 
