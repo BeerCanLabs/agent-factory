@@ -6,7 +6,7 @@ import { z } from 'zod';
 export const FACTORY_SERVICE_NAMES = [
   'gatekeeper',
   'keymaster',
-  'tinman',
+  'executive',
   'secretary',
   'landlord',
   'auditor',
@@ -58,9 +58,9 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/gatekeeper-egress/src/signin-links.ts',
     ],
   },
-  tinman: {
-    name: 'tinman',
-    title: 'Tinman',
+  executive: {
+    name: 'executive',
+    title: 'Executive',
     role: 'Model service and uniform inference provider with token and cost metering (M1–M4, E5)',
     hostedIn: ['packages/gatekeeper-egress'],
     owns: [

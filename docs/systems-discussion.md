@@ -53,7 +53,7 @@ request.
 If a hold belongs to a skill, the gatekeeper-egress still has to enforce it, and **it cannot depend on the agent saying
 which skill it is using**: a confused or manipulated agent could simply not say. Enforcement has to recognize what is
 being sent (system, method, path pattern) from a declaration that the skill carries and the Factory trusts. This is
-the same "which skill is this call for" question as in `docs/tinman-roadmap.md`, but a wrong answer there only picks a
+the same "which skill is this call for" question as in `docs/executive-roadmap.md`, but a wrong answer there only picks a
 different model, while here it would skip a human check.
 
 ## Open questions (all Dale's)
@@ -77,7 +77,7 @@ different model, while here it would skip a human check.
 ## Related
 
 - `DESIGN_AUTHORITY.md` §6.3.1 (E4, E7, E9, E10), §6.11 (Keymaster), §6.15 (the Cast), the Cast extraction roadmap.
-- `docs/tinman-roadmap.md` (hints, owner selection and the per-skill signal).
+- `docs/executive-roadmap.md` (hints, owner selection and the per-skill signal).
 - The Bouncer's role assignments as data (GAP-090, TSK-112) and agent owners (GAP-088).
 
 Nothing in this file is to be executed.
