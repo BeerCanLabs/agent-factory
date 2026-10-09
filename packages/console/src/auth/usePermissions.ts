@@ -21,5 +21,6 @@ export function usePermissions() {
     canApproveModel: hasRole('admin'),
     canManageCredentials: hasRole('admin'),
     canDecideSkills: hasRole('admin'),
+    canManageIdentities: hasRole('admin'),
   };
 }
