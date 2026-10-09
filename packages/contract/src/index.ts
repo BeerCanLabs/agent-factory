@@ -23,6 +23,9 @@ export {
   connectionSchema,
   credentialSource,
   secretDeclarations,
+  agentRolesSchema,
+  agentRoleSchema,
+  roleSkillPolicySchema,
 } from './schema.js';
 export type {
   SecretsManifest,
@@ -42,6 +45,8 @@ export type {
   McpCapability,
   SkillEntry,
   SecretDeclaration,
+  AgentRoles,
+  AgentRole,
 } from './schema.js';
 export { validateCartridge } from './validate.js';
 export type { ValidationIssue, ValidationResult } from './validate.js';

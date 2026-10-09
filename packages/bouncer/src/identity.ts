@@ -25,6 +25,7 @@ export type IdentityLink = {
   actor: string;
   name?: string;
   roles?: Role[];
+  agentRoles?: Record<string, string[]>;
   linkedBy: string;
   linkedAt: string;
 };
@@ -74,14 +75,15 @@ export class IdentityLinkStore {
     id: string,
     actor: string,
     by: string,
-    extra?: { name?: string; roles?: Role[] },
+    extra?: { name?: string; roles?: Role[]; agentRoles?: Record<string, string[]> },
   ): { link: IdentityLink; changed: boolean } {
     const current = this.items.get(key(provider, id));
     const sameRoles =
       (!current?.roles && !extra?.roles) ||
       (current?.roles?.length === extra?.roles?.length &&
         current?.roles?.every((r, i) => r === extra?.roles?.[i]));
-    if (current?.actor === actor && current?.name === extra?.name && sameRoles) {
+    const sameAgentRoles = JSON.stringify(current?.agentRoles || {}) === JSON.stringify(extra?.agentRoles || {});
+    if (current?.actor === actor && current?.name === extra?.name && sameRoles && sameAgentRoles) {
       return { link: { ...current }, changed: false };
     }
     const link: IdentityLink = {
@@ -90,6 +92,7 @@ export class IdentityLinkStore {
       actor,
       ...(extra?.name ? { name: extra.name } : {}),
       ...(extra?.roles ? { roles: [...extra.roles] } : {}),
+      ...(extra?.agentRoles ? { agentRoles: { ...extra.agentRoles } } : {}),
       linkedBy: by,
       linkedAt: new Date().toISOString(),
     };
@@ -126,6 +129,8 @@ export type AuthenticatedCaller = {
   name?: string;
   role: Role | 'agent-owner';
   roles: readonly Role[];
+  agentRoles?: readonly string[];
+  isOwner?: boolean;
   provider?: string;
   id?: string;
 };
@@ -141,6 +146,7 @@ export type IngressAuthorizeRequest = {
     actor: string;
     name?: string;
     roles?: readonly Role[];
+    agentRoles?: Record<string, string[]>;
   };
   adminEmails?: readonly string[];
   isIngressCaller?: boolean;
@@ -220,6 +226,10 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
   }
 
   const isOwner = owners.some((o) => o.toLowerCase() === actor.toLowerCase());
+  const linkAgentRoles = link.agentRoles?.[agentId] ?? [];
+  const effectiveAgentRoles = isOwner
+    ? Array.from(new Set(['Owner', ...linkAgentRoles]))
+    : linkAgentRoles;
 
   // Determine the primary role that actually satisfied the privilege
   let satisfyingRole: Role | 'agent-owner';
@@ -246,6 +256,8 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
       name: link.name,
       role: satisfyingRole,
       roles: faithfulRoles,
+      agentRoles: effectiveAgentRoles,
+      isOwner,
       provider: requestedBy.provider,
       id: requestedBy.id,
     },

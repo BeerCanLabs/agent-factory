@@ -65,6 +65,8 @@ describe('Bouncer authorizeIngress', () => {
         name: 'Admin User',
         role: 'admin',
         roles: ['admin', 'operator', 'approver', 'viewer', 'ingest'],
+        agentRoles: [],
+        isOwner: false,
         provider: 'discord',
         id: '123456789',
       });
@@ -122,6 +124,30 @@ describe('Bouncer authorizeIngress', () => {
       assert.equal(res.caller?.role, 'agent-owner');
       assert.equal(res.caller?.name, 'Alice');
       assert.equal(res.caller?.provider, 'slack');
+      assert.equal(res.caller?.isOwner, true);
+      assert.deepEqual(res.caller?.agentRoles, ['Owner']);
+    }
+  });
+
+  it('populates agentRoles mapped for a specific agent', () => {
+    const res = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'steph_disc' },
+      agentId: 'donna',
+      link: {
+        actor: 'cloudflare:stephanie@example.com',
+        name: 'Stephanie',
+        roles: ['operator'],
+        agentRoles: {
+          donna: ['Family'],
+          higgins: ['Realtor'],
+        },
+      },
+    });
+    assert.equal(res.allowed, true);
+    if (res.allowed) {
+      assert.equal(res.caller?.name, 'Stephanie');
+      assert.equal(res.caller?.isOwner, false);
+      assert.deepEqual(res.caller?.agentRoles, ['Family']);
     }
   });
 
@@ -218,5 +244,17 @@ describe('Bouncer IdentityLinkStore', () => {
     const unlinked = store.unlink('discord', 'disc_123');
     assert.ok(unlinked);
     assert.equal(store.resolve('discord', 'disc_123'), undefined);
+  });
+
+  it('stores and preserves agentRoles mapping', () => {
+    const store = new IdentityLinkStore();
+    const { link } = store.link('discord', 'steph_1', 'cloudflare:stephanie@example.com', 'token:admin', {
+      name: 'Stephanie',
+      roles: ['operator'],
+      agentRoles: { donna: ['Family'] },
+    });
+    assert.deepEqual(link.agentRoles, { donna: ['Family'] });
+    const resolved = store.resolveLink('discord', 'steph_1');
+    assert.deepEqual(resolved?.agentRoles, { donna: ['Family'] });
   });
 });

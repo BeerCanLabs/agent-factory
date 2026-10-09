@@ -101,7 +101,20 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
       }
     }
   }
-  const { link, changed } = store.link(provider, id, actor, principal.actor, { name, roles });
+  let agentRoles: Record<string, string[]> | undefined;
+  if (body.agentRoles !== undefined && body.agentRoles !== null) {
+    if (typeof body.agentRoles !== 'object' || Array.isArray(body.agentRoles)) {
+      return json(res, 400, { error: 'agentRoles must be a map of agentId to array of role strings' }), true;
+    }
+    agentRoles = {};
+    for (const [agentId, rolesList] of Object.entries(body.agentRoles)) {
+      if (typeof agentId !== 'string' || !Array.isArray(rolesList) || !rolesList.every((r: unknown) => typeof r === 'string')) {
+        return json(res, 400, { error: 'agentRoles must map agentId string to array of role strings' }), true;
+      }
+      agentRoles[agentId] = [...new Set(rolesList as string[])];
+    }
+  }
+  const { link, changed } = store.link(provider, id, actor, principal.actor, { name, roles, agentRoles });
   if (changed) ledger('IDENTITY_LINKED', actor, { name: link.name, roles: link.roles });
   json(res, 200, link);
   return true;
