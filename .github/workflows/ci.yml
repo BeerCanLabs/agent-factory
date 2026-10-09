@@ -11,9 +11,13 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - run: npm install
       - run: npm test
       - run: npm run validate
+      - run: (cd agents/examples/starter-python && python3 -m unittest discover -s tests)
 
   compose-proof:
     # Proves the paper's claims against real containers: network isolation, run tokens, gatekeeper-egress

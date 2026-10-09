@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateCartridge } from './validate.js';
-import { cartridgeSchema } from './schema.js';
+import { cartridgeSchema, memorySchema, memoryArchetype } from './schema.js';
 import './system.test.js';
 
 
@@ -381,6 +381,85 @@ describe('skills & triad governance declarations', () => {
       ],
     });
     assert.equal(res.success, true);
+  });
+});
+
+describe('memory archetype declarations (§GAP-115, §TSK-029)', () => {
+  it('accepts valid memory archetypes (ephemeral, episodic, workspace)', () => {
+    assert.equal(memoryArchetype.safeParse('ephemeral').success, true);
+    assert.equal(memoryArchetype.safeParse('episodic').success, true);
+    assert.equal(memoryArchetype.safeParse('workspace').success, true);
+
+    // Rejects unknown or obsolete archetype names
+    assert.equal(memoryArchetype.safeParse('infinite').success, false);
+    assert.equal(memoryArchetype.safeParse('type1').success, false);
+    assert.equal(memoryArchetype.safeParse('durable').success, false);
+    assert.equal(memoryArchetype.safeParse('').success, false);
+  });
+
+  it('validates memory configurations with archetypes and bounds', () => {
+    const ephemeral = memorySchema.safeParse({ archetype: 'ephemeral' });
+    assert.equal(ephemeral.success, true);
+
+    const episodic = memorySchema.safeParse({
+      archetype: 'episodic',
+      retentionDays: 30,
+      maxMessages: 20,
+      maxChars: 24000,
+    });
+    assert.equal(episodic.success, true);
+
+    const workspace = memorySchema.safeParse({
+      archetype: 'workspace',
+      prefix: 'proj-',
+      retentionDays: 90,
+      enabled: true,
+    });
+    assert.equal(workspace.success, true);
+  });
+
+  it('rejects invalid memory bounds and unknown properties', () => {
+    // Non-positive integers
+    assert.equal(memorySchema.safeParse({ archetype: 'episodic', retentionDays: 0 }).success, false);
+    assert.equal(memorySchema.safeParse({ archetype: 'episodic', retentionDays: -5 }).success, false);
+    assert.equal(memorySchema.safeParse({ archetype: 'episodic', maxMessages: 0 }).success, false);
+    assert.equal(memorySchema.safeParse({ archetype: 'episodic', maxChars: -100 }).success, false);
+
+    // Non-integers
+    assert.equal(memorySchema.safeParse({ archetype: 'episodic', retentionDays: 14.5 }).success, false);
+
+    // Empty prefix
+    assert.equal(memorySchema.safeParse({ archetype: 'workspace', prefix: '' }).success, false);
+
+    // Unknown properties (strict)
+    assert.equal(memorySchema.safeParse({ archetype: 'episodic', syncMode: 's3' }).success, false);
+  });
+
+  it('validates memory block in unified cartridgeSchema', () => {
+    const base = {
+      schemaVersion: '1.0',
+      id: 'memory-agent',
+      triggers: [{ type: 'http', path: '/wake' }],
+    };
+
+    const validCartridge = cartridgeSchema.safeParse({
+      ...base,
+      memory: {
+        archetype: 'episodic',
+        retentionDays: 30,
+        maxMessages: 20,
+        maxChars: 24000,
+      },
+    });
+    assert.equal(validCartridge.success, true);
+
+    const invalidCartridge = cartridgeSchema.safeParse({
+      ...base,
+      memory: {
+        archetype: 'unknown-archetype',
+      },
+    });
+    assert.equal(invalidCartridge.success, false);
   });
 });
 

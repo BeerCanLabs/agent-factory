@@ -157,10 +157,16 @@ export const identitySchema = z
   })
   .strict();
 
+export const memoryArchetype = z.enum(['ephemeral', 'episodic', 'workspace']);
+
 export const memorySchema = z
   .object({
-    prefix: z.string().min(1),
+    prefix: z.string().min(1).optional(),
     enabled: z.boolean().optional(),
+    archetype: memoryArchetype.optional(),
+    retentionDays: z.number().int().positive().optional(),
+    maxMessages: z.number().int().positive().optional(),
+    maxChars: z.number().int().positive().optional(),
   })
   .strict();
 

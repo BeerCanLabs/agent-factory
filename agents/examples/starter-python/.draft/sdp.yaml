@@ -1,0 +1,13 @@
+# DRAFT Software Deployment Pattern (SDP) Manifest
+schema_version: "1.0.5"
+metadata:
+  name: "starter-python"
+  organization: "BeerCanLabs"
+  catalog_status: "complete"
+
+components:
+  - id: "starter-python"
+    name: "Operations Assistant Starter"
+    component_type: "agent_cartridge"
+    substrate: "factory_oci"
+    acceptable_use_status: "approved"

@@ -94,7 +94,7 @@ Your container must listen on the port specified by the `$PORT` environment vari
 * `FACTORY_URL`: Factory Control Plane internal URL (`http://control-plane.factory.internal:8088`).
 * `FACTORY_GATEKEEPER_EGRESS_URL`: gatekeeper-egress (`http://gatekeeper-egress.factory.internal:8089`). All outbound LLM and MCP calls **must** route through this URL for token metering and secret injection.
 * `AGENT_ID`: The unique identifier of this cartridge.
-* `MEMORY_STORE_URI`: Path/bucket for long-term memory.
+* `MEMORY_STORE_URI`: Path/bucket for long-term memory (hydrated transparently by the Factory Secretary shim into `$MEMORY_DIR`; see the [Agent Memory Architecture Guide](../architecture/agent-memory-models.md)).
 
 ### Python Minimal Skeleton (`agent.py`):
 ```python
