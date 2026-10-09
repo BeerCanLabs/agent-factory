@@ -32,6 +32,7 @@ function initialLocation(): { screen: ScreenId; agentId?: string } {
 
 
 const MainLayout: React.FC = () => {
+  const { hasRole } = useAuth();
   const [initial] = useState(initialLocation);
   const [currentScreen, setCurrentScreen] = useState<ScreenId>(initial.screen);
   const [agents, setAgents] = useState<AgentRecord[]>([]);
@@ -130,7 +131,18 @@ const MainLayout: React.FC = () => {
             />
           )}
 
-          {currentScreen === 'identities' && <IdentitiesView />}
+          {currentScreen === 'identities' && (
+            hasRole('admin') ? (
+              <IdentitiesView />
+            ) : (
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-12 text-center text-xs text-slate-500">
+                <p className="font-semibold text-slate-700 dark:text-slate-300">Admin Privileges Required</p>
+                <p className="text-slate-500 text-[11px] mt-1">
+                  Viewing and managing Bouncer external identity links requires administrator authority.
+                </p>
+              </div>
+            )
+          )}
 
           {currentScreen === 'skills' && <SkillsView />}
           {currentScreen === 'systems' && <SystemsView />}
