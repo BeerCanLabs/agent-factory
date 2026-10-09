@@ -12,10 +12,11 @@ import {
   KeyRound,
   Puzzle,
   Server,
+  Fingerprint,
 } from 'lucide-react';
 import { useAuth } from '../auth/CloudflareAuth.js';
 
-export type ScreenId = 'fleet' | 'workbench' | 'credentials' | 'skills' | 'systems' | 'approvals' | 'finops' | 'ledger' | 'triage' | 'studio';
+export type ScreenId = 'fleet' | 'workbench' | 'credentials' | 'identities' | 'skills' | 'systems' | 'approvals' | 'finops' | 'ledger' | 'triage' | 'studio';
 
 
 interface SidebarProps {
@@ -33,7 +34,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeAgentsCount,
   outstandingCredentialsCount = 0,
 }) => {
-  const { activeRole } = useAuth();
+  const { activeRole, hasRole } = useAuth();
+  const isAdmin = hasRole('admin');
 
   const navItems: Array<{ id: ScreenId; label: string; icon: React.ReactNode; badge?: string | number; badgeColor?: string }> = [
     {
@@ -55,6 +57,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: outstandingCredentialsCount > 0 ? outstandingCredentialsCount : undefined,
       badgeColor: 'bg-amber-950 text-amber-400 border border-amber-800/80',
     },
+    ...(isAdmin
+      ? [
+          {
+            id: 'identities' as const,
+            label: 'Identities & Access',
+            icon: <Fingerprint className="w-4 h-4" />,
+          },
+        ]
+      : []),
     {
       id: 'skills',
       label: 'Skills',

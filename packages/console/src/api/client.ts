@@ -1,4 +1,4 @@
-import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, LedgerEvent, OfferedModel, OutstandingCredentials, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
+import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
 
 
 const API_BASE = '/api/v1';
@@ -325,6 +325,29 @@ export const factoryApi = {
     return request<{ system: SystemDefinition }>(`/systems/${encodeURIComponent(id)}/reject`, {
       method: 'POST',
       body: JSON.stringify({ ...(version !== undefined ? { version } : {}), ...(reason ? { reason } : {}) }),
+    });
+  },
+
+  // Bouncer Identity Mapping (§6.12 A1, A2, GAP-090)
+  async listIdentityLinks(): Promise<IdentityLink[]> {
+    const res = await request<{ links: IdentityLink[] }>('/identity-links');
+    return res.links ?? [];
+  },
+
+  async setIdentityLink(
+    provider: IdentityProvider,
+    id: string,
+    data: { actor: string; name?: string; roles?: FactoryRole[] },
+  ): Promise<IdentityLink> {
+    return request<IdentityLink>(`/identity-links/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async unlinkIdentity(provider: IdentityProvider, id: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/identity-links/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
     });
   },
 };

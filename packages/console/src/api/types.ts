@@ -324,3 +324,18 @@ export interface SystemSummary {
   versions: SystemDefinition[];
 }
 
+export const IDENTITY_PROVIDERS = ['discord', 'slack', 'teams', 'webui', 'cli'] as const;
+export type IdentityProvider = (typeof IDENTITY_PROVIDERS)[number];
+
+export type FactoryRole = 'admin' | 'operator' | 'approver' | 'viewer' | 'ingest';
+
+export interface IdentityLink {
+  provider: IdentityProvider;
+  id: string;
+  actor: string;
+  name?: string;
+  roles?: FactoryRole[];
+  linkedBy: string;
+  linkedAt: string;
+}
+
