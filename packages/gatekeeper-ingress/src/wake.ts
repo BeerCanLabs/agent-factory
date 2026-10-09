@@ -22,7 +22,14 @@ export class WakeRefusedError extends Error {
   }
 }
 
-/** The error for a wake the control plane did not accept; only a budget refusal is typed. */
+export class UnauthorizedCallerError extends Error {
+  constructor(readonly reason?: string) {
+    super(`unauthorized_caller: ${reason ?? 'caller not authorized'}`);
+    this.name = 'UnauthorizedCallerError';
+  }
+}
+
+/** The error for a wake the control plane did not accept; budget and authorization refusals are typed. */
 export function wakeFailure(status: number, body: string, kind: RefusedKind = 'wake'): Error {
   if (status === 402) {
     try {
@@ -32,6 +39,16 @@ export function wakeFailure(status: number, body: string, kind: RefusedKind = 'w
       /* not a budget refusal body */
     }
   }
+  if (status === 403) {
+    try {
+      const parsed = JSON.parse(body) as { error?: unknown; reason?: unknown };
+      if (parsed.error === 'unauthorized_caller') {
+        return new UnauthorizedCallerError(typeof parsed.reason === 'string' ? parsed.reason : undefined);
+      }
+    } catch {
+      /* not a json refusal body */
+    }
+  }
   return new Error(`factory answered ${status}`);
 }
 
@@ -39,4 +56,9 @@ export function wakeFailure(status: number, body: string, kind: RefusedKind = 'w
 export function wakeRefusedText(agentName: string, window: string, kind: RefusedKind = 'wake'): string {
   const label = window === 'perDay' ? 'daily budget (perDay)' : window === 'perMonth' ? 'monthly budget (perMonth)' : 'budget';
   return `🚫 *${agentName} is over its ${label}, so ${kind === 'wake' ? 'it was not started' : 'your message was not delivered'}.*`;
+}
+
+/** One sentence for the channel when the caller is unmapped or unauthorized. */
+export function unauthorizedCallerText(agentName: string): string {
+  return `⛔ *You are not authorized to interact with ${agentName}. Please contact the factory administrator.*`;
 }

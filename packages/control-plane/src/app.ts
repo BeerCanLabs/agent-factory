@@ -2,7 +2,7 @@ import http from 'node:http';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
-import { redactSecrets, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
+import { redactSecrets, payloadHash, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
 import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
 import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import {
@@ -31,7 +31,7 @@ import { AdmissionRefusedError, type DeployProvider, type Runtime, type SourceRe
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
-import { authorize, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type Privilege } from '@beercanlabs/factory-bouncer';
+import { authorize, authorizeIngress, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type AuthenticatedCaller, type Privilege } from '@beercanlabs/factory-bouncer';
 import { validatePolicy, type PolicyStore } from './policy.js';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
@@ -412,7 +412,15 @@ export function unblockRun(state: FactoryState, runId: string, from: RunState, a
   return next;
 }
 
-export type CreateRunOptions = { actor: string; trigger: string; input?: unknown; callbackUrl?: string; model?: string; requestedBy?: { provider: string; id: string } };
+export type CreateRunOptions = {
+  actor: string;
+  trigger: string;
+  input?: unknown;
+  callbackUrl?: string;
+  model?: string;
+  requestedBy?: { provider: string; id: string };
+  caller?: AuthenticatedCaller;
+};
 
 /** The single entry point for waking an agent: manual, webhook, cron, event route, gatekeeper-ingress. */
 export async function createRun(state: FactoryState, agentId: string, opts: CreateRunOptions): Promise<Outcome<Run>> {
@@ -426,9 +434,22 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
     if (bad) return { status: 400, body: { error: bad } };
   }
 
+  // Sanitize input: never mutate caller's object, and never allow a forged caller
+  let sanitizedInput: unknown = opts.input;
+  if (opts.input && typeof opts.input === 'object' && !Array.isArray(opts.input)) {
+    const copy = { ...(opts.input as Record<string, unknown>) };
+    delete copy.caller;
+    if (opts.caller) {
+      copy.caller = { ...opts.caller };
+    }
+    sanitizedInput = copy;
+  } else if (opts.caller && opts.input === undefined) {
+    sanitizedInput = { caller: { ...opts.caller } };
+  }
+
   // Deduplicate incoming runs with identical messageId
-  if (opts.input && typeof opts.input === 'object') {
-    const msgId = (opts.input as Record<string, any>).messageId;
+  if (sanitizedInput && typeof sanitizedInput === 'object') {
+    const msgId = (sanitizedInput as Record<string, any>).messageId;
     if (msgId) {
       const existing = state.runs.list({ agentId }).find((r) => {
         const rInput = r.input as Record<string, any> | undefined;
@@ -474,6 +495,7 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
       trigger: opts.trigger,
       callbackUrl: opts.callbackUrl,
       ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
+      ...(opts.caller ? { caller: opts.caller } : {}),
       missing: bound.missing,
     });
     record(state, run, 'PRE_FLIGHT_MISSING_SECRET', opts.actor);
@@ -487,9 +509,10 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
     state: 'QUEUED',
     actor: opts.actor,
     trigger: opts.trigger,
-    input: opts.input,
+    input: sanitizedInput,
     callbackUrl: opts.callbackUrl,
     ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
+    ...(opts.caller ? { caller: opts.caller } : {}),
     ...(opts.model ? { model: opts.model } : {}),
   });
   record(state, run, 'RUN_QUEUED', opts.actor);
@@ -1297,7 +1320,9 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     // Only a caller allowed to say who asked (the ingress) may name the requester. `input.authorId` is whatever the
     // caller wrote and is never an identity.
+    const isIngress = authorize({ principal, privilege: 'runs.attest-requester' }).allowed;
     let requestedBy: { provider: string; id: string } | undefined;
+    let caller: AuthenticatedCaller | undefined;
     if (body.requestedBy !== undefined) {
       const attest = authorize({ principal, privilege: 'runs.attest-requester' });
       if (!attest.allowed) {
@@ -1312,6 +1337,57 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       }
       requestedBy = { provider: rb.provider, id: rb.id };
     }
+
+    if (isIngress && !requestedBy) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: runCreate[1],
+        type: 'action',
+        action: 'WAKE_REFUSED_UNAUTHORIZED_CALLER',
+        actor: principal.actor,
+      });
+      json(res, 403, {
+        error: 'unauthorized_caller',
+        reason: 'missing requestedBy for external ingress caller',
+        required: 'operator',
+      });
+      return;
+    }
+
+    if (requestedBy) {
+      const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean);
+      const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
+      const ingressAuth = authorizeIngress({
+        requestedBy,
+        agentId: runCreate[1],
+        privilege: 'agents.wake',
+        owners: ownersOf(state, runCreate[1]),
+        link: link ? { actor: link.actor, name: link.name, roles: link.roles } : undefined,
+        adminEmails,
+        isIngressCaller: isIngress,
+      });
+
+      if (!ingressAuth.allowed) {
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId: runCreate[1],
+          type: 'action',
+          action: 'WAKE_REFUSED_UNAUTHORIZED_CALLER',
+          actor: principal.actor,
+          payloadSha256: payloadHash(requestedBy),
+        });
+        json(res, 403, {
+          error: ingressAuth.error,
+          reason: ingressAuth.reason,
+          required: ingressAuth.required,
+        });
+        return;
+      }
+      caller = ingressAuth.caller;
+    }
     const out = await createRun(state, runCreate[1], {
       actor: principal.actor,
       trigger: runCreate[2] === 'wake' ? 'manual' : 'api',
@@ -1319,6 +1395,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       callbackUrl: body.callbackUrl as string | undefined,
       model: body.model as string | undefined,
       ...(requestedBy ? { requestedBy } : {}),
+      ...(caller ? { caller } : {}),
     });
     json(res, out.status, out.body);
     return;
@@ -1396,7 +1473,92 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 402, { error: 'budget_exceeded', window: refused });
       return;
     }
-    const payload = await readJson(req);
+    const rawBody = (await readJson(req)) as Record<string, unknown>;
+    const isIngress = authorize({ principal, privilege: 'runs.attest-requester' }).allowed;
+    let requestedBy: { provider: string; id: string } | undefined;
+    if (rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody)) {
+      if (rawBody.requestedBy !== undefined) {
+        const attest = authorize({ principal, privilege: 'runs.attest-requester' });
+        if (!attest.allowed) {
+          json(res, 403, { error: 'forbidden', required: attest.required });
+          return;
+        }
+        const rb = rawBody.requestedBy as Record<string, unknown> | null;
+        const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 128;
+        if (!rb || typeof rb !== 'object' || Array.isArray(rb) || !text(rb.provider) || !text(rb.id)) {
+          json(res, 400, { error: 'requestedBy must be { provider, id }, each a string of at most 128 characters' });
+          return;
+        }
+        requestedBy = { provider: rb.provider, id: rb.id };
+      }
+    }
+
+    if (isIngress && !requestedBy) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: agent.id,
+        runId: activeRun(state, agent.id)?.runId,
+        type: 'action',
+        action: 'CONVERSATION_REFUSED_UNAUTHORIZED_CALLER',
+        actor: principal.actor,
+      });
+      json(res, 403, {
+        error: 'unauthorized_caller',
+        reason: 'missing requestedBy for external ingress caller',
+        required: 'operator',
+      });
+      return;
+    }
+
+    let caller: AuthenticatedCaller | undefined;
+    if (requestedBy) {
+      const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean);
+      const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
+      const ingressAuth = authorizeIngress({
+        requestedBy,
+        agentId: agent.id,
+        privilege: 'agents.converse',
+        owners: ownersOf(state, agent.id),
+        link: link ? { actor: link.actor, name: link.name, roles: link.roles } : undefined,
+        adminEmails,
+        isIngressCaller: isIngress,
+      });
+      if (!ingressAuth.allowed) {
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId: agent.id,
+          runId: activeRun(state, agent.id)?.runId,
+          type: 'action',
+          action: 'CONVERSATION_REFUSED_UNAUTHORIZED_CALLER',
+          actor: principal.actor,
+          payloadSha256: payloadHash(requestedBy),
+        });
+        json(res, 403, {
+          error: ingressAuth.error,
+          reason: ingressAuth.reason,
+          required: ingressAuth.required,
+        });
+        return;
+      }
+      caller = ingressAuth.caller;
+    }
+
+    // Input hygiene: unwrap body.input if sent as { input, requestedBy }, strip unverified caller
+    let payload = (rawBody && typeof rawBody === 'object' && 'input' in rawBody && rawBody.input !== undefined) ? rawBody.input : rawBody;
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const copy = { ...(payload as Record<string, unknown>) };
+      delete copy.caller;
+      if (caller) {
+        copy.caller = { ...caller };
+      }
+      payload = copy;
+    } else if (caller && payload === undefined) {
+      payload = { caller: { ...caller } };
+    }
+
     await state.runtime.deliver(agent, payload);
     deliverToMailbox(state, agent.id, payload);
     const currentRun = activeRun(state, agent.id);

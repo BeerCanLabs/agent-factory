@@ -41,7 +41,6 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/gatekeeper-ingress', 'packages/gatekeeper-egress', 'packages/auth', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
-      'packages/control-plane/src/identity-links.ts',
       'packages/control-plane/src/policy.ts',
       'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
       'packages/gatekeeper-egress/src/main.ts',
@@ -128,6 +127,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/bouncer', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/identity-links.ts',
     ],
   },
   timekeeper: {
