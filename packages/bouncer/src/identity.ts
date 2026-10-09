@@ -194,14 +194,15 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
 
   // Resolve roles:
   // 1. Explicit link roles if set
-  // 2. Admin if email listed in FACTORY_ADMIN_EMAILS
-  // 3. Grandfathered legacy link fallback ('operator') so existing linked users do not break (Finding 6)
+  // 2. Admin if email listed in FACTORY_ADMIN_EMAILS or token:admin
+  // 3. Clean slate mapping: zero grandfathering for un-roled legacy links.
+  //    External callers without explicit roles have no roles assigned and must be granted roles by an admin.
   const resolvedRoles: readonly Role[] =
     link.roles && link.roles.length > 0
       ? link.roles
       : isEmailAdmin
         ? (['admin', 'operator', 'approver', 'viewer', 'ingest'] as const)
-        : (['operator'] as const);
+        : [];
 
   const principal: Principal = { actor, roles: [...resolvedRoles] };
 
@@ -233,12 +234,12 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
     satisfyingRole = resolvedRoles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ?? resolvedRoles[0] ?? 'operator';
   }
 
-  // Report faithfully: link's explicitly granted roles, or admin if derived from email, or grandfathered operator
+  // Report faithfully: link's explicitly granted roles, or admin if derived from email, or empty array if un-roled
   const faithfulRoles: readonly Role[] = link.roles
     ? [...link.roles]
     : isEmailAdmin
       ? (['admin'] as const)
-      : (['operator'] as const);
+      : [];
 
   return {
     allowed: true,

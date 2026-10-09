@@ -279,19 +279,25 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     assert.equal(rBob.body.error, 'unauthorized_caller');
   });
 
-  it('supports legacy links via FACTORY_ADMIN_EMAILS and grandfathered operator', async () => {
+  it('resolves roles via FACTORY_ADMIN_EMAILS and enforces clean slate (un-roled non-admin rejected)', async () => {
     const oldEnv = process.env.FACTORY_ADMIN_EMAILS;
-    process.env.FACTORY_ADMIN_EMAILS = 'legacy-admin@example.com';
+    process.env.FACTORY_ADMIN_EMAILS = 'admin@example.com';
     try {
-      // Legacy link with no roles for email in FACTORY_ADMIN_EMAILS -> admin
-      state.identityLinks!.link('discord', 'leg-admin-id', 'cloudflare:legacy-admin@example.com', 'admin');
-      const rAdmin = await wake(INGRESS, { input: { messageId: 'm-leg1' }, requestedBy: discord('leg-admin-id') });
+      // Un-roled link for email in FACTORY_ADMIN_EMAILS -> admin
+      state.identityLinks!.link('discord', 'admin-id', 'cloudflare:admin@example.com', 'admin');
+      const rAdmin = await wake(INGRESS, { input: { messageId: 'm-leg1' }, requestedBy: discord('admin-id') });
       assert.equal(rAdmin.status, 202);
       assert.equal(rAdmin.body.caller.role, 'admin');
 
-      // Legacy link with no roles for email NOT in FACTORY_ADMIN_EMAILS -> grandfathered operator (can wake)
-      state.identityLinks!.link('discord', 'leg-op-id', 'cloudflare:other@example.com', 'admin');
-      const rOp = await wake(INGRESS, { input: { messageId: 'm-leg2' }, requestedBy: discord('leg-op-id') });
+      // Un-roled link for email NOT in FACTORY_ADMIN_EMAILS -> rejected with 403 (clean slate: zero grandfathering)
+      state.identityLinks!.link('discord', 'unroled-id', 'cloudflare:other@example.com', 'admin');
+      const rUnroled = await wake(INGRESS, { input: { messageId: 'm-leg2' }, requestedBy: discord('unroled-id') });
+      assert.equal(rUnroled.status, 403);
+      assert.equal(rUnroled.body.error, 'unauthorized_caller');
+
+      // Explicitly roled link -> authorized
+      state.identityLinks!.link('discord', 'roled-op-id', 'cloudflare:other@example.com', 'admin', { roles: ['operator'] });
+      const rOp = await wake(INGRESS, { input: { messageId: 'm-leg3' }, requestedBy: discord('roled-op-id') });
       assert.equal(rOp.status, 202);
       assert.equal(rOp.body.caller.role, 'operator');
     } finally {

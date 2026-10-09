@@ -125,19 +125,36 @@ describe('Bouncer authorizeIngress', () => {
     }
   });
 
-  it('resolves legacy link without explicit roles as grandfathered operator when not admin', () => {
+  it('rejects un-roled link without explicit roles when not admin or owner (clean slate: zero grandfathering)', () => {
     const res = authorizeIngress({
-      requestedBy: { provider: 'discord', id: 'legacy_user' },
+      requestedBy: { provider: 'discord', id: 'unroled_user' },
       agentId: 'donna',
       link: {
-        actor: 'cloudflare:legacy_user@example.com',
-        name: 'Legacy User',
+        actor: 'cloudflare:unroled_user@example.com',
+        name: 'Unroled User',
+      },
+    });
+    assert.equal(res.allowed, false);
+    if (!res.allowed) {
+      assert.equal(res.error, 'unauthorized_caller');
+      assert.equal(res.required, 'operator');
+    }
+  });
+
+  it('authorizes un-roled link if caller is agent owner (derived agent-owner role)', () => {
+    const res = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'owner_user' },
+      agentId: 'donna',
+      owners: ['cloudflare:owner@example.com'],
+      link: {
+        actor: 'cloudflare:owner@example.com',
+        name: 'Agent Owner',
       },
     });
     assert.equal(res.allowed, true);
     if (res.allowed) {
-      assert.equal(res.caller?.role, 'operator');
-      assert.deepEqual(res.caller?.roles, ['operator']);
+      assert.equal(res.caller?.role, 'agent-owner');
+      assert.deepEqual(res.caller?.roles, []);
     }
   });
 

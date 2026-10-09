@@ -100,9 +100,6 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
         }
       }
     }
-  } else {
-    // Grandfathering/Default: links created without explicit roles default to 'operator' (Finding 6)
-    roles = ['operator'];
   }
   const { link, changed } = store.link(provider, id, actor, principal.actor, { name, roles });
   if (changed) ledger('IDENTITY_LINKED', actor, { name: link.name, roles: link.roles });
