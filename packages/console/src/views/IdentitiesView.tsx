@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Fingerprint,
   Plus,
@@ -8,13 +8,8 @@ import {
   Pencil,
   Copy,
   Check,
-  Shield,
-  ShieldAlert,
   ShieldCheck,
-  UserCheck,
   AlertCircle,
-  ExternalLink,
-  Info,
 } from 'lucide-react';
 import { factoryApi } from '../api/client.js';
 import type { FactoryRole, IdentityLink, IdentityProvider } from '../api/types.js';
@@ -30,6 +25,10 @@ const ALL_ROLES: Array<{ role: FactoryRole; label: string; desc: string }> = [
   { role: 'viewer', label: 'Viewer', desc: 'Read-only access: view agent states, metrics, and immutable ledger' },
   { role: 'ingest', label: 'Ingest', desc: 'Event ingestion authority: post telemetry and metrics' },
 ];
+
+const ADMIN_PRESET: FactoryRole[] = ALL_ROLES.map((r) => r.role);
+const OPERATOR_PRESET: FactoryRole[] = ['operator', 'approver', 'viewer'];
+const VIEWER_PRESET: FactoryRole[] = ['viewer'];
 
 const PROVIDER_INFO: Record<IdentityProvider, { label: string; badgeClass: string; placeholder: string; helper: string }> = {
   discord: {
@@ -47,8 +46,8 @@ const PROVIDER_INFO: Record<IdentityProvider, { label: string; badgeClass: strin
   teams: {
     label: 'MS Teams',
     badgeClass: 'bg-blue-500/10 text-blue-400 border-blue-500/30',
-    placeholder: 'e.g. 29:1a2b3c4d5e...',
-    helper: 'Microsoft Teams AAD User ID or Bot Framework participant ID.',
+    placeholder: 'e.g. a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+    helper: 'Microsoft Teams Azure AD User Object ID (GUID) or username (letters, digits, dot, dash, underscore).',
   },
   webui: {
     label: 'Web UI',
@@ -72,8 +71,19 @@ const ROLE_BADGE: Record<FactoryRole, string> = {
   ingest: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30',
 };
 
+// In lockstep with Bouncer & Control Plane validation rules (§6.12, packages/bouncer/src/identity.ts)
 const EXTERNAL_ID_REGEX = /^[A-Za-z0-9._-]{1,128}$/;
-const ACTOR_REGEX = /^(cloudflare|oidc|token):\S+$/;
+const PRINCIPAL_ACTOR_REGEX = /^(cloudflare|oidc|token):\S+$/;
+
+function validateActor(actor: string): string | null {
+  const trimmed = actor.trim().toLowerCase();
+  if (!trimmed) return 'Principal Actor is required.';
+  if (trimmed.length > 256) return 'Principal Actor must be 256 characters or less.';
+  if (!PRINCIPAL_ACTOR_REGEX.test(trimmed)) {
+    return 'Principal Actor must be in format cloudflare:email@example.com, oidc:subject, or token:name.';
+  }
+  return null;
+}
 
 export const IdentitiesView: React.FC = () => {
   const { user } = useAuth();
@@ -82,9 +92,11 @@ export const IdentitiesView: React.FC = () => {
   const [links, setLinks] = useState<IdentityLink[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProvider, setSelectedProvider] = useState<IdentityProvider | 'all'>('all');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Link / Edit Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -93,7 +105,7 @@ export const IdentitiesView: React.FC = () => {
   const [modalId, setModalId] = useState('');
   const [modalActor, setModalActor] = useState('');
   const [modalName, setModalName] = useState('');
-  const [modalRoles, setModalRoles] = useState<FactoryRole[]>(['admin', 'operator', 'approver', 'viewer', 'ingest']);
+  const [modalRoles, setModalRoles] = useState<FactoryRole[]>([]);
   const [modalSubmitting, setModalSubmitting] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
 
@@ -105,10 +117,12 @@ export const IdentitiesView: React.FC = () => {
   const loadData = useCallback(async () => {
     try {
       setRefreshing(true);
+      setLoadError(null);
       const data = await factoryApi.listIdentityLinks();
       setLinks(data);
     } catch (err: any) {
       console.error('Failed to load identity links:', err);
+      setLoadError(err.message || 'Failed to load identity links.');
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -117,12 +131,20 @@ export const IdentitiesView: React.FC = () => {
 
   useEffect(() => {
     void loadData();
+    return () => {
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+    };
   }, [loadData]);
 
-  const copyToClipboard = (text: string, key: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 2000);
+  const copyToClipboard = async (text: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedKey(key);
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+      copyTimeoutRef.current = setTimeout(() => setCopiedKey(null), 2000);
+    } catch (err) {
+      console.warn('Failed to copy to clipboard:', err);
+    }
   };
 
   const openCreateModal = () => {
@@ -133,7 +155,8 @@ export const IdentitiesView: React.FC = () => {
     const defaultActor = user?.email ? `cloudflare:${user.email.toLowerCase()}` : '';
     setModalActor(defaultActor);
     setModalName(user?.name && user.name !== user.email ? user.name : '');
-    setModalRoles(['admin', 'operator', 'approver', 'viewer', 'ingest']);
+    // Principle of least privilege: default to empty roles
+    setModalRoles([]);
     setModalError(null);
     setIsModalOpen(true);
   };
@@ -163,21 +186,23 @@ export const IdentitiesView: React.FC = () => {
       setModalError('External ID must only contain letters, digits, dot, dash, or underscore (1-128 chars).');
       return;
     }
-    if (!trimmedActor) {
-      setModalError('Principal Actor is required.');
+    const actorErr = validateActor(modalActor);
+    if (actorErr) {
+      setModalError(actorErr);
       return;
     }
-    if (!ACTOR_REGEX.test(trimmedActor)) {
-      setModalError('Principal Actor must be in format cloudflare:user@example.com, oidc:subject, or token:name.');
-      return;
-    }
+
+    // Sort roles in canonical order to prevent spurious ledger/store changes
+    const canonicalRoles = modalRoles.length > 0
+      ? ALL_ROLES.map((r) => r.role).filter((r) => modalRoles.includes(r))
+      : undefined;
 
     try {
       setModalSubmitting(true);
       await factoryApi.setIdentityLink(modalProvider, trimmedId, {
         actor: trimmedActor,
         ...(trimmedName ? { name: trimmedName } : {}),
-        roles: modalRoles.length > 0 ? modalRoles : undefined,
+        roles: canonicalRoles,
       });
       setIsModalOpen(false);
       await loadData();
@@ -234,7 +259,7 @@ export const IdentitiesView: React.FC = () => {
     return counts;
   }, [links]);
 
-  const adminCount = links.filter((l) => l.roles?.includes('admin')).length;
+  const explicitAdminCount = links.filter((l) => l.roles?.includes('admin')).length;
   const activeProvidersCount = IDENTITY_PROVIDERS.filter((p) => links.some((l) => l.provider === p)).length;
 
   return (
@@ -301,9 +326,9 @@ export const IdentitiesView: React.FC = () => {
           <div className="text-[11px] text-slate-400 mt-1">Across all external channels</div>
         </div>
         <div className="bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 rounded-xl p-4">
-          <div className="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Admin Principals</div>
-          <div className="text-2xl font-bold text-rose-500 mt-1">{adminCount}</div>
-          <div className="text-[11px] text-slate-400 mt-1">Full sovereign control granted</div>
+          <div className="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Explicit Admin Links</div>
+          <div className="text-2xl font-bold text-rose-500 mt-1">{explicitAdminCount}</div>
+          <div className="text-[11px] text-slate-400 mt-1">Directly granted admin role</div>
         </div>
         <div className="bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 rounded-xl p-4">
           <div className="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Active Surfaces</div>
@@ -370,6 +395,21 @@ export const IdentitiesView: React.FC = () => {
             <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-slate-400" />
             Loading identity mappings...
           </div>
+        ) : loadError ? (
+          <div className="p-12 text-center text-xs text-rose-400 space-y-3">
+            <AlertCircle className="w-8 h-8 mx-auto text-rose-500" />
+            <div>
+              <p className="font-semibold text-rose-300">Failed to load identity mappings</p>
+              <p className="text-slate-400 text-[11px] mt-0.5 font-mono">{loadError}</p>
+            </div>
+            <button
+              onClick={() => void loadData()}
+              className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs transition"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Retry</span>
+            </button>
+          </div>
         ) : filteredLinks.length === 0 ? (
           <div className="p-12 text-center text-xs text-slate-500 space-y-3">
             <Fingerprint className="w-10 h-10 mx-auto text-slate-400 stroke-1" />
@@ -432,7 +472,7 @@ export const IdentitiesView: React.FC = () => {
                         <div className="flex items-center space-x-1.5 font-mono text-[11px] text-slate-800 dark:text-slate-200">
                           <span>{link.id}</span>
                           <button
-                            onClick={() => copyToClipboard(link.id, copyKey)}
+                            onClick={() => void copyToClipboard(link.id, copyKey)}
                             className="p-1 text-slate-400 hover:text-slate-200 rounded hover:bg-slate-800 transition"
                             title="Copy External ID"
                           >
@@ -474,9 +514,11 @@ export const IdentitiesView: React.FC = () => {
                               </span>
                             ))
                           ) : (
-                            <span className="inline-flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/30">
-                              <AlertCircle className="w-2.5 h-2.5" />
-                              <span>No roles (Blocked)</span>
+                            <span
+                              className="inline-flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700"
+                              title="No explicit roles assigned to this link. If the Cloudflare email is in FACTORY_ADMIN_EMAILS, admin access is resolved at runtime."
+                            >
+                              <span>No explicit roles</span>
                             </span>
                           )}
                         </div>
@@ -615,7 +657,7 @@ export const IdentitiesView: React.FC = () => {
               <p className="text-[11px] text-slate-500 mt-1">
                 Format: <code className="text-emerald-400">cloudflare:email@example.com</code>,{' '}
                 <code className="text-emerald-400">oidc:subject</code>, or{' '}
-                <code className="text-emerald-400">token:name</code>.
+                <code className="text-emerald-400">token:name</code> (max 256 characters).
               </p>
             </div>
 
@@ -646,18 +688,26 @@ export const IdentitiesView: React.FC = () => {
                 <div className="flex items-center space-x-1.5 text-[10px]">
                   <button
                     type="button"
-                    onClick={() => setModalRoles(['admin', 'operator', 'approver', 'viewer', 'ingest'])}
+                    onClick={() => setModalRoles([...ADMIN_PRESET])}
                     className="text-emerald-400 hover:underline"
                   >
-                    Admin Preset
+                    Admin
                   </button>
                   <span className="text-slate-600">•</span>
                   <button
                     type="button"
-                    onClick={() => setModalRoles(['operator', 'approver', 'viewer'])}
+                    onClick={() => setModalRoles([...OPERATOR_PRESET])}
                     className="text-emerald-400 hover:underline"
                   >
-                    Operator Preset
+                    Operator
+                  </button>
+                  <span className="text-slate-600">•</span>
+                  <button
+                    type="button"
+                    onClick={() => setModalRoles([...VIEWER_PRESET])}
+                    className="text-emerald-400 hover:underline"
+                  >
+                    Viewer
                   </button>
                   <span className="text-slate-600">•</span>
                   <button
