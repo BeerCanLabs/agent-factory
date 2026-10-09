@@ -19,6 +19,8 @@ export type RunState =
   | 'BLOCKED_UNHEALTHY'
   | (typeof TERMINAL_STATES)[number];
 
+import type { AuthenticatedCaller } from '@beercanlabs/factory-bouncer';
+
 export type Run = {
   runId: string;
   agentId: string;
@@ -30,6 +32,8 @@ export type Run = {
   input?: unknown;
   /** GAP-088: who asked for this run, as the Gatekeeper's ingress verified it. Set only by a caller allowed to say so. */
   requestedBy?: { provider: string; id: string };
+  /** GAP-090: the Bouncer's verified, authenticated caller for this run, if initiated externally. */
+  caller?: AuthenticatedCaller;
   /** Pins every LLM call in this run to one model (enforced by the gatekeeper-egress). */
   model?: string;
   callbackUrl?: string;

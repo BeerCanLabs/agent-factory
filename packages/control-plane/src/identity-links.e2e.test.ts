@@ -117,10 +117,29 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
   });
 
   it('refuses an unknown provider, a bad id and an actor that is not a principal', async () => {
-    assert.equal((await call('/api/v1/identity-links/slack/1', 'PUT', ADMIN, { actor: 'token:x' })).status, 400);
+    assert.equal((await call('/api/v1/identity-links/unknown/1', 'PUT', ADMIN, { actor: 'token:x' })).status, 400);
     assert.equal((await call('/api/v1/identity-links/discord/a%20b', 'PUT', ADMIN, { actor: 'token:x' })).status, 400);
     for (const actor of ['alice', 'email:alice@example.com', 'token:', 'cloudflare:a b', 42, undefined]) {
       assert.equal((await call('/api/v1/identity-links/discord/1', 'PUT', ADMIN, { actor })).status, 400, String(actor));
+    }
+  });
+
+  it('supports slack, teams, webui, and cli providers with optional name and roles', async () => {
+    for (const provider of ['slack', 'teams', 'webui', 'cli'] as const) {
+      const res = await call(`/api/v1/identity-links/${provider}/user1`, 'PUT', ADMIN, {
+        actor: 'cloudflare:dale.sackrider@gmail.com',
+        name: 'Dale',
+        roles: ['admin', 'operator'],
+      });
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      assert.equal(res.body.provider, provider);
+      assert.equal(res.body.name, 'Dale');
+      assert.deepEqual(res.body.roles, ['admin', 'operator']);
+      const resolved = state.identityLinks!.resolveLink(provider, 'user1');
+      assert.equal(resolved?.actor, 'cloudflare:dale.sackrider@gmail.com');
+      assert.equal(resolved?.name, 'Dale');
+      assert.deepEqual(resolved?.roles, ['admin', 'operator']);
+      await call(`/api/v1/identity-links/${provider}/user1`, 'DELETE', ADMIN);
     }
   });
 

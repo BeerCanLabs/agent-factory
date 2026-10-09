@@ -16,6 +16,7 @@ import { noopRuntime } from './runtime.js';
 import { MemoryRunStore } from './runs.js';
 import { PolicyStore } from './policy.js';
 import { FileConfigBackend, VersionedConfigStore } from '@beercanlabs/factory-registrar';
+import { IdentityLinkStore } from './identity-links.js';
 
 const ADMIN = 'admin-requester';
 const OPERATOR = 'operator-requester';
@@ -35,11 +36,12 @@ const passed = (status: number) => status !== 401 && status !== 403;
 describe('the requesting user on the run (TSK-106)', { concurrency: false }, () => {
   let cp: http.Server;
   let dir: string;
+  let state: FactoryState;
   let api: (path: string, method?: string, token?: string, body?: unknown) => Promise<{ status: number; body: any }>;
 
   before(async () => {
     dir = mkdtempSync(join(tmpdir(), 'cp-requester-'));
-    const state = {
+    state = {
       agents: new Map(),
       registryDir: join(dir, 'registry'),
       ledger: new MemoryLedger(),
@@ -134,6 +136,57 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     for (const bad of ['42', [], {}, { provider: 'discord' }, { provider: 'discord', id: '' }, { provider: 'discord', id: 7 }, { provider: 'd'.repeat(129), id: '1' }, null]) {
       const r = await wake(INGRESS, { input: { messageId: 'bad' }, requestedBy: bad });
       assert.equal(r.status, 400, JSON.stringify(bad));
+    }
+  });
+
+  it('rejects unmapped callers when identityLinks is configured (Bouncer identity gate)', async () => {
+    state.identityLinks = new IdentityLinkStore(join(dir, 'links'));
+    try {
+      const r = await wake(INGRESS, { input: { messageId: 'm-unmapped' }, requestedBy: discord('unmapped-user') });
+      assert.equal(r.status, 403);
+      assert.equal(r.body.error, 'unauthorized_caller');
+      assert.equal(r.body.reason, 'unmapped external identity: discord:unmapped-user');
+    } finally {
+      state.identityLinks = undefined;
+    }
+  });
+
+  it('authorizes mapped admin and owner callers and injects caller metadata into run and input', async () => {
+    state.identityLinks = new IdentityLinkStore(join(dir, 'links'));
+    try {
+      state.identityLinks.link('discord', '470400107028938752', 'cloudflare:dale.sackrider@gmail.com', 'admin', {
+        name: 'Dale',
+        roles: ['admin'],
+      });
+      const r = await wake(INGRESS, { input: { messageId: 'm-dale', content: 'hello agent' }, requestedBy: discord('470400107028938752') });
+      assert.equal(r.status, 202);
+      const expectedCaller = {
+        actor: 'cloudflare:dale.sackrider@gmail.com',
+        name: 'Dale',
+        role: 'admin',
+        roles: ['admin'],
+        provider: 'discord',
+        id: '470400107028938752',
+      };
+      assert.deepEqual(r.body.caller, expectedCaller);
+      const run = state.runs.get(r.body.runId);
+      assert.ok(run);
+      assert.deepEqual(run.caller, expectedCaller);
+      assert.deepEqual((run.input as any).caller, expectedCaller);
+
+      // Mapped agent owner: Alice owns 'ada'
+      state.identityLinks.link('discord', 'alice-discord-id', 'token:alice', 'admin', { name: 'Alice' });
+      const rAlice = await wake(INGRESS, { input: { messageId: 'm-alice' }, requestedBy: discord('alice-discord-id') });
+      assert.equal(rAlice.status, 202);
+      assert.equal(rAlice.body.caller.role, 'agent-owner');
+
+      // Mapped non-owner viewer: insufficient privileges
+      state.identityLinks.link('discord', 'bob-discord-id', 'token:bob', 'admin', { name: 'Bob', roles: ['viewer'] });
+      const rBob = await wake(INGRESS, { input: { messageId: 'm-bob' }, requestedBy: discord('bob-discord-id') });
+      assert.equal(rBob.status, 403);
+      assert.equal(rBob.body.error, 'unauthorized_caller');
+    } finally {
+      state.identityLinks = undefined;
     }
   });
 });

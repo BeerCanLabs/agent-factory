@@ -12,6 +12,9 @@ import { join } from 'node:path';
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 
+import type { Role } from '@beercanlabs/factory-auth';
+import { ROLES } from '@beercanlabs/factory-auth';
+
 /** A principal actor as the Gatekeeper's authentication names a caller: `cloudflare:`, `oidc:` or `token:`. */
 export const PRINCIPAL_ACTOR = /^(cloudflare|oidc|token):\S+$/;
 
@@ -21,10 +24,18 @@ export function parseActor(value: unknown): string | undefined {
   return PRINCIPAL_ACTOR.test(actor) && actor.length <= 256 ? actor : undefined;
 }
 
-export type IdentityProvider = 'discord';
-export type IdentityLink = { provider: IdentityProvider; id: string; actor: string; linkedBy: string; linkedAt: string };
+export const PROVIDERS = ['discord', 'slack', 'teams', 'webui', 'cli'] as const;
+export type IdentityProvider = (typeof PROVIDERS)[number] | string;
+export type IdentityLink = {
+  provider: IdentityProvider;
+  id: string;
+  actor: string;
+  name?: string;
+  roles?: Role[];
+  linkedBy: string;
+  linkedAt: string;
+};
 
-const PROVIDERS: readonly string[] = ['discord'];
 const EXTERNAL_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
 /** Links on disk, one file each, written the way the approval store writes. In memory when there is no directory. */
@@ -51,15 +62,40 @@ export class IdentityLinkStore {
     return this.items.get(key(provider, id))?.actor;
   }
 
+  /** The full identity link for this external identity, if any. */
+  resolveLink(provider: string, id: string): IdentityLink | undefined {
+    return this.items.get(key(provider, id));
+  }
+
   list(): IdentityLink[] {
     return [...this.items.values()].sort((a, b) => key(a.provider, a.id).localeCompare(key(b.provider, b.id)));
   }
 
   /** Links, or replaces the link of, an external identity. `created: false` and no write when it is already so. */
-  link(provider: IdentityProvider, id: string, actor: string, by: string): { link: IdentityLink; changed: boolean } {
+  link(
+    provider: IdentityProvider,
+    id: string,
+    actor: string,
+    by: string,
+    extra?: { name?: string; roles?: Role[] },
+  ): { link: IdentityLink; changed: boolean } {
     const current = this.items.get(key(provider, id));
-    if (current?.actor === actor) return { link: { ...current }, changed: false };
-    const link: IdentityLink = { provider, id, actor, linkedBy: by, linkedAt: new Date().toISOString() };
+    const sameRoles =
+      (!current?.roles && !extra?.roles) ||
+      (current?.roles?.length === extra?.roles?.length &&
+        current?.roles?.every((r, i) => r === extra?.roles?.[i]));
+    if (current?.actor === actor && current?.name === extra?.name && sameRoles) {
+      return { link: { ...current }, changed: false };
+    }
+    const link: IdentityLink = {
+      provider,
+      id,
+      actor,
+      ...(extra?.name ? { name: extra.name } : {}),
+      ...(extra?.roles ? { roles: [...extra.roles] } : {}),
+      linkedBy: by,
+      linkedAt: new Date().toISOString(),
+    };
     // Write first: a link grants the right to decide approvals, so a failed write must not leave one live in memory.
     this.save(link);
     this.items.set(key(provider, id), link);
@@ -103,7 +139,7 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
   const store = state.identityLinks;
   if (!store) return json(res, 503, { error: 'identity_links_unavailable' }), true;
   const [provider, id] = [decodeURIComponent(one[1]), decodeURIComponent(one[2])];
-  if (!PROVIDERS.includes(provider) || !EXTERNAL_ID.test(id)) {
+  if (!PROVIDERS.includes(provider as any) || !EXTERNAL_ID.test(id)) {
     return json(res, 400, { error: 'unknown_identity', message: `provider must be one of ${PROVIDERS.join(', ')} and id letters, digits, dot, dash or underscore` }), true;
   }
   const ledger = (action: 'IDENTITY_LINKED' | 'IDENTITY_UNLINKED', actor: string) =>
@@ -116,10 +152,26 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
     json(res, 200, { ok: true });
     return true;
   }
-  const actor = parseActor((await readJson(req)).actor);
+  const body = await readJson(req);
+  const actor = parseActor(body.actor);
   if (!actor) return json(res, 400, { error: 'actor must be a principal actor such as cloudflare:alice@example.com, oidc:... or token:...' }), true;
-  const { link, changed } = store.link(provider as IdentityProvider, id, actor, principal.actor);
+  let name: string | undefined;
+  if (body.name !== undefined && body.name !== null) {
+    if (typeof body.name !== 'string' || body.name.length > 128) {
+      return json(res, 400, { error: 'name must be a string of at most 128 characters' }), true;
+    }
+    name = body.name.trim() || undefined;
+  }
+  let roles: Role[] | undefined;
+  if (body.roles !== undefined && body.roles !== null) {
+    if (!Array.isArray(body.roles) || !body.roles.every((r: unknown) => typeof r === 'string' && (ROLES as readonly string[]).includes(r))) {
+      return json(res, 400, { error: `roles must be an array of valid roles: ${ROLES.join(', ')}` }), true;
+    }
+    roles = [...new Set(body.roles as Role[])];
+  }
+  const { link, changed } = store.link(provider as IdentityProvider, id, actor, principal.actor, { name, roles });
   if (changed) ledger('IDENTITY_LINKED', actor);
   json(res, 200, link);
   return true;
 }
+

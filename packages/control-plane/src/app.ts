@@ -31,10 +31,8 @@ import { AdmissionRefusedError, type DeployProvider, type Runtime, type SourceRe
 import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
 import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
 import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
-import { authorize, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type Privilege } from '@beercanlabs/factory-bouncer';
+import { authorize, authorizeIngress, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type AuthenticatedCaller, type Privilege } from '@beercanlabs/factory-bouncer';
 import { validatePolicy, type PolicyStore } from './policy.js';
-
-/** E9: the largest held request body the control plane keeps (characters, base64 included). */
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
@@ -412,7 +410,15 @@ export function unblockRun(state: FactoryState, runId: string, from: RunState, a
   return next;
 }
 
-export type CreateRunOptions = { actor: string; trigger: string; input?: unknown; callbackUrl?: string; model?: string; requestedBy?: { provider: string; id: string } };
+export type CreateRunOptions = {
+  actor: string;
+  trigger: string;
+  input?: unknown;
+  callbackUrl?: string;
+  model?: string;
+  requestedBy?: { provider: string; id: string };
+  caller?: AuthenticatedCaller;
+};
 
 /** The single entry point for waking an agent: manual, webhook, cron, event route, gatekeeper-ingress. */
 export async function createRun(state: FactoryState, agentId: string, opts: CreateRunOptions): Promise<Outcome<Run>> {
@@ -424,6 +430,10 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
   if (opts.callbackUrl) {
     const bad = checkCallbackUrl(opts.callbackUrl, state.callbacks);
     if (bad) return { status: 400, body: { error: bad } };
+  }
+
+  if (opts.caller && opts.input && typeof opts.input === 'object' && !Array.isArray(opts.input)) {
+    (opts.input as Record<string, unknown>).caller = opts.caller;
   }
 
   // Deduplicate incoming runs with identical messageId
@@ -474,6 +484,7 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
       trigger: opts.trigger,
       callbackUrl: opts.callbackUrl,
       ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
+      ...(opts.caller ? { caller: opts.caller } : {}),
       missing: bound.missing,
     });
     record(state, run, 'PRE_FLIGHT_MISSING_SECRET', opts.actor);
@@ -490,6 +501,7 @@ export async function createRun(state: FactoryState, agentId: string, opts: Crea
     input: opts.input,
     callbackUrl: opts.callbackUrl,
     ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
+    ...(opts.caller ? { caller: opts.caller } : {}),
     ...(opts.model ? { model: opts.model } : {}),
   });
   record(state, run, 'RUN_QUEUED', opts.actor);
@@ -1298,6 +1310,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     // Only a caller allowed to say who asked (the ingress) may name the requester. `input.authorId` is whatever the
     // caller wrote and is never an identity.
     let requestedBy: { provider: string; id: string } | undefined;
+    let caller: AuthenticatedCaller | undefined;
     if (body.requestedBy !== undefined) {
       const attest = authorize({ principal, privilege: 'runs.attest-requester' });
       if (!attest.allowed) {
@@ -1311,6 +1324,47 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         return;
       }
       requestedBy = { provider: rb.provider, id: rb.id };
+
+      if (state.identityLinks) {
+        const link = state.identityLinks.resolveLink(requestedBy.provider, requestedBy.id);
+        const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
+          .split(',')
+          .map((e) => e.trim().toLowerCase())
+          .filter(Boolean);
+        const isEmailAdmin = (act: string) => {
+          if (!act.startsWith('cloudflare:')) return false;
+          const email = act.slice('cloudflare:'.length).trim().toLowerCase();
+          return adminEmails.includes(email);
+        };
+        const linkRoles = link?.roles && link.roles.length > 0
+          ? link.roles
+          : link && isEmailAdmin(link.actor)
+            ? (['admin', 'operator', 'approver', 'viewer', 'ingest'] as const)
+            : undefined;
+
+        const ingressAuth = authorizeIngress({
+          requestedBy,
+          agentId: runCreate[1],
+          owners: ownersOf(state, runCreate[1]),
+          link: link
+            ? {
+                actor: link.actor,
+                name: link.name,
+                roles: linkRoles,
+              }
+            : undefined,
+        });
+
+        if (!ingressAuth.allowed) {
+          json(res, 403, {
+            error: ingressAuth.error,
+            reason: ingressAuth.reason,
+            required: ingressAuth.required,
+          });
+          return;
+        }
+        caller = ingressAuth.caller;
+      }
     }
     const out = await createRun(state, runCreate[1], {
       actor: principal.actor,
@@ -1319,6 +1373,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       callbackUrl: body.callbackUrl as string | undefined,
       model: body.model as string | undefined,
       ...(requestedBy ? { requestedBy } : {}),
+      ...(caller ? { caller } : {}),
     });
     json(res, out.status, out.body);
     return;
