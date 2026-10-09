@@ -276,6 +276,8 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
       name: 'Dale',
       role: 'admin',
       roles: ['admin'],
+      agentRoles: [],
+      isOwner: false,
       provider: 'discord',
       id: '123456789',
     };
@@ -290,6 +292,8 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     const rAlice = await wake(INGRESS, { input: { messageId: 'm-alice' }, requestedBy: discord('alice-discord-id') });
     assert.equal(rAlice.status, 202);
     assert.equal(rAlice.body.caller.role, 'agent-owner');
+    assert.equal(rAlice.body.caller.isOwner, true);
+    assert.deepEqual(rAlice.body.caller.agentRoles, ['Owner']);
 
     // Mapped agent owner with no explicit roles gets 403 on /conversation (agents.converse requires operator)
     const rAliceConvo = await api('/api/v1/agents/ada/conversation', 'POST', INGRESS, {
