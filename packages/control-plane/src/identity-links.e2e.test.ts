@@ -127,7 +127,7 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
   it('supports slack, teams, webui, and cli providers with optional name and roles', async () => {
     for (const provider of ['slack', 'teams', 'webui', 'cli'] as const) {
       const res = await call(`/api/v1/identity-links/${provider}/user1`, 'PUT', ADMIN, {
-        actor: 'cloudflare:dale.sackrider@gmail.com',
+        actor: 'cloudflare:dale@example.com',
         name: 'Dale',
         roles: ['admin', 'operator'],
       });
@@ -136,11 +136,37 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
       assert.equal(res.body.name, 'Dale');
       assert.deepEqual(res.body.roles, ['admin', 'operator']);
       const resolved = state.identityLinks!.resolveLink(provider, 'user1');
-      assert.equal(resolved?.actor, 'cloudflare:dale.sackrider@gmail.com');
+      assert.equal(resolved?.actor, 'cloudflare:dale@example.com');
       assert.equal(resolved?.name, 'Dale');
       assert.deepEqual(resolved?.roles, ['admin', 'operator']);
       await call(`/api/v1/identity-links/${provider}/user1`, 'DELETE', ADMIN);
     }
+  });
+
+  it('IDENTITY_LINKED ledger hash changes when roles or name change', async () => {
+    const before = ledger.query({ agentId: 'factory' }).length;
+    await call('/api/v1/identity-links/discord/hash-test', 'PUT', ADMIN, {
+      actor: 'token:user1',
+      name: 'User One',
+      roles: ['viewer'],
+    });
+    await call('/api/v1/identity-links/discord/hash-test', 'PUT', ADMIN, {
+      actor: 'token:user1',
+      name: 'User One (Updated)',
+      roles: ['viewer'],
+    });
+    await call('/api/v1/identity-links/discord/hash-test', 'PUT', ADMIN, {
+      actor: 'token:user1',
+      name: 'User One (Updated)',
+      roles: ['viewer', 'operator'],
+    });
+    const rows = ledger.query({ agentId: 'factory' }).slice(before);
+    assert.equal(rows.length, 3);
+    const hashes = rows.map((r) => r.payloadSha256);
+    assert.notEqual(hashes[0], hashes[1]);
+    assert.notEqual(hashes[1], hashes[2]);
+    assert.notEqual(hashes[0], hashes[2]);
+    await call('/api/v1/identity-links/discord/hash-test', 'DELETE', ADMIN);
   });
 
   it('ledgers each change once, with no Discord id in the row, and not an unchanged link', async () => {

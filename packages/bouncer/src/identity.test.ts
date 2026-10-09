@@ -3,9 +3,18 @@ import assert from 'node:assert/strict';
 import { authorizeIngress } from './identity.js';
 
 describe('Bouncer authorizeIngress', () => {
-  it('allows internal actions with no requestedBy', () => {
+  it('allows internal actions with no requestedBy when not ingress caller', () => {
     const res = authorizeIngress({ agentId: 'donna' });
     assert.deepEqual(res, { allowed: true });
+  });
+
+  it('rejects an external ingress caller with missing requestedBy (fail closed)', () => {
+    const res = authorizeIngress({ agentId: 'donna', isIngressCaller: true });
+    assert.equal(res.allowed, false);
+    if (!res.allowed) {
+      assert.equal(res.error, 'unauthorized_caller');
+      assert.match(res.reason, /missing requestedBy for external ingress caller/);
+    }
   });
 
   it('rejects an unmapped external identity with unauthorized_caller', () => {
@@ -25,7 +34,7 @@ describe('Bouncer authorizeIngress', () => {
     const res = authorizeIngress({
       requestedBy: { provider: 'discord', id: 'viewer_user' },
       agentId: 'donna',
-      owners: ['cloudflare:dale.sackrider@gmail.com'],
+      owners: ['cloudflare:admin@example.com'],
       link: {
         actor: 'cloudflare:stranger@example.com',
         roles: ['viewer'],
@@ -40,25 +49,60 @@ describe('Bouncer authorizeIngress', () => {
 
   it('authorizes a mapped admin user across all agents and returns caller metadata', () => {
     const res = authorizeIngress({
-      requestedBy: { provider: 'discord', id: '470400107028938752' },
+      requestedBy: { provider: 'discord', id: '123456789' },
       agentId: 'donna',
       owners: ['cloudflare:other@example.com'],
       link: {
-        actor: 'cloudflare:dale.sackrider@gmail.com',
-        name: 'Dale',
+        actor: 'cloudflare:admin@example.com',
+        name: 'Admin User',
         roles: ['admin', 'operator', 'approver', 'viewer', 'ingest'],
       },
     });
     assert.equal(res.allowed, true);
     if (res.allowed) {
       assert.deepEqual(res.caller, {
-        actor: 'cloudflare:dale.sackrider@gmail.com',
-        name: 'Dale',
+        actor: 'cloudflare:admin@example.com',
+        name: 'Admin User',
         role: 'admin',
         roles: ['admin', 'operator', 'approver', 'viewer', 'ingest'],
         provider: 'discord',
-        id: '470400107028938752',
+        id: '123456789',
       });
+    }
+  });
+
+  it('resolves legacy link via adminEmails when link has no explicit roles', () => {
+    const res = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'admin_disc' },
+      agentId: 'donna',
+      adminEmails: ['legacy_admin@example.com'],
+      link: {
+        actor: 'cloudflare:legacy_admin@example.com',
+        name: 'Legacy Admin',
+      },
+    });
+    assert.equal(res.allowed, true);
+    if (res.allowed) {
+      assert.equal(res.caller?.role, 'admin');
+      assert.deepEqual(res.caller?.roles, ['admin']);
+    }
+  });
+
+  it('reports the satisfying role when a user has multiple roles (viewer, operator)', () => {
+    const res = authorizeIngress({
+      requestedBy: { provider: 'slack', id: 'U_MULTI' },
+      agentId: 'donna',
+      link: {
+        actor: 'cloudflare:user@example.com',
+        name: 'Multi Role User',
+        roles: ['viewer', 'operator'],
+      },
+    });
+    assert.equal(res.allowed, true);
+    if (res.allowed) {
+      // Must report 'operator' since operator satisfied agents.wake, not 'viewer'
+      assert.equal(res.caller?.role, 'operator');
+      assert.deepEqual(res.caller?.roles, ['viewer', 'operator']);
     }
   });
 
@@ -81,14 +125,14 @@ describe('Bouncer authorizeIngress', () => {
     }
   });
 
-  it('authorizes an operator user', () => {
+  it('authorizes conversation mid-run with agents.converse privilege', () => {
     const res = authorizeIngress({
-      requestedBy: { provider: 'teams', id: 'T987' },
-      agentId: 'switch',
-      owners: ['cloudflare:someone@example.com'],
+      requestedBy: { provider: 'discord', id: 'op_user' },
+      agentId: 'donna',
+      privilege: 'agents.converse',
       link: {
         actor: 'token:ops',
-        name: 'Ops Team',
+        name: 'Operator',
         roles: ['operator'],
       },
     });

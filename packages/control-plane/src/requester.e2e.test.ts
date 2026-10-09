@@ -6,7 +6,7 @@ import http from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MemoryLedger } from '@beercanlabs/factory-ledger';
+import { MemoryLedger, payloadHash } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { SpendTracker } from '@beercanlabs/factory-budget';
@@ -64,6 +64,7 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
       secretValues: new Set(),
       idleMs: 0,
       idleTimers: new Map(),
+      identityLinks: new IdentityLinkStore(join(dir, 'links')),
     } as unknown as FactoryState;
     state.configs = await VersionedConfigStore.open(new FileConfigBackend(join(dir, 'config')));
     cp = createFactoryServer(state);
@@ -80,6 +81,11 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     const reg = await api('/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA, cartridge: { id: 'ada', name: 'ada' } });
     assert.equal(reg.status, 201, JSON.stringify(reg.body));
     assert.equal((await api('/api/v1/agents/ada/owners', 'PUT', ADMIN, { owners: ['token:alice'] })).status, 200);
+
+    // Link test identities: Alice owns ada so she can wake it
+    state.identityLinks.link('discord', '42', 'token:alice', 'admin', { name: 'Alice' });
+    state.identityLinks.link('discord', '1', 'token:alice', 'admin', { name: 'Alice' });
+    state.identityLinks.link('discord', '2', 'token:alice', 'admin', { name: 'Alice' });
   });
 
   after(() => {
@@ -139,54 +145,164 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     }
   });
 
-  it('rejects unmapped callers when identityLinks is configured (Bouncer identity gate)', async () => {
-    state.identityLinks = new IdentityLinkStore(join(dir, 'links'));
+  it('rejects an external ingress caller with missing requestedBy (fail closed)', async () => {
+    const before = state.ledger.query({ agentId: 'ada' }).length;
+    const r = await wake(INGRESS, { input: { messageId: 'm-no-rb' } });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error, 'unauthorized_caller');
+    assert.equal(r.body.reason, 'missing requestedBy for external ingress caller');
+    const rows = state.ledger.query({ agentId: 'ada' }).slice(before);
+    const refusal = rows.find((row) => row.action === 'WAKE_REFUSED_UNAUTHORIZED_CALLER');
+    assert.ok(refusal);
+    assert.equal(refusal.actor, 'token:gatekeeper-ingress');
+  });
+
+  it('rejects an external ingress caller when no link store is configured (fail closed)', async () => {
+    const saved = state.identityLinks;
+    state.identityLinks = undefined;
     try {
-      const r = await wake(INGRESS, { input: { messageId: 'm-unmapped' }, requestedBy: discord('unmapped-user') });
+      const r = await wake(INGRESS, { input: { messageId: 'm-no-store' }, requestedBy: discord('42') });
       assert.equal(r.status, 403);
       assert.equal(r.body.error, 'unauthorized_caller');
-      assert.equal(r.body.reason, 'unmapped external identity: discord:unmapped-user');
+      assert.equal(r.body.reason, 'unmapped external identity: discord:42');
     } finally {
-      state.identityLinks = undefined;
+      state.identityLinks = saved;
     }
   });
 
+  it('rejects unmapped callers with 403 unauthorized_caller and ledgers refusal with hashed payload', async () => {
+    const before = state.ledger.query({ agentId: 'ada' }).length;
+    const r = await wake(INGRESS, { input: { messageId: 'm-unmapped' }, requestedBy: discord('unmapped-user') });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error, 'unauthorized_caller');
+    assert.equal(r.body.reason, 'unmapped external identity: discord:unmapped-user');
+    const rows = state.ledger.query({ agentId: 'ada' }).slice(before);
+    const refusal = rows.find((row) => row.action === 'WAKE_REFUSED_UNAUTHORIZED_CALLER');
+    assert.ok(refusal);
+    assert.equal(refusal.payloadSha256, payloadHash(discord('unmapped-user')));
+    assert.equal(JSON.stringify(refusal).includes('unmapped-user'), false);
+  });
+
+  it('rejects unmapped or unauthorized /conversation POST and ledgers refusal', async () => {
+    const before = state.ledger.query({ agentId: 'ada' }).length;
+
+    // Missing requestedBy from ingress caller
+    const rMissing = await api('/api/v1/agents/ada/conversation', 'POST', INGRESS, { input: { content: 'hi' } });
+    assert.equal(rMissing.status, 403);
+    assert.equal(rMissing.body.error, 'unauthorized_caller');
+
+    // Unmapped requestedBy
+    const rUnmapped = await api('/api/v1/agents/ada/conversation', 'POST', INGRESS, {
+      input: { content: 'hi' },
+      requestedBy: discord('unmapped-convo'),
+    });
+    assert.equal(rUnmapped.status, 403);
+    assert.equal(rUnmapped.body.error, 'unauthorized_caller');
+
+    // Mapped viewer who is not owner of ada
+    state.identityLinks!.link('discord', 'stranger-disc', 'token:stranger', 'admin', { roles: ['viewer'] });
+    const rStranger = await api('/api/v1/agents/ada/conversation', 'POST', INGRESS, {
+      input: { content: 'hi' },
+      requestedBy: discord('stranger-disc'),
+    });
+    assert.equal(rStranger.status, 403);
+    assert.equal(rStranger.body.error, 'unauthorized_caller');
+
+    const rows = state.ledger.query({ agentId: 'ada' }).slice(before);
+    const refusals = rows.filter((row) => row.action === 'CONVERSATION_REFUSED_UNAUTHORIZED_CALLER');
+    assert.equal(refusals.length, 3);
+    const hashedRefusal = refusals.find((r) => r.payloadSha256 === payloadHash(discord('unmapped-convo')));
+    assert.ok(hashedRefusal);
+    assert.equal(JSON.stringify(hashedRefusal).includes('unmapped-convo'), false);
+  });
+
+  it('strips forged input.caller on wake and /conversation', async () => {
+    state.identityLinks!.link('discord', '123456789', 'cloudflare:dale@example.com', 'admin', {
+      name: 'Dale',
+      roles: ['admin'],
+    });
+
+    // Wake with forged caller in input
+    const rWake = await wake(INGRESS, {
+      input: { messageId: 'm-forge', caller: { actor: 'evil:hacker', role: 'admin' } },
+      requestedBy: discord('123456789'),
+    });
+    assert.equal(rWake.status, 202);
+    const run = state.runs.get(rWake.body.runId);
+    assert.ok(run);
+    assert.equal(run.caller?.actor, 'cloudflare:dale@example.com');
+    assert.equal((run.input as any).caller?.actor, 'cloudflare:dale@example.com');
+
+    // Conversation with forged caller in input
+    const rConvo = await api('/api/v1/agents/ada/conversation', 'POST', INGRESS, {
+      input: { text: 'hello', caller: { actor: 'evil:hacker' } },
+      requestedBy: discord('123456789'),
+    });
+    assert.equal(rConvo.status, 202);
+    const mailbox = state.mailboxes?.get('ada');
+    const msg = mailbox?.messages[mailbox.messages.length - 1];
+    assert.ok(msg);
+    assert.equal((msg.payload as any).caller?.actor, 'cloudflare:dale@example.com');
+  });
+
   it('authorizes mapped admin and owner callers and injects caller metadata into run and input', async () => {
-    state.identityLinks = new IdentityLinkStore(join(dir, 'links'));
+    state.identityLinks!.link('discord', '123456789', 'cloudflare:dale@example.com', 'admin', {
+      name: 'Dale',
+      roles: ['admin'],
+    });
+    const r = await wake(INGRESS, { input: { messageId: 'm-dale', content: 'hello agent' }, requestedBy: discord('123456789') });
+    assert.equal(r.status, 202);
+    const expectedCaller = {
+      actor: 'cloudflare:dale@example.com',
+      name: 'Dale',
+      role: 'admin',
+      roles: ['admin'],
+      provider: 'discord',
+      id: '123456789',
+    };
+    assert.deepEqual(r.body.caller, expectedCaller);
+    const run = state.runs.get(r.body.runId);
+    assert.ok(run);
+    assert.deepEqual(run.caller, expectedCaller);
+    assert.deepEqual((run.input as any).caller, expectedCaller);
+
+    // Mapped agent owner: Alice owns 'ada'
+    state.identityLinks!.link('discord', 'alice-discord-id', 'token:alice', 'admin', { name: 'Alice' });
+    const rAlice = await wake(INGRESS, { input: { messageId: 'm-alice' }, requestedBy: discord('alice-discord-id') });
+    assert.equal(rAlice.status, 202);
+    assert.equal(rAlice.body.caller.role, 'agent-owner');
+
+    // Mapped non-owner viewer: insufficient privileges
+    state.identityLinks!.link('discord', 'bob-discord-id', 'token:bob', 'admin', { name: 'Bob', roles: ['viewer'] });
+    const rBob = await wake(INGRESS, { input: { messageId: 'm-bob' }, requestedBy: discord('bob-discord-id') });
+    assert.equal(rBob.status, 403);
+    assert.equal(rBob.body.error, 'unauthorized_caller');
+  });
+
+  it('supports legacy links via FACTORY_ADMIN_EMAILS and fallback to viewer', async () => {
+    const oldEnv = process.env.FACTORY_ADMIN_EMAILS;
+    process.env.FACTORY_ADMIN_EMAILS = 'legacy-admin@example.com';
     try {
-      state.identityLinks.link('discord', '470400107028938752', 'cloudflare:dale.sackrider@gmail.com', 'admin', {
-        name: 'Dale',
-        roles: ['admin'],
-      });
-      const r = await wake(INGRESS, { input: { messageId: 'm-dale', content: 'hello agent' }, requestedBy: discord('470400107028938752') });
-      assert.equal(r.status, 202);
-      const expectedCaller = {
-        actor: 'cloudflare:dale.sackrider@gmail.com',
-        name: 'Dale',
-        role: 'admin',
-        roles: ['admin'],
-        provider: 'discord',
-        id: '470400107028938752',
-      };
-      assert.deepEqual(r.body.caller, expectedCaller);
-      const run = state.runs.get(r.body.runId);
-      assert.ok(run);
-      assert.deepEqual(run.caller, expectedCaller);
-      assert.deepEqual((run.input as any).caller, expectedCaller);
+      // Legacy link with no roles for email in FACTORY_ADMIN_EMAILS -> admin
+      state.identityLinks!.link('discord', 'leg-admin-id', 'cloudflare:legacy-admin@example.com', 'admin');
+      const rAdmin = await wake(INGRESS, { input: { messageId: 'm-leg1' }, requestedBy: discord('leg-admin-id') });
+      assert.equal(rAdmin.status, 202);
+      assert.equal(rAdmin.body.caller.role, 'admin');
 
-      // Mapped agent owner: Alice owns 'ada'
-      state.identityLinks.link('discord', 'alice-discord-id', 'token:alice', 'admin', { name: 'Alice' });
-      const rAlice = await wake(INGRESS, { input: { messageId: 'm-alice' }, requestedBy: discord('alice-discord-id') });
-      assert.equal(rAlice.status, 202);
-      assert.equal(rAlice.body.caller.role, 'agent-owner');
-
-      // Mapped non-owner viewer: insufficient privileges
-      state.identityLinks.link('discord', 'bob-discord-id', 'token:bob', 'admin', { name: 'Bob', roles: ['viewer'] });
-      const rBob = await wake(INGRESS, { input: { messageId: 'm-bob' }, requestedBy: discord('bob-discord-id') });
-      assert.equal(rBob.status, 403);
-      assert.equal(rBob.body.error, 'unauthorized_caller');
+      // Legacy link with no roles for email NOT in FACTORY_ADMIN_EMAILS -> viewer fallback (cannot wake non-owned ada)
+      state.identityLinks!.link('discord', 'leg-viewer-id', 'cloudflare:other@example.com', 'admin');
+      const rViewer = await wake(INGRESS, { input: { messageId: 'm-leg2' }, requestedBy: discord('leg-viewer-id') });
+      assert.equal(rViewer.status, 403);
     } finally {
-      state.identityLinks = undefined;
+      if (oldEnv !== undefined) process.env.FACTORY_ADMIN_EMAILS = oldEnv;
+      else delete process.env.FACTORY_ADMIN_EMAILS;
     }
+  });
+
+  it('reports satisfying role (operator) when user has multiple roles (viewer, operator)', async () => {
+    state.identityLinks!.link('discord', 'multi-user', 'token:multi', 'admin', { roles: ['viewer', 'operator'] });
+    const rMulti = await wake(INGRESS, { input: { messageId: 'm-multi' }, requestedBy: discord('multi-user') });
+    assert.equal(rMulti.status, 202);
+    assert.equal(rMulti.body.caller.role, 'operator');
   });
 });

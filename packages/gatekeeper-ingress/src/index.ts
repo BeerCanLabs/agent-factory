@@ -187,9 +187,9 @@ export function createGatekeeperIngress(opts: {
       try {
         await opts.wake(msg.agentId, msg);
       } catch (err) {
-        console.error(`[gatekeeper-ingress] wake ${msg.agentId} failed: ${err instanceof Error ? err.message : String(err)}`);
         if (err instanceof WakeRefusedError) await state.discord.refuseWake?.(msg.channelId, err.window, err.kind).catch(() => {});
         else if (err instanceof UnauthorizedCallerError) await state.discord.refuseUnauthorized?.(msg.channelId).catch(() => {});
+        else console.error(`[gatekeeper-ingress] wake ${msg.agentId} failed: ${err instanceof Error ? err.message : String(err)}`);
         // Re-read: the control plane may have moved presence on while the wake was in flight.
         if ((state.discord.presence as Presence) === 'starting') await state.discord.setPresence('offline');
       }

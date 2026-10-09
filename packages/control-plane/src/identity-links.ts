@@ -9,11 +9,10 @@
 import type http from 'node:http';
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { payloadHash } from '@beercanlabs/factory-ledger';
-import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
-
 import type { Role } from '@beercanlabs/factory-auth';
 import { ROLES } from '@beercanlabs/factory-auth';
+import { payloadHash } from '@beercanlabs/factory-ledger';
+import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 
 /** A principal actor as the Gatekeeper's authentication names a caller: `cloudflare:`, `oidc:` or `token:`. */
 export const PRINCIPAL_ACTOR = /^(cloudflare|oidc|token):\S+$/;
@@ -25,7 +24,12 @@ export function parseActor(value: unknown): string | undefined {
 }
 
 export const PROVIDERS = ['discord', 'slack', 'teams', 'webui', 'cli'] as const;
-export type IdentityProvider = (typeof PROVIDERS)[number] | string;
+export type IdentityProvider = (typeof PROVIDERS)[number];
+
+export function isProvider(p: string): p is IdentityProvider {
+  return (PROVIDERS as readonly string[]).includes(p);
+}
+
 export type IdentityLink = {
   provider: IdentityProvider;
   id: string;
@@ -139,16 +143,29 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
   const store = state.identityLinks;
   if (!store) return json(res, 503, { error: 'identity_links_unavailable' }), true;
   const [provider, id] = [decodeURIComponent(one[1]), decodeURIComponent(one[2])];
-  if (!PROVIDERS.includes(provider as any) || !EXTERNAL_ID.test(id)) {
+  if (!isProvider(provider) || !EXTERNAL_ID.test(id)) {
     return json(res, 400, { error: 'unknown_identity', message: `provider must be one of ${PROVIDERS.join(', ')} and id letters, digits, dot, dash or underscore` }), true;
   }
-  const ledger = (action: 'IDENTITY_LINKED' | 'IDENTITY_UNLINKED', actor: string) =>
-    // Never the external id itself: only a hash of the provider, id and person.
-    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'factory', type: 'action', action, actor: principal.actor, payloadSha256: payloadHash({ provider, id, actor }) });
+  const ledger = (action: 'IDENTITY_LINKED' | 'IDENTITY_UNLINKED', actor: string, details?: { name?: string; roles?: Role[] }) =>
+    // Never the external id itself: only a hash of the provider, id, person, name and roles.
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: 'factory',
+      type: 'action',
+      action,
+      actor: principal.actor,
+      payloadSha256: payloadHash({
+        provider,
+        id,
+        actor,
+        ...(details?.name ? { name: details.name } : {}),
+        ...(details?.roles ? { roles: details.roles } : {}),
+      }),
+    });
   if (req.method === 'DELETE') {
     const removed = store.unlink(provider, id);
     if (!removed) return json(res, 404, { error: 'not_found' }), true;
-    ledger('IDENTITY_UNLINKED', removed.actor);
+    ledger('IDENTITY_UNLINKED', removed.actor, { name: removed.name, roles: removed.roles });
     json(res, 200, { ok: true });
     return true;
   }
@@ -168,10 +185,17 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
       return json(res, 400, { error: `roles must be an array of valid roles: ${ROLES.join(', ')}` }), true;
     }
     roles = [...new Set(body.roles as Role[])];
+    // Escalation check: caller cannot grant roles above their own unless admin
+    if (!principal.roles?.includes('admin')) {
+      for (const r of roles) {
+        if (!principal.roles?.includes(r)) {
+          return json(res, 403, { error: 'privilege_escalation', message: `cannot grant role '${r}' above caller roles` }), true;
+        }
+      }
+    }
   }
-  const { link, changed } = store.link(provider as IdentityProvider, id, actor, principal.actor, { name, roles });
-  if (changed) ledger('IDENTITY_LINKED', actor);
+  const { link, changed } = store.link(provider, id, actor, principal.actor, { name, roles });
+  if (changed) ledger('IDENTITY_LINKED', actor, { name: link.name, roles: link.roles });
   json(res, 200, link);
   return true;
 }
-

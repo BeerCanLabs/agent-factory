@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { AuthenticatedCaller } from '@beercanlabs/factory-bouncer';
 
 export const TERMINAL_STATES = [
   'DONE',
@@ -18,8 +19,6 @@ export type RunState =
   | 'BLOCKED_FOR_HUMAN'
   | 'BLOCKED_UNHEALTHY'
   | (typeof TERMINAL_STATES)[number];
-
-import type { AuthenticatedCaller } from '@beercanlabs/factory-bouncer';
 
 export type Run = {
   runId: string;

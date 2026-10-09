@@ -25,6 +25,7 @@ export function createDiscordClient(): DiscordClient {
   let currentPresence: Presence = 'offline';
   let agentName = 'your agent';
   const seenMessageIds = new Set<string>();
+  const recentUnauthorized = new Map<string, number>();
   /** Discord shows starting as idle (yellow): a wake is in progress, the agent cannot take a turn yet. */
   const discordStatus = (p: Presence) => (p === 'offline' ? 'invisible' : p === 'starting' ? 'idle' : 'online');
 
@@ -198,6 +199,11 @@ export function createDiscordClient(): DiscordClient {
     async refuseUnauthorized(channelId: string) {
       const session = standbySessions.get(channelId);
       clearStandbySession(channelId);
+      const last = recentUnauthorized.get(channelId);
+      if (last && Date.now() - last < 15_000 && !session) {
+        return;
+      }
+      recentUnauthorized.set(channelId, Date.now());
       const text = unauthorizedCallerText(agentName);
       try {
         const channel = await client.channels.fetch(channelId);
