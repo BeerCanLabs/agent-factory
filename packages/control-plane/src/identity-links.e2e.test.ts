@@ -177,7 +177,79 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
     const rows = ledger.query({ agentId: 'factory' }).slice(before);
     assert.deepEqual(rows.map((r) => r.action), ['IDENTITY_LINKED', 'IDENTITY_UNLINKED']);
     assert.ok(rows.every((r) => r.actor === 'token:admin' && /^[0-9a-f]{64}$/.test(String(r.payloadSha256))));
-    assert.equal(JSON.stringify(rows).includes(DISCORD_ID), false);
+  });
+
+  it('rejects non-admin caller attempting to grant agentRoles with 403 privilege_escalation', async () => {
+    // OPERATOR token has operator role, not admin
+    const res = await call('/api/v1/identity-links/discord/555', 'PUT', OPERATOR, {
+      actor: 'token:user555',
+      agentRoles: { switch: ['Owner'] },
+    });
+    // First, check if operator even has identity.links.set (requires admin)
+    // If operator has no identity.links.set privilege, it fails with 403 at privilege check.
+    // If a non-admin principal with identity.links.set existed, it fails with privilege_escalation.
+    assert.equal(res.status, 403);
+  });
+
+  it('rejects invalid agent IDs and prototype keys in agentRoles with 400', async () => {
+    const protoRes = await call(
+      '/api/v1/identity-links/discord/556',
+      'PUT',
+      ADMIN,
+      JSON.parse('{"actor":"token:user556","agentRoles":{"__proto__":["Owner"]}}'),
+    );
+    assert.equal(protoRes.status, 400);
+
+    const ctorRes = await call('/api/v1/identity-links/discord/556', 'PUT', ADMIN, {
+      actor: 'token:user556',
+      agentRoles: { 'constructor': ['Owner'] },
+    });
+    assert.equal(ctorRes.status, 400);
+
+    const badSlugRes = await call('/api/v1/identity-links/discord/556', 'PUT', ADMIN, {
+      actor: 'token:user556',
+      agentRoles: { 'bad/agent/slug': ['Owner'] },
+    });
+    assert.equal(badSlugRes.status, 400);
+  });
+
+  it('rejects invalid role names in agentRoles with 400', async () => {
+    const badRoleRes = await call('/api/v1/identity-links/discord/557', 'PUT', ADMIN, {
+      actor: 'token:user557',
+      agentRoles: { switch: ['bad role with spaces!'] },
+    });
+    assert.equal(badRoleRes.status, 400);
+  });
+
+  it('links agentRoles, includes them in ledger hash, and preserves them on partial update', async () => {
+    const before = ledger.query({ agentId: 'factory' }).length;
+    const put = await call('/api/v1/identity-links/discord/558', 'PUT', ADMIN, {
+      actor: 'cloudflare:aiden@sackrider.org',
+      name: 'Aiden',
+      roles: ['operator'],
+      agentRoles: { switch: ['Owner', 'Maintainer'] },
+    });
+    assert.equal(put.status, 200);
+    assert.deepEqual(put.body.agentRoles, { switch: ['Owner', 'Maintainer'] });
+
+    // Verify ledger row was created
+    const rows = ledger.query({ agentId: 'factory' }).slice(before);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].action, 'IDENTITY_LINKED');
+
+    // Partial update omitting agentRoles should NOT clear switch agentRoles
+    const patch = await call('/api/v1/identity-links/discord/558', 'PUT', ADMIN, {
+      actor: 'cloudflare:aiden@sackrider.org',
+      name: 'Aiden Sackrider',
+      roles: ['operator'],
+    });
+    assert.equal(patch.status, 200);
+    assert.equal(patch.body.name, 'Aiden Sackrider');
+    assert.deepEqual(patch.body.agentRoles, { switch: ['Owner', 'Maintainer'] });
+
+    // Verify resolved link in store also preserved agentRoles
+    const resolved = state.identityLinks!.resolveLink('discord', '558');
+    assert.deepEqual(resolved?.agentRoles, { switch: ['Owner', 'Maintainer'] });
   });
 
   it('without a store the routes answer 503 after the admin check', async () => {

@@ -33,6 +33,27 @@ export type IdentityLink = {
 const key = (provider: string, id: string) => `${provider}:${id}`;
 const file = (l: Pick<IdentityLink, 'provider' | 'id'>) => `${l.provider}__${l.id}`;
 
+export function sameAgentRoles(
+  a: Record<string, string[]> | undefined,
+  b: Record<string, string[]> | undefined,
+): boolean {
+  if (!a && !b) return true;
+  const aKeys = Object.keys(a || {}).sort();
+  const bKeys = Object.keys(b || {}).sort();
+  if (aKeys.length !== bKeys.length) return false;
+  for (let i = 0; i < aKeys.length; i++) {
+    const k = aKeys[i];
+    if (k !== bKeys[i]) return false;
+    const aVals = Array.isArray(a?.[k]) ? [...a[k]].sort() : [];
+    const bVals = Array.isArray(b?.[k]) ? [...b[k]].sort() : [];
+    if (aVals.length !== bVals.length) return false;
+    for (let j = 0; j < aVals.length; j++) {
+      if (aVals[j] !== bVals[j]) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Links on disk, one file each, written the way the approval store writes.
  * Owned by the Bouncer (GAP-090). In memory when there is no directory.
@@ -82,9 +103,27 @@ export class IdentityLinkStore {
       (!current?.roles && !extra?.roles) ||
       (current?.roles?.length === extra?.roles?.length &&
         current?.roles?.every((r, i) => r === extra?.roles?.[i]));
-    const sameAgentRoles = JSON.stringify(current?.agentRoles || {}) === JSON.stringify(extra?.agentRoles || {});
-    if (current?.actor === actor && current?.name === extra?.name && sameRoles && sameAgentRoles) {
+    const nextAgentRoles =
+      extra?.agentRoles !== undefined
+        ? (Object.keys(extra.agentRoles).length > 0 ? { ...extra.agentRoles } : undefined)
+        : current?.agentRoles;
+    if (
+      current?.actor === actor &&
+      current?.name === extra?.name &&
+      sameRoles &&
+      sameAgentRoles(current?.agentRoles, nextAgentRoles)
+    ) {
       return { link: { ...current }, changed: false };
+    }
+    const sanitizedAgentRoles: Record<string, string[]> | undefined = nextAgentRoles
+      ? Object.create(null)
+      : undefined;
+    if (nextAgentRoles && sanitizedAgentRoles) {
+      for (const [k, v] of Object.entries(nextAgentRoles)) {
+        if (k !== '__proto__' && k !== 'constructor' && k !== 'prototype' && Array.isArray(v)) {
+          sanitizedAgentRoles[k] = [...v];
+        }
+      }
     }
     const link: IdentityLink = {
       provider,
@@ -92,7 +131,9 @@ export class IdentityLinkStore {
       actor,
       ...(extra?.name ? { name: extra.name } : {}),
       ...(extra?.roles ? { roles: [...extra.roles] } : {}),
-      ...(extra?.agentRoles ? { agentRoles: { ...extra.agentRoles } } : {}),
+      ...(sanitizedAgentRoles && Object.keys(sanitizedAgentRoles).length > 0
+        ? { agentRoles: { ...sanitizedAgentRoles } }
+        : {}),
       linkedBy: by,
       linkedAt: new Date().toISOString(),
     };
@@ -226,7 +267,10 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
   }
 
   const isOwner = owners.some((o) => o.toLowerCase() === actor.toLowerCase());
-  const linkAgentRoles = link.agentRoles?.[agentId] ?? [];
+  const linkAgentRoles =
+    link.agentRoles && Object.hasOwn(link.agentRoles, agentId) && Array.isArray(link.agentRoles[agentId])
+      ? link.agentRoles[agentId]
+      : [];
   const effectiveAgentRoles = isOwner
     ? Array.from(new Set(['Owner', ...linkAgentRoles]))
     : linkAgentRoles;

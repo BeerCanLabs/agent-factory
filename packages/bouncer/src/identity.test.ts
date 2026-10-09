@@ -257,4 +257,62 @@ describe('Bouncer IdentityLinkStore', () => {
     const resolved = store.resolveLink('discord', 'steph_1');
     assert.deepEqual(resolved?.agentRoles, { donna: ['Family'] });
   });
+
+  it('preserves existing agentRoles on re-link when omitted (partial update)', () => {
+    const store = new IdentityLinkStore();
+    store.link('discord', 'user_1', 'cloudflare:user1@example.com', 'token:admin', {
+      name: 'User One',
+      roles: ['operator'],
+      agentRoles: { switch: ['Owner'], donna: ['Family'] },
+    });
+
+    // Re-link with only updated name; agentRoles should not be clobbered
+    const { link: updated } = store.link('discord', 'user_1', 'cloudflare:user1@example.com', 'token:admin', {
+      name: 'User One Updated',
+      roles: ['operator'],
+    });
+    assert.equal(updated.name, 'User One Updated');
+    assert.deepEqual(updated.agentRoles, { switch: ['Owner'], donna: ['Family'] });
+  });
+
+  it('considers reordered agentRoles identical (no spurious change)', () => {
+    const store = new IdentityLinkStore();
+    store.link('discord', 'user_2', 'cloudflare:user2@example.com', 'token:admin', {
+      agentRoles: { switch: ['A', 'B'], donna: ['X', 'Y'] },
+    });
+
+    // Re-link with different key and array ordering
+    const { changed } = store.link('discord', 'user_2', 'cloudflare:user2@example.com', 'token:admin', {
+      agentRoles: { donna: ['Y', 'X'], switch: ['B', 'A'] },
+    });
+    assert.equal(changed, false);
+  });
+
+  it('safely handles prototype keys without corrupting lookups or throwing', () => {
+    const store = new IdentityLinkStore();
+    const { link } = store.link('discord', 'user_3', 'cloudflare:user3@example.com', 'token:admin', {
+      agentRoles: { constructor: ['SomeRole'], donna: ['User'] } as any,
+    });
+    // constructor should not be stored as an agent role
+    assert.equal(link.agentRoles?.constructor instanceof Function, true); // standard prototype
+    assert.deepEqual(link.agentRoles?.donna, ['User']);
+
+    // authorizeIngress safe lookup for agentId 'constructor'
+    const res = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'user_3' },
+      agentId: 'constructor',
+      owners: [],
+      link: {
+        actor: 'cloudflare:user3@example.com',
+        roles: ['operator'],
+        agentRoles: link.agentRoles,
+      },
+    });
+    // Does not throw and returns empty agentRoles
+    assert.equal(res.allowed, true);
+    if (res.allowed) {
+      assert.deepEqual(res.caller?.agentRoles, []);
+    }
+  });
 });
+
