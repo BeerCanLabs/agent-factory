@@ -13,7 +13,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/approvals.test.ts src/wire.test.ts src/hold.test.ts src/decisions.test.ts src/privileges.test.ts src/roles.test.ts"
+    "test": "tsx --test src/approvals.test.ts src/wire.test.ts src/hold.test.ts src/decisions.test.ts src/privileges.test.ts src/roles.test.ts src/identity.test.ts"
   },
   "dependencies": {
     "@beercanlabs/factory-auth": "0.1.0",

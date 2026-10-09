@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, Partials, Events, ActivityType } from 'discord.js';
 import type { DiscordClient, Conversation, Presence } from './index.js';
-import { wakeRefusedText } from './wake.js';
+import { wakeRefusedText, unauthorizedCallerText } from './wake.js';
 
 interface StandbySession {
   messageId: string;
@@ -25,6 +25,7 @@ export function createDiscordClient(): DiscordClient {
   let currentPresence: Presence = 'offline';
   let agentName = 'your agent';
   const seenMessageIds = new Set<string>();
+  const recentUnauthorized = new Map<string, number>();
   /** Discord shows starting as idle (yellow): a wake is in progress, the agent cannot take a turn yet. */
   const discordStatus = (p: Presence) => (p === 'offline' ? 'invisible' : p === 'starting' ? 'idle' : 'online');
 
@@ -193,6 +194,25 @@ export function createDiscordClient(): DiscordClient {
         }
       } catch (err) {
         console.warn('[gatekeeper-ingress] Failed to post the wake refusal:', err);
+      }
+    },
+    async refuseUnauthorized(channelId: string) {
+      const session = standbySessions.get(channelId);
+      clearStandbySession(channelId);
+      const last = recentUnauthorized.get(channelId);
+      if (last && Date.now() - last < 15_000 && !session) {
+        return;
+      }
+      recentUnauthorized.set(channelId, Date.now());
+      const text = unauthorizedCallerText(agentName);
+      try {
+        const channel = await client.channels.fetch(channelId);
+        if (channel && 'send' in channel && 'messages' in channel) {
+          if (session) await (await channel.messages.fetch(session.messageId)).edit(text);
+          else await channel.send(text);
+        }
+      } catch (err) {
+        console.warn('[gatekeeper-ingress] Failed to post the unauthorized refusal:', err);
       }
     },
     async setPresence(status: Presence) {

@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { createGatekeeperIngress, fakeDiscordClient } from './index.js';
-import { WakeRefusedError } from './wake.js';
+import { WakeRefusedError, UnauthorizedCallerError } from './wake.js';
 
 describe('gatekeeper-ingress', () => {
   it('stays idle when no Discord token is bound', async () => {
@@ -153,5 +153,30 @@ describe('gatekeeper-ingress', () => {
     await door.reconcile([{ agentId: 'echo-agent', secretRef: 'DISCORD_BOT_TOKEN', initialPresence: 'available' }]);
     await door.receive(msg('m2', 'hello'));
     assert.deepEqual(gw.refusals, []);
+  });
+
+  it('a wake refused for unauthorized caller tells the channel and resets presence to offline', async () => {
+    const { gw, door } = await connected(async () => {
+      throw new UnauthorizedCallerError('Identity link not found');
+    });
+    await door.receive(msg('m1', 'hello'));
+    assert.deepEqual(gw.unauthorizedRefusals, ['c1']);
+    assert.equal(gw.presence, 'offline');
+  });
+
+  it('a message into a live run refused for unauthorized caller tells the channel and leaves presence available', async () => {
+    const gw = fakeDiscordClient();
+    const door = createGatekeeperIngress({
+      discord: gw,
+      providers: [envProvider({ DISCORD_BOT_TOKEN: 'bot-token' })],
+      wake: async () => {},
+      handoff: async () => {
+        throw new UnauthorizedCallerError('Identity link not found');
+      },
+    });
+    await door.reconcile([{ agentId: 'echo-agent', secretRef: 'DISCORD_BOT_TOKEN', initialPresence: 'available' }]);
+    await door.receive(msg('m1', 'who are you?'));
+    assert.deepEqual(gw.unauthorizedRefusals, ['c1']);
+    assert.equal(gw.presence, 'available');
   });
 });

@@ -1,5 +1,5 @@
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
-import { WakeRefusedError } from './wake.js';
+import { WakeRefusedError, UnauthorizedCallerError } from './wake.js';
 
 /**
  * offline: asleep (Discord invisible). starting: a wake is in progress but the agent cannot take a turn yet
@@ -24,19 +24,28 @@ export type DiscordClient = {
   setAgentName?(name: string): void;
   /** The factory refused to wake the agent over budget: tell the channel why, replacing the standby message. */
   refuseWake?(channelId: string, window: string, kind?: 'wake' | 'handoff'): Promise<void>;
+  /** The factory refused the caller because they are unmapped or unauthorized. */
+  refuseUnauthorized?(channelId: string): Promise<void>;
   onMessage(handler: (msg: Omit<Conversation, 'agentId'>) => void): void;
   destroy(): Promise<void>;
 };
 
-export function fakeDiscordClient(): DiscordClient & { refusals: Array<{ channelId: string; window: string; kind: 'wake' | 'handoff' }> } {
+export function fakeDiscordClient(): DiscordClient & {
+  refusals: Array<{ channelId: string; window: string; kind: 'wake' | 'handoff' }>;
+  unauthorizedRefusals: string[];
+} {
   const handlers: Array<(msg: Omit<Conversation, 'agentId'>) => void> = [];
   return {
     connected: false,
     presence: 'offline',
     refusals: [] as Array<{ channelId: string; window: string; kind: 'wake' | 'handoff' }>,
+    unauthorizedRefusals: [] as string[],
     setAgentName(_name) {},
     async refuseWake(channelId, window, kind = 'wake') {
       this.refusals.push({ channelId, window, kind });
+    },
+    async refuseUnauthorized(channelId) {
+      this.unauthorizedRefusals.push(channelId);
     },
     async login() {
       this.connected = true;
@@ -168,6 +177,7 @@ export function createGatekeeperIngress(opts: {
         } catch (err) {
           // The agent is out of budget: say so from the Gatekeeper; the agent never sees the message.
           if (err instanceof WakeRefusedError) await state.discord.refuseWake?.(msg.channelId, err.window, err.kind).catch(() => {});
+          else if (err instanceof UnauthorizedCallerError) await state.discord.refuseUnauthorized?.(msg.channelId).catch(() => {});
           else console.error(`[gatekeeper-ingress] handoff ${msg.agentId} failed: ${err instanceof Error ? err.message : String(err)}`);
         }
         return;
@@ -177,8 +187,9 @@ export function createGatekeeperIngress(opts: {
       try {
         await opts.wake(msg.agentId, msg);
       } catch (err) {
-        console.error(`[gatekeeper-ingress] wake ${msg.agentId} failed: ${err instanceof Error ? err.message : String(err)}`);
         if (err instanceof WakeRefusedError) await state.discord.refuseWake?.(msg.channelId, err.window, err.kind).catch(() => {});
+        else if (err instanceof UnauthorizedCallerError) await state.discord.refuseUnauthorized?.(msg.channelId).catch(() => {});
+        else console.error(`[gatekeeper-ingress] wake ${msg.agentId} failed: ${err instanceof Error ? err.message : String(err)}`);
         // Re-read: the control plane may have moved presence on while the wake was in flight.
         if ((state.discord.presence as Presence) === 'starting') await state.discord.setPresence('offline');
       }

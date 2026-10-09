@@ -3,7 +3,7 @@ import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createGatekeeperIngress } from './index.js';
 import { createGatekeeperIngressHttp } from './http.js';
 import { createDiscordClient } from './discord.js';
-import { WakeRefusedError, wakeBody, wakeFailure } from './wake.js';
+import { WakeRefusedError, UnauthorizedCallerError, wakeBody, wakeFailure } from './wake.js';
 
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const FACTORY_URL = (process.env.FACTORY_URL || 'http://127.0.0.1:8088').replace(/\/$/, '');
@@ -33,11 +33,14 @@ const door = createGatekeeperIngress({
         'Content-Type': 'application/json',
         ...(FACTORY_TOKEN ? { Authorization: `Bearer ${FACTORY_TOKEN}` } : {}),
       },
-      body: JSON.stringify(msg),
+      body: JSON.stringify({
+        input: msg,
+        ...(msg.authorId ? { requestedBy: { provider: 'discord', id: msg.authorId } } : {}),
+      }),
     });
     if (res.ok) return;
     const failure = wakeFailure(res.status, await res.text().catch(() => ''), 'handoff');
-    if (failure instanceof WakeRefusedError) throw failure;
+    if (failure instanceof WakeRefusedError || failure instanceof UnauthorizedCallerError) throw failure;
     console.error(`[gatekeeper-ingress] handoff ${msg.agentId} ${res.status}`);
   },
 });

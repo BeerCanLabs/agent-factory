@@ -10,3 +10,19 @@ export type { DerivedRole, Privilege } from './privileges.js';
 export { PRIVILEGES } from './privileges.js';
 export type { AuthorizeRequest, AuthorizeResource, AuthorizeResult } from './authorize.js';
 export { authorize } from './authorize.js';
+export type {
+  AuthenticatedCaller,
+  ExternalIdentity,
+  IdentityLink,
+  IdentityProvider,
+  IngressAuthorizeRequest,
+  IngressAuthorizeResult,
+} from './identity.js';
+export {
+  IdentityLinkStore,
+  PRINCIPAL_ACTOR,
+  PROVIDERS,
+  authorizeIngress,
+  isProvider,
+  parseActor,
+} from './identity.js';
