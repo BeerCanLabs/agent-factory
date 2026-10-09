@@ -4,7 +4,7 @@ import http from 'node:http';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import { createGatekeeperEgress, type ControlClient, type Policy, type RunContext } from './gatekeeper-egress.js';
 import { bedrockConverse, parseModelCatalog, toConverse, type ModelCatalog } from './models.js';
-import { signV4 } from './sigv4.js';
+import { signV4 } from '@beercanlabs/factory-executive';
 
 const tokens = new RunTokens('models-test-run-token-key-0123456789');
 const AWS = { accessKeyId: 'AKIDGATEKEEPER', secretAccessKey: 'gatekeeper-egress-secret-key', sessionToken: 'gatekeeper-egress-session' };
