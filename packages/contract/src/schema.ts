@@ -207,24 +207,6 @@ export const connectionSchema = z
   })
   .strict();
 
-export const roleSkillPolicySchema = z
-  .object({
-    allow: z.array(z.string()).optional(),
-    deny: z.array(z.string()).optional(),
-  })
-  .strict();
-
-export const agentRoleSchema = z
-  .object({
-    description: z.string().optional(),
-    skills: z.record(z.union([z.array(z.string()), roleSkillPolicySchema])).optional(),
-  })
-  .strict();
-
-export const agentRolesSchema = z.record(agentRoleSchema);
-export type AgentRole = z.infer<typeof agentRoleSchema>;
-export type AgentRoles = z.infer<typeof agentRolesSchema>;
-
 /** Unified cartridge.yaml schema */
 export const cartridgeSchema = z
   .object({
@@ -232,8 +214,6 @@ export const cartridgeSchema = z
     id: z.string().regex(/^[a-z0-9][a-z0-9-_]*$/i, 'cartridge id must be a slug').optional(),
     name: z.string().min(1).optional(),
     role: z.string().optional(),
-    /** Declared agent-level RBAC roles mapping to skill capabilities (e.g. Family, Maintainer, Owner). */
-    roles: agentRolesSchema.optional(),
     /** `builtin` lists the agent with platform/system agents (and applies their budget and kill-switch exemptions). */
     category: z.enum(['user', 'builtin']).optional(),
     prompt: z.string().optional(),

@@ -463,38 +463,3 @@ describe('memory archetype declarations (§GAP-115, §TSK-029)', () => {
   });
 });
 
-describe('cartridge RBAC roles declarations', () => {
-  it('validates a cartridge with declared roles mapping to skills', () => {
-    const base = {
-      schemaVersion: '1.0',
-      id: 'rbac-agent',
-      triggers: [{ type: 'http', path: '/wake' }],
-      roles: {
-        Family: {
-          description: 'Immediate family members',
-          skills: {
-            'google-workspace': {
-              allow: ['calendar'],
-              deny: ['email'],
-            },
-          },
-        },
-        Maintainer: {
-          description: 'Technical maintainers',
-          skills: {
-            'github-ops': ['read', 'write'],
-          },
-        },
-        Owner: {
-          skills: {
-            '*': ['*'],
-          },
-        },
-      },
-    };
-
-    const valid = cartridgeSchema.safeParse(base);
-    assert.equal(valid.success, true);
-  });
-});
-
