@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "prepare": "git config core.hooksPath .githooks 2>/dev/null || true",
-    "build": "npm run build -w @beercanlabs/factory-auth -w @beercanlabs/factory-contract -w @beercanlabs/factory-ledger -w @beercanlabs/factory-budget -w @beercanlabs/factory-bouncer -w @beercanlabs/factory-timekeeper -w @beercanlabs/factory-registrar -w @beercanlabs/factory-secrets-bind -w @beercanlabs/factory-hydrate -w @beercanlabs/factory-keymaster -w @beercanlabs/factory-telemetry -w @beercanlabs/factory-inspector -w @beercanlabs/factory-gatekeeper-egress -w @beercanlabs/factory-bench && npm run build --workspaces --if-present",
+    "build": "npm run build -w @beercanlabs/factory-auth -w @beercanlabs/factory-contract -w @beercanlabs/factory-ledger -w @beercanlabs/factory-budget -w @beercanlabs/factory-executive -w @beercanlabs/factory-bouncer -w @beercanlabs/factory-timekeeper -w @beercanlabs/factory-registrar -w @beercanlabs/factory-secrets-bind -w @beercanlabs/factory-hydrate -w @beercanlabs/factory-keymaster -w @beercanlabs/factory-telemetry -w @beercanlabs/factory-inspector -w @beercanlabs/factory-gatekeeper-egress -w @beercanlabs/factory-bench && npm run build --workspaces --if-present",
     "test": "npm run build && npm run test --workspaces --if-present",
     "validate": "npm exec -w @beercanlabs/factory-contract -- tsx src/cli.ts validate --all ../../agents"
   },

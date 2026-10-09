@@ -1,5 +1,5 @@
 import type { Price } from '@beercanlabs/factory-budget';
-import { awsCredentialsFromEnv, signV4, type AwsCredentials } from './sigv4.js';
+import { awsCredentialsFromEnv, signV4, type AwsCredentials } from '@beercanlabs/factory-executive';
 
 /**
  * Factory model API (DESIGN_AUTHORITY §6.9 M1–M3): agents send OpenAI Chat Completions requests
