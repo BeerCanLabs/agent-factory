@@ -1,9 +1,120 @@
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
 import { authorize } from './authorize.js';
 import { ROLE_PRIVILEGES, type Privilege } from './privileges.js';
 
-export const SUPPORTED_PROVIDERS = ['discord', 'slack', 'teams', 'webui', 'cli'] as const;
-export type SupportedProvider = (typeof SUPPORTED_PROVIDERS)[number];
+export const PRINCIPAL_ACTOR = /^(cloudflare|oidc|token):\S+$/;
+
+/** A principal actor as stored (trimmed, lower-case), or undefined when it is not one. */
+export function parseActor(value: unknown): string | undefined {
+  const actor = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return PRINCIPAL_ACTOR.test(actor) && actor.length <= 256 ? actor : undefined;
+}
+
+export const PROVIDERS = ['discord', 'slack', 'teams', 'webui', 'cli'] as const;
+export type IdentityProvider = (typeof PROVIDERS)[number];
+
+export function isProvider(p: string): p is IdentityProvider {
+  return (PROVIDERS as readonly string[]).includes(p);
+}
+
+export type IdentityLink = {
+  provider: IdentityProvider;
+  id: string;
+  actor: string;
+  name?: string;
+  roles?: Role[];
+  linkedBy: string;
+  linkedAt: string;
+};
+
+const key = (provider: string, id: string) => `${provider}:${id}`;
+const file = (l: Pick<IdentityLink, 'provider' | 'id'>) => `${l.provider}__${l.id}`;
+
+/**
+ * Links on disk, one file each, written the way the approval store writes.
+ * Owned by the Bouncer (GAP-090). In memory when there is no directory.
+ */
+export class IdentityLinkStore {
+  private readonly items = new Map<string, IdentityLink>();
+
+  constructor(private readonly dir?: string) {
+    if (!dir) return;
+    mkdirSync(dir, { recursive: true });
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.json')) continue;
+      try {
+        const l = JSON.parse(readFileSync(join(dir, name), 'utf8')) as IdentityLink;
+        this.items.set(key(l.provider, l.id), l);
+      } catch (err) {
+        // A truncated or hand-edited file must not stop the factory. Skipping it grants nothing (fail closed).
+        console.error(`[bouncer] identity link file ${name} skipped: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  /** The principal actor linked to this external identity, if any. */
+  resolve(provider: string, id: string): string | undefined {
+    return this.items.get(key(provider, id))?.actor;
+  }
+
+  /** The full identity link for this external identity, if any. */
+  resolveLink(provider: string, id: string): IdentityLink | undefined {
+    return this.items.get(key(provider, id));
+  }
+
+  list(): IdentityLink[] {
+    return [...this.items.values()].sort((a, b) => key(a.provider, a.id).localeCompare(key(b.provider, b.id)));
+  }
+
+  /** Links, or replaces the link of, an external identity. `created: false` and no write when it is already so. */
+  link(
+    provider: IdentityProvider,
+    id: string,
+    actor: string,
+    by: string,
+    extra?: { name?: string; roles?: Role[] },
+  ): { link: IdentityLink; changed: boolean } {
+    const current = this.items.get(key(provider, id));
+    const sameRoles =
+      (!current?.roles && !extra?.roles) ||
+      (current?.roles?.length === extra?.roles?.length &&
+        current?.roles?.every((r, i) => r === extra?.roles?.[i]));
+    if (current?.actor === actor && current?.name === extra?.name && sameRoles) {
+      return { link: { ...current }, changed: false };
+    }
+    const link: IdentityLink = {
+      provider,
+      id,
+      actor,
+      ...(extra?.name ? { name: extra.name } : {}),
+      ...(extra?.roles ? { roles: [...extra.roles] } : {}),
+      linkedBy: by,
+      linkedAt: new Date().toISOString(),
+    };
+    // Write first: a link grants access, so a failed write must not leave one live in memory.
+    this.save(link);
+    this.items.set(key(provider, id), link);
+    return { link: { ...link }, changed: true };
+  }
+
+  unlink(provider: string, id: string): IdentityLink | undefined {
+    const current = this.items.get(key(provider, id));
+    if (!current) return undefined;
+    this.items.delete(key(provider, id));
+    if (this.dir) rmSync(join(this.dir, `${file(current)}.json`), { force: true });
+    return { ...current };
+  }
+
+  private save(l: IdentityLink) {
+    if (!this.dir) return;
+    const path = join(this.dir, `${file(l)}.json`);
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(l));
+    renameSync(tmp, path);
+  }
+}
 
 export type ExternalIdentity = {
   provider: string;
@@ -81,13 +192,16 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
     (email && req.adminEmails?.some((e) => e.trim().toLowerCase() === email)) ||
     actor === 'token:admin';
 
-  // Resolve roles: explicit link roles, otherwise admin email lookup, otherwise legacy link fallback ('viewer')
+  // Resolve roles:
+  // 1. Explicit link roles if set
+  // 2. Admin if email listed in FACTORY_ADMIN_EMAILS
+  // 3. Grandfathered legacy link fallback ('operator') so existing linked users do not break (Finding 6)
   const resolvedRoles: readonly Role[] =
     link.roles && link.roles.length > 0
       ? link.roles
       : isEmailAdmin
         ? (['admin', 'operator', 'approver', 'viewer', 'ingest'] as const)
-        : (['viewer'] as const);
+        : (['operator'] as const);
 
   const principal: Principal = { actor, roles: [...resolvedRoles] };
 
@@ -119,12 +233,12 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
     satisfyingRole = resolvedRoles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ?? resolvedRoles[0] ?? 'operator';
   }
 
-  // Report faithfully: link's explicitly granted roles, or admin if derived from email, or empty
+  // Report faithfully: link's explicitly granted roles, or admin if derived from email, or grandfathered operator
   const faithfulRoles: readonly Role[] = link.roles
     ? [...link.roles]
     : isEmailAdmin
       ? (['admin'] as const)
-      : (['viewer'] as const);
+      : (['operator'] as const);
 
   return {
     allowed: true,

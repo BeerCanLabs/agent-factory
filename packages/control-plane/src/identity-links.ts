@@ -7,124 +7,31 @@
 //   PUT    /api/v1/identity-links/:provider/:id      `{ actor }`: link, or replace the link (admin; ledgered)
 //   DELETE /api/v1/identity-links/:provider/:id      unlink (admin; ledgered)
 import type http from 'node:http';
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import type { Role } from '@beercanlabs/factory-auth';
 import { ROLES } from '@beercanlabs/factory-auth';
 import { payloadHash } from '@beercanlabs/factory-ledger';
+import {
+  IdentityLinkStore,
+  PRINCIPAL_ACTOR,
+  PROVIDERS,
+  isProvider,
+  parseActor,
+  type IdentityLink,
+  type IdentityProvider,
+} from '@beercanlabs/factory-bouncer';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 
-/** A principal actor as the Gatekeeper's authentication names a caller: `cloudflare:`, `oidc:` or `token:`. */
-export const PRINCIPAL_ACTOR = /^(cloudflare|oidc|token):\S+$/;
-
-/** A principal actor as stored (trimmed, lower-case), or undefined when it is not one. */
-export function parseActor(value: unknown): string | undefined {
-  const actor = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  return PRINCIPAL_ACTOR.test(actor) && actor.length <= 256 ? actor : undefined;
-}
-
-export const PROVIDERS = ['discord', 'slack', 'teams', 'webui', 'cli'] as const;
-export type IdentityProvider = (typeof PROVIDERS)[number];
-
-export function isProvider(p: string): p is IdentityProvider {
-  return (PROVIDERS as readonly string[]).includes(p);
-}
-
-export type IdentityLink = {
-  provider: IdentityProvider;
-  id: string;
-  actor: string;
-  name?: string;
-  roles?: Role[];
-  linkedBy: string;
-  linkedAt: string;
+export {
+  IdentityLinkStore,
+  PRINCIPAL_ACTOR,
+  PROVIDERS,
+  isProvider,
+  parseActor,
+  type IdentityLink,
+  type IdentityProvider,
 };
 
 const EXTERNAL_ID = /^[A-Za-z0-9._-]{1,128}$/;
-
-/** Links on disk, one file each, written the way the approval store writes. In memory when there is no directory. */
-export class IdentityLinkStore {
-  private readonly items = new Map<string, IdentityLink>();
-
-  constructor(private readonly dir?: string) {
-    if (!dir) return;
-    mkdirSync(dir, { recursive: true });
-    for (const name of readdirSync(dir)) {
-      if (!name.endsWith('.json')) continue;
-      try {
-        const l = JSON.parse(readFileSync(join(dir, name), 'utf8')) as IdentityLink;
-        this.items.set(key(l.provider, l.id), l);
-      } catch (err) {
-        // A truncated or hand-edited file must not stop the control plane. Skipping it grants nothing (fail closed).
-        console.error(`[control-plane] identity link file ${name} skipped: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-  }
-
-  /** The principal actor linked to this external identity, if any. */
-  resolve(provider: string, id: string): string | undefined {
-    return this.items.get(key(provider, id))?.actor;
-  }
-
-  /** The full identity link for this external identity, if any. */
-  resolveLink(provider: string, id: string): IdentityLink | undefined {
-    return this.items.get(key(provider, id));
-  }
-
-  list(): IdentityLink[] {
-    return [...this.items.values()].sort((a, b) => key(a.provider, a.id).localeCompare(key(b.provider, b.id)));
-  }
-
-  /** Links, or replaces the link of, an external identity. `created: false` and no write when it is already so. */
-  link(
-    provider: IdentityProvider,
-    id: string,
-    actor: string,
-    by: string,
-    extra?: { name?: string; roles?: Role[] },
-  ): { link: IdentityLink; changed: boolean } {
-    const current = this.items.get(key(provider, id));
-    const sameRoles =
-      (!current?.roles && !extra?.roles) ||
-      (current?.roles?.length === extra?.roles?.length &&
-        current?.roles?.every((r, i) => r === extra?.roles?.[i]));
-    if (current?.actor === actor && current?.name === extra?.name && sameRoles) {
-      return { link: { ...current }, changed: false };
-    }
-    const link: IdentityLink = {
-      provider,
-      id,
-      actor,
-      ...(extra?.name ? { name: extra.name } : {}),
-      ...(extra?.roles ? { roles: [...extra.roles] } : {}),
-      linkedBy: by,
-      linkedAt: new Date().toISOString(),
-    };
-    // Write first: a link grants the right to decide approvals, so a failed write must not leave one live in memory.
-    this.save(link);
-    this.items.set(key(provider, id), link);
-    return { link: { ...link }, changed: true };
-  }
-
-  unlink(provider: string, id: string): IdentityLink | undefined {
-    const current = this.items.get(key(provider, id));
-    if (!current) return undefined;
-    this.items.delete(key(provider, id));
-    if (this.dir) rmSync(join(this.dir, `${file(current)}.json`), { force: true });
-    return { ...current };
-  }
-
-  private save(l: IdentityLink) {
-    if (!this.dir) return;
-    const path = join(this.dir, `${file(l)}.json`);
-    const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(l));
-    renameSync(tmp, path);
-  }
-}
-
-const key = (provider: string, id: string) => `${provider}:${id}`;
-const file = (l: Pick<IdentityLink, 'provider' | 'id'>) => `${l.provider}__${l.id}`;
 
 const ONE = /^\/api\/v1\/identity-links\/([^/]+)\/([^/]+)$/;
 
@@ -193,6 +100,9 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
         }
       }
     }
+  } else {
+    // Grandfathering/Default: links created without explicit roles default to 'operator' (Finding 6)
+    roles = ['operator'];
   }
   const { link, changed } = store.link(provider, id, actor, principal.actor, { name, roles });
   if (changed) ledger('IDENTITY_LINKED', actor, { name: link.name, roles: link.roles });

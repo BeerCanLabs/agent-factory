@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { authorizeIngress } from './identity.js';
+import { authorizeIngress, IdentityLinkStore } from './identity.js';
 
 describe('Bouncer authorizeIngress', () => {
   it('allows internal actions with no requestedBy when not ingress caller', () => {
@@ -125,6 +125,22 @@ describe('Bouncer authorizeIngress', () => {
     }
   });
 
+  it('resolves legacy link without explicit roles as grandfathered operator when not admin', () => {
+    const res = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'legacy_user' },
+      agentId: 'donna',
+      link: {
+        actor: 'cloudflare:legacy_user@example.com',
+        name: 'Legacy User',
+      },
+    });
+    assert.equal(res.allowed, true);
+    if (res.allowed) {
+      assert.equal(res.caller?.role, 'operator');
+      assert.deepEqual(res.caller?.roles, ['operator']);
+    }
+  });
+
   it('authorizes conversation mid-run with agents.converse privilege', () => {
     const res = authorizeIngress({
       requestedBy: { provider: 'discord', id: 'op_user' },
@@ -140,5 +156,32 @@ describe('Bouncer authorizeIngress', () => {
     if (res.allowed) {
       assert.equal(res.caller?.role, 'operator');
     }
+  });
+});
+
+describe('Bouncer IdentityLinkStore', () => {
+  it('links, resolves, lists and unlinks external identities', () => {
+    const store = new IdentityLinkStore();
+    const { link, changed } = store.link('discord', 'disc_123', 'cloudflare:alice@example.com', 'token:admin', {
+      name: 'Alice',
+      roles: ['operator'],
+    });
+    assert.equal(changed, true);
+    assert.equal(link.provider, 'discord');
+    assert.equal(link.actor, 'cloudflare:alice@example.com');
+    assert.equal(store.resolve('discord', 'disc_123'), 'cloudflare:alice@example.com');
+    assert.equal(store.resolveLink('discord', 'disc_123')?.name, 'Alice');
+
+    // Idempotent link
+    const second = store.link('discord', 'disc_123', 'cloudflare:alice@example.com', 'token:admin', {
+      name: 'Alice',
+      roles: ['operator'],
+    });
+    assert.equal(second.changed, false);
+
+    assert.equal(store.list().length, 1);
+    const unlinked = store.unlink('discord', 'disc_123');
+    assert.ok(unlinked);
+    assert.equal(store.resolve('discord', 'disc_123'), undefined);
   });
 });

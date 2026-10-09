@@ -279,7 +279,7 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     assert.equal(rBob.body.error, 'unauthorized_caller');
   });
 
-  it('supports legacy links via FACTORY_ADMIN_EMAILS and fallback to viewer', async () => {
+  it('supports legacy links via FACTORY_ADMIN_EMAILS and grandfathered operator', async () => {
     const oldEnv = process.env.FACTORY_ADMIN_EMAILS;
     process.env.FACTORY_ADMIN_EMAILS = 'legacy-admin@example.com';
     try {
@@ -289,10 +289,11 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
       assert.equal(rAdmin.status, 202);
       assert.equal(rAdmin.body.caller.role, 'admin');
 
-      // Legacy link with no roles for email NOT in FACTORY_ADMIN_EMAILS -> viewer fallback (cannot wake non-owned ada)
-      state.identityLinks!.link('discord', 'leg-viewer-id', 'cloudflare:other@example.com', 'admin');
-      const rViewer = await wake(INGRESS, { input: { messageId: 'm-leg2' }, requestedBy: discord('leg-viewer-id') });
-      assert.equal(rViewer.status, 403);
+      // Legacy link with no roles for email NOT in FACTORY_ADMIN_EMAILS -> grandfathered operator (can wake)
+      state.identityLinks!.link('discord', 'leg-op-id', 'cloudflare:other@example.com', 'admin');
+      const rOp = await wake(INGRESS, { input: { messageId: 'm-leg2' }, requestedBy: discord('leg-op-id') });
+      assert.equal(rOp.status, 202);
+      assert.equal(rOp.body.caller.role, 'operator');
     } finally {
       if (oldEnv !== undefined) process.env.FACTORY_ADMIN_EMAILS = oldEnv;
       else delete process.env.FACTORY_ADMIN_EMAILS;

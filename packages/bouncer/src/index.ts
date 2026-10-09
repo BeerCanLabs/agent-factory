@@ -13,8 +13,16 @@ export { authorize } from './authorize.js';
 export type {
   AuthenticatedCaller,
   ExternalIdentity,
+  IdentityLink,
+  IdentityProvider,
   IngressAuthorizeRequest,
   IngressAuthorizeResult,
-  SupportedProvider,
 } from './identity.js';
-export { SUPPORTED_PROVIDERS, authorizeIngress } from './identity.js';
+export {
+  IdentityLinkStore,
+  PRINCIPAL_ACTOR,
+  PROVIDERS,
+  authorizeIngress,
+  isProvider,
+  parseActor,
+} from './identity.js';
