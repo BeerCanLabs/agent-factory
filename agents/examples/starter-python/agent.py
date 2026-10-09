@@ -21,6 +21,7 @@ from memory import (
     ARCHETYPE_EPISODIC,
     ARCHETYPE_WORKSPACE,
     load_archetype_from_cartridge,
+    load_memory_bounds,
 )
 from memory import episodic
 from memory import ephemeral
@@ -58,15 +59,21 @@ def main() -> int:
     # Determine memory archetype from cartridge.yaml (fails closed on invalid/missing config)
     cartridge_path = Path(__file__).resolve().parent / "cartridge.yaml"
     archetype_name, _ = load_archetype_from_cartridge(cartridge_path)
-    print(f"[agent] Operating under memory archetype: '{archetype_name}'")
+    # The bounds the cartridge declares (memory.retentionDays, maxMessages, maxChars) are the ones this agent runs with.
+    bounds = load_memory_bounds(cartridge_path)
+    print(f"[agent] Operating under memory archetype: '{archetype_name}' with bounds {bounds}")
 
     payload = get_input_payload()
     print(f"[agent] Processing input payload: {payload}")
 
+    # `authorId` is caller-supplied trigger context, not a verified identity: whoever can wake this agent can name
+    # any author. The partition below keeps one author's turns apart from another's in prompt space only; it is not
+    # an access control until the Factory passes a verified scope to the run (GAP-116).
     author_id = str(payload.get("authorId") or payload.get("author_id") or "operations")
     user_message = str(payload.get("message") or payload.get("raw_input") or "wake")
     status = "succeeded"
     summary = ""
+    context: dict = {}
 
     db = None
     try:
@@ -78,9 +85,9 @@ def main() -> int:
             db.execute("PRAGMA busy_timeout = 5000;")
 
             episodic.init_episodic_tables(db)
-            pruned = episodic.prune_conversations(db, retention_days=30)
+            pruned = episodic.prune_conversations(db, retention_days=bounds["retention_days"])
             if pruned:
-                print(f"[agent] Pruned {pruned} historical turns older than 30 days.")
+                print(f"[agent] Pruned {pruned} historical turns older than {bounds['retention_days']} days.")
 
             session_id, session_name = episodic.get_or_create_active_session(db, user_id=author_id)
 
@@ -95,7 +102,10 @@ def main() -> int:
                     user_id=author_id,
                     session_id=session_id,
                     session_name=session_name,
+                    max_messages=bounds["max_messages"],
+                    max_chars=bounds["max_chars"],
                 )
+                context = {"whiteboardTurns": len(turns), "awarenessBanner": banner}
                 summary = f"Processed alert for {payload.get('service', 'general')}: {payload.get('event', payload.get('ping', 'ok'))}"
 
                 # Record user and assistant turn in episodic memory
@@ -108,6 +118,8 @@ def main() -> int:
                 )
 
         elif archetype_name == ARCHETYPE_WORKSPACE:
+            # Like `authorId`, `project_id` is caller-supplied input, not a verified scope (GAP-116): it chooses which
+            # per-project database this run opens, so it separates projects but does not protect one from another.
             project_id = str(payload.get("project_id") or "default-project")
             task_id = str(payload.get("task_id") or "default-task")
             db_path = workspace.get_workspace_db_path(memory_dir, project_id)
@@ -124,7 +136,7 @@ def main() -> int:
 
         else:
             # Ephemeral archetype: transient in-memory whiteboard only, zero SQLite persistence
-            whiteboard = ephemeral.EphemeralWhiteboard()
+            whiteboard = ephemeral.EphemeralWhiteboard(max_messages=bounds["max_messages"], max_chars=bounds["max_chars"])
             whiteboard.add_message(role="user", content=user_message)
             summary = f"Ephemeral query processed: {user_message}"
             whiteboard.add_message(role="assistant", content=summary)
@@ -145,6 +157,7 @@ def main() -> int:
             "archetype": archetype_name,
             "processed_at": datetime.now(timezone.utc).isoformat(),
             "echo": payload,
+            **({"context": context} if context else {}),
         },
     }
 

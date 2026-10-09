@@ -54,7 +54,7 @@ flowchart TD
 * **Memory Lifecycle:**
   * **Whiteboard Only:** The agent maintains state only within transient process memory (in-RAM prompt buffer). Once the response is emitted, the execution container terminates without saving conversational history.
   * **Stateless Retrieval:** Knowledge is retrieved on demand via tools (RAG search, vector index query, or external documentation endpoints routed via the `gatekeeper-egress`).
-  * **Zero SQLite Footprint:** In `cartridge.yaml`, `memory.archetype` is set to `ephemeral`. The agent writes no on-disk database files in `$MEMORY_DIR`, bypassing local state persistence and remote storage synchronization.
+  * **Zero SQLite Footprint:** In `cartridge.yaml`, `memory.archetype` is set to `ephemeral`. The agent writes no on-disk database files in `$MEMORY_DIR`, so there is no local state to persist. The Factory does not yet read this declaration (or `persistence.enabled`): if the deployment configures a memory store, the shim still pulls and pushes `$MEMORY_DIR`, which for an ephemeral agent holds nothing the agent wrote. A real bypass needs the Factory to honor the declaration (GAP-116).
 * **Operational Characteristics:**
   * **Cold Start:** Fast startup since no database tables are created or restored.
   * **Concurrency:** Highly scalable statelessly with zero database lock contention.
@@ -80,7 +80,7 @@ flowchart TD
 * **Purpose:** Autonomous software engineering, issue triage, automated refactoring, code reviews, and CI failure resolution.
 * **Memory Lifecycle:**
   * **Project & Task Workspace Memory:** Rather than maintaining user conversational chat turns, the workspace engine (`memory/workspace.py`) maintains dedicated project-scoped and task-scoped state caches: AST symbols, active git branches/diffs, test execution logs, and checkpoint key-values.
-  * **Project-Level Isolation:** To prevent cross-project memory contamination, task and state records are partitioned strictly by project ID (or separate per-project database files, `workspace_{project_id}.db`). The model is never permitted to supply or alter the project scope in tool calls.
+  * **Project-Level Isolation:** To prevent cross-project memory contamination, task and state records are partitioned strictly by project ID (or separate per-project database files, `workspace_{project_id}.db`). The model is never permitted to supply or alter the project scope in tool calls. The project id the runner binds comes from the run's input, which the caller wrote (see 5.2): it separates projects but does not protect one from another until the Factory passes a verified scope (GAP-116), and all projects' files still travel together (see 3.4).
   * **Git & Issue Trackers as System of Record (SoR):** The coding worker does **not** rely on an internal SQLite database as its permanent multi-team source of truth. Git branches, commits, pull requests, and ticketing systems (GitHub Issues, Linear, Jira) are the definitive System of Record.
   * **Execution & Concurrency Model:** Under the Factory's current Landlord architecture, invocations for a single agent queue sequentially behind an active run (`activeRun` check in `createRun`, returning 202 when busy). The workspace memory archetype is engineered with task-isolated state caches so that as the Landlord roadmap evolves toward task-partitioned concurrency, workspace tasks can execute in parallel across tasks without database deadlocks.
   * **Ephemeral Task Reporting:** The worker records execution progress to `/tmp/factory-result.json`, commits and pushes its code changes via the `gatekeeper-egress`, and terminates cleanly.
@@ -178,6 +178,7 @@ The Safe represents the remote object storage bucket backing the agent's memory.
   * **Periodic Sync:** Flushes local state to S3 periodically (default every 60 seconds) as a safeguard against unexpected host eviction. Note: Periodic background synchronization captures filesystem snapshots while the database may be in flight; deterministic transactional consistency is established on clean container shutdown after `PRAGMA wal_checkpoint(TRUNCATE)`.
   * **On Sleep:** Checkpoints local state and syncs the directory back to S3 upon exit.
 * **Security & Isolation:** Cartridges never possess IAM credentials for object storage. All cloud authorization is handled exclusively by the Factory platform perimeter.
+* **What the Factory does not yet do (GAP-116):** the shim hydrates one directory per agent from one storage prefix, set when the agent is deployed. It does not read `memory.archetype`, `retentionDays`, `maxMessages`, `maxChars` or `persistence.enabled`; those are declared in the contract and enforced only by the cartridge's own code. Every file in `$MEMORY_DIR` is pulled and pushed together, so a run loads and writes back every project's database, not only the one it works on.
 
 ---
 
@@ -360,7 +361,7 @@ An agent must **never** rely on user self-identification in conversational text 
 
 User identity metadata is extracted from trigger payload metadata (`input.authorId` or `input.author_id`) as populated by the ingress perimeter:
 ```python
-# Identity comes strictly from trigger metadata
+# Identity comes from trigger metadata, which the caller supplied (see the note below)
 author_id = str(payload.get("authorId") or payload.get("author_id"))
 if not author_id:
     author_id = "anonymous"
@@ -368,7 +369,7 @@ if not author_id:
 
 > [!IMPORTANT]
 > **Platform Authority vs. Cartridge Filtering (GAP-092):**  
-> As documented in GAP-092, `input.authorId` reflects caller-supplied trigger context. The platform's verified caller identity is recorded as `run.requestedBy` on the factory run record. The Factory's human approval holds (E9) and Bouncer policy checks remain the ultimate security authority for sensitive operations. Cartridge-level user-ID gating provides a complementary, in-cartridge defense-in-depth layer for memory partitioning and prompt-level boundaries.
+> As documented in GAP-092, `input.authorId` reflects caller-supplied trigger context. The platform's verified caller identity is recorded as `run.requestedBy` on the factory run record. The Factory's human approval holds (E9) and Bouncer policy checks remain the ultimate security authority for sensitive operations. Cartridge-level user-ID gating provides a complementary, in-cartridge defense-in-depth layer for memory partitioning and prompt-level boundaries. It is not an access control: anyone who can wake the agent can name any `authorId`, so the partition separates users in prompt space only. The Factory does not yet pass a verified scope to the agent (GAP-116).
 
 ### 5.3 Deterministic Tool-Level Entitlement Checks
 Entitlements and scopes must be enforced deterministically inside the tool handler, **not** by relying on LLM prompt instructions:

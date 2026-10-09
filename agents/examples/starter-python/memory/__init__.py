@@ -33,8 +33,22 @@ _ARCHETYPE_MODULES = {
 }
 
 
+def _strip_inline_comment(val: str) -> str:
+    """Drop a trailing `# comment` from a scalar, leaving a `#` inside quotes alone."""
+    quote = ""
+    for i, ch in enumerate(val):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "#" and (i == 0 or val[i - 1].isspace()):
+            return val[:i].rstrip()
+    return val
+
+
 def _parse_yaml_scalar(val: str) -> Any:
-    val = val.strip()
+    val = _strip_inline_comment(val).strip()
     if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
         return val[1:-1]
     if val.lower() == "true":
@@ -87,11 +101,8 @@ def get_memory_archetype(name: str):
     return _ARCHETYPE_MODULES[clean_name]
 
 
-def load_archetype_from_cartridge(cartridge_path: Path | str | None = None) -> tuple[str, Any]:
-    """Inspect cartridge.yaml to determine and return the configured memory archetype.
-
-    Fails closed: raises RuntimeError or ValueError on corrupt/invalid manifests.
-    """
+def _read_manifest(cartridge_path: Path | str | None = None) -> tuple[Path, dict]:
+    """Read cartridge.yaml. Fails closed: raises on a missing or unreadable manifest."""
     path = Path(cartridge_path) if cartridge_path else Path("cartridge.yaml")
     if not path.is_absolute() and not path.exists():
         # Search parents for cartridge.yaml
@@ -105,10 +116,17 @@ def load_archetype_from_cartridge(cartridge_path: Path | str | None = None) -> t
         raise FileNotFoundError(f"Cartridge manifest not found at {path}")
 
     try:
-        content = path.read_text("utf-8")
-        data = _parse_manifest(content)
+        return path, _parse_manifest(path.read_text("utf-8"))
     except Exception as e:
         raise RuntimeError(f"Failed to read cartridge manifest at {path}: {e}") from e
+
+
+def load_archetype_from_cartridge(cartridge_path: Path | str | None = None) -> tuple[str, Any]:
+    """Inspect cartridge.yaml to determine and return the configured memory archetype.
+
+    Fails closed: raises RuntimeError or ValueError on corrupt/invalid manifests.
+    """
+    path, data = _read_manifest(cartridge_path)
 
     archetype_name = None
     memory_conf = data.get("memory")
@@ -134,6 +152,33 @@ def load_archetype_from_cartridge(cartridge_path: Path | str | None = None) -> t
         )
 
     return archetype_name, get_memory_archetype(archetype_name)
+
+
+DEFAULT_RETENTION_DAYS = 30
+DEFAULT_MAX_MESSAGES = 20
+DEFAULT_MAX_CHARS = 24000
+
+
+def load_memory_bounds(cartridge_path: Path | str | None = None) -> dict[str, int]:
+    """The memory bounds the cartridge declares (`memory.retentionDays`, `maxMessages`, `maxChars`).
+
+    An omitted bound takes its default; a bound that is not a positive whole number is refused, so the declared
+    bounds are the ones the agent runs with. Fails closed on a missing or unreadable manifest.
+    """
+    path, data = _read_manifest(cartridge_path)
+    conf = data.get("memory")
+    conf = conf if isinstance(conf, dict) else {}
+    bounds = {}
+    for key, name, default in (
+        ("retentionDays", "retention_days", DEFAULT_RETENTION_DAYS),
+        ("maxMessages", "max_messages", DEFAULT_MAX_MESSAGES),
+        ("maxChars", "max_chars", DEFAULT_MAX_CHARS),
+    ):
+        value = conf.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"Cartridge manifest at {path}: memory.{key} must be a positive whole number, got {value!r}")
+        bounds[name] = value
+    return bounds
 
 
 # Re-export canonical Type 2 Episodic functions for SM-castle / principal agent parity
@@ -172,6 +217,7 @@ __all__ = [
     "SUPPORTED_ARCHETYPES",
     "get_memory_archetype",
     "load_archetype_from_cartridge",
+    "load_memory_bounds",
     # Submodules
     "ephemeral",
     "episodic",
