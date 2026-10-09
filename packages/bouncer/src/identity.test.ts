@@ -158,6 +158,24 @@ describe('Bouncer authorizeIngress', () => {
     }
   });
 
+  it('rejects un-roled agent owner on agents.converse (owner rights apply to wake, not converse)', () => {
+    const res = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'owner_user' },
+      agentId: 'donna',
+      privilege: 'agents.converse',
+      owners: ['cloudflare:owner@example.com'],
+      link: {
+        actor: 'cloudflare:owner@example.com',
+        name: 'Agent Owner',
+      },
+    });
+    assert.equal(res.allowed, false);
+    if (!res.allowed) {
+      assert.equal(res.error, 'unauthorized_caller');
+      assert.equal(res.required, 'operator');
+    }
+  });
+
   it('authorizes conversation mid-run with agents.converse privilege', () => {
     const res = authorizeIngress({
       requestedBy: { provider: 'discord', id: 'op_user' },

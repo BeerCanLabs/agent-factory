@@ -188,13 +188,11 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
   const actor = link.actor;
   const isCloudflare = actor.startsWith('cloudflare:');
   const email = isCloudflare ? actor.slice('cloudflare:'.length).trim().toLowerCase() : '';
-  const isEmailAdmin =
-    (email && req.adminEmails?.some((e) => e.trim().toLowerCase() === email)) ||
-    actor === 'token:admin';
+  const isEmailAdmin = Boolean(email && req.adminEmails?.some((e) => e.trim().toLowerCase() === email));
 
   // Resolve roles:
   // 1. Explicit link roles if set
-  // 2. Admin if email listed in FACTORY_ADMIN_EMAILS or token:admin
+  // 2. Admin if email listed in FACTORY_ADMIN_EMAILS
   // 3. Clean slate mapping: zero grandfathering for un-roled legacy links.
   //    External callers without explicit roles have no roles assigned and must be granted roles by an admin.
   const resolvedRoles: readonly Role[] =

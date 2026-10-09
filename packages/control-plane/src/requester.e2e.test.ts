@@ -243,6 +243,25 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     const msg = mailbox?.messages[mailbox.messages.length - 1];
     assert.ok(msg);
     assert.equal((msg.payload as any).caller?.actor, 'cloudflare:dale@example.com');
+
+    // Non-ingress caller (OPERATOR) cannot name requestedBy on /conversation (attest privilege required)
+    const rForgeReqBy = await api('/api/v1/agents/ada/conversation', 'POST', OPERATOR, {
+      input: { text: 'try to forge' },
+      requestedBy: discord('123456789'),
+    });
+    assert.equal(rForgeReqBy.status, 403);
+    assert.equal(rForgeReqBy.body.error, 'forbidden');
+    assert.equal(rForgeReqBy.body.required, 'gatekeeper-ingress');
+
+    // Caller sending authorId without requestedBy does NOT get mapped or injected as caller
+    const rAuthorId = await api('/api/v1/agents/ada/conversation', 'POST', OPERATOR, {
+      content: 'hello',
+      authorId: '123456789',
+    });
+    assert.equal(rAuthorId.status, 202);
+    const lastMsg = mailbox?.messages[mailbox.messages.length - 1];
+    assert.ok(lastMsg);
+    assert.equal((lastMsg.payload as any).caller, undefined);
   });
 
   it('authorizes mapped admin and owner callers and injects caller metadata into run and input', async () => {
@@ -271,6 +290,15 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     const rAlice = await wake(INGRESS, { input: { messageId: 'm-alice' }, requestedBy: discord('alice-discord-id') });
     assert.equal(rAlice.status, 202);
     assert.equal(rAlice.body.caller.role, 'agent-owner');
+
+    // Mapped agent owner with no explicit roles gets 403 on /conversation (agents.converse requires operator)
+    const rAliceConvo = await api('/api/v1/agents/ada/conversation', 'POST', INGRESS, {
+      input: { text: 'next turn' },
+      requestedBy: discord('alice-discord-id'),
+    });
+    assert.equal(rAliceConvo.status, 403);
+    assert.equal(rAliceConvo.body.error, 'unauthorized_caller');
+    assert.equal(rAliceConvo.body.required, 'operator');
 
     // Mapped non-owner viewer: insufficient privileges
     state.identityLinks!.link('discord', 'bob-discord-id', 'token:bob', 'admin', { name: 'Bob', roles: ['viewer'] });

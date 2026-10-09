@@ -1320,7 +1320,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     // Only a caller allowed to say who asked (the ingress) may name the requester. `input.authorId` is whatever the
     // caller wrote and is never an identity.
-    const isIngress = Boolean(principal.roles?.includes('gatekeeper-ingress'));
+    const isIngress = authorize({ principal, privilege: 'runs.attest-requester' }).allowed;
     let requestedBy: { provider: string; id: string } | undefined;
     let caller: AuthenticatedCaller | undefined;
     if (body.requestedBy !== undefined) {
@@ -1474,16 +1474,22 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     const rawBody = (await readJson(req)) as Record<string, unknown>;
-    const isIngress = Boolean(principal.roles?.includes('gatekeeper-ingress'));
+    const isIngress = authorize({ principal, privilege: 'runs.attest-requester' }).allowed;
     let requestedBy: { provider: string; id: string } | undefined;
     if (rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody)) {
-      if (rawBody.requestedBy && typeof rawBody.requestedBy === 'object' && !Array.isArray(rawBody.requestedBy)) {
-        const rb = rawBody.requestedBy as Record<string, unknown>;
-        if (typeof rb.provider === 'string' && typeof rb.id === 'string') {
-          requestedBy = { provider: rb.provider, id: rb.id };
+      if (rawBody.requestedBy !== undefined) {
+        const attest = authorize({ principal, privilege: 'runs.attest-requester' });
+        if (!attest.allowed) {
+          json(res, 403, { error: 'forbidden', required: attest.required });
+          return;
         }
-      } else if (typeof rawBody.authorId === 'string' && rawBody.authorId) {
-        requestedBy = { provider: 'discord', id: rawBody.authorId };
+        const rb = rawBody.requestedBy as Record<string, unknown> | null;
+        const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 128;
+        if (!rb || typeof rb !== 'object' || Array.isArray(rb) || !text(rb.provider) || !text(rb.id)) {
+          json(res, 400, { error: 'requestedBy must be { provider, id }, each a string of at most 128 characters' });
+          return;
+        }
+        requestedBy = { provider: rb.provider, id: rb.id };
       }
     }
 
