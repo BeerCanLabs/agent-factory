@@ -13,18 +13,26 @@ import { StudioView } from './views/StudioView.js';
 import { CredentialsView } from './views/CredentialsView.js';
 import { SkillsView } from './views/SkillsView.js';
 import { SystemsView } from './views/SystemsView.js';
+import { IdentitiesView } from './views/IdentitiesView.js';
 import { factoryApi } from './api/client.js';
 import type { AgentRecord, ApprovalItem } from './api/types.js';
 
-/** Deep link, e.g. from the OAuth consent page: `/?view=credentials&agent=<id>`, or `/?view=skills`, `/?view=systems`. */
+/** Deep link, e.g. from the OAuth consent page: `/?view=credentials&agent=<id>`, or `/?view=identities`, `/?view=skills`, `/?view=systems`. */
 function initialLocation(): { screen: ScreenId; agentId?: string } {
   const q = new URLSearchParams(window.location.search);
   const view = q.get('view');
-  return { screen: view === 'credentials' || view === 'skills' || view === 'systems' ? view : 'fleet', agentId: q.get('agent') ?? undefined };
+  return {
+    screen:
+      view === 'credentials' || view === 'identities' || view === 'skills' || view === 'systems'
+        ? view
+        : 'fleet',
+    agentId: q.get('agent') ?? undefined,
+  };
 }
 
 
 const MainLayout: React.FC = () => {
+  const { hasRole } = useAuth();
   const [initial] = useState(initialLocation);
   const [currentScreen, setCurrentScreen] = useState<ScreenId>(initial.screen);
   const [agents, setAgents] = useState<AgentRecord[]>([]);
@@ -121,6 +129,19 @@ const MainLayout: React.FC = () => {
               onSelectAgent={setSelectedAgentId}
               onChanged={loadOutstanding}
             />
+          )}
+
+          {currentScreen === 'identities' && (
+            hasRole('admin') ? (
+              <IdentitiesView />
+            ) : (
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-12 text-center text-xs text-slate-500">
+                <p className="font-semibold text-slate-700 dark:text-slate-300">Admin Privileges Required</p>
+                <p className="text-slate-500 text-[11px] mt-1">
+                  Viewing and managing Bouncer external identity links requires administrator authority.
+                </p>
+              </div>
+            )
           )}
 
           {currentScreen === 'skills' && <SkillsView />}

@@ -67,4 +67,20 @@ describe('A2 console forwards the caller, adds no credential', () => {
     const anon = await fetch(`http://127.0.0.1:${port}/api/auth/me`, { headers: { 'cf-access-authenticated-user-email': 'owner@example.com' } });
     assert.equal(anon.status, 401);
   });
+
+  it('proxies identity-links endpoints forwarding credentials and payload', async () => {
+    seen.length = 0;
+    const res = await fetch(`http://127.0.0.1:${port}/api/v1/identity-links/discord/123456789`, {
+      method: 'PUT',
+      headers: {
+        'cf-access-jwt-assertion': 'jwt-for-admin',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ actor: 'cloudflare:owner@example.com', name: 'Owner', roles: ['admin'] }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { path: '/api/v1/identity-links/discord/123456789' });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]['cf-access-jwt-assertion'], 'jwt-for-admin');
+  });
 });
