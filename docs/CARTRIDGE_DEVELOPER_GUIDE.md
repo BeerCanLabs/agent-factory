@@ -172,7 +172,7 @@ The agent application contains your tools and reasoning loop.
 When the Factory Console wakes your cartridge:
 1. **Input Payload:** Injected via the `FACTORY_INPUT` environment variable and written to `/tmp/factory-input.json`.
 2. **Secrets:** Injected into `os.environ` using the exact names declared in `cartridge.yaml`.
-3. **Memory Directory:** The Console hydrates previous state into `os.environ["MEMORY_DIR"]` (defaults to `/memory`). For architectural depth on Agent Archetypes, the Storage Triad (Whiteboard vs. Notebook vs. Safe), FTS5 episodic search, and avoiding the decoder ring anti-pattern, see the [Agent Memory Architecture Guide](architecture/agent-memory-models.md).
+3. **Memory Directory:** The Console hydrates previous state into `os.environ["MEMORY_DIR"]`. The Factory sets it (`/tmp/mind` in the reference runtimes), so always read it from the environment and never hard-code a path. For architectural depth on Agent Archetypes, the Storage Triad (Whiteboard vs. Notebook vs. Safe), FTS5 episodic search, and avoiding the decoder ring anti-pattern, see the [Agent Memory Architecture Guide](architecture/agent-memory-models.md).
 4. **Egress Interception & Credential Injection:** The Console enforces a **Zero-Trust Network Perimeter** (no public IP, no default internet gateway route `0.0.0.0/0`). Outbound traffic to LLMs and third-party APIs (such as Discord) egresses exclusively through the **gatekeeper-egress** via standard Base URL variables:
    - `ANTHROPIC_BASE_URL` (`${GATEKEEPER_EGRESS_URL}/anthropic`)
    - `OPENAI_BASE_URL` (`${GATEKEEPER_EGRESS_URL}/v1`)
@@ -467,6 +467,19 @@ Build and push to your container registry:
 docker build -t ghcr.io/myorg/ops-assistant:1.0.0 .
 docker push ghcr.io/myorg/ops-assistant:1.0.0
 ```
+
+### 3. What the Factory Checks Before It Accepts a Commit (Admission)
+When an owner registers an agent by naming its repository, the Factory pins the exact commit and builds it in an isolated build environment before anything is deployed (DESIGN_AUTHORITY.md L3 and L4). A commit that fails is refused with a reason, and the refusal is recorded in the ledger. Check these yourself first; the reference starter (`agents/examples/starter-python`) passes them.
+
+1. **A pinned commit.** The Factory builds the full 40-character commit SHA you register, never a branch or a mutable tag. The image is tagged `<agent-id>-<first 12 characters of the SHA>`.
+2. **No hard-coded credentials** (refusal `hardcoded_secret`). Every tracked file is scanned for known token formats (GitHub, Slack, Anthropic, xAI, AWS keys, Notion, private-key headers) and for `secret`, `password`, `api_key` or `token` assigned a long literal. A hit is reported as `file:line`, never the value. Declare secrets by name in `cartridge.yaml` (`secrets.requires`); the Factory injects them, and an agent holds only its run token (S1). A line that is a deliberate false positive can carry the marker `secret-scan:allow`.
+3. **Your own tests exist and pass** (refusals `no_tests`, `tests_failed`). Python agents (a `requirements.txt`, `pyproject.toml` or `setup.py`) need at least one `test_*.py` or `*_test.py` file, and `python -m pytest -q` must pass; pytest collecting nothing counts as `no_tests`. Node agents (a `package.json`) need a real `scripts.test`, and `npm ci && npm test` must pass. Any other kind of agent is refused as `no_tests`. `requirements.txt` is installed first, so declare every dependency your tests and agent import.
+4. **The image builds and is pushed** (refusals `build_failed`, `push_failed`). The build runs `docker build` on your `Dockerfile`, so every file the agent imports must be copied into the image.
+5. **The source is reachable** (refusal `source_unavailable`): the repository can be cloned and the commit is the one registered.
+
+The Factory also validates `cartridge.yaml` and its sibling files against the contract when it loads the agent (the same check as `npx @beercanlabs/contract validate`, section 7.1), and the Factory design rules apply: memory under `$MEMORY_DIR` with no cloud storage SDKs (section 5 and `docs/architecture/agent-memory-models.md`), every outbound call through the gatekeeper-egress, and egress declared in the cartridge.
+
+Admission is not deployment. An agent deploys only after a policy owner has set its policy and budget (E7), and the Factory deploys exactly the admitted image. The build steps above are the AWS landing zone's builder (`landing-zones/aws/codebuild.tf`); a provider whose build cannot run tests yet (the GCP landing zone today) refuses every commit with `not_supported`.
 
 ---
 
