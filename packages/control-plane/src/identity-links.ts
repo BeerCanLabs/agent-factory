@@ -32,6 +32,8 @@ export {
 };
 
 const EXTERNAL_ID = /^[A-Za-z0-9._-]{1,128}$/;
+const AGENT_ID_REGEX = /^[a-z0-9][a-z0-9-_]{0,63}$/i;
+const ROLE_NAME_REGEX = /^[A-Za-z0-9_-]{1,64}$/;
 
 const ONE = /^\/api\/v1\/identity-links\/([^/]+)\/([^/]+)$/;
 
@@ -53,7 +55,11 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
   if (!isProvider(provider) || !EXTERNAL_ID.test(id)) {
     return json(res, 400, { error: 'unknown_identity', message: `provider must be one of ${PROVIDERS.join(', ')} and id letters, digits, dot, dash or underscore` }), true;
   }
-  const ledger = (action: 'IDENTITY_LINKED' | 'IDENTITY_UNLINKED', actor: string, details?: { name?: string; roles?: Role[] }) =>
+  const ledger = (
+    action: 'IDENTITY_LINKED' | 'IDENTITY_UNLINKED',
+    actor: string,
+    details?: { name?: string; roles?: Role[]; agentRoles?: Record<string, string[]> },
+  ) =>
     // Never the external id itself: only a hash of the provider, id, person, name and roles.
     state.ledger.append({
       timestamp: new Date().toISOString(),
@@ -67,12 +73,13 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
         actor,
         ...(details?.name ? { name: details.name } : {}),
         ...(details?.roles ? { roles: details.roles } : {}),
+        ...(details?.agentRoles ? { agentRoles: details.agentRoles } : {}),
       }),
     });
   if (req.method === 'DELETE') {
     const removed = store.unlink(provider, id);
     if (!removed) return json(res, 404, { error: 'not_found' }), true;
-    ledger('IDENTITY_UNLINKED', removed.actor, { name: removed.name, roles: removed.roles });
+    ledger('IDENTITY_UNLINKED', removed.actor, { name: removed.name, roles: removed.roles, agentRoles: removed.agentRoles });
     json(res, 200, { ok: true });
     return true;
   }
@@ -101,8 +108,52 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
       }
     }
   }
-  const { link, changed } = store.link(provider, id, actor, principal.actor, { name, roles });
-  if (changed) ledger('IDENTITY_LINKED', actor, { name: link.name, roles: link.roles });
+  let agentRoles: Record<string, string[]> | undefined;
+  if (body.agentRoles !== undefined && body.agentRoles !== null) {
+    if (typeof body.agentRoles !== 'object' || Array.isArray(body.agentRoles)) {
+      return json(res, 400, { error: 'agentRoles must be a map of agentId to array of role strings' }), true;
+    }
+    // Escalation check: caller cannot grant agent roles unless admin
+    if (!principal.roles?.includes('admin')) {
+      return json(res, 403, { error: 'privilege_escalation', message: 'cannot grant agentRoles: caller must be admin' }), true;
+    }
+    const entries = Object.entries(body.agentRoles);
+    if (entries.length > 50) {
+      return json(res, 400, { error: 'agentRoles exceeds maximum limit of 50 agents' }), true;
+    }
+    if (Object.prototype.hasOwnProperty.call(body.agentRoles, '__proto__')) {
+      return json(res, 400, { error: "invalid agentId '__proto__': prototype properties forbidden" }), true;
+    }
+    const map: Record<string, string[]> = Object.create(null);
+    for (const [agentId, rolesList] of entries) {
+      if (
+        typeof agentId !== 'string' ||
+        !AGENT_ID_REGEX.test(agentId) ||
+        agentId === '__proto__' ||
+        agentId === 'constructor' ||
+        agentId === 'prototype'
+      ) {
+        return json(res, 400, { error: `invalid agentId '${agentId}': must be a valid slug (letters, digits, dash, underscore)` }), true;
+      }
+      if (!Array.isArray(rolesList) || rolesList.length > 20) {
+        return json(res, 400, { error: `agentRoles for '${agentId}' must be an array of at most 20 role strings` }), true;
+      }
+      const cleanedRoles: string[] = [];
+      for (const r of rolesList) {
+        if (typeof r !== 'string' || !ROLE_NAME_REGEX.test(r)) {
+          return json(res, 400, { error: `invalid role name in '${agentId}': must be 1-64 alphanumeric characters, dash or underscore` }), true;
+        }
+        if (r.toLowerCase() === 'owner') {
+          return json(res, 400, { error: 'invalid_agent_roles', message: `role 'Owner' in '${agentId}' is reserved and derived strictly from agent ownership` }), true;
+        }
+        cleanedRoles.push(r);
+      }
+      map[agentId] = [...new Set(cleanedRoles)];
+    }
+    agentRoles = map;
+  }
+  const { link, changed } = store.link(provider, id, actor, principal.actor, { name, roles, agentRoles });
+  if (changed) ledger('IDENTITY_LINKED', actor, { name: link.name, roles: link.roles, agentRoles: link.agentRoles });
   json(res, 200, link);
   return true;
 }

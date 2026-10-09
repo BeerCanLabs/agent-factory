@@ -25,4 +25,5 @@ export {
   authorizeIngress,
   isProvider,
   parseActor,
+  sanitizeAgentRoles,
 } from './identity.js';

@@ -65,6 +65,8 @@ describe('Bouncer authorizeIngress', () => {
         name: 'Admin User',
         role: 'admin',
         roles: ['admin', 'operator', 'approver', 'viewer', 'ingest'],
+        agentRoles: [],
+        isOwner: false,
         provider: 'discord',
         id: '123456789',
       });
@@ -122,6 +124,30 @@ describe('Bouncer authorizeIngress', () => {
       assert.equal(res.caller?.role, 'agent-owner');
       assert.equal(res.caller?.name, 'Alice');
       assert.equal(res.caller?.provider, 'slack');
+      assert.equal(res.caller?.isOwner, true);
+      assert.deepEqual(res.caller?.agentRoles, ['Owner']);
+    }
+  });
+
+  it('populates agentRoles mapped for a specific agent', () => {
+    const res = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'steph_disc' },
+      agentId: 'donna',
+      link: {
+        actor: 'cloudflare:stephanie@example.com',
+        name: 'Stephanie',
+        roles: ['operator'],
+        agentRoles: {
+          donna: ['Family'],
+          higgins: ['Realtor'],
+        },
+      },
+    });
+    assert.equal(res.allowed, true);
+    if (res.allowed) {
+      assert.equal(res.caller?.name, 'Stephanie');
+      assert.equal(res.caller?.isOwner, false);
+      assert.deepEqual(res.caller?.agentRoles, ['Family']);
     }
   });
 
@@ -219,4 +245,148 @@ describe('Bouncer IdentityLinkStore', () => {
     assert.ok(unlinked);
     assert.equal(store.resolve('discord', 'disc_123'), undefined);
   });
+
+  it('stores and preserves agentRoles mapping', () => {
+    const store = new IdentityLinkStore();
+    const { link } = store.link('discord', 'steph_1', 'cloudflare:stephanie@example.com', 'token:admin', {
+      name: 'Stephanie',
+      roles: ['operator'],
+      agentRoles: { donna: ['Family'] },
+    });
+    assert.deepEqual({ ...link.agentRoles }, { donna: ['Family'] });
+    const resolved = store.resolveLink('discord', 'steph_1');
+    assert.deepEqual({ ...resolved?.agentRoles }, { donna: ['Family'] });
+  });
+
+  it('preserves existing agentRoles on re-link when omitted (partial update) for same actor', () => {
+    const store = new IdentityLinkStore();
+    store.link('discord', 'user_1', 'cloudflare:user1@example.com', 'token:admin', {
+      name: 'User One',
+      roles: ['operator'],
+      agentRoles: { switch: ['Operator'], donna: ['Family'] },
+    });
+
+    // Re-link with only updated name; agentRoles should not be clobbered
+    const { link: updated } = store.link('discord', 'user_1', 'cloudflare:user1@example.com', 'token:admin', {
+      name: 'User One Updated',
+      roles: ['operator'],
+    });
+    assert.equal(updated.name, 'User One Updated');
+    assert.deepEqual({ ...updated.agentRoles }, { switch: ['Operator'], donna: ['Family'] });
+  });
+
+  it('resets agentRoles when re-pointing link to a different actor and agentRoles is omitted', () => {
+    const store = new IdentityLinkStore();
+    store.link('discord', 'shared_user', 'cloudflare:alice@example.com', 'token:admin', {
+      name: 'Alice',
+      roles: ['operator'],
+      agentRoles: { switch: ['Operator'] },
+    });
+
+    // Re-point link to Bob without agentRoles: Alice's agentRoles must NOT carry over to Bob
+    const { link: repointed } = store.link('discord', 'shared_user', 'cloudflare:bob@example.com', 'token:admin', {
+      name: 'Bob',
+      roles: ['operator'],
+    });
+    assert.equal(repointed.actor, 'cloudflare:bob@example.com');
+    assert.equal(repointed.agentRoles, undefined);
+  });
+
+  it('considers reordered agentRoles identical (no spurious change)', () => {
+    const store = new IdentityLinkStore();
+    store.link('discord', 'user_2', 'cloudflare:user2@example.com', 'token:admin', {
+      agentRoles: { switch: ['A', 'B'], donna: ['X', 'Y'] },
+    });
+
+    // Re-link with different key and array ordering
+    const { changed } = store.link('discord', 'user_2', 'cloudflare:user2@example.com', 'token:admin', {
+      agentRoles: { donna: ['Y', 'X'], switch: ['B', 'A'] },
+    });
+    assert.equal(changed, false);
+  });
+
+  it('detects no spurious change when input contains prototype keys', () => {
+    const store = new IdentityLinkStore();
+    store.link('discord', 'user_spurious', 'cloudflare:user@example.com', 'token:admin', {
+      agentRoles: { constructor: ['Role'] as any, donna: ['User'] },
+    });
+
+    // Re-link with identical unsanitized input
+    const { changed } = store.link('discord', 'user_spurious', 'cloudflare:user@example.com', 'token:admin', {
+      agentRoles: { constructor: ['Role'] as any, donna: ['User'] },
+    });
+    assert.equal(changed, false);
+  });
+
+  it('reserves Owner role and derives it strictly from catalog owners', () => {
+    const store = new IdentityLinkStore();
+    const { link } = store.link('discord', 'user_owner', 'cloudflare:alice@example.com', 'token:admin', {
+      agentRoles: { switch: ['Owner', 'Operator'] },
+    });
+    // 'Owner' should be stripped from stored agentRoles
+    assert.deepEqual(link.agentRoles?.switch, ['Operator']);
+
+    // Non-owner gets only non-Owner roles
+    const nonOwnerAuth = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'user_owner' },
+      agentId: 'switch',
+      owners: ['cloudflare:bob@example.com'],
+      link: {
+        actor: 'cloudflare:alice@example.com',
+        roles: ['operator'],
+        agentRoles: link.agentRoles,
+      },
+    });
+    assert.equal(nonOwnerAuth.allowed, true);
+    if (nonOwnerAuth.allowed) {
+      assert.equal(nonOwnerAuth.caller?.isOwner, false);
+      assert.deepEqual(nonOwnerAuth.caller?.agentRoles, ['Operator']);
+    }
+
+    // Owner gets 'Owner' injected
+    const ownerAuth = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'user_owner' },
+      agentId: 'switch',
+      owners: ['cloudflare:alice@example.com'],
+      link: {
+        actor: 'cloudflare:alice@example.com',
+        roles: ['operator'],
+        agentRoles: link.agentRoles,
+      },
+    });
+    assert.equal(ownerAuth.allowed, true);
+    if (ownerAuth.allowed) {
+      assert.equal(ownerAuth.caller?.isOwner, true);
+      assert.deepEqual(ownerAuth.caller?.agentRoles, ['Owner', 'Operator']);
+    }
+  });
+
+  it('safely handles prototype keys without corrupting lookups or throwing', () => {
+    const store = new IdentityLinkStore();
+    const { link } = store.link('discord', 'user_3', 'cloudflare:user3@example.com', 'token:admin', {
+      agentRoles: { constructor: ['SomeRole'], donna: ['User'] } as any,
+    });
+    // constructor should not be stored as an own property, and null-prototype avoids inheritance
+    assert.equal(Object.hasOwn(link.agentRoles || {}, 'constructor'), false);
+    assert.equal(link.agentRoles?.constructor, undefined);
+    assert.deepEqual(link.agentRoles?.donna, ['User']);
+
+    // authorizeIngress safe lookup for agentId 'constructor'
+    const res = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'user_3' },
+      agentId: 'constructor',
+      owners: [],
+      link: {
+        actor: 'cloudflare:user3@example.com',
+        roles: ['operator'],
+        agentRoles: link.agentRoles,
+      },
+    });
+    // Does not throw and returns empty agentRoles
+    assert.equal(res.allowed, true);
+    if (res.allowed) {
+      assert.deepEqual(res.caller?.agentRoles, []);
+    }
+  });
 });
+

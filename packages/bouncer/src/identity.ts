@@ -25,12 +25,63 @@ export type IdentityLink = {
   actor: string;
   name?: string;
   roles?: Role[];
+  agentRoles?: Record<string, string[]>;
   linkedBy: string;
   linkedAt: string;
 };
 
 const key = (provider: string, id: string) => `${provider}:${id}`;
 const file = (l: Pick<IdentityLink, 'provider' | 'id'>) => `${l.provider}__${l.id}`;
+
+export function sameAgentRoles(
+  a: Record<string, string[]> | undefined,
+  b: Record<string, string[]> | undefined,
+): boolean {
+  if (!a && !b) return true;
+  const aKeys = Object.keys(a || {}).sort();
+  const bKeys = Object.keys(b || {}).sort();
+  if (aKeys.length !== bKeys.length) return false;
+  for (let i = 0; i < aKeys.length; i++) {
+    const k = aKeys[i];
+    if (k !== bKeys[i]) return false;
+    const aVals = Array.isArray(a?.[k]) ? [...a[k]].sort() : [];
+    const bVals = Array.isArray(b?.[k]) ? [...b[k]].sort() : [];
+    if (aVals.length !== bVals.length) return false;
+    for (let j = 0; j < aVals.length; j++) {
+      if (aVals[j] !== bVals[j]) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Sanitizes an agentRoles dictionary:
+ * - Drops prototype/inherited keys ('__proto__', 'constructor', 'prototype')
+ * - Strips reserved 'Owner' role (case-insensitive), derived strictly from agent ownership
+ * - Deduplicates role arrays
+ * - Returns a null-prototype Record or undefined if empty
+ */
+export function sanitizeAgentRoles(
+  input: Record<string, string[]> | undefined,
+): Record<string, string[]> | undefined {
+  if (!input) return undefined;
+  const result: Record<string, string[]> = Object.create(null);
+  for (const [k, v] of Object.entries(input)) {
+    if (
+      k !== '__proto__' &&
+      k !== 'constructor' &&
+      k !== 'prototype' &&
+      Object.prototype.hasOwnProperty.call(input, k) &&
+      Array.isArray(v)
+    ) {
+      const roles = v.filter((r) => typeof r === 'string' && r.toLowerCase() !== 'owner');
+      if (roles.length > 0) {
+        result[k] = [...new Set(roles)];
+      }
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
 
 /**
  * Links on disk, one file each, written the way the approval store writes.
@@ -46,6 +97,9 @@ export class IdentityLinkStore {
       if (!name.endsWith('.json')) continue;
       try {
         const l = JSON.parse(readFileSync(join(dir, name), 'utf8')) as IdentityLink;
+        if (l.agentRoles) {
+          l.agentRoles = sanitizeAgentRoles(l.agentRoles);
+        }
         this.items.set(key(l.provider, l.id), l);
       } catch (err) {
         // A truncated or hand-edited file must not stop the factory. Skipping it grants nothing (fail closed).
@@ -74,22 +128,40 @@ export class IdentityLinkStore {
     id: string,
     actor: string,
     by: string,
-    extra?: { name?: string; roles?: Role[] },
+    extra?: { name?: string; roles?: Role[]; agentRoles?: Record<string, string[]> },
   ): { link: IdentityLink; changed: boolean } {
     const current = this.items.get(key(provider, id));
     const sameRoles =
       (!current?.roles && !extra?.roles) ||
       (current?.roles?.length === extra?.roles?.length &&
         current?.roles?.every((r, i) => r === extra?.roles?.[i]));
-    if (current?.actor === actor && current?.name === extra?.name && sameRoles) {
+
+    // Bug 1: Preserve agentRoles only when actor is unchanged.
+    // If actor changed and extra.agentRoles is omitted, agentRoles reset to undefined.
+    const rawNextAgentRoles =
+      extra?.agentRoles !== undefined
+        ? extra.agentRoles
+        : (current?.actor === actor ? current?.agentRoles : undefined);
+
+    // Bug 3: Sanitize before change detection to avoid spurious duplicate changes
+    const nextAgentRoles = sanitizeAgentRoles(rawNextAgentRoles);
+
+    if (
+      current?.actor === actor &&
+      current?.name === extra?.name &&
+      sameRoles &&
+      sameAgentRoles(current?.agentRoles, nextAgentRoles)
+    ) {
       return { link: { ...current }, changed: false };
     }
+
     const link: IdentityLink = {
       provider,
       id,
       actor,
       ...(extra?.name ? { name: extra.name } : {}),
       ...(extra?.roles ? { roles: [...extra.roles] } : {}),
+      ...(nextAgentRoles ? { agentRoles: nextAgentRoles } : {}),
       linkedBy: by,
       linkedAt: new Date().toISOString(),
     };
@@ -126,6 +198,8 @@ export type AuthenticatedCaller = {
   name?: string;
   role: Role | 'agent-owner';
   roles: readonly Role[];
+  agentRoles?: readonly string[];
+  isOwner?: boolean;
   provider?: string;
   id?: string;
 };
@@ -141,6 +215,7 @@ export type IngressAuthorizeRequest = {
     actor: string;
     name?: string;
     roles?: readonly Role[];
+    agentRoles?: Record<string, string[]>;
   };
   adminEmails?: readonly string[];
   isIngressCaller?: boolean;
@@ -220,6 +295,16 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
   }
 
   const isOwner = owners.some((o) => o.toLowerCase() === actor.toLowerCase());
+  const linkAgentRoles =
+    link.agentRoles &&
+    Object.prototype.hasOwnProperty.call(link.agentRoles, agentId) &&
+    Array.isArray(link.agentRoles[agentId])
+      ? link.agentRoles[agentId].filter((r) => typeof r === 'string' && r.toLowerCase() !== 'owner')
+      : [];
+  const effectiveAgentRoles = isOwner
+    ? ['Owner', ...linkAgentRoles]
+    : linkAgentRoles;
+
 
   // Determine the primary role that actually satisfied the privilege
   let satisfyingRole: Role | 'agent-owner';
@@ -246,6 +331,8 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
       name: link.name,
       role: satisfyingRole,
       roles: faithfulRoles,
+      agentRoles: effectiveAgentRoles,
+      isOwner,
       provider: requestedBy.provider,
       id: requestedBy.id,
     },
