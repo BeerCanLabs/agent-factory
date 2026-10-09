@@ -340,10 +340,56 @@ id: test-agent
         """Verify get_workspace_db_path creates isolated, sanitized database filenames."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             p1 = workspace.get_workspace_db_path(tmp_dir, "my-team/project-1")
-            self.assertEqual(p1.name, "workspace_my-team_project-1.db")
+            self.assertTrue(p1.name.startswith("workspace_my-team_project-1-") and p1.name.endswith(".db"), p1.name)
+            self.assertEqual(p1.parent, Path(tmp_dir))
 
             p2 = workspace.get_workspace_db_path(tmp_dir, "clean_project")
             self.assertEqual(p2.name, "workspace_clean_project.db")
+
+    def test_workspace_db_path_never_collides_for_different_ids(self):
+        """Two different project ids must never share a database file, even when sanitizing makes them look alike."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            slash = workspace.get_workspace_db_path(tmp_dir, "a/b")
+            underscore = workspace.get_workspace_db_path(tmp_dir, "a_b")
+            dot = workspace.get_workspace_db_path(tmp_dir, "a.b")
+            self.assertEqual(len({slash, underscore, dot}), 3)
+            # Stable: the same id always maps to the same file.
+            self.assertEqual(slash, workspace.get_workspace_db_path(tmp_dir, "a/b"))
+            # An empty id is not the id "default".
+            self.assertNotEqual(workspace.get_workspace_db_path(tmp_dir, ""), workspace.get_workspace_db_path(tmp_dir, "default"))
+
+    def test_manifest_inline_comments_are_ignored(self):
+        """A trailing comment must not change a value; a # inside quotes stays."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "cartridge.yaml"
+            path.write_text('memory:\n  archetype: workspace # per-project\n  retentionDays: 14 # two weeks\n  label: "a # b"\n', "utf-8")
+            name, _ = memory.load_archetype_from_cartridge(path)
+            self.assertEqual(name, "workspace")
+            self.assertEqual(memory.load_memory_bounds(path)["retention_days"], 14)
+            self.assertEqual(memory._parse_manifest(path.read_text("utf-8"))["memory"]["label"], "a # b")
+
+    def test_memory_bounds_defaults_declared_and_refused(self):
+        """The declared bounds are the ones the agent runs with; a bad value is refused, not defaulted."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "cartridge.yaml"
+            path.write_text("memory:\n  archetype: episodic\n", "utf-8")
+            self.assertEqual(memory.load_memory_bounds(path), {"retention_days": 30, "max_messages": 20, "max_chars": 24000})
+
+            path.write_text("memory:\n  archetype: episodic\n  retentionDays: 7\n  maxMessages: 5\n  maxChars: 1000\n", "utf-8")
+            self.assertEqual(memory.load_memory_bounds(path), {"retention_days": 7, "max_messages": 5, "max_chars": 1000})
+
+            for bad in ("0", "-3", "many", "true", "1.5"):
+                path.write_text(f"memory:\n  archetype: episodic\n  retentionDays: {bad}\n", "utf-8")
+                with self.assertRaises(ValueError, msg=bad):
+                    memory.load_memory_bounds(path)
+
+        with self.assertRaises(FileNotFoundError):
+            memory.load_memory_bounds(Path(tmp_dir) / "missing" / "cartridge.yaml")
+
+    def test_starter_cartridge_declares_bounds_the_agent_reads(self):
+        """The shipped cartridge's own bounds load, so the schema fields are not decorative."""
+        bounds = memory.load_memory_bounds(Path(__file__).resolve().parent.parent / "cartridge.yaml")
+        self.assertEqual(bounds, {"retention_days": 30, "max_messages": 20, "max_chars": 24000})
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ Characteristics:
 - Preserves long-term task records while pruning ephemeral reasoning turns on wake.
 """
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -48,8 +49,15 @@ WORKSPACE_RECALL_TOOL_SPEC = {
 
 
 def get_workspace_db_path(memory_dir: Path | str, project_id: str) -> Path:
-    """Return isolated per-project database path to prevent multi-team state co-mingling."""
-    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", project_id.strip()) or "default"
+    """Return the isolated per-project database path.
+
+    A project id made only of letters, digits, `_` and `-` keeps a readable name. Any other id is sanitized and gets a
+    short hash of the original appended, so two different ids can never share one file (`a/b` and `a_b` stay apart).
+    """
+    raw = project_id.strip()
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", raw) or "default"
+    if safe_id != raw:
+        safe_id = f"{safe_id}-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:8]}"
     return Path(memory_dir) / f"workspace_{safe_id}.db"
 
 
