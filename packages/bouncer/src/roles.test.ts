@@ -14,6 +14,8 @@ const OWNER_RIGHTS: Privilege[] = [
   'agents.wake',
   'agents.pause',
   'agents.resume',
+  'skills.adopt.request',
+  'skills.adopt.remove',
   'approvals.decide',
 ];
 
@@ -53,7 +55,7 @@ describe('agent-owner and requester', () => {
   it('the owner never holds isolate, cancel, converse or a fleet-wide privilege', () => {
     const alice = as('cloudflare:alice@example.com');
     const r = on('a', ['cloudflare:alice@example.com']);
-    for (const p of ['agents.isolate', 'runs.cancel', 'agents.converse', 'registry.purge', 'policy.set', 'config.export', 'agents.owners.set', 'credentials.outstanding.read'] as Privilege[]) {
+    for (const p of ['agents.isolate', 'runs.cancel', 'agents.converse', 'registry.purge', 'policy.set', 'config.export', 'agents.owners.set', 'credentials.outstanding.read', 'skills.adopt.decide', 'skills.retire'] as Privilege[]) {
       assert.equal(allowed(alice, p, r), false, p);
     }
   });

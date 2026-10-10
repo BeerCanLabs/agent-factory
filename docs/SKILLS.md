@@ -280,8 +280,13 @@ Any viewer can read the catalog:
 | `GET /api/v1/skills` | every skill: name, description, `latestApproved` (or `null`), its requirements, and each version with its status, pin, checks (and the run in progress), and its decision (`decidedBy`, `decidedAt`, `reason`, `revoked`) |
 | `GET /api/v1/skills/:id` | one skill, with every version's full record |
 | `GET /api/v1/skills/:id/versions/:version` | one version's record |
+| `GET /api/v1/skills/:id/adopters` | the agents that use the skill (`approved`: in the agent's configuration) and the pending requests, each with who asked and who approved, and whether a newer approved version is available |
 
 `requires` in the catalog is the latest approved version's, or the newest registered version's if none is approved yet.
+Each skill also shows `visibility`, `owner` (private skills), `retired`, and its `adopters`.
+
+**A private skill is visible only to admins and to the owners of its owner agent.** To anyone else it doesn't exist:
+the list leaves it out and its other endpoints answer `404`.
 
 ## 7. Adoption is deployment configuration
 
@@ -291,12 +296,34 @@ the factory builds one image from the agent's source plus each skill at its pinn
 image (SK4). No code is loaded at runtime. When a newer approved version exists, the owner sees "skill update available"
 and decides when to upgrade (SK5).
 
-The configuration store and adoption are delivered by TSK-052, TSK-054 and TSK-055. This registry provides what they
-build on: approved, pinned versions.
+**What exists today (TSK-158).** The routes below change an agent's configuration record: a new version listing the
+adopted skill, with who asked and who approved, and a ledger row. The build and redeploy that make an adoption take
+effect on the running agent are the next slice (TSK-159); until then the configuration says what the agent *should*
+run.
+
+| Endpoint | Who | What it does |
+|---|---|---|
+| `GET /api/v1/agents/:id/skills` | any viewer | the agent's adopted skills, pending requests, revocations, and the skills it could adopt now (public skills and its own private ones) |
+| `POST /api/v1/agents/:id/skills` `{skillId, version, reason?}` | admin or the agent's owner | asks to adopt (or upgrade to) an approved version; the request shows what access it would add |
+| `POST /api/v1/agents/:id/skills/:skillId/adoption/approve` `{reason?}` | admin only | approves the request: writes the new configuration version. It never grants access: the agent's policy still names the routes |
+| `POST /api/v1/agents/:id/skills/:skillId/adoption/reject` `{reason?}` | admin only | ends the request, changing nothing |
+| `DELETE /api/v1/agents/:id/skills/:skillId` `{reason?}` | admin or the agent's owner | removes the adoption (a new version without it), or withdraws a pending request |
+| `POST /api/v1/registry/skills/:id/retire` `{reason?, force?}` | admin only | retires every version: no new version, no new adoption. Refused while an agent adopts it (`409 skill_in_use`); `force` pauses those agents and removes the skill from their configuration |
+
+An owner can ask and remove but never decide: an adoption adds access, so an admin approves it. Asking for a version that
+is unapproved, retired, or already adopted is refused (`skill_not_approved`, `skill_retired`, `already_adopted`).
+
+**Private skills adopt themselves.** Approving a version of a private skill adopts it for its owner agent in the same
+step (the response lists `adopted`), with the approving admin recorded as the approver. A later version moves the owner
+to it. If the owner removes the skill, later versions are no longer adopted automatically: the owner asks again and an
+admin approves (SK6). Registering a private skill needs an admin or an owner of the named agent, and the agent must
+exist.
 
 ## Who can register, and what counts as the same skill
 
-- Any authenticated user can register a skill. Registering never makes it usable: an admin approves each version.
+- Any authenticated user can register a public skill. Registering never makes it usable: an admin approves each version.
+- A private skill can be registered by an admin or an owner of the agent it names.
+- A skill's visibility and owner never change. A new version that would change either is refused: register a new skill.
 - A skill is its source. Every version of a skill id comes from the same repository and path. A different repository
   or path is a different skill, so register it under a different id.
 

@@ -70,6 +70,10 @@ export const PRIVILEGES = [
   'systems.decide',
   'skills.decide',
   'skills.checks.run',
+  'skills.adopt.request',
+  'skills.adopt.remove',
+  'skills.adopt.decide',
+  'skills.retire',
   'spend.budget.set',
 ] as const;
 
@@ -241,6 +245,10 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'systems.decide',
     'skills.decide',
     'skills.checks.run',
+    'skills.adopt.request',
+    'skills.adopt.remove',
+    'skills.adopt.decide',
+    'skills.retire',
     'spend.budget.set',
   ],
 };
@@ -259,6 +267,8 @@ export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
   'credentials.agent.set',
   'connections.start',
   'connections.import',
+  'skills.adopt.request',
+  'skills.adopt.remove',
   'approvals.decide',
 ]);
 
@@ -280,6 +290,8 @@ export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> 
     'agents.wake',
     'agents.pause',
     'agents.resume',
+    'skills.adopt.request',
+    'skills.adopt.remove',
     'approvals.decide',
   ],
   requester: ['approvals.decide'],
