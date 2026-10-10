@@ -97,6 +97,24 @@ describe('adoption store', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('skips a record with an unknown state or a missing field, so a hand-edited file cannot change a decision', () => {
+    const dir = tmp();
+    try {
+      mkdirSync(join(dir, 'ada'));
+      const ok = { agentId: 'ada', version: '1.0.0', requestedBy: 'a', requestedAt: 'x' };
+      writeFileSync(join(dir, 'ada', 'print.json'), JSON.stringify({ ...ok, skillId: 'print', state: 'approvd' }));
+      writeFileSync(join(dir, 'ada', 'notes.json'), JSON.stringify({ ...ok, skillId: 'notes', state: 'revoked', requestedBy: '' }));
+      writeFileSync(join(dir, 'ada', 'fine.json'), JSON.stringify({ ...ok, skillId: 'fine', state: 'revoked' }));
+      const warned: string[] = [];
+      const store = new AdoptionStore(dir, (m) => warned.push(m));
+      assert.deepEqual(store.forAgent('ada').map((r) => r.skillId), ['fine']);
+      assert.equal(store.blocksAutoAdopt('ada', 'print'), false);
+      assert.equal(warned.length, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('which agents use a skill, and which skills an agent uses (SK7)', () => {

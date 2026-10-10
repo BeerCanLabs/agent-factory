@@ -285,6 +285,22 @@ describe('retirement (SK6)', () => {
   });
 });
 
+describe('retirement of a skill that is partly retired already (SK6)', () => {
+  it('keeps the first retirement’s record, retires only what is not yet retired, and is retired only when every version is', () => {
+    const reg = new SkillRegistry();
+    reg.save(record('1.0.0', { status: 'approved' }));
+    reg.retire('discord-progress', 'first-admin', 'old', new Date('2026-10-10T00:00:00Z'));
+    reg.save(record('1.1.0', { status: 'approved' }));
+    assert.equal(summarizeSkill(reg, 'discord-progress')!.retired, false, 'a newer version is not retired');
+    assert.equal(summarizeSkill(reg, 'discord-progress')!.latestApproved, '1.1.0');
+    const changed = reg.retire('discord-progress', 'second-admin', 'again', new Date('2026-10-11T00:00:00Z'));
+    assert.deepEqual(changed.map((r) => r.version), ['1.1.0']);
+    assert.deepEqual([reg.get('discord-progress', '1.0.0')!.retiredBy, reg.get('discord-progress', '1.0.0')!.retiredReason], ['first-admin', 'old']);
+    assert.deepEqual([reg.get('discord-progress', '1.1.0')!.retiredBy, reg.get('discord-progress', '1.1.0')!.retiredReason], ['second-admin', 'again']);
+    assert.equal(summarizeSkill(reg, 'discord-progress')!.retired, true);
+  });
+});
+
 describe('who may adopt what (SK1, SK3)', () => {
   const reg = () => {
     const r = new SkillRegistry();

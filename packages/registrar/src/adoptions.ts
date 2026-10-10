@@ -15,6 +15,7 @@ import { SKILL_ID } from '@beercanlabs/factory-contract';
 import { AGENT_ID, adoptionProvenance, type ConfigStore } from './config-store.js';
 
 export type AdoptionState = 'requested' | 'rejected' | 'revoked';
+const STATES: readonly AdoptionState[] = ['requested', 'rejected', 'revoked'];
 
 /** What a skill would add to an agent's access, shown to the admin who decides (SK3, E7). Computed by the caller. */
 export type AccessAdded = { routes: string[]; models: string[]; credentials: string[]; connections: string[] };
@@ -69,6 +70,10 @@ export class AdoptionStore {
         try {
           const rec = JSON.parse(readFileSync(join(dir, agentId, file), 'utf8')) as AdoptionRecord;
           if (rec.agentId !== agentId || `${rec.skillId}.json` !== file) throw new Error('record does not match its file name');
+          if (!STATES.includes(rec.state)) throw new Error(`unknown adoption state ${JSON.stringify(rec.state)}`);
+          for (const k of ['version', 'requestedBy', 'requestedAt'] as const) {
+            if (typeof rec[k] !== 'string' || !rec[k]) throw new Error(`adoption record has no ${k}`);
+          }
           this.records.set(`${agentId}/${rec.skillId}`, rec);
         } catch (err) {
           this.warn(`skipping unreadable adoption record ${join(dir, agentId, file)}:`, err);
@@ -104,7 +109,11 @@ export class AdoptionStore {
     return [...this.records.values()].filter((r) => r.skillId === skillId).sort((a, b) => a.agentId.localeCompare(b.agentId)).map((r) => structuredClone(r));
   }
 
-  /** Records a request. A newer request for the same (agent, skill) replaces an earlier request, rejection or revocation. */
+  /**
+   * Records a request. A newer request for the same (agent, skill) replaces an earlier request, rejection or revocation,
+   * and replacing a revocation lifts the block on automatic adoption (SK6). So only an explicit request by the owner or
+   * an admin may call this for a revoked private skill; the automatic path asks `blocksAutoAdopt` and never calls it.
+   */
   request(input: AdoptionRequest, now: Date = new Date()): AdoptionRecord {
     check(input.agentId, input.skillId);
     return this.save({
