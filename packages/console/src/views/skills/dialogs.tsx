@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { AlertTriangle, Archive, Loader2, PauseCircle, RotateCcw, ShieldCheck, ShieldOff, UserMinus, XCircle } from 'lucide-react';
 import type { SkillAdopter, SkillSummary, SkillVersion } from '../../api/types.js';
 import { ApiError, factoryApi } from '../../api/client.js';
@@ -265,6 +265,20 @@ export const RetireDialog: React.FC<{ skill: SkillSummary; adopters: SkillAdopte
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The list the screen holds can be a minute old, and this dialog says which agents will be paused: ask again now.
+  const [checking, setChecking] = useState(true);
+  const [stale, setStale] = useState(false);
+  useEffect(() => {
+    let live = true;
+    factoryApi
+      .listSkillAdopters(skill.id)
+      .then((fresh) => live && setImpact(retireImpact(fresh)))
+      .catch(() => live && setStale(true))
+      .finally(() => live && setChecking(false));
+    return () => {
+      live = false;
+    };
+  }, [skill.id]);
 
   const submit = async () => {
     setBusy(true);
@@ -310,7 +324,7 @@ export const RetireDialog: React.FC<{ skill: SkillSummary; adopters: SkillAdopte
           <button className={btnQuiet} onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button className={btnDanger} onClick={submit} disabled={busy || !reason.trim() || !retireConfirmed(typed, skill.id, impact)}>
+          <button className={btnDanger} onClick={submit} disabled={busy || checking || !reason.trim() || !retireConfirmed(typed, skill.id, impact)}>
             {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
             {impact.inUse ? `Retire and rebuild ${impact.agents.length} agent${impact.agents.length === 1 ? '' : 's'}` : 'Retire'} {skill.id}
           </button>
@@ -320,7 +334,15 @@ export const RetireDialog: React.FC<{ skill: SkillSummary; adopters: SkillAdopte
       <p>
         Retiring <strong className="font-mono">{skill.id}</strong> stops any new version being approved or adopted. Every version stays on record.
       </p>
-      <p className={impact.inUse ? 'font-semibold text-rose-800 dark:text-rose-300' : 'text-slate-600 dark:text-slate-400'}>{retireEffect(impact)}</p>
+      {checking ? (
+        <p className="text-slate-500 flex items-center gap-1.5">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          Checking which agents run this skill…
+        </p>
+      ) : (
+        <p className={impact.inUse ? 'font-semibold text-rose-800 dark:text-rose-300' : 'text-slate-600 dark:text-slate-400'}>{retireEffect(impact)}</p>
+      )}
+      {stale && <p className="text-[11px] text-amber-700 dark:text-amber-400">Could not refresh the list of agents; this is the last one the screen had. The factory still refuses a retire that would surprise you.</p>}
       {impact.inUse && (
         <>
           <ul className="space-y-1">
@@ -364,7 +386,6 @@ export const AdoptionDialog: React.FC<{ action: AdoptionAction; onClose: () => v
   const target = kind === 'upgrade' ? skill.latestApproved : adopter.version;
   const what = `${skill.id}@${target ?? adopter.version}`;
   const agent = adopter.agentId;
-  const withdraw = kind === 'remove' && adopter.state === 'requested';
   const ownerPrivate = skill.visibility === 'private' && skill.owner === agent;
   const text = reason.trim() || undefined;
 
@@ -380,7 +401,7 @@ export const AdoptionDialog: React.FC<{ action: AdoptionAction; onClose: () => v
         onDone(`Rejected ${agent}’s request for ${what}. Nothing changed.`);
       } else if (kind === 'remove') {
         await factoryApi.removeAdoption(agent, skill.id, text);
-        onDone(withdraw ? `Withdrew ${agent}’s request for ${what}.` : `Removed ${skill.id} from ${agent}. ${agent} is being rebuilt without it.`);
+        onDone(`Removed ${skill.id} from ${agent}. ${agent} is being rebuilt without it.`);
       } else {
         if (!target) throw new Error('there is no newer approved version');
         await factoryApi.requestAdoption(agent, skill.id, target, text);
@@ -403,7 +424,7 @@ export const AdoptionDialog: React.FC<{ action: AdoptionAction; onClose: () => v
     }
   };
 
-  const titles = { approve: `Approve ${skill.name} for ${agent}`, reject: `Reject ${agent}’s request`, remove: withdraw ? 'Withdraw the request' : `Remove ${skill.name} from ${agent}`, upgrade: `Upgrade ${agent} to ${skill.name} ${skill.latestApproved ?? ''}` };
+  const titles = { approve: `Approve ${skill.name} for ${agent}`, reject: `Reject ${agent}’s request`, remove: `Remove ${skill.name} from ${agent}`, upgrade: `Upgrade ${agent} to ${skill.name} ${skill.latestApproved ?? ''}` };
   const danger = kind === 'remove' || kind === 'reject';
   const Icon = kind === 'approve' ? ShieldCheck : kind === 'upgrade' ? RotateCcw : kind === 'remove' ? UserMinus : XCircle;
 
@@ -420,14 +441,18 @@ export const AdoptionDialog: React.FC<{ action: AdoptionAction; onClose: () => v
           </button>
           <button className={danger ? btnDanger : btnPrimary} data-autofocus onClick={submit} disabled={busy || (kind === 'upgrade' && !target)}>
             {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Icon className="w-3.5 h-3.5" />}
-            {kind === 'approve' ? 'Approve' : kind === 'reject' ? 'Reject' : kind === 'remove' ? (withdraw ? 'Withdraw' : 'Remove') : 'Upgrade'}
+            {kind === 'approve' ? 'Approve' : kind === 'reject' ? 'Reject' : kind === 'remove' ? 'Remove' : 'Upgrade'}
           </button>
         </>
       }
     >
       <div className="font-mono text-[11px] bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-2 py-1.5 space-y-0.5">
         <div className="font-semibold text-slate-800 dark:text-slate-200">{what}</div>
-        <div className="text-slate-500">agent {agent}{adopter.requestedBy ? ` · asked by ${adopter.requestedBy}` : ''}</div>
+        <div className="text-slate-500">
+          agent {agent}
+          {/* Who asked is shown when deciding a request. For an upgrade or a removal the person asking now is you, not whoever asked for the adoption. */}
+          {(kind === 'approve' || kind === 'reject') && adopter.requestedBy ? ` · asked by ${adopter.requestedBy}` : ''}
+        </div>
       </div>
       {kind === 'approve' && (
         <>
@@ -440,8 +465,8 @@ export const AdoptionDialog: React.FC<{ action: AdoptionAction; onClose: () => v
       {kind === 'reject' && <p>{agent} keeps what it has. The request ends and nothing is built.</p>}
       {kind === 'remove' && (
         <>
-          <p>{withdraw ? 'The request ends and nothing changes.' : `${skill.id} is taken out of ${agent}’s configuration and ${agent} is rebuilt without it.`}</p>
-          {!withdraw && ownerPrivate && <p className="text-slate-500">This is {agent}’s own private skill. Once removed, new versions are not adopted for it automatically: it must ask again and an admin approves.</p>}
+          <p>{`${skill.id} is taken out of ${agent}’s configuration and ${agent} is rebuilt without it.`}</p>
+          {ownerPrivate && <p className="text-slate-500">This is {agent}’s own private skill. Once removed, new versions are not adopted for it automatically: it must ask again and an admin approves.</p>}
         </>
       )}
       {kind === 'upgrade' && (

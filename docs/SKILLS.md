@@ -299,12 +299,13 @@ what a role cannot do.
   it, and any adoption requests waiting. Skills with work waiting are open when the screen loads.
 - **Adopters.** Every agent that uses the skill or has asked to, with who asked, who approved, when, whether it was
   adopted automatically, and whether an update is available. An admin can **approve** or **reject** a request,
-  **remove** an adoption (or withdraw a request), or **upgrade** an agent to the newest approved version (a request and
-  its approval in one step). Each opens a dialog that says what it will do, and each ends in a rebuild of that agent.
+  **remove** an adoption, or **upgrade** an agent to the newest approved version (a request and its approval in one
+  step; the agent keeps one version of the skill, the newer). Each opens a dialog that says what it will do, and each
+  ends in a rebuild of that agent. Withdrawing a request is the requester's act, on the agent's own page.
 - **Actions.** For each version, what the skill does at each system and whether each action needs a person (Human
   approval) or is Autonomous. A hold is shown, not yet enforced, until grants carry actions (GAP-070).
-- **Retire this skill** (admin). If no agent runs the skill, a reason is enough. If agents run it, the dialog names them,
-  says what will happen to each (paused, the skill removed from its configuration, rebuilt without it, resumed when
+- **Retire this skill** (admin). If no agent runs the skill, a reason is enough. If agents run it, the dialog asks the factory who runs it
+  as it opens (the list on screen can be a minute old), names them, says what will happen to each (paused, the skill removed from its configuration, rebuilt without it, resumed when
   that finishes), and asks for the skill's id to be typed before it sends the forced retire.
 - **Revoke** (a version) works as before; a forced revoke now also removes the skill from the agents that ran it and
   rebuilds them.
