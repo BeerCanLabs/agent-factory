@@ -121,6 +121,62 @@ describe('the roles an agent declares (E12, TSK-172)', { concurrency: false }, (
     assert.deepEqual(r.body.roles[0].skills.gmail, { allow: [], deny: ['*'] });
   });
 
+  it('lists the skills the cartridge declares, so access can be described over all of them', async () => {
+    const r = await api('/api/v1/agents/donna/roles', 'GET', ADMIN);
+    assert.deepEqual(r.body.skillIds, ['google-calendar', 'gmail', 'print']);
+    assert.equal(r.body.effective, undefined, 'nothing is described until a set of roles is asked about');
+  });
+
+  it('says what someone who holds Family may use: the calendar and printing, and not Gmail', async () => {
+    const r = await api('/api/v1/agents/donna/roles?held=Family', 'GET', ADMIN);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const e = r.body.effective;
+    assert.deepEqual(e.held, ['Family']);
+    assert.deepEqual(e.unknownRoles, []);
+    assert.deepEqual(e.skills.map((s: { skill: string; access: { kind: string; why?: string } }) => [s.skill, s.access.kind, s.access.why ?? '']), [
+      ['google-calendar', 'all', ''],
+      ['gmail', 'none', 'denied'],
+      ['print', 'all', ''],
+    ]);
+    assert.deepEqual(e.routes, { 'google-calendar': 'allowed', 'google-gmail': 'denied', print: 'allowed' });
+  });
+
+  it('describes a set of roles the same way the egress will: someone with no role may use nothing, an unknown role gives nothing, and the owner’s role everything', async () => {
+    const none = (await api('/api/v1/agents/donna/roles?held=', 'GET', ADMIN)).body.effective;
+    assert.deepEqual(none.skills.map((s: { access: { why?: string } }) => s.access.why), ['unlisted', 'unlisted', 'unlisted']);
+    const unknown = (await api('/api/v1/agents/donna/roles?held=Cousin,Family', 'GET', ADMIN)).body.effective;
+    assert.deepEqual([unknown.held, unknown.unknownRoles], [['Family'], ['Cousin']]);
+    const owner = (await api('/api/v1/agents/donna/roles?held=Owner', 'GET', ADMIN)).body.effective;
+    assert.deepEqual(Object.values(owner.routes), ['allowed', 'allowed', 'allowed']);
+  });
+
+  it('describes an agent registered before skillIds existed from the skills it can still see', async () => {
+    const donna = state.agents.get('donna')!;
+    const { skillIds: _gone, ...old } = donna as typeof donna & { skillIds?: string[] };
+    state.agents.set('donna', old as typeof donna);
+    try {
+      const r = await api('/api/v1/agents/donna/roles?held=Family', 'GET', ADMIN);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual([...r.body.skillIds].sort(), ['gmail', 'google-calendar', 'print'], 'routes and the skills roles name');
+      assert.equal(r.body.effective.skills.length, 3);
+    } finally {
+      state.agents.set('donna', donna);
+    }
+  });
+
+  it('refuses to describe more than 20 roles instead of silently dropping the rest', async () => {
+    const names = Array.from({ length: 21 }, (_, i) => `R${i}`).join(',');
+    const r = await api(`/api/v1/agents/donna/roles?held=${names}`, 'GET', ADMIN);
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+    assert.equal(r.body.error, 'too_many_roles');
+    assert.equal((await api(`/api/v1/agents/donna/roles?held=${names.split(',').slice(0, 20).join(',')}`, 'GET', ADMIN)).status, 200, 'exactly 20 is fine');
+  });
+
+  it('the description is for those who may read the roles: an owner yes, a viewer no', async () => {
+    assert.equal((await api('/api/v1/agents/donna/roles?held=Family', 'GET', DALE)).status, 200);
+    assert.equal((await api('/api/v1/agents/donna/roles?held=Family', 'GET', VIEWER)).status, 403);
+  });
+
   it('tells the agent’s owner, but not a viewer, an operator or an anonymous caller', async () => {
     assert.equal((await api('/api/v1/agents/donna/roles', 'GET', DALE)).status, 200, 'its owner');
     assert.equal((await api('/api/v1/agents/donna/roles', 'GET', VIEWER)).status, 403);

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadCatalog, rolesOf, skillRoutesOf } from './catalog.js';
+import { loadCatalog, rolesOf, skillIdsOf, skillRoutesOf } from './catalog.js';
 
 // The maps have no prototype on purpose; compare what they hold, not what they inherit.
 const plain = (v: unknown) => JSON.parse(JSON.stringify(v));
@@ -126,5 +126,15 @@ describe('a cartridge on disk', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('the skills a cartridge declares (E12)', () => {
+  it('lists the ids in order, once each, and leaves out what is not a skill id', () => {
+    assert.deepEqual(skillIdsOf({ skills: [{ id: 'google-calendar' }, { id: 'gmail' }, { id: 'gmail' }, { id: '__proto__' }, { id: '*' }, { id: '../x' }, { routes: [] }, null, 'x'] }).skillIds, ['google-calendar', 'gmail']);
+  });
+
+  it('says nothing for no skills', () => {
+    for (const skills of [undefined, null, [], 'x', [{}]]) assert.deepEqual(skillIdsOf({ skills }), {}, JSON.stringify(skills));
   });
 });
