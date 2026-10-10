@@ -2059,17 +2059,23 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     const roles = agent.roles ?? [];
-    // `?held=Family,Realtor`: what someone who holds those roles may use, by the one rule the egress also applies (E12).
+    // `?held=Family,Realtor`: what someone who holds those roles may use, by the rule the egress will apply (E12, TSK-174;
+    // nothing enforces it there yet). More than 20 names is refused, not silently cut.
     const heldParam = new URL(req.url ?? '/', 'http://factory.local').searchParams.get('held');
-    const held = heldParam === null ? undefined : heldParam.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 20);
+    const held = heldParam === null ? undefined : heldParam.split(',').map((s) => s.trim()).filter(Boolean);
+    if (held && held.length > 20) {
+      json(res, 400, { error: 'too_many_roles', max: 20, message: 'ask about at most 20 roles at a time' });
+      return;
+    }
+    const skillIds = agent.skillIds ?? [];
     json(res, 200, {
       agentId,
       roles,
       // Owner is declared but never assigned (it comes from ownership): these are the names a person can be given.
       assignable: roles.map((r) => r.name).filter((n) => n.toLowerCase() !== 'owner'),
       skillRoutes: agent.skillRoutes ?? {},
-      skillIds: agent.skillIds ?? Object.keys(agent.skillRoutes ?? {}),
-      ...(held ? { effective: effectiveAccess(roles, held, agent.skillIds ?? Object.keys(agent.skillRoutes ?? {}), agent.skillRoutes ?? {}) } : {}),
+      skillIds,
+      ...(held ? { effective: effectiveAccess(roles, held, skillIds, agent.skillRoutes ?? {}) } : {}),
     });
     return;
   }

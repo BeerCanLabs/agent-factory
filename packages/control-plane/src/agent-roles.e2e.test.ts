@@ -150,6 +150,14 @@ describe('the roles an agent declares (E12, TSK-172)', { concurrency: false }, (
     assert.deepEqual(Object.values(owner.routes), ['allowed', 'allowed', 'allowed']);
   });
 
+  it('refuses to describe more than 20 roles instead of silently dropping the rest', async () => {
+    const names = Array.from({ length: 21 }, (_, i) => `R${i}`).join(',');
+    const r = await api(`/api/v1/agents/donna/roles?held=${names}`, 'GET', ADMIN);
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+    assert.equal(r.body.error, 'too_many_roles');
+    assert.equal((await api(`/api/v1/agents/donna/roles?held=${names.split(',').slice(0, 20).join(',')}`, 'GET', ADMIN)).status, 200, 'exactly 20 is fine');
+  });
+
   it('the description is for those who may read the roles: an owner yes, a viewer no', async () => {
     assert.equal((await api('/api/v1/agents/donna/roles?held=Family', 'GET', DALE)).status, 200);
     assert.equal((await api('/api/v1/agents/donna/roles?held=Family', 'GET', VIEWER)).status, 403);

@@ -308,6 +308,15 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
       assert.equal((await put('704', 'cloudflare:someone-else@example.com', { 'donna-e': ['Family'] })).body.error, 'unknown_agent_role', 'nor kept when the link is re-pointed to another person');
     });
 
+    it('an agent that has since been unregistered does not block an edit that only keeps what is already held', async () => {
+      agent('gone-e', ['Owner', 'Family']);
+      assert.equal((await put('706', 'cloudflare:ghosted@example.com', { 'gone-e': ['Family'], 'higgins-e': ['Realtor'] })).status, 200);
+      state.agents.delete('gone-e');
+      const keep = await put('706', 'cloudflare:ghosted@example.com', { 'gone-e': ['Family'], 'higgins-e': ['Realtor'] }, { name: 'Ghosted' });
+      assert.equal(keep.status, 200, JSON.stringify(keep.body));
+      assert.equal((await put('707', 'cloudflare:other@example.com', { 'gone-e': ['Family'] })).body.error, 'unknown_agent', 'but a role on it cannot be given to anyone new');
+    });
+
     it('always allows removing a role, even for an agent that is gone', async () => {
       const r = await put('704', 'cloudflare:aiden-e@example.com', { 'donna-e': [], ghost: [] });
       assert.equal(r.status, 200, JSON.stringify(r.body));
