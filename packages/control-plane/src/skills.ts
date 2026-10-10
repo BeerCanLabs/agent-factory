@@ -508,7 +508,11 @@ function skillUsers(state: FactoryState, id: string, version: string): string[] 
 
 // ---- Adoption (SK3, SK6, SK7) ------------------------------------------------------------------------------------
 
-/** One adoption change per agent at a time: it reads the configuration, then writes the next version. */
+/**
+ * One adoption change per agent at a time: it reads the configuration, then writes the next version. The lock, and the
+ * set of skills being retired, live in this process: the control plane is one process (as its registry, ledger and
+ * stores are), and a second replica would not see them.
+ */
 const agentLocks = new WeakMap<FactoryState, Map<string, Promise<unknown>>>();
 function withAgentLock<T>(state: FactoryState, agentId: string, fn: () => Promise<T>): Promise<T> {
   let locks = agentLocks.get(state);
@@ -674,17 +678,23 @@ async function requestAdoption(state: FactoryState, req: http.IncomingMessage, r
   if (typeof skillId !== 'string' || !SKILL_ID.test(skillId) || typeof version !== 'string' || !SEMVER.test(version)) {
     return json(res, 400, { error: 'invalid_skill', message: 'skillId (kebab-case) and version (semantic version) are required' });
   }
-  const check = adoptCheck(state, agentId, skillId, version);
-  if (!check.ok) return json(res, REFUSAL_STATUS[check.error], { error: check.error, skillId, version, message: check.message });
-  if (currentSkills(state, agentId).some((k) => k.id === skillId && k.version === version)) {
-    return json(res, 409, { error: 'already_adopted', skillId, version, message: `${agentId} already runs ${skillId}@${version}` });
-  }
-  const store = adoptionStore(state);
-  const earlier = store.get(agentId, skillId);
-  const record = store.request({ agentId, skillId, version, requestedBy: principal.actor, ...(reason ? { reason } : {}), accessAdded: accessAddedFor(state, agentId, check.record) });
-  ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REQUESTED', principal.actor, skillId, version, reason, check.record.commit);
-  // A newer request for the same skill replaces a pending one; say so, so the asker is not surprised.
-  json(res, 201, earlier?.state === 'requested' ? { ...record, replacedRequest: { version: earlier.version, requestedBy: earlier.requestedBy, requestedAt: earlier.requestedAt } } : record);
+  // Under the agent's lock: an approval being written clears the request it approved, so a newer request for the same
+  // skill must wait for it, or the approval would clear that one too and the asker's 201 would be a lie.
+  const out = await withAgentLock(state, agentId, async () => {
+    const check = adoptCheck(state, agentId, skillId, version);
+    if (!check.ok) return { status: REFUSAL_STATUS[check.error], body: { error: check.error, skillId, version, message: check.message } };
+    if (currentSkills(state, agentId).some((k) => k.id === skillId && k.version === version)) {
+      return { status: 409, body: { error: 'already_adopted', skillId, version, message: `${agentId} already runs ${skillId}@${version}` } };
+    }
+    const store = adoptionStore(state);
+    const earlier = store.get(agentId, skillId);
+    const record = store.request({ agentId, skillId, version, requestedBy: principal.actor, ...(reason ? { reason } : {}), accessAdded: accessAddedFor(state, agentId, check.record) });
+    ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REQUESTED', principal.actor, skillId, version, reason, check.record.commit);
+    // A newer request for the same skill replaces a pending one; say so, so the asker is not surprised.
+    const replaced = earlier?.state === 'requested' ? { replacedRequest: { version: earlier.version, requestedBy: earlier.requestedBy, requestedAt: earlier.requestedAt } } : {};
+    return { status: 201, body: { ...record, ...replaced } };
+  });
+  json(res, out.status, out.body);
 }
 
 async function decideAdoption(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, agentId: string, skillId: string, decision: 'approve' | 'reject'): Promise<void> {
