@@ -288,6 +288,28 @@ Each skill also shows `visibility`, `owner` (private skills), `retired`, and its
 **A private skill is visible only to admins and to the owners of its owner agent.** To anyone else it doesn't exist:
 the list leaves it out and its other endpoints answer `404`.
 
+### The Skills screen (dashboard)
+
+Everyone signed in sees the catalog; the control plane decides what each role may see and do, and the screen only hides
+what a role cannot do.
+
+- **Filter and search.** All, Public or Private (with counts), and a search over name, id, description and owner. A
+  private skill is shown only to admins and to the owners of its owner agent; to anyone else it does not exist.
+- **Each skill** shows a Public or Private badge (and the owner agent), a Retired badge when it is, how many agents use
+  it, and any adoption requests waiting. Skills with work waiting are open when the screen loads.
+- **Adopters.** Every agent that uses the skill or has asked to, with who asked, who approved, when, whether it was
+  adopted automatically, and whether an update is available. An admin can **approve** or **reject** a request,
+  **remove** an adoption, or **upgrade** an agent to the newest approved version (a request and its approval in one
+  step; the agent keeps one version of the skill, the newer). Each opens a dialog that says what it will do, and each
+  ends in a rebuild of that agent. Withdrawing a request is the requester's act, on the agent's own page.
+- **Actions.** For each version, what the skill does at each system and whether each action needs a person (Human
+  approval) or is Autonomous. A hold is shown, not yet enforced, until grants carry actions (GAP-070).
+- **Retire this skill** (admin). If no agent runs the skill, a reason is enough. If agents run it, the dialog asks the factory who runs it
+  as it opens (the list on screen can be a minute old), names them, says what will happen to each (paused, the skill removed from its configuration, rebuilt without it, resumed when
+  that finishes), and asks for the skill's id to be typed before it sends the forced retire.
+- **Revoke** (a version) works as before; a forced revoke now also removes the skill from the agents that ran it and
+  rebuilds them.
+
 ## 7. Adoption is deployment configuration
 
 An agent adopts a skill by configuration in the factory, not by a pull request or a code change (§6.14 SK3). The
