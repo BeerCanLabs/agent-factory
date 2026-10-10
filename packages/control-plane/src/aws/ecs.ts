@@ -28,6 +28,20 @@ export async function resolveSecretArn(secretNameOrArn: string, fallbackArn?: st
 }
 
 /**
+ * The container's non-secret environment: where the mind lives, and what the Landlord names at launch (SK4: where the
+ * skills manifest is). `launchEnv` may not replace the mind settings.
+ */
+export function agentEnvironment(mindBucket: string, memoryPrefix: string, launchEnv: Record<string, string> = {}): Array<{ name: string; value: string }> {
+  const fixed = [
+    { name: "FACTORY_MIND_BUCKET", value: mindBucket },
+    { name: "MEMORY_STORE_URI", value: `s3://${mindBucket}` },
+    { name: "MEMORY_PREFIX", value: memoryPrefix },
+  ];
+  const taken = new Set(fixed.map((e) => e.name));
+  return [...fixed, ...Object.entries(launchEnv).filter(([name]) => !taken.has(name)).map(([name, value]) => ({ name, value }))];
+}
+
+/**
  * Registers an ECS Fargate Task Definition for a Factory agent.
  * 
  * @param agentId - The unique identifier for the agent
@@ -43,6 +57,7 @@ export async function registerAgentTaskDefinition(
   taskRoleArn: string,
   execRoleArn: string,
   memoryPrefix: string = agentId,
+  launchEnv: Record<string, string> = {},
 ) {
   // Landing-zone settings (never hard-coded here): where minds live and where logs go.
   const mindBucket = process.env.FACTORY_MIND_BUCKET;
@@ -79,11 +94,7 @@ export async function registerAgentTaskDefinition(
         essential: true,
         secrets: resolvedSecrets,
         // The shim (packages/hydrate) pulls the mind into MEMORY_DIR before the worker starts and pushes it after.
-        environment: [
-          { name: "FACTORY_MIND_BUCKET", value: mindBucket },
-          { name: "MEMORY_STORE_URI", value: `s3://${mindBucket}` },
-          { name: "MEMORY_PREFIX", value: memoryPrefix },
-        ],
+        environment: agentEnvironment(mindBucket, memoryPrefix, launchEnv),
         logConfiguration: {
           logDriver: "awslogs",
           options: {

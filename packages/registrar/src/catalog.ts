@@ -163,6 +163,16 @@ export type AgentRecord = {
   commit?: string;
   /** The commit whose SHA-tagged image is deployed now (L4). */
   deployedCommit?: string;
+  /**
+   * SK4: the skills the deployed image contains, each as the approved version it was built from. Absent or empty: none.
+   * What runs, as `deployedCommit` is for the source; the configuration says what should run (SK3).
+   */
+  deployedSkills?: Array<{ id: string; version: string }>;
+  /**
+   * SK6: set when a forced retire or revocation paused this agent because it ran the skill. Redeploying the agent
+   * without that skill resumes it; an agent paused for any other reason is never resumed by a skill change.
+   */
+  pausedForSkill?: string;
   /** Outcome of the last admission build of `commit`. */
   admission?: { commit: string; status: 'building' | 'admitted' | 'refused'; reason?: string; phase?: string; message?: string; at: string };
   /** Connections the cartridge declares (§6.11 K1): provider plus scopes. A request shown to admins, not a grant. */
