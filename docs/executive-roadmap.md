@@ -1,7 +1,8 @@
 # Executive roadmap: model configuration
 
 Status: **intent confirmed (Dale, chat, 2026-10-10); extraction done, model configuration queued.** The Executive
-extraction (`DESIGN_AUTHORITY.md` §6.15, step 6; TSK-147 to TSK-155) was moves only. The behavior below is a separate
+extraction (`DESIGN_AUTHORITY.md` §6.15, step 6; TSK-147 to TSK-155) was moves only, apart from the guard test that
+fails on a second copy of its rules. The behavior below is a separate
 work stream that follows it (GAP-126; TSK-165 to TSK-170). This file is for any person or AI agent picking the work up;
 everything in it can be checked against the code paths named below.
 
@@ -52,7 +53,7 @@ whose code named other models.
 
 ## Order of work
 
-**First, the extraction (moves only): done** (TSK-147 to TSK-155: the plan in #125, the code in #128, #132 and #134). The signer,
+**First, the extraction (moves only, apart from the guard test): done** (TSK-147 to TSK-155: the plan in #125, the code in #128, #132 and #134). The signer,
 the catalog and adapters, token counting, the policy gate (`checkModel`, `offeredModels`) and the serving of a call
 (`findModel`, `complete`) are in `packages/executive`; the Executive owns no file in `gatekeeper-egress`; a conformance
 test guards against a second copy. What stays in the egress is GAP-127.
