@@ -48,6 +48,8 @@ export interface AgentRecord {
   sqliteSizeKb?: number;
   lastWalCheckpoint?: string;
   mindPrefix?: string;
+  /** SK4: the skills the deployed image contains, as the approved versions it was built from. Absent: none. */
+  deployedSkills?: Array<{ id: string; version: string }>;
 }
 
 export interface RunRecord {
@@ -427,4 +429,45 @@ export interface AgentRolesInfo {
   skillRoutes: Record<string, string[]>;
   skillIds: string[];
   effective?: EffectiveAccess;
+}
+
+/** A skill in an agent's configuration, with who asked for and approved it (SK3). `auto`: a private skill adopted for its owner. */
+export interface AgentAdoptedSkill {
+  id: string;
+  version: string;
+  requestedBy?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  auto?: true;
+}
+
+/** An adoption request waiting for an admin, or a private skill's adoption its owner removed (it is not adopted again by itself). */
+export interface AgentSkillRequest {
+  agentId: string;
+  skillId: string;
+  version: string;
+  state: 'requested' | 'revoked';
+  requestedBy?: string;
+  requestedAt?: string;
+  reason?: string;
+}
+
+/** The latest approved version of a skill this agent could be given. It also lists the skills the agent already runs. */
+export interface AvailableSkill {
+  id: string;
+  name: string;
+  description: string;
+  visibility: SkillVisibility;
+  owner?: string;
+  version: string;
+  requires: SkillRequires;
+}
+
+/** `GET /api/v1/agents/:id/skills` (SK3, SK5, SK7): what an agent runs, has asked for, was refused, and could adopt. */
+export interface AgentSkills {
+  agentId: string;
+  adopted: AgentAdoptedSkill[];
+  requests: AgentSkillRequest[];
+  revoked: AgentSkillRequest[];
+  available: AvailableSkill[];
 }
