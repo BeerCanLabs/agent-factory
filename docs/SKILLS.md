@@ -29,10 +29,30 @@ requires:                       # all optional; each list defaults to empty
       source: discord           # Keymaster instruction catalog id (§6.11 K5)
       description: Bot token for the progress message
   models: [claude-haiku-4-5]    # factory model names (§6.9 M1)
+visibility: public              # public (default) or private; see below
+# owner: higgins                # a private skill names its one owner agent; a public skill names none
+actions:                        # what the skill does; optional for skills written before actions existed
+  - id: post-message            # kebab-case, unique in the skill
+    route: discord              # must also be in requires.routes
+    method: POST
+    path: /channels/{id}/messages   # a path, never a URL; starts with one "/"
+    hold: true                  # required: true = a person approves the exact request first; false = autonomous
 ```
 
 The schema lives in `packages/contract/src/skill.ts` (`skillManifestSchema`, `validateSkillManifest`). Unknown keys
 are refused, so a manifest can't carry a secret value.
+
+**Visibility and owner (§6.14 SK1).** A skill is **public** (any agent can be given it, with approval) or **private**
+(it names one owner agent, and only that agent can adopt it). Both are set when the skill is registered and never
+change; to change either, register a new skill. A private skill without an `owner`, or a public skill with one, is
+refused at admission.
+
+**Actions and `hold` (SK2, E9).** Each action names the route, method and path the skill takes. `hold: true` means
+the action is human-in-the-loop: nothing is sent until a person approves that exact request, and the approval is
+written to the ledger first. `hold: false` means the action is autonomous. There is no default: an action that doesn't
+say is refused. An action must go through a route the skill lists in `requires.routes`, and its path is a path, never a
+host or URL. The declared `hold` is recorded and shown to the admin who approves the version, but the
+gatekeeper-egress cannot enforce it per action until grants carry actions (GAP-070).
 
 ## 2. What `requires` means: a request, not a grant
 
