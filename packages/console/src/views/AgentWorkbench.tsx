@@ -14,6 +14,7 @@ import {
   Sliders,
   DollarSign,
   Shield,
+  Users,
   Layers,
   UploadCloud,
 } from 'lucide-react';
@@ -22,6 +23,7 @@ import { usePermissions } from '../auth/usePermissions.js';
 import { factoryApi } from '../api/client.js';
 import { PolicyEditor } from '../components/PolicyEditor.js';
 import { ModelsView } from '../components/ModelsView.js';
+import { OwnersEditor } from '../components/OwnersEditor.js';
 
 interface AgentWorkbenchProps {
   agent: AgentRecord;
@@ -37,7 +39,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
   onRefresh,
 }) => {
   const permissions = usePermissions();
-  const [activeTab, setActiveTab] = useState<'runtime' | 'terminal' | 'memory' | 'models' | 'policy' | 'lifecycle'>('runtime');
+  const [activeTab, setActiveTab] = useState<'runtime' | 'terminal' | 'memory' | 'models' | 'policy' | 'owners' | 'lifecycle'>('runtime');
   const [convoPrompt, setConvoPrompt] = useState('');
   const [isSendingConvo, setIsSendingConvo] = useState(false);
   const [logs, setLogs] = useState<string[]>([
@@ -218,6 +220,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
           { id: 'memory', label: 'Memory & Persistence', icon: <Database className="w-3.5 h-3.5" /> },
           { id: 'models', label: 'Models', icon: <Layers className="w-3.5 h-3.5" /> },
           { id: 'policy', label: 'Policy', icon: <Shield className="w-3.5 h-3.5" /> },
+          { id: 'owners', label: 'Owners', icon: <Users className="w-3.5 h-3.5" /> },
           { id: 'lifecycle', label: 'Lifecycle & Decommission', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
         ].map((tab) => (
           <button
@@ -390,7 +393,10 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
       {/* Tab 5: Policy */}
       {activeTab === 'policy' && <PolicyEditor agent={agent} canEdit={permissions.canSetPolicy} />}
 
-      {/* Tab 6: Lifecycle & Decommission */}
+      {/* Tab 6: Owners */}
+      {activeTab === 'owners' && <OwnersEditor agent={agent} canEdit={permissions.canSetOwners} />}
+
+      {/* Tab 7: Lifecycle & Decommission */}
       {activeTab === 'lifecycle' && (
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-6 shadow-sm transition-colors">
           <div>
