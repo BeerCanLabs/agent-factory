@@ -92,7 +92,7 @@ export async function recordConfig(state: FactoryState, agentId: string, change:
   }
 }
 
-function ledgerVersion(state: FactoryState, record: ConfigRecord, actor: string): void {
+export function ledgerVersion(state: FactoryState, record: ConfigRecord, actor: string): void {
   state.ledger.append({
     timestamp: new Date().toISOString(),
     agentId: record.agentId,
