@@ -1,4 +1,4 @@
-import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
+import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, AgentRolesInfo, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
 
 
 const API_BASE = '/api/v1';
@@ -380,12 +380,19 @@ export const factoryApi = {
   async setIdentityLink(
     provider: IdentityProvider,
     id: string,
-    data: { actor: string; name?: string; roles?: FactoryRole[] },
+    data: { actor: string; name?: string; roles?: FactoryRole[]; agentRoles?: Record<string, string[]> },
   ): Promise<IdentityLink> {
     return request<IdentityLink>(`/identity-links/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
+  },
+
+  // E12: the roles an agent's cartridge declares. With `held`, also what someone who holds those roles may use, by the
+  // one rule the gatekeeper-egress applies. An admin and the agent's owner may read it.
+  async getAgentRoles(agentId: string, held?: string[]): Promise<AgentRolesInfo> {
+    const q = held ? `?held=${encodeURIComponent(held.join(','))}` : '';
+    return request<AgentRolesInfo>(`/agents/${encodeURIComponent(agentId)}/roles${q}`);
   },
 
   async unlinkIdentity(provider: IdentityProvider, id: string): Promise<{ ok: boolean }> {

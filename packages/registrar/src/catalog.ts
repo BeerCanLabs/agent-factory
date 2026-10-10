@@ -188,6 +188,8 @@ export type AgentRecord = {
   roles?: DeclaredRole[];
   /** E12: the gatekeeper-egress routes each of the cartridge's own skills uses, by skill id. */
   skillRoutes?: Record<string, string[]>;
+  /** E12: the ids of the skills the cartridge declares, so a person's access can be described over all of them. */
+  skillIds?: string[];
 };
 
 /** One role as the cartridge declares it: for each skill (`*` is every skill), the actions it allows and denies (`*` is every action). */
@@ -233,6 +235,17 @@ export function rolesOf(cartridge: { roles?: unknown }): { roles?: DeclaredRole[
   }
   out.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.name.localeCompare(b.name));
   return out.length ? { roles: out } : {};
+}
+
+/** The ids of the skills a cartridge declares (E12), in order, once each; an id that is not a plain skill id is left out. */
+export function skillIdsOf(cartridge: { skills?: unknown }): { skillIds?: string[] } {
+  if (!Array.isArray(cartridge.skills)) return {};
+  const ids: string[] = [];
+  for (const s of cartridge.skills) {
+    const id = s && typeof s === 'object' ? (s as { id?: unknown }).id : undefined;
+    if (typeof id === 'string' && SKILL_KEY.test(id) && id !== '*' && !ids.includes(id)) ids.push(id);
+  }
+  return ids.length ? { skillIds: ids } : {};
 }
 
 /** The routes each of a cartridge's own skills uses (E12), by skill id: plain route ids only, a skill with none omitted. */
@@ -422,6 +435,7 @@ export function loadCatalog(agentsRoot: string, options: { includeRetired?: bool
       ...credentialsOf(rawCartridge ?? {}),
       ...rolesOf(rawCartridge ?? {}),
       ...skillRoutesOf(rawCartridge ?? {}),
+      ...skillIdsOf(rawCartridge ?? {}),
     });
   }
   return out;

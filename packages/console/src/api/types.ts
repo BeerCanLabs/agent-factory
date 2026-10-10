@@ -384,7 +384,47 @@ export interface IdentityLink {
   actor: string;
   name?: string;
   roles?: FactoryRole[];
+  /** E12: the roles this person holds on each agent, by agent id. Never `Owner`: that comes from owning the agent. */
+  agentRoles?: Record<string, string[]>;
   linkedBy: string;
   linkedAt: string;
 }
 
+/** What a role may do with one skill (E12): the actions it allows and denies, `*` meaning every one. */
+export interface DeclaredRoleSkillRule {
+  allow: string[];
+  deny: string[];
+}
+
+/** A role an agent's cartridge declares. */
+export interface DeclaredRole {
+  name: string;
+  description?: string;
+  skills: Record<string, DeclaredRoleSkillRule>;
+}
+
+/** What someone may do with one skill: all of it, only some actions, all but some, or none (refused, or simply not theirs). */
+export type SkillAccess =
+  | { kind: 'all' }
+  | { kind: 'only'; actions: string[] }
+  | { kind: 'except'; actions: string[] }
+  | { kind: 'none'; why: 'denied' | 'unlisted' };
+
+/** What the factory says someone who holds some roles on an agent may use: the rule the egress applies (E12). */
+export interface EffectiveAccess {
+  held: string[];
+  unknownRoles: string[];
+  skills: Array<{ skill: string; access: SkillAccess; routes: string[] }>;
+  routes: Record<string, 'allowed' | 'denied'>;
+}
+
+/** `GET /api/v1/agents/:id/roles`: what the agent declares, and, when asked about some held roles, what they allow. */
+export interface AgentRolesInfo {
+  agentId: string;
+  roles: DeclaredRole[];
+  /** The names a person can be given: the declared roles, never `Owner`. */
+  assignable: string[];
+  skillRoutes: Record<string, string[]>;
+  skillIds: string[];
+  effective?: EffectiveAccess;
+}

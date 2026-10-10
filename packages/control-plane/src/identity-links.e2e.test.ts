@@ -232,6 +232,8 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
   });
 
   it('links agentRoles, includes them in ledger hash, and preserves them on partial update', async () => {
+    // E12: a role can be given only if the agent declares it.
+    state.agents.set('switch', { id: 'switch', name: 'Switch', role: 'Agent', state: 'SLEEPING', provider: 'local', artifact: '', requires: [], ungated: [], gated: [], triggers: [], dir: '/agents/switch', roles: [{ name: 'Operator', skills: {} }, { name: 'Maintainer', skills: {} }, { name: 'Owner', skills: {} }] } as never);
     const before = ledger.query({ agentId: 'factory' }).length;
     const put = await call('/api/v1/identity-links/discord/558', 'PUT', ADMIN, {
       actor: 'cloudflare:aiden@sackrider.org',
@@ -260,6 +262,57 @@ describe('identity links (TSK-107)', { concurrency: false }, () => {
     // Verify resolved link in store also preserved agentRoles
     const resolved = state.identityLinks!.resolveLink('discord', '558');
     assert.deepEqual({ ...resolved?.agentRoles }, { switch: ['Operator', 'Maintainer'] });
+  });
+
+  describe('only roles the agent declares can be given (E12, TSK-173)', () => {
+    const put = (id: string, actor: string, agentRoles: Record<string, string[]>, extra: Record<string, unknown> = {}) =>
+      call(`/api/v1/identity-links/discord/${id}`, 'PUT', ADMIN, { actor, ...extra, agentRoles });
+    const agent = (id: string, roles: string[]) =>
+      state.agents.set(id, { id, name: id, role: 'Agent', state: 'SLEEPING', provider: 'local', artifact: '', requires: [], ungated: [], gated: [], triggers: [], dir: `/agents/${id}`, roles: roles.map((name) => ({ name, skills: {} })) } as never);
+
+    it('refuses a role the agent does not declare, saying which it does', async () => {
+      agent('donna-e', ['Owner', 'Family']);
+      const r = await put('701', 'cloudflare:cousin@example.com', { 'donna-e': ['Famly'] });
+      assert.equal(r.status, 400, JSON.stringify(r.body));
+      assert.equal(r.body.error, 'unknown_agent_role');
+      assert.deepEqual([r.body.agentId, r.body.roles, r.body.assignable], ['donna-e', ['Famly'], ['Family']]);
+      assert.match(r.body.message, /does not declare 'Famly'; it declares 'Family'/);
+      assert.equal(state.identityLinks!.resolveLink('discord', '701'), undefined, 'nothing was linked');
+    });
+
+    it('refuses a role of another agent, an agent that is not registered, the reserved Owner, and any role on an agent that declares none', async () => {
+      agent('higgins-e', ['Owner', 'Realtor']);
+      agent('plain-e', []);
+      assert.equal((await put('702', 'cloudflare:a@example.com', { 'donna-e': ['Realtor'] })).body.error, 'unknown_agent_role', 'Realtor is Higgins’s');
+      assert.equal((await put('702', 'cloudflare:a@example.com', { ghost: ['Family'] })).body.error, 'unknown_agent');
+      assert.equal((await put('702', 'cloudflare:a@example.com', { 'donna-e': ['Owner'] })).status, 400, 'Owner is never assigned');
+      const none = await put('702', 'cloudflare:a@example.com', { 'plain-e': ['Anything'] });
+      assert.equal(none.body.error, 'unknown_agent_role');
+      assert.deepEqual(none.body.assignable, []);
+      assert.match(none.body.message, /no roles that can be given/);
+    });
+
+    it('gives a declared role, and one person may hold roles on several agents', async () => {
+      const r = await put('703', 'cloudflare:stephanie-e@example.com', { 'donna-e': ['Family'], 'higgins-e': ['Realtor'] }, { name: 'Stephanie' });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual({ ...r.body.agentRoles }, { 'donna-e': ['Family'], 'higgins-e': ['Realtor'] });
+    });
+
+    it('does not refuse a role the link already holds when the cartridge has since dropped it, but will not add it to anyone else', async () => {
+      assert.equal((await put('704', 'cloudflare:aiden-e@example.com', { 'donna-e': ['Family'] })).status, 200);
+      agent('donna-e', ['Owner']); // the cartridge no longer declares Family
+      const rename = await put('704', 'cloudflare:aiden-e@example.com', { 'donna-e': ['Family'] }, { name: 'Aiden' });
+      assert.equal(rename.status, 200, 'an unrelated edit is not blocked by a role the cartridge dropped');
+      assert.equal(rename.body.name, 'Aiden');
+      assert.equal((await put('705', 'cloudflare:new-e@example.com', { 'donna-e': ['Family'] })).body.error, 'unknown_agent_role', 'but it cannot be given to anyone new');
+      assert.equal((await put('704', 'cloudflare:someone-else@example.com', { 'donna-e': ['Family'] })).body.error, 'unknown_agent_role', 'nor kept when the link is re-pointed to another person');
+    });
+
+    it('always allows removing a role, even for an agent that is gone', async () => {
+      const r = await put('704', 'cloudflare:aiden-e@example.com', { 'donna-e': [], ghost: [] });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual(r.body.agentRoles ?? {}, {});
+    });
   });
 
   it('without a store the routes answer 503 after the admin check', async () => {

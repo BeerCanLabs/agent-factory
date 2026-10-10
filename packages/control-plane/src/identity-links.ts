@@ -150,6 +150,30 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
       }
       map[agentId] = [...new Set(cleanedRoles)];
     }
+    // E12: a role is assignable only if the agent's admitted cartridge declares it (never `Owner`: that comes from
+    // ownership). A role this link already holds is never refused on a later edit, so a role the cartridge has since
+    // dropped cannot block an unrelated change; only adding an undeclared one is refused. An empty list removes, always.
+    const current = store.resolveLink(provider, id);
+    const kept: Record<string, string[]> = current && current.actor === actor && current.agentRoles ? current.agentRoles : {};
+    for (const [agentId, list] of Object.entries(map)) {
+      if (list.length === 0) continue;
+      const agent = state.agents.get(agentId);
+      if (!agent) {
+        return json(res, 400, { error: 'unknown_agent', agentId, message: `agent '${agentId}' is not registered, so it has no roles to give` }), true;
+      }
+      const assignable = (agent.roles ?? []).map((r) => r.name).filter((n) => n.toLowerCase() !== 'owner');
+      const already = Object.prototype.hasOwnProperty.call(kept, agentId) ? kept[agentId] : [];
+      const refused = list.filter((r) => !assignable.includes(r) && !already.includes(r));
+      if (refused.length) {
+        return json(res, 400, {
+          error: 'unknown_agent_role',
+          agentId,
+          roles: refused,
+          assignable,
+          message: `agent '${agentId}' does not declare ${refused.map((r) => `'${r}'`).join(', ')}; it declares ${assignable.length ? assignable.map((r) => `'${r}'`).join(', ') : 'no roles that can be given'}`,
+        }), true;
+      }
+    }
     agentRoles = map;
   }
   const { link, changed } = store.link(provider, id, actor, principal.actor, { name, roles, agentRoles });
