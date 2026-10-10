@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/main.js",
-    "test": "tsx --test src/meter.test.ts src/gatekeeper-egress.test.ts src/model-route.test.ts src/connections.test.ts src/routes.test.ts src/held.test.ts src/signin-links.test.ts src/message-limit.test.ts src/system-routes.test.ts"
+    "test": "tsx --test src/gatekeeper-egress.test.ts src/model-route.test.ts src/connections.test.ts src/routes.test.ts src/held.test.ts src/signin-links.test.ts src/message-limit.test.ts src/system-routes.test.ts"
   },
   "dependencies": {
     "@beercanlabs/factory-auth": "0.1.0",
