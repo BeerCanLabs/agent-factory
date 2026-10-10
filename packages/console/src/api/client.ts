@@ -113,6 +113,21 @@ export const factoryApi = {
     return request<AgentPolicy>(`/agents/${encodeURIComponent(id)}/policy`, { method: 'PUT', body: JSON.stringify(policy) });
   },
 
+  // The agent's owners, held on its configuration record (TSK-103). Anyone may read; an admin sets them (a new version).
+  async getOwners(id: string): Promise<string[]> {
+    const cfg = await request<{ owners?: string[] }>(`/agents/${encodeURIComponent(id)}/config`);
+    return cfg.owners ?? [];
+  },
+
+  async setOwners(id: string, owners: string[], reason: string): Promise<string[]> {
+    const cfg = await request<{ owners?: string[] }>(`/agents/${encodeURIComponent(id)}/owners`, {
+      method: 'PUT',
+      headers: { 'x-change-reason': reason },
+      body: JSON.stringify({ owners }),
+    });
+    return cfg.owners ?? [];
+  },
+
   // The models this factory offers (M3).
   async listModels(): Promise<OfferedModel[]> {
     return (await request<{ models: OfferedModel[] }>('/models')).models;

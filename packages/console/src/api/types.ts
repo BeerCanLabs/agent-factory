@@ -127,6 +127,8 @@ export interface TriageIncident {
 
 export interface AuthUser {
   email: string;
+  /** The principal actor the factory knows this person by, e.g. `cloudflare:alice@example.com`. */
+  actor?: string;
   name: string;
   roles: Array<'viewer' | 'operator' | 'approver' | 'admin'>;
   provider: string;

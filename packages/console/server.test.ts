@@ -62,7 +62,7 @@ describe('A2 console forwards the caller, adds no credential', () => {
   it('/api/auth/me reports what the control plane verified, never a default admin', async () => {
     const me = await fetch(`http://127.0.0.1:${port}/api/auth/me`, { headers: { 'cf-access-jwt-assertion': 'h.p.s' } });
     assert.deepEqual(await me.json(), {
-      user: { email: 'owner@example.com', name: 'owner@example.com', roles: ['admin', 'operator', 'approver', 'viewer'], provider: 'Cloudflare Access' },
+      user: { email: 'owner@example.com', name: 'owner@example.com', actor: 'cloudflare:owner@example.com', roles: ['admin', 'operator', 'approver', 'viewer'], provider: 'Cloudflare Access' },
     });
     const anon = await fetch(`http://127.0.0.1:${port}/api/auth/me`, { headers: { 'cf-access-authenticated-user-email': 'owner@example.com' } });
     assert.equal(anon.status, 401);
