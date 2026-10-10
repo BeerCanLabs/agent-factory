@@ -8,6 +8,8 @@ export function gcpDeployProvider(): DeployProvider {
      * Not implemented: the Cloud Build admission build does not yet run the agent's tests (L3), so this provider
      * admits nothing. `buildAgentImage` in ./cloudbuild.ts builds the pinned commit but is not an admission gate.
      */
+    // Takes no `skills` argument because it refuses every build (SK4). If GCP gains a build it must accept the skills and
+    // put them in the image, or refuse them: a provider must never build an agent without the skills it has adopted.
     async buildImage(agentId: string, source: SourceRef): Promise<string> {
       throw new AdmissionRefusedError(
         'not_supported',
