@@ -77,7 +77,7 @@ export function createConsoleServer(opts: ConsoleOptions): http.Server {
           const email = access ? who.actor.slice('cloudflare:'.length) : who.actor;
           const roles = (who.roles ?? []).filter((x) => ['admin', 'operator', 'approver', 'viewer'].includes(x));
           res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-          res.end(JSON.stringify({ user: { email, name: email, roles, provider: access ? 'Cloudflare Access' : 'Factory token' } }));
+          res.end(JSON.stringify({ user: { email, name: email, actor: who.actor, roles, provider: access ? 'Cloudflare Access' : 'Factory token' } }));
         });
       });
       r.on('error', (err) => {
