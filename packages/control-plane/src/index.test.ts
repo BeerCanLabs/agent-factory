@@ -17,7 +17,7 @@ import { AggregationTemporality, InMemoryMetricExporter, MeterProvider, Periodic
 import { noopRuntime, type Runtime } from './runtime.js';
 import { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { FileRunStore, MemoryRunStore, RunTokens, type Run } from './runs.js';
-import { checkCallbackUrl, deliverCallback } from './callbacks.js';
+import { checkCallbackUrl, deliverCallback } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
