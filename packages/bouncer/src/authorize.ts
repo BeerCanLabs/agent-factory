@@ -7,9 +7,10 @@ const ROLE_ORDER: readonly Role[] = ['viewer', 'operator', 'approver', 'ingest',
 /**
  * The agent a privilege is asked for, and what the Bouncer needs to know about it. `owners` are the agent's owners
  * (principal actors). `requester` is present when the run has a requesting user; its `actor` is that person's
- * principal actor, absent when the requester is not linked to anyone.
+ * principal actor, absent when the requester is not linked to anyone. `memberRoles` are the roles the caller holds on
+ * this agent, from their identity link (the Bouncer's own data), never `Owner`: only `authorizeIngress` sets it.
  */
-export type AuthorizeResource = { agentId: string; owners: readonly string[]; requester?: { actor?: string } };
+export type AuthorizeResource = { agentId: string; owners: readonly string[]; requester?: { actor?: string }; memberRoles?: readonly string[] };
 
 export type AuthorizeRequest = { principal: Principal; privilege: Privilege; resource?: AuthorizeResource };
 export type AuthorizeResult = { allowed: true } | { allowed: false; required: Role };
@@ -21,9 +22,10 @@ const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCas
  * authentication; this maps its roles to privileges. On a denial `required` is the first role (in the order above)
  * that holds it.
  *
- * With a `resource`, two more roles can apply, derived from data and never from `principal.roles`, and only for an
- * agent-scoped privilege: `agent-owner` when the caller is one of the agent's owners, and `requester` when the caller
- * is the run's requesting user. An owner decides (`approvals.decide`) only when the run has no requesting user.
+ * With a `resource`, three more roles can apply, derived from data and never from `principal.roles`, and only for an
+ * agent-scoped privilege: `agent-owner` when the caller is one of the agent's owners, `requester` when the caller is
+ * the run's requesting user, and `agent-member` when the caller holds a role on this agent (E12). An owner decides
+ * (`approvals.decide`) only when the run has no requesting user.
  */
 export function authorize(req: AuthorizeRequest): AuthorizeResult {
   const { principal, privilege, resource } = req;
@@ -36,7 +38,10 @@ export function authorize(req: AuthorizeRequest): AuthorizeResult {
       !(privilege === 'approvals.decide' && resource.requester);
     const requester =
       resource.requester?.actor !== undefined && same(resource.requester.actor, actor) && DERIVED_ROLE_PRIVILEGES.requester.includes(privilege);
-    if (owner || requester) return { allowed: true };
+    const member =
+      (resource.memberRoles ?? []).some((r) => typeof r === 'string' && r.trim() !== '' && r.trim().toLowerCase() !== 'owner') &&
+      DERIVED_ROLE_PRIVILEGES['agent-member'].includes(privilege);
+    if (owner || requester || member) return { allowed: true };
   }
   const required = ROLE_ORDER.find((r) => ROLE_PRIVILEGES[r].includes(privilege));
   if (!required) throw new Error(`no role holds privilege ${privilege}`);
