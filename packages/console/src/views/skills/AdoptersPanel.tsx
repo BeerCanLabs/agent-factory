@@ -76,16 +76,10 @@ export const AdoptersPanel: React.FC<{
                     Upgrade
                   </button>
                 )}
-                {r.offer.remove && r.state === 'approved' && (
+                {r.offer.remove && (
                   <button className={`${btnQuiet} text-rose-700 dark:text-rose-400`} onClick={() => onAct({ kind: 'remove', skill, adopter: r })}>
                     <UserMinus className="w-3.5 h-3.5" />
                     Remove
-                  </button>
-                )}
-                {r.offer.remove && r.state === 'requested' && !r.offer.reject && (
-                  <button className={btnQuiet} onClick={() => onAct({ kind: 'remove', skill, adopter: r })}>
-                    <UserMinus className="w-3.5 h-3.5" />
-                    Withdraw
                   </button>
                 )}
               </div>

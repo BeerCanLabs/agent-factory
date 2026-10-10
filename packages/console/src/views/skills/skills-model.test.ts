@@ -14,7 +14,6 @@ import {
   holdKind,
   holdLabel,
   key,
-  needsAttention,
   openByDefault,
   queueCount,
   retireConfirmed,
@@ -125,14 +124,14 @@ describe('what an admin may do to an adopter (SK3, SK5, SK6)', () => {
     for (const r of rows) assert.deepEqual(r.offer, { approve: false, reject: false, remove: false, upgrade: false });
   });
 
-  it('offers approve, reject and withdraw for a request; remove, and upgrade when one exists, for an adoption', () => {
+  it('offers approve and reject for a request, and remove (and upgrade when one exists) for an adoption', () => {
     const rows = adopterRows(
       [adopter({ agentId: 'castle', state: 'approved' }), adopter({ agentId: 'donna', state: 'requested' }), adopter({ agentId: 'higgins', state: 'approved', upgradeAvailable: true })],
       skill(),
       { canDecide: true },
     );
     const by = Object.fromEntries(rows.map((r) => [r.agentId, r.offer]));
-    assert.deepEqual(by.donna, { approve: true, reject: true, remove: true, upgrade: false });
+    assert.deepEqual(by.donna, { approve: true, reject: true, remove: false, upgrade: false });
     assert.deepEqual(by.castle, { approve: false, reject: false, remove: true, upgrade: false });
     assert.deepEqual(by.higgins, { approve: false, reject: false, remove: true, upgrade: true });
   });
@@ -142,10 +141,10 @@ describe('what an admin may do to an adopter (SK3, SK5, SK6)', () => {
     assert.deepEqual(rows.map((r) => r.agentId), ['donna', 'nick', 'archie', 'castle']);
   });
 
-  it('offers no approval and no upgrade for a retired skill, but still lets an admin decline or remove', () => {
+  it('offers no approval and no upgrade for a retired skill, but still lets an admin decline a request or remove an adoption', () => {
     const rows = adopterRows([adopter({ state: 'requested' }), adopter({ agentId: 'donna', upgradeAvailable: true })], skill({ retired: true }), { canDecide: true });
     const by = Object.fromEntries(rows.map((r) => [r.agentId, r.offer]));
-    assert.deepEqual(by.higgins, { approve: false, reject: true, remove: true, upgrade: false });
+    assert.deepEqual(by.higgins, { approve: false, reject: true, remove: false, upgrade: false });
     assert.deepEqual(by.donna, { approve: false, reject: false, remove: true, upgrade: false });
   });
 
@@ -172,10 +171,6 @@ describe('where an admin has work (SK1, SK3)', () => {
 
   it('counts adoption requests', () => {
     assert.equal(adoptionRequestCount(queue), 2);
-  });
-
-  it('flags a skill with an approvable version or a request waiting', () => {
-    assert.deepEqual(queue.map(needsAttention), [true, true, false, false]);
   });
 
   it('opens, at first load, the skills with a pending version of any kind or a request', () => {

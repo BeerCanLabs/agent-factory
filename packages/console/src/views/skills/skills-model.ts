@@ -86,7 +86,7 @@ export function sortActions(actions: readonly SkillAction[] | undefined): SkillA
 
 // ---- Adopters (SK3, SK5, SK7) ----------------------------------------------------------------------------------
 
-/** What an admin may do to one adopter row. A request is decided or withdrawn; an adoption is removed or upgraded. */
+/** What an admin may do to one adopter row. A request is approved or rejected (withdrawing it is the requester's act); an adoption is removed or upgraded. */
 export type AdopterOffer = { approve: boolean; reject: boolean; remove: boolean; upgrade: boolean };
 export type AdopterRow = SkillAdopter & { offer: AdopterOffer };
 
@@ -96,7 +96,7 @@ export function adopterRows(adopters: readonly SkillAdopter[] | undefined, skill
     const offer: AdopterOffer = {
       approve: perms.canDecide && requested && !skill.retired,
       reject: perms.canDecide && requested,
-      remove: perms.canDecide,
+      remove: perms.canDecide && !requested,
       // An upgrade is a request for the newer version that an admin approves in the same step; never for a retired skill.
       upgrade: perms.canDecide && a.state === 'approved' && a.upgradeAvailable === true && !skill.retired,
     };
@@ -110,11 +110,6 @@ export function adopterCounts(adopters: readonly SkillAdopter[] | undefined): { 
   const list = adopters ?? [];
   const requested = list.filter((a) => a.state === 'requested').length;
   return { approved: list.length - requested, requested };
-}
-
-/** Skills with a version waiting on a decision, or an adoption request waiting, are where an admin has work. */
-export function needsAttention(s: Pick<SkillSummary, 'versions' | 'adopters'>): boolean {
-  return s.versions.some((v) => v.status === 'pending' && v.tests === 'passed') || (s.adopters ?? []).some((a) => a.state === 'requested');
 }
 
 /** Versions whose checks passed and that wait for an admin. */
