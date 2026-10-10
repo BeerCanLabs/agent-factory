@@ -74,6 +74,7 @@ export const PRIVILEGES = [
   'skills.adopt.remove',
   'skills.adopt.decide',
   'skills.retire',
+  'agents.roles.read',
   'spend.budget.set',
 ] as const;
 
@@ -249,6 +250,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'skills.adopt.remove',
     'skills.adopt.decide',
     'skills.retire',
+    'agents.roles.read',
     'spend.budget.set',
   ],
 };
@@ -269,6 +271,7 @@ export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
   'connections.import',
   'skills.adopt.request',
   'skills.adopt.remove',
+  'agents.roles.read',
   'approvals.decide',
   // E12: a person who holds an agent role may start a run and converse, so a message can reach the agent they hold it on.
   'agents.converse',
@@ -294,6 +297,7 @@ export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> 
     'agents.resume',
     'skills.adopt.request',
     'skills.adopt.remove',
+    'agents.roles.read',
     'approvals.decide',
   ],
   /**

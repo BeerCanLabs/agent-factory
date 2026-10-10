@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { validateCartridge, classifySecrets, connectionSchema, secretDeclarations, type Surface, type Cartridge, type SecretsManifest, type Connection, type SecretDeclaration } from '@beercanlabs/factory-contract';
+import { validateCartridge, classifySecrets, connectionSchema, secretDeclarations, ROLE_NAME, ROUTE_ID, type Surface, type Cartridge, type SecretsManifest, type Connection, type SecretDeclaration } from '@beercanlabs/factory-contract';
 
 export type AgentCategory = 'user' | 'builtin';
 
@@ -181,7 +181,17 @@ export type AgentRecord = {
   credentials?: SecretDeclaration[];
   /** Egress the cartridge declares (E7 request, E8 ceiling). Shown to the admin who sets policy; never a grant. */
   egress?: { routes: string[]; hosts: string[] };
+  /**
+   * E12: the roles the cartridge declares (what each may use), as admitted. An admin assigns people to them; the
+   * gatekeeper-egress applies them. `Owner` is declared here but never assigned: it comes from ownership.
+   */
+  roles?: DeclaredRole[];
+  /** E12: the gatekeeper-egress routes each of the cartridge's own skills uses, by skill id. */
+  skillRoutes?: Record<string, string[]>;
 };
+
+/** One role as the cartridge declares it: for each skill (`*` is every skill), the actions it allows and denies (`*` is every action). */
+export type DeclaredRole = { name: string; description?: string; skills: Record<string, { allow: string[]; deny: string[] }> };
 
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string' && s.length > 0) : []);
 
@@ -192,6 +202,51 @@ export function egressOf(cartridge: { egress?: unknown }): { egress?: { routes: 
   const routes = strings((e as { routes?: unknown }).routes);
   const hosts = strings((e as { hosts?: unknown }).hosts);
   return routes.length || hosts.length ? { egress: { routes, hosts } } : {};
+}
+
+/** A skill id as a role may name it: `*`, or a plain id. Anything else (`__proto__`, a path) is not a skill. */
+const SKILL_KEY = /^(\*|[A-Za-z0-9][A-Za-z0-9._-]{0,63})$/;
+
+/**
+ * The roles a cartridge body declares (E12), normalized: sorted by name, each rule's actions listed, entries that are not
+ * valid dropped (the contract refuses them at admission; this only reads what is left, and trusts nothing). `Owner` is kept.
+ * Maps are made without a prototype so a skill id can never reach one.
+ */
+export function rolesOf(cartridge: { roles?: unknown }): { roles?: DeclaredRole[] } {
+  const raw = cartridge.roles;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: DeclaredRole[] = [];
+  for (const [name, role] of Object.entries(raw as Record<string, unknown>)) {
+    if (!ROLE_NAME.test(name) || !role || typeof role !== 'object' || Array.isArray(role)) continue;
+    const skills: Record<string, { allow: string[]; deny: string[] }> = Object.create(null);
+    const declared = (role as { skills?: unknown }).skills;
+    if (declared && typeof declared === 'object' && !Array.isArray(declared)) {
+      for (const [skillId, rule] of Object.entries(declared as Record<string, unknown>)) {
+        if (!SKILL_KEY.test(skillId) || !rule || typeof rule !== 'object') continue;
+        const allow = strings((rule as { allow?: unknown }).allow);
+        const deny = strings((rule as { deny?: unknown }).deny);
+        if (allow.length || deny.length) skills[skillId] = { allow, deny };
+      }
+    }
+    const description = (role as { description?: unknown }).description;
+    out.push({ name, ...(typeof description === 'string' && description ? { description } : {}), skills });
+  }
+  out.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.name.localeCompare(b.name));
+  return out.length ? { roles: out } : {};
+}
+
+/** The routes each of a cartridge's own skills uses (E12), by skill id: plain route ids only, a skill with none omitted. */
+export function skillRoutesOf(cartridge: { skills?: unknown }): { skillRoutes?: Record<string, string[]> } {
+  if (!Array.isArray(cartridge.skills)) return {};
+  const out: Record<string, string[]> = Object.create(null);
+  for (const s of cartridge.skills) {
+    if (!s || typeof s !== 'object') continue;
+    const id = (s as { id?: unknown }).id;
+    if (typeof id !== 'string' || !SKILL_KEY.test(id) || id === '*') continue;
+    const routes = [...new Set(strings((s as { routes?: unknown }).routes).filter((r) => ROUTE_ID.test(r)))];
+    if (routes.length) out[id] = routes;
+  }
+  return Object.keys(out).length ? { skillRoutes: out } : {};
 }
 
 /** The declared static credentials of a cartridge body (K5.1), when any carry a source or description. */
@@ -365,6 +420,8 @@ export function loadCatalog(agentsRoot: string, options: { includeRetired?: bool
         : [rawCartridge?.model || 'gemini-2.0-flash'],
       ...connectionsOf(rawCartridge ?? {}),
       ...credentialsOf(rawCartridge ?? {}),
+      ...rolesOf(rawCartridge ?? {}),
+      ...skillRoutesOf(rawCartridge ?? {}),
     });
   }
   return out;

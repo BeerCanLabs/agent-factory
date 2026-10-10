@@ -15,7 +15,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/validate.test.ts src/skill.test.ts src/system.test.ts src/services.test.ts",
+    "test": "tsx --test src/validate.test.ts src/roles.test.ts src/skill.test.ts src/system.test.ts src/services.test.ts",
     "validate": "tsx src/cli.ts validate"
   },
   "dependencies": {

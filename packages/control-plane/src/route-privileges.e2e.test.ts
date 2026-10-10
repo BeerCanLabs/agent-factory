@@ -57,6 +57,7 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/registry/agents', privilege: 'agents.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/registry/agents/castle', privilege: 'agents.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/agents/castle/policy', privilege: 'policy.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/agents/castle/roles', privilege: 'agents.roles.read', role: 'admin' },
   { method: 'GET', path: '/api/v1/agents/castle/config', privilege: 'config.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/agents/castle/config/history', privilege: 'config.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/agents/castle/config/versions/1', privilege: 'config.read', role: 'viewer' },
