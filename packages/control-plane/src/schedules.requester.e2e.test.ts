@@ -142,6 +142,17 @@ describe('a scheduled run carries its requester’s authority, never more (E12, 
       assert.equal(r({ actor: 'factory:anything' }), undefined);
       assert.equal(r({ trigger: 'schedule', input: { scheduleId: 7 } }), undefined);
     });
+
+    it('refuses to overwrite another person’s schedule by ID on POST', async () => {
+      state.schedules!.save(sched({ id: 'sched-dale-debrief', requestedBy: { kind: 'principal', actor: 'cloudflare:dale@example.com' } }));
+      const res = await api('/api/v1/schedules', 'POST', OPERATOR, { agentId: 'donna', id: 'sched-dale-debrief', cron: '0 8 * * *', prompt: 'hijacked' });
+      assert.equal(res.status, 403);
+      assert.match(res.body.reason, /cannot modify a schedule created by another requester/);
+
+      const adminRes = await api('/api/v1/schedules', 'POST', ADMIN, { agentId: 'donna', id: 'sched-dale-debrief', cron: '0 8 * * *', prompt: 'admin update' });
+      assert.equal(adminRes.status, 200);
+      assert.equal(state.schedules!.get('sched-dale-debrief')!.prompt, 'admin update');
+    });
   });
 
   describe('when a schedule fires', () => {
@@ -172,9 +183,10 @@ describe('a scheduled run carries its requester’s authority, never more (E12, 
     it('runs a principal’s schedule by the roles that principal holds, through a link or as an admin', () => {
       const viaLink = scheduleRunOptions(state, sched({ requestedBy: { kind: 'principal', actor: 'cloudflare:boss@example.com' } }))!;
       assert.equal(viaLink.caller.role, 'admin');
-      assert.equal(viaLink.requestedBy, undefined, 'only an identity is recorded on the run');
+      assert.deepEqual(viaLink.requestedBy, discord('300'), 'a link-backed candidate records its identity on the run');
       const owner = scheduleRunOptions(state, sched({ requestedBy: { kind: 'principal', actor: 'cloudflare:dale@example.com' } }))!;
       assert.equal(owner.caller.isOwner, true);
+      assert.equal(owner.requestedBy, undefined, 'bare principal does not record an external identity');
     });
 
     it('skips and ledgers a schedule whose requester no longer holds a role: removing the role stops it', () => {
@@ -214,6 +226,39 @@ describe('a scheduled run carries its requester’s authority, never more (E12, 
     it('the ledger row names the schedule by its hash, never its prompt', () => {
       scheduleRunOptions(state, sched({ prompt: 'SECRET-PROMPT-TEXT', requestedBy: { kind: 'identity', provider: 'discord', id: '202' } }));
       assert.ok(!JSON.stringify(skipped()).includes('SECRET-PROMPT-TEXT'));
+    });
+
+    it('fires a bearer-token schedule with its token authority', () => {
+      const s = sched({ requestedBy: { kind: 'principal', actor: 'token:operator' } });
+      const who = scheduleRunOptions(state, s);
+      assert.ok(who, 'it starts');
+      assert.equal(who.caller.role, 'operator');
+      assert.equal(who.caller.source, 'schedule');
+    });
+
+    it('candidate choice selects the highest privilege path (owner over unprivileged/restricted link)', () => {
+      // Dale has a discord identity link 100 with no agent roles, and bare principal which is Owner
+      const s = sched({ requestedBy: { kind: 'principal', actor: 'cloudflare:dale@example.com' } });
+      const who = scheduleRunOptions(state, s)!;
+      assert.equal(who.caller.isOwner, true);
+      assert.equal(who.requestedBy, undefined, 'bare principal owner wins over link');
+    });
+
+    it('cartridge crons create a run with a scheduler badge', async () => {
+      const { createRun } = await import('./app.js');
+      const { SCHEDULER_BADGE } = await import('./schedules.js');
+      const out = await createRun(state, 'donna', {
+        actor: SYSTEM.scheduler,
+        trigger: 'cron',
+        caller: SCHEDULER_BADGE('cron'),
+      });
+      assert.equal(out.status, 202);
+      const run = state.runs.get((out.body as { runId: string }).runId)!;
+      const caller = (run.input as { caller: Record<string, unknown> }).caller;
+      assert.deepEqual(
+        [caller.actor, caller.role, caller.source, caller.scheduleName],
+        ['factory:scheduler', 'system', 'schedule', 'cron']
+      );
     });
   });
 });

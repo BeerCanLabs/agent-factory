@@ -24,6 +24,7 @@ export type AuthResult = { ok: true; principal: Principal } | { ok: false; reaso
 export type AuthProvider = {
   name: string;
   verify(authorization: string | undefined): Promise<AuthResult>;
+  tokenRoles?(tokenName: string): Role[] | undefined;
 };
 
 function asRoles(values: unknown, roleMap?: Record<string, Role>): Role[] {
@@ -56,6 +57,10 @@ export function bearerAuth(tokens: NamedToken[] | string): AuthProvider {
   const list: NamedToken[] =
     typeof tokens === 'string' ? (tokens ? [{ name: 'admin', token: tokens, roles: ['admin'] }] : []) : tokens;
   const usable = list.filter((t) => t.token.length > 0);
+  const byName = new Map<string, Role[]>();
+  for (const t of usable) {
+    if (!byName.has(t.name)) byName.set(t.name, t.roles);
+  }
   return {
     name: 'bearer',
     async verify(authorization) {
@@ -65,6 +70,9 @@ export function bearerAuth(tokens: NamedToken[] | string): AuthProvider {
         if (safeEqual(presented, t.token)) return { ok: true, principal: { actor: `token:${t.name}`, roles: t.roles } };
       }
       return { ok: false, reason: 'unknown token' };
+    },
+    tokenRoles(tokenName: string) {
+      return byName.get(tokenName);
     },
   };
 }
@@ -155,6 +163,13 @@ export function anyAuth(providers: AuthProvider[]): AuthProvider {
       }
       return { ok: false, reason: reasons.join('; ') || 'no auth provider' };
     },
+    tokenRoles(tokenName: string) {
+      for (const p of providers) {
+        const r = p.tokenRoles?.(tokenName);
+        if (r) return r;
+      }
+      return undefined;
+    },
   };
 }
 
@@ -164,6 +179,9 @@ export function insecureNoAuth(): AuthProvider {
     name: 'none',
     async verify() {
       return { ok: true, principal: { actor: 'anonymous', roles: ['admin'] } };
+    },
+    tokenRoles() {
+      return ['admin'];
     },
   };
 }
@@ -178,6 +196,14 @@ function parseTokens(raw: string | undefined): NamedToken[] {
     if (!roles.length) throw new Error(`FACTORY_TOKENS[${i}] has no valid roles`);
     return { name: t.name, token: t.token, roles };
   });
+}
+
+/** Normalized list of administrator e-mails from FACTORY_ADMIN_EMAILS. */
+export function adminEmailsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.FACTORY_ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 /**
@@ -201,10 +227,7 @@ export function authFromEnv(env: NodeJS.ProcessEnv = process.env): AuthProvider 
     if (!env.FACTORY_OIDC_ISSUER || !env.FACTORY_OIDC_AUDIENCE) {
       throw new Error('OIDC needs both FACTORY_OIDC_ISSUER and FACTORY_OIDC_AUDIENCE');
     }
-    const adminEmails = (env.FACTORY_ADMIN_EMAILS ?? '')
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
+    const adminEmails = adminEmailsFromEnv(env);
     providers.push(
       oidcAuth({
         issuer: env.FACTORY_OIDC_ISSUER,

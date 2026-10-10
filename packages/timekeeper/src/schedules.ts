@@ -2,8 +2,8 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { cronMatches, getZonedTimeParts } from './cron.js';
 
-/** How a schedule came to be: an agent called the API with its run token, an operator used the console, or a direct API call. */
-export type ScheduleOrigin = 'agent' | 'console' | 'api';
+/** How a schedule came to be: an agent called the API with its run token, or an external principal called the API. */
+export type ScheduleOrigin = 'agent' | 'api';
 
 /**
  * Whose authority a schedule's runs carry (DESIGN_AUTHORITY.md E12, GAP-131): an external identity, a Cloudflare

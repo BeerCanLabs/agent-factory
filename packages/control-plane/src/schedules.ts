@@ -9,7 +9,7 @@
  */
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import type { Role } from '@beercanlabs/factory-auth';
+import { adminEmailsFromEnv, type Role } from '@beercanlabs/factory-auth';
 import { authorize, authorizeIngress, type AuthenticatedCaller } from '@beercanlabs/factory-bouncer';
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { DEFAULT_TIMEZONE, cronIssue, isTimeZone, type ScheduledAction, type ScheduleRequester } from '@beercanlabs/factory-timekeeper';
@@ -63,8 +63,8 @@ function canWrite(caller: ScheduleCaller, res: http.ServerResponse): boolean {
 }
 
 /** What a schedule's ledger rows commit to: its id, agent, cron and time zone. Never the prompt text (E3). */
-export function scheduleLedgerHash(s: Pick<ScheduledAction, 'id' | 'agentId' | 'cron' | 'timezone'>): string {
-  return payloadHash({ scheduleId: s.id, agentId: s.agentId, cron: s.cron, timezone: s.timezone ?? null });
+export function scheduleLedgerHash(s: Pick<ScheduledAction, 'id' | 'agentId' | 'cron' | 'timezone'>, reason?: string): string {
+  return payloadHash({ scheduleId: s.id, agentId: s.agentId, cron: s.cron, timezone: s.timezone ?? null, ...(reason ? { reason } : {}) });
 }
 
 function ledgerSchedule(state: FactoryState, caller: ScheduleCaller, action: 'SCHEDULE_CREATED' | 'SCHEDULE_DELETED', s: ScheduledAction) {
@@ -116,14 +116,60 @@ function readRequester(v: unknown): ScheduleRequester | undefined {
   return undefined;
 }
 
-const SCHEDULER_BADGE = (scheduleName: string): AuthenticatedCaller => ({
+/** True if two ScheduleRequesters name the same identity or principal. */
+export function requestersEqual(a?: ScheduleRequester, b?: ScheduleRequester): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'system') return true;
+  if (a.kind === 'principal' && b.kind === 'principal') return a.actor.toLowerCase() === b.actor.toLowerCase();
+  if (a.kind === 'identity' && b.kind === 'identity') return a.provider.toLowerCase() === b.provider.toLowerCase() && a.id === b.id;
+  return false;
+}
+
+/** Whether the caller has authority to modify or delete this schedule. */
+export function canModifySchedule(
+  state: FactoryState,
+  caller: ScheduleCaller,
+  existing: ScheduledAction,
+): boolean {
+  const owners = ownersOf(state, existing.agentId);
+  if (caller.kind === 'run') {
+    const run = state.runs.get(caller.runId);
+    if (!run || run.agentId !== existing.agentId) return false;
+    const runReq = requesterOfRun(state, run);
+    if (!runReq) return false;
+    if (run.actor && owners.some((o) => o.toLowerCase() === run.actor.toLowerCase())) return true;
+    return requestersEqual(existing.requestedBy, runReq);
+  }
+  const isOwner = owners.some((o) => o.toLowerCase() === caller.actor.toLowerCase());
+  const adminEmails = adminEmailsFromEnv();
+  const isCloudflare = caller.actor.startsWith('cloudflare:');
+  const email = isCloudflare ? caller.actor.slice('cloudflare:'.length).trim().toLowerCase() : '';
+  const tokenName = caller.actor.startsWith('token:') ? caller.actor.slice('token:'.length) : undefined;
+  const tokenRoles = tokenName ? state.auth?.tokenRoles?.(tokenName) : undefined;
+  const isAdmin = Boolean((email && adminEmails.includes(email)) || tokenRoles?.includes('admin'));
+  if (isOwner || isAdmin) return true;
+  if (existing.requestedBy?.kind === 'principal' && existing.requestedBy.actor.toLowerCase() === caller.actor.toLowerCase()) {
+    return true;
+  }
+  if (existing.requestedBy?.kind === 'identity') {
+    const linkedActor = state.identityLinks?.resolve(existing.requestedBy.provider, existing.requestedBy.id);
+    if (linkedActor && linkedActor.toLowerCase() === caller.actor.toLowerCase()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export const SCHEDULER_BADGE = (scheduleName?: string): AuthenticatedCaller => ({
   actor: SYSTEM.scheduler,
   name: 'Scheduler',
   role: 'system',
   roles: [],
   isOwner: false,
   source: 'schedule',
-  scheduleName,
+  ...(scheduleName ? { scheduleName } : {}),
 });
 
 /**
@@ -144,7 +190,7 @@ export function scheduleRunOptions(
       type: 'action',
       action: 'SCHEDULE_SKIPPED_UNAUTHORIZED',
       actor: SYSTEM.scheduler,
-      payloadSha256: scheduleLedgerHash(sched),
+      payloadSha256: scheduleLedgerHash(sched, why),
     });
     console.warn(`[scheduler] Skipping "${sched.name}" (${sched.id}): ${why}`);
     return undefined;
@@ -152,10 +198,16 @@ export function scheduleRunOptions(
   if (!requester) return skip('its requester is not readable');
   if (requester.kind === 'system') return { caller: SCHEDULER_BADGE(sched.name) };
 
-  const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+  const adminEmails = adminEmailsFromEnv();
   const owners = ownersOf(state, sched.agentId);
-  // The person's own link where there is one; for a principal, any link of theirs, then their bare principal (an admin
-  // by e-mail needs no link). Whoever is first allowed is the requester.
+
+  const tokenName =
+    requester.kind === 'principal' && requester.actor.startsWith('token:')
+      ? requester.actor.slice('token:'.length)
+      : undefined;
+  const tokenRoles = tokenName ? state.auth?.tokenRoles?.(tokenName) : undefined;
+
+  // The person's own link where there is one; for a principal, any link of theirs, then their bare principal.
   const candidates =
     requester.kind === 'identity'
       ? [{ requestedBy: { provider: requester.provider, id: requester.id }, link: state.identityLinks?.resolveLink(requester.provider, requester.id) }]
@@ -163,15 +215,71 @@ export function scheduleRunOptions(
           ...(state.identityLinks?.list() ?? [])
             .filter((l) => l.actor.toLowerCase() === requester.actor.toLowerCase())
             .map((l) => ({ requestedBy: { provider: l.provider, id: l.id }, link: l })),
-          { requestedBy: { provider: 'principal', id: requester.actor }, link: { actor: requester.actor } },
+          { requestedBy: { provider: 'principal', id: requester.actor }, link: { actor: requester.actor, ...(tokenRoles ? { roles: tokenRoles } : {}) } },
         ];
+
+  type AllowedCandidate = {
+    c: (typeof candidates)[number];
+    caller: AuthenticatedCaller;
+    score: number;
+  };
+
+  const allowed: AllowedCandidate[] = [];
   for (const c of candidates) {
-    const auth = authorizeIngress({ requestedBy: c.requestedBy, agentId: sched.agentId, privilege: 'agents.wake', owners, link: c.link, adminEmails, isIngressCaller: true });
+    const auth = authorizeIngress({
+      requestedBy: c.requestedBy,
+      agentId: sched.agentId,
+      privilege: 'agents.wake',
+      owners,
+      link: c.link,
+      adminEmails,
+      isIngressCaller: true,
+    });
     if (auth.allowed && auth.caller) {
-      return { caller: { ...auth.caller, source: 'schedule', scheduleName: sched.name }, ...(requester.kind === 'identity' ? { requestedBy: c.requestedBy } : {}) };
+      let score = 0;
+      if (auth.caller.isOwner) score += 10000;
+      const roleScores: Record<string, number> = {
+        admin: 5000,
+        operator: 4000,
+        approver: 3000,
+        'agent-owner': 2500,
+        'agent-member': 2000,
+        viewer: 1000,
+        ingest: 500,
+        guest: 0,
+      };
+      score += roleScores[auth.caller.role] ?? 0;
+      score += (auth.caller.agentRoles?.length ?? 0) * 10;
+      allowed.push({ c, caller: auth.caller, score });
     }
   }
-  return skip('its requester no longer holds a role on this agent');
+
+  if (allowed.length === 0) {
+    return skip('its requester no longer holds a role on this agent');
+  }
+
+  // Sort candidates by:
+  // 1. Highest privilege score descending
+  // 2. For a principal requester, if scores tie, prefer the bare principal candidate (no identity link)
+  // 3. Deterministic tie-breaker: provider then id
+  allowed.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (requester.kind === 'principal') {
+      const aIsBare = a.c.requestedBy.provider === 'principal';
+      const bIsBare = b.c.requestedBy.provider === 'principal';
+      if (aIsBare !== bIsBare) return aIsBare ? -1 : 1;
+    }
+    const aKey = `${a.c.requestedBy.provider}:${a.c.requestedBy.id}`;
+    const bKey = `${b.c.requestedBy.provider}:${b.c.requestedBy.id}`;
+    return aKey.localeCompare(bKey);
+  });
+
+  const best = allowed[0];
+  const isLinkBacked = best.c.requestedBy.provider !== 'principal';
+  return {
+    caller: { ...best.caller, source: 'schedule', scheduleName: sched.name },
+    ...(isLinkBacked ? { requestedBy: best.c.requestedBy } : {}),
+  };
 }
 
 const optionalString = (v: unknown): v is string | undefined | null => v === undefined || v === null || typeof v === 'string';
@@ -255,12 +363,26 @@ export async function handleSchedules(state: FactoryState, req: http.IncomingMes
     }
     // Only an operator may choose the id: a run must never be able to overwrite another agent's schedule by id.
     let id = `sched-${randomUUID()}`;
+    const existing = caller.kind === 'principal' && body.id ? store?.get(body.id as string) : undefined;
     if (caller.kind === 'principal' && body.id) {
       if (!SCHEDULE_ID.test(body.id as string)) {
         json(res, 400, { error: 'invalid_field', field: 'id' });
         return true;
       }
       id = body.id as string;
+      if (existing) {
+        const adminEmails = adminEmailsFromEnv();
+        const isCloudflare = caller.actor.startsWith('cloudflare:');
+        const email = isCloudflare ? caller.actor.slice('cloudflare:'.length).trim().toLowerCase() : '';
+        const tokenName = caller.actor.startsWith('token:') ? caller.actor.slice('token:'.length) : undefined;
+        const tokenRoles = tokenName ? state.auth?.tokenRoles?.(tokenName) : undefined;
+        const isAdmin = Boolean((email && adminEmails.includes(email)) || tokenRoles?.includes('admin'));
+        const isSameRequester = requestersEqual(existing.requestedBy, { kind: 'principal', actor: caller.actor });
+        if (existing.agentId !== agentId || (!isSameRequester && !isAdmin)) {
+          json(res, 403, { error: 'forbidden', reason: 'cannot modify a schedule created by another requester' });
+          return true;
+        }
+      }
     }
     // E12, GAP-131: whose authority this schedule's runs will carry. The factory decides; the request body never can.
     let requestedBy: ScheduleRequester | undefined;
@@ -284,7 +406,7 @@ export async function handleSchedules(state: FactoryState, req: http.IncomingMes
       ...(channelId ? { channelId } : {}),
       prompt: body.prompt,
       enabled: body.enabled !== false,
-      createdAt: new Date().toISOString(),
+      createdAt: existing ? existing.createdAt : new Date().toISOString(),
       createdVia: caller.kind === 'run' ? 'agent' : 'api',
       requestedBy,
     };
