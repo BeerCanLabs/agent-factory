@@ -278,7 +278,7 @@ async function decide(
     return;
   }
   const status: SkillStatus = decision === 'approve' ? 'approved' : 'rejected';
-  if (decision === 'approve' && rec.retired) {
+  if (decision === 'approve' && (rec.retired || isRetiring(state, id))) {
     json(res, 409, { error: 'skill_retired', id, version, message: 'a retired skill takes no new approved version (SK6)' });
     return;
   }
@@ -572,6 +572,16 @@ function accessAddedFor(state: FactoryState, agentId: string, rec: SkillVersionR
   };
 }
 
+/** Skills a forced retire is working on: no new adoption may start for them, so the adopters it finds are the last. */
+const retiring = new WeakMap<FactoryState, Set<string>>();
+const isRetiring = (state: FactoryState, id: string): boolean => retiring.get(state)?.has(id) === true;
+
+/** `canAdopt`, and also refuses a skill that is being retired (SK6). */
+function adoptCheck(state: FactoryState, agentId: string, id: string, version: string): ReturnType<typeof canAdopt> {
+  if (isRetiring(state, id)) return { ok: false, error: 'skill_retired', message: `skill ${id} is being retired (SK6)` };
+  return canAdopt(skillRegistry(state), agentId, id, version);
+}
+
 const REFUSAL_STATUS = { not_found: 404, skill_private: 403, skill_retired: 409, skill_not_approved: 409 } as const;
 
 /**
@@ -582,6 +592,7 @@ const REFUSAL_STATUS = { not_found: 404, skill_private: 403, skill_retired: 409,
 async function autoAdoptPrivate(state: FactoryState, rec: SkillVersionRecord, principal: Principal): Promise<{ adopted: string[]; failed?: string } | undefined> {
   const owner = ownerOf(rec);
   if (visibilityOf(rec) !== 'private' || !owner) return undefined;
+  if (isRetiring(state, rec.id) || rec.retired) return { adopted: [] };
   const adoptions = adoptionStore(state);
   if (adoptions.blocksAutoAdopt(owner, rec.id)) return { adopted: [] };
   if (!state.agents.has(owner)) {
@@ -610,6 +621,7 @@ async function autoAdoptPrivate(state: FactoryState, rec: SkillVersionRecord, pr
 /** SK7: who is looking. An admin sees every skill; anyone else sees public skills and the private skills of agents they own. */
 function viewerOf(state: FactoryState, principal: Principal): SkillViewer {
   const admin = authorize({ principal, privilege: 'skills.decide' }).allowed;
+  if (admin) return { admin, ownedAgents: [] };
   const actor = principal.actor.toLowerCase();
   const ownedAgents = (state.configs?.agentIds() ?? []).filter((id) => ownersOf(state, id).some((o) => o.toLowerCase() === actor));
   return { admin, ownedAgents };
@@ -617,14 +629,6 @@ function viewerOf(state: FactoryState, principal: Principal): SkillViewer {
 
 function adoptersOf(state: FactoryState, id: string, version?: string) {
   return state.configs ? adopters(state.configs, adoptionStore(state), id, version) : [];
-}
-
-async function readOptionalJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
-  try {
-    return await readJson(req);
-  } catch {
-    return {};
-  }
 }
 
 function reasonOf(res: http.ServerResponse, body: Record<string, unknown>): string | undefined | null {
@@ -670,35 +674,42 @@ async function requestAdoption(state: FactoryState, req: http.IncomingMessage, r
   if (typeof skillId !== 'string' || !SKILL_ID.test(skillId) || typeof version !== 'string' || !SEMVER.test(version)) {
     return json(res, 400, { error: 'invalid_skill', message: 'skillId (kebab-case) and version (semantic version) are required' });
   }
-  const check = canAdopt(skillRegistry(state), agentId, skillId, version);
+  const check = adoptCheck(state, agentId, skillId, version);
   if (!check.ok) return json(res, REFUSAL_STATUS[check.error], { error: check.error, skillId, version, message: check.message });
   if (currentSkills(state, agentId).some((k) => k.id === skillId && k.version === version)) {
     return json(res, 409, { error: 'already_adopted', skillId, version, message: `${agentId} already runs ${skillId}@${version}` });
   }
-  const record = adoptionStore(state).request({ agentId, skillId, version, requestedBy: principal.actor, ...(reason ? { reason } : {}), accessAdded: accessAddedFor(state, agentId, check.record) });
+  const store = adoptionStore(state);
+  const earlier = store.get(agentId, skillId);
+  const record = store.request({ agentId, skillId, version, requestedBy: principal.actor, ...(reason ? { reason } : {}), accessAdded: accessAddedFor(state, agentId, check.record) });
   ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REQUESTED', principal.actor, skillId, version, reason, check.record.commit);
-  json(res, 201, record);
+  // A newer request for the same skill replaces a pending one; say so, so the asker is not surprised.
+  json(res, 201, earlier?.state === 'requested' ? { ...record, replacedRequest: { version: earlier.version, requestedBy: earlier.requestedBy, requestedAt: earlier.requestedAt } } : record);
 }
 
 async function decideAdoption(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, agentId: string, skillId: string, decision: 'approve' | 'reject'): Promise<void> {
   const principal = await requirePrivilege(req, res, state, 'skills.adopt.decide');
   if (!principal) return;
-  const body = await readOptionalJson(req);
+  const body = await readJson(req);
   const reason = reasonOf(res, body);
   if (reason === null) return;
   const adoptions = adoptionStore(state);
   if (decision === 'reject') {
-    const rejected = adoptions.reject(agentId, skillId, principal.actor, reason);
-    if (!rejected) return json(res, 409, { error: 'no_request', agentId, skillId, message: 'there is no pending adoption request for this agent and skill' });
-    ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REJECTED', principal.actor, skillId, rejected.version, reason);
-    return json(res, 200, rejected);
+    // Under the agent's lock, so a rejection cannot land while an approval of the same request is being written.
+    const out = await withAgentLock(state, agentId, async () => {
+      const rejected = adoptions.reject(agentId, skillId, principal.actor, reason);
+      if (!rejected) return { status: 409, body: { error: 'no_request', agentId, skillId, message: 'there is no pending adoption request for this agent and skill' } };
+      ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REJECTED', principal.actor, skillId, rejected.version, reason);
+      return { status: 200, body: rejected };
+    });
+    return json(res, out.status, out.body);
   }
   const outcome = await withAgentLock(state, agentId, async () => {
     const request = adoptions.get(agentId, skillId);
     if (!request || request.state !== 'requested') return { status: 409, body: { error: 'no_request', agentId, skillId, message: 'there is no pending adoption request for this agent and skill' } };
     if (!state.agents.has(agentId)) return { status: 404, body: { error: 'not_found' } };
     // The skill may have been retired or revoked since the request was made.
-    const check = canAdopt(skillRegistry(state), agentId, skillId, request.version);
+    const check = adoptCheck(state, agentId, skillId, request.version);
     if (!check.ok) return { status: REFUSAL_STATUS[check.error], body: { error: check.error, skillId, version: request.version, message: check.message } };
     const skills = currentSkills(state, agentId);
     if (skills.some((k) => k.id === skillId && k.version === request.version)) {
@@ -720,7 +731,7 @@ async function decideAdoption(state: FactoryState, req: http.IncomingMessage, re
 async function removeAdoption(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, agentId: string, skillId: string): Promise<void> {
   const principal = await requirePrivilege(req, res, state, 'skills.adopt.remove', { agentId });
   if (!principal) return;
-  const body = await readOptionalJson(req);
+  const body = await readJson(req);
   const reason = reasonOf(res, body);
   if (reason === null) return;
   const adoptions = adoptionStore(state);
@@ -749,56 +760,84 @@ async function removeAdoption(state: FactoryState, req: http.IncomingMessage, re
  * SK6: retires every version of a skill. While any agent's configuration still adopts it this is refused; `force` pauses
  * each of those agents, removes the skill from its configuration (a new version) and retires the skill. Redeploying
  * them without it and resuming them is the apply step (TSK-159).
+ *
+ * A forced retire must leave no agent pinned to a retired skill, even when an approval is in flight. So the skill is
+ * marked as being retired first (no adoption may start), and each pass waits for the writes already under way to land
+ * before it looks for adopters again; it stops when a pass finds none.
  */
 async function retireSkill(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
   const principal = await requirePrivilege(req, res, state, 'skills.retire');
   if (!principal) return;
-  const body = await readOptionalJson(req);
+  const body = await readJson(req);
   const reason = reasonOf(res, body);
   if (reason === null) return;
   const registry = skillRegistry(state);
   const versions = registry.versions(id);
   if (!versions.length) return json(res, 404, { error: 'not_found', id });
   if (versions.every((v) => v.retired)) return json(res, 409, { error: 'already_retired', id });
-  const users = adoptersOf(state, id).filter((a) => a.state === 'approved').map((a) => a.agentId);
-  if (users.length && body.force !== true) {
-    return json(res, 409, { error: 'skill_in_use', id, agents: users, message: 'remove the skill from these agents first, or retire with "force": true to pause them and remove it' });
+  const approvedAdopters = () => adoptersOf(state, id).filter((a) => a.state === 'approved').map((a) => a.agentId);
+  const first = approvedAdopters();
+  if (first.length && body.force !== true) {
+    return json(res, 409, { error: 'skill_in_use', id, agents: first, message: 'remove the skill from these agents first, or retire with "force": true to pause them and remove it' });
   }
-  const paused: string[] = [];
-  const removedFrom: string[] = [];
-  const failed: string[] = [];
-  for (const agentId of users) {
-    const out = await applyKillSwitch(state, agentId, 'PAUSE', principal.actor);
-    if (out.status === 200) paused.push(agentId);
-    const removed = await withAgentLock(state, agentId, async () => {
-      const skills = currentSkills(state, agentId);
-      const adopted = skills.find((k) => k.id === id);
-      if (!adopted) return true;
-      const written = await writeSkills(state, agentId, skills.filter((k) => k.id !== id), { actor: principal.actor, reason: reason ?? `skill ${id} retired` });
-      if (written.ok) ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REMOVED', principal.actor, id, adopted.version, reason ?? `skill ${id} retired`);
-      return written.ok;
-    });
-    (removed ? removedFrom : failed).push(agentId);
-  }
-  if (failed.length) return json(res, 500, { error: 'adopters_not_updated', id, paused, removedFrom, failed, message: 'the skill was not retired; retry to finish removing it from the remaining agents' });
-  const adoptions = adoptionStore(state);
-  for (const r of adoptions.forSkill(id)) if (r.state === 'requested') adoptions.clear(r.agentId, id);
-  let changed: SkillVersionRecord[];
+  let flags = retiring.get(state);
+  if (!flags) retiring.set(state, (flags = new Set()));
+  if (flags.has(id)) return json(res, 409, { error: 'retire_in_progress', id });
+  flags.add(id);
   try {
-    changed = registry.retire(id, principal.actor, reason);
-  } catch (err) {
-    console.warn(`[control-plane] failed to persist retirement of ${id}:`, err);
-    return json(res, 500, { error: 'persist_failed', message: 'the retirement could not be written' });
+    const paused: string[] = [];
+    const pauseFailed: string[] = [];
+    const removedFrom: string[] = [];
+    const failed: string[] = [];
+    const MAX_PASSES = 5;
+    for (let pass = 0; pass < MAX_PASSES; pass++) {
+      // Writes already past their checks finish under their agent's lock; wait for them, then look again.
+      await Promise.all([...(agentLocks.get(state)?.values() ?? [])]);
+      const users = approvedAdopters().filter((a) => !failed.includes(a));
+      if (!users.length) break;
+      for (const agentId of users) {
+        if (!paused.includes(agentId) && !pauseFailed.includes(agentId)) {
+          const out = await applyKillSwitch(state, agentId, 'PAUSE', principal.actor);
+          (out.status === 200 ? paused : pauseFailed).push(agentId);
+        }
+        const removed = await withAgentLock(state, agentId, async () => {
+          const skills = currentSkills(state, agentId);
+          const adopted = skills.find((k) => k.id === id);
+          if (!adopted) return true;
+          const written = await writeSkills(state, agentId, skills.filter((k) => k.id !== id), { actor: principal.actor, reason: reason ?? `skill ${id} retired` });
+          if (written.ok) ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REMOVED', principal.actor, id, adopted.version, reason ?? `skill ${id} retired`);
+          return written.ok;
+        });
+        if (removed) removedFrom.push(agentId);
+        else failed.push(agentId);
+      }
+    }
+    const left = approvedAdopters();
+    if (failed.length || left.length) {
+      return json(res, 500, { error: 'adopters_not_updated', id, paused, pauseFailed, removedFrom, failed, remaining: left, message: 'the skill was not retired; retry to finish removing it from the remaining agents' });
+    }
+    const adoptions = adoptionStore(state);
+    for (const r of adoptions.forSkill(id)) if (r.state === 'requested') adoptions.clear(r.agentId, id);
+    let changed: SkillVersionRecord[];
+    try {
+      changed = registry.retire(id, principal.actor, reason);
+    } catch (err) {
+      console.warn(`[control-plane] failed to persist retirement of ${id}:`, err);
+      return json(res, 500, { error: 'persist_failed', message: 'the retirement could not be written' });
+    }
+    const forced = removedFrom.length > 0 || first.length > 0;
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: ledgerKey(id),
+      type: 'action',
+      action: forced ? 'SKILL_RETIRED_FORCED' : 'SKILL_RETIRED',
+      actor: principal.actor,
+      ...(reason ? { payloadSha256: payloadHash(reason) } : {}),
+    });
+    json(res, 200, { id, retired: changed.map((v) => v.version), ...(forced ? { paused, pauseFailed, removedFrom } : {}) });
+  } finally {
+    flags.delete(id);
   }
-  state.ledger.append({
-    timestamp: new Date().toISOString(),
-    agentId: ledgerKey(id),
-    type: 'action',
-    action: users.length ? 'SKILL_RETIRED_FORCED' : 'SKILL_RETIRED',
-    actor: principal.actor,
-    ...(reason ? { payloadSha256: payloadHash(reason) } : {}),
-  });
-  json(res, 200, { id, retired: changed.map((v) => v.version), ...(users.length ? { paused, removedFrom } : {}) });
 }
 
 const CHECKS = /^\/api\/v1\/registry\/skills\/([^/]+)\/versions\/([^/]+)\/checks$/;
