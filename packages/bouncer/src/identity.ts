@@ -285,7 +285,9 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
     link.agentRoles &&
     Object.prototype.hasOwnProperty.call(link.agentRoles, agentId) &&
     Array.isArray(link.agentRoles[agentId])
-      ? link.agentRoles[agentId].filter((r) => typeof r === 'string' && r.trim() !== '' && r.toLowerCase() !== 'owner')
+      ? link.agentRoles[agentId]
+          .filter((r): r is string => typeof r === 'string' && r.trim() !== '' && r.trim().toLowerCase() !== 'owner')
+          .map((r) => r.trim())
       : [];
 
   const auth = authorize({
