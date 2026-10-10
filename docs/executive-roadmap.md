@@ -52,7 +52,7 @@ whose code named other models.
 
 ## Order of work
 
-**First, the extraction (moves only): done** (TSK-147 to TSK-155; PRs #125, #128, #132 and the close-out's). The signer,
+**First, the extraction (moves only): done** (TSK-147 to TSK-155: the plan in #125, the code in #128, #132 and #134). The signer,
 the catalog and adapters, token counting, the policy gate (`checkModel`, `offeredModels`) and the serving of a call
 (`findModel`, `complete`) are in `packages/executive`; the Executive owns no file in `gatekeeper-egress`; a conformance
 test guards against a second copy. What stays in the egress is GAP-127.
