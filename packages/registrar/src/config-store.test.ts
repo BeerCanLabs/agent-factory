@@ -226,6 +226,21 @@ describe('adoption provenance', () => {
     }
   });
 
+  it('records provenance only with a real configuration change: re-applying an adoption the configuration has keeps the first', async () => {
+    const dir = tmp();
+    try {
+      const store = await VersionedConfigStore.open(new FileConfigBackend(dir));
+      await store.put(content({ skills: [adopt] }), { ...meta, skillAdoptions: [prov] });
+      const again = await store.put(content({ skills: [adopt] }), { ...meta, skillAdoptions: [{ ...prov, approvedBy: 'token:someone-else' }] });
+      assert.equal(again.created, false);
+      assert.equal(again.record.version, 1);
+      assert.equal(again.record.skillAdoptions![0].approvedBy, 'cloudflare:dale@example.com');
+      assert.equal(store.history('ada').length, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses provenance for an adoption the configuration does not carry', async () => {
     const dir = tmp();
     try {
