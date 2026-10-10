@@ -13,7 +13,7 @@ import {
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
 import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, finishRun, reconcileRuns, SYSTEM } from './app.js';
-import { scheduleRunOptions } from './schedules.js';
+import { scheduleRunOptions, SCHEDULER_BADGE } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { FileRunStore, RunTokens } from './runs.js';
 import { callbackPolicyFromEnv } from './callbacks.js';
@@ -346,7 +346,13 @@ if (process.env.FACTORY_CRON !== '0') {
     fire: (request) => {
       if (request.kind === 'cartridge') {
         // Skipping a cartridge cron while the agent is running is the Landlord's rule, not the Timekeeper's.
-        if (!activeRun(state, request.agentId)) void createRun(state, request.agentId, { actor: SYSTEM.scheduler, trigger: 'cron' });
+        if (!activeRun(state, request.agentId)) {
+          void createRun(state, request.agentId, {
+            actor: SYSTEM.scheduler,
+            trigger: 'cron',
+            caller: SCHEDULER_BADGE('cron'),
+          });
+        }
         return;
       }
       const sched = request.schedule;
