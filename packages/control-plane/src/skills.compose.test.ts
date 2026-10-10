@@ -46,7 +46,7 @@ describe('composing adopted skills into a build context (SK4)', () => {
     mkdirSync(repos, { recursive: true });
     const tavily = makeRepo('skill-tavily-search', { 'skill.yaml': skillYaml('tavily-search', '0.1.0'), 'tavily_search/__init__.py': 'def search(q):\n    return q\n', 'README.md': '# t\n' });
     const mono = makeRepo('skills-mono', { 'print/skill.yaml': skillYaml('print', '0.1.1'), 'print/print_api.py': 'X = 1\n', 'other/skill.yaml': skillYaml('other', '9.9.9') });
-    const leaky = makeRepo('skill-leaky', { 'skill.yaml': skillYaml('leaky', '1.0.0'), 'leaky/__init__.py': 'API_TOKEN = "Zk3mPq9xLw2RtYh7VbN5cJd8Fg4Ss1Aa"\n' });
+    const leaky = makeRepo('skill-leaky', { 'skill.yaml': skillYaml('leaky', '1.0.0'), 'leaky/__init__.py': 'API_TOKEN = "Zk3mPq9xLw2RtYh7VbN5cJd8Fg4Ss1Aa"\n' });  // secret-scan:allow (a made-up value, the fixture the script must refuse)
     pins = {
       tavily: { repo: `https://${HOST}/skill-tavily-search`, path: '.', commit: tavily },
       print: { repo: `https://${HOST}/skills-mono`, path: 'print', commit: mono },
