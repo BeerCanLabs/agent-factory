@@ -32,13 +32,13 @@ export const OwnersEditor: React.FC<{ agent: AgentRecord; canEdit: boolean }> = 
     factoryApi.getOwners(agent.id).then(load).catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [agent.id]);
 
-  // The actor the factory knows this signed-in person by, for the "add me" shortcut.
-  const myActor = user.email ? `${user.provider || 'cloudflare'}:${user.email}`.toLowerCase() : '';
+  // The actor the factory knows this signed-in person by (from /api/auth/me), for the "add me" shortcut.
+  const myActor = user.actor?.toLowerCase() ?? '';
 
   const add = (raw: string) => {
     const actor = raw.trim().toLowerCase();
     if (!actor) return;
-    if (!/^[a-z0-9_-]+:\S+$/.test(actor)) {
+    if (!/^(cloudflare|oidc|token):\S+$/.test(actor)) {
       setError('An owner is a principal actor such as cloudflare:alice@example.com, oidc:... or token:...');
       return;
     }
