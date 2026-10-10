@@ -317,7 +317,16 @@ image, and the agent restarts on it. Nothing is loaded at runtime and nothing ne
   deploy is applied when that deploy ends. A build that is refused or fails leaves the running image in place, and the
   ledger records `AGENT_CONFIG_APPLY_FAILED`; the configuration still says what should run.
 - **Pausing.** A forced retire or revocation pauses the agents that run the skill, remembers it was for the skill, and
-  resumes them when they are redeployed without it. An agent an operator had paused stays paused.
+  resumes them when they are redeployed without it. An agent an operator had paused stays paused. A pause set while a
+  deploy is running stays when that deploy ends (its image may still have the skill), and the rebuild without the skill
+  is applied right after, whether the deploy was started by an adoption or by the deploy route.
+- **When an apply cannot start.** If the factory cannot rebuild (no deploy provider, the agent has no policy route, or its
+  source is not pinned), it changes nothing and records `AGENT_CONFIG_APPLY_SKIPPED` with the reason. A paused agent stays
+  paused, safely, and nothing retries by itself: fix the cause, then redeploy it
+  (`POST /api/v1/registry/agents/:id/deploy`) or make another skills change.
+- **When a build fails.** An apply that is refused or fails leaves the agent as it was, with the image and compute it was
+  running (`AGENT_CONFIG_APPLY_FAILED`); an adoption never takes a working agent out of service. A manual deploy keeps its
+  behavior: a failure after the build leaves the agent in `ERROR`.
 - **A skill is in use** until the agents running it are redeployed without it: their configuration pins it, or their
   deployed image still has it.
 - **Where it is built.** The AWS landing zone (`landing-zones/aws/codebuild.tf`, `compose-skills.sh`). Production applies

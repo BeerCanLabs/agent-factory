@@ -45,11 +45,19 @@ export type DeployJob = {
   /** The agent's state before this deploy: what a refused build leaves it in. */
   previousState: AgentRecord['state'];
   /**
-   * A change to the skills must not unpause an agent that someone paused for another reason, so the state it had is put
-   * back after the deploy. The deploy route keeps its old behavior: a deploy of a paused agent brings it online.
+   * True when this deploy applies a skills change to a running agent (`applyConfig`), false for the deploy route.
+   * An apply must not unpause an agent that someone paused for another reason, so the state it had is put back; and if
+   * it fails after a good build, the agent goes back to that state too, because the image and compute it was running
+   * are still in place. The deploy route keeps its old behavior: a deploy of a paused agent brings it online, and a
+   * failure after the build leaves the agent in `ERROR`.
    */
-  keepPause: boolean;
+  isApply: boolean;
 };
+
+export type DeployResult = 'deployed' | 'refused' | 'failed';
+
+/** A pause or isolation set while a deploy ran: the agent's state is `DEPLOYING` from the start, so anything else was set since. */
+const stoppedDuring = (agent: AgentRecord): boolean => agent.state === 'PAUSED' || agent.state === 'ISOLATED';
 
 function row(state: FactoryState, agentId: string, action: string, actor: string, commit?: string, requestId?: string): void {
   state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action, actor, ...(commit ? { commit } : {}), ...(requestId ? { requestId } : {}) });
@@ -59,7 +67,31 @@ function row(state: FactoryState, agentId: string, action: string, actor: string
  * Admits, builds, provisions and registers one agent's image (L3, L4), and records the outcome. The caller has already set
  * the agent `DEPLOYING` and saved it. Never throws: a refusal or a failure is recorded on the agent and in the ledger.
  */
-export async function runDeploy(state: FactoryState, job: DeployJob): Promise<void> {
+/**
+ * Agents with a deploy running. The agent's `state` says `DEPLOYING` too, but a pause or isolation set meanwhile replaces
+ * it, and a second deploy must not start beside the first, so this is the record of whether one is running.
+ */
+const deploying = new WeakMap<FactoryState, Set<string>>();
+export const isDeploying = (state: FactoryState, agentId: string): boolean => deploying.get(state)?.has(agentId) === true;
+
+export async function runDeploy(state: FactoryState, job: DeployJob): Promise<DeployResult> {
+  let running = deploying.get(state);
+  if (!running) deploying.set(state, (running = new Set()));
+  running.add(job.agent.id);
+  try {
+    return await deploy(state, job);
+  } finally {
+    running.delete(job.agent.id);
+    // A skills change that arrived while this deploy ran (from either entry point) is applied now, so it is never dropped.
+    const next = applyAgain.get(state)?.get(job.agent.id);
+    if (next) {
+      applyAgain.get(state)!.delete(job.agent.id);
+      triggerApply(state, job.agent.id, next.actor, `${next.reason} (queued)`);
+    }
+  }
+}
+
+async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult> {
   const { agent, actor, source, skills, previousState } = job;
   const agentId = agent.id;
   const commit = source.commit;
@@ -74,11 +106,11 @@ export async function runDeploy(state: FactoryState, job: DeployJob): Promise<vo
   if (outcome.status === 'refused') {
     console.error(`[control-plane] Admission refused ${agentId}@${commit}: ${outcome.reason}: ${outcome.message}`);
     agent.admission = admissionOf(outcome);
-    // A refused new version leaves the running version in place.
-    agent.state = stateAfterRefusal(agent, previousState);
+    // A refused new version leaves the running version in place (and a pause set while it built stays).
+    if (!stoppedDuring(agent)) agent.state = stateAfterRefusal(agent, previousState);
     registryOf(state).save(agent);
     row(state, agentId, `AGENT_ADMISSION_REFUSED:${outcome.reason}`, actor, commit);
-    return;
+    return 'refused';
   }
   const imageUri = outcome.imageUri;
   try {
@@ -98,16 +130,25 @@ export async function runDeploy(state: FactoryState, job: DeployJob): Promise<vo
     // SK6: an agent paused because it ran a skill is resumed once the image no longer has it.
     const resumed = agent.pausedForSkill !== undefined && !agent.deployedSkills.some((s) => s.id === agent.pausedForSkill);
     if (resumed) delete agent.pausedForSkill;
-    const stayPaused = job.keepPause && (previousState === 'PAUSED' || previousState === 'ISOLATED') && !resumed;
-    agent.state = stayPaused ? previousState : 'SLEEPING'; // Officially online
+    // The state the deploy ends in. A pause set while it ran stays (the image may still have the skill; the queued apply
+    // that follows rebuilds it). An apply puts back the pause the agent had. Otherwise the agent is online.
+    const stoppedNow = stoppedDuring(agent);
+    const heldBefore = job.isApply && (previousState === 'PAUSED' || previousState === 'ISOLATED');
+    if (resumed) agent.state = previousState === 'ISOLATED' || agent.state === 'ISOLATED' ? 'ISOLATED' : 'SLEEPING';
+    else if (!stoppedNow) agent.state = heldBefore ? previousState : 'SLEEPING'; // Officially online; a pause set meanwhile stays
     registryOf(state).save(agent);
     row(state, agentId, 'AGENT_DEPLOYED', actor, commit);
     if (resumed) row(state, agentId, 'AGENT_RESUMED_AFTER_SKILL_CHANGE', actor, commit);
+    return 'deployed';
   } catch (err) {
     console.error(`[control-plane] Deploy failed for ${agentId}:`, err);
-    agent.state = 'ERROR';
+    // An apply that fails after a good build leaves the agent as it was: its image and compute are still in place.
+    // The deploy route keeps `ERROR`.
+    if (!job.isApply) agent.state = 'ERROR';
+    else if (!stoppedDuring(agent)) agent.state = previousState;
     registryOf(state).save(agent);
     row(state, agentId, 'AGENT_DEPLOY_FAILED', actor, commit);
+    return 'failed';
   }
 }
 
@@ -117,7 +158,7 @@ export type ApplyOutcome =
   | { status: 'unchanged' | 'skipped' | 'failed'; reason: string };
 
 /** Agents whose configuration changed while a deploy was running: applied again when it ends. */
-const applyAgain = new WeakMap<FactoryState, Set<string>>();
+const applyAgain = new WeakMap<FactoryState, Map<string, { actor: string; reason: string }>>();
 
 /**
  * Applies the agent's current configuration (SK4): when the skills it should run differ from the ones in the deployed
@@ -133,10 +174,10 @@ export function applyConfig(state: FactoryState, agentId: string, actor: string,
   if (agent.state === 'RETIRED_PENDING_PURGE' || agent.state === 'PURGED') return { status: 'skipped', reason: `agent_${agent.state.toLowerCase()}` };
   const requestId = `config:${agentId}:v${state.configs?.current(agentId)?.version ?? 0}`;
 
-  if (agent.state === 'DEPLOYING') {
+  if (agent.state === 'DEPLOYING' || isDeploying(state, agentId)) {
     let flags = applyAgain.get(state);
-    if (!flags) applyAgain.set(state, (flags = new Set()));
-    flags.add(agentId);
+    if (!flags) applyAgain.set(state, (flags = new Map()));
+    flags.set(agentId, { actor, reason });
     return { status: 'pending' };
   }
 
@@ -169,15 +210,11 @@ export function applyConfig(state: FactoryState, agentId: string, actor: string,
   registryOf(state).save(agent);
   row(state, agentId, 'AGENT_CONFIG_APPLY_STARTED', actor, pin.source.commit, requestId);
 
-  const done = runDeploy(state, { agent, actor, source: pin.source, skills: built.skills, previousState, keepPause: true })
-    .then(() => {
-      row(state, agentId, agent.state === 'ERROR' || agent.admission?.status === 'refused' ? 'AGENT_CONFIG_APPLY_FAILED' : 'AGENT_CONFIG_APPLIED', actor, pin.source.commit, requestId);
+  const done = runDeploy(state, { agent, actor, source: pin.source, skills: built.skills, previousState, isApply: true })
+    .then((result) => {
+      row(state, agentId, result === 'deployed' ? 'AGENT_CONFIG_APPLIED' : 'AGENT_CONFIG_APPLY_FAILED', actor, pin.source.commit, requestId);
     })
-    .catch((err) => console.error(`[control-plane] apply of ${agentId} failed:`, err))
-    .then(() => {
-      // A change that came in while this deploy ran.
-      if (applyAgain.get(state)?.delete(agentId)) applyConfig(state, agentId, actor, `${reason} (queued)`);
-    });
+    .catch((err) => console.error(`[control-plane] apply of ${agentId} failed:`, err));
   return { status: 'started', done };
 }
 
