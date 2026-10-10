@@ -4,7 +4,7 @@ import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, payloadHash, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
 import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
-import { cartridgeRoleProblems, classifySecrets, type Surface } from '@beercanlabs/factory-contract';
+import { cartridgeRoleProblems, classifySecrets, effectiveAccess, type Surface } from '@beercanlabs/factory-contract';
 import {
   AgentRecord,
   AgentRegistry,
@@ -17,6 +17,7 @@ import {
   credentialsOf,
   egressOf,
   rolesOf,
+  skillIdsOf,
   skillRoutesOf,
   FULL_SHA,
   gitLsRemoteResolver,
@@ -2028,6 +2029,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       ...egressOf(cartridge),
       ...rolesOf(cartridge),
       ...skillRoutesOf(cartridge),
+      ...skillIdsOf(cartridge),
     };
     state.agents.set(record.id, record);
 
@@ -2057,12 +2059,17 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     const roles = agent.roles ?? [];
+    // `?held=Family,Realtor`: what someone who holds those roles may use, by the one rule the egress also applies (E12).
+    const heldParam = new URL(req.url ?? '/', 'http://factory.local').searchParams.get('held');
+    const held = heldParam === null ? undefined : heldParam.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 20);
     json(res, 200, {
       agentId,
       roles,
       // Owner is declared but never assigned (it comes from ownership): these are the names a person can be given.
       assignable: roles.map((r) => r.name).filter((n) => n.toLowerCase() !== 'owner'),
       skillRoutes: agent.skillRoutes ?? {},
+      skillIds: agent.skillIds ?? Object.keys(agent.skillRoutes ?? {}),
+      ...(held ? { effective: effectiveAccess(roles, held, agent.skillIds ?? Object.keys(agent.skillRoutes ?? {}), agent.skillRoutes ?? {}) } : {}),
     });
     return;
   }

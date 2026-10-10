@@ -198,9 +198,11 @@ roles:
 - The holds on a skill's actions (`hold:`, E9) are separate: a role that allows a skill does not remove a hold.
 
 **What the factory does with them today.** It validates them (`cartridge validate`), refuses a registration that declares
-them badly, records them on the agent, and tells an admin and the agent's owner (`GET /api/v1/agents/:id/roles`). **It does
-not yet apply them to what your agent reaches** (the gatekeeper-egress will, TSK-174), and the console cannot yet assign them
-(TSK-173); until then your own check in the cartridge is the only limit. What the factory will never do: stop your agent
+them badly, records them on the agent, and tells an admin and the agent's owner (`GET /api/v1/agents/:id/roles`, and with
+`?held=Family` what someone holding those roles may use). An admin assigns them in the console (Identities, Access to
+agents); the identity-links API refuses a role your cartridge does not declare (and `Owner`), so a typo or a role from
+another agent cannot be given. **It does not yet apply them to what your agent reaches** (the gatekeeper-egress will,
+TSK-174); until then your own check in the cartridge is the only limit. What the factory will never do: stop your agent
 repeating what it already remembers (that is your cartridge's, §6.6).
 
 ## 5. Step 3: Implementing the Hands & Eyes (`agent.py`)
