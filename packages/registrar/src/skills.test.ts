@@ -6,7 +6,19 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SkillManifest } from '@beercanlabs/factory-contract';
-import { SkillRegistry, checkSkillPath, compareSemver, fetchManifest, summarizeSkill, type SkillVersionRecord } from './skills.js';
+import {
+  SkillRegistry,
+  availableTo,
+  canAdopt,
+  checkSkillPath,
+  compareSemver,
+  fetchManifest,
+  ownerOf,
+  skillVisibleTo,
+  summarizeSkill,
+  visibilityOf,
+  type SkillVersionRecord,
+} from './skills.js';
 import { SourceError, type SkillSource } from './source.js';
 
 const SHA = 'c'.repeat(40);
@@ -184,5 +196,145 @@ describe('reading skill.yaml at a commit', () => {
     const unreachable = await fetchManifest(source({ readFile: async () => { throw new Error('boom'); } }), 'https://h/r', '.', SHA, undefined, (m) => warnings.push(m));
     assert.match(unreachable.reasons[0], /^repo: cannot fetch https:\/\/h\/r;/);
     assert.deepEqual(warnings, ['could not read skill source https://h/r:']);
+  });
+});
+
+// TSK-157 (§6.14 SK1, SK3, SK6, SK7): visibility, owner and retirement in the registry.
+const privateRecord = (id: string, owner: string, version = '1.0.0', over: Partial<SkillVersionRecord> = {}): SkillVersionRecord =>
+  record(version, { id, manifest: { ...manifest(version), id, visibility: 'private', owner } as unknown as SkillManifest, ...over });
+
+describe('visibility and owner (SK1)', () => {
+  it('a record written before visibility existed is a public skill with no owner', () => {
+    const legacy = record('1.0.0');
+    assert.equal(legacy.manifest.visibility, undefined);
+    assert.equal(visibilityOf(legacy), 'public');
+    assert.equal(ownerOf(legacy), undefined);
+  });
+
+  it('reads visibility and owner from the manifest, and a public skill has no owner even if one is written', () => {
+    const p = privateRecord('print', 'higgins');
+    assert.equal(visibilityOf(p), 'private');
+    assert.equal(ownerOf(p), 'higgins');
+    const odd = record('1.0.0', { manifest: { ...manifest('1.0.0'), visibility: 'public', owner: 'higgins' } as unknown as SkillManifest });
+    assert.equal(ownerOf(odd), undefined);
+  });
+
+  it('shows visibility and owner in the summary', () => {
+    const reg = new SkillRegistry();
+    reg.save(record('1.0.0', { status: 'approved' }));
+    reg.save(privateRecord('print', 'higgins', '1.0.0', { status: 'approved' }));
+    assert.deepEqual([summarizeSkill(reg, 'discord-progress')!.visibility, summarizeSkill(reg, 'discord-progress')!.owner], ['public', undefined]);
+    const s = summarizeSkill(reg, 'print')!;
+    assert.deepEqual([s.visibility, s.owner, s.retired], ['private', 'higgins', false]);
+  });
+
+  it('refuses a version that would change the skill’s visibility or owner, and accepts one that keeps them', () => {
+    const reg = new SkillRegistry();
+    assert.equal(reg.identityIssue({ id: 'print', visibility: 'private', owner: 'higgins' }), undefined);
+    reg.save(privateRecord('print', 'higgins'));
+    assert.equal(reg.identityIssue({ id: 'print', visibility: 'private', owner: 'higgins' }), undefined);
+    assert.match(reg.identityIssue({ id: 'print', visibility: 'private', owner: 'donna' })!, /private to higgins.*private to donna.*register a new skill/);
+    assert.match(reg.identityIssue({ id: 'print', visibility: 'public' })!, /cannot make it public/);
+    reg.save(record('1.0.0'));
+    assert.match(reg.identityIssue({ id: 'discord-progress', visibility: 'private', owner: 'higgins' })!, /is public/);
+    assert.equal(reg.identityIssue({ id: 'discord-progress', visibility: 'public' }), undefined);
+  });
+
+  it('who can see a private skill: admins and the owners of its owner agent (SK7)', () => {
+    const priv = { visibility: 'private' as const, owner: 'higgins' };
+    assert.equal(skillVisibleTo({ visibility: 'public' }, { admin: false, ownedAgents: [] }), true);
+    assert.equal(skillVisibleTo(priv, { admin: true, ownedAgents: [] }), true);
+    assert.equal(skillVisibleTo(priv, { admin: false, ownedAgents: ['higgins'] }), true);
+    assert.equal(skillVisibleTo(priv, { admin: false, ownedAgents: ['donna'] }), false);
+    assert.equal(skillVisibleTo(priv, { admin: false, ownedAgents: [] }), false);
+  });
+});
+
+describe('retirement (SK6)', () => {
+  it('retires every version, persists it, and a reload still shows it; retiring again changes nothing', () => {
+    const dir = tmp();
+    try {
+      const reg = new SkillRegistry(dir);
+      reg.save(record('1.0.0', { status: 'approved' }));
+      reg.save(record('1.1.0', { status: 'approved' }));
+      const changed = reg.retire('discord-progress', 'admin', 'replaced', new Date('2026-10-10T00:00:00Z'));
+      assert.deepEqual(changed.map((r) => r.version), ['1.0.0', '1.1.0']);
+      const again = new SkillRegistry(dir);
+      assert.deepEqual(again.get('discord-progress', '1.1.0')!.retired, true);
+      assert.deepEqual(
+        [again.get('discord-progress', '1.1.0')!.retiredBy, again.get('discord-progress', '1.1.0')!.retiredAt, again.get('discord-progress', '1.1.0')!.retiredReason],
+        ['admin', '2026-10-10T00:00:00.000Z', 'replaced'],
+      );
+      assert.deepEqual(again.retire('discord-progress', 'admin'), []);
+      assert.deepEqual(new SkillRegistry().retire('nope', 'admin'), []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a retired skill has no latest approved version and says so in the summary', () => {
+    const reg = new SkillRegistry();
+    reg.save(record('1.0.0', { status: 'approved' }));
+    assert.equal(summarizeSkill(reg, 'discord-progress')!.latestApproved, '1.0.0');
+    reg.retire('discord-progress', 'admin');
+    const s = summarizeSkill(reg, 'discord-progress')!;
+    assert.equal(s.latestApproved, null);
+    assert.equal(s.retired, true);
+    assert.equal(s.versions[0].retired, true);
+    assert.equal(s.versions[0].status, 'approved');
+  });
+});
+
+describe('retirement of a skill that is partly retired already (SK6)', () => {
+  it('keeps the first retirement’s record, retires only what is not yet retired, and is retired only when every version is', () => {
+    const reg = new SkillRegistry();
+    reg.save(record('1.0.0', { status: 'approved' }));
+    reg.retire('discord-progress', 'first-admin', 'old', new Date('2026-10-10T00:00:00Z'));
+    reg.save(record('1.1.0', { status: 'approved' }));
+    assert.equal(summarizeSkill(reg, 'discord-progress')!.retired, false, 'a newer version is not retired');
+    assert.equal(summarizeSkill(reg, 'discord-progress')!.latestApproved, '1.1.0');
+    const changed = reg.retire('discord-progress', 'second-admin', 'again', new Date('2026-10-11T00:00:00Z'));
+    assert.deepEqual(changed.map((r) => r.version), ['1.1.0']);
+    assert.deepEqual([reg.get('discord-progress', '1.0.0')!.retiredBy, reg.get('discord-progress', '1.0.0')!.retiredReason], ['first-admin', 'old']);
+    assert.deepEqual([reg.get('discord-progress', '1.1.0')!.retiredBy, reg.get('discord-progress', '1.1.0')!.retiredReason], ['second-admin', 'again']);
+    assert.equal(summarizeSkill(reg, 'discord-progress')!.retired, true);
+  });
+});
+
+describe('who may adopt what (SK1, SK3)', () => {
+  const reg = () => {
+    const r = new SkillRegistry();
+    r.save(record('1.0.0', { status: 'approved' }));
+    r.save(record('1.1.0', { status: 'pending' }));
+    r.save(privateRecord('print', 'higgins', '0.1.1', { status: 'approved' }));
+    r.save(record('2.0.0', { id: 'old-skill', status: 'approved', manifest: { ...manifest('2.0.0'), id: 'old-skill' } as unknown as SkillManifest }));
+    r.retire('old-skill', 'admin');
+    return r;
+  };
+
+  it('an approved public version can be adopted by any agent', () => {
+    const r = reg();
+    const c = canAdopt(r, 'donna', 'discord-progress', '1.0.0');
+    assert.equal(c.ok, true);
+  });
+
+  it('refuses unknown, pending, retired and another agent’s private skill, each with its own reason', () => {
+    const r = reg();
+    const why = (agent: string, id: string, v: string) => {
+      const c = canAdopt(r, agent, id, v);
+      return c.ok ? 'ok' : c.error;
+    };
+    assert.equal(why('donna', 'nope', '1.0.0'), 'not_found');
+    assert.equal(why('donna', 'discord-progress', '9.9.9'), 'not_found');
+    assert.equal(why('donna', 'discord-progress', '1.1.0'), 'skill_not_approved');
+    assert.equal(why('donna', 'old-skill', '2.0.0'), 'skill_retired');
+    assert.equal(why('donna', 'print', '0.1.1'), 'skill_private');
+    assert.equal(why('higgins', 'print', '0.1.1'), 'ok');
+  });
+
+  it('lists for an agent the public skills and its own private skills, never another agent’s, never retired or unapproved ones', () => {
+    const r = reg();
+    assert.deepEqual(availableTo(r, 'higgins').map((s) => [s.id, s.version]), [['discord-progress', '1.0.0'], ['print', '0.1.1']]);
+    assert.deepEqual(availableTo(r, 'donna').map((s) => s.id), ['discord-progress']);
   });
 });
