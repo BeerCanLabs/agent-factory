@@ -68,14 +68,18 @@ export type AdoptedRow = AgentAdoptedSkill & {
   updateTo?: string;
   /** Who put it there, in words. */
   source: string;
-  offer: { upgrade: boolean; rollBack: boolean; remove: boolean };
+  /** One button changes the version: `upgrade` when a newer one exists, otherwise `changeVersion` (the dialog lists every approved version). */
+  offer: { upgrade: boolean; changeVersion: boolean; remove: boolean };
 };
 
 export type PendingRow = AgentSkillRequest & { offer: { cancel: boolean; approve: boolean; reject: boolean } };
 
 export type AvailableRow = AvailableSkill & { offer: { request: boolean } };
 
-export type AgentSkillsRows = { adopted: AdoptedRow[]; pending: PendingRow[]; available: AvailableRow[]; refused: AgentSkillRequest[] };
+/** A private skill its owner removed: not adopted again by itself, so the way back is to ask again, offered here and not under Available. */
+export type RefusedRow = AgentSkillRequest & { offer: { request: boolean } };
+
+export type AgentSkillsRows = { adopted: AdoptedRow[]; pending: PendingRow[]; available: AvailableRow[]; refused: RefusedRow[] };
 
 const byId = <T>(rows: readonly T[], id: (r: T) => string): T[] => [...rows].sort((a, b) => id(a).localeCompare(id(b)));
 
@@ -99,20 +103,23 @@ export function agentSkillRows(data: AgentSkills, perms: AgentSkillsPerms): Agen
     const l = latest.get(a.id);
     const cmp = l ? compareVersions(a.version, l) : undefined;
     const waiting = pendingIds.has(a.id);
+    const upgrade = perms.canManage && !waiting && !!l && cmp !== undefined && cmp < 0;
     return {
       ...a,
       ...(l && cmp !== undefined && cmp < 0 ? { updateTo: l } : {}),
       source: sourceOf(a),
-      offer: { upgrade: perms.canManage && !waiting && !!l && cmp !== undefined && cmp < 0, rollBack: perms.canManage && !waiting, remove: perms.canManage },
+      offer: { upgrade, changeVersion: perms.canManage && !waiting && !upgrade, remove: perms.canManage },
     };
   });
   // The control plane removes the adopted skill when it is asked to cancel a request for a skill the agent already runs, so
   // Cancel is offered only for a skill that is not adopted. For an upgrade request an admin Rejects it (nothing is touched).
   const pending = byId(data.requests, (r) => r.skillId).map((r): PendingRow => ({ ...r, offer: { cancel: perms.canManage && !adoptedIds.has(r.skillId), approve: perms.canDecide, reject: perms.canDecide } }));
+  const refusedIds = new Set(data.revoked.map((r) => r.skillId));
   const available = byId(data.available, (s) => s.id)
-    .filter((s) => !adoptedIds.has(s.id) && !pendingIds.has(s.id))
+    .filter((s) => !adoptedIds.has(s.id) && !pendingIds.has(s.id) && !refusedIds.has(s.id))
     .map((s): AvailableRow => ({ ...s, offer: { request: perms.canManage } }));
-  return { adopted, pending, available, refused: byId(data.revoked, (r) => r.skillId) };
+  const refused = byId(data.revoked, (r) => r.skillId).map((r): RefusedRow => ({ ...r, offer: { request: perms.canManage && !adoptedIds.has(r.skillId) && !pendingIds.has(r.skillId) && latest.has(r.skillId) } }));
+  return { adopted, pending, available, refused };
 }
 
 // ---- What running means ---------------------------------------------------------------------------------------
@@ -144,7 +151,7 @@ export const rebuildText = (r: Rebuild): string | undefined =>
   r.kind === 'rebuilding'
     ? 'Rebuilding: the factory is building and deploying this agent with its new skills. Nothing needs doing.'
     : r.kind === 'waiting'
-      ? `Waiting to be applied: the configuration ${[r.missing.length ? `adds ${r.missing.join(', ')}` : '', r.extra.length ? `removes ${r.extra.join(', ')}` : ''].filter(Boolean).join(' and ')}, and the running image does not have the change yet.`
+      ? `Waiting to be applied: the configuration ${[r.missing.length ? `adds ${r.missing.join(', ')}` : '', r.extra.length ? `removes ${r.extra.join(', ')}` : ''].filter(Boolean).join(' and ')}, and the running image does not have the change yet. It is applied automatically; if it stays like this, ask an admin to redeploy the agent.`
       : undefined;
 
 // ---- Choosing a version ---------------------------------------------------------------------------------------

@@ -94,9 +94,27 @@ describe('the lists', () => {
       const r = agentSkillRows(base, p);
       return { adopted: r.adopted.find((a) => a.id === 'tavily-search')!.offer, pending: r.pending[0].offer, available: r.available[0].offer };
     };
-    assert.deepEqual(offers(ADMIN), { adopted: { upgrade: true, rollBack: true, remove: true }, pending: { cancel: true, approve: true, reject: true }, available: { request: true } });
-    assert.deepEqual(offers(OWNER), { adopted: { upgrade: true, rollBack: true, remove: true }, pending: { cancel: true, approve: false, reject: false }, available: { request: true } });
-    assert.deepEqual(offers(VIEWER), { adopted: { upgrade: false, rollBack: false, remove: false }, pending: { cancel: false, approve: false, reject: false }, available: { request: false } });
+    assert.deepEqual(offers(ADMIN), { adopted: { upgrade: true, changeVersion: false, remove: true }, pending: { cancel: true, approve: true, reject: true }, available: { request: true } });
+    assert.deepEqual(offers(OWNER), { adopted: { upgrade: true, changeVersion: false, remove: true }, pending: { cancel: true, approve: false, reject: false }, available: { request: true } });
+    assert.deepEqual(offers(VIEWER), { adopted: { upgrade: false, changeVersion: false, remove: false }, pending: { cancel: false, approve: false, reject: false }, available: { request: false } });
+  });
+
+  it('offers one button to change the version: Upgrade when a newer one exists, otherwise Change version, never both', () => {
+    const rows = agentSkillRows(base, ADMIN).adopted;
+    const tavily = rows.find((r) => r.id === 'tavily-search')!;
+    const print = rows.find((r) => r.id === 'print')!;
+    assert.deepEqual([tavily.offer.upgrade, tavily.offer.changeVersion], [true, false]);
+    assert.deepEqual([print.offer.upgrade, print.offer.changeVersion], [false, true]);
+  });
+
+  it('lists a removed private skill once: under Removed, with the way back, and not under Available', () => {
+    const d = data({ revoked: [{ agentId: 'higgins', skillId: 'old-private', version: '1.0.0', state: 'revoked' }], available: [avail('old-private', '1.1.0'), avail('calendar', '2.0.0')] });
+    const r = agentSkillRows(d, ADMIN);
+    assert.deepEqual(r.available.map((s) => s.id), ['calendar']);
+    assert.deepEqual(r.refused.map((s) => [s.skillId, s.offer.request]), [['old-private', true]]);
+    assert.equal(agentSkillRows(d, VIEWER).refused[0].offer.request, false);
+    const gone = agentSkillRows(data({ revoked: [{ agentId: 'higgins', skillId: 'old-private', version: '1.0.0', state: 'revoked' }] }), ADMIN);
+    assert.equal(gone.refused[0].offer.request, false, 'nothing approved to ask for any more');
   });
 
   it('offers no second request for a skill that has one waiting, so one cannot silently replace the other', () => {
@@ -107,7 +125,7 @@ describe('the lists', () => {
     });
     const row = agentSkillRows(waiting, ADMIN).adopted[0];
     assert.equal(row.updateTo, '0.3.0', 'it still says a newer version exists');
-    assert.deepEqual(row.offer, { upgrade: false, rollBack: false, remove: true });
+    assert.deepEqual(row.offer, { upgrade: false, changeVersion: false, remove: true });
   });
 
   it('never offers Cancel on a request for a skill the agent already runs: the control plane would remove the running skill', () => {
@@ -153,7 +171,7 @@ describe('whether the agent is being rebuilt', () => {
   it('says a change is waiting when the image and the configuration differ and no deploy is running, naming what differs', () => {
     const w = rebuildState({ state: 'SLEEPING', deployedSkills: [{ id: 'old', version: '1.0.0' }, { id: 'print', version: '0.1.0' }] }, adopted);
     assert.deepEqual(w, { kind: 'waiting', missing: ['print@0.1.1'], extra: ['old@1.0.0', 'print@0.1.0'] });
-    assert.equal(rebuildText(w), 'Waiting to be applied: the configuration adds print@0.1.1 and removes old@1.0.0, print@0.1.0, and the running image does not have the change yet.');
+    assert.equal(rebuildText(w), 'Waiting to be applied: the configuration adds print@0.1.1 and removes old@1.0.0, print@0.1.0, and the running image does not have the change yet. It is applied automatically; if it stays like this, ask an admin to redeploy the agent.');
     assert.equal(rebuildState({ state: 'SLEEPING' }, adopted).kind, 'waiting', 'an image with no recorded skills is not the one with print in it');
   });
 
