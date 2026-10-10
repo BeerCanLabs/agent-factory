@@ -80,6 +80,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/apply.ts',
       'packages/control-plane/src/callbacks.ts',
       'packages/control-plane/src/queues.ts',
       'packages/control-plane/src/runs.ts',
