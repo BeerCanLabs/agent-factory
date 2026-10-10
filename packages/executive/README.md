@@ -1,8 +1,8 @@
 # Executive (`@beercanlabs/factory-executive`)
 
-The Executive is the Factory's model service (`DESIGN_AUTHORITY.md` §6.15, M1 to M4). It is being extracted from `packages/gatekeeper-egress` one piece at a time (the Executive flow work stream, TSK-148 to TSK-155).
+The Executive is the Factory's model service (`DESIGN_AUTHORITY.md` §6.15, M1 to M4). It was extracted from `packages/gatekeeper-egress` (the Executive flow work stream, TSK-147 to TSK-155), and a conformance test (`packages/conformance/src/executive.test.ts`) fails on a second copy of its rules.
 
-Today it holds:
+It holds:
 
 - `signV4`, `awsCredentialsFromEnv`: AWS SigV4 request signing, used by the Bedrock adapter.
 - `parseModelCatalog`, `parseChatRequest`, `defaultModelAdapters`, `bedrockConverse`, `toConverse`, `fromConverse`, `ModelUpstreamError`: the model catalog (operations data, M3), the OpenAI-compatible request rules (M1) and the provider adapters.
