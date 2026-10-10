@@ -317,10 +317,42 @@ the factory builds one image from the agent's source plus each skill at its pinn
 image (SK4). No code is loaded at runtime. When a newer approved version exists, the owner sees "skill update available"
 and decides when to upgrade (SK5).
 
-**What exists today (TSK-158).** The routes below change an agent's configuration record: a new version listing the
-adopted skill, with who asked and who approved, and a ledger row. The build and redeploy that make an adoption take
-effect on the running agent are the next slice (TSK-159); until then the configuration says what the agent *should*
-run.
+**An adoption takes effect by a rebuild (TSK-159).** The routes below change an agent's configuration record: a new
+version listing the adopted skill, with who asked and who approved, and a ledger row. Then the factory applies it: it
+builds the agent's image from its source plus each adopted skill at its approved version's pinned commit, deploys that
+image, and the agent restarts on it. Nothing is loaded at runtime and nothing needs a pull request.
+
+- **How the image is built.** The agent's own image is built as before (its Dockerfile is never changed or read for
+  this), then one layer is added holding `/opt/factory/skills/<id>/` for each skill and `/opt/factory/skills.json`
+  listing them. Each skill is fetched at exactly its commit, checked against the version that was approved, scanned for
+  hard-coded credentials, and kept inside its own folder. Only the final image is pushed.
+- **How it is tagged.** `<agent>-<commit>-<12 hex of a hash of the skill pins>`, so the same source with other skills is
+  another image. An agent with no skills keeps the tag it always had.
+- **What the agent is launched with.** `FACTORY_SKILLS_MANIFEST=/opt/factory/skills.json`. The factory delivers the files
+  and the manifest; how a cartridge loads and calls a skill is the cartridge's. **No cartridge reads the manifest yet**, so
+  an adopted skill is in the image but an agent does not use it until its code does (the migration, TSK-162, starts with
+  Higgins).
+- **When it happens.** After an approved adoption, a removal, a private skill's version being approved, and a forced
+  retire or revocation. Not for a request, a rejection or a revocation record, which change nothing. An agent that was
+  never deployed is not built by an adoption: its first deploy includes its skills. A change that arrives during a
+  deploy is applied when that deploy ends. A build that is refused or fails leaves the running image in place, and the
+  ledger records `AGENT_CONFIG_APPLY_FAILED`; the configuration still says what should run.
+- **Pausing.** A forced retire or revocation pauses the agents that run the skill, remembers it was for the skill, and
+  resumes them when they are redeployed without it. An agent an operator had paused stays paused. A pause set while a
+  deploy is running stays when that deploy ends (its image may still have the skill), and the rebuild without the skill
+  is applied right after, whether the deploy was started by an adoption or by the deploy route.
+- **When an apply cannot start.** If the factory cannot rebuild (no deploy provider, the agent has no policy route, or its
+  source is not pinned), it changes nothing and records `AGENT_CONFIG_APPLY_SKIPPED` with the reason. A paused agent stays
+  paused, safely, and nothing retries by itself: fix the cause, then redeploy it
+  (`POST /api/v1/registry/agents/:id/deploy`) or make another skills change.
+- **When a build fails.** An apply that is refused or fails leaves the agent as it was, with the image and compute it was
+  running (`AGENT_CONFIG_APPLY_FAILED`); an adoption never takes a working agent out of service. A manual deploy keeps its
+  behavior: a failure after the build leaves the agent in `ERROR`.
+- **A skill is in use** until the agents running it are redeployed without it: their configuration pins it, or their
+  deployed image still has it.
+- **Where it is built.** The AWS landing zone (`landing-zones/aws/codebuild.tf`, `compose-skills.sh`). Production applies
+  that change in the deploy repository, with the control plane. The Compose landing zone has no build provider, and the
+  GCP provider refuses every build, so neither builds skills.
 
 | Endpoint | Who | What it does |
 |---|---|---|
@@ -359,10 +391,12 @@ exist.
 
 ## Revoking a version
 
-An admin can revoke an approved version (`POST /api/v1/registry/skills/:id/versions/:version/reject`). If any agent's
-configuration pins that version in its `skills` list (the factory reads its configuration store), the factory refuses (`409 skill_in_use`) and lists those agents: redeploy
-them without the skill first. An admin may override with `{"force": true}`, which revokes the version at once and
-pauses every agent using it until it is redeployed without it. A revoked version's record is `rejected` with `revoked: true`.
+An admin can revoke an approved version (`POST /api/v1/registry/skills/:id/versions/:version/reject`). If any agent runs
+that version (its configuration pins it, or its deployed image has it; the factory reads both) the factory refuses
+(`409 skill_in_use`) and lists those agents. An admin may override with `{"force": true}`: the version is revoked at
+once, the agents are paused for the skill, it is removed from their configuration, and they are redeployed without it,
+which resumes them (an agent an operator had paused stays paused). A revoked version's record is `rejected` with
+`revoked: true`.
 
 ## Checks before approval
 
