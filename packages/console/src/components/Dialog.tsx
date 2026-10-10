@@ -34,18 +34,19 @@ export const Dialog: React.FC<{
         aria-modal="true"
         aria-label={title}
         onMouseDown={(e) => e.stopPropagation()}
-        className={`w-full max-w-lg bg-white dark:bg-slate-900 rounded-xl shadow-xl border ${
+        // Never taller than the window: the body scrolls, and the header and the buttons stay where they can be reached.
+        className={`w-full max-w-lg max-h-[calc(100vh-2rem)] flex flex-col bg-white dark:bg-slate-900 rounded-xl shadow-xl border ${
           tone === 'danger' ? 'border-rose-300 dark:border-rose-800' : 'border-slate-200 dark:border-slate-700'
         }`}
       >
-        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 dark:border-slate-800">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 dark:border-slate-800 shrink-0">
           <h3 className={`text-sm font-bold ${tone === 'danger' ? 'text-rose-700 dark:text-rose-400' : 'text-slate-900 dark:text-white'}`}>{title}</h3>
           <button onClick={onClose} disabled={busy} className="p-1 rounded text-slate-500 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40" aria-label="Close">
             <X className="w-4 h-4" />
           </button>
         </div>
-        <div className="px-5 py-4 space-y-3 text-xs text-slate-700 dark:text-slate-300">{children}</div>
-        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 rounded-b-xl">{footer}</div>
+        <div className="px-5 py-4 space-y-3 text-xs text-slate-700 dark:text-slate-300 overflow-y-auto min-h-0">{children}</div>
+        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 rounded-b-xl shrink-0">{footer}</div>
       </div>
     </div>
   );

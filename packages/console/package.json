@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "serve": "node --loader tsx server.ts",
     "start": "node dist/server.js",
-    "test": "tsx --test server.test.ts src/views/skills/skills-model.test.ts"
+    "test": "tsx --test server.test.ts src/views/skills/skills-model.test.ts src/views/identities/access-model.test.ts"
   },
   "dependencies": {
     "lucide-react": "^1.16.0",

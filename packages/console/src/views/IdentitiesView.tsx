@@ -18,6 +18,9 @@ import { useAuth } from '../auth/CloudflareAuth.js';
 import { usePermissions } from '../auth/usePermissions.js';
 import { Dialog } from '../components/Dialog.js';
 
+import { AgentAccessEditor } from './identities/AgentAccessEditor.js';
+import { canonicalRoles as canonicalAgentRoles, factoryRoleWarnings, sameRoles, summarizeRoles, type AgentRoleMap } from './identities/access-model.js';
+
 const ALL_ROLES: Array<{ role: FactoryRole; label: string; desc: string }> = [
   { role: 'admin', label: 'Admin', desc: 'Full sovereign authority: manage fleet, identities, credentials, budgets & purge' },
   { role: 'operator', label: 'Operator', desc: 'Operational authority: wake, dispatch prompts, converse with agents, pause & resume' },
@@ -106,6 +109,9 @@ export const IdentitiesView: React.FC = () => {
   const [modalActor, setModalActor] = useState('');
   const [modalName, setModalName] = useState('');
   const [modalRoles, setModalRoles] = useState<FactoryRole[]>([]);
+  // E12: what each agent will do for this person. `initial` is what the link held when the dialog opened.
+  const [modalAgentRoles, setModalAgentRoles] = useState<AgentRoleMap>({});
+  const [modalAgentRolesInitial, setModalAgentRolesInitial] = useState<AgentRoleMap>({});
   const [modalSubmitting, setModalSubmitting] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
 
@@ -157,6 +163,8 @@ export const IdentitiesView: React.FC = () => {
     setModalName(user?.name && user.name !== user.email ? user.name : '');
     // Principle of least privilege: default to empty roles
     setModalRoles([]);
+    setModalAgentRoles({});
+    setModalAgentRolesInitial({});
     setModalError(null);
     setIsModalOpen(true);
   };
@@ -168,6 +176,8 @@ export const IdentitiesView: React.FC = () => {
     setModalActor(link.actor);
     setModalName(link.name ?? '');
     setModalRoles(link.roles ? [...link.roles] : []);
+    setModalAgentRoles(canonicalAgentRoles(link.agentRoles));
+    setModalAgentRolesInitial(canonicalAgentRoles(link.agentRoles));
     setModalError(null);
     setIsModalOpen(true);
   };
@@ -203,6 +213,8 @@ export const IdentitiesView: React.FC = () => {
         actor: trimmedActor,
         ...(trimmedName ? { name: trimmedName } : {}),
         roles: canonicalRoles,
+        // Sent only when changed: left out, the factory keeps what the person holds, so an edit of a name cannot touch them.
+        ...(sameRoles(modalAgentRoles, modalAgentRolesInitial) ? {} : { agentRoles: canonicalAgentRoles(modalAgentRoles) }),
       });
       setIsModalOpen(false);
       await loadData();
@@ -443,6 +455,7 @@ export const IdentitiesView: React.FC = () => {
                   <th className="py-3 px-4">Display Name</th>
                   <th className="py-3 px-4">Cloudflare Principal</th>
                   <th className="py-3 px-4">Authorized Roles</th>
+                  <th className="py-3 px-4">Agent Access</th>
                   <th className="py-3 px-4">Audit Record</th>
                   <th className="py-3 px-4 text-right">Actions</th>
                 </tr>
@@ -519,6 +532,23 @@ export const IdentitiesView: React.FC = () => {
                               title="No explicit roles assigned to this link. If the Cloudflare email is in FACTORY_ADMIN_EMAILS, admin access is resolved at runtime."
                             >
                               <span>No explicit roles</span>
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      {/* Agent access (E12): what each agent will do for this person */}
+                      <td className="py-3 px-4">
+                        <div className="flex flex-wrap gap-1 max-w-xs" data-testid={`agent-access-${link.id}`}>
+                          {summarizeRoles(link.agentRoles).length > 0 ? (
+                            summarizeRoles(link.agentRoles).map((s) => (
+                              <span key={s} className="px-1.5 py-0.5 rounded text-[10px] font-semibold border bg-violet-950/40 text-violet-300 border-violet-800">
+                                {s}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-[10px] text-slate-500" title="No agent holds a role for this person. They reach agents only through a factory role.">
+                              None
                             </span>
                           )}
                         </div>
@@ -750,7 +780,15 @@ export const IdentitiesView: React.FC = () => {
                   );
                 })}
               </div>
+              {factoryRoleWarnings(modalRoles, modalAgentRoles).map((w) => (
+                <p key={w} className="text-[11px] text-amber-400 bg-amber-950/30 border border-amber-900/60 rounded-md px-2.5 py-1.5">
+                  {w}
+                </p>
+              ))}
             </div>
+
+            {/* Only an admin may give agent roles (the server refuses anyone else), so no one else is offered the editor. */}
+            {canManageIdentities && <AgentAccessEditor value={modalAgentRoles} onChange={setModalAgentRoles} disabled={modalSubmitting} />}
           </div>
         </Dialog>
       )}
