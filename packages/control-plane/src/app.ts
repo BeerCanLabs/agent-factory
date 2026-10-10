@@ -2048,7 +2048,19 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
-  // E12: the roles an agent's cartridge declares, for the screen that assigns them and the egress that applies them.
+  /**
+ * The skills an agent declares. A record saved before `skillIds` existed (dynamic records load as saved, not re-derived)
+ * has none, so fall back to the skills we can still see: those with an egress route, and those a role names. That can
+ * miss a skill with neither; registering the agent again records them all.
+ */
+function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, string[]>; roles?: Array<{ skills: Record<string, unknown> }> }): string[] {
+  if (agent.skillIds) return agent.skillIds;
+  const ids = new Set(Object.keys(agent.skillRoutes ?? {}));
+  for (const r of agent.roles ?? []) for (const s of Object.keys(r.skills ?? {})) if (s !== '*') ids.add(s);
+  return [...ids];
+}
+
+// E12: the roles an agent's cartridge declares, for the screen that assigns them and the egress that applies them.
   const rolesMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/roles$/);
   if (rolesMatch && req.method === 'GET') {
     const agentId = decodeURIComponent(rolesMatch[1]);
@@ -2067,7 +2079,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 400, { error: 'too_many_roles', max: 20, message: 'ask about at most 20 roles at a time' });
       return;
     }
-    const skillIds = agent.skillIds ?? [];
+    const skillIds = skillIdsFor(agent);
     json(res, 200, {
       agentId,
       roles,
