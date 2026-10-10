@@ -2,6 +2,8 @@ export { signV4, awsCredentialsFromEnv } from './sigv4.js';
 export type { AwsCredentials } from './sigv4.js';
 export { checkModel, offeredModels } from './model-policy.js';
 export type { ModelCheck, ModelPolicy } from './model-policy.js';
+export { complete, findModel } from './complete.js';
+export type { Completion } from './complete.js';
 export { SseMeter, usageFromJson } from './meter.js';
 export type { Provider, Usage } from './meter.js';
 export { bedrockConverse, defaultModelAdapters, parseModelCatalog, parseChatRequest, toConverse, fromConverse, ModelUpstreamError } from './models.js';

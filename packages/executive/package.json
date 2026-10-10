@@ -13,7 +13,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/sigv4.test.ts src/models.test.ts src/meter.test.ts src/model-policy.test.ts"
+    "test": "tsx --test src/sigv4.test.ts src/models.test.ts src/meter.test.ts src/model-policy.test.ts src/complete.test.ts"
   },
   "dependencies": {
     "@beercanlabs/factory-budget": "0.1.0"
