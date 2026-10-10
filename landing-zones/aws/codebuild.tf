@@ -65,6 +65,12 @@ resource "aws_iam_role_policy" "codebuild_policy" {
 # repository without tests, runs the agent's own tests, and pushes an image tagged by the commit, never a
 # mutable tag. Refusal reasons are exit codes that packages/control-plane/src/aws/codebuild.ts maps back:
 # 3 = no_tests, 4 = tests_failed, 5 = source_unavailable, 6 = hardcoded_secret; any other failure maps from its phase.
+#
+# Skills (§6.14 SK4): when the control plane also sends SKILLS (the agent's adopted skills, each at an approved
+# version's pinned commit), IMAGE_TAG is <agentId>-<commit[:12]>-<12 hex of a hash of the skill pins>. The agent's image is
+# built as before (kept local), then landing-zones/aws/compose-skills.sh fetches each skill at its commit, checks it, and
+# the final image adds one layer holding the skills and /opt/factory/skills.json on top. The agent's Dockerfile is not
+# read for them, and only the final image is pushed.
 resource "aws_codebuild_project" "factory_agent_builder" {
   name         = "factory-agent-builder"
   service_role = aws_iam_role.codebuild.arn
@@ -107,7 +113,20 @@ phases:
     on-failure: ABORT
     commands:
       - echo "Admission build for $AGENT_ID at $REPO_URL@$GIT_COMMIT -> $IMAGE_TAG"
-      - '[[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ && "$IMAGE_TAG" == "$AGENT_ID-$(echo $GIT_COMMIT | cut -c1-12)" ]] || exit 5'
+      - '[[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 5'
+      - |
+        PREFIX="$AGENT_ID-$(echo $GIT_COMMIT | cut -c1-12)"
+        if [ -n "$SKILLS" ]; then
+          [ "$${IMAGE_TAG:0:$${#PREFIX}+1}" = "$PREFIX-" ] && [[ "$${IMAGE_TAG:$${#PREFIX}+1}" =~ ^[0-9a-f]{12}$ ]] || exit 5
+        else
+          [ "$IMAGE_TAG" = "$PREFIX" ] || exit 5
+        fi
+      - |
+        if [ -n "$SKILLS" ]; then
+        cat > /tmp/compose-skills.sh <<'FACTORY_COMPOSE_SKILLS'
+        ${indent(8, file("${path.module}/compose-skills.sh"))}
+        FACTORY_COMPOSE_SKILLS
+        fi
       - |
         AUTH=()
         # The source token goes only to an allowed source host (var.agent_source_token_hosts); any other repo is cloned
@@ -160,7 +179,16 @@ phases:
   build:
     on-failure: ABORT
     commands:
-      - docker build --label "org.opencontainers.image.revision=$GIT_COMMIT" --label "org.opencontainers.image.source=$REPO_URL" -t "$ECR_REPO_URI:$IMAGE_TAG" .
+      - |
+        LABELS=(--label "org.opencontainers.image.revision=$GIT_COMMIT" --label "org.opencontainers.image.source=$REPO_URL")
+        if [ -z "$SKILLS" ]; then
+          docker build "$${LABELS[@]}" -t "$ECR_REPO_URI:$IMAGE_TAG" . || exit 1
+        else
+          docker build "$${LABELS[@]}" -t "agent-base:$IMAGE_TAG" . || exit 1
+          bash /tmp/compose-skills.sh /tmp/factory-skills; RC=$?
+          [ "$RC" -eq 0 ] || exit "$RC"
+          docker build "$${LABELS[@]}" --build-arg "BASE=agent-base:$IMAGE_TAG" -t "$ECR_REPO_URI:$IMAGE_TAG" /tmp/factory-skills || exit 1
+        fi
   post_build:
     on-failure: ABORT
     commands:
