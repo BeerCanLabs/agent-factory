@@ -1,4 +1,4 @@
-import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, AgentRolesInfo, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
+import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, AgentRolesInfo, AgentSkills, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
 
 
 const API_BASE = '/api/v1';
@@ -293,6 +293,12 @@ export const factoryApi = {
   // Who uses a skill, and the adoption requests waiting (SK7). A private skill the caller may not see is a 404.
   async listSkillAdopters(id: string): Promise<SkillAdopter[]> {
     return request<SkillAdopter[]>(`/skills/${encodeURIComponent(id)}/adopters`);
+  },
+
+  // SK3, SK5: what one agent runs, has asked for, was refused, and could adopt. Visible to a viewer; private skills the caller
+  // may not see are left out.
+  async getAgentSkills(agentId: string): Promise<AgentSkills> {
+    return request<AgentSkills>(`/agents/${encodeURIComponent(agentId)}/skills`);
   },
 
   // Adoption is a configuration change with its own approval (SK3). An admin decides; an owner may ask and remove.

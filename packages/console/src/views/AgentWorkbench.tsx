@@ -17,6 +17,7 @@ import {
   Users,
   Layers,
   UploadCloud,
+  Puzzle,
 } from 'lucide-react';
 import type { AgentRecord } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
@@ -24,6 +25,7 @@ import { factoryApi } from '../api/client.js';
 import { PolicyEditor } from '../components/PolicyEditor.js';
 import { ModelsView } from '../components/ModelsView.js';
 import { OwnersEditor } from '../components/OwnersEditor.js';
+import { AgentSkillsTab } from './skills/AgentSkillsTab.js';
 
 interface AgentWorkbenchProps {
   agent: AgentRecord;
@@ -39,7 +41,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
   onRefresh,
 }) => {
   const permissions = usePermissions();
-  const [activeTab, setActiveTab] = useState<'runtime' | 'terminal' | 'memory' | 'models' | 'policy' | 'owners' | 'lifecycle'>('runtime');
+  const [activeTab, setActiveTab] = useState<'runtime' | 'terminal' | 'memory' | 'models' | 'skills' | 'policy' | 'owners' | 'lifecycle'>('runtime');
   const [convoPrompt, setConvoPrompt] = useState('');
   const [isSendingConvo, setIsSendingConvo] = useState(false);
   const [logs, setLogs] = useState<string[]>([
@@ -219,6 +221,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
           { id: 'terminal', label: 'Live Mailbox & Terminal', icon: <Terminal className="w-3.5 h-3.5" /> },
           { id: 'memory', label: 'Memory & Persistence', icon: <Database className="w-3.5 h-3.5" /> },
           { id: 'models', label: 'Models', icon: <Layers className="w-3.5 h-3.5" /> },
+          { id: 'skills', label: 'Skills', icon: <Puzzle className="w-3.5 h-3.5" /> },
           { id: 'policy', label: 'Policy', icon: <Shield className="w-3.5 h-3.5" /> },
           { id: 'owners', label: 'Owners', icon: <Users className="w-3.5 h-3.5" /> },
           { id: 'lifecycle', label: 'Lifecycle & Decommission', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
@@ -389,6 +392,9 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
 
       {/* Tab 4: Models (read-only; models are granted in the Policy tab, GAP-062) */}
       {activeTab === 'models' && <ModelsView agent={agent} onOpenPolicy={() => setActiveTab('policy')} />}
+
+      {/* Skills (SK3 to SK6, TSK-161): what the agent runs and may be given; changes are configuration, never a pull request */}
+      {activeTab === 'skills' && <AgentSkillsTab key={agent.id} agent={agent} onRefresh={onRefresh} />}
 
       {/* Tab 5: Policy */}
       {activeTab === 'policy' && <PolicyEditor agent={agent} canEdit={permissions.canSetPolicy} />}
