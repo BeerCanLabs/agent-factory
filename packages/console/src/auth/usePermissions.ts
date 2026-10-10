@@ -15,6 +15,7 @@ export function usePermissions() {
     canDeploy: hasRole('admin'),
     canSetBudget: hasRole('admin'),
     canSetPolicy: hasRole('admin'),
+    canSetOwners: hasRole('admin'),
     canQuarantine: hasRole('admin'),
     canRetire: hasRole('admin'),
     canPurge: hasRole('admin'),
