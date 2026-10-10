@@ -3,7 +3,7 @@ import { timingSafeEqual, randomUUID } from 'node:crypto';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, payloadHash, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
-import { accessAssertionOf, adminEmailsFromEnv, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
+import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
 import { cartridgeRoleProblems, classifySecrets, effectiveAccess, type Surface } from '@beercanlabs/factory-contract';
 import {
   AgentRecord,
@@ -1359,7 +1359,10 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
 
     if (requestedBy) {
-      const adminEmails = adminEmailsFromEnv();
+      const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean);
       const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
       const ingressAuth = authorizeIngress({
         requestedBy,
@@ -1513,7 +1516,10 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
     let caller: AuthenticatedCaller | undefined;
     if (requestedBy) {
-      const adminEmails = adminEmailsFromEnv();
+      const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean);
       const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
       const ingressAuth = authorizeIngress({
         requestedBy,
