@@ -6,7 +6,8 @@ Today it holds:
 
 - `signV4`, `awsCredentialsFromEnv`: AWS SigV4 request signing, used by the Bedrock adapter.
 - `parseModelCatalog`, `parseChatRequest`, `defaultModelAdapters`, `bedrockConverse`, `toConverse`, `fromConverse`, `ModelUpstreamError`: the model catalog (operations data, M3), the OpenAI-compatible request rules (M1) and the provider adapters.
+- `usageFromJson`, `SseMeter`, `Usage`, `Provider`: token counting (E5). The Executive reports each call's usage; the Treasurer prices it (`packages/budget`).
 
-Still in `gatekeeper-egress` until their tasks land: token counting (`meter.ts`, TSK-150) and the model-policy gate (`modelDenial`, TSK-151).
+Still in `gatekeeper-egress` until its task lands: the model-policy gate (`modelDenial`, TSK-151).
 
 The dependency points one way: the egress depends on the Executive; the Executive never imports the egress, the control plane or the console. Prices and the catalog are operations data (M3), not repository data.
