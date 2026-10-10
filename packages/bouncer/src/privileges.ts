@@ -270,10 +270,12 @@ export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
   'skills.adopt.request',
   'skills.adopt.remove',
   'approvals.decide',
+  // E12: a person who holds an agent role may start a run and converse, so a message can reach the agent they hold it on.
+  'agents.converse',
 ]);
 
 /** The roles that are derived from data about one agent or run, never read from a credential or a claim. */
-export type DerivedRole = 'agent-owner' | 'requester';
+export type DerivedRole = 'agent-owner' | 'agent-member' | 'requester';
 
 /**
  * What a derived role holds, on its own agent only (Dale, 2026-10-03). `approvals.decide` is held by an owner only
@@ -294,5 +296,11 @@ export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> 
     'skills.adopt.remove',
     'approvals.decide',
   ],
+  /**
+   * E12 (Dale, 2026-10-10): a person who holds an agent role on an agent (Stephanie: `Family` on Donna) may reach that
+   * agent, and nothing else: start a run and converse. It holds no factory role, so it holds nothing on any other agent,
+   * and nothing here that changes, reads or decides anything.
+   */
+  'agent-member': ['agents.wake', 'agents.converse'],
   requester: ['approvals.decide'],
 };

@@ -196,7 +196,7 @@ export type ExternalIdentity = {
 export type AuthenticatedCaller = {
   actor: string;
   name?: string;
-  role: Role | 'agent-owner';
+  role: Role | 'agent-owner' | 'agent-member';
   roles: readonly Role[];
   agentRoles?: readonly string[];
   isOwner?: boolean;
@@ -279,10 +279,19 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
 
   const principal: Principal = { actor, roles: [...resolvedRoles] };
 
+  // E12: the roles this person holds on this agent, from their link. A person who holds one may reach this agent (and no
+  // other): that is the derived role `agent-member`. `Owner` is never assigned; it comes from ownership below.
+  const linkAgentRoles =
+    link.agentRoles &&
+    Object.prototype.hasOwnProperty.call(link.agentRoles, agentId) &&
+    Array.isArray(link.agentRoles[agentId])
+      ? link.agentRoles[agentId].filter((r) => typeof r === 'string' && r.trim() !== '' && r.toLowerCase() !== 'owner')
+      : [];
+
   const auth = authorize({
     principal,
     privilege,
-    resource: { agentId, owners },
+    resource: { agentId, owners, memberRoles: linkAgentRoles },
   });
 
   if (!auth.allowed) {
@@ -295,26 +304,22 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
   }
 
   const isOwner = owners.some((o) => o.toLowerCase() === actor.toLowerCase());
-  const linkAgentRoles =
-    link.agentRoles &&
-    Object.prototype.hasOwnProperty.call(link.agentRoles, agentId) &&
-    Array.isArray(link.agentRoles[agentId])
-      ? link.agentRoles[agentId].filter((r) => typeof r === 'string' && r.toLowerCase() !== 'owner')
-      : [];
   const effectiveAgentRoles = isOwner
     ? ['Owner', ...linkAgentRoles]
     : linkAgentRoles;
 
 
   // Determine the primary role that actually satisfied the privilege
-  let satisfyingRole: Role | 'agent-owner';
+  let satisfyingRole: Role | 'agent-owner' | 'agent-member';
   if (resolvedRoles.includes('admin')) {
     satisfyingRole = 'admin';
   } else if (isOwner) {
     satisfyingRole = 'agent-owner';
   } else {
     // Find the granted role that holds the required privilege (e.g. ['viewer', 'operator'] -> 'operator')
-    satisfyingRole = resolvedRoles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ?? resolvedRoles[0] ?? 'operator';
+    // A person admitted only by an agent role satisfied the privilege as an agent-member.
+    satisfyingRole =
+      resolvedRoles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ?? (linkAgentRoles.length > 0 ? 'agent-member' : (resolvedRoles[0] ?? 'operator'));
   }
 
   // Report faithfully: link's explicitly granted roles, or admin if derived from email, or empty array if un-roled
