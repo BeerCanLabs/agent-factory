@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AgentSkills } from '../../api/types.js';
-import { actorOf, agentSkillRows, choosableVersions, compareVersions, isOwnerOf, isRollBack, permsFor, rebuildState, rebuildText } from './agent-skills-model.js';
+import { actorOf, agentSkillRows, choosableVersions, compareVersions, defaultVersion, isOwnerOf, isRollBack, permsFor, rebuildState, rebuildText } from './agent-skills-model.js';
 
 const ADMIN = permsFor({ isAdmin: true, isOwner: false });
 const OWNER = permsFor({ isAdmin: false, isOwner: true });
@@ -31,6 +31,16 @@ describe('comparing versions', () => {
     assert.ok(compareVersions('1.0.0', '0.9.9')! > 0);
     assert.equal(compareVersions('2.3.4', '2.3.4'), 0);
     assert.equal(compareVersions('2.3.4+build5', '2.3.4'), 0);
+  });
+  it('orders pre-releases by their identifiers, numbers as numbers: rc.2 before rc.10 (Semantic Versioning 11)', () => {
+    const order = ['1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-alpha.beta', '1.0.0-beta', '1.0.0-beta.2', '1.0.0-beta.11', '1.0.0-rc.1', '1.0.0'];
+    for (let i = 0; i < order.length - 1; i++) {
+      assert.ok(compareVersions(order[i], order[i + 1])! < 0, `${order[i]} < ${order[i + 1]}`);
+      assert.ok(compareVersions(order[i + 1], order[i])! > 0, `${order[i + 1]} > ${order[i]}`);
+    }
+    assert.ok(compareVersions('1.0.0-rc.10', '1.0.0-rc.2')! > 0);
+    assert.ok(compareVersions('1.0.0-rc.2', '1.0.0-rc.10')! < 0);
+    assert.equal(compareVersions('1.0.0-rc.2', '1.0.0-rc.2'), 0);
   });
   it('puts a pre-release before its own release, and says nothing about what is not a version', () => {
     assert.ok(compareVersions('1.0.0-rc.1', '1.0.0')! < 0);
@@ -89,6 +99,36 @@ describe('the lists', () => {
     assert.deepEqual(offers(VIEWER), { adopted: { upgrade: false, rollBack: false, remove: false }, pending: { cancel: false, approve: false, reject: false }, available: { request: false } });
   });
 
+  it('offers no second request for a skill that has one waiting, so one cannot silently replace the other', () => {
+    const waiting = data({
+      adopted: [{ id: 'tavily-search', version: '0.1.0' }],
+      requests: [{ agentId: 'higgins', skillId: 'tavily-search', version: '0.2.0', state: 'requested', requestedBy: 'cloudflare:aiden@example.com' }],
+      available: [avail('tavily-search', '0.3.0')],
+    });
+    const row = agentSkillRows(waiting, ADMIN).adopted[0];
+    assert.equal(row.updateTo, '0.3.0', 'it still says a newer version exists');
+    assert.deepEqual(row.offer, { upgrade: false, rollBack: false, remove: true });
+  });
+
+  it('never offers Cancel on a request for a skill the agent already runs: the control plane would remove the running skill', () => {
+    const waiting = data({
+      adopted: [{ id: 'tavily-search', version: '0.1.0' }],
+      requests: [
+        { agentId: 'higgins', skillId: 'tavily-search', version: '0.2.0', state: 'requested' },
+        { agentId: 'higgins', skillId: 'notes', version: '1.0.0', state: 'requested' },
+      ],
+      available: [avail('tavily-search', '0.2.0'), avail('notes', '1.0.0')],
+    });
+    for (const p of [ADMIN, OWNER]) {
+      const [notes, tavily] = agentSkillRows(waiting, p).pending; // sorted by skill id
+      assert.equal(notes.skillId, 'notes');
+      assert.equal(notes.offer.cancel, true, 'a request for a skill it does not run can be cancelled');
+      assert.equal(tavily.offer.cancel, false, 'an upgrade request cannot');
+    }
+    const [, tavily] = agentSkillRows(waiting, ADMIN).pending;
+    assert.deepEqual([tavily.offer.approve, tavily.offer.reject], [true, true], 'an admin can still reject it, which touches nothing');
+  });
+
   it('sorts each list by skill id and handles an agent with nothing', () => {
     assert.deepEqual(agentSkillRows(data(), ADMIN), { adopted: [], pending: [], available: [], refused: [] });
     const r = agentSkillRows(data({ available: [avail('b', '1.0.0'), avail('a', '1.0.0')] }), ADMIN);
@@ -132,6 +172,17 @@ describe('moving to another version', () => {
     assert.deepEqual(choosableVersions(versions, '0.2.0'), ['0.10.0', '0.1.0']);
     assert.deepEqual(choosableVersions(versions), ['0.10.0', '0.2.0', '0.1.0']);
     assert.deepEqual(choosableVersions([], '1.0.0'), []);
+  });
+  it('leaves out a version the control plane would not adopt, so the order is always well defined', () => {
+    const odd = [{ version: 'latest', status: 'approved' }, { version: '1.0', status: 'approved' }, { version: '1.0.0', status: 'approved' }, { version: '1.2.0', status: 'approved' }, { version: '1.10.0-rc.2', status: 'approved' }, { version: '1.10.0-rc.10', status: 'approved' }];
+    assert.deepEqual(choosableVersions(odd), ['1.10.0-rc.10', '1.10.0-rc.2', '1.2.0', '1.0.0']);
+  });
+  it('starts a dialog on the newest version, but never on a roll back: changing the newest version asks for a choice', () => {
+    assert.equal(defaultVersion(['0.2.0', '0.1.0']), '0.2.0', 'asking for a skill');
+    assert.equal(defaultVersion(['0.3.0', '0.2.0'], '0.1.0'), '0.3.0', 'an upgrade');
+    assert.equal(defaultVersion(['0.2.0', '0.1.0'], '0.3.0'), '', 'on the newest version, every other one is older');
+    assert.equal(defaultVersion([], '0.3.0'), '');
+    assert.equal(defaultVersion([]), '');
   });
   it('calls going to an older version a roll back, and nothing else', () => {
     assert.equal(isRollBack('0.2.0', '0.1.0'), true);

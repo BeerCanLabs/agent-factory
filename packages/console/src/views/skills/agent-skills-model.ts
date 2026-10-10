@@ -6,7 +6,7 @@
  * The control plane enforces every role and rule (A2): this only decides what to *offer*. A button hidden here is still
  * refused there, and a button shown here can still be refused (the skill may have been retired since the list loaded).
  */
-import type { AgentAdoptedSkill, AgentSkillRequest, AgentSkills, AvailableSkill, SkillVisibility } from '../../api/types.js';
+import type { AgentAdoptedSkill, AgentSkillRequest, AgentSkills, AvailableSkill } from '../../api/types.js';
 
 /** The principal name the factory knows a Cloudflare e-mail by. */
 export const actorOf = (email: string | undefined): string | undefined => (email ? `cloudflare:${email.trim().toLowerCase()}` : undefined);
@@ -34,7 +34,20 @@ export function compareVersions(a: string, b: string): number | undefined {
   if (x.pre === y.pre) return 0;
   if (!x.pre) return 1; // a release is newer than its own pre-release
   if (!y.pre) return -1;
-  return x.pre < y.pre ? -1 : 1;
+  // Semantic Versioning 11: compare the dot-separated identifiers in turn. Numbers are compared as numbers (rc.2 before
+  // rc.10) and come before text; when one runs out first, the shorter is older.
+  const pa = x.pre.split('.');
+  const pb = y.pre.split('.');
+  for (let i = 0; i < Math.min(pa.length, pb.length); i++) {
+    if (pa[i] === pb[i]) continue;
+    const an = /^\d+$/.test(pa[i]);
+    const bn = /^\d+$/.test(pb[i]);
+    if (an && bn) return Number(pa[i]) - Number(pb[i]);
+    if (an) return -1;
+    if (bn) return 1;
+    return pa[i] < pb[i] ? -1 : 1;
+  }
+  return pa.length - pb.length;
 }
 
 // ---- What a person may do -------------------------------------------------------------------------------------
@@ -80,18 +93,22 @@ export function agentSkillRows(data: AgentSkills, perms: AgentSkillsPerms): Agen
   for (const a of data.available) latest.set(a.id, a.version);
   const adoptedIds = new Set(data.adopted.map((a) => a.id));
   const pendingIds = new Set(data.requests.map((r) => r.skillId));
+  // A second request for a skill replaces the first without a word, so none is offered while one waits: decide it or cancel it.
 
   const adopted = byId(data.adopted, (a) => a.id).map((a): AdoptedRow => {
     const l = latest.get(a.id);
     const cmp = l ? compareVersions(a.version, l) : undefined;
+    const waiting = pendingIds.has(a.id);
     return {
       ...a,
       ...(l && cmp !== undefined && cmp < 0 ? { updateTo: l } : {}),
       source: sourceOf(a),
-      offer: { upgrade: perms.canManage && !!l && cmp !== undefined && cmp < 0, rollBack: perms.canManage, remove: perms.canManage },
+      offer: { upgrade: perms.canManage && !waiting && !!l && cmp !== undefined && cmp < 0, rollBack: perms.canManage && !waiting, remove: perms.canManage },
     };
   });
-  const pending = byId(data.requests, (r) => r.skillId).map((r): PendingRow => ({ ...r, offer: { cancel: perms.canManage, approve: perms.canDecide, reject: perms.canDecide } }));
+  // The control plane removes the adopted skill when it is asked to cancel a request for a skill the agent already runs, so
+  // Cancel is offered only for a skill that is not adopted. For an upgrade request an admin Rejects it (nothing is touched).
+  const pending = byId(data.requests, (r) => r.skillId).map((r): PendingRow => ({ ...r, offer: { cancel: perms.canManage && !adoptedIds.has(r.skillId), approve: perms.canDecide, reject: perms.canDecide } }));
   const available = byId(data.available, (s) => s.id)
     .filter((s) => !adoptedIds.has(s.id) && !pendingIds.has(s.id))
     .map((s): AvailableRow => ({ ...s, offer: { request: perms.canManage } }));
@@ -135,13 +152,21 @@ export const rebuildText = (r: Rebuild): string | undefined =>
 /** Versions an agent may be moved to: approved and not retired, newest first, the one it runs left out. */
 export function choosableVersions(versions: ReadonlyArray<{ version: string; status: string; retired?: boolean }>, current?: string): string[] {
   return versions
-    .filter((v) => v.status === 'approved' && !v.retired && v.version !== current)
+    // The control plane only adopts a semantic version, so one that is not cannot be chosen, and sorting stays well defined.
+    .filter((v) => v.status === 'approved' && !v.retired && v.version !== current && parse(v.version))
     .map((v) => v.version)
     .sort((a, b) => -(compareVersions(a, b) ?? 0));
 }
 
+/**
+ * The version a dialog preselects. Asking for a skill, or upgrading, starts on the newest. Changing the version of a skill
+ * that already runs the newest would otherwise start on an older one, so a quick confirm would roll the agent back: there
+ * is no default then, and the person must choose.
+ */
+export const defaultVersion = (choices: readonly string[], current?: string): string => {
+  const first = choices[0] ?? '';
+  return current && first && isRollBack(current, first) ? '' : first;
+};
+
 /** Whether moving from `from` to `to` goes back. A version that cannot be compared is not called a roll back. */
 export const isRollBack = (from: string, to: string): boolean => (compareVersions(to, from) ?? 0) < 0;
-
-export const visibilityNote = (s: { visibility?: SkillVisibility; owner?: string }, agentId: string): string | undefined =>
-  s.visibility === 'private' ? (s.owner === agentId ? 'private to this agent' : `private to ${s.owner ?? 'another agent'}`) : undefined;
