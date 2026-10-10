@@ -196,12 +196,15 @@ export type ExternalIdentity = {
 export type AuthenticatedCaller = {
   actor: string;
   name?: string;
-  role: Role | 'agent-owner' | 'agent-member';
+  role: Role | 'agent-owner' | 'agent-member' | 'system';
   roles: readonly Role[];
   agentRoles?: readonly string[];
   isOwner?: boolean;
   provider?: string;
   id?: string;
+  /** E12, GAP-131: set on a scheduled run, with the schedule's name; absent on a person's message. */
+  source?: 'schedule';
+  scheduleName?: string;
 };
 
 export type IngressPrivilege = 'agents.wake' | 'agents.converse';
