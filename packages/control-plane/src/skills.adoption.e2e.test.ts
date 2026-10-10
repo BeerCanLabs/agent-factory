@@ -465,6 +465,24 @@ describe('adoption: request, approve, remove, retire, and private skills (TSK-15
       assert.deepEqual((await call('/api/v1/skills/multi/adopters', 'GET', ADMIN)).body.map((a: { state: string; version: string }) => [a.state, a.version]).sort(), [['approved', '0.1.0'], ['requested', '0.2.0']]);
     });
 
+    it('an upgrade is a request for a newer approved version, decided like any other, and it replaces the version (the console’s Upgrade button)', async () => {
+      // cyd runs multi@0.1.0 and has asked for 0.2.0 (the test above); the console sends exactly these two calls.
+      assert.deepEqual(skillsOf('cyd').filter((s) => s.startsWith('multi@')), ['multi@0.1.0']);
+      assert.equal(adoptionStore(state).get('cyd', 'multi')?.version, '0.2.0');
+      const adopters = (await call('/api/v1/skills/multi/adopters', 'GET', ADMIN)).body as Array<{ agentId: string; version: string; state: string; upgradeAvailable?: boolean }>;
+      assert.equal(adopters.find((a) => a.agentId === 'cyd' && a.state === 'approved')!.upgradeAvailable, true, 'the screen is told an update exists');
+
+      const approved = await call('/api/v1/agents/cyd/skills/multi/adoption/approve', 'POST', ADMIN, { reason: 'upgrade' });
+      assert.equal(approved.status, 200, JSON.stringify(approved.body));
+      assert.deepEqual(skillsOf('cyd').filter((s) => s.startsWith('multi@')), ['multi@0.2.0'], 'one version of a skill, the newer');
+      assert.equal(adoptionStore(state).get('cyd', 'multi'), undefined);
+      const after = (await call('/api/v1/skills/multi/adopters', 'GET', ADMIN)).body as Array<{ agentId: string; version: string; state: string; upgradeAvailable?: boolean }>;
+      assert.deepEqual(after.filter((a) => a.agentId === 'cyd').map((a) => [a.version, a.state, a.upgradeAvailable]), [['0.2.0', 'approved', false]]);
+
+      // And the request step is not refused as "already adopted" when only the version differs, but is when it is the same.
+      assert.equal((await call('/api/v1/agents/cyd/skills', 'POST', ADMIN, { skillId: 'multi', version: '0.2.0' })).body.error, 'already_adopted');
+    });
+
     it('a second request replaces a pending one and says so', async () => {
       await publish(publicManifest('twice', '0.1.0'));
       const first = await ask('bea', 'twice');
