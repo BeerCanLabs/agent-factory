@@ -40,7 +40,7 @@ import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
-import { buildSkillsFor, runDeploy } from './apply.js';
+import { buildSkillsFor, isDeploying, runDeploy } from './apply.js';
 import { handleRunProgress } from './progress-routes.js';
 import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercanlabs/factory-inspector';
 import { handleSchedules } from './schedules.js';
@@ -2195,7 +2195,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 400, { error: 'builtin_agent', message: 'Built-in system agents are deployed with the platform, not through the registry' });
       return;
     }
-    if (agent.state === 'DEPLOYING' || agent.state === 'RETIRED_PENDING_PURGE' || agent.state === 'PURGED') {
+    if (agent.state === 'DEPLOYING' || isDeploying(state, agentId) || agent.state === 'RETIRED_PENDING_PURGE' || agent.state === 'PURGED') {
       json(res, 409, { error: 'invalid_state', message: `Agent is ${agent.state}` });
       return;
     }
@@ -2239,7 +2239,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, `deploy of ${commit}`) });
     json(res, 202, agent);
 
-    void runDeploy(state, { agent, actor: principal.actor, source, skills: built.skills, previousState, keepPause: false });
+    void runDeploy(state, { agent, actor: principal.actor, source, skills: built.skills, previousState, isApply: false });
     return;
   }
 

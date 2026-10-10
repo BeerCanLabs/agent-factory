@@ -64,6 +64,10 @@ describe('applying an agent’s configuration: a skills change rebuilds and rede
   let registered: Registered[];
   let buildMs = 0;
   let refuse: AdmissionRefusedError | undefined;
+  /** Refuse every build from the Nth on (counting from 1 in `builds`); Infinity: never. */
+  let refuseFrom = Infinity;
+  /** Fail registering compute, as a provider can after a good build. */
+  let registerFails = false;
 
   const call = async (path: string, method = 'GET', token?: string, body?: unknown) => {
     const res = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -121,13 +125,14 @@ describe('applying an agent’s configuration: a skills change rebuilds and rede
       async buildImage(agentId, source, skills) {
         builds.push({ agentId, source, skills });
         await sleep(buildMs);
-        if (refuse) throw refuse;
+        if (refuse || builds.length >= refuseFrom) throw refuse ?? new AdmissionRefusedError('build_failed', 'docker build failed');
         return `${ECR}:${imageTagFor(agentId, source.commit, skills ?? [])}`;
       },
       async provisionIdentity() {
         return { identity: 'task-role', executionIdentity: 'exec-role' };
       },
       async registerCompute(agentId, imageUri, _secrets, _identity, _exec, _prefix, launchEnv) {
+        if (registerFails) throw new Error('RegisterTaskDefinition failed');
         registered.push({ agentId, imageUri, launchEnv });
       },
     };
@@ -380,6 +385,115 @@ describe('applying an agent’s configuration: a skills change rebuilds and rede
       assert.equal(plain.status, 409);
       assert.equal(plain.body.error, 'skill_in_use');
       assert.ok(plain.body.agents.includes('switch'), 'the image still has it');
+    });
+  });
+
+  describe('a skills change while a deploy runs, from either entry point (review of #133)', () => {
+    const route = (id: string) => call(`/api/v1/registry/agents/${id}/deploy`, 'POST', ADMIN, {});
+
+    it('a change during a deploy started by the route is applied when it ends, not dropped', async () => {
+      await deployedAgent('finn');
+      assert.equal((await call('/api/v1/agents/finn/skills', 'POST', OWNER, { skillId: 'tavily-search', version: '0.1.0' })).status, 201);
+      builds.length = 0;
+      buildMs = 60;
+      try {
+        assert.equal((await route('finn')).status, 202);
+        await sleep(15);
+        assert.equal(agent('finn').state, 'DEPLOYING', 'the route’s build is under way');
+        const approved = await call('/api/v1/agents/finn/skills/tavily-search/adoption/approve', 'POST', ADMIN, {});
+        assert.equal(approved.status, 200, JSON.stringify(approved.body));
+        await settled('finn', () => builds.length === 2 && deployed('finn').length === 1);
+      } finally {
+        buildMs = 0;
+      }
+      assert.equal(builds[0].skills, undefined, 'the route built what the configuration said when it started');
+      assert.deepEqual(builds[1].skills!.map((s) => s.id), ['tavily-search']);
+      assert.deepEqual(deployed('finn'), ['tavily-search@0.1.0']);
+      assert.equal(agent('finn').state, 'SLEEPING');
+    });
+
+    it('an agent paused for a revoked skill mid-deploy stays paused while its image still has the skill', async () => {
+      await publish(manifest('doomed-skill', '0.1.0')); // only gina uses it, so no other agent is rebuilt by its retirement
+      await deployedAgent('gina');
+      await adopt('gina', 'doomed-skill');
+      await settled('gina', () => deployed('gina').includes('doomed-skill@0.1.0'));
+      builds.length = 0;
+      buildMs = 200; // longer than the retire takes, so its apply is queued while this deploy is still running
+      refuseFrom = 2; // the route’s build (1) goes through; the rebuild without the skill (2) is refused
+      try {
+        assert.equal((await route('gina')).status, 202);
+        await sleep(15);
+        const forced = await call('/api/v1/registry/skills/doomed-skill/retire', 'POST', ADMIN, { force: true });
+        assert.equal(forced.status, 200, JSON.stringify(forced.body));
+        await settled('gina', () => builds.length === 2 && actions('AGENT_CONFIG_APPLY_FAILED', 'gina').length === 1);
+      } finally {
+        buildMs = 0;
+        refuseFrom = Infinity;
+      }
+      assert.deepEqual(deployed('gina'), ['doomed-skill@0.1.0'], 'the image that is running still has the skill');
+      assert.equal(agent('gina').state, 'PAUSED', 'so the agent must not be online');
+      assert.equal(agent('gina').pausedForSkill, 'doomed-skill');
+      assert.equal(actions('AGENT_RESUMED_AFTER_SKILL_CHANGE', 'gina').length, 0);
+    });
+
+    it('a build that is refused does not bring a paused agent back online either', async () => {
+      await publish(manifest('doomed-too', '0.1.0'));
+      await deployedAgent('jack');
+      await adopt('jack', 'doomed-too');
+      await settled('jack', () => deployed('jack').includes('doomed-too@0.1.0'));
+      builds.length = 0;
+      buildMs = 200; // longer than the retire takes, so its apply is queued while this deploy is still running
+      refuseFrom = 1; // every build is refused, the route’s first one included
+      try {
+        assert.equal((await route('jack')).status, 202);
+        await sleep(15);
+        assert.equal((await call('/api/v1/registry/skills/doomed-too/retire', 'POST', ADMIN, { force: true })).status, 200);
+        await settled('jack', () => builds.length === 2);
+      } finally {
+        buildMs = 0;
+        refuseFrom = Infinity;
+      }
+      assert.deepEqual(deployed('jack'), ['doomed-too@0.1.0'], 'the image that is running still has the skill');
+      assert.equal(agent('jack').state, 'PAUSED');
+    });
+
+    it('and once a rebuild without the skill succeeds, it is resumed', async () => {
+      const out = applyConfig(state, 'gina', 'token:admin', 'retry');
+      assert.equal(out.status, 'started', JSON.stringify(out));
+      await settled('gina', () => deployed('gina').length === 0);
+      assert.equal(agent('gina').state, 'SLEEPING');
+      assert.equal(agent('gina').pausedForSkill, undefined);
+      assert.equal(actions('AGENT_RESUMED_AFTER_SKILL_CHANGE', 'gina').length, 1);
+    });
+  });
+
+  describe('a failure after a good build (review of #133)', () => {
+    it('an apply leaves a healthy agent as it was, because its image and compute are still in place', async () => {
+      await publish(manifest('fresh-skill', '0.1.0'));
+      await deployedAgent('hugh');
+      registerFails = true;
+      try {
+        await adopt('hugh', 'fresh-skill');
+        await settled('hugh', () => actions('AGENT_CONFIG_APPLY_FAILED', 'hugh').length === 1);
+      } finally {
+        registerFails = false;
+      }
+      assert.equal(agent('hugh').state, 'SLEEPING', 'not ERROR: an adoption must not take a working agent out of service');
+      assert.deepEqual(deployed('hugh'), []);
+      assert.equal(actions('AGENT_DEPLOY_FAILED', 'hugh').length, 1);
+      assert.equal(actions('AGENT_CONFIG_APPLIED', 'hugh').length, 0, 'and it is not reported as applied');
+    });
+
+    it('the deploy route keeps its behavior: a failure after the build leaves the agent in ERROR', async () => {
+      await deployedAgent('iris');
+      registerFails = true;
+      try {
+        assert.equal((await call('/api/v1/registry/agents/iris/deploy', 'POST', ADMIN, {})).status, 202);
+        await settled('iris', () => agent('iris').state === 'ERROR');
+      } finally {
+        registerFails = false;
+      }
+      assert.equal(agent('iris').state, 'ERROR');
     });
   });
 });
