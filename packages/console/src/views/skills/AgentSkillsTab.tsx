@@ -7,7 +7,7 @@ import { usePermissions } from '../../auth/usePermissions.js';
 import { Dialog } from '../../components/Dialog.js';
 import { AdoptionDialog, type AdoptionAction } from './dialogs.js';
 import { VisibilityBadge } from './StatusBadge.js';
-import { agentSkillRows, choosableVersions, defaultVersion, isOwnerOf, isRollBack, permsFor, rebuildState, rebuildText, type AdoptedRow } from './agent-skills-model.js';
+import { agentSkillRows, choosableVersions, defaultVersion, isOwnerOf, isRollBack, permsFor, rebuildState, rebuildText, type Rebuild } from './agent-skills-model.js';
 import { errorText, when } from './skills-model.js';
 import { btnDanger, btnPrimary, btnQuiet, card, input, label } from './ui.js';
 
@@ -73,18 +73,21 @@ const RequestDialog: React.FC<{ agentId: string; ask: Ask; canDecide: boolean; o
     setBusy(true);
     setError(null);
     try {
-      await factoryApi.requestAdoption(agentId, ask.skillId, version, text);
+      const requested = await factoryApi.requestAdoption(agentId, ask.skillId, version, text);
+      // The control plane says when a new request replaced one that was waiting; the person is told, not left to find out.
+      const replaced = (requested as { replacedRequest?: { version?: string; requestedBy?: string } }).replacedRequest;
+      const replacedNote = replaced ? ` It replaced the request for ${ask.skillId}@${replaced.version ?? '?'}${replaced.requestedBy ? ` that ${replaced.requestedBy} had made` : ''}.` : '';
       if (!canDecide) {
-        onDone(`Asked for ${ask.skillId}@${version} for ${agentId}. An admin decides it; nothing changes until then.`);
+        onDone(`Asked for ${ask.skillId}@${version} for ${agentId}. An admin decides it; nothing changes until then.${replacedNote}`, replaced ? 'warn' : 'ok');
         return;
       }
       try {
         await factoryApi.approveAdoption(agentId, ask.skillId, text);
       } catch (err) {
-        onDone(`Asked for ${ask.skillId}@${version} for ${agentId}, but approving it failed (${errorText(err)}). The request is still waiting under Pending, and nothing has changed on ${agentId}.`, 'warn');
+        onDone(`Asked for ${ask.skillId}@${version} for ${agentId}, but approving it failed (${errorText(err)}). The request is still waiting under Pending, and nothing has changed on ${agentId}.${replacedNote}`, 'warn');
         return;
       }
-      onDone(`${agentId} is being rebuilt with ${ask.skillId}@${version}.`);
+      onDone(`${agentId} is being rebuilt with ${ask.skillId}@${version}.${replacedNote}`, replaced ? 'warn' : 'ok');
     } catch (err) {
       const body = err instanceof ApiError ? err.body : null;
       setError(body?.error === 'already_adopted' ? `${agentId} already runs ${ask.skillId}@${version}.` : body?.error === 'skill_retired' ? 'This skill is retired, so it can no longer be adopted.' : errorText(err));
@@ -252,30 +255,38 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
 
   const perms = permsFor({ isAdmin: canDecideAdoptions, isOwner: isOwnerOf(owners, user.email) });
   const rows = data ? agentSkillRows(data, perms) : null;
-  const rebuild = rebuildState(agent, data?.adopted ?? []);
+  // What the configuration says is unknown until the list loads, so until then only a running deploy can be reported: judging the
+  // image against an empty configuration would call everything it holds "removed".
+  const rebuild: Rebuild = data ? rebuildState(agent, data.adopted) : agent.state === 'DEPLOYING' ? { kind: 'rebuilding' } : { kind: 'none' };
 
   latest.current = { load, onRefresh };
 
-  // While the agent is rebuilt, follow it: the list and the agent's state, every few seconds, then every half minute if it
-  // is still going after ten minutes (never stopping while the banner says rebuilding). It depends only on whether a rebuild
-  // is on, so a parent that re-renders (or passes a new callback) cannot restart or stall it.
-  const rebuilding = rebuild.kind === 'rebuilding';
+  // While a change to the skills is rebuilding, or waiting to be applied, follow it: the list and the agent's state, every few
+  // seconds, then every half minute once it has gone on for ten minutes (never stopping while the banner is up). A refresh made
+  // right after a change can come before the factory starts the deploy, which is why "waiting" is followed too. Each round
+  // starts when the last one has finished, so slow answers cannot pile up, and the effect depends only on whether a change is
+  // pending, so a parent that re-renders (or passes a new callback) cannot restart or stall it.
+  const following = rebuild.kind !== 'none';
   useEffect(() => {
-    if (!rebuilding) {
+    if (!following) {
       startedFollowing.current = null;
       return;
     }
     startedFollowing.current ??= Date.now();
+    let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
-    const tick = () => {
-      void latest.current.load();
-      void latest.current.onRefresh();
+    const tick = async () => {
+      await Promise.allSettled([latest.current.load(), latest.current.onRefresh()]);
+      if (stopped) return;
       const slow = Date.now() - (startedFollowing.current ?? Date.now()) > REBUILD_FOLLOW_MAX_MS;
-      timer = setTimeout(tick, slow ? REBUILD_SLOW_POLL_MS : REBUILD_POLL_MS);
+      timer = setTimeout(() => void tick(), slow ? REBUILD_SLOW_POLL_MS : REBUILD_POLL_MS);
     };
-    timer = setTimeout(tick, REBUILD_POLL_MS);
-    return () => clearTimeout(timer);
-  }, [rebuilding]);
+    timer = setTimeout(() => void tick(), REBUILD_POLL_MS);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [following]);
 
   const done = (message: string, tone: NoticeTone = 'ok') => {
     setAsk(null);
@@ -287,7 +298,17 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
   };
 
   const banner = rebuildText(rebuild);
-  const adoptedAction = (kind: AdoptionAction['kind'], row: AdoptedRow) => setAdoption({ kind, skill: summaryOf(row.id, data), adopter: { agentId: agent.id, version: row.version, state: 'approved' } });
+  // The dialogs say things that depend on the skill (a private skill's removal is not undone by a new version), so they are
+  // opened with the skill's own record, not the agent's list, which leaves out a skill that is retired or not approved.
+  const openAdoption = async (kind: AdoptionAction['kind'], skillId: string, adopter: AdoptionAction['adopter']) => {
+    let skill = summaryOf(skillId, data);
+    try {
+      skill = { ...skill, ...(await factoryApi.getSkill(skillId)) };
+    } catch {
+      // The partial summary still names the skill; the control plane decides what is allowed.
+    }
+    if (mounted.current) setAdoption({ kind, skill, adopter });
+  };
 
   return (
     <div className="space-y-4" data-testid="agent-skills">
@@ -338,13 +359,13 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
                         <ArrowUpCircle className="w-3.5 h-3.5" /> Upgrade
                       </button>
                     )}
-                    {r.offer.rollBack && (
+                    {r.offer.changeVersion && (
                       <button className={btnQuiet} onClick={() => setAsk({ skillId: r.id, name: summaryOf(r.id, data).name, current: r.version })}>
                         <RotateCcw className="w-3.5 h-3.5" /> Change version
                       </button>
                     )}
                     {r.offer.remove && (
-                      <button className={btnQuiet} onClick={() => adoptedAction('remove', r)}>
+                      <button className={btnQuiet} onClick={() => void openAdoption('remove', r.id, { agentId: agent.id, version: r.version, state: 'approved' })}>
                         <Trash2 className="w-3.5 h-3.5" /> Remove
                       </button>
                     )}
@@ -368,12 +389,12 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
                   </div>
                   <div className="flex gap-2">
                     {p.offer.approve && (
-                      <button className={btnPrimary} onClick={() => setAdoption({ kind: 'approve', skill: summaryOf(p.skillId, data), adopter: { agentId: agent.id, version: p.version, state: 'requested', ...(p.requestedBy ? { requestedBy: p.requestedBy } : {}) } })}>
+                      <button className={btnPrimary} onClick={() => void openAdoption('approve', p.skillId, { agentId: agent.id, version: p.version, state: 'requested', ...(p.requestedBy ? { requestedBy: p.requestedBy } : {}) })}>
                         Approve
                       </button>
                     )}
                     {p.offer.reject && (
-                      <button className={btnQuiet} onClick={() => setAdoption({ kind: 'reject', skill: summaryOf(p.skillId, data), adopter: { agentId: agent.id, version: p.version, state: 'requested', ...(p.requestedBy ? { requestedBy: p.requestedBy } : {}) } })}>
+                      <button className={btnQuiet} onClick={() => void openAdoption('reject', p.skillId, { agentId: agent.id, version: p.version, state: 'requested', ...(p.requestedBy ? { requestedBy: p.requestedBy } : {}) })}>
                         Reject
                       </button>
                     )}
@@ -411,8 +432,15 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
             <Section title="Removed private skills" count={rows.refused.length} hint="not adopted again by themselves">
               <ul className="text-[11px] text-slate-500 space-y-1">
                 {rows.refused.map((r) => (
-                  <li key={r.skillId} className="flex items-center gap-2">
-                    <ArrowDownToLine className="w-3 h-3" /> <span className="font-mono">{r.skillId}</span> was removed; a new version is adopted only if it is asked for again and an admin approves.
+                  <li key={r.skillId} className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2">
+                      <ArrowDownToLine className="w-3 h-3" /> <span className="font-mono">{r.skillId}</span> was removed; a new version is adopted only if it is asked for again and an admin approves.
+                    </span>
+                    {r.offer.request && (
+                      <button className={btnQuiet} onClick={() => setAsk({ skillId: r.skillId, name: summaryOf(r.skillId, data).name })}>
+                        <Plus className="w-3.5 h-3.5" /> {perms.canDecide ? 'Adopt again' : 'Ask again'}
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>
