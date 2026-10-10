@@ -22,6 +22,9 @@ export function usePermissions() {
     canApproveModel: hasRole('admin'),
     canManageCredentials: hasRole('admin'),
     canDecideSkills: hasRole('admin'),
+    // SK3, SK6: an adoption adds access, so an admin decides it; retiring a skill reaches every agent that runs it.
+    canDecideAdoptions: hasRole('admin'),
+    canRetireSkills: hasRole('admin'),
     canManageIdentities: hasRole('admin'),
   };
 }
