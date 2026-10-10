@@ -62,10 +62,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'executive',
     title: 'Executive',
     role: 'Model service and uniform inference provider with token and cost metering (M1–M4, E5)',
-    hostedIn: ['packages/executive', 'packages/gatekeeper-egress'],
-    owns: [
-      'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
-    ],
+    hostedIn: ['packages/executive'],
   },
   secretary: {
     name: 'secretary',
@@ -191,7 +188,6 @@ export const SHARED_PACKAGES = ['packages/control-plane', 'packages/gatekeeper-e
 export const SPLIT_FILES: readonly string[] = [
   'packages/control-plane/src/app.ts',
   'packages/control-plane/src/aws/codebuild.ts',
-  'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
 ];
 
 /** Entry points that wire the members together; they belong to no one member. */
