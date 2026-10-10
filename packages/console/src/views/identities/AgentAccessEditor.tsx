@@ -18,6 +18,13 @@ export const AgentAccessEditor: React.FC<{ value: AgentRoleMap; onChange: (next:
   const [loaded, setLoaded] = useState<Record<string, Loaded>>({});
   const [effective, setEffective] = useState<Record<string, ReturnType<typeof describeAccess> | 'loading' | 'error'>>({});
   const asked = useRef<Record<string, string>>({});
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -39,8 +46,8 @@ export const AgentAccessEditor: React.FC<{ value: AgentRoleMap; onChange: (next:
       setLoaded((p) => ({ ...p, [id]: { state: 'loading' } }));
       factoryApi
         .getAgentRoles(id)
-        .then((info) => setLoaded((p) => ({ ...p, [id]: { state: 'ready', info } })))
-        .catch((e: unknown) => setLoaded((p) => ({ ...p, [id]: { state: 'error', message: e instanceof Error ? e.message : String(e) } })));
+        .then((info) => mounted.current && setLoaded((p) => ({ ...p, [id]: { state: 'ready', info } })))
+        .catch((e: unknown) => mounted.current && setLoaded((p) => ({ ...p, [id]: { state: 'error', message: e instanceof Error ? e.message : String(e) } })));
     }
   }, [shown, loaded]);
 
@@ -55,9 +62,10 @@ export const AgentAccessEditor: React.FC<{ value: AgentRoleMap; onChange: (next:
       factoryApi
         .getAgentRoles(id, held)
         .then((info) => {
-          if (asked.current[id] === key && info.effective) setEffective((p) => ({ ...p, [id]: describeAccess(info.effective!) }));
+          if (!mounted.current || asked.current[id] !== key) return;
+          setEffective((p) => ({ ...p, [id]: info.effective ? describeAccess(info.effective) : 'error' }));
         })
-        .catch(() => asked.current[id] === key && setEffective((p) => ({ ...p, [id]: 'error' })));
+        .catch(() => mounted.current && asked.current[id] === key && setEffective((p) => ({ ...p, [id]: 'error' })));
     }
   }, [shown, value]);
 
@@ -69,7 +77,7 @@ export const AgentAccessEditor: React.FC<{ value: AgentRoleMap; onChange: (next:
       <div>
         <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400">Access to agents</label>
         <p className="text-[11px] text-slate-500 mt-0.5">
-          What an agent will do for this person. These are separate from the factory roles above: a role here applies to one agent only, and never lets the person change or manage it.
+          What an agent will do for this person. These are separate from the factory roles above: a role here applies to one agent only, and never lets the person change or manage it. The agent's own cartridge applies them today; the factory will enforce them at its egress next.
         </p>
       </div>
 
@@ -93,6 +101,15 @@ export const AgentAccessEditor: React.FC<{ value: AgentRoleMap; onChange: (next:
                 type="button"
                 disabled={disabled}
                 onClick={() => {
+                  delete asked.current[id];
+                  setEffective((p) => {
+                    const { [id]: _gone, ...rest } = p;
+                    return rest;
+                  });
+                  setLoaded((p) => {
+                    const { [id]: _gone, ...rest } = p;
+                    return rest;
+                  });
                   setPending((p) => p.filter((x) => x !== id));
                   onChange(withoutAgent(value, id));
                 }}
@@ -110,7 +127,23 @@ export const AgentAccessEditor: React.FC<{ value: AgentRoleMap; onChange: (next:
                 Loading the roles {id} declares…
               </p>
             )}
-            {l?.state === 'error' && <p className="text-[11px] text-rose-400">Could not load the roles {id} declares: {l.message}</p>}
+            {l?.state === 'error' && (
+              <p className="text-[11px] text-rose-400">
+                Could not load the roles {id} declares: {l.message}{' '}
+                <button
+                  type="button"
+                  className="underline"
+                  onClick={() =>
+                    setLoaded((p) => {
+                      const { [id]: _gone, ...rest } = p;
+                      return rest;
+                    })
+                  }
+                >
+                  Retry
+                </button>
+              </p>
+            )}
             {l?.state === 'ready' && assignable.length === 0 && stale.length === 0 && (
               <p className="text-[11px] text-amber-400">{id} declares no roles that can be given, so it will not do anything for anyone but its owner.</p>
             )}

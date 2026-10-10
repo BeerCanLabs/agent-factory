@@ -88,6 +88,12 @@ describe('saying what a set of roles may use, from what the factory answered', (
     assert.equal(accessSentence(describeAccess(eff([['gmail', { kind: 'none', why: 'denied' }]], ['Family']))), 'Can use none of its skills. Refused gmail.');
   });
 
+  it('does not say someone holds no role when the only roles they hold are ones the agent no longer declares', () => {
+    const w = describeAccess(eff([['print', { kind: 'none', why: 'unlisted' }]], [], ['Cousin']));
+    assert.equal(w.holdsNothing, false);
+    assert.equal(accessSentence(w), 'Can use none of its skills.');
+  });
+
   it('carries a held role the agent no longer declares, so the screen can flag it', () => {
     const w = describeAccess(eff([['print', { kind: 'all' }]], ['Family'], ['Cousin']));
     assert.deepEqual(w.unknownRoles, ['Cousin']);

@@ -77,7 +77,7 @@ export type AccessWords = { can: string[]; cannot: string[]; notTheirs: string[]
  * refused to them outright (a role of theirs denies it), and what is simply not theirs (no role of theirs lists it).
  */
 export function describeAccess(effective: EffectiveAccess): AccessWords {
-  const words: AccessWords = { can: [], cannot: [], notTheirs: [], unknownRoles: [...effective.unknownRoles], holdsNothing: effective.held.length === 0 };
+  const words: AccessWords = { can: [], cannot: [], notTheirs: [], unknownRoles: [...effective.unknownRoles], holdsNothing: effective.held.length === 0 && effective.unknownRoles.length === 0 };
   for (const s of effective.skills) {
     const l = lineFor(s.skill, s.access);
     (l.side === 'can' ? words.can : l.side === 'cannot' ? words.cannot : words.notTheirs).push(l.text);

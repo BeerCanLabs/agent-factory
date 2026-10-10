@@ -157,12 +157,14 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
     const kept: Record<string, string[]> = current && current.actor === actor && current.agentRoles ? current.agentRoles : {};
     for (const [agentId, list] of Object.entries(map)) {
       if (list.length === 0) continue;
+      const already = Object.prototype.hasOwnProperty.call(kept, agentId) ? kept[agentId] : [];
+      // Nothing new for this agent (every role is already held): an agent since unregistered cannot block the edit.
+      if (list.every((r) => already.includes(r))) continue;
       const agent = state.agents.get(agentId);
       if (!agent) {
         return json(res, 400, { error: 'unknown_agent', agentId, message: `agent '${agentId}' is not registered, so it has no roles to give` }), true;
       }
       const assignable = (agent.roles ?? []).map((r) => r.name).filter((n) => n.toLowerCase() !== 'owner');
-      const already = Object.prototype.hasOwnProperty.call(kept, agentId) ? kept[agentId] : [];
       const refused = list.filter((r) => !assignable.includes(r) && !already.includes(r));
       if (refused.length) {
         return json(res, 400, {
