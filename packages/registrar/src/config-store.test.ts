@@ -10,6 +10,7 @@ import {
   VersionedConfigStore,
   canonicalJson,
   configBackendFromEnv,
+  adoptionProvenance,
   configHash,
   type ConfigContent,
   type ConfigRecord,
@@ -190,5 +191,67 @@ describe('FACTORY_CONFIG_STORE_URI', () => {
     assert.equal(configBackendFromEnv(undefined, '/d').description, 'file:///d');
     assert.equal(configBackendFromEnv('  ', '/d').description, 'file:///d');
     assert.throws(() => configBackendFromEnv('gs://b/p', '/d'), /must be s3:\/\/, file:\/\/ or a path/);
+  });
+});
+
+// TSK-157 (§6.14 SK3): adoption provenance sits beside the version and outside the content hash.
+describe('adoption provenance', () => {
+  const adopt = { id: 'tavily-search', version: '0.1.0' };
+  const prov = { id: 'tavily-search', version: '0.1.0', requestedBy: 'token:ops', requestedAt: '2026-10-10T01:00:00.000Z', approvedBy: 'cloudflare:dale@example.com', approvedAt: '2026-10-10T02:00:00.000Z' };
+
+  // Computed from `configHash` before this change; a record that exists on main must keep hashing to the same bytes.
+  it('does not change the hash of any configuration: pinned vectors', () => {
+    assert.equal(configHash(content()), '77b2d0c39432d64a2a8d6e9428ddf05ab507839cefb8c593ea2949636b0fbc24');
+    assert.equal(configHash(content({ skills: [adopt] })), 'a9f2a5df1ed989014b3e8b2fe6259c744e89228930f2b542374772d7adc2758c');
+    assert.equal(configHash(content({ skills: [adopt], owners: ['cloudflare:dale@example.com'] })), '198333ca69d8940f3310371028db474c9b8da23a4da079eccac267273c353cdb');
+    const withProvenance = { ...content({ skills: [adopt] }), version: 2, updatedAt: 'x', updatedBy: 'y', reason: 'z', skillAdoptions: [prov], hash: 'h' } as ConfigRecord;
+    assert.equal(configHash(withProvenance), configHash(content({ skills: [adopt] })));
+  });
+
+  it('is stored beside the version, survives a reload and gives the same hash with or without it', async () => {
+    const dir = tmp();
+    try {
+      const store = await VersionedConfigStore.open(new FileConfigBackend(dir));
+      await store.put(content(), meta);
+      const v2 = await store.put(content({ skills: [adopt] }), { ...meta, skillAdoptions: [prov] });
+      assert.equal(v2.created, true);
+      assert.deepEqual(v2.record.skillAdoptions, [prov]);
+      assert.equal(v2.record.hash, configHash(content({ skills: [adopt] })));
+      const again = await VersionedConfigStore.open(new FileConfigBackend(dir));
+      assert.deepEqual(again.current('ada')!.skillAdoptions, [prov]);
+      assert.equal(again.history('ada')[0].skillAdoptions, undefined);
+      assert.deepEqual(adoptionProvenance(again, 'ada', 'tavily-search'), prov);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses provenance for an adoption the configuration does not carry', async () => {
+    const dir = tmp();
+    try {
+      const store = await VersionedConfigStore.open(new FileConfigBackend(dir));
+      await assert.rejects(store.put(content(), { ...meta, skillAdoptions: [prov] }), /does not adopt it/);
+      await assert.rejects(store.put(content({ skills: [{ id: 'tavily-search', version: '0.2.0' }] }), { ...meta, skillAdoptions: [prov] }), /does not adopt it/);
+      assert.equal(store.current('ada'), undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('finds the provenance of the version now adopted, through later versions that changed something else', async () => {
+    const dir = tmp();
+    try {
+      const store = await VersionedConfigStore.open(new FileConfigBackend(dir));
+      assert.equal(adoptionProvenance(store, 'ada', 'tavily-search'), undefined);
+      await store.put(content({ skills: [adopt] }), { ...meta, skillAdoptions: [prov] });
+      await store.put(content({ skills: [adopt], policy: { routes: ['models', 'tavily'] } }), meta);
+      assert.deepEqual(adoptionProvenance(store, 'ada', 'tavily-search'), prov);
+      const up = { id: 'tavily-search', version: '0.2.0' };
+      await store.put(content({ skills: [up], policy: { routes: ['models', 'tavily'] } }), meta);
+      assert.equal(adoptionProvenance(store, 'ada', 'tavily-search'), undefined, 'adopted before provenance was recorded for this version');
+      assert.equal(adoptionProvenance(store, 'ada', 'other'), undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
