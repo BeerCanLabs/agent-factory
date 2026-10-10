@@ -117,7 +117,7 @@ describe('agent-member', () => {
   });
 
   it('holds nothing without a role on the agent: no roles, a blank name, or only the reserved Owner', () => {
-    for (const roles of [[], [''], ['   '], ['Owner'], ['owner'], ['OWNER', ' ']]) {
+    for (const roles of [[], [''], ['   '], ['Owner'], ['owner'], ['OWNER', ' '], [' Owner '], [' owner ']]) {
       const held = PRIVILEGES.filter((p) => allowed(stephanie, p, donna(roles)));
       assert.deepEqual(held, [], JSON.stringify(roles));
     }

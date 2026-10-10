@@ -181,8 +181,16 @@ describe('Bouncer authorizeIngress', () => {
     });
 
     it('is refused with no role, an empty list, a blank name or only the reserved Owner (no role of hers is a role)', () => {
-      for (const agentRoles of [undefined, {}, { donna: [] }, { donna: [''] }, { donna: ['  '] }, { donna: ['Owner'] }, { donna: ['owner'] }]) {
+      for (const agentRoles of [undefined, {}, { donna: [] }, { donna: [''] }, { donna: ['  '] }, { donna: ['Owner'] }, { donna: ['owner'] }, { donna: [' Owner '] }, { donna: [' owner '] }]) {
         assert.equal(ask('donna', stephanie(agentRoles as Record<string, string[]> | undefined)).allowed, false, JSON.stringify(agentRoles));
+      }
+    });
+
+    it('trims whitespace on role names and filters out whitespace-padded Owner from effective agent roles', () => {
+      const res = ask('donna', stephanie({ donna: [' Family ', ' Owner '] }));
+      assert.equal(res.allowed, true);
+      if (res.allowed) {
+        assert.deepEqual(res.caller?.agentRoles, ['Family']);
       }
     });
 
