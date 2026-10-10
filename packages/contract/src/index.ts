@@ -49,13 +49,17 @@ export type { ValidationIssue, ValidationResult } from './validate.js';
 export {
   SEMVER,
   SKILL_ID,
+  SKILL_OWNER,
+  SKILL_VISIBILITIES,
+  SKILL_ACTION_METHODS,
+  skillActionSchema,
   skillManifestSchema,
   skillRequiresSchema,
   skillCredentialSchema,
   validateSkillManifest,
   skillDesignIssues,
 } from './skill.js';
-export type { SkillManifest, SkillRequires, SkillCredential, SkillIssue, SkillValidation, SkillDesignOptions } from './skill.js';
+export type { SkillManifest, SkillRequires, SkillCredential, SkillAction, SkillVisibility, SkillIssue, SkillValidation, SkillDesignOptions } from './skill.js';
 
 export {
   SYSTEM_ID,

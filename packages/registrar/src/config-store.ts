@@ -50,11 +50,29 @@ export type ConfigContent = {
   owners?: string[];
 };
 
+/**
+ * SK3: who asked for an approved adoption and who approved it. It sits beside the version and outside the content hash
+ * (so an adopter change never changes the image tag, as `owners` must not either): the hash covers `skills`, which is
+ * what runs, and the history of versions is the audit trail of who adopted what and when.
+ */
+export type SkillAdoptionProvenance = {
+  id: string;
+  version: string;
+  requestedBy: string;
+  requestedAt: string;
+  approvedBy: string;
+  approvedAt: string;
+  /** A private skill's adoption by its owner agent, made in the same change as the approval of its version. */
+  auto?: true;
+};
+
 export type ConfigRecord = ConfigContent & {
   version: number;
   updatedAt: string;
   updatedBy: string;
   reason: string;
+  /** The adoptions this version created or changed; absent when it changed none. Not part of the hash. */
+  skillAdoptions?: SkillAdoptionProvenance[];
   /** sha256 of the canonical JSON of the content (agentId, source, skills, policy), hex. */
   hash: string;
 };
@@ -65,6 +83,8 @@ export type ConfigExport = {
   agents: Array<{ agentId: string; current: number; versions: ConfigRecord[] }>;
 };
 
+export type ConfigMeta = { updatedBy: string; reason: string; skillAdoptions?: SkillAdoptionProvenance[] };
+
 /** The provider-neutral store. Reads are synchronous, from memory; only `put` reaches the backend. */
 export interface ConfigStore {
   readonly description: string;
@@ -73,7 +93,7 @@ export interface ConfigStore {
   history(agentId: string): ConfigRecord[];
   agentIds(): string[];
   /** Creates the next version unless the content is unchanged (then returns the current one, `created: false`). */
-  put(content: ConfigContent, meta: { updatedBy: string; reason: string }): Promise<{ record: ConfigRecord; created: boolean }>;
+  put(content: ConfigContent, meta: ConfigMeta): Promise<{ record: ConfigRecord; created: boolean }>;
   /** Removes every version of the agent's record from the backend (recoverably). Undefined when it had none. */
   remove(agentId: string, by: string, reason: string, now?: Date): Promise<ConfigRecord | undefined>;
   exportAll(): ConfigExport;
@@ -322,7 +342,7 @@ export class VersionedConfigStore implements ConfigStore {
     return [...this.versions.keys()].sort();
   }
 
-  put(content: ConfigContent, meta: { updatedBy: string; reason: string }): Promise<{ record: ConfigRecord; created: boolean }> {
+  put(content: ConfigContent, meta: ConfigMeta): Promise<{ record: ConfigRecord; created: boolean }> {
     // One write at a time, so version numbers are assigned in order.
     const next = this.queue.then(() => this.write(content, meta));
     this.queue = next.catch(() => undefined);
@@ -342,8 +362,14 @@ export class VersionedConfigStore implements ConfigStore {
     return next;
   }
 
-  private async write(content: ConfigContent, meta: { updatedBy: string; reason: string }): Promise<{ record: ConfigRecord; created: boolean }> {
+  private async write(content: ConfigContent, meta: ConfigMeta): Promise<{ record: ConfigRecord; created: boolean }> {
     checkAgentId(content.agentId);
+    for (const a of meta.skillAdoptions ?? []) {
+      // Provenance describes an adoption this version carries; one that is not in `skills` would describe nothing.
+      if (!content.skills.some((k) => k.id === a.id && k.version === a.version)) {
+        throw new Error(`adoption provenance for ${a.id}@${a.version} but the configuration does not adopt it`);
+      }
+    }
     const hash = configHash(content);
     const latest = this.current(content.agentId);
     if (latest && latest.hash === hash) return { record: latest, created: false };
@@ -357,6 +383,7 @@ export class VersionedConfigStore implements ConfigStore {
       updatedAt: new Date().toISOString(),
       updatedBy: meta.updatedBy,
       reason: meta.reason,
+      ...(meta.skillAdoptions?.length ? { skillAdoptions: structuredClone(meta.skillAdoptions) } : {}),
       hash,
     };
     await this.backend.write(record);
@@ -376,4 +403,20 @@ export class VersionedConfigStore implements ConfigStore {
       }),
     };
   }
+}
+
+/**
+ * SK3: the provenance of the agent's current adoption of a skill: the newest version of the record that carries an
+ * adoption of the version now adopted. Undefined when the agent has not adopted the skill, or adopted it before
+ * provenance was recorded.
+ */
+export function adoptionProvenance(store: Pick<ConfigStore, 'current' | 'history'>, agentId: string, skillId: string): SkillAdoptionProvenance | undefined {
+  const adopted = store.current(agentId)?.skills.find((k) => k.id === skillId);
+  if (!adopted) return undefined;
+  const history = store.history(agentId);
+  for (let i = history.length - 1; i >= 0; i--) {
+    const found = history[i].skillAdoptions?.find((a) => a.id === skillId && a.version === adopted.version);
+    if (found) return found;
+  }
+  return undefined;
 }
