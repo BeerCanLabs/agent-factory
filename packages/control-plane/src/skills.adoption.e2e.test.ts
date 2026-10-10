@@ -36,7 +36,7 @@ const memoryBackend = (): ConfigBackend => {
   const records: ConfigRecord[] = [];
   // A slow write, so two changes to one agent genuinely overlap unless the control plane serializes them.
   const write = async (r: ConfigRecord) => {
-    await new Promise((done) => setTimeout(done, 25));
+    await new Promise((done) => setTimeout(done, 40));
     records.push(r);
   };
   return { description: 'memory', loadAll: async () => records, write, remove: async () => {} };
@@ -356,6 +356,7 @@ describe('adoption: request, approve, remove, retire, and private skills (TSK-15
       const forced = await call('/api/v1/registry/skills/discord-progress/retire', 'POST', ADMIN, { force: true, reason: 'replaced' });
       assert.equal(forced.status, 200, JSON.stringify(forced.body));
       assert.deepEqual([forced.body.retired, forced.body.paused, forced.body.removedFrom], [['0.1.0'], ['donna'], ['donna']]);
+      assert.deepEqual(forced.body.pauseFailed, []);
       assert.deepEqual(skillsOf('donna'), ['factory-schedules@0.1.0']);
       assert.equal(state.agents.get('donna')!.state, 'PAUSED');
       assert.equal(actions('SKILL_RETIRED_FORCED').at(-1)!.agentId, 'skill:discord-progress');
@@ -379,6 +380,95 @@ describe('adoption: request, approve, remove, retire, and private skills (TSK-15
       assert.deepEqual(out.body.retired, ['0.1.0', '0.2.0']);
       assert.equal(actions('SKILL_RETIRED').at(-1)!.agentId, 'skill:tavily-search');
       assert.equal((await call('/api/v1/registry/skills/nope/retire', 'POST', ADMIN, {})).status, 404);
+    });
+  });
+
+  describe('changes that overlap (review of #131)', () => {
+    const OWNER_ADA = 'adoption-ada-owner-token';
+    const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+    const pins = (id: string) => ['ada', 'bea', 'cyd', 'dee'].filter((a) => skillsOf(a).some((s) => s.startsWith(`${id}@`)));
+
+    before(async () => {
+      for (const id of ['ada', 'bea', 'cyd', 'dee']) {
+        state.agents.set(id, { id, name: id, role: 'Agent', state: 'SLEEPING', provider: 'local', artifact: '', requires: [], ungated: [], gated: [], triggers: [], dir: `/agents/${id}` } as never);
+        await state.configs!.put({ agentId: id, source: {}, skills: [], policy: null, owners: [`token:${id}-owner`] }, { updatedBy: 'test', reason: 'owners' });
+      }
+      void OWNER_ADA;
+    });
+
+    const ask = (agent: string, skillId: string) => call(`/api/v1/agents/${agent}/skills`, 'POST', ADMIN, { skillId, version: '0.1.0' });
+
+    it('a rejection cannot land while the approval of the same request is being written', async () => {
+      await publish(publicManifest('slow-one', '0.1.0'));
+      assert.equal((await ask('ada', 'slow-one')).status, 201);
+      const approve = call('/api/v1/agents/ada/skills/slow-one/adoption/approve', 'POST', ADMIN, {});
+      await sleep(15);
+      const reject = await call('/api/v1/agents/ada/skills/slow-one/adoption/reject', 'POST', ADMIN, { reason: 'too late' });
+      const approved = await approve;
+      assert.equal(approved.status, 200, JSON.stringify(approved.body));
+      assert.equal(reject.status, 409, 'the request was already decided');
+      assert.equal(reject.body.error, 'no_request');
+      assert.deepEqual(pins('slow-one'), ['ada']);
+      assert.equal(actions('SKILL_ADOPTION_REJECTED').filter((e) => e.agentId === 'ada').length, 0, 'the ledger holds one decision, not two');
+    });
+
+    it('a forced retire leaves no agent pinned to the skill, whether an approval is already writing or starts just after', async () => {
+      // 'racer-c' has no adopter yet, so the retire has no other work: only waiting for the write already under way finds it.
+      for (const [name, delay, ada] of [['racer-a', 15, true], ['racer-b', 0, true], ['racer-c', 15, false]] as const) {
+        await publish(publicManifest(name, '0.1.0'));
+        if (ada) {
+          assert.equal((await ask('ada', name)).status, 201);
+          assert.equal((await call(`/api/v1/agents/ada/skills/${name}/adoption/approve`, 'POST', ADMIN, {})).status, 200);
+        }
+        assert.equal((await ask('bea', name)).status, 201);
+        const approveBea = call(`/api/v1/agents/bea/skills/${name}/adoption/approve`, 'POST', ADMIN, {});
+        await sleep(delay);
+        const retire = await call(`/api/v1/registry/skills/${name}/retire`, 'POST', ADMIN, { force: true });
+        const bea = await approveBea;
+        assert.equal(retire.status, 200, JSON.stringify(retire.body));
+        assert.ok([200, 409].includes(bea.status), `${name}: ${bea.status} ${JSON.stringify(bea.body)}`);
+        if (bea.status === 409) assert.equal(bea.body.error, 'skill_retired');
+        assert.deepEqual(pins(name), [], `${name}: no agent may still run a retired skill`);
+        assert.equal((await call(`/api/v1/skills/${name}`, 'GET', ADMIN)).body.retired, true);
+      }
+    });
+
+    it('once a forced retire is under way no adoption may start, so the adopters it finds are the last', async () => {
+      await publish(publicManifest('racer-d', '0.1.0'));
+      assert.equal((await ask('cyd', 'racer-d')).status, 201);
+      assert.equal((await call('/api/v1/agents/cyd/skills/racer-d/adoption/approve', 'POST', ADMIN, {})).status, 200);
+      assert.equal((await ask('dee', 'racer-d')).status, 201);
+      const retire = call('/api/v1/registry/skills/racer-d/retire', 'POST', ADMIN, { force: true });
+      // The retire pauses its first adopter only after it has marked the skill, and then spends a slow write stripping it.
+      for (let i = 0; i < 500 && state.agents.get('cyd')!.state !== 'PAUSED'; i++) await sleep(2);
+      assert.equal(state.agents.get('cyd')!.state, 'PAUSED', 'the retire has started');
+      const late = await call('/api/v1/agents/dee/skills/racer-d/adoption/approve', 'POST', ADMIN, {});
+      assert.equal(late.status, 409, JSON.stringify(late.body));
+      assert.equal(late.body.error, 'skill_retired');
+      assert.equal((await retire).status, 200);
+      assert.deepEqual(pins('racer-d'), []);
+    });
+
+    it('a second request replaces a pending one and says so', async () => {
+      await publish(publicManifest('twice', '0.1.0'));
+      const first = await ask('bea', 'twice');
+      assert.equal(first.body.replacedRequest, undefined);
+      const second = await ask('bea', 'twice');
+      assert.equal(second.status, 201);
+      assert.deepEqual(second.body.replacedRequest.version, '0.1.0');
+      assert.equal(adoptionStore(state).forAgent('bea').filter((r) => r.skillId === 'twice').length, 1);
+    });
+
+    it('a malformed body is refused, not read as an empty one', async () => {
+      const raw = (path: string, method: string, body: string) =>
+        fetch(`http://127.0.0.1:${port}${path}`, { method, headers: { 'content-type': 'application/json', authorization: `Bearer ${ADMIN}` }, body });
+      for (const [path, method] of [['/api/v1/registry/skills/twice/retire', 'POST'], ['/api/v1/agents/bea/skills/twice', 'DELETE'], ['/api/v1/agents/bea/skills/twice/adoption/approve', 'POST']] as const) {
+        const res = await raw(path, method, '{"force": tru');
+        assert.ok(res.status >= 400 && res.status < 600, `${method} ${path}: ${res.status}`);
+        assert.notEqual(res.status, 200, `${method} ${path}`);
+      }
+      assert.deepEqual((await call('/api/v1/skills/twice', 'GET', ADMIN)).body.retired, false, 'a malformed retire did nothing');
+      assert.equal(adoptionStore(state).get('bea', 'twice')?.state, 'requested', 'a malformed delete or approve did nothing');
     });
   });
 });

@@ -308,10 +308,10 @@ run.
 | `POST /api/v1/agents/:id/skills/:skillId/adoption/approve` `{reason?}` | admin only | approves the request: writes the new configuration version. It never grants access: the agent's policy still names the routes |
 | `POST /api/v1/agents/:id/skills/:skillId/adoption/reject` `{reason?}` | admin only | ends the request, changing nothing |
 | `DELETE /api/v1/agents/:id/skills/:skillId` `{reason?}` | admin or the agent's owner | removes the adoption (a new version without it), or withdraws a pending request |
-| `POST /api/v1/registry/skills/:id/retire` `{reason?, force?}` | admin only | retires every version: no new version, no new adoption. Refused while an agent adopts it (`409 skill_in_use`); `force` pauses those agents and removes the skill from their configuration |
+| `POST /api/v1/registry/skills/:id/retire` `{reason?, force?}` | admin only | retires every version: no new version, no new adoption. Refused while an agent adopts it (`409 skill_in_use`); `force` pauses those agents and removes the skill from their configuration; no adoption can start while it runs, and the response lists `paused`, `pauseFailed` and `removedFrom` |
 
 An owner can ask and remove but never decide: an adoption adds access, so an admin approves it. Asking for a version that
-is unapproved, retired, or already adopted is refused (`skill_not_approved`, `skill_retired`, `already_adopted`).
+is unapproved, retired, or already adopted is refused (`skill_not_approved`, `skill_retired`, `already_adopted`). A new request for a skill that already has a pending one replaces it, and the response says so (`replacedRequest`).
 
 **Private skills adopt themselves.** Approving a version of a private skill adopts it for its owner agent in the same
 step (the response lists `adopted`), with the approving admin recorded as the approver. A later version moves the owner
