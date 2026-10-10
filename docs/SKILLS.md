@@ -310,6 +310,15 @@ run.
 | `DELETE /api/v1/agents/:id/skills/:skillId` `{reason?}` | admin or the agent's owner | removes the adoption (a new version without it), or withdraws a pending request |
 | `POST /api/v1/registry/skills/:id/retire` `{reason?, force?}` | admin only | retires every version: no new version, no new adoption. Refused while an agent adopts it (`409 skill_in_use`); `force` pauses those agents and removes the skill from their configuration; no adoption can start while it runs, and the response lists `paused`, `pauseFailed` and `removedFrom` |
 
+**A forced retire and agents that cannot be paused.** Pausing only flips the agent's state, so it fails in two cases: the
+agent is unknown, or it is a built-in agent, which is exempt from the kill switch. Neither is an error to retry, so a
+forced retire does not stop for it: the skill is still removed from that agent's configuration and the agent is listed in
+`pauseFailed`. Until the redeploy (TSK-159) an agent that was not paused keeps running what it was deployed with.
+
+**One control plane.** Adoption changes for an agent run one at a time, and a forced retire blocks new adoptions of the
+skill, by locks held in the control plane's memory. That matches the rest of its stores, which assume one process; a
+second replica would not see them.
+
 An owner can ask and remove but never decide: an adoption adds access, so an admin approves it. Asking for a version that
 is unapproved, retired, or already adopted is refused (`skill_not_approved`, `skill_retired`, `already_adopted`). A new request for a skill that already has a pending one replaces it, and the response says so (`replacedRequest`).
 

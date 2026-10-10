@@ -449,6 +449,22 @@ describe('adoption: request, approve, remove, retire, and private skills (TSK-15
       assert.deepEqual(pins('racer-d'), []);
     });
 
+    it('a newer request that arrives while an approval is being written is kept, not cleared with it', async () => {
+      await publish(publicManifest('multi', '0.1.0'));
+      await publish(publicManifest('multi', '0.2.0'));
+      assert.equal((await ask('cyd', 'multi')).status, 201);
+      const approve = call('/api/v1/agents/cyd/skills/multi/adoption/approve', 'POST', ADMIN, {});
+      await sleep(15);
+      const newer = await call('/api/v1/agents/cyd/skills', 'POST', ADMIN, { skillId: 'multi', version: '0.2.0' });
+      assert.equal((await approve).status, 200);
+      assert.equal(newer.status, 201, JSON.stringify(newer.body));
+      assert.equal(newer.body.replacedRequest, undefined, 'the first request was decided before the second was made');
+      assert.deepEqual(skillsOf('cyd').filter((s) => s.startsWith('multi@')), ['multi@0.1.0']);
+      const left = adoptionStore(state).get('cyd', 'multi');
+      assert.deepEqual([left?.state, left?.version], ['requested', '0.2.0'], 'the asker’s request is still there');
+      assert.deepEqual((await call('/api/v1/skills/multi/adopters', 'GET', ADMIN)).body.map((a: { state: string; version: string }) => [a.state, a.version]).sort(), [['approved', '0.1.0'], ['requested', '0.2.0']]);
+    });
+
     it('a second request replaces a pending one and says so', async () => {
       await publish(publicManifest('twice', '0.1.0'));
       const first = await ask('bea', 'twice');
