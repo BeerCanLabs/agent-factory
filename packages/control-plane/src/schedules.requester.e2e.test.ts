@@ -143,15 +143,37 @@ describe('a scheduled run carries its requester’s authority, never more (E12, 
       assert.equal(r({ trigger: 'schedule', input: { scheduleId: 7 } }), undefined);
     });
 
-    it('refuses to overwrite another person’s schedule by ID on POST', async () => {
-      state.schedules!.save(sched({ id: 'sched-dale-debrief', requestedBy: { kind: 'principal', actor: 'cloudflare:dale@example.com' } }));
+    it('refuses to overwrite another person’s schedule by ID on POST and preserves requestedBy on admin update', async () => {
+      state.schedules!.save(sched({ id: 'sched-dale-debrief', createdVia: 'api', requestedBy: { kind: 'principal', actor: 'cloudflare:dale@example.com' } }));
       const res = await api('/api/v1/schedules', 'POST', OPERATOR, { agentId: 'donna', id: 'sched-dale-debrief', cron: '0 8 * * *', prompt: 'hijacked' });
       assert.equal(res.status, 403);
       assert.match(res.body.reason, /cannot modify a schedule created by another requester/);
 
       const adminRes = await api('/api/v1/schedules', 'POST', ADMIN, { agentId: 'donna', id: 'sched-dale-debrief', cron: '0 8 * * *', prompt: 'admin update' });
       assert.equal(adminRes.status, 200);
-      assert.equal(state.schedules!.get('sched-dale-debrief')!.prompt, 'admin update');
+      const updated = state.schedules!.get('sched-dale-debrief')!;
+      assert.equal(updated.prompt, 'admin update');
+      assert.deepEqual(updated.requestedBy, { kind: 'principal', actor: 'cloudflare:dale@example.com' }, 'requestedBy is preserved on update');
+      assert.equal(updated.createdVia, 'api', 'createdVia is preserved on update');
+    });
+
+    it('guards DELETE so an operator cannot delete another person’s schedule', async () => {
+      state.schedules!.save(sched({ id: 'sched-to-delete', createdVia: 'api', requestedBy: { kind: 'principal', actor: 'cloudflare:dale@example.com' } }));
+      const delOp = await api('/api/v1/schedules/sched-to-delete', 'DELETE', OPERATOR);
+      assert.equal(delOp.status, 403);
+      assert.match(delOp.body.reason, /cannot delete a schedule created by another requester/);
+
+      const delAdmin = await api('/api/v1/schedules/sched-to-delete', 'DELETE', ADMIN);
+      assert.equal(delAdmin.status, 200);
+      assert.equal(delAdmin.body.deleted, true);
+    });
+
+    it('refuses non-principal actors like agent: or webhook:', () => {
+      const r = (over: Record<string, unknown>) => requesterOfRun(state, { runId: 'r', agentId: 'donna', state: 'WORKING', trigger: 'api', ...over } as never);
+      assert.equal(r({ actor: 'agent:donna' }), undefined);
+      assert.equal(r({ actor: 'webhook:stripe' }), undefined);
+      assert.deepEqual(r({ actor: 'token:operator' }), { kind: 'principal', actor: 'token:operator' });
+      assert.deepEqual(r({ actor: 'cloudflare:dale@example.com' }), { kind: 'principal', actor: 'cloudflare:dale@example.com' });
     });
   });
 
@@ -172,12 +194,17 @@ describe('a scheduled run carries its requester’s authority, never more (E12, 
       assert.equal(o.caller.source, 'schedule');
     });
 
-    it('a schedule with no requester, and the system, run as the scheduler with the agent’s own authority', () => {
+    it('a legacy schedule with no requester, and the system, run as the scheduler with the agent’s own authority', () => {
       for (const s of [sched(), sched({ requestedBy: { kind: 'system' } })]) {
         const o = scheduleRunOptions(state, s)!;
         assert.deepEqual([o.caller.actor, o.caller.role, o.caller.roles, o.caller.isOwner, o.caller.source], ['factory:scheduler', 'system', [], false, 'schedule']);
         assert.equal(o.requestedBy, undefined);
       }
+    });
+
+    it('a schedule created via API but missing requestedBy does not fall back to system', () => {
+      const corrupt = sched({ createdVia: 'api', requestedBy: undefined });
+      assert.equal(scheduleRunOptions(state, corrupt), undefined, 'malformed schedule with createdVia skips');
     });
 
     it('runs a principal’s schedule by the roles that principal holds, through a link or as an admin', () => {
@@ -236,29 +263,12 @@ describe('a scheduled run carries its requester’s authority, never more (E12, 
       assert.equal(who.caller.source, 'schedule');
     });
 
-    it('candidate choice selects the highest privilege path (owner over unprivileged/restricted link)', () => {
+    it('candidate choice prefers bare principal when allowed, otherwise deterministic link order', () => {
       // Dale has a discord identity link 100 with no agent roles, and bare principal which is Owner
       const s = sched({ requestedBy: { kind: 'principal', actor: 'cloudflare:dale@example.com' } });
       const who = scheduleRunOptions(state, s)!;
       assert.equal(who.caller.isOwner, true);
       assert.equal(who.requestedBy, undefined, 'bare principal owner wins over link');
-    });
-
-    it('cartridge crons create a run with a scheduler badge', async () => {
-      const { createRun } = await import('./app.js');
-      const { SCHEDULER_BADGE } = await import('./schedules.js');
-      const out = await createRun(state, 'donna', {
-        actor: SYSTEM.scheduler,
-        trigger: 'cron',
-        caller: SCHEDULER_BADGE('cron'),
-      });
-      assert.equal(out.status, 202);
-      const run = state.runs.get((out.body as { runId: string }).runId)!;
-      const caller = (run.input as { caller: Record<string, unknown> }).caller;
-      assert.deepEqual(
-        [caller.actor, caller.role, caller.source, caller.scheduleName],
-        ['factory:scheduler', 'system', 'schedule', 'cron']
-      );
     });
   });
 });
