@@ -7,6 +7,11 @@ import { connectionSchema, credentialSource, secretName } from './schema.js';
  * A skill's requirements are a request, never a grant: what a skill can do inside an agent is bounded by that agent's
  * policy (E7, E8). A skill holds no secret (S1): it names the credentials it needs, the Keymaster holds them and the
  * gatekeeper-egress injects them. Unknown keys are refused, so a value can never ride along in the manifest.
+ *
+ * A skill is public (any agent may be given it) or private (it names one owner agent and only that agent may adopt it,
+ * SK1, SK3). It declares its actions (SK2): each names the route, method and path it takes and says `hold: true`
+ * (human-in-the-loop, E9) or `hold: false` (autonomous). A declared `hold` is recorded and shown to the approver but is
+ * enforced only once grants carry actions (GAP-070).
  */
 
 /** Semantic Versioning 2.0.0 (https://semver.org), without a leading `v`. */
@@ -33,6 +38,31 @@ export const skillRequiresSchema = z
   })
   .strict();
 
+export const SKILL_VISIBILITIES = ['public', 'private'] as const;
+export type SkillVisibility = (typeof SKILL_VISIBILITIES)[number];
+
+/** An agent id, as a skill's `owner` names it: lowercase letters, digits, `-` and `_`. */
+export const SKILL_OWNER = /^[a-z0-9][a-z0-9_-]*$/;
+
+export const SKILL_ACTION_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] as const;
+
+/**
+ * One thing a skill does at a system (E11): the route it goes through, the method and the path. `hold` has no default
+ * (E9: there is no factory default): the author says true (a person approves the exact request first) or false.
+ */
+export const skillActionSchema = z
+  .object({
+    id: z.string().max(64).regex(SKILL_ID, 'action id must be kebab-case (e.g. post-message)'),
+    route: z.string().min(1),
+    method: z.enum(SKILL_ACTION_METHODS),
+    path: z.string().max(512).regex(/^\/(?!\/)[^\s?#]*$/, 'action path must start with a single "/" and hold no query, fragment or spaces'),
+    hold: z.boolean({
+      required_error: 'action must declare hold: true (a person approves it first) or hold: false (autonomous); there is no default (E9)',
+      invalid_type_error: 'hold must be true or false',
+    }),
+  })
+  .strict();
+
 export const skillManifestSchema = z
   .object({
     id: z.string().max(64).regex(SKILL_ID, 'skill id must be kebab-case (e.g. discord-progress)'),
@@ -44,18 +74,22 @@ export const skillManifestSchema = z
       .string()
       .min(1)
       .refine((e) => !e.startsWith('/') && !e.split(/[\\/]/).includes('..'), 'entry must be a module or a path inside the skill'),
+    visibility: z.enum(SKILL_VISIBILITIES).default('public'),
+    owner: z.string().max(64).regex(SKILL_OWNER, 'owner must be an agent id (lowercase letters, digits, - and _)').optional(),
     requires: skillRequiresSchema.default({}),
+    actions: z.array(skillActionSchema).default([]),
   })
   .strict();
 
 export type SkillManifest = z.infer<typeof skillManifestSchema>;
+export type SkillAction = z.infer<typeof skillActionSchema>;
 export type SkillRequires = z.infer<typeof skillRequiresSchema>;
 export type SkillCredential = z.infer<typeof skillCredentialSchema>;
 
 export type SkillIssue = { path: string; message: string };
 export type SkillValidation = { ok: true; manifest: SkillManifest } | { ok: false; issues: SkillIssue[] };
 
-/** Validates a parsed `skill.yaml` against the schema, filling defaults (an absent `requires` list is empty). */
+/** Validates a parsed `skill.yaml` against the schema, filling defaults (public, and an absent `requires` or `actions` list is empty). */
 export function validateSkillManifest(raw: unknown): SkillValidation {
   const parsed = skillManifestSchema.safeParse(raw);
   if (parsed.success) return { ok: true, manifest: parsed.data };
@@ -83,6 +117,8 @@ export type SkillDesignOptions = {
  * - Models are factory model names, metered through a provider route (E5, M1), never a provider-qualified id or URL.
  * - A credential the gatekeeper-egress already holds for the platform (a model provider key) needs no declaration
  *   and is refused: declaring it would ask for a platform key to be put in reach of the skill (S1, E5).
+ * - A private skill names its owner agent and a public skill names none (SK1).
+ * - An action goes through a route the skill declares, has a unique id, and a path that is a path, never a URL (E1, E11).
  * - Names are declared once each.
  */
 export function skillDesignIssues(manifest: SkillManifest, opts: SkillDesignOptions = {}): SkillIssue[] {
@@ -119,6 +155,24 @@ export function skillDesignIssues(manifest: SkillManifest, opts: SkillDesignOpti
   });
   dupes(manifest.requires.credentials.map((c) => c.name), 'requires.credentials');
   dupes(manifest.requires.connections.map((c) => c.provider), 'requires.connections');
+
+  if (manifest.visibility === 'private' && !manifest.owner) {
+    issues.push({ path: 'owner', message: 'a private skill must name its owner agent (SK1)' });
+  }
+  if (manifest.visibility === 'public' && manifest.owner) {
+    issues.push({ path: 'owner', message: `a public skill has no owner; "${manifest.owner}" is named, so declare visibility: private or drop owner (SK1)` });
+  }
+
+  const routes = new Set(manifest.requires.routes);
+  manifest.actions.forEach((a, i) => {
+    if (!routes.has(a.route)) {
+      issues.push({ path: `actions.${i}.route`, message: `action "${a.id}" uses route "${a.route}", which the skill does not declare in requires.routes (E8, E11)` });
+    }
+    if (a.path.includes('://')) {
+      issues.push({ path: `actions.${i}.path`, message: `action "${a.id}" path is a URL, not a path: actions go through a route, never a host (E1, E11)` });
+    }
+  });
+  dupes(manifest.actions.map((a) => a.id), 'actions');
 
   return issues;
 }
