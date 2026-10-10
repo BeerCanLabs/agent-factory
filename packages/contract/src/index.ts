@@ -2,6 +2,12 @@ export {
   REQUIRED_FILES,
   OPTIONAL_FILES,
   cartridgeSchema,
+  cartridgeRoleIssues,
+  cartridgeRoleProblems,
+  roleSchema,
+  roleSkillRuleSchema,
+  ROLE_NAME,
+  ROUTE_ID,
   secretsManifestSchema,
   surfaceSchema,
   artifactSchema,
@@ -25,6 +31,8 @@ export {
   secretDeclarations,
 } from './schema.js';
 export type {
+  CartridgeRole,
+  RoleIssue,
   SecretsManifest,
   Surface,
   Artifact,

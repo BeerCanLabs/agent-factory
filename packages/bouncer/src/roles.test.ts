@@ -16,6 +16,7 @@ const OWNER_RIGHTS: Privilege[] = [
   'agents.resume',
   'skills.adopt.request',
   'skills.adopt.remove',
+  'agents.roles.read',
   'approvals.decide',
 ];
 

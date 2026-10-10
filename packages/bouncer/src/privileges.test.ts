@@ -76,6 +76,7 @@ const CENSUS: Record<string, Role> = {
   'skills.adopt.remove': 'admin',
   'skills.adopt.decide': 'admin',
   'skills.retire': 'admin',
+  'agents.roles.read': 'admin',
   'spend.budget.set': 'admin',
 };
 // Held by one service role alone; an admin does not hold them. `runs.attest-requester` moved from `operator` to
@@ -107,7 +108,7 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 70);
+    assert.equal(PRIVILEGES.length, 71);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 
