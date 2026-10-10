@@ -10,11 +10,12 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type { Role } from '@beercanlabs/factory-auth';
-import { authorize } from '@beercanlabs/factory-bouncer';
+import { authorize, authorizeIngress, type AuthenticatedCaller } from '@beercanlabs/factory-bouncer';
 import { payloadHash } from '@beercanlabs/factory-ledger';
-import { DEFAULT_TIMEZONE, cronIssue, isTimeZone, type ScheduledAction } from '@beercanlabs/factory-timekeeper';
-import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
-import { isTerminal } from './runs.js';
+import { DEFAULT_TIMEZONE, cronIssue, isTimeZone, type ScheduledAction, type ScheduleRequester } from '@beercanlabs/factory-timekeeper';
+import { json, readJson, requirePrivilege, SYSTEM, type FactoryState } from './app.js';
+import { ownersOf } from './config-store.js';
+import { isTerminal, type Run } from './runs.js';
 
 // ---------------------------------------------------------------------------
 // Callers
@@ -77,6 +78,100 @@ function ledgerSchedule(state: FactoryState, caller: ScheduleCaller, action: 'SC
     actor: caller.actor,
     payloadSha256: scheduleLedgerHash(s),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Whose authority a schedule carries (E12, GAP-131)
+// ---------------------------------------------------------------------------
+
+/**
+ * Who a run is for, as the factory itself recorded it. Never what a request says: a run that creates a schedule is
+ * read from the run's own record, so an agent cannot name its requester. `undefined` means the factory cannot tell,
+ * and the caller refuses (fail closed).
+ */
+export function requesterOfRun(state: FactoryState, run: Run): ScheduleRequester | undefined {
+  // The cartridge's own declared cron is the agent's own work.
+  if (run.trigger === 'cron') return { kind: 'system' };
+  // A scheduled run passes on its schedule's requester, so authority cannot grow through a chain of schedules. A
+  // schedule that is gone, or malformed, leaves no one to pass on.
+  if (run.trigger === 'schedule') {
+    const id = (run.input as { scheduleId?: unknown } | undefined)?.scheduleId;
+    const s = typeof id === 'string' ? state.schedules?.get(id) : undefined;
+    if (!s) return undefined;
+    return s.requestedBy === undefined ? { kind: 'system' } : readRequester(s.requestedBy);
+  }
+  if (run.requestedBy) return { kind: 'identity', provider: run.requestedBy.provider, id: run.requestedBy.id };
+  // Started by an authenticated principal (a console or API wake); a factory actor names no person.
+  return run.actor && !run.actor.startsWith('factory:') ? { kind: 'principal', actor: run.actor } : undefined;
+}
+
+/** A stored requester that is well formed, or `undefined`. Stored data is read as untrusted: a bad one is never `system`. */
+function readRequester(v: unknown): ScheduleRequester | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const r = v as Record<string, unknown>;
+  const text = (x: unknown): x is string => typeof x === 'string' && x.length > 0 && x.length <= 256;
+  if (r.kind === 'system') return { kind: 'system' };
+  if (r.kind === 'principal' && text(r.actor)) return { kind: 'principal', actor: r.actor };
+  if (r.kind === 'identity' && text(r.provider) && text(r.id)) return { kind: 'identity', provider: r.provider, id: r.id };
+  return undefined;
+}
+
+const SCHEDULER_BADGE = (scheduleName: string): AuthenticatedCaller => ({
+  actor: SYSTEM.scheduler,
+  name: 'Scheduler',
+  role: 'system',
+  roles: [],
+  isOwner: false,
+  source: 'schedule',
+  scheduleName,
+});
+
+/**
+ * What to start a schedule's run with: a verified badge carrying the requester's CURRENT authority, never more, by the
+ * rule a person's own message meets (`agents.wake` on that agent). `system` is the agent's own authority. A requester
+ * who no longer holds a role, or whose record is malformed, has the fire skipped and ledgered, and `undefined` is
+ * returned. A schedule saved before this was recorded has no requester and is `system`.
+ */
+export function scheduleRunOptions(
+  state: FactoryState,
+  sched: ScheduledAction,
+): { caller: AuthenticatedCaller; requestedBy?: { provider: string; id: string } } | undefined {
+  const requester = sched.requestedBy === undefined ? ({ kind: 'system' } as const) : readRequester(sched.requestedBy);
+  const skip = (why: string) => {
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: sched.agentId,
+      type: 'action',
+      action: 'SCHEDULE_SKIPPED_UNAUTHORIZED',
+      actor: SYSTEM.scheduler,
+      payloadSha256: scheduleLedgerHash(sched),
+    });
+    console.warn(`[scheduler] Skipping "${sched.name}" (${sched.id}): ${why}`);
+    return undefined;
+  };
+  if (!requester) return skip('its requester is not readable');
+  if (requester.kind === 'system') return { caller: SCHEDULER_BADGE(sched.name) };
+
+  const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+  const owners = ownersOf(state, sched.agentId);
+  // The person's own link where there is one; for a principal, any link of theirs, then their bare principal (an admin
+  // by e-mail needs no link). Whoever is first allowed is the requester.
+  const candidates =
+    requester.kind === 'identity'
+      ? [{ requestedBy: { provider: requester.provider, id: requester.id }, link: state.identityLinks?.resolveLink(requester.provider, requester.id) }]
+      : [
+          ...(state.identityLinks?.list() ?? [])
+            .filter((l) => l.actor.toLowerCase() === requester.actor.toLowerCase())
+            .map((l) => ({ requestedBy: { provider: l.provider, id: l.id }, link: l })),
+          { requestedBy: { provider: 'principal', id: requester.actor }, link: { actor: requester.actor } },
+        ];
+  for (const c of candidates) {
+    const auth = authorizeIngress({ requestedBy: c.requestedBy, agentId: sched.agentId, privilege: 'agents.wake', owners, link: c.link, adminEmails, isIngressCaller: true });
+    if (auth.allowed && auth.caller) {
+      return { caller: { ...auth.caller, source: 'schedule', scheduleName: sched.name }, ...(requester.kind === 'identity' ? { requestedBy: c.requestedBy } : {}) };
+    }
+  }
+  return skip('its requester no longer holds a role on this agent');
 }
 
 const optionalString = (v: unknown): v is string | undefined | null => v === undefined || v === null || typeof v === 'string';
@@ -167,6 +262,18 @@ export async function handleSchedules(state: FactoryState, req: http.IncomingMes
       }
       id = body.id as string;
     }
+    // E12, GAP-131: whose authority this schedule's runs will carry. The factory decides; the request body never can.
+    let requestedBy: ScheduleRequester | undefined;
+    if (caller.kind === 'run') {
+      const run = state.runs.get(caller.runId);
+      requestedBy = run ? requesterOfRun(state, run) : undefined;
+      if (!requestedBy) {
+        json(res, 403, { error: 'forbidden', reason: 'the factory cannot tell whose authority this schedule would carry' });
+        return true;
+      }
+    } else {
+      requestedBy = { kind: 'principal', actor: caller.actor };
+    }
     const channelId = (body.channelId as string | undefined) || (body.channel_id as string | undefined) || undefined;
     const schedule: ScheduledAction = {
       id,
@@ -178,6 +285,8 @@ export async function handleSchedules(state: FactoryState, req: http.IncomingMes
       prompt: body.prompt,
       enabled: body.enabled !== false,
       createdAt: new Date().toISOString(),
+      createdVia: caller.kind === 'run' ? 'agent' : 'api',
+      requestedBy,
     };
     if (!store) {
       json(res, 503, { error: 'schedules_unavailable' });

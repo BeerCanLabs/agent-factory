@@ -7,7 +7,7 @@ export {
   isTimeZone,
   type ZonedTimeParts,
 } from './cron.js';
-export { ScheduleStore, type ScheduledAction } from './schedules.js';
+export { ScheduleStore, type ScheduledAction, type ScheduleOrigin, type ScheduleRequester } from './schedules.js';
 export {
   createTimekeeper,
   type CronAgent,
