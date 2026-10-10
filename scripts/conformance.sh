@@ -7,6 +7,7 @@ log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 if npm run build -w @beercanlabs/factory-contract -w @beercanlabs/factory-auth -w @beercanlabs/factory-ledger \
     -w @beercanlabs/factory-budget \
+    -w @beercanlabs/factory-executive \
     -w @beercanlabs/factory-bouncer \
     -w @beercanlabs/factory-timekeeper \
     -w @beercanlabs/factory-registrar \

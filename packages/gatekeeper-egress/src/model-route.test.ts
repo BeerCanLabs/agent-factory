@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import { createGatekeeperEgress, type ControlClient, type Policy, type RunContext } from './gatekeeper-egress.js';
-import { bedrockConverse, parseModelCatalog, toConverse, type ModelCatalog } from './models.js';
-import { signV4 } from './sigv4.js';
+import { bedrockConverse, parseModelCatalog, signV4, type ModelCatalog } from '@beercanlabs/factory-executive';
 
 const tokens = new RunTokens('models-test-run-token-key-0123456789');
 const AWS = { accessKeyId: 'AKIDGATEKEEPER', secretAccessKey: 'gatekeeper-egress-secret-key', sessionToken: 'gatekeeper-egress-session' };
@@ -329,29 +328,5 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
     const res = await call(port, '/models/v1/models', { token, method: 'GET' });
     assert.equal(res.status, 200);
     assert.deepEqual(res.json().data.map((m: { id: string }) => m.id), ['claude-haiku-4-5']);
-  });
-});
-
-describe('model catalog and translation', () => {
-  it('rejects a malformed catalog', () => {
-    assert.throws(() => parseModelCatalog('[]'));
-    assert.throws(() => parseModelCatalog('{"x":{"provider":"bedrock-converse"}}'), /needs provider and id/);
-    assert.deepEqual(parseModelCatalog(undefined), {});
-  });
-
-  it('merges consecutive same-role turns for Converse', () => {
-    const body = toConverse({
-      messages: [
-        { role: 'user', content: 'a' },
-        { role: 'user', content: 'b' },
-        { role: 'assistant', content: 'c' },
-      ],
-    });
-    assert.deepEqual(body, {
-      messages: [
-        { role: 'user', content: [{ text: 'a' }, { text: 'b' }] },
-        { role: 'assistant', content: [{ text: 'c' }] },
-      ],
-    });
   });
 });

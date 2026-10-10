@@ -62,12 +62,9 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'executive',
     title: 'Executive',
     role: 'Model service and uniform inference provider with token and cost metering (M1–M4, E5)',
-    hostedIn: ['packages/gatekeeper-egress'],
+    hostedIn: ['packages/executive', 'packages/gatekeeper-egress'],
     owns: [
       'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
-      'packages/gatekeeper-egress/src/meter.ts',
-      'packages/gatekeeper-egress/src/models.ts',
-      'packages/gatekeeper-egress/src/sigv4.ts',
     ],
   },
   secretary: {

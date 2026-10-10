@@ -3,7 +3,7 @@ import { RunTokens } from '@beercanlabs/factory-auth';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { createGatekeeperEgress, type ControlClient, type Route } from './gatekeeper-egress.js';
 import type { Price } from '@beercanlabs/factory-budget';
-import { parseModelCatalog, type ModelCatalog } from './models.js';
+import { parseModelCatalog, type ModelCatalog } from '@beercanlabs/factory-executive';
 import { traceConfigFromEnv } from '@beercanlabs/factory-inspector';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 
