@@ -42,8 +42,8 @@ Agent Factory is architected around **11 canonical services ("The Cast of Charac
    - **Contract:** Zero-knowledge credential evaluation, ephemeral leases, token rotation events, and write-only platform secrets onboarding without exposing plaintext credentials to agents.
 
 3. **Executive (Model Service / Inference Provider):**
-   - **Role:** Provides a uniform OpenAI-compatible Chat Completions API (M1), translates calls across model providers (Bedrock, OpenAI, Anthropic, xAI), enforces model policy routing (M2), and counts tokens (E5).
-   - **Contract:** Translates provider formats, normalizes token usage (`input`, `output`, `cacheRead`, `cacheWrite`), and reports usage to the Treasurer for pricing.
+   - **Role:** Provides a uniform OpenAI-compatible Chat Completions API (M1), translates calls to model providers (Bedrock today), decides whether an agent may use a model (M2), and counts tokens (E5).
+   - **Contract:** `checkModel` and `offeredModels` (may this agent use this model?), `complete` (serve one call and return the result, a refusal, or the provider's failure), the model catalog and provider adapters; normalizes token usage (`input`, `output`, `cacheRead`, `cacheWrite`) and reports it to the Treasurer for pricing. Lives in `packages/executive`.
 
 4. **Secretary (Hydration & State Store):**
    - **Role:** Enforces "The Safe" (§6.6); syncs local SQLite databases in `$MEMORY_DIR` with cloud object storage on wake and sleep.
