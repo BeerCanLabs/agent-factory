@@ -13,6 +13,7 @@ import {
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
 import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, finishRun, reconcileRuns, SYSTEM } from './app.js';
+import { scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { FileRunStore, RunTokens } from './runs.js';
 import { callbackPolicyFromEnv } from './callbacks.js';
@@ -349,10 +350,14 @@ if (process.env.FACTORY_CRON !== '0') {
         return;
       }
       const sched = request.schedule;
+      // E12, GAP-131: the run carries its requester's current authority, or does not start.
+      const who = scheduleRunOptions(state, sched);
+      if (!who) return;
       console.log(`[scheduler] Firing dynamic schedule "${sched.name}" (${sched.id}) for agent ${sched.agentId}`);
       void createRun(state, sched.agentId, {
         actor: SYSTEM.scheduler,
         trigger: 'schedule',
+        ...who,
         input: {
           content: sched.prompt,
           message: sched.prompt,
