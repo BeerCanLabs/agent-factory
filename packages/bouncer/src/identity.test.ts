@@ -151,6 +151,77 @@ describe('Bouncer authorizeIngress', () => {
     }
   });
 
+  describe('a person who holds only an agent role (E12, GAP-127)', () => {
+    const stephanie = (agentRoles: Record<string, string[]> | undefined, roles?: readonly ('viewer' | 'operator')[]) => ({
+      actor: 'cloudflare:stephanie@example.com',
+      name: 'Stephanie',
+      ...(roles ? { roles } : {}),
+      ...(agentRoles ? { agentRoles } : {}),
+    });
+    const ask = (agentId: string, link: ReturnType<typeof stephanie>, privilege: 'agents.wake' | 'agents.converse' = 'agents.wake') =>
+      authorizeIngress({ requestedBy: { provider: 'discord', id: 'steph' }, agentId, privilege, owners: ['cloudflare:dale@example.com'], link, isIngressCaller: true });
+
+    it('is admitted to start a run and to converse with the agent she holds the role on, with no factory role', () => {
+      for (const privilege of ['agents.wake', 'agents.converse'] as const) {
+        const res = ask('donna', stephanie({ donna: ['Family'] }), privilege);
+        assert.equal(res.allowed, true, privilege);
+        if (res.allowed) {
+          assert.equal(res.caller?.role, 'agent-member');
+          assert.deepEqual(res.caller?.roles, [], 'she holds no factory role, and the badge says so');
+          assert.deepEqual(res.caller?.agentRoles, ['Family']);
+          assert.equal(res.caller?.isOwner, false);
+        }
+      }
+    });
+
+    it('is refused on an agent she holds no role on, even though she holds one on another', () => {
+      const res = ask('higgins', stephanie({ donna: ['Family'] }));
+      assert.equal(res.allowed, false);
+      if (!res.allowed) assert.match(res.reason, /does not hold agents\.wake on agent 'higgins'/);
+    });
+
+    it('is refused with no role, an empty list, a blank name or only the reserved Owner (no role of hers is a role)', () => {
+      for (const agentRoles of [undefined, {}, { donna: [] }, { donna: [''] }, { donna: ['  '] }, { donna: ['Owner'] }, { donna: ['owner'] }, { donna: [' Owner '] }, { donna: [' owner '] }]) {
+        assert.equal(ask('donna', stephanie(agentRoles as Record<string, string[]> | undefined)).allowed, false, JSON.stringify(agentRoles));
+      }
+    });
+
+    it('trims whitespace on role names and filters out whitespace-padded Owner from effective agent roles', () => {
+      const res = ask('donna', stephanie({ donna: [' Family ', ' Owner '] }));
+      assert.equal(res.allowed, true);
+      if (res.allowed) {
+        assert.deepEqual(res.caller?.agentRoles, ['Family']);
+      }
+    });
+
+    it('is refused when she is not mapped at all: a stranger’s message is not delivered', () => {
+      const res = authorizeIngress({ requestedBy: { provider: 'discord', id: 'a-stranger' }, agentId: 'donna', isIngressCaller: true, link: undefined });
+      assert.equal(res.allowed, false);
+      if (!res.allowed) assert.match(res.reason, /unmapped external identity/);
+    });
+
+    it('does not let a role name collide with prototype keys to admit someone', () => {
+      const link = stephanie(Object.create(null));
+      assert.equal(ask('constructor', link).allowed, false);
+      assert.equal(ask('__proto__', link).allowed, false);
+    });
+
+    it('still reports a factory role first when she also holds one that satisfies the privilege', () => {
+      const res = ask('donna', stephanie({ donna: ['Family'] }, ['operator']));
+      assert.equal(res.allowed, true);
+      if (res.allowed) assert.equal(res.caller?.role, 'operator');
+    });
+
+    it('with only a viewer role and an agent role, is admitted as a member (viewer cannot wake)', () => {
+      const res = ask('donna', stephanie({ donna: ['Family'] }, ['viewer']));
+      assert.equal(res.allowed, true);
+      if (res.allowed) {
+        assert.equal(res.caller?.role, 'agent-member');
+        assert.deepEqual(res.caller?.roles, ['viewer']);
+      }
+    });
+  });
+
   it('rejects un-roled link without explicit roles when not admin or owner (clean slate: zero grandfathering)', () => {
     const res = authorizeIngress({
       requestedBy: { provider: 'discord', id: 'unroled_user' },
