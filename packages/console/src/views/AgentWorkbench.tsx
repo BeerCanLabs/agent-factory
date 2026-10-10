@@ -394,7 +394,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
       {activeTab === 'models' && <ModelsView agent={agent} onOpenPolicy={() => setActiveTab('policy')} />}
 
       {/* Skills (SK3 to SK6, TSK-161): what the agent runs and may be given; changes are configuration, never a pull request */}
-      {activeTab === 'skills' && <AgentSkillsTab agent={agent} onRefresh={onRefresh} />}
+      {activeTab === 'skills' && <AgentSkillsTab key={agent.id} agent={agent} onRefresh={onRefresh} />}
 
       {/* Tab 5: Policy */}
       {activeTab === 'policy' && <PolicyEditor agent={agent} canEdit={permissions.canSetPolicy} />}

@@ -7,7 +7,7 @@ import { usePermissions } from '../../auth/usePermissions.js';
 import { Dialog } from '../../components/Dialog.js';
 import { AdoptionDialog, type AdoptionAction } from './dialogs.js';
 import { VisibilityBadge } from './StatusBadge.js';
-import { agentSkillRows, choosableVersions, isOwnerOf, isRollBack, permsFor, rebuildState, rebuildText, type AdoptedRow } from './agent-skills-model.js';
+import { agentSkillRows, choosableVersions, defaultVersion, isOwnerOf, isRollBack, permsFor, rebuildState, rebuildText, type AdoptedRow } from './agent-skills-model.js';
 import { errorText, when } from './skills-model.js';
 import { btnDanger, btnPrimary, btnQuiet, card, input, label } from './ui.js';
 
@@ -21,6 +21,7 @@ import { btnDanger, btnPrimary, btnQuiet, card, input, label } from './ui.js';
 
 const REBUILD_POLL_MS = 5_000;
 const REBUILD_FOLLOW_MAX_MS = 10 * 60_000;
+const REBUILD_SLOW_POLL_MS = 30_000;
 
 // A summary good enough for the shared adoption dialog, from what the agent's own list says about the skill.
 const summaryOf = (id: string, data: AgentSkills | null): SkillSummary => {
@@ -40,7 +41,7 @@ const summaryOf = (id: string, data: AgentSkills | null): SkillSummary => {
 type Ask = { skillId: string; name: string; current?: string };
 
 /** Asks for a skill, or moves to another approved version of it (a newer one is an upgrade, an older one a roll back). */
-const RequestDialog: React.FC<{ agentId: string; ask: Ask; canDecide: boolean; onClose: () => void; onDone: (m: string) => void }> = ({ agentId, ask, canDecide, onClose, onDone }) => {
+const RequestDialog: React.FC<{ agentId: string; ask: Ask; canDecide: boolean; onClose: () => void; onDone: (m: string, tone?: NoticeTone) => void }> = ({ agentId, ask, canDecide, onClose, onDone }) => {
   const [versions, setVersions] = useState<string[] | null>(null);
   const [version, setVersion] = useState('');
   const [reason, setReason] = useState('');
@@ -55,7 +56,7 @@ const RequestDialog: React.FC<{ agentId: string; ask: Ask; canDecide: boolean; o
         if (!live) return;
         const v = choosableVersions(s.versions, ask.current);
         setVersions(v);
-        setVersion(v[0] ?? '');
+        setVersion(defaultVersion(v, ask.current));
       })
       .catch((e: unknown) => live && (setVersions([]), setError(errorText(e))));
     return () => {
@@ -64,7 +65,8 @@ const RequestDialog: React.FC<{ agentId: string; ask: Ask; canDecide: boolean; o
   }, [ask.skillId, ask.current]);
 
   const back = !!ask.current && !!version && isRollBack(ask.current, version);
-  const verb = !ask.current ? 'Adopt' : back ? 'Roll back' : 'Upgrade';
+  // Until a version is chosen the dialog does not say upgrade or roll back: it does not know which it is.
+  const verb = !ask.current ? 'Adopt' : !version ? 'Change' : back ? 'Roll back' : 'Upgrade';
   const text = reason.trim() || undefined;
 
   const submit = async () => {
@@ -79,7 +81,7 @@ const RequestDialog: React.FC<{ agentId: string; ask: Ask; canDecide: boolean; o
       try {
         await factoryApi.approveAdoption(agentId, ask.skillId, text);
       } catch (err) {
-        onDone(`Asked for ${ask.skillId}@${version}, but approving it failed (${errorText(err)}). The request is waiting in the list.`);
+        onDone(`Asked for ${ask.skillId}@${version} for ${agentId}, but approving it failed (${errorText(err)}). The request is still waiting under Pending, and nothing has changed on ${agentId}.`, 'warn');
         return;
       }
       onDone(`${agentId} is being rebuilt with ${ask.skillId}@${version}.`);
@@ -93,7 +95,7 @@ const RequestDialog: React.FC<{ agentId: string; ask: Ask; canDecide: boolean; o
 
   return (
     <Dialog
-      title={`${verb} ${ask.name} on ${agentId}`}
+      title={verb === 'Change' ? `Change the version of ${ask.name} on ${agentId}` : `${verb} ${ask.name} on ${agentId}`}
       onClose={onClose}
       busy={busy}
       footer={
@@ -118,6 +120,7 @@ const RequestDialog: React.FC<{ agentId: string; ask: Ask; canDecide: boolean; o
         <label className="block space-y-1">
           <span className={label}>Version</span>
           <select className={input} value={version} onChange={(e) => setVersion(e.target.value)} disabled={busy}>
+            {!version && <option value="">Choose a version</option>}
             {versions.map((v) => (
               <option key={v} value={v}>
                 {v}
@@ -184,6 +187,8 @@ const CancelDialog: React.FC<{ agentId: string; skillId: string; version: string
   );
 };
 
+type NoticeTone = 'ok' | 'warn';
+
 const Section: React.FC<{ title: string; count: number; hint?: string; children: React.ReactNode }> = ({ title, count, hint, children }) => (
   <section className={`${card} p-4 space-y-3`}>
     <div className="flex items-baseline justify-between gap-3">
@@ -201,27 +206,38 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
   const { canDecideAdoptions } = usePermissions();
   const [data, setData] = useState<AgentSkills | null>(null);
   const [owners, setOwners] = useState<string[]>([]);
+  const latest = useRef({ load: async () => {}, onRefresh: (() => {}) as () => void | Promise<void> });
+  const loadSeq = useRef(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ text: string; tone: NoticeTone } | null>(null);
+  const [ownersError, setOwnersError] = useState<string | null>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
   const [adoption, setAdoption] = useState<AdoptionAction | null>(null);
   const [cancel, setCancel] = useState<{ skillId: string; version: string } | null>(null);
   const mounted = useRef(true);
   const startedFollowing = useRef<number | null>(null);
 
+  // Only the newest load may write: an older one that answers late (a slow response, or another click on Refresh) is dropped.
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    const current = () => mounted.current && seq === loadSeq.current;
     setRefreshing(true);
     try {
-      const [skills, o] = await Promise.all([factoryApi.getAgentSkills(agent.id), factoryApi.getOwners(agent.id).catch(() => [] as string[])]);
-      if (!mounted.current) return;
+      const [skills, o] = await Promise.all([
+        factoryApi.getAgentSkills(agent.id),
+        // An owners failure is shown, not turned into "no owners": that would hide every action from an owner without a word.
+        factoryApi.getOwners(agent.id).then((list) => ({ list, error: null as string | null }), (e: unknown) => ({ list: [] as string[], error: errorText(e) })),
+      ]);
+      if (!current()) return;
       setData(skills);
-      setOwners(o);
+      setOwners(o.list);
+      setOwnersError(o.error);
       setLoadError(null);
     } catch (err) {
-      if (mounted.current) setLoadError(errorText(err));
+      if (current()) setLoadError(errorText(err));
     } finally {
-      if (mounted.current) setRefreshing(false);
+      if (current()) setRefreshing(false);
     }
   }, [agent.id]);
 
@@ -238,26 +254,34 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
   const rows = data ? agentSkillRows(data, perms) : null;
   const rebuild = rebuildState(agent, data?.adopted ?? []);
 
-  // While the agent is rebuilt, follow it: the list and the agent's state, every few seconds, until it settles or ten minutes pass.
+  latest.current = { load, onRefresh };
+
+  // While the agent is rebuilt, follow it: the list and the agent's state, every few seconds, then every half minute if it
+  // is still going after ten minutes (never stopping while the banner says rebuilding). It depends only on whether a rebuild
+  // is on, so a parent that re-renders (or passes a new callback) cannot restart or stall it.
+  const rebuilding = rebuild.kind === 'rebuilding';
   useEffect(() => {
-    if (rebuild.kind !== 'rebuilding') {
+    if (!rebuilding) {
       startedFollowing.current = null;
       return;
     }
     startedFollowing.current ??= Date.now();
-    const t = setInterval(() => {
-      if (Date.now() - (startedFollowing.current ?? Date.now()) > REBUILD_FOLLOW_MAX_MS) return clearInterval(t);
-      void load();
-      void onRefresh();
-    }, REBUILD_POLL_MS);
-    return () => clearInterval(t);
-  }, [rebuild.kind, load, onRefresh]);
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      void latest.current.load();
+      void latest.current.onRefresh();
+      const slow = Date.now() - (startedFollowing.current ?? Date.now()) > REBUILD_FOLLOW_MAX_MS;
+      timer = setTimeout(tick, slow ? REBUILD_SLOW_POLL_MS : REBUILD_POLL_MS);
+    };
+    timer = setTimeout(tick, REBUILD_POLL_MS);
+    return () => clearTimeout(timer);
+  }, [rebuilding]);
 
-  const done = (message: string) => {
+  const done = (message: string, tone: NoticeTone = 'ok') => {
     setAsk(null);
     setAdoption(null);
     setCancel(null);
-    setNotice(message);
+    setNotice({ text: message, tone });
     void load();
     void onRefresh();
   };
@@ -283,8 +307,8 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
         </div>
       )}
       {notice && (
-        <div className="text-xs rounded-lg px-3 py-2 border bg-emerald-50 text-emerald-900 border-emerald-300 dark:bg-emerald-950/30 dark:text-emerald-200 dark:border-emerald-800 flex justify-between gap-3" role="status">
-          <span>{notice}</span>
+        <div className={`text-xs rounded-lg px-3 py-2 border flex justify-between gap-3 ${notice.tone === 'warn' ? 'bg-amber-50 text-amber-900 border-amber-300 dark:bg-amber-950/30 dark:text-amber-200 dark:border-amber-800' : 'bg-emerald-50 text-emerald-900 border-emerald-300 dark:bg-emerald-950/30 dark:text-emerald-200 dark:border-emerald-800'}`} role="status">
+          <span>{notice.text}</span>
           <button onClick={() => setNotice(null)} className="underline shrink-0">
             Dismiss
           </button>
@@ -397,11 +421,16 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
         </>
       )}
 
-      {!perms.canManage && rows && <p className="text-[11px] text-slate-500">Only {agent.name}’s owners and admins can change its skills.</p>}
+      {ownersError && !canDecideAdoptions && (
+        <p className="text-[11px] text-amber-700 dark:text-amber-400">
+          Could not read {agent.name}’s owners ({ownersError}), so the buttons that change its skills are hidden. Refresh to try again.
+        </p>
+      )}
+      {!perms.canManage && !ownersError && rows && <p className="text-[11px] text-slate-500">Only {agent.name}’s owners and admins can change its skills.</p>}
 
       {ask && <RequestDialog agentId={agent.id} ask={ask} canDecide={perms.canDecide} onClose={() => setAsk(null)} onDone={done} />}
-      {adoption && <AdoptionDialog action={adoption} onClose={() => setAdoption(null)} onDone={done} />}
-      {cancel && <CancelDialog agentId={agent.id} skillId={cancel.skillId} version={cancel.version} onClose={() => setCancel(null)} onDone={done} />}
+      {adoption && <AdoptionDialog action={adoption} onClose={() => setAdoption(null)} onDone={(m) => done(m)} />}
+      {cancel && <CancelDialog agentId={agent.id} skillId={cancel.skillId} version={cancel.version} onClose={() => setCancel(null)} onDone={(m) => done(m)} />}
     </div>
   );
 };
