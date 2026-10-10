@@ -40,6 +40,7 @@ import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
+import { buildSkillsFor, isDeploying, runDeploy } from './apply.js';
 import { handleRunProgress } from './progress-routes.js';
 import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercanlabs/factory-inspector';
 import { handleSchedules } from './schedules.js';
@@ -185,7 +186,7 @@ const MAX_BODY = 256 * 1024;
 type Outcome<T> = { status: number; body: T | { error: string; [k: string]: unknown } };
 
 /** The agent registry's records on disk (`registryDir`); with none configured nothing is written. */
-function registryOf(state: FactoryState): AgentRegistry {
+export function registryOf(state: FactoryState): AgentRegistry {
   return new AgentRegistry(state.registryDir, (message, err) => console.warn(`[control-plane] ${message}`, err));
 }
 
@@ -2194,7 +2195,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 400, { error: 'builtin_agent', message: 'Built-in system agents are deployed with the platform, not through the registry' });
       return;
     }
-    if (agent.state === 'DEPLOYING' || agent.state === 'RETIRED_PENDING_PURGE' || agent.state === 'PURGED') {
+    if (agent.state === 'DEPLOYING' || isDeploying(state, agentId) || agent.state === 'RETIRED_PENDING_PURGE' || agent.state === 'PURGED') {
       json(res, 409, { error: 'invalid_state', message: `Agent is ${agent.state}` });
       return;
     }
@@ -2221,6 +2222,13 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
 
+    // SK4: the image is the agent's source plus the skills its configuration adopts, each at its approved pin.
+    const built = buildSkillsFor(state, agentId);
+    if (!built.ok) {
+      json(res, 409, { error: built.error, message: built.message });
+      return;
+    }
+
     const source: SourceRef = { repo, commit };
     const previousState = agent.state;
     agent.repo = repo;
@@ -2231,73 +2239,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, `deploy of ${commit}`) });
     json(res, 202, agent);
 
-    void (async () => {
-      const dp = state.deployProvider!;
-      console.log(`[control-plane] Admission build for ${agentId} at ${commit}...`);
-      const outcome = await admit(source, {
-        build: (src) => dp.buildImage(agentId, src),
-        isRefusal: (err): err is AdmissionRefusedError => err instanceof AdmissionRefusedError,
-        redact: (message) => redactSecrets(message, state.secretValues ?? []),
-      });
-      if (outcome.status === 'refused') {
-        console.error(`[control-plane] Admission refused ${agentId}@${commit}: ${outcome.reason}: ${outcome.message}`);
-        agent.admission = admissionOf(outcome);
-        // A refused new version leaves the running version in place.
-        agent.state = stateAfterRefusal(agent, previousState);
-        registryOf(state).save(agent);
-        state.ledger.append({
-          timestamp: new Date().toISOString(),
-          agentId,
-          type: 'action',
-          action: `AGENT_ADMISSION_REFUSED:${outcome.reason}`,
-          actor: principal.actor,
-          commit,
-        });
-        return;
-      }
-      const imageUri = outcome.imageUri;
-      try {
-        agent.admission = admissionOf(outcome);
-        state.ledger.append({
-          timestamp: new Date().toISOString(),
-          agentId,
-          type: 'action',
-          action: 'AGENT_ADMITTED',
-          actor: principal.actor,
-          commit,
-        });
-        console.log(`[control-plane] Provisioning identity for ${agentId}...`);
-        const { identity, executionIdentity } = await dp.provisionIdentity(agentId, agent.requires);
-        console.log(`[control-plane] Registering compute for ${agentId} with ${imageUri}...`);
-        await dp.registerCompute(agentId, imageUri, agent.requires, identity, executionIdentity, agent.memoryPrefix ?? agentId);
-
-        agent.artifact = imageUri;
-        agent.deployedCommit = commit;
-        agent.provider = 'cloud';
-        agent.state = 'SLEEPING'; // Officially online
-        registryOf(state).save(agent);
-        state.ledger.append({
-          timestamp: new Date().toISOString(),
-          agentId,
-          type: 'action',
-          action: 'AGENT_DEPLOYED',
-          actor: principal.actor,
-          commit,
-        });
-      } catch (err) {
-        console.error(`[control-plane] Deploy failed for ${agentId}:`, err);
-        agent.state = 'ERROR';
-        registryOf(state).save(agent);
-        state.ledger.append({
-          timestamp: new Date().toISOString(),
-          agentId,
-          type: 'action',
-          action: 'AGENT_DEPLOY_FAILED',
-          actor: principal.actor,
-          commit,
-        });
-      }
-    })();
+    void runDeploy(state, { agent, actor: principal.actor, source, skills: built.skills, previousState, isApply: false });
     return;
   }
 

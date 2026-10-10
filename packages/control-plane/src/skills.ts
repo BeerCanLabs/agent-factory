@@ -38,7 +38,8 @@ import { payloadHash } from '@beercanlabs/factory-ledger';
 import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, type SkillManifest } from '@beercanlabs/factory-contract';
 import { authorize } from '@beercanlabs/factory-bouncer';
 import type { Principal } from '@beercanlabs/factory-auth';
-import { applyKillSwitch, json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import { applyKillSwitch, json, readJson, registryOf, requirePrivilege, type FactoryState } from './app.js';
+import { triggerApply } from './apply.js';
 import { configOf, ledgerVersion, ownersOf } from './config-store.js';
 import {
   AdoptionStore,
@@ -314,8 +315,7 @@ async function decide(
   }
   const paused: string[] = [];
   for (const agentId of users) {
-    const out = await applyKillSwitch(state, agentId, 'PAUSE', principal.actor);
-    if (out.status === 200) paused.push(agentId);
+    if (await pauseForSkill(state, agentId, id, principal.actor)) paused.push(agentId);
   }
   const now = new Date().toISOString();
   const next: SkillVersionRecord = { ...rec, status, decidedBy: principal.actor, decidedAt: now };
@@ -339,9 +339,15 @@ async function decide(
     commit: rec.commit,
     ...(next.reason ? { payloadSha256: payloadHash(next.reason) } : {}),
   });
+  // SK6: a forced revocation takes the skill out of the agents that ran it and redeploys them without it, which resumes them.
+  const removedFrom: string[] = [];
+  for (const agentId of users) {
+    if (await stripSkill(state, agentId, id, principal.actor, `skill ${id}@${version} revoked`)) removedFrom.push(agentId);
+    triggerApply(state, agentId, principal.actor, `skill ${id}@${version} revoked`);
+  }
   // SK3: approving a version of a private skill adopts it for its owner agent in the same change (unless revoked).
   const auto = decision === 'approve' ? await autoAdoptPrivate(state, next, principal) : undefined;
-  json(res, 200, { ...(users.length ? { ...next, paused } : next), ...(auto ? { adopted: auto.adopted, ...(auto.failed ? { adoptionFailed: auto.failed } : {}) } : {}) });
+  json(res, 200, { ...(users.length ? { ...next, paused, removedFrom } : next), ...(auto ? { adopted: auto.adopted, ...(auto.failed ? { adoptionFailed: auto.failed } : {}) } : {}) });
 }
 
 /**
@@ -490,16 +496,26 @@ export function setSkillUsage(state: FactoryState, fn: (id: string, version: str
   usage.set(state, fn);
 }
 
-/** SK3: an agent uses a skill version when its current configuration's `skills` list pins that version. */
+/**
+ * SK1, SK3, SK4: the agents that run a skill: those whose configuration pins it (what should run) and those whose
+ * deployed image contains it (what does run), at `version` or at any version. A skill is in use until both are clear,
+ * so removing it from a configuration does not free it until the agent has been redeployed without it.
+ */
+export function skillRunners(state: FactoryState, id: string, version?: string): string[] {
+  const out = new Set<string>();
+  const store = state.configs;
+  for (const agentId of store?.agentIds() ?? []) {
+    if (store?.current(agentId)?.skills.some((s) => s.id === id && (!version || s.version === version))) out.add(agentId);
+  }
+  for (const [agentId, agent] of state.agents) {
+    if (agent.deployedSkills?.some((s) => s.id === id && (!version || s.version === version))) out.add(agentId);
+  }
+  return [...out].sort();
+}
+
+/** The default usage source: `skillRunners`. */
 export function configStoreSkillUsage(state: FactoryState): (id: string, version: string) => string[] {
-  return (id, version) => {
-    const store = state.configs;
-    if (!store) return [];
-    return store
-      .agentIds()
-      .filter((agentId) => store.current(agentId)?.skills.some((s) => s.id === id && s.version === version))
-      .sort();
-  };
+  return (id, version) => skillRunners(state, id, version);
 }
 
 function skillUsers(state: FactoryState, id: string, version: string): string[] {
@@ -589,6 +605,35 @@ function adoptCheck(state: FactoryState, agentId: string, id: string, version: s
 const REFUSAL_STATUS = { not_found: 404, skill_private: 403, skill_retired: 409, skill_not_approved: 409 } as const;
 
 /**
+ * SK6: pauses an agent because it runs a skill that is being revoked or retired, and remembers why, so that redeploying
+ * it without the skill resumes it. An agent that was already paused (or isolated) by someone is left as it was, and is
+ * not resumed by a skill change. Returns whether the agent is now paused.
+ */
+async function pauseForSkill(state: FactoryState, agentId: string, skillId: string, actor: string): Promise<boolean> {
+  const agent = state.agents.get(agentId);
+  const alreadyStopped = agent?.state === 'PAUSED' || agent?.state === 'ISOLATED';
+  const out = await applyKillSwitch(state, agentId, 'PAUSE', actor);
+  if (out.status !== 200) return false;
+  if (agent && !alreadyStopped) {
+    agent.pausedForSkill = skillId;
+    registryOf(state).save(agent);
+  }
+  return true;
+}
+
+/** Removes a skill from an agent's configuration (a new version, ledgered). True when the agent no longer adopts it. */
+async function stripSkill(state: FactoryState, agentId: string, skillId: string, actor: string, reason: string): Promise<boolean> {
+  return withAgentLock(state, agentId, async () => {
+    const skills = currentSkills(state, agentId);
+    const adopted = skills.find((k) => k.id === skillId);
+    if (!adopted) return true;
+    const written = await writeSkills(state, agentId, skills.filter((k) => k.id !== skillId), { actor, reason });
+    if (written.ok) ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REMOVED', actor, skillId, adopted.version, reason);
+    return written.ok;
+  });
+}
+
+/**
  * SK3: a private skill's approved version is adopted for its owner agent in the same change, unless the owner's
  * adoption was revoked (SK6). The admin who approved the version is the adoption's approver; the row is marked
  * automatic. A failure never undoes the approval: it is ledgered and a request is left for an admin to approve.
@@ -614,7 +659,10 @@ async function autoAdoptPrivate(state: FactoryState, rec: SkillVersionRecord, pr
     });
   });
   if (result.ok) {
-    if (result.created) ledgerAdoption(state, owner, 'SKILL_ADOPTED_PRIVATE', principal.actor, rec.id, rec.version, undefined, rec.commit);
+    if (result.created) {
+      ledgerAdoption(state, owner, 'SKILL_ADOPTED_PRIVATE', principal.actor, rec.id, rec.version, undefined, rec.commit);
+      triggerApply(state, owner, principal.actor, `adopt private skill ${rec.id}@${rec.version}`);
+    }
     return { adopted: result.created ? [owner] : [] };
   }
   ledgerAdoption(state, owner, 'SKILL_ADOPTION_FAILED', principal.actor, rec.id, rec.version, result.error, rec.commit);
@@ -735,6 +783,7 @@ async function decideAdoption(state: FactoryState, req: http.IncomingMessage, re
     ledgerAdoption(state, agentId, 'SKILL_ADOPTION_APPROVED', principal.actor, skillId, request.version, reason, check.record.commit);
     return { status: 200, body: { agentId, skillId, version: request.version, configVersion: written.version, hash: written.hash } };
   });
+  if (outcome.status === 200) triggerApply(state, agentId, principal.actor, `adopt ${skillId}`);
   json(res, outcome.status, outcome.body);
 }
 
@@ -763,13 +812,14 @@ async function removeAdoption(state: FactoryState, req: http.IncomingMessage, re
     ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REMOVED', principal.actor, skillId, adopted?.version ?? pending?.version ?? '', reason, rec?.commit);
     return { status: 200, body: { agentId, skillId, removed: true, ...(configVersion ? { configVersion } : {}) } };
   });
+  if (outcome.status === 200 && 'configVersion' in outcome.body) triggerApply(state, agentId, principal.actor, `remove ${skillId}`);
   json(res, outcome.status, outcome.body);
 }
 
 /**
- * SK6: retires every version of a skill. While any agent's configuration still adopts it this is refused; `force` pauses
- * each of those agents, removes the skill from its configuration (a new version) and retires the skill. Redeploying
- * them without it and resuming them is the apply step (TSK-159).
+ * SK6: retires every version of a skill. While any agent runs it (its configuration pins it, or its deployed image has
+ * it) this is refused; `force` pauses each of those agents for the skill, removes it from their configuration (a new
+ * version), retires the skill, and redeploys each agent without it (`triggerApply`), which resumes it.
  *
  * A forced retire must leave no agent pinned to a retired skill, even when an approval is in flight. So the skill is
  * marked as being retired first (no adoption may start), and each pass waits for the writes already under way to land
@@ -785,10 +835,11 @@ async function retireSkill(state: FactoryState, req: http.IncomingMessage, res: 
   const versions = registry.versions(id);
   if (!versions.length) return json(res, 404, { error: 'not_found', id });
   if (versions.every((v) => v.retired)) return json(res, 409, { error: 'already_retired', id });
+  // Configured by an approved adoption (the configuration pins it), and, wider, running it (the deployed image has it).
   const approvedAdopters = () => adoptersOf(state, id).filter((a) => a.state === 'approved').map((a) => a.agentId);
-  const first = approvedAdopters();
+  const first = skillRunners(state, id);
   if (first.length && body.force !== true) {
-    return json(res, 409, { error: 'skill_in_use', id, agents: first, message: 'remove the skill from these agents first, or retire with "force": true to pause them and remove it' });
+    return json(res, 409, { error: 'skill_in_use', id, agents: first, message: 'redeploy these agents without the skill first, or retire with "force": true to pause them and remove it' });
   }
   let flags = retiring.get(state);
   if (!flags) retiring.set(state, (flags = new Set()));
@@ -799,6 +850,11 @@ async function retireSkill(state: FactoryState, req: http.IncomingMessage, res: 
     const pauseFailed: string[] = [];
     const removedFrom: string[] = [];
     const failed: string[] = [];
+    const touched = new Set<string>();
+    const pause = async (agentId: string) => {
+      if (paused.includes(agentId) || pauseFailed.includes(agentId)) return;
+      (await pauseForSkill(state, agentId, id, principal.actor) ? paused : pauseFailed).push(agentId);
+    };
     const MAX_PASSES = 5;
     for (let pass = 0; pass < MAX_PASSES; pass++) {
       // Writes already past their checks finish under their agent's lock; wait for them, then look again.
@@ -806,21 +862,18 @@ async function retireSkill(state: FactoryState, req: http.IncomingMessage, res: 
       const users = approvedAdopters().filter((a) => !failed.includes(a));
       if (!users.length) break;
       for (const agentId of users) {
-        if (!paused.includes(agentId) && !pauseFailed.includes(agentId)) {
-          const out = await applyKillSwitch(state, agentId, 'PAUSE', principal.actor);
-          (out.status === 200 ? paused : pauseFailed).push(agentId);
-        }
-        const removed = await withAgentLock(state, agentId, async () => {
-          const skills = currentSkills(state, agentId);
-          const adopted = skills.find((k) => k.id === id);
-          if (!adopted) return true;
-          const written = await writeSkills(state, agentId, skills.filter((k) => k.id !== id), { actor: principal.actor, reason: reason ?? `skill ${id} retired` });
-          if (written.ok) ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REMOVED', principal.actor, id, adopted.version, reason ?? `skill ${id} retired`);
-          return written.ok;
-        });
-        if (removed) removedFrom.push(agentId);
-        else failed.push(agentId);
+        await pause(agentId);
+        const removed = await stripSkill(state, agentId, id, principal.actor, reason ?? `skill ${id} retired`);
+        if (removed) {
+          removedFrom.push(agentId);
+          touched.add(agentId);
+        } else failed.push(agentId);
       }
+    }
+    // Agents whose image still has the skill although their configuration no longer lists it stop too, and are redeployed.
+    for (const agentId of skillRunners(state, id)) {
+      await pause(agentId);
+      touched.add(agentId);
     }
     const left = approvedAdopters();
     if (failed.length || left.length) {
@@ -835,7 +888,7 @@ async function retireSkill(state: FactoryState, req: http.IncomingMessage, res: 
       console.warn(`[control-plane] failed to persist retirement of ${id}:`, err);
       return json(res, 500, { error: 'persist_failed', message: 'the retirement could not be written' });
     }
-    const forced = removedFrom.length > 0 || first.length > 0;
+    const forced = touched.size > 0 || first.length > 0;
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId: ledgerKey(id),
@@ -844,6 +897,8 @@ async function retireSkill(state: FactoryState, req: http.IncomingMessage, res: 
       actor: principal.actor,
       ...(reason ? { payloadSha256: payloadHash(reason) } : {}),
     });
+    // SK4: each agent that ran the skill is rebuilt without it; a paused one resumes when that completes.
+    for (const agentId of touched) triggerApply(state, agentId, principal.actor, `skill ${id} retired`);
     json(res, 200, { id, retired: changed.map((v) => v.version), ...(forced ? { paused, pauseFailed, removedFrom } : {}) });
   } finally {
     flags.delete(id);
