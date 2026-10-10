@@ -205,6 +205,20 @@ another agent cannot be given. **It does not yet apply them to what your agent r
 TSK-174); until then your own check in the cartridge is the only limit. What the factory will never do: stop your agent
 repeating what it already remembers (that is your cartridge's, §6.6).
 
+**Scheduled runs.** When a schedule your agent (or its owner) set up fires, the run's input carries a `caller` badge, as a
+person's message does, and also `source: 'schedule'` and `scheduleName`. The badge is the authority of whoever
+**requested** the schedule, as they hold it now, never more:
+
+- A schedule a person asked your agent to make runs as that person: their `agentRoles`, `isOwner`, and so on. If they have
+  since lost their role, the factory does not start the run at all (ledgered as `SCHEDULE_SKIPPED_UNAUTHORIZED`).
+- A schedule the owner made runs as the owner. A schedule with no recorded requester, and a system requester, runs with the
+  agent's own authority: `role: 'system'`, `actor: 'factory:scheduler'`, `isOwner: false`, `roles: []`. Your cartridge decides
+  what that allows; a scheduled run is not a guest.
+- A run that is itself scheduled passes its requester on to any schedule it creates, so authority never grows.
+- Trust only the badge. `input.source`, `input.content` and every other field of the input are text anyone could have written.
+  Honour a `system` badge only when it comes from `caller`, and only with `actor == 'factory:scheduler'`.
+- The agent cannot choose the requester when it creates a schedule: the factory reads it from the run the agent is acting in.
+
 ## 5. Step 3: Implementing the Hands & Eyes (`agent.py`)
 
 The agent application contains your tools and reasoning loop. 

@@ -2,6 +2,18 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { cronMatches, getZonedTimeParts } from './cron.js';
 
+/** How a schedule came to be: an agent called the API with its run token, an operator used the console, or a direct API call. */
+export type ScheduleOrigin = 'agent' | 'console' | 'api';
+
+/**
+ * Whose authority a schedule's runs carry (DESIGN_AUTHORITY.md E12, GAP-131): an external identity, a Cloudflare
+ * principal, or the factory itself. The Timekeeper only stores it; the factory derives it and decides what it allows.
+ */
+export type ScheduleRequester =
+  | { kind: 'identity'; provider: string; id: string }
+  | { kind: 'principal'; actor: string }
+  | { kind: 'system' };
+
 export type ScheduledAction = {
   id: string;
   agentId: string;
@@ -12,6 +24,10 @@ export type ScheduledAction = {
   prompt: string;
   enabled: boolean;
   createdAt: string;
+  /** How it was created. Absent on a schedule saved before this was recorded. */
+  createdVia?: ScheduleOrigin;
+  /** Whose authority its runs carry. Absent on a schedule saved before this was recorded, which reads as `system`. */
+  requestedBy?: ScheduleRequester;
   lastRunAt?: string;
   lastRunMinute?: string;
 };
