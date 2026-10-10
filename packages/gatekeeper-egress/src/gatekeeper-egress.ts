@@ -8,9 +8,8 @@ import { checkHold, checkToolApproval, describeHeldRequest, type HoldRule, type 
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
-import { SseMeter, usageFromJson, type Provider, type Usage } from './meter.js';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { ModelUpstreamError, defaultModelAdapters, parseChatRequest, type ChatResult, type ModelAdapter, type ModelCatalog } from './models.js';
+import { ModelUpstreamError, SseMeter, defaultModelAdapters, parseChatRequest, usageFromJson, type ChatResult, type ModelAdapter, type ModelCatalog, type Provider, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
 /** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
