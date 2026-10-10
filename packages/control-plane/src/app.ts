@@ -4,7 +4,7 @@ import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, payloadHash, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
 import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
-import { classifySecrets, type Surface } from '@beercanlabs/factory-contract';
+import { cartridgeRoleProblems, classifySecrets, type Surface } from '@beercanlabs/factory-contract';
 import {
   AgentRecord,
   AgentRegistry,
@@ -16,6 +16,8 @@ import {
   connectionsOf,
   credentialsOf,
   egressOf,
+  rolesOf,
+  skillRoutesOf,
   FULL_SHA,
   gitLsRemoteResolver,
   isBuiltinCartridge,
@@ -1899,6 +1901,22 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
 
+    // E12: the roles a cartridge declares must be well formed and name only skills it declares, or a typo would silently
+    // allow a person nothing (or the wrong thing). Refused before anything is recorded.
+    const roleProblems = cartridgeRoleProblems(cartridge as { roles?: unknown; skills?: unknown });
+    if (roleProblems.length) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId,
+        type: 'action',
+        action: 'AGENT_REGISTRATION_REFUSED:roles',
+        actor: principal.actor,
+        payloadSha256: payloadHash(roleProblems),
+      });
+      json(res, 422, { error: 'invalid_roles', reasons: roleProblems });
+      return;
+    }
+
     // §6.8 L3: a registration names a repository and is pinned to one exact commit, never a branch.
     const rawRepo = body.repo ?? cartridge.repo;
     let source: SourceRef | undefined;
@@ -2008,6 +2026,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       ...connectionsOf(cartridge),
       ...credentialsOf({ secrets: cartridge.secrets ?? (Array.isArray(body.secrets) ? { requires: body.secrets } : undefined) }),
       ...egressOf(cartridge),
+      ...rolesOf(cartridge),
+      ...skillRoutesOf(cartridge),
     };
     state.agents.set(record.id, record);
 
@@ -2023,6 +2043,27 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (path === '/api/v1/registry/agents' && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'agents.read'))) return;
     json(res, 200, Array.from(state.agents.values()).map((a) => enrichAgent(state, a)));
+    return;
+  }
+
+  // E12: the roles an agent's cartridge declares, for the screen that assigns them and the egress that applies them.
+  const rolesMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/roles$/);
+  if (rolesMatch && req.method === 'GET') {
+    const agentId = decodeURIComponent(rolesMatch[1]);
+    if (!(await requirePrivilege(req, res, state, 'agents.roles.read', { agentId }))) return;
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    const roles = agent.roles ?? [];
+    json(res, 200, {
+      agentId,
+      roles,
+      // Owner is declared but never assigned (it comes from ownership): these are the names a person can be given.
+      assignable: roles.map((r) => r.name).filter((n) => n.toLowerCase() !== 'owner'),
+      skillRoutes: agent.skillRoutes ?? {},
+    });
     return;
   }
 
