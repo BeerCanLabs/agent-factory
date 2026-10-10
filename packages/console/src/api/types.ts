@@ -212,6 +212,22 @@ export interface SkillRequires {
   models: string[];
 }
 
+/** SK1: a public skill can be given to any agent; a private skill belongs to one owner agent. */
+export type SkillVisibility = 'public' | 'private';
+
+/**
+ * One thing a skill does at a system (SK2, E11). `hold: true` is human-in-the-loop: a person approves the exact request
+ * first (E9). `hold: false` is autonomous. A declared hold is shown here but enforced only once grants carry actions
+ * (GAP-070).
+ */
+export interface SkillAction {
+  id: string;
+  route: string;
+  method: string;
+  path: string;
+  hold: boolean;
+}
+
 export interface SkillManifest {
   id: string;
   version: string;
@@ -219,7 +235,11 @@ export interface SkillManifest {
   description: string;
   language: string;
   entry: string;
+  /** Absent in a record written before skills were public or private: it is public. */
+  visibility?: SkillVisibility;
+  owner?: string;
   requires: SkillRequires;
+  actions?: SkillAction[];
 }
 
 export type SkillStatus = 'pending' | 'approved' | 'rejected';
@@ -243,10 +263,30 @@ export interface SkillVersion {
   decidedAt?: string;
   reason?: string;
   revoked?: boolean;
+  /** SK6: the skill was retired; this version stays recorded but can no longer be approved or adopted. */
+  retired?: boolean;
+  retiredBy?: string;
+  retiredAt?: string;
+  retiredReason?: string;
   /** Only on a registration response: the branch or tag the commit was resolved from. */
   resolvedFrom?: string;
-  /** Only on a forced revocation response: the agents that were paused. */
+  /** Only on a forced revocation response: the agents that were paused, and the ones the skill was removed from. */
   paused?: string[];
+  removedFrom?: string[];
+}
+
+/** An agent's use of a skill (SK7): asked for, or approved and in its configuration. */
+export interface SkillAdopter {
+  agentId: string;
+  version: string;
+  state: 'requested' | 'approved';
+  requestedBy?: string;
+  approvedBy?: string;
+  since?: string;
+  /** A private skill adopted for its owner when a version was approved. */
+  auto?: boolean;
+  /** Only from the adopters endpoint: a newer approved version exists. */
+  upgradeAvailable?: boolean;
 }
 
 /** A skill in the catalog: `versions` are summaries in the list, full records for one skill. */
@@ -254,9 +294,16 @@ export interface SkillSummary {
   id: string;
   name: string;
   description: string;
+  /** Absent from a control plane that predates public and private skills: public. */
+  visibility?: SkillVisibility;
+  owner?: string;
+  /** Every version is retired (SK6). */
+  retired?: boolean;
   latestApproved: string | null;
   requires: SkillRequires;
   versions: SkillVersion[];
+  /** Who uses this skill (SK7). */
+  adopters?: SkillAdopter[];
 }
 
 export type SystemStatus = 'proposed' | 'approved' | 'rejected';
