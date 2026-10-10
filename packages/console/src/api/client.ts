@@ -1,4 +1,4 @@
-import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
+import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
 
 
 const API_BASE = '/api/v1';
@@ -288,6 +288,34 @@ export const factoryApi = {
       method: 'POST',
       body: JSON.stringify({ reason, ...(force ? { force: true } : {}) }),
     });
+  },
+
+  // Who uses a skill, and the adoption requests waiting (SK7). A private skill the caller may not see is a 404.
+  async listSkillAdopters(id: string): Promise<SkillAdopter[]> {
+    return request<SkillAdopter[]>(`/skills/${encodeURIComponent(id)}/adopters`);
+  },
+
+  // Adoption is a configuration change with its own approval (SK3). An admin decides; an owner may ask and remove.
+  async requestAdoption(agentId: string, skillId: string, version: string, reason?: string): Promise<Record<string, unknown>> {
+    return request(`/agents/${encodeURIComponent(agentId)}/skills`, { method: 'POST', body: JSON.stringify({ skillId, version, ...(reason ? { reason } : {}) }) });
+  },
+
+  async approveAdoption(agentId: string, skillId: string, reason?: string): Promise<Record<string, unknown>> {
+    return request(`/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillId)}/adoption/approve`, { method: 'POST', body: JSON.stringify(reason ? { reason } : {}) });
+  },
+
+  async rejectAdoption(agentId: string, skillId: string, reason?: string): Promise<Record<string, unknown>> {
+    return request(`/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillId)}/adoption/reject`, { method: 'POST', body: JSON.stringify(reason ? { reason } : {}) });
+  },
+
+  async removeAdoption(agentId: string, skillId: string, reason?: string): Promise<Record<string, unknown>> {
+    return request(`/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillId)}`, { method: 'DELETE', body: JSON.stringify(reason ? { reason } : {}) });
+  },
+
+  // SK6: retire every version of a skill. Refused while an agent runs it (409 skill_in_use); `force` pauses those agents,
+  // removes the skill from their configuration and redeploys them without it.
+  async retireSkill(id: string, opts: { reason?: string; force?: boolean } = {}): Promise<{ id: string; retired: string[]; paused?: string[]; pauseFailed?: string[]; removedFrom?: string[] }> {
+    return request(`/registry/skills/${encodeURIComponent(id)}/retire`, { method: 'POST', body: JSON.stringify(opts) });
   },
 
   async rerunSkillChecks(id: string, version: string): Promise<SkillVersion> {
