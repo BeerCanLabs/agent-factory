@@ -6,8 +6,11 @@ import assert from 'node:assert/strict';
 import { files, read } from './support.js';
 
 // What this guard does not do, so the next reader does not mistake it for more:
-//  - It is line-based. A rule copied under another name passes. It sees definitions of the Executive's own names and
-//    literals only the Executive writes today.
+//  - It is line-based. A rule copied under a different name passes. It sees definitions of the Executive's own names
+//    (functions, classes, types, object methods and properties, and anything exported or imported under one of those
+//    names) and the literals only the Executive writes today.
+//  - It reads TypeScript and JavaScript source (`.ts`, `.tsx`, `.js`, `.mjs`, `.cjs`) under every package's `src/` except
+//    the Executive's own. Build output, tests and root-level config files are not read.
 //  - It does NOT guard `complete`, `Usage`, `Provider`, `Completion` or `CatalogEntry`. They are ordinary words or names
 //    another member could legitimately use (the Keymaster has its own `CatalogEntry`), so guarding them would raise false
 //    alarms. The Executive's `complete` and `findModel` are covered by their literals below.
@@ -33,6 +36,11 @@ const SECOND_COPY: Array<{ what: string; re: RegExp }> = [
     what: 'a type the Executive owns, defined again',
     re: new RegExp(`\\b(?:interface)\\s+(?:${OWNED_TYPES})\\b|\\btype\\s+(?:${OWNED_TYPES})\\s*(?:<[^>]*>)?\\s*=`),
   },
+  { what: 'an export or import renamed to a name the Executive owns', re: new RegExp(`\\bas\\s+(?:${OWNED_VALUES}|${OWNED_TYPES})\\b`) },
+  {
+    what: 'an object method or property the Executive owns, defined again',
+    re: new RegExp(`^\\s*(?:async\\s+)?(?:${OWNED_VALUES})\\s*(?:\\([^)]*\\)\\s*(?::\\s*[^{=]+)?\\{|:\\s*(?:async\\s*)?(?:function\\b|\\([^)]*\\)\\s*=>|\\w+\\s*=>))`),
+  },
   { what: 'an answer or refusal of the model policy or the adapters, written again', re: new RegExp(`['"](?:${OWNED_CODES})['"]`) },
   { what: 'AWS request signing, written again', re: /['"`]AWS4-HMAC-SHA256\b/ },
   { what: 'the Bedrock endpoint, written again', re: /bedrock-runtime/ },
@@ -42,12 +50,10 @@ const SECOND_COPY: Array<{ what: string; re: RegExp }> = [
 const matches = (src: string, patterns = SECOND_COPY) =>
   src.split('\n').flatMap((line, i) => patterns.filter((c) => c.re.test(line)).map((c) => `${i + 1}: ${line.trim()}  [${c.what}]`));
 
-const nonTest = (p: string) => !p.endsWith('.test.ts');
 const NOT_EXECUTIVE = (p: string) => !p.startsWith('packages/executive/');
-/** Where the rule used to live and could be copied back: the other members' source. */
-const GUARDED = /^packages\/(control-plane|gatekeeper-egress|gatekeeper-ingress)\/src\/.*\.ts$/;
-/** Any package's own source: for the literals only the Executive writes. */
-const ANY_PACKAGE_SOURCE = /^packages\/[^/]+\/src\/.*\.ts$/;
+/** Any package's own source, wherever the rule could be copied to: not only the packages it came out of. */
+const ANY_PACKAGE_SOURCE = /^packages\/[^/]+\/src\/.*\.(?:ts|tsx|js|mjs|cjs)$/;
+const nonTestSource = (p: string) => !/\.test\.(?:ts|tsx|js|mjs|cjs)$/.test(p);
 
 describe('Executive: one copy of the model service rules', () => {
   it('the patterns recognize what they exist to forbid, and not what callers legitimately do', () => {
@@ -79,6 +85,15 @@ describe('Executive: one copy of the model service rules', () => {
       "const endpoint = `https://bedrock-runtime.${region}.amazonaws.com`;",
       'cacheRead: n(u.cache_read_input_tokens),',
       'cacheWrite: n(u.cache_creation_input_tokens),',
+      'export { sign as signV4 };',
+      "import { somethingElse as checkModel } from './other.js';",
+      'export { Policy as ModelPolicy } from "./policy.js";',
+      '  checkModel(policy, model) {',
+      '  async findModel(catalog, model) {',
+      '  offeredModels(policy: P, names: string[]): string[] {',
+      '  signV4: (req, creds) => sign(req, creds),',
+      '  usageFromJson: function (provider, body) {',
+      '  bedrockConverse: async (opts) => ({}),',
     ];
     for (const line of forbidden) assert.equal(matches(line).length >= 1, true, `should be caught: ${line}`);
 
@@ -97,6 +112,14 @@ describe('Executive: one copy of the model service rules', () => {
       'usage: { prompt_tokens: usage.input, completion_tokens: usage.output, total_tokens: usage.input + usage.output },',
       'export function complete(args) {',
       'type Usage = { total: number };',
+      "import { signV4 as sign } from '@beercanlabs/factory-executive';",
+      'export { checkModel };',
+      '  checkModel(policy, model);',
+      '  if (checkModel(policy, model).allowed) {',
+      '  const r = checkModel(policy, model, {',
+      '  offeredModels(modelPolicyOf(ctx), Object.keys(catalog)).map((id) => ({ id })),',
+      '  return findModel(catalog, model) ?? other;',
+      '  complete: async (entry) => entry,',
     ];
     for (const line of allowed) assert.deepEqual(matches(line), [], `should be allowed: ${line}`);
   });
@@ -129,23 +152,39 @@ describe('Executive: one copy of the model service rules', () => {
       ['packages/executive/src/model-policy.ts', 'model_pinned'],
       ['packages/executive/src/complete.ts', 'findModel'],
       ['packages/executive/src/complete.ts', 'provider_unavailable'],
+      ['packages/executive/src/complete.ts', 'upstream_error'],
+      ['packages/executive/src/models.ts', 'upstream_error'],
+      ['packages/executive/src/models.ts', 'unsupported_content'],
+      ['packages/executive/src/models.ts', 'messages_required'],
     ];
     for (const [file, name] of originals) {
       assert.ok(matches(read(file)).some((m) => m.includes(name)), `${file} no longer carries ${name} where the guard looks for it`);
     }
   });
 
-  it("control-plane, gatekeeper-egress and gatekeeper-ingress source do not define the Executive's rules again", () => {
-    const found = files('packages', (p) => GUARDED.test(p) && nonTest(p)).flatMap((f) => matches(read(f)).map((m) => `${f}:${m}`));
-    assert.deepEqual(found, [], "the model catalog, the adapters, signing, token counting, the policy gate and the serving of a call are the Executive's: import them from @beercanlabs/factory-executive");
+  it("no package but the Executive defines its rules again or writes the literals only it writes", () => {
+    const found = files('packages', (p) => ANY_PACKAGE_SOURCE.test(p) && nonTestSource(p) && NOT_EXECUTIVE(p)).flatMap((f) =>
+      matches(read(f)).map((m) => `${f}:${m}`),
+    );
+    assert.deepEqual(
+      found,
+      [],
+      "the model catalog, the adapters, signing, token counting, the policy gate and the serving of a call are the Executive's: import them from @beercanlabs/factory-executive",
+    );
   });
 
-  it("no other package writes the literals only the Executive writes (the signing scheme, the Bedrock host, Anthropic's usage fields)", () => {
-    const LITERALS = SECOND_COPY.filter((c) => /signing|Bedrock|Anthropic|answer or refusal/.test(c.what));
-    const found = files('packages', (p) => ANY_PACKAGE_SOURCE.test(p) && nonTest(p) && NOT_EXECUTIVE(p)).flatMap((f) =>
-      matches(read(f), LITERALS).map((m) => `${f}:${m}`),
-    );
-    assert.deepEqual(found, [], 'these belong to packages/executive alone');
+  it('the file scope reaches every package and every source extension, and skips only tests and the Executive itself', () => {
+    for (const ok of ['packages/keymaster/src/x.ts', 'packages/budget/src/a/b.ts', 'packages/console/src/view.tsx', 'packages/hydrate/src/shim.js', 'packages/x/src/y.mjs', 'packages/x/src/y.cjs']) {
+      assert.equal(ANY_PACKAGE_SOURCE.test(ok) && nonTestSource(ok) && NOT_EXECUTIVE(ok), true, `should be read: ${ok}`);
+    }
+    for (const skipped of ['packages/executive/src/models.ts', 'packages/keymaster/src/x.test.ts', 'packages/x/src/y.test.mjs', 'packages/x/dist/y.js', 'packages/console/postcss.config.js']) {
+      assert.equal(ANY_PACKAGE_SOURCE.test(skipped) && nonTestSource(skipped) && NOT_EXECUTIVE(skipped), false, `should be skipped: ${skipped}`);
+    }
+    // ... and it is not vacuous: it finds the real source of the packages that came closest to hosting this code.
+    const read_ = files('packages', (p) => ANY_PACKAGE_SOURCE.test(p) && nonTestSource(p) && NOT_EXECUTIVE(p));
+    for (const must of ['packages/gatekeeper-egress/src/gatekeeper-egress.ts', 'packages/control-plane/src/app.ts', 'packages/budget/src/index.ts', 'packages/inspector/src/index.ts']) {
+      assert.ok(read_.includes(must), `the scan no longer reaches ${must}`);
+    }
   });
 
   it('packages/executive depends on no control-plane, gatekeeper or console package, in its manifest or its source', () => {
@@ -154,15 +193,34 @@ describe('Executive: one copy of the model service rules', () => {
     const back = names.filter((n) => /^@beercanlabs\/factory-(control-plane|gatekeeper-.+|console)$/.test(n));
     assert.deepEqual(back, [], 'the dependency points one way: the gatekeeper-egress depends on the Executive');
 
-    const IMPORT_BACK = /\bfrom\s+['"](?:@beercanlabs\/factory-(?:control-plane|gatekeeper-[a-z-]+|console)|(?:\.\.\/)+(?:control-plane|gatekeeper-[a-z-]+|console))\b/;
-    assert.equal(IMPORT_BACK.test("import { x } from '@beercanlabs/factory-gatekeeper-egress';"), true);
-    const upToEgress = ['..', '..', 'gatekeeper-egress', 'src', 'gatekeeper-egress.js'].join('/'); // built, so this file holds no relative cross-package import itself
-    assert.equal(IMPORT_BACK.test(`import { x } from '${upToEgress}';`), true);
-    assert.equal(IMPORT_BACK.test("import type { Price } from '@beercanlabs/factory-budget';"), false);
-    assert.equal(IMPORT_BACK.test("import { x } from './models.js';"), false);
-    const imports = files('packages/executive/src', (p) => p.endsWith('.ts') && nonTest(p)).flatMap((f) =>
-      read(f).split('\n').filter((l) => IMPORT_BACK.test(l)).map((l) => `${f}: ${l.trim()}`),
-    );
+    // Any way of reaching those packages: `from`, a bare `import 'x'`, `import('x')` and `require('x')`, on one line or several.
+    const SPEC = "(?:@beercanlabs\\/factory-(?:control-plane|gatekeeper-[a-z-]+|console)|(?:\\.\\.\\/)+(?:control-plane|gatekeeper-[a-z-]+|console))\\b";
+    const IMPORT_BACK = new RegExp(`\\b(?:from|import|require)\\s*\\(?\\s*['"]${SPEC}`);
+    // Built from pieces, so this file holds no literal cross-package specifier for the imports check to read as a real import.
+    const spec = (name: string) => ['@beercanlabs', `factory-${name}`].join('/');
+    const upToEgress = ['..', '..', 'gatekeeper-egress', 'src', 'gatekeeper-egress.js'].join('/');
+    const caught = [
+      `import { x } from '${spec('gatekeeper-egress')}';`,
+      `import { x } from '${upToEgress}';`,
+      `export { x } from '${spec('control-plane')}';`,
+      `import '${spec('console')}';`,
+      `const m = await import('${spec('gatekeeper-ingress')}');`,
+      `const m = require('${spec('control-plane')}');`,
+      `import {\n  x,\n} from\n  '${spec('gatekeeper-egress')}';`,
+    ];
+    for (const src of caught) assert.equal(IMPORT_BACK.test(src), true, `should be caught: ${src}`);
+    const fine = [
+      `import type { Price } from '${spec('budget')}';`,
+      "import { x } from './models.js';",
+      "import { signV4 } from './sigv4.js';",
+      "const note = 'the gatekeeper-egress depends on the Executive';",
+      `// a note about ${spec('console')}, not an import`,
+    ];
+    for (const src of fine) assert.equal(IMPORT_BACK.test(src), false, `should be allowed: ${src}`);
+    const imports = files('packages/executive/src', (p) => ANY_PACKAGE_SOURCE.test(p) && nonTestSource(p)).flatMap((f) => {
+      const hit = IMPORT_BACK.exec(read(f));
+      return hit ? [`${f}: ${hit[0].replace(/\s+/g, ' ')}`] : [];
+    });
     assert.deepEqual(imports, [], 'the Executive takes what it needs from another member as plain values or a structural type, never by importing it');
   });
 });
