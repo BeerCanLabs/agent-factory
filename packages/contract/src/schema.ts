@@ -122,6 +122,9 @@ export const artifactSchema = z
   })
   .strict();
 
+/** A gatekeeper-egress route id: a plain name, never a host, URL or port. */
+export const ROUTE_ID = /^[a-z0-9][a-z0-9_-]*$/;
+
 export const skillEntry = z
   .object({
     id: z.string().min(1),
@@ -133,6 +136,11 @@ export const skillEntry = z
     secretRef: z.string().min(1).optional(),
     hold: z.union([z.enum(['none', 'required']), z.string()]).default('none'),
     injection: z.string().optional(),
+    /**
+     * E12: the gatekeeper-egress routes this skill goes through, by id. A role allows or denies a skill, and the egress
+     * sees routes, so this is how one becomes the other. A registered skill's routes are `requires.routes` (SK2).
+     */
+    routes: z.array(z.string().regex(ROUTE_ID, 'a skill route is a gatekeeper-egress route id (lowercase letters, digits, - and _), never a host')).optional(),
   })
   .strict();
 
@@ -207,6 +215,88 @@ export const connectionSchema = z
   })
   .strict();
 
+/** A role's name: letters, digits, `-` and `_`. The same rule the identity links apply to a role they assign. */
+export const ROLE_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * What a role may do with one skill (E12): the actions it allows and the ones it denies, `"*"` meaning every action.
+ * A rule must say something: an empty rule would read as "nothing" or as "everything" depending on who reads it.
+ */
+export const roleSkillRuleSchema = z
+  .object({
+    allow: z.array(z.string().min(1)).optional(),
+    deny: z.array(z.string().min(1)).optional(),
+  })
+  .strict()
+  .refine((r) => (r.allow?.length ?? 0) + (r.deny?.length ?? 0) > 0, {
+    message: 'a rule must list at least one action to allow or deny ("*" is every action)',
+  });
+
+/** A role the cartridge declares (E12): which skills it may use. The key `"*"` stands for every skill. */
+export const roleSchema = z
+  .object({
+    description: z.string().optional(),
+    skills: z.record(z.string().min(1), roleSkillRuleSchema).default({}),
+  })
+  .strict();
+
+export type CartridgeRole = z.infer<typeof roleSchema>;
+
+export type RoleIssue = { path: Array<string | number>; message: string };
+
+/**
+ * E12: what is wrong with the roles a cartridge declares, apart from their shape: a role that names a skill the
+ * cartridge does not declare (it could never be applied, and a typo would silently allow nothing), or two roles whose
+ * names differ only in case (`Owner` and `owner`: one role under two names). Pure, so validation and registration agree.
+ */
+export function cartridgeRoleIssues(cartridge: { roles?: unknown; skills?: unknown }): RoleIssue[] {
+  const roles = cartridge.roles;
+  if (!roles || typeof roles !== 'object' || Array.isArray(roles)) return [];
+  const declared = new Set(
+    (Array.isArray(cartridge.skills) ? cartridge.skills : []).map((s) => (s && typeof s === 'object' ? (s as { id?: unknown }).id : undefined)).filter((id): id is string => typeof id === 'string'),
+  );
+  const issues: RoleIssue[] = [];
+  const seen = new Map<string, string>();
+  for (const [name, role] of Object.entries(roles as Record<string, unknown>)) {
+    const earlier = seen.get(name.toLowerCase());
+    if (earlier !== undefined) issues.push({ path: ['roles', name], message: `role "${name}" is the same role as "${earlier}": role names differ by more than case` });
+    else seen.set(name.toLowerCase(), name);
+    const skills = role && typeof role === 'object' ? (role as { skills?: unknown }).skills : undefined;
+    if (!skills || typeof skills !== 'object' || Array.isArray(skills)) continue;
+    for (const skillId of Object.keys(skills as Record<string, unknown>)) {
+      if (skillId !== '*' && !declared.has(skillId)) {
+        issues.push({ path: ['roles', name, 'skills', skillId], message: `role "${name}" names skill "${skillId}", which the cartridge does not declare in skills[]` });
+      }
+    }
+  }
+  return issues;
+}
+
+/**
+ * Every problem with the roles and skill routes a cartridge body declares, as readable reasons (E12). Registration reads
+ * a cartridge body without running the whole schema, so it asks this; validation asks the schema, which asks the same
+ * rules. Empty when the cartridge declares none.
+ */
+export function cartridgeRoleProblems(cartridge: { roles?: unknown; skills?: unknown }): string[] {
+  const reasons: string[] = [];
+  if (cartridge.roles !== undefined && cartridge.roles !== null) {
+    const shape = z.record(z.string().regex(ROLE_NAME, 'a role name is letters, digits, - and _ (at most 64)'), roleSchema).safeParse(cartridge.roles);
+    if (!shape.success) for (const i of shape.error.issues) reasons.push(`roles${i.path.length ? `.${i.path.join('.')}` : ''}: ${i.message}`);
+  }
+  if (Array.isArray(cartridge.skills)) {
+    cartridge.skills.forEach((s, n) => {
+      const routes = s && typeof s === 'object' ? (s as { routes?: unknown }).routes : undefined;
+      if (routes === undefined) return;
+      const id = typeof (s as { id?: unknown }).id === 'string' ? (s as { id: string }).id : String(n);
+      if (!Array.isArray(routes) || routes.some((r) => typeof r !== 'string' || !ROUTE_ID.test(r))) {
+        reasons.push(`skills.${id}.routes: a skill route is a gatekeeper-egress route id (lowercase letters, digits, - and _), never a host`);
+      }
+    });
+  }
+  for (const i of cartridgeRoleIssues(cartridge)) reasons.push(`${i.path.join('.')}: ${i.message}`);
+  return reasons;
+}
+
 /** Unified cartridge.yaml schema */
 export const cartridgeSchema = z
   .object({
@@ -251,8 +341,13 @@ export const cartridgeSchema = z
     requestedModels: z.array(z.string()).optional(),
     approvedModels: z.array(z.string()).optional(),
     connections: z.array(connectionSchema).optional(),
+    /** E12: the roles a person may hold on this agent, and what each may use. `Owner` is declared here but never assigned. */
+    roles: z.record(z.string().regex(ROLE_NAME, 'a role name is letters, digits, - and _ (at most 64)'), roleSchema).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((c, ctx) => {
+    for (const issue of cartridgeRoleIssues(c)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: issue.path, message: issue.message });
+  });
 
 export const egressSchema = z
   .object({

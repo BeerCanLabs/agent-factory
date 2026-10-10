@@ -164,6 +164,45 @@ skills:
 
 ---
 
+### Who may use what: `roles` and a skill's `routes`
+
+An agent often works for more than one person. `roles` says what each kind of person may use; an admin then gives people
+a role on your agent (Stephanie is `Family` on Donna). Roles grant people access: they never restrict your agent's own
+scheduled or autonomous work.
+
+```yaml
+skills:
+  - id: google-calendar
+    routes: [google-calendar]      # the gatekeeper-egress routes this skill goes through
+  - id: gmail
+    routes: [google-gmail]
+
+roles:
+  Owner:                           # declared, but never assigned: it comes from owning the agent
+    skills:
+      "*": { allow: ["*"] }        # "*" is every skill; an action list's "*" is every action
+  Family:
+    description: Immediate family
+    skills:
+      google-calendar: { allow: ["*"] }
+      gmail: { deny: ["*"] }       # the skills a role does not list, it may not use
+```
+
+- A role lists **skills** (and, per skill, the actions it allows or denies). A rule must list at least one action.
+- A role may name only skills the cartridge declares in `skills:` (or `"*"`). Registration refuses a typo instead of
+  silently allowing a person nothing.
+- A skill's `routes` are plain gatekeeper-egress route ids, never hosts. The factory sees routes, not skills, so `routes`
+  is how a role becomes something it can apply. Two skills that use the same route cannot be told apart at the egress:
+  if a role allows one and denies the other, the route is refused (deny wins).
+- Role names are letters, digits, `-` and `_`, and differ by more than case.
+- The holds on a skill's actions (`hold:`, E9) are separate: a role that allows a skill does not remove a hold.
+
+**What the factory does with them today.** It validates them (`cartridge validate`), refuses a registration that declares
+them badly, records them on the agent, and tells an admin and the agent's owner (`GET /api/v1/agents/:id/roles`). **It does
+not yet apply them to what your agent reaches** (the gatekeeper-egress will, TSK-174), and the console cannot yet assign them
+(TSK-173); until then your own check in the cartridge is the only limit. What the factory will never do: stop your agent
+repeating what it already remembers (that is your cartridge's, §6.6).
+
 ## 5. Step 3: Implementing the Hands & Eyes (`agent.py`)
 
 The agent application contains your tools and reasoning loop. 
