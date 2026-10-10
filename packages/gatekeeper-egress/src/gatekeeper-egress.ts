@@ -9,7 +9,7 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { ModelUpstreamError, SseMeter, defaultModelAdapters, parseChatRequest, usageFromJson, type ChatResult, type ModelAdapter, type ModelCatalog, type Provider, type Usage } from '@beercanlabs/factory-executive';
+import { SseMeter, checkModel, complete, defaultModelAdapters, findModel, offeredModels, usageFromJson, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
 /** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
@@ -549,13 +549,14 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     });
   }
 
-  /** Policy gate on a model name (E4, E7): shared by provider routes and the factory model API. */
-  function modelDenial(ctx: RunContext, model: string): [number, string, Record<string, unknown>] | undefined {
-    const isTraining = ctx.agentState === 'TRAINING';
-    const allowed = ctx.policy.models ?? [opts.defaultModel ?? DEFAULT_MODEL];
-    if (!isTraining && !allowed.includes(model)) return [403, 'model_not_allowed', { model }];
-    if (ctx.run.model && ctx.run.model !== model) return [403, 'model_pinned', { model, pinned: ctx.run.model }];
-    return undefined;
+  /** What the Executive needs to decide whether this run may use a model (E4, E7): shared by provider routes and the factory model API. */
+  function modelPolicyOf(ctx: RunContext): ModelPolicy {
+    return {
+      allowedModels: ctx.policy.models,
+      defaultModel: opts.defaultModel ?? DEFAULT_MODEL,
+      training: ctx.agentState === 'TRAINING',
+      pinnedModel: ctx.run.model,
+    };
   }
 
   function throttled(ctx: RunContext): boolean {
@@ -606,8 +607,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     calls.get(res)?.start(model);
     if (req.method === 'POST' && parsed) {
       if (!model) return deny(res, ctx, route, 400, 'model_required');
-      const denial = modelDenial(ctx, model);
-      if (denial) return deny(res, ctx, route, ...denial);
+      const check = checkModel(modelPolicyOf(ctx), model);
+      if (!check.allowed) return deny(res, ctx, route, check.status, check.code, check.detail);
       if (!priceFor(opts.prices, model)) return deny(res, ctx, route, 403, 'unpriced_model', { model });
     }
     if (throttled(ctx)) return deny(res, ctx, route, 429, 'throttled');
@@ -674,7 +675,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const catalog = opts.modelCatalog ?? {};
     const path = rest.split('?')[0].replace(/\/$/, '');
     if (req.method === 'GET' && path === '/v1/models') {
-      const offered = Object.keys(catalog).filter((name) => !modelDenial(ctx, name));
+      const offered = offeredModels(modelPolicyOf(ctx), Object.keys(catalog));
       return send(res, 200, { object: 'list', data: offered.map((id) => ({ id, object: 'model', owned_by: 'factory' })) });
     }
     if (req.method !== 'POST' || path !== '/v1/chat/completions') return send(res, 404, { error: 'unknown_endpoint' });
@@ -685,31 +686,26 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const model = typeof parsed.model === 'string' ? parsed.model : undefined;
     calls.get(res)?.start(model);
     if (!model) return deny(res, ctx, route, 400, 'model_required');
-    const entry = Object.hasOwn(catalog, model) ? catalog[model] : undefined;
+    const entry = findModel(catalog, model);
     if (!entry) return deny(res, ctx, route, 400, 'model_not_offered', { model });
-    const denial = modelDenial(ctx, model);
-    if (denial) return deny(res, ctx, route, ...denial);
+    const check = checkModel(modelPolicyOf(ctx), model);
+    if (!check.allowed) return deny(res, ctx, route, check.status, check.code, check.detail);
     const price = entry.price ?? priceFor(opts.prices, model);
     if (!price) return deny(res, ctx, route, 403, 'unpriced_model', { model });
     if (throttled(ctx)) return deny(res, ctx, route, 429, 'throttled');
-    const chat = parseChatRequest(parsed);
-    if (!chat.ok) return deny(res, ctx, route, 400, chat.error);
-    const adapter = Object.hasOwn(modelAdapters, entry.provider) ? modelAdapters[entry.provider] : undefined;
-    if (!adapter) return deny(res, ctx, route, 503, 'provider_unavailable', { provider: entry.provider });
-
     const requestId = randomUUID();
     const t0 = performance.now();
-    let result: ChatResult;
-    try {
-      result = await adapter.complete(entry, chat.req);
-    } catch (err) {
-      const e = err instanceof ModelUpstreamError ? err : new ModelUpstreamError(502, 'upstream_error', err instanceof Error ? err.message : String(err));
+    const done = await complete({ entry, adapters: modelAdapters, body: parsed });
+    if (!done.ok && done.kind === 'refused') return deny(res, ctx, route, done.status, done.code, done.detail);
+    if (!done.ok) {
+      const e = done.error;
       markOutcome(res, /timeout|timed out/i.test(`${e.code} ${e.message}`) ? 'timeout' : 'error');
       m?.requests.add(1, { route: route.id, outcome: e.code, agent: ctx.run.agentId });
       console.error(`[gatekeeper-egress] models ${model} via ${entry.provider}: ${e.code} ${e.upstreamStatus ?? ''} ${e.message}`);
       ledger(ctx, route, { type: 'action', action: 'MODEL_UPSTREAM_ERROR', model, provider: entry.provider, upstreamStatus: e.upstreamStatus, requestId });
       return send(res, e.status, { error: e.code, message: redactSecrets(e.message, secretValues), ...(e.upstreamStatus ? { upstreamStatus: e.upstreamStatus } : {}) });
     }
+    const { request: chat, result } = done;
     m?.requests.add(1, { route: route.id, outcome: '200' });
     m?.latency.record((performance.now() - t0) / 1000, { route: route.id });
 
@@ -718,7 +714,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (result.usage) usage = { model, input: result.usage.input, output: result.usage.output, cacheRead: 0, cacheWrite: 0 };
     else {
       // No usage reported: charge the worst case the request allowed rather than nothing.
-      usage = { model, input: 0, output: chat.req.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
+      usage = { model, input: 0, output: chat.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
       action = 'METERING_GAP';
     }
     recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action, extra: { provider: entry.provider, upstreamModel: entry.id } });
