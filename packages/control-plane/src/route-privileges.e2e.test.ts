@@ -77,6 +77,8 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: `/api/v1/skills/${SKILL}`, privilege: 'skills.read', role: 'viewer' },
   { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1`, privilege: 'skills.read', role: 'viewer' },
   { method: 'POST', path: '/api/v1/registry/skills', privilege: 'skills.register', role: 'viewer', body: {} },
+  { method: 'GET', path: `/api/v1/skills/${SKILL}/adopters`, privilege: 'skills.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/agents/castle/skills', privilege: 'config.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/systems', privilege: 'systems.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/systems/nope', privilege: 'systems.read', role: 'viewer' },
   { method: 'POST', path: '/api/v1/systems', privilege: 'systems.propose', role: 'viewer', body: {} },
@@ -144,6 +146,11 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/approve`, privilege: 'skills.decide', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/reject`, privilege: 'skills.decide', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/checks`, privilege: 'skills.checks.run', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/agents/castle/skills', privilege: 'skills.adopt.request', role: 'admin', body: {} },
+  { method: 'DELETE', path: `/api/v1/agents/castle/skills/${SKILL}`, privilege: 'skills.adopt.remove', role: 'admin' },
+  { method: 'POST', path: `/api/v1/agents/castle/skills/${SKILL}/adoption/approve`, privilege: 'skills.adopt.decide', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/agents/castle/skills/${SKILL}/adoption/reject`, privilege: 'skills.adopt.decide', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/retire`, privilege: 'skills.retire', role: 'admin', body: {} },
 ];
 
 async function listen(server: http.Server): Promise<number> {

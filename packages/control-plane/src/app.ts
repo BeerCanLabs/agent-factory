@@ -1046,7 +1046,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleConfig(state, req, res, path)) return;
-  if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills')) && (await handleSkills(state, req, res, path))) return;
+  if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills') || /^\/api\/v1\/agents\/[^/]+\/skills(\/|$)/.test(path)) && (await handleSkills(state, req, res, path))) return;
   if (await handleRunProgress(state, req, res, path)) return;
   if (path.startsWith('/api/v1/schedules') && (await handleSchedules(state, req, res, path))) return;
   if (path.startsWith('/api/v1/identity-links') && (await handleIdentityLinks(state, req, res, path))) return;
