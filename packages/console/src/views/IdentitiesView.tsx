@@ -787,7 +787,8 @@ export const IdentitiesView: React.FC = () => {
               ))}
             </div>
 
-            <AgentAccessEditor value={modalAgentRoles} onChange={setModalAgentRoles} disabled={modalSubmitting} />
+            {/* Only an admin may give agent roles (the server refuses anyone else), so no one else is offered the editor. */}
+            {canManageIdentities && <AgentAccessEditor value={modalAgentRoles} onChange={setModalAgentRoles} disabled={modalSubmitting} />}
           </div>
         </Dialog>
       )}

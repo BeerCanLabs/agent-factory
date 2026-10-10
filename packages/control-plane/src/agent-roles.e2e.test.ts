@@ -150,6 +150,20 @@ describe('the roles an agent declares (E12, TSK-172)', { concurrency: false }, (
     assert.deepEqual(Object.values(owner.routes), ['allowed', 'allowed', 'allowed']);
   });
 
+  it('describes an agent registered before skillIds existed from the skills it can still see', async () => {
+    const donna = state.agents.get('donna')!;
+    const { skillIds: _gone, ...old } = donna as typeof donna & { skillIds?: string[] };
+    state.agents.set('donna', old as typeof donna);
+    try {
+      const r = await api('/api/v1/agents/donna/roles?held=Family', 'GET', ADMIN);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual([...r.body.skillIds].sort(), ['gmail', 'google-calendar', 'print'], 'routes and the skills roles name');
+      assert.equal(r.body.effective.skills.length, 3);
+    } finally {
+      state.agents.set('donna', donna);
+    }
+  });
+
   it('refuses to describe more than 20 roles instead of silently dropping the rest', async () => {
     const names = Array.from({ length: 21 }, (_, i) => `R${i}`).join(',');
     const r = await api(`/api/v1/agents/donna/roles?held=${names}`, 'GET', ADMIN);
