@@ -66,7 +66,6 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     owns: [
       'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
       'packages/gatekeeper-egress/src/meter.ts',
-      'packages/gatekeeper-egress/src/models.ts',
     ],
   },
   secretary: {

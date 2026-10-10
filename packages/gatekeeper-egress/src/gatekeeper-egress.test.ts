@@ -6,7 +6,7 @@ import { RunTokens } from '@beercanlabs/factory-auth';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import type { ApprovalOutcome } from '@beercanlabs/factory-bouncer';
 import { createGatekeeperEgress, type ControlClient, type Policy, type RunContext } from './gatekeeper-egress.js';
-import { ModelUpstreamError } from './models.js';
+import { ModelUpstreamError } from '@beercanlabs/factory-executive';
 import type { ProgressEvent } from '@beercanlabs/factory-inspector';
 
 const REAL_KEY = 'sk-real-provider-key-0000';
