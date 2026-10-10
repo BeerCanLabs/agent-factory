@@ -1,5 +1,5 @@
 import { CodeBuildClient, StartBuildCommand, BatchGetBuildsCommand, type Build } from '@aws-sdk/client-codebuild';
-import { AdmissionRefusedError, imageTagFor, type AdmissionRefusal, type SourceRef } from '../runtime.js';
+import { AdmissionRefusedError, imageTagFor, type AdmissionRefusal, type BuildSkill, type SourceRef } from '../runtime.js';
 import { cleanFailure, parseSkillCheckResult, skillCheckEnv, type SkillChecker, type SkillCheckOutcome } from '@beercanlabs/factory-registrar';
 
 const TERMINAL_FAILURES = new Set(['FAILED', 'FAULT', 'TIMED_OUT', 'STOPPED']);
@@ -33,20 +33,41 @@ export function admissionFailure(build: Build): AdmissionRefusedError {
   return new AdmissionRefusedError(reason, `CodeBuild ${build.buildStatus} in ${phase ?? 'unknown phase'}${detail}`, phase);
 }
 
+/** CodeBuild limits an environment variable's value; a build with this many skills is refused rather than truncated. */
+export const MAX_SKILLS_ENV_CHARS = 3500;
+
+/**
+ * The `SKILLS` value the buildspec reads (SK4): the pins to fetch, as JSON. Only what the build needs: never a manifest
+ * body, a requirement or a credential.
+ */
+export function skillsEnv(skills: readonly BuildSkill[]): string {
+  return JSON.stringify([...skills].sort((a, b) => a.id.localeCompare(b.id)).map(({ id, version, repo, path, commit }) => ({ id, version, repo, path, commit })));
+}
+
 /**
  * Admission build for one pinned commit: the buildspec clones the repo, checks out GIT_COMMIT, refuses a repo
  * without tests, runs them, builds, and pushes `<ecr>:<agentId>-<commit[:12]>`. Polls until the build ends.
+ *
+ * With `opts.skills` (SK4) the buildspec also fetches each adopted skill at its pinned commit, checks it, and adds one
+ * layer holding the skills and their manifest on top of the agent's own image; the tag then carries a hash of the pins
+ * (`imageTagFor`). The agent's Dockerfile is not read for them.
  */
 export async function buildAgentImage(
   agentId: string,
   source: SourceRef,
-  opts: { client?: Pick<CodeBuildClient, 'send'>; pollMs?: number; projectName?: string } = {},
+  opts: { client?: Pick<CodeBuildClient, 'send'>; pollMs?: number; projectName?: string; skills?: readonly BuildSkill[] } = {},
 ): Promise<string> {
   const ecrRepoUri = process.env.FACTORY_ECR_REPO_URI;
   if (!ecrRepoUri) throw new Error('FACTORY_ECR_REPO_URI environment variable is required');
   const client = opts.client ?? new CodeBuildClient({ region: process.env.AWS_REGION || 'us-east-1' });
-  const tag = imageTagFor(agentId, source.commit);
-  const env = { AGENT_ID: agentId, REPO_URL: source.repo, GIT_COMMIT: source.commit, IMAGE_TAG: tag };
+  const skills = opts.skills ?? [];
+  const tag = imageTagFor(agentId, source.commit, skills);
+  const skillsValue = skills.length ? skillsEnv(skills) : '';
+  if (skillsValue.length > MAX_SKILLS_ENV_CHARS) {
+    throw new AdmissionRefusedError('build_failed', `${skills.length} skills do not fit the build's environment (${skillsValue.length} > ${MAX_SKILLS_ENV_CHARS} characters)`);
+  }
+  // Only set when there are skills: the project defines no SKILLS of its own, and an empty override may be refused.
+  const env = { AGENT_ID: agentId, REPO_URL: source.repo, GIT_COMMIT: source.commit, IMAGE_TAG: tag, ...(skillsValue ? { SKILLS: skillsValue } : {}) };
 
   const startRes = await client.send(
     new StartBuildCommand({
