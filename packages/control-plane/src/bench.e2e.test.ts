@@ -14,8 +14,7 @@ import { createGatekeeperEgress, type ControlClient } from '@beercanlabs/factory
 import { httpClient, matrix, recommend, runBench, summarize } from '@beercanlabs/factory-bench';
 import { loadCatalog } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, finishRun, SYSTEM, type FactoryState } from './app.js';
-import { memoryRuntime } from '@beercanlabs/factory-landlord';
-import { MemoryRunStore } from './runs.js';
+import { MemoryRunStore, memoryRuntime } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';

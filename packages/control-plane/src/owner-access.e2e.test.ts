@@ -14,8 +14,7 @@ import { bearerAuth } from '@beercanlabs/factory-auth';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { noopRuntime } from '@beercanlabs/factory-landlord';
-import { MemoryRunStore } from './runs.js';
+import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-landlord';
 import { PolicyStore } from './policy.js';
 import { FileConfigBackend, VersionedConfigStore } from '@beercanlabs/factory-registrar';
 
