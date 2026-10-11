@@ -50,3 +50,8 @@ export class AgentRegistry {
     }
   }
 }
+
+/** The agent registry's records on disk (`registryDir`); with none configured nothing is written. */
+export function registryOf(state: { registryDir?: string }): AgentRegistry {
+  return new AgentRegistry(state.registryDir, (message, err) => console.warn(`[control-plane] ${message}`, err));
+}
