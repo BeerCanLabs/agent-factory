@@ -16,7 +16,7 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { noopRuntime } from '@beercanlabs/factory-landlord';
 import { MemoryRunStore } from './runs.js';
 import { PolicyStore } from './policy.js';
-import type { DeployProvider } from './aws/deploy.js';
+import type { DeployProvider } from '@beercanlabs/factory-landlord/aws/deploy';
 import { FileConfigBackend, VersionedConfigStore, configHash, type ConfigBackend } from '@beercanlabs/factory-registrar';
 import { ownersOf } from './config-store.js';
 

@@ -80,15 +80,6 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/apply.ts',
       'packages/control-plane/src/queues.ts',
       'packages/control-plane/src/runs.ts',
-      'packages/control-plane/src/aws/codebuild.ts',
-      'packages/control-plane/src/aws/deploy.ts',
-      'packages/control-plane/src/aws/ecs.ts',
-      'packages/control-plane/src/aws/gatekeeper-held.ts',
-      'packages/control-plane/src/aws/iam.ts',
-      'packages/control-plane/src/gcp/cloudbuild.ts',
-      'packages/control-plane/src/gcp/cloudrun.ts',
-      'packages/control-plane/src/gcp/deploy.ts',
-      'packages/control-plane/src/gcp/iam.ts',
     ],
   },
   auditor: {
@@ -135,7 +126,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/contract', 'packages/control-plane', 'packages/registrar'],
     owns: [
       'packages/control-plane/src/app.ts',
-      'packages/control-plane/src/aws/codebuild.ts',
+      'packages/control-plane/src/aws/skill-checker.ts',
       'packages/control-plane/src/config-store.ts',
       'packages/control-plane/src/skills.ts',
       'packages/control-plane/src/systems.ts',
@@ -184,7 +175,6 @@ export const SHARED_PACKAGES = ['packages/control-plane', 'packages/gatekeeper-e
  */
 export const SPLIT_FILES: readonly string[] = [
   'packages/control-plane/src/app.ts',
-  'packages/control-plane/src/aws/codebuild.ts',
 ];
 
 /** Entry points that wire the members together; they belong to no one member. */

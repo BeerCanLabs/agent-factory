@@ -12,7 +12,7 @@ import YAML from 'yaml';
 import type { Build } from '@aws-sdk/client-codebuild';
 import type { SkillManifest } from '@beercanlabs/factory-contract';
 import { SKILL_CHECK_SCRIPT, localSkillChecker, manifestB64, parseSkillCheckResult, skillCheckEnv, type SkillCheckOutcome } from '@beercanlabs/factory-registrar';
-import { codeBuildSkillChecker, skillCheckOutcome } from './aws/codebuild.js';
+import { codeBuildSkillChecker, skillCheckOutcome } from './aws/skill-checker.js';
 import { skillCheckerFromEnv } from './skills.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');

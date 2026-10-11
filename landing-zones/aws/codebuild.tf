@@ -63,7 +63,7 @@ resource "aws_iam_role_policy" "codebuild_policy" {
 # Admission build (DESIGN_AUTHORITY.md §6.8 L3/L4). The control plane starts it with AGENT_ID, REPO_URL,
 # GIT_COMMIT (full 40-char SHA) and IMAGE_TAG (<agentId>-<commit[:12]>). It builds exactly that commit, refuses a
 # repository without tests, runs the agent's own tests, and pushes an image tagged by the commit, never a
-# mutable tag. Refusal reasons are exit codes that packages/control-plane/src/aws/codebuild.ts maps back:
+# mutable tag. Refusal reasons are exit codes that packages/landlord/src/aws/codebuild.ts maps back:
 # 3 = no_tests, 4 = tests_failed, 5 = source_unavailable, 6 = hardcoded_secret; any other failure maps from its phase.
 #
 # Skills (§6.14 SK4): when the control plane also sends SKILLS (the agent's adopted skills, each at an approved
@@ -243,7 +243,7 @@ resource "aws_iam_role_policy" "codebuild_skill_checker" {
   })
 }
 
-# Skill checks (SK1). The control plane (packages/control-plane/src/aws/codebuild.ts, codeBuildSkillChecker) starts a
+# Skill checks (SK1). The control plane (packages/control-plane/src/aws/skill-checker.ts, codeBuildSkillChecker) starts a
 # build per registered skill version with SKILL_ID, SKILL_VERSION, REPO_URL, GIT_COMMIT (full SHA), SKILL_PATH and
 # SKILL_MANIFEST_B64 (the registered manifest). The build clones exactly that commit with the agent builder's source
 # token handling, runs the check script in the skill's folder, and exports SKILL_CHECK_RESULT

@@ -116,14 +116,14 @@ let deployProvider: DeployProvider | undefined;
 const deployProviderType = process.env.FACTORY_DEPLOY_PROVIDER || (process.env.FACTORY_RUNTIME === 'ecs' ? 'aws' : process.env.FACTORY_RUNTIME === 'cloudrun' ? 'gcp' : undefined);
 if (deployProviderType === 'aws') {
   try {
-    const { awsDeployProvider } = await import('./aws/deploy.js');
+    const { awsDeployProvider } = await import('@beercanlabs/factory-landlord/aws/deploy');
     deployProvider = awsDeployProvider();
   } catch (err) {
     console.warn('[control-plane] failed to initialize AWS deploy provider:', err);
   }
 } else if (deployProviderType === 'gcp') {
   try {
-    const { gcpDeployProvider } = await import('./gcp/deploy.js');
+    const { gcpDeployProvider } = await import('@beercanlabs/factory-landlord/gcp/deploy');
     deployProvider = gcpDeployProvider();
   } catch (err) {
     console.warn('[control-plane] failed to initialize GCP deploy provider:', err);
