@@ -16,7 +16,7 @@ import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, f
 import { scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { FileRunStore, RunTokens } from './runs.js';
-import { callbackPolicyFromEnv } from './callbacks.js';
+import { callbackPolicyFromEnv } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
