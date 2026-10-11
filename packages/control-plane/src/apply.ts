@@ -13,7 +13,8 @@
 import { BUILTIN_AGENT_IDS, admissionOf, admit, beginAdmission, pinSource, stateAfterRefusal, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { redactSecrets } from '@beercanlabs/factory-ledger';
 import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type SourceRef } from '@beercanlabs/factory-landlord';
-import { registryOf, type FactoryState } from './app.js';
+import { type FactoryState } from './app.js';
+import { registryOf } from '@beercanlabs/factory-registrar';
 import { skillRegistry } from './skills.js';
 
 /** SK4: the skills to build into the agent's image: its configuration's adopted skills, each approved, unretired and pinned. */
