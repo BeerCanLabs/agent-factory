@@ -19,7 +19,7 @@ const matches = (src: string, patterns: RegExp[]) =>
   src.split('\n').flatMap((line, i) => (patterns.some((re) => re.test(line)) ? [`${i + 1}: ${line.trim()}`] : []));
 
 /** The packages that must not carry their own copy: where the cron rule, the schedule store and the firing loop used to live. */
-const GUARDED = /^packages\/(control-plane|gatekeeper-egress|gatekeeper-ingress)\/src\/.*\.ts$/;
+const GUARDED = /^packages\/(control-plane|gatekeeper)\/src\/.*\.ts$/;
 const CLOCK_OWNER = 'packages/control-plane/src/index.ts';
 
 describe('Timekeeper: one copy of the cron rule and one clock', () => {
@@ -58,7 +58,7 @@ describe('Timekeeper: one copy of the cron rule and one clock', () => {
   it('packages/timekeeper does not depend on control-plane, a gatekeeper or the console', () => {
     const pkg = JSON.parse(read('packages/timekeeper/package.json')) as Record<string, Record<string, string> | undefined>;
     const names = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].flatMap((k) => Object.keys(pkg[k] ?? {}));
-    const back = names.filter((n) => /^@beercanlabs\/factory-(control-plane|gatekeeper-.+|console)$/.test(n));
+    const back = names.filter((n) => /^@beercanlabs\/factory-(control-plane|gatekeeper(?:-.+)?|console)$/.test(n));
     assert.deepEqual(back, [], 'the dependency points one way: the control plane depends on the Timekeeper');
   });
 });

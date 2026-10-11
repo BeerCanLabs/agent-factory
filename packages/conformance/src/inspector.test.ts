@@ -38,7 +38,7 @@ const matches = (src: string, patterns = SECOND_COPY) =>
   src.split('\n').flatMap((line, i) => patterns.filter((c) => c.re.test(line)).map((c) => `${i + 1}: ${line.trim()}  [${c.what}]`));
 
 /** Where the rule used to live and could be copied back: the other kernel packages' own source. */
-const GUARDED = /^packages\/(control-plane|gatekeeper|gatekeeper-ingress)\/src\/.*\.ts$/;
+const GUARDED = /^packages\/(control-plane|gatekeeper)\/src\/.*\.ts$/;
 const nonTest = (p: string) => !p.endsWith('.test.ts');
 
 /** A call that makes an Inspector (the definition `function createInspector(` is not a call). */

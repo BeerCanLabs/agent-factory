@@ -38,12 +38,17 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'gatekeeper',
     title: 'Gatekeeper',
     role: 'Perimeter defense, ingress presence, front-door authentication verification (A1, A2), wakes, and outbound routing with credential injection',
-    hostedIn: ['packages/gatekeeper-ingress', 'packages/gatekeeper', 'packages/auth', 'packages/control-plane'],
+    hostedIn: ['packages/gatekeeper', 'packages/auth', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/policy.ts',
       'packages/gatekeeper/src/egress/gatekeeper-egress.ts',
       'packages/gatekeeper/src/egress/main.ts',
+      'packages/gatekeeper/src/ingress/discord.ts',
+      'packages/gatekeeper/src/ingress/http.ts',
+      'packages/gatekeeper/src/ingress/index.ts',
+      'packages/gatekeeper/src/ingress/server.ts',
+      'packages/gatekeeper/src/ingress/wake.ts',
     ],
   },
   keymaster: {

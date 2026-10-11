@@ -209,13 +209,13 @@ describe('Executive: one copy of the model service rules', () => {
   it('packages/executive depends on no control-plane, gatekeeper or console package, in its manifest or its source', () => {
     const pkg = JSON.parse(read('packages/executive/package.json')) as Record<string, Record<string, string> | undefined>;
     const names = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].flatMap((k) => Object.keys(pkg[k] ?? {}));
-    const back = names.filter((n) => /^@beercanlabs\/factory-(control-plane|gatekeeper-.+|console)$/.test(n));
+    const back = names.filter((n) => /^@beercanlabs\/factory-(control-plane|gatekeeper(?:-.+)?|console)$/.test(n));
     assert.deepEqual(back, [], 'the dependency points one way: the gatekeeper-egress depends on the Executive');
 
     // Any way of reaching those packages: `from`, a bare `import 'x'`, `import('x')` and `require('x')`, on one line or several;
     // by package name (with or without a deep path) or by a relative path (with or without `packages/`).
     const SPEC =
-      "(?:@beercanlabs\\/factory-(?:control-plane|gatekeeper-[a-z-]+|console)|(?:\\.\\.\\/)+(?:packages\\/)?(?:control-plane|gatekeeper-[a-z-]+|console))(?=\\/|['\"])";
+      "(?:@beercanlabs\\/factory-(?:control-plane|gatekeeper(?:-[a-z-]+)?|console)|(?:\\.\\.\\/)+(?:packages\\/)?(?:control-plane|gatekeeper(?:-[a-z-]+)?|console))(?=\\/|['\"])";
     const IMPORT_BACK = new RegExp(`\\b(?:from|import|require)\\s*\\(?\\s*['"]${SPEC}`, 'g');
     const backImports = (src: string) =>
       [...src.matchAll(IMPORT_BACK)]
@@ -228,18 +228,18 @@ describe('Executive: one copy of the model service rules', () => {
 
     // Built from pieces, so this file holds no literal cross-package specifier for the imports check to read as a real import.
     const spec = (name: string) => ['@beercanlabs', `factory-${name}`].join('/');
-    const upToEgress = ['..', '..', 'gatekeeper-egress', 'src', 'gatekeeper-egress.js'].join('/');
-    const upThroughPackages = ['..', '..', '..', 'packages', 'gatekeeper-egress', 'src', 'a.js'].join('/');
+    const upToEgress = ['..', '..', 'gatekeeper', 'src', 'index.js'].join('/');
+    const upThroughPackages = ['..', '..', '..', 'packages', 'gatekeeper', 'src', 'a.js'].join('/');
     const caught = [
-      `import { x } from '${spec('gatekeeper-egress')}';`,
-      `import { x } from '${spec('gatekeeper-egress')}/dist/x.js';`,
+      `import { x } from '${spec('gatekeeper')}';`,
+      `import { x } from '${spec('gatekeeper')}/dist/x.js';`,
       `import { x } from '${upToEgress}';`,
       `import { x } from '${upThroughPackages}';`,
       `export { x } from '${spec('control-plane')}';`,
       `import '${spec('console')}';`,
       `const m = await import('${spec('gatekeeper-ingress')}');`,
       `const m = require('${spec('control-plane')}');`,
-      `import {\n  x,\n} from\n  '${spec('gatekeeper-egress')}';`,
+      `import {\n  x,\n} from\n  '${spec('gatekeeper')}';`,
     ];
     for (const src of caught) assert.equal(backImports(src).length, 1, `should be caught: ${JSON.stringify(src)}`);
     const fine = [
@@ -248,7 +248,7 @@ describe('Executive: one copy of the model service rules', () => {
       "import { signV4 } from './sigv4.js';",
       "const note = 'the gatekeeper-egress depends on the Executive';",
       `// import { x } from '${spec('console')}';`,
-      ` * import { x } from '${spec('gatekeeper-egress')}';`,
+      ` * import { x } from '${spec('gatekeeper')}';`,
       `const label = '${spec('console-extras')}';`,
     ];
     for (const src of fine) assert.deepEqual(backImports(src), [], `should be allowed: ${JSON.stringify(src)}`);

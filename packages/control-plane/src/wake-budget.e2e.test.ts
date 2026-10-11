@@ -119,7 +119,7 @@ describe('wake asks the Treasurer before a run exists', () => {
     overMonth(state, 'donna');
     const srv = await listen(state);
     try {
-      // packages/gatekeeper-ingress/src/server.ts posts { input: msg } to this path.
+      // packages/gatekeeper/src/ingress/server.ts posts { input: msg } to this path.
       const res = await post(
         srv.port,
         '/api/v1/agents/donna/wake',
