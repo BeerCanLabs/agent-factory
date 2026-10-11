@@ -8,6 +8,8 @@ It holds so far:
 
 - `Runtime`, `memoryRuntime`, `noopRuntime`, `dockerRuntime`, `dockerApi`, `parseImageMap`, `ecsRuntime`, `defaultEcsCli`, `parseTaskMap`: the runtime launchers, and the build-side types and helpers the cloud adapters share (`SourceRef`, `BuildSkill`, `DeployProvider`, `AdmissionRefusedError`, `imageTagFor`, `skillsHash`, the skills manifest constants).
 
-The cloud adapters, the run store and the run lifecycle follow in TSK-181 to TSK-185. The HTTP wake and run handlers stay in `control-plane`.
+- `aws/*` and `gcp/*` (subpath exports, loaded lazily so a deployment pulls in only its own cloud's SDKs): the image build (CodeBuild, Cloud Build), the agent execution roles and secret access (IAM), the task and job registration (ECS, Cloud Run) and the `DeployProvider` for each. `landing-zones/` holds the matching infrastructure.
+
+The run store and the run lifecycle follow in TSK-182 to TSK-184. The HTTP wake and run handlers stay in `control-plane`.
 
 The dependency points one way: the control plane depends on the Landlord; the Landlord depends on the Registrar and the Secretary (`packages/hydrate`) and never imports the control plane.

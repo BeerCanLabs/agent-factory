@@ -1,4 +1,4 @@
-import type { BuildSkill, DeployProvider, SourceRef } from '@beercanlabs/factory-landlord';
+import type { BuildSkill, DeployProvider, SourceRef } from '../runtime.js';
 import { buildAgentImage } from './codebuild.js';
 import { provisionAgentRoles } from './iam.js';
 import { registerAgentTaskDefinition } from './ecs.js';

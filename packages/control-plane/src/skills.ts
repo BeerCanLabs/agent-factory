@@ -78,7 +78,7 @@ export async function skillCheckerFromEnv(env: NodeJS.ProcessEnv = process.env):
   const provider = env.FACTORY_DEPLOY_PROVIDER || (env.FACTORY_RUNTIME === 'ecs' ? 'aws' : undefined);
   const kind = env.FACTORY_SKILL_CHECKER || (provider === 'aws' ? 'codebuild' : 'none');
   if (kind === 'codebuild') {
-    const { codeBuildSkillChecker } = await import('./aws/codebuild.js');
+    const { codeBuildSkillChecker } = await import('./aws/skill-checker.js');
     return codeBuildSkillChecker();
   }
   if (kind === 'local') return localSkillChecker();

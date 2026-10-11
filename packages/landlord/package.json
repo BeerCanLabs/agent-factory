@@ -2,22 +2,32 @@
   "name": "@beercanlabs/factory-landlord",
   "version": "0.1.0",
   "private": true,
-  "description": "Landlord: the Factory's compute lifecycle (callback delivery and the runtime launchers today; the cloud adapters, run store and run lifecycle follow).",
+  "description": "Landlord: the Factory's compute lifecycle (callback delivery, the runtime launchers and the AWS and GCP build, IAM and deploy adapters today; the run store and run lifecycle follow).",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./aws/*": "./dist/aws/*.js",
+    "./gcp/*": "./dist/gcp/*.js"
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/runtime-ecs.test.ts src/runtime-docker.test.ts"
+    "test": "tsx --test src/runtime-ecs.test.ts src/runtime-docker.test.ts src/aws/gatekeeper-held.test.ts src/aws/iam.test.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-codebuild": "^3.1136.0",
+    "@aws-sdk/client-ecs": "^3.1136.0",
+    "@aws-sdk/client-iam": "^3.1136.0",
+    "@aws-sdk/client-secrets-manager": "^3.1136.0",
     "@beercanlabs/factory-hydrate": "0.1.0",
-    "@beercanlabs/factory-registrar": "0.1.0"
+    "@beercanlabs/factory-registrar": "0.1.0",
+    "@google-cloud/cloudbuild": "^4.8.1",
+    "@google-cloud/iam-credentials": "^4.2.2",
+    "@google-cloud/run": "^2.3.0",
+    "google-auth-library": "^9.15.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
