@@ -1,0 +1,602 @@
+/**
+ * The Landlord's run lifecycle (DESIGN_AUTHORITY.md §6.15, L1 to L6): waking an agent (`createRun`), starting a queued
+ * run, finishing it, parking and unparking it, the idle timeout, the turn mailbox, the kill switch, health checks and
+ * the reconcile of runs whose tasks outlive the process. Moved out of the control plane's `app.ts` (TSK-183, GAP-132).
+ *
+ * `LandlordState` is the part of the control plane's `FactoryState` this code reads and writes, so the package does not
+ * import the control plane; `FactoryState` is assignable to it. The HTTP handlers that call these functions stay in
+ * `control-plane`, where the Bouncer's privileges and the Gatekeeper's run-token rule meet a request.
+ */
+import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
+import { checkStanding, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
+import type { AuthenticatedCaller } from '@beercanlabs/factory-bouncer';
+import type { FactoryMetrics } from '@beercanlabs/factory-inspector';
+import type { LedgerStore } from '@beercanlabs/factory-ledger';
+import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
+import { BUILTIN_AGENT_IDS, registryOf, type AgentRecord } from '@beercanlabs/factory-registrar';
+import { checkCallbackUrl, deliverCallback, type CallbackPolicy } from './callbacks.js';
+import { isTerminal, type Run, type RunState, type RunStore, type RunTokens } from './runs.js';
+import type { Runtime } from './runtime.js';
+
+export type Outcome<T> = { status: number; body: T | { error: string; [k: string]: unknown } };
+
+/** What the lifecycle reads from the policy store: the budget it enforces and the routes it hands the run. */
+export type LandlordPolicies = {
+  get(agentId: string): { budgetUsd?: BudgetLimits; routes?: string[] };
+  has(agentId: string): boolean;
+};
+
+/** The part of the control plane's `FactoryState` the run lifecycle uses. `FactoryState` is assignable to it. */
+export type LandlordState = {
+  agents: Map<string, AgentRecord>;
+  registryDir?: string;
+  ledger: LedgerStore;
+  runtime: Runtime;
+  runs: RunStore;
+  runTokens: RunTokens;
+  callbacks: CallbackPolicy;
+  policies: LandlordPolicies;
+  spend: SpendTracker;
+  providers: SecretProvider[];
+  secretValues: Set<string>;
+  secretCache?: Map<string, { value: string; at: number }>;
+  /** Provider keys only the gatekeeper-egress holds (S1); pre-flight treats them as satisfied and never reads them. */
+  gatekeeperEgressHeldSecrets?: Set<string>;
+  publicUrl?: string;
+  gatekeeperEgressUrl?: string;
+  gatekeeperIngressUrl?: string;
+  gatekeeperIngressToken?: string;
+  /** Max wall-clock per run before it is stopped as TIMED_OUT. 0 disables. */
+  idleMs: number;
+  idleTimers: Map<string, ReturnType<typeof setTimeout>>;
+  heartbeatTimeoutMs?: number;
+  maxRssMb?: number;
+  crashLoopThreshold?: number;
+  metrics?: FactoryMetrics;
+  /** In-memory mailboxes for running tasks to receive follow-up messages while warm. */
+  mailboxes?: Map<string, MailboxQueue>;
+};
+
+export type MailboxMessage = {
+  id: string;
+  timestamp: string;
+  payload: unknown;
+};
+
+export type MailboxQueue = {
+  messages: MailboxMessage[];
+  waiters: Array<(msg: MailboxMessage) => void>;
+};
+
+export function deliverToMailbox(state: LandlordState, agentId: string, payload: unknown) {
+  if (!state.mailboxes) state.mailboxes = new Map();
+  let queue = state.mailboxes.get(agentId);
+  if (!queue) {
+    queue = { messages: [], waiters: [] };
+    state.mailboxes.set(agentId, queue);
+  }
+  const msg: MailboxMessage = {
+    id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    timestamp: new Date().toISOString(),
+    payload,
+  };
+  const waiter = queue.waiters.shift();
+  if (waiter) {
+    waiter(msg);
+  } else {
+    queue.messages.push(msg);
+  }
+  const run = activeRun(state, agentId);
+  if (run) {
+    scheduleTimeout(state, run);
+  }
+}
+
+/** Actors for actions the factory takes on its own (not on behalf of a caller). */
+export const SYSTEM = {
+  idle: 'factory:run-timeout',
+  scheduler: 'factory:scheduler',
+  runtime: 'factory:runtime',
+  router: 'factory:event-router',
+  reconciler: 'factory:reconciler',
+  health: 'factory:health',
+  policy: 'factory:policy',
+} as const;
+
+export async function notifyGatekeeperIngress(state: LandlordState, agentId: string, presence: 'offline' | 'starting' | 'available') {
+  if (!state.gatekeeperIngressUrl) return;
+  try {
+    const res = await fetch(`${state.gatekeeperIngressUrl.replace(/\/$/, '')}/api/v1/presence`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(state.gatekeeperIngressToken ? { Authorization: `Bearer ${state.gatekeeperIngressToken}` } : {}),
+      },
+      body: JSON.stringify({ agentId, presence }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) console.error(`[control-plane] gatekeeper-ingress presence ${res.status}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[control-plane] gatekeeper-ingress unreachable: ${message}`);
+  }
+}
+
+export function record(state: LandlordState, run: Pick<Run, 'agentId' | 'runId'>, action: string, actor: string) {
+  state.ledger.append({
+    timestamp: new Date().toISOString(),
+    agentId: run.agentId,
+    runId: run.runId,
+    type: 'action',
+    action,
+    actor,
+  });
+}
+
+export function activeRun(state: LandlordState, agentId: string): Run | undefined {
+  return state.runs.list({ agentId, active: true }).find((r) => r.state !== 'QUEUED');
+}
+
+const SECRET_CACHE_TTL_MS = 5 * 60 * 1000;
+
+export async function bindAgentSecrets(state: LandlordState, names: string[]): Promise<{ ok: true; env: Record<string, string> } | { ok: false; missing: string[] }> {
+  const cache = (state.secretCache ??= new Map());
+  const now = Date.now();
+  const env: Record<string, string> = {};
+  const uncached: string[] = [];
+  for (const name of names.filter((n) => !state.gatekeeperEgressHeldSecrets?.has(n))) {
+    const hit = cache.get(name);
+    if (hit && now - hit.at < SECRET_CACHE_TTL_MS) env[name] = hit.value;
+    else uncached.push(name);
+  }
+  if (uncached.length) {
+    const bound = await bindSecrets(uncached, state.providers);
+    if (!bound.ok) return bound;
+    for (const [name, value] of Object.entries(bound.env)) {
+      cache.set(name, { value, at: now });
+      env[name] = value;
+    }
+  }
+  for (const value of Object.values(env)) if (value.length >= 4) state.secretValues.add(value);
+  return { ok: true, env };
+}
+
+export function scheduleTimeout(state: LandlordState, run: Run) {
+  const prev = state.idleTimers.get(run.agentId);
+  if (prev) clearTimeout(prev);
+  const agent = state.agents.get(run.agentId);
+  const idleWindowMs = (agent?.warmDownSeconds && agent.warmDownSeconds > 0)
+    ? agent.warmDownSeconds * 1000
+    : (state.idleMs > 0 ? state.idleMs : 3_600_000);
+  // idleMs is a hard wall-clock cap from run start: activity can extend the idle window, never past the cap.
+  const started = run.startedAt ? Date.parse(run.startedAt) : Date.now();
+  const capMs = state.idleMs > 0 ? state.idleMs - (Date.now() - started) : Infinity;
+  const timeoutMs = Math.max(0, Math.min(idleWindowMs, capMs));
+  const t = setTimeout(() => {
+    const cur = state.runs.get(run.runId);
+    if (cur && !isTerminal(cur.state)) void finishRun(state, run.runId, 'TIMED_OUT', { actor: SYSTEM.idle });
+  }, timeoutMs);
+  t.unref?.();
+  state.idleTimers.set(run.agentId, t);
+}
+
+/** Park a live run. The task keeps running; the gatekeeper-egress refuses its egress until unblocked. */
+export function blockRun(state: LandlordState, runId: string, to: 'BLOCKED_BUDGET_EXCEEDED' | 'BLOCKED_FOR_HUMAN' | 'BLOCKED_UNHEALTHY', actor: string) {
+  const run = state.runs.get(runId);
+  if (!run || isTerminal(run.state) || run.state === to) return run;
+  const timer = state.idleTimers.get(run.agentId);
+  if (timer) clearTimeout(timer);
+  const next = state.runs.update(runId, { state: to });
+  record(state, next, to, actor);
+  return next;
+}
+
+export function unblockRun(state: LandlordState, runId: string, from: RunState, actor: string) {
+  const run = state.runs.get(runId);
+  if (!run || run.state !== from) return run;
+  const next = state.runs.update(runId, { state: 'WORKING' });
+  record(state, next, 'RUN_UNBLOCKED', actor);
+  scheduleTimeout(state, next);
+  return next;
+}
+
+export type CreateRunOptions = {
+  actor: string;
+  trigger: string;
+  input?: unknown;
+  callbackUrl?: string;
+  model?: string;
+  requestedBy?: { provider: string; id: string };
+  caller?: AuthenticatedCaller;
+};
+
+/** The single entry point for waking an agent: manual, webhook, cron, event route, gatekeeper-ingress. */
+export async function createRun(state: LandlordState, agentId: string, opts: CreateRunOptions): Promise<Outcome<Run>> {
+  const agent = state.agents.get(agentId);
+  if (!agent) return { status: 404, body: { error: 'not_found' } };
+  if (agent.state === 'PAUSED' || agent.state === 'ISOLATED') {
+    return { status: 409, body: { error: `agent_${agent.state.toLowerCase()}` } };
+  }
+  if (opts.callbackUrl) {
+    const bad = checkCallbackUrl(opts.callbackUrl, state.callbacks);
+    if (bad) return { status: 400, body: { error: bad } };
+  }
+
+  // Sanitize input: never mutate caller's object, and never allow a forged caller
+  let sanitizedInput: unknown = opts.input;
+  if (opts.input && typeof opts.input === 'object' && !Array.isArray(opts.input)) {
+    const copy = { ...(opts.input as Record<string, unknown>) };
+    delete copy.caller;
+    if (opts.caller) {
+      copy.caller = { ...opts.caller };
+    }
+    sanitizedInput = copy;
+  } else if (opts.caller && opts.input === undefined) {
+    sanitizedInput = { caller: { ...opts.caller } };
+  }
+
+  // Deduplicate incoming runs with identical messageId
+  if (sanitizedInput && typeof sanitizedInput === 'object') {
+    const msgId = (sanitizedInput as Record<string, any>).messageId;
+    if (msgId) {
+      const existing = state.runs.list({ agentId }).find((r) => {
+        const rInput = r.input as Record<string, any> | undefined;
+        return rInput && rInput.messageId === msgId;
+      });
+      if (existing) {
+        return { status: 200, body: existing };
+      }
+    }
+  }
+
+  // No run exists yet, so perRun does not apply. Built-ins stay exempt, same predicate as ledger ingest.
+  const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
+  if (!isBuiltin) {
+    const budget = state.policies.get(agentId).budgetUsd;
+    const standing = checkStanding({
+      limits: budget ? { perDay: budget.perDay, perMonth: budget.perMonth } : undefined,
+      spend: state.spend.get(agentId, undefined),
+    });
+    if (!standing.inGoodStanding) {
+      // A queue message is left for SQS to redeliver, so a refusal row on every visibility timeout would flood the ledger.
+      if (opts.trigger !== 'queue') {
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId,
+          type: 'action',
+          action: 'WAKE_REFUSED_BUDGET_EXCEEDED',
+          actor: SYSTEM.policy,
+        });
+      }
+      return { status: 402, body: { error: 'budget_exceeded', window: standing.window } };
+    }
+  }
+
+  // S1 backstop, every runtime: pre-flight required secrets (412) and learn their values so they are redacted
+  // from results and ledger rows. Cloud runtimes ignore the values; their platform injects its own.
+  const bound = await bindAgentSecrets(state, agent.ungated ?? agent.requires);
+  if (!bound.ok) {
+    const run = state.runs.create({
+      agentId,
+      state: 'PRE_FLIGHT_MISSING_SECRET',
+      actor: opts.actor,
+      trigger: opts.trigger,
+      callbackUrl: opts.callbackUrl,
+      ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
+      ...(opts.caller ? { caller: opts.caller } : {}),
+      missing: bound.missing,
+    });
+    record(state, run, 'PRE_FLIGHT_MISSING_SECRET', opts.actor);
+    void fireCallback(state, run);
+    return { status: 412, body: { error: 'unbound_secrets', missing: bound.missing, runId: run.runId } };
+  }
+
+  const busy = activeRun(state, agentId);
+  const run = state.runs.create({
+    agentId,
+    state: 'QUEUED',
+    actor: opts.actor,
+    trigger: opts.trigger,
+    input: sanitizedInput,
+    callbackUrl: opts.callbackUrl,
+    ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
+    ...(opts.caller ? { caller: opts.caller } : {}),
+    ...(opts.model ? { model: opts.model } : {}),
+  });
+  record(state, run, 'RUN_QUEUED', opts.actor);
+  if (busy) return { status: 202, body: run };
+  return { status: 202, body: await startRun(state, run, bound.env) };
+}
+
+export async function startRun(state: LandlordState, run: Run, secrets?: Record<string, string>): Promise<Run> {
+  const agent = state.agents.get(run.agentId)!;
+  let env = secrets;
+  if (!env) {
+    const bound = await bindAgentSecrets(state, agent.ungated ?? agent.requires);
+    if (!bound.ok) {
+      const failed = state.runs.update(run.runId, { state: 'PRE_FLIGHT_MISSING_SECRET', missing: bound.missing });
+      record(state, failed, 'PRE_FLIGHT_MISSING_SECRET', SYSTEM.runtime);
+      void fireCallback(state, failed);
+      return failed;
+    }
+    env = bound.env;
+  }
+  for (const value of Object.values(env)) if (value.length >= 4) state.secretValues.add(value);
+
+  // E7 deny-by-default: starting a run never changes the agent's policy; only admin actions do.
+
+  let cur = state.runs.update(run.runId, { state: 'STARTING' });
+  // P1: a started task is not a ready agent. Presence shows starting now and available only on markRunReady.
+  await notifyGatekeeperIngress(state, agent.id, 'starting');
+  const runToken = await state.runTokens.mint(run);
+  const runEnv: Record<string, string> = {
+    FACTORY_RUN_ID: run.runId,
+    FACTORY_RUN_TOKEN: runToken,
+    ...(state.publicUrl ? { FACTORY_URL: state.publicUrl } : {}),
+    ...(run.model ? { FACTORY_MODEL: run.model } : {}),
+    ...(state.gatekeeperEgressUrl ? { FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl } : {}),
+    ...gatekeeperEgressEnv({
+      FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl,
+      FACTORY_RUN_TOKEN: runToken,
+      FACTORY_EGRESS_ROUTES: (state.policies.has(agent.id) ? state.policies.get(agent.id).routes ?? [] : []).join(','),
+    }),
+  };
+  try {
+    const { handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv });
+    cur = state.runs.update(run.runId, { state: 'WORKING', taskHandle: handle, startedAt: new Date().toISOString() });
+  } catch (err) {
+    return finishRun(state, run.runId, 'FAILED', {
+      actor: SYSTEM.runtime,
+      error: `start failed: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+  agent.state = 'WORKING';
+  record(state, cur, 'RUN_STARTED', run.actor);
+  scheduleTimeout(state, cur);
+  return cur;
+}
+
+/**
+ * P1 readiness: the run's first input fetch, heartbeat or mailbox poll is the earliest signal from inside the
+ * container that the agent process is running and can take a turn (a conversational worker fetches input on boot
+ * or polls its mailbox for follow-ups; the shim heartbeats after spawning). Only then does presence go available.
+ */
+export async function markRunReady(state: LandlordState, runId: string) {
+  // Synchronous up to the notification, so the run is marked ready before the caller answers; the notification
+  // itself never delays the run's heartbeat or mailbox reply.
+  const run = state.runs.get(runId);
+  if (!run || run.readyAt || run.state !== 'WORKING') return;
+  const ready = state.runs.update(runId, { readyAt: new Date().toISOString() });
+  record(state, ready, 'RUN_READY', `run:${run.agentId}`);
+  await notifyGatekeeperIngress(state, run.agentId, 'available');
+}
+
+export async function finishRun(
+  state: LandlordState,
+  runId: string,
+  terminal: Extract<RunState, 'DONE' | 'FAILED' | 'TIMED_OUT' | 'CANCELLED'>,
+  extra: { actor: string; exitCode?: number | null; result?: unknown; error?: string },
+): Promise<Run> {
+  const cur = state.runs.get(runId);
+  if (!cur) throw new Error(`unknown run ${runId}`);
+  if (isTerminal(cur.state)) return cur;
+  const agent = state.agents.get(cur.agentId);
+
+  const done = state.runs.update(runId, {
+    state: terminal,
+    ...(extra.exitCode !== undefined ? { exitCode: extra.exitCode } : {}),
+    ...(extra.result !== undefined ? { result: extra.result } : {}),
+    ...(extra.error !== undefined ? { error: extra.error } : {}),
+  });
+  record(state, done, `RUN_${terminal}`, extra.actor);
+  state.metrics?.runs.add(1, { agent: done.agentId, state: terminal, trigger: done.trigger });
+  if (done.startedAt) {
+    state.metrics?.runSeconds.record((Date.parse(done.updatedAt) - Date.parse(done.startedAt)) / 1000, { agent: done.agentId, state: terminal });
+  }
+
+  const timer = state.idleTimers.get(done.agentId);
+  if (timer) clearTimeout(timer);
+  state.idleTimers.delete(done.agentId);
+
+  const queue = state.mailboxes?.get(done.agentId);
+  if (queue) {
+    while (queue.waiters.length > 0) {
+      const w = queue.waiters.shift();
+      w?.({ id: 'done', timestamp: new Date().toISOString(), payload: null });
+    }
+    queue.messages.length = 0;
+  }
+
+  if (agent) {
+    if (state.runtime.running(agent.id) || done.taskHandle) {
+      try {
+        await state.runtime.stop(agent, done.taskHandle);
+      } catch (err) {
+        console.error(`[control-plane] stop ${agent.id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (agent.state === 'WORKING') agent.state = terminal === 'DONE' ? 'SLEEPING' : 'ERROR';
+    await notifyGatekeeperIngress(state, agent.id, 'offline');
+  }
+  if (terminal === 'FAILED' && done.agentId !== 'med-doc' && state.agents.has('med-doc')) {
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: done.agentId, runId, type: 'crash', actor: SYSTEM.runtime });
+    await createRun(state, 'med-doc', { actor: SYSTEM.router, trigger: 'event:crash', input: { agentId: done.agentId, runId } });
+  }
+
+  void fireCallback(state, done);
+  if (terminal === 'FAILED') await breakCrashLoop(state, done.agentId);
+
+  const next = state.runs.list({ agentId: done.agentId, active: true }).find((r) => r.state === 'QUEUED');
+  if (next && agent && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED') await startRun(state, next);
+  return done;
+}
+
+export async function fireCallback(state: LandlordState, run: Run) {
+  if (!run.callbackUrl) return;
+  const outcome = await deliverCallback(
+    run.callbackUrl,
+    {
+      runId: run.runId,
+      agentId: run.agentId,
+      state: run.state,
+      result: run.result,
+      error: run.error,
+      missing: run.missing,
+      exitCode: run.exitCode,
+      finishedAt: run.updatedAt,
+    },
+    state.callbacks,
+  );
+  record(state, run, outcome.ok ? 'RUN_CALLBACK_DELIVERED' : 'RUN_CALLBACK_FAILED', 'factory:callbacks');
+  if (!outcome.ok) console.error(`[control-plane] callback for ${run.runId}: ${outcome.error ?? outcome.status}`);
+}
+
+/**
+ * Recovery for an agent that is stuck: ends every run it still has (a stopped container, a result that never arrived,
+ * a run left blocked), stops the task, tells the ingress it is offline, and puts the agent back to SLEEPING. It does
+ * not touch the budget, the policy or the agent's memory, and the next wake is still checked like any other. A paused,
+ * isolated, deploying or retired agent is refused: those have their own controls.
+ */
+export async function resetAgent(state: LandlordState, id: string, actor: string): Promise<Outcome<AgentRecord>> {
+  const agent = state.agents.get(id);
+  if (!agent) return { status: 404, body: { error: 'not_found' } };
+  if (agent.state !== 'WORKING' && agent.state !== 'SLEEPING' && agent.state !== 'ERROR') {
+    return { status: 409, body: { error: `agent_${String(agent.state).toLowerCase()}` } as any };
+  }
+  for (const run of state.runs.list({ agentId: id, active: true })) {
+    await finishRun(state, run.runId, 'CANCELLED', { actor, error: `reset by ${actor}` });
+  }
+  agent.state = 'SLEEPING';
+  await notifyGatekeeperIngress(state, id, 'offline');
+  state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_RESET', actor });
+  registryOf(state).update(agent);
+  return { status: 200, body: agent };
+}
+
+export async function applyKillSwitch(
+  state: LandlordState,
+  id: string,
+  command: 'PAUSE' | 'ISOLATE' | 'RESUME',
+  actor: string,
+): Promise<Outcome<AgentRecord>> {
+  const agent = state.agents.get(id);
+  if (!agent) return { status: 404, body: { error: 'not_found' } };
+  const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
+  if (isBuiltin && (command === 'PAUSE' || command === 'ISOLATE')) {
+    return {
+      status: 400,
+      body: {
+        error: 'builtin_agents_exempt_from_killswitch',
+        message: 'Built-in system agents are critical infrastructure and cannot be paused or isolated.',
+      } as any,
+    };
+  }
+  if (command === 'PAUSE') agent.state = 'PAUSED';
+  else if (command === 'ISOLATE') agent.state = 'ISOLATED';
+  else agent.state = activeRun(state, id) ? 'WORKING' : 'SLEEPING';
+  state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: command, actor });
+  registryOf(state).update(agent);
+  if (command === 'RESUME' && !activeRun(state, id)) {
+    const next = state.runs.list({ agentId: id, active: true }).find((r) => r.state === 'QUEUED');
+    if (next) await startRun(state, next);
+  }
+  return { status: 200, body: agent };
+}
+
+/** Pause an agent whose recent runs keep failing, so the queue stops feeding it. */
+async function breakCrashLoop(state: LandlordState, agentId: string) {
+  const threshold = state.crashLoopThreshold ?? 0;
+  const agent = state.agents.get(agentId);
+  const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(agentId));
+  if (isBuiltin || threshold <= 0 || !agent || agent.state === 'PAUSED' || agent.state === 'ISOLATED') return;
+  const since = Date.now() - 10 * 60_000;
+  const recent = state.runs
+    .list({ agentId })
+    .filter((r) => isTerminal(r.state) && Date.parse(r.updatedAt) >= since)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  let streak = 0;
+  for (const r of recent) {
+    if (r.state !== 'FAILED') break;
+    streak++;
+  }
+  if (streak < threshold) return;
+  await applyKillSwitch(state, agentId, 'PAUSE', SYSTEM.health);
+  state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'CRASH_LOOP_PAUSED', actor: SYSTEM.health });
+  state.metrics?.health.add(1, { agent: agentId, kind: 'crash_loop' });
+}
+
+/** Halt compute for a run that went silent or over its memory ceiling; park it for a human. */
+export async function haltUnhealthy(state: LandlordState, runId: string, reason: string) {
+  const run = state.runs.get(runId);
+  if (!run || isTerminal(run.state) || run.state === 'BLOCKED_UNHEALTHY') return;
+  const agent = state.agents.get(run.agentId);
+  if (agent) {
+    try {
+      await state.runtime.stop(agent, run.taskHandle);
+    } catch (err) {
+      console.error(`[control-plane] halt ${run.agentId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    agent.state = 'ERROR';
+  }
+  blockRun(state, runId, 'BLOCKED_UNHEALTHY', SYSTEM.health);
+  state.runs.update(runId, { error: reason });
+  const crash = state.ledger.append({ timestamp: new Date().toISOString(), agentId: run.agentId, runId, type: 'crash', action: reason, actor: SYSTEM.health });
+  state.metrics?.health.add(1, { agent: run.agentId, kind: 'unhealthy' });
+  await routeEvents(state, crash);
+}
+
+/** Runs opt in to liveness by sending their first heartbeat; silent runs are governed by the run timeout. */
+export async function checkHealth(state: LandlordState, now = Date.now()) {
+  for (const run of state.runs.list({ active: true })) {
+    if (run.state !== 'WORKING' || !run.lastHeartbeatAt) continue;
+    if (state.heartbeatTimeoutMs && now - Date.parse(run.lastHeartbeatAt) > state.heartbeatTimeoutMs) {
+      await haltUnhealthy(state, run.runId, 'HEARTBEAT_LOST');
+    } else if (state.maxRssMb && (run.rssMb ?? 0) > state.maxRssMb) {
+      await haltUnhealthy(state, run.runId, 'MEMORY_CEILING');
+    }
+  }
+}
+
+export async function routeEvents(state: LandlordState, event: { type: string; agentId: string; runId?: string }) {
+  if (event.type === 'crash' && event.agentId !== 'med-doc' && state.agents.has('med-doc')) {
+    await createRun(state, 'med-doc', { actor: SYSTEM.router, trigger: 'event:crash', input: { agentId: event.agentId, runId: event.runId } });
+  }
+  if (event.type === 'budget.alert' && event.agentId !== 'finops-officer' && state.agents.has('finops-officer')) {
+    await createRun(state, 'finops-officer', { actor: SYSTEM.router, trigger: 'event:budget.alert', input: { agentId: event.agentId } });
+  }
+}
+
+/** Poll runtimes whose tasks outlive this process; finish runs whose tasks stopped. */
+export async function reconcileRuns(state: LandlordState): Promise<void> {
+  for (const run of state.runs.list({ active: true })) {
+    if (run.state === 'QUEUED') continue;
+    if (!state.runtime.status || !run.taskHandle) {
+      if (!state.runtime.running(run.agentId)) {
+        await finishRun(state, run.runId, 'FAILED', { actor: SYSTEM.reconciler, error: 'task lost: control plane restarted' });
+      }
+      continue;
+    }
+    const s = await state.runtime.status(run.taskHandle).catch(() => ({ state: 'unknown' as const }));
+    if (s.state === 'stopped') {
+      await finishRun(state, run.runId, s.exitCode === 0 ? 'DONE' : 'FAILED', {
+        actor: SYSTEM.reconciler,
+        exitCode: s.exitCode,
+        ...(s.exitCode === 0 ? {} : { error: s.reason ?? `exit ${s.exitCode}` }),
+      });
+    } else if (s.state === 'running') {
+      const agent = state.agents.get(run.agentId);
+      if (agent && agent.state === 'SLEEPING') agent.state = 'WORKING';
+      if (!state.idleTimers.has(run.agentId)) {
+        scheduleTimeout(state, run);
+      }
+    } else if (s.state === 'unknown') {
+      const ageMs = Date.now() - new Date(run.startedAt || run.createdAt).getTime();
+      if (ageMs > 60_000) {
+        await finishRun(state, run.runId, 'FAILED', {
+          actor: SYSTEM.reconciler,
+          error: 'task lost: task not found in runtime',
+        });
+      }
+    }
+  }
+}

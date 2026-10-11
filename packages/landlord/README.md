@@ -13,6 +13,8 @@ It holds so far:
 - `MemoryRunStore`, `FileRunStore`, `RunStore`, `Run`, `RunState`, `isTerminal`, `RunTokens`: the run store and run tokens.
 - `pollQueueOnce`, `startQueuePollers`: SQS queue triggers. They take a `createRun` callback; the Landlord never imports the control plane.
 
-The run lifecycle (`createRun`, `finishRun`, the kill switch, health and reconcile) follows in TSK-183 and TSK-184. The HTTP wake and run handlers stay in `control-plane`.
+- `createRun`, `startRun`, `finishRun`, `blockRun`, `unblockRun`, `activeRun`, `resetAgent`, `applyKillSwitch`, `checkHealth`, `reconcileRuns`, `routeEvents`, `deliverToMailbox`, `SYSTEM` and the rest of the run lifecycle (`lifecycle.ts`). They take `LandlordState`, the part of the control plane's `FactoryState` they use, so the Landlord does not import the control plane.
+
+The typed contract over these functions, and the guard test, follow in TSK-184 and TSK-185. The HTTP wake and run handlers stay in `control-plane`.
 
 The dependency points one way: the control plane depends on the Landlord; the Landlord depends on the Registrar and the Secretary (`packages/hydrate`) and never imports the control plane.

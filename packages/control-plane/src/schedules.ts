@@ -13,9 +13,9 @@ import type { Role } from '@beercanlabs/factory-auth';
 import { authorize, authorizeIngress, type AuthenticatedCaller } from '@beercanlabs/factory-bouncer';
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { DEFAULT_TIMEZONE, cronIssue, isTimeZone, type ScheduledAction, type ScheduleRequester } from '@beercanlabs/factory-timekeeper';
-import { json, readJson, requirePrivilege, SYSTEM, type FactoryState } from './app.js';
+import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import { isTerminal, SYSTEM, type Run } from '@beercanlabs/factory-landlord';
 import { ownersOf } from './config-store.js';
-import { isTerminal, type Run } from '@beercanlabs/factory-landlord';
 
 function adminEmailsFromEnv(): string[] {
   return (process.env.FACTORY_ADMIN_EMAILS ?? '')

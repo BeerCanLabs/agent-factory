@@ -32,8 +32,8 @@ import {
   type RunInterval,
   type TaskSize,
 } from '@beercanlabs/factory-budget';
-import { bearerOf, json, readJson, requirePrivilege, routeEvents, SYSTEM, type FactoryState } from './app.js';
-import { isTerminal } from '@beercanlabs/factory-landlord';
+import { bearerOf, json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import { isTerminal, routeEvents, SYSTEM } from '@beercanlabs/factory-landlord';
 
 /** Agent tasks are registered at 0.25 vCPU / 0.5 GB (`aws/ecs.ts`). */
 export const DEFAULT_AGENT_TASK_SIZE: TaskSize = { vcpu: 0.25, memoryGb: 0.5 };
