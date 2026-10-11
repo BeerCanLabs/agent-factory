@@ -38,7 +38,7 @@ const matches = (src: string, patterns = SECOND_COPY) =>
   src.split('\n').flatMap((line, i) => patterns.filter((c) => c.re.test(line)).map((c) => `${i + 1}: ${line.trim()}  [${c.what}]`));
 
 /** Where the rule used to live and could be copied back: the other kernel packages' own source. */
-const GUARDED = /^packages\/(control-plane|gatekeeper-egress|gatekeeper-ingress)\/src\/.*\.ts$/;
+const GUARDED = /^packages\/(control-plane|gatekeeper|gatekeeper-ingress)\/src\/.*\.ts$/;
 const nonTest = (p: string) => !p.endsWith('.test.ts');
 
 /** A call that makes an Inspector (the definition `function createInspector(` is not a call). */
@@ -129,11 +129,11 @@ describe('Inspector: one copy of the events, progress, traces, metrics and triag
   it('packages/inspector depends on no control-plane, gatekeeper or console package, in its manifest or its source', () => {
     const pkg = JSON.parse(read('packages/inspector/package.json')) as Record<string, Record<string, string> | undefined>;
     const names = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].flatMap((k) => Object.keys(pkg[k] ?? {}));
-    const back = names.filter((n) => /^@beercanlabs\/factory-(control-plane|gatekeeper-.+|console)$/.test(n));
+    const back = names.filter((n) => /^@beercanlabs\/factory-(control-plane|gatekeeper(?:-.+)?|console)$/.test(n));
     assert.deepEqual(back, [], 'the dependency points one way: the control plane and the egress depend on the Inspector');
 
-    const IMPORT_BACK = /\bfrom\s+['"](?:@beercanlabs\/factory-(?:control-plane|gatekeeper-[a-z-]+|console)|(?:\.\.\/)+(?:control-plane|gatekeeper-[a-z-]+|console))\b/;
-    assert.equal(IMPORT_BACK.test("import { x } from '@beercanlabs/factory-gatekeeper-egress';"), true);
+    const IMPORT_BACK = /\bfrom\s+['"](?:@beercanlabs\/factory-(?:control-plane|gatekeeper(?:-[a-z-]+)?|console)|(?:\.\.\/)+(?:control-plane|gatekeeper(?:-[a-z-]+)?|console))\b/;
+    assert.equal(IMPORT_BACK.test("import { x } from '@beercanlabs/factory-gatekeeper';"), true);
     const upToControlPlane = ['..', '..', 'control-plane', 'src', 'app.js'].join('/'); // built, so this file holds no relative cross-package import itself
     assert.equal(IMPORT_BACK.test(`import { x } from '${upToControlPlane}';`), true);
     assert.equal(IMPORT_BACK.test("import { x } from '@beercanlabs/factory-ledger';"), false);

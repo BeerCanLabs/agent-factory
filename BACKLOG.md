@@ -18,7 +18,7 @@
     *   Costs on the Factory Ledger (`type: 'llm'`) lack actor attribution, preventing visibility into per-user or per-project spend.
 *   **Proposed Architecture:**
     1.  **Identity Link Budget Schema:** Extend `IdentityLink` in `packages/bouncer` and `packages/control-plane` with optional `budgetUsd?: { perDay?: number; perMonth?: number }`.
-    2.  **Ledger Event Attribution:** Update `packages/gatekeeper-egress` to record `actor: ctx.run.caller?.actor` on all `type: 'llm'` ledger rows.
+    2.  **Ledger Event Attribution:** Update `packages/gatekeeper` to record `actor: ctx.run.caller?.actor` on all `type: 'llm'` ledger rows.
     3.  **Actor Spend Tracking:** Update `SpendTracker` in `packages/budget` to aggregate ledger spend by `actor`.
     4.  **Dual Standing Check:** In `gatekeeper-egress` and `control-plane` standing checks, evaluate both agent-level standing (if configured) and caller-level standing. If a caller's budget is exhausted, return HTTP 402 `user_budget_exceeded` (`BLOCKED_USER_BUDGET_EXCEEDED`) for that caller's run only, leaving the shared agent available for other authorized operators.
     5.  **Project Budgets (Phase 2):** Attribute and constrain spend per `project_id` once verified memory scoping (GAP-116) is implemented.

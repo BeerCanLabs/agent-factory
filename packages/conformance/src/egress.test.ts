@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import { RunTokens } from '@beercanlabs/factory-auth';
-import { createGatekeeperEgress, type ControlClient, type RunContext } from '@beercanlabs/factory-gatekeeper-egress';
+import { createGatekeeperEgress, type ControlClient, type RunContext } from '@beercanlabs/factory-gatekeeper';
 import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
 import { expectOnlyBaselined, files, read, type Violation } from './support.js';
 

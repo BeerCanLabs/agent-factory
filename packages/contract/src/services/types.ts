@@ -38,12 +38,12 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'gatekeeper',
     title: 'Gatekeeper',
     role: 'Perimeter defense, ingress presence, front-door authentication verification (A1, A2), wakes, and outbound routing with credential injection',
-    hostedIn: ['packages/gatekeeper-ingress', 'packages/gatekeeper-egress', 'packages/auth', 'packages/control-plane'],
+    hostedIn: ['packages/gatekeeper-ingress', 'packages/gatekeeper', 'packages/auth', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/policy.ts',
-      'packages/gatekeeper-egress/src/gatekeeper-egress.ts',
-      'packages/gatekeeper-egress/src/main.ts',
+      'packages/gatekeeper/src/egress/gatekeeper-egress.ts',
+      'packages/gatekeeper/src/egress/main.ts',
     ],
   },
   keymaster: {
@@ -164,7 +164,7 @@ export interface PackageClassification {
  * a member's `owns`, COMPOSITION_ROOT_FILES or PLATFORM_FILES. SV1 and `owns` must agree (a member that owns a file
  * in a package lists that package in `hostedIn`).
  */
-export const SHARED_PACKAGES = ['packages/control-plane', 'packages/gatekeeper-egress'] as const;
+export const SHARED_PACKAGES = ['packages/control-plane', 'packages/gatekeeper'] as const;
 
 /**
  * Files several members share until they are broken up (§6.15). The conformance test requires each to be claimed by
@@ -177,7 +177,7 @@ export const SPLIT_FILES: readonly string[] = [
 /** Entry points that wire the members together; they belong to no one member. */
 export const COMPOSITION_ROOT_FILES: readonly string[] = [
   'packages/control-plane/src/index.ts',
-  'packages/gatekeeper-egress/src/index.ts',
+  'packages/gatekeeper/src/index.ts',
 ];
 
 /** Operator-facing files in a shared package that serve a declared platform role rather than a member. */
