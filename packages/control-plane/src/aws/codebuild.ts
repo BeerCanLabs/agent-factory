@@ -1,5 +1,5 @@
 import { CodeBuildClient, StartBuildCommand, BatchGetBuildsCommand, type Build } from '@aws-sdk/client-codebuild';
-import { AdmissionRefusedError, imageTagFor, type AdmissionRefusal, type BuildSkill, type SourceRef } from '../runtime.js';
+import { AdmissionRefusedError, imageTagFor, type AdmissionRefusal, type BuildSkill, type SourceRef } from '@beercanlabs/factory-landlord';
 import { cleanFailure, parseSkillCheckResult, skillCheckEnv, type SkillChecker, type SkillCheckOutcome } from '@beercanlabs/factory-registrar';
 
 const TERMINAL_FAILURES = new Set(['FAILED', 'FAULT', 'TIMED_OUT', 'STOPPED']);

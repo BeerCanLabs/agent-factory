@@ -6,6 +6,8 @@ It holds so far:
 
 - `callbackPolicyFromEnv`, `checkCallbackUrl`, `signBody`, `deliverCallback`: the signed, retried delivery of a run's callback, and the check that refuses a private or insecure target.
 
-The runtime launchers, the cloud adapters, the run store and the run lifecycle follow in TSK-180 to TSK-184. The HTTP wake and run handlers stay in `control-plane`.
+- `Runtime`, `memoryRuntime`, `noopRuntime`, `dockerRuntime`, `dockerApi`, `parseImageMap`, `ecsRuntime`, `defaultEcsCli`, `parseTaskMap`: the runtime launchers, and the build-side types and helpers the cloud adapters share (`SourceRef`, `BuildSkill`, `DeployProvider`, `AdmissionRefusedError`, `imageTagFor`, `skillsHash`, the skills manifest constants).
 
-The dependency points one way: the control plane depends on the Landlord; the Landlord never imports the control plane.
+The cloud adapters, the run store and the run lifecycle follow in TSK-181 to TSK-185. The HTTP wake and run handlers stay in `control-plane`.
+
+The dependency points one way: the control plane depends on the Landlord; the Landlord depends on the Registrar and the Secretary (`packages/hydrate`) and never imports the control plane.

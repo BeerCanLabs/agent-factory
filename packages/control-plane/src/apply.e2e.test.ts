@@ -13,7 +13,7 @@ import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { VersionedConfigStore, type ConfigBackend, type ConfigRecord } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, imageTagFor, noopRuntime, type BuildSkill, type DeployProvider, type SourceRef } from './runtime.js';
+import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, imageTagFor, noopRuntime, type BuildSkill, type DeployProvider, type SourceRef } from '@beercanlabs/factory-landlord';
 import { MemoryRunStore } from './runs.js';
 import { PolicyStore } from './policy.js';
 import { applyConfig } from './apply.js';
