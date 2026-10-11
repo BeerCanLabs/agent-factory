@@ -14,7 +14,7 @@ import type { Meter } from '@opentelemetry/api';
 
 /** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
 export const DEFAULT_MODEL = 'claude-haiku-4-5';
-import { stripSignInLinksFromJson } from './signin-links.js';
+import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';
 import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from '@beercanlabs/factory-inspector';
 
 export type Route = {

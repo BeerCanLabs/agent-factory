@@ -50,12 +50,11 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'keymaster',
     title: 'Keymaster',
     role: 'Credential facilitation, OAuth connection lifecycle, and vault mapping (K1–K5)',
-    hostedIn: ['packages/keymaster', 'packages/secrets-bind', 'packages/control-plane', 'packages/gatekeeper-egress'],
+    hostedIn: ['packages/keymaster', 'packages/secrets-bind', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/connections.ts',
       'packages/control-plane/src/credentials.ts',
-      'packages/gatekeeper-egress/src/signin-links.ts',
     ],
   },
   executive: {
