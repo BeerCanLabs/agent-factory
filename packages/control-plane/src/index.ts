@@ -15,8 +15,7 @@ import {
 import { activeRun, checkHealth, createFactoryServer, createRun, FactoryState, finishRun, reconcileRuns, SYSTEM } from './app.js';
 import { scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
-import { FileRunStore, RunTokens } from './runs.js';
-import { callbackPolicyFromEnv, dockerApi, dockerRuntime, ecsRuntime, memoryRuntime, parseImageMap, parseTaskMap, type DeployProvider } from '@beercanlabs/factory-landlord';
+import { callbackPolicyFromEnv, dockerApi, dockerRuntime, ecsRuntime, FileRunStore, memoryRuntime, parseImageMap, parseTaskMap, RunTokens, startQueuePollers, type DeployProvider } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
@@ -24,7 +23,6 @@ import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from './policy.js';
 import { busSinkFromEnv, createInspector, factoryMetrics } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
-import { startQueuePollers } from './queues.js';
 import { checkRegistry, migrateConfigs, pruneOrphans } from './config-store.js';
 import { SystemsStore } from './systems.js';
 import { checkFactoryBudgets, createTreasury } from './spend.js';
@@ -331,7 +329,7 @@ setInterval(() => void checkFactoryBudgets(state).catch((e) => console.error(`[t
 
 const server = createFactoryServer(state);
 attachEventStream(server, state, inspector);
-startQueuePollers(state);
+startQueuePollers(state.agents.values(), (id, o) => createRun(state, id, o));
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[control-plane] listening on :${PORT} with ${state.agents.size} cartridges`);
 });

@@ -13,8 +13,7 @@ import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { FileConfigBackend, VersionedConfigStore } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { noopRuntime } from '@beercanlabs/factory-landlord';
-import { MemoryRunStore } from './runs.js';
+import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-landlord';
 import { PolicyStore } from './policy.js';
 import { IdentityLinkStore } from './identity-links.js';
 
