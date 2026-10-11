@@ -14,6 +14,6 @@ export { pollQueueOnce, startQueuePollers } from './queues.js';
 export type { AwsCli, CreateRun, QueueAgent } from './queues.js';
 export {
   SYSTEM, activeRun, applyKillSwitch, blockRun, checkHealth, createRun, deliverToMailbox, finishRun, haltUnhealthy, reconcileRuns, resetAgent,
-  routeEvents, scheduleTimeout, startRun, markRunReady, notifyGatekeeperIngress, unblockRun, record,
+  routeEvents, scheduleTimeout, markRunReady, unblockRun,
 } from './lifecycle.js';
 export type { CreateRunOptions, LandlordPolicies, LandlordState, MailboxMessage, MailboxQueue, Outcome } from './lifecycle.js';
