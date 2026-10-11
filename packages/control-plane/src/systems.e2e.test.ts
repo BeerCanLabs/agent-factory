@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { noopRuntime } from './runtime.js';
+import { noopRuntime } from '@beercanlabs/factory-landlord';
 import { MemoryRunStore, RunTokens } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';

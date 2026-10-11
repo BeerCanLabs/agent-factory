@@ -2,7 +2,7 @@
   "name": "@beercanlabs/factory-landlord",
   "version": "0.1.0",
   "private": true,
-  "description": "Landlord: the Factory's compute lifecycle (callback delivery today; the runtime launchers, cloud adapters, run store and run lifecycle follow).",
+  "description": "Landlord: the Factory's compute lifecycle (callback delivery and the runtime launchers today; the cloud adapters, run store and run lifecycle follow).",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -13,7 +13,11 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "echo \"no package tests yet; callbacks are covered by control-plane's index.test.ts\""
+    "test": "tsx --test src/runtime-ecs.test.ts src/runtime-docker.test.ts"
+  },
+  "dependencies": {
+    "@beercanlabs/factory-hydrate": "0.1.0",
+    "@beercanlabs/factory-registrar": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
