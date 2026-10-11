@@ -38,7 +38,9 @@ import { payloadHash } from '@beercanlabs/factory-ledger';
 import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, type SkillManifest } from '@beercanlabs/factory-contract';
 import { authorize } from '@beercanlabs/factory-bouncer';
 import type { Principal } from '@beercanlabs/factory-auth';
-import { applyKillSwitch, json, readJson, registryOf, requirePrivilege, type FactoryState } from './app.js';
+import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import { applyKillSwitch } from '@beercanlabs/factory-landlord';
+import { registryOf } from '@beercanlabs/factory-registrar';
 import { triggerApply } from './apply.js';
 import { configOf, ledgerVersion, ownersOf } from './config-store.js';
 import {
