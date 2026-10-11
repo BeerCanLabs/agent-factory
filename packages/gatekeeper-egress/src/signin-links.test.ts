@@ -5,7 +5,6 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import { createGatekeeperEgress, type ControlClient, type RunContext } from './gatekeeper-egress.js';
-import { stripSignInLinksFromText } from './signin-links.js';
 
 const tokens = new RunTokens('signin-links-test-run-token-key-0123456789');
 const FACTORY = 'https://agent-factory.example.com';
@@ -120,11 +119,5 @@ describe('K4 sign-in links in agent messages', { concurrency: false }, () => {
   it('K4 only marked routes are rewritten', async () => {
     await post(port, '/notion/v1/pages', token, { note: INVENTED });
     assert.equal(JSON.parse(seen[0]).note, INVENTED);
-  });
-
-  it('K4 without a factory URL every sign-in link is removed', () => {
-    const r = stripSignInLinksFromText(`${REAL} and ${INVENTED}`, undefined);
-    assert.equal(r.removed, 3);
-    assert.ok(!r.text.includes('http'));
   });
 });

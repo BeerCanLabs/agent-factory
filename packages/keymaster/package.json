@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/keymaster.test.ts src/connections.test.ts src/credentials.test.ts"
+    "test": "tsx --test src/keymaster.test.ts src/connections.test.ts src/credentials.test.ts src/signin-links.test.ts"
   },
   "dependencies": {
     "@beercanlabs/factory-auth": "0.1.0",
