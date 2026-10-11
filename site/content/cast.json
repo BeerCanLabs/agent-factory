@@ -1,0 +1,1199 @@
+{
+ "depts": [
+  "Front desk",
+  "Money and models",
+  "Keys and secrets",
+  "Operations",
+  "Records"
+ ],
+ "deptNotes": {
+  "Front desk": "who gets in and what they may do",
+  "Money and models": "what an agent may use and what it costs",
+  "Keys and secrets": "the credentials agents never hold",
+  "Operations": "compute, time and memory",
+  "Records": "what is admitted, written down and watched"
+ },
+ "members": [
+  {
+   "id": "gatekeeper",
+   "name": "Gatekeeper",
+   "title": "Head of Perimeter Security",
+   "dept": "Front desk",
+   "art": {
+    "skin": "#C99B7A",
+    "hair": "#2A2A2E",
+    "style": "short",
+    "shirt": "#2C4C7C"
+   },
+   "rules": "A1, A2, E1, E6, S1",
+   "tag": "Nothing comes in or goes out without passing the desk.",
+   "bio": "Stands at every door of the factory. The Gatekeeper checks who is knocking, wakes a sleeping agent when a message arrives, and is the only way an agent reaches the outside world. Agents never carry real credentials; the Gatekeeper adds them on the way out.",
+   "does": [
+    "Verifies a bearer token or an OIDC login and says who the caller is, with their roles",
+    "Holds the Discord connection so a sleeping agent can still be reached",
+    "Proxies every outbound agent call and injects the credential",
+    "Relays a refused wake, such as a budget block, back to the person"
+   ],
+   "dont": [
+    "Decide what a caller may do. That is the Bouncer.",
+    "Price or count anything. That is the Treasurer and the Executive.",
+    "Start compute. That is the Landlord."
+   ],
+   "flows": [
+    {
+     "id": "let-in",
+     "name": "Let a person or service in",
+     "intro": "Every request to the control plane starts here. The Gatekeeper authenticates and never authorizes.",
+     "steps": [
+      {
+       "t": "A request arrives at the load balancer with a service token or an OIDC login."
+      },
+      {
+       "t": "packages/auth verifies the credential and returns a principal: an actor name and a list of roles. It cannot say what that principal may do."
+      },
+      {
+       "t": "For people on Discord, an admin-set identity link maps the Discord user to a person. A caller with no link is refused with 403 before any compute starts."
+      },
+      {
+       "t": "The route names one privilege. The Gatekeeper asks the Bouncer whether the principal’s roles hold it.",
+       "to": "bouncer",
+       "c": "bouncer-authorize",
+       "why": "Roles map to privileges in one table, owned by the Bouncer."
+      },
+      {
+       "t": "The decision, allowed or refused, is written to the ledger.",
+       "to": "auditor",
+       "c": "auditor-ledger",
+       "why": "Perimeter decisions are part of the audit trail."
+      }
+     ]
+    },
+    {
+     "id": "wake",
+     "name": "Wake a sleeping agent from Discord",
+     "intro": "The agent is at zero compute. The ingress is not.",
+     "steps": [
+      {
+       "t": "A message lands on gatekeeper-ingress, which keeps the Discord socket open even when no agent is running."
+      },
+      {
+       "t": "The ingress asks the Landlord to start a run for the agent.",
+       "to": "landlord",
+       "c": "landlord-lifecycle",
+       "why": "Starting compute is the Landlord’s job."
+      },
+      {
+       "t": "The Landlord asks the Treasurer whether the agent is inside its budget. If not, the wake is refused with 402 and the ingress tells the person why.",
+       "to": "treasurer",
+       "c": "treasurer-standing",
+       "why": "The Treasurer decides standing; the Gatekeeper relays the refusal."
+      },
+      {
+       "t": "The Landlord reports back through the ingress presence calls: starting, working, idle.",
+       "to": "landlord",
+       "c": "gatekeeper-ingress",
+       "why": "onAgentStarting, onAgentWorking and onAgentIdle keep the person’s Discord status honest."
+      }
+     ]
+    },
+    {
+     "id": "outbound",
+     "name": "Carry an agent’s outbound call",
+     "intro": "The agent talks to a base URL on the egress. It never sees the real endpoint or key.",
+     "steps": [
+      {
+       "t": "The agent calls one of its route base URLs with its run token. The egress checks the token and the agent’s policy for that route."
+      },
+      {
+       "t": "The egress asks the Bouncer whether this request must be held for a person’s approval.",
+       "to": "bouncer",
+       "c": "bouncer-hold",
+       "why": "The Bouncer owns the hold rules; the egress enforces the answer."
+      },
+      {
+       "t": "The egress asks the Keymaster for the credential and adds it to the request.",
+       "to": "keymaster",
+       "c": "keymaster-checkout",
+       "why": "The credential exists only on the wire, never in the agent."
+      },
+      {
+       "t": "The call goes out. A ledger row records it, and a progress event shows it on the run.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      },
+      {
+       "t": "Progress for the run is published for live viewing.",
+       "to": "inspector",
+       "c": "inspector-events"
+      }
+     ]
+    },
+    {
+     "id": "model",
+     "name": "Carry a model call",
+     "intro": "Same desk, special route. The handlers stay with the Gatekeeper because the run token, throttle and ledger meet the request there.",
+     "steps": [
+      {
+       "t": "The agent sends an OpenAI-format chat request to the egress model route."
+      },
+      {
+       "t": "The egress asks the Treasurer whether the agent is in good standing before spending anything.",
+       "to": "treasurer",
+       "c": "treasurer-standing"
+      },
+      {
+       "t": "It asks the Executive whether this agent may use the model it named.",
+       "to": "executive",
+       "c": "executive-model-policy",
+       "why": "Allow-list, factory default, training exemption and a run’s pin."
+      },
+      {
+       "t": "The Executive serves the call and returns the result, a refusal, or the upstream failure.",
+       "to": "executive",
+       "c": "executive-complete"
+      },
+      {
+       "t": "The usage is priced and the cost is recorded with the ledger row.",
+       "to": "treasurer",
+       "c": "treasurer-pricing"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "keymaster",
+   "name": "Keymaster",
+   "title": "Director of Credentials",
+   "dept": "Keys and secrets",
+   "art": {
+    "skin": "#8D5B3E",
+    "hair": "#1C1C1C",
+    "style": "curly",
+    "shirt": "#7A5A1E"
+   },
+   "rules": "K1 to K5, S1",
+   "tag": "Agents use keys. They never hold them.",
+   "bio": "Holds every key to every account the factory touches and hands one out only for the length of a single call. The Keymaster runs the consent flows when a person connects an account, refreshes tokens, and keeps the map from a secret’s name to the vault that stores it.",
+   "does": [
+    "Runs OAuth consent in the console, never in an agent",
+    "Stores each grant by agent, provider and scopes, and refreshes it",
+    "Checks out a credential for one outbound call",
+    "Takes static secrets write-only and never reads them back"
+   ],
+   "dont": [
+    "Decide whether a person may connect an account. That is the Bouncer.",
+    "Forward the call. That is the Gatekeeper."
+   ],
+   "flows": [
+    {
+     "id": "connect",
+     "name": "Connect an account (OAuth)",
+     "intro": "First provider is Google. The consent happens in the factory, not in the agent.",
+     "steps": [
+      {
+       "t": "An owner of the agent starts a connection in the console.",
+       "to": "bouncer",
+       "c": "bouncer-authorize",
+       "why": "Starting a connection is an owner privilege."
+      },
+      {
+       "t": "The Keymaster sends the person to the provider’s consent screen and receives the callback."
+      },
+      {
+       "t": "The grant is stored scoped to agent × provider × scopes. The agent container never receives it."
+      },
+      {
+       "t": "The connection and its owner are written to the ledger.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      },
+      {
+       "t": "When a token expires the Keymaster refreshes it. If the provider refuses, the connection shows “needs re-consent”."
+      }
+     ]
+    },
+    {
+     "id": "checkout",
+     "name": "Check out a credential for one call",
+     "intro": "Called by the egress on every outbound request that needs a key.",
+     "steps": [
+      {
+       "t": "The Gatekeeper asks to check out a credential for an agent and a route.",
+       "to": "gatekeeper",
+       "c": "keymaster-checkout",
+       "why": "The contract is Keymaster.checkout; the egress is the only caller."
+      },
+      {
+       "t": "The Keymaster resolves the grant or the named secret from the vault.",
+       "to": "keymaster",
+       "c": "secrets-provider",
+       "why": "A SecretProvider per landing zone: Secrets Manager, Secret Manager, a file or the environment."
+      },
+      {
+       "t": "It returns a lease. The egress injects the credential and the lease is revoked or expires."
+      }
+     ]
+    },
+    {
+     "id": "gated",
+     "name": "Release a gated dispatch",
+     "intro": "Some tool calls need a person to say yes first.",
+     "steps": [
+      {
+       "t": "dispatchGated receives a call marked as needing approval."
+      },
+      {
+       "t": "The Keymaster consults the Bouncer’s approval record. Only an approved, unused approval releases the credential; it is consumed on use.",
+       "to": "bouncer",
+       "c": "bouncer-tool-approval",
+       "why": "checkToolApproval says which tool calls need approval."
+      }
+     ]
+    },
+    {
+     "id": "onboard",
+     "name": "Onboard a secret (write-only)",
+     "intro": "K5. An admin supplies a value once. Nobody reads it back.",
+     "steps": [
+      {
+       "t": "An admin submits the value in the console.",
+       "to": "bouncer",
+       "c": "bouncer-authorize"
+      },
+      {
+       "t": "The Keymaster writes it through the landing zone’s writable secret provider.",
+       "to": "keymaster",
+       "c": "secrets-provider"
+      },
+      {
+       "t": "The credential report shows present or missing for each name, never the value."
+      },
+      {
+       "t": "The action is ledgered with the actor and the secret’s name.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "executive",
+   "name": "Executive",
+   "title": "Chief of Model Access",
+   "dept": "Money and models",
+   "art": {
+    "skin": "#E0B08C",
+    "hair": "#6D6D73",
+    "style": "short",
+    "shirt": "#1E2A36"
+   },
+   "rules": "M1 to M4, E5, E7",
+   "tag": "Gives every agent its executive function.",
+   "bio": "Gives an agent access to a model. The Executive offers one OpenAI-compatible API, translates each call to whichever provider serves the model, counts the tokens, and decides whether a given agent may use a given model. What the agent then does with the model is the cartridge’s business.",
+   "does": [
+    "Publishes the catalog of offered models under neutral names",
+    "Checks an agent’s allowed models, the factory default and a run’s pin",
+    "Translates a call to the provider’s native API and the answer back",
+    "Counts input, output and cache tokens, streaming or not"
+   ],
+   "dont": [
+    "Hold a credential or answer an HTTP request. The Gatekeeper does both.",
+    "Set prices or decide standing. That is the Treasurer.",
+    "Choose what an agent says or remembers. That is the cartridge."
+   ],
+   "flows": [
+    {
+     "id": "serve",
+     "name": "Serve one model call",
+     "intro": "complete never throws. It returns a result, a refusal made before any provider was called, or the upstream failure.",
+     "steps": [
+      {
+       "t": "The Gatekeeper hands over the parsed request.",
+       "to": "gatekeeper",
+       "c": "executive-complete"
+      },
+      {
+       "t": "The Executive validates it against the OpenAI chat rules (M1) and finds the model in the catalog."
+      },
+      {
+       "t": "It picks the adapter for the model’s provider and translates the request to that provider’s native API."
+      },
+      {
+       "t": "The answer is translated back to OpenAI format and returned with the token usage."
+      }
+     ]
+    },
+    {
+     "id": "allowed",
+     "name": "Decide whether an agent may use a model",
+     "intro": "Plain values in, so the Executive never imports the control plane’s policy type.",
+     "steps": [
+      {
+       "t": "The caller passes the agent’s allow-list, the model asked for, whether it is a training run and any pin on the run.",
+       "to": "gatekeeper",
+       "c": "executive-model-policy"
+      },
+      {
+       "t": "checkModel answers allowed or the reason it is not. When a policy names no models, the factory default applies."
+      },
+      {
+       "t": "offeredModels lists the names an agent may pick from, for the console’s policy tab."
+      }
+     ]
+    },
+    {
+     "id": "count",
+     "name": "Count tokens and report usage",
+     "intro": "E5. The count belongs here; the price does not.",
+     "steps": [
+      {
+       "t": "usageFromJson reads usage from a normal reply; SseMeter reads it from a stream as it passes."
+      },
+      {
+       "t": "The usage goes to the Treasurer as input, output, cacheRead and cacheWrite tokens.",
+       "to": "treasurer",
+       "c": "treasurer-pricing",
+       "why": "The Executive depends on the Treasurer for the Price and TokenUsage types only."
+      },
+      {
+       "t": "Metrics and a trace of the call are recorded.",
+       "to": "inspector",
+       "c": "inspector-events"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "secretary",
+   "name": "Secretary",
+   "title": "Keeper of the Notebook",
+   "dept": "Operations",
+   "art": {
+    "skin": "#F0C8A8",
+    "hair": "#8B4A2B",
+    "style": "bun",
+    "shirt": "#6A7F94"
+   },
+   "rules": "The Safe (§6.6)",
+   "tag": "Files in. Files out. No cloud SDK needed.",
+   "bio": "Moves an agent’s notebook between object storage and the folder the agent works in. When an agent wakes the Secretary brings the files in; when it sleeps the Secretary puts them back. The agent only ever sees a local folder.",
+   "does": [
+    "Pulls the agent’s prefix from object storage into $MEMORY_DIR on wake",
+    "Pushes $MEMORY_DIR back on sleep",
+    "Builds the platform environment the agent starts with, including the egress base URLs"
+   ],
+   "dont": [
+    "Decide what is worth remembering. That is the cartridge’s notebook.",
+    "Decide what a notebook contains or how it is organized. That is the cartridge’s."
+   ],
+   "flows": [
+    {
+     "id": "in",
+     "name": "Bring the notebook in (wake)",
+     "intro": "Runs inside the agent’s container as part of the shim.",
+     "steps": [
+      {
+       "t": "The Landlord starts the container with the agent’s memory prefix and its mind store.",
+       "to": "landlord",
+       "c": "secretary-mind",
+       "why": "The prefix is fixed at deploy."
+      },
+      {
+       "t": "pullMind copies the prefix from the mind store to $MEMORY_DIR."
+      },
+      {
+       "t": "platformEnv and the egress environment are set, so the agent finds its base URLs and never a cloud key."
+      },
+      {
+       "t": "The agent starts and sees ordinary files."
+      }
+     ]
+    },
+    {
+     "id": "out",
+     "name": "Send the notebook out (sleep)",
+     "intro": "Runs when the turn ends or the container is told to stop.",
+     "steps": [
+      {
+       "t": "The agent finishes its turn."
+      },
+      {
+       "t": "pushMind copies $MEMORY_DIR back to the same prefix in the mind store."
+      },
+      {
+       "t": "The Landlord scales the agent to zero.",
+       "to": "landlord",
+       "c": "secretary-mind"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "landlord",
+   "name": "Landlord",
+   "title": "Property Manager, Compute",
+   "dept": "Operations",
+   "art": {
+    "skin": "#B07A56",
+    "hair": "#3B2A20",
+    "style": "short",
+    "shirt": "#B8641E"
+   },
+   "rules": "L1 to L6, §6.4",
+   "tag": "Opens the office when someone needs it. Locks up when they leave.",
+   "bio": "Runs the building. The Landlord turns on compute when an agent is needed, brokers the agent’s turns, and turns it off again when the work is done. It builds and starts only what the Registrar has admitted.",
+   "does": [
+    "Wakes an agent from zero and queues a second message behind the running one",
+    "Brokers each turn over the /mailbox long-poll",
+    "Warms down and scales to zero",
+    "Pauses, kills and retires an agent in two stages"
+   ],
+   "dont": [
+    "Decide who may wake an agent. That is the Bouncer.",
+    "Decide whether the agent may spend. That is the Treasurer.",
+    "Decide what may be built. That is the Registrar."
+   ],
+   "flows": [
+    {
+     "id": "wake",
+     "name": "Wake from zero",
+     "intro": "createRun is the single door every wake passes through: Discord, webhook, schedule, queue, MCP and the console.",
+     "steps": [
+      {
+       "t": "A wake arrives. If its messageId already has a run, that run is returned with 200 and nothing starts."
+      },
+      {
+       "t": "The Landlord asks the Treasurer. Over budget returns 402 and no compute starts.",
+       "to": "treasurer",
+       "c": "treasurer-standing"
+      },
+      {
+       "t": "If the agent already has an active run, the new message is queued and the reply is 202."
+      },
+      {
+       "t": "The Landlord starts the agent’s task from its admitted image and tells the ingress the agent is starting.",
+       "to": "gatekeeper",
+       "c": "gatekeeper-ingress"
+      },
+      {
+       "t": "In the container, the Secretary brings the notebook in.",
+       "to": "secretary",
+       "c": "secretary-mind"
+      }
+     ]
+    },
+    {
+     "id": "turn",
+     "name": "Broker a turn",
+     "intro": "The agent never accepts an inbound connection. It asks for work.",
+     "steps": [
+      {
+       "t": "The agent long-polls /mailbox. The Landlord answers with the next message or holds the request open."
+      },
+      {
+       "t": "When the turn ends, the agent posts its result through a run callback."
+      },
+      {
+       "t": "Run state changes are published for live viewing.",
+       "to": "inspector",
+       "c": "inspector-events"
+      }
+     ]
+    },
+    {
+     "id": "sleep",
+     "name": "Warm down and sleep",
+     "intro": "Agents scale to zero. The ingress stays up.",
+     "steps": [
+      {
+       "t": "No work arrives for the warm-down window."
+      },
+      {
+       "t": "The Secretary sends the notebook out.",
+       "to": "secretary",
+       "c": "secretary-mind"
+      },
+      {
+       "t": "The task stops and the Landlord tells the ingress the agent is idle.",
+       "to": "gatekeeper",
+       "c": "gatekeeper-ingress"
+      }
+     ]
+    },
+    {
+     "id": "pause",
+     "name": "Pause, kill and retire",
+     "intro": "Operational controls for an agent that must stop.",
+     "steps": [
+      {
+       "t": "An operator or an agent owner presses pause. The control plane checks the privilege first.",
+       "to": "bouncer",
+       "c": "bouncer-authorize",
+       "why": "Owners may wake, pause and resume their own agent."
+      },
+      {
+       "t": "The run is blocked and compute is stopped. A paused agent is not woken by any trigger."
+      },
+      {
+       "t": "Retirement runs in two stages (§6.4) and each stage is ledgered.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      }
+     ]
+    },
+    {
+     "id": "deploy",
+     "name": "Build and register an admitted commit",
+     "intro": "The build is injected into the Registrar’s admission. The Landlord supplies it.",
+     "steps": [
+      {
+       "t": "The Registrar pins the repository and commit, then calls the Landlord’s build.",
+       "to": "registrar",
+       "c": "registrar-admit"
+      },
+      {
+       "t": "The build runs on the landing zone’s build service and pushes the image to its registry."
+      },
+      {
+       "t": "The Landlord creates the agent’s identity and its task definition or Cloud Run job."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "auditor",
+   "name": "Auditor",
+   "title": "Chief Records Officer",
+   "dept": "Records",
+   "art": {
+    "skin": "#D2A582",
+    "hair": "#4A4A4A",
+    "style": "bob",
+    "shirt": "#3C4A57"
+   },
+   "rules": "LG1, LG2",
+   "tag": "If it happened, it is in the book. The book cannot be edited.",
+   "bio": "Keeps the append-only record of what runs, spends, grants and refuses. Each row is chained to the one before it and redacted of secrets and prompts, so a changed or removed row is detectable. Checkpoints are sealed to storage that refuses overwrites.",
+   "does": [
+    "Appends rows to a hash chain with secrets and prompts redacted",
+    "Verifies the chain on request",
+    "Seals checkpoints to write-once storage",
+    "Allows one writer at a time through a lease"
+   ],
+   "dont": [
+    "Judge what the rows mean. That is the Inspector and the people who read them.",
+    "Delete or edit a row. Nothing can."
+   ],
+   "flows": [
+    {
+     "id": "append",
+     "name": "Record an event",
+     "intro": "Every member writes through the same door.",
+     "steps": [
+      {
+       "t": "A member sends an event: who acted, what happened, which agent, which run.",
+       "to": "gatekeeper",
+       "c": "auditor-ledger",
+       "why": "Gatekeeper, Landlord, Treasurer, Bouncer, Keymaster and Registrar all append."
+      },
+      {
+       "t": "Secrets and prompts are redacted before anything is stored."
+      },
+      {
+       "t": "The row gets the next sequence number and a hash of its content plus the previous hash."
+      },
+      {
+       "t": "The row is tapped to the event hub, so live views and the bus see it.",
+       "to": "inspector",
+       "c": "inspector-events",
+       "why": "tapLedger lets the Inspector watch without writing."
+      }
+     ]
+    },
+    {
+     "id": "verify",
+     "name": "Verify the chain",
+     "intro": "Anyone with read access can check the book.",
+     "steps": [
+      {
+       "t": "verifyChain recomputes each hash from the genesis value forward."
+      },
+      {
+       "t": "It returns ok, or the first sequence number where the chain breaks and why."
+      }
+     ]
+    },
+    {
+     "id": "seal",
+     "name": "Seal a checkpoint",
+     "intro": "Where the checkpoint goes depends on the landing zone.",
+     "steps": [
+      {
+       "t": "The Checkpointer writes the latest sequence number and hash to a checkpoint sink."
+      },
+      {
+       "t": "The sink is write-once storage that refuses overwrites, provided by the landing zone."
+      },
+      {
+       "t": "Starting a new segment archives the old one and carries its last hash forward as the new genesis."
+      }
+     ]
+    },
+    {
+     "id": "lease",
+     "name": "Keep one writer",
+     "intro": "Two writers would fork the chain.",
+     "steps": [
+      {
+       "t": "A LedgerLease is taken before the first append."
+      },
+      {
+       "t": "A second holder gets LeaseHeldError and stays read-only."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "treasurer",
+   "name": "Treasurer",
+   "title": "Head of Spend and FinOps",
+   "dept": "Money and models",
+   "art": {
+    "skin": "#9C6B4E",
+    "hair": "#222",
+    "style": "short",
+    "shirt": "#2F5D46"
+   },
+   "rules": "E5, E7, M3",
+   "tag": "Every call has a price. Nobody spends without a limit someone set.",
+   "bio": "Owns the budget rule, spend accounting and pricing, plus factory cloud spend and the compute inventory. The Treasurer answers one question, whether an agent is inside its limits, and every other member enforces the answer.",
+   "does": [
+    "Answers standing for an agent: per run, per day, per month",
+    "Prices each model call from the Executive’s token counts",
+    "Reports cloud spend and compute inventory with a read-only role",
+    "Stores budgets an admin sets, with no default budget"
+   ],
+   "dont": [
+    "Block anything itself. Callers enforce: 402, blockRun, budget.alert.",
+    "Count tokens. That is the Executive."
+   ],
+   "flows": [
+    {
+     "id": "standing",
+     "name": "Answer: is this agent in good standing?",
+     "intro": "checkStanding is asked before a model call, before a wake, before a message goes into a live run, on ledger ingest and on a policy update.",
+     "steps": [
+      {
+       "t": "The caller passes the agent’s limits and its spend for the run, the day and the month.",
+       "to": "landlord",
+       "c": "treasurer-standing",
+       "why": "The Gatekeeper’s egress and the Landlord both ask."
+      },
+      {
+       "t": "The Treasurer compares them and returns ok, or the first window exceeded: perRun, perDay or perMonth."
+      },
+      {
+       "t": "The caller enforces: the Landlord returns 402, the egress refuses the call, the control plane raises budget.alert."
+      },
+      {
+       "t": "The refusal is ledgered with the window.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      }
+     ]
+    },
+    {
+     "id": "price",
+     "name": "Price a model call",
+     "intro": "The Executive counts; the Treasurer prices.",
+     "steps": [
+      {
+       "t": "The Executive reports input, output, cacheRead and cacheWrite tokens.",
+       "to": "executive",
+       "c": "treasurer-pricing"
+      },
+      {
+       "t": "priceFor finds the model’s price and costUsd turns the tokens into dollars."
+      },
+      {
+       "t": "The cost is added to the agent’s run, day and month spend."
+      }
+     ]
+    },
+    {
+     "id": "budgets",
+     "name": "Set a budget",
+     "intro": "There is no default. Until an admin sets one, nothing is enforced for that agent or for the factory.",
+     "steps": [
+      {
+       "t": "An admin sends PUT /api/v1/spend/budgets.",
+       "to": "bouncer",
+       "c": "bouncer-authorize",
+       "why": "The spend tools are one grant, factory-spend."
+      },
+      {
+       "t": "validateBudgetLimits rejects anything that is not a positive number."
+      },
+      {
+       "t": "The change is ledgered.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      }
+     ]
+    },
+    {
+     "id": "cloud",
+     "name": "Report cloud spend and compute",
+     "intro": "Model spend and infrastructure spend in one view.",
+     "steps": [
+      {
+       "t": "A dedicated read-only role reads the provider’s cost and compute inventory. Agents never hold it."
+      },
+      {
+       "t": "Spend is attributed to agents and to the factory. Budgets are evaluated on gross usage, before credits."
+      },
+      {
+       "t": "The console reads GET /api/v1/spend/report and /spend/compute.",
+       "to": "bouncer",
+       "c": "bouncer-authorize"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "bouncer",
+   "name": "Bouncer",
+   "title": "Head of Authorization",
+   "dept": "Front desk",
+   "art": {
+    "skin": "#7A4E36",
+    "hair": "#101010",
+    "style": "none",
+    "shirt": "#161E27"
+   },
+   "rules": "A2, E4, E9, SK3, E12",
+   "tag": "Knows the list. Holds the door when it has to.",
+   "bio": "Decides who may do what. A person has roles, a role holds privileges, and every route on the control plane asks for exactly one. The Bouncer also holds sensitive agent actions until a person approves them.",
+   "does": [
+    "Answers authorize for every route",
+    "Derives agent-owner, agent-member and requester from data, never from a credential",
+    "Decides which outbound requests and tool calls are held",
+    "Keeps the approval record and says who may decide it"
+   ],
+   "dont": [
+    "Verify a credential. That is the Gatekeeper.",
+    "Forward the held request. The egress does that after approval."
+   ],
+   "flows": [
+    {
+     "id": "authorize",
+     "name": "Authorize a request",
+     "intro": "A user maps to roles; a role maps to privileges; never a user to a privilege.",
+     "steps": [
+      {
+       "t": "The Gatekeeper authenticates the caller and passes the principal.",
+       "to": "gatekeeper",
+       "c": "bouncer-authorize"
+      },
+      {
+       "t": "The route names one privilege. authorize takes the principal, the privilege and an optional resource such as the agent."
+      },
+      {
+       "t": "Derived roles join the principal’s own: agent-owner if the person is on the agent’s configuration record; agent-member if they hold an agent role; requester if their message started the run.",
+       "to": "registrar",
+       "c": "registrar-config",
+       "why": "Owners are stored on the configuration record (SK3)."
+      },
+      {
+       "t": "It returns allowed, or the missing privilege. A conformance test fails if a route is missing from the matrix."
+      }
+     ]
+    },
+    {
+     "id": "hold",
+     "name": "Hold an action for approval",
+     "intro": "E9. The egress asks; the Bouncer decides; the egress enforces.",
+     "steps": [
+      {
+       "t": "The Gatekeeper’s egress passes a request to checkHold with the agent’s hold rules.",
+       "to": "gatekeeper",
+       "c": "bouncer-hold"
+      },
+      {
+       "t": "If it is held, the Bouncer stores a reviewed copy, its hash and a size-limited body in an approval record."
+      },
+      {
+       "t": "The run is blocked and the requesting user is asked to decide."
+      },
+      {
+       "t": "Tool calls that need approval go through checkToolApproval before the Keymaster releases a credential.",
+       "to": "keymaster",
+       "c": "bouncer-tool-approval"
+      }
+     ]
+    },
+    {
+     "id": "decide",
+     "name": "Decide an approval",
+     "intro": "Who may say yes depends on who asked.",
+     "steps": [
+      {
+       "t": "For an agent’s action the agent is the actor and the requesting user is the reviewer and approver."
+      },
+      {
+       "t": "If the run has no requesting user, an agent owner decides. A global admin or approver may decide any agent’s."
+      },
+      {
+       "t": "The control plane acts on the decision: blockRun to stop, deliverDecision to continue.",
+       "to": "landlord",
+       "c": "landlord-lifecycle"
+      },
+      {
+       "t": "The decision, with who decided it, is ledgered.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "timekeeper",
+   "name": "Timekeeper",
+   "title": "Scheduler",
+   "dept": "Operations",
+   "art": {
+    "skin": "#E8C39E",
+    "hair": "#C9C9CC",
+    "style": "short",
+    "shirt": "#6E4B8B"
+   },
+   "rules": "§6.15",
+   "tag": "Knows what is due. Rings the Landlord. Never starts anything itself.",
+   "bio": "Decides when an agent is due, so no agent needs a clock running inside its container. Each minute the Timekeeper looks at every cartridge cron and every schedule an agent created, and tells the Landlord who is due.",
+   "does": [
+    "Checks cartridge cron expressions each minute",
+    "Stores schedules agents create, with time zones",
+    "Validates cron and time zone input",
+    "Calls fire with a request for each due item"
+   ],
+   "dont": [
+    "Start a run. fire is the Landlord’s side.",
+    "Import the control plane. Only the composition root calls it."
+   ],
+   "flows": [
+    {
+     "id": "cron",
+     "name": "Fire a cartridge cron",
+     "intro": "The cron lives in the cartridge. The clock lives in the factory.",
+     "steps": [
+      {
+       "t": "Every minute createTimekeeper asks which agents’ cron expressions match the current time in their time zone."
+      },
+      {
+       "t": "For each due agent it calls fire with a cartridge request."
+      },
+      {
+       "t": "The Landlord wakes the agent, unless it is already running, in which case that tick is skipped.",
+       "to": "landlord",
+       "c": "timekeeper-fire"
+      }
+     ]
+    },
+    {
+     "id": "schedule",
+     "name": "Let an agent schedule itself",
+     "intro": "An agent creates a schedule through the schedules API with its run token.",
+     "steps": [
+      {
+       "t": "The request is checked against the run token’s scope.",
+       "to": "gatekeeper",
+       "c": "auth-principal",
+       "why": "Run-token scoping is the Gatekeeper’s."
+      },
+      {
+       "t": "The route asks for its privilege.",
+       "to": "bouncer",
+       "c": "bouncer-authorize"
+      },
+      {
+       "t": "cronIssue and isTimeZone validate the input. The schedule is saved to schedules.json."
+      },
+      {
+       "t": "The creation is ledgered.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      },
+      {
+       "t": "When the schedule is due, checkDue yields it once and fire wakes the agent.",
+       "to": "landlord",
+       "c": "timekeeper-fire"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "registrar",
+   "name": "Registrar",
+   "title": "Director of Admissions",
+   "dept": "Records",
+   "art": {
+    "skin": "#C08A6A",
+    "hair": "#5A2D2D",
+    "style": "bob",
+    "shirt": "#5B3A72"
+   },
+   "rules": "L3, L4, SK1 to SK5, E10",
+   "tag": "Decides what gets in. Writes down what it let in.",
+   "bio": "Keeps the register of every agent, skill and system, and decides what may be deployed. Only a pinned, admitted commit runs. The Registrar never builds an image and never answers an HTTP request.",
+   "does": [
+    "Records each agent and pins its repository and commit",
+    "Admits or refuses a commit, with a reason",
+    "Registers skills and runs the factory’s checks on their code",
+    "Keeps the versioned deployment configuration and the systems store"
+   ],
+   "dont": [
+    "Build the image. The Landlord supplies the build.",
+    "Decide who may deploy. That is the Bouncer."
+   ],
+   "flows": [
+    {
+     "id": "register",
+     "name": "Register an agent",
+     "intro": "L3. The record holds a pinned source, never a moving branch.",
+     "steps": [
+      {
+       "t": "An admin registers a repository. checkRepoUrl validates it.",
+       "to": "bouncer",
+       "c": "bouncer-authorize"
+      },
+      {
+       "t": "The Registrar resolves the commit and stores the agent record as <registryDir>/<id>.json.",
+       "to": "registrar",
+       "c": "registrar-agents"
+      },
+      {
+       "t": "The registration is ledgered.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      }
+     ]
+    },
+    {
+     "id": "admit",
+     "name": "Admit a commit",
+     "intro": "L4. Only a pinned, admitted commit deploys.",
+     "steps": [
+      {
+       "t": "The deploy route calls admit with the pinned source and an injected build.",
+       "to": "landlord",
+       "c": "registrar-admit",
+       "why": "The Landlord supplies buildImage; the Registrar never builds."
+      },
+      {
+       "t": "The build checks the commit is 40 hex characters, scans for hard-coded secrets, requires tests and runs them, then builds and pushes the image."
+      },
+      {
+       "t": "A refusal carries one reason: no_tests, tests_failed, source_unavailable, hardcoded_secret, build_failed, push_failed or not_supported."
+      },
+      {
+       "t": "The result and its reason are ledgered.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      }
+     ]
+    },
+    {
+     "id": "skills",
+     "name": "Adopt a shared skill",
+     "intro": "SK1 to SK5. A skill is code the factory checks before an agent may use it.",
+     "steps": [
+      {
+       "t": "The skill’s manifest is fetched and its path checked."
+      },
+      {
+       "t": "SkillChecker runs the factory’s checks on the skill’s code. The landing zone supplies the build service that runs them."
+      },
+      {
+       "t": "Versions compare by semver; an agent adopts a version and the adoption is recorded."
+      }
+     ]
+    },
+    {
+     "id": "config",
+     "name": "Version an agent’s deployment configuration",
+     "intro": "SK3. The record that says how an agent runs, and who owns it.",
+     "steps": [
+      {
+       "t": "Each change writes a new version under <agent>/<version>.json. configHash is stable when no owners are set."
+      },
+      {
+       "t": "The store is versioned, which allows point-in-time restore (R1)."
+      },
+      {
+       "t": "The Bouncer reads the owner list from here to derive agent-owner.",
+       "to": "bouncer",
+       "c": "registrar-config"
+      }
+     ]
+    },
+    {
+     "id": "systems",
+     "name": "Define a system",
+     "intro": "E10. A system is an external service the factory knows how to reach.",
+     "steps": [
+      {
+       "t": "An admin defines a system. It is written through to <dir>/<id>/<version>.json with a ledger row for each change.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      },
+      {
+       "t": "The Keymaster derives its connection provider from the system definition.",
+       "to": "keymaster",
+       "c": "registrar-systems"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "inspector",
+   "name": "Inspector",
+   "title": "Head of Observability",
+   "dept": "Records",
+   "art": {
+    "skin": "#D9A77F",
+    "hair": "#2D3B2D",
+    "style": "bun",
+    "shirt": "#2B4A3A"
+   },
+   "rules": "§6.5",
+   "tag": "Watches. Reports. Decides nothing.",
+   "bio": "Watches the factory and says what it sees. The Inspector publishes run events, streams live progress, keeps prompt traces, measures the runs, and groups failed runs into incidents. It never decides or acts on what it finds.",
+   "does": [
+    "Publishes run events to subscribers and the event bus",
+    "Keeps a short, sanitized progress ring per run for live viewing",
+    "Writes and prunes prompt traces when tracing is on",
+    "Groups failed runs into incidents"
+   ],
+   "dont": [
+    "Block or retry anything. That is a decision, and it belongs to someone else.",
+    "Write the ledger. The Auditor does. The Inspector only taps it."
+   ],
+   "flows": [
+    {
+     "id": "events",
+     "name": "Publish a run event",
+     "intro": "One hub, many readers.",
+     "steps": [
+      {
+       "t": "The Landlord or the Gatekeeper calls publish or publishRun.",
+       "to": "landlord",
+       "c": "inspector-events"
+      },
+      {
+       "t": "The EventHub delivers it to local subscribers such as the console’s live view."
+      },
+      {
+       "t": "If the event is worth sending to the bus, a sink writes it to the landing zone’s event bus."
+      },
+      {
+       "t": "tapLedger copies ledger rows into the same hub without writing to the ledger.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      }
+     ]
+    },
+    {
+     "id": "progress",
+     "name": "Stream a run’s live progress",
+     "intro": "What the agent is doing right now, safe to show.",
+     "steps": [
+      {
+       "t": "The egress’s ProgressEmitter reports each call as it starts and ends.",
+       "to": "gatekeeper",
+       "c": "inspector-events"
+      },
+      {
+       "t": "sanitizeProgress strips anything sensitive and RunProgress keeps a bounded ring for the run."
+      },
+      {
+       "t": "The console long-polls readProgress and shows the run move."
+      }
+     ]
+    },
+    {
+     "id": "traces",
+     "name": "Keep a prompt trace",
+     "intro": "Off by default. On when FACTORY_TRACE_PROMPTS is set.",
+     "steps": [
+      {
+       "t": "writeTrace stores the call for debugging in the agent’s mind."
+      },
+      {
+       "t": "pruneTraces removes old traces by the configured limits."
+      }
+     ]
+    },
+    {
+     "id": "incidents",
+     "name": "Spot an incident",
+     "intro": "Triage, not alerting.",
+     "steps": [
+      {
+       "t": "incidentsFromRuns groups recent failed runs by agent and cause."
+      },
+      {
+       "t": "The control plane serves the list and the console shows it. Nobody is paged."
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "journey": [
+  [
+   "gatekeeper",
+   "A message arrives",
+   "The Gatekeeper authenticates it and holds the door."
+  ],
+  [
+   "bouncer",
+   "Is it allowed?",
+   "The Bouncer checks roles against the privilege."
+  ],
+  [
+   "treasurer",
+   "Can we afford it?",
+   "The Treasurer checks the budget."
+  ],
+  [
+   "landlord",
+   "Open the office",
+   "The Landlord starts the agent from zero."
+  ],
+  [
+   "secretary",
+   "Bring the notebook",
+   "The Secretary loads its files."
+  ],
+  [
+   "executive",
+   "Use a model",
+   "The Executive serves the call; the Keymaster adds the key."
+  ],
+  [
+   "auditor",
+   "Write it down",
+   "The Auditor records every step."
+  ]
+ ]
+}
