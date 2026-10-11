@@ -15,7 +15,7 @@ files in this repository (GAP-135, TSK-195). There is no script on any page.
 | Layout and copy of the pages | `lib/render.mjs`, `styles.css` |
 
 ```sh
-node site/build.mjs                     # writes site/dist
+SITE_BASE=/ node site/build.mjs         # writes site/dist (SITE_BASE defaults to /)
 node site/check.mjs                     # fails if the site has drifted from the code
 (cd site/dist && python3 -m http.server 8000)   # preview at http://localhost:8000
 ```
@@ -24,18 +24,20 @@ node site/check.mjs                     # fails if the site has drifted from the
 file does not exist, when a contract is used by no flow, when a blueprint lacks a row for a member, when a built link
 is broken, and when the content carries execution detail (gap or task numbers, roadmap or build status, Terraform).
 
-`site/` is not an npm workspace; it has no dependencies.
+`site/` is not an npm workspace; it has no dependencies. Fonts are self-hosted in `static/fonts/` (SIL Open Font
+License, see `LICENSES.txt`), so a visitor's browser contacts no third party.
 
 ## Publish
 
-`.github/workflows/site.yml` builds and checks on a pull request that touches `site/` or the cast's definition, and
-deploys to GitHub Pages when such a change merges to `main`.
+`.github/workflows/site.yml` builds and checks on a pull request that touches `site/` or any package (the check reads the cast's definition and
+each contract's source file), and deploys to GitHub Pages when such a change merges to `main`.
 
 ### One-time setup (needs repository admin and the Cloudflare account)
 
 1. **GitHub:** Settings, Pages, Build and deployment, Source: **GitHub Actions**. Then set the custom domain to
-   `beercanlabs.ai` and, once the certificate is issued, tick **Enforce HTTPS**. (The Actions deployment ignores the
-   `CNAME` file; the setting is what binds the domain.)
+   `beercanlabs.ai` and, once the certificate is issued, tick **Enforce HTTPS**. The domain is bound by this
+   setting; there is no `CNAME` file in the repository (an Actions deployment ignores one). Until it is set the site
+   is served from the `github.io` project path, where the root-relative links break.
 2. **GitHub, recommended:** verify the domain for the organization (Settings, Pages, Add a domain) so no one else can
    claim it. It asks for one TXT record.
 3. **Cloudflare, `beercanlabs.ai`**, DNS records, all set to **DNS only** (grey cloud) so GitHub can issue the certificate:

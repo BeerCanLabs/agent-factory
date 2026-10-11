@@ -556,7 +556,7 @@
        "c": "registrar-admit"
       },
       {
-       "t": "The build runs on the landing zone\u2019s build service and pushes the image to its registry."
+       "t": "The build runs on the landing zone’s build service and pushes the image to its registry."
       },
       {
        "t": "The Landlord creates the agent’s identity and its task definition or Cloud Run job."
@@ -753,7 +753,7 @@
      "intro": "Model spend and infrastructure spend in one view.",
      "steps": [
       {
-       "t": "A dedicated read-only role reads the provider\u2019s cost and compute inventory. Agents never hold it."
+       "t": "A dedicated read-only role reads the provider’s cost and compute inventory. Agents never hold it."
       },
       {
        "t": "Spend is attributed to agents and to the factory. Budgets are evaluated on gross usage, before credits."
@@ -1103,7 +1103,7 @@
        "t": "The EventHub delivers it to local subscribers such as the console’s live view."
       },
       {
-       "t": "If the event is worth sending to the bus, a sink writes it to the landing zone\u2019s event bus."
+       "t": "If the event is worth sending to the bus, a sink writes it to the landing zone’s event bus."
       },
       {
        "t": "tapLedger copies ledger rows into the same hub without writing to the ledger.",
@@ -1158,5 +1158,42 @@
     }
    ]
   }
+ ],
+ "journey": [
+  [
+   "gatekeeper",
+   "A message arrives",
+   "The Gatekeeper authenticates it and holds the door."
+  ],
+  [
+   "bouncer",
+   "Is it allowed?",
+   "The Bouncer checks roles against the privilege."
+  ],
+  [
+   "treasurer",
+   "Can we afford it?",
+   "The Treasurer checks the budget."
+  ],
+  [
+   "landlord",
+   "Open the office",
+   "The Landlord starts the agent from zero."
+  ],
+  [
+   "secretary",
+   "Bring the notebook",
+   "The Secretary loads its files."
+  ],
+  [
+   "executive",
+   "Use a model",
+   "The Executive serves the call; the Keymaster adds the key."
+  ],
+  [
+   "auditor",
+   "Write it down",
+   "The Auditor records every step."
+  ]
  ]
 }

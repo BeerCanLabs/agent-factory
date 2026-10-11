@@ -7,20 +7,21 @@ on:
     branches: [main]
     paths:
       - 'site/**'
-      - 'packages/contract/src/services/**'
+      - 'packages/**'
       - '.github/workflows/site.yml'
   pull_request:
     paths:
       - 'site/**'
-      - 'packages/contract/src/services/**'
+      - 'packages/**'
       - '.github/workflows/site.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A pull request run has its own group, so it can never displace or cancel a deploy queued from main.
 concurrency:
-  group: pages
+  group: site-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:

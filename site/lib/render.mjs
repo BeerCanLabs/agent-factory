@@ -22,6 +22,9 @@ export function makeSite({ cast, contracts, blueprints, base = '/', siteUrl = 'h
     infra: () => root + 'infrastructure/',
     blueprint: (k) => root + 'infrastructure/' + k + '/',
   };
+  const WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen'];
+  const countWord = WORDS[members.length] || String(members.length);
+  const Count = countWord[0].toUpperCase() + countWord.slice(1);
   const uniq = (xs) => xs.filter((x, i, a) => a.indexOf(x) === i);
 
   const avatar = (id) => '<span class="av">' + portrait(byId[id]) + '</span>';
@@ -30,22 +33,14 @@ export function makeSite({ cast, contracts, blueprints, base = '/', siteUrl = 'h
   function usedIn(cid) {
     const out = [], seen = new Set();
     for (const m of members) for (const f of m.flows) for (const s of f.steps) {
-      if (s.c === cid && !seen.has(m.id + f.id)) { seen.add(m.id + f.id); out.push({ m, f }); }
+      if (s.c === cid && !seen.has(m.id + ':' + f.id)) { seen.add(m.id + ':' + f.id); out.push({ m, f }); }
     }
     return out;
   }
 
   /* ---------- views: each returns { title, description, body, nav } ---------- */
   function home() {
-    const journey = [
-      ['gatekeeper', 'A message arrives', 'The Gatekeeper authenticates it and holds the door.'],
-      ['bouncer', 'Is it allowed?', 'The Bouncer checks roles against the privilege.'],
-      ['treasurer', 'Can we afford it?', 'The Treasurer checks the budget.'],
-      ['landlord', 'Open the office', 'The Landlord starts the agent from zero.'],
-      ['secretary', 'Bring the notebook', 'The Secretary loads its files.'],
-      ['executive', 'Use a model', 'The Executive serves the call; the Keymaster adds the key.'],
-      ['auditor', 'Write it down', 'The Auditor records every step.'],
-    ];
+    const journey = cast.journey;
     const body =
       '<section class="hero"><div class="eyebrow">Agent Factory</div>' +
       '<h1>Just build the agent. <em>The factory is already built.</em></h1>' +
@@ -59,19 +54,19 @@ export function makeSite({ cast, contracts, blueprints, base = '/', siteUrl = 'h
       '<div class="card ink"><div class="eyebrow" style="color:var(--panel-2)">The cartridge</div><h2>The employee</h2><p>Persona, instructions, skills, and its own notebook. What an agent decides, remembers and says is the cartridge’s business, never the factory’s.</p></div></section>' +
       '<section class="sec-head"><div class="eyebrow">A day in the life</div><h2>What happens when someone messages a sleeping agent</h2></section>' +
       '<ol class="journey">' + journey.map((x) => '<li><b>' + x[1] + '</b><span class="muted">' + x[2] + '</span><a href="' + url.member(x[0]) + '">' + avatar(x[0]) + '<span>' + esc(byId[x[0]].name) + '</span></a></li>').join('') + '</ol>' +
-      '<section class="split"><div class="card"><h3>Eleven staff, one rule</h3><p>Each member owns one job behind a typed contract. A change is either inside one member or on one contract between two. Read each member’s page for its key product flows and the contracts it keeps with the others.</p><a class="btn alt" href="' + url.contracts() + '" style="justify-self:start">All contracts</a></div>' +
+      '<section class="split"><div class="card"><h3>' + Count + ' staff, one rule</h3><p>Each member owns one job behind a typed contract. A change is either inside one member or on one contract between two. Read each member’s page for its key product flows and the contracts it keeps with the others.</p><a class="btn alt" href="' + url.contracts() + '" style="justify-self:start">All contracts</a></div>' +
       '<div class="card"><h3>Any cloud</h3><p>A blueprint maps each member to the services of one provider. AWS and GCP each have a blueprint. Nothing in the factory requires either.</p><a class="btn alt" href="' + url.infra() + '" style="justify-self:start">Infrastructure</a></div></section>';
     return { title: 'Beer Can Labs', description: 'Agent Factory is open-source, turnkey hosting for fleets of autonomous agents. Just build the agent; the factory is already built.', body, nav: 'home' };
   }
 
   function staff() {
-    let h = '<section class="sec-head"><div class="eyebrow">Staff</div><h1>Meet the cast</h1><p class="lead">Eleven staff run the factory. Each has one job, one package and one contract with everyone they work with.</p></section>';
+    let h = '<section class="sec-head"><div class="eyebrow">Staff</div><h1>Meet the cast</h1><p class="lead">' + Count + ' staff run the factory. Each has one job, one package and one contract with everyone they work with.</p></section>';
     for (const d of cast.depts) {
       const ms = members.filter((m) => m.dept === d);
       h += '<section class="dept"><h2>' + esc(d) + ' <small>' + esc(cast.deptNotes[d]) + '</small></h2><div class="grid">' + ms.map((m) =>
         '<a class="person" href="' + url.member(m.id) + '"><div class="pic">' + portrait(m) + '</div><div class="info"><span class="title">' + esc(m.title) + '</span><h3>' + esc(m.name) + '</h3><p>' + esc(m.tag) + '</p><div class="chips"><span class="chip">' + m.flows.length + ' flows</span></div></div></a>').join('') + '</div></section>';
     }
-    return { title: 'Staff | Beer Can Labs', description: 'The eleven members of the Agent Factory cast: what each does, its key product flows and its contracts.', body: h, nav: 'staff' };
+    return { title: 'Staff | Beer Can Labs', description: 'The ' + countWord + ' members of the Agent Factory cast: what each does, its key product flows and its contracts.', body: h, nav: 'staff' };
   }
 
   function member(m) {
@@ -85,7 +80,7 @@ export function makeSite({ cast, contracts, blueprints, base = '/', siteUrl = 'h
         let c = '';
         if (s.c) {
           const ct = cById[s.c], other = s.to || ct.from;
-          c = '<div class="callout">' + avatar(other) + '<span>Works with ' + personLink(other) + '</span><span class="muted">· contract</span><a class="contract-link" href="' + url.contract(ct.id) + '">' + esc(ct.name) + ' →</a>' + (s.why ? '<span class="why">' + esc(s.why) + '</span>' : '') + '</div>';
+          c = '<div class="callout">' + (other === m.id ? '<span class="muted">Contract</span>' : avatar(other) + '<span>Works with ' + personLink(other) + '</span><span class="muted">· contract</span>') + '<a class="contract-link" href="' + url.contract(ct.id) + '">' + esc(ct.name) + ' →</a>' + (s.why ? '<span class="why">' + esc(s.why) + '</span>' : '') + '</div>';
         }
         return '<li><div><p>' + esc(s.t) + '</p>' + c + '</div></li>';
       }).join('') + '</ol></section>';
@@ -141,8 +136,6 @@ export function makeSite({ cast, contracts, blueprints, base = '/', siteUrl = 'h
       '<title>' + esc(page.title) + '</title><meta name="description" content="' + esc(page.description) + '">' +
       '<link rel="canonical" href="' + esc(canonical) + '"><meta property="og:title" content="' + esc(page.title) + '"><meta property="og:description" content="' + esc(page.description) + '"><meta property="og:type" content="website"><meta property="og:url" content="' + esc(canonical) + '">' +
       '<meta name="color-scheme" content="light dark"><link rel="icon" href="' + root + 'favicon.svg" type="image/svg+xml">' +
-      '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>' +
-      '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,500..900&family=Public+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">' +
       '<link rel="stylesheet" href="' + root + 'styles.css"></head><body>' +
       '<div class="top"><div class="wrap"><a class="brand" href="' + url.home() + '" aria-label="Beer Can Labs home"><svg viewBox="0 0 26 34" aria-hidden="true"><rect x="2" y="4" width="22" height="27" rx="3" fill="var(--accent)"/><rect x="2" y="1" width="22" height="4" rx="1.5" fill="var(--ink)"/><rect x="2" y="30" width="22" height="3" rx="1.5" fill="var(--ink)"/><rect x="6" y="12" width="14" height="9" fill="var(--bg)"/><path d="M9 17h8M13 14v6" stroke="var(--ink)" stroke-width="1.6"/></svg>Beer Can Labs</a>' +
       '<nav aria-label="Main">' + NAV.map((n) => '<a href="' + n[2] + '"' + (n[0] === page.nav ? ' aria-current="page"' : '') + '>' + n[1] + '</a>').join('') + '</nav></div></div>' +

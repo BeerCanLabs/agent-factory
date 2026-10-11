@@ -1,3 +1,7 @@
+@font-face { font-family: 'Archivo'; font-style: normal; font-weight: 100 900; font-stretch: 62% 125%; font-display: swap; src: url('fonts/archivo-latin-wdth-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Public Sans'; font-style: normal; font-weight: 100 900; font-display: swap; src: url('fonts/public-sans-latin-wght-normal.woff2') format('woff2'); }
+@font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('fonts/ibm-plex-mono-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 500; font-display: swap; src: url('fonts/ibm-plex-mono-latin-500-normal.woff2') format('woff2'); }
 /* Layout concept: a company site with a label-printer feel. Wide condensed-to-extended Archivo headlines like a can label, aluminum neutrals, one can-red accent. */
 :root {
   --bg: #E8EBED;
