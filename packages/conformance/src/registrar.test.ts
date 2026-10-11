@@ -46,7 +46,7 @@ const matches = (src: string) =>
   src.split('\n').flatMap((line, i) => SECOND_COPY.filter((c) => c.re.test(line)).map((c) => `${i + 1}: ${line.trim()}  [${c.what}]`));
 
 /** Where the rule used to live and could be copied back: the other kernel packages' own source. */
-const GUARDED = /^packages\/(control-plane|gatekeeper-egress|gatekeeper-ingress)\/src\/.*\.ts$/;
+const GUARDED = /^packages\/(control-plane|gatekeeper)\/src\/.*\.ts$/;
 
 describe('Registrar: one copy of the admission, pinning, record and configuration rules', () => {
   it('the patterns recognize what they exist to forbid, and not what callers legitimately do', () => {
@@ -109,10 +109,10 @@ describe('Registrar: one copy of the admission, pinning, record and configuratio
   it('packages/registrar depends on no control-plane, gatekeeper or console package, in its manifest or its source', () => {
     const pkg = JSON.parse(read('packages/registrar/package.json')) as Record<string, Record<string, string> | undefined>;
     const names = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].flatMap((k) => Object.keys(pkg[k] ?? {}));
-    const back = names.filter((n) => /^@beercanlabs\/factory-(control-plane|gatekeeper-.+|console)$/.test(n));
+    const back = names.filter((n) => /^@beercanlabs\/factory-(control-plane|gatekeeper(?:-.+)?|console)$/.test(n));
     assert.deepEqual(back, [], 'the dependency points one way: the control plane depends on the Registrar');
 
-    const IMPORT_BACK = /\bfrom\s+['"](?:@beercanlabs\/factory-(?:control-plane|gatekeeper-[a-z-]+|console)|(?:\.\.\/)+(?:control-plane|gatekeeper-[a-z-]+|console))\b/;
+    const IMPORT_BACK = /\bfrom\s+['"](?:@beercanlabs\/factory-(?:control-plane|gatekeeper(?:-[a-z-]+)?|console)|(?:\.\.\/)+(?:control-plane|gatekeeper(?:-[a-z-]+)?|console))\b/;
     assert.equal(IMPORT_BACK.test("import { x } from '@beercanlabs/factory-control-plane';"), true);
     const upToControlPlane = ['..', '..', 'control-plane', 'src', 'app.js'].join('/'); // built, so this file holds no relative cross-package import itself
     assert.equal(IMPORT_BACK.test(`import { x } from '${upToControlPlane}';`), true);

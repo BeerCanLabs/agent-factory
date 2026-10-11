@@ -95,7 +95,7 @@ services:
   gatekeeper-ingress:
     build:
       context: ../..
-      dockerfile: packages/gatekeeper-ingress/Dockerfile
+      dockerfile: packages/gatekeeper/ingress.Dockerfile
     image: factory-gatekeeper-ingress:dev
     environment:
       PORT: 8090

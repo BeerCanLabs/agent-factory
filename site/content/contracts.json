@@ -294,7 +294,7 @@
    "landlord"
   ],
   "sig": "createGatekeeperIngress(opts)\n// receive(msg)\n// onAgentStarting(id), onAgentWorking(id),\n// onAgentIdle(id)",
-  "src": "packages/gatekeeper-ingress/src/index.ts",
+  "src": "packages/gatekeeper/src/ingress/index.ts",
   "what": "How a message reaches a sleeping agent, and how the Landlord reports the agent’s state back.",
   "rules": [
    "Discord is an optional mailbox, not a requirement.",

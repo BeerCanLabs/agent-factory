@@ -9,7 +9,7 @@ const MATRIX = 'packages/control-plane/src/route-privileges.e2e.test.ts';
 
 const nonTest = (re: RegExp) => files('packages', (p) => re.test(p) && !p.endsWith('.test.ts'));
 const controlPlane = () => nonTest(/^packages\/control-plane\/src\/.*\.ts$/);
-const services = () => nonTest(/^packages\/(control-plane|gatekeeper|gatekeeper-ingress)\/src\/.*\.ts$/);
+const services = () => nonTest(/^packages\/(control-plane|gatekeeper)\/src\/.*\.ts$/);
 
 /** Source with comments removed, so prose cannot trip or satisfy a check. Keeps line breaks. */
 const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' ')).replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');

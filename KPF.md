@@ -45,7 +45,7 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
   - `WebSocket /stream` (UI streams live tool execution logs directly to the user)
 
 ### 5. gatekeeper-ingress (Presence & Real-Time Routing)
-- **Description:** Persistent, stateful connection manager and ingress routing actor (`packages/gatekeeper-ingress`). Because AI Subminds scale to zero to save costs, they cannot hold WebSockets open. gatekeeper-ingress holds these connections (like Discord Gateway, Slack RTM, or Custom WebSockets) 24/7, manages the "Online/Offline" presence, and wakes the agent when an event occurs.
+- **Description:** Persistent, stateful connection manager and ingress routing actor (`packages/gatekeeper`, `src/ingress`). Because AI Subminds scale to zero to save costs, they cannot hold WebSockets open. gatekeeper-ingress holds these connections (like Discord Gateway, Slack RTM, or Custom WebSockets) 24/7, manages the "Online/Offline" presence, and wakes the agent when an event occurs.
 - **Interface (WebSockets / Webhooks):**
   - Custom UI frontends establish a WebSocket connection directly with gatekeeper-ingress.
   - gatekeeper-ingress uses an internal Webhook (`POST /wake`) to trigger the stateless Agent.

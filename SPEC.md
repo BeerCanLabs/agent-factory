@@ -257,5 +257,5 @@ Daemon vs on-behalf-of identity (`identity.yaml`) may land later as optional car
 | Secret binding | `packages/secrets-bind` (env, file, HTTP vault, AWS Secrets Manager) |
 | Mind hydration + agent shim | `packages/hydrate` + `runtimes/generic` |
 | Metrics | `packages/telemetry` (OTLP) |
-| gatekeeper-ingress | `packages/gatekeeper-ingress` — idle without a bot token |
+| gatekeeper-ingress | `packages/gatekeeper` (`src/ingress`) — idle without a bot token |
 | Landing zones | Compose and AWS (ECS) binds; Azure/GCP slot notes |

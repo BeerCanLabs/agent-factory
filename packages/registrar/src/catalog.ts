@@ -44,7 +44,7 @@ export const BUILTIN_SYSTEM_AGENTS: AgentRecord[] = [
     ],
     memoryPrefix: 'system-gatekeeper-ingress',
     warmDownSeconds: 0,
-    dir: '/app/packages/gatekeeper-ingress',
+    dir: '/app/packages/gatekeeper',
     model: 'deterministic',
     requestedModels: [],
     approvedModels: [],

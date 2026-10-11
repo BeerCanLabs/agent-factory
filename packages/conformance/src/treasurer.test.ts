@@ -22,7 +22,7 @@ describe('Treasurer: one copy of the budget rule', () => {
   });
 
   it('gatekeeper-egress and control-plane source do not compare spend with a limit themselves', () => {
-    const found = files('packages', (p) => /^packages\/(gatekeeper-egress|control-plane)\/src\/.*\.ts$/.test(p) && !p.endsWith('.test.ts')).flatMap((f) =>
+    const found = files('packages', (p) => /^packages\/(gatekeeper|control-plane)\/src\/.*\.ts$/.test(p) && !p.endsWith('.test.ts')).flatMap((f) =>
       comparisons(read(f)).map((c) => `${f}:${c}`),
     );
     assert.deepEqual(found, [], 'ask the Treasurer: call checkStanding or exceededWindow from @beercanlabs/factory-budget');

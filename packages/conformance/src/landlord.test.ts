@@ -45,7 +45,7 @@ const SECOND_COPY: Array<{ what: string; re: RegExp }> = [
 
 /** Packages the Landlord must never import: the callers it serves, and the other members' perimeter code. */
 const FORBIDDEN_IMPORTS =
-  /['"]@beercanlabs\/factory-(?:control-plane|gatekeeper|gatekeeper-ingress|console|executive|keymaster|timekeeper|bench)(?:\/[^'"]*)?['"]/g;
+  /['"]@beercanlabs\/factory-(?:control-plane|gatekeeper|console|executive|keymaster|timekeeper|bench)(?:\/[^'"]*)?['"]/g;
 
 const lineOf = (src: string, index: number) => src.slice(0, index).split('\n').length;
 const oneLine = (text: string) => text.trim().replace(/\s+/g, ' ');
@@ -116,7 +116,7 @@ describe('Landlord: one copy of the compute lifecycle, and the dependency points
   it("the Landlord's package.json lists none of those packages either", () => {
     const manifest = JSON.parse(read('packages/landlord/package.json')) as { dependencies?: Record<string, string> };
     const listed = Object.keys(manifest.dependencies ?? {}).filter((d) =>
-      /^@beercanlabs\/factory-(?:control-plane|gatekeeper|gatekeeper-ingress|console|executive|keymaster|timekeeper|bench)$/.test(d),
+      /^@beercanlabs\/factory-(?:control-plane|gatekeeper|console|executive|keymaster|timekeeper|bench)$/.test(d),
     );
     assert.deepEqual(listed, []);
   });
