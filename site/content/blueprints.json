@@ -1,0 +1,106 @@
+{
+ "aws": {
+  "name": "AWS",
+  "mark": "AWS",
+  "pattern": "Containers that scale to zero on AWS",
+  "blurb": "How each member of the cast is served by AWS: agents run as containers that exist only while they work, behind a load balancer, with state in object storage.",
+  "rows": [
+   [
+    "gatekeeper",
+    "Application Load Balancer in front of the container services for ingress and egress; VPC with security groups and private endpoints"
+   ],
+   [
+    "keymaster",
+    "AWS Secrets Manager"
+   ],
+   [
+    "executive",
+    "Amazon Bedrock"
+   ],
+   [
+    "secretary",
+    "Amazon S3 bucket for agent memory"
+   ],
+   [
+    "landlord",
+    "Amazon ECS on Fargate, one task definition per agent, Amazon ECR for images, an IAM role per agent"
+   ],
+   [
+    "auditor",
+    "Amazon S3 with Object Lock for sealed ledger checkpoints"
+   ],
+   [
+    "treasurer",
+    "AWS Cost Explorer and the ECS inventory, through a read-only IAM role"
+   ],
+   [
+    "bouncer",
+    "No provider service. Runs inside the control plane; identity comes from your OIDC provider"
+   ],
+   [
+    "timekeeper",
+    "No provider service. A one-minute clock inside the control plane"
+   ],
+   [
+    "registrar",
+    "AWS CodeBuild for agent builds and skill checks, Amazon ECR, a versioned S3 bucket for configuration"
+   ],
+   [
+    "inspector",
+    "Amazon EventBridge for the event bus, OpenTelemetry for metrics and traces"
+   ]
+  ]
+ },
+ "gcp": {
+  "name": "GCP",
+  "mark": "GCP",
+  "pattern": "Containers that scale to zero on Google Cloud",
+  "blurb": "How each member of the cast is served by Google Cloud: agents run as jobs that exist only while they work, with state in object storage.",
+  "rows": [
+   [
+    "gatekeeper",
+    "Cloud Run services for ingress and egress; VPC with Cloud NAT"
+   ],
+   [
+    "keymaster",
+    "Secret Manager"
+   ],
+   [
+    "executive",
+    "Vertex AI"
+   ],
+   [
+    "secretary",
+    "Cloud Storage bucket for agent memory"
+   ],
+   [
+    "landlord",
+    "Cloud Run jobs, one per agent, Artifact Registry for images, a service account per agent"
+   ],
+   [
+    "auditor",
+    "Cloud Storage with a retention policy for sealed ledger checkpoints"
+   ],
+   [
+    "treasurer",
+    "Cloud Billing export to BigQuery, and the Cloud Run inventory, through a read-only service account"
+   ],
+   [
+    "bouncer",
+    "No provider service. Runs inside the control plane; identity comes from your OIDC provider"
+   ],
+   [
+    "timekeeper",
+    "No provider service. A one-minute clock inside the control plane"
+   ],
+   [
+    "registrar",
+    "Cloud Build for agent builds and skill checks, Artifact Registry, a versioned Cloud Storage bucket for configuration"
+   ],
+   [
+    "inspector",
+    "Pub/Sub and Cloud Audit Logs for the event bus, OpenTelemetry for metrics and traces"
+   ]
+  ]
+ }
+}
