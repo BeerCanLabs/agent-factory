@@ -11,6 +11,7 @@ if npm run build -w @beercanlabs/factory-contract -w @beercanlabs/factory-auth -
     -w @beercanlabs/factory-bouncer \
     -w @beercanlabs/factory-timekeeper \
     -w @beercanlabs/factory-registrar \
+    -w @beercanlabs/factory-landlord \
     -w @beercanlabs/factory-secrets-bind -w @beercanlabs/factory-telemetry -w @beercanlabs/factory-hydrate \
     -w @beercanlabs/factory-inspector \
     -w @beercanlabs/factory-gatekeeper-egress >"$log" 2>&1 \

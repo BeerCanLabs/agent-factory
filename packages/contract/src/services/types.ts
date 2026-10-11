@@ -74,11 +74,10 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'landlord',
     title: 'Landlord',
     role: 'Compute lifecycle management, wake-from-zero, warm-down, and turn mailbox delivery (L1–L6)',
-    hostedIn: ['packages/control-plane'],
+    hostedIn: ['packages/control-plane', 'packages/landlord'],
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/apply.ts',
-      'packages/control-plane/src/callbacks.ts',
       'packages/control-plane/src/queues.ts',
       'packages/control-plane/src/runs.ts',
       'packages/control-plane/src/runtime.ts',
