@@ -34,7 +34,7 @@ import { join } from 'node:path';
 import { AGENT_ID, type ConfigContent, type ConfigRecord } from '@beercanlabs/factory-registrar';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { parseActor } from './identity-links.js';
-import { isReservedPolicyId } from './policy.js';
+import { isReservedPolicyId } from '@beercanlabs/factory-gatekeeper/policy';
 
 /**
  * The agent's configuration as the factory holds it now. Adopted skills and owners carry forward: a registration, a

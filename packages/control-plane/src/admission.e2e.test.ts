@@ -13,7 +13,7 @@ import { BUILTIN_SYSTEM_AGENTS, checkRepoUrl } from '@beercanlabs/factory-regist
 import { AdmissionRefusedError, imageTagFor, MemoryRunStore, noopRuntime, type AdmissionRefusal, type DeployProvider, type SourceRef } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { admissionFailure, buildAgentImage } from '@beercanlabs/factory-landlord/aws/codebuild';
 
 const ADMIN = 'admin-admission-token';

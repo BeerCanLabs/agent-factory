@@ -20,7 +20,7 @@ import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
-import { PolicyStore, validatePolicy } from './policy.js';
+import { PolicyStore, validatePolicy } from '@beercanlabs/factory-gatekeeper/policy';
 import { busSinkFromEnv, createInspector, factoryMetrics } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
 import { checkRegistry, migrateConfigs, pruneOrphans } from './config-store.js';

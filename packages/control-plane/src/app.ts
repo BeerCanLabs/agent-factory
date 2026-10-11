@@ -33,7 +33,7 @@ import {
 import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-landlord';
 import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
 import { authorize, authorizeIngress, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type AuthenticatedCaller, type Privilege } from '@beercanlabs/factory-bouncer';
-import { validatePolicy, type PolicyStore } from './policy.js';
+import { validatePolicy, type PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';

@@ -10,7 +10,7 @@ import { BUILTIN_SYSTEM_AGENTS, type AgentRecord } from '@beercanlabs/factory-re
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { ScheduleStore, type ScheduledAction } from '@beercanlabs/factory-timekeeper';
 import { scheduleLedgerHash } from './schedules.js';
 

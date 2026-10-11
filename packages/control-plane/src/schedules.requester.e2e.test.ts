@@ -16,7 +16,7 @@ import { FileConfigBackend, VersionedConfigStore } from '@beercanlabs/factory-re
 import { ScheduleStore, type ScheduledAction } from '@beercanlabs/factory-timekeeper';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { createRun, MemoryRunStore, noopRuntime, SYSTEM } from '@beercanlabs/factory-landlord';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { IdentityLinkStore } from './identity-links.js';
 import { requesterOfRun, scheduleRunOptions } from './schedules.js';
 

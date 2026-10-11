@@ -17,7 +17,7 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { finishRun, MemoryRunStore, memoryRuntime, SYSTEM } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 
 const agentsRoot = fileURLToPath(new URL('../../../agents', import.meta.url));
 const KEY = 'bench-run-token-key-0123456789abcdefghij';

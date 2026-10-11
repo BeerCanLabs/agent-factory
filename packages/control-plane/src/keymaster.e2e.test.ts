@@ -8,7 +8,7 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import type { AgentRecord } from '@beercanlabs/factory-registrar';
 
 const KEY = 'e2e-run-token-key-0123456789abcdefghij';

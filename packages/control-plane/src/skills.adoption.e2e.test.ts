@@ -14,7 +14,7 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { VersionedConfigStore, type ConfigBackend, type ConfigRecord } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-landlord';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { adoptionStore, loadSkills, recordSkillChecks } from './skills.js';
 
 const ADMIN = 'adoption-admin-token';

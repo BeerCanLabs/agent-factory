@@ -16,6 +16,8 @@ RUN npm run build -w @beercanlabs/factory-contract \
   -w @beercanlabs/factory-timekeeper \
   -w @beercanlabs/factory-registrar \
   -w @beercanlabs/factory-landlord \
+  -w @beercanlabs/factory-executive \
+  -w @beercanlabs/factory-gatekeeper \
   -w @beercanlabs/factory-control-plane
 
 FROM node:22-alpine
@@ -35,6 +37,8 @@ COPY packages/inspector/package.json ./packages/inspector/package.json
 COPY packages/timekeeper/package.json ./packages/timekeeper/package.json
 COPY packages/registrar/package.json ./packages/registrar/package.json
 COPY packages/landlord/package.json ./packages/landlord/package.json
+COPY packages/executive/package.json ./packages/executive/package.json
+COPY packages/gatekeeper/package.json ./packages/gatekeeper/package.json
 COPY packages/control-plane/package.json ./packages/control-plane/package.json
 RUN npm install --omit=dev -w @beercanlabs/factory-control-plane
 COPY --from=builder /app/packages/contract/dist ./packages/contract/dist
@@ -50,6 +54,8 @@ COPY --from=builder /app/packages/inspector/dist ./packages/inspector/dist
 COPY --from=builder /app/packages/timekeeper/dist ./packages/timekeeper/dist
 COPY --from=builder /app/packages/registrar/dist ./packages/registrar/dist
 COPY --from=builder /app/packages/landlord/dist ./packages/landlord/dist
+COPY --from=builder /app/packages/executive/dist ./packages/executive/dist
+COPY --from=builder /app/packages/gatekeeper/dist ./packages/gatekeeper/dist
 COPY --from=builder /app/packages/control-plane/dist ./packages/control-plane/dist
 COPY agents ./agents
 RUN mkdir -p /data/mind && chown -R node:node /data

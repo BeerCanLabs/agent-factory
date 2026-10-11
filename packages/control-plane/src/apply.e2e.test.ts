@@ -14,7 +14,7 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { VersionedConfigStore, type ConfigBackend, type ConfigRecord } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { AdmissionRefusedError, imageTagFor, MemoryRunStore, noopRuntime, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type DeployProvider, type SourceRef } from '@beercanlabs/factory-landlord';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { applyConfig } from './apply.js';
 import { loadSkills, recordSkillChecks } from './skills.js';
 

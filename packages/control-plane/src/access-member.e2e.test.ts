@@ -15,7 +15,7 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { FileConfigBackend, VersionedConfigStore } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-landlord';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { IdentityLinkStore } from './identity-links.js';
 
 const ADMIN = 'admin-access-member';
