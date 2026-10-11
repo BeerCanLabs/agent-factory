@@ -707,7 +707,7 @@ That is 59 privileges and 61 `authenticate` call sites (a privilege can be asked
 
 ### Gatekeeper flow work stream (TSK-187 to TSK-194)
 
-**Status (2026-10-11):** TSK-187 (this plan) is `COMPLETED`; TSK-188 to TSK-194 are `PENDING`. No code until Dale confirms the wording below.
+**Status (2026-10-11):** TSK-187 (the plan, #150), TSK-191 (#152) and TSK-188 are `COMPLETED`; TSK-189, TSK-190 and TSK-192 to TSK-194 are `PENDING`. The plan and its defaults are confirmed by Dale (below).
 
 **Intent.** The Gatekeeper owns the perimeter: inbound presence and wakes, front-door authentication verification (A1, A2), the run-token rule, the policy and identity-link data, and outbound proxying with credential injection (E1 to E6, S1). `packages/gatekeeper` holds all of that behind one typed contract. It authenticates and never authorizes (the Bouncer's); it asks the Treasurer, the Bouncer, the Executive and the Keymaster through their contracts and enforces the answers. The dependency points one way: the control plane depends on the Gatekeeper, never the reverse.
 
@@ -715,7 +715,7 @@ That is 59 privileges and 61 `authenticate` call sites (a privilege can be asked
 
 **Confirmed by Dale (chat, 2026-10-11):** extract the Gatekeeper ("Lets extract the gatekeeper - which I believe is the last crew member to extract"); consolidate `gatekeeper-egress` and `gatekeeper-ingress` into one `packages/gatekeeper`; the run-token rule moves behind a typed contract (`verifyRun`) that `app.ts` calls. This change is the plan only.
 
-**Defaults chosen by the drafter, to be confirmed by Dale:** the extraction is moves only; `packages/auth` stays its own package, hosted by the Gatekeeper as `packages/telemetry` is by the Inspector (D-A); the egress and the ingress stay separate processes with separate entry points and images inside the one package; the `/api/v1/identity-links` handler and the policy routes stay in `control-plane` (GAP-133's reasoning); `signin-links.ts` is the Keymaster's and moves there; `createGatekeeperEgress` is not split into per-route modules (not a move; a later task if wanted).
+**Defaults chosen by the drafter, confirmed by Dale as written (chat, 2026-10-11: "Yes, I confirm the defaults"):** the extraction is moves only; `packages/auth` stays its own package, hosted by the Gatekeeper as `packages/telemetry` is by the Inspector (D-A); the egress and the ingress stay separate processes with separate entry points and images inside the one package; the `/api/v1/identity-links` handler and the policy routes stay in `control-plane` (GAP-133's reasoning); `signin-links.ts` is the Keymaster's and moves there; `createGatekeeperEgress` is not split into per-route modules (not a move; a later task if wanted).
 
 **Traps.**
 - Two entry points in one package: each Dockerfile, `scripts/compose-e2e.sh`, `landing-zones/*` and the `start` scripts must name the right built file.
