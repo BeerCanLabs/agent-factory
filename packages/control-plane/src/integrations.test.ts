@@ -12,14 +12,12 @@ import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { loadCatalog } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, createRun, finishRun, SYSTEM, type FactoryState } from './app.js';
-import { noopRuntime } from '@beercanlabs/factory-landlord';
-import { MemoryRunStore } from './runs.js';
+import { MemoryRunStore, noopRuntime, pollQueueOnce } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
 import { createInspector, eventBridgeSink, fileSink, type FactoryEvent } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
-import { pollQueueOnce } from './queues.js';
 
 const listen = (s: http.Server) => new Promise<number>((r) => s.listen(0, '127.0.0.1', () => r((s.address() as AddressInfo).port)));
 const agentsRoot = fileURLToPath(new URL('../../../agents', import.meta.url));
@@ -164,7 +162,7 @@ describe('SQS queue trigger', () => {
       deleted.push(args[args.indexOf('--receipt-handle') + 1]);
       return '{}';
     };
-    assert.equal(await pollQueueOnce(state, 'echo-agent', 'https://sqs.us-east-1.amazonaws.com/1/q', cli), 2);
+    assert.equal(await pollQueueOnce((id, o) => createRun(state, id, o), 'echo-agent', 'https://sqs.us-east-1.amazonaws.com/1/q', cli), 2);
     const runs = state.runs.list({ agentId: 'echo-agent' });
     assert.deepEqual(runs.map((r) => [r.state, r.actor, r.trigger]), [
       ['WORKING', 'queue:echo-agent', 'queue'],
@@ -176,7 +174,7 @@ describe('SQS queue trigger', () => {
 
     state.agents.get('echo-agent')!.state = 'PAUSED';
     deleted.length = 0;
-    assert.equal(await pollQueueOnce(state, 'echo-agent', 'https://sqs.us-east-1.amazonaws.com/1/q', cli), 0);
+    assert.equal(await pollQueueOnce((id, o) => createRun(state, id, o), 'echo-agent', 'https://sqs.us-east-1.amazonaws.com/1/q', cli), 0);
     assert.deepEqual(deleted, [], 'paused agent: messages stay on the queue for redelivery');
   });
 

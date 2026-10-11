@@ -10,6 +10,9 @@ It holds so far:
 
 - `aws/*` and `gcp/*` (subpath exports, loaded lazily so a deployment pulls in only its own cloud's SDKs): the image build (CodeBuild, Cloud Build), the agent execution roles and secret access (IAM), the task and job registration (ECS, Cloud Run) and the `DeployProvider` for each. `landing-zones/` holds the matching infrastructure.
 
-The run store and the run lifecycle follow in TSK-182 to TSK-184. The HTTP wake and run handlers stay in `control-plane`.
+- `MemoryRunStore`, `FileRunStore`, `RunStore`, `Run`, `RunState`, `isTerminal`, `RunTokens`: the run store and run tokens.
+- `pollQueueOnce`, `startQueuePollers`: SQS queue triggers. They take a `createRun` callback; the Landlord never imports the control plane.
+
+The run lifecycle (`createRun`, `finishRun`, the kill switch, health and reconcile) follows in TSK-183 and TSK-184. The HTTP wake and run handlers stay in `control-plane`.
 
 The dependency points one way: the control plane depends on the Landlord; the Landlord depends on the Registrar and the Secretary (`packages/hydrate`) and never imports the control plane.

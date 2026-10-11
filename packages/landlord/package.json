@@ -2,7 +2,7 @@
   "name": "@beercanlabs/factory-landlord",
   "version": "0.1.0",
   "private": true,
-  "description": "Landlord: the Factory's compute lifecycle (callback delivery, the runtime launchers and the AWS and GCP build, IAM and deploy adapters today; the run store and run lifecycle follow).",
+  "description": "Landlord: the Factory's compute lifecycle (callback delivery, the runtime launchers, the AWS and GCP build, IAM and deploy adapters, the run store and the queue pollers today; the run lifecycle follows).",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -22,6 +22,8 @@
     "@aws-sdk/client-ecs": "^3.1136.0",
     "@aws-sdk/client-iam": "^3.1136.0",
     "@aws-sdk/client-secrets-manager": "^3.1136.0",
+    "@beercanlabs/factory-auth": "0.1.0",
+    "@beercanlabs/factory-bouncer": "0.1.0",
     "@beercanlabs/factory-hydrate": "0.1.0",
     "@beercanlabs/factory-registrar": "0.1.0",
     "@google-cloud/cloudbuild": "^4.8.1",

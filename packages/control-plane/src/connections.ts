@@ -11,7 +11,7 @@ import http from 'node:http';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { ConnectionKeymaster, grantSecretName, type Grant } from '@beercanlabs/factory-keymaster';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
-import { isTerminal } from './runs.js';
+import { isTerminal } from '@beercanlabs/factory-landlord';
 import { invalidateCredentials } from './credentials.js';
 
 const STATE_TTL_MS = 10 * 60 * 1000;
