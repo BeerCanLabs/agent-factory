@@ -17,7 +17,7 @@
  *     a pytest configuration exists).
  *
  * Checkers:
- *   - `codeBuildSkillChecker` (aws/codebuild.ts): the `factory-skill-checker` CodeBuild project
+ *   - `codeBuildSkillChecker` (control-plane aws/skill-checker.ts): the `factory-skill-checker` CodeBuild project
  *     (landing-zones/aws/codebuild.tf), which embeds this same script; a test keeps the two identical.
  *   - `localSkillChecker`: clones and runs the script on this machine (development; needs git and python3).
  *   - `fakeSkillChecker`: for tests.

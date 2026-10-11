@@ -15,7 +15,7 @@ import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import { admissionFailure, buildAgentImage } from './aws/codebuild.js';
+import { admissionFailure, buildAgentImage } from '@beercanlabs/factory-landlord/aws/codebuild';
 
 const ADMIN = 'admin-admission-token';
 const REPO = 'https://github.com/BeerCanLabs/SM-donna.git';
