@@ -1,0 +1,323 @@
+[
+ {
+  "id": "bouncer-authorize",
+  "name": "authorize",
+  "from": "bouncer",
+  "to": [
+   "gatekeeper",
+   "keymaster",
+   "landlord",
+   "treasurer",
+   "timekeeper",
+   "registrar"
+  ],
+  "sig": "authorize({ principal, privilege, resource? })\n  : AuthorizeResult",
+  "src": "packages/bouncer/src/authorize.ts",
+  "what": "Whether a principal’s roles hold one named privilege on a resource. Every control-plane route calls it with exactly one privilege.",
+  "rules": [
+   "Roles map to privileges in one table inside the Bouncer.",
+   "agent-owner, agent-member and requester come from data, never from a credential.",
+   "A role check outside packages/bouncer and packages/auth fails conformance.",
+   "A route missing from the matrix test fails conformance."
+  ]
+ },
+ {
+  "id": "bouncer-hold",
+  "name": "checkHold",
+  "from": "bouncer",
+  "to": [
+   "gatekeeper"
+  ],
+  "sig": "checkHold(request, rule: HoldRule)\n  : HoldDecision",
+  "src": "packages/bouncer/src/decisions.ts",
+  "what": "Whether an outbound request is held for a person’s approval, using the agent’s hold rules.",
+  "rules": [
+   "The Bouncer decides; the egress enforces.",
+   "A held request stores a reviewed copy, its hash and a size-limited body.",
+   "The limits are HELD_BODY_LIMIT and HELD_STORED_BODY_LIMIT."
+  ]
+ },
+ {
+  "id": "bouncer-tool-approval",
+  "name": "checkToolApproval",
+  "from": "bouncer",
+  "to": [
+   "keymaster"
+  ],
+  "sig": "checkToolApproval(check: ToolApprovalCheck)\n  : ToolApprovalDecision",
+  "src": "packages/bouncer/src/decisions.ts",
+  "what": "Whether a tool call needs a person’s approval, and whether an approval already covers it.",
+  "rules": [
+   "An approval is consumed when used."
+  ]
+ },
+ {
+  "id": "treasurer-standing",
+  "name": "checkStanding",
+  "from": "treasurer",
+  "to": [
+   "gatekeeper",
+   "landlord"
+  ],
+  "sig": "checkStanding(request: StandingRequest)\n  : StandingResult",
+  "src": "packages/budget/src/standing.ts",
+  "what": "Whether an agent is inside its limits. Returns ok, or the first window exceeded: perRun, perDay or perMonth.",
+  "rules": [
+   "The Treasurer decides; callers enforce (402, blockRun, budget.alert).",
+   "No default budget exists. Without one, nothing is enforced.",
+   "A conformance test fails if egress or control-plane source compares spend with a limit itself."
+  ]
+ },
+ {
+  "id": "treasurer-pricing",
+  "name": "costUsd / priceFor",
+  "from": "treasurer",
+  "to": [
+   "executive",
+   "gatekeeper"
+  ],
+  "sig": "priceFor(model): Price\ncostUsd(price: Price, usage: TokenUsage)\n  : number",
+  "src": "packages/budget/src/pricing.ts",
+  "what": "Turns the Executive’s token counts into dollars. TokenUsage is input, output, cacheRead and cacheWrite.",
+  "rules": [
+   "The Executive depends on the Treasurer for the Price and TokenUsage types only."
+  ]
+ },
+ {
+  "id": "executive-complete",
+  "name": "complete",
+  "from": "executive",
+  "to": [
+   "gatekeeper"
+  ],
+  "sig": "complete(request, catalog, adapters)\n  : Promise<Completion>",
+  "src": "packages/executive/src/complete.ts",
+  "what": "Serves one model call: validates the request, finds the provider’s adapter and calls it. Never throws.",
+  "rules": [
+   "Returns a result, a refusal made before any provider was called, or the upstream failure.",
+   "The Executive holds no credential and answers no HTTP request."
+  ]
+ },
+ {
+  "id": "executive-model-policy",
+  "name": "checkModel / offeredModels",
+  "from": "executive",
+  "to": [
+   "gatekeeper"
+  ],
+  "sig": "checkModel(policy: ModelPolicy, name)\n  : ModelCheck\nofferedModels(policy): string[]",
+  "src": "packages/executive/src/model-policy.ts",
+  "what": "Whether an agent may use a model, and which models it may choose from.",
+  "rules": [
+   "Plain values in. The Executive does not import the control plane’s Policy.",
+   "Factory default applies when a policy names none (M2, E7)."
+  ]
+ },
+ {
+  "id": "inspector-events",
+  "name": "createInspector",
+  "from": "inspector",
+  "to": [
+   "landlord",
+   "gatekeeper",
+   "auditor"
+  ],
+  "sig": "createInspector(opts: InspectorOptions)\n  : Inspector\n// publish, publishRun, subscribe, tapLedger,\n// attachBus, reportProgress, readProgress, stop",
+  "src": "packages/inspector/src/inspector.ts",
+  "what": "The one door for run events, live progress and ledger taps.",
+  "rules": [
+   "The Inspector watches and decides nothing.",
+   "A conformance test fails on a second copy of the event hub."
+  ]
+ },
+ {
+  "id": "timekeeper-fire",
+  "name": "createTimekeeper",
+  "from": "timekeeper",
+  "to": [
+   "landlord"
+  ],
+  "sig": "createTimekeeper({ agents, schedules, fire })\n// fire(req: FireRequest)\n// { kind: 'cartridge', agentId }\n// | { kind: 'schedule', schedule }",
+  "src": "packages/timekeeper/src/index.ts",
+  "what": "Each minute, tells the Landlord which cartridge crons and which schedules are due.",
+  "rules": [
+   "It never starts a run and never imports the control plane.",
+   "The composition root is its only caller."
+  ]
+ },
+ {
+  "id": "registrar-admit",
+  "name": "admit",
+  "from": "registrar",
+  "to": [
+   "landlord"
+  ],
+  "sig": "admit(source, { build, isRefusal, redact })",
+  "src": "packages/registrar/src/admission.ts",
+  "what": "Admits or refuses a pinned commit. The Landlord injects the image build.",
+  "rules": [
+   "Only a pinned, admitted commit deploys (L3, L4).",
+   "A refusal carries one reason."
+  ]
+ },
+ {
+  "id": "registrar-agents",
+  "name": "AgentRegistry",
+  "from": "registrar",
+  "to": [
+   "landlord",
+   "keymaster"
+  ],
+  "sig": "AgentRegistry\n// save, update, remove  (<registryDir>/<id>.json)\ntype AgentRecord",
+  "src": "packages/registrar/src/registry.ts",
+  "what": "The agent record and the store behind it.",
+  "rules": [
+   "AgentRecord lives in the Registrar. The Landlord and the Keymaster import it from there."
+  ]
+ },
+ {
+  "id": "registrar-config",
+  "name": "VersionedConfigStore",
+  "from": "registrar",
+  "to": [
+   "bouncer"
+  ],
+  "sig": "VersionedConfigStore\nconfigHash(config): string",
+  "src": "packages/registrar/src/config-store.ts",
+  "what": "Versioned deployment configuration, including the owners the Bouncer reads.",
+  "rules": [
+   "configHash does not change when owners are absent.",
+   "A versioned backend allows point-in-time restore (R1)."
+  ]
+ },
+ {
+  "id": "registrar-systems",
+  "name": "SystemsStore",
+  "from": "registrar",
+  "to": [
+   "keymaster"
+  ],
+  "sig": "SystemsStore",
+  "src": "packages/registrar/src/systems.ts",
+  "what": "System definitions (E10). The Keymaster derives a connection provider from one.",
+  "rules": [
+   "The store moved without a Keymaster dependency; the control plane adds the two Keymaster methods."
+  ]
+ },
+ {
+  "id": "keymaster-checkout",
+  "name": "Keymaster.checkout",
+  "from": "keymaster",
+  "to": [
+   "gatekeeper"
+  ],
+  "sig": "checkout(params: CheckoutParams)\n  : Promise<CheckoutOutcome>",
+  "src": "packages/keymaster/src/keymaster.ts",
+  "what": "A credential for one outbound call, as a lease.",
+  "rules": [
+   "Agents never hold real secrets (S1).",
+   "A lease expires or is revoked."
+  ]
+ },
+ {
+  "id": "secrets-provider",
+  "name": "SecretProvider",
+  "from": "keymaster",
+  "to": [
+   "keymaster"
+  ],
+  "sig": "type SecretProvider\n// one implementation per landing zone:\n// vault, file, environment, HTTP",
+  "src": "packages/secrets-bind/src/index.ts",
+  "what": "Maps a secret’s name to the vault that holds it. One provider per landing zone.",
+  "rules": [
+   "Names only travel; values stay in the vault.",
+   "Writes are through a writable provider, write-only."
+  ]
+ },
+ {
+  "id": "secretary-mind",
+  "name": "pullMind / pushMind",
+  "from": "secretary",
+  "to": [
+   "landlord"
+  ],
+  "sig": "pullMind(store: MindStore, prefix, dest)\npushMind(store: MindStore, prefix, src)",
+  "src": "packages/hydrate/src/index.ts",
+  "what": "Copies an agent’s prefix between the mind store and $MEMORY_DIR.",
+  "rules": [
+   "The prefix is fixed at deploy.",
+   "Cartridges never need a cloud storage SDK."
+  ]
+ },
+ {
+  "id": "auditor-ledger",
+  "name": "LedgerStore / verifyChain",
+  "from": "auditor",
+  "to": [
+   "gatekeeper",
+   "landlord",
+   "treasurer",
+   "bouncer",
+   "keymaster",
+   "registrar",
+   "timekeeper"
+  ],
+  "sig": "LedgerStore  (FileLedger, MemoryLedger)\nverifyChain(rows, genesis): VerifyResult\nCheckpointer, LedgerLease",
+  "src": "packages/ledger/src/index.ts",
+  "what": "Append a redacted, hash-chained row; verify the chain; seal checkpoints.",
+  "rules": [
+   "Rows are append-only.",
+   "Secrets and prompts are redacted before storage."
+  ]
+ },
+ {
+  "id": "auth-principal",
+  "name": "AuthProvider / Principal",
+  "from": "gatekeeper",
+  "to": [
+   "bouncer",
+   "timekeeper"
+  ],
+  "sig": "type Principal = { actor: string; roles: Role[] }\ntype AuthProvider  // bearerAuth, oidcAuth, anyAuth\nclass RunTokens",
+  "src": "packages/auth/src/index.ts",
+  "what": "Who is calling and with what roles. Authentication only.",
+  "rules": [
+   "Roles: viewer, operator, approver, ingest, gatekeeper-egress, gatekeeper-ingress, admin.",
+   "It authenticates and never authorizes."
+  ]
+ },
+ {
+  "id": "gatekeeper-ingress",
+  "name": "GatekeeperIngress",
+  "from": "gatekeeper",
+  "to": [
+   "landlord"
+  ],
+  "sig": "createGatekeeperIngress(opts)\n// receive(msg)\n// onAgentStarting(id), onAgentWorking(id),\n// onAgentIdle(id)",
+  "src": "packages/gatekeeper-ingress/src/index.ts",
+  "what": "How a message reaches a sleeping agent, and how the Landlord reports the agent’s state back.",
+  "rules": [
+   "Discord is an optional mailbox, not a requirement.",
+   "The ingress keeps its socket when the agent scales to zero."
+  ]
+ },
+ {
+  "id": "landlord-lifecycle",
+  "name": "createRun and the run lifecycle",
+  "from": "landlord",
+  "to": [
+   "gatekeeper",
+   "bouncer",
+   "timekeeper"
+  ],
+  "sig": "createRun(state: LandlordState, …)\n// finishRun, blockRun, unblockRun, activeRun,\n// deliverToMailbox, resetAgent, applyKillSwitch,\n// reconcileRuns\ntype Runtime  // dockerRuntime, ecsRuntime",
+  "src": "packages/landlord/src/lifecycle.ts",
+  "what": "Wake, run and stop an agent. Every wake path goes through createRun.",
+  "rules": [
+   "Every wake path goes through createRun.",
+   "A replayed messageId returns the existing run with 200.",
+   "The functions take LandlordState; the queue pollers and the Timekeeper’s fire take createRun as a callback, so the package never imports the control plane.",
+   "A conformance test fails on a second copy of these rules."
+  ]
+ }
+]
