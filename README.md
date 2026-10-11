@@ -51,7 +51,7 @@ Agent Factory is architected around **11 canonical services ("The Cast of Charac
 
 5. **Landlord (Compute Lifecycle & Turn Broker):**
    - **Role:** Manages serverless min=0 compute, wake-from-zero, warm-down windows, operational pause/kill-switches, turn coordination via `/mailbox` long-polling, and two-stage retirement (§6.4).
-   - **Contract:** Run state machine lifecycle, pre-flight standing verification with the Treasurer before starting runs (`createRun`), and runtime container task supervision.
+   - **Contract:** `packages/landlord` exports the run lifecycle (`createRun`, `finishRun`, `applyKillSwitch`, `checkHealth`, `reconcileRuns` and the rest), the run store, the queue pollers, callback delivery, the runtime launchers and the AWS and GCP build, IAM and deploy adapters (`./aws/*`, `./gcp/*`). The functions take the part of the control plane's state they use, so the package never imports the control plane. Pre-flight standing verification with the Treasurer runs before every wake. The HTTP wake and run handlers stay in `packages/control-plane` (GAP-133).
 
 6. **Auditor (Immutable Ledger):**
    - **Role:** Owns the cryptographic append-only WORM audit trail of runs, spend, credential actions, and perimeter decisions (LG1, LG2).
