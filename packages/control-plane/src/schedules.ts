@@ -93,7 +93,7 @@ export function scheduleLedgerHash(s: Pick<ScheduledAction, 'id' | 'agentId' | '
   return payloadHash({ scheduleId: s.id, agentId: s.agentId, cron: s.cron, timezone: s.timezone ?? null, ...(reason ? { reason } : {}) });
 }
 
-function ledgerSchedule(state: FactoryState, caller: ScheduleCaller, action: 'SCHEDULE_CREATED' | 'SCHEDULE_DELETED', s: ScheduledAction) {
+function ledgerSchedule(state: FactoryState, caller: ScheduleCaller, action: 'SCHEDULE_CREATED' | 'SCHEDULE_DELETED' | 'SCHEDULE_UPDATED', s: ScheduledAction) {
   // Actor and agent, plus a hash of the schedule's identity (the ledger's row fields are a fixed allowlist).
   state.ledger.append({
     timestamp: new Date().toISOString(),
@@ -319,12 +319,12 @@ const SCHEDULE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 // ---------------------------------------------------------------------------
 
 /**
- * `GET /api/v1/schedules`, `POST /api/v1/schedules`, `DELETE /api/v1/schedules/:id`. Returns false for other paths.
+ * `GET /api/v1/schedules`, `POST /api/v1/schedules`, `PATCH /api/v1/schedules/:id`, `DELETE /api/v1/schedules/:id`. Returns false for other paths.
  *
  * - A run lists only its own agent's schedules, whatever filter it sends (`agent=` or the legacy `agentId=`).
  * - A run creates only for its own agent: an `agentId` naming another agent is 403. It never chooses the id.
- * - A run deletes only its own agent's schedules: another agent's id gets the same 404 as a missing one.
- * - An operator keeps fleet access: the `agent` filter, any `agentId` in the body, any id to delete. A viewer lists.
+ * - A run updates and deletes only its own agent's schedules: another agent's id gets the same 404 as a missing one.
+ * - An operator keeps fleet access: the `agent` filter, any `agentId` in the body, any id to update or delete. A viewer lists.
  *
  * Responses keep the shapes the agents already read: `{ schedules }`, `{ ok, schedule }`, `{ ok, deleted }`.
  */
@@ -332,7 +332,7 @@ export async function handleSchedules(state: FactoryState, req: http.IncomingMes
   const one = path.match(/^\/api\/v1\/schedules\/([^/]+)$/);
   if (path !== '/api/v1/schedules' && !one) return false;
   if (path === '/api/v1/schedules' && req.method !== 'GET' && req.method !== 'POST') return false;
-  if (one && req.method !== 'DELETE') return false;
+  if (one && req.method !== 'DELETE' && req.method !== 'PATCH' && req.method !== 'PUT' && req.method !== 'POST') return false;
 
   const caller = await authenticateOperatorOrRun(req, res, state);
   if (!caller) return true;
@@ -345,7 +345,7 @@ export async function handleSchedules(state: FactoryState, req: http.IncomingMes
     return true;
   }
 
-  if (req.method === 'POST') {
+  if (path === '/api/v1/schedules' && req.method === 'POST') {
     if (!canWrite(caller, res)) return true;
     const body = await readJson(req);
     if (!optionalString(body.agentId)) {
@@ -406,7 +406,7 @@ export async function handleSchedules(state: FactoryState, req: http.IncomingMes
         }
       }
     }
-    // E12, GAP-131: whose authority this schedule's runs will carry. The factory decides; the request body never can.
+    // E12, GAP-131: whose authority this schedule's runs will carry. An operator may specify requestedBy; a run's is decided by the factory.
     let requestedBy: ScheduleRequester | undefined;
     if (caller.kind === 'run') {
       const run = state.runs.get(caller.runId);
@@ -416,7 +416,15 @@ export async function handleSchedules(state: FactoryState, req: http.IncomingMes
         return true;
       }
     } else {
-      requestedBy = { kind: 'principal', actor: caller.actor };
+      if (body.requestedBy !== undefined) {
+        requestedBy = readRequester(body.requestedBy);
+        if (!requestedBy) {
+          json(res, 400, { error: 'invalid_field', field: 'requestedBy' });
+          return true;
+        }
+      } else {
+        requestedBy = existing ? existing.requestedBy : { kind: 'principal', actor: caller.actor };
+      }
     }
     const channelId = (body.channelId as string | undefined) || (body.channel_id as string | undefined) || undefined;
     const schedule: ScheduledAction = {
@@ -430,7 +438,7 @@ export async function handleSchedules(state: FactoryState, req: http.IncomingMes
       enabled: body.enabled !== false,
       createdAt: existing ? existing.createdAt : new Date().toISOString(),
       createdVia: existing ? existing.createdVia : (caller.kind === 'run' ? 'agent' : 'api'),
-      requestedBy: existing ? existing.requestedBy : requestedBy,
+      requestedBy,
     };
     if (!store) {
       json(res, 503, { error: 'schedules_unavailable' });
@@ -439,6 +447,117 @@ export async function handleSchedules(state: FactoryState, req: http.IncomingMes
     store.save(schedule);
     ledgerSchedule(state, caller, 'SCHEDULE_CREATED', schedule);
     json(res, 200, { ok: true, schedule });
+    return true;
+  }
+
+  // PATCH / PUT / POST /api/v1/schedules/:id
+  if (one && (req.method === 'PATCH' || req.method === 'PUT' || req.method === 'POST')) {
+    if (!canWrite(caller, res)) return true;
+    const id = decodeURIComponent(one[1]);
+    const existing = store?.get(id);
+    if (caller.kind === 'run' && (!existing || existing.agentId !== caller.agentId)) {
+      // Another agent's schedule looks exactly like a missing one: a run never learns which ids exist.
+      json(res, 404, { error: 'not_found' });
+      return true;
+    }
+    if (!existing) {
+      json(res, 404, { error: 'not_found' });
+      return true;
+    }
+    if (!canModifySchedule(state, caller, existing)) {
+      if (caller.kind === 'run') {
+        json(res, 404, { error: 'not_found' });
+      } else {
+        json(res, 403, { error: 'forbidden', reason: 'cannot modify a schedule created by another requester' });
+      }
+      return true;
+    }
+    const body = await readJson(req);
+    if (caller.kind === 'run' && body.agentId && body.agentId !== caller.agentId) {
+      json(res, 403, { error: 'forbidden', reason: 'a run schedules only for its own agent' });
+      return true;
+    }
+    if (caller.kind === 'principal' && body.agentId && body.agentId !== existing.agentId) {
+      json(res, 400, { error: 'cannot_change_agent' });
+      return true;
+    }
+    if (body.id !== undefined && body.id !== id) {
+      json(res, 400, { error: 'invalid_field', field: 'id' });
+      return true;
+    }
+    if (body.cron !== undefined) {
+      if (typeof body.cron !== 'string' || !body.cron.trim()) {
+        json(res, 400, { error: body.cron === '' ? 'missing_cron' : 'invalid_cron' });
+        return true;
+      }
+      const cronProblem = cronIssue(body.cron);
+      if (cronProblem) {
+        json(res, 400, { error: 'invalid_cron', reason: cronProblem });
+        return true;
+      }
+    }
+    if (body.prompt !== undefined) {
+      if (typeof body.prompt !== 'string' || !body.prompt.trim()) {
+        json(res, 400, { error: 'missing_prompt' });
+        return true;
+      }
+    }
+    if (body.name !== undefined) {
+      if (typeof body.name !== 'string') {
+        json(res, 400, { error: 'invalid_field', field: 'name' });
+        return true;
+      }
+    }
+    if (body.timezone !== undefined) {
+      if (typeof body.timezone !== 'string') {
+        json(res, 400, { error: 'invalid_field', field: 'timezone' });
+        return true;
+      }
+      if (!isTimeZone(body.timezone)) {
+        json(res, 400, { error: 'invalid_timezone', timezone: body.timezone });
+        return true;
+      }
+    }
+    const rawChannel = body.channelId !== undefined ? body.channelId : body.channel_id;
+    if (rawChannel !== undefined && !optionalString(rawChannel)) {
+      json(res, 400, { error: 'invalid_field', field: 'channelId' });
+      return true;
+    }
+    if (body.enabled !== undefined && typeof body.enabled !== 'boolean') {
+      json(res, 400, { error: 'invalid_field', field: 'enabled' });
+      return true;
+    }
+    if (caller.kind === 'principal' && body.requestedBy !== undefined) {
+      const parsedReq = readRequester(body.requestedBy);
+      if (!parsedReq) {
+        json(res, 400, { error: 'invalid_field', field: 'requestedBy' });
+        return true;
+      }
+    }
+    if (!store) {
+      json(res, 503, { error: 'schedules_unavailable' });
+      return true;
+    }
+    const channelId = rawChannel !== undefined ? ((rawChannel as string) || undefined) : existing.channelId;
+    const updated: ScheduledAction = {
+      ...existing,
+      name: body.name !== undefined ? (body.name as string) : existing.name,
+      cron: body.cron !== undefined ? (body.cron as string).trim().split(/\s+/).join(' ') : existing.cron,
+      timezone: body.timezone !== undefined ? (body.timezone as string) : existing.timezone,
+      prompt: body.prompt !== undefined ? (body.prompt as string) : existing.prompt,
+      enabled: body.enabled !== undefined ? (body.enabled as boolean) : existing.enabled,
+      requestedBy: caller.kind === 'principal' && body.requestedBy !== undefined ? readRequester(body.requestedBy) : existing.requestedBy,
+      ...(channelId ? { channelId } : {}),
+    };
+    if (!channelId) {
+      delete updated.channelId;
+    }
+    if (!updated.requestedBy) {
+      delete updated.requestedBy;
+    }
+    store.save(updated);
+    ledgerSchedule(state, caller, 'SCHEDULE_UPDATED', updated);
+    json(res, 200, { ok: true, schedule: updated });
     return true;
   }
 
