@@ -103,7 +103,7 @@ export const SYSTEM = {
   policy: 'factory:policy',
 } as const;
 
-export async function notifyGatekeeperIngress(state: LandlordState, agentId: string, presence: 'offline' | 'starting' | 'available') {
+async function notifyGatekeeperIngress(state: LandlordState, agentId: string, presence: 'offline' | 'starting' | 'available') {
   if (!state.gatekeeperIngressUrl) return;
   try {
     const res = await fetch(`${state.gatekeeperIngressUrl.replace(/\/$/, '')}/api/v1/presence`, {
@@ -122,7 +122,7 @@ export async function notifyGatekeeperIngress(state: LandlordState, agentId: str
   }
 }
 
-export function record(state: LandlordState, run: Pick<Run, 'agentId' | 'runId'>, action: string, actor: string) {
+function record(state: LandlordState, run: Pick<Run, 'agentId' | 'runId'>, action: string, actor: string) {
   state.ledger.append({
     timestamp: new Date().toISOString(),
     agentId: run.agentId,
@@ -139,7 +139,7 @@ export function activeRun(state: LandlordState, agentId: string): Run | undefine
 
 const SECRET_CACHE_TTL_MS = 5 * 60 * 1000;
 
-export async function bindAgentSecrets(state: LandlordState, names: string[]): Promise<{ ok: true; env: Record<string, string> } | { ok: false; missing: string[] }> {
+async function bindAgentSecrets(state: LandlordState, names: string[]): Promise<{ ok: true; env: Record<string, string> } | { ok: false; missing: string[] }> {
   const cache = (state.secretCache ??= new Map());
   const now = Date.now();
   const env: Record<string, string> = {};
@@ -308,7 +308,7 @@ export async function createRun(state: LandlordState, agentId: string, opts: Cre
   return { status: 202, body: await startRun(state, run, bound.env) };
 }
 
-export async function startRun(state: LandlordState, run: Run, secrets?: Record<string, string>): Promise<Run> {
+async function startRun(state: LandlordState, run: Run, secrets?: Record<string, string>): Promise<Run> {
   const agent = state.agents.get(run.agentId)!;
   let env = secrets;
   if (!env) {
@@ -431,7 +431,7 @@ export async function finishRun(
   return done;
 }
 
-export async function fireCallback(state: LandlordState, run: Run) {
+async function fireCallback(state: LandlordState, run: Run) {
   if (!run.callbackUrl) return;
   const outcome = await deliverCallback(
     run.callbackUrl,
