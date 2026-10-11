@@ -7,12 +7,10 @@ import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { loadCatalog, BUILTIN_SYSTEM_AGENTS } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, createRun, SYSTEM, type FactoryState } from './app.js';
-import { noopRuntime } from '@beercanlabs/factory-landlord';
-import { MemoryRunStore } from './runs.js';
+import { MemoryRunStore, noopRuntime, pollQueueOnce } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from './policy.js';
-import { pollQueueOnce } from './queues.js';
 import { ScheduleStore, agentsDueForCron } from '@beercanlabs/factory-timekeeper';
 
 const agentsRoot = fileURLToPath(new URL('../../../agents', import.meta.url));
@@ -229,14 +227,14 @@ describe('wake asks the Treasurer before a run exists', () => {
       return '{}';
     };
     const queue = 'https://sqs.us-east-1.amazonaws.com/1/q';
-    assert.equal(await pollQueueOnce(state, 'donna', queue, cli), 0);
+    assert.equal(await pollQueueOnce((id, o) => createRun(state, id, o), 'donna', queue, cli), 0);
     assert.deepEqual(deleted, []);
     assert.equal(runtime.started.length, 0);
     assert.equal(state.runs.list({ agentId: 'donna' }).length, 0);
     assert.equal(refusals(state, 'donna').length, 0);
 
     state.policies.set('donna', { routes: [], budgetUsd: { perDay: 100, perMonth: 100 } });
-    assert.equal(await pollQueueOnce(state, 'donna', queue, cli), 1);
+    assert.equal(await pollQueueOnce((id, o) => createRun(state, id, o), 'donna', queue, cli), 1);
     assert.deepEqual(deleted, ['h1']);
     assert.equal(runtime.started.length, 1);
     assert.equal(runtime.started[0].agentId, 'donna');

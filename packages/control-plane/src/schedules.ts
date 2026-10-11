@@ -15,7 +15,7 @@ import { payloadHash } from '@beercanlabs/factory-ledger';
 import { DEFAULT_TIMEZONE, cronIssue, isTimeZone, type ScheduledAction, type ScheduleRequester } from '@beercanlabs/factory-timekeeper';
 import { json, readJson, requirePrivilege, SYSTEM, type FactoryState } from './app.js';
 import { ownersOf } from './config-store.js';
-import { isTerminal, type Run } from './runs.js';
+import { isTerminal, type Run } from '@beercanlabs/factory-landlord';
 
 function adminEmailsFromEnv(): string[] {
   return (process.env.FACTORY_ADMIN_EMAILS ?? '')
