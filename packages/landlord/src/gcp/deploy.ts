@@ -1,4 +1,4 @@
-import { AdmissionRefusedError, type DeployProvider, type SourceRef } from '@beercanlabs/factory-landlord';
+import { AdmissionRefusedError, type DeployProvider, type SourceRef } from '../runtime.js';
 import { provisionAgentServiceAccount } from './iam.js';
 import { registerAgentJob } from './cloudrun.js';
 

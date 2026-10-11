@@ -2,8 +2,8 @@
 // launched with when an agent has adopted skills. An agent with none must be exactly what it was before skills existed.
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_SKILLS_ENV_CHARS, buildAgentImage, skillsEnv } from './aws/codebuild.js';
-import { agentEnvironment } from './aws/ecs.js';
+import { MAX_SKILLS_ENV_CHARS, buildAgentImage, skillsEnv } from '@beercanlabs/factory-landlord/aws/codebuild';
+import { agentEnvironment } from '@beercanlabs/factory-landlord/aws/ecs';
 import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, imageTagFor, skillsHash, type BuildSkill } from '@beercanlabs/factory-landlord';
 
 const C = 'a'.repeat(40);

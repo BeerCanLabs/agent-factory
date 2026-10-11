@@ -9,7 +9,7 @@
  */
 
 import { CloudBuildClient, protos } from '@google-cloud/cloudbuild';
-import { imageTagFor, type SourceRef } from '@beercanlabs/factory-landlord';
+import { imageTagFor, type SourceRef } from '../runtime.js';
 
 type Build = protos.google.devtools.cloudbuild.v1.IBuild;
 
