@@ -196,7 +196,7 @@ Budgets, model and route allowlists, tool allowlists and approval requirements a
 
 For complete specification of the zero-trust perimeter, dual reverse/forward proxy, and egress schema, see [docs/NETWORK_ISOLATION_AND_EGRESS.md](./docs/NETWORK_ISOLATION_AND_EGRESS.md).
 
-One fleet-wide gatekeeper-egress (`packages/gatekeeper-egress`) is the only route out of the agent network. The gatekeeper-egress operates as both a **reverse proxy** (via Base URL rewrites for LLMs and Discord) and a **forward proxy** (via `HTTP_PROXY`/`HTTPS_PROXY` with HTTP `CONNECT` tunneling for arbitrary external APIs like GitHub, Notion, etc.). Agents authenticate using their run token (`x-api-key`, `Authorization: Bearer`, `x-factory-run-token`, or `Proxy-Authorization`).
+One fleet-wide gatekeeper-egress (`packages/gatekeeper`) is the only route out of the agent network. The gatekeeper-egress operates as both a **reverse proxy** (via Base URL rewrites for LLMs and Discord) and a **forward proxy** (via `HTTP_PROXY`/`HTTPS_PROXY` with HTTP `CONNECT` tunneling for arbitrary external APIs like GitHub, Notion, etc.). Agents authenticate using their run token (`x-api-key`, `Authorization: Bearer`, `x-factory-run-token`, or `Proxy-Authorization`).
 
 The gatekeeper-egress:
 
@@ -252,7 +252,7 @@ Daemon vs on-behalf-of identity (`identity.yaml`) may land later as optional car
 | Cartridge schema + validator | `packages/contract` + `npm run validate` |
 | Auth + RBAC | `packages/auth` — JWKS-verified OIDC, named service tokens, run tokens |
 | Control plane REST + MCP, runs, policy, approvals, health | `packages/control-plane` |
-| Egress gatekeeper-egress | `packages/gatekeeper-egress` |
+| Egress gatekeeper-egress | `packages/gatekeeper` |
 | Ledger (hash chain + WORM checkpoints) | `packages/ledger` |
 | Secret binding | `packages/secrets-bind` (env, file, HTTP vault, AWS Secrets Manager) |
 | Mind hydration + agent shim | `packages/hydrate` + `runtimes/generic` |

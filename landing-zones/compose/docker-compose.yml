@@ -77,7 +77,7 @@ services:
   gatekeeper-egress:
     build:
       context: ../..
-      dockerfile: packages/gatekeeper-egress/Dockerfile
+      dockerfile: packages/gatekeeper/Dockerfile
     image: factory-gatekeeper-egress:dev
     environment:
       <<: *factory-keys

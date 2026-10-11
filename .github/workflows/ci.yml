@@ -31,7 +31,7 @@ jobs:
       - name: Build production images
         run: |
           set -e
-          for spec in packages/control-plane/Dockerfile: packages/gatekeeper-egress/Dockerfile: packages/gatekeeper-ingress/Dockerfile: \
+          for spec in packages/control-plane/Dockerfile: packages/gatekeeper/Dockerfile: packages/gatekeeper-ingress/Dockerfile: \
                       packages/console/Dockerfile: runtimes/generic/Dockerfile:examples/echo-agent \
                       runtimes/generic/Dockerfile:examples/llm-summarizer; do
             f="${spec%%:*}"; c="${spec#*:}"

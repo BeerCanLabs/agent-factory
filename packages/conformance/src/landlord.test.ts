@@ -45,7 +45,7 @@ const SECOND_COPY: Array<{ what: string; re: RegExp }> = [
 
 /** Packages the Landlord must never import: the callers it serves, and the other members' perimeter code. */
 const FORBIDDEN_IMPORTS =
-  /['"]@beercanlabs\/factory-(?:control-plane|gatekeeper-egress|gatekeeper-ingress|console|executive|keymaster|timekeeper|bench)(?:\/[^'"]*)?['"]/g;
+  /['"]@beercanlabs\/factory-(?:control-plane|gatekeeper|gatekeeper-ingress|console|executive|keymaster|timekeeper|bench)(?:\/[^'"]*)?['"]/g;
 
 const lineOf = (src: string, index: number) => src.slice(0, index).split('\n').length;
 const oneLine = (text: string) => text.trim().replace(/\s+/g, ' ');
@@ -93,7 +93,7 @@ describe('Landlord: one copy of the compute lifecycle, and the dependency points
 
     const reaches = (line: string) => [...line.matchAll(FORBIDDEN_IMPORTS)].length;
     assert.equal(reaches("import { createFactoryServer } from '@beercanlabs/factory-control-plane';"), 1);
-    assert.equal(reaches("const e = await import('@beercanlabs/factory-gatekeeper-egress');"), 1);
+    assert.equal(reaches("const e = await import('@beercanlabs/factory-gatekeeper');"), 1);
     assert.equal(reaches("import { createTimekeeper } from '@beercanlabs/factory-timekeeper';"), 1);
     assert.equal(reaches("import { checkStanding } from '@beercanlabs/factory-budget';"), 0, 'the Landlord asks the Treasurer');
     assert.equal(reaches("import { AgentRegistry } from '@beercanlabs/factory-registrar';"), 0, 'the Landlord depends on the Registrar');
@@ -116,7 +116,7 @@ describe('Landlord: one copy of the compute lifecycle, and the dependency points
   it("the Landlord's package.json lists none of those packages either", () => {
     const manifest = JSON.parse(read('packages/landlord/package.json')) as { dependencies?: Record<string, string> };
     const listed = Object.keys(manifest.dependencies ?? {}).filter((d) =>
-      /^@beercanlabs\/factory-(?:control-plane|gatekeeper-egress|gatekeeper-ingress|console|executive|keymaster|timekeeper|bench)$/.test(d),
+      /^@beercanlabs\/factory-(?:control-plane|gatekeeper|gatekeeper-ingress|console|executive|keymaster|timekeeper|bench)$/.test(d),
     );
     assert.deepEqual(listed, []);
   });

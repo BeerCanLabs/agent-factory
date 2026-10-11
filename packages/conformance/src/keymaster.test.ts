@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { RunTokens } from '@beercanlabs/factory-auth';
-import { createGatekeeperEgress, type ControlClient, type Route } from '@beercanlabs/factory-gatekeeper-egress';
+import { createGatekeeperEgress, type ControlClient, type Route } from '@beercanlabs/factory-gatekeeper';
 import { expectOnlyBaselined, files, read } from './support.js';
 
 const GOOGLE_HOST = /(^|\.)(googleapis\.com|google\.com)$/;

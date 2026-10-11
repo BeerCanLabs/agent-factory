@@ -15,7 +15,7 @@ if npm run build -w @beercanlabs/factory-contract -w @beercanlabs/factory-auth -
     -w @beercanlabs/factory-inspector \
     -w @beercanlabs/factory-landlord \
     -w @beercanlabs/factory-keymaster \
-    -w @beercanlabs/factory-gatekeeper-egress >"$log" 2>&1 \
+    -w @beercanlabs/factory-gatekeeper >"$log" 2>&1 \
   && npm test -w @beercanlabs/factory-conformance >>"$log" 2>&1 \
   && (cd agents/examples/starter-python && python3 -m unittest discover -s tests) >>"$log" 2>&1; then
   exit 0

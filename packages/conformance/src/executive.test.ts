@@ -195,7 +195,7 @@ describe('Executive: one copy of the model service rules', () => {
     }
     // ... and it is not vacuous: it finds the real source of the packages that came closest to hosting this code.
     const scanned = files('packages', (p) => ANY_PACKAGE_SOURCE.test(p) && nonTestSource(p) && NOT_EXECUTIVE(p));
-    for (const must of ['packages/gatekeeper-egress/src/gatekeeper-egress.ts', 'packages/control-plane/src/app.ts', 'packages/budget/src/index.ts', 'packages/inspector/src/index.ts']) {
+    for (const must of ['packages/gatekeeper/src/egress/gatekeeper-egress.ts', 'packages/control-plane/src/app.ts', 'packages/budget/src/index.ts', 'packages/inspector/src/index.ts']) {
       assert.ok(scanned.includes(must), `the scan no longer reaches ${must}`);
     }
   });

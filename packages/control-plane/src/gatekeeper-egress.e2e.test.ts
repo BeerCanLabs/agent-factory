@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
-import { createGatekeeperEgress, type ControlClient } from '@beercanlabs/factory-gatekeeper-egress';
+import { createGatekeeperEgress, type ControlClient } from '@beercanlabs/factory-gatekeeper';
 import { loadCatalog } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { MemoryRunStore, noopRuntime, type Run } from '@beercanlabs/factory-landlord';
