@@ -266,4 +266,178 @@ describe('GAP-061 schedules are scoped to the calling agent', { concurrency: fal
     assert.equal(opRow?.actor, 'token:operator');
     assert.equal(opRow?.runId, undefined);
   });
+
+  it('own-agent update: a run updates its own schedule (cron, prompt, name, timezone, pause, resume)', async () => {
+    const mine = seed('finley');
+    const { token } = await liveRun('finley');
+
+    // Update fields
+    const updated = await call(port, `/api/v1/schedules/${mine.id}`, 'PATCH', token, {
+      name: 'Updated morning brief',
+      cron: '0 8 * * *',
+      prompt: 'New updated prompt',
+      timezone: 'America/New_York',
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.ok, true);
+    assert.equal(updated.body.schedule.id, mine.id);
+    assert.equal(updated.body.schedule.name, 'Updated morning brief');
+    assert.equal(updated.body.schedule.cron, '0 8 * * *');
+    assert.equal(updated.body.schedule.prompt, 'New updated prompt');
+    assert.equal(updated.body.schedule.timezone, 'America/New_York');
+    assert.equal(updated.body.schedule.enabled, true);
+
+    // Pause schedule
+    const paused = await call(port, `/api/v1/schedules/${mine.id}`, 'PATCH', token, { enabled: false });
+    assert.equal(paused.status, 200);
+    assert.equal(paused.body.schedule.enabled, false);
+    assert.equal(state.schedules!.get(mine.id)?.enabled, false);
+
+    // Resume schedule
+    const resumed = await call(port, `/api/v1/schedules/${mine.id}`, 'PATCH', token, { enabled: true });
+    assert.equal(resumed.status, 200);
+    assert.equal(resumed.body.schedule.enabled, true);
+    assert.equal(state.schedules!.get(mine.id)?.enabled, true);
+  });
+
+  it('cross-agent update refused: another agent\'s schedule is a 404, identical to a missing one, and stays', async () => {
+    const theirs = seed('donna');
+    const { token } = await liveRun('finley');
+    const foreign = await call(port, `/api/v1/schedules/${theirs.id}`, 'PATCH', token, { prompt: 'hacked' });
+    const missing = await call(port, '/api/v1/schedules/sched-does-not-exist', 'PATCH', token, { prompt: 'hacked' });
+    assert.equal(foreign.status, 404);
+    assert.deepEqual(foreign, missing, 'an existing foreign id must be indistinguishable from a missing one');
+    assert.equal(state.schedules!.get(theirs.id)?.prompt, 'seeded');
+  });
+
+  it('operator fleet update: an operator updates any schedule, viewer is 403, and invalid fields are 400', async () => {
+    const s = seed('donna');
+    const op = await call(port, `/api/v1/schedules/${s.id}`, 'PATCH', OPERATOR, { name: 'Op updated', enabled: false });
+    assert.equal(op.status, 200);
+    assert.equal(op.body.schedule.name, 'Op updated');
+    assert.equal(op.body.schedule.enabled, false);
+
+    const viewer = await call(port, `/api/v1/schedules/${s.id}`, 'PATCH', VIEWER, { name: 'Viewer attempt' });
+    assert.equal(viewer.status, 403);
+
+    const noAuth = await call(port, `/api/v1/schedules/${s.id}`, 'PATCH', undefined, { name: 'No auth' });
+    assert.equal(noAuth.status, 401);
+
+    // Validation
+    const badCron = await call(port, `/api/v1/schedules/${s.id}`, 'PATCH', OPERATOR, { cron: 'invalid-cron' });
+    assert.equal(badCron.status, 400);
+    assert.equal(badCron.body.error, 'invalid_cron');
+
+    const badTz = await call(port, `/api/v1/schedules/${s.id}`, 'PATCH', OPERATOR, { timezone: 'Mars/Olympus' });
+    assert.equal(badTz.status, 400);
+    assert.equal(badTz.body.error, 'invalid_timezone');
+
+    const badEnabled = await call(port, `/api/v1/schedules/${s.id}`, 'PATCH', OPERATOR, { enabled: 'not-a-bool' });
+    assert.equal(badEnabled.status, 400);
+    assert.equal(badEnabled.body.error, 'invalid_field');
+  });
+
+  it('PUT and POST update support on /api/v1/schedules/:id', async () => {
+    const mine = seed('finley');
+    const { token } = await liveRun('finley');
+    const putRes = await call(port, `/api/v1/schedules/${mine.id}`, 'PUT', token, { prompt: 'updated via PUT' });
+    assert.equal(putRes.status, 200);
+    assert.equal(putRes.body.schedule.prompt, 'updated via PUT');
+
+    const postRes = await call(port, `/api/v1/schedules/${mine.id}`, 'POST', token, { prompt: 'updated via POST' });
+    assert.equal(postRes.status, 200);
+    assert.equal(postRes.body.schedule.prompt, 'updated via POST');
+  });
+
+  it('ledger rows: update records SCHEDULE_UPDATED with actor, agent, and hash without prompt text', async () => {
+    const { run, token } = await liveRun('finley');
+    const created = await call(port, '/api/v1/schedules', 'POST', token, { cron: '0 6 * * *', prompt: PROMPT, name: 'Daily report' });
+    const id = created.body.schedule.id as string;
+    const updated = await call(port, `/api/v1/schedules/${id}`, 'PATCH', token, { cron: '0 7 * * *', prompt: 'Secret new prompt' });
+    assert.equal(updated.status, 200);
+
+    const hash = scheduleLedgerHash(updated.body.schedule);
+    const u = rows('SCHEDULE_UPDATED').find((e) => e.payloadSha256 === hash);
+    assert.ok(u, 'SCHEDULE_UPDATED ledger row must exist');
+    assert.equal(u.agentId, 'finley');
+    assert.equal(u.runId, run.runId);
+    assert.equal(u.actor, `run:finley:${run.runId}`);
+    assert.ok(!JSON.stringify(u).includes('Secret new prompt'), 'prompt text must never reach the ledger');
+  });
+
+  it('guards PATCH so an operator cannot update another requester\'s schedule', async () => {
+    state.schedules!.save({
+      id: 'sched-dale-debrief',
+      agentId: 'donna',
+      name: 'seeded',
+      cron: '0 6 * * *',
+      prompt: 'seeded',
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      createdVia: 'api',
+      requestedBy: { kind: 'principal', actor: 'cloudflare:dale@example.com' },
+    });
+    const res = await call(port, '/api/v1/schedules/sched-dale-debrief', 'PATCH', OPERATOR, { prompt: 'hijacked' });
+    assert.equal(res.status, 403);
+    assert.match(res.body.reason, /cannot modify a schedule created by another requester/);
+    assert.equal(state.schedules!.get('sched-dale-debrief')?.prompt, 'seeded');
+  });
+
+  it('allows operators to set and update requestedBy on POST and PATCH', async () => {
+    // 1. Operator creates with explicit requestedBy
+    const postRes = await call(port, '/api/v1/schedules', 'POST', OPERATOR, {
+      agentId: 'finley',
+      cron: '0 9 * * *',
+      prompt: 'operator created with identity',
+      requestedBy: { kind: 'identity', provider: 'discord', id: '123456' },
+    });
+    assert.equal(postRes.status, 200);
+    assert.deepEqual(postRes.body.schedule.requestedBy, { kind: 'identity', provider: 'discord', id: '123456' });
+
+    // 2. A run's requestedBy is always determined by the factory, ignoring what the body requested
+    const { token: finleyToken } = await liveRun('finley');
+    const runPostRes = await call(port, '/api/v1/schedules', 'POST', finleyToken, {
+      agentId: 'finley',
+      cron: '0 9 * * *',
+      prompt: 'run attempt with requestedBy',
+      requestedBy: { kind: 'identity', provider: 'discord', id: '123456' },
+    });
+    assert.equal(runPostRes.status, 200);
+    assert.deepEqual(runPostRes.body.schedule.requestedBy, { kind: 'principal', actor: 'test' });
+
+    // 3. Operator updates legacy schedule (no requestedBy) to bind an identity
+    const legacy = seed('finley', 'sched-finley-legacy');
+    const patchRes = await call(port, `/api/v1/schedules/${legacy.id}`, 'PATCH', OPERATOR, {
+      requestedBy: { kind: 'identity', provider: 'discord', id: '470400107028938752' },
+    });
+    assert.equal(patchRes.status, 200);
+    assert.deepEqual(patchRes.body.schedule.requestedBy, {
+      kind: 'identity',
+      provider: 'discord',
+      id: '470400107028938752',
+    });
+    assert.deepEqual(state.schedules!.get(legacy.id)?.requestedBy, {
+      kind: 'identity',
+      provider: 'discord',
+      id: '470400107028938752',
+    });
+
+    // 4. A run patching its own schedule cannot change requestedBy; the schedule's requester is preserved
+    const runPatchRes = await call(port, `/api/v1/schedules/${runPostRes.body.schedule.id}`, 'PATCH', finleyToken, {
+      prompt: 'updated prompt',
+      requestedBy: { kind: 'identity', provider: 'discord', id: '999999' },
+    });
+    assert.equal(runPatchRes.status, 200);
+    assert.equal(runPatchRes.body.schedule.prompt, 'updated prompt');
+    assert.deepEqual(runPatchRes.body.schedule.requestedBy, { kind: 'principal', actor: 'test' });
+
+    // 5. Invalid requestedBy returns 400
+    const legacy2 = seed('finley', 'sched-finley-legacy-2');
+    const badReq = await call(port, `/api/v1/schedules/${legacy2.id}`, 'PATCH', OPERATOR, {
+      requestedBy: { invalid: 'format' },
+    });
+    assert.equal(badReq.status, 400);
+    assert.equal(badReq.body.error, 'invalid_field');
+    assert.equal(badReq.body.field, 'requestedBy');
+  });
 });
