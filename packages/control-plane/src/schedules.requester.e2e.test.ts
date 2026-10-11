@@ -15,7 +15,7 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { FileConfigBackend, VersionedConfigStore } from '@beercanlabs/factory-registrar';
 import { ScheduleStore, type ScheduledAction } from '@beercanlabs/factory-timekeeper';
 import { createFactoryServer, createRun, SYSTEM, type FactoryState } from './app.js';
-import { noopRuntime } from './runtime.js';
+import { noopRuntime } from '@beercanlabs/factory-landlord';
 import { MemoryRunStore } from './runs.js';
 import { PolicyStore } from './policy.js';
 import { IdentityLinkStore } from './identity-links.js';

@@ -10,7 +10,7 @@ import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { BUILTIN_SYSTEM_AGENTS, checkRepoUrl } from '@beercanlabs/factory-registrar';
-import { AdmissionRefusedError, imageTagFor, noopRuntime, type AdmissionRefusal, type DeployProvider, type SourceRef } from './runtime.js';
+import { AdmissionRefusedError, imageTagFor, noopRuntime, type AdmissionRefusal, type DeployProvider, type SourceRef } from '@beercanlabs/factory-landlord';
 import { MemoryRunStore } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';

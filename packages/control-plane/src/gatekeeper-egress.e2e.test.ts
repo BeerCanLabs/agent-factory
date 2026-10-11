@@ -8,7 +8,7 @@ import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { createGatekeeperEgress, type ControlClient } from '@beercanlabs/factory-gatekeeper-egress';
 import { loadCatalog } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { noopRuntime } from './runtime.js';
+import { noopRuntime } from '@beercanlabs/factory-landlord';
 import { MemoryRunStore, type Run } from './runs.js';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
