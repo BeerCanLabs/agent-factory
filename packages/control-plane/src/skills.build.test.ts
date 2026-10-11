@@ -4,7 +4,7 @@ import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { MAX_SKILLS_ENV_CHARS, buildAgentImage, skillsEnv } from './aws/codebuild.js';
 import { agentEnvironment } from './aws/ecs.js';
-import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, imageTagFor, skillsHash, type BuildSkill } from './runtime.js';
+import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, imageTagFor, skillsHash, type BuildSkill } from '@beercanlabs/factory-landlord';
 
 const C = 'a'.repeat(40);
 const S1: BuildSkill = { id: 'tavily-search', version: '0.1.0', repo: 'https://github.com/BeerCanLabs/skill-tavily-search', path: '.', commit: '1'.repeat(40) };
