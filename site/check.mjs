@@ -19,7 +19,10 @@ if (!codeNames.length) fail('could not read FACTORY_SERVICE_NAMES from packages/
 const ids = cast.members.map((m) => m.id);
 for (const n of codeNames) if (!ids.includes(n)) fail('cast member in code but not on the site: ' + n);
 for (const i of ids) if (!codeNames.includes(i)) fail('cast member on the site but not in code: ' + i);
-for (const m of cast.members) if (!cast.depts.includes(m.dept)) fail(m.id + ': unknown department ' + m.dept);
+for (const m of cast.members) {
+  if (!cast.depts.includes(m.dept)) fail(m.id + ': unknown department ' + m.dept);
+  if (!existsSync(join(here, 'static', 'cast', m.id + '.png'))) fail(m.id + ': missing portrait static/cast/' + m.id + '.png');
+}
 for (const [i, j] of cast.journey.entries()) if (!ids.includes(j[0])) fail('journey step ' + (i + 1) + ': unknown member ' + j[0]);
 
 // 2. Contracts: both ends are members, the source file exists, and a flow uses it.
