@@ -34,6 +34,7 @@ import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, cr
 import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
 import { authorize, authorizeIngress, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type AuthenticatedCaller, type Privilege } from '@beercanlabs/factory-bouncer';
 import { validatePolicy, type PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
+import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
@@ -450,14 +451,20 @@ export function bearerOf(req: http.IncomingMessage): string | undefined {
 
 /** Authenticate a run token for exactly this run while it is still live. */
 async function authenticateRun(req: http.IncomingMessage, res: http.ServerResponse, state: FactoryState, runId: string) {
-  const claims = await state.runTokens.verify(bearerOf(req));
-  const run = claims && claims.runId === runId ? state.runs.get(runId) : undefined;
   const isResultPost = (req.url?.includes('/result') || false) && req.method === 'POST';
-  if (!claims || !run || run.agentId !== claims.agentId || (isTerminal(run.state) && (!isResultPost || run.state !== 'TIMED_OUT'))) {
+  const verdict = await verifyRun({
+    tokens: state.runTokens,
+    token: bearerOf(req),
+    runId,
+    runOf: (id) => state.runs.get(id),
+    ended: (r) => isTerminal(r.state),
+    endedOk: (r) => isResultPost && r.state === 'TIMED_OUT', // a timed-out run may still post its result
+  });
+  if (verdict.kind !== 'ok') {
     json(res, 401, { error: 'invalid_run_token' });
     return null;
   }
-  return run;
+  return verdict.run;
 }
 
 export function getKeymaster(state: FactoryState): Keymaster {
@@ -589,10 +596,10 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (path === '/api/v1/spend' && req.method === 'GET') {
     let actor: string;
     let agentId = 'factory';
-    const claims = await state.runTokens.verify(bearerOf(req));
-    if (claims) {
-      const run = state.runs.get(claims.runId);
-      if (!run || run.agentId !== claims.agentId || isTerminal(run.state)) return json(res, 401, { error: 'invalid_run_token' });
+    const verdict = await verifyRun({ tokens: state.runTokens, token: bearerOf(req), runOf: (id) => state.runs.get(id), ended: (r) => isTerminal(r.state) });
+    if (verdict.kind === 'refused') return json(res, 401, { error: 'invalid_run_token' });
+    if (verdict.kind === 'ok') {
+      const claims = verdict.claims;
       // Only a policy an admin set for this agent counts; the factory fallback policy never grants it.
       const granted = state.policies.has(claims.agentId) && Object.prototype.hasOwnProperty.call(state.policies.get(claims.agentId).tools ?? {}, 'factory-spend');
       if (!granted) {

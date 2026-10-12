@@ -18,7 +18,6 @@ export type Conversation = {
 
 export type AgentActivity = {
   route?: string;
-  tool?: string;
   model?: string;
   kind?: string;
 };

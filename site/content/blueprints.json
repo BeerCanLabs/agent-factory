@@ -18,12 +18,8 @@
     "Amazon Bedrock"
    ],
    [
-    "secretary",
-    "Amazon S3 bucket for agent memory"
-   ],
-   [
     "landlord",
-    "Amazon ECS on Fargate, one task definition per agent, Amazon ECR for images, an IAM role per agent"
+    "Amazon ECS on Fargate, one task definition per agent, Amazon ECR for images, Amazon S3 bucket for agent memory, an IAM role per agent"
    ],
    [
     "auditor",
@@ -70,12 +66,8 @@
     "Vertex AI"
    ],
    [
-    "secretary",
-    "Cloud Storage bucket for agent memory"
-   ],
-   [
     "landlord",
-    "Cloud Run jobs, one per agent, Artifact Registry for images, a service account per agent"
+    "Cloud Run jobs, one per agent, Artifact Registry for images, Cloud Storage bucket for agent memory, a service account per agent"
    ],
    [
     "auditor",

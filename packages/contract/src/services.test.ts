@@ -13,7 +13,7 @@ const designAuthorityPath = fileURLToPath(new URL('../../../DESIGN_AUTHORITY.md'
 /** Bold names under the §6.15 cast heading, in document order. */
 function castNames(): string[] {
   const doc = readFileSync(designAuthorityPath, 'utf8');
-  const heading = '#### The 11 Factory Services (The Cast):';
+  const heading = '#### The 10 Factory Services (The Cast):';
   const start = doc.indexOf(heading);
   assert.notEqual(start, -1, `missing heading: ${heading}`);
   const rest = doc.slice(start + heading.length);

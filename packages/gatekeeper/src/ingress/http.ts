@@ -3,6 +3,12 @@ import type { AuthProvider } from '@beercanlabs/factory-auth';
 import type { GatekeeperIngress } from './index.js';
 
 /** Health is public; presence changes come only from the control plane (GATEKEEPER_INGRESS_TOKEN). */
+type ActivityEvent = { agentId?: string; route?: string; model?: string; kind?: string };
+
+/** `POST /api/v1/activity` bounds: progress batches are small metadata (the control plane sends at most 500 events). */
+const ACTIVITY_MAX_BODY_BYTES = 256 * 1024;
+const ACTIVITY_MAX_EVENTS = 500;
+
 export function createGatekeeperIngressHttp(door: GatekeeperIngress, presenceAuth: AuthProvider): http.Server {
   return http.createServer(async (req, res) => {
     const path = (req.url ?? '/').split('?')[0];
@@ -41,15 +47,20 @@ export function createGatekeeperIngressHttp(door: GatekeeperIngress, presenceAut
         return;
       }
       let body = '';
-      for await (const c of req) body += c;
-      let payload: {
-        agentId?: string;
-        route?: string;
-        tool?: string;
-        model?: string;
-        kind?: string;
-        events?: Array<{ agentId?: string; route?: string; tool?: string; model?: string; kind?: string }>;
-      };
+      let tooLarge = false;
+      for await (const c of req) {
+        body += c;
+        if (body.length > ACTIVITY_MAX_BODY_BYTES) {
+          tooLarge = true;
+          break;
+        }
+      }
+      if (tooLarge) {
+        res.writeHead(413, { 'Content-Type': 'application/json', Connection: 'close' });
+        res.end(JSON.stringify({ error: 'payload too large' }));
+        return;
+      }
+      let payload: ActivityEvent & { events?: ActivityEvent[] };
       try {
         payload = JSON.parse(body || '{}');
       } catch {
@@ -57,14 +68,10 @@ export function createGatekeeperIngressHttp(door: GatekeeperIngress, presenceAut
         res.end(JSON.stringify({ error: 'invalid json' }));
         return;
       }
-      if (payload.events && Array.isArray(payload.events)) {
-        for (const evt of payload.events) {
-          if (evt.agentId) {
-            await door.onAgentActivity?.(evt.agentId, evt);
-          }
-        }
-      } else if (payload.agentId) {
-        await door.onAgentActivity?.(payload.agentId, payload);
+      // Events are applied in order: a late call.start must not overwrite a newer call.end.
+      const events = Array.isArray(payload.events) ? payload.events.slice(0, ACTIVITY_MAX_EVENTS) : [payload];
+      for (const evt of events) {
+        if (evt && typeof evt.agentId === 'string') await door.onAgentActivity?.(evt.agentId, evt);
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok' }));

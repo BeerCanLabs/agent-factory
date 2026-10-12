@@ -15,8 +15,17 @@ interface ActiveTurnSession {
   typingInterval?: NodeJS.Timeout;
   lastActivityAt: number;
   lastTypingAt: number;
-  currentTool?: string;
 }
+
+export type DiscordClientOptions = {
+  /** How long a turn may go without activity before the ingress goes silent. Default: `GATEKEEPER_INGRESS_TURN_LEASE_MS` or 30 s. */
+  turnLeaseMs?: number;
+  /** How often typing is re-sent (Discord expires it after ~10 s). Default 7 s. */
+  typingIntervalMs?: number;
+};
+
+/** Typing is re-sent on activity only when the last pulse is older than this. */
+const TYPING_MIN_GAP_MS = 4000;
 
 export function createDiscordClient(
   client: Client = new Client({
@@ -27,12 +36,14 @@ export function createDiscordClient(
       GatewayIntentBits.MessageContent,
     ],
     partials: [Partials.Channel, Partials.Message],
-  })
+  }),
+  opts: DiscordClientOptions = {},
 ): DiscordClient {
   const handlers: Array<(msg: Omit<Conversation, 'agentId'>) => void> = [];
   const standbySessions = new Map<string, StandbySession>(); // channelId -> StandbySession
   const activeTurns = new Map<string, ActiveTurnSession>(); // channelId -> ActiveTurnSession
-  const turnLeaseMs = Number(process.env.GATEKEEPER_INGRESS_TURN_LEASE_MS) || 30_000;
+  const turnLeaseMs = opts.turnLeaseMs ?? (Number(process.env.GATEKEEPER_INGRESS_TURN_LEASE_MS) || 30_000);
+  const typingIntervalMs = opts.typingIntervalMs ?? 7000;
   let currentPresence: Presence = 'offline';
   let agentName = 'your agent';
   const seenMessageIds = new Set<string>();
@@ -49,51 +60,48 @@ export function createDiscordClient(
     standbySessions.delete(channelId);
   }
 
+  /** When the last turn ends nothing owns the bot's custom status, so it returns to plain presence. */
+  function resetIdlePresence() {
+    if (activeTurns.size > 0) return;
+    client.user?.setPresence({ status: discordStatus(currentPresence), activities: [] });
+  }
+
   function clearActiveTurn(channelId: string) {
     const turn = activeTurns.get(channelId);
     if (!turn) return;
-    if (turn.typingInterval) {
-      clearInterval(turn.typingInterval);
-    }
+    if (turn.typingInterval) clearInterval(turn.typingInterval);
     activeTurns.delete(channelId);
+  }
+
+  function pulseTyping(turn: ActiveTurnSession) {
+    turn.lastTypingAt = Date.now();
+    void turn.channel.sendTyping().catch(() => {});
+  }
+
+  /**
+   * One tick of a turn's heartbeat. A standby session has its own typing loop and its own failure timer (a cold wake
+   * legitimately has no activity for a while), so the lease is enforced, and typing sent here, only outside standby.
+   */
+  function heartbeat(channelId: string) {
+    const turn = activeTurns.get(channelId);
+    if (!turn) return;
+    if (standbySessions.has(channelId)) return;
+    if (Date.now() - turn.lastActivityAt > turnLeaseMs) {
+      console.log(`[gatekeeper-ingress] Turn lease expired for channel ${channelId}, going silent.`);
+      clearActiveTurn(channelId);
+      resetIdlePresence();
+      return;
+    }
+    pulseTyping(turn);
   }
 
   function startActiveTurn(channelId: string, channel: { sendTyping: () => Promise<unknown> }) {
     clearActiveTurn(channelId);
     const now = Date.now();
-    void channel.sendTyping().catch(() => {});
-
-    let typingInterval: NodeJS.Timeout | undefined;
-    if (!standbySessions.has(channelId)) {
-      typingInterval = setInterval(() => {
-        const turn = activeTurns.get(channelId);
-        if (!turn) {
-          if (typingInterval) clearInterval(typingInterval);
-          return;
-        }
-        if (Date.now() - turn.lastActivityAt > turnLeaseMs) {
-          console.log(`[gatekeeper-ingress] Turn lease expired for channel ${channelId}, going silent.`);
-          clearActiveTurn(channelId);
-          if (activeTurns.size === 0) {
-            client.user?.setPresence({
-              status: discordStatus(currentPresence),
-              activities: [],
-            });
-          }
-          return;
-        }
-        turn.lastTypingAt = Date.now();
-        void turn.channel.sendTyping().catch(() => {});
-      }, 7000);
-    }
-
-    activeTurns.set(channelId, {
-      channelId,
-      channel,
-      typingInterval,
-      lastActivityAt: now,
-      lastTypingAt: now,
-    });
+    const turn: ActiveTurnSession = { channelId, channel, lastActivityAt: now, lastTypingAt: now };
+    if (!standbySessions.has(channelId)) void channel.sendTyping().catch(() => {});
+    turn.typingInterval = setInterval(() => heartbeat(channelId), typingIntervalMs);
+    activeTurns.set(channelId, turn);
   }
 
   client.on(Events.MessageCreate, async (message) => {
@@ -122,12 +130,7 @@ export function createDiscordClient(
         }
       }
       clearActiveTurn(message.channelId);
-      if (activeTurns.size === 0) {
-        client.user?.setPresence({
-          status: discordStatus(currentPresence),
-          activities: [],
-        });
-      }
+      resetIdlePresence();
       return;
     }
 
@@ -197,7 +200,7 @@ export function createDiscordClient(
             }
             clearStandbySession(message.channelId);
             clearActiveTurn(message.channelId);
-            client.user?.setPresence({ activities: [] });
+            resetIdlePresence();
           }, failureTimeoutMs);
 
           standbySessions.set(message.channelId, {
@@ -209,11 +212,9 @@ export function createDiscordClient(
         } catch (err) {
           console.warn('[gatekeeper-ingress] Failed to start standby session:', err);
         }
-        startActiveTurn(message.channelId, message.channel);
-      } else {
-        // Keep typing indicator active with activity lease tracking
-        startActiveTurn(message.channelId, message.channel);
       }
+      // Typing and the activity lease (the standby session, if any, carries its own typing and timers)
+      startActiveTurn(message.channelId, message.channel);
 
       for (const handler of handlers) {
         handler({
@@ -246,65 +247,41 @@ export function createDiscordClient(
       await client.login(token);
     },
     async recordActivity(activity: AgentActivity) {
-      const toolName =
-        activity.tool ||
-        (activity.route && !activity.route.startsWith('models') && !activity.route.startsWith('model:') ? activity.route : undefined);
+      // A late event (after the reply, after the lease lapsed) has no turn to belong to; setting a status now would
+      // leave it on the bot with nothing to clear it.
+      if (activeTurns.size === 0) return;
+
+      // Progress names the route (an identifier, E3), not the tool inside it.
       const isModel = Boolean(activity.model || activity.route?.startsWith('model'));
+      const routeName = activity.route && !isModel ? activity.route : undefined;
 
       let text: string;
-      if (activity.kind === 'call.start') {
-        if (toolName) {
-          text = `Tool: ${toolName}...`;
-        } else if (isModel) {
-          text = 'Thinking...';
-        } else {
-          text = 'Working...';
-        }
-      } else if (activity.kind === 'call.end') {
+      if (activity.kind === 'call.end') {
+        text = 'Thinking...';
+      } else if (routeName) {
+        text = `Tool: ${routeName}...`;
+      } else if (isModel) {
         text = 'Thinking...';
       } else {
-        text = toolName ? `Tool: ${toolName}...` : 'Thinking...';
+        text = 'Working...';
       }
-
-      if (text.length > 120) {
-        text = text.slice(0, 117) + '...';
-      }
+      if (text.length > 120) text = text.slice(0, 117) + '...';
 
       client.user?.setActivity(text, { type: ActivityType.Custom });
 
+      // The event names an agent, not a channel, and one agent runs one turn at a time: it is alive, so every open
+      // turn of this client is kept alive.
       const now = Date.now();
       for (const turn of activeTurns.values()) {
         turn.lastActivityAt = now;
-        turn.currentTool = toolName;
-        if (!turn.typingInterval && !standbySessions.has(turn.channelId)) {
-          turn.typingInterval = setInterval(() => {
-            if (Date.now() - turn.lastActivityAt > turnLeaseMs) {
-              clearActiveTurn(turn.channelId);
-              if (activeTurns.size === 0) {
-                client.user?.setPresence({
-                  status: discordStatus(currentPresence),
-                  activities: [],
-                });
-              }
-              return;
-            }
-            turn.lastTypingAt = Date.now();
-            void turn.channel.sendTyping().catch(() => {});
-          }, 7000);
-        }
-        if (now - turn.lastTypingAt > 4000) {
-          turn.lastTypingAt = now;
-          void turn.channel.sendTyping().catch(() => {});
-        }
+        if (!standbySessions.has(turn.channelId) && now - turn.lastTypingAt > TYPING_MIN_GAP_MS) pulseTyping(turn);
       }
     },
     async refuseWake(channelId: string, window: string, kind: 'wake' | 'handoff' = 'wake') {
       const session = standbySessions.get(channelId);
       clearStandbySession(channelId);
       clearActiveTurn(channelId);
-      if (activeTurns.size === 0) {
-        client.user?.setPresence({ activities: [] });
-      }
+      resetIdlePresence();
       const text = wakeRefusedText(agentName, window, kind);
       try {
         const channel = await client.channels.fetch(channelId);
@@ -320,9 +297,7 @@ export function createDiscordClient(
       const session = standbySessions.get(channelId);
       clearStandbySession(channelId);
       clearActiveTurn(channelId);
-      if (activeTurns.size === 0) {
-        client.user?.setPresence({ activities: [] });
-      }
+      resetIdlePresence();
       const last = recentUnauthorized.get(channelId);
       if (last && Date.now() - last < 15_000 && !session) {
         return;

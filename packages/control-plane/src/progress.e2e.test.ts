@@ -198,8 +198,8 @@ describe('§6.5 run progress events: run-scoped, bounded, headless', { concurren
       const { run } = await liveRun('donna');
       await report([ev(run.runId, 'donna', { route: 'github', kind: 'call.start' })]);
 
-      // Give event loop a tick for background fetch
-      await new Promise((r) => setTimeout(r, 50));
+      // The relay is fire-and-forget: wait for it to arrive rather than for a fixed time.
+      for (let i = 0; i < 200 && received.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
 
       assert.equal(received.length, 1);
       assert.equal(received[0].auth, 'Bearer ingress-test-token');

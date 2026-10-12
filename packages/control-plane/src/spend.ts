@@ -34,6 +34,7 @@ import {
 } from '@beercanlabs/factory-budget';
 import { bearerOf, json, readJson, requirePrivilege, type FactoryState } from './app.js';
 import { isTerminal, routeEvents, SYSTEM } from '@beercanlabs/factory-landlord';
+import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 
 /** Agent tasks are registered at 0.25 vCPU / 0.5 GB (`aws/ecs.ts`). */
 export const DEFAULT_AGENT_TASK_SIZE: TaskSize = { vcpu: 0.25, memoryGb: 0.5 };
@@ -103,13 +104,13 @@ export function createTreasury(opts: { cloud?: CloudCostSource; compute?: Comput
  * Answers the request itself (401/403) and returns undefined when the caller may not read.
  */
 export async function spendReader(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): Promise<{ actor: string; agentId: string } | undefined> {
-  const claims = await state.runTokens.verify(bearerOf(req));
-  if (claims) {
-    const run = state.runs.get(claims.runId);
-    if (!run || run.agentId !== claims.agentId || isTerminal(run.state)) {
-      json(res, 401, { error: 'invalid_run_token' });
-      return undefined;
-    }
+  const verdict = await verifyRun({ tokens: state.runTokens, token: bearerOf(req), runOf: (id) => state.runs.get(id), ended: (r) => isTerminal(r.state) });
+  if (verdict.kind === 'refused') {
+    json(res, 401, { error: 'invalid_run_token' });
+    return undefined;
+  }
+  if (verdict.kind === 'ok') {
+    const claims = verdict.claims;
     // Only a policy an admin set for this agent counts; the factory fallback policy never grants it.
     const granted = state.policies.has(claims.agentId) && Object.prototype.hasOwnProperty.call(state.policies.get(claims.agentId).tools ?? {}, 'factory-spend');
     if (!granted) {

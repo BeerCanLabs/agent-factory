@@ -108,15 +108,6 @@ describe('gatekeeper-ingress discord client', () => {
     assert.equal(activities.length, 2);
     assert.equal(activities[1].name, 'Thinking...');
 
-    // Second tool call with explicit tool name
-    await discord.recordActivity?.({
-      tool: 'github_create_issue',
-      route: 'github',
-      kind: 'call.start',
-    });
-    assert.equal(activities.length, 3);
-    assert.equal(activities[2].name, 'Tool: github_create_issue...');
-
     await discord.destroy();
   });
 
@@ -186,6 +177,93 @@ describe('gatekeeper-ingress discord client', () => {
     // Activities should be cleared
     assert.equal(activities.length, 0);
 
+    await discord.destroy();
+  });
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const userMsg = (channel: unknown, id = 'm1', channelId = 'ch1') => ({
+    id,
+    channelId,
+    guildId: null,
+    author: { id: 'u1', bot: false },
+    channel,
+    mentions: { has: () => false },
+    content: 'work',
+  });
+
+  it('ignores a late activity event when no turn is open, so no status is left behind', async () => {
+    const { mockClient, activities } = createMockClient();
+    const discord = createDiscordClient(mockClient as any);
+    await discord.setPresence('available');
+
+    await discord.recordActivity?.({ route: 'github', kind: 'call.start' });
+    assert.equal(activities.length, 0);
+
+    // The same after the agent has replied: a late call.end must not bring "Thinking..." back.
+    mockClient.emit(Events.MessageCreate, userMsg({ sendTyping: async () => {} }));
+    mockClient.emit(Events.MessageCreate, { id: 'r1', channelId: 'ch1', guildId: null, author: { id: 'bot-id-123', bot: true }, channel: {}, content: 'done' });
+    await discord.recordActivity?.({ route: 'github', kind: 'call.end' });
+    assert.equal(activities.length, 0);
+
+    await discord.destroy();
+  });
+
+  it('goes silent and clears the status when the lease lapses with no activity', async () => {
+    const { mockClient, activities } = createMockClient();
+    const discord = createDiscordClient(mockClient as any, { turnLeaseMs: 40, typingIntervalMs: 10 });
+    await discord.setPresence('available');
+
+    let typingCalls = 0;
+    mockClient.emit(Events.MessageCreate, userMsg({ sendTyping: async () => { typingCalls++; } }));
+    await discord.recordActivity?.({ route: 'github', kind: 'call.start' });
+    assert.equal(activities.length, 1);
+
+    await sleep(150);
+    assert.equal(activities.length, 0, 'status cleared');
+    const after = typingCalls;
+    await sleep(50);
+    assert.equal(typingCalls, after, 'typing stopped');
+
+    // The lapsed turn owns nothing, so a straggler sets nothing.
+    await discord.recordActivity?.({ route: 'github', kind: 'call.start' });
+    assert.equal(activities.length, 0);
+    await discord.destroy();
+  });
+
+  it('activity keeps the lease alive past its nominal length', async () => {
+    const { mockClient, activities } = createMockClient();
+    const discord = createDiscordClient(mockClient as any, { turnLeaseMs: 60, typingIntervalMs: 10 });
+    await discord.setPresence('available');
+    mockClient.emit(Events.MessageCreate, userMsg({ sendTyping: async () => {} }));
+    for (let i = 0; i < 5; i++) {
+      await sleep(30);
+      await discord.recordActivity?.({ route: 'github', kind: i % 2 ? 'call.end' : 'call.start' });
+    }
+    assert.ok(activities.length >= 5, 'still active after 150 ms with a 60 ms lease');
+    await discord.destroy();
+  });
+
+  it('a standby (cold wake) turn is not cut off by the lease while the agent starts', async () => {
+    const { mockClient, activities } = createMockClient();
+    const discord = createDiscordClient(mockClient as any, { turnLeaseMs: 30, typingIntervalMs: 10 });
+    // Presence stays offline, so the message starts a standby session.
+    const channel = { sendTyping: async () => {}, send: async () => ({ id: 'standby-1' }) };
+    mockClient.emit(Events.MessageCreate, userMsg(channel));
+    await sleep(100);
+
+    // The turn is still open after the lease length, so activity once the agent is up is shown.
+    await discord.recordActivity?.({ route: 'github', kind: 'call.start' });
+    assert.equal(activities.at(-1)?.name, 'Tool: github...');
+    await discord.destroy();
+  });
+
+  it('a call.start for a model route shows Thinking... and never the route name', async () => {
+    const { mockClient, activities } = createMockClient();
+    const discord = createDiscordClient(mockClient as any);
+    await discord.setPresence('available');
+    mockClient.emit(Events.MessageCreate, userMsg({ sendTyping: async () => {} }));
+    await discord.recordActivity?.({ route: 'model:anthropic', kind: 'call.start' });
+    assert.equal(activities.at(-1)?.name, 'Thinking...');
     await discord.destroy();
   });
 });

@@ -235,21 +235,6 @@
   ]
  },
  {
-  "id": "secretary-mind",
-  "name": "pullMind / pushMind",
-  "from": "secretary",
-  "to": [
-   "landlord"
-  ],
-  "sig": "pullMind(store: MindStore, prefix, dest)\npushMind(store: MindStore, prefix, src)",
-  "src": "packages/hydrate/src/index.ts",
-  "what": "Copies an agent’s prefix between the mind store and $MEMORY_DIR.",
-  "rules": [
-   "The prefix is fixed at deploy.",
-   "Cartridges never need a cloud storage SDK."
-  ]
- },
- {
   "id": "auditor-ledger",
   "name": "LedgerStore / verifyChain",
   "from": "auditor",

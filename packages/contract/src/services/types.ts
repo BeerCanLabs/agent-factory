@@ -1,13 +1,12 @@
 import { z } from 'zod';
 
 /**
- * The 11 canonical Factory Services (The Cast of Characters) defined in DESIGN_AUTHORITY.md §6.15.
+ * The 10 canonical Factory Services (The Cast of Characters) defined in DESIGN_AUTHORITY.md §6.15.
  */
 export const FACTORY_SERVICE_NAMES = [
   'gatekeeper',
   'keymaster',
   'executive',
-  'secretary',
   'landlord',
   'auditor',
   'treasurer',
@@ -42,6 +41,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/gatekeeper/src/policy/index.ts',
+      'packages/gatekeeper/src/run-token/index.ts',
       'packages/gatekeeper/src/egress/gatekeeper-egress.ts',
       'packages/gatekeeper/src/egress/main.ts',
       'packages/gatekeeper/src/ingress/discord.ts',
@@ -68,17 +68,11 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     role: 'Model service and uniform inference provider with token and cost metering (M1–M4, E5)',
     hostedIn: ['packages/executive'],
   },
-  secretary: {
-    name: 'secretary',
-    title: 'Secretary',
-    role: 'State hydration and remote object storage synchronization (The Safe, §6.6)',
-    hostedIn: ['packages/hydrate'],
-  },
   landlord: {
     name: 'landlord',
     title: 'Landlord',
-    role: 'Compute lifecycle management, wake-from-zero, warm-down, and turn mailbox delivery (L1–L6)',
-    hostedIn: ['packages/control-plane', 'packages/landlord'],
+    role: 'Compute and state lifecycle management, wake-from-zero, warm-down, turn mailbox delivery (L1–L6), and container runtime state hydration (The Safe, §6.6)',
+    hostedIn: ['packages/control-plane', 'packages/landlord', 'packages/hydrate'],
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/apply.ts',

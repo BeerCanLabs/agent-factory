@@ -2,6 +2,7 @@ import type http from 'node:http';
 import { PROGRESS_MAX_WAIT_MS } from '@beercanlabs/factory-inspector';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { isTerminal } from '@beercanlabs/factory-landlord';
+import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 
 function bearer(req: http.IncomingMessage): string | undefined {
   const h = req.headers.authorization;
@@ -19,7 +20,7 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
     const body = await readJson(req);
     const batch = Array.isArray(body.events) ? body.events.slice(0, 500) : [];
     // Attribution comes from the run itself: an event naming another agent is not this run's.
-    const liveEvents: Array<{ agentId: string; route?: string; model?: string; kind?: string }> = [];
+    const liveEvents: ActivityEvent[] = [];
     const accepted = state.inspector.reportProgress(batch, (e) => {
       const run = state.runs.get(e.runId);
       const isLive = Boolean(run) && run!.agentId === e.agentId && !isTerminal(run!.state);
@@ -29,7 +30,7 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
       return isLive;
     });
     if (state.gatekeeperIngressUrl && liveEvents.length > 0) {
-      void notifyGatekeeperActivity(state, liveEvents).catch(() => {});
+      enqueueGatekeeperActivity(state, liveEvents);
     }
     json(res, 200, { accepted });
     return true;
@@ -39,9 +40,8 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
   if (m && req.method === 'GET') {
     const runId = decodeURIComponent(m[1]);
     // Only this run's own live token reads this run's progress (like /input).
-    const claims = await state.runTokens.verify(bearer(req));
-    const run = claims && claims.runId === runId ? state.runs.get(runId) : undefined;
-    if (!claims || !run || run.agentId !== claims.agentId || isTerminal(run.state)) {
+    const verdict = await verifyRun({ tokens: state.runTokens, token: bearer(req), runId, runOf: (id) => state.runs.get(id), ended: (r) => isTerminal(r.state) });
+    if (verdict.kind !== 'ok') {
       json(res, 401, { error: 'invalid_run_token' });
       return true;
     }
@@ -59,9 +59,31 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
   return false;
 }
 
+type ActivityEvent = { agentId: string; route?: string; model?: string; kind?: string };
+
+/**
+ * Activity goes to gatekeeper-ingress one request at a time and in order, so a late `call.start` cannot overtake a
+ * newer `call.end`. It is a convenience for a person waiting in Discord: when the ingress is slow or down the backlog
+ * is bounded and the oldest-unsent batches are not worth waiting for, so new ones are dropped.
+ */
+const ACTIVITY_MAX_PENDING = 50;
+let activityChain: Promise<void> = Promise.resolve();
+let activityPending = 0;
+
+function enqueueGatekeeperActivity(state: { gatekeeperIngressUrl?: string; gatekeeperIngressToken?: string }, events: ActivityEvent[]): void {
+  if (activityPending >= ACTIVITY_MAX_PENDING) return;
+  activityPending++;
+  activityChain = activityChain
+    .then(() => notifyGatekeeperActivity(state, events))
+    .catch(() => {})
+    .finally(() => {
+      activityPending--;
+    });
+}
+
 async function notifyGatekeeperActivity(
   state: { gatekeeperIngressUrl?: string; gatekeeperIngressToken?: string },
-  events: Array<{ agentId: string; route?: string; model?: string; kind?: string }>,
+  events: ActivityEvent[],
 ): Promise<void> {
   if (!state.gatekeeperIngressUrl || events.length === 0) return;
   try {
