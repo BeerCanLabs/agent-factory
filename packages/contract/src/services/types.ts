@@ -42,6 +42,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/gatekeeper/src/policy/index.ts',
+      'packages/gatekeeper/src/run-token/index.ts',
       'packages/gatekeeper/src/egress/gatekeeper-egress.ts',
       'packages/gatekeeper/src/egress/main.ts',
       'packages/gatekeeper/src/ingress/discord.ts',

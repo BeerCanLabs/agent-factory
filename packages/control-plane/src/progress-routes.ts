@@ -2,6 +2,7 @@ import type http from 'node:http';
 import { PROGRESS_MAX_WAIT_MS } from '@beercanlabs/factory-inspector';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { isTerminal } from '@beercanlabs/factory-landlord';
+import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 
 function bearer(req: http.IncomingMessage): string | undefined {
   const h = req.headers.authorization;
@@ -31,9 +32,8 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
   if (m && req.method === 'GET') {
     const runId = decodeURIComponent(m[1]);
     // Only this run's own live token reads this run's progress (like /input).
-    const claims = await state.runTokens.verify(bearer(req));
-    const run = claims && claims.runId === runId ? state.runs.get(runId) : undefined;
-    if (!claims || !run || run.agentId !== claims.agentId || isTerminal(run.state)) {
+    const verdict = await verifyRun({ tokens: state.runTokens, token: bearer(req), runId, runOf: (id) => state.runs.get(id), ended: (r) => isTerminal(r.state) });
+    if (verdict.kind !== 'ok') {
       json(res, 401, { error: 'invalid_run_token' });
       return true;
     }
