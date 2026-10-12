@@ -15,6 +15,7 @@ import { payloadHash } from '@beercanlabs/factory-ledger';
 import { DEFAULT_TIMEZONE, cronIssue, isTimeZone, type ScheduledAction, type ScheduleRequester } from '@beercanlabs/factory-timekeeper';
 import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
 import { isTerminal, SYSTEM, type Run } from '@beercanlabs/factory-landlord';
+import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { ownersOf } from './config-store.js';
 
 function adminEmailsFromEnv(): string[] {
@@ -66,13 +67,13 @@ export async function authenticateOperatorOrRun(
   res: http.ServerResponse,
   state: FactoryState,
 ): Promise<ScheduleCaller | null> {
-  const claims = await state.runTokens.verify(bearer(req));
-  if (claims) {
-    const run = state.runs.get(claims.runId);
-    if (!run || run.agentId !== claims.agentId || isTerminal(run.state)) {
-      json(res, 401, { error: 'invalid_run_token' });
-      return null;
-    }
+  const verdict = await verifyRun({ tokens: state.runTokens, token: bearer(req), runOf: (id) => state.runs.get(id), ended: (r) => isTerminal(r.state) });
+  if (verdict.kind === 'refused') {
+    json(res, 401, { error: 'invalid_run_token' });
+    return null;
+  }
+  if (verdict.kind === 'ok') {
+    const claims = verdict.claims;
     return { kind: 'run', actor: `run:${claims.agentId}:${claims.runId}`, agentId: claims.agentId, runId: claims.runId };
   }
   const principal = await requirePrivilege(req, res, state, 'schedules.read');
