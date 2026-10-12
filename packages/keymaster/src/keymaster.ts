@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import type { RunTokens } from '@beercanlabs/factory-auth';
 import type { Approval } from '@beercanlabs/factory-bouncer';
 import type { LedgerStore } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
@@ -26,7 +25,6 @@ export type KeymasterOptions = {
   approvals: ApprovalConsumer;
   ledger: LedgerStore;
   providers: SecretProvider[];
-  runTokens?: RunTokens;
   leaseTtlMs?: number;
   secretValues?: Set<string>;
   getAgent?: (agentId: string) => AgentInfo | undefined | Promise<AgentInfo | undefined>;
@@ -39,7 +37,6 @@ export type CheckoutParams = {
   gatedSecret: string;
   turnId: string;
   proofHash?: string;
-  runToken?: string;
   actor?: string;
 };
 
@@ -73,7 +70,6 @@ export class Keymaster {
   private readonly approvals: ApprovalConsumer;
   private readonly ledger: LedgerStore;
   private readonly providers: SecretProvider[];
-  private readonly runTokens?: RunTokens;
   private readonly leaseTtlMs: number;
   private readonly secretValues: Set<string>;
   private readonly getAgent?: (agentId: string) => AgentInfo | undefined | Promise<AgentInfo | undefined>;
@@ -85,7 +81,6 @@ export class Keymaster {
     this.approvals = opts.approvals;
     this.ledger = opts.ledger;
     this.providers = opts.providers;
-    this.runTokens = opts.runTokens;
     this.leaseTtlMs = opts.leaseTtlMs ?? 5 * 60 * 1000; // 5 minutes default
     this.secretValues = opts.secretValues ?? new Set<string>();
     this.getAgent = opts.getAgent;
@@ -101,16 +96,9 @@ export class Keymaster {
       return { ok: false, status: 400, error: 'missing_required_fields' };
     }
 
-    // 1. Verify caller run token if provided or if runTokens configured
-    if (params.runToken && this.runTokens) {
-      const claims = await this.runTokens.verify(params.runToken);
-      if (!claims || claims.runId !== params.runId) {
-        await this.recordDenied(params, 'invalid_run_token', 'run:unauthenticated');
-        return { ok: false, status: 401, error: 'invalid_run_token' };
-      }
-    }
+    // The caller is authenticated before this is called (the Gatekeeper's `verifyRun`, GAP-137); the Keymaster does not check a run token.
 
-    // 2. Verify run status if getRun provided
+    // 1. Verify run status if getRun provided
     let run: RunInfo | undefined;
     if (this.getRun) {
       run = await this.getRun(params.runId);
@@ -124,7 +112,7 @@ export class Keymaster {
       }
     }
 
-    // 3. Verify cartridge gated classification if getAgent provided
+    // 2. Verify cartridge gated classification if getAgent provided
     if (run && this.getAgent) {
       const agent = await this.getAgent(run.agentId);
       if (agent?.gated) {
@@ -140,7 +128,7 @@ export class Keymaster {
       }
     }
 
-    // 4. Look up approval
+    // 3. Look up approval
     const approval = await this.approvals.get(params.approvalId);
     if (!approval) {
       await this.recordDenied(params, 'approval_not_found', params.actor ?? (run ? `run:${run.agentId}` : 'unknown'));

@@ -15,7 +15,6 @@
     "test": "tsx --test src/keymaster.test.ts src/connections.test.ts src/credentials.test.ts src/signin-links.test.ts"
   },
   "dependencies": {
-    "@beercanlabs/factory-auth": "0.1.0",
     "@beercanlabs/factory-contract": "0.1.0",
     "@beercanlabs/factory-ledger": "0.1.0",
     "@beercanlabs/factory-bouncer": "0.1.0",
