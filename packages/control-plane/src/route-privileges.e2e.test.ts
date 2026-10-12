@@ -98,6 +98,8 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/agents/nope/wake', privilege: 'runs.attest-requester', role: 'operator', thenExclusive: 'gatekeeper-ingress', body: { requestedBy: { provider: 'discord', id: '1' } } },
   { method: 'POST', path: '/api/v1/hooks/hooked', privilege: 'hooks.invoke', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/schedules', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
+  { method: 'PATCH', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
+  { method: 'PUT', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
   { method: 'DELETE', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer' },
   // approver
   { method: 'POST', path: '/api/v1/approvals/nope', privilege: 'approvals.decide', role: 'approver', body: { decision: 'approved' } },
