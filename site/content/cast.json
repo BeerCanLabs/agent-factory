@@ -367,75 +367,9 @@
    ]
   },
   {
-   "id": "secretary",
-   "name": "Secretary",
-   "title": "Keeper of the Notebook",
-   "dept": "Operations",
-   "art": {
-    "skin": "#F0C8A8",
-    "hair": "#8B4A2B",
-    "style": "bun",
-    "shirt": "#6A7F94"
-   },
-   "rules": "The Safe (§6.6)",
-   "tag": "Files in. Files out. No cloud SDK needed.",
-   "bio": "Moves an agent’s notebook between object storage and the folder the agent works in. When an agent wakes the Secretary brings the files in; when it sleeps the Secretary puts them back. The agent only ever sees a local folder.",
-   "does": [
-    "Pulls the agent’s prefix from object storage into $MEMORY_DIR on wake",
-    "Pushes $MEMORY_DIR back on sleep",
-    "Builds the platform environment the agent starts with, including the egress base URLs"
-   ],
-   "dont": [
-    "Decide what is worth remembering. That is the cartridge’s notebook.",
-    "Decide what a notebook contains or how it is organized. That is the cartridge’s."
-   ],
-   "flows": [
-    {
-     "id": "in",
-     "name": "Bring the notebook in (wake)",
-     "intro": "Runs inside the agent’s container as part of the shim.",
-     "steps": [
-      {
-       "t": "The Landlord starts the container with the agent’s memory prefix and its mind store.",
-       "to": "landlord",
-       "c": "secretary-mind",
-       "why": "The prefix is fixed at deploy."
-      },
-      {
-       "t": "pullMind copies the prefix from the mind store to $MEMORY_DIR."
-      },
-      {
-       "t": "platformEnv and the egress environment are set, so the agent finds its base URLs and never a cloud key."
-      },
-      {
-       "t": "The agent starts and sees ordinary files."
-      }
-     ]
-    },
-    {
-     "id": "out",
-     "name": "Send the notebook out (sleep)",
-     "intro": "Runs when the turn ends or the container is told to stop.",
-     "steps": [
-      {
-       "t": "The agent finishes its turn."
-      },
-      {
-       "t": "pushMind copies $MEMORY_DIR back to the same prefix in the mind store."
-      },
-      {
-       "t": "The Landlord scales the agent to zero.",
-       "to": "landlord",
-       "c": "secretary-mind"
-      }
-     ]
-    }
-   ]
-  },
-  {
    "id": "landlord",
    "name": "Landlord",
-   "title": "Property Manager, Compute",
+   "title": "Property Manager, Compute & State",
    "dept": "Operations",
    "art": {
     "skin": "#B07A56",
@@ -443,11 +377,12 @@
     "style": "short",
     "shirt": "#B8641E"
    },
-   "rules": "L1 to L6, §6.4",
+   "rules": "L1 to L6, §6.4, §6.6",
    "tag": "Opens the office when someone needs it. Locks up when they leave.",
-   "bio": "Runs the building. The Landlord turns on compute when an agent is needed, brokers the agent’s turns, and turns it off again when the work is done. It builds and starts only what the Registrar has admitted.",
+   "bio": "Runs the building. The Landlord turns on compute when an agent is needed, loads and syncs its state in the safe, brokers the agent’s turns, and turns it off again when the work is done. It builds and starts only what the Registrar has admitted.",
    "does": [
     "Wakes an agent from zero and queues a second message behind the running one",
+    "Brings the agent’s notebook into $MEMORY_DIR on wake, and syncs it back on sleep",
     "Brokers each turn over the /mailbox long-poll",
     "Warms down and scales to zero",
     "Pauses, kills and retires an agent in two stages"
@@ -480,9 +415,7 @@
        "c": "gatekeeper-ingress"
       },
       {
-       "t": "In the container, the Secretary brings the notebook in.",
-       "to": "secretary",
-       "c": "secretary-mind"
+       "t": "In the container, the Landlord’s shim brings the notebook into $MEMORY_DIR."
       }
      ]
     },
@@ -513,9 +446,7 @@
        "t": "No work arrives for the warm-down window."
       },
       {
-       "t": "The Secretary sends the notebook out.",
-       "to": "secretary",
-       "c": "secretary-mind"
+       "t": "In the container, the Landlord’s shim syncs $MEMORY_DIR back to the mind store."
       },
       {
        "t": "The task stops and the Landlord tells the ingress the agent is idle.",
@@ -1178,12 +1109,7 @@
   [
    "landlord",
    "Open the office",
-   "The Landlord starts the agent from zero."
-  ],
-  [
-   "secretary",
-   "Bring the notebook",
-   "The Secretary loads its files."
+   "The Landlord starts the agent from zero and loads its files into the safe."
   ],
   [
    "executive",

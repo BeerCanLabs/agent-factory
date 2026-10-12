@@ -1,6 +1,6 @@
 # Landlord (`@beercanlabs/factory-landlord`)
 
-The Landlord is the Factory's compute lifecycle (`DESIGN_AUTHORITY.md` §6.15, L1 to L6): building and registering an agent's runtime, waking it from zero, run states and timeouts, warm-down, the operational pause and kill switches, the turn mailbox and two-stage retirement. It was extracted from `packages/control-plane` (the Landlord flow work stream, GAP-132, TSK-178 to TSK-186).
+The Landlord is the Factory's compute and state lifecycle (`DESIGN_AUTHORITY.md` §6.15, L1 to L6, §6.6): building and registering an agent's runtime, waking it from zero, container state hydration in the safe, run states and timeouts, warm-down, the operational pause and kill switches, the turn mailbox and two-stage retirement. It was extracted from `packages/control-plane` (the Landlord flow work stream, GAP-132, TSK-178 to TSK-186), and hosts the in-container runtime shim (`packages/hydrate`, TSK-196).
 
 It holds so far:
 
@@ -17,4 +17,4 @@ It holds so far:
 
 The extraction is complete (GAP-132). What stays in `control-plane` is GAP-133. A conformance test (`packages/conformance/src/landlord.test.ts`) fails on a second copy of these rules or on a back-dependency. The HTTP wake and run handlers stay in `control-plane`.
 
-The dependency points one way: the control plane depends on the Landlord; the Landlord depends on the Registrar and the Secretary (`packages/hydrate`) and never imports the control plane.
+The dependency points one way: the control plane depends on the Landlord; the Landlord depends on the Registrar and hosts the in-container runtime shim (`packages/hydrate`), and never imports the control plane.
