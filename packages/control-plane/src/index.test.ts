@@ -18,7 +18,7 @@ import { AggregationTemporality, InMemoryMetricExporter, MeterProvider, Periodic
 import { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 
 const agentsRoot = fileURLToPath(new URL('../test-fixtures/agents', import.meta.url));
 

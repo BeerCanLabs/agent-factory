@@ -15,7 +15,7 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { createRun, finishRun, MemoryRunStore, noopRuntime, pollQueueOnce, SYSTEM } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { createInspector, eventBridgeSink, fileSink, type FactoryEvent } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
 

@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./policy": {
+      "types": "./dist/policy/index.d.ts",
+      "default": "./dist/policy/index.js"
     }
   },
   "scripts": {
@@ -25,6 +29,7 @@
     "@beercanlabs/factory-inspector": "0.1.0",
     "@beercanlabs/factory-keymaster": "0.1.0",
     "@beercanlabs/factory-ledger": "0.1.0",
+    "@beercanlabs/factory-registrar": "0.1.0",
     "@beercanlabs/factory-secrets-bind": "0.1.0",
     "@beercanlabs/factory-telemetry": "0.1.0",
     "@opentelemetry/api": "^1.9.1",

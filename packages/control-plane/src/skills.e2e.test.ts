@@ -13,7 +13,7 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { approvedSkill, loadSkills, recordSkillChecks, setSkillUsage, skillRegistry } from './skills.js';
 
 const ADMIN = 'admin-skills-token';

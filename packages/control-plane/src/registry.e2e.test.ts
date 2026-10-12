@@ -12,7 +12,7 @@ import { BUILTIN_SYSTEM_AGENTS } from '@beercanlabs/factory-registrar';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { Keymaster } from '@beercanlabs/factory-keymaster';
 
 const ADMIN = 'admin-e2e-token';

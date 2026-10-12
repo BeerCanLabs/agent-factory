@@ -11,7 +11,7 @@ import { BUILTIN_SYSTEM_AGENTS } from '@beercanlabs/factory-registrar';
 import { MemoryRunStore, noopRuntime, RunTokens } from '@beercanlabs/factory-landlord';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
-import { PolicyStore } from './policy.js';
+import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 
 const TEAM = 'team.example.cloudflareaccess.com';

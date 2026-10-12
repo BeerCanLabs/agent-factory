@@ -24,7 +24,7 @@ everything in it can be checked against the code paths named below.
 
 ## What the code does today (checked 2026-10-10)
 
-- The owner's control is the policy's `models` list (`packages/control-plane/src/policy.ts`; edited in
+- The owner's control is the policy's `models` list (`packages/gatekeeper/src/policy/index.ts`; edited in
   `packages/console/src/components/PolicyEditor.tsx`). It is an allow-list. There is no field for a selected model, a
   backup or a per-skill model.
 - A policy that names no models grants exactly the factory default (`DEFAULT_MODEL`, Claude Haiku 4.5 unless operations
