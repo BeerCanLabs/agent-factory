@@ -34,8 +34,8 @@ Agent Factory is architected around **11 canonical services ("The Cast of Charac
 ### The 11 Cast Members
 
 1. **Gatekeeper (Perimeter Security):**
-   - **Role:** Owns inbound presence, wakes, webhooks, front-door authentication verification (A1, A2), and zero-trust outbound proxying (E1, E6) with credential injection (S1). Composed of `gatekeeper-ingress` and `gatekeeper-egress`.
-   - **Contract:** Inbound webhook & presence protocol, token-authenticated egress proxy (`<ROUTE>_BASE_URL`), and run-token authorization. Relays wake refusals (such as budget caps) directly to callers.
+   - **Role:** Owns inbound presence, wakes, webhooks, front-door authentication verification (A1, A2), and zero-trust outbound proxying (E1, E6) with credential injection (S1). It authenticates and never authorizes. Lives in `packages/gatekeeper` (the egress and the ingress, each its own process and image), with `packages/auth` hosted by it.
+   - **Contract:** Inbound webhook & presence protocol, token-authenticated egress proxy (`<ROUTE>_BASE_URL`), the per-agent policy store (`@beercanlabs/factory-gatekeeper/policy`) and `verifyRun` (`@beercanlabs/factory-gatekeeper/run-token`: does this token speak for a live run of the agent it names?). Relays wake refusals (such as budget caps) directly to callers.
 
 2. **Keymaster (Credential Facilitation):**
    - **Role:** Owns OAuth connections, consent flows, token refreshes (K1–K4), write-only static secret onboarding (K5), and vault mapping.
