@@ -34,6 +34,42 @@ export function createGatekeeperIngressHttp(door: GatekeeperIngress, presenceAut
       res.end(JSON.stringify(door.status()));
       return;
     }
+    if (path === '/api/v1/activity' && req.method === 'POST') {
+      if (!(await presenceAuth.verify(req.headers.authorization)).ok) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      let body = '';
+      for await (const c of req) body += c;
+      let payload: {
+        agentId?: string;
+        route?: string;
+        tool?: string;
+        model?: string;
+        kind?: string;
+        events?: Array<{ agentId?: string; route?: string; tool?: string; model?: string; kind?: string }>;
+      };
+      try {
+        payload = JSON.parse(body || '{}');
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid json' }));
+        return;
+      }
+      if (payload.events && Array.isArray(payload.events)) {
+        for (const evt of payload.events) {
+          if (evt.agentId) {
+            await door.onAgentActivity?.(evt.agentId, evt);
+          }
+        }
+      } else if (payload.agentId) {
+        await door.onAgentActivity?.(payload.agentId, payload);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok' }));
+      return;
+    }
     res.writeHead(404);
     res.end();
   });

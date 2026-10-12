@@ -1,5 +1,5 @@
 import { Client, GatewayIntentBits, Partials, Events, ActivityType } from 'discord.js';
-import type { DiscordClient, Conversation, Presence } from './index.js';
+import type { DiscordClient, Conversation, Presence, AgentActivity } from './index.js';
 import { wakeRefusedText, unauthorizedCallerText } from './wake.js';
 
 interface StandbySession {
@@ -9,8 +9,17 @@ interface StandbySession {
   failTimer: NodeJS.Timeout;
 }
 
-export function createDiscordClient(): DiscordClient {
-  const client = new Client({
+interface ActiveTurnSession {
+  channelId: string;
+  channel: { sendTyping: () => Promise<unknown> };
+  typingInterval?: NodeJS.Timeout;
+  lastActivityAt: number;
+  lastTypingAt: number;
+  currentTool?: string;
+}
+
+export function createDiscordClient(
+  client: Client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
@@ -18,10 +27,12 @@ export function createDiscordClient(): DiscordClient {
       GatewayIntentBits.MessageContent,
     ],
     partials: [Partials.Channel, Partials.Message],
-  });
-
+  })
+): DiscordClient {
   const handlers: Array<(msg: Omit<Conversation, 'agentId'>) => void> = [];
   const standbySessions = new Map<string, StandbySession>(); // channelId -> StandbySession
+  const activeTurns = new Map<string, ActiveTurnSession>(); // channelId -> ActiveTurnSession
+  const turnLeaseMs = Number(process.env.GATEKEEPER_INGRESS_TURN_LEASE_MS) || 30_000;
   let currentPresence: Presence = 'offline';
   let agentName = 'your agent';
   const seenMessageIds = new Set<string>();
@@ -36,6 +47,53 @@ export function createDiscordClient(): DiscordClient {
     clearTimeout(session.warnTimer);
     clearTimeout(session.failTimer);
     standbySessions.delete(channelId);
+  }
+
+  function clearActiveTurn(channelId: string) {
+    const turn = activeTurns.get(channelId);
+    if (!turn) return;
+    if (turn.typingInterval) {
+      clearInterval(turn.typingInterval);
+    }
+    activeTurns.delete(channelId);
+  }
+
+  function startActiveTurn(channelId: string, channel: { sendTyping: () => Promise<unknown> }) {
+    clearActiveTurn(channelId);
+    const now = Date.now();
+    void channel.sendTyping().catch(() => {});
+
+    let typingInterval: NodeJS.Timeout | undefined;
+    if (!standbySessions.has(channelId)) {
+      typingInterval = setInterval(() => {
+        const turn = activeTurns.get(channelId);
+        if (!turn) {
+          if (typingInterval) clearInterval(typingInterval);
+          return;
+        }
+        if (Date.now() - turn.lastActivityAt > turnLeaseMs) {
+          console.log(`[gatekeeper-ingress] Turn lease expired for channel ${channelId}, going silent.`);
+          clearActiveTurn(channelId);
+          if (activeTurns.size === 0) {
+            client.user?.setPresence({
+              status: discordStatus(currentPresence),
+              activities: [],
+            });
+          }
+          return;
+        }
+        turn.lastTypingAt = Date.now();
+        void turn.channel.sendTyping().catch(() => {});
+      }, 7000);
+    }
+
+    activeTurns.set(channelId, {
+      channelId,
+      channel,
+      typingInterval,
+      lastActivityAt: now,
+      lastTypingAt: now,
+    });
   }
 
   client.on(Events.MessageCreate, async (message) => {
@@ -63,10 +121,13 @@ export function createDiscordClient(): DiscordClient {
           // ignore delete errors (e.g. already deleted or missing perm)
         }
       }
-      client.user?.setPresence({
-        status: discordStatus(currentPresence),
-        activities: [],
-      });
+      clearActiveTurn(message.channelId);
+      if (activeTurns.size === 0) {
+        client.user?.setPresence({
+          status: discordStatus(currentPresence),
+          activities: [],
+        });
+      }
       return;
     }
 
@@ -135,6 +196,7 @@ export function createDiscordClient(): DiscordClient {
               console.warn('[gatekeeper-ingress] Failed to update failure standby message:', err);
             }
             clearStandbySession(message.channelId);
+            clearActiveTurn(message.channelId);
             client.user?.setPresence({ activities: [] });
           }, failureTimeoutMs);
 
@@ -147,9 +209,10 @@ export function createDiscordClient(): DiscordClient {
         } catch (err) {
           console.warn('[gatekeeper-ingress] Failed to start standby session:', err);
         }
+        startActiveTurn(message.channelId, message.channel);
       } else {
-        // Keep typing indicator active if already in a session or active conversation
-        void message.channel.sendTyping().catch(() => {});
+        // Keep typing indicator active with activity lease tracking
+        startActiveTurn(message.channelId, message.channel);
       }
 
       for (const handler of handlers) {
@@ -182,9 +245,66 @@ export function createDiscordClient(): DiscordClient {
       if (client.isReady()) return;
       await client.login(token);
     },
+    async recordActivity(activity: AgentActivity) {
+      const toolName =
+        activity.tool ||
+        (activity.route && !activity.route.startsWith('models') && !activity.route.startsWith('model:') ? activity.route : undefined);
+      const isModel = Boolean(activity.model || activity.route?.startsWith('model'));
+
+      let text: string;
+      if (activity.kind === 'call.start') {
+        if (toolName) {
+          text = `Tool: ${toolName}...`;
+        } else if (isModel) {
+          text = 'Thinking...';
+        } else {
+          text = 'Working...';
+        }
+      } else if (activity.kind === 'call.end') {
+        text = 'Thinking...';
+      } else {
+        text = toolName ? `Tool: ${toolName}...` : 'Thinking...';
+      }
+
+      if (text.length > 120) {
+        text = text.slice(0, 117) + '...';
+      }
+
+      client.user?.setActivity(text, { type: ActivityType.Custom });
+
+      const now = Date.now();
+      for (const turn of activeTurns.values()) {
+        turn.lastActivityAt = now;
+        turn.currentTool = toolName;
+        if (!turn.typingInterval && !standbySessions.has(turn.channelId)) {
+          turn.typingInterval = setInterval(() => {
+            if (Date.now() - turn.lastActivityAt > turnLeaseMs) {
+              clearActiveTurn(turn.channelId);
+              if (activeTurns.size === 0) {
+                client.user?.setPresence({
+                  status: discordStatus(currentPresence),
+                  activities: [],
+                });
+              }
+              return;
+            }
+            turn.lastTypingAt = Date.now();
+            void turn.channel.sendTyping().catch(() => {});
+          }, 7000);
+        }
+        if (now - turn.lastTypingAt > 4000) {
+          turn.lastTypingAt = now;
+          void turn.channel.sendTyping().catch(() => {});
+        }
+      }
+    },
     async refuseWake(channelId: string, window: string, kind: 'wake' | 'handoff' = 'wake') {
       const session = standbySessions.get(channelId);
       clearStandbySession(channelId);
+      clearActiveTurn(channelId);
+      if (activeTurns.size === 0) {
+        client.user?.setPresence({ activities: [] });
+      }
       const text = wakeRefusedText(agentName, window, kind);
       try {
         const channel = await client.channels.fetch(channelId);
@@ -199,6 +319,10 @@ export function createDiscordClient(): DiscordClient {
     async refuseUnauthorized(channelId: string) {
       const session = standbySessions.get(channelId);
       clearStandbySession(channelId);
+      clearActiveTurn(channelId);
+      if (activeTurns.size === 0) {
+        client.user?.setPresence({ activities: [] });
+      }
       const last = recentUnauthorized.get(channelId);
       if (last && Date.now() - last < 15_000 && !session) {
         return;
@@ -220,6 +344,9 @@ export function createDiscordClient(): DiscordClient {
       if (!client.isReady()) return;
       client.user?.setStatus(discordStatus(status));
       if (status === 'offline') {
+        for (const channelId of activeTurns.keys()) {
+          clearActiveTurn(channelId);
+        }
         client.user?.setPresence({ activities: [] });
       }
     },
@@ -229,6 +356,9 @@ export function createDiscordClient(): DiscordClient {
     async destroy() {
       for (const channelId of standbySessions.keys()) {
         clearStandbySession(channelId);
+      }
+      for (const channelId of activeTurns.keys()) {
+        clearActiveTurn(channelId);
       }
       await client.destroy();
     },

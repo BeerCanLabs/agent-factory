@@ -16,6 +16,13 @@ export type Conversation = {
   authorId: string;
 };
 
+export type AgentActivity = {
+  route?: string;
+  tool?: string;
+  model?: string;
+  kind?: string;
+};
+
 export type DiscordClient = {
   connected: boolean;
   presence: Presence;
@@ -26,6 +33,7 @@ export type DiscordClient = {
   refuseWake?(channelId: string, window: string, kind?: 'wake' | 'handoff'): Promise<void>;
   /** The factory refused the caller because they are unmapped or unauthorized. */
   refuseUnauthorized?(channelId: string): Promise<void>;
+  recordActivity?(activity: AgentActivity): Promise<void>;
   onMessage(handler: (msg: Omit<Conversation, 'agentId'>) => void): void;
   destroy(): Promise<void>;
 };
@@ -33,6 +41,7 @@ export type DiscordClient = {
 export function fakeDiscordClient(): DiscordClient & {
   refusals: Array<{ channelId: string; window: string; kind: 'wake' | 'handoff' }>;
   unauthorizedRefusals: string[];
+  activities: AgentActivity[];
 } {
   const handlers: Array<(msg: Omit<Conversation, 'agentId'>) => void> = [];
   return {
@@ -40,12 +49,16 @@ export function fakeDiscordClient(): DiscordClient & {
     presence: 'offline',
     refusals: [] as Array<{ channelId: string; window: string; kind: 'wake' | 'handoff' }>,
     unauthorizedRefusals: [] as string[],
+    activities: [] as AgentActivity[],
     setAgentName(_name) {},
     async refuseWake(channelId, window, kind = 'wake') {
       this.refusals.push({ channelId, window, kind });
     },
     async refuseUnauthorized(channelId) {
       this.unauthorizedRefusals.push(channelId);
+    },
+    async recordActivity(activity) {
+      this.activities.push(activity);
     },
     async login() {
       this.connected = true;
@@ -82,6 +95,8 @@ export type GatekeeperIngress = {
   onAgentStarting(agentId: string): Promise<void>;
   /** Control plane tells us the agent's run is ready to take a turn. */
   onAgentWorking(agentId: string): Promise<void>;
+  /** Outbound tool/model progress reported for the agent; pulses typing and sets custom activity. */
+  onAgentActivity?(agentId: string, activity: AgentActivity): Promise<void>;
 };
 
 export function createGatekeeperIngress(opts: {
@@ -210,6 +225,11 @@ export function createGatekeeperIngress(opts: {
       const state = agents.get(agentId);
       if (!state || !state.discord.connected) return;
       await state.discord.setPresence('available');
+    },
+    async onAgentActivity(agentId, activity) {
+      const state = agents.get(agentId);
+      if (!state || !state.discord.connected) return;
+      await state.discord.recordActivity?.(activity);
     },
   };
   

@@ -45,10 +45,21 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
   - `WebSocket /stream` (UI streams live tool execution logs directly to the user)
 
 ### 5. gatekeeper-ingress (Presence & Real-Time Routing)
-- **Description:** Persistent, stateful connection manager and ingress routing actor (`packages/gatekeeper`, `src/ingress`). Because AI Subminds scale to zero to save costs, they cannot hold WebSockets open. gatekeeper-ingress holds these connections (like Discord Gateway, Slack RTM, or Custom WebSockets) 24/7, manages the "Online/Offline" presence, and wakes the agent when an event occurs.
+- **Description:** Persistent, stateful connection manager and ingress routing actor (`packages/gatekeeper`, `src/ingress`). Because AI Subminds scale to zero to save costs, they cannot hold WebSockets open. gatekeeper-ingress holds these connections (like Discord Gateway, Slack RTM, or Custom WebSockets) 24/7, manages the "Online/Offline" presence, and wakes the agent when an event occurs. When an agent is working and executing tools or model inferences, gatekeeper-ingress maintains an active typing heartbeat (every 7 seconds) and live bot status indicators (`Tool: <name>...`, `Thinking...`) driven by egress progress notifications (`POST /api/v1/activity`). If an agent becomes silent or unresponsive for more than the activity lease (default: 30 seconds), gatekeeper-ingress goes silent. When the agent replies, all standby and progress indicators immediately clear.
+- **Entry points:**
+  - `POST /api/v1/activity` (`packages/gatekeeper/src/ingress/http.ts`)
+  - `createDiscordClient.recordActivity` (`packages/gatekeeper/src/ingress/discord.ts`)
+  - `handleRunProgress` (`packages/control-plane/src/progress-routes.ts`)
+- **If it silently breaks:**
+  - Users waiting in Discord see the typing indicator lapse after 10 seconds of tool calls, leaving them in dead silence wondering if the agent crashed or is still processing.
+- **Test status:**
+  - `Automated (packages/gatekeeper/src/ingress/discord.test.ts)`
+  - `Automated (packages/gatekeeper/src/ingress/http.test.ts)`
+  - `Automated (packages/control-plane/src/progress.e2e.test.ts)`
 - **Interface (WebSockets / Webhooks):**
   - Custom UI frontends establish a WebSocket connection directly with gatekeeper-ingress.
   - gatekeeper-ingress uses an internal Webhook (`POST /wake`) to trigger the stateless Agent.
+  - Control plane notifies gatekeeper-ingress of outbound activity (`POST /api/v1/activity`) during live runs.
 
 ### 6. Doctor (Triage Function & Incident Engine)
 - **Description:** Built-in triage and diagnostic actor (`packages/triage`). A unified, append-only fault engine where all system faults converge. Whether an agent crashes from an Out-of-Memory error, lacks a secret during pre-flight, gets blocked by the LLM, or fails a task internally, Doctor diagnoses the failure, writes to the immutable ledger, and routes diagnostic alerts to operators.
@@ -113,6 +124,7 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 | **KPF 5: gatekeeper-ingress (Presence & Routing)** | Deliver Follow-Up Turn to Running Agent | 🤖 gatekeeper-ingress | REST / HTTPS |
 | **KPF 5: gatekeeper-ingress (Presence & Routing)** | Container Mailbox Retrieval | ⚙️ Agent Runtime | HTTP Long-Polling |
 | **KPF 5: gatekeeper-ingress (Presence & Routing)** | Agent Container Heartbeat | ⚙️ Agent Runtime | REST / HTTPS |
+| **KPF 5: gatekeeper-ingress (Presence & Routing)** | Tool Activity & Typing Indicator Pulse | 🤖 Control Plane / gatekeeper-ingress | REST / HTTPS |
 | **KPF 6: Triage & Fault Ledger (Doctor)** | Query Immutable Ledger Audit Trail | 👤 Auditor | REST / HTTPS |
 | **KPF 6: Triage & Fault Ledger (Doctor)** | Query Run State & Execution Errors | 👤 SRE | REST / HTTPS |
 | **KPF 6: Triage & Fault Ledger (Doctor)** | Report Run Exit / Crash Result | ⚙️ Agent Runtime | REST / HTTPS |
