@@ -15,4 +15,3 @@ Who asks, and who acts on the answer:
 - Built-in agents are exempt at the callers.
 
 `packages/conformance/src/accountant.test.ts` fails if `gatekeeper-egress` or `control-plane` source compares spend with a limit itself.
-

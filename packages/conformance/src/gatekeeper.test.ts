@@ -40,8 +40,7 @@ const SECOND_COPY: Array<{ what: string; re: RegExp }> = [
 
 /** Packages the Gatekeeper must never import: the callers it serves and the members that sit above the perimeter. */
 const FORBIDDEN_IMPORTS =
-  /['"]@beercanlabs\/factory-(?:control-plane|console|landlord|property-manager|timekeeper|bench)(?:\/[^'"]*)?['"]/g;
-
+  /['"]@beercanlabs\/factory-(?:control-plane|console|property-manager|timekeeper|bench)(?:\/[^'"]*)?['"]/g;
 
 /** Any way of reaching the Gatekeeper, by package name, with or without a subpath. */
 const IMPORTS_GATEKEEPER = /['"]@beercanlabs\/factory-gatekeeper(?:\/[^'"]*)?['"]/g;
@@ -126,7 +125,7 @@ describe('Gatekeeper: one copy of the perimeter rules, and the dependency points
   });
 
   it("the Gatekeeper's package.json lists none of those packages either", () => {
-    const listed = manifestDeps('gatekeeper').filter((d) => /^@beercanlabs\/factory-(?:control-plane|console|landlord|property-manager|timekeeper|bench)$/.test(d));
+    const listed = manifestDeps('gatekeeper').filter((d) => /^@beercanlabs\/factory-(?:control-plane|console|property-manager|timekeeper|bench)$/.test(d));
     assert.deepEqual(listed, []);
   });
 

@@ -2,7 +2,7 @@
  * The Accountant's AWS adapter (DESIGN_AUTHORITY §6.15 Accountant): implements `CloudCostSource` (Cost Explorer) and
  * `ComputeSource` (ECS) for the AWS landing zone.
  *
- * Every call is made with the Accountant's own read-only role (`FACTORY_ACCOUNTANT_ROLE_ARN` or `FACTORY_TREASURER_ROLE_ARN`), assumed from the control
+ * Every call is made with the Accountant's own read-only role (`FACTORY_ACCOUNTANT_ROLE_ARN`), assumed from the control
  * plane's task role; the control-plane role may assume that one role and holds no billing permission itself, so
  * CloudTrail attributes every billing read to the Accountant. Agents never reach this: they read the Accountant's report
  * through `/api/v1/spend/*`.
@@ -58,9 +58,6 @@ export function accountantCredentials(roleArn: string, opts: { region?: string; 
   };
 }
 
-export const treasurerCredentials = accountantCredentials;
-
-
 const num = (v: string | undefined) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -72,7 +69,7 @@ export class AwsCostSource implements CloudCostSource {
   constructor(private readonly ce: Pick<CostExplorerClient, 'send'>) {}
 
   static fromRole(roleArn: string): AwsCostSource {
-    return new AwsCostSource(new CostExplorerClient({ region: 'us-east-1', credentials: treasurerCredentials(roleArn, { region: process.env.AWS_REGION }) }));
+    return new AwsCostSource(new CostExplorerClient({ region: 'us-east-1', credentials: accountantCredentials(roleArn, { region: process.env.AWS_REGION }) }));
   }
 
   private async all(input: GetCostAndUsageCommandInput): Promise<ResultByTime[]> {
@@ -130,7 +127,7 @@ export class AwsComputeSource implements ComputeSource {
   constructor(private readonly ecs: Pick<ECSClient, 'send'>, readonly cluster: string) {}
 
   static fromRole(roleArn: string, cluster: string): AwsComputeSource {
-    return new AwsComputeSource(new ECSClient({ credentials: treasurerCredentials(roleArn, { region: process.env.AWS_REGION }) }), cluster);
+    return new AwsComputeSource(new ECSClient({ credentials: accountantCredentials(roleArn, { region: process.env.AWS_REGION }) }), cluster);
   }
 
   async inventory(): Promise<ComputeInventory> {

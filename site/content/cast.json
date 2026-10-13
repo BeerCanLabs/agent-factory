@@ -36,8 +36,8 @@
    ],
    "dont": [
     "Decide what a caller may do. That is the Bouncer.",
-    "Price or count anything. That is the Treasurer and the Executive.",
-    "Start compute. That is the Landlord."
+    "Price or count anything. That is the Accountant and the Executive.",
+    "Start compute. That is the Property Manager."
    ],
    "flows": [
     {
@@ -300,7 +300,7 @@
    ],
    "dont": [
     "Hold a credential or answer an HTTP request. The Gatekeeper does both.",
-    "Set prices or decide standing. That is the Treasurer.",
+    "Set prices or decide standing. That is the Accountant.",
     "Choose what an agent says or remembers. That is the cartridge."
    ],
    "flows": [
@@ -389,7 +389,7 @@
    ],
    "dont": [
     "Decide who may wake an agent. That is the Bouncer.",
-    "Decide whether the agent may spend. That is the Treasurer.",
+    "Decide whether the agent may spend. That is the Accountant.",
     "Decide what may be built. That is the Registrar."
    ],
    "flows": [
@@ -816,7 +816,7 @@
     "Calls fire with a request for each due item"
    ],
    "dont": [
-    "Start a run. fire is the Landlord’s side.",
+    "Start a run. fire is the Property Manager’s side.",
     "Import the control plane. Only the composition root calls it."
    ],
    "flows": [
@@ -892,7 +892,7 @@
     "Keeps the versioned deployment configuration and the systems store"
    ],
    "dont": [
-    "Build the image. The Landlord supplies the build.",
+    "Build the image. The Property Manager supplies the build.",
     "Decide who may deploy. That is the Bouncer."
    ],
    "flows": [
