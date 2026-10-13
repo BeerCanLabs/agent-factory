@@ -8,7 +8,7 @@
  ],
  "deptNotes": {
   "Front desk": "who gets in and what they may do",
-  "Money and models": "what an agent may use and what it costs",
+  "Money and models": "what it costs and what an agent may use",
   "Keys and secrets": "the credentials agents never hold",
   "Operations": "compute, time and memory",
   "Records": "what is admitted, written down and watched"
@@ -279,88 +279,108 @@
    ]
   },
   {
-   "id": "executive",
-   "name": "Executive",
-   "title": "Chief of Model Access",
+   "id": "accountant",
+   "name": "Accountant",
+   "title": "Accountant",
    "dept": "Money and models",
    "art": {
-    "skin": "#E0B08C",
-    "hair": "#6D6D73",
+    "skin": "#9C6B4E",
+    "hair": "#222",
     "style": "short",
-    "shirt": "#1E2A36"
+    "shirt": "#2F5D46"
    },
-   "rules": "M1 to M4, E5, E7",
-   "tag": "Gives every agent its executive function.",
-   "bio": "Gives an agent access to a model. The Executive offers one OpenAI-compatible API, translates each call to whichever provider serves the model, counts the tokens, and decides whether a given agent may use a given model. What the agent then does with the model is the cartridge’s business.",
+   "rules": "E5, E7, M3",
+   "tag": "Every call has a price. Nobody spends without a limit someone set.",
+   "bio": "Owns the budget rule, spend accounting and pricing, plus factory cloud spend and the compute inventory. The Accountant answers one question, whether an agent is inside its limits, and every other member enforces the answer.",
    "does": [
-    "Publishes the catalog of offered models under neutral names",
-    "Checks an agent’s allowed models, the factory default and a run’s pin",
-    "Translates a call to the provider’s native API and the answer back",
-    "Counts input, output and cache tokens, streaming or not"
+    "Answers standing for an agent: per run, per day, per month",
+    "Prices each model call from the Executive’s token counts",
+    "Reports cloud spend and compute inventory with a read-only role",
+    "Stores budgets an admin sets, with no default budget"
    ],
    "dont": [
-    "Hold a credential or answer an HTTP request. The Gatekeeper does both.",
-    "Set prices or decide standing. That is the Accountant.",
-    "Choose what an agent says or remembers. That is the cartridge."
+    "Block anything itself. Callers enforce: 402, blockRun, budget.alert.",
+    "Count tokens. That is the Executive."
    ],
    "flows": [
     {
-     "id": "serve",
-     "name": "Serve one model call",
-     "intro": "complete never throws. It returns a result, a refusal made before any provider was called, or the upstream failure.",
+     "id": "standing",
+     "name": "Answer: is this agent in good standing?",
+     "intro": "checkStanding is asked before a model call, before a wake, before a message goes into a live run, on ledger ingest and on a policy update.",
      "steps": [
       {
-       "t": "The Gatekeeper hands over the parsed request.",
-       "to": "gatekeeper",
-       "c": "executive-complete"
+       "t": "The caller passes the agent’s limits and its spend for the run, the day and the month.",
+       "to": "property-manager",
+       "c": "accountant-standing",
+       "why": "The Gatekeeper’s egress and the Property Manager both ask."
       },
       {
-       "t": "The Executive validates it against the OpenAI chat rules (M1) and finds the model in the catalog."
+       "t": "The Accountant compares them and returns ok, or the first window exceeded: perRun, perDay or perMonth."
       },
       {
-       "t": "It picks the adapter for the model’s provider and translates the request to that provider’s native API."
+       "t": "The caller enforces: the Property Manager returns 402, the egress refuses the call, the control plane raises budget.alert."
       },
       {
-       "t": "The answer is translated back to OpenAI format and returned with the token usage."
+       "t": "The refusal is ledgered with the window.",
+       "to": "auditor",
+       "c": "auditor-ledger"
       }
      ]
     },
     {
-     "id": "allowed",
-     "name": "Decide whether an agent may use a model",
-     "intro": "Plain values in, so the Executive never imports the control plane’s policy type.",
+     "id": "price",
+     "name": "Price a model call",
+     "intro": "The Executive counts; the Accountant prices.",
      "steps": [
       {
-       "t": "The caller passes the agent’s allow-list, the model asked for, whether it is a training run and any pin on the run.",
-       "to": "gatekeeper",
-       "c": "executive-model-policy"
+       "t": "The Executive reports input, output, cacheRead and cacheWrite tokens.",
+       "to": "executive",
+       "c": "accountant-pricing"
       },
       {
-       "t": "checkModel answers allowed or the reason it is not. When a policy names no models, the factory default applies."
+       "t": "priceFor finds the model’s price and costUsd turns the tokens into dollars."
       },
       {
-       "t": "offeredModels lists the names an agent may pick from, for the console’s policy tab."
+       "t": "The cost is added to the agent’s run, day and month spend."
       }
      ]
     },
     {
-     "id": "count",
-     "name": "Count tokens and report usage",
-     "intro": "E5. The count belongs here; the price does not.",
+     "id": "budgets",
+     "name": "Set a budget",
+     "intro": "There is no default. Until an admin sets one, nothing is enforced for that agent or for the factory.",
      "steps": [
       {
-       "t": "usageFromJson reads usage from a normal reply; SseMeter reads it from a stream as it passes."
+       "t": "An admin sends PUT /api/v1/spend/budgets.",
+       "to": "bouncer",
+       "c": "bouncer-authorize",
+       "why": "The spend tools are one grant, factory-spend."
       },
       {
-       "t": "The usage goes to the Accountant as input, output, cacheRead and cacheWrite tokens.",
-       "to": "accountant",
-       "c": "accountant-pricing",
-       "why": "The Executive depends on the Accountant for the Price and TokenUsage types only."
+       "t": "validateBudgetLimits rejects anything that is not a positive number."
       },
       {
-       "t": "Metrics and a trace of the call are recorded.",
-       "to": "inspector",
-       "c": "inspector-events"
+       "t": "The change is ledgered.",
+       "to": "auditor",
+       "c": "auditor-ledger"
+      }
+     ]
+    },
+    {
+     "id": "cloud",
+     "name": "Report cloud spend and compute",
+     "intro": "Model spend and infrastructure spend in one view.",
+     "steps": [
+      {
+       "t": "A dedicated read-only role reads the provider’s cost and compute inventory. Agents never hold it."
+      },
+      {
+       "t": "Spend is attributed to agents and to the factory. Budgets are evaluated on gross usage, before credits."
+      },
+      {
+       "t": "The console reads GET /api/v1/spend/report and /spend/compute.",
+       "to": "bouncer",
+       "c": "bouncer-authorize"
       }
      ]
     }
@@ -591,108 +611,88 @@
    ]
   },
   {
-   "id": "accountant",
-   "name": "Accountant",
-   "title": "Accountant",
+   "id": "executive",
+   "name": "Executive",
+   "title": "Chief of Model Access",
    "dept": "Money and models",
    "art": {
-    "skin": "#9C6B4E",
-    "hair": "#222",
+    "skin": "#E0B08C",
+    "hair": "#6D6D73",
     "style": "short",
-    "shirt": "#2F5D46"
+    "shirt": "#1E2A36"
    },
-   "rules": "E5, E7, M3",
-   "tag": "Every call has a price. Nobody spends without a limit someone set.",
-   "bio": "Owns the budget rule, spend accounting and pricing, plus factory cloud spend and the compute inventory. The Accountant answers one question, whether an agent is inside its limits, and every other member enforces the answer.",
+   "rules": "M1 to M4, E5, E7",
+   "tag": "Gives every agent its executive function.",
+   "bio": "Gives an agent access to a model. The Executive offers one OpenAI-compatible API, translates each call to whichever provider serves the model, counts the tokens, and decides whether a given agent may use a given model. What the agent then does with the model is the cartridge’s business.",
    "does": [
-    "Answers standing for an agent: per run, per day, per month",
-    "Prices each model call from the Executive’s token counts",
-    "Reports cloud spend and compute inventory with a read-only role",
-    "Stores budgets an admin sets, with no default budget"
+    "Publishes the catalog of offered models under neutral names",
+    "Checks an agent’s allowed models, the factory default and a run’s pin",
+    "Translates a call to the provider’s native API and the answer back",
+    "Counts input, output and cache tokens, streaming or not"
    ],
    "dont": [
-    "Block anything itself. Callers enforce: 402, blockRun, budget.alert.",
-    "Count tokens. That is the Executive."
+    "Hold a credential or answer an HTTP request. The Gatekeeper does both.",
+    "Set prices or decide standing. That is the Accountant.",
+    "Choose what an agent says or remembers. That is the cartridge."
    ],
    "flows": [
     {
-     "id": "standing",
-     "name": "Answer: is this agent in good standing?",
-     "intro": "checkStanding is asked before a model call, before a wake, before a message goes into a live run, on ledger ingest and on a policy update.",
+     "id": "serve",
+     "name": "Serve one model call",
+     "intro": "complete never throws. It returns a result, a refusal made before any provider was called, or the upstream failure.",
      "steps": [
       {
-       "t": "The caller passes the agent’s limits and its spend for the run, the day and the month.",
-       "to": "property-manager",
-       "c": "accountant-standing",
-       "why": "The Gatekeeper’s egress and the Property Manager both ask."
+       "t": "The Gatekeeper hands over the parsed request.",
+       "to": "gatekeeper",
+       "c": "executive-complete"
       },
       {
-       "t": "The Accountant compares them and returns ok, or the first window exceeded: perRun, perDay or perMonth."
+       "t": "The Executive validates it against the OpenAI chat rules (M1) and finds the model in the catalog."
       },
       {
-       "t": "The caller enforces: the Property Manager returns 402, the egress refuses the call, the control plane raises budget.alert."
+       "t": "It picks the adapter for the model’s provider and translates the request to that provider’s native API."
       },
       {
-       "t": "The refusal is ledgered with the window.",
-       "to": "auditor",
-       "c": "auditor-ledger"
+       "t": "The answer is translated back to OpenAI format and returned with the token usage."
       }
      ]
     },
     {
-     "id": "price",
-     "name": "Price a model call",
-     "intro": "The Executive counts; the Accountant prices.",
+     "id": "allowed",
+     "name": "Decide whether an agent may use a model",
+     "intro": "Plain values in, so the Executive never imports the control plane’s policy type.",
      "steps": [
       {
-       "t": "The Executive reports input, output, cacheRead and cacheWrite tokens.",
-       "to": "executive",
-       "c": "accountant-pricing"
+       "t": "The caller passes the agent’s allow-list, the model asked for, whether it is a training run and any pin on the run.",
+       "to": "gatekeeper",
+       "c": "executive-model-policy"
       },
       {
-       "t": "priceFor finds the model’s price and costUsd turns the tokens into dollars."
+       "t": "checkModel answers allowed or the reason it is not. When a policy names no models, the factory default applies."
       },
       {
-       "t": "The cost is added to the agent’s run, day and month spend."
+       "t": "offeredModels lists the names an agent may pick from, for the console’s policy tab."
       }
      ]
     },
     {
-     "id": "budgets",
-     "name": "Set a budget",
-     "intro": "There is no default. Until an admin sets one, nothing is enforced for that agent or for the factory.",
+     "id": "count",
+     "name": "Count tokens and report usage",
+     "intro": "E5. The count belongs here; the price does not.",
      "steps": [
       {
-       "t": "An admin sends PUT /api/v1/spend/budgets.",
-       "to": "bouncer",
-       "c": "bouncer-authorize",
-       "why": "The spend tools are one grant, factory-spend."
+       "t": "usageFromJson reads usage from a normal reply; SseMeter reads it from a stream as it passes."
       },
       {
-       "t": "validateBudgetLimits rejects anything that is not a positive number."
+       "t": "The usage goes to the Accountant as input, output, cacheRead and cacheWrite tokens.",
+       "to": "accountant",
+       "c": "accountant-pricing",
+       "why": "The Executive depends on the Accountant for the Price and TokenUsage types only."
       },
       {
-       "t": "The change is ledgered.",
-       "to": "auditor",
-       "c": "auditor-ledger"
-      }
-     ]
-    },
-    {
-     "id": "cloud",
-     "name": "Report cloud spend and compute",
-     "intro": "Model spend and infrastructure spend in one view.",
-     "steps": [
-      {
-       "t": "A dedicated read-only role reads the provider’s cost and compute inventory. Agents never hold it."
-      },
-      {
-       "t": "Spend is attributed to agents and to the factory. Budgets are evaluated on gross usage, before credits."
-      },
-      {
-       "t": "The console reads GET /api/v1/spend/report and /spend/compute.",
-       "to": "bouncer",
-       "c": "bouncer-authorize"
+       "t": "Metrics and a trace of the call are recorded.",
+       "to": "inspector",
+       "c": "inspector-events"
       }
      ]
     }
