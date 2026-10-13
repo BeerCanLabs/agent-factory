@@ -18,19 +18,15 @@
     "Amazon Bedrock"
    ],
    [
-    "secretary",
-    "Amazon S3 bucket for agent memory"
-   ],
-   [
-    "landlord",
-    "Amazon ECS on Fargate, one task definition per agent, Amazon ECR for images, an IAM role per agent"
+    "property-manager",
+    "Amazon ECS on Fargate, one task definition per agent, Amazon ECR for images, Amazon S3 bucket for agent memory, an IAM role per agent"
    ],
    [
     "auditor",
     "Amazon S3 with Object Lock for sealed ledger checkpoints"
    ],
    [
-    "treasurer",
+    "accountant",
     "AWS Cost Explorer and the ECS inventory, through a read-only IAM role"
    ],
    [
@@ -70,19 +66,15 @@
     "Vertex AI"
    ],
    [
-    "secretary",
-    "Cloud Storage bucket for agent memory"
-   ],
-   [
-    "landlord",
-    "Cloud Run jobs, one per agent, Artifact Registry for images, a service account per agent"
+    "property-manager",
+    "Cloud Run jobs, one per agent, Artifact Registry for images, Cloud Storage bucket for agent memory, a service account per agent"
    ],
    [
     "auditor",
     "Cloud Storage with a retention policy for sealed ledger checkpoints"
    ],
    [
-    "treasurer",
+    "accountant",
     "Cloud Billing export to BigQuery, and the Cloud Run inventory, through a read-only service account"
    ],
    [

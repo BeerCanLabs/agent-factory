@@ -13,9 +13,9 @@ import { bearerAuth } from '@beercanlabs/factory-auth';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-landlord';
+import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
-import type { DeployProvider } from '@beercanlabs/factory-landlord/aws/deploy';
+import type { DeployProvider } from '@beercanlabs/factory-property-manager/aws/deploy';
 import { FileConfigBackend, VersionedConfigStore, configHash, type ConfigBackend } from '@beercanlabs/factory-registrar';
 import { ownersOf } from './config-store.js';
 

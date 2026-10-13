@@ -37,7 +37,7 @@ output "event_bus" {
   value = aws_cloudwatch_event_bus.factory.name
 }
 
-output "treasurer_role_arn" {
-  description = "The Treasurer IAM role for Cost Explorer and ECS inventory."
-  value       = aws_iam_role.treasurer.arn
+output "accountant_role_arn" {
+  description = "The Accountant IAM role for Cost Explorer and ECS inventory."
+  value       = aws_iam_role.accountant.arn
 }

@@ -90,8 +90,8 @@ main { padding-block: 36px 72px; display: grid; gap: 48px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 16px; }
 .person { background: var(--panel); border: 1px solid var(--line); text-decoration: none; display: grid; grid-template-rows: auto 1fr; min-width: 0; }
 .person:hover { border-color: var(--ink); }
-.person .pic { background: var(--panel-2); display: grid; place-items: center; padding: 18px 0 0; border-bottom: 1px solid var(--line); }
-.person .pic svg { width: 132px; height: 132px; }
+.person .pic { background: var(--panel-2); display: grid; place-items: center; padding: 12px; border-bottom: 1px solid var(--line); }
+.person .pic img { width: 168px; height: 168px; object-fit: contain; }
 .person .info { padding: 16px; display: grid; gap: 6px; align-content: start; }
 .person .title { font: 500 0.78rem var(--f-mono); color: var(--accent); letter-spacing: 0.04em; text-transform: uppercase; }
 .person p { font-size: 0.92rem; color: var(--muted); }
@@ -106,8 +106,8 @@ main { padding-block: 36px 72px; display: grid; gap: 48px; }
 .crumbs a { color: var(--muted); }
 .profile { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 28px; align-items: start; }
 @media (max-width: 640px) { .profile { grid-template-columns: 1fr; } }
-.profile .pic { max-width: 260px; background: var(--panel-2); border: 1px solid var(--line); padding: 14px 14px 0; }
-.profile .pic svg { width: 100%; height: auto; display: block; }
+.profile .pic { max-width: 260px; background: var(--panel-2); border: 1px solid var(--line); padding: 12px; }
+.profile .pic img { width: 100%; height: auto; display: block; }
 .profile .who { display: grid; gap: 12px; }
 .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
 .facts div { border-top: 2px solid var(--ink); padding-top: 8px; display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
@@ -127,7 +127,7 @@ main { padding-block: 36px 72px; display: grid; gap: 48px; }
 .flow li > div { display: grid; gap: 8px; min-width: 0; }
 .callout { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); padding: 8px 12px; font-size: 0.88rem; }
 .callout .av { width: 30px; height: 30px; border-radius: 50%; overflow: hidden; background: var(--panel-2); flex: none; }
-.callout .av svg { width: 100%; height: 100%; display: block; }
+.callout .av img { width: 100%; height: 100%; object-fit: cover; object-position: center 28%; display: block; }
 .callout a.person-link { font-weight: 700; }
 .callout a.contract-link { font: 500 0.82rem var(--f-mono); color: var(--accent); }
 .callout .why { color: var(--muted); flex-basis: 100%; }
@@ -139,7 +139,7 @@ pre.sig { background: var(--code-bg); color: var(--code-ink); padding: 16px; ove
 .between .arrow { font: 700 1.4rem var(--f-display); color: var(--accent); }
 .pill { display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px 4px 4px; border: 1px solid var(--ink); border-radius: 99px; text-decoration: none; font-weight: 700; background: var(--panel); }
 .pill .av { width: 28px; height: 28px; border-radius: 50%; overflow: hidden; background: var(--panel-2); }
-.pill .av svg { width: 100%; height: 100%; display: block; }
+.pill .av img { width: 100%; height: 100%; object-fit: cover; object-position: center 28%; display: block; }
 .list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .list li { background: var(--panel); border: 1px solid var(--line); padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; }
 .list a { font-weight: 700; }
@@ -165,7 +165,7 @@ th { text-align: left; font: 500 0.72rem var(--f-mono); letter-spacing: 0.1em; t
 td { padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
 td.member a { display: flex; align-items: center; gap: 10px; font-weight: 700; text-decoration: none; }
 td.member .av { width: 34px; height: 34px; border-radius: 50%; overflow: hidden; background: var(--panel-2); flex: none; }
-td.member .av svg { width: 100%; height: 100%; display: block; }
+td.member .av img { width: 100%; height: 100%; object-fit: cover; object-position: center 28%; display: block; }
 .svc { font-weight: 700; }
 footer { border-top: 2px solid var(--ink); padding-block: 20px 36px; margin-inline: -16px; padding-inline: 16px; font-size: 0.85rem; color: var(--muted); }
 footer .wrap { display: grid; gap: 6px; }

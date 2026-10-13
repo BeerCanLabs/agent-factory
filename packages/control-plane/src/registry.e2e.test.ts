@@ -9,7 +9,7 @@ import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { BUILTIN_SYSTEM_AGENTS } from '@beercanlabs/factory-registrar';
-import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-landlord';
+import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';

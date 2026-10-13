@@ -12,7 +12,7 @@
  */
 import { BUILTIN_AGENT_IDS, admissionOf, admit, beginAdmission, pinSource, stateAfterRefusal, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { redactSecrets } from '@beercanlabs/factory-ledger';
-import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type SourceRef } from '@beercanlabs/factory-landlord';
+import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type SourceRef } from '@beercanlabs/factory-property-manager';
 import { type FactoryState } from './app.js';
 import { registryOf } from '@beercanlabs/factory-registrar';
 import { skillRegistry } from './skills.js';

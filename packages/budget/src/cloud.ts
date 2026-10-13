@@ -1,11 +1,11 @@
 /**
- * Treasurer: the factory's cloud spend (DESIGN_AUTHORITY §6.15 Treasurer).
+ * Accountant: the factory's cloud spend (DESIGN_AUTHORITY §6.15 Accountant).
  *
  * Cloud-neutral rules over facts a landing-zone adapter supplies through two contracts: `CloudCostSource` (the cloud
- * bill, by record type, service and usage type) and `ComputeSource` (what compute is allocated now). The Treasurer
+ * bill, by record type, service and usage type) and `ComputeSource` (what compute is allocated now). The Accountant
  * decides what is AI and what is infrastructure, gross vs credits vs net, the run-rate projection, each agent's
  * compute cost, and whether a factory budget has been crossed. No cloud SDK here; adapters live with their landing
- * zone (`control-plane/src/aws/treasurer.ts`).
+ * zone (`control-plane/src/aws/accountant.ts`).
  *
  * Budgets are judged on gross usage. Credits are reported but never counted against a budget: they mask the bill.
  */

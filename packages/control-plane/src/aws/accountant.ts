@@ -1,10 +1,10 @@
 /**
- * The Treasurer's AWS adapter (DESIGN_AUTHORITY §6.15 Treasurer): implements `CloudCostSource` (Cost Explorer) and
+ * The Accountant's AWS adapter (DESIGN_AUTHORITY §6.15 Accountant): implements `CloudCostSource` (Cost Explorer) and
  * `ComputeSource` (ECS) for the AWS landing zone.
  *
- * Every call is made with the Treasurer's own read-only role (`FACTORY_TREASURER_ROLE_ARN`), assumed from the control
+ * Every call is made with the Accountant's own read-only role (`FACTORY_ACCOUNTANT_ROLE_ARN`), assumed from the control
  * plane's task role; the control-plane role may assume that one role and holds no billing permission itself, so
- * CloudTrail attributes every billing read to the Treasurer. Agents never reach this: they read the Treasurer's report
+ * CloudTrail attributes every billing read to the Accountant. Agents never reach this: they read the Accountant's report
  * through `/api/v1/spend/*`.
  */
 import { CostExplorerClient, GetCostAndUsageCommand, type GetCostAndUsageCommandInput, type ResultByTime } from '@aws-sdk/client-cost-explorer';
@@ -36,8 +36,8 @@ import type {
 type Creds = { accessKeyId: string; secretAccessKey: string; sessionToken?: string; expiration?: Date };
 type CredProvider = () => Promise<Creds>;
 
-/** Short-lived credentials for the Treasurer role, refreshed five minutes before they expire. */
-export function treasurerCredentials(roleArn: string, opts: { region?: string; sts?: Pick<STSClient, 'send'> } = {}): CredProvider {
+/** Short-lived credentials for the Accountant role, refreshed five minutes before they expire. */
+export function accountantCredentials(roleArn: string, opts: { region?: string; sts?: Pick<STSClient, 'send'> } = {}): CredProvider {
   const sts = opts.sts ?? new STSClient({ region: opts.region });
   let cached: Creds | undefined;
   let inflight: Promise<Creds> | undefined;
@@ -45,7 +45,7 @@ export function treasurerCredentials(roleArn: string, opts: { region?: string; s
     if (cached?.expiration && cached.expiration.getTime() - Date.now() > 5 * 60_000) return cached;
     inflight ??= (async () => {
       try {
-        const out = await sts.send(new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: 'factory-treasurer', DurationSeconds: 3600 }));
+        const out = await sts.send(new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: 'factory-accountant', DurationSeconds: 3600 }));
         const c = out.Credentials;
         if (!c?.AccessKeyId || !c.SecretAccessKey) throw new Error('AssumeRole returned no credentials');
         cached = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration };
@@ -69,7 +69,7 @@ export class AwsCostSource implements CloudCostSource {
   constructor(private readonly ce: Pick<CostExplorerClient, 'send'>) {}
 
   static fromRole(roleArn: string): AwsCostSource {
-    return new AwsCostSource(new CostExplorerClient({ region: 'us-east-1', credentials: treasurerCredentials(roleArn, { region: process.env.AWS_REGION }) }));
+    return new AwsCostSource(new CostExplorerClient({ region: 'us-east-1', credentials: accountantCredentials(roleArn, { region: process.env.AWS_REGION }) }));
   }
 
   private async all(input: GetCostAndUsageCommandInput): Promise<ResultByTime[]> {
@@ -127,7 +127,7 @@ export class AwsComputeSource implements ComputeSource {
   constructor(private readonly ecs: Pick<ECSClient, 'send'>, readonly cluster: string) {}
 
   static fromRole(roleArn: string, cluster: string): AwsComputeSource {
-    return new AwsComputeSource(new ECSClient({ credentials: treasurerCredentials(roleArn, { region: process.env.AWS_REGION }) }), cluster);
+    return new AwsComputeSource(new ECSClient({ credentials: accountantCredentials(roleArn, { region: process.env.AWS_REGION }) }), cluster);
   }
 
   async inventory(): Promise<ComputeInventory> {

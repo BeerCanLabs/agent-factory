@@ -27,7 +27,7 @@ export function makeSite({ cast, contracts, blueprints, base = '/', siteUrl = 'h
   const Count = countWord[0].toUpperCase() + countWord.slice(1);
   const uniq = (xs) => xs.filter((x, i, a) => a.indexOf(x) === i);
 
-  const avatar = (id) => '<span class="av">' + portrait(byId[id]) + '</span>';
+  const avatar = (id) => '<span class="av">' + portrait(byId[id], root) + '</span>';
   const personLink = (id) => '<a class="person-link" href="' + url.member(id) + '">' + esc(byId[id].name) + '</a>';
 
   function usedIn(cid) {
@@ -64,14 +64,14 @@ export function makeSite({ cast, contracts, blueprints, base = '/', siteUrl = 'h
     for (const d of cast.depts) {
       const ms = members.filter((m) => m.dept === d);
       h += '<section class="dept"><h2>' + esc(d) + ' <small>' + esc(cast.deptNotes[d]) + '</small></h2><div class="grid">' + ms.map((m) =>
-        '<a class="person" href="' + url.member(m.id) + '"><div class="pic">' + portrait(m) + '</div><div class="info"><span class="title">' + esc(m.title) + '</span><h3>' + esc(m.name) + '</h3><p>' + esc(m.tag) + '</p><div class="chips"><span class="chip">' + m.flows.length + ' flows</span></div></div></a>').join('') + '</div></section>';
+        '<a class="person" href="' + url.member(m.id) + '"><div class="pic">' + portrait(m, root) + '</div><div class="info"><span class="title">' + esc(m.title) + '</span><h3>' + esc(m.name) + '</h3><p>' + esc(m.tag) + '</p><div class="chips"><span class="chip">' + m.flows.length + ' flows</span></div></div></a>').join('') + '</div></section>';
     }
     return { title: 'Staff | Beer Can Labs', description: 'The ' + countWord + ' members of the Agent Factory cast: what each does, its key product flows and its contracts.', body: h, nav: 'staff' };
   }
 
   function member(m) {
     let h = '<div class="crumbs"><a href="' + url.staff() + '">Staff</a> / ' + esc(m.name) + '</div>' +
-      '<section class="profile"><div class="pic">' + portrait(m) + '</div><div class="who"><div class="eyebrow">' + esc(m.dept) + '</div><h1>' + esc(m.name) + '</h1><div><span class="eyebrow" style="color:var(--accent)">' + esc(m.title) + '</span></div><p class="lead">' + esc(m.bio) + '</p></div></section>' +
+      '<section class="profile"><div class="pic">' + portrait(m, root) + '</div><div class="who"><div class="eyebrow">' + esc(m.dept) + '</div><h1>' + esc(m.name) + '</h1><div><span class="eyebrow" style="color:var(--accent)">' + esc(m.title) + '</span></div><p class="lead">' + esc(m.bio) + '</p></div></section>' +
       '<dl class="facts"><div><dt>Design rules</dt><dd>' + esc(m.rules) + '</dd></div><div><dt>Contracts offered</dt><dd>' + (contracts.filter((c) => c.from === m.id).length || 'None') + '</dd></div><div><dt>Key flows</dt><dd>' + m.flows.length + '</dd></div></dl>' +
       '<section class="two"><div class="card"><h3>On the job</h3><ul>' + m.does.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul></div><div class="card"><h3>Not my job</h3><ul>' + m.dont.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul></div></section>' +
       '<section class="sec-head"><div class="eyebrow">Key product flows</div><h2>What ' + esc(m.name) + ' does, step by step</h2><nav class="toc" aria-label="Flows">' + m.flows.map((f) => '<a href="#flow-' + f.id + '">' + esc(f.name) + '</a>').join('') + '</nav></section>';

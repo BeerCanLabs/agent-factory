@@ -26,7 +26,7 @@ async function openSystems(dir: string, ledger: Parameters<typeof SystemsStore.o
   await store.importRoutes(TEST_PROVIDERS, 'migration:test');
   return store;
 }
-import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-landlord';
+import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';

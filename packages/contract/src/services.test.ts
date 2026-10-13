@@ -13,18 +13,22 @@ const designAuthorityPath = fileURLToPath(new URL('../../../DESIGN_AUTHORITY.md'
 /** Bold names under the §6.15 cast heading, in document order. */
 function castNames(): string[] {
   const doc = readFileSync(designAuthorityPath, 'utf8');
-  const heading = '#### The 11 Factory Services (The Cast):';
+  const heading = '#### The 10 Factory Services (The Cast):';
   const start = doc.indexOf(heading);
   assert.notEqual(start, -1, `missing heading: ${heading}`);
   const rest = doc.slice(start + heading.length);
   const end = rest.search(/\n#### /);
   const section = end === -1 ? rest : rest.slice(0, end);
-  return [...section.matchAll(/^\d+\. \*\*([A-Za-z]+)/gm)].map((m) => m[1].toLowerCase());
+  return [...section.matchAll(/^\d+\. \*\*([A-Za-z -]+?)(?=\s*(?:\([^*]+\))?:?\*\*)/gm)].map((m) =>
+    m[1].toLowerCase().replace(/\s+/g, '-')
+  );
 }
 
 describe('Factory Services (The Cast)', () => {
   it('SV1 names match the cast in DESIGN_AUTHORITY.md §6.15', () => {
-    assert.deepEqual([...FACTORY_SERVICE_NAMES], castNames());
+    const parsed = castNames();
+    assert.equal(parsed.length, 10, 'expected exactly 10 cast names in DESIGN_AUTHORITY.md §6.15');
+    assert.deepEqual([...FACTORY_SERVICE_NAMES], parsed);
   });
 
   it('validates service names via schema', () => {

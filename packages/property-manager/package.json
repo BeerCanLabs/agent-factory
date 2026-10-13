@@ -1,8 +1,8 @@
 {
-  "name": "@beercanlabs/factory-landlord",
+  "name": "@beercanlabs/factory-property-manager",
   "version": "0.1.0",
   "private": true,
-  "description": "Landlord: the Factory's compute lifecycle (callback delivery, the runtime launchers, the AWS and GCP build, IAM and deploy adapters, the run store and the queue pollers today; the run lifecycle follows).",
+  "description": "Property Manager: the Factory's compute and state lifecycle (callback delivery, the runtime launchers, the AWS and GCP build, IAM and deploy adapters, the run store and the queue pollers today; the run lifecycle follows).",
   "type": "module",
   "main": "dist/index.js",
   "exports": {

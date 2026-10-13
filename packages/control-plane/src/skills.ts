@@ -39,7 +39,7 @@ import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, type SkillM
 import { authorize } from '@beercanlabs/factory-bouncer';
 import type { Principal } from '@beercanlabs/factory-auth';
 import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
-import { applyKillSwitch } from '@beercanlabs/factory-landlord';
+import { applyKillSwitch } from '@beercanlabs/factory-property-manager';
 import { registryOf } from '@beercanlabs/factory-registrar';
 import { triggerApply } from './apply.js';
 import { configOf, ledgerVersion, ownersOf } from './config-store.js';
