@@ -175,4 +175,43 @@ describe('§6.5 run progress events: run-scoped, bounded, headless', { concurren
     assert.equal(small.size, 2);
     assert.deepEqual(small.read('r1').events, [], 'the stalest run was dropped');
   });
+
+  it('notifies gatekeeper-ingress /api/v1/activity when gatekeeperIngressUrl is set', async () => {
+    const received: Array<{ auth?: string; body: unknown }> = [];
+    const ingressServer = http.createServer((req, res) => {
+      let b = '';
+      req.on('data', (c) => (b += c));
+      req.on('end', () => {
+        received.push({ auth: req.headers.authorization, body: b ? JSON.parse(b) : null });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+      });
+    });
+    await new Promise<void>((r) => ingressServer.listen(0, '127.0.0.1', r));
+    const addr = ingressServer.address();
+    const ingressPort = typeof addr === 'object' && addr ? addr.port : 0;
+
+    try {
+      state.gatekeeperIngressUrl = `http://127.0.0.1:${ingressPort}`;
+      state.gatekeeperIngressToken = 'ingress-test-token';
+
+      const { run } = await liveRun('donna');
+      await report([ev(run.runId, 'donna', { route: 'github', kind: 'call.start' })]);
+
+      // The relay is fire-and-forget: wait for it to arrive rather than for a fixed time.
+      for (let i = 0; i < 200 && received.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+
+      assert.equal(received.length, 1);
+      assert.equal(received[0].auth, 'Bearer ingress-test-token');
+      const body = received[0].body as { events: Array<{ agentId: string; route: string; kind: string }> };
+      assert.equal(body.events.length, 1);
+      assert.equal(body.events[0].agentId, 'donna');
+      assert.equal(body.events[0].route, 'github');
+      assert.equal(body.events[0].kind, 'call.start');
+    } finally {
+      delete state.gatekeeperIngressUrl;
+      delete state.gatekeeperIngressToken;
+      await new Promise<void>((r) => ingressServer.close(() => r()));
+    }
+  });
 });

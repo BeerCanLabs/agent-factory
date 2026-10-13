@@ -20,10 +20,18 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
     const body = await readJson(req);
     const batch = Array.isArray(body.events) ? body.events.slice(0, 500) : [];
     // Attribution comes from the run itself: an event naming another agent is not this run's.
+    const liveEvents: ActivityEvent[] = [];
     const accepted = state.inspector.reportProgress(batch, (e) => {
       const run = state.runs.get(e.runId);
-      return Boolean(run) && run!.agentId === e.agentId && !isTerminal(run!.state);
+      const isLive = Boolean(run) && run!.agentId === e.agentId && !isTerminal(run!.state);
+      if (isLive) {
+        liveEvents.push({ agentId: e.agentId, route: e.route, model: e.model, kind: e.kind });
+      }
+      return isLive;
     });
+    if (state.gatekeeperIngressUrl && liveEvents.length > 0) {
+      enqueueGatekeeperActivity(state, liveEvents);
+    }
     json(res, 200, { accepted });
     return true;
   }
@@ -49,4 +57,48 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
     return true;
   }
   return false;
+}
+
+type ActivityEvent = { agentId: string; route?: string; model?: string; kind?: string };
+
+/**
+ * Activity goes to gatekeeper-ingress one request at a time and in order, so a late `call.start` cannot overtake a
+ * newer `call.end`. It is a convenience for a person waiting in Discord: when the ingress is slow or down the backlog
+ * is bounded and the oldest-unsent batches are not worth waiting for, so new ones are dropped.
+ */
+const ACTIVITY_MAX_PENDING = 50;
+let activityChain: Promise<void> = Promise.resolve();
+let activityPending = 0;
+
+function enqueueGatekeeperActivity(state: { gatekeeperIngressUrl?: string; gatekeeperIngressToken?: string }, events: ActivityEvent[]): void {
+  if (activityPending >= ACTIVITY_MAX_PENDING) return;
+  activityPending++;
+  activityChain = activityChain
+    .then(() => notifyGatekeeperActivity(state, events))
+    .catch(() => {})
+    .finally(() => {
+      activityPending--;
+    });
+}
+
+async function notifyGatekeeperActivity(
+  state: { gatekeeperIngressUrl?: string; gatekeeperIngressToken?: string },
+  events: ActivityEvent[],
+): Promise<void> {
+  if (!state.gatekeeperIngressUrl || events.length === 0) return;
+  try {
+    const res = await fetch(`${state.gatekeeperIngressUrl.replace(/\/$/, '')}/api/v1/activity`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(state.gatekeeperIngressToken ? { Authorization: `Bearer ${state.gatekeeperIngressToken}` } : {}),
+      },
+      body: JSON.stringify({ events }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) console.error(`[control-plane] gatekeeper-ingress activity ${res.status}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[control-plane] gatekeeper-ingress activity unreachable: ${message}`);
+  }
 }
