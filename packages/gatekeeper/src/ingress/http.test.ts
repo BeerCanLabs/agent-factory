@@ -54,6 +54,72 @@ describe('gatekeeper-ingress http', () => {
     assert.equal(await call(port, '/api/v1/presence', 'POST', 'presence-token', body), 200);
   });
 
+  it('requires GATEKEEPER_INGRESS_TOKEN for activity events', async () => {
+    const body = { agentId: 'echo-agent', route: 'github', kind: 'call.start' };
+    assert.equal(await call(port, '/api/v1/activity', 'POST', undefined, body), 401);
+    assert.equal(await call(port, '/api/v1/activity', 'POST', 'wrong', body), 401);
+    assert.equal(await call(port, '/api/v1/activity', 'POST', 'presence-token', body), 200);
+  });
+
+  it('forwards single and batched activity events to the agent client', async () => {
+    const discord = fakeDiscordClient();
+    const { server: s, door } = serve(
+      bearerAuth([{ name: 'control-plane', token: 'presence-token', roles: ['operator'] }]),
+      discord,
+      [envProvider({ DISCORD_BOT_TOKEN: 'bot-token' })],
+    );
+    await door.reconcile([{ agentId: 'echo-agent', secretRef: 'DISCORD_BOT_TOKEN' }]);
+    const p = await listen(s);
+    try {
+      // Single event
+      const res1 = await call(p, '/api/v1/activity', 'POST', 'presence-token', {
+        agentId: 'echo-agent',
+        route: 'github',
+        kind: 'call.start',
+      });
+      assert.equal(res1, 200);
+      assert.equal(discord.activities.length, 1);
+      assert.equal(discord.activities[0].route, 'github');
+      assert.equal(discord.activities[0].kind, 'call.start');
+
+      // Batched events
+      const res2 = await call(p, '/api/v1/activity', 'POST', 'presence-token', {
+        events: [
+          { agentId: 'echo-agent', route: 'tavily', kind: 'call.start' },
+          { agentId: 'echo-agent', route: 'tavily', kind: 'call.end' },
+        ],
+      });
+      assert.equal(res2, 200);
+      assert.equal(discord.activities.length, 3);
+      assert.equal(discord.activities[1].route, 'tavily');
+      assert.equal(discord.activities[2].kind, 'call.end');
+    } finally {
+      await new Promise<void>((r) => s.close(() => r()));
+    }
+  });
+
+  it('bounds the activity endpoint: oversized bodies are refused and batches are capped', async () => {
+    const discord = fakeDiscordClient();
+    const { server: s, door } = serve(
+      bearerAuth([{ name: 'control-plane', token: 'presence-token', roles: ['operator'] }]),
+      discord,
+      [envProvider({ DISCORD_BOT_TOKEN: 'bot-token' })],
+    );
+    await door.reconcile([{ agentId: 'echo-agent', secretRef: 'DISCORD_BOT_TOKEN' }]);
+    const p = await listen(s);
+    try {
+      const big = { agentId: 'echo-agent', route: 'x'.repeat(300 * 1024), kind: 'call.start' };
+      assert.equal(await call(p, '/api/v1/activity', 'POST', 'presence-token', big), 413);
+      assert.equal(discord.activities.length, 0);
+
+      const events = Array.from({ length: 700 }, () => ({ agentId: 'echo-agent', route: 'github', kind: 'call.start' }));
+      assert.equal(await call(p, '/api/v1/activity', 'POST', 'presence-token', { events }), 200);
+      assert.equal(discord.activities.length, 500);
+    } finally {
+      await new Promise<void>((r) => s.close(() => r()));
+    }
+  });
+
   it('fails closed when no token is configured', async () => {
     const open = serve(bearerAuth([])).server;
     const p = await listen(open);
