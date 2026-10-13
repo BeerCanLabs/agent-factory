@@ -16,4 +16,5 @@ export {
   SYSTEM, activeRun, applyKillSwitch, blockRun, checkHealth, createRun, deliverToMailbox, finishRun, haltUnhealthy, reconcileRuns, resetAgent,
   routeEvents, scheduleTimeout, markRunReady, unblockRun,
 } from './lifecycle.js';
-export type { CreateRunOptions, LandlordPolicies, LandlordState, MailboxMessage, MailboxQueue, Outcome } from './lifecycle.js';
+export type { CreateRunOptions, PropertyManagerPolicies, PropertyManagerState, LandlordPolicies, LandlordState, MailboxMessage, MailboxQueue, Outcome } from './lifecycle.js';
+

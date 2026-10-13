@@ -155,7 +155,7 @@ describe('SV1 intentional services (§6.15)', () => {
       writeFileSync(join(pkg, 'package.json'), '{}\n');
       writeFileSync(join(pkg, 'README.md'), '# stub\n');
       assert.throws(
-        () => assertHostedImplementation('treasurer', 'packages/empty-host', root),
+        () => assertHostedImplementation('accountant', 'packages/empty-host', root),
         /has no implementation source/
       );
     } finally {
@@ -163,7 +163,7 @@ describe('SV1 intentional services (§6.15)', () => {
     }
   });
 
-  it('all 11 canonical services are hosted in the factory packages', () => {
+  it('all 10 canonical services are hosted in the factory packages', () => {
     for (const service of FACTORY_SERVICE_NAMES) {
       const meta = FACTORY_SERVICES[service];
       assert.ok(meta.hostedIn.length > 0, `Canonical service '${service}' is not hosted by any package.`);

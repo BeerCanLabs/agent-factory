@@ -7,9 +7,9 @@ export const FACTORY_SERVICE_NAMES = [
   'gatekeeper',
   'keymaster',
   'executive',
-  'landlord',
+  'property-manager',
   'auditor',
-  'treasurer',
+  'accountant',
   'bouncer',
   'timekeeper',
   'registrar',
@@ -68,11 +68,11 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     role: 'Model service and uniform inference provider with token and cost metering (M1–M4, E5)',
     hostedIn: ['packages/executive'],
   },
-  landlord: {
-    name: 'landlord',
-    title: 'Landlord',
-    role: 'Compute and state lifecycle management, wake-from-zero, warm-down, turn mailbox delivery (L1–L6), and container runtime state hydration (The Safe, §6.6)',
-    hostedIn: ['packages/control-plane', 'packages/landlord', 'packages/hydrate'],
+  'property-manager': {
+    name: 'property-manager',
+    title: 'Property Manager',
+    role: 'Compute and state lifecycle management, wake-from-zero, warm-down, turn mailbox delivery (PM1–PM6), and container runtime state hydration (The Safe, §6.6)',
+    hostedIn: ['packages/control-plane', 'packages/property-manager', 'packages/hydrate'],
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/apply.ts',
@@ -87,15 +87,15 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/app.ts',
     ],
   },
-  treasurer: {
-    name: 'treasurer',
-    title: 'Treasurer',
+  accountant: {
+    name: 'accountant',
+    title: 'Accountant',
     role: 'Spend governance, real-time token pricing, and budget circuit-breakers (E5, M3)',
     hostedIn: ['packages/budget', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/spend.ts',
-      'packages/control-plane/src/aws/treasurer.ts',
+      'packages/control-plane/src/aws/accountant.ts',
     ],
   },
   bouncer: {

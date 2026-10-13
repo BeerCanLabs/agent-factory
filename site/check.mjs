@@ -14,7 +14,8 @@ const fail = (m) => errors.push(m);
 // 1. The cast is exactly the code's cast (SV1).
 const types = readFileSync(join(repo, 'packages/contract/src/services/types.ts'), 'utf8');
 const list = types.match(/FACTORY_SERVICE_NAMES\s*=\s*\[([\s\S]*?)\]\s*as const/);
-const codeNames = list ? [...list[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1]) : [];
+const codeNames = list ? [...list[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1]) : [];
+
 if (!codeNames.length) fail('could not read FACTORY_SERVICE_NAMES from packages/contract/src/services/types.ts');
 const ids = cast.members.map((m) => m.id);
 for (const n of codeNames) if (!ids.includes(n)) fail('cast member in code but not on the site: ' + n);

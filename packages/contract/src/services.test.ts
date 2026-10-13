@@ -19,7 +19,9 @@ function castNames(): string[] {
   const rest = doc.slice(start + heading.length);
   const end = rest.search(/\n#### /);
   const section = end === -1 ? rest : rest.slice(0, end);
-  return [...section.matchAll(/^\d+\. \*\*([A-Za-z]+)/gm)].map((m) => m[1].toLowerCase());
+  return [...section.matchAll(/^\d+\. \*\*([A-Za-z -]+?)(?=\s*(?:\([^*]+\))?:?\*\*)/gm)].map((m) =>
+    m[1].toLowerCase().replace(/\s+/g, '-')
+  );
 }
 
 describe('Factory Services (The Cast)', () => {

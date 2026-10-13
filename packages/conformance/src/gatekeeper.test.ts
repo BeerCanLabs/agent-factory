@@ -40,7 +40,8 @@ const SECOND_COPY: Array<{ what: string; re: RegExp }> = [
 
 /** Packages the Gatekeeper must never import: the callers it serves and the members that sit above the perimeter. */
 const FORBIDDEN_IMPORTS =
-  /['"]@beercanlabs\/factory-(?:control-plane|console|landlord|timekeeper|bench)(?:\/[^'"]*)?['"]/g;
+  /['"]@beercanlabs\/factory-(?:control-plane|console|landlord|property-manager|timekeeper|bench)(?:\/[^'"]*)?['"]/g;
+
 
 /** Any way of reaching the Gatekeeper, by package name, with or without a subpath. */
 const IMPORTS_GATEKEEPER = /['"]@beercanlabs\/factory-gatekeeper(?:\/[^'"]*)?['"]/g;
@@ -92,9 +93,9 @@ describe('Gatekeeper: one copy of the perimeter rules, and the dependency points
 
     const reaches = (line: string) => [...line.matchAll(FORBIDDEN_IMPORTS)].length;
     assert.equal(reaches("import { createFactoryServer } from '@beercanlabs/factory-control-plane';"), 1);
-    assert.equal(reaches("const e = await import('@beercanlabs/factory-landlord');"), 1);
+    assert.equal(reaches("const e = await import('@beercanlabs/factory-property-manager');"), 1);
     assert.equal(reaches("import { createTimekeeper } from '@beercanlabs/factory-timekeeper';"), 1);
-    assert.equal(reaches("import { checkStanding } from '@beercanlabs/factory-budget';"), 0, 'the Gatekeeper asks the Treasurer');
+    assert.equal(reaches("import { checkStanding } from '@beercanlabs/factory-budget';"), 0, 'the Gatekeeper asks the Accountant');
     assert.equal(reaches("import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';"), 0, 'the Gatekeeper asks the Keymaster');
 
     const toGatekeeper = (line: string) => [...line.matchAll(IMPORTS_GATEKEEPER)].length;
@@ -125,7 +126,7 @@ describe('Gatekeeper: one copy of the perimeter rules, and the dependency points
   });
 
   it("the Gatekeeper's package.json lists none of those packages either", () => {
-    const listed = manifestDeps('gatekeeper').filter((d) => /^@beercanlabs\/factory-(?:control-plane|console|landlord|timekeeper|bench)$/.test(d));
+    const listed = manifestDeps('gatekeeper').filter((d) => /^@beercanlabs\/factory-(?:control-plane|console|landlord|property-manager|timekeeper|bench)$/.test(d));
     assert.deepEqual(listed, []);
   });
 

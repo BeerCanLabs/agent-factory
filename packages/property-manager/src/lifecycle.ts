@@ -21,13 +21,14 @@ import type { Runtime } from './runtime.js';
 export type Outcome<T> = { status: number; body: T | { error: string; [k: string]: unknown } };
 
 /** What the lifecycle reads from the policy store: the budget it enforces and the routes it hands the run. */
-export type LandlordPolicies = {
+export type PropertyManagerPolicies = {
   get(agentId: string): { budgetUsd?: BudgetLimits; routes?: string[] };
   has(agentId: string): boolean;
 };
+export type LandlordPolicies = PropertyManagerPolicies;
 
 /** The part of the control plane's `FactoryState` the run lifecycle uses. `FactoryState` is assignable to it. */
-export type LandlordState = {
+export type PropertyManagerState = {
   agents: Map<string, AgentRecord>;
   registryDir?: string;
   ledger: LedgerStore;
@@ -35,7 +36,7 @@ export type LandlordState = {
   runs: RunStore;
   runTokens: RunTokens;
   callbacks: CallbackPolicy;
-  policies: LandlordPolicies;
+  policies: PropertyManagerPolicies;
   spend: SpendTracker;
   providers: SecretProvider[];
   secretValues: Set<string>;
@@ -56,6 +57,7 @@ export type LandlordState = {
   /** In-memory mailboxes for running tasks to receive follow-up messages while warm. */
   mailboxes?: Map<string, MailboxQueue>;
 };
+export type LandlordState = PropertyManagerState;
 
 export type MailboxMessage = {
   id: string;

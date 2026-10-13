@@ -1,7 +1,7 @@
 [
   {
     "rule": "S1",
-    "where": "packages/landlord/src/aws/ecs.ts",
+    "where": "packages/property-manager/src/aws/ecs.ts",
     "detail": "valueFrom",
     "gap": "GAP-031",
     "why": "Agent task definitions inject real secret values into containers. Convert to gatekeeper-egress injection under TSK-024."
