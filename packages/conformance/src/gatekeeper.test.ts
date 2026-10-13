@@ -15,7 +15,7 @@ import { files, read } from './support.js';
 //  - It does NOT guard the HTTP handlers that call the Gatekeeper (`authenticateRun`, the identity-links and policy
 //    routes in `control-plane`): the Bouncer's privileges and the Auditor's ledger rows meet a request there (GAP-133).
 //  - It does NOT guard the identity-link store: it is in `packages/bouncer` (GAP-136).
-//  - It allows NO place outside the Gatekeeper to verify a run token itself. The Keymaster used to (GAP-137, TSK-197): it
+//  - It allows NO place outside the Gatekeeper to verify a run token itself. The Keymaster used to (GAP-137, TSK-201): it
 //    could not use the contract, because the Gatekeeper depends on the Keymaster (the sign-in link rule), so the reverse
 //    would be a cycle. Its check was removed instead; the caller verifies the run before it asks the Keymaster.
 //    The list below is empty; adding to it needs a gap.

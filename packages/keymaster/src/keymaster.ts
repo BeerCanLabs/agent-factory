@@ -138,19 +138,19 @@ export class Keymaster {
     const agentId = run?.agentId ?? approval.agentId;
     const actor = params.actor ?? `run:${agentId}`;
 
-    // 5. Verify approval scope (runId and agentId)
+    // 4. Verify approval scope (runId and agentId)
     if (approval.runId !== params.runId || approval.agentId !== agentId) {
       await this.recordDenied(params, 'approval_scope_mismatch', actor, agentId);
       return { ok: false, status: 403, error: 'approval_scope_mismatch' };
     }
 
-    // 6. Verify authorization proof hash if provided or present
+    // 5. Verify authorization proof hash if provided or present
     if (params.proofHash && approval.argsSha256 && params.proofHash !== approval.argsSha256) {
       await this.recordDenied(params, 'proof_hash_mismatch', actor, agentId);
       return { ok: false, status: 403, error: 'proof_hash_mismatch' };
     }
 
-    // 7. Verify approval state & replay check
+    // 6. Verify approval state & replay check
     if (approval.state === 'consumed') {
       await this.recordDenied(params, 'approval_already_consumed', actor, agentId, approval.argsSha256);
       return { ok: false, status: 409, error: 'approval_already_consumed' };
@@ -161,7 +161,7 @@ export class Keymaster {
       return { ok: false, status: 403, error: `approval_${approval.state}` };
     }
 
-    // 8. Atomically burn / consume approval
+    // 7. Atomically burn / consume approval
     const consumed = await this.approvals.consume(params.approvalId);
     if (!consumed) {
       // Replay or race condition
@@ -169,7 +169,7 @@ export class Keymaster {
       return { ok: false, status: 409, error: 'approval_already_consumed' };
     }
 
-    // 9. Fetch secret value from providers
+    // 8. Fetch secret value from providers
     const bound = await bindSecrets([params.gatedSecret], this.providers);
     if (!bound.ok || !bound.env[params.gatedSecret]) {
       return {
