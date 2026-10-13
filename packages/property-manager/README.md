@@ -1,6 +1,6 @@
 # Property Manager (`@beercanlabs/factory-property-manager`)
 
-The Property Manager is the Factory's compute and state lifecycle (`DESIGN_AUTHORITY.md` §6.15, PM1 to PM6, §6.6): building and registering an agent's runtime, waking it from zero, container state hydration in the safe, run states and timeouts, warm-down, the operational pause and kill switches, the turn mailbox and two-stage retirement. It was extracted from `packages/control-plane` (the Landlord/Property Manager flow work stream, GAP-132, TSK-178 to TSK-186), and hosts the in-container runtime shim (`packages/hydrate`, TSK-196).
+The Property Manager is the Factory's compute and state lifecycle (`DESIGN_AUTHORITY.md` §6.15, L1 to L6, §6.6): building and registering an agent's runtime, waking it from zero, container state hydration in the safe, run states and timeouts, warm-down, the operational pause and kill switches, the turn mailbox and two-stage retirement. It was extracted from `packages/control-plane` (the Landlord/Property Manager flow work stream, GAP-132, TSK-178 to TSK-186), and hosts the in-container runtime shim (`packages/hydrate`, TSK-196).
 
 It holds so far:
 

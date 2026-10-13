@@ -1,5 +1,5 @@
 /**
- * The Treasurer's spend endpoints (DESIGN_AUTHORITY §6.15 Treasurer): AI, infrastructure and per-agent spend, the
+ * The Accountant's spend endpoints (DESIGN_AUTHORITY §6.15 Accountant): AI, infrastructure and per-agent spend, the
  * cluster's compute allocation, and the factory budgets.
  *
  *   GET /api/v1/spend/report?period=current|last   the full report (`buildSpendReport`)
@@ -9,7 +9,7 @@
  *
  * Reads use the access model of `GET /api/v1/spend`: a viewer (`spend.read`), or a live run whose admin-set policy
  * grants the `factory-spend` tool (E7: never implied). Every read and every change is ledgered. The cloud bill is read
- * through the Treasurer's `CloudCostSource`, never by an agent.
+ * through the Accountant's `CloudCostSource`, never by an agent.
  */
 import type http from 'node:http';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -86,7 +86,7 @@ export class FactoryBudgetStore {
   }
 }
 
-/** The Treasurer's wiring: its landing-zone sources (absent on a zone with no adapter) and its budget store. */
+/** The Accountant's wiring: its landing-zone sources (absent on a zone with no adapter) and its budget store. */
 export type Treasury = {
   cloud?: CloudCostSource;
   compute?: ComputeSource;
@@ -132,7 +132,7 @@ function runIntervals(state: FactoryState): RunInterval[] {
     .map((r) => ({ agentId: r.agentId, start: r.startedAt ?? r.createdAt, ...(isTerminal(r.state) ? { end: r.updatedAt } : {}) }));
 }
 
-/** The Treasurer's report for a period. Infrastructure is `unavailable` (never an error) without a cloud adapter. */
+/** The Accountant's report for a period. Infrastructure is `unavailable` (never an error) without a cloud adapter. */
 export async function spendReport(state: FactoryState, period: Period, now = new Date()) {
   const t = state.treasury;
   const window = periodWindow(now, period);
@@ -144,7 +144,7 @@ export async function spendReport(state: FactoryState, period: Period, now = new
     try {
       cloud = await t.cache.get(`${source.provider}:${window.start}:${window.end}`, async () => summarizeCloud(await source.costs({ start: window.start, end: window.end })));
     } catch (err) {
-      console.error(`[treasurer] cloud cost read failed: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`[accountant] cloud cost read failed: ${err instanceof Error ? err.message : String(err)}`);
       cloud = { unavailable: 'the cloud cost source did not answer' };
     }
   }
@@ -244,7 +244,7 @@ export async function handleSpend(state: FactoryState, req: http.IncomingMessage
     }
     const report = await spendReport(state, p);
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: reader.agentId, type: 'action', action: 'SPEND_REPORT_READ', actor: reader.actor });
-    if (p === 'current') void checkFactoryBudgets(state).catch((e) => console.error(`[treasurer] budget check: ${e instanceof Error ? e.message : String(e)}`));
+    if (p === 'current') void checkFactoryBudgets(state).catch((e) => console.error(`[accountant] budget check: ${e instanceof Error ? e.message : String(e)}`));
     json(res, 200, report);
     return true;
   }
@@ -255,7 +255,7 @@ export async function handleSpend(state: FactoryState, req: http.IncomingMessage
     try {
       body = await computeReport(state);
     } catch (err) {
-      console.error(`[treasurer] compute read failed: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`[accountant] compute read failed: ${err instanceof Error ? err.message : String(err)}`);
       body = { unavailable: 'the compute source did not answer', asOf: new Date().toISOString() };
     }
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: reader.agentId, type: 'action', action: 'SPEND_COMPUTE_READ', actor: reader.actor });
@@ -285,7 +285,7 @@ export async function handleSpend(state: FactoryState, req: http.IncomingMessage
     const saved = state.treasury.budgets.set(v.budgets, principal.actor);
     state.ledger.append({ timestamp: saved.setAt, agentId: 'factory', type: 'action', action: 'FACTORY_BUDGET_SET', actor: principal.actor });
     json(res, 200, saved);
-    void checkFactoryBudgets(state).catch((e) => console.error(`[treasurer] budget check: ${e instanceof Error ? e.message : String(e)}`));
+    void checkFactoryBudgets(state).catch((e) => console.error(`[accountant] budget check: ${e instanceof Error ? e.message : String(e)}`));
     return true;
   }
   return false;

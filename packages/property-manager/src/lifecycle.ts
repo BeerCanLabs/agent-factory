@@ -1,9 +1,9 @@
 /**
- * The Landlord's run lifecycle (DESIGN_AUTHORITY.md §6.15, L1 to L6): waking an agent (`createRun`), starting a queued
+ * The Property Manager's run lifecycle (DESIGN_AUTHORITY.md §6.15, L1 to L6): waking an agent (`createRun`), starting a queued
  * run, finishing it, parking and unparking it, the idle timeout, the turn mailbox, the kill switch, health checks and
  * the reconcile of runs whose tasks outlive the process. Moved out of the control plane's `app.ts` (TSK-183, GAP-132).
  *
- * `LandlordState` is the part of the control plane's `FactoryState` this code reads and writes, so the package does not
+ * `PropertyManagerState` is the part of the control plane's `FactoryState` this code reads and writes, so the package does not
  * import the control plane; `FactoryState` is assignable to it. The HTTP handlers that call these functions stay in
  * `control-plane`, where the Bouncer's privileges and the Gatekeeper's run-token rule meet a request.
  */
@@ -25,7 +25,6 @@ export type PropertyManagerPolicies = {
   get(agentId: string): { budgetUsd?: BudgetLimits; routes?: string[] };
   has(agentId: string): boolean;
 };
-export type LandlordPolicies = PropertyManagerPolicies;
 
 /** The part of the control plane's `FactoryState` the run lifecycle uses. `FactoryState` is assignable to it. */
 export type PropertyManagerState = {
@@ -57,7 +56,6 @@ export type PropertyManagerState = {
   /** In-memory mailboxes for running tasks to receive follow-up messages while warm. */
   mailboxes?: Map<string, MailboxQueue>;
 };
-export type LandlordState = PropertyManagerState;
 
 export type MailboxMessage = {
   id: string;
@@ -70,7 +68,7 @@ export type MailboxQueue = {
   waiters: Array<(msg: MailboxMessage) => void>;
 };
 
-export function deliverToMailbox(state: LandlordState, agentId: string, payload: unknown) {
+export function deliverToMailbox(state: PropertyManagerState, agentId: string, payload: unknown) {
   if (!state.mailboxes) state.mailboxes = new Map();
   let queue = state.mailboxes.get(agentId);
   if (!queue) {
@@ -105,7 +103,7 @@ export const SYSTEM = {
   policy: 'factory:policy',
 } as const;
 
-async function notifyGatekeeperIngress(state: LandlordState, agentId: string, presence: 'offline' | 'starting' | 'available') {
+async function notifyGatekeeperIngress(state: PropertyManagerState, agentId: string, presence: 'offline' | 'starting' | 'available') {
   if (!state.gatekeeperIngressUrl) return;
   try {
     const res = await fetch(`${state.gatekeeperIngressUrl.replace(/\/$/, '')}/api/v1/presence`, {
@@ -124,7 +122,7 @@ async function notifyGatekeeperIngress(state: LandlordState, agentId: string, pr
   }
 }
 
-function record(state: LandlordState, run: Pick<Run, 'agentId' | 'runId'>, action: string, actor: string) {
+function record(state: PropertyManagerState, run: Pick<Run, 'agentId' | 'runId'>, action: string, actor: string) {
   state.ledger.append({
     timestamp: new Date().toISOString(),
     agentId: run.agentId,
@@ -135,13 +133,13 @@ function record(state: LandlordState, run: Pick<Run, 'agentId' | 'runId'>, actio
   });
 }
 
-export function activeRun(state: LandlordState, agentId: string): Run | undefined {
+export function activeRun(state: PropertyManagerState, agentId: string): Run | undefined {
   return state.runs.list({ agentId, active: true }).find((r) => r.state !== 'QUEUED');
 }
 
 const SECRET_CACHE_TTL_MS = 5 * 60 * 1000;
 
-async function bindAgentSecrets(state: LandlordState, names: string[]): Promise<{ ok: true; env: Record<string, string> } | { ok: false; missing: string[] }> {
+async function bindAgentSecrets(state: PropertyManagerState, names: string[]): Promise<{ ok: true; env: Record<string, string> } | { ok: false; missing: string[] }> {
   const cache = (state.secretCache ??= new Map());
   const now = Date.now();
   const env: Record<string, string> = {};
@@ -163,7 +161,7 @@ async function bindAgentSecrets(state: LandlordState, names: string[]): Promise<
   return { ok: true, env };
 }
 
-export function scheduleTimeout(state: LandlordState, run: Run) {
+export function scheduleTimeout(state: PropertyManagerState, run: Run) {
   const prev = state.idleTimers.get(run.agentId);
   if (prev) clearTimeout(prev);
   const agent = state.agents.get(run.agentId);
@@ -183,7 +181,7 @@ export function scheduleTimeout(state: LandlordState, run: Run) {
 }
 
 /** Park a live run. The task keeps running; the gatekeeper-egress refuses its egress until unblocked. */
-export function blockRun(state: LandlordState, runId: string, to: 'BLOCKED_BUDGET_EXCEEDED' | 'BLOCKED_FOR_HUMAN' | 'BLOCKED_UNHEALTHY', actor: string) {
+export function blockRun(state: PropertyManagerState, runId: string, to: 'BLOCKED_BUDGET_EXCEEDED' | 'BLOCKED_FOR_HUMAN' | 'BLOCKED_UNHEALTHY', actor: string) {
   const run = state.runs.get(runId);
   if (!run || isTerminal(run.state) || run.state === to) return run;
   const timer = state.idleTimers.get(run.agentId);
@@ -193,7 +191,7 @@ export function blockRun(state: LandlordState, runId: string, to: 'BLOCKED_BUDGE
   return next;
 }
 
-export function unblockRun(state: LandlordState, runId: string, from: RunState, actor: string) {
+export function unblockRun(state: PropertyManagerState, runId: string, from: RunState, actor: string) {
   const run = state.runs.get(runId);
   if (!run || run.state !== from) return run;
   const next = state.runs.update(runId, { state: 'WORKING' });
@@ -213,7 +211,7 @@ export type CreateRunOptions = {
 };
 
 /** The single entry point for waking an agent: manual, webhook, cron, event route, gatekeeper-ingress. */
-export async function createRun(state: LandlordState, agentId: string, opts: CreateRunOptions): Promise<Outcome<Run>> {
+export async function createRun(state: PropertyManagerState, agentId: string, opts: CreateRunOptions): Promise<Outcome<Run>> {
   const agent = state.agents.get(agentId);
   if (!agent) return { status: 404, body: { error: 'not_found' } };
   if (agent.state === 'PAUSED' || agent.state === 'ISOLATED') {
@@ -310,7 +308,7 @@ export async function createRun(state: LandlordState, agentId: string, opts: Cre
   return { status: 202, body: await startRun(state, run, bound.env) };
 }
 
-async function startRun(state: LandlordState, run: Run, secrets?: Record<string, string>): Promise<Run> {
+async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<string, string>): Promise<Run> {
   const agent = state.agents.get(run.agentId)!;
   let env = secrets;
   if (!env) {
@@ -363,7 +361,7 @@ async function startRun(state: LandlordState, run: Run, secrets?: Record<string,
  * container that the agent process is running and can take a turn (a conversational worker fetches input on boot
  * or polls its mailbox for follow-ups; the shim heartbeats after spawning). Only then does presence go available.
  */
-export async function markRunReady(state: LandlordState, runId: string) {
+export async function markRunReady(state: PropertyManagerState, runId: string) {
   // Synchronous up to the notification, so the run is marked ready before the caller answers; the notification
   // itself never delays the run's heartbeat or mailbox reply.
   const run = state.runs.get(runId);
@@ -374,7 +372,7 @@ export async function markRunReady(state: LandlordState, runId: string) {
 }
 
 export async function finishRun(
-  state: LandlordState,
+  state: PropertyManagerState,
   runId: string,
   terminal: Extract<RunState, 'DONE' | 'FAILED' | 'TIMED_OUT' | 'CANCELLED'>,
   extra: { actor: string; exitCode?: number | null; result?: unknown; error?: string },
@@ -433,7 +431,7 @@ export async function finishRun(
   return done;
 }
 
-async function fireCallback(state: LandlordState, run: Run) {
+async function fireCallback(state: PropertyManagerState, run: Run) {
   if (!run.callbackUrl) return;
   const outcome = await deliverCallback(
     run.callbackUrl,
@@ -459,7 +457,7 @@ async function fireCallback(state: LandlordState, run: Run) {
  * not touch the budget, the policy or the agent's memory, and the next wake is still checked like any other. A paused,
  * isolated, deploying or retired agent is refused: those have their own controls.
  */
-export async function resetAgent(state: LandlordState, id: string, actor: string): Promise<Outcome<AgentRecord>> {
+export async function resetAgent(state: PropertyManagerState, id: string, actor: string): Promise<Outcome<AgentRecord>> {
   const agent = state.agents.get(id);
   if (!agent) return { status: 404, body: { error: 'not_found' } };
   if (agent.state !== 'WORKING' && agent.state !== 'SLEEPING' && agent.state !== 'ERROR') {
@@ -476,7 +474,7 @@ export async function resetAgent(state: LandlordState, id: string, actor: string
 }
 
 export async function applyKillSwitch(
-  state: LandlordState,
+  state: PropertyManagerState,
   id: string,
   command: 'PAUSE' | 'ISOLATE' | 'RESUME',
   actor: string,
@@ -506,7 +504,7 @@ export async function applyKillSwitch(
 }
 
 /** Pause an agent whose recent runs keep failing, so the queue stops feeding it. */
-async function breakCrashLoop(state: LandlordState, agentId: string) {
+async function breakCrashLoop(state: PropertyManagerState, agentId: string) {
   const threshold = state.crashLoopThreshold ?? 0;
   const agent = state.agents.get(agentId);
   const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(agentId));
@@ -528,7 +526,7 @@ async function breakCrashLoop(state: LandlordState, agentId: string) {
 }
 
 /** Halt compute for a run that went silent or over its memory ceiling; park it for a human. */
-export async function haltUnhealthy(state: LandlordState, runId: string, reason: string) {
+export async function haltUnhealthy(state: PropertyManagerState, runId: string, reason: string) {
   const run = state.runs.get(runId);
   if (!run || isTerminal(run.state) || run.state === 'BLOCKED_UNHEALTHY') return;
   const agent = state.agents.get(run.agentId);
@@ -548,7 +546,7 @@ export async function haltUnhealthy(state: LandlordState, runId: string, reason:
 }
 
 /** Runs opt in to liveness by sending their first heartbeat; silent runs are governed by the run timeout. */
-export async function checkHealth(state: LandlordState, now = Date.now()) {
+export async function checkHealth(state: PropertyManagerState, now = Date.now()) {
   for (const run of state.runs.list({ active: true })) {
     if (run.state !== 'WORKING' || !run.lastHeartbeatAt) continue;
     if (state.heartbeatTimeoutMs && now - Date.parse(run.lastHeartbeatAt) > state.heartbeatTimeoutMs) {
@@ -559,7 +557,7 @@ export async function checkHealth(state: LandlordState, now = Date.now()) {
   }
 }
 
-export async function routeEvents(state: LandlordState, event: { type: string; agentId: string; runId?: string }) {
+export async function routeEvents(state: PropertyManagerState, event: { type: string; agentId: string; runId?: string }) {
   if (event.type === 'crash' && event.agentId !== 'med-doc' && state.agents.has('med-doc')) {
     await createRun(state, 'med-doc', { actor: SYSTEM.router, trigger: 'event:crash', input: { agentId: event.agentId, runId: event.runId } });
   }
@@ -569,7 +567,7 @@ export async function routeEvents(state: LandlordState, event: { type: string; a
 }
 
 /** Poll runtimes whose tasks outlive this process; finish runs whose tasks stopped. */
-export async function reconcileRuns(state: LandlordState): Promise<void> {
+export async function reconcileRuns(state: PropertyManagerState): Promise<void> {
   for (const run of state.runs.list({ active: true })) {
     if (run.state === 'QUEUED') continue;
     if (!state.runtime.status || !run.taskHandle) {

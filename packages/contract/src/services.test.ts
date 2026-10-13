@@ -26,7 +26,9 @@ function castNames(): string[] {
 
 describe('Factory Services (The Cast)', () => {
   it('SV1 names match the cast in DESIGN_AUTHORITY.md §6.15', () => {
-    assert.deepEqual([...FACTORY_SERVICE_NAMES], castNames());
+    const parsed = castNames();
+    assert.equal(parsed.length, 10, 'expected exactly 10 cast names in DESIGN_AUTHORITY.md §6.15');
+    assert.deepEqual([...FACTORY_SERVICE_NAMES], parsed);
   });
 
   it('validates service names via schema', () => {

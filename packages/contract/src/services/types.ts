@@ -71,7 +71,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
   'property-manager': {
     name: 'property-manager',
     title: 'Property Manager',
-    role: 'Compute and state lifecycle management, wake-from-zero, warm-down, turn mailbox delivery (PM1–PM6), and container runtime state hydration (The Safe, §6.6)',
+    role: 'Compute and state lifecycle management, wake-from-zero, warm-down, turn mailbox delivery (L1–L6), and container runtime state hydration (The Safe, §6.6)',
     hostedIn: ['packages/control-plane', 'packages/property-manager', 'packages/hydrate'],
     owns: [
       'packages/control-plane/src/app.ts',

@@ -41,8 +41,3 @@ output "accountant_role_arn" {
   description = "The Accountant IAM role for Cost Explorer and ECS inventory."
   value       = aws_iam_role.accountant.arn
 }
-
-output "treasurer_role_arn" {
-  description = "Alias for accountant_role_arn."
-  value       = aws_iam_role.accountant.arn
-}

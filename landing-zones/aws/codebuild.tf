@@ -64,7 +64,6 @@ resource "aws_iam_role_policy" "codebuild_policy" {
 # GIT_COMMIT (full 40-char SHA) and IMAGE_TAG (<agentId>-<commit[:12]>). It builds exactly that commit, refuses a
 # repository without tests, runs the agent's own tests, and pushes an image tagged by the commit, never a
 # mutable tag. Refusal reasons are exit codes that packages/property-manager/src/aws/codebuild.ts maps back:
-
 # 3 = no_tests, 4 = tests_failed, 5 = source_unavailable, 6 = hardcoded_secret; any other failure maps from its phase.
 #
 # Skills (§6.14 SK4): when the control plane also sends SKILLS (the agent's adopted skills, each at an approved
