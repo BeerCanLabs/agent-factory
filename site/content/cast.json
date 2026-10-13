@@ -77,20 +77,20 @@
        "t": "A message lands on gatekeeper-ingress, which keeps the Discord socket open even when no agent is running."
       },
       {
-       "t": "The ingress asks the Landlord to start a run for the agent.",
-       "to": "landlord",
-       "c": "landlord-lifecycle",
-       "why": "Starting compute is the Landlord’s job."
+       "t": "The ingress asks the Property Manager to start a run for the agent.",
+       "to": "property-manager",
+       "c": "property-manager-lifecycle",
+       "why": "Starting compute is the Property Manager’s job."
       },
       {
-       "t": "The Landlord asks the Treasurer whether the agent is inside its budget. If not, the wake is refused with 402 and the ingress tells the person why.",
-       "to": "treasurer",
-       "c": "treasurer-standing",
-       "why": "The Treasurer decides standing; the Gatekeeper relays the refusal."
+       "t": "The Property Manager asks the Accountant whether the agent is inside its budget. If not, the wake is refused with 402 and the ingress tells the person why.",
+       "to": "accountant",
+       "c": "accountant-standing",
+       "why": "The Accountant decides standing; the Gatekeeper relays the refusal."
       },
       {
-       "t": "The Landlord reports back through the ingress presence calls: starting, working, idle.",
-       "to": "landlord",
+       "t": "The Property Manager reports back through the ingress presence calls: starting, working, idle.",
+       "to": "property-manager",
        "c": "gatekeeper-ingress",
        "why": "onAgentStarting, onAgentWorking and onAgentIdle keep the person’s Discord status honest."
       }
@@ -137,9 +137,9 @@
        "t": "The agent sends an OpenAI-format chat request to the egress model route."
       },
       {
-       "t": "The egress asks the Treasurer whether the agent is in good standing before spending anything.",
-       "to": "treasurer",
-       "c": "treasurer-standing"
+       "t": "The egress asks the Accountant whether the agent is in good standing before spending anything.",
+       "to": "accountant",
+       "c": "accountant-standing"
       },
       {
        "t": "It asks the Executive whether this agent may use the model it named.",
@@ -154,8 +154,8 @@
       },
       {
        "t": "The usage is priced and the cost is recorded with the ledger row.",
-       "to": "treasurer",
-       "c": "treasurer-pricing"
+       "to": "accountant",
+       "c": "accountant-pricing"
       }
      ]
     }
@@ -352,10 +352,10 @@
        "t": "usageFromJson reads usage from a normal reply; SseMeter reads it from a stream as it passes."
       },
       {
-       "t": "The usage goes to the Treasurer as input, output, cacheRead and cacheWrite tokens.",
-       "to": "treasurer",
-       "c": "treasurer-pricing",
-       "why": "The Executive depends on the Treasurer for the Price and TokenUsage types only."
+       "t": "The usage goes to the Accountant as input, output, cacheRead and cacheWrite tokens.",
+       "to": "accountant",
+       "c": "accountant-pricing",
+       "why": "The Executive depends on the Accountant for the Price and TokenUsage types only."
       },
       {
        "t": "Metrics and a trace of the call are recorded.",
@@ -367,8 +367,8 @@
    ]
   },
   {
-   "id": "landlord",
-   "name": "Landlord",
+   "id": "property-manager",
+   "name": "Property Manager",
    "title": "Property Manager, Compute & State",
    "dept": "Operations",
    "art": {
@@ -379,7 +379,7 @@
    },
    "rules": "L1 to L6, §6.4, §6.6",
    "tag": "Opens the office when someone needs it. Locks up when they leave.",
-   "bio": "Runs the building. The Landlord turns on compute when an agent is needed, loads and syncs its state in the safe, brokers the agent’s turns, and turns it off again when the work is done. It builds and starts only what the Registrar has admitted.",
+   "bio": "Runs the building. The Property Manager turns on compute when an agent is needed, loads and syncs its state in the safe, brokers the agent’s turns, and turns it off again when the work is done. It builds and starts only what the Registrar has admitted.",
    "does": [
     "Wakes an agent from zero and queues a second message behind the running one",
     "Brings the agent’s notebook into $MEMORY_DIR on wake, and syncs it back on sleep",
@@ -402,20 +402,20 @@
        "t": "A wake arrives. If its messageId already has a run, that run is returned with 200 and nothing starts."
       },
       {
-       "t": "The Landlord asks the Treasurer. Over budget returns 402 and no compute starts.",
-       "to": "treasurer",
-       "c": "treasurer-standing"
+       "t": "The Property Manager asks the Accountant. Over budget returns 402 and no compute starts.",
+       "to": "accountant",
+       "c": "accountant-standing"
       },
       {
        "t": "If the agent already has an active run, the new message is queued and the reply is 202."
       },
       {
-       "t": "The Landlord starts the agent’s task from its admitted image and tells the ingress the agent is starting.",
+       "t": "The Property Manager starts the agent’s task from its admitted image and tells the ingress the agent is starting.",
        "to": "gatekeeper",
        "c": "gatekeeper-ingress"
       },
       {
-       "t": "In the container, the Landlord’s shim brings the notebook into $MEMORY_DIR."
+       "t": "In the container, the Property Manager’s shim brings the notebook into $MEMORY_DIR."
       }
      ]
     },
@@ -425,7 +425,7 @@
      "intro": "The agent never accepts an inbound connection. It asks for work.",
      "steps": [
       {
-       "t": "The agent long-polls /mailbox. The Landlord answers with the next message or holds the request open."
+       "t": "The agent long-polls /mailbox. The Property Manager answers with the next message or holds the request open."
       },
       {
        "t": "When the turn ends, the agent posts its result through a run callback."
@@ -446,10 +446,10 @@
        "t": "No work arrives for the warm-down window."
       },
       {
-       "t": "In the container, the Landlord’s shim syncs $MEMORY_DIR back to the mind store."
+       "t": "In the container, the Property Manager’s shim syncs $MEMORY_DIR back to the mind store."
       },
       {
-       "t": "The task stops and the Landlord tells the ingress the agent is idle.",
+       "t": "The task stops and the Property Manager tells the ingress the agent is idle.",
        "to": "gatekeeper",
        "c": "gatekeeper-ingress"
       }
@@ -479,10 +479,10 @@
     {
      "id": "deploy",
      "name": "Build and register an admitted commit",
-     "intro": "The build is injected into the Registrar’s admission. The Landlord supplies it.",
+     "intro": "The build is injected into the Registrar’s admission. The Property Manager supplies it.",
      "steps": [
       {
-       "t": "The Registrar pins the repository and commit, then calls the Landlord’s build.",
+       "t": "The Registrar pins the repository and commit, then calls the Property Manager’s build.",
        "to": "registrar",
        "c": "registrar-admit"
       },
@@ -490,7 +490,7 @@
        "t": "The build runs on the landing zone’s build service and pushes the image to its registry."
       },
       {
-       "t": "The Landlord creates the agent’s identity and its task definition or Cloud Run job."
+       "t": "The Property Manager creates the agent’s identity and its task definition or Cloud Run job."
       }
      ]
     }
@@ -530,7 +530,7 @@
        "t": "A member sends an event: who acted, what happened, which agent, which run.",
        "to": "gatekeeper",
        "c": "auditor-ledger",
-       "why": "Gatekeeper, Landlord, Treasurer, Bouncer, Keymaster and Registrar all append."
+       "why": "Gatekeeper, Property Manager, Accountant, Bouncer, Keymaster and Registrar all append."
       },
       {
        "t": "Secrets and prompts are redacted before anything is stored."
@@ -591,9 +591,9 @@
    ]
   },
   {
-   "id": "treasurer",
-   "name": "Treasurer",
-   "title": "Head of Spend and FinOps",
+   "id": "accountant",
+   "name": "Accountant",
+   "title": "Accountant",
    "dept": "Money and models",
    "art": {
     "skin": "#9C6B4E",
@@ -603,7 +603,7 @@
    },
    "rules": "E5, E7, M3",
    "tag": "Every call has a price. Nobody spends without a limit someone set.",
-   "bio": "Owns the budget rule, spend accounting and pricing, plus factory cloud spend and the compute inventory. The Treasurer answers one question, whether an agent is inside its limits, and every other member enforces the answer.",
+   "bio": "Owns the budget rule, spend accounting and pricing, plus factory cloud spend and the compute inventory. The Accountant answers one question, whether an agent is inside its limits, and every other member enforces the answer.",
    "does": [
     "Answers standing for an agent: per run, per day, per month",
     "Prices each model call from the Executive’s token counts",
@@ -622,15 +622,15 @@
      "steps": [
       {
        "t": "The caller passes the agent’s limits and its spend for the run, the day and the month.",
-       "to": "landlord",
-       "c": "treasurer-standing",
-       "why": "The Gatekeeper’s egress and the Landlord both ask."
+       "to": "property-manager",
+       "c": "accountant-standing",
+       "why": "The Gatekeeper’s egress and the Property Manager both ask."
       },
       {
-       "t": "The Treasurer compares them and returns ok, or the first window exceeded: perRun, perDay or perMonth."
+       "t": "The Accountant compares them and returns ok, or the first window exceeded: perRun, perDay or perMonth."
       },
       {
-       "t": "The caller enforces: the Landlord returns 402, the egress refuses the call, the control plane raises budget.alert."
+       "t": "The caller enforces: the Property Manager returns 402, the egress refuses the call, the control plane raises budget.alert."
       },
       {
        "t": "The refusal is ledgered with the window.",
@@ -642,12 +642,12 @@
     {
      "id": "price",
      "name": "Price a model call",
-     "intro": "The Executive counts; the Treasurer prices.",
+     "intro": "The Executive counts; the Accountant prices.",
      "steps": [
       {
        "t": "The Executive reports input, output, cacheRead and cacheWrite tokens.",
        "to": "executive",
-       "c": "treasurer-pricing"
+       "c": "accountant-pricing"
       },
       {
        "t": "priceFor finds the model’s price and costUsd turns the tokens into dollars."
@@ -783,8 +783,8 @@
       },
       {
        "t": "The control plane acts on the decision: blockRun to stop, deliverDecision to continue.",
-       "to": "landlord",
-       "c": "landlord-lifecycle"
+       "to": "property-manager",
+       "c": "property-manager-lifecycle"
       },
       {
        "t": "The decision, with who decided it, is ledgered.",
@@ -807,8 +807,8 @@
     "shirt": "#6E4B8B"
    },
    "rules": "§6.15",
-   "tag": "Knows what is due. Rings the Landlord. Never starts anything itself.",
-   "bio": "Decides when an agent is due, so no agent needs a clock running inside its container. Each minute the Timekeeper looks at every cartridge cron and every schedule an agent created, and tells the Landlord who is due.",
+   "tag": "Knows what is due. Rings the Property Manager. Never starts anything itself.",
+   "bio": "Decides when an agent is due, so no agent needs a clock running inside its container. Each minute the Timekeeper looks at every cartridge cron and every schedule an agent created, and tells the Property Manager who is due.",
    "does": [
     "Checks cartridge cron expressions each minute",
     "Stores schedules agents create, with time zones",
@@ -832,8 +832,8 @@
        "t": "For each due agent it calls fire with a cartridge request."
       },
       {
-       "t": "The Landlord wakes the agent, unless it is already running, in which case that tick is skipped.",
-       "to": "landlord",
+       "t": "The Property Manager wakes the agent, unless it is already running, in which case that tick is skipped.",
+       "to": "property-manager",
        "c": "timekeeper-fire"
       }
      ]
@@ -864,7 +864,7 @@
       },
       {
        "t": "When the schedule is due, checkDue yields it once and fire wakes the agent.",
-       "to": "landlord",
+       "to": "property-manager",
        "c": "timekeeper-fire"
       }
      ]
@@ -925,9 +925,9 @@
      "steps": [
       {
        "t": "The deploy route calls admit with the pinned source and an injected build.",
-       "to": "landlord",
+       "to": "property-manager",
        "c": "registrar-admit",
-       "why": "The Landlord supplies buildImage; the Registrar never builds."
+       "why": "The Property Manager supplies buildImage; the Registrar never builds."
       },
       {
        "t": "The build checks the commit is 40 hex characters, scans for hard-coded secrets, requires tests and runs them, then builds and pushes the image."
@@ -1026,8 +1026,8 @@
      "intro": "One hub, many readers.",
      "steps": [
       {
-       "t": "The Landlord or the Gatekeeper calls publish or publishRun.",
-       "to": "landlord",
+       "t": "The Property Manager or the Gatekeeper calls publish or publishRun.",
+       "to": "property-manager",
        "c": "inspector-events"
       },
       {
@@ -1093,33 +1093,27 @@
  "journey": [
   [
    "gatekeeper",
-   "A message arrives",
-   "The Gatekeeper authenticates it and holds the door."
+   "A message arrives"
   ],
   [
    "bouncer",
-   "Is it allowed?",
-   "The Bouncer checks roles against the privilege."
+   "Is it allowed?"
   ],
   [
-   "treasurer",
-   "Can we afford it?",
-   "The Treasurer checks the budget."
+   "accountant",
+   "Can we afford it?"
   ],
   [
-   "landlord",
-   "Open the office",
-   "The Landlord starts the agent from zero and loads its files into the safe."
+   "property-manager",
+   "Open the office"
   ],
   [
    "executive",
-   "Use a model",
-   "The Executive serves the call; the Keymaster adds the key."
+   "Use a model"
   ],
   [
    "auditor",
-   "Write it down",
-   "The Auditor records every step."
+   "Write it down"
   ]
  ]
 }

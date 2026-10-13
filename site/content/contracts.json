@@ -6,8 +6,8 @@
   "to": [
    "gatekeeper",
    "keymaster",
-   "landlord",
-   "treasurer",
+   "property-manager",
+   "accountant",
    "timekeeper",
    "registrar"
   ],
@@ -52,26 +52,26 @@
   ]
  },
  {
-  "id": "treasurer-standing",
+  "id": "accountant-standing",
   "name": "checkStanding",
-  "from": "treasurer",
+  "from": "accountant",
   "to": [
    "gatekeeper",
-   "landlord"
+   "property-manager"
   ],
   "sig": "checkStanding(request: StandingRequest)\n  : StandingResult",
   "src": "packages/budget/src/standing.ts",
   "what": "Whether an agent is inside its limits. Returns ok, or the first window exceeded: perRun, perDay or perMonth.",
   "rules": [
-   "The Treasurer decides; callers enforce (402, blockRun, budget.alert).",
+   "The Accountant decides; callers enforce (402, blockRun, budget.alert).",
    "No default budget exists. Without one, nothing is enforced.",
    "A conformance test fails if egress or control-plane source compares spend with a limit itself."
   ]
  },
  {
-  "id": "treasurer-pricing",
+  "id": "accountant-pricing",
   "name": "costUsd / priceFor",
-  "from": "treasurer",
+  "from": "accountant",
   "to": [
    "executive",
    "gatekeeper"
@@ -80,7 +80,7 @@
   "src": "packages/budget/src/pricing.ts",
   "what": "Turns the Executive’s token counts into dollars. TokenUsage is input, output, cacheRead and cacheWrite.",
   "rules": [
-   "The Executive depends on the Treasurer for the Price and TokenUsage types only."
+   "The Executive depends on the Accountant for the Price and TokenUsage types only."
   ]
  },
  {
@@ -118,7 +118,7 @@
   "name": "createInspector",
   "from": "inspector",
   "to": [
-   "landlord",
+   "property-manager",
    "gatekeeper",
    "auditor"
   ],
@@ -135,11 +135,11 @@
   "name": "createTimekeeper",
   "from": "timekeeper",
   "to": [
-   "landlord"
+   "property-manager"
   ],
   "sig": "createTimekeeper({ agents, schedules, fire })\n// fire(req: FireRequest)\n// { kind: 'cartridge', agentId }\n// | { kind: 'schedule', schedule }",
   "src": "packages/timekeeper/src/index.ts",
-  "what": "Each minute, tells the Landlord which cartridge crons and which schedules are due.",
+  "what": "Each minute, tells the Property Manager which cartridge crons and which schedules are due.",
   "rules": [
    "It never starts a run and never imports the control plane.",
    "The composition root is its only caller."
@@ -150,11 +150,11 @@
   "name": "admit",
   "from": "registrar",
   "to": [
-   "landlord"
+   "property-manager"
   ],
   "sig": "admit(source, { build, isRefusal, redact })",
   "src": "packages/registrar/src/admission.ts",
-  "what": "Admits or refuses a pinned commit. The Landlord injects the image build.",
+  "what": "Admits or refuses a pinned commit. The Property Manager injects the image build.",
   "rules": [
    "Only a pinned, admitted commit deploys (L3, L4).",
    "A refusal carries one reason."
@@ -165,14 +165,14 @@
   "name": "AgentRegistry",
   "from": "registrar",
   "to": [
-   "landlord",
+   "property-manager",
    "keymaster"
   ],
   "sig": "AgentRegistry\n// save, update, remove  (<registryDir>/<id>.json)\ntype AgentRecord",
   "src": "packages/registrar/src/registry.ts",
   "what": "The agent record and the store behind it.",
   "rules": [
-   "AgentRecord lives in the Registrar. The Landlord and the Keymaster import it from there."
+   "AgentRecord lives in the Registrar. The Property Manager and the Keymaster import it from there."
   ]
  },
  {
@@ -240,8 +240,8 @@
   "from": "auditor",
   "to": [
    "gatekeeper",
-   "landlord",
-   "treasurer",
+   "property-manager",
+   "accountant",
    "bouncer",
    "keymaster",
    "registrar",
@@ -276,32 +276,32 @@
   "name": "GatekeeperIngress",
   "from": "gatekeeper",
   "to": [
-   "landlord"
+   "property-manager"
   ],
   "sig": "createGatekeeperIngress(opts)\n// receive(msg)\n// onAgentStarting(id), onAgentWorking(id),\n// onAgentIdle(id)",
   "src": "packages/gatekeeper/src/ingress/index.ts",
-  "what": "How a message reaches a sleeping agent, and how the Landlord reports the agent’s state back.",
+  "what": "How a message reaches a sleeping agent, and how the Property Manager reports the agent’s state back.",
   "rules": [
    "Discord is an optional mailbox, not a requirement.",
    "The ingress keeps its socket when the agent scales to zero."
   ]
  },
  {
-  "id": "landlord-lifecycle",
+  "id": "property-manager-lifecycle",
   "name": "createRun and the run lifecycle",
-  "from": "landlord",
+  "from": "property-manager",
   "to": [
    "gatekeeper",
    "bouncer",
    "timekeeper"
   ],
-  "sig": "createRun(state: LandlordState, …)\n// finishRun, blockRun, unblockRun, activeRun,\n// deliverToMailbox, resetAgent, applyKillSwitch,\n// reconcileRuns\ntype Runtime  // dockerRuntime, ecsRuntime",
-  "src": "packages/landlord/src/lifecycle.ts",
+  "sig": "createRun(state: PropertyManagerState, …)\n// finishRun, blockRun, unblockRun, activeRun,\n// deliverToMailbox, resetAgent, applyKillSwitch,\n// reconcileRuns\ntype Runtime  // dockerRuntime, ecsRuntime",
+  "src": "packages/property-manager/src/lifecycle.ts",
   "what": "Wake, run and stop an agent. Every wake path goes through createRun.",
   "rules": [
    "Every wake path goes through createRun.",
    "A replayed messageId returns the existing run with 200.",
-   "The functions take LandlordState; the queue pollers and the Timekeeper’s fire take createRun as a callback, so the package never imports the control plane.",
+   "The functions take PropertyManagerState; the queue pollers and the Timekeeper’s fire take createRun as a callback, so the package never imports the control plane.",
    "A conformance test fails on a second copy of these rules."
   ]
  }

@@ -12,7 +12,7 @@ import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { loadCatalog } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { createRun, finishRun, MemoryRunStore, noopRuntime, pollQueueOnce, SYSTEM } from '@beercanlabs/factory-landlord';
+import { createRun, finishRun, MemoryRunStore, noopRuntime, pollQueueOnce, SYSTEM } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';

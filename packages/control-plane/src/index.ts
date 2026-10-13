@@ -13,7 +13,7 @@ import {
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, FactoryState } from './app.js';
-import { activeRun, callbackPolicyFromEnv, checkHealth, createRun, dockerApi, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-landlord';
+import { activeRun, callbackPolicyFromEnv, checkHealth, createRun, dockerApi, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
 import { scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { SpendTracker } from '@beercanlabs/factory-budget';
@@ -26,7 +26,8 @@ import { attachEventStream } from './stream.js';
 import { checkRegistry, migrateConfigs, pruneOrphans } from './config-store.js';
 import { SystemsStore } from './systems.js';
 import { checkFactoryBudgets, createTreasury } from './spend.js';
-import { AwsComputeSource, AwsCostSource } from './aws/treasurer.js';
+import { AwsComputeSource, AwsCostSource } from './aws/accountant.js';
+
 
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
@@ -114,14 +115,14 @@ let deployProvider: DeployProvider | undefined;
 const deployProviderType = process.env.FACTORY_DEPLOY_PROVIDER || (process.env.FACTORY_RUNTIME === 'ecs' ? 'aws' : process.env.FACTORY_RUNTIME === 'cloudrun' ? 'gcp' : undefined);
 if (deployProviderType === 'aws') {
   try {
-    const { awsDeployProvider } = await import('@beercanlabs/factory-landlord/aws/deploy');
+    const { awsDeployProvider } = await import('@beercanlabs/factory-property-manager/aws/deploy');
     deployProvider = awsDeployProvider();
   } catch (err) {
     console.warn('[control-plane] failed to initialize AWS deploy provider:', err);
   }
 } else if (deployProviderType === 'gcp') {
   try {
-    const { gcpDeployProvider } = await import('@beercanlabs/factory-landlord/gcp/deploy');
+    const { gcpDeployProvider } = await import('@beercanlabs/factory-property-manager/gcp/deploy');
     deployProvider = gcpDeployProvider();
   } catch (err) {
     console.warn('[control-plane] failed to initialize GCP deploy provider:', err);
@@ -303,21 +304,21 @@ const schedulesPath = process.env.FACTORY_SCHEDULES_PATH || join(DATA_DIR, 'sche
 const schedules = new ScheduleStore(schedulesPath);
 state.schedules = schedules;
 
-// §6.15 Treasurer: cloud spend, ECS compute inventory, and factory budgets.
+// §6.15 Accountant: cloud spend, ECS compute inventory, and factory budgets.
 const budgetsPath = process.env.FACTORY_BUDGETS_PATH || join(DATA_DIR, 'budgets.json');
-const treasurerRoleArn = process.env.FACTORY_TREASURER_ROLE_ARN;
+const accountantRoleArn = process.env.FACTORY_ACCOUNTANT_ROLE_ARN || process.env.FACTORY_TREASURER_ROLE_ARN;
 const ecsCluster = process.env.FACTORY_ECS_CLUSTER;
 
 let cloudSource: AwsCostSource | undefined;
 let computeSource: AwsComputeSource | undefined;
-if (treasurerRoleArn) {
+if (accountantRoleArn) {
   try {
-    cloudSource = AwsCostSource.fromRole(treasurerRoleArn);
+    cloudSource = AwsCostSource.fromRole(accountantRoleArn);
     if (ecsCluster) {
-      computeSource = AwsComputeSource.fromRole(treasurerRoleArn, ecsCluster);
+      computeSource = AwsComputeSource.fromRole(accountantRoleArn, ecsCluster);
     }
   } catch (err) {
-    console.error(`[control-plane] treasurer initialization failed: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[control-plane] accountant initialization failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 const treasury = createTreasury({ cloud: cloudSource, compute: computeSource, budgetsPath });

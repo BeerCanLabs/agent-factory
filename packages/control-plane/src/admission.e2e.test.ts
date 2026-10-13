@@ -10,11 +10,11 @@ import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { BUILTIN_SYSTEM_AGENTS, checkRepoUrl } from '@beercanlabs/factory-registrar';
-import { AdmissionRefusedError, imageTagFor, MemoryRunStore, noopRuntime, type AdmissionRefusal, type DeployProvider, type SourceRef } from '@beercanlabs/factory-landlord';
+import { AdmissionRefusedError, imageTagFor, MemoryRunStore, noopRuntime, type AdmissionRefusal, type DeployProvider, type SourceRef } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
-import { admissionFailure, buildAgentImage } from '@beercanlabs/factory-landlord/aws/codebuild';
+import { admissionFailure, buildAgentImage } from '@beercanlabs/factory-property-manager/aws/codebuild';
 
 const ADMIN = 'admin-admission-token';
 const REPO = 'https://github.com/BeerCanLabs/SM-donna.git';

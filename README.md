@@ -43,19 +43,19 @@ Agent Factory is architected around **10 canonical services ("The Cast of Charac
 
 3. **Executive (Model Service / Inference Provider):**
    - **Role:** Provides a uniform OpenAI-compatible Chat Completions API (M1), translates calls to model providers (Bedrock today), decides whether an agent may use a model (M2), and counts tokens (E5).
-   - **Contract:** `checkModel` and `offeredModels` (may this agent use this model?), `complete` (serve one call and return the result, a refusal, or the provider's failure), the model catalog and provider adapters; normalizes token usage (`input`, `output`, `cacheRead`, `cacheWrite`) and reports it to the Treasurer for pricing. Lives in `packages/executive`.
+   - **Contract:** `checkModel` and `offeredModels` (may this agent use this model?), `complete` (serve one call and return the result, a refusal, or the provider's failure), the model catalog and provider adapters; normalizes token usage (`input`, `output`, `cacheRead`, `cacheWrite`) and reports it to the Accountant for pricing. Lives in `packages/executive`.
 
-4. **Landlord (Compute & State Lifecycle, Turn Broker):**
+4. **Property Manager (Compute & State Lifecycle, Turn Broker):**
    - **Role:** Property Manager, Compute & State. Manages serverless min=0 compute, wake-from-zero, warm-down windows, operational pause/kill-switches, turn coordination via `/mailbox` long-polling, container runtime state hydration ("The Safe", §6.6), and two-stage retirement (§6.4).
-   - **Contract:** `packages/landlord` exports the run lifecycle (`createRun`, `finishRun`, `applyKillSwitch`, `checkHealth`, `reconcileRuns` and the rest), the run store, the queue pollers, callback delivery, the runtime launchers and the AWS and GCP build, IAM and deploy adapters (`./aws/*`, `./gcp/*`). `packages/hydrate` holds the in-container runtime shim (`shim.ts`, `pullMind`, `pushMind`, `gatekeeperEgressEnv`) that executes inside the agent container as PID 1 to hydrate `$MEMORY_DIR` on wake, sync state on sleep, heartbeat to the control plane, bridge decoupled inputs and outputs, and supervise the worker process. The functions take the part of the control plane's state they use, so the package never imports the control plane. Pre-flight standing verification with the Treasurer runs before every wake. The HTTP wake and run handlers stay in `packages/control-plane` (GAP-133).
+   - **Contract:** `packages/property-manager` exports the run lifecycle (`createRun`, `finishRun`, `applyKillSwitch`, `checkHealth`, `reconcileRuns` and the rest), the run store, the queue pollers, callback delivery, the runtime launchers and the AWS and GCP build, IAM and deploy adapters (`./aws/*`, `./gcp/*`). `packages/hydrate` holds the in-container runtime shim (`shim.ts`, `pullMind`, `pushMind`, `gatekeeperEgressEnv`) that executes inside the agent container as PID 1 to hydrate `$MEMORY_DIR` on wake, sync state on sleep, heartbeat to the control plane, bridge decoupled inputs and outputs, and supervise the worker process. The functions take the part of the control plane's state they use, so the package never imports the control plane. Pre-flight standing verification with the Accountant runs before every wake. The HTTP wake and run handlers stay in `packages/control-plane` (GAP-133).
 
 5. **Auditor (Immutable Ledger):**
    - **Role:** Owns the cryptographic append-only WORM audit trail of runs, spend, credential actions, and perimeter decisions (LG1, LG2).
    - **Contract:** Single-writer leased file ledger with SHA-256 hash chaining, WORM checkpointing (S3 Object Lock / GCS retention), and automated secret and prompt redaction.
 
-6. **Treasurer (Spend Governance & FinOps):**
+6. **Accountant (Spend Governance & FinOps):**
    - **Role:** Spend governance, real-time token pricing, and budget circuit-breakers (E5, M3). Resides in `packages/budget`.
-   - **Contract:** Exposes `checkStanding({ limits, spend, pendingUsd? })` returning `{ inGoodStanding: true }` or `{ inGoodStanding: false, window }`. Gatekeeper-egress checks standing before every model call, and the Landlord checks before waking an agent.
+   - **Contract:** Exposes `checkStanding({ limits, spend, pendingUsd? })` returning `{ inGoodStanding: true }` or `{ inGoodStanding: false, window }`. Gatekeeper-egress checks standing before every model call, and the Property Manager checks before waking an agent.
 
 7. **Bouncer (Governance & Approvals):**
    - **Role:** Intercepts and holds sensitive actions (writes in a person's name, sensitive tools) until explicit human sign-off is granted (E4, E9).
@@ -66,8 +66,8 @@ Agent Factory is architected around **10 canonical services ("The Cast of Charac
    - **Contract:** Agent-scoped `ScheduleStore`, cron evaluation, and scheduled wake dispatch.
 
 9. **Registrar (Admissions & Catalog):**
-   - **Role:** Decides what is admitted and what is recorded about it: the agent record and registry, commit pinning and admission (L3–L4), the skill registry and its checks (SK1–SK5), and the versioned configuration store. It never builds an image or serves a request; the Landlord builds, and the control plane's handlers meet the request.
-   - **Contract:** `packages/registrar` exports the agent record and registry store, `pinSource` and `admit` (a source and the Landlord's build callback in, admitted or refused out; it changes no record and cannot deploy), the skill registry, and the configuration store (`VersionedConfigStore`, `configHash`). A new commit alerting an admin, who admits it before it is deployed (L5), is on the roadmap in `docs/registrar-roadmap.md`.
+   - **Role:** Decides what is admitted and what is recorded about it: the agent record and registry, commit pinning and admission (L3–L4), the skill registry and its checks (SK1–SK5), and the versioned configuration store. It never builds an image or serves a request; the Property Manager builds, and the control plane's handlers meet the request.
+   - **Contract:** `packages/registrar` exports the agent record and registry store, `pinSource` and `admit` (a source and the Property Manager's build callback in, admitted or refused out; it changes no record and cannot deploy), the skill registry, and the configuration store (`VersionedConfigStore`, `configHash`). A new commit alerting an admin, who admits it before it is deployed (L5), is on the roadmap in `docs/registrar-roadmap.md`.
 
 10. **Inspector (Observability, Telemetry & Triage):**
     - **Role:** Watches the factory and says what it sees: emits live run progress and event streams (e.g., `discord-progress`, the WebSocket stream, the enterprise bus), registers the headless run metrics instruments, writes prompt traces, and derives the triage incident list (`/api/v1/triage`). It decides nothing, and the HTTP handlers stay in the control plane. Routing crash diagnostics to an alerting tool is not built (GAP-107).

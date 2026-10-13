@@ -1,7 +1,7 @@
 import type http from 'node:http';
 import { PROGRESS_MAX_WAIT_MS } from '@beercanlabs/factory-inspector';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
-import { isTerminal } from '@beercanlabs/factory-landlord';
+import { isTerminal } from '@beercanlabs/factory-property-manager';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 
 function bearer(req: http.IncomingMessage): string | undefined {

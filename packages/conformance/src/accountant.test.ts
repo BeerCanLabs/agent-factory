@@ -1,4 +1,4 @@
-// DESIGN_AUTHORITY.md §6.15 (Treasurer), GAP-083: the budget rule exists once, in packages/budget.
+// DESIGN_AUTHORITY.md §6.15 (Accountant), GAP-083: the budget rule exists once, in packages/budget.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { files, read } from './support.js';
@@ -12,7 +12,7 @@ const SPEND_VERSUS_LIMIT = [
 
 const comparisons = (src: string) => src.split('\n').flatMap((line, i) => (SPEND_VERSUS_LIMIT.some((re) => re.test(line)) ? [`${i + 1}: ${line.trim()}`] : []));
 
-describe('Treasurer: one copy of the budget rule', () => {
+describe('Accountant: one copy of the budget rule', () => {
   it('the pattern recognizes the comparisons it exists to forbid', () => {
     assert.equal(comparisons('if (spend.day >= policy.budgetUsd.perDay) return "perDay";').length, 1);
     assert.equal(comparisons('const over = limits.perMonth <= s.month;').length, 1);
@@ -25,6 +25,6 @@ describe('Treasurer: one copy of the budget rule', () => {
     const found = files('packages', (p) => /^packages\/(gatekeeper|control-plane)\/src\/.*\.ts$/.test(p) && !p.endsWith('.test.ts')).flatMap((f) =>
       comparisons(read(f)).map((c) => `${f}:${c}`),
     );
-    assert.deepEqual(found, [], 'ask the Treasurer: call checkStanding or exceededWindow from @beercanlabs/factory-budget');
+    assert.deepEqual(found, [], 'ask the Accountant: call checkStanding or exceededWindow from @beercanlabs/factory-budget');
   });
 });

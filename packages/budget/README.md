@@ -1,6 +1,6 @@
-# Treasurer (`@beercanlabs/factory-budget`)
+# Accountant (`@beercanlabs/factory-budget`)
 
-The Treasurer decides whether an agent is inside its budget. Nothing else in the Factory holds that rule.
+The Accountant decides whether an agent is inside its budget. Nothing else in the Factory holds that rule.
 
 - `exceededWindow(limits, spend)`: the first window whose spend is at or over its limit, in the order `perRun`, `perDay`, `perMonth`. An unset limit is not enforced; no `limits` means not over budget.
 - `checkStanding({ limits, spend, pendingUsd? })`: the contract callers use. Returns `{ inGoodStanding: true }` or `{ inGoodStanding: false, window }`. `pendingUsd` is spend metered but not yet acknowledged by the control plane and counts toward all three windows.
@@ -14,4 +14,5 @@ Who asks, and who acts on the answer:
 - The control plane asks on ledger ingest and on a policy update (`budget.alert`, `BLOCKED_BUDGET_EXCEEDED`), and `createRun` asks before every wake and refuses with 402 `budget_exceeded` (a queued message stays in the queue; no ledger row is written for it).
 - Built-in agents are exempt at the callers.
 
-`packages/conformance/src/treasurer.test.ts` fails if `gatekeeper-egress` or `control-plane` source compares spend with a limit itself.
+`packages/conformance/src/accountant.test.ts` fails if `gatekeeper-egress` or `control-plane` source compares spend with a limit itself.
+

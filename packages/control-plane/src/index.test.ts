@@ -12,7 +12,7 @@ import { bearerAuth } from '@beercanlabs/factory-auth';
 import { pullMind, pushMind } from '@beercanlabs/factory-hydrate';
 import { loadCatalog } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, FactoryState, handleMcp } from './app.js';
-import { checkCallbackUrl, checkHealth, deliverCallback, FileRunStore, MemoryRunStore, noopRuntime, reconcileRuns, RunTokens, type Run, type Runtime } from '@beercanlabs/factory-landlord';
+import { checkCallbackUrl, checkHealth, deliverCallback, FileRunStore, MemoryRunStore, noopRuntime, reconcileRuns, RunTokens, type Run, type Runtime } from '@beercanlabs/factory-property-manager';
 import { factoryMetrics } from '@beercanlabs/factory-inspector';
 import { AggregationTemporality, InMemoryMetricExporter, MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { ScheduleStore } from '@beercanlabs/factory-timekeeper';

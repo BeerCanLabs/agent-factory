@@ -2,9 +2,9 @@
 // launched with when an agent has adopted skills. An agent with none must be exactly what it was before skills existed.
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_SKILLS_ENV_CHARS, buildAgentImage, skillsEnv } from '@beercanlabs/factory-landlord/aws/codebuild';
-import { agentEnvironment } from '@beercanlabs/factory-landlord/aws/ecs';
-import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, imageTagFor, skillsHash, type BuildSkill } from '@beercanlabs/factory-landlord';
+import { MAX_SKILLS_ENV_CHARS, buildAgentImage, skillsEnv } from '@beercanlabs/factory-property-manager/aws/codebuild';
+import { agentEnvironment } from '@beercanlabs/factory-property-manager/aws/ecs';
+import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, imageTagFor, skillsHash, type BuildSkill } from '@beercanlabs/factory-property-manager';
 
 const C = 'a'.repeat(40);
 const S1: BuildSkill = { id: 'tavily-search', version: '0.1.0', repo: 'https://github.com/BeerCanLabs/skill-tavily-search', path: '.', commit: '1'.repeat(40) };

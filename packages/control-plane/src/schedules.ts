@@ -14,7 +14,7 @@ import { authorize, authorizeIngress, type AuthenticatedCaller } from '@beercanl
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { DEFAULT_TIMEZONE, cronIssue, isTimeZone, type ScheduledAction, type ScheduleRequester } from '@beercanlabs/factory-timekeeper';
 import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
-import { isTerminal, SYSTEM, type Run } from '@beercanlabs/factory-landlord';
+import { isTerminal, SYSTEM, type Run } from '@beercanlabs/factory-property-manager';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { ownersOf } from './config-store.js';
 

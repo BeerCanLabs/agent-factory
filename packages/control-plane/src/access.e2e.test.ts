@@ -8,7 +8,7 @@ import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, cloudflareAccessAuth } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { BUILTIN_SYSTEM_AGENTS } from '@beercanlabs/factory-registrar';
-import { MemoryRunStore, noopRuntime, RunTokens } from '@beercanlabs/factory-landlord';
+import { MemoryRunStore, noopRuntime, RunTokens } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';

@@ -180,20 +180,20 @@ resource "aws_iam_role_policy" "control_plane" {
         Resource = "arn:aws:sqs:${var.aws_region}:${var.account_id}:${local.name}-*"
       },
       {
-        Sid      = "AssumeTreasurerRole"
+        Sid      = "AssumeAccountantRole"
         Effect   = "Allow"
         Action   = ["sts:AssumeRole"]
-        Resource = aws_iam_role.treasurer.arn
+        Resource = aws_iam_role.accountant.arn
       },
       local.telemetry_statement,
     ]
   })
 }
 
-# §6.15 Treasurer: read-only access to Cost Explorer and ECS inventory.
+# §6.15 Accountant: read-only access to Cost Explorer and ECS inventory.
 # The control plane assumes this role; agents never hold credentials or reach Cost Explorer directly.
-resource "aws_iam_role" "treasurer" {
-  name = "${local.name}-treasurer"
+resource "aws_iam_role" "accountant" {
+  name = "${local.name}-accountant"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -208,9 +208,9 @@ resource "aws_iam_role" "treasurer" {
   })
 }
 
-resource "aws_iam_role_policy" "treasurer" {
-  name = "treasurer"
-  role = aws_iam_role.treasurer.id
+resource "aws_iam_role_policy" "accountant" {
+  name = "accountant"
+  role = aws_iam_role.accountant.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
