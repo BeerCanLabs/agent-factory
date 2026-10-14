@@ -56,4 +56,53 @@
         2.  **Factory Contract & Shim Validator:** Once standardized across all agent engines, `@beercanlabs/factory-contract` provides the shared schema for `cartridge.yaml`, and the standard runtime shims enforce the matrix.
 *   **Status:** Queued on backlog.
 
+## Decoupled Tasks & Schedules (Archetype-Aware Multi-User Timekeeping)
+*   **Feature:** Architectural decoupling of scheduled agent activities into four explicit primitives—**Task**, **Schedule**, **Executor**, and **Commissioner**—enabling robust multi-user collaboration, project-level autonomy on Type 3 workspace agents, and lifecycle resilience when individual users depart.
+*   **Context & Core Problem:**
+    *   Currently, `@beercanlabs/factory-timekeeper` and `packages/control-plane/src/schedules.ts` conflate what to do, when to do it, who runs it, and who asked for it into a single flat struct: `ScheduledAction`.
+    *   Under E12 / TSK-177 / GAP-131, every schedule is bound 1:1 to a single `requestedBy` identity. When the schedule fires, `scheduleRunOptions` resolves that specific person's current roles and identity link.
+    *   **The Breakdown on Type 3 (Workspace / Team Agents, e.g., Switch, Archie):**
+        1.  *User Exits / Deprovisioning:* If an engineer (e.g., Aiden) sets up a nightly vulnerability scan or CI dependency audit for Project X, and later leaves the company or has their link revoked, the scheduled run silently halts (`SCHEDULE_SKIPPED_UNAUTHORIZED`). The automation belonged to the project/team, but was killed by an individual's departure.
+        2.  *Multi-User Mutability:* Peer collaborators (e.g., Dale) cannot edit the cron, update the prompt, or cancel the schedule through the agent because `canModifySchedule` enforces creator-only access (`requestersEqual`), returning 404/403 to other teammates.
+        3.  *Budget Misattribution:* The scheduled run burns the ex-employee's personal actor budget ceiling (GAP-118 / TSK-146) instead of the project or agent workspace budget.
+    *   **The Breakdown on Type 2 (Episodic / Principal + Collaborator Agents, e.g., Donna, Castle):**
+        1.  *Personal vs. Shared Disambiguation:* An episodic agent has a single Primary (Owner) and optional secondary users (Family, Collaborators). A task scheduled by a secondary user in a shared channel (e.g., household trash reminder) silently dies if the secondary user exits, leaving the Primary with no visibility or adoption path.
+*   **The 4 Core Architectural Elements:**
+    1.  **The Task** (*What to do*):
+        *   The specification of the intent, prompt, parameters, delivery channel/surface, and execution payload.
+        *   Carries an explicit **Scope** defining its boundary and beneficiary:
+            *   `personal`: Bound to a single user's private episodic partition (Type 2).
+            *   `project`: Bound to a workspace project / repository (Type 3).
+            *   `channel`: Bound to a shared communication surface / channel (Type 2 collaborative).
+    2.  **The Schedule** (*When to do it*):
+        *   The temporal rules: cron expression, time zone, recurrence interval, enabled/disabled state, and last-run / next-due calculation.
+        *   **Owned strictly by Timekeeper**: Timekeeper evaluates clock ticks against active schedules and signals the factory when an action is due. It has zero awareness of task semantics, agent prompts, or user permissions.
+    3.  **The Executor** (*Who performs it*):
+        *   The designated Agent cartridge (`agentId`) that executes the work inside an isolated container.
+        *   **Owned by Property Manager**: Property Manager wakes the container, applies memory hydration/checkpointing (§6.6), and supervises execution.
+    4.  **The Commissioner** (*On whose behalf*):
+        *   The stakeholder or entity authorizing and commissioning the work:
+            *   *Provenance / Audit:* `createdBy` (immutable record of the human caller who initiated the schedule).
+            *   *Execution Authority:* Resolved based on the Task's **Scope**:
+                *   *Project Scope:* Runs under **Project / Agent Authority** (`system` / `SCHEDULER_BADGE` scoped to the agent's declared skills). Survives individual user departures.
+                *   *Channel Scope:* Runs under the creator's authority while active; if the secondary user departs/deprovisions, falls back to the Primary (`agent-owner`) authority so shared channel automation is not abruptly broken.
+                *   *Personal Scope:* Runs strictly under the creator's authority; if the user departs, the schedule terminates.
+*   **Proposed Technical Architecture:**
+    1.  **Contract & Timekeeper Types (`packages/timekeeper/src/schedules.ts`):**
+        *   Enrich `ScheduledAction` with structured `task: { prompt, name, scope, channelId? }` and `schedule: { cron, timezone, enabled }`, while maintaining flat backward-compatible property accessors.
+        *   Add `TaskScope = { kind: 'personal'; userId: string } | { kind: 'project'; projectId: string } | { kind: 'channel'; channelId: string }`.
+    2.  **Control Plane & Authority Resolution (`packages/control-plane/src/schedules.ts`):**
+        *   Update `scheduleRunOptions`:
+            *   If `scope.kind === 'project'`: Issue `SCHEDULER_BADGE` with agent's project authority regardless of whether the original creator is currently active.
+            *   If `scope.kind === 'channel'`: Resolve creator link; if invalid, fall back to the agent's `owners` (`agent-owner`) and ledger `SCHEDULE_ADOPTION_FALLBACK`.
+            *   If `scope.kind === 'personal'`: Preserve strict E12 check; skip if creator is inactive.
+        *   Update `canModifySchedule`:
+            *   Allow any caller holding `agent-member`, `operator`, or `owner` on the agent to edit/delete `project`-scoped tasks.
+            *   Allow creator and `agent-owner` to edit/delete `channel`-scoped tasks.
+            *   Restrict `personal`-scoped tasks to creator and `agent-owner`.
+    3.  **Audit Ledger (`packages/ledger`):**
+        *   Record `scope` and `commissioner` in `SCHEDULE_CREATED`, `SCHEDULE_UPDATED`, and `SCHEDULE_DELETED` hashes without exposing prompt content (E3).
+*   **Status:** Queued on backlog (registered in `DESIGN_AUTHORITY.md` as GAP-146, TSK-202).
+
+
 
