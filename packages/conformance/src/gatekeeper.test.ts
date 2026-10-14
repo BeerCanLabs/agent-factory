@@ -15,9 +15,10 @@ import { files, read } from './support.js';
 //  - It does NOT guard the HTTP handlers that call the Gatekeeper (`authenticateRun`, the identity-links and policy
 //    routes in `control-plane`): the Bouncer's privileges and the Auditor's ledger rows meet a request there (GAP-133).
 //  - It does NOT guard the identity-link store: it is in `packages/bouncer` (GAP-136).
-//  - It allows ONE place outside the Gatekeeper to verify a run token itself: the Keymaster's checkout
-//    (`packages/keymaster/src/keymaster.ts`, GAP-137). It cannot use the contract: the Gatekeeper depends on the Keymaster
-//    (the sign-in link rule), so the reverse would be a cycle. The exemption is named below; adding another needs a gap.
+//  - It allows NO place outside the Gatekeeper to verify a run token itself. The Keymaster used to (GAP-137, TSK-204): it
+//    could not use the contract, because the Gatekeeper depends on the Keymaster (the sign-in link rule), so the reverse
+//    would be a cycle. Its check was removed instead; the caller verifies the run before it asks the Keymaster.
+//    The list below is empty; adding to it needs a gap.
 
 /** Names the Gatekeeper owns. A definition of any of them outside the package is a second copy. */
 const OWNED_VALUES = [
@@ -29,8 +30,8 @@ const OWNED_VALUES = [
   'createGatekeeperEgress', 'createGatekeeperIngress',
 ].join('|');
 
-/** Where a run token may be checked outside the Gatekeeper, and why (GAP-137). Nowhere else. */
-const RUN_TOKEN_EXCEPTIONS = ['packages/keymaster/src/keymaster.ts'];
+/** Where a run token may be checked outside the Gatekeeper, and why. Nowhere (GAP-137 removed the Keymaster's). */
+const RUN_TOKEN_EXCEPTIONS: string[] = [];
 
 /** A second copy of the Gatekeeper's code: a definition of a name it owns, or a run token checked by hand. Never a use. */
 const SECOND_COPY: Array<{ what: string; re: RegExp }> = [
@@ -109,12 +110,6 @@ describe('Gatekeeper: one copy of the perimeter rules, and the dependency points
       matches(read(f), SECOND_COPY).map((m) => `${f}:${m}`),
     );
     assert.deepEqual(found, [], 'use the Gatekeeper through its entry points (@beercanlabs/factory-gatekeeper, /policy, /run-token), do not write the rule again');
-  });
-
-  it('the named exception still checks a run token by hand (when it stops, remove it from the list and close GAP-137)', () => {
-    for (const p of RUN_TOKEN_EXCEPTIONS) {
-      assert.ok(matches(read(p), SECOND_COPY).length >= 1, `${p} no longer verifies a run token itself; remove it from RUN_TOKEN_EXCEPTIONS`);
-    }
   });
 
   it('the Gatekeeper imports no caller and no member above the perimeter (one-way dependency)', () => {
