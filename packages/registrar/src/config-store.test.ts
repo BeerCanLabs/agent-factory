@@ -181,6 +181,38 @@ describe('S3 configuration store (AWS CLI, no SDK)', () => {
     await assert.rejects(store.put(content(), meta), /PreconditionFailed/);
     assert.equal(store.current('ada'), undefined);
   });
+
+  it('retries transient s3 sync failures during loadAll before succeeding or raising', async () => {
+    const v1: ConfigRecord = { ...content(), version: 1, updatedAt: 't1', updatedBy: 'admin', reason: 'r', hash: configHash(content()) };
+    let attempts = 0;
+    const backend = new S3ConfigBackend(
+      's3://factory-config/config',
+      async (args) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('Command failed: aws s3 sync s3://factory-config/config/');
+        const dest = args[3];
+        mkdirSync(join(dest, 'ada'), { recursive: true });
+        writeFileSync(join(dest, 'ada', '1.json'), JSON.stringify(v1));
+        return '';
+      },
+      { maxAttempts: 3, retryDelayMs: 1 },
+    );
+    const store = await VersionedConfigStore.open(backend);
+    assert.equal(attempts, 2);
+    assert.deepEqual(store.current('ada'), v1);
+
+    let failAttempts = 0;
+    const alwaysFails = new S3ConfigBackend(
+      's3://factory-config/config',
+      async () => {
+        failAttempts += 1;
+        throw new Error('persistent s3 sync failure');
+      },
+      { maxAttempts: 2, retryDelayMs: 1 },
+    );
+    await assert.rejects(VersionedConfigStore.open(alwaysFails), /persistent s3 sync failure/);
+    assert.equal(failAttempts, 2);
+  });
 });
 
 describe('FACTORY_CONFIG_STORE_URI', () => {

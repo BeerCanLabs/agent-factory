@@ -226,13 +226,17 @@ export class S3ConfigBackend implements ConfigBackend {
   private readonly bucket: string;
   private readonly prefix: string;
   private readonly cli: AwsCli;
+  private readonly maxAttempts: number;
+  private readonly retryDelayMs: number;
 
-  constructor(uri: string, cli?: AwsCli) {
+  constructor(uri: string, cli?: AwsCli, options?: { maxAttempts?: number; retryDelayMs?: number }) {
     const m = uri.match(/^s3:\/\/([^/]+)\/?(.*)$/);
     if (!m) throw new Error(`not an s3:// uri: ${uri}`);
     this.bucket = m[1];
     this.prefix = m[2] ? `${m[2].replace(/\/+$/, '')}/` : '';
     this.description = `s3://${this.bucket}/${this.prefix}`;
+    this.maxAttempts = Math.max(1, options?.maxAttempts ?? 3);
+    this.retryDelayMs = Math.max(0, options?.retryDelayMs ?? 1000);
     this.cli =
       cli ??
       (async (args) => {
@@ -242,13 +246,22 @@ export class S3ConfigBackend implements ConfigBackend {
   }
 
   async loadAll(): Promise<ConfigRecord[]> {
-    const dir = mkdtempSync(join(tmpdir(), 'config-store-'));
-    try {
-      await this.cli(['s3', 'sync', `s3://${this.bucket}/${this.prefix}`, dir, '--only-show-errors', '--no-progress']);
-      return readTree(dir);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      const dir = mkdtempSync(join(tmpdir(), 'config-store-'));
+      try {
+        await this.cli(['s3', 'sync', `s3://${this.bucket}/${this.prefix}`, dir, '--only-show-errors', '--no-progress']);
+        return readTree(dir);
+      } catch (err) {
+        lastErr = err;
+        if (attempt < this.maxAttempts && this.retryDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs * 2 ** (attempt - 1)));
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
+    throw lastErr;
   }
 
   async write(record: ConfigRecord): Promise<void> {
