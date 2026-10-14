@@ -1,14 +1,14 @@
 {
  "depts": [
   "Front desk",
-  "Money and models",
+  "Models and Money",
   "Keys and secrets",
   "Operations",
   "Records"
  ],
  "deptNotes": {
   "Front desk": "who gets in and what they may do",
-  "Money and models": "what an agent may use and what it costs",
+  "Models and Money": "what an agent may use and what it costs",
   "Keys and secrets": "the credentials agents never hold",
   "Operations": "compute, time and memory",
   "Records": "what is admitted, written down and watched"
@@ -282,7 +282,7 @@
    "id": "executive",
    "name": "Executive",
    "title": "Chief of Model Access",
-   "dept": "Money and models",
+   "dept": "Models and Money",
    "art": {
     "skin": "#E0B08C",
     "hair": "#6D6D73",
@@ -594,7 +594,7 @@
    "id": "accountant",
    "name": "Accountant",
    "title": "Accountant",
-   "dept": "Money and models",
+   "dept": "Models and Money",
    "art": {
     "skin": "#9C6B4E",
     "hair": "#222",
