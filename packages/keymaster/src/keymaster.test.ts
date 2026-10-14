@@ -5,7 +5,6 @@ import type { Approval } from '@beercanlabs/factory-bouncer';
 import { Keymaster, type ApprovalConsumer } from './keymaster.js';
 import { MemoryLedger, payloadHash } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
-import { RunTokens } from '@beercanlabs/factory-auth';
 
 class MockApprovalStore implements ApprovalConsumer {
   private approvals = new Map<string, Approval>();
@@ -36,8 +35,6 @@ describe('Keymaster Subsystem', () => {
   it('unconsumed approval produces ephemeral lease and writes zero-knowledge transaction to ledger', async () => {
     const ledger = new MemoryLedger();
     const approvals = new MockApprovalStore();
-    const runTokens = new RunTokens(undefined);
-
     const approval: Approval = {
       approvalId: 'app-1',
       runId: 'run-1',
@@ -52,13 +49,10 @@ describe('Keymaster Subsystem', () => {
     };
     approvals.add(approval);
 
-    const token = await runTokens.mint({ runId: 'run-1', agentId: 'agent-1' });
-
     const keymaster = new Keymaster({
       approvals,
       ledger,
       providers: [provider],
-      runTokens,
       getAgent: () => ({ id: 'agent-1', gated: [secretKey], ungated: ['UNGATED_SECRET'] }),
       getRun: () => ({ runId: 'run-1', agentId: 'agent-1', state: 'RUNNING' }),
     });
@@ -69,7 +63,6 @@ describe('Keymaster Subsystem', () => {
       gatedSecret: secretKey,
       turnId: 'turn-42',
       proofHash: approval.argsSha256,
-      runToken: token,
     });
 
     assert.equal(result.ok, true);
@@ -249,42 +242,6 @@ describe('Keymaster Subsystem', () => {
     assert.equal(badHash.ok, false);
     assert.equal(badHash.status, 403);
     assert.equal(badHash.error, 'proof_hash_mismatch');
-  });
-
-  it('rejects unauthenticated requests when runToken is invalid', async () => {
-    const ledger = new MemoryLedger();
-    const approvals = new MockApprovalStore();
-    const runTokens = new RunTokens(undefined);
-
-    approvals.add({
-      approvalId: 'app-auth',
-      runId: 'run-1',
-      agentId: 'agent-1',
-      route: 'keymaster',
-      tool: 'checkout',
-      argsSha256: 'h',
-      state: 'approved',
-      requestedAt: new Date().toISOString(),
-    });
-
-    const keymaster = new Keymaster({
-      approvals,
-      ledger,
-      providers: [provider],
-      runTokens,
-    });
-
-    const result = await keymaster.checkout({
-      runId: 'run-1',
-      approvalId: 'app-auth',
-      gatedSecret: secretKey,
-      turnId: 'turn-1',
-      runToken: 'invalid-token-here',
-    });
-
-    assert.equal(result.ok, false);
-    assert.equal(result.status, 401);
-    assert.equal(result.error, 'invalid_run_token');
   });
 
   it('rejects checkout of secrets not classified as gated', async () => {

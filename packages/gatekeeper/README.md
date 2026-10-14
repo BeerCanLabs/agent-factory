@@ -11,6 +11,6 @@ It holds:
 
 The entry points are the root and those two subpaths, nothing deeper (D1). The control plane loads the subpaths, not the egress server.
 
-`packages/auth` (`RunTokens`, the roles, the auth providers) stays its own package, hosted by the Gatekeeper. The HTTP handlers that call the Gatekeeper stay in `control-plane` (GAP-133). The identity-link store is in `packages/bouncer` today (GAP-136, open), and the Keymaster verifies a run token itself (GAP-137).
+`packages/auth` (`RunTokens`, the roles, the auth providers) stays its own package, hosted by the Gatekeeper. The HTTP handlers that call the Gatekeeper stay in `control-plane` (GAP-133). The identity-link store is the Bouncer's, in `packages/bouncer` (GAP-136, decided). The Keymaster no longer verifies a run token itself (GAP-137 part 1, TSK-204); its `getRun` check is part 2, still open.
 
 The dependency points one way: the control plane depends on the Gatekeeper; the Gatekeeper depends on the Treasurer, Bouncer, Executive, Inspector, Keymaster, Registrar and Auditor packages and never imports the control plane, the Landlord, the Timekeeper or the console. A conformance test (`packages/conformance/src/gatekeeper.test.ts`) fails on a second copy of these rules, on a run token verified by hand elsewhere, or on a back-dependency.

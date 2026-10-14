@@ -473,7 +473,6 @@ export function getKeymaster(state: FactoryState): Keymaster {
       approvals: state.approvals,
       ledger: state.ledger,
       providers: state.providers,
-      runTokens: state.runTokens,
       secretValues: state.secretValues,
       getAgent: (agentId: string) => state.agents.get(agentId),
       getRun: (runId: string) => state.runs.get(runId),
