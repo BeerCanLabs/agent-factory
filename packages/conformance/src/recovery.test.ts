@@ -10,4 +10,16 @@ describe('R1 the factory state is recoverable', () => {
     assert.match(policy, /file_system_id\s*=\s*aws_efs_file_system\.ledger\.id/, 'the backup policy covers the control plane volume');
     assert.match(policy, /status\s*=\s*"ENABLED"/, 'automatic backups are enabled');
   });
+
+  it('the GCP landing zone versions the state and config buckets and mounts the state bucket at /data', () => {
+    const storage = read('landing-zones/gcp/storage.tf');
+    for (const bucket of ['state', 'config']) {
+      const block = storage.match(new RegExp(`resource "google_storage_bucket" "${bucket}" \\{[\\s\\S]*?\\n\\}`))?.[0] ?? '';
+      assert.ok(block, `google_storage_bucket.${bucket} not found`);
+      assert.match(block, /versioning\s*\{\s*enabled\s*=\s*true\s*\}/);
+    }
+    const cr = read('landing-zones/gcp/cloud_run.tf');
+    assert.match(cr, /bucket\s*=\s*google_storage_bucket\.state\.name/);
+    assert.match(cr, /mount_path\s*=\s*"\/data"/);
+  });
 });

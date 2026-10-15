@@ -143,3 +143,121 @@ describe('bedrock-converse adapter', () => {
     await fails(adapter(down).complete(ENTRY, REQ), 502, 'upstream_unreachable');
   });
 });
+
+describe('Vertex AI and API-key model adapters (M1–M3)', () => {
+  const REQ: ChatRequest = {
+    messages: [
+      { role: 'system', content: 'You are helpful.' },
+      { role: 'user', content: 'Say hi.' },
+    ],
+    maxTokens: 128,
+  };
+
+  it('vertexGemini translates OpenAI ChatRequest to generateContent and maps usageMetadata', async () => {
+    const { vertexGemini } = await import('./models.js');
+    let calledUrl = '';
+    let sentBody: unknown;
+    const adapter = vertexGemini({
+      project: 'gcp-proj-1',
+      accessToken: async () => 'ya29-vertex',
+      endpoint: (r) => `https://${r}.vertex.test`,
+      fetch: (async (url: string, init: RequestInit) => {
+        calledUrl = String(url);
+        sentBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            candidates: [{ content: { parts: [{ text: 'Hello from Gemini!' }] }, finishReason: 'STOP' }],
+            usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 4 },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    const res = await adapter.complete({ provider: 'vertex-ai', id: 'gemini-2.5-pro', region: 'us-central1' }, REQ);
+    assert.deepEqual(res, { content: 'Hello from Gemini!', finishReason: 'stop', usage: { input: 9, output: 4 } });
+    assert.equal(calledUrl, 'https://us-central1.vertex.test/v1/projects/gcp-proj-1/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent');
+    assert.deepEqual(sentBody, {
+      contents: [{ role: 'user', parts: [{ text: 'Say hi.' }] }],
+      systemInstruction: { parts: [{ text: 'You are helpful.' }] },
+      generationConfig: { maxOutputTokens: 128 },
+    });
+  });
+
+  it('vertexAnthropic calls rawPredict with vertex-2023-10-16 and maps Anthropic usage', async () => {
+    const { vertexAnthropic } = await import('./models.js');
+    let calledUrl = '';
+    const adapter = vertexAnthropic({
+      project: 'gcp-proj-1',
+      accessToken: async () => 'ya29-vertex',
+      endpoint: (r) => `https://${r}.vertex.test`,
+      fetch: (async (url: string) => {
+        calledUrl = String(url);
+        return new Response(
+          JSON.stringify({
+            content: [{ type: 'text', text: 'Hello from Vertex Claude!' }],
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 11, output_tokens: 5 },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    const res = await adapter.complete({ provider: 'vertex-anthropic', id: 'claude-sonnet-4-5@20250929', region: 'us-east5' }, REQ);
+    assert.deepEqual(res, { content: 'Hello from Vertex Claude!', finishReason: 'stop', usage: { input: 11, output: 5 } });
+    assert.equal(calledUrl, 'https://us-east5.vertex.test/v1/projects/gcp-proj-1/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-5%4020250929:rawPredict');
+  });
+
+  it('anthropicMessages and openAiCompatible adapters call direct provider endpoints with API keys', async () => {
+    const { anthropicMessages, openAiCompatible, defaultModelAdapters } = await import('./models.js');
+    const claude = anthropicMessages({
+      apiKey: async () => 'sk-ant-test',
+      endpoint: 'https://anthropic.test',
+      fetch: (async (_url: string, init: RequestInit) => {
+        const h = init.headers as Record<string, string>;
+        assert.equal(h['x-api-key'], 'sk-ant-test');
+        return new Response(
+          JSON.stringify({
+            content: [{ type: 'text', text: 'Direct Claude' }],
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 7, output_tokens: 2 },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+    assert.deepEqual(await claude.complete({ provider: 'anthropic', id: 'claude-sonnet-4-5' }, REQ), {
+      content: 'Direct Claude',
+      finishReason: 'stop',
+      usage: { input: 7, output: 2 },
+    });
+
+    const grok = openAiCompatible({
+      apiKey: async () => 'xai-test',
+      endpoint: 'https://xai.test',
+      fetch: (async (_url: string, init: RequestInit) => {
+        const h = init.headers as Record<string, string>;
+        assert.equal(h['Authorization'], 'Bearer xai-test');
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'Direct Grok' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 8, completion_tokens: 3 },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+    assert.deepEqual(await grok.complete({ provider: 'xai', id: 'grok-4' }, REQ), {
+      content: 'Direct Grok',
+      finishReason: 'stop',
+      usage: { input: 8, output: 3 },
+    });
+
+    const defaults = defaultModelAdapters();
+    for (const key of ['bedrock-converse', 'vertex-ai', 'vertex-gemini', 'vertex-anthropic', 'anthropic', 'openai', 'xai']) {
+      assert.ok(defaults[key], `defaultModelAdapters includes ${key}`);
+    }
+  });
+});
+

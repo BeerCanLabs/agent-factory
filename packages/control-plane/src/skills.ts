@@ -77,14 +77,22 @@ import {
  * configured. The CodeBuild checker is loaded only when selected, so the kernel does not load a cloud SDK otherwise.
  */
 export async function skillCheckerFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<SkillChecker | undefined> {
-  const provider = env.FACTORY_DEPLOY_PROVIDER || (env.FACTORY_RUNTIME === 'ecs' ? 'aws' : undefined);
-  const kind = env.FACTORY_SKILL_CHECKER || (provider === 'aws' ? 'codebuild' : 'none');
+  const provider =
+    env.FACTORY_DEPLOY_PROVIDER ||
+    (env.FACTORY_RUNTIME === 'ecs' ? 'aws' : env.FACTORY_RUNTIME === 'cloudrun' ? 'gcp' : undefined);
+  const kind =
+    env.FACTORY_SKILL_CHECKER ||
+    (provider === 'aws' ? 'codebuild' : provider === 'gcp' ? 'cloudbuild' : 'none');
   if (kind === 'codebuild') {
     const { codeBuildSkillChecker } = await import('./aws/skill-checker.js');
     return codeBuildSkillChecker();
   }
+  if (kind === 'cloudbuild') {
+    const { cloudBuildSkillChecker } = await import('./gcp/skill-checker.js');
+    return cloudBuildSkillChecker();
+  }
   if (kind === 'local') return localSkillChecker();
-  if (kind !== 'none') console.warn(`[control-plane] FACTORY_SKILL_CHECKER=${kind} is not a checker (codebuild, local, none); skill checks are off`);
+  if (kind !== 'none') console.warn(`[control-plane] FACTORY_SKILL_CHECKER=${kind} is not a checker (codebuild, cloudbuild, local, none); skill checks are off`);
   return undefined;
 }
 

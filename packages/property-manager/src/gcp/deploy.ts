@@ -1,20 +1,12 @@
-import { AdmissionRefusedError, type DeployProvider, type SourceRef } from '../runtime.js';
+import type { BuildSkill, DeployProvider, SourceRef } from '../runtime.js';
+import { buildAgentImage } from './cloudbuild.js';
 import { provisionAgentServiceAccount } from './iam.js';
 import { registerAgentJob } from './cloudrun.js';
 
 export function gcpDeployProvider(): DeployProvider {
   return {
-    /**
-     * Not implemented: the Cloud Build admission build does not yet run the agent's tests (L3), so this provider
-     * admits nothing. `buildAgentImage` in ./cloudbuild.ts builds the pinned commit but is not an admission gate.
-     */
-    // Takes no `skills` argument because it refuses every build (SK4). If GCP gains a build it must accept the skills and
-    // put them in the image, or refuse them: a provider must never build an agent without the skills it has adopted.
-    async buildImage(agentId: string, source: SourceRef): Promise<string> {
-      throw new AdmissionRefusedError(
-        'not_supported',
-        `GCP admission build for ${agentId}@${source.commit} is not implemented: Cloud Build does not run the agent's tests yet`,
-      );
+    async buildImage(agentId: string, source: SourceRef, skills?: BuildSkill[]): Promise<string> {
+      return buildAgentImage(agentId, source, { skills });
     },
 
     async provisionIdentity(agentId: string, secrets: string[]): Promise<{ identity: string; executionIdentity?: string }> {
@@ -27,8 +19,11 @@ export function gcpDeployProvider(): DeployProvider {
       imageUri: string,
       secrets: string[],
       identity: string,
+      _executionIdentity?: string,
+      memoryPrefix?: string,
+      launchEnv?: Record<string, string>,
     ): Promise<void> {
-      await registerAgentJob(agentId, imageUri, secrets, identity);
+      await registerAgentJob(agentId, imageUri, secrets, identity, memoryPrefix ?? agentId, launchEnv);
     },
   };
 }

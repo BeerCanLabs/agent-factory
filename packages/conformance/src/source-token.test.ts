@@ -24,7 +24,17 @@ describe('S1 the source token goes only to allowed source hosts', () => {
     });
   }
 
-  it('the control plane gets the same host list as the builds', () => {
+  it('the control plane gets the same host list as the builds (AWS & GCP)', () => {
     assert.match(read('landing-zones/aws/ecs.tf'), /name = "FACTORY_AGENT_SOURCE_TOKEN_HOSTS", value = join\(",", var\.agent_source_token_hosts\)/);
+    assert.match(read('landing-zones/gcp/cloud_run.tf'), /name\s*=\s*"FACTORY_AGENT_SOURCE_TOKEN_HOSTS"[\s\S]{0,80}value\s*=\s*join\(",", var\.agent_source_token_hosts\)/);
+  });
+
+  it('both GCP Cloud Build runners gate every GIT_TOKEN_SECRET_ID read on the allowed host check', () => {
+    for (const file of ['packages/property-manager/src/gcp/cloudbuild.ts', 'packages/control-plane/src/gcp/skill-checker.ts']) {
+      const src = read(file);
+      const fetches = [...src.matchAll(/if \[ -n "\\?\$\{?GIT_TOKEN_SECRET_ID[^"\]]*\}?" \]([^\n]*)then/g)];
+      assert.ok(fetches.length > 0, `${file} reads the source token somewhere`);
+      for (const f of fetches) assert.match(f[1], /\[ -n "\$allowed" \]/, `${file}: every token read is gated on the host check`);
+    }
   });
 });

@@ -215,14 +215,91 @@ describe('S3 configuration store (AWS CLI, no SDK)', () => {
   });
 });
 
+describe('GCS configuration store (native GCS JSON API, no SDK)', () => {
+  it('writes each version with ifGenerationMatch=0, loads versions with retry, and removes agent prefix', async () => {
+    const { GcsConfigBackend } = await import('./config-store.js');
+    const objects = new Map<string, string>();
+    let listCalls = 0;
+    let failFirstList = false;
+    const fetchMock: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      const method = init?.method ?? 'GET';
+      if (method === 'POST' && url.pathname === '/upload/storage/v1/b/factory-config/o') {
+        const name = url.searchParams.get('name') ?? '';
+        const ifGen = url.searchParams.get('ifGenerationMatch');
+        if (ifGen === '0' && objects.has(name)) {
+          return new Response('{}', { status: 412 });
+        }
+        objects.set(name, String(init?.body ?? ''));
+        return new Response(JSON.stringify({ name }), { status: 200 });
+      }
+      if (method === 'GET' && url.pathname === '/storage/v1/b/factory-config/o') {
+        listCalls += 1;
+        if (failFirstList && listCalls === 1) {
+          return new Response('{}', { status: 503 });
+        }
+        const prefix = url.searchParams.get('prefix') ?? '';
+        const items = [...objects.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name }));
+        return new Response(JSON.stringify({ items }), { status: 200 });
+      }
+      const objMatch = url.pathname.match(/^\/storage\/v1\/b\/factory-config\/o\/(.+)$/);
+      if (method === 'GET' && objMatch && url.searchParams.get('alt') === 'media') {
+        const name = decodeURIComponent(objMatch[1]);
+        const val = objects.get(name);
+        if (val === undefined) return new Response('', { status: 404 });
+        return new Response(val, { status: 200 });
+      }
+      if (method === 'DELETE' && objMatch) {
+        const name = decodeURIComponent(objMatch[1]);
+        objects.delete(name);
+        return new Response(null, { status: 204 });
+      }
+      return new Response('', { status: 404 });
+    };
+
+    const backend = new GcsConfigBackend('gs://factory-config/config/', {
+      fetch: fetchMock,
+      getAccessToken: async () => 'tok-gcs',
+      maxAttempts: 3,
+      retryDelayMs: 1,
+    });
+    assert.equal(backend.description, 'gs://factory-config/config/');
+    const store = await VersionedConfigStore.open(backend);
+    const v1 = await store.put(content({ policy: null }), meta);
+    const v2 = await store.put(content(), { updatedBy: 'admin', reason: 'grant models' });
+    assert.equal(v1.record.version, 1);
+    assert.equal(v2.record.version, 2);
+    assert.equal(objects.has('config/ada/1.json'), true);
+    assert.equal(objects.has('config/ada/2.json'), true);
+    assert.equal(objects.has('config/ada/current.json'), true);
+
+    // Overwriting an existing version fails with PreconditionFailed (ifGenerationMatch=0)
+    await assert.rejects(backend.write(v1.record), /PreconditionFailed/);
+
+    // Reloading with a transient 503 on first attempt succeeds via retry
+    failFirstList = true;
+    listCalls = 0;
+    const reopened = await VersionedConfigStore.open(backend);
+    assert.equal(listCalls, 2);
+    assert.deepEqual(reopened.history('ada'), [v1.record, v2.record]);
+
+    // Remove deletes only the agent's prefix
+    await reopened.remove('ada', 'admin', 'purge');
+    assert.equal(objects.size, 0);
+  });
+});
+
 describe('FACTORY_CONFIG_STORE_URI', () => {
-  it('selects S3, a file URI, a path, or the default directory', () => {
+  it('selects S3, GCS, a file URI, a path, or the default directory', async () => {
+    const { GcsConfigBackend } = await import('./config-store.js');
     assert.ok(configBackendFromEnv('s3://b/p', '/d') instanceof S3ConfigBackend);
+    assert.ok(configBackendFromEnv('gs://b/p', '/d') instanceof GcsConfigBackend);
+    assert.ok(configBackendFromEnv('gcs://b/p', '/d') instanceof GcsConfigBackend);
     assert.equal(configBackendFromEnv('file:///data/config', '/d').description, 'file:///data/config');
     assert.equal(configBackendFromEnv('/data/config', '/d').description, 'file:///data/config');
     assert.equal(configBackendFromEnv(undefined, '/d').description, 'file:///d');
     assert.equal(configBackendFromEnv('  ', '/d').description, 'file:///d');
-    assert.throws(() => configBackendFromEnv('gs://b/p', '/d'), /must be s3:\/\/, file:\/\/ or a path/);
+    assert.throws(() => configBackendFromEnv('az://b/p', '/d'), /must be s3:\/\/, gs:\/\/, gcs:\/\/, file:\/\/ or a path/);
   });
 });
 
