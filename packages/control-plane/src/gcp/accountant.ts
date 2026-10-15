@@ -102,6 +102,13 @@ function parseCpuVcpu(raw: string | undefined): number {
   return num(raw);
 }
 
+type BqQueryResponse = {
+  jobComplete?: boolean;
+  jobReference?: { projectId?: string; jobId?: string; location?: string };
+  pageToken?: string;
+  rows?: Array<{ f?: Array<{ v?: string | null }> }>;
+};
+
 function parseMemoryGb(raw: string | undefined): number {
   if (!raw) return 0;
   if (raw.endsWith('Gi')) return num(raw.slice(0, -2));
@@ -174,6 +181,35 @@ export class GcpCostSource implements CloudCostSource {
     return this.discoveredTable;
   }
 
+  /** jobs.query returns 200 with jobComplete false and no rows while the billing aggregation is still running. */
+  private async waitForQuery(token: string, initial: BqQueryResponse): Promise<BqQueryResponse> {
+    const fetchFn = this.opts.fetchImpl ?? fetch;
+    let data = initial;
+    for (let attempt = 0; attempt < 30 && data.jobComplete === false; attempt++) {
+      const jobId = data.jobReference?.jobId;
+      if (!jobId) throw new Error('BigQuery billing query is not finished and returned no job id');
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const projectId = data.jobReference?.projectId ?? this.opts.projectId;
+      const params = new URLSearchParams();
+      if (data.jobReference?.location) params.set('location', data.jobReference.location);
+      if (data.pageToken) params.set('pageToken', data.pageToken);
+      const query = params.toString();
+      const res = await fetchFn(
+        `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/queries/${encodeURIComponent(jobId)}${query ? `?${query}` : ''}`,
+        { headers: { authorization: `Bearer ${token}` } },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`BigQuery getQueryResults failed (${res.status}): ${text.slice(0, 300)}`);
+      }
+      data = (await res.json()) as BqQueryResponse;
+    }
+    if (data.jobComplete === false) {
+      throw new Error('BigQuery billing query did not finish');
+    }
+    return data;
+  }
+
   async costs(window: { start: string; end: string }): Promise<CloudCostSnapshot> {
     const token = await (this.opts.tokenProvider ?? metadataToken)();
     const table = await this.resolveTable(token);
@@ -219,16 +255,15 @@ export class GcpCostSource implements CloudCostSource {
       throw new Error(`BigQuery billing query failed (${res.status}): ${text.slice(0, 300)}`);
     }
 
-    const data = (await res.json()) as {
-      rows?: Array<{ f?: Array<{ v?: string | null }> }>;
-    };
+    const data = (await res.json()) as BqQueryResponse;
+    const finished = await this.waitForQuery(token, data);
 
     const lines: CostLine[] = [];
     const usage: UsageLine[] = [];
     const byServiceCost = new Map<string, number>();
     const byServiceCredit = new Map<string, number>();
 
-    for (const row of data.rows ?? []) {
+    for (const row of finished.rows ?? []) {
       const cells = row.f ?? [];
       const service = cells[0]?.v || 'Unknown';
       const usageType = cells[1]?.v || 'Unknown';

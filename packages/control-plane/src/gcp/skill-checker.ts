@@ -99,7 +99,8 @@ export function defaultGcpCloudBuildApi(): GcpCloudBuildApi {
   };
 }
 
-export const GCP_SKILL_CHECK_STEP_SCRIPT = `cat > /tmp/skill_check.py <<'PY'
+export const GCP_SKILL_CHECK_STEP_SCRIPT = `apt-get update -qq && apt-get install -y -qq git ca-certificates >/dev/null
+cat > /tmp/skill_check.py <<'PY'
 ${SKILL_CHECK_SCRIPT.replace(/\n$/, '')}
 PY
 echo "Skill check for $SKILL_ID@$SKILL_VERSION at $REPO_URL@$GIT_COMMIT ($SKILL_PATH)"

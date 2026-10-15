@@ -91,6 +91,8 @@ const inspector = createInspector();
       if (hydrated > 0) console.log(`[control-plane] hydrated ${hydrated} ledger rows from WORM checkpoint sink`);
     } catch (err) {
       console.error(`[control-plane] ledger hydration from WORM sink failed: ${err instanceof Error ? err.message : String(err)}`);
+      console.error('[control-plane] refusing to open an empty ledger over a checkpoint sink that could not be read');
+      process.exit(3);
     }
   }
 }

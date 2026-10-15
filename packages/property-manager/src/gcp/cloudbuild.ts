@@ -62,6 +62,8 @@ export function admissionFailure(build: GcpBuild): AdmissionRefusedError {
 }
 
 export const CLONE_STEP_SCRIPT = `set -euo pipefail
+# python:3.12 has Python and bash, not git or Node. Admission clone, secret scan, and npm test need both.
+apt-get update -qq && apt-get install -y -qq git nodejs npm ca-certificates >/dev/null
 echo "Admission build for $AGENT_ID at $REPO_URL@$GIT_COMMIT -> $IMAGE_TAG"
 [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 5
 PREFIX="$AGENT_ID-$(echo "$GIT_COMMIT" | cut -c1-12)"
@@ -102,6 +104,7 @@ cd /workspace/agent-repo && git checkout --detach "$GIT_COMMIT" && [ "$(git rev-
 `;
 
 export const TEST_AND_SKILLS_STEP_SCRIPT = `set -u
+apt-get update -qq && apt-get install -y -qq git nodejs npm ca-certificates >/dev/null
 cd /workspace/agent-repo || exit 5
 # K1 / GAP-045: refuse a repository that hard-codes credentials (file:line only, never the value).
 KNOWN='github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|ntn_[A-Za-z0-9]{30,}|secret_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'

@@ -157,11 +157,33 @@ resource "google_project_iam_member" "gw_vertex_ai_user" {
   member  = "serviceAccount:${google_service_account.gatekeeper_egress.email}"
 }
 
-# gatekeeper-egress reads provider secrets, OAuth connection tokens, and Discord bot tokens (S1, K4)
-resource "google_project_iam_member" "gw_secrets" {
+# Provider keys the egress injects, plus the two secrets Cloud Run mounts into the egress container.
+# Not project-wide: factory signing keys, callback keys, and agent secrets stay off this identity (S1).
+# Connection access tokens come from the control plane (K3), not from Secret Manager.
+resource "google_secret_manager_secret_iam_member" "gw_provider_secrets" {
+  for_each  = toset(var.provider_secret_names)
+  secret_id = "${local.secrets_prefix}${each.value}"
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.gatekeeper_egress.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "gw_runtime_secrets" {
+  for_each  = toset(["FACTORY_GATEKEEPER_EGRESS_TOKEN", "FACTORY_RUN_TOKEN_KEY"])
+  secret_id = "${local.secrets_prefix}${each.value}"
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.gatekeeper_egress.email}"
+}
+
+# Per-agent Discord bot tokens named <prefix><agent>_DISCORD_BOT_TOKEN. The condition cannot see other factory secrets.
+resource "google_project_iam_member" "gw_discord_bot_tokens" {
   project = var.project_id
   role    = "roles/secretmanager.secretAccessor"
   member  = "serviceAccount:${google_service_account.gatekeeper_egress.email}"
+  condition {
+    title       = "discord-bot-tokens-only"
+    description = "Egress may read only prefixed Discord bot token secrets"
+    expression  = "resource.name.extract('/secrets/{name}').startsWith('${local.secrets_prefix}') && resource.name.extract('/secrets/{name}').endsWith('_DISCORD_BOT_TOKEN')"
+  }
 }
 
 # ---- gatekeeper-ingress ----------------------------------------------------------------------
@@ -198,7 +220,7 @@ resource "google_storage_bucket_iam_member" "agent_mind_access" {
 
 resource "google_secret_manager_secret_iam_member" "agent_secrets" {
   for_each  = { for pair in flatten([for id, a in var.agents : [for s in a.secrets : { agent = id, secret = s }]]) : "${pair.agent}/${pair.secret}" => pair }
-  secret_id = each.value.secret
+  secret_id = "${local.secrets_prefix}${each.value.secret}"
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.agent[each.value.agent].email}"
 }
