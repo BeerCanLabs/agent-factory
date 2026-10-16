@@ -258,12 +258,33 @@ export class GcpCostSource implements CloudCostSource {
     const data = (await res.json()) as BqQueryResponse;
     const finished = await this.waitForQuery(token, data);
 
+    const rows = [...(finished.rows ?? [])];
+    let pageToken = finished.pageToken;
+    const jobId = finished.jobReference?.jobId;
+    const projectId = finished.jobReference?.projectId ?? this.opts.projectId;
+    while (pageToken && jobId) {
+      const params = new URLSearchParams({ pageToken });
+      if (finished.jobReference?.location) params.set('location', finished.jobReference.location);
+      const queryParams = params.toString();
+      const pageRes = await fetchFn(
+        `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/queries/${encodeURIComponent(jobId)}${queryParams ? `?${queryParams}` : ''}`,
+        { headers: { authorization: `Bearer ${token}` } },
+      );
+      if (!pageRes.ok) {
+        const text = await pageRes.text().catch(() => '');
+        throw new Error(`BigQuery getQueryResults page failed (${pageRes.status}): ${text.slice(0, 300)}`);
+      }
+      const page = (await pageRes.json()) as BqQueryResponse;
+      rows.push(...(page.rows ?? []));
+      pageToken = page.pageToken;
+    }
+
     const lines: CostLine[] = [];
     const usage: UsageLine[] = [];
     const byServiceCost = new Map<string, number>();
     const byServiceCredit = new Map<string, number>();
 
-    for (const row of finished.rows ?? []) {
+    for (const row of rows) {
       const cells = row.f ?? [];
       const service = cells[0]?.v || 'Unknown';
       const usageType = cells[1]?.v || 'Unknown';

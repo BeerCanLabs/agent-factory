@@ -99,7 +99,7 @@ export function defaultGcpCloudBuildApi(): GcpCloudBuildApi {
   };
 }
 
-export const GCP_SKILL_CHECK_STEP_SCRIPT = `apt-get update -qq && apt-get install -y -qq git ca-certificates >/dev/null
+export const GCP_SKILL_CHECK_STEP_SCRIPT = `apt-get update -qq && apt-get install -y -qq git nodejs npm ca-certificates >/dev/null
 cat > /tmp/skill_check.py <<'PY'
 ${SKILL_CHECK_SCRIPT.replace(/\n$/, '')}
 PY
