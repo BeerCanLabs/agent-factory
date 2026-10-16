@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShieldCheck, UserCheck, RefreshCw, AlertTriangle, CheckCircle, Database, Sun, Moon } from 'lucide-react';
+import { ShieldCheck, UserCheck, RefreshCw, AlertTriangle, CheckCircle, Database, Sun, Moon, Bell } from 'lucide-react';
 import { useAuth } from '../auth/CloudflareAuth.js';
 import { useTheme } from '../context/ThemeContext.js';
 import { factoryApi } from '../api/client.js';
@@ -7,9 +7,11 @@ import { factoryApi } from '../api/client.js';
 interface HeaderProps {
   onRefresh: () => void;
   isRefreshing: boolean;
+  updateCount?: number;
+  onOpenUpdates?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing }) => {
+export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing, updateCount, onOpenUpdates }) => {
   const { user, activeRole, setActiveRole } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const [verifyingWorm, setVerifyingWorm] = useState(false);
@@ -74,6 +76,22 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing }) => {
             {verifyingWorm ? 'Verifying...' : 'Verify'}
           </button>
         </div>
+
+        {/* Update Notifications Bell */}
+        {onOpenUpdates && (
+          <button
+            onClick={onOpenUpdates}
+            className="relative p-1.5 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white bg-slate-100 dark:bg-slate-950 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-800 transition"
+            title="Cartridge Updates"
+          >
+            <Bell className="w-4 h-4" />
+            {updateCount !== undefined && updateCount > 0 && (
+              <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white dark:ring-slate-900 animate-pulse">
+                {updateCount}
+              </span>
+            )}
+          </button>
+        )}
 
         {/* Refresh */}
         <button

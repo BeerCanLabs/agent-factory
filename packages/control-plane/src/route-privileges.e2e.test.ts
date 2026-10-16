@@ -93,6 +93,8 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/agents/nope/resume', privilege: 'agents.resume', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/reset', privilege: 'agents.reset', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/isolate', privilege: 'agents.isolate', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/updates/check', privilege: 'agents.update.read', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/updates/install', privilege: 'agents.update.install', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/runs/nope/cancel', privilege: 'runs.cancel', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/conversation', privilege: 'agents.converse', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/wake', privilege: 'runs.attest-requester', role: 'operator', thenExclusive: 'gatekeeper-ingress', body: { requestedBy: { provider: 'discord', id: '1' } } },
@@ -295,6 +297,10 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       const r = await call(port, 'GET', '/api/v1/whoami', cred);
       assert.equal(r.status, cred === 'none' ? 401 : 200, `whoami as ${cred}`);
     }
+    for (const cred of CREDENTIALS) {
+      const r = await call(port, 'POST', '/api/v1/hooks/github', cred, {});
+      assert.equal(r.status, 200, `/api/v1/hooks/github as ${cred}`);
+    }
   });
 
   it('the webhook with a secretRef and the run-token routes ignore roles: every credential is refused alike', async () => {
@@ -325,11 +331,12 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     };
     const names = async (cred: Role) => (await rpc(cred, 'tools/list')).result?.tools?.map((t) => t.name).sort();
     const viewerTools = ['get_run', 'list_agents', 'list_approvals', 'query_ledger'];
-    const operatorTools = ['isolate_agent', 'pause_agent', 'resume_agent', 'wake_agent'];
+    const operatorTools = ['check_agent_update', 'isolate_agent', 'pause_agent', 'resume_agent', 'wake_agent'];
+    const adminTools = ['install_agent_update'];
     assert.deepEqual(await names('viewer'), viewerTools);
     assert.deepEqual(await names('operator'), [...viewerTools, ...operatorTools].sort());
     assert.deepEqual(await names('approver'), [...viewerTools, 'decide_approval'].sort());
-    assert.deepEqual(await names('admin'), [...viewerTools, ...operatorTools, 'decide_approval'].sort());
+    assert.deepEqual(await names('admin'), [...viewerTools, ...operatorTools, ...adminTools, 'decide_approval'].sort());
     assert.deepEqual(await names('ingest'), undefined);
     assert.equal((await rpc('viewer', 'tools/call', { name: 'wake_agent', arguments: { id: 'castle' } })).error?.message, 'forbidden: requires operator');
     assert.equal((await rpc('operator', 'tools/call', { name: 'decide_approval', arguments: {} })).error?.message, 'forbidden: requires approver');

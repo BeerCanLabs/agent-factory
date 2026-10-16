@@ -26,5 +26,7 @@ export function usePermissions() {
     canDecideAdoptions: hasRole('admin'),
     canRetireSkills: hasRole('admin'),
     canManageIdentities: hasRole('admin'),
+    canCheckUpdates: hasRole('operator'),
+    canInstallUpdates: hasRole('admin'),
   };
 }

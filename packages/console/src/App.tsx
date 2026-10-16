@@ -14,6 +14,8 @@ import { CredentialsView } from './views/CredentialsView.js';
 import { SkillsView } from './views/SkillsView.js';
 import { SystemsView } from './views/SystemsView.js';
 import { IdentitiesView } from './views/IdentitiesView.js';
+import { DrainModal } from './components/DrainModal.js';
+import { UpdateDrawer } from './components/UpdateDrawer.js';
 import { factoryApi } from './api/client.js';
 import type { AgentRecord, ApprovalItem } from './api/types.js';
 
@@ -40,6 +42,15 @@ const MainLayout: React.FC = () => {
   const [selectedAgentId, setSelectedAgentId] = useState<string>(initial.agentId ?? 'higgins');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [outstanding, setOutstanding] = useState<Record<string, number>>({});
+  const [isUpdateDrawerOpen, setIsUpdateDrawerOpen] = useState(false);
+  const [selectedAgentForUpdate, setSelectedAgentForUpdate] = useState<AgentRecord | null>(null);
+
+  const updatesAvailableCount = agents.filter((a) => a.updateAvailable).length;
+
+  const handleCheckUpdate = async (agentId: string) => {
+    await factoryApi.checkAgentUpdate(agentId);
+    await loadData();
+  };
 
   // Outstanding credentials per agent (§6.11 K5). Admin-only on the API; others simply see no counts.
   const loadOutstanding = async () => {
@@ -91,7 +102,12 @@ const MainLayout: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-200">
-      <Header onRefresh={loadData} isRefreshing={isRefreshing} />
+      <Header
+        onRefresh={loadData}
+        isRefreshing={isRefreshing}
+        updateCount={updatesAvailableCount}
+        onOpenUpdates={() => setIsUpdateDrawerOpen(true)}
+      />
 
       <div className="flex flex-1 overflow-hidden">
         <Sidebar
@@ -110,6 +126,8 @@ const MainLayout: React.FC = () => {
               onRefresh={loadData}
               outstandingCredentials={outstanding}
               onOpenCredentials={handleOpenCredentials}
+              onOpenUpdateModal={(agent) => setSelectedAgentForUpdate(agent)}
+              onCheckUpdate={handleCheckUpdate}
             />
           )}
 
@@ -163,6 +181,28 @@ const MainLayout: React.FC = () => {
           {currentScreen === 'studio' && <StudioView onRefresh={loadData} />}
         </main>
       </div>
+
+      <UpdateDrawer
+        isOpen={isUpdateDrawerOpen}
+        onClose={() => setIsUpdateDrawerOpen(false)}
+        agents={agents}
+        onSelectAgentForUpdate={(agent) => {
+          setSelectedAgentForUpdate(agent);
+          setIsUpdateDrawerOpen(false);
+        }}
+        onCheckUpdate={handleCheckUpdate}
+      />
+
+      {selectedAgentForUpdate && (
+        <DrainModal
+          agent={selectedAgentForUpdate}
+          isOpen={Boolean(selectedAgentForUpdate)}
+          onClose={() => setSelectedAgentForUpdate(null)}
+          onSuccess={() => {
+            loadData();
+          }}
+        />
+      )}
     </div>
   );
 };

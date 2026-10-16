@@ -60,6 +60,17 @@ export const factoryApi = {
     return request<AgentRecord>(`/registry/agents/${id}`);
   },
 
+  async checkAgentUpdate(id: string): Promise<Record<string, any>> {
+    return request<Record<string, any>>(`/agents/${id}/updates/check`, { method: 'POST' });
+  },
+
+  async installAgentUpdate(id: string, options: { mode?: 'drain' | 'restart_now'; version?: string; commit?: string } = {}): Promise<Record<string, any>> {
+    return request<Record<string, any>>(`/agents/${id}/updates/install`, {
+      method: 'POST',
+      body: JSON.stringify(options),
+    });
+  },
+
   async wakeAgent(id: string, payload: Record<string, any> = {}): Promise<{ runId: string }> {
     return request<{ runId: string }>(`/agents/${id}/wake`, {
       method: 'POST',

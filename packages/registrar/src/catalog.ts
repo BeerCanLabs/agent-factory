@@ -163,6 +163,25 @@ export type AgentRecord = {
   commit?: string;
   /** The commit whose SHA-tagged image is deployed now (L4). */
   deployedCommit?: string;
+  /** The semantic version currently installed (e.g. 1.0.0; default 0.1.0 for unversioned). */
+  installedVersion?: string;
+  /** True when a newer release is detected. */
+  updateAvailable?: boolean;
+  /** The latest available release version (e.g. 1.1.0). */
+  offeredVersion?: string;
+  /** The commit SHA of the offered release. */
+  offeredCommit?: string;
+  /** Release notes / changelog body for the offered version. */
+  releaseNotes?: string;
+  /** ISO timestamp when the offered release was published. */
+  publishedAt?: string;
+  /** ISO timestamp when update availability was last checked. */
+  lastCheckedAt?: string;
+  /** When Stage 1 admits an update while active, the staged version and commit pending reboot. */
+  stagedVersion?: string;
+  stagedCommit?: string;
+  /** When true, the staged version will be applied automatically when the active run sleeps. */
+  pendingDrain?: boolean;
   /**
    * SK4: the skills the deployed image contains, each as the approved version it was built from. Absent or empty: none.
    * What runs, as `deployedCommit` is for the source; the configuration says what should run (SK3).

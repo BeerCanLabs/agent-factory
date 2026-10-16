@@ -20,6 +20,8 @@ const OWNER_RIGHTS: Privilege[] = [
   'skills.training.run',
   'agents.roles.read',
   'approvals.decide',
+  'agents.update.read',
+  'agents.update.install',
 ];
 
 const as = (actor: string, roles: Role[] = []): Principal => ({ actor, roles });

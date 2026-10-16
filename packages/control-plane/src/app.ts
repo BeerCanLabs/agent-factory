@@ -1,5 +1,6 @@
 import http from 'node:http';
-import { timingSafeEqual, randomUUID } from 'node:crypto';
+import { timingSafeEqual, randomUUID, createHash } from 'node:crypto';
+import { checkAgentUpdate, extractGitHubRepo, isNewerVersion, parseSemVer } from './updates.js';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, payloadHash, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
@@ -303,6 +304,20 @@ const TOOLS: ToolSpec[] = [
     args: { approvalId: { type: 'string' }, decision: { type: 'string' }, notes: { type: 'string' } },
     required: ['approvalId', 'decision'],
   },
+  {
+    name: 'check_agent_update',
+    description: 'Check for available cartridge updates from git repository',
+    privilege: 'agents.update.read',
+    args: { id: { type: 'string' } },
+    required: ['id'],
+  },
+  {
+    name: 'install_agent_update',
+    description: 'Install an available cartridge update (mode: drain or restart_now)',
+    privilege: 'agents.update.install',
+    args: { id: { type: 'string' }, mode: { type: 'string' } },
+    required: ['id'],
+  },
 ];
 
 export async function handleMcp(state: FactoryState, payload: Record<string, unknown>, principal: Principal): Promise<unknown> {
@@ -354,6 +369,38 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'pause_agent') return (await applyKillSwitch(state, id, 'PAUSE', actor)).body;
   if (name === 'resume_agent') return (await applyKillSwitch(state, id, 'RESUME', actor)).body;
   if (name === 'isolate_agent') return (await applyKillSwitch(state, id, 'ISOLATE', actor)).body;
+  if (name === 'check_agent_update') {
+    const agent = state.agents.get(id);
+    if (!agent) return { error: 'not_found' };
+    const res = await checkAgentUpdate(agent, process.env.FACTORY_AGENT_SOURCE_TOKEN);
+    Object.assign(agent, res);
+    registryOf(state).save(agent);
+    return res;
+  }
+  if (name === 'install_agent_update') {
+    const agent = state.agents.get(id);
+    if (!agent) return { error: 'not_found' };
+    const mode = (args.mode === 'restart_now' ? 'restart_now' : 'drain') as 'drain' | 'restart_now';
+    const targetCommit = agent.offeredCommit ?? agent.commit;
+    const targetVersion = agent.offeredVersion;
+    if (!targetCommit) return { error: 'no_commit_available' };
+    if (agent.state === 'WORKING' && mode === 'drain') {
+      agent.stagedCommit = targetCommit;
+      agent.stagedVersion = targetVersion;
+      agent.pendingDrain = true;
+      registryOf(state).save(agent);
+      return { ok: true, status: 'staged_drain', agentId: id, commit: targetCommit, version: targetVersion };
+    }
+    agent.commit = targetCommit;
+    agent.deployedCommit = targetCommit;
+    if (targetVersion) agent.installedVersion = targetVersion;
+    agent.updateAvailable = false;
+    delete agent.pendingDrain;
+    delete agent.stagedCommit;
+    delete agent.stagedVersion;
+    registryOf(state).save(agent);
+    return { ok: true, status: 'applied', agentId: id, commit: targetCommit, version: targetVersion };
+  }
   return { error: `unknown tool ${name}` };
 }
 
@@ -636,6 +683,53 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
+  if (path === '/api/v1/hooks/github' && req.method === 'POST') {
+    const raw = await readBody(req);
+    let body: Record<string, any> = {};
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      json(res, 400, { error: 'invalid_json' });
+      return;
+    }
+    const event = req.headers['x-github-event'];
+    if (event === 'release' && body.action === 'published') {
+      const repoUrl = body.repository?.html_url || body.repository?.clone_url || body.repository?.full_name;
+      const release = body.release;
+      if (repoUrl && release?.tag_name) {
+        const matched = [...state.agents.values()].find((a) => {
+          if (!a.repo) return false;
+          const aRepo = extractGitHubRepo(a.repo);
+          const bRepo = extractGitHubRepo(repoUrl);
+          return aRepo && bRepo && aRepo.owner.toLowerCase() === bRepo.owner.toLowerCase() && aRepo.repo.toLowerCase() === bRepo.repo.toLowerCase();
+        });
+        if (matched) {
+          const sem = parseSemVer(release.tag_name);
+          const offeredVersion = sem ? `${sem.major}.${sem.minor}.${sem.patch}` : release.tag_name.replace(/^v/, '');
+          matched.offeredVersion = offeredVersion;
+          matched.offeredCommit = release.target_commitish;
+          matched.releaseNotes = release.body ?? '';
+          matched.publishedAt = release.published_at ?? new Date().toISOString();
+          matched.updateAvailable = isNewerVersion(offeredVersion, matched.installedVersion ?? '0.1.0');
+          matched.lastCheckedAt = new Date().toISOString();
+          registryOf(state).save(matched);
+          state.ledger.append({
+            timestamp: new Date().toISOString(),
+            agentId: matched.id,
+            type: 'action',
+            action: 'AGENT_UPDATE_OFFERED',
+            actor: 'github:release',
+            payloadSha256: createHash('sha256').update(offeredVersion).digest('hex'),
+          });
+          json(res, 200, { ok: true, agentId: matched.id, offeredVersion, updateAvailable: matched.updateAvailable });
+          return;
+        }
+      }
+    }
+    json(res, 200, { ok: true, ignored: true });
+    return;
+  }
+
   // Webhooks authenticate with the cartridge's own shared secret, not a factory bearer.
   const hookMatch = path.match(/^\/api\/v1\/hooks\/([^/]+)$/);
   if (hookMatch && req.method === 'POST') {
@@ -883,6 +977,61 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     if (!principal) return;
     const out = await applyKillSwitch(state, killMatch[1], killMatch[2].toUpperCase() as 'PAUSE' | 'RESUME' | 'ISOLATE', principal.actor);
     json(res, out.status, out.body);
+    return;
+  }
+
+  const updateCheckMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/updates\/check$/);
+  if (updateCheckMatch && req.method === 'POST') {
+    const agentId = updateCheckMatch[1];
+    const principal = await requirePrivilege(req, res, state, 'agents.update.read', { agentId });
+    if (!principal) return;
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    const update = await checkAgentUpdate(agent, process.env.FACTORY_AGENT_SOURCE_TOKEN);
+    Object.assign(agent, update);
+    registryOf(state).save(agent);
+    json(res, 200, update);
+    return;
+  }
+
+  const updateInstallMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/updates\/install$/);
+  if (updateInstallMatch && req.method === 'POST') {
+    const agentId = updateInstallMatch[1];
+    const principal = await requirePrivilege(req, res, state, 'agents.update.install', { agentId });
+    if (!principal) return;
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    const body = await readJson(req);
+    const mode = (body.mode === 'restart_now' ? 'restart_now' : 'drain') as 'drain' | 'restart_now';
+    const targetCommit = (body.commit as string | undefined) ?? agent.offeredCommit ?? agent.commit;
+    const targetVersion = (body.version as string | undefined) ?? agent.offeredVersion;
+    if (!targetCommit) {
+      json(res, 400, { error: 'no_commit_available', message: 'No target commit available to install' });
+      return;
+    }
+    if (agent.state === 'WORKING' && mode === 'drain') {
+      agent.stagedCommit = targetCommit;
+      agent.stagedVersion = targetVersion;
+      agent.pendingDrain = true;
+      registryOf(state).save(agent);
+      json(res, 200, { ok: true, status: 'staged_drain', agentId, commit: targetCommit, version: targetVersion });
+      return;
+    }
+    agent.commit = targetCommit;
+    agent.deployedCommit = targetCommit;
+    if (targetVersion) agent.installedVersion = targetVersion;
+    agent.updateAvailable = false;
+    delete agent.pendingDrain;
+    delete agent.stagedCommit;
+    delete agent.stagedVersion;
+    registryOf(state).save(agent);
+    json(res, 200, { ok: true, status: 'applied', agentId, commit: targetCommit, version: targetVersion });
     return;
   }
 

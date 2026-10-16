@@ -78,6 +78,8 @@ export const PRIVILEGES = [
   'skills.training.run',
   'agents.roles.read',
   'spend.budget.set',
+  'agents.update.read',
+  'agents.update.install',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -139,6 +141,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'agents.converse',
     'hooks.invoke',
     'schedules.write',
+    'agents.update.read',
   ],
   approver: [
     'agents.read',
@@ -256,6 +259,8 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'skills.training.run',
     'agents.roles.read',
     'spend.budget.set',
+    'agents.update.read',
+    'agents.update.install',
   ],
 };
 
@@ -281,6 +286,8 @@ export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
   'approvals.decide',
   // E12: a person who holds an agent role may start a run and converse, so a message can reach the agent they hold it on.
   'agents.converse',
+  'agents.update.read',
+  'agents.update.install',
 ]);
 
 /** The roles that are derived from data about one agent or run, never read from a credential or a claim. */
@@ -307,6 +314,8 @@ export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> 
     'skills.training.run',
     'agents.roles.read',
     'approvals.decide',
+    'agents.update.read',
+    'agents.update.install',
   ],
   /**
    * E12 (Dale, 2026-10-10): a person who holds an agent role on an agent (Stephanie: `Family` on Donna) may reach that
