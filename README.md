@@ -73,6 +73,8 @@ Agent Factory is architected around **10 canonical services ("The Cast of Charac
     - **Role:** Watches the factory and says what it sees: emits live run progress and event streams (e.g., `discord-progress`, the WebSocket stream, the enterprise bus), registers the headless run metrics instruments, writes prompt traces, and derives the triage incident list (`/api/v1/triage`). It decides nothing, and the HTTP handlers stay in the control plane. Routing crash diagnostics to an alerting tool is not built (GAP-107).
     - **Contract:** `packages/inspector` exports `createInspector` (publish and subscribe to events, tap the ledger, attach an enterprise bus, report and read run progress), the progress emitter and prompt traces the egress uses, `factoryMetrics`, and `incidentsFromRuns`. `packages/telemetry` (`initTelemetry`) is a separate package it hosts.
 
+House staff are optional cartridges in `agents/staff`. They are not an eleventh platform service and they are not loaded into the baked catalog. The Personal Trainer (`agents/staff/personal-trainer`) guides a builder through a skill scorecard, scores pinned trials, and recommends a model. Training spend posts to the skill (`PUT /api/v1/skills/:id/training-account`). Using an adopted skill still posts to the agent's budget. The trainer does not rewrite the skill and does not deploy.
+
 ### Contracts as Designed: Architectural Invariants
 
 - **First-Class Cross-Service Contracts (SV2):** Services communicate across package boundaries strictly through explicit, typed contracts wired directly into real call sites. Direct backdoor access to another service's private persistence, tables, or internal modules is strictly forbidden.

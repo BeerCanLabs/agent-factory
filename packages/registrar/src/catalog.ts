@@ -451,7 +451,8 @@ function walk(root: string, depth = 0): string[] {
   const here = entries.includes('cartridge.yaml') || entries.includes('soul.md') ? [root] : [];
   if (depth >= 3) return here;
   const nested = entries.flatMap((name) => {
-    if (name.startsWith('.')) return [];
+    // House staff (agents/staff) ship in the repo and are admitted by an operator. They are not baked into the catalog (L2).
+    if (name.startsWith('.') || (depth === 0 && name === 'staff')) return [];
     const child = join(root, name);
     try {
       return statSync(child).isDirectory() && basename(child) !== 'node_modules' ? walk(child, depth + 1) : [];

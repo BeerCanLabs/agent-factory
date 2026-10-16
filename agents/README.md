@@ -9,5 +9,6 @@ Each cartridge consumes factory APIs:
 | `examples/echo-agent` | contract fixture; `worker.mjs` writes to hydrated `MEMORY_DIR` |
 | `examples/llm-summarizer` | test fixture for model metering and bench scoring |
 | `examples/starter-python` | reference decoupled Python agent starter |
+| `staff/personal-trainer` | optional house staff; not loaded by the baked catalog; admit it to deploy it |
 
 Crash routing and budget alerts are **event routes** in the control plane (by cartridge id). Remediation logic stays in the agent.

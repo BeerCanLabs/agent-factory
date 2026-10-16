@@ -216,6 +216,8 @@ Route and price configuration: `FACTORY_GATEKEEPER_EGRESS_CONFIG` (JSON `{routes
 
 Every cartridge ships `bench.yaml`: cases with an `input` and deterministic expectations (`status`, `equals`, `contains`, `matches`). Running it is optional. `factory-bench --cartridge <dir> --models a,b` runs each case as a real run through the factory with the run **pinned** to the model (`POST /runs {model}`; the gatekeeper-egress refuses any other model for that run), reads each run's cost from the ledger, and prints the Cost vs Quality Matrix projected to `--runs-per-month`. It recommends the cheapest model meeting `--min-pass` with a per-run budget of 2× the most expensive observed case; `--apply` writes that into the agent's policy (admin). No LLM judge: grading is reproducible.
 
+Skill training is a separate meter. The optional Personal Trainer (`agents/staff/personal-trainer`) stores a baseline on a skill and posts trial outputs to `POST /api/v1/skills/:id/training-runs`. Cost lands on that skill's training account, never on an adopter's agent budget. The recommendation does not change the live skill.
+
 ## 4. Foundational example cartridges
 
 Shipped under `agents/` as portable examples. Factory code must not import them.

@@ -95,6 +95,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/spend.ts',
+      'packages/control-plane/src/skill-training.ts',
       'packages/control-plane/src/aws/accountant.ts',
       'packages/control-plane/src/gcp/accountant.ts',
     ],

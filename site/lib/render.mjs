@@ -8,7 +8,7 @@ export function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 }
 
-export function makeSite({ cast, contracts, blueprints, base = '/', siteUrl = 'https://beercanlabs.ai', commit = '' }) {
+export function makeSite({ cast, contracts, blueprints, house = { intro: '', members: [] }, base = '/', siteUrl = 'https://beercanlabs.ai', commit = '' }) {
   const members = cast.members;
   const byId = Object.fromEntries(members.map((m) => [m.id, m]));
   const cById = Object.fromEntries(contracts.map((c) => [c.id, c]));
@@ -66,7 +66,17 @@ export function makeSite({ cast, contracts, blueprints, base = '/', siteUrl = 'h
       h += '<section class="dept"><h2>' + esc(d) + ' <small>' + esc(cast.deptNotes[d]) + '</small></h2><div class="grid">' + ms.map((m) =>
         '<a class="person" href="' + url.member(m.id) + '"><div class="pic">' + portrait(m, root) + '</div><div class="info"><span class="title">' + esc(m.title) + '</span><h3>' + esc(m.name) + '</h3><p>' + esc(m.tag) + '</p><div class="chips"><span class="chip">' + m.flows.length + ' flows</span></div></div></a>').join('') + '</div></section>';
     }
-    return { title: 'Staff | Beer Can Labs', description: 'The ' + countWord + ' members of the Agent Factory cast: what each does, its key product flows and its contracts.', body: h, nav: 'staff' };
+    h += '<section class="dept"><h2>House staff <small>optional agents that ship with the factory</small></h2><p class="muted">' + esc(house.intro) + '</p><div class="grid">' +
+      house.members.map((m) => '<a class="person" href="' + url.member(m.id) + '"><div class="pic"><img src="' + root + 'house/' + m.id + '.png" alt="Portrait of the ' + esc(m.name) + '" width="512" height="512"></div><div class="info"><span class="title">' + esc(m.title) + '</span><h3>' + esc(m.name) + '</h3><p>' + esc(m.tag) + '</p></div></a>').join('') +
+      '</div></section>';
+    return { title: 'Staff | Beer Can Labs', description: 'The ' + countWord + ' members of the Agent Factory cast, plus the optional house staff.', body: h, nav: 'staff' };
+  }
+
+  function houseMember(m) {
+    let h = '<div class="crumbs"><a href="' + url.staff() + '">Staff</a> / ' + esc(m.name) + '</div>' +
+      '<section class="profile"><div class="pic"><img src="' + root + 'house/' + m.id + '.png" alt="Portrait of the ' + esc(m.name) + '" width="512" height="512"></div><div class="who"><div class="eyebrow">House staff</div><h1>' + esc(m.name) + '</h1><div><span class="eyebrow" style="color:var(--accent)">' + esc(m.title) + '</span></div><p class="lead">' + esc(m.bio) + '</p></div></section>' +
+      '<section class="two"><div class="card"><h3>On the job</h3><ul>' + m.does.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul></div><div class="card"><h3>Not my job</h3><ul>' + m.dont.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul></div></section>';
+    return { title: m.name + ' | Beer Can Labs', description: m.title + '. ' + m.tag, body: h, nav: 'staff' };
   }
 
   function member(m) {
@@ -148,6 +158,7 @@ export function makeSite({ cast, contracts, blueprints, base = '/', siteUrl = 'h
   function pages() {
     const out = [['/', home()], ['/staff/', staff()], ['/contracts/', contractIndex()], ['/infrastructure/', infra()]];
     for (const m of members) out.push(['/staff/' + m.id + '/', member(m)]);
+    for (const m of house.members) out.push(['/staff/' + m.id + '/', houseMember(m)]);
     for (const c of contracts) out.push(['/contracts/' + c.id + '/', contract(c)]);
     for (const k of Object.keys(blueprints)) out.push(['/infrastructure/' + k + '/', blueprint(k)]);
     return out;

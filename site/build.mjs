@@ -13,6 +13,7 @@ const siteUrl = (process.env.SITE_URL || 'https://beercanlabs.ai').replace(/\/$/
 
 const site = makeSite({
   cast: read('cast.json'), contracts: read('contracts.json'), blueprints: read('blueprints.json'),
+  house: read('house.json'),
   base, siteUrl, commit: process.env.GITHUB_SHA || '',
 });
 

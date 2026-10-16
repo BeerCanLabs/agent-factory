@@ -1,0 +1,6 @@
+cases:
+  - id: asks-for-a-skill
+    input:
+      message: help
+    expect:
+      contains: ["skill"]
