@@ -50,6 +50,16 @@ export interface AgentRecord {
   mindPrefix?: string;
   /** SK4: the skills the deployed image contains, as the approved versions it was built from. Absent: none. */
   deployedSkills?: Array<{ id: string; version: string }>;
+  installedVersion?: string;
+  updateAvailable?: boolean;
+  offeredVersion?: string;
+  offeredCommit?: string;
+  releaseNotes?: string;
+  publishedAt?: string;
+  lastCheckedAt?: string;
+  stagedVersion?: string;
+  stagedCommit?: string;
+  pendingDrain?: boolean;
 }
 
 export interface RunRecord {

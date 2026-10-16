@@ -15,6 +15,7 @@ import {
   Sliders,
   UploadCloud,
   KeyRound,
+  ArrowUpCircle,
 } from 'lucide-react';
 import type { AgentRecord, AgentState } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
@@ -27,10 +28,21 @@ interface FleetViewProps {
   /** Outstanding credentials per agent id (§6.11 K5); absent when the viewer cannot see them. */
   outstandingCredentials?: Record<string, number>;
   onOpenCredentials?: (agentId: string) => void;
+  onOpenUpdateModal?: (agent: AgentRecord) => void;
+  onCheckUpdate?: (agentId: string) => Promise<void>;
 }
 
-export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onRefresh, outstandingCredentials, onOpenCredentials }) => {
+export const FleetView: React.FC<FleetViewProps> = ({
+  agents,
+  onSelectAgent,
+  onRefresh,
+  outstandingCredentials,
+  onOpenCredentials,
+  onOpenUpdateModal,
+  onCheckUpdate,
+}) => {
   const permissions = usePermissions();
+  const [checkingUpdateId, setCheckingUpdateId] = useState<string | null>(null);
   const [filterCategory, setFilterCategory] = useState<'USER' | 'BUILTIN' | 'ALL'>('USER');
   const [filterState, setFilterState] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
@@ -151,6 +163,20 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
       onRefresh();
     } catch (err: any) {
       alert(`Failed to deploy agent: ${err.message}`);
+    }
+  };
+
+  const handleCheckUpdate = async (agentId: string) => {
+    if (!onCheckUpdate) return;
+    setCheckingUpdateId(agentId);
+    try {
+      await onCheckUpdate(agentId);
+      setActionMessage('Checked GitHub for latest release.');
+      onRefresh();
+    } catch (err: any) {
+      alert(`Failed to check update: ${err.message}`);
+    } finally {
+      setCheckingUpdateId(null);
     }
   };
 
@@ -419,6 +445,29 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                     </div>
                     <div className="flex items-center space-x-2">
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">{agent.id}</p>
+                      <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800/60 px-1.5 py-0.2 rounded border border-slate-200 dark:border-slate-800">
+                        v{agent.installedVersion || '0.1.0'}
+                      </span>
+                      {agent.updateAvailable && (
+                        <button
+                          onClick={() => onOpenUpdateModal?.(agent)}
+                          title={`Update available: v${agent.offeredVersion}. Click to review & install.`}
+                          className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800/80 hover:bg-emerald-200 dark:hover:bg-emerald-900 flex items-center space-x-1 animate-pulse"
+                        >
+                          <ArrowUpCircle className="w-3 h-3" />
+                          <span>v{agent.offeredVersion} available</span>
+                        </button>
+                      )}
+                      {onCheckUpdate && (
+                        <button
+                          onClick={() => handleCheckUpdate(agent.id)}
+                          disabled={checkingUpdateId === agent.id}
+                          title="Check for update on GitHub"
+                          className="p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded transition"
+                        >
+                          <RefreshCw className={`w-2.5 h-2.5 ${checkingUpdateId === agent.id ? 'animate-spin text-emerald-500' : ''}`} />
+                        </button>
+                      )}
                       {outstandingCredentials && agent.id in outstandingCredentials && (
                         <button
                           onClick={() => onOpenCredentials?.(agent.id)}
@@ -477,6 +526,18 @@ export const FleetView: React.FC<FleetViewProps> = ({ agents, onSelectAgent, onR
                           <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping mr-1" />
                           <span>Deploying</span>
                         </span>
+                      )}
+
+                      {agent.updateAvailable && (
+                        <button
+                          onClick={() => onOpenUpdateModal?.(agent)}
+                          disabled={!permissions.canInstallUpdates}
+                          title={`Install update to v${agent.offeredVersion}`}
+                          className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded font-medium text-xs flex items-center space-x-1 shadow-sm transition"
+                        >
+                          <ArrowUpCircle className="w-3 h-3" />
+                          <span>Update</span>
+                        </button>
                       )}
 
                       {(agent.state === 'SLEEPING' || agent.state === 'ERROR') && (

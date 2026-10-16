@@ -416,6 +416,18 @@ export async function finishRun(
       }
     }
     if (agent.state === 'WORKING') agent.state = terminal === 'DONE' ? 'SLEEPING' : 'ERROR';
+    if (agent.pendingDrain && agent.stagedCommit) {
+      console.log(`[property-manager] Applying pending drained update for ${agent.id} at ${agent.stagedCommit}...`);
+      agent.commit = agent.stagedCommit;
+      agent.deployedCommit = agent.stagedCommit;
+      if (agent.stagedVersion) agent.installedVersion = agent.stagedVersion;
+      if (agent.stagedVersion && agent.offeredVersion === agent.stagedVersion) {
+        agent.updateAvailable = false;
+      }
+      delete agent.pendingDrain;
+      delete agent.stagedCommit;
+      delete agent.stagedVersion;
+    }
     await notifyGatekeeperIngress(state, agent.id, 'offline');
   }
   if (terminal === 'FAILED' && done.agentId !== 'med-doc' && state.agents.has('med-doc')) {
