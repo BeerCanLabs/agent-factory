@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { Checkpointer, FileLedger, LedgerLease, LeaseHeldError, archiveAndStartSegment, checkpointSinkFromEnv, readSegment, secretValuesFromEnv, segmentWormUri } from '@beercanlabs/factory-ledger';
+import { Checkpointer, FileLedger, LedgerLease, LeaseHeldError, archiveAndStartSegment, checkpointSinkFromEnv, hydrateLedgerFromSink, readSegment, secretValuesFromEnv, segmentWormUri } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { accessAuthFromEnv, authFromEnv } from '@beercanlabs/factory-auth';
 import {
@@ -13,10 +13,10 @@ import {
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, FactoryState } from './app.js';
-import { activeRun, callbackPolicyFromEnv, checkHealth, createRun, dockerApi, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
+import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
 import { scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
-import { SpendTracker } from '@beercanlabs/factory-budget';
+import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
@@ -27,6 +27,7 @@ import { checkRegistry, migrateConfigs, pruneOrphans } from './config-store.js';
 import { SystemsStore } from './systems.js';
 import { checkFactoryBudgets, createTreasury } from './spend.js';
 import { AwsComputeSource, AwsCostSource } from './aws/accountant.js';
+import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
 const AGENTS_ROOT = process.env.AGENTS_ROOT || fileURLToPath(new URL('../../../agents', import.meta.url));
@@ -79,6 +80,22 @@ console.log(`[control-plane] ledger lease held by ${ledgerLease.holder}`);
 
 const inspector = createInspector();
 // LG2: each segment has its own genesis and its own write-once checkpoint prefix.
+// On serverless (Cloud Run) cold boots where LEDGER_PATH lives on fast local disk (/tmp/ledger.jsonl),
+// restore any missing rows from the write-once checkpoint sink before opening and verifying FileLedger.
+{
+  const bootSegment = readSegment(LEDGER_PATH);
+  const bootSink = checkpointSinkFromEnv({ ...process.env, FACTORY_LEDGER_WORM_URI: segmentWormUri(process.env.FACTORY_LEDGER_WORM_URI, bootSegment) });
+  if (bootSink) {
+    try {
+      const hydrated = await hydrateLedgerFromSink(LEDGER_PATH, bootSink);
+      if (hydrated > 0) console.log(`[control-plane] hydrated ${hydrated} ledger rows from WORM checkpoint sink`);
+    } catch (err) {
+      console.error(`[control-plane] ledger hydration from WORM sink failed: ${err instanceof Error ? err.message : String(err)}`);
+      console.error('[control-plane] refusing to open an empty ledger over a checkpoint sink that could not be read');
+      process.exit(3);
+    }
+  }
+}
 const openSegment = () => {
   const segment = readSegment(LEDGER_PATH);
   const store = new FileLedger(LEDGER_PATH, { secrets: () => secretValues, genesis: segment?.genesis });
@@ -201,6 +218,12 @@ const state: FactoryState = {
           securityGroups: (process.env.FACTORY_ECS_SECURITY_GROUPS || '').split(',').filter(Boolean),
           assignPublicIp: process.env.FACTORY_ECS_ASSIGN_PUBLIC_IP !== 'false',
         })
+      : process.env.FACTORY_RUNTIME === 'cloudrun'
+      ? cloudRunRuntime({
+          projectId: process.env.FACTORY_GCP_PROJECT || '',
+          region: process.env.FACTORY_GCP_REGION || 'us-central1',
+          jobMap: parseJobMap(process.env.FACTORY_CLOUDRUN_JOBS),
+        })
       : memoryRuntime({
           store: { root: MEMORY_STORE, uri: process.env.MEMORY_STORE_URI },
           ephemeralRoot: EPHEMERAL,
@@ -302,13 +325,13 @@ const schedulesPath = process.env.FACTORY_SCHEDULES_PATH || join(DATA_DIR, 'sche
 const schedules = new ScheduleStore(schedulesPath);
 state.schedules = schedules;
 
-// §6.15 Accountant: cloud spend, ECS compute inventory, and factory budgets.
+// §6.15 Accountant: cloud spend, ECS / Cloud Run compute inventory, and factory budgets.
 const budgetsPath = process.env.FACTORY_BUDGETS_PATH || join(DATA_DIR, 'budgets.json');
 const accountantRoleArn = process.env.FACTORY_ACCOUNTANT_ROLE_ARN;
 const ecsCluster = process.env.FACTORY_ECS_CLUSTER;
 
-let cloudSource: AwsCostSource | undefined;
-let computeSource: AwsComputeSource | undefined;
+let cloudSource: CloudCostSource | undefined;
+let computeSource: ComputeSource | undefined;
 if (accountantRoleArn) {
   try {
     cloudSource = AwsCostSource.fromRole(accountantRoleArn);
@@ -317,6 +340,13 @@ if (accountantRoleArn) {
     }
   } catch (err) {
     console.error(`[control-plane] accountant initialization failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+} else if (process.env.FACTORY_GCP_PROJECT) {
+  try {
+    cloudSource = GcpCostSource.fromEnv();
+    computeSource = GcpComputeSource.fromEnv();
+  } catch (err) {
+    console.error(`[control-plane] GCP accountant initialization failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 const treasury = createTreasury({ cloud: cloudSource, compute: computeSource, budgetsPath });

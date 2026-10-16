@@ -15,7 +15,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/runtime-ecs.test.ts src/runtime-docker.test.ts src/aws/gatekeeper-held.test.ts src/aws/iam.test.ts"
+    "test": "tsx --test src/runtime-ecs.test.ts src/runtime-cloudrun.test.ts src/runtime-docker.test.ts src/aws/gatekeeper-held.test.ts src/aws/iam.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-codebuild": "^3.1136.0",

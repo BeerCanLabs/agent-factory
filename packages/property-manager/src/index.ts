@@ -8,6 +8,8 @@ export { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
 export type { DockerApi, DockerRuntimeOptions } from './runtime-docker.js';
 export { defaultEcsCli, ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 export type { EcsCli } from './runtime-ecs.js';
+export { cloudRunRuntime, defaultCloudRunApi, parseJobMap } from './runtime-cloudrun.js';
+export type { CloudRunApi, CloudRunExecutionDesc } from './runtime-cloudrun.js';
 export { MemoryRunStore, FileRunStore, RunTokens, TERMINAL_STATES, isTerminal } from './runs.js';
 export type { Run, RunState, RunStore } from './runs.js';
 export { pollQueueOnce, startQueuePollers } from './queues.js';

@@ -154,12 +154,40 @@ describe('§6.5 bus sinks: batch, ship, retry', () => {
     await assert.rejects(() => sink.send(events.slice(0, 1)), /EventBridge rejected 2 event\(s\)/);
   });
 
+  it('Pub/Sub sink publishes base64-encoded events with source and detailType attributes', async () => {
+    const { pubsubSink } = await import('./events.js');
+    let publishedUrl = '';
+    let publishedBody: { messages: Array<{ data: string; attributes: Record<string, string> }> } | undefined;
+    const sink = pubsubSink('factory-events', {
+      projectId: 'gcp-proj-1',
+      getAccessToken: async () => 'tok-pubsub',
+      apiEndpoint: 'https://pubsub.test',
+      fetch: (async (url: string, init: RequestInit) => {
+        publishedUrl = String(url);
+        publishedBody = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ messageIds: ['1'] }), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    const ev = runEvent(run('FAILED', { runId: 'r-pubsub', error: 'simulated failure' }));
+    await sink.send([ev]);
+    assert.equal(sink.name, 'pubsub:factory-events');
+    assert.equal(publishedUrl, 'https://pubsub.test/v1/projects/gcp-proj-1/topics/factory-events:publish');
+    assert.equal(publishedBody?.messages.length, 1);
+    assert.deepEqual(JSON.parse(Buffer.from(publishedBody!.messages[0].data, 'base64').toString('utf8')), ev);
+    assert.deepEqual(publishedBody!.messages[0].attributes, {
+      source: 'agent-factory',
+      detailType: 'factory.run',
+      agentId: 'agent-a',
+    });
+  });
+
   it('FACTORY_EVENT_BUS selects the sink and refuses anything else', () => {
     assert.equal(busSinkFromEnv({}), undefined);
     assert.equal(busSinkFromEnv({ FACTORY_EVENT_BUS: 'eventbridge:main' })?.name, 'eventbridge:main');
+    assert.equal(busSinkFromEnv({ FACTORY_EVENT_BUS: 'pubsub:factory-events', FACTORY_GCP_PROJECT: 'p1' })?.name, 'pubsub:factory-events');
     const dir = mkdtempSync(join(tmpdir(), 'bus-'));
     assert.equal(busSinkFromEnv({ FACTORY_EVENT_BUS: `file://${join(dir, 'x.ndjson')}` })?.name, `file:${join(dir, 'x.ndjson')}`);
-    assert.throws(() => busSinkFromEnv({ FACTORY_EVENT_BUS: 'kafka:x' }), /FACTORY_EVENT_BUS must be eventbridge:<bus> or file:\/\/<path>, got kafka:x/);
+    assert.throws(() => busSinkFromEnv({ FACTORY_EVENT_BUS: 'kafka:x' }), /FACTORY_EVENT_BUS must be eventbridge:<bus>, pubsub:<topic> or file:\/\/<path>, got kafka:x/);
   });
 });
 

@@ -97,6 +97,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/spend.ts',
       'packages/control-plane/src/skill-training.ts',
       'packages/control-plane/src/aws/accountant.ts',
+      'packages/control-plane/src/gcp/accountant.ts',
     ],
   },
   bouncer: {
@@ -124,6 +125,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/aws/skill-checker.ts',
+      'packages/control-plane/src/gcp/skill-checker.ts',
       'packages/control-plane/src/config-store.ts',
       'packages/control-plane/src/skills.ts',
       'packages/control-plane/src/systems.ts',

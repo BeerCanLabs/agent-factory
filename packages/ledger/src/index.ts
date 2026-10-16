@@ -12,8 +12,8 @@ export {
   secretValuesFromEnv,
   toLedgerEvent,
 } from './sanitize.js';
-export { FileCheckpointSink, S3CheckpointSink, GcsCheckpointSink, checkpointSinkFromEnv } from './checkpoints.js';
-export type { Checkpoint, CheckpointRef, CheckpointSink } from './checkpoints.js';
+export { FileCheckpointSink, S3CheckpointSink, GcsCheckpointSink, checkpointSinkFromEnv, hydrateLedgerFromSink } from './checkpoints.js';
+export type { Checkpoint, CheckpointRef, CheckpointSink, GcsCheckpointOptions } from './checkpoints.js';
 export { LedgerLease, LeaseHeldError, type LeaseRecord } from './lease.js';
 export { archiveAndStartSegment, readSegment, segmentGenesis, segmentWormUri, type SegmentRecord } from './segment.js';
 import type { CheckpointSink } from './checkpoints.js';

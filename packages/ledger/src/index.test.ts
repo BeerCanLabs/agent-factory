@@ -304,6 +304,63 @@ describe('GCS checkpoint sink', () => {
     const s2 = checkpointSinkFromEnv({ FACTORY_LEDGER_WORM_URI: 'gs://bucket/path' });
     assert.ok(s2 instanceof GcsCheckpointSink);
   });
+
+  it('writes, lists, and hydrates FileLedger over native GCS JSON API without gcloud binary', async () => {
+    const { hydrateLedgerFromSink } = await import('./index.js');
+    const objects = new Map<string, string>();
+    const fetchMock: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      const method = init?.method ?? 'GET';
+      if (method === 'POST' && url.pathname === '/upload/storage/v1/b/worm-bucket/o') {
+        const name = url.searchParams.get('name') ?? '';
+        objects.set(name, String(init?.body ?? ''));
+        return new Response(JSON.stringify({ name }), { status: 200 });
+      }
+      if (method === 'GET' && url.pathname === '/storage/v1/b/worm-bucket/o') {
+        const prefix = url.searchParams.get('prefix') ?? '';
+        const items = [...objects.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name }));
+        return new Response(JSON.stringify({ items }), { status: 200 });
+      }
+      const dlMatch = url.pathname.match(/^\/storage\/v1\/b\/worm-bucket\/o\/(.+)$/);
+      if (method === 'GET' && dlMatch && url.searchParams.get('alt') === 'media') {
+        const name = decodeURIComponent(dlMatch[1]);
+        const body = objects.get(name);
+        if (body === undefined) return new Response('', { status: 404 });
+        return new Response(body, { status: 200 });
+      }
+      return new Response('', { status: 404 });
+    };
+
+    const dir = mkdtempSync(join(tmpdir(), 'gcs-hydrate-'));
+    try {
+      const path1 = join(dir, 'instance1.jsonl');
+      const ledger1 = new FileLedger(path1);
+      for (let i = 0; i < 3; i++) ledger1.append({ agentId: 'a', type: 'action', action: `STEP_${i}`, actor: 'token:t' });
+      const sink = new GcsCheckpointSink('gcs://worm-bucket/ledger', 365, undefined, {
+        fetch: fetchMock,
+        getAccessToken: async () => 'tok',
+      });
+      const cp = new Checkpointer(ledger1, sink);
+      await cp.init();
+      await cp.flush();
+
+      // Simulate cold Cloud Run container restart with empty /tmp/ledger.jsonl
+      const path2 = join(dir, 'instance2.jsonl');
+      const hydratedCount = await hydrateLedgerFromSink(path2, sink);
+      assert.equal(hydratedCount, 3);
+      const ledger2 = new FileLedger(path2);
+      const verify = ledger2.verify(await sink.list());
+      assert.equal(verify.ok, true);
+      if (verify.ok) {
+        assert.equal(verify.rows, 3);
+        assert.equal(verify.checkpointsChecked, 1);
+      }
+      ledger2.append({ agentId: 'a', type: 'action', action: 'STEP_3', actor: 'token:t' });
+      assert.equal(ledger2.query().length, 4);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 

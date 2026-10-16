@@ -140,21 +140,83 @@ describe('bindSecrets', () => {
     }
   });
 
-  it('surfaces AWS write errors other than not-found; other backends say writes are not implemented', async () => {
+  it('surfaces AWS and GCP write errors other than not-found; http backend says writes are not implemented', async () => {
     const provider = awsSecretsManagerProvider('p/', async () => {
       throw new Error('AccessDeniedException');
     });
     await assert.rejects(provider.put!('x', 'v'), /AccessDenied/);
     const { gcpSecretManagerProvider, writableProvider, SecretWriteNotImplementedError } = await import('./index.js');
-    await assert.rejects(gcpSecretManagerProvider('p', async () => '').put!('x', 'v'), SecretWriteNotImplementedError);
+    const gcpProvider = gcpSecretManagerProvider('p', async () => {
+      throw new Error('PERMISSION_DENIED');
+    });
+    await assert.rejects(gcpProvider.put!('x', 'v'), /PERMISSION_DENIED/);
     await assert.rejects(httpProvider('http://127.0.0.1:1').put!('x', 'v'), SecretWriteNotImplementedError);
     assert.equal(writableProvider([envProvider({})]), undefined);
     assert.equal(writableProvider([envProvider({}), provider])?.name, 'aws-sm');
+    assert.equal(writableProvider([envProvider({}), gcpProvider])?.name, 'gcp-sm');
+  });
+
+  it('supports GCP Secret Manager REST API (get, put, has, present) with prefix and slash encoding', async () => {
+    const { gcpSecretManagerProvider } = await import('./index.js');
+    const store = new Map<string, string>();
+    const fetchMock: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      const method = init?.method ?? 'GET';
+      const path = url.pathname;
+      const accessMatch = path.match(/\/projects\/proj-1\/secrets\/([^/]+)\/versions\/latest:access$/);
+      if (method === 'GET' && accessMatch) {
+        const id = decodeURIComponent(accessMatch[1]);
+        const val = store.get(id);
+        if (val === undefined) return new Response('{}', { status: 404 });
+        return new Response(JSON.stringify({ payload: { data: Buffer.from(val, 'utf8').toString('base64') } }), { status: 200 });
+      }
+      const addVerMatch = path.match(/\/projects\/proj-1\/secrets\/([^/:]+):addVersion$/);
+      if (method === 'POST' && addVerMatch) {
+        const id = decodeURIComponent(addVerMatch[1]);
+        if (!store.has(id)) return new Response('{}', { status: 404 });
+        const body = JSON.parse(String(init?.body ?? '{}')) as { payload: { data: string } };
+        store.set(id, Buffer.from(body.payload.data, 'base64').toString('utf8'));
+        return new Response('{}', { status: 200 });
+      }
+      if (method === 'POST' && path.endsWith('/projects/proj-1/secrets')) {
+        const id = url.searchParams.get('secretId')!;
+        store.set(id, '');
+        return new Response('{}', { status: 200 });
+      }
+      const versMatch = path.match(/\/projects\/proj-1\/secrets\/([^/]+)\/versions$/);
+      if (method === 'GET' && versMatch) {
+        const id = decodeURIComponent(versMatch[1]);
+        const val = store.get(id);
+        if (!val) return new Response(JSON.stringify({ versions: [] }), { status: 200 });
+        return new Response(JSON.stringify({ versions: [{ state: 'ENABLED' }] }), { status: 200 });
+      }
+      if (method === 'GET' && path.endsWith('/projects/proj-1/secrets')) {
+        const secrets = [...store.keys()].map((id) => ({ name: `projects/123/secrets/${id}` }));
+        return new Response(JSON.stringify({ secrets }), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    };
+
+    const gcp = gcpSecretManagerProvider('proj-1', undefined, {
+      prefix: 'factory-prod-',
+      fetch: fetchMock,
+      getAccessToken: async () => 'tok-123',
+    });
+
+    assert.equal(await gcp.has!('connections/donna/google'), false);
+    await gcp.put!('connections/donna/google', '{"refreshToken":"r1"}');
+    await gcp.put!('NOTION_API_KEY', 'secret-notion');
+    assert.equal(store.has('factory-prod-connections---donna---google'), true);
+    assert.equal(store.has('factory-prod-NOTION_API_KEY'), true);
+    assert.equal(await gcp.has!('connections/donna/google'), true);
+    assert.equal(await gcp.get('connections/donna/google'), '{"refreshToken":"r1"}');
+    assert.equal(await gcp.get('NOTION_API_KEY'), 'secret-notion');
+    assert.deepEqual([...(await gcp.present!())].sort(), ['NOTION_API_KEY', 'connections/donna/google']);
   });
 
   it('wires gcpSecretManagerProvider into providersFromEnv', async () => {
     const { providersFromEnv } = await import('./index.js');
-    const providers = providersFromEnv({ FACTORY_SECRETS_GCP_PROJECT: 'proj-123' });
+    const providers = providersFromEnv({ FACTORY_SECRETS_GCP_PROJECT: 'proj-123', FACTORY_SECRETS_GCP_PREFIX: 'factory-prod-' });
     assert.ok(providers.some((p) => p.name === 'gcp-sm'));
   });
 

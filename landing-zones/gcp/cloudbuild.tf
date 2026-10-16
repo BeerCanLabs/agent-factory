@@ -1,13 +1,25 @@
-# ---- Cloud Build Service Account for dynamic agent builds -----------------------------------
-# The Factory Control Plane assumes this SA to trigger Cloud Build jobs.
-# Equivalent to aws_iam_role.codebuild.
+# ============================================================================================
+# Cloud Build Service Accounts — Agent Factory GCP Landing Zone (DESIGN_AUTHORITY §6.8 L3/L4, §6.14 SK1)
+# Equivalent to landing-zones/aws/codebuild.tf.
+#
+# - google_service_account.cloudbuild (`factory-prod-cb`): runs admission builds (`buildAgentImage`
+#   in packages/property-manager/src/gcp/cloudbuild.ts) and pushes admitted SHA-tagged images to
+#   Artifact Registry.
+# - google_service_account.skill_checker (`factory-prod-skill-checker`): runs SK1 skill checks
+#   (`cloudBuildSkillChecker` in packages/control-plane/src/gcp/skill-checker.ts) with NO Artifact
+#   Registry write access.
+# ============================================================================================
 
-resource "google_service_account" "cloudbuild" {
-  account_id   = "${local.name}-cb"
-  display_name = "Factory Cloud Build (dynamic agent builder)"
+data "google_project" "current" {
+  project_id = var.project_id
 }
 
-# Allow Cloud Build SA to push images to Artifact Registry
+# ---- 1. Agent Admission Builder Service Account (L3/L4) -------------------------------------
+resource "google_service_account" "cloudbuild" {
+  account_id   = "${local.name}-cb"
+  display_name = "Factory Cloud Build (dynamic agent admission builder)"
+}
+
 resource "google_artifact_registry_repository_iam_member" "cb_writer" {
   location   = google_artifact_registry_repository.dynamic_agents.location
   repository = google_artifact_registry_repository.dynamic_agents.name
@@ -15,80 +27,53 @@ resource "google_artifact_registry_repository_iam_member" "cb_writer" {
   member     = "serviceAccount:${google_service_account.cloudbuild.email}"
 }
 
-# Allow Cloud Build SA to write logs
 resource "google_project_iam_member" "cb_log_writer" {
   project = var.project_id
   role    = "roles/logging.logWriter"
   member  = "serviceAccount:${google_service_account.cloudbuild.email}"
 }
 
-# Allow Cloud Build SA to read source from Cloud Storage (used when control plane uploads a workspace tarball)
 resource "google_project_iam_member" "cb_storage_reader" {
   project = var.project_id
   role    = "roles/storage.objectViewer"
   member  = "serviceAccount:${google_service_account.cloudbuild.email}"
 }
 
-# Grant the Cloud Build service agent the ability to use this SA
-# (Required: Cloud Build's own SA must be able to act as our SA)
+resource "google_secret_manager_secret_iam_member" "cb_source_token" {
+  count     = var.agent_source_token_secret_name != "" ? 1 : 0
+  secret_id = var.agent_source_token_secret_name
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.cloudbuild.email}"
+}
+
 resource "google_service_account_iam_member" "cb_sa_user" {
   service_account_id = google_service_account.cloudbuild.name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloudbuild.iam.gserviceaccount.com"
 }
 
-data "google_project" "current" {
-  project_id = var.project_id
+# ---- 2. Isolated Skill Checker Service Account (SK1) ----------------------------------------
+# Holds NO Artifact Registry write access: skill checks execute untrusted skill tests and never build or push images.
+resource "google_service_account" "skill_checker" {
+  account_id   = "${local.name}-skill-checker"
+  display_name = "Factory Cloud Build Skill Checker (SK1)"
 }
 
-# A reusable inline build config used as the template when the control plane triggers builds.
-# The control plane passes AGENT_ID and REPO_URL as substitutions at trigger time.
-# Equivalent to the aws_codebuild_project 'factory-agent-builder' buildspec.
-resource "google_cloudbuild_trigger" "agent_builder" {
-  name        = "${local.name}-agent-builder"
-  description = "Template trigger: builds a dynamic agent image from a Git repo and pushes to Artifact Registry. Triggered programmatically by the control plane."
-  location    = var.region
+resource "google_project_iam_member" "skill_checker_log_writer" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.skill_checker.email}"
+}
 
-  # Manual trigger — the control plane calls the Cloud Build API to run it
-  # with REPO_URL and AGENT_ID substitution overrides.
-  source_to_build {
-    uri       = "https://github.com/placeholder/placeholder" # overridden at runtime
-    ref       = "refs/heads/main"
-    repo_type = "GITHUB"
-  }
+resource "google_secret_manager_secret_iam_member" "skill_checker_source_token" {
+  count     = var.agent_source_token_secret_name != "" ? 1 : 0
+  secret_id = var.agent_source_token_secret_name
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.skill_checker.email}"
+}
 
-  substitutions = {
-    _AGENT_ID          = "placeholder"
-    _ARTIFACT_REGISTRY = "${var.region}-docker.pkg.dev/${var.project_id}/${local.name}-agents"
-  }
-
-  build {
-    step {
-      name = "gcr.io/cloud-builders/docker"
-      args = [
-        "build",
-        "-t",
-        "$_ARTIFACT_REGISTRY:$_AGENT_ID",
-        "."
-      ]
-    }
-    step {
-      name = "gcr.io/cloud-builders/docker"
-      args = [
-        "push",
-        "$_ARTIFACT_REGISTRY:$_AGENT_ID"
-      ]
-    }
-    images = ["$_ARTIFACT_REGISTRY:$_AGENT_ID"]
-    options {
-      logging = "CLOUD_LOGGING_ONLY"
-    }
-  }
-
-  service_account = google_service_account.cloudbuild.id
-
-  depends_on = [
-    google_artifact_registry_repository.dynamic_agents,
-    google_service_account.cloudbuild,
-  ]
+resource "google_service_account_iam_member" "skill_checker_sa_user" {
+  service_account_id = google_service_account.skill_checker.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloudbuild.iam.gserviceaccount.com"
 }

@@ -112,12 +112,91 @@ export function eventBridgeSink(bus: string, cli?: AwsCli): BusSink {
   };
 }
 
+export type PubSubSinkOptions = {
+  projectId?: string;
+  fetch?: typeof fetch;
+  getAccessToken?: () => Promise<string>;
+  apiEndpoint?: string;
+};
+
+let cachedPubSubToken: { token: string; expiresAt: number } | undefined;
+
+async function defaultPubSubToken(fetchFn: typeof fetch = fetch): Promise<string> {
+  if (process.env.GOOGLE_OAUTH_ACCESS_TOKEN) return process.env.GOOGLE_OAUTH_ACCESS_TOKEN.trim();
+  if (cachedPubSubToken && Date.now() < cachedPubSubToken.expiresAt - 60_000) return cachedPubSubToken.token;
+  try {
+    const res = await fetchFn('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', {
+      headers: { 'Metadata-Flavor': 'Google' },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { access_token: string; expires_in?: number };
+      if (data.access_token) {
+        cachedPubSubToken = { token: data.access_token, expiresAt: Date.now() + (data.expires_in ?? 300) * 1000 };
+        return data.access_token;
+      }
+    }
+  } catch {
+    // Fall back to gcloud CLI on local developer machines
+  }
+  const { stdout } = await execFileAsync('gcloud', ['auth', 'print-access-token'], { encoding: 'utf8' });
+  return stdout.trim();
+}
+
+/** Google Cloud Pub/Sub topic sink. Publishes base64 JSON messages with source/detailType attributes, up to 100 per call. */
+export function pubsubSink(topic: string, options?: PubSubSinkOptions): BusSink {
+  const fetchFn = options?.fetch ?? fetch;
+  const tokenFn = options?.getAccessToken ?? (() => defaultPubSubToken(fetchFn));
+  const endpoint = (options?.apiEndpoint ?? process.env.PUBSUB_API_ENDPOINT ?? 'https://pubsub.googleapis.com').replace(/\/$/, '');
+  const resolveTopicPath = () => {
+    if (topic.startsWith('projects/')) return topic;
+    const project = options?.projectId ?? process.env.FACTORY_GCP_PROJECT ?? process.env.FACTORY_SECRETS_GCP_PROJECT;
+    if (!project) throw new Error('pubsubSink requires projectId or FACTORY_GCP_PROJECT when topic is not projects/<p>/topics/<t>');
+    return `projects/${project}/topics/${topic}`;
+  };
+
+  return {
+    name: `pubsub:${topic}`,
+    async send(events) {
+      if (!events.length) return;
+      const fullTopic = resolveTopicPath();
+      const token = await tokenFn();
+      for (let i = 0; i < events.length; i += 100) {
+        const messages = events.slice(i, i + 100).map((e) => ({
+          data: Buffer.from(JSON.stringify(e), 'utf8').toString('base64'),
+          attributes: {
+            source: 'agent-factory',
+            detailType: `factory.${e.kind}`,
+            agentId: e.agentId,
+          },
+        }));
+        const res = await fetchFn(`${endpoint}/v1/${fullTopic}:publish`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ messages }),
+        });
+        if (!res.ok) {
+          throw new Error(`Pub/Sub publish failed (${res.status})`);
+        }
+      }
+    },
+  };
+}
+
 export function busSinkFromEnv(env: NodeJS.ProcessEnv = process.env): BusSink | undefined {
   const spec = env.FACTORY_EVENT_BUS;
   if (!spec) return undefined;
   if (spec.startsWith('eventbridge:')) return eventBridgeSink(spec.slice('eventbridge:'.length));
+  if (spec.startsWith('pubsub:')) {
+    return pubsubSink(spec.slice('pubsub:'.length), {
+      projectId: env.FACTORY_GCP_PROJECT ?? env.FACTORY_SECRETS_GCP_PROJECT,
+    });
+  }
   if (spec.startsWith('file://')) return fileSink(spec.slice('file://'.length));
-  throw new Error(`FACTORY_EVENT_BUS must be eventbridge:<bus> or file://<path>, got ${spec}`);
+  throw new Error(`FACTORY_EVENT_BUS must be eventbridge:<bus>, pubsub:<topic> or file://<path>, got ${spec}`);
 }
 
 /** Batch bus-worthy events and ship them; failures are retried on the next flush. */

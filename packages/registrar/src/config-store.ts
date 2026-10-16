@@ -304,13 +304,178 @@ export class S3ConfigBackend implements ConfigBackend {
   }
 }
 
-/** `FACTORY_CONFIG_STORE_URI`: `s3://bucket/prefix`, `file:///path` or a plain path. Unset: `fallbackDir`. */
+export type GcsConfigBackendOptions = {
+  maxAttempts?: number;
+  retryDelayMs?: number;
+  fetch?: typeof fetch;
+  getAccessToken?: () => Promise<string>;
+  apiEndpoint?: string;
+};
+
+let cachedRegistrarGcsToken: { token: string; expiresAt: number } | undefined;
+
+async function defaultRegistrarGcsToken(fetchFn: typeof fetch = fetch): Promise<string> {
+  if (process.env.GOOGLE_OAUTH_ACCESS_TOKEN) return process.env.GOOGLE_OAUTH_ACCESS_TOKEN.trim();
+  if (cachedRegistrarGcsToken && Date.now() < cachedRegistrarGcsToken.expiresAt - 60_000) return cachedRegistrarGcsToken.token;
+  try {
+    const res = await fetchFn('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', {
+      headers: { 'Metadata-Flavor': 'Google' },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { access_token: string; expires_in?: number };
+      if (data.access_token) {
+        cachedRegistrarGcsToken = { token: data.access_token, expiresAt: Date.now() + (data.expires_in ?? 300) * 1000 };
+        return data.access_token;
+      }
+    }
+  } catch {
+    // Fall back to gcloud CLI on local developer machines
+  }
+  const { stdout } = await execFileAsync('gcloud', ['auth', 'print-access-token'], { encoding: 'utf8' });
+  return stdout.trim();
+}
+
+/**
+ * A GCS bucket with Object Versioning (R1 point-in-time restore), using the native GCS JSON API (no `gcloud` binary or
+ * cloud SDK in the kernel, GAP-014 / GAP-023). Loading downloads `<prefix><agentId>/<n>.json` into a scratch directory
+ * with bounded retry; each new version is a conditional write (`ifGenerationMatch=0`) that fails if the object already
+ * exists, followed by the `current.json` pointer.
+ */
+export class GcsConfigBackend implements ConfigBackend {
+  readonly description: string;
+  private readonly bucket: string;
+  private readonly prefix: string;
+  private readonly maxAttempts: number;
+  private readonly retryDelayMs: number;
+  private readonly fetchFn: typeof fetch;
+  private readonly tokenFn: () => Promise<string>;
+  private readonly endpoint: string;
+
+  constructor(uri: string, options?: GcsConfigBackendOptions) {
+    const m = uri.match(/^(?:gs|gcs):\/\/([^/]+)\/?(.*)$/);
+    if (!m) throw new Error(`not a gs:// or gcs:// uri: ${uri}`);
+    this.bucket = m[1];
+    this.prefix = m[2] ? `${m[2].replace(/\/+$/, '')}/` : '';
+    this.description = `gs://${this.bucket}/${this.prefix}`;
+    this.maxAttempts = Math.max(1, options?.maxAttempts ?? 3);
+    this.retryDelayMs = Math.max(0, options?.retryDelayMs ?? 1000);
+    this.fetchFn = options?.fetch ?? fetch;
+    this.tokenFn = options?.getAccessToken ?? (() => defaultRegistrarGcsToken(this.fetchFn));
+    this.endpoint = (options?.apiEndpoint ?? process.env.GCS_API_ENDPOINT ?? 'https://storage.googleapis.com').replace(/\/$/, '');
+  }
+
+  async loadAll(): Promise<ConfigRecord[]> {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      const dir = mkdtempSync(join(tmpdir(), 'config-store-gcs-'));
+      try {
+        const token = await this.tokenFn();
+        let pageToken: string | undefined;
+        do {
+          const params = new URLSearchParams();
+          if (this.prefix) params.set('prefix', this.prefix);
+          if (pageToken) params.set('pageToken', pageToken);
+          const listRes = await this.fetchFn(
+            `${this.endpoint}/storage/v1/b/${encodeURIComponent(this.bucket)}/o?${params.toString()}`,
+            { headers: { Authorization: `Bearer ${token}` } },
+          );
+          if (!listRes.ok) throw new Error(`GCS config list failed (${listRes.status})`);
+          const data = (await listRes.json()) as { items?: Array<{ name?: string }>; nextPageToken?: string };
+          for (const item of data.items ?? []) {
+            const name = item.name ?? '';
+            if (!name.startsWith(this.prefix)) continue;
+            const rel = name.slice(this.prefix.length);
+            const parts = rel.split('/');
+            if (parts.length !== 2 || !AGENT_ID.test(parts[0]) || !VERSION_FILE.test(parts[1])) continue;
+            const dlRes = await this.fetchFn(
+              `${this.endpoint}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(name)}?alt=media`,
+              { headers: { Authorization: `Bearer ${token}` } },
+            );
+            if (!dlRes.ok) throw new Error(`GCS config download failed (${dlRes.status})`);
+            const text = await dlRes.text();
+            const agentDir = join(dir, parts[0]);
+            mkdirSync(agentDir, { recursive: true });
+            writeFileSync(join(agentDir, parts[1]), text);
+          }
+          pageToken = data.nextPageToken;
+        } while (pageToken);
+        return readTree(dir);
+      } catch (err) {
+        lastErr = err;
+        if (attempt < this.maxAttempts && this.retryDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs * 2 ** (attempt - 1)));
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+    throw lastErr;
+  }
+
+  async write(record: ConfigRecord): Promise<void> {
+    checkAgentId(record.agentId);
+    const token = await this.tokenFn();
+    const versionKey = `${this.prefix}${record.agentId}/${record.version}.json`;
+    const currentKey = `${this.prefix}${record.agentId}/current.json`;
+
+    const vRes = await this.fetchFn(
+      `${this.endpoint}/upload/storage/v1/b/${encodeURIComponent(this.bucket)}/o?uploadType=media&ifGenerationMatch=0&name=${encodeURIComponent(versionKey)}`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: body(record),
+      },
+    );
+    if (!vRes.ok) {
+      throw new Error(`GCS config write failed (${vRes.status}: PreconditionFailed)`);
+    }
+
+    const cRes = await this.fetchFn(
+      `${this.endpoint}/upload/storage/v1/b/${encodeURIComponent(this.bucket)}/o?uploadType=media&name=${encodeURIComponent(currentKey)}`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: pointer(record),
+      },
+    );
+    if (!cRes.ok) {
+      throw new Error(`GCS config pointer write failed (${cRes.status})`);
+    }
+  }
+
+  async remove(agentId: string, _meta?: { removedBy: string; reason: string; now?: Date }): Promise<void> {
+    checkAgentId(agentId);
+    const token = await this.tokenFn();
+    const agentPrefix = `${this.prefix}${agentId}/`;
+    const listRes = await this.fetchFn(
+      `${this.endpoint}/storage/v1/b/${encodeURIComponent(this.bucket)}/o?prefix=${encodeURIComponent(agentPrefix)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!listRes.ok) throw new Error(`GCS config remove list failed (${listRes.status})`);
+    const data = (await listRes.json()) as { items?: Array<{ name?: string }> };
+    for (const item of data.items ?? []) {
+      const name = item.name ?? '';
+      if (!name.startsWith(agentPrefix)) continue;
+      const delRes = await this.fetchFn(
+        `${this.endpoint}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(name)}`,
+        { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } },
+      );
+      if (!delRes.ok && delRes.status !== 404) {
+        throw new Error(`GCS config delete failed (${delRes.status})`);
+      }
+    }
+  }
+}
+
+/** `FACTORY_CONFIG_STORE_URI`: `s3://bucket/prefix`, `gs://bucket/prefix`, `gcs://bucket/prefix`, `file:///path` or a plain path. Unset: `fallbackDir`. */
 export function configBackendFromEnv(uri: string | undefined, fallbackDir: string, cli?: AwsCli): ConfigBackend {
   const u = uri?.trim();
   if (!u) return new FileConfigBackend(fallbackDir);
   if (u.startsWith('s3://')) return new S3ConfigBackend(u, cli);
+  if (u.startsWith('gs://') || u.startsWith('gcs://')) return new GcsConfigBackend(u);
   if (u.startsWith('file://')) return new FileConfigBackend(u.slice('file://'.length));
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) throw new Error(`FACTORY_CONFIG_STORE_URI must be s3://, file:// or a path, got ${u}`);
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) throw new Error(`FACTORY_CONFIG_STORE_URI must be s3://, gs://, gcs://, file:// or a path, got ${u}`);
   return new FileConfigBackend(u);
 }
 

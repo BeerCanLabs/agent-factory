@@ -173,7 +173,393 @@ export function bedrockConverse(opts: BedrockConverseOptions = {}): ModelAdapter
   };
 }
 
-/** Adapters by catalog `provider`. Add anthropic-messages, vertex, openai-compatible here. */
-export function defaultModelAdapters(): Record<string, ModelAdapter> {
-  return { 'bedrock-converse': bedrockConverse() };
+// ---------------------------------------------------------------------------------------------
+// GCP Metadata / Access Token & Secret lookup helpers for Vertex AI and API-key adapters
+
+let cachedGcpAccessToken: { token: string; expiresAt: number } | undefined;
+const cachedProviderSecrets = new Map<string, { value: string; expiresAt: number }>();
+
+export async function gcpAccessTokenFromEnv(doFetch: typeof fetch = fetch): Promise<string> {
+  if (process.env.GOOGLE_OAUTH_ACCESS_TOKEN) {
+    return process.env.GOOGLE_OAUTH_ACCESS_TOKEN.trim();
+  }
+  if (cachedGcpAccessToken && Date.now() < cachedGcpAccessToken.expiresAt - 60_000) {
+    return cachedGcpAccessToken.token;
+  }
+  const res = await doFetch('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', {
+    headers: { 'Metadata-Flavor': 'Google' },
+    signal: AbortSignal.timeout(3000),
+  });
+  if (!res.ok) throw new Error(`GCP metadata token HTTP ${res.status}`);
+  const data = (await res.json()) as { access_token?: string; expires_in?: number };
+  if (!data.access_token) throw new Error('GCP metadata response had no access_token');
+  cachedGcpAccessToken = {
+    token: data.access_token,
+    expiresAt: Date.now() + (data.expires_in ?? 300) * 1000,
+  };
+  return data.access_token;
 }
+
+async function resolveProviderSecret(secretName: string, doFetch: typeof fetch = fetch): Promise<string> {
+  const fromEnv = process.env[secretName];
+  if (fromEnv) return fromEnv.trim();
+
+  const cached = cachedProviderSecrets.get(secretName);
+  if (cached && Date.now() < cached.expiresAt) return cached.value;
+
+  const gcpProject = process.env.FACTORY_SECRETS_GCP_PROJECT ?? process.env.FACTORY_GCP_PROJECT;
+  if (gcpProject) {
+    const prefix = process.env.FACTORY_SECRETS_GCP_PREFIX ?? '';
+    const secretId = `${prefix}${secretName.replace(/\//g, '---')}`;
+    const token = await gcpAccessTokenFromEnv(doFetch);
+    const res = await doFetch(
+      `https://secretmanager.googleapis.com/v1/projects/${encodeURIComponent(gcpProject)}/secrets/${encodeURIComponent(secretId)}/versions/latest:access`,
+      { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000) },
+    );
+    if (res.ok) {
+      const json = (await res.json()) as { payload?: { data?: string } };
+      if (json.payload?.data) {
+        const value = Buffer.from(json.payload.data, 'base64').toString('utf8').replace(/\r?\n$/, '');
+        if (value) {
+          cachedProviderSecrets.set(secretName, { value, expiresAt: Date.now() + 60_000 });
+          return value;
+        }
+      }
+    }
+  }
+  throw new Error(`secret ${secretName} not available`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// vertex-gemini / vertex-ai (Google Gemini on Vertex AI via generateContent)
+
+export type VertexOptions = {
+  project?: string;
+  region?: string;
+  accessToken?: () => Promise<string>;
+  endpoint?: (region: string) => string;
+  fetch?: typeof fetch;
+  timeoutMs?: number;
+};
+
+const VERTEX_GEMINI_FINISH: Record<string, string> = {
+  STOP: 'stop',
+  MAX_TOKENS: 'length',
+  SAFETY: 'content_filter',
+  RECITATION: 'content_filter',
+  BLOCKLIST: 'content_filter',
+  PROHIBITED_CONTENT: 'content_filter',
+  SPII: 'content_filter',
+};
+
+export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
+  const doFetch = opts.fetch ?? fetch;
+  const getToken = opts.accessToken ?? (() => gcpAccessTokenFromEnv(doFetch));
+  const endpoint =
+    opts.endpoint ??
+    ((region: string) => (region === 'global' ? 'https://aiplatform.googleapis.com' : `https://${region}-aiplatform.googleapis.com`));
+
+  return {
+    async complete(entry, req) {
+      const project = opts.project ?? process.env.FACTORY_GCP_PROJECT ?? process.env.FACTORY_SECRETS_GCP_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT;
+      const region = entry.region ?? opts.region ?? process.env.FACTORY_GCP_REGION ?? 'us-central1';
+      if (!project) throw new ModelUpstreamError(503, 'provider_misconfigured', 'FACTORY_GCP_PROJECT is not configured for Vertex AI');
+
+      let token: string;
+      try {
+        token = await getToken();
+      } catch (err) {
+        console.error(`[gatekeeper-egress] vertex credentials: ${err instanceof Error ? err.message : String(err)}`);
+        throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no cloud credentials');
+      }
+
+      const systemParts = req.messages.filter((m) => m.role === 'system').map((m) => ({ text: m.content }));
+      const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+      for (const m of req.messages) {
+        if (m.role === 'system') continue;
+        const role = m.role === 'assistant' ? 'model' : 'user';
+        const last = contents.at(-1);
+        if (last && last.role === role) last.parts.push({ text: m.content });
+        else contents.push({ role, parts: [{ text: m.content }] });
+      }
+
+      const generationConfig = {
+        ...(req.maxTokens !== undefined ? { maxOutputTokens: req.maxTokens } : {}),
+        ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+        ...(req.topP !== undefined ? { topP: req.topP } : {}),
+        ...(req.stop ? { stopSequences: req.stop } : {}),
+      };
+
+      const payload = {
+        contents,
+        ...(systemParts.length ? { systemInstruction: { parts: systemParts } } : {}),
+        ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
+      };
+
+      const url = `${endpoint(region).replace(/\/$/, '')}/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(region)}/publishers/google/models/${encodeURIComponent(entry.id)}:generateContent`;
+      let res: Response;
+      try {
+        res = await doFetch(url, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(opts.timeoutMs ?? 300_000),
+        });
+      } catch (err) {
+        throw new ModelUpstreamError(502, 'upstream_unreachable', err instanceof Error ? err.message : String(err));
+      }
+
+      const text = await res.text();
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch {}
+      if (!res.ok) {
+        const errObj = (json as { error?: { message?: unknown } } | undefined)?.error;
+        const message = String(errObj?.message ?? text).slice(0, 500);
+        if (res.status === 429) throw new ModelUpstreamError(429, 'upstream_throttled', message, res.status);
+        throw new ModelUpstreamError(502, 'upstream_error', message, res.status);
+      }
+
+      const b = (json ?? {}) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> }; finishReason?: string }>;
+        usageMetadata?: { promptTokenCount?: unknown; candidatesTokenCount?: unknown };
+      };
+      const first = b.candidates?.[0];
+      const content = (first?.content?.parts ?? []).map((p) => (typeof p.text === 'string' ? p.text : '')).join('');
+      const finishReason = VERTEX_GEMINI_FINISH[first?.finishReason ?? ''] ?? 'stop';
+      const u = b.usageMetadata;
+      const usage =
+        u && typeof u.promptTokenCount === 'number' && typeof u.candidatesTokenCount === 'number'
+          ? { input: u.promptTokenCount, output: u.candidatesTokenCount }
+          : null;
+      return { content, finishReason, usage };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// vertex-anthropic & anthropic (Claude Messages API on Vertex AI or direct api.anthropic.com)
+
+function toAnthropicMessages(req: ChatRequest) {
+  const system = req.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+  const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  for (const m of req.messages) {
+    if (m.role === 'system') continue;
+    const last = messages.at(-1);
+    if (last && last.role === m.role) last.content += `\n${m.content}`;
+    else messages.push({ role: m.role, content: m.content });
+  }
+  return {
+    max_tokens: req.maxTokens ?? 4096,
+    messages,
+    ...(system ? { system } : {}),
+    ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+    ...(req.topP !== undefined ? { top_p: req.topP } : {}),
+    ...(req.stop ? { stop_sequences: req.stop } : {}),
+  };
+}
+
+function fromAnthropicMessages(body: unknown): ChatResult {
+  const b = (body ?? {}) as {
+    content?: Array<{ type?: string; text?: unknown }>;
+    stop_reason?: string;
+    usage?: Record<string, unknown>;
+  };
+  const content = (b.content ?? []).map((c) => (typeof c.text === 'string' ? c.text : '')).join('');
+  const u = b.usage;
+  const inTok = u && typeof u['input_tokens'] === 'number' ? (u['input_tokens'] as number) : undefined;
+  const outTok = u && typeof u['output_tokens'] === 'number' ? (u['output_tokens'] as number) : undefined;
+  const usage = inTok !== undefined && outTok !== undefined ? { input: inTok, output: outTok } : null;
+  return { content, finishReason: FINISH[b.stop_reason ?? ''] ?? 'stop', usage };
+}
+
+export function vertexAnthropic(opts: VertexOptions = {}): ModelAdapter {
+  const doFetch = opts.fetch ?? fetch;
+  const getToken = opts.accessToken ?? (() => gcpAccessTokenFromEnv(doFetch));
+  const endpoint =
+    opts.endpoint ??
+    ((region: string) => (region === 'global' ? 'https://aiplatform.googleapis.com' : `https://${region}-aiplatform.googleapis.com`));
+
+  return {
+    async complete(entry, req) {
+      const project = opts.project ?? process.env.FACTORY_GCP_PROJECT ?? process.env.FACTORY_SECRETS_GCP_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT;
+      const region = entry.region ?? opts.region ?? process.env.FACTORY_GCP_REGION ?? 'us-east5';
+      if (!project) throw new ModelUpstreamError(503, 'provider_misconfigured', 'FACTORY_GCP_PROJECT is not configured for Vertex AI');
+
+      let token: string;
+      try {
+        token = await getToken();
+      } catch (err) {
+        console.error(`[gatekeeper-egress] vertex-anthropic credentials: ${err instanceof Error ? err.message : String(err)}`);
+        throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no cloud credentials');
+      }
+
+      const payload = { anthropic_version: 'vertex-2023-10-16', ...toAnthropicMessages(req) };
+      const url = `${endpoint(region).replace(/\/$/, '')}/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(region)}/publishers/anthropic/models/${encodeURIComponent(entry.id)}:rawPredict`;
+      let res: Response;
+      try {
+        res = await doFetch(url, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(opts.timeoutMs ?? 300_000),
+        });
+      } catch (err) {
+        throw new ModelUpstreamError(502, 'upstream_unreachable', err instanceof Error ? err.message : String(err));
+      }
+
+      const text = await res.text();
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch {}
+      if (!res.ok) {
+        const errObj = (json as { error?: { message?: unknown } } | undefined)?.error;
+        const message = String(errObj?.message ?? text).slice(0, 500);
+        if (res.status === 429) throw new ModelUpstreamError(429, 'upstream_throttled', message, res.status);
+        throw new ModelUpstreamError(502, 'upstream_error', message, res.status);
+      }
+      return fromAnthropicMessages(json);
+    },
+  };
+}
+
+export type ApiKeyAdapterOptions = {
+  apiKey?: () => Promise<string>;
+  secretName?: string;
+  endpoint?: string;
+  fetch?: typeof fetch;
+  timeoutMs?: number;
+};
+
+export function anthropicMessages(opts: ApiKeyAdapterOptions = {}): ModelAdapter {
+  const doFetch = opts.fetch ?? fetch;
+  const secretName = opts.secretName ?? 'ANTHROPIC_API_KEY';
+  const getKey = opts.apiKey ?? (() => resolveProviderSecret(secretName, doFetch));
+  const base = (opts.endpoint ?? 'https://api.anthropic.com').replace(/\/$/, '');
+
+  return {
+    async complete(entry, req) {
+      let key: string;
+      try {
+        key = await getKey();
+      } catch (err) {
+        console.error(`[gatekeeper-egress] anthropic credentials: ${err instanceof Error ? err.message : String(err)}`);
+        throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no provider credentials');
+      }
+      const payload = { model: entry.id, ...toAnthropicMessages(req) };
+      let res: Response;
+      try {
+        res = await doFetch(`${base}/v1/messages`, {
+          method: 'POST',
+          headers: {
+            'x-api-key': key,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(opts.timeoutMs ?? 300_000),
+        });
+      } catch (err) {
+        throw new ModelUpstreamError(502, 'upstream_unreachable', err instanceof Error ? err.message : String(err));
+      }
+      const text = await res.text();
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch {}
+      if (!res.ok) {
+        const errObj = (json as { error?: { message?: unknown } } | undefined)?.error;
+        const message = String(errObj?.message ?? text).slice(0, 500);
+        if (res.status === 429) throw new ModelUpstreamError(429, 'upstream_throttled', message, res.status);
+        throw new ModelUpstreamError(502, 'upstream_error', message, res.status);
+      }
+      return fromAnthropicMessages(json);
+    },
+  };
+}
+
+export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter {
+  const doFetch = opts.fetch ?? fetch;
+  const secretName = opts.secretName ?? 'OPENAI_API_KEY';
+  const getKey = opts.apiKey ?? (() => resolveProviderSecret(secretName, doFetch));
+  const base = (opts.endpoint ?? 'https://api.openai.com').replace(/\/$/, '');
+
+  return {
+    async complete(entry, req) {
+      let key: string;
+      try {
+        key = await getKey();
+      } catch (err) {
+        console.error(`[gatekeeper-egress] ${secretName} credentials: ${err instanceof Error ? err.message : String(err)}`);
+        throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no provider credentials');
+      }
+      const payload = {
+        model: entry.id,
+        messages: req.messages,
+        ...(req.maxTokens !== undefined ? { max_tokens: req.maxTokens } : {}),
+        ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+        ...(req.topP !== undefined ? { top_p: req.topP } : {}),
+        ...(req.stop ? { stop: req.stop } : {}),
+      };
+      let res: Response;
+      try {
+        res = await doFetch(`${base}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${key}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(opts.timeoutMs ?? 300_000),
+        });
+      } catch (err) {
+        throw new ModelUpstreamError(502, 'upstream_unreachable', err instanceof Error ? err.message : String(err));
+      }
+      const text = await res.text();
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch {}
+      if (!res.ok) {
+        const errObj = (json as { error?: { message?: unknown } } | undefined)?.error;
+        const message = String(errObj?.message ?? text).slice(0, 500);
+        if (res.status === 429) throw new ModelUpstreamError(429, 'upstream_throttled', message, res.status);
+        throw new ModelUpstreamError(502, 'upstream_error', message, res.status);
+      }
+      const b = (json ?? {}) as {
+        choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }>;
+        usage?: Record<string, unknown>;
+      };
+      const first = b.choices?.[0];
+      const content = typeof first?.message?.content === 'string' ? first.message.content : '';
+      const finishReason = typeof first?.finish_reason === 'string' ? first.finish_reason : 'stop';
+      const u = b.usage;
+      const inTok = u && typeof u['prompt_tokens'] === 'number' ? (u['prompt_tokens'] as number) : undefined;
+      const outTok = u && typeof u['completion_tokens'] === 'number' ? (u['completion_tokens'] as number) : undefined;
+      const usage = inTok !== undefined && outTok !== undefined ? { input: inTok, output: outTok } : null;
+      return { content, finishReason, usage };
+    },
+  };
+}
+
+/** Adapters by catalog `provider`. Supports AWS Bedrock, GCP Vertex AI (Gemini & Claude), and API-key providers (Anthropic, OpenAI, xAI). */
+export function defaultModelAdapters(): Record<string, ModelAdapter> {
+  const gemini = vertexGemini();
+  const vClaude = vertexAnthropic();
+  const anthropic = anthropicMessages();
+  const openai = openAiCompatible({ secretName: 'OPENAI_API_KEY', endpoint: 'https://api.openai.com' });
+  const xai = openAiCompatible({ secretName: 'XAI_API_KEY', endpoint: 'https://api.x.ai' });
+  return {
+    'bedrock-converse': bedrockConverse(),
+    'vertex-ai': gemini,
+    'vertex-gemini': gemini,
+    'vertex-anthropic': vClaude,
+    anthropic,
+    'anthropic-messages': anthropic,
+    openai,
+    xai,
+  };
+}
+

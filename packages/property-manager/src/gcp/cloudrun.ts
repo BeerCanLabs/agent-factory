@@ -1,31 +1,64 @@
 /**
  * GCP Cloud Run Jobs orchestration for dynamic agent registration.
- * Equivalent to packages/control-plane/src/aws/ecs.ts.
- *
- * The Factory Control Plane calls registerAgentJob() after a successful
- * Cloud Build to register the agent as a Cloud Run Job that can be
- * invoked on-demand (scale to zero).
+ * Equivalent to packages/property-manager/src/aws/ecs.ts.
  */
 
 import { JobsClient, protos } from '@google-cloud/run';
+import { toGcpSecretId } from '@beercanlabs/factory-secrets-bind';
+import { agentContainerSecrets, secretName } from '../aws/gatekeeper-held.js';
 
 type Job = protos.google.cloud.run.v2.IJob;
 type EnvVar = protos.google.cloud.run.v2.IEnvVar;
 
+export function resolveGcpSecretId(secretNameOrResource: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (secretNameOrResource.startsWith('projects/')) {
+    const parts = secretNameOrResource.split('/');
+    const idx = parts.indexOf('secrets');
+    return idx >= 0 && parts[idx + 1] ? parts[idx + 1] : secretNameOrResource;
+  }
+  const prefix = env.FACTORY_SECRETS_GCP_PREFIX ?? '';
+  return toGcpSecretId(prefix, secretNameOrResource);
+}
+
+/**
+ * The container's non-secret environment on GCP: where the mind lives (`gcs://<mindBucket>`),
+ * plus launch settings named by the Landlord (SK4: where the skills manifest is).
+ * `launchEnv` may not replace the fixed mind settings.
+ */
+export function agentEnvironment(
+  mindBucket: string,
+  memoryPrefix: string,
+  launchEnv: Record<string, string> = {},
+): Array<{ name: string; value: string }> {
+  const storeUri = mindBucket.startsWith('gcs://') || mindBucket.startsWith('gs://') ? mindBucket : `gcs://${mindBucket}`;
+  const bucketName = mindBucket.replace(/^gcs:\/\/|^gs:\/\//, '');
+  const fixed = [
+    { name: 'FACTORY_MIND_BUCKET', value: bucketName },
+    { name: 'MEMORY_STORE_URI', value: storeUri },
+    { name: 'MEMORY_PREFIX', value: memoryPrefix },
+    { name: 'MEMORY_DIR', value: '/tmp/mind' },
+  ];
+  const taken = new Set(fixed.map((e) => e.name));
+  return [
+    ...fixed,
+    ...Object.entries(launchEnv)
+      .filter(([name]) => !taken.has(name))
+      .map(([name, value]) => ({ name, value })),
+  ];
+}
+
 /**
  * Creates or updates a Cloud Run Job for a dynamically-built Factory agent.
  * Equivalent to ECS RegisterTaskDefinition.
- *
- * @param agentId      - Unique agent identifier.
- * @param imageUri     - Full container image URI from Artifact Registry.
- * @param secrets      - List of Secret Manager secret names to inject as env vars.
- * @param serviceAccountEmail - The agent's dedicated GCP Service Account email.
  */
 export async function registerAgentJob(
   agentId: string,
   imageUri: string,
   secrets: string[],
   serviceAccountEmail: string,
+  memoryPrefix: string = agentId,
+  launchEnv: Record<string, string> = {},
+  opts: { client?: Pick<JobsClient, 'createJob' | 'updateJob'> } = {},
 ): Promise<string> {
   const projectId = process.env.FACTORY_GCP_PROJECT;
   if (!projectId) throw new Error('FACTORY_GCP_PROJECT environment variable is not set');
@@ -33,29 +66,33 @@ export async function registerAgentJob(
   const region = process.env.FACTORY_GCP_REGION;
   if (!region) throw new Error('FACTORY_GCP_REGION environment variable is not set');
 
-  const client = new JobsClient();
+  const client = opts.client ?? new JobsClient();
   const parent = `projects/${projectId}/locations/${region}`;
   const jobName = `factory-agent-${agentId}`;
-  const mindBucketUri = process.env.MEMORY_STORE_URI ?? `gcs://${projectId}-mind`;
+  const mindBucket =
+    process.env.FACTORY_MIND_BUCKET ?? process.env.MEMORY_STORE_URI ?? `factory-prod-mind-${projectId}`;
 
-  // Base environment variables — same as the AWS ECS container_definitions env block
   const baseEnv: EnvVar[] = [
-    { name: 'AGENT_ID',         value: agentId },
-    { name: 'MEMORY_DIR',       value: '/tmp/mind' },
-    { name: 'MEMORY_PREFIX',    value: agentId },
-    { name: 'MEMORY_STORE_URI', value: mindBucketUri },
+    { name: 'AGENT_ID', value: agentId },
+    ...agentEnvironment(mindBucket, memoryPrefix, launchEnv),
   ];
 
-  // Secret environment variables from Secret Manager
-  const secretEnv: EnvVar[] = secrets.map((secretName) => ({
-    name: secretName.replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase(),
-    valueSource: {
-      secretKeyRef: {
-        secret:  secretName,
-        version: 'latest',
+  // S1: gatekeeper-held secrets are injected at egress by gatekeeper-egress, never into the container.
+  const secretEnv: EnvVar[] = agentContainerSecrets(secrets ?? []).map((rawSecret) => {
+    const bare = secretName(rawSecret);
+    return {
+      name: bare.replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase(),
+      valueSource: {
+        secretKeyRef: {
+          secret: resolveGcpSecretId(rawSecret),
+          version: 'latest',
+        },
       },
-    },
-  }));
+    };
+  });
+
+  const vpcNetwork = process.env.FACTORY_GCP_VPC_NETWORK;
+  const agentsSubnet = process.env.FACTORY_GCP_AGENTS_SUBNET;
 
   const job: Job = {
     labels: {
@@ -66,14 +103,27 @@ export async function registerAgentJob(
       template: {
         serviceAccount: serviceAccountEmail,
         maxRetries: 0,
-        timeout: { seconds: 3600 }, // 1-hour max; matches AWS task pattern
+        timeout: { seconds: 3600 },
+        ...(vpcNetwork && agentsSubnet
+          ? {
+              vpcAccess: {
+                networkInterfaces: [
+                  {
+                    network: vpcNetwork,
+                    subnetwork: agentsSubnet,
+                  },
+                ],
+                egress: 'ALL_TRAFFIC' as const,
+              },
+            }
+          : {}),
         containers: [
           {
             image: imageUri,
             name: 'worker',
             resources: {
               limits: {
-                cpu:    '1000m',
+                cpu: '1000m',
                 memory: '512Mi',
               },
             },
@@ -84,22 +134,15 @@ export async function registerAgentJob(
     },
   };
 
-  console.log(`[gcp/cloudrun] Registering Cloud Run Job ${jobName} with image ${imageUri}`);
-
   try {
-    // Try to create; fall back to update if the job already exists (idempotent)
     const [operation] = await client.createJob({ parent, jobId: jobName, job });
     await operation.promise();
-    console.log(`[gcp/cloudrun] Job ${jobName} created.`);
   } catch (err: unknown) {
-    // gRPC status 6 = ALREADY_EXISTS
     const code = (err as { code?: number }).code;
     if (code === 6) {
-      console.log(`[gcp/cloudrun] Job ${jobName} exists; updating...`);
       const fullName = `${parent}/jobs/${jobName}`;
       const [operation] = await client.updateJob({ job: { name: fullName, ...job } });
       await operation.promise();
-      console.log(`[gcp/cloudrun] Job ${jobName} updated.`);
     } else {
       throw err;
     }

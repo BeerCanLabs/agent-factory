@@ -28,10 +28,21 @@ describe('A1 one front door (AWS landing zone)', () => {
     assert.doesNotMatch(network, /^\s*\w+\s*=\s*\[aws_security_group\.alb\.id,/m, 'network.tf opens a port on the load balancer');
   });
 
-  it('ingress_cidrs is required and refuses /0', () => {
-    const v = read('landing-zones/aws/variables.tf').match(/variable "ingress_cidrs" \{[\s\S]*?\n\}/)?.[0] ?? '';
-    assert.ok(v, 'variable ingress_cidrs is not declared');
-    assert.doesNotMatch(v, /\bdefault\b/, 'ingress_cidrs must have no default');
-    assert.match(v, /\/0\$/, 'ingress_cidrs validation must refuse /0');
+  it('ingress_cidrs is required and refuses /0 in both AWS and GCP landing zones', () => {
+    for (const path of ['landing-zones/aws/variables.tf', 'landing-zones/gcp/variables.tf']) {
+      const v = read(path).match(/variable "ingress_cidrs" \{[\s\S]*?\n\}/)?.[0] ?? '';
+      assert.ok(v, `${path}: variable ingress_cidrs is not declared`);
+      assert.doesNotMatch(v, /\bdefault\b/, `${path}: ingress_cidrs must have no default`);
+      assert.match(v, /\/0\$/, `${path}: ingress_cidrs validation must refuse /0`);
+    }
+  });
+
+  it('the GCP landing zone restricts Cloud Run ingress to internal + LB and protects the LB with Cloud Armor', () => {
+    const cr = read('landing-zones/gcp/cloud_run.tf');
+    assert.doesNotMatch(cr, /INGRESS_TRAFFIC_ALL/, 'no Cloud Run service may accept direct internet traffic');
+    const lb = read('landing-zones/gcp/lb.tf');
+    assert.match(lb, /resource "google_compute_security_policy" "front_door"/);
+    assert.match(lb, /chunklist\(var\.ingress_cidrs/);
+    assert.match(lb, /action\s*=\s*"deny\(403\)"/);
   });
 });

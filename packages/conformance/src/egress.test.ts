@@ -55,30 +55,41 @@ describe('§6.6 mind storage belongs to the shim', () => {
   });
 });
 
-describe('E6 network-enforced (AWS landing zone)', () => {
+describe('E6 network-enforced (AWS & GCP landing zones)', () => {
   const network = read('landing-zones/aws/network.tf');
-  it('the agent route table has no routes', () => {
+  it('the agent route table has no routes (AWS)', () => {
     const table = network.match(/resource "aws_route_table" "agents" \{[\s\S]*?\n\}/)?.[0] ?? '';
     assert.ok(table, 'agent route table not found');
     assert.doesNotMatch(table, /\broute\s*\{/);
     assert.doesNotMatch(network, /route_table_id\s*=\s*aws_route_table\.agents\.id[\s\S]{0,200}(gateway_id|nat_gateway_id)/);
   });
-  it('agents get no public IP', () => {
+  it('agents get no public IP (AWS)', () => {
     assert.match(read('landing-zones/aws/ecs.tf'), /FACTORY_ECS_ASSIGN_PUBLIC_IP", value = "false"/);
   });
-  it('the agent security group has no open egress', () => {
+  it('the agent security group has no open egress (AWS)', () => {
     for (const m of network.matchAll(/resource "aws_vpc_security_group_egress_rule" "[^"]+" \{[\s\S]*?\n\}/g)) {
       if (/security_group_id\s*=\s*aws_security_group\.agents\.id/.test(m[0])) assert.doesNotMatch(m[0], /0\.0\.0\.0\/0/);
     }
   });
+  it('Cloud NAT covers only the services subnetwork, never the agents subnetwork (GCP)', () => {
+    const gcpNet = read('landing-zones/gcp/network.tf');
+    assert.match(gcpNet, /source_subnetwork_ip_ranges_to_nat\s*=\s*"LIST_OF_SUBNETWORKS"/);
+    assert.match(gcpNet, /name\s*=\s*google_compute_subnetwork\.services\.id/);
+    assert.doesNotMatch(gcpNet, /name\s*=\s*google_compute_subnetwork\.agents\.id/);
+  });
 });
 
-describe('LG1 single ledger writer (AWS landing zone)', () => {
-  it('the control plane deploys stop-then-start, never side by side', () => {
+describe('LG1 single ledger writer (AWS & GCP landing zones)', () => {
+  it('the control plane deploys stop-then-start, never side by side (AWS)', () => {
     const svc = read('landing-zones/aws/ecs.tf').match(/resource "aws_ecs_service" "control_plane" \{[\s\S]*?\n\}/)?.[0] ?? '';
     assert.ok(svc, 'control-plane service not found');
     assert.match(svc, /deployment_minimum_healthy_percent\s*=\s*0\b/);
     assert.match(svc, /deployment_maximum_percent\s*=\s*100\b/);
+  });
+  it('the control plane Cloud Run service caps max_instance_count at 1 (GCP)', () => {
+    const cp = read('landing-zones/gcp/cloud_run.tf').match(/resource "google_cloud_run_v2_service" "control_plane" \{[\s\S]*?\n\}/)?.[0] ?? '';
+    assert.ok(cp, 'GCP control-plane service not found');
+    assert.match(cp, /max_instance_count\s*=\s*1\b/);
   });
   it('the control plane takes the ledger lease before opening the ledger', () => {
     const src = read('packages/control-plane/src/index.ts');

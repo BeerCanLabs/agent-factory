@@ -6,5 +6,28 @@ export { complete, findModel } from './complete.js';
 export type { Completion } from './complete.js';
 export { SseMeter, usageFromJson } from './meter.js';
 export type { Provider, Usage } from './meter.js';
-export { bedrockConverse, defaultModelAdapters, parseModelCatalog, parseChatRequest, toConverse, fromConverse, ModelUpstreamError } from './models.js';
-export type { BedrockConverseOptions, CatalogEntry, ChatMessage, ChatRequest, ChatResult, ModelAdapter, ModelCatalog } from './models.js';
+export {
+  bedrockConverse,
+  vertexGemini,
+  vertexAnthropic,
+  anthropicMessages,
+  openAiCompatible,
+  defaultModelAdapters,
+  parseModelCatalog,
+  parseChatRequest,
+  toConverse,
+  fromConverse,
+  ModelUpstreamError,
+} from './models.js';
+export type {
+  BedrockConverseOptions,
+  VertexOptions,
+  ApiKeyAdapterOptions,
+  CatalogEntry,
+  ChatMessage,
+  ChatRequest,
+  ChatResult,
+  ModelAdapter,
+  ModelCatalog,
+} from './models.js';
+
