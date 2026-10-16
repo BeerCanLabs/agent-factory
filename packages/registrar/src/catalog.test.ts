@@ -21,6 +21,7 @@ describe('loadCatalog', () => {
     assert.equal(byId.has('starter-python'), false);
     // echo-agent is the factory self-test (compose proof, deploy DoD), listed with built-in & system agents
     assert.equal(byId.get('echo-agent')?.category, 'builtin');
+    assert.equal(byId.has('personal-trainer'), false, 'house staff stay out of the baked catalog until admitted');
   });
 
   it('a registry record overrides the static catalog cartridge with the same id; built-ins cannot be replaced', () => {

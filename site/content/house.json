@@ -1,0 +1,23 @@
+{
+  "intro": "House staff ship with the factory and are admitted only when you want them. They are employees, not part of the ten platform services. A customer agent and a house agent do not share a roster.",
+  "members": [
+    {
+      "id": "personal-trainer",
+      "name": "Personal Trainer",
+      "title": "Skill training",
+      "tag": "Builds a scorecard for a skill and recommends the cheapest model that passes it.",
+      "bio": "Sits with the person who owns a skill and writes down what a good outcome is, one case at a time. Then it scores pinned trials and names the cheapest model that passed. The money for that work stays on the skill. When an agent later uses the skill, the cost stays on that agent. The trainer does not rewrite the skill and does not deploy the winner. A person accepts a new version of the skill.",
+      "does": [
+        "Guides the builder through a baseline scorecard for one skill, public or private.",
+        "Scores trial outputs and recommends the cheapest model that passed every case.",
+        "Charges the skill's training account, which starts empty until a person sets a cap."
+      ],
+      "dont": [
+        "Does not rewrite the skill's instructions.",
+        "Does not admit or deploy a skill version.",
+        "Does not draw an agent's budget when the skill is optimized, and does not draw the training account when an agent uses the skill.",
+        "Does not appear on the workforce list until an operator admits it. It has no Discord door."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+schemaVersion: "1.0"
+id: personal-trainer
+name: "Personal Trainer"
+role: "House staff: skill training"
+prompt: "./soul.md"
+category: user
+
+triggers:
+  - type: http
+    path: /wake
+
+secrets:
+  requires: []
+
+persistence:
+  enabled: true
+  prefix: personal-trainer
+
+memory:
+  archetype: episodic
+  retentionDays: 30
+  maxMessages: 40
+  maxChars: 24000
+
+compute:
+  kind: oci
+  ref: "ghcr.io/beercanlabs/personal-trainer:latest"
+  localCommand:
+    - python3
+    - agent.py
