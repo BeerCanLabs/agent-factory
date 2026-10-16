@@ -140,6 +140,10 @@ describe('skill training account', { concurrency: false }, () => {
     const actions = state.ledger.query().map((e) => e.action);
     assert.ok(actions.includes('TRAINING_CAP_SET'));
     assert.ok(actions.includes('TRAINING_RECOMMENDED'));
+    const runRow = state.ledger.query().find((e) => String(e.action).startsWith('TRAINING_RUN'));
+    const baselineRow = state.ledger.query().find((e) => e.action === 'TRAINING_BASELINE_SET');
+    assert.equal(runRow?.payloadSha256, baselineRow?.payloadSha256);
+    assert.equal(runRow?.payloadSha256?.length, 64);
     assert.equal(actions.some((a) => String(a).includes('long note')), false);
   });
 });

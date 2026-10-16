@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from session import load_state, save_state, turn
+from session import FactoryClient, load_state, save_state, turn
 
 
 def read_input() -> dict:
@@ -28,7 +28,7 @@ def main() -> int:
     state = load_state(state_path)
     payload = read_input()
     message = str(payload.get("message") or payload.get("raw_input") or "wake")
-    reply = turn(state, message)
+    reply = turn(state, message, FactoryClient())
     save_state(state_path, state)
     result = {"status": "succeeded", "message": reply, "skillId": state.get("skillId")}
     out = Path(os.environ.get("FACTORY_RESULT_FILE", "/tmp/factory-result.json"))

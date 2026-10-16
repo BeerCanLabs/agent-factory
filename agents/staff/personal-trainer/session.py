@@ -1,23 +1,31 @@
-"""Interview state for the Personal Trainer. No model call lives here: the factory scores on the skill account."""
+"""Interview for the Personal Trainer.
+
+The cartridge remembers the conversation. The factory scores trials, charges the skill
+training account, and chooses the model. This module does not grade outputs.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 HELP = (
     "I train one skill at a time. I will not change its instructions.\n"
-    "Tell me the skill id (`skill summarize`), then a case "
-    "(`case short | a long note | contains:brief`), then the models to compare (`models small, large`).\n"
-    "After each pinned run, report the output (`trial small | short | a brief note | 0.20`).\n"
-    "Say `recommend` when you want the cheapest model that passed every case. "
-    "I do not deploy it. Say `status` to see where we are."
+    "Tell me the skill id (`skill summarize`). I will check that the skill has a training cap.\n"
+    "Then give a case (`case short | a long note | contains:brief`) and the models "
+    "(`models small, large`).\n"
+    "After each pinned run, report the output (`trial small | short | a brief note | 0.20`). "
+    "I send a finished model to the factory to score and to charge the skill.\n"
+    "Say `recommend` for the factory's cheapest model that passed. I do not deploy it."
 )
 
 
 def empty_state() -> dict:
-    return {"skillId": None, "cases": [], "models": [], "trials": {}}
+    return {"skillId": None, "capped": False, "cases": [], "models": [], "pending": {}, "posted": False}
 
 
 def load_state(path: Path) -> dict:
@@ -31,6 +39,54 @@ def save_state(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, indent=2), "utf-8")
 
 
+class FactoryClient:
+    """Calls the control plane. A missing URL cannot score: there is no local grader."""
+
+    def __init__(self, base_url: str | None = None, token: str | None = None):
+        self.base_url = (base_url if base_url is not None else os.environ.get("FACTORY_CONTROL_URL", "")).rstrip("/")
+        self.token = token if token is not None else os.environ.get("FACTORY_API_TOKEN", "")
+
+    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+        if not self.base_url:
+            return {"error": "factory_unconfigured"}
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            self.base_url + path,
+            data=data,
+            method=method,
+            headers={"content-type": "application/json", "authorization": f"Bearer {self.token}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as res:
+                raw = res.read().decode("utf-8")
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as err:
+            raw = err.read().decode("utf-8")
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            parsed["error"] = parsed.get("error") or f"http_{err.code}"
+            parsed["status"] = err.code
+            return parsed
+
+    def account(self, skill_id: str) -> dict:
+        return self._request("GET", f"/api/v1/skills/{skill_id}/training")
+
+    def baseline(self, skill_id: str, cases: list) -> dict:
+        return self._request("PUT", f"/api/v1/skills/{skill_id}/training-baseline", {"cases": cases})
+
+    def run(self, skill_id: str, model: str, cost: float, outputs: list) -> dict:
+        return self._request(
+            "POST",
+            f"/api/v1/skills/{skill_id}/training-runs",
+            {"model": model, "costUsd": cost, "outputs": outputs},
+        )
+
+    def recommend(self, skill_id: str) -> dict:
+        return self._request("POST", f"/api/v1/skills/{skill_id}/training-recommendation", {})
+
+
 def _parse_assertion(text: str) -> dict | None:
     if text.startswith("contains:"):
         return {"contains": text[len("contains:") :]}
@@ -41,54 +97,58 @@ def _parse_assertion(text: str) -> dict | None:
     return None
 
 
-def _passes(output: str, case: dict) -> bool:
-    if "equals" in case and output != case["equals"]:
-        return False
-    if "contains" in case and case["contains"] not in output:
-        return False
-    if "matches" in case:
-        try:
-            if re.search(case["matches"], output) is None:
-                return False
-        except re.error:
-            return False
-    return any(k in case for k in ("equals", "contains", "matches"))
-
-
-def recommend(state: dict) -> dict | None:
-    winners = []
-    for model, trial in state["trials"].items():
-        if trial["failed"] == 0 and trial["passed"] == len(state["cases"]) and state["cases"]:
-            winners.append({"model": model, "costUsd": trial["costUsd"]})
-    if not winners:
+def _refuse(result: dict) -> str | None:
+    error = result.get("error")
+    if not error:
         return None
-    return min(winners, key=lambda w: w["costUsd"])
+    if error == "factory_unconfigured":
+        return "I have no factory to score against. Set FACTORY_CONTROL_URL and try again."
+    if error in {"training_budget_required", "training_budget_exceeded"}:
+        return "The skill's training account cannot pay for that. Raise the cap, or stop. I will not score it myself."
+    if error == "training_no_winner":
+        return "The factory has no model that passed every case. I will not pick one locally."
+    return f"The factory refused that ({error})."
 
 
-def turn(state: dict, message: str) -> str:
+def turn(state: dict, message: str, factory: FactoryClient | None = None) -> str:
+    client = factory if factory is not None else FactoryClient()
     text = (message or "").strip()
     if not text or text.lower() in {"help", "wake"}:
         return HELP
 
     if text.lower() == "status":
+        cap = "set" if state.get("capped") else "missing"
         return (
-            f"Skill: {state['skillId'] or '(none)'}. "
-            f"Cases: {len(state['cases'])}. Models: {', '.join(state['models']) or '(none)'}. "
-            f"Trials: {len(state['trials'])}."
+            f"Skill: {state.get('skillId') or '(none)'}. Training cap: {cap}. "
+            f"Cases: {len(state['cases'])}. Models: {', '.join(state['models']) or '(none)'}."
         )
 
     if text.lower().startswith("skill "):
         skill_id = text.split(None, 1)[1].strip()
         if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", skill_id):
             return "A skill id is kebab-case, like summarize or ticket-triage."
+        account = client.account(skill_id)
+        refused = _refuse(account)
+        if refused:
+            return refused
         state["skillId"] = skill_id
         state["cases"] = []
-        state["trials"] = {}
-        return f"We are training `{skill_id}`. Give me the first case. A case is a name, an input, and one check."
+        state["models"] = []
+        state["pending"] = {}
+        state["posted"] = False
+        if not account.get("capUsd"):
+            state["capped"] = False
+            return (
+                f"`{skill_id}` has no training cap, so I will stop. "
+                f"Set one with PUT /api/v1/skills/{skill_id}/training-account and tell me the skill again."
+            )
+        state["capped"] = True
+        return f"We are training `{skill_id}`. The training cap is ${account['capUsd']}. Give me the first case."
+
+    if not state.get("capped"):
+        return "Set a training cap on the skill and tell me the skill id again. I will not collect cases before that."
 
     if text.lower().startswith("case "):
-        if not state["skillId"]:
-            return "Name the skill first: `skill summarize`."
         parts = [p.strip() for p in text.split(" ", 1)[1].split("|")]
         if len(parts) != 3:
             return "A case looks like `case short | a long note | contains:brief`."
@@ -97,7 +157,8 @@ def turn(state: dict, message: str) -> str:
             return "End the case with contains:..., equals:..., or matches:..."
         state["cases"] = [c for c in state["cases"] if c["name"] != parts[0]]
         state["cases"].append({"name": parts[0], "input": parts[1], **assertion})
-        state["trials"] = {}
+        state["pending"] = {}
+        state["posted"] = False
         return f"Recorded case `{parts[0]}`. Add another case, or list models with `models small, large`."
 
     if text.lower().startswith("models "):
@@ -106,54 +167,63 @@ def turn(state: dict, message: str) -> str:
         models = [m.strip() for m in text.split(None, 1)[1].split(",") if m.strip()]
         if len(models) < 2:
             return "Name at least two models, separated by commas."
+        saved = client.baseline(state["skillId"], state["cases"])
+        refused = _refuse(saved)
+        if refused:
+            return refused
         state["models"] = models
-        return (
-            "Run each model pinned on these cases, then report each output: "
-            "`trial <model> | <case> | <output> | <cost>`."
-        )
+        state["pending"] = {}
+        state["posted"] = True
+        return "The factory has the scorecard. Report each output: `trial <model> | <case> | <output> | <cost>`."
 
     if text.lower().startswith("trial "):
-        if not state["models"]:
-            return "List the models before reporting a trial."
+        if not state.get("posted"):
+            return "List the models first so I can store the scorecard on the factory."
         parts = [p.strip() for p in text.split(" ", 1)[1].split("|")]
         if len(parts) != 4:
             return "A trial looks like `trial small | short | a brief note | 0.20`."
         model, name, output, cost_text = parts
         if model not in state["models"]:
             return f"`{model}` is not in the model list."
-        case = next((c for c in state["cases"] if c["name"] == name), None)
-        if not case:
+        if not any(c["name"] == name for c in state["cases"]):
             return f"There is no case named `{name}`."
         try:
             cost = float(cost_text)
         except ValueError:
             return "The cost has to be a number of dollars."
-        trial = state["trials"].setdefault(model, {"passed": 0, "failed": 0, "costUsd": 0.0, "seen": []})
-        if name in trial["seen"]:
+        bucket = state["pending"].setdefault(model, {})
+        if name in bucket:
             return f"I already have `{name}` for `{model}`."
-        trial["seen"].append(name)
-        trial["costUsd"] = round(trial["costUsd"] + cost, 6)
-        if _passes(output, case):
-            trial["passed"] += 1
-            verdict = "pass"
-        else:
-            trial["failed"] += 1
-            verdict = "fail"
-        missing = [c["name"] for c in state["cases"] if c["name"] not in trial["seen"]]
+        bucket[name] = {"output": output, "cost": cost}
+        missing = [c["name"] for c in state["cases"] if c["name"] not in bucket]
         if missing:
-            return f"`{model}` / `{name}` is a {verdict}. Still need: {', '.join(missing)}."
-        return f"`{model}` finished: {trial['passed']} passed, {trial['failed']} failed, ${trial['costUsd']:.4f}. Say `recommend` when every model is in."
-
-    if text.lower() == "recommend":
-        if not state["skillId"] or not state["cases"]:
-            return "There is no scorecard yet."
-        choice = recommend(state)
-        if not choice:
-            return "No model passed every case. Bring another trial, or tighten the case only if the check was wrong. I will not rewrite the skill."
+            return f"Holding `{model}` / `{name}` for the factory. Still need: {', '.join(missing)}."
+        result = client.run(
+            state["skillId"],
+            model,
+            round(sum(item["cost"] for item in bucket.values()), 6),
+            [{"name": case["name"], "output": bucket[case["name"]]["output"]} for case in state["cases"]],
+        )
+        refused = _refuse(result)
+        if refused:
+            del state["pending"][model]
+            return refused
         return (
-            f"Recommend `{choice['model']}` for `{state['skillId']}` at ${choice['costUsd']:.4f} per pass of this scorecard. "
-            "I have not changed the skill. Accepting it is a new skill version, and a person admits that version. "
-            "Agents that later adopt it pay for it from their own budget."
+            f"The factory scored `{model}`: {result['passed']} passed, {result['failed']} failed, "
+            f"${result['costUsd']:.4f} posted to the skill. Say `recommend` when every model is in."
         )
 
-    return "I didn't catch that. Say `help` for the four steps: skill, case, models, trial."
+    if text.lower() == "recommend":
+        if not state.get("skillId") or not state.get("posted"):
+            return "There is no scorecard on the factory yet."
+        choice = client.recommend(state["skillId"])
+        refused = _refuse(choice)
+        if refused:
+            return refused
+        rec = choice["recommendation"]
+        return (
+            f"The factory recommends `{rec['model']}` for `{state['skillId']}` at ${rec['costUsd']:.4f}. "
+            "I have not changed the skill. Accepting it is a new skill version, and a person admits that version."
+        )
+
+    return "I didn't catch that. Say `help` for the steps: skill, case, models, trial."

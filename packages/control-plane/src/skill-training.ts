@@ -1,7 +1,7 @@
 // Skill training accounts (GAP-160). Spend while the Personal Trainer works on a skill posts here.
 // An agent's budget is untouched. The ledger records the model, the cost and a hash, never the case text.
 import type http from 'node:http';
-import { chargeTraining, outputPasses, type TrainingAccount, type TrainingAssertion } from '@beercanlabs/factory-budget';
+import { chargeTraining, type TrainingAccount } from '@beercanlabs/factory-budget';
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { ownerOf, skillVisibleTo, visibilityOf, type SkillViewer } from '@beercanlabs/factory-registrar';
 import type { Principal } from '@beercanlabs/factory-auth';
@@ -16,6 +16,24 @@ const CAP = /^\/api\/v1\/skills\/([^/]+)\/training-account$/;
 const BASELINE = /^\/api\/v1\/skills\/([^/]+)\/training-baseline$/;
 const RUN = /^\/api\/v1\/skills\/([^/]+)\/training-runs$/;
 const RECOMMEND = /^\/api\/v1\/skills\/([^/]+)\/training-recommendation$/;
+
+export type TrainingAssertion = { equals?: string; contains?: string; matches?: string };
+
+/** True when the output meets every assertion that was set, and at least one assertion was set. Scoring stays with the training route, not the Accountant's pricing package. */
+export function outputPasses(output: string, assertion: TrainingAssertion): boolean {
+  const has = assertion.equals !== undefined || assertion.contains !== undefined || assertion.matches !== undefined;
+  if (!has) return false;
+  if (assertion.equals !== undefined && output !== assertion.equals) return false;
+  if (assertion.contains !== undefined && !output.includes(assertion.contains)) return false;
+  if (assertion.matches !== undefined) {
+    try {
+      if (!new RegExp(assertion.matches).test(output)) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
 
 export type TrainingCase = { name: string; input: string } & TrainingAssertion;
 export type TrainingTrial = { model: string; passed: number; failed: number; costUsd: number };
@@ -257,6 +275,7 @@ export async function handleSkillTraining(state: FactoryState, req: http.Incomin
       actor: auth.principal.actor,
       model: body.model,
       costUsd: body.costUsd,
+      payloadSha256: payloadHash(rec.baseline),
     });
     json(res, 200, { skillId: id, ...trial, spentUsd: rec.account.spentUsd });
     return true;
