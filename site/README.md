@@ -10,6 +10,7 @@ files in this repository (GAP-135, TSK-195). There is no script on any page.
 | To change | Edit |
 |---|---|
 | A cast member's bio or flows | `content/cast.json` |
+| Optional house staff (not a cast member) | `content/house.json` and `static/house/` |
 | A cast member's portrait | `static/cast/<id>.png` |
 | A contract between two members | `content/contracts.json` |
 | What serves each member on a provider | `content/blueprints.json` |

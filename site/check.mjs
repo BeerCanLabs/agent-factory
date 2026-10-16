@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..');
 const read = (f) => JSON.parse(readFileSync(join(here, 'content', f), 'utf8'));
-const cast = read('cast.json'), contracts = read('contracts.json'), blueprints = read('blueprints.json');
+const cast = read('cast.json'), contracts = read('contracts.json'), blueprints = read('blueprints.json'), house = read('house.json');
 const errors = [];
 const fail = (m) => errors.push(m);
 
@@ -25,6 +25,12 @@ for (const m of cast.members) {
   if (!existsSync(join(here, 'static', 'cast', m.id + '.png'))) fail(m.id + ': missing portrait static/cast/' + m.id + '.png');
 }
 for (const [i, j] of cast.journey.entries()) if (!ids.includes(j[0])) fail('journey step ' + (i + 1) + ': unknown member ' + j[0]);
+
+for (const m of house.members) {
+  if (ids.includes(m.id) || codeNames.includes(m.id)) fail(m.id + ': house staff cannot be a cast member');
+  if (!existsSync(join(here, 'static', 'house', m.id + '.png'))) fail(m.id + ': missing portrait static/house/' + m.id + '.png');
+  if (!m.does?.length || !m.dont?.length) fail(m.id + ': house staff need does and dont');
+}
 
 // 2. Contracts: both ends are members, the source file exists, and a flow uses it.
 const cIds = new Set(contracts.map((c) => c.id));
@@ -53,7 +59,7 @@ for (const [k, b] of Object.entries(blueprints)) {
 
 // 4. The site documents intent, not execution: no gap or task numbers, no roadmap or build status.
 const INTENT = [/\b(GAP|TSK)-\d+/, /roadmap/i, /\bnot (yet )?(built|extracted|wired)\b/i, /\bcoming soon\b/i, /\bterraform\b/i];
-for (const [file, text] of [['cast.json', JSON.stringify(cast)], ['contracts.json', JSON.stringify(contracts)], ['blueprints.json', JSON.stringify(blueprints)]]) {
+for (const [file, text] of [['cast.json', JSON.stringify(cast)], ['contracts.json', JSON.stringify(contracts)], ['blueprints.json', JSON.stringify(blueprints)], ['house.json', JSON.stringify(house)]]) {
   for (const re of INTENT) { const m = text.match(re); if (m) fail(file + ': execution detail in intent content: "' + m[0] + '"'); }
 }
 

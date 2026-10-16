@@ -42,6 +42,7 @@ import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
+import { handleSkillTraining } from './skill-training.js';
 import { buildSkillsFor, isDeploying, runDeploy } from './apply.js';
 import { handleRunProgress } from './progress-routes.js';
 import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercanlabs/factory-inspector';
@@ -509,6 +510,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleConfig(state, req, res, path)) return;
+  if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills') || /^\/api\/v1\/agents\/[^/]+\/skills(\/|$)/.test(path)) && (await handleSkills(state, req, res, path))) return;
   if (await handleRunProgress(state, req, res, path)) return;
   if (path.startsWith('/api/v1/schedules') && (await handleSchedules(state, req, res, path))) return;

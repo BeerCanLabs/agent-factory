@@ -68,14 +68,16 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
   - `Webhook (EventBridge/SQS)` (The Factory drops a crash event into a queue)
   - **Kernel Module (`packages/triage`):** Doctor consumes these infrastructure faults (like OOM crashes) and routes them to external observability dashboards or Slack webhooks for operators.
 
-### 7. Coach (Training Function & Quality Governance)
-- **Description:** Built-in training, evaluation, and quality governance actor (`packages/bench`). Responsible for objective measurement of agent quality against deterministic expectations and closed-loop model evaluation:
-  1. **Phase 1 (Offline Rubric Gating):** Coach executes candidate model simulations against `bench.yaml` test cases with concrete assertions (`equals`, `contains`, `matches`), producing Cost-vs-Quality Scorecards before production model switching.
-  2. **Phase 2 (Live Runtime Evaluation & Training):** Coach continuously evaluates live prompt and task traces (`FACTORY_TRACE_PROMPTS`) collected in mind storage, assessing regression, drift, and recommending prompt or model optimizations.
-- **Interface (CLI / REST API):** 
-  - `POST /api/v1/agents/:id/runs` with `{ model: "pinned-model", trace: true }`. Run pinned simulation and collect prompt traces for Coach evaluation.
-  - CLI: `factory-bench --cartridge <dir> --models a,b` runs cases, scores accuracy, measures cost from the ledger, and outputs recommended models.
-  - CLI: `factory-bench --cartridge <dir> --models a,b` runs cases, scores accuracy, measures cost from the ledger, and outputs recommended models.
+### 7. Personal Trainer (skill training)
+- **Description:** Optional house staff shipped in `agents/staff/personal-trainer` and admitted by an operator. It is one character. It trains a skill, public or private, not an agent. It guides the builder through a baseline of concrete assertions (`equals`, `contains`, `matches`), scores pinned trial outputs, and recommends the cheapest model that passed. It does not rewrite the skill and it does not deploy. A person accepts a skill version through the Registrar. The ten platform services stay non-generative. The trainer uses the Executive for a model and the Accountant for a training account on the skill.
+- **Money:** Optimization spend, including the guidance session's posted trial costs, hits the skill training account. The account starts empty until a person sets a cap. When any agent later uses the skill, the cost hits that agent's own budget.
+- **Interface:**
+  - Conversation API only. The shipped cartridge has no Discord surface.
+  - `PUT /api/v1/skills/:id/training-account` sets the cap.
+  - `PUT /api/v1/skills/:id/training-baseline` stores the cases (the ledger keeps a hash).
+  - `POST /api/v1/skills/:id/training-runs` scores outputs and charges the skill.
+  - `POST /api/v1/skills/:id/training-recommendation` records the cheapest passing model and deploys nothing.
+  - `GET /api/v1/skills/:id/training` returns the account, trial totals, and case names.
 
 ### 8. Headless Observability & Telemetry Surface (Cost, Quantity, Quality)
 - **Description:** The Factory operates strictly on a headless architecture. It does not format PDF reports, build email templates, or render dashboard charts—those are client/UX layer concerns. Instead, the Factory captures structured telemetry (Cost, Quantity of work, and Quality pass rates) as a native byproduct of execution and exposes them via clean, queryable APIs for scheduled or ad-hoc enterprise reporting.
@@ -129,10 +131,9 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 | **KPF 6: Triage & Fault Ledger (Doctor)** | Query Run State & Execution Errors | 👤 SRE | REST / HTTPS |
 | **KPF 6: Triage & Fault Ledger (Doctor)** | Report Run Exit / Crash Result | ⚙️ Agent Runtime | REST / HTTPS |
 | **KPF 6: Triage & Fault Ledger (Doctor)** | Route Infrastructure Crash & Incident Alerts | 🤖 Doctor | Cloud Pub/Sub (`EventBridge` / `SQS`) |
-| **KPF 7: Quality & Benchmarking (Coach)** | Execute Offline Benchmark Suite | 🤖 Coach / 👤 Dev | CLI / REST |
-| **KPF 7: Quality & Benchmarking (Coach)** | Run Pinned Simulation with Tracing | 🤖 Coach | REST / HTTPS |
-| **KPF 7: Quality & Benchmarking (Coach)** | Retrieve Benchmark History & Scorecard | 👤 QA Lead | REST / HTTPS |
-| **KPF 7: Quality & Benchmarking (Coach)** | Continuous Prompt & Task Trace Evaluation | 🤖 Coach | S3 Mind Storage / REST |
+| **KPF 7: Personal Trainer** | Guide a skill baseline | 🤖 Personal Trainer / 👤 Builder | Conversation API |
+| **KPF 7: Personal Trainer** | Score a pinned trial against the skill account | 🤖 Personal Trainer | REST |
+| **KPF 7: Personal Trainer** | Recommend a model; a person accepts the skill version | 👤 Builder | REST |
 | **KPF 8: Headless Observability** | Query Real-Time Operational Metrics | 👤 SRE | REST / HTTPS |
 | **KPF 8: Headless Observability** | Prometheus Metrics Pull | ⚙️ Monitoring Agent | HTTP (Prometheus scrape) |
 | **KPF 8: Headless Observability** | Deep Telemetry & Multi-Dimensional Query | ⚙️ Analytics System | GraphQL / HTTPS |

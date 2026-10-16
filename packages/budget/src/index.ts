@@ -27,6 +27,8 @@ export { costUsd, priceFor } from './pricing.js';
 export { validateBudgetLimits } from './limits.js';
 export type { StandingDenied, StandingOk, StandingRequest, StandingResult } from './standing.js';
 export { checkStanding } from './standing.js';
+export type { TrainingAccount, TrainingAssertion, TrainingCharge } from './training.js';
+export { chargeTraining, outputPasses } from './training.js';
 export type {
   BudgetStatus,
   CloudCostSnapshot,
