@@ -168,7 +168,7 @@ describe('§6.5 bus sinks: batch, ship, retry', () => {
         return new Response(JSON.stringify({ messageIds: ['1'] }), { status: 200 });
       }) as unknown as typeof fetch,
     });
-    const ev = runEvent(run('FAILED', { runId: 'r-pubsub' }));
+    const ev = runEvent(run('FAILED', { runId: 'r-pubsub', error: 'simulated failure' }));
     await sink.send([ev]);
     assert.equal(sink.name, 'pubsub:factory-events');
     assert.equal(publishedUrl, 'https://pubsub.test/v1/projects/gcp-proj-1/topics/factory-events:publish');
