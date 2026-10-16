@@ -131,7 +131,9 @@ describe('skill training account', { concurrency: false }, () => {
     assert.equal(winner.body.recommendation.model, 'small');
     assert.equal(winner.body.adopted, false);
 
-    const view = await call(port, '/api/v1/skills/summarize/training', 'GET', VIEWER);
+    const hidden = await call(port, '/api/v1/skills/summarize/training', 'GET', VIEWER);
+    assert.equal(hidden.status, 403);
+    const view = await call(port, '/api/v1/skills/summarize/training', 'GET', ADMIN);
     assert.equal(view.status, 200);
     assert.equal(view.body.baseline[0].input, undefined);
     assert.equal(JSON.stringify(view.body).includes('long note'), false);

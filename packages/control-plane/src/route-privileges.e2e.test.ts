@@ -153,7 +153,7 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: `/api/v1/agents/castle/skills/${SKILL}/adoption/approve`, privilege: 'skills.adopt.decide', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/agents/castle/skills/${SKILL}/adoption/reject`, privilege: 'skills.adopt.decide', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/retire`, privilege: 'skills.retire', role: 'admin', body: {} },
-  { method: 'GET', path: `/api/v1/skills/${SKILL}/training`, privilege: 'skills.read', role: 'viewer' },
+  { method: 'GET', path: `/api/v1/skills/${SKILL}/training`, privilege: 'skills.training.run', role: 'admin' },
   { method: 'PUT', path: `/api/v1/skills/${SKILL}/training-account`, privilege: 'skills.training.fund', role: 'admin', body: {} },
   { method: 'PUT', path: `/api/v1/skills/${SKILL}/training-baseline`, privilege: 'skills.training.run', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/skills/${SKILL}/training-runs`, privilege: 'skills.training.run', role: 'admin', body: {} },
@@ -304,6 +304,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       { method: 'POST', path: '/api/v1/runs/nope/result', body: {} },
       { method: 'POST', path: '/api/v1/runs/nope/heartbeat', body: {} },
       { method: 'GET', path: '/api/v1/runs/nope/mailbox' },
+      { method: 'POST', path: '/api/v1/runs/nope/training', body: {} },
       { method: 'GET', path: '/api/v1/runs/nope/events' },
       { method: 'POST', path: '/api/v1/keymaster/checkout', body: {} },
     ];

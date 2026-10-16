@@ -40,20 +40,24 @@ def save_state(path: Path, state: dict) -> None:
 
 
 class FactoryClient:
-    """Calls the control plane. A missing URL cannot score: there is no local grader."""
+    """Posts training ops to this run's control-plane URL with the run token.
 
-    def __init__(self, base_url: str | None = None, token: str | None = None):
-        self.base_url = (base_url if base_url is not None else os.environ.get("FACTORY_CONTROL_URL", "")).rstrip("/")
-        self.token = token if token is not None else os.environ.get("FACTORY_API_TOKEN", "")
+    That is the same channel a cartridge uses for its input and result. There is no
+    provider host and no static API token. A missing run token cannot score.
+    """
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
-        if not self.base_url:
+    def __init__(self, base_url: str | None = None, run_id: str | None = None, token: str | None = None):
+        self.base_url = (base_url if base_url is not None else os.environ.get("FACTORY_URL", "")).rstrip("/")
+        self.run_id = run_id if run_id is not None else os.environ.get("FACTORY_RUN_ID", "")
+        self.token = token if token is not None else os.environ.get("FACTORY_RUN_TOKEN", "")
+
+    def _request(self, body: dict) -> dict:
+        if not self.base_url or not self.run_id or not self.token:
             return {"error": "factory_unconfigured"}
-        data = None if body is None else json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
-            self.base_url + path,
-            data=data,
-            method=method,
+            f"{self.base_url}/api/v1/runs/{self.run_id}/training",
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
             headers={"content-type": "application/json", "authorization": f"Bearer {self.token}"},
         )
         try:
@@ -71,20 +75,16 @@ class FactoryClient:
             return parsed
 
     def account(self, skill_id: str) -> dict:
-        return self._request("GET", f"/api/v1/skills/{skill_id}/training")
+        return self._request({"op": "account", "skillId": skill_id})
 
     def baseline(self, skill_id: str, cases: list) -> dict:
-        return self._request("PUT", f"/api/v1/skills/{skill_id}/training-baseline", {"cases": cases})
+        return self._request({"op": "baseline", "skillId": skill_id, "cases": cases})
 
     def run(self, skill_id: str, model: str, cost: float, outputs: list) -> dict:
-        return self._request(
-            "POST",
-            f"/api/v1/skills/{skill_id}/training-runs",
-            {"model": model, "costUsd": cost, "outputs": outputs},
-        )
+        return self._request({"op": "run", "skillId": skill_id, "model": model, "costUsd": cost, "outputs": outputs})
 
     def recommend(self, skill_id: str) -> dict:
-        return self._request("POST", f"/api/v1/skills/{skill_id}/training-recommendation", {})
+        return self._request({"op": "recommend", "skillId": skill_id})
 
 
 def _parse_assertion(text: str) -> dict | None:
@@ -102,7 +102,7 @@ def _refuse(result: dict) -> str | None:
     if not error:
         return None
     if error == "factory_unconfigured":
-        return "I have no factory to score against. Set FACTORY_CONTROL_URL and try again."
+        return "This run has no factory URL or run token, so I cannot score. I will not call a model provider myself."
     if error in {"training_budget_required", "training_budget_exceeded"}:
         return "The skill's training account cannot pay for that. Raise the cap, or stop. I will not score it myself."
     if error == "training_no_winner":

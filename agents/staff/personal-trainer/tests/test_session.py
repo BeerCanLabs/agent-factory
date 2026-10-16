@@ -7,7 +7,7 @@ from session import FactoryClient, empty_state, load_state, save_state, turn
 
 class FakeFactory(FactoryClient):
     def __init__(self, cap=1):
-        super().__init__(base_url="http://factory.test", token="t")
+        super().__init__(base_url="http://factory.test", run_id="run-1", token="run-token")
         self.cap = cap
         self.baselines = []
         self.runs = []

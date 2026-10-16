@@ -81,24 +81,13 @@ function viewerOf(state: FactoryState, principal: Principal): SkillViewer {
   return { admin, ownedAgents };
 }
 
-function skillOr404(state: FactoryState, res: http.ServerResponse, id: string, principal: Principal) {
-  if (!SKILL_ID.test(id)) {
-    json(res, 404, { error: 'not_found', id });
-    return null;
-  }
-  const versions = skillRegistry(state).versions(id);
-  const first = versions[0];
-  if (!first) {
-    json(res, 404, { error: 'not_found', id });
-    return null;
-  }
+function skillVisible(state: FactoryState, id: string, principal: Principal) {
+  if (!SKILL_ID.test(id)) return null;
+  const first = skillRegistry(state).versions(id)[0];
+  if (!first) return null;
   const owner = ownerOf(first);
   const visible = skillVisibleTo({ visibility: visibilityOf(first), ...(owner ? { owner } : {}) }, viewerOf(state, principal));
-  if (!visible) {
-    json(res, 404, { error: 'not_found', id });
-    return null;
-  }
-  return first;
+  return visible ? first : null;
 }
 
 /** Admin, or an owner of the private skill's owner agent. A public skill's training money is an admin act. */
@@ -154,29 +143,26 @@ function publicRecord(rec: TrainingRecord) {
   };
 }
 
-/** Handles the skill training routes. Returns false for any other path. */
-export async function handleSkillTraining(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
-  const get = path.match(TRAINING);
-  if (get && req.method === 'GET') {
-    const principal = await requirePrivilege(req, res, state, 'skills.read');
-    if (!principal) return true;
-    const id = decode(get[1]);
-    if (!skillOr404(state, res, id, principal)) return true;
-    json(res, 200, publicRecord(recordOf(state, id)));
-    return true;
-  }
+export type TrainingOp = {
+  op: 'account' | 'cap' | 'baseline' | 'run' | 'recommend';
+  skillId: string;
+  capUsd?: number;
+  cases?: unknown;
+  model?: unknown;
+  costUsd?: unknown;
+  outputs?: unknown;
+};
 
-  const cap = path.match(CAP);
-  if (cap && req.method === 'PUT') {
-    const id = decode(cap[1]);
-    const auth = await authorizeTraining(state, req, res, id, 'skills.training.fund');
-    if (!auth) return true;
-    const body = (await readJson(req)) as { capUsd?: unknown };
-    const capUsd = body?.capUsd;
-    if (typeof capUsd !== 'number' || !Number.isFinite(capUsd) || capUsd <= 0) {
-      json(res, 400, { error: 'training_cap_invalid' });
-      return true;
-    }
+/** Apply one training operation for an already authorized principal. Scoring and spend stay here. */
+export async function applyTraining(state: FactoryState, principal: Principal, op: TrainingOp): Promise<{ status: number; body: Record<string, unknown> }> {
+  const id = op.skillId;
+  if (op.op === 'account') {
+    if (!skillVisible(state, id, principal)) return { status: 404, body: { error: 'not_found', id } };
+    return { status: 200, body: publicRecord(recordOf(state, id)) as Record<string, unknown> };
+  }
+  if (op.op === 'cap') {
+    const capUsd = op.capUsd;
+    if (typeof capUsd !== 'number' || !Number.isFinite(capUsd) || capUsd <= 0) return { status: 400, body: { error: 'training_cap_invalid' } };
     const rec = recordOf(state, id);
     rec.account = { capUsd, spentUsd: rec.account?.spentUsd ?? 0 };
     state.ledger.append({
@@ -184,28 +170,15 @@ export async function handleSkillTraining(state: FactoryState, req: http.Incomin
       agentId: `skill:${id}`,
       type: 'action',
       action: 'TRAINING_CAP_SET',
-      actor: auth.principal.actor,
+      actor: principal.actor,
       costUsd: capUsd,
     });
-    json(res, 200, { skillId: id, capUsd, spentUsd: rec.account.spentUsd });
-    return true;
+    return { status: 200, body: { skillId: id, capUsd, spentUsd: rec.account.spentUsd } };
   }
-
-  const baseline = path.match(BASELINE);
-  if (baseline && req.method === 'PUT') {
-    const id = decode(baseline[1]);
-    const auth = await authorizeTraining(state, req, res, id, 'skills.training.run');
-    if (!auth) return true;
-    const body = (await readJson(req)) as { cases?: unknown };
-    if (!Array.isArray(body?.cases) || body.cases.length === 0 || body.cases.length > 32) {
-      json(res, 400, { error: 'training_baseline_invalid' });
-      return true;
-    }
-    const cases = body.cases.map(caseOf);
-    if (cases.some((c) => !c)) {
-      json(res, 400, { error: 'training_baseline_invalid' });
-      return true;
-    }
+  if (op.op === 'baseline') {
+    if (!Array.isArray(op.cases) || op.cases.length === 0 || op.cases.length > 32) return { status: 400, body: { error: 'training_baseline_invalid' } };
+    const cases = op.cases.map(caseOf);
+    if (cases.some((c) => !c)) return { status: 400, body: { error: 'training_baseline_invalid' } };
     const rec = recordOf(state, id);
     rec.baseline = cases as TrainingCase[];
     rec.trials = [];
@@ -215,10 +188,116 @@ export async function handleSkillTraining(state: FactoryState, req: http.Incomin
       agentId: `skill:${id}`,
       type: 'action',
       action: 'TRAINING_BASELINE_SET',
-      actor: auth.principal.actor,
+      actor: principal.actor,
       payloadSha256: payloadHash(cases),
     });
-    json(res, 200, { skillId: id, cases: rec.baseline.length });
+    return { status: 200, body: { skillId: id, cases: rec.baseline.length } };
+  }
+  if (op.op === 'run') {
+    if (typeof op.model !== 'string' || !op.model || op.model.length > 128) return { status: 400, body: { error: 'training_run_invalid' } };
+    if (typeof op.costUsd !== 'number' || !Number.isFinite(op.costUsd) || op.costUsd < 0) return { status: 400, body: { error: 'training_run_invalid' } };
+    const rec = recordOf(state, id);
+    if (!rec.baseline.length) return { status: 409, body: { error: 'training_baseline_required' } };
+    if (!Array.isArray(op.outputs)) return { status: 400, body: { error: 'training_run_invalid' } };
+    const byName = new Map(op.outputs.map((row) => {
+      const item = row as { name?: unknown; output?: unknown };
+      return [item?.name, item?.output] as const;
+    }));
+    if (rec.baseline.some((c) => typeof byName.get(c.name) !== 'string')) return { status: 400, body: { error: 'training_run_invalid' } };
+    const charged = chargeTraining(rec.account, op.costUsd);
+    if (!charged.ok) return { status: 402, body: { error: charged.error } };
+    let passed = 0;
+    let failed = 0;
+    for (const c of rec.baseline) {
+      if (outputPasses(String(byName.get(c.name)), c)) passed += 1;
+      else failed += 1;
+    }
+    rec.account = charged.account;
+    const trial: TrainingTrial = { model: op.model, passed, failed, costUsd: op.costUsd };
+    rec.trials.push(trial);
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: `skill:${id}`,
+      type: 'action',
+      action: `TRAINING_RUN passed=${passed} failed=${failed}`,
+      actor: principal.actor,
+      model: op.model,
+      costUsd: op.costUsd,
+      payloadSha256: payloadHash(rec.baseline),
+    });
+    return { status: 200, body: { skillId: id, ...trial, spentUsd: rec.account.spentUsd } };
+  }
+  const rec = recordOf(state, id);
+  const winners = rec.trials.filter((t) => t.failed === 0 && t.passed > 0);
+  if (!winners.length) return { status: 409, body: { error: 'training_no_winner' } };
+  const best = winners.reduce((a, b) => (a.costUsd <= b.costUsd ? a : b));
+  rec.recommendation = { model: best.model, costUsd: best.costUsd, at: new Date().toISOString() };
+  state.ledger.append({
+    timestamp: rec.recommendation.at,
+    agentId: `skill:${id}`,
+    type: 'action',
+    action: 'TRAINING_RECOMMENDED',
+    actor: principal.actor,
+    model: best.model,
+    costUsd: best.costUsd,
+  });
+  return { status: 200, body: { skillId: id, recommendation: rec.recommendation, adopted: false } };
+}
+
+/**
+ * A live run asks for training. The run token proves which run it is. The principal is the run's caller,
+ * the person the Gatekeeper already verified, never a secret the cartridge holds.
+ */
+export async function applyTrainingForCaller(
+  state: FactoryState,
+  principal: Principal,
+  body: { op?: unknown; skillId?: unknown; capUsd?: number; cases?: unknown; model?: unknown; costUsd?: unknown; outputs?: unknown },
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const id = typeof body.skillId === 'string' ? body.skillId : '';
+  const op = body.op === 'cap' ? 'cap' : body.op === 'baseline' ? 'baseline' : body.op === 'run' ? 'run' : body.op === 'recommend' ? 'recommend' : body.op === 'account' ? 'account' : '';
+  if (!op) return { status: 400, body: { error: 'training_op_invalid' } };
+  const known = SKILL_ID.test(id) ? skillRegistry(state).versions(id) : [];
+  const ownerAgent = known[0] ? ownerOf(known[0]) : undefined;
+  const resource = ownerAgent ? { agentId: ownerAgent, owners: ownersOf(state, ownerAgent) } : undefined;
+  const decision = op === 'cap'
+    ? authorize({ principal, privilege: 'skills.training.fund', ...(resource ? { resource } : {}) })
+    : authorize({ principal, privilege: 'skills.training.run', ...(resource ? { resource } : {}) });
+  if (!decision.allowed) return { status: 403, body: { error: 'forbidden', required: decision.required } };
+  if (!known[0]) return { status: 404, body: { error: 'not_found', id } };
+  return applyTraining(state, principal, { op, skillId: id, capUsd: body.capUsd, cases: body.cases, model: body.model, costUsd: body.costUsd, outputs: body.outputs });
+}
+
+/** Handles the skill training routes. Returns false for any other path. */
+export async function handleSkillTraining(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
+  const get = path.match(TRAINING);
+  if (get && req.method === 'GET') {
+    const id = decode(get[1]);
+    const auth = await authorizeTraining(state, req, res, id, 'skills.training.run');
+    if (!auth) return true;
+    const result = await applyTraining(state, auth.principal, { op: 'account', skillId: id });
+    json(res, result.status, result.body);
+    return true;
+  }
+
+  const cap = path.match(CAP);
+  if (cap && req.method === 'PUT') {
+    const id = decode(cap[1]);
+    const auth = await authorizeTraining(state, req, res, id, 'skills.training.fund');
+    if (!auth) return true;
+    const body = (await readJson(req)) as { capUsd?: number };
+    const result = await applyTraining(state, auth.principal, { op: 'cap', skillId: id, capUsd: body?.capUsd });
+    json(res, result.status, result.body);
+    return true;
+  }
+
+  const baseline = path.match(BASELINE);
+  if (baseline && req.method === 'PUT') {
+    const id = decode(baseline[1]);
+    const auth = await authorizeTraining(state, req, res, id, 'skills.training.run');
+    if (!auth) return true;
+    const body = (await readJson(req)) as { cases?: unknown };
+    const result = await applyTraining(state, auth.principal, { op: 'baseline', skillId: id, cases: body?.cases });
+    json(res, result.status, result.body);
     return true;
   }
 
@@ -228,56 +307,8 @@ export async function handleSkillTraining(state: FactoryState, req: http.Incomin
     const auth = await authorizeTraining(state, req, res, id, 'skills.training.run');
     if (!auth) return true;
     const body = (await readJson(req)) as { model?: unknown; costUsd?: unknown; outputs?: unknown };
-    if (typeof body?.model !== 'string' || !body.model || body.model.length > 128) {
-      json(res, 400, { error: 'training_run_invalid' });
-      return true;
-    }
-    if (typeof body.costUsd !== 'number' || !Number.isFinite(body.costUsd) || body.costUsd < 0) {
-      json(res, 400, { error: 'training_run_invalid' });
-      return true;
-    }
-    const rec = recordOf(state, id);
-    if (!rec.baseline.length) {
-      json(res, 409, { error: 'training_baseline_required' });
-      return true;
-    }
-    if (!Array.isArray(body.outputs)) {
-      json(res, 400, { error: 'training_run_invalid' });
-      return true;
-    }
-    const byName = new Map(body.outputs.map((row) => {
-      const item = row as { name?: unknown; output?: unknown };
-      return [item?.name, item?.output] as const;
-    }));
-    if (rec.baseline.some((c) => typeof byName.get(c.name) !== 'string')) {
-      json(res, 400, { error: 'training_run_invalid' });
-      return true;
-    }
-    const charged = chargeTraining(rec.account, body.costUsd);
-    if (!charged.ok) {
-      json(res, 402, { error: charged.error });
-      return true;
-    }
-    let passed = 0;
-    let failed = 0;
-    for (const c of rec.baseline) {
-      if (outputPasses(String(byName.get(c.name)), c)) passed += 1;
-      else failed += 1;
-    }
-    rec.account = charged.account;
-    const trial: TrainingTrial = { model: body.model, passed, failed, costUsd: body.costUsd };
-    rec.trials.push(trial);
-    state.ledger.append({
-      timestamp: new Date().toISOString(),
-      agentId: `skill:${id}`,
-      type: 'action',
-      action: `TRAINING_RUN passed=${passed} failed=${failed}`,
-      actor: auth.principal.actor,
-      model: body.model,
-      costUsd: body.costUsd,
-      payloadSha256: payloadHash(rec.baseline),
-    });
-    json(res, 200, { skillId: id, ...trial, spentUsd: rec.account.spentUsd });
+    const result = await applyTraining(state, auth.principal, { op: 'run', skillId: id, model: body?.model, costUsd: body?.costUsd, outputs: body?.outputs });
+    json(res, result.status, result.body);
     return true;
   }
 
@@ -286,24 +317,8 @@ export async function handleSkillTraining(state: FactoryState, req: http.Incomin
     const id = decode(recommend[1]);
     const auth = await authorizeTraining(state, req, res, id, 'skills.training.run');
     if (!auth) return true;
-    const rec = recordOf(state, id);
-    const winners = rec.trials.filter((t) => t.failed === 0 && t.passed > 0);
-    if (!winners.length) {
-      json(res, 409, { error: 'training_no_winner' });
-      return true;
-    }
-    const best = winners.reduce((a, b) => (a.costUsd <= b.costUsd ? a : b));
-    rec.recommendation = { model: best.model, costUsd: best.costUsd, at: new Date().toISOString() };
-    state.ledger.append({
-      timestamp: rec.recommendation.at,
-      agentId: `skill:${id}`,
-      type: 'action',
-      action: 'TRAINING_RECOMMENDED',
-      actor: auth.principal.actor,
-      model: best.model,
-      costUsd: best.costUsd,
-    });
-    json(res, 200, { skillId: id, recommendation: rec.recommendation, adopted: false });
+    const result = await applyTraining(state, auth.principal, { op: 'recommend', skillId: id });
+    json(res, result.status, result.body);
     return true;
   }
 
