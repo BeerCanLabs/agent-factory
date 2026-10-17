@@ -33,7 +33,7 @@ describe('vendor discovery', () => {
     async requestApproval() { return { approvalId: 'a', state: 'pending' as const }; },
     async consumeApproval() { return false; },
     async ledger() {},
-    async platformCredentialNames() { return ['ANTHROPIC_API_KEY']; },
+    async systemRoutes() { return { routes: [], platformCredentials: ['ANTHROPIC_API_KEY'] }; },
   } satisfies ControlClient;
 
   const providers: SecretProvider[] = [{

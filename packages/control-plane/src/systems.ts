@@ -84,7 +84,7 @@ export async function handleSystems(
     const store = systemsStore(state);
     const secret = validation.proposal.credential?.secret;
     if (secret) {
-      const owner = store.list().find((s) => s.id !== validation.proposal.id && s.activeDefinition?.credential?.secret === secret);
+      const owner = store.findActiveByCredentialSecret(secret, validation.proposal.id);
       if (owner) {
         json(res, 409, { error: 'credential_name_taken', name: secret, system: owner.id });
         return true;

@@ -101,7 +101,7 @@ export type ControlClient = {
    */
   progress?(events: ProgressEvent[]): Promise<void>;
   /** E10: resolve non-model routes from the factory. Cached, refreshed on change, no redeploy. */
-  systemRoutes?(): Promise<Route[]>;
+  systemRoutes?(): Promise<Route[] | { routes: Route[]; platformCredentials?: string[] }>;
   /** Credential names on approved systems. Vendor discovery may read these and no others. */
   platformCredentialNames?(): Promise<string[]>;
   /** GAP-162: resolve dynamic model catalog from control plane. Cached, refreshed on interval, no redeploy. */
@@ -138,8 +138,6 @@ export type GatekeeperEgressOptions = {
   allowHttpSystems?: boolean;
   /** Bearer the control plane presents on POST /internal/vendor-models. Absent: that route is not served. */
   serviceToken?: string;
-  /** Secret names this process may read for vendor discovery. Route credential names are included too. */
-  heldSecretNames?: readonly string[];
   /** Tests: replace the vendor fetch. Production uses discoverVendorModels' own fetch. */
   discoverFetch?: typeof fetch;
 };
@@ -299,6 +297,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   const MISS_REFRESH_INTERVAL_MS = Math.min(2_000, ROUTE_REFRESH_INTERVAL_MS);
 
   let inflight: Promise<void> | undefined;
+  const cachedPlatformCredentials = new Set<string>();
   /** Refresh factory systems when stale or on an unknown id; concurrent callers share one fetch. */
   async function ensureRoutes(targetRouteId?: string): Promise<void> {
     if (!opts.control.systemRoutes) return;
@@ -313,15 +312,22 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const miss = Boolean(targetRouteId && !routes.has(targetRouteId) && now - lastMissRefresh >= MISS_REFRESH_INTERVAL_MS);
     if (!miss && now - lastRouteRefresh < ROUTE_REFRESH_INTERVAL_MS) return;
     if (miss) lastMissRefresh = now;
-    let remote: Route[];
+    let remotePayload: Route[] | { routes: Route[]; platformCredentials?: string[] };
     try {
-      remote = await opts.control.systemRoutes();
+      remotePayload = await opts.control.systemRoutes();
     } catch (err) {
       // Keep the last known systems: a control-plane restart must not cut every agent off.
       console.error(`[gatekeeper-egress] system routes refresh: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
+    const remote = Array.isArray(remotePayload) ? remotePayload : remotePayload?.routes;
     if (!Array.isArray(remote)) return;
+    if (!Array.isArray(remotePayload) && Array.isArray(remotePayload.platformCredentials)) {
+      cachedPlatformCredentials.clear();
+      for (const name of remotePayload.platformCredentials) {
+        if (/^[A-Z][A-Z0-9_]*$/.test(name)) cachedPlatformCredentials.add(name);
+      }
+    }
     routes.clear();
     for (const [id, r] of staticRoutes) routes.set(id, r);
     for (const r of remote) {
@@ -985,9 +991,12 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           return send(res, 400, { error: 'invalid_upstream' });
         }
         if (parsed.protocol !== 'https:') return send(res, 400, { error: 'invalid_upstream' });
-        const allowed = new Set<string>();
-        for (const name of (await opts.control.platformCredentialNames?.()) ?? []) {
-          if (/^[A-Z][A-Z0-9_]*$/.test(name)) allowed.add(name);
+        await ensureRoutes();
+        const allowed = new Set<string>(cachedPlatformCredentials);
+        if (opts.control.platformCredentialNames) {
+          for (const name of (await opts.control.platformCredentialNames()) ?? []) {
+            if (/^[A-Z][A-Z0-9_]*$/.test(name)) allowed.add(name);
+          }
         }
         for (const route of routes.values()) {
           const name = route.credential?.secret;

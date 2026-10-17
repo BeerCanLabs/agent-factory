@@ -270,7 +270,7 @@ async function submitProviderClient(state: FactoryState, req: http.IncomingMessa
 
 /** Handles the credentials API. Returns false when the path is not one of its routes. */
 export async function handleCredentials(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
-  if (state.systems) syncPlatformCredentials(state);
+  const held = state.systems ? syncPlatformCredentials(state) : (state.gatekeeperEgressHeldSecrets ?? new Set<string>());
   const providerClient = path.match(/^\/api\/v1\/keymaster\/providers\/([a-z0-9-]+)\/client$/);
   if (providerClient && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'credentials.provider.read'))) return true;
@@ -301,7 +301,7 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
   if (path === '/api/v1/keymaster/platform/credentials' && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'credentials.platform.read'))) return true;
     const items = await assessPlatformCredentials({
-      gatekeeperEgressHeld: syncPlatformCredentials(state),
+      gatekeeperEgressHeld: held,
       present: (name) => cachedPresent(state, name),
       submitPath: platformSubmitPath,
     });
@@ -313,7 +313,7 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
     const principal = await requirePrivilege(req, res, state, 'credentials.platform.set');
     if (!principal) return true;
     const name = decodeURIComponent(plat[1]);
-    if (!syncPlatformCredentials(state).has(name)) {
+    if (!held.has(name)) {
       return noStore(res, 404, { error: 'not_a_platform_credential', name, message: `${name} is not a credential on an approved system` }), true;
     }
     await writeCredential(state, req, res, 'platform', name, principal.actor);

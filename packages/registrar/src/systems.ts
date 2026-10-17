@@ -360,6 +360,15 @@ export class SystemsStore {
     return names.sort();
   }
 
+  /** Finds an active approved system whose credential.secret matches the given secret. */
+  findActiveByCredentialSecret(secret: string, excludeId?: string): SystemDefinition | undefined {
+    for (const def of this.current.values()) {
+      if (excludeId && def.id === excludeId) continue;
+      if (def.credential?.secret === secret) return def;
+    }
+    return undefined;
+  }
+
   activeRoutes(): EgressRoute[] {
     const routes: EgressRoute[] = [];
     for (const def of this.current.values()) {

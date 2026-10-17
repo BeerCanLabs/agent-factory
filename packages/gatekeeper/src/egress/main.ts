@@ -84,14 +84,8 @@ const control: ControlClient = {
   async systemRoutes() {
     const res = await call('GET', '/api/v1/gatekeeper-egress/routes');
     if (!res.ok) throw new Error(`control plane system routes ${res.status}`);
-    const body = (await res.json()) as { routes?: Route[] };
-    return body.routes ?? [];
-  },
-  async platformCredentialNames() {
-    const res = await call('GET', '/api/v1/gatekeeper-egress/routes');
-    if (!res.ok) throw new Error(`control plane system routes ${res.status}`);
-    const body = (await res.json()) as { platformCredentials?: string[] };
-    return body.platformCredentials ?? [];
+    const body = (await res.json()) as { routes?: Route[]; platformCredentials?: string[] };
+    return { routes: body.routes ?? [], platformCredentials: body.platformCredentials ?? [] };
   },
   async modelCatalog() {
     const res = await call('GET', '/api/v1/models/internal/catalog');

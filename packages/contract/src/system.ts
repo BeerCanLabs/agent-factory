@@ -56,7 +56,7 @@ const BUILTIN_PLATFORM_CREDENTIAL: Record<string, string> = {
   openai: 'OPENAI_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
   xai: 'XAI_API_KEY',
-  google: 'GEMINI_API_KEY',
+  gemini: 'GEMINI_API_KEY',
 };
 
 export function platformCredentialName(systemId: string): string {
@@ -241,7 +241,7 @@ export const AI_PROVIDER_TEMPLATES: Record<string, {
     credentialHeader: 'Authorization',
     credentialFormat: 'Bearer {}',
   },
-  google: {
+  gemini: {
     name: 'Google Gemini',
     description: 'Gemini models direct via Google AI Studio API',
     upstream: 'https://generativelanguage.googleapis.com',

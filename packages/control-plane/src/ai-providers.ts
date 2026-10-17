@@ -6,7 +6,7 @@ const BUILTIN_AI_PROVIDERS = [
   ['openai', 'openai'],
   ['anthropic', 'anthropic'],
   ['xai', 'xai'],
-  ['gemini', 'google'],
+  ['gemini', 'gemini'],
 ] as const;
 
 /**

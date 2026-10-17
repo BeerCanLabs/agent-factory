@@ -4,7 +4,8 @@ import { platformCredentialName, validateSystemProposal, systemDefinitionSchema 
 
 describe('system definition schemas', () => {
   it('gives each vendor its own platform credential name', () => {
-    assert.equal(platformCredentialName('google'), 'GEMINI_API_KEY');
+    assert.equal(platformCredentialName('gemini'), 'GEMINI_API_KEY');
+    assert.equal(platformCredentialName('google'), 'GOOGLE_API_KEY');
     assert.equal(platformCredentialName('openai'), 'OPENAI_API_KEY');
     assert.equal(platformCredentialName('deepseek'), 'DEEPSEEK_API_KEY');
     assert.equal(platformCredentialName('custom-provider'), 'CUSTOM_PROVIDER_API_KEY');
