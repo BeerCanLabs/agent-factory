@@ -324,9 +324,273 @@ describe('Vertex AI and API-key model adapters (M1–M3)', () => {
     });
 
     const defaults = defaultModelAdapters();
-    for (const key of ['bedrock-converse', 'vertex-ai', 'vertex-gemini', 'vertex-anthropic', 'anthropic', 'openai', 'xai']) {
+    for (const key of ['bedrock-converse', 'vertex-ai', 'vertex-gemini', 'vertex-anthropic', 'anthropic', 'openai', 'xai', 'gemini', 'google']) {
       assert.ok(defaults[key], `defaultModelAdapters includes ${key}`);
     }
   });
+
+  it('translates tools and parses tool_calls across OpenAI/xAI, Anthropic, and Google Gemini', async () => {
+    const { openAiCompatible, anthropicMessages, vertexGemini } = await import('./models.js');
+
+    const TOOL_REQ: ChatRequest = {
+      messages: [{ role: 'user', content: 'What is the weather in Seattle?' }],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'get_weather',
+            description: 'Get weather forecast',
+            parameters: {
+              type: 'object',
+              properties: { location: { type: 'string' } },
+              required: ['location'],
+            },
+          },
+        },
+      ],
+      tool_choice: 'required',
+    };
+
+    // 1. OpenAI / xAI (openAiCompatible)
+    let openaiBody: Record<string, unknown> | undefined;
+    const openai = openAiCompatible({
+      apiKey: async () => 'test-key',
+      endpoint: 'https://api.openai.com',
+      fetch: (async (_url: string, init: RequestInit) => {
+        openaiBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: 'call_oa1',
+                      type: 'function',
+                      function: { name: 'get_weather', arguments: '{"location":"Seattle"}' },
+                    },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+            usage: { prompt_tokens: 15, completion_tokens: 8 },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    const openaiRes = await openai.complete({ provider: 'openai', id: 'gpt-4o' }, TOOL_REQ);
+    assert.deepEqual(openaiRes.toolCalls, [
+      {
+        id: 'call_oa1',
+        type: 'function',
+        function: { name: 'get_weather', arguments: '{"location":"Seattle"}' },
+      },
+    ]);
+    assert.equal(openaiRes.finishReason, 'tool_calls');
+    assert.deepEqual(openaiBody?.tools, TOOL_REQ.tools);
+    assert.equal(openaiBody?.tool_choice, 'required');
+
+    // 2. Anthropic (anthropicMessages)
+    let anthropicBody: Record<string, unknown> | undefined;
+    const anthropic = anthropicMessages({
+      apiKey: async () => 'sk-ant-test',
+      endpoint: 'https://api.anthropic.com',
+      fetch: (async (_url: string, init: RequestInit) => {
+        anthropicBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            content: [
+              { type: 'text', text: 'Checking the forecast...' },
+              { type: 'tool_use', id: 'toolu_123', name: 'get_weather', input: { location: 'Seattle' } },
+            ],
+            stop_reason: 'tool_use',
+            usage: { input_tokens: 18, output_tokens: 12 },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    const anthropicRes = await anthropic.complete({ provider: 'anthropic', id: 'claude-3-7-sonnet' }, TOOL_REQ);
+    assert.equal(anthropicRes.content, 'Checking the forecast...');
+    assert.equal(anthropicRes.finishReason, 'tool_calls');
+    assert.deepEqual(anthropicRes.toolCalls, [
+      {
+        id: 'toolu_123',
+        type: 'function',
+        function: { name: 'get_weather', arguments: '{"location":"Seattle"}' },
+      },
+    ]);
+    assert.deepEqual(anthropicBody?.tools, [
+      {
+        name: 'get_weather',
+        description: 'Get weather forecast',
+        input_schema: {
+          type: 'object',
+          properties: { location: { type: 'string' } },
+          required: ['location'],
+        },
+      },
+    ]);
+    assert.deepEqual(anthropicBody?.tool_choice, { type: 'any' });
+
+    // 3. Google Gemini (vertexGemini)
+    let geminiBody: Record<string, unknown> | undefined;
+    const gemini = vertexGemini({
+      project: 'gcp-proj-1',
+      accessToken: async () => 'ya29-token',
+      endpoint: (r) => `https://${r}.vertex.test`,
+      fetch: (async (_url: string, init: RequestInit) => {
+        geminiBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { functionCall: { name: 'get_weather', args: { location: 'Seattle' } } },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+            usageMetadata: { promptTokenCount: 14, candidatesTokenCount: 6 },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    const geminiRes = await gemini.complete({ provider: 'vertex-ai', id: 'gemini-2.5-pro' }, TOOL_REQ);
+    assert.equal(geminiRes.finishReason, 'tool_calls');
+    assert.equal(geminiRes.toolCalls?.length, 1);
+    assert.equal(geminiRes.toolCalls?.[0].function.name, 'get_weather');
+    assert.equal(geminiRes.toolCalls?.[0].function.arguments, '{"location":"Seattle"}');
+    assert.deepEqual(geminiBody?.tools, [
+      {
+        functionDeclarations: [
+          {
+            name: 'get_weather',
+            description: 'Get weather forecast',
+            parameters: {
+              type: 'object',
+              properties: { location: { type: 'string' } },
+              required: ['location'],
+            },
+          },
+        ],
+      },
+    ]);
+    assert.deepEqual(geminiBody?.toolConfig, {
+      functionCallingConfig: { mode: 'ANY' },
+    });
+  });
+
+  it('honors tool_choice: "none" across providers by suppressing tool declarations or enforcing mode NONE', async () => {
+    const { openAiCompatible, anthropicMessages, toAnthropicMessages, vertexGemini, toConverse } = await import('./models.js');
+
+    const NONE_REQ: ChatRequest = {
+      messages: [{ role: 'user', content: 'What is 2 + 2?' }],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'calculate',
+            description: 'Calculator',
+            parameters: { type: 'object', properties: { expr: { type: 'string' } } },
+          },
+        },
+      ],
+      tool_choice: 'none',
+    };
+
+    // 1. Bedrock Converse (toConverse) omits toolConfig completely
+    const converseBody = toConverse(NONE_REQ);
+    assert.equal(converseBody.toolConfig, undefined);
+
+    // 2. Anthropic (toAnthropicMessages / anthropicMessages) omits tools and tool_choice
+    const anthropicMsg = toAnthropicMessages(NONE_REQ);
+    assert.equal((anthropicMsg as Record<string, unknown>).tools, undefined);
+    assert.equal((anthropicMsg as Record<string, unknown>).tool_choice, undefined);
+
+    let anthropicBody: Record<string, unknown> | undefined;
+    const anthropic = anthropicMessages({
+      apiKey: async () => 'sk-ant-test',
+      endpoint: 'https://api.anthropic.com',
+      fetch: (async (_url: string, init: RequestInit) => {
+        anthropicBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            content: [{ type: 'text', text: '4' }],
+            stop_reason: 'end_turn',
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+    const antRes = await anthropic.complete({ provider: 'anthropic', id: 'claude-3-7-sonnet' }, NONE_REQ);
+    assert.equal(antRes.content, '4');
+    assert.equal(antRes.finishReason, 'stop');
+    assert.equal(antRes.toolCalls, undefined);
+    assert.equal(anthropicBody?.tools, undefined);
+    assert.equal(anthropicBody?.tool_choice, undefined);
+
+    // 3. Google Gemini (vertexGemini) omits tools and sets toolConfig.functionCallingConfig.mode = 'NONE'
+    let geminiBody: Record<string, unknown> | undefined;
+    const gemini = vertexGemini({
+      project: 'gcp-proj-1',
+      accessToken: async () => 'ya29-token',
+      endpoint: (r) => `https://${r}.vertex.test`,
+      fetch: (async (_url: string, init: RequestInit) => {
+        geminiBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: { parts: [{ text: '4' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+    const gemRes = await gemini.complete({ provider: 'vertex-ai', id: 'gemini-2.5-pro' }, NONE_REQ);
+    assert.equal(gemRes.content, '4');
+    assert.equal(gemRes.finishReason, 'stop');
+    assert.equal(gemRes.toolCalls, undefined);
+    assert.equal(geminiBody?.tools, undefined);
+    assert.deepEqual(geminiBody?.toolConfig, {
+      functionCallingConfig: { mode: 'NONE' },
+    });
+
+    // 4. OpenAI / xAI (openAiCompatible) passes tool_choice: 'none' and tools
+    let openaiBody: Record<string, unknown> | undefined;
+    const openai = openAiCompatible({
+      apiKey: async () => 'test-key',
+      endpoint: 'https://api.openai.com',
+      fetch: (async (_url: string, init: RequestInit) => {
+        openaiBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '4' }, finish_reason: 'stop' }],
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+    const oaiRes = await openai.complete({ provider: 'openai', id: 'gpt-4o' }, NONE_REQ);
+    assert.equal(oaiRes.content, '4');
+    assert.equal(oaiRes.finishReason, 'stop');
+    assert.equal(oaiRes.toolCalls, undefined);
+    assert.deepEqual(openaiBody?.tools, NONE_REQ.tools);
+    assert.equal(openaiBody?.tool_choice, 'none');
+  });
 });
+
 
