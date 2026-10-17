@@ -338,7 +338,7 @@ export async function gcpAccessTokenFromEnv(doFetch: typeof fetch = fetch): Prom
 }
 
 async function resolveProviderSecret(secretName: string, doFetch: typeof fetch = fetch): Promise<string> {
-  const fromEnv = process.env[secretName];
+  const fromEnv = process.env[secretName] ?? (secretName === 'GEMINI_API_KEY' ? process.env.GOOGLE_API_KEY : undefined);
   if (fromEnv) return fromEnv.trim();
 
   const cached = cachedProviderSecrets.get(secretName);
@@ -703,6 +703,7 @@ export type ApiKeyAdapterOptions = {
   apiKey?: () => Promise<string>;
   secretName?: string;
   endpoint?: string;
+  chatPath?: string;
   fetch?: typeof fetch;
   timeoutMs?: number;
 };
@@ -759,6 +760,8 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
   const secretName = opts.secretName ?? 'OPENAI_API_KEY';
   const getKey = opts.apiKey ?? (() => resolveProviderSecret(secretName, doFetch));
   const base = (opts.endpoint ?? 'https://api.openai.com').replace(/\/$/, '');
+  const chatPath = opts.chatPath ?? '/v1/chat/completions';
+  const chatUrl = `${base}${chatPath.startsWith('/') ? chatPath : `/${chatPath}`}`;
 
   return {
     async complete(entry, req) {
@@ -781,7 +784,7 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
       };
       let res: Response;
       try {
-        res = await doFetch(`${base}/v1/chat/completions`, {
+        res = await doFetch(chatUrl, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${key}`,
@@ -851,13 +854,18 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
   };
 }
 
-/** Adapters by catalog `provider`. Supports AWS Bedrock, GCP Vertex AI (Gemini & Claude), and API-key providers (Anthropic, OpenAI, xAI). */
+/** Adapters by catalog `provider`. Supports AWS Bedrock, GCP Vertex AI (Gemini & Claude), and API-key providers (Anthropic, OpenAI, xAI, Google/Gemini). */
 export function defaultModelAdapters(): Record<string, ModelAdapter> {
   const gemini = vertexGemini();
   const vClaude = vertexAnthropic();
   const anthropic = anthropicMessages();
   const openai = openAiCompatible({ secretName: 'OPENAI_API_KEY', endpoint: 'https://api.openai.com' });
   const xai = openAiCompatible({ secretName: 'XAI_API_KEY', endpoint: 'https://api.x.ai' });
+  const directGemini = openAiCompatible({
+    secretName: 'GEMINI_API_KEY',
+    endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    chatPath: '/chat/completions',
+  });
   return {
     'bedrock-converse': bedrockConverse(),
     'vertex-ai': gemini,
@@ -867,6 +875,8 @@ export function defaultModelAdapters(): Record<string, ModelAdapter> {
     'anthropic-messages': anthropic,
     openai,
     xai,
+    gemini: directGemini,
+    google: directGemini,
   };
 }
 

@@ -324,7 +324,7 @@ describe('Vertex AI and API-key model adapters (M1–M3)', () => {
     });
 
     const defaults = defaultModelAdapters();
-    for (const key of ['bedrock-converse', 'vertex-ai', 'vertex-gemini', 'vertex-anthropic', 'anthropic', 'openai', 'xai']) {
+    for (const key of ['bedrock-converse', 'vertex-ai', 'vertex-gemini', 'vertex-anthropic', 'anthropic', 'openai', 'xai', 'gemini', 'google']) {
       assert.ok(defaults[key], `defaultModelAdapters includes ${key}`);
     }
   });
