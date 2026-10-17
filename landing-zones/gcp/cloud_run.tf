@@ -438,6 +438,10 @@ resource "google_cloud_run_v2_service" "gatekeeper_egress" {
         value = var.gatekeeper_egress_routes
       }
       env {
+        name  = "FACTORY_GATEKEEPER_EGRESS_HELD_SECRETS"
+        value = join(",", var.provider_secret_names)
+      }
+      env {
         name  = "FACTORY_MODEL_CATALOG"
         value = var.model_catalog
       }

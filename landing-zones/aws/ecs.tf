@@ -118,6 +118,7 @@ resource "aws_ecs_task_definition" "control_plane" {
       ])
       secrets = concat([
         { name = "FACTORY_TOKEN", valueFrom = local.secret["FACTORY_TOKEN"] },
+        { name = "FACTORY_GATEKEEPER_EGRESS_TOKEN", valueFrom = local.secret["GATEKEEPER_EGRESS_TOKEN"] },
         { name = "FACTORY_TOKENS", valueFrom = aws_secretsmanager_secret.factory_tokens.arn },
         { name = "GATEKEEPER_INGRESS_TOKEN", valueFrom = local.secret["GATEKEEPER_INGRESS_TOKEN"] },
         { name = "FACTORY_RUN_TOKEN_KEY", valueFrom = local.secret["FACTORY_RUN_TOKEN_KEY"] },
@@ -187,6 +188,7 @@ resource "aws_ecs_task_definition" "gatekeeper_egress" {
         { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
         { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
         { name = "FACTORY_GATEKEEPER_EGRESS_ROUTES", value = local.gatekeeper_egress_routes },
+        { name = "FACTORY_GATEKEEPER_EGRESS_HELD_SECRETS", value = join(",", local.held_secret_names) },
         # K4 (GAP-067): the only host a sign-in link in an agent's message may point at.
         { name = "FACTORY_PUBLIC_BASE_URL", value = var.factory_public_base_url },
         { name = "FACTORY_PRICES", value = var.gatekeeper_egress_prices },

@@ -101,9 +101,43 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
     assert.ok(list.body.templates.openai);
   });
 
-  it('2. POST /api/v1/models/scan validates vendor', async () => {
+  it('2. POST /api/v1/models/scan validates vendor and asks the egress, never a local secret', async () => {
     const badScan = await call(port, '/api/v1/models/scan', 'POST', ADMIN, { vendorId: 'nonexistent-xyz' });
     assert.equal(badScan.status, 400);
+
+    const unconfigured = await call(port, '/api/v1/models/scan', 'POST', ADMIN, { vendorId: 'anthropic' });
+    assert.equal(unconfigured.status, 503);
+    assert.equal(unconfigured.body.error, 'discovery_unavailable');
+
+    let askedSecret: string | undefined;
+    const egress = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { secretName?: string };
+        askedSecret = body.secretName;
+        assert.equal(req.headers.authorization, 'Bearer egress-discovery-token');
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ models: [{ id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' }] }));
+      });
+    });
+    await new Promise<void>((r) => egress.listen(0, '127.0.0.1', r));
+    const addr = egress.address();
+    if (!addr || typeof addr === 'string') throw new Error('no port');
+    state.gatekeeperEgressUrl = `http://127.0.0.1:${addr.port}`;
+    state.gatekeeperEgressToken = 'egress-discovery-token';
+    let reads = 0;
+    state.providers = [{ name: 'mem', async get() { reads += 1; return 'should-not-be-read'; }, async put() {}, async has() { return false; }, async present() { return new Set(); } }];
+
+    const scan = await call(port, '/api/v1/models/scan', 'POST', ADMIN, { vendorId: 'anthropic' });
+    assert.equal(scan.status, 200);
+    assert.equal(scan.body.staged[0].rawId, 'claude-sonnet-4-5');
+    assert.equal(askedSecret, 'ANTHROPIC_API_KEY');
+    assert.equal(reads, 0);
+    state.gatekeeperEgressUrl = undefined;
+    state.gatekeeperEgressToken = undefined;
+    state.providers = [];
+    await new Promise<void>((r) => egress.close(() => r()));
   });
 
   it('3. POST /api/v1/models/admit admits a new model and ledgers it', async () => {

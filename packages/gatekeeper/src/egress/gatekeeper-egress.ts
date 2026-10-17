@@ -2,14 +2,14 @@ import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 import stream from 'node:stream';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { RunTokens } from '@beercanlabs/factory-auth';
 import { checkHold, checkToolApproval, describeHeldRequest, type HoldRule, type ApprovalOutcome, type ApprovalRequest, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { SseMeter, checkModel, complete, defaultModelAdapters, findModel, offeredModels, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
+import { SseMeter, checkModel, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
 /** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
@@ -134,6 +134,12 @@ export type GatekeeperEgressOptions = {
   routeRefreshIntervalMs?: number;
   /** Tests only: accept factory systems with an http upstream (production systems must be https). */
   allowHttpSystems?: boolean;
+  /** Bearer the control plane presents on POST /internal/vendor-models. Absent: that route is not served. */
+  serviceToken?: string;
+  /** Secret names this process may read for vendor discovery. Route credential names are included too. */
+  heldSecretNames?: readonly string[];
+  /** Tests: replace the vendor fetch. Production uses discoverVendorModels' own fetch. */
+  discoverFetch?: typeof fetch;
 };
 
 
@@ -941,6 +947,68 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   const server = http.createServer(async (req, res) => {
     try {
       const url = req.url ?? '/';
+      if (url.split('?')[0] === '/internal/vendor-models' && req.method === 'POST') {
+        if (!opts.serviceToken) return send(res, 404, { error: 'not_found' });
+        const presented = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+        const a = Buffer.from(presented);
+        const b = Buffer.from(opts.serviceToken);
+        if (a.length !== b.length || !timingSafeEqual(a, b)) return send(res, 401, { error: 'unauthorized' });
+        const raw = await new Promise<Buffer>((resolve, reject) => {
+          const chunks: Buffer[] = [];
+          let n = 0;
+          req.on('data', (c: Buffer) => {
+            n += c.length;
+            if (n > 8192) reject(new Error('too_large'));
+            else chunks.push(c);
+          });
+          req.on('end', () => resolve(Buffer.concat(chunks)));
+          req.on('error', reject);
+        }).catch(() => undefined);
+        if (!raw) return send(res, 413, { error: 'body_too_large' });
+        let body: { upstream?: unknown; adapter?: unknown; discoveryPath?: unknown; secretName?: unknown };
+        try {
+          body = JSON.parse(raw.toString('utf8'));
+        } catch {
+          return send(res, 400, { error: 'invalid_json' });
+        }
+        const secretName = typeof body.secretName === 'string' ? body.secretName : '';
+        const upstream = typeof body.upstream === 'string' ? body.upstream : '';
+        const adapter = typeof body.adapter === 'string' ? body.adapter : '';
+        const discoveryPath = typeof body.discoveryPath === 'string' ? body.discoveryPath : undefined;
+        if (!/^[A-Z][A-Z0-9_]*$/.test(secretName)) return send(res, 400, { error: 'invalid_secret_name' });
+        let parsed: URL;
+        try {
+          parsed = new URL(upstream);
+        } catch {
+          return send(res, 400, { error: 'invalid_upstream' });
+        }
+        if (parsed.protocol !== 'https:') return send(res, 400, { error: 'invalid_upstream' });
+        const allowed = new Set<string>(opts.heldSecretNames ?? []);
+        for (const route of routes.values()) {
+          const name = route.credential?.secret;
+          if (name && /^[A-Z][A-Z0-9_]*$/.test(name)) allowed.add(name);
+        }
+        if (!allowed.has(secretName)) return send(res, 403, { error: 'secret_not_held' });
+        const bound = await bindSecrets([secretName], opts.providers);
+        if (!bound.ok || !bound.env[secretName]) return send(res, 503, { error: 'credential_unbound' });
+        if (bound.env[secretName].length >= 4) secretValues.add(bound.env[secretName]);
+        try {
+          const models = await discoverVendorModels({
+            upstream,
+            adapter,
+            discoveryPath,
+            apiKey: bound.env[secretName],
+            fetchFn: opts.discoverFetch,
+          });
+          return send(res, 200, {
+            models: models.map((m) => ({ id: m.id, name: m.name, ownedBy: m.ownedBy, created: m.created, description: m.description })),
+          });
+        } catch (err) {
+          console.error(`[gatekeeper-egress] vendor discovery: ${err instanceof Error ? err.message.replace(bound.env[secretName], '[redacted]') : 'failed'}`);
+          return send(res, 502, { error: 'discovery_failed' });
+        }
+      }
+
       if (url === '/healthz') {
         if (opts.control.systemRoutes && Date.now() - lastRouteRefresh > ROUTE_REFRESH_INTERVAL_MS) {
           await ensureRoutes();
