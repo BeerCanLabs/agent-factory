@@ -89,4 +89,50 @@ describe('ModelStore', () => {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it('disambiguates friendly-name collisions using raw id', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'modelstore-test-'));
+    const file = join(tmp, 'catalog.json');
+    try {
+      const store = new ModelStore(file);
+      // Admit first gpt-4o
+      const m1 = store.admit({
+        name: 'gpt-4o',
+        provider: 'openai',
+        id: 'gpt-4o',
+      });
+      assert.equal(m1.name, 'gpt-4o');
+
+      // Admit second model with same friendly name but different id (e.g. gpt-4o-2024-08-06)
+      const m2 = store.admit({
+        name: 'gpt-4o',
+        provider: 'openai',
+        id: 'gpt-4o-2024-08-06',
+        endpoint: 'https://custom.endpoint.com',
+      });
+      // Should disambiguate using raw id
+      assert.equal(m2.name, 'gpt-4o-2024-08-06');
+      assert.equal(m2.endpoint, 'https://custom.endpoint.com');
+
+      assert.equal(store.listOffered().length, 2);
+      assert.ok(store.getOffered('gpt-4o'));
+      assert.ok(store.getOffered('gpt-4o-2024-08-06'));
+
+      const egress = store.toEgressCatalog();
+      assert.equal(egress['gpt-4o-2024-08-06'].endpoint, 'https://custom.endpoint.com');
+
+      // Reject if both friendly name and raw id are already in use
+      assert.throws(
+        () =>
+          store.admit({
+            name: 'gpt-4o',
+            provider: 'other-provider',
+            id: 'gpt-4o-2024-08-06',
+          }),
+        /collides with existing model/,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });

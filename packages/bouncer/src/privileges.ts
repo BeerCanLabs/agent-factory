@@ -44,6 +44,7 @@ export const PRIVILEGES = [
   'egress.keymaster.checkout',
   'egress.progress.report',
   'egress.routes.read',
+  'egress.models.read',
   'egress.connections.token',
   'registry.register',
   'registry.budget.set',
@@ -180,6 +181,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'egress.keymaster.checkout',
     'egress.progress.report',
     'egress.routes.read',
+    'egress.models.read',
     'egress.connections.token',
   ],
   // The ingress is the one party that sees who sent a message, so it alone may say who asked (Dale, 2026-10-04: an
@@ -227,6 +229,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'egress.keymaster.checkout',
     'egress.progress.report',
     'egress.routes.read',
+    'egress.models.read',
     'registry.register',
     'registry.budget.set',
     'registry.retire',

@@ -191,6 +191,8 @@ export const AI_PROVIDER_TEMPLATES: Record<string, {
   description: string;
   upstream: string;
   adapter: 'openAiCompatible' | 'anthropicMessages' | 'vertexGemini' | 'vertexAnthropic' | 'bedrockConverse';
+  adapterKey: string;
+  heldSecret: string;
   discoveryPath: string;
   credentialHeader: string;
   credentialFormat?: string;
@@ -200,6 +202,8 @@ export const AI_PROVIDER_TEMPLATES: Record<string, {
     description: 'Flagship models (GPT-4o, o1, o3-mini) from OpenAI',
     upstream: 'https://api.openai.com',
     adapter: 'openAiCompatible',
+    adapterKey: 'openai',
+    heldSecret: 'OPENAI_API_KEY',
     discoveryPath: '/v1/models',
     credentialHeader: 'Authorization',
     credentialFormat: 'Bearer {}',
@@ -209,6 +213,8 @@ export const AI_PROVIDER_TEMPLATES: Record<string, {
     description: 'Claude models (Sonnet, Haiku, Opus) direct from Anthropic',
     upstream: 'https://api.anthropic.com',
     adapter: 'anthropicMessages',
+    adapterKey: 'anthropic',
+    heldSecret: 'ANTHROPIC_API_KEY',
     discoveryPath: '/v1/models',
     credentialHeader: 'x-api-key',
   },
@@ -217,6 +223,8 @@ export const AI_PROVIDER_TEMPLATES: Record<string, {
     description: 'Grok models from xAI',
     upstream: 'https://api.x.ai',
     adapter: 'openAiCompatible',
+    adapterKey: 'xai',
+    heldSecret: 'XAI_API_KEY',
     discoveryPath: '/v1/models',
     credentialHeader: 'Authorization',
     credentialFormat: 'Bearer {}',
@@ -226,6 +234,8 @@ export const AI_PROVIDER_TEMPLATES: Record<string, {
     description: 'Gemini models direct via Google AI Studio API',
     upstream: 'https://generativelanguage.googleapis.com',
     adapter: 'vertexGemini',
+    adapterKey: 'google',
+    heldSecret: 'GEMINI_API_KEY',
     discoveryPath: '/v1beta/models',
     credentialHeader: 'x-goog-api-key',
   },
@@ -234,6 +244,8 @@ export const AI_PROVIDER_TEMPLATES: Record<string, {
     description: 'Self-hosted or specialized endpoint (Ollama, vLLM, DeepSeek, Together, Groq)',
     upstream: 'https://api.example.com',
     adapter: 'openAiCompatible',
+    adapterKey: 'openai',
+    heldSecret: 'OPENAI_API_KEY',
     discoveryPath: '/v1/models',
     credentialHeader: 'Authorization',
     credentialFormat: 'Bearer {}',

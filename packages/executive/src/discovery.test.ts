@@ -123,7 +123,17 @@ describe('Executive Model Discovery & Reference Pricing', () => {
         apiKey: 'bad-key',
         fetchFn: fakeFetch,
       }),
-      /Model discovery failed HTTP 401: Invalid API Key/,
+      /Model discovery failed with HTTP 401/,
+    );
+  });
+
+  it('rejects non-https upstream URLs', async () => {
+    await assert.rejects(
+      discoverVendorModels({
+        upstream: 'http://169.254.169.254',
+        adapter: 'openAiCompatible',
+      }),
+      /https upstream URL/,
     );
   });
 });

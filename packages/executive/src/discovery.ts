@@ -98,6 +98,16 @@ export interface VendorDiscoveryOptions {
  * Parses standard OpenAI ({ data: [...] }), Anthropic ({ data: [...] }), and Google ({ models: [...] }) formats.
  */
 export async function discoverVendorModels(opts: VendorDiscoveryOptions): Promise<DiscoveredModel[]> {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(opts.upstream);
+  } catch {
+    throw new Error('Model discovery requires a valid URL');
+  }
+  if (parsedUrl.protocol !== 'https:') {
+    throw new Error('Model discovery requires an https upstream URL');
+  }
+
   const fetcher = opts.fetchFn ?? fetch;
   const basePath = (opts.discoveryPath || '/v1/models').replace(/^\//, '');
   const url = `${opts.upstream.replace(/\/$/, '')}/${basePath}`;
@@ -120,8 +130,7 @@ export async function discoverVendorModels(opts: VendorDiscoveryOptions): Promis
 
   const res = await fetcher(url, { method: 'GET', headers });
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Model discovery failed HTTP ${res.status}: ${text.slice(0, 300)}`);
+    throw new Error(`Model discovery failed with HTTP ${res.status}`);
   }
 
   const body = (await res.json()) as Record<string, unknown>;

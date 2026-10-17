@@ -65,7 +65,6 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/ledger', privilege: 'ledger.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/ledger/verify', privilege: 'ledger.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/models', privilege: 'models.read', role: 'viewer' },
-  { method: 'GET', path: '/api/v1/models/internal/catalog', privilege: 'models.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/metrics', privilege: 'metrics.read', role: 'viewer' },
   { method: 'GET', path: '/metrics', privilege: 'metrics.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/triage', privilege: 'triage.read', role: 'viewer' },
@@ -116,6 +115,7 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/gatekeeper-egress/keymaster/checkout', privilege: 'egress.keymaster.checkout', role: 'gatekeeper-egress', body: {} },
   { method: 'POST', path: '/api/v1/gatekeeper-egress/progress', privilege: 'egress.progress.report', role: 'gatekeeper-egress', body: {} },
   { method: 'GET', path: '/api/v1/gatekeeper-egress/routes', privilege: 'egress.routes.read', role: 'gatekeeper-egress' },
+  { method: 'GET', path: '/api/v1/models/internal/catalog', privilege: 'egress.models.read', role: 'gatekeeper-egress' },
   { method: 'POST', path: '/api/v1/gatekeeper-egress/connections/token', privilege: 'egress.connections.token', role: 'gatekeeper-egress', exclusive: true, body: {} },
   // admin
   { method: 'POST', path: '/api/v1/registry/agents', privilege: 'registry.register', role: 'admin', body: {} },

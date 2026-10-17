@@ -16,6 +16,7 @@ import { IdentityLinkStore } from './identity-links.js';
 
 const ADMIN = 'admin-model-token';
 const VIEWER = 'viewer-model-token';
+const EGRESS = 'egress-model-token';
 
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -77,6 +78,7 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
+        { name: 'egress', token: EGRESS, roles: ['gatekeeper-egress'] },
       ]),
     };
 
@@ -107,7 +109,7 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
   it('3. POST /api/v1/models/admit admits a new model and ledgers it', async () => {
     const admit = await call(port, '/api/v1/models/admit', 'POST', ADMIN, {
       name: 'grok-2',
-      provider: 'openAiCompatible',
+      provider: 'xai',
       id: 'grok-2-1212',
       vendorId: 'xai',
       price: { inputPerMTok: 2.0, outputPerMTok: 10.0 },
@@ -120,8 +122,13 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
     assert.equal((admitLedger[0] as any).model, 'grok-2');
   });
 
-  it('4. GET /api/v1/models/internal/catalog syncs catalog with ETag', async () => {
-    const internalCatalog = await call(port, '/api/v1/models/internal/catalog', 'GET', VIEWER);
+  it('4. GET /api/v1/models/internal/catalog syncs catalog with ETag and egress role', async () => {
+    // Viewer should be 403 (does not hold egress.models.read)
+    const viewerDenied = await call(port, '/api/v1/models/internal/catalog', 'GET', VIEWER);
+    assert.equal(viewerDenied.status, 403);
+
+    // Egress principal succeeds
+    const internalCatalog = await call(port, '/api/v1/models/internal/catalog', 'GET', EGRESS);
     assert.equal(internalCatalog.status, 200);
     assert.ok(internalCatalog.headers.etag);
     assert.ok(internalCatalog.body.models['grok-2']);
@@ -136,16 +143,23 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
     assert.deepEqual(priceUpdate.body.model.price, { inputPerMTok: 1.5, outputPerMTok: 7.5 });
   });
 
-  it('6. DELETE /api/v1/models/:name retires model and cleans agent policies', async () => {
-    state.policies.set('donna', { routes: [], models: ['claude-haiku-4-5', 'grok-2'] });
+  it('6. DELETE /api/v1/models/:name retires model and cleans agent policies with M2 fallback', async () => {
+    // Only grok-2 assigned
+    state.policies.set('donna', { routes: [], models: ['grok-2'] });
+
+    // Nonexistent 404 does not touch policy
+    const notFound = await call(port, '/api/v1/models/nonexistent', 'DELETE', ADMIN);
+    assert.equal(notFound.status, 404);
+    assert.deepEqual(state.policies.get('donna').models, ['grok-2']);
 
     const retire = await call(port, '/api/v1/models/grok-2', 'DELETE', ADMIN);
     assert.equal(retire.status, 200);
     assert.equal(retire.body.retired, 'grok-2');
     assert.deepEqual(retire.body.affectedAgents, ['donna']);
 
+    // When policy models array becomes empty, models key must be deleted for M2 default fallback!
     const donnaPolicy = state.policies.get('donna');
-    assert.deepEqual(donnaPolicy.models, ['claude-haiku-4-5']);
+    assert.equal(donnaPolicy.models, undefined);
   });
 
   it('7. MCP tools manage model catalog lifecycle', async () => {

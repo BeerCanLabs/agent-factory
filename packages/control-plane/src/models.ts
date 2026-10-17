@@ -12,6 +12,7 @@ export interface StoredModel {
   name: string;
   provider: string;
   id: string;
+  endpoint?: string;
   vendorId?: string;
   region?: string;
   price?: {
@@ -133,23 +134,36 @@ export class ModelStore {
     name: string;
     provider: string;
     id: string;
+    endpoint?: string;
     vendorId?: string;
     region?: string;
     price?: { inputPerMTok: number; outputPerMTok: number };
     actor?: string;
   }): StoredModel {
+    let targetName = params.name;
+    const existing = this.models.get(targetName);
+    if (existing && (existing.id !== params.id || existing.provider !== params.provider)) {
+      // Disambiguate using raw id if friendly name collides with a different model
+      if (!this.models.has(params.id)) {
+        targetName = params.id;
+      } else {
+        throw new Error(`Model name '${params.name}' collides with existing model '${existing.name}' (${existing.provider}:${existing.id})`);
+      }
+    }
+
     const now = new Date().toISOString();
     const model: StoredModel = {
-      name: params.name,
+      name: targetName,
       provider: params.provider,
       id: params.id,
+      endpoint: params.endpoint,
       vendorId: params.vendorId,
       region: params.region,
       price: params.price,
       admittedAt: now,
       admittedBy: params.actor ?? 'admin',
     };
-    this.models.set(params.name, model);
+    this.models.set(targetName, model);
 
     // Remove from staged if it was there
     if (params.vendorId) {
@@ -181,12 +195,13 @@ export class ModelStore {
   }
 
   /** Formats the catalog for gatekeeper-egress / Executive Consumption */
-  toEgressCatalog(): Record<string, { provider: string; id: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }> {
-    const out: Record<string, { provider: string; id: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }> = {};
+  toEgressCatalog(): Record<string, { provider: string; id: string; endpoint?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }> {
+    const out: Record<string, { provider: string; id: string; endpoint?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }> = {};
     for (const [name, m] of this.models.entries()) {
       out[name] = {
         provider: m.provider,
         id: m.id,
+        ...(m.endpoint ? { endpoint: m.endpoint } : {}),
         ...(m.region ? { region: m.region } : {}),
         ...(m.price ? { price: m.price } : {}),
       };

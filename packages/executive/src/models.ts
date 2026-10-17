@@ -7,8 +7,8 @@ import { awsCredentialsFromEnv, signV4, type AwsCredentials } from './sigv4.js';
  * serves each (`FACTORY_MODEL_CATALOG`); an adapter per provider translates to its native API.
  */
 
-/** One offered model. `provider` selects the adapter; `id`/`region` are provider-specific. */
-export type CatalogEntry = { provider: string; id: string; region?: string; price?: Price };
+/** One offered model. `provider` selects the adapter; `id`/`region` are provider-specific; `endpoint` is optional custom base URL. */
+export type CatalogEntry = { provider: string; id: string; endpoint?: string; region?: string; price?: Price };
 export type ModelCatalog = Record<string, CatalogEntry>;
 
 export type ToolCall = {
@@ -64,7 +64,13 @@ export function parseModelCatalog(json: string | undefined): ModelCatalog {
     if (p !== undefined && (typeof p.inputPerMTok !== 'number' || typeof p.outputPerMTok !== 'number')) {
       throw new Error(`FACTORY_MODEL_CATALOG.${name}.price needs inputPerMTok and outputPerMTok`);
     }
-    out[name] = { provider: e.provider, id: e.id, ...(e.region ? { region: e.region } : {}), ...(p ? { price: p } : {}) };
+    out[name] = {
+      provider: e.provider,
+      id: e.id,
+      ...(typeof (e as any).endpoint === 'string' ? { endpoint: (e as any).endpoint } : {}),
+      ...(e.region ? { region: e.region } : {}),
+      ...(p ? { price: p } : {}),
+    };
   }
   return out;
 }
@@ -761,9 +767,8 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
   const doFetch = opts.fetch ?? fetch;
   const secretName = opts.secretName ?? 'OPENAI_API_KEY';
   const getKey = opts.apiKey ?? (() => resolveProviderSecret(secretName, doFetch));
-  const base = (opts.endpoint ?? 'https://api.openai.com').replace(/\/$/, '');
+  const defaultBase = (opts.endpoint ?? 'https://api.openai.com').replace(/\/$/, '');
   const chatPath = opts.chatPath ?? '/v1/chat/completions';
-  const chatUrl = `${base}${chatPath.startsWith('/') ? chatPath : `/${chatPath}`}`;
 
   return {
     async complete(entry, req) {
@@ -774,6 +779,8 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
         console.error(`[gatekeeper-egress] ${secretName} credentials: ${err instanceof Error ? err.message : String(err)}`);
         throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no provider credentials');
       }
+      const base = (entry.endpoint ?? defaultBase).replace(/\/$/, '');
+      const chatUrl = `${base}${chatPath.startsWith('/') ? chatPath : `/${chatPath}`}`;
       const payload: Record<string, unknown> = {
         model: entry.id,
         messages: req.messages,

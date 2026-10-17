@@ -516,6 +516,8 @@ export interface AiProviderTemplate {
   description: string;
   upstream: string;
   adapter: string;
+  adapterKey?: 'openai' | 'anthropic' | 'xai' | 'google';
+  heldSecret?: 'OPENAI_API_KEY' | 'ANTHROPIC_API_KEY' | 'XAI_API_KEY' | 'GEMINI_API_KEY';
   discoveryPath: string;
   credentialHeader?: string;
   credentialFormat?: string;
@@ -541,6 +543,7 @@ export interface AdmitModelRequest {
   id: string;
   vendorId?: string;
   region?: string;
+  endpoint?: string;
   price?: {
     inputPerMTok: number;
     outputPerMTok: number;

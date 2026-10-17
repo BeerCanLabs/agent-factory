@@ -425,14 +425,14 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   }
   if (name === 'scan_vendor_models') {
     const vendorId = args.vendorId;
-    let upstream = AI_PROVIDER_TEMPLATES[vendorId]?.upstream;
-    let adapter = AI_PROVIDER_TEMPLATES[vendorId]?.adapter ?? 'openAiCompatible';
-    let discoveryPath = AI_PROVIDER_TEMPLATES[vendorId]?.discoveryPath;
-    let apiKey: string | undefined;
+    if (!vendorId) return { error: 'vendorId is required' };
+    let upstream: string | undefined;
+    let adapter = 'openAiCompatible';
+    let discoveryPath: string | undefined;
 
     if (state.systems) {
       const sys = state.systems.get(vendorId);
-      if (sys) {
+      if (sys && sys.kind === 'ai-provider') {
         upstream = sys.upstream;
         if (sys.aiProvider) {
           adapter = sys.aiProvider.adapter;
@@ -440,12 +440,46 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
         }
       }
     }
+
+    if (!upstream && AI_PROVIDER_TEMPLATES[vendorId]) {
+      const tmpl = AI_PROVIDER_TEMPLATES[vendorId];
+      upstream = tmpl.upstream;
+      adapter = tmpl.adapter;
+      discoveryPath = tmpl.discoveryPath;
+    }
+
     if (!upstream) return { error: `vendor ${vendorId} not found in systems or templates` };
 
+    try {
+      const parsed = new URL(upstream);
+      if (parsed.protocol !== 'https:') {
+        return { error: 'invalid_upstream', message: 'upstream must be an https URL' };
+      }
+    } catch {
+      return { error: 'invalid_upstream', message: 'upstream must be a valid URL' };
+    }
+
+    let apiKey: string | undefined;
+    const heldSecret = AI_PROVIDER_TEMPLATES[vendorId]?.heldSecret ?? (adapter === 'openAiCompatible' ? 'OPENAI_API_KEY' : undefined);
+    const secretCandidates = [heldSecret, `shared/${vendorId}/api-key`, `shared/${vendorId}/service-account-key`].filter(Boolean) as string[];
+
     if (state.providers && state.providers.length > 0) {
-      const bound = await bindSecrets([`shared/${vendorId}/api-key`, `shared/${vendorId}/service-account-key`], state.providers);
+      const bound = await bindSecrets(secretCandidates, state.providers);
       if (bound.ok) {
-        apiKey = bound.env[`shared/${vendorId}/api-key`] || bound.env[`shared/${vendorId}/service-account-key`];
+        for (const s of secretCandidates) {
+          if (bound.env[s]) {
+            apiKey = bound.env[s];
+            break;
+          }
+        }
+      }
+    }
+    if (!apiKey) {
+      for (const s of secretCandidates) {
+        if (process.env[s]) {
+          apiKey = process.env[s];
+          break;
+        }
       }
     }
 
@@ -475,7 +509,7 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
       });
       return { ok: true, count: staged.length, staged };
     } catch (err: any) {
-      return { error: 'discovery_failed', message: err.message };
+      return { error: 'discovery_failed', message: `Model discovery failed for vendor ${vendorId}` };
     }
   }
   if (name === 'admit_model') {
@@ -528,17 +562,23 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'retire_vendor_or_model') {
     if (!state.modelStore) return { error: 'model_store_not_configured' };
     const modelName = args.name;
+    const deleted = state.modelStore.retire(modelName);
+    if (!deleted) return { error: 'not_found' };
+
     const affectedAgents: string[] = [];
     for (const agentId of state.policies.ids()) {
       const policy = state.policies.get(agentId);
       if (policy.models && policy.models.includes(modelName)) {
         affectedAgents.push(agentId);
-        policy.models = policy.models.filter((m) => m !== modelName);
+        const remaining = policy.models.filter((m) => m !== modelName);
+        if (remaining.length === 0) {
+          delete policy.models;
+        } else {
+          policy.models = remaining;
+        }
         state.policies.set(agentId, policy);
       }
     }
-    const deleted = state.modelStore.retire(modelName);
-    if (!deleted) return { error: 'not_found' };
     state.modelCatalog = state.modelStore.toEgressCatalog();
     state.ledger.append({
       action: 'MODEL_RETIRED',
@@ -1510,9 +1550,9 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
-  // Internal catalog endpoint with ETag for gatekeeper-egress sync (§6.9 M3, GAP-162)
+  // Internal catalog endpoint with ETag for gatekeeper-egress sync (§6.9 M3, GAP-162, GAP-163)
   if (path === '/api/v1/models/internal/catalog' && req.method === 'GET') {
-    if (!(await requirePrivilege(req, res, state, 'models.read'))) return;
+    if (!(await requirePrivilege(req, res, state, 'egress.models.read'))) return;
     const version = state.modelStore?.getVersion() ?? 1;
     res.setHeader('ETag', `"${version}"`);
     json(res, 200, {
@@ -1523,29 +1563,33 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
-  // On-demand vendor model discovery (Executive §6.9 M1–M4, GAP-162)
+  // On-demand vendor model discovery (Executive §6.9 M1–M4, GAP-162, GAP-163)
   if (path === '/api/v1/models/scan' && req.method === 'POST') {
     const principal = await requirePrivilege(req, res, state, 'models.manage');
     if (!principal) return;
-    const body = (await readJson(req)) as { vendorId?: string; upstream?: string; adapter?: string; discoveryPath?: string; apiKey?: string };
+    const body = (await readJson(req)) as { vendorId?: string };
     const vendorId = body.vendorId;
-    let upstream = body.upstream;
-    let adapter = body.adapter || 'openAiCompatible';
-    let discoveryPath = body.discoveryPath;
-    let apiKey = body.apiKey;
+    if (!vendorId) {
+      json(res, 400, { error: 'invalid_request', message: 'vendorId is required' });
+      return;
+    }
 
-    if (vendorId && state.systems) {
+    let upstream: string | undefined;
+    let adapter = 'openAiCompatible';
+    let discoveryPath: string | undefined;
+
+    if (state.systems) {
       const sys = state.systems.get(vendorId);
-      if (sys) {
-        upstream = upstream ?? sys.upstream;
+      if (sys && sys.kind === 'ai-provider') {
+        upstream = sys.upstream;
         if (sys.aiProvider) {
           adapter = sys.aiProvider.adapter;
-          discoveryPath = discoveryPath ?? sys.aiProvider.discoveryPath;
+          discoveryPath = sys.aiProvider.discoveryPath;
         }
       }
     }
 
-    if (!upstream && vendorId && AI_PROVIDER_TEMPLATES[vendorId]) {
+    if (!upstream && AI_PROVIDER_TEMPLATES[vendorId]) {
       const tmpl = AI_PROVIDER_TEMPLATES[vendorId];
       upstream = tmpl.upstream;
       adapter = tmpl.adapter;
@@ -1553,14 +1597,42 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
 
     if (!upstream) {
-      json(res, 400, { error: 'invalid_request', message: 'vendorId (matching registered system or template) or upstream URL required' });
+      json(res, 400, { error: 'invalid_request', message: 'vendorId must match a registered ai-provider system or built-in template' });
       return;
     }
 
-    if (!apiKey && vendorId && state.providers && state.providers.length > 0) {
-      const bound = await bindSecrets([`shared/${vendorId}/api-key`, `shared/${vendorId}/service-account-key`], state.providers);
+    try {
+      const parsedUrl = new URL(upstream);
+      if (parsedUrl.protocol !== 'https:') {
+        json(res, 400, { error: 'invalid_upstream', message: 'upstream must be an https URL' });
+        return;
+      }
+    } catch {
+      json(res, 400, { error: 'invalid_upstream', message: 'upstream must be a valid URL' });
+      return;
+    }
+
+    let apiKey: string | undefined;
+    const heldSecret = AI_PROVIDER_TEMPLATES[vendorId]?.heldSecret ?? (adapter === 'openAiCompatible' ? 'OPENAI_API_KEY' : undefined);
+    const secretCandidates = [heldSecret, `shared/${vendorId}/api-key`, `shared/${vendorId}/service-account-key`].filter(Boolean) as string[];
+
+    if (state.providers && state.providers.length > 0) {
+      const bound = await bindSecrets(secretCandidates, state.providers);
       if (bound.ok) {
-        apiKey = bound.env[`shared/${vendorId}/api-key`] || bound.env[`shared/${vendorId}/service-account-key`];
+        for (const s of secretCandidates) {
+          if (bound.env[s]) {
+            apiKey = bound.env[s];
+            break;
+          }
+        }
+      }
+    }
+    if (!apiKey) {
+      for (const s of secretCandidates) {
+        if (process.env[s]) {
+          apiKey = process.env[s];
+          break;
+        }
       }
     }
 
@@ -1575,7 +1647,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       const staged: StagedModel[] = discovered.map((d) => {
         const ref = resolveModelReference(d.id);
         return {
-          vendorId: vendorId ?? 'custom',
+          vendorId,
           rawId: d.id,
           displayName: d.name ?? d.id,
           discoveredAt: new Date().toISOString(),
@@ -1592,7 +1664,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       state.ledger.append({
         action: 'MODELS_DISCOVERED',
         actor: principal.actor,
-        vendorId: vendorId ?? 'custom',
+        vendorId,
         count: staged.length,
         timestamp: new Date().toISOString(),
       });
@@ -1600,16 +1672,16 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 200, { ok: true, count: staged.length, staged });
       return;
     } catch (err: any) {
-      json(res, 502, { error: 'discovery_failed', message: err.message });
+      json(res, 502, { error: 'discovery_failed', message: `Model discovery failed for vendor ${vendorId}` });
       return;
     }
   }
 
-  // Model admission with token pricing (Accountant §6.4, GAP-162)
+  // Model admission with token pricing (Accountant §6.4, GAP-162, GAP-163)
   if (path === '/api/v1/models/admit' && req.method === 'POST') {
     const principal = await requirePrivilege(req, res, state, 'models.manage');
     if (!principal) return;
-    const body = (await readJson(req)) as { name?: string; provider?: string; id?: string; vendorId?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } };
+    const body = (await readJson(req)) as { name?: string; provider?: string; id?: string; endpoint?: string; vendorId?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } };
     if (!body.name || !body.provider || !body.id) {
       json(res, 400, { error: 'invalid_request', message: 'name, provider, and id are required' });
       return;
@@ -1618,29 +1690,35 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 500, { error: 'model_store_not_configured' });
       return;
     }
-    const model = state.modelStore.admit({
-      name: body.name,
-      provider: body.provider,
-      id: body.id,
-      vendorId: body.vendorId,
-      region: body.region,
-      price: body.price,
-      actor: principal.actor,
-    });
-    state.modelCatalog = state.modelStore.toEgressCatalog();
+    try {
+      const model = state.modelStore.admit({
+        name: body.name,
+        provider: body.provider,
+        id: body.id,
+        endpoint: body.endpoint,
+        vendorId: body.vendorId,
+        region: body.region,
+        price: body.price,
+        actor: principal.actor,
+      });
+      state.modelCatalog = state.modelStore.toEgressCatalog();
 
-    state.ledger.append({
-      action: 'MODEL_ADMITTED',
-      actor: principal.actor,
-      model: model.name,
-      provider: model.provider,
-      vendorId: model.vendorId,
-      price: model.price,
-      timestamp: new Date().toISOString(),
-    });
+      state.ledger.append({
+        action: 'MODEL_ADMITTED',
+        actor: principal.actor,
+        model: model.name,
+        provider: model.provider,
+        vendorId: model.vendorId,
+        price: model.price,
+        timestamp: new Date().toISOString(),
+      });
 
-    json(res, 201, { ok: true, model });
-    return;
+      json(res, 201, { ok: true, model });
+      return;
+    } catch (err: any) {
+      json(res, 409, { error: 'admission_failed', message: err.message });
+      return;
+    }
   }
 
   // Dynamic token pricing update (Accountant §6.4, GAP-162)
@@ -1676,7 +1754,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
   }
 
-  // Model retirement with policy fallback migration (§6.9 M2, GAP-162)
+  // Model retirement with policy fallback migration (§6.9 M2, GAP-162, GAP-163)
   const modelDeleteMatch = path.match(/^\/api\/v1\/models\/([^/]+)$/);
   if (modelDeleteMatch && req.method === 'DELETE') {
     const principal = await requirePrivilege(req, res, state, 'models.manage');
@@ -1687,21 +1765,27 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
 
-    const affectedAgents: string[] = [];
-    for (const agentId of state.policies.ids()) {
-      const policy = state.policies.get(agentId);
-      if (policy.models && policy.models.includes(modelName)) {
-        affectedAgents.push(agentId);
-        policy.models = policy.models.filter((m) => m !== modelName);
-        state.policies.set(agentId, policy);
-      }
-    }
-
     const deleted = state.modelStore.retire(modelName);
     if (!deleted) {
       json(res, 404, { error: 'not_found' });
       return;
     }
+
+    const affectedAgents: string[] = [];
+    for (const agentId of state.policies.ids()) {
+      const policy = state.policies.get(agentId);
+      if (policy.models && policy.models.includes(modelName)) {
+        affectedAgents.push(agentId);
+        const remaining = policy.models.filter((m) => m !== modelName);
+        if (remaining.length === 0) {
+          delete policy.models;
+        } else {
+          policy.models = remaining;
+        }
+        state.policies.set(agentId, policy);
+      }
+    }
+
     state.modelCatalog = state.modelStore.toEgressCatalog();
     state.ledger.append({
       action: 'MODEL_RETIRED',

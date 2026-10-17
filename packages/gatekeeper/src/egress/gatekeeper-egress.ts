@@ -9,7 +9,7 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { SseMeter, checkModel, complete, defaultModelAdapters, findModel, offeredModels, usageFromJson, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
+import { SseMeter, checkModel, complete, defaultModelAdapters, findModel, offeredModels, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
 /** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
@@ -347,8 +347,14 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (now - lastCatalogRefresh < CATALOG_REFRESH_INTERVAL_MS) return;
     try {
       const remote = await opts.control.modelCatalog();
-      if (remote && typeof remote === 'object') {
-        activeCatalog = { ...(opts.modelCatalog ?? {}), ...remote };
+      if (remote && typeof remote === 'object' && !Array.isArray(remote)) {
+        const valid: ModelCatalog = {};
+        for (const [k, v] of Object.entries(remote)) {
+          if (v && typeof v === 'object' && typeof (v as any).provider === 'string' && typeof (v as any).id === 'string') {
+            valid[k] = v as CatalogEntry;
+          }
+        }
+        activeCatalog = valid;
       }
     } catch (err) {
       console.error(`[gatekeeper-egress] model catalog refresh: ${err instanceof Error ? err.message : String(err)}`);

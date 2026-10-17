@@ -48,12 +48,41 @@ export const OnboardVendorModal: React.FC<OnboardVendorModalProps> = ({
 
   const currentTemplate = templates[vendorId];
   const isCustom = vendorId === 'custom';
+  const customId = customName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'custom-provider';
+  const heldSecret = currentTemplate?.heldSecret ?? 'OPENAI_API_KEY';
 
   const handleStep1Next = async () => {
     setError(null);
-    if (isCustom && (!customName || !customUpstream)) {
-      setError('Please provide a name and upstream URL for custom endpoint');
-      return;
+    if (isCustom) {
+      if (!customName.trim() || !customUpstream.trim()) {
+        setError('Please provide a name and upstream URL for custom endpoint');
+        return;
+      }
+      try {
+        const u = new URL(customUpstream.trim());
+        if (u.protocol !== 'https:') {
+          setError('Upstream base URL must start with https://');
+          return;
+        }
+      } catch {
+        setError('Upstream base URL must be a valid URL (e.g. https://api.deepseek.com)');
+        return;
+      }
+      try {
+        await factoryApi.proposeSystem({
+          id: customId,
+          name: customName.trim(),
+          kind: 'ai-provider',
+          upstream: customUpstream.trim(),
+          aiProvider: {
+            adapter: 'openAiCompatible',
+            discoveryPath: '/v1/models',
+          },
+        });
+        await factoryApi.approveSystem(customId, 1, 'Custom AI provider admitted via Console');
+      } catch {
+        // If it already exists or was approved previously, proceed
+      }
     }
     setStep(2);
   };
@@ -64,12 +93,11 @@ export const OnboardVendorModal: React.FC<OnboardVendorModalProps> = ({
       setError('An API key or bearer token is required to authenticate with the vendor');
       return;
     }
-    // Write key to Keymaster write-only via platform credential API if possible
     try {
-      await factoryApi.submitPlatformCredential(`shared/${vendorId}/api-key`, apiKey.trim());
+      await factoryApi.submitPlatformCredential(heldSecret, apiKey.trim());
     } catch (e: any) {
-      // Continue even if platform credential store is local env-based
-      console.warn('Keymaster submission notice:', e.message);
+      setError(`Failed to save credential in Keymaster: ${e.message}`);
+      return;
     }
     setStep(3);
     void runDiscovery();
@@ -80,10 +108,7 @@ export const OnboardVendorModal: React.FC<OnboardVendorModalProps> = ({
     setError(null);
     try {
       const res = await factoryApi.scanVendorModels({
-        vendorId,
-        upstream: isCustom ? customUpstream : currentTemplate?.upstream,
-        adapter: isCustom ? customAdapter : currentTemplate?.adapter,
-        apiKey: apiKey.trim(),
+        vendorId: isCustom ? customId : vendorId,
       });
       setStagedModels(res.staged);
       // Pre-select top recommended models
@@ -129,15 +154,33 @@ export const OnboardVendorModal: React.FC<OnboardVendorModalProps> = ({
     setIsSubmitting(true);
     setError(null);
     try {
-      for (const rawId of selectedRawIds) {
-        const staged = stagedModels.find((m) => m.rawId === rawId);
-        if (!staged) continue;
+      const selected = Array.from(selectedRawIds)
+        .map((rawId) => stagedModels.find((m) => m.rawId === rawId))
+        .filter(Boolean) as StagedModel[];
+
+      // Disambiguate friendly name collisions across the admitted set
+      const usedNames = new Set<string>();
+
+      for (const staged of selected) {
+        const rawId = staged.rawId;
+        let modelName = staged.suggestedFriendlyName || rawId;
+        if (usedNames.has(modelName)) {
+          modelName = rawId;
+        }
+        if (usedNames.has(modelName)) {
+          modelName = `${rawId}-${Math.random().toString(36).substring(2, 6)}`;
+        }
+        usedNames.add(modelName);
+
         const price = admittingPrices[rawId] ?? { input: 1.0, output: 5.0 };
+        const providerKey = currentTemplate?.adapterKey ?? 'openai';
+
         await factoryApi.admitModel({
-          name: staged.suggestedFriendlyName || staged.rawId,
-          provider: isCustom ? customAdapter : (currentTemplate?.adapter ?? 'openAiCompatible'),
-          id: staged.rawId,
-          vendorId,
+          name: modelName,
+          provider: providerKey,
+          id: rawId,
+          vendorId: isCustom ? customId : vendorId,
+          endpoint: isCustom ? customUpstream.trim() : undefined,
           price: {
             inputPerMTok: price.input,
             outputPerMTok: price.output,
@@ -284,7 +327,7 @@ export const OnboardVendorModal: React.FC<OnboardVendorModalProps> = ({
                   Office of the Keymaster (§6.11 K1–K5)
                 </p>
                 <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                  Provide the API key for <strong className="font-semibold">{currentTemplate?.name || vendorId}</strong>. It will be stored write-only under <code className="font-mono text-[10px]">shared/{vendorId}/api-key</code> and never logged or exposed to agents.
+                  Provide the API key for <strong className="font-semibold">{currentTemplate?.name || customName || vendorId}</strong>. It will be stored write-only as a gatekeeper-held platform credential (<code className="font-mono text-[10px]">{heldSecret}</code>) and never logged or exposed to agents.
                 </p>
               </div>
 
@@ -324,7 +367,7 @@ export const OnboardVendorModal: React.FC<OnboardVendorModalProps> = ({
                 <div className="p-8 text-center space-y-2">
                   <RefreshCw className="w-6 h-6 animate-spin mx-auto text-purple-600" />
                   <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">Querying vendor models endpoint...</p>
-                  <p className="text-[11px] text-slate-500">Connecting to {currentTemplate?.upstream}</p>
+                  <p className="text-[11px] text-slate-500">Connecting to {isCustom ? customUpstream : currentTemplate?.upstream}</p>
                 </div>
               ) : stagedModels.length === 0 ? (
                 <div className="p-6 text-center text-xs text-slate-500 border border-dashed rounded-xl">
