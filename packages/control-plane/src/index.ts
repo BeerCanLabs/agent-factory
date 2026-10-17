@@ -25,6 +25,8 @@ import { busSinkFromEnv, createInspector, factoryMetrics } from '@beercanlabs/fa
 import { attachEventStream } from './stream.js';
 import { checkRegistry, migrateConfigs, pruneOrphans } from './config-store.js';
 import { SystemsStore } from './systems.js';
+import { seedBuiltinAiProviders } from './ai-providers.js';
+import { syncPlatformCredentials } from './credentials.js';
 import { checkFactoryBudgets, createTreasury } from './spend.js';
 import { AwsComputeSource, AwsCostSource } from './aws/accountant.js';
 import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
@@ -297,6 +299,9 @@ try {
     if (imported.length) console.log(`[control-plane] systems imported from the deployment: ${imported.join(', ')}`);
     for (const s of skipped) console.error(`[control-plane] system not imported: ${s}`);
   }
+  const seeded = await seedBuiltinAiProviders(state.systems);
+  if (seeded.length) console.log(`[control-plane] built-in AI providers seeded: ${seeded.join(', ')}`);
+  syncPlatformCredentials(state);
   console.log(`[control-plane] systems store: ${state.systems.list().length} systems available`);
 } catch (err) {
   console.error(`[control-plane] systems store initialization failed: ${err instanceof Error ? err.message : String(err)}`);

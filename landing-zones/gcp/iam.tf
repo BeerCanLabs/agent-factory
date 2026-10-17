@@ -157,14 +157,18 @@ resource "google_project_iam_member" "gw_vertex_ai_user" {
   member  = "serviceAccount:${google_service_account.gatekeeper_egress.email}"
 }
 
-# Provider keys the egress injects, plus the two secrets Cloud Run mounts into the egress container.
-# Not project-wide: factory signing keys, callback keys, and agent secrets stay off this identity (S1).
+# Provider API keys the egress injects. The name rule is the allowlist: a factory secret ending in
+# _API_KEY. Signing keys, callback keys, and agent secrets do not match (S1).
 # Connection access tokens come from the control plane (K3), not from Secret Manager.
-resource "google_secret_manager_secret_iam_member" "gw_provider_secrets" {
-  for_each  = toset(var.provider_secret_names)
-  secret_id = "${local.secrets_prefix}${each.value}"
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.gatekeeper_egress.email}"
+resource "google_project_iam_member" "gw_provider_api_keys" {
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.gatekeeper_egress.email}"
+  condition {
+    title       = "platform-api-keys-only"
+    description = "Egress may read prefixed secrets named *_API_KEY"
+    expression  = "resource.name.extract('/secrets/{name}').startsWith('${local.secrets_prefix}') && resource.name.extract('/secrets/{name}').endsWith('_API_KEY')"
+  }
 }
 
 # The control plane presents this token to the egress for vendor discovery. It never reads provider keys (S1).

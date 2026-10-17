@@ -20,8 +20,6 @@ const config = process.env.FACTORY_GATEKEEPER_EGRESS_CONFIG
   : { routes: JSON.parse(process.env.FACTORY_GATEKEEPER_EGRESS_ROUTES ?? '[]') as Route[], prices: JSON.parse(process.env.FACTORY_PRICES ?? '{}') as Record<string, Price> };
 // Offered models (§6.9 M3): FACTORY_MODEL_CATALOG wins over a config file's `models`.
 const modelCatalog = process.env.FACTORY_MODEL_CATALOG ? parseModelCatalog(process.env.FACTORY_MODEL_CATALOG) : parseModelCatalog(JSON.stringify(config.models ?? {}));
-const heldSecretNames = (process.env.FACTORY_GATEKEEPER_EGRESS_HELD_SECRETS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-
 async function call(method: string, path: string, body?: unknown): Promise<Response> {
   return fetch(`${FACTORY_URL}${path}`, {
     method,
@@ -86,8 +84,8 @@ const control: ControlClient = {
   async systemRoutes() {
     const res = await call('GET', '/api/v1/gatekeeper-egress/routes');
     if (!res.ok) throw new Error(`control plane system routes ${res.status}`);
-    const body = (await res.json()) as { routes?: Route[] };
-    return body.routes ?? [];
+    const body = (await res.json()) as { routes?: Route[]; platformCredentials?: string[] };
+    return { routes: body.routes ?? [], platformCredentials: body.platformCredentials ?? [] };
   },
   async modelCatalog() {
     const res = await call('GET', '/api/v1/models/internal/catalog');
@@ -126,7 +124,6 @@ const server = createGatekeeperEgress({
   modelCatalog,
   defaultModel: process.env.FACTORY_DEFAULT_MODEL || undefined,
   serviceToken: TOKEN,
-  heldSecretNames,
 });
 
 const port = parseInt(process.env.PORT || '8081', 10);

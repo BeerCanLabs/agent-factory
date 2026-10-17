@@ -49,7 +49,8 @@ export const OnboardVendorModal: React.FC<OnboardVendorModalProps> = ({
   const currentTemplate = templates[vendorId];
   const isCustom = vendorId === 'custom';
   const customId = customName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'custom-provider';
-  const heldSecret = currentTemplate?.heldSecret ?? 'OPENAI_API_KEY';
+  const systemId = isCustom ? customId : vendorId;
+  const heldSecret = currentTemplate?.heldSecret || `${systemId.toUpperCase().replace(/-/g, '_')}_API_KEY`;
 
   const handleStep1Next = async () => {
     setError(null);
@@ -69,7 +70,7 @@ export const OnboardVendorModal: React.FC<OnboardVendorModalProps> = ({
         return;
       }
       try {
-        await factoryApi.proposeSystem({
+        const proposed = await factoryApi.proposeSystem({
           id: customId,
           name: customName.trim(),
           kind: 'ai-provider',
@@ -78,10 +79,12 @@ export const OnboardVendorModal: React.FC<OnboardVendorModalProps> = ({
             adapter: 'openAiCompatible',
             discoveryPath: '/v1/models',
           },
+          credential: { secret: heldSecret, header: 'authorization', format: 'Bearer {}' },
         });
-        await factoryApi.approveSystem(customId, 1, 'Custom AI provider admitted via Console');
-      } catch {
-        // If it already exists or was approved previously, proceed
+        await factoryApi.approveSystem(customId, proposed.system.version, 'Custom AI provider admitted via Console');
+      } catch (e: any) {
+        setError(`Failed to register vendor: ${e.message}`);
+        return;
       }
     }
     setStep(2);

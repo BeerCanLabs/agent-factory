@@ -33,6 +33,7 @@ describe('vendor discovery', () => {
     async requestApproval() { return { approvalId: 'a', state: 'pending' as const }; },
     async consumeApproval() { return false; },
     async ledger() {},
+    async systemRoutes() { return { routes: [], platformCredentials: ['ANTHROPIC_API_KEY'] }; },
   } satisfies ControlClient;
 
   const providers: SecretProvider[] = [{
@@ -51,7 +52,6 @@ describe('vendor discovery', () => {
       control,
       providers,
       serviceToken: TOKEN,
-      heldSecretNames: ['ANTHROPIC_API_KEY'],
       discoverFetch: async (_url, init) => {
         seenKey = new Headers(init?.headers).get('x-api-key') ?? '';
         return new Response(JSON.stringify({ data: [{ id: 'claude-sonnet-4-5', display_name: 'Claude Sonnet 4.5' }] }), { status: 200 });

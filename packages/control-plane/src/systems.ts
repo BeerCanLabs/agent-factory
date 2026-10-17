@@ -59,7 +59,7 @@ export async function handleSystems(
   if (path === '/api/v1/gatekeeper-egress/routes' && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'egress.routes.read'))) return true;
     const store = systemsStore(state);
-    json(res, 200, { routes: store.activeRoutes() });
+    json(res, 200, { routes: store.activeRoutes(), platformCredentials: store.platformCredentialNames() });
     return true;
   }
 
@@ -82,6 +82,14 @@ export async function handleSystems(
       return true;
     }
     const store = systemsStore(state);
+    const secret = validation.proposal.credential?.secret;
+    if (secret) {
+      const owner = store.findActiveByCredentialSecret(secret, validation.proposal.id);
+      if (owner) {
+        json(res, 409, { error: 'credential_name_taken', name: secret, system: owner.id });
+        return true;
+      }
+    }
     const def = await store.propose(validation.proposal, principal.actor);
     json(res, 201, { system: def });
     return true;
@@ -119,6 +127,7 @@ export async function handleSystems(
     const store = systemsStore(state);
     try {
       const def = await store.approve(id, version, principal.actor, reason);
+      state.gatekeeperEgressHeldSecrets = new Set(store.platformCredentialNames());
       json(res, 200, { system: def });
     } catch (err) {
       json(res, 404, { error: err instanceof Error ? err.message : String(err) });
@@ -138,6 +147,7 @@ export async function handleSystems(
     const store = systemsStore(state);
     try {
       const def = await store.reject(id, version, principal.actor, reason);
+      state.gatekeeperEgressHeldSecrets = new Set(store.platformCredentialNames());
       json(res, 200, { system: def });
     } catch (err) {
       json(res, 404, { error: err instanceof Error ? err.message : String(err) });

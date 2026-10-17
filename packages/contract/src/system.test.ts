@@ -1,8 +1,17 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateSystemProposal, systemDefinitionSchema } from './system.js';
+import { platformCredentialName, validateSystemProposal, systemDefinitionSchema } from './system.js';
 
 describe('system definition schemas', () => {
+  it('gives each vendor its own platform credential name', () => {
+    assert.equal(platformCredentialName('gemini'), 'GEMINI_API_KEY');
+    assert.equal(platformCredentialName('google'), 'GOOGLE_API_KEY');
+    assert.equal(platformCredentialName('openai'), 'OPENAI_API_KEY');
+    assert.equal(platformCredentialName('deepseek'), 'DEEPSEEK_API_KEY');
+    assert.equal(platformCredentialName('custom-provider'), 'CUSTOM_PROVIDER_API_KEY');
+    assert.notEqual(platformCredentialName('deepseek'), platformCredentialName('openai'));
+  });
+
   it('validates a valid http system proposal with static credential', () => {
     const res = validateSystemProposal({
       id: 'github',
