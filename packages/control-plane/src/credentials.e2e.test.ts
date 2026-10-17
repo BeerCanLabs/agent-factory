@@ -140,6 +140,17 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
       gatekeeperEgressHeldSecrets: new Set(['NOTION_API_KEY', 'ANTHROPIC_API_KEY']),
       systems: await openSystems(systemsDir, ledger),
     };
+    await state.systems.propose({
+      id: 'notion', name: 'Notion', kind: 'http', upstream: 'https://api.notion.com',
+      credential: { secret: 'NOTION_API_KEY', header: 'authorization', format: 'Bearer {}' },
+    }, 'test');
+    await state.systems.approve('notion', 1, 'test');
+    await state.systems.propose({
+      id: 'anthropic', name: 'Anthropic', kind: 'ai-provider', upstream: 'https://api.anthropic.com',
+      aiProvider: { adapter: 'anthropicMessages', discoveryPath: '/v1/models' },
+      credential: { secret: 'ANTHROPIC_API_KEY', header: 'x-api-key' },
+    }, 'test');
+    await state.systems.approve('anthropic', 1, 'test');
     state.connections = new ConnectionKeymaster({
       providers: [provider],
       ledger,
@@ -242,6 +253,17 @@ describe('Keymaster credentials API (§6.11 K5)', { concurrency: false }, () => 
     assert.equal(JSON.stringify(ledger.query({})).includes('example-fake-notion-secret'), false);
     assert.equal((await req('/api/v1/keymaster/platform/credentials', { token: ADMIN })).json().credentials.find((c: { name: string }) => c.name === 'NOTION_API_KEY').status, 'present');
     // Only gatekeeper-held names; admin only.
+    assert.equal((await req('/api/v1/keymaster/platform/credentials/GEMINI_API_KEY', { method: 'POST', token: ADMIN, raw: 'gemini-test-key-value' })).status, 404);
+    await state.systems!.propose({
+      id: 'gemini', name: 'Google Gemini', kind: 'ai-provider', upstream: 'https://generativelanguage.googleapis.com',
+      aiProvider: { adapter: 'vertexGemini', discoveryPath: '/v1beta/models' },
+      credential: { secret: 'GEMINI_API_KEY', header: 'x-goog-api-key' },
+    }, 'test');
+    await state.systems!.approve('gemini', 1, 'test');
+    const gemini = await req('/api/v1/keymaster/platform/credentials/GEMINI_API_KEY', { method: 'POST', token: ADMIN, raw: 'gemini-test-key-value' });
+    assert.equal(gemini.status, 201);
+    assert.equal(values.get('GEMINI_API_KEY'), 'gemini-test-key-value');
+    values.delete('GEMINI_API_KEY');
     assert.equal((await req('/api/v1/keymaster/platform/credentials/DISCORD_BOT_TOKEN', { method: 'POST', token: ADMIN, raw: FAKE_DISCORD })).status, 404);
     assert.notEqual((await req('/api/v1/keymaster/platform/credentials')).status, 200);
     values.delete('NOTION_API_KEY');

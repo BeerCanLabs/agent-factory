@@ -80,6 +80,13 @@ async function lookupPresent(state: FactoryState, name: string): Promise<boolean
 
 const platformSubmitPath = (name: string) => `/api/v1/keymaster/platform/credentials/${encodeURIComponent(name)}`;
 
+/** Approved systems own platform credential names. Replaces the boot-time env list on this state. */
+export function syncPlatformCredentials(state: FactoryState): Set<string> {
+  const names = new Set(state.systems?.platformCredentialNames() ?? []);
+  state.gatekeeperEgressHeldSecrets = names;
+  return names;
+}
+
 /** Built-in system actors get their credentials from the platform's own deployment, not from an owner. */
 const isBuiltin = (a: AgentRecord) => Boolean(a.isBuiltin || a.category === 'builtin' || BUILTIN_AGENT_IDS.has(a.id));
 
@@ -263,6 +270,7 @@ async function submitProviderClient(state: FactoryState, req: http.IncomingMessa
 
 /** Handles the credentials API. Returns false when the path is not one of its routes. */
 export async function handleCredentials(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
+  if (state.systems) syncPlatformCredentials(state);
   const providerClient = path.match(/^\/api\/v1\/keymaster\/providers\/([a-z0-9-]+)\/client$/);
   if (providerClient && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'credentials.provider.read'))) return true;
@@ -293,7 +301,7 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
   if (path === '/api/v1/keymaster/platform/credentials' && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'credentials.platform.read'))) return true;
     const items = await assessPlatformCredentials({
-      gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets ?? new Set(),
+      gatekeeperEgressHeld: syncPlatformCredentials(state),
       present: (name) => cachedPresent(state, name),
       submitPath: platformSubmitPath,
     });
@@ -305,8 +313,8 @@ export async function handleCredentials(state: FactoryState, req: http.IncomingM
     const principal = await requirePrivilege(req, res, state, 'credentials.platform.set');
     if (!principal) return true;
     const name = decodeURIComponent(plat[1]);
-    if (!(state.gatekeeperEgressHeldSecrets ?? new Set<string>()).has(name)) {
-      return noStore(res, 404, { error: 'not_a_platform_credential', name, message: `${name} is not held by the gatekeeper-egress` }), true;
+    if (!syncPlatformCredentials(state).has(name)) {
+      return noStore(res, 404, { error: 'not_a_platform_credential', name, message: `${name} is not a credential on an approved system` }), true;
     }
     await writeCredential(state, req, res, 'platform', name, principal.actor);
     return true;

@@ -53,7 +53,7 @@ import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
-import { AI_PROVIDER_TEMPLATES } from '@beercanlabs/factory-contract';
+import { AI_PROVIDER_TEMPLATES, platformCredentialName } from '@beercanlabs/factory-contract';
 import { resolveModelReference, type DiscoveredModel } from '@beercanlabs/factory-executive';
 import { ModelStore, type StoredModel, type StagedModel } from './models.js';
 
@@ -438,8 +438,9 @@ function vendorTarget(state: FactoryState, vendorId: string): VendorTarget | { e
   } catch {
     return { error: 'invalid_upstream', message: 'upstream must be a valid URL' };
   }
-  const secretName = AI_PROVIDER_TEMPLATES[vendorId]?.heldSecret
-    ?? (adapter === 'anthropicMessages' ? 'ANTHROPIC_API_KEY' : adapter === 'vertexGemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY');
+  const secretName = sys?.credential?.secret
+    || AI_PROVIDER_TEMPLATES[vendorId]?.heldSecret
+    || platformCredentialName(vendorId);
   return { upstream, adapter, discoveryPath, secretName };
 }
 

@@ -102,6 +102,8 @@ export type ControlClient = {
   progress?(events: ProgressEvent[]): Promise<void>;
   /** E10: resolve non-model routes from the factory. Cached, refreshed on change, no redeploy. */
   systemRoutes?(): Promise<Route[]>;
+  /** Credential names on approved systems. Vendor discovery may read these and no others. */
+  platformCredentialNames?(): Promise<string[]>;
   /** GAP-162: resolve dynamic model catalog from control plane. Cached, refreshed on interval, no redeploy. */
   modelCatalog?(): Promise<ModelCatalog>;
 };
@@ -983,7 +985,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           return send(res, 400, { error: 'invalid_upstream' });
         }
         if (parsed.protocol !== 'https:') return send(res, 400, { error: 'invalid_upstream' });
-        const allowed = new Set<string>(opts.heldSecretNames ?? []);
+        const allowed = new Set<string>();
+        for (const name of (await opts.control.platformCredentialNames?.()) ?? []) {
+          if (/^[A-Z][A-Z0-9_]*$/.test(name)) allowed.add(name);
+        }
         for (const route of routes.values()) {
           const name = route.credential?.secret;
           if (name && /^[A-Z][A-Z0-9_]*$/.test(name)) allowed.add(name);

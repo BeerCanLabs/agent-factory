@@ -81,6 +81,7 @@ export {
   validateSystemProposal,
   oauthClientSecretName,
   serviceAccountKeyName,
+  platformCredentialName,
   aiProviderConfigSchema,
   AI_PROVIDER_TEMPLATES,
 } from './system.js';

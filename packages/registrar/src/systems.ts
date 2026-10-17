@@ -148,6 +148,7 @@ export class SystemsStore {
       description: proposal.description,
       kind: proposal.kind,
       upstream: proposal.upstream,
+      aiProvider: proposal.aiProvider,
       credential: proposal.credential,
       connection: proposal.connection,
       scopes: proposal.scopes,
@@ -196,6 +197,7 @@ export class SystemsStore {
       description: proposal.description,
       kind: proposal.kind,
       upstream: proposal.upstream,
+      aiProvider: proposal.aiProvider,
       credential: proposal.credential,
       connection: proposal.connection,
       scopes: proposal.scopes,
@@ -346,6 +348,16 @@ export class SystemsStore {
       });
     }
     return summaries.sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  /** Credential names on approved systems. This is the platform-credential list. */
+  platformCredentialNames(): string[] {
+    const names: string[] = [];
+    for (const def of this.current.values()) {
+      const secret = def.credential?.secret;
+      if (secret) names.push(secret);
+    }
+    return names.sort();
   }
 
   activeRoutes(): EgressRoute[] {

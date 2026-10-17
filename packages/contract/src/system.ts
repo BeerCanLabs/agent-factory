@@ -51,6 +51,18 @@ const httpsUrl = (field: string) =>
 export const oauthClientSecretName = (systemId: string) => `shared/${systemId}/oauth-client`;
 export const serviceAccountKeyName = (systemId: string) => `shared/${systemId}/service-account-key`;
 
+/** Platform API-key name for a system. Built-ins keep the secret already in the store; every other id gets its own. */
+const BUILTIN_PLATFORM_CREDENTIAL: Record<string, string> = {
+  openai: 'OPENAI_API_KEY',
+  anthropic: 'ANTHROPIC_API_KEY',
+  xai: 'XAI_API_KEY',
+  google: 'GEMINI_API_KEY',
+};
+
+export function platformCredentialName(systemId: string): string {
+  return BUILTIN_PLATFORM_CREDENTIAL[systemId] ?? `${systemId.toUpperCase().replace(/-/g, '_')}_API_KEY`;
+}
+
 export const systemOAuthUserSchema = z
   .object({
     kind: z.literal('oauth-user').default('oauth-user'),
@@ -245,7 +257,7 @@ export const AI_PROVIDER_TEMPLATES: Record<string, {
     upstream: 'https://api.example.com',
     adapter: 'openAiCompatible',
     adapterKey: 'openai',
-    heldSecret: 'OPENAI_API_KEY',
+    heldSecret: '',
     discoveryPath: '/v1/models',
     credentialHeader: 'Authorization',
     credentialFormat: 'Bearer {}',
