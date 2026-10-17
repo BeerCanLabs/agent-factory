@@ -67,7 +67,10 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     name: 'executive',
     title: 'Executive',
     role: 'Model service and uniform inference provider with token and cost metering (M1–M4, E5)',
-    hostedIn: ['packages/executive'],
+    hostedIn: ['packages/executive', 'packages/control-plane'],
+    owns: [
+      'packages/control-plane/src/models.ts',
+    ],
   },
   'property-manager': {
     name: 'property-manager',

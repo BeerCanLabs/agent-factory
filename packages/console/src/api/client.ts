@@ -1,4 +1,4 @@
-import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, AgentRolesInfo, AgentSkills, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident } from './types.js';
+import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, AgentRolesInfo, AgentSkills, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident, StoredModel, StagedModel, ModelsCatalogResponse, ScanModelsResponse, AdmitModelRequest } from './types.js';
 
 
 const API_BASE = '/api/v1';
@@ -150,6 +150,38 @@ export const factoryApi = {
     return { models: r.models, default: r.default ?? 'claude-haiku-4-5' };
   },
 
+  // Dynamic Model Governance & FinOps (GAP-162)
+  async getDynamicModelCatalog(): Promise<ModelsCatalogResponse> {
+    return request<ModelsCatalogResponse>('/models');
+  },
+
+  async scanVendorModels(params: { vendorId?: string; upstream?: string; adapter?: string; discoveryPath?: string; apiKey?: string }): Promise<ScanModelsResponse> {
+    return request<ScanModelsResponse>('/models/scan', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  },
+
+  async admitModel(params: AdmitModelRequest): Promise<{ ok: boolean; model: StoredModel }> {
+    return request<{ ok: boolean; model: StoredModel }>('/models/admit', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  },
+
+  async updateModelPricing(name: string, price: { inputPerMTok: number; outputPerMTok: number }): Promise<{ ok: boolean; model: StoredModel }> {
+    return request<{ ok: boolean; model: StoredModel }>(`/models/${encodeURIComponent(name)}/pricing`, {
+      method: 'PUT',
+      body: JSON.stringify({ price }),
+    });
+  },
+
+  async deleteModel(name: string): Promise<{ ok: boolean; retired: string; affectedAgents: string[] }> {
+    return request<{ ok: boolean; retired: string; affectedAgents: string[] }>(`/models/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+  },
+
   async setAgentBudget(id: string, spendLimitUsd: number, period: string = 'daily'): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>(`/registry/agents/${id}/budget`, {
       method: 'PUT',
@@ -249,6 +281,10 @@ export const factoryApi = {
   async getPlatformCredentials(): Promise<AgentCredentials> {
     const res = await request<Omit<AgentCredentials, 'agentId'>>('/keymaster/platform/credentials');
     return { agentId: PLATFORM_CREDENTIALS, ...res };
+  },
+
+  async submitPlatformCredential(name: string, value: string): Promise<{ name: string; status: string; action: string; at: string }> {
+    return this.submitCredential(`/keymaster/platform/credentials/${encodeURIComponent(name)}`, value);
   },
 
   async getOutstandingCredentials(): Promise<OutstandingCredentials> {

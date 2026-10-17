@@ -9,7 +9,7 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { SseMeter, checkModel, complete, defaultModelAdapters, findModel, offeredModels, usageFromJson, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
+import { SseMeter, checkModel, complete, defaultModelAdapters, findModel, offeredModels, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
 /** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
@@ -102,6 +102,8 @@ export type ControlClient = {
   progress?(events: ProgressEvent[]): Promise<void>;
   /** E10: resolve non-model routes from the factory. Cached, refreshed on change, no redeploy. */
   systemRoutes?(): Promise<Route[]>;
+  /** GAP-162: resolve dynamic model catalog from control plane. Cached, refreshed on interval, no redeploy. */
+  modelCatalog?(): Promise<ModelCatalog>;
 };
 
 
@@ -326,6 +328,41 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   }
 
   void ensureRoutes();
+
+  let activeCatalog: ModelCatalog = { ...(opts.modelCatalog ?? {}) };
+  let lastCatalogRefresh = 0;
+  const CATALOG_REFRESH_INTERVAL_MS = opts.routeRefreshIntervalMs ?? 10_000;
+  let catalogInflight: Promise<void> | undefined;
+
+  async function ensureCatalog(): Promise<void> {
+    if (!opts.control.modelCatalog) return;
+    if (catalogInflight) return catalogInflight;
+    catalogInflight = refreshCatalog().finally(() => (catalogInflight = undefined));
+    return catalogInflight;
+  }
+
+  async function refreshCatalog(): Promise<void> {
+    if (!opts.control.modelCatalog) return;
+    const now = Date.now();
+    if (now - lastCatalogRefresh < CATALOG_REFRESH_INTERVAL_MS) return;
+    try {
+      const remote = await opts.control.modelCatalog();
+      if (remote && typeof remote === 'object' && !Array.isArray(remote)) {
+        const valid: ModelCatalog = {};
+        for (const [k, v] of Object.entries(remote)) {
+          if (v && typeof v === 'object' && typeof (v as any).provider === 'string' && typeof (v as any).id === 'string') {
+            valid[k] = v as CatalogEntry;
+          }
+        }
+        activeCatalog = valid;
+      }
+    } catch (err) {
+      console.error(`[gatekeeper-egress] model catalog refresh: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    lastCatalogRefresh = Date.now();
+  }
+
+  void ensureCatalog();
 
   const ttl = opts.contextTtlMs ?? 1000;
 
@@ -695,7 +732,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
    * with its own credentials and never forwards the run token.
    */
   async function handleModels(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
-    const catalog = opts.modelCatalog ?? {};
+    void ensureCatalog();
+    const catalog = activeCatalog;
     const path = rest.split('?')[0].replace(/\/$/, '');
     if (req.method === 'GET' && path === '/v1/models') {
       const offered = offeredModels(modelPolicyOf(ctx), Object.keys(catalog));

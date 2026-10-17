@@ -46,6 +46,7 @@ const CENSUS: Record<string, Role> = {
   'egress.keymaster.checkout': 'gatekeeper-egress',
   'egress.progress.report': 'gatekeeper-egress',
   'egress.routes.read': 'gatekeeper-egress',
+  'egress.models.read': 'gatekeeper-egress',
   'egress.connections.token': 'gatekeeper-egress',
   'registry.register': 'admin',
   'registry.budget.set': 'admin',
@@ -82,6 +83,7 @@ const CENSUS: Record<string, Role> = {
   'spend.budget.set': 'admin',
   'agents.update.read': 'operator',
   'agents.update.install': 'admin',
+  'models.manage': 'admin',
 };
 // Held by one service role alone; an admin does not hold them. `runs.attest-requester` moved from `operator` to
 // `gatekeeper-ingress` (TSK-111): the old rule no longer matches it, so the proof below reads it from here.
@@ -112,7 +114,7 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 75);
+    assert.equal(PRIVILEGES.length, 77);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 

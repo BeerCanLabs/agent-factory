@@ -10,20 +10,21 @@ import { z } from 'zod';
 
 export const SYSTEM_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-/** Model provider hosts (E5): model calls use landing-zone provider routes, never a factory system. */
+/** Model provider hosts (E5): model calls use landing-zone provider routes, unless registered as an ai-provider system. */
 export const MODEL_PROVIDER_HOST = /(^|\.)(api\.anthropic\.com|api\.openai\.com|api\.x\.ai|generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com|openai\.azure\.com)$|^bedrock(-runtime)?[.-]/;
 
 const systemUpstream = z
   .string()
   .url('upstream must be a valid https URL')
-  .refine((u) => u.startsWith('https://'), 'upstream must be an https URL')
-  .refine((u) => {
-    try {
-      return !MODEL_PROVIDER_HOST.test(new URL(u).hostname);
-    } catch {
-      return false;
-    }
-  }, 'a model provider is not a system (E5: model calls use provider routes)');
+  .refine((u) => u.startsWith('https://'), 'upstream must be an https URL');
+
+export const aiProviderConfigSchema = z
+  .object({
+    adapter: z.enum(['openAiCompatible', 'anthropicMessages', 'vertexGemini', 'vertexAnthropic', 'bedrockConverse']).default('openAiCompatible'),
+    discoveryPath: z.string().optional().default('/v1/models'),
+    defaultHeaders: z.record(z.string()).optional(),
+  })
+  .strict();
 
 export const systemCredentialSchema = z
   .object({
@@ -83,8 +84,9 @@ export const systemProposalSchema = z
     id: z.string().max(64).regex(SYSTEM_ID, 'system id must be kebab-case (e.g. github, discord, closing-climb)'),
     name: z.string().min(1),
     description: z.string().optional(),
-    kind: z.enum(['http', 'mcp']).default('http'),
+    kind: z.enum(['http', 'mcp', 'ai-provider']).default('http'),
     upstream: systemUpstream,
+    aiProvider: aiProviderConfigSchema.optional(),
     credential: systemCredentialSchema.optional(),
     connection: z.string().min(1).optional(),
     scopes: z.array(z.string().min(1)).optional(),
@@ -94,6 +96,17 @@ export const systemProposalSchema = z
     maxContentChars: z.number().int().positive().optional(),
   })
   .strict()
+  .refine(
+    (data) => {
+      if (data.kind === 'ai-provider') return true;
+      try {
+        return !MODEL_PROVIDER_HOST.test(new URL(data.upstream).hostname);
+      } catch {
+        return true;
+      }
+    },
+    { message: 'a model provider is not a system (E5: model calls use provider routes)', path: ['upstream'] },
+  )
   .refine(
     (data) => !(data.credential && data.connection),
     { message: 'a system definition cannot combine a static credential and a Keymaster connection', path: ['connection'] },
@@ -116,8 +129,9 @@ export const systemDefinitionSchema = z
     id: z.string().max(64).regex(SYSTEM_ID, 'system id must be kebab-case (e.g. github, discord, closing-climb)'),
     name: z.string().min(1),
     description: z.string().optional(),
-    kind: z.enum(['http', 'mcp']).default('http'),
+    kind: z.enum(['http', 'mcp', 'ai-provider']).default('http'),
     upstream: systemUpstream,
+    aiProvider: aiProviderConfigSchema.optional(),
     credential: systemCredentialSchema.optional(),
     connection: z.string().min(1).optional(),
     scopes: z.array(z.string().min(1)).optional(),
@@ -136,6 +150,17 @@ export const systemDefinitionSchema = z
   })
   .strict()
   .refine(
+    (data) => {
+      if (data.kind === 'ai-provider') return true;
+      try {
+        return !MODEL_PROVIDER_HOST.test(new URL(data.upstream).hostname);
+      } catch {
+        return true;
+      }
+    },
+    { message: 'a model provider is not a system (E5: model calls use provider routes)', path: ['upstream'] },
+  )
+  .refine(
     (data) => !(data.credential && data.connection),
     { message: 'a system definition cannot combine a static credential and a Keymaster connection', path: ['connection'] },
   )
@@ -152,6 +177,7 @@ export const systemDefinitionSchema = z
     { message: 'OAuth providers are supported on http systems only', path: ['oauth'] },
   );
 
+export type AiProviderConfig = z.infer<typeof aiProviderConfigSchema>;
 export type SystemCredential = z.infer<typeof systemCredentialSchema>;
 export type SystemHold = z.infer<typeof systemHoldSchema>;
 export type SystemOAuthUser = z.infer<typeof systemOAuthUserSchema>;
@@ -159,6 +185,72 @@ export type SystemJwtBearer = z.infer<typeof systemJwtBearerSchema>;
 export type SystemOAuth = z.infer<typeof systemOAuthSchema>;
 export type SystemProposal = z.infer<typeof systemProposalSchema>;
 export type SystemDefinition = z.infer<typeof systemDefinitionSchema>;
+
+export const AI_PROVIDER_TEMPLATES: Record<string, {
+  name: string;
+  description: string;
+  upstream: string;
+  adapter: 'openAiCompatible' | 'anthropicMessages' | 'vertexGemini' | 'vertexAnthropic' | 'bedrockConverse';
+  adapterKey: string;
+  heldSecret: string;
+  discoveryPath: string;
+  credentialHeader: string;
+  credentialFormat?: string;
+}> = {
+  openai: {
+    name: 'OpenAI',
+    description: 'Flagship models (GPT-4o, o1, o3-mini) from OpenAI',
+    upstream: 'https://api.openai.com',
+    adapter: 'openAiCompatible',
+    adapterKey: 'openai',
+    heldSecret: 'OPENAI_API_KEY',
+    discoveryPath: '/v1/models',
+    credentialHeader: 'Authorization',
+    credentialFormat: 'Bearer {}',
+  },
+  anthropic: {
+    name: 'Anthropic',
+    description: 'Claude models (Sonnet, Haiku, Opus) direct from Anthropic',
+    upstream: 'https://api.anthropic.com',
+    adapter: 'anthropicMessages',
+    adapterKey: 'anthropic',
+    heldSecret: 'ANTHROPIC_API_KEY',
+    discoveryPath: '/v1/models',
+    credentialHeader: 'x-api-key',
+  },
+  xai: {
+    name: 'xAI (Grok)',
+    description: 'Grok models from xAI',
+    upstream: 'https://api.x.ai',
+    adapter: 'openAiCompatible',
+    adapterKey: 'xai',
+    heldSecret: 'XAI_API_KEY',
+    discoveryPath: '/v1/models',
+    credentialHeader: 'Authorization',
+    credentialFormat: 'Bearer {}',
+  },
+  google: {
+    name: 'Google Gemini',
+    description: 'Gemini models direct via Google AI Studio API',
+    upstream: 'https://generativelanguage.googleapis.com',
+    adapter: 'vertexGemini',
+    adapterKey: 'google',
+    heldSecret: 'GEMINI_API_KEY',
+    discoveryPath: '/v1beta/models',
+    credentialHeader: 'x-goog-api-key',
+  },
+  custom: {
+    name: 'Custom OpenAI-Compatible',
+    description: 'Self-hosted or specialized endpoint (Ollama, vLLM, DeepSeek, Together, Groq)',
+    upstream: 'https://api.example.com',
+    adapter: 'openAiCompatible',
+    adapterKey: 'openai',
+    heldSecret: 'OPENAI_API_KEY',
+    discoveryPath: '/v1/models',
+    credentialHeader: 'Authorization',
+    credentialFormat: 'Bearer {}',
+  },
+};
 
 export type SystemIssue = { path: string; message: string };
 export type SystemValidation = { ok: true; proposal: SystemProposal } | { ok: false; issues: SystemIssue[] };

@@ -16,8 +16,19 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../auth/CloudflareAuth.js';
 
-export type ScreenId = 'fleet' | 'workbench' | 'credentials' | 'identities' | 'skills' | 'systems' | 'approvals' | 'finops' | 'ledger' | 'triage' | 'studio';
-
+export type ScreenId =
+  | 'fleet'
+  | 'workbench'
+  | 'credentials'
+  | 'identities'
+  | 'skills'
+  | 'systems'
+  | 'models'
+  | 'approvals'
+  | 'finops'
+  | 'ledger'
+  | 'triage'
+  | 'studio';
 
 interface SidebarProps {
   currentScreen: ScreenId;
@@ -25,6 +36,17 @@ interface SidebarProps {
   pendingApprovalsCount: number;
   activeAgentsCount: number;
   outstandingCredentialsCount?: number;
+}
+
+interface NavSection {
+  office: string;
+  items: Array<{
+    id: ScreenId;
+    label: string;
+    icon: React.ReactNode;
+    badge?: string | number;
+    badgeColor?: string;
+  }>;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -37,104 +59,145 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const { activeRole, hasRole } = useAuth();
   const isAdmin = hasRole('admin');
 
-  const navItems: Array<{ id: ScreenId; label: string; icon: React.ReactNode; badge?: string | number; badgeColor?: string }> = [
+  const navSections: NavSection[] = [
     {
-      id: 'fleet',
-      label: 'Fleet Command',
-      icon: <Users className="w-4 h-4" />,
-      badge: activeAgentsCount > 0 ? activeAgentsCount : undefined,
-      badgeColor: 'bg-emerald-950 text-emerald-400 border border-emerald-800/80',
+      office: 'Executive Office',
+      items: [
+        {
+          id: 'models',
+          label: 'Models & Providers',
+          icon: <Cpu className="w-4 h-4" />,
+        },
+      ],
     },
     {
-      id: 'workbench',
-      label: 'Agent Workbench',
-      icon: <Terminal className="w-4 h-4" />,
+      office: 'Property Manager',
+      items: [
+        {
+          id: 'fleet',
+          label: 'Fleet Command',
+          icon: <Users className="w-4 h-4" />,
+          badge: activeAgentsCount > 0 ? activeAgentsCount : undefined,
+          badgeColor: 'bg-emerald-950 text-emerald-400 border border-emerald-800/80',
+        },
+        {
+          id: 'workbench',
+          label: 'Agent Workbench',
+          icon: <Terminal className="w-4 h-4" />,
+        },
+      ],
     },
     {
-      id: 'credentials',
-      label: 'Credentials',
-      icon: <KeyRound className="w-4 h-4" />,
-      badge: outstandingCredentialsCount > 0 ? outstandingCredentialsCount : undefined,
-      badgeColor: 'bg-amber-950 text-amber-400 border border-amber-800/80',
-    },
-    ...(isAdmin
-      ? [
-          {
-            id: 'identities' as const,
-            label: 'Identities & Access',
-            icon: <Fingerprint className="w-4 h-4" />,
-          },
-        ]
-      : []),
-    {
-      id: 'skills',
-      label: 'Skills',
-      icon: <Puzzle className="w-4 h-4" />,
+      office: 'Registrar',
+      items: [
+        {
+          id: 'systems',
+          label: 'Systems & Egress',
+          icon: <Server className="w-4 h-4" />,
+        },
+        {
+          id: 'skills',
+          label: 'Skill Catalog',
+          icon: <Puzzle className="w-4 h-4" />,
+        },
+      ],
     },
     {
-      id: 'systems',
-      label: 'Systems',
-      icon: <Server className="w-4 h-4" />,
+      office: 'Keymaster',
+      items: [
+        {
+          id: 'credentials',
+          label: 'Credentials & Vault',
+          icon: <KeyRound className="w-4 h-4" />,
+          badge: outstandingCredentialsCount > 0 ? outstandingCredentialsCount : undefined,
+          badgeColor: 'bg-amber-950 text-amber-400 border border-amber-800/80',
+        },
+        ...(isAdmin
+          ? [
+              {
+                id: 'identities' as const,
+                label: 'Identities & Access',
+                icon: <Fingerprint className="w-4 h-4" />,
+              },
+            ]
+          : []),
+      ],
     },
     {
-      id: 'approvals',
-      label: 'Approvals',
-      icon: <CheckSquare className="w-4 h-4" />,
-      badge: pendingApprovalsCount > 0 ? pendingApprovalsCount : undefined,
-      badgeColor: 'bg-amber-950 text-amber-400 border border-amber-800/80 animate-pulse',
+      office: 'Accountant',
+      items: [
+        {
+          id: 'finops',
+          label: 'FinOps & Pricing',
+          icon: <DollarSign className="w-4 h-4" />,
+        },
+      ],
     },
     {
-      id: 'finops',
-      label: 'FinOps & Budget',
-      icon: <DollarSign className="w-4 h-4" />,
+      office: 'Inspector',
+      items: [
+        {
+          id: 'approvals',
+          label: 'Approvals',
+          icon: <CheckSquare className="w-4 h-4" />,
+          badge: pendingApprovalsCount > 0 ? pendingApprovalsCount : undefined,
+          badgeColor: 'bg-amber-950 text-amber-400 border border-amber-800/80 animate-pulse',
+        },
+        {
+          id: 'triage',
+          label: 'Triage & Incidents',
+          icon: <AlertOctagon className="w-4 h-4" />,
+        },
+      ],
     },
     {
-      id: 'ledger',
-      label: 'Immutable Ledger',
-      icon: <FileText className="w-4 h-4" />,
-    },
-    {
-      id: 'triage',
-      label: 'Triage & Incidents',
-      icon: <AlertOctagon className="w-4 h-4" />,
-    },
-    {
-      id: 'studio',
-      label: 'Cartridge Studio',
-      icon: <Cpu className="w-4 h-4" />,
+      office: 'Auditor',
+      items: [
+        {
+          id: 'ledger',
+          label: 'Immutable Ledger',
+          icon: <FileText className="w-4 h-4" />,
+        },
+      ],
     },
   ];
 
   return (
-    <aside className="w-64 bg-slate-100/70 dark:bg-slate-900/50 border-r border-slate-200 dark:border-slate-800 flex flex-col justify-between shrink-0 min-h-[calc(100vh-57px)] transition-colors">
-      <div className="p-4 space-y-1">
-        <div className="px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-          Navigation
-        </div>
-        {navItems.map((item) => {
-          const isActive = currentScreen === item.id;
-          return (
-            <button
-              key={item.id}
-              onClick={() => onSelectScreen(item.id)}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition ${
-                isActive
-                  ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-200/50 dark:hover:bg-slate-800/50'
-              }`}
-            >
-              <div className="flex items-center space-x-3">
-                <span className={isActive ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'}>{item.icon}</span>
-                <span>{item.label}</span>
-              </div>
-              {item.badge !== undefined && (
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${item.badgeColor}`}>
-                  {item.badge}
-                </span>
-              )}
-            </button>
-          );
-        })}
+    <aside className="w-64 bg-slate-100/70 dark:bg-slate-900/50 border-r border-slate-200 dark:border-slate-800 flex flex-col justify-between shrink-0 min-h-[calc(100vh-57px)] transition-colors overflow-y-auto">
+      <div className="p-4 space-y-4">
+        {navSections.map((section) => (
+          <div key={section.office} className="space-y-1">
+            <div className="px-3 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+              {section.office}
+            </div>
+            {section.items.map((item) => {
+              const isActive = currentScreen === item.id;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => onSelectScreen(item.id)}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition ${
+                    isActive
+                      ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/30'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-200/50 dark:hover:bg-slate-800/50'
+                  }`}
+                >
+                  <div className="flex items-center space-x-2.5">
+                    <span className={isActive ? 'text-purple-600 dark:text-purple-400' : 'text-slate-500 dark:text-slate-400'}>
+                      {item.icon}
+                    </span>
+                    <span>{item.label}</span>
+                  </div>
+                  {item.badge !== undefined && (
+                    <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded-full ${item.badgeColor}`}>
+                      {item.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        ))}
       </div>
 
       {/* Role Notice & Links */}

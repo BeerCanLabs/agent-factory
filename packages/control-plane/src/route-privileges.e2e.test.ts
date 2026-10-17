@@ -115,6 +115,7 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/gatekeeper-egress/keymaster/checkout', privilege: 'egress.keymaster.checkout', role: 'gatekeeper-egress', body: {} },
   { method: 'POST', path: '/api/v1/gatekeeper-egress/progress', privilege: 'egress.progress.report', role: 'gatekeeper-egress', body: {} },
   { method: 'GET', path: '/api/v1/gatekeeper-egress/routes', privilege: 'egress.routes.read', role: 'gatekeeper-egress' },
+  { method: 'GET', path: '/api/v1/models/internal/catalog', privilege: 'egress.models.read', role: 'gatekeeper-egress' },
   { method: 'POST', path: '/api/v1/gatekeeper-egress/connections/token', privilege: 'egress.connections.token', role: 'gatekeeper-egress', exclusive: true, body: {} },
   // admin
   { method: 'POST', path: '/api/v1/registry/agents', privilege: 'registry.register', role: 'admin', body: {} },
@@ -126,6 +127,10 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/registry/agents/nope/model', privilege: 'registry.model.set', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/registry/agents/nope/model', privilege: 'registry.model.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/agents/nope/models/approve', privilege: 'registry.model.set', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/models/scan', privilege: 'models.manage', role: 'admin', body: { vendorId: 'openai' } },
+  { method: 'POST', path: '/api/v1/models/admit', privilege: 'models.manage', role: 'admin', body: { name: 'm', provider: 'p', id: 'i' } },
+  { method: 'PUT', path: '/api/v1/models/m/pricing', privilege: 'models.manage', role: 'admin', body: { price: { inputPerMTok: 1, outputPerMTok: 2 } } },
+  { method: 'DELETE', path: '/api/v1/models/m', privilege: 'models.manage', role: 'admin' },
   { method: 'PUT', path: '/api/v1/agents/nope/policy', privilege: 'policy.set', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/policies/budget', privilege: 'policy.budget.set', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/spend/budgets', privilege: 'spend.budget.set', role: 'admin', body: { totalMonthUsd: 300 } },
@@ -330,9 +335,9 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       error?: { code: number; message: string };
     };
     const names = async (cred: Role) => (await rpc(cred, 'tools/list')).result?.tools?.map((t) => t.name).sort();
-    const viewerTools = ['get_run', 'list_agents', 'list_approvals', 'query_ledger'];
+    const viewerTools = ['get_run', 'list_agents', 'list_approvals', 'list_model_catalog', 'query_ledger'];
     const operatorTools = ['check_agent_update', 'isolate_agent', 'pause_agent', 'resume_agent', 'wake_agent'];
-    const adminTools = ['install_agent_update'];
+    const adminTools = ['admit_model', 'install_agent_update', 'retire_vendor_or_model', 'scan_vendor_models', 'update_model_pricing'];
     assert.deepEqual(await names('viewer'), viewerTools);
     assert.deepEqual(await names('operator'), [...viewerTools, ...operatorTools].sort());
     assert.deepEqual(await names('approver'), [...viewerTools, 'decide_approval'].sort());

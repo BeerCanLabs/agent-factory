@@ -30,4 +30,15 @@ export type {
   ModelAdapter,
   ModelCatalog,
 } from './models.js';
+export {
+  discoverVendorModels,
+  resolveModelReference,
+  REFERENCE_MODEL_PRICING,
+} from './discovery.js';
+export type {
+  DiscoveredModel,
+  ModelPricing,
+  ModelReference,
+  VendorDiscoveryOptions,
+} from './discovery.js';
 

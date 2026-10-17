@@ -81,6 +81,8 @@ export {
   validateSystemProposal,
   oauthClientSecretName,
   serviceAccountKeyName,
+  aiProviderConfigSchema,
+  AI_PROVIDER_TEMPLATES,
 } from './system.js';
 export type {
   SystemCredential,
@@ -92,6 +94,7 @@ export type {
   SystemDefinition,
   SystemIssue,
   SystemValidation,
+  AiProviderConfig,
 } from './system.js';
 
 export * from './services/index.js';
