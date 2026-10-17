@@ -82,6 +82,7 @@ const CENSUS: Record<string, Role> = {
   'spend.budget.set': 'admin',
   'agents.update.read': 'operator',
   'agents.update.install': 'admin',
+  'models.manage': 'admin',
 };
 // Held by one service role alone; an admin does not hold them. `runs.attest-requester` moved from `operator` to
 // `gatekeeper-ingress` (TSK-111): the old rule no longer matches it, so the proof below reads it from here.
@@ -112,7 +113,7 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 75);
+    assert.equal(PRIVILEGES.length, 76);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 

@@ -88,6 +88,12 @@ const control: ControlClient = {
     const body = (await res.json()) as { routes?: Route[] };
     return body.routes ?? [];
   },
+  async modelCatalog() {
+    const res = await call('GET', '/api/v1/models/internal/catalog');
+    if (!res.ok) throw new Error(`control plane model catalog ${res.status}`);
+    const body = (await res.json()) as { models?: ModelCatalog; catalog?: ModelCatalog };
+    return body.catalog ?? body.models ?? {};
+  },
   async ledger(event) {
     try {
       const res = await call('POST', '/api/v1/ledger', event);

@@ -80,6 +80,7 @@ export const PRIVILEGES = [
   'spend.budget.set',
   'agents.update.read',
   'agents.update.install',
+  'models.manage',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -261,6 +262,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'spend.budget.set',
     'agents.update.read',
     'agents.update.install',
+    'models.manage',
   ],
 };
 

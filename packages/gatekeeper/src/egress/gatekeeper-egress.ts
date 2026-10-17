@@ -102,6 +102,8 @@ export type ControlClient = {
   progress?(events: ProgressEvent[]): Promise<void>;
   /** E10: resolve non-model routes from the factory. Cached, refreshed on change, no redeploy. */
   systemRoutes?(): Promise<Route[]>;
+  /** GAP-162: resolve dynamic model catalog from control plane. Cached, refreshed on interval, no redeploy. */
+  modelCatalog?(): Promise<ModelCatalog>;
 };
 
 
@@ -326,6 +328,35 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   }
 
   void ensureRoutes();
+
+  let activeCatalog: ModelCatalog = { ...(opts.modelCatalog ?? {}) };
+  let lastCatalogRefresh = 0;
+  const CATALOG_REFRESH_INTERVAL_MS = opts.routeRefreshIntervalMs ?? 10_000;
+  let catalogInflight: Promise<void> | undefined;
+
+  async function ensureCatalog(): Promise<void> {
+    if (!opts.control.modelCatalog) return;
+    if (catalogInflight) return catalogInflight;
+    catalogInflight = refreshCatalog().finally(() => (catalogInflight = undefined));
+    return catalogInflight;
+  }
+
+  async function refreshCatalog(): Promise<void> {
+    if (!opts.control.modelCatalog) return;
+    const now = Date.now();
+    if (now - lastCatalogRefresh < CATALOG_REFRESH_INTERVAL_MS) return;
+    try {
+      const remote = await opts.control.modelCatalog();
+      if (remote && typeof remote === 'object') {
+        activeCatalog = { ...(opts.modelCatalog ?? {}), ...remote };
+      }
+    } catch (err) {
+      console.error(`[gatekeeper-egress] model catalog refresh: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    lastCatalogRefresh = Date.now();
+  }
+
+  void ensureCatalog();
 
   const ttl = opts.contextTtlMs ?? 1000;
 
@@ -695,7 +726,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
    * with its own credentials and never forwards the run token.
    */
   async function handleModels(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
-    const catalog = opts.modelCatalog ?? {};
+    void ensureCatalog();
+    const catalog = activeCatalog;
     const path = rest.split('?')[0].replace(/\/$/, '');
     if (req.method === 'GET' && path === '/v1/models') {
       const offered = offeredModels(modelPolicyOf(ctx), Object.keys(catalog));

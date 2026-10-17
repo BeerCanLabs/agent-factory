@@ -53,12 +53,17 @@ import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
+import { AI_PROVIDER_TEMPLATES } from '@beercanlabs/factory-contract';
+import { discoverVendorModels, resolveModelReference } from '@beercanlabs/factory-executive';
+import { ModelStore, type StoredModel, type StagedModel } from './models.js';
 
 export type FactoryState = {
 
   agents: Map<string, AgentRecord>;
+  /** Dynamic model store (§6.9 M3, GAP-162). */
+  modelStore?: ModelStore;
   /** Models the factory offers (§6.9 M3, FACTORY_MODEL_CATALOG), by neutral name. */
-  modelCatalog?: Record<string, { provider: string; price?: { inputPerMTok: number; outputPerMTok: number } }>;
+  modelCatalog?: Record<string, { provider: string; id?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }>;
   /** The model a policy that names none grants (M2; FACTORY_DEFAULT_MODEL, default claude-haiku-4-5). */
   defaultModel?: string;
   registryDir?: string;
@@ -319,6 +324,53 @@ const TOOLS: ToolSpec[] = [
     args: { id: { type: 'string' }, mode: { type: 'string' } },
     required: ['id'],
   },
+  {
+    name: 'list_model_catalog',
+    description: 'List offered and staged models in the factory',
+    privilege: 'models.read',
+    args: {},
+  },
+  {
+    name: 'scan_vendor_models',
+    description: 'Scan an AI vendor endpoint to discover available models',
+    privilege: 'models.manage',
+    args: { vendorId: { type: 'string' } },
+    required: ['vendorId'],
+  },
+  {
+    name: 'admit_model',
+    description: 'Admit a discovered or new model to the factory offering with token pricing',
+    privilege: 'models.manage',
+    args: {
+      name: { type: 'string' },
+      provider: { type: 'string' },
+      id: { type: 'string' },
+      vendorId: { type: 'string' },
+      inputPerMTok: { type: 'string' },
+      outputPerMTok: { type: 'string' },
+    },
+    required: ['name', 'provider', 'id'],
+  },
+  {
+    name: 'update_model_pricing',
+    description: 'Update token pricing per million tokens for an admitted model',
+    privilege: 'models.manage',
+    args: {
+      name: { type: 'string' },
+      inputPerMTok: { type: 'string' },
+      outputPerMTok: { type: 'string' },
+    },
+    required: ['name', 'inputPerMTok', 'outputPerMTok'],
+  },
+  {
+    name: 'retire_vendor_or_model',
+    description: 'Retire an admitted model from the factory offering',
+    privilege: 'models.manage',
+    args: {
+      name: { type: 'string' },
+    },
+    required: ['name'],
+  },
 ];
 
 export async function handleMcp(state: FactoryState, payload: Record<string, unknown>, principal: Principal): Promise<unknown> {
@@ -364,6 +416,140 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'get_run') return state.runs.get(args.runId) ?? { error: 'not_found' };
   if (name === 'list_approvals') return state.approvals.list({ state: 'pending' });
   if (name === 'decide_approval') return (await decideApproval(state, args.approvalId, args.decision, principal, args.notes)).body;
+  if (name === 'list_model_catalog') {
+    return {
+      offered: state.modelStore ? state.modelStore.listOffered() : Object.entries(state.modelCatalog ?? {}).map(([n, m]) => ({ name: n, ...m })),
+      staged: state.modelStore?.listStaged() ?? [],
+      default: state.defaultModel ?? 'claude-haiku-4-5',
+    };
+  }
+  if (name === 'scan_vendor_models') {
+    const vendorId = args.vendorId;
+    let upstream = AI_PROVIDER_TEMPLATES[vendorId]?.upstream;
+    let adapter = AI_PROVIDER_TEMPLATES[vendorId]?.adapter ?? 'openAiCompatible';
+    let discoveryPath = AI_PROVIDER_TEMPLATES[vendorId]?.discoveryPath;
+    let apiKey: string | undefined;
+
+    if (state.systems) {
+      const sys = state.systems.get(vendorId);
+      if (sys) {
+        upstream = sys.upstream;
+        if (sys.aiProvider) {
+          adapter = sys.aiProvider.adapter;
+          discoveryPath = sys.aiProvider.discoveryPath;
+        }
+      }
+    }
+    if (!upstream) return { error: `vendor ${vendorId} not found in systems or templates` };
+
+    if (state.providers && state.providers.length > 0) {
+      const bound = await bindSecrets([`shared/${vendorId}/api-key`, `shared/${vendorId}/service-account-key`], state.providers);
+      if (bound.ok) {
+        apiKey = bound.env[`shared/${vendorId}/api-key`] || bound.env[`shared/${vendorId}/service-account-key`];
+      }
+    }
+
+    try {
+      const discovered = await discoverVendorModels({ upstream, adapter, discoveryPath, apiKey });
+      const staged: StagedModel[] = discovered.map((d) => {
+        const ref = resolveModelReference(d.id);
+        return {
+          vendorId,
+          rawId: d.id,
+          displayName: d.name ?? d.id,
+          discoveredAt: new Date().toISOString(),
+          suggestedFriendlyName: ref.friendlyName,
+          suggestedPrice: ref.price,
+        };
+      });
+      if (state.modelStore) {
+        state.modelStore.stageDiscovered(staged);
+        state.modelCatalog = state.modelStore.toEgressCatalog();
+      }
+      state.ledger.append({
+        action: 'MODELS_DISCOVERED',
+        actor,
+        vendorId,
+        count: staged.length,
+        timestamp: new Date().toISOString(),
+      });
+      return { ok: true, count: staged.length, staged };
+    } catch (err: any) {
+      return { error: 'discovery_failed', message: err.message };
+    }
+  }
+  if (name === 'admit_model') {
+    if (!state.modelStore) return { error: 'model_store_not_configured' };
+    const price = (args.inputPerMTok && args.outputPerMTok) ? {
+      inputPerMTok: parseFloat(args.inputPerMTok),
+      outputPerMTok: parseFloat(args.outputPerMTok),
+    } : undefined;
+    const model = state.modelStore.admit({
+      name: args.name,
+      provider: args.provider,
+      id: args.id,
+      vendorId: args.vendorId,
+      price,
+      actor,
+    });
+    state.modelCatalog = state.modelStore.toEgressCatalog();
+    state.ledger.append({
+      action: 'MODEL_ADMITTED',
+      actor,
+      model: model.name,
+      provider: model.provider,
+      vendorId: model.vendorId,
+      price: model.price,
+      timestamp: new Date().toISOString(),
+    });
+    return { ok: true, model };
+  }
+  if (name === 'update_model_pricing') {
+    if (!state.modelStore) return { error: 'model_store_not_configured' };
+    const price = {
+      inputPerMTok: parseFloat(args.inputPerMTok),
+      outputPerMTok: parseFloat(args.outputPerMTok),
+    };
+    try {
+      const model = state.modelStore.updatePricing(args.name, price, actor);
+      state.modelCatalog = state.modelStore.toEgressCatalog();
+      state.ledger.append({
+        action: 'MODEL_PRICING_UPDATED',
+        actor,
+        model: args.name,
+        price,
+        timestamp: new Date().toISOString(),
+      });
+      return { ok: true, model };
+    } catch (err: any) {
+      return { error: 'not_found', message: err.message };
+    }
+  }
+  if (name === 'retire_vendor_or_model') {
+    if (!state.modelStore) return { error: 'model_store_not_configured' };
+    const modelName = args.name;
+    const affectedAgents: string[] = [];
+    for (const agentId of state.policies.ids()) {
+      const policy = state.policies.get(agentId);
+      if (policy.models && policy.models.includes(modelName)) {
+        affectedAgents.push(agentId);
+        policy.models = policy.models.filter((m) => m !== modelName);
+        state.policies.set(agentId, policy);
+      }
+    }
+    const deleted = state.modelStore.retire(modelName);
+    if (!deleted) return { error: 'not_found' };
+    state.modelCatalog = state.modelStore.toEgressCatalog();
+    state.ledger.append({
+      action: 'MODEL_RETIRED',
+      actor,
+      model: modelName,
+      affectedAgents,
+      timestamp: new Date().toISOString(),
+    });
+    return { ok: true, retired: modelName, affectedAgents };
+  }
+
   const id = args.id;
   if (!id) return { error: 'id required' };
   if (name === 'wake_agent') return (await createRun(state, id, { actor, trigger: 'mcp' })).body;
@@ -1309,15 +1495,222 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
-  // §6.9 M3: the models this factory offers (operations config), for the admin choosing an agent's models. Names,
-  // providers and prices only; provider model ids and regions stay with gatekeeper-egress.
+  // §6.9 M3: the models this factory offers, for the admin choosing an agent's models.
   if (path === '/api/v1/models' && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'models.read'))) return;
     json(res, 200, {
-      models: Object.entries(state.modelCatalog ?? {}).map(([name, m]) => ({ name, provider: m.provider, ...(m.price ? { price: m.price } : {}) })),
+      models: state.modelStore
+        ? state.modelStore.listOffered().map((m) => ({ name: m.name, provider: m.provider, id: m.id, vendorId: m.vendorId, ...(m.price ? { price: m.price } : {}) }))
+        : Object.entries(state.modelCatalog ?? {}).map(([name, m]) => ({ name, provider: m.provider, ...(m.price ? { price: m.price } : {}) })),
+      staged: state.modelStore?.listStaged() ?? [],
       // M2: what an agent gets when its policy names no models.
       default: state.defaultModel ?? 'claude-haiku-4-5',
+      templates: AI_PROVIDER_TEMPLATES,
     });
+    return;
+  }
+
+  // Internal catalog endpoint with ETag for gatekeeper-egress sync (§6.9 M3, GAP-162)
+  if (path === '/api/v1/models/internal/catalog' && req.method === 'GET') {
+    if (!(await requirePrivilege(req, res, state, 'models.read'))) return;
+    const version = state.modelStore?.getVersion() ?? 1;
+    res.setHeader('ETag', `"${version}"`);
+    json(res, 200, {
+      version,
+      models: state.modelStore ? state.modelStore.toEgressCatalog() : (state.modelCatalog ?? {}),
+      default: state.defaultModel ?? 'claude-haiku-4-5',
+    });
+    return;
+  }
+
+  // On-demand vendor model discovery (Executive §6.9 M1–M4, GAP-162)
+  if (path === '/api/v1/models/scan' && req.method === 'POST') {
+    const principal = await requirePrivilege(req, res, state, 'models.manage');
+    if (!principal) return;
+    const body = (await readJson(req)) as { vendorId?: string; upstream?: string; adapter?: string; discoveryPath?: string; apiKey?: string };
+    const vendorId = body.vendorId;
+    let upstream = body.upstream;
+    let adapter = body.adapter || 'openAiCompatible';
+    let discoveryPath = body.discoveryPath;
+    let apiKey = body.apiKey;
+
+    if (vendorId && state.systems) {
+      const sys = state.systems.get(vendorId);
+      if (sys) {
+        upstream = upstream ?? sys.upstream;
+        if (sys.aiProvider) {
+          adapter = sys.aiProvider.adapter;
+          discoveryPath = discoveryPath ?? sys.aiProvider.discoveryPath;
+        }
+      }
+    }
+
+    if (!upstream && vendorId && AI_PROVIDER_TEMPLATES[vendorId]) {
+      const tmpl = AI_PROVIDER_TEMPLATES[vendorId];
+      upstream = tmpl.upstream;
+      adapter = tmpl.adapter;
+      discoveryPath = tmpl.discoveryPath;
+    }
+
+    if (!upstream) {
+      json(res, 400, { error: 'invalid_request', message: 'vendorId (matching registered system or template) or upstream URL required' });
+      return;
+    }
+
+    if (!apiKey && vendorId && state.providers && state.providers.length > 0) {
+      const bound = await bindSecrets([`shared/${vendorId}/api-key`, `shared/${vendorId}/service-account-key`], state.providers);
+      if (bound.ok) {
+        apiKey = bound.env[`shared/${vendorId}/api-key`] || bound.env[`shared/${vendorId}/service-account-key`];
+      }
+    }
+
+    try {
+      const discovered = await discoverVendorModels({
+        upstream,
+        adapter,
+        discoveryPath,
+        apiKey,
+      });
+
+      const staged: StagedModel[] = discovered.map((d) => {
+        const ref = resolveModelReference(d.id);
+        return {
+          vendorId: vendorId ?? 'custom',
+          rawId: d.id,
+          displayName: d.name ?? d.id,
+          discoveredAt: new Date().toISOString(),
+          suggestedFriendlyName: ref.friendlyName,
+          suggestedPrice: ref.price,
+        };
+      });
+
+      if (state.modelStore) {
+        state.modelStore.stageDiscovered(staged);
+        state.modelCatalog = state.modelStore.toEgressCatalog();
+      }
+
+      state.ledger.append({
+        action: 'MODELS_DISCOVERED',
+        actor: principal.actor,
+        vendorId: vendorId ?? 'custom',
+        count: staged.length,
+        timestamp: new Date().toISOString(),
+      });
+
+      json(res, 200, { ok: true, count: staged.length, staged });
+      return;
+    } catch (err: any) {
+      json(res, 502, { error: 'discovery_failed', message: err.message });
+      return;
+    }
+  }
+
+  // Model admission with token pricing (Accountant §6.4, GAP-162)
+  if (path === '/api/v1/models/admit' && req.method === 'POST') {
+    const principal = await requirePrivilege(req, res, state, 'models.manage');
+    if (!principal) return;
+    const body = (await readJson(req)) as { name?: string; provider?: string; id?: string; vendorId?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } };
+    if (!body.name || !body.provider || !body.id) {
+      json(res, 400, { error: 'invalid_request', message: 'name, provider, and id are required' });
+      return;
+    }
+    if (!state.modelStore) {
+      json(res, 500, { error: 'model_store_not_configured' });
+      return;
+    }
+    const model = state.modelStore.admit({
+      name: body.name,
+      provider: body.provider,
+      id: body.id,
+      vendorId: body.vendorId,
+      region: body.region,
+      price: body.price,
+      actor: principal.actor,
+    });
+    state.modelCatalog = state.modelStore.toEgressCatalog();
+
+    state.ledger.append({
+      action: 'MODEL_ADMITTED',
+      actor: principal.actor,
+      model: model.name,
+      provider: model.provider,
+      vendorId: model.vendorId,
+      price: model.price,
+      timestamp: new Date().toISOString(),
+    });
+
+    json(res, 201, { ok: true, model });
+    return;
+  }
+
+  // Dynamic token pricing update (Accountant §6.4, GAP-162)
+  const pricingMatch = path.match(/^\/api\/v1\/models\/([^/]+)\/pricing$/);
+  if (pricingMatch && req.method === 'PUT') {
+    const principal = await requirePrivilege(req, res, state, 'models.manage');
+    if (!principal) return;
+    const modelName = pricingMatch[1];
+    const body = (await readJson(req)) as { price?: { inputPerMTok: number; outputPerMTok: number } };
+    if (!body.price || typeof body.price.inputPerMTok !== 'number' || typeof body.price.outputPerMTok !== 'number') {
+      json(res, 400, { error: 'invalid_request', message: 'price with numeric inputPerMTok and outputPerMTok required' });
+      return;
+    }
+    if (!state.modelStore) {
+      json(res, 500, { error: 'model_store_not_configured' });
+      return;
+    }
+    try {
+      const model = state.modelStore.updatePricing(modelName, body.price, principal.actor);
+      state.modelCatalog = state.modelStore.toEgressCatalog();
+      state.ledger.append({
+        action: 'MODEL_PRICING_UPDATED',
+        actor: principal.actor,
+        model: modelName,
+        price: body.price,
+        timestamp: new Date().toISOString(),
+      });
+      json(res, 200, { ok: true, model });
+      return;
+    } catch (err: any) {
+      json(res, 404, { error: 'not_found', message: err.message });
+      return;
+    }
+  }
+
+  // Model retirement with policy fallback migration (§6.9 M2, GAP-162)
+  const modelDeleteMatch = path.match(/^\/api\/v1\/models\/([^/]+)$/);
+  if (modelDeleteMatch && req.method === 'DELETE') {
+    const principal = await requirePrivilege(req, res, state, 'models.manage');
+    if (!principal) return;
+    const modelName = modelDeleteMatch[1];
+    if (!state.modelStore) {
+      json(res, 500, { error: 'model_store_not_configured' });
+      return;
+    }
+
+    const affectedAgents: string[] = [];
+    for (const agentId of state.policies.ids()) {
+      const policy = state.policies.get(agentId);
+      if (policy.models && policy.models.includes(modelName)) {
+        affectedAgents.push(agentId);
+        policy.models = policy.models.filter((m) => m !== modelName);
+        state.policies.set(agentId, policy);
+      }
+    }
+
+    const deleted = state.modelStore.retire(modelName);
+    if (!deleted) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    state.modelCatalog = state.modelStore.toEgressCatalog();
+    state.ledger.append({
+      action: 'MODEL_RETIRED',
+      actor: principal.actor,
+      model: modelName,
+      affectedAgents,
+      timestamp: new Date().toISOString(),
+    });
+    json(res, 200, { ok: true, retired: modelName, affectedAgents });
     return;
   }
 

@@ -28,6 +28,7 @@ import { SystemsStore } from './systems.js';
 import { checkFactoryBudgets, createTreasury } from './spend.js';
 import { AwsComputeSource, AwsCostSource } from './aws/accountant.js';
 import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
+import { ModelStore } from './models.js';
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
 const AGENTS_ROOT = process.env.AGENTS_ROOT || fileURLToPath(new URL('../../../agents', import.meta.url));
@@ -165,10 +166,16 @@ function modelCatalogFromEnv(json: string | undefined): FactoryState['modelCatal
   }
 }
 
+const modelStore = new ModelStore(
+  join(DATA_DIR, 'models', 'catalog.json'),
+  modelCatalogFromEnv(process.env.FACTORY_MODEL_CATALOG),
+);
+
 const state: FactoryState = {
   agents: new Map(allAgents.map((a) => [a.id, a])),
-  // §6.9 M3: the same catalog gatekeeper-egress serves, so the admin chooses from what is actually offered.
-  modelCatalog: modelCatalogFromEnv(process.env.FACTORY_MODEL_CATALOG),
+  modelStore,
+  // §6.9 M3: the dynamic catalog gatekeeper-egress serves, so the admin chooses from what is actually offered.
+  modelCatalog: modelStore.toEgressCatalog(),
   defaultModel: process.env.FACTORY_DEFAULT_MODEL || undefined,
   registryDir: REGISTRY_DIR,
   ledger,

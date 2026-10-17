@@ -21,7 +21,7 @@ export type SystemSummary = {
   id: string;
   name: string;
   description?: string;
-  kind: 'http' | 'mcp';
+  kind: 'http' | 'mcp' | 'ai-provider';
   upstream: string;
   status: 'proposed' | 'approved' | 'rejected';
   latestVersion: number;
@@ -351,6 +351,7 @@ export class SystemsStore {
   activeRoutes(): EgressRoute[] {
     const routes: EgressRoute[] = [];
     for (const def of this.current.values()) {
+      if (def.kind === 'ai-provider') continue;
       routes.push({
         id: def.id,
         kind: def.kind,

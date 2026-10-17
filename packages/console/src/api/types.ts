@@ -481,3 +481,68 @@ export interface AgentSkills {
   revoked: AgentSkillRequest[];
   available: AvailableSkill[];
 }
+
+/** Dynamic Model Catalog & FinOps Governance (GAP-162) */
+export interface StoredModel {
+  name: string;
+  provider: string;
+  id: string;
+  vendorId?: string;
+  region?: string;
+  price?: {
+    inputPerMTok: number;
+    outputPerMTok: number;
+  };
+  admittedAt: string;
+  admittedBy?: string;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export interface StagedModel {
+  vendorId: string;
+  rawId: string;
+  displayName?: string;
+  discoveredAt: string;
+  suggestedFriendlyName: string;
+  suggestedPrice?: {
+    inputPerMTok: number;
+    outputPerMTok: number;
+  };
+}
+
+export interface AiProviderTemplate {
+  name: string;
+  description: string;
+  upstream: string;
+  adapter: string;
+  discoveryPath: string;
+  credentialHeader?: string;
+  credentialFormat?: string;
+}
+
+export interface ModelsCatalogResponse {
+  models: StoredModel[];
+  staged: StagedModel[];
+  default: string;
+  templates: Record<string, AiProviderTemplate>;
+}
+
+export interface ScanModelsResponse {
+  ok: boolean;
+  vendorId?: string;
+  count: number;
+  staged: StagedModel[];
+}
+
+export interface AdmitModelRequest {
+  name: string;
+  provider: string;
+  id: string;
+  vendorId?: string;
+  region?: string;
+  price?: {
+    inputPerMTok: number;
+    outputPerMTok: number;
+  };
+}

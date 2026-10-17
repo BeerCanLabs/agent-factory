@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import { DollarSign, AlertOctagon, TrendingUp, ShieldAlert, Cpu } from 'lucide-react';
-import type { AgentRecord } from '../api/types.js';
+import React, { useState, useEffect } from 'react';
+import { DollarSign, AlertOctagon, TrendingUp, ShieldAlert, Cpu, CheckCircle } from 'lucide-react';
+import type { AgentRecord, StoredModel } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
 import { factoryApi } from '../api/client.js';
 
@@ -16,6 +16,41 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
   const [newBudgetLimit, setNewBudgetLimit] = useState<number>(100);
   const [editingPeriod, setEditingPeriod] = useState<'daily' | 'monthly'>('monthly');
   const [isUpdating, setIsUpdating] = useState(false);
+
+  // Model token pricing state (Accountant §6.4, GAP-162)
+  const [models, setModels] = useState<StoredModel[]>([]);
+  const [editingModel, setEditingModel] = useState<string | null>(null);
+  const [modelInputPrice, setModelInputPrice] = useState<number>(0);
+  const [modelOutputPrice, setModelOutputPrice] = useState<number>(0);
+  const [pricingSuccess, setPricingSuccess] = useState<string | null>(null);
+
+  const loadModels = async () => {
+    try {
+      const res = await factoryApi.getDynamicModelCatalog();
+      setModels(res.models);
+    } catch (e: any) {
+      console.warn('Failed to load model pricing:', e.message);
+    }
+  };
+
+  useEffect(() => {
+    void loadModels();
+  }, []);
+
+  const handleUpdatePrice = async (name: string) => {
+    try {
+      await factoryApi.updateModelPricing(name, {
+        inputPerMTok: modelInputPrice,
+        outputPerMTok: modelOutputPrice,
+      });
+      setPricingSuccess(`Updated pricing for ${name}`);
+      setEditingModel(null);
+      void loadModels();
+      setTimeout(() => setPricingSuccess(null), 4000);
+    } catch (e: any) {
+      alert(`Pricing update failed: ${e.message}`);
+    }
+  };
 
   const isBuiltinAgent = (a: AgentRecord) => Boolean(
     a.isBuiltin || a.category === 'builtin' || a.budgetExempt || ['gatekeeper-ingress', 'keymaster', 'doctor', 'coach'].includes(a.id)
@@ -284,6 +319,112 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
                         <ShieldAlert className="w-3 h-3 text-red-500 dark:text-red-400" />
                         <span>Quarantine</span>
                       </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Accountant Office — Model Token Rates & Cost Allocation (§6.4, GAP-162) */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center space-x-2">
+              <Cpu className="w-4 h-4 text-emerald-500" />
+              <span>Office of the Accountant — Model Token Rates</span>
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Live token pricing per million tokens enforced at gatekeeper egress. Editable via REST API & MCP without factory redeployment.
+            </p>
+          </div>
+          {pricingSuccess && (
+            <span className="text-xs text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1.5 animate-fade-in">
+              <CheckCircle className="w-4 h-4" /> {pricingSuccess}
+            </span>
+          )}
+        </div>
+
+        <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-lg">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 text-slate-500 font-semibold text-[11px]">
+                <th className="py-2.5 px-3">Model Name</th>
+                <th className="py-2.5 px-3">Vendor</th>
+                <th className="py-2.5 px-3 text-right">Input ($/MTok)</th>
+                <th className="py-2.5 px-3 text-right">Output ($/MTok)</th>
+                <th className="py-2.5 px-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              {models.map((m) => {
+                const isEditing = editingModel === m.name;
+                return (
+                  <tr key={m.name} className="hover:bg-slate-50 dark:hover:bg-slate-800/30">
+                    <td className="py-2.5 px-3 font-semibold text-slate-900 dark:text-white">
+                      {m.name}
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                        {m.vendorId ?? m.provider}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3 text-right font-mono">
+                      {isEditing ? (
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={modelInputPrice}
+                          onChange={(e) => setModelInputPrice(parseFloat(e.target.value) || 0)}
+                          className="w-20 px-2 py-0.5 text-xs bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded text-right font-mono"
+                        />
+                      ) : (
+                        <span>${m.price?.inputPerMTok.toFixed(2) ?? '—'}</span>
+                      )}
+                    </td>
+                    <td className="py-2.5 px-3 text-right font-mono">
+                      {isEditing ? (
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={modelOutputPrice}
+                          onChange={(e) => setModelOutputPrice(parseFloat(e.target.value) || 0)}
+                          className="w-20 px-2 py-0.5 text-xs bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded text-right font-mono"
+                        />
+                      ) : (
+                        <span>${m.price?.outputPerMTok.toFixed(2) ?? '—'}</span>
+                      )}
+                    </td>
+                    <td className="py-2.5 px-3 text-right">
+                      {isEditing ? (
+                        <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            onClick={() => void handleUpdatePrice(m.name)}
+                            className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium text-[11px]"
+                          >
+                            Save
+                          </button>
+                          <button
+                            onClick={() => setEditingModel(null)}
+                            className="px-2 py-0.5 text-slate-500 hover:text-slate-700 text-[11px]"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setEditingModel(m.name);
+                            setModelInputPrice(m.price?.inputPerMTok ?? 0);
+                            setModelOutputPrice(m.price?.outputPerMTok ?? 0);
+                          }}
+                          className="px-2 py-0.5 text-emerald-600 hover:underline font-medium text-[11px]"
+                        >
+                          Edit Pricing
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );
