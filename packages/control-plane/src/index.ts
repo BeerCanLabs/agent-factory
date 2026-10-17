@@ -203,6 +203,7 @@ const state: FactoryState = {
   publicBaseUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
   publicUrl: process.env.FACTORY_PUBLIC_URL || process.env.FACTORY_URL || 'http://control-plane.factory.internal:8088',
   gatekeeperEgressUrl: process.env.FACTORY_GATEKEEPER_EGRESS_URL,
+  gatekeeperEgressToken: process.env.FACTORY_GATEKEEPER_EGRESS_TOKEN,
   gatekeeperEgressHeldSecrets: new Set((process.env.FACTORY_GATEKEEPER_EGRESS_HELD_SECRETS ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
   idleMs: IDLE_MS,
   idleTimers: new Map(),

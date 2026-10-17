@@ -54,7 +54,7 @@ import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
 import { AI_PROVIDER_TEMPLATES } from '@beercanlabs/factory-contract';
-import { discoverVendorModels, resolveModelReference } from '@beercanlabs/factory-executive';
+import { resolveModelReference, type DiscoveredModel } from '@beercanlabs/factory-executive';
 import { ModelStore, type StoredModel, type StagedModel } from './models.js';
 
 export type FactoryState = {
@@ -117,6 +117,8 @@ export type FactoryState = {
   publicUrl?: string;
   /** URL agents use to reach the gatekeeper-egress; handed to every run as FACTORY_GATEKEEPER_EGRESS_URL. */
   gatekeeperEgressUrl?: string;
+  /** Bearer the control plane presents to the gatekeeper-egress for vendor discovery. Never a provider key. */
+  gatekeeperEgressToken?: string;
   /** Max wall-clock per run before it is stopped as TIMED_OUT. 0 disables. */
   idleMs: number;
   idleTimers: Map<string, ReturnType<typeof setTimeout>>;
@@ -409,6 +411,96 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method ${String(method)}` } };
 }
 
+type VendorTarget = { upstream: string; adapter: string; discoveryPath?: string; secretName: string };
+
+/** Registered ai-provider, else a built-in template. HTTPS only. The secret name is held by the gatekeeper-egress. */
+function vendorTarget(state: FactoryState, vendorId: string): VendorTarget | { error: string; message?: string } {
+  let upstream: string | undefined;
+  let adapter = 'openAiCompatible';
+  let discoveryPath: string | undefined;
+  const sys = state.systems?.get(vendorId);
+  if (sys && sys.kind === 'ai-provider') {
+    upstream = sys.upstream;
+    if (sys.aiProvider) {
+      adapter = sys.aiProvider.adapter;
+      discoveryPath = sys.aiProvider.discoveryPath;
+    }
+  }
+  if (!upstream && AI_PROVIDER_TEMPLATES[vendorId]) {
+    const tmpl = AI_PROVIDER_TEMPLATES[vendorId];
+    upstream = tmpl.upstream;
+    adapter = tmpl.adapter;
+    discoveryPath = tmpl.discoveryPath;
+  }
+  if (!upstream) return { error: 'invalid_request', message: 'vendorId must match a registered ai-provider system or built-in template' };
+  try {
+    if (new URL(upstream).protocol !== 'https:') return { error: 'invalid_upstream', message: 'upstream must be an https URL' };
+  } catch {
+    return { error: 'invalid_upstream', message: 'upstream must be a valid URL' };
+  }
+  const secretName = AI_PROVIDER_TEMPLATES[vendorId]?.heldSecret
+    ?? (adapter === 'anthropicMessages' ? 'ANTHROPIC_API_KEY' : adapter === 'vertexGemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY');
+  return { upstream, adapter, discoveryPath, secretName };
+}
+
+/**
+ * S1: the control plane never reads a provider key. The gatekeeper-egress holds it and calls the vendor.
+ * Returns model ids only.
+ */
+async function discoverViaEgress(state: FactoryState, target: VendorTarget): Promise<DiscoveredModel[]> {
+  const base = state.gatekeeperEgressUrl?.replace(/\/$/, '');
+  const token = state.gatekeeperEgressToken;
+  if (!base || !token) {
+    const err = new Error('vendor discovery is not configured');
+    (err as Error & { status?: number }).status = 503;
+    throw err;
+  }
+  const res = await fetch(`${base}/internal/vendor-models`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      upstream: target.upstream,
+      adapter: target.adapter,
+      discoveryPath: target.discoveryPath,
+      secretName: target.secretName,
+    }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  const body = (await res.json().catch(() => ({}))) as { models?: DiscoveredModel[]; error?: string };
+  if (!res.ok || !Array.isArray(body.models)) {
+    const err = new Error(body.error === 'credential_unbound' ? 'credential_unbound' : 'discovery_failed');
+    (err as Error & { status?: number }).status = res.status === 503 ? 503 : 502;
+    throw err;
+  }
+  return body.models;
+}
+
+function stageDiscovered(state: FactoryState, vendorId: string, discovered: DiscoveredModel[], actor: string): StagedModel[] {
+  const staged: StagedModel[] = discovered.map((d) => {
+    const ref = resolveModelReference(d.id);
+    return {
+      vendorId,
+      rawId: d.id,
+      displayName: d.name ?? d.id,
+      discoveredAt: new Date().toISOString(),
+      suggestedFriendlyName: ref.friendlyName,
+      suggestedPrice: ref.price,
+    };
+  });
+  if (state.modelStore) {
+    state.modelStore.stageDiscovered(staged);
+    state.modelCatalog = state.modelStore.toEgressCatalog();
+  }
+  state.ledger.append({
+    action: 'MODELS_DISCOVERED',
+    actor,
+    vendorId,
+    count: staged.length,
+    timestamp: new Date().toISOString(),
+  });
+  return staged;
+}
+
 async function dispatchTool(state: FactoryState, name: string, args: Record<string, string>, principal: Principal): Promise<unknown> {
   const actor = principal.actor;
   if (name === 'list_agents') return [...state.agents.values()];
@@ -426,90 +518,15 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'scan_vendor_models') {
     const vendorId = args.vendorId;
     if (!vendorId) return { error: 'vendorId is required' };
-    let upstream: string | undefined;
-    let adapter = 'openAiCompatible';
-    let discoveryPath: string | undefined;
-
-    if (state.systems) {
-      const sys = state.systems.get(vendorId);
-      if (sys && sys.kind === 'ai-provider') {
-        upstream = sys.upstream;
-        if (sys.aiProvider) {
-          adapter = sys.aiProvider.adapter;
-          discoveryPath = sys.aiProvider.discoveryPath;
-        }
-      }
-    }
-
-    if (!upstream && AI_PROVIDER_TEMPLATES[vendorId]) {
-      const tmpl = AI_PROVIDER_TEMPLATES[vendorId];
-      upstream = tmpl.upstream;
-      adapter = tmpl.adapter;
-      discoveryPath = tmpl.discoveryPath;
-    }
-
-    if (!upstream) return { error: `vendor ${vendorId} not found in systems or templates` };
-
+    const target = vendorTarget(state, vendorId);
+    if ('error' in target) return target;
     try {
-      const parsed = new URL(upstream);
-      if (parsed.protocol !== 'https:') {
-        return { error: 'invalid_upstream', message: 'upstream must be an https URL' };
-      }
-    } catch {
-      return { error: 'invalid_upstream', message: 'upstream must be a valid URL' };
-    }
-
-    let apiKey: string | undefined;
-    const heldSecret = AI_PROVIDER_TEMPLATES[vendorId]?.heldSecret ?? (adapter === 'openAiCompatible' ? 'OPENAI_API_KEY' : undefined);
-    const secretCandidates = [heldSecret, `shared/${vendorId}/api-key`, `shared/${vendorId}/service-account-key`].filter(Boolean) as string[];
-
-    if (state.providers && state.providers.length > 0) {
-      const bound = await bindSecrets(secretCandidates, state.providers);
-      if (bound.ok) {
-        for (const s of secretCandidates) {
-          if (bound.env[s]) {
-            apiKey = bound.env[s];
-            break;
-          }
-        }
-      }
-    }
-    if (!apiKey) {
-      for (const s of secretCandidates) {
-        if (process.env[s]) {
-          apiKey = process.env[s];
-          break;
-        }
-      }
-    }
-
-    try {
-      const discovered = await discoverVendorModels({ upstream, adapter, discoveryPath, apiKey });
-      const staged: StagedModel[] = discovered.map((d) => {
-        const ref = resolveModelReference(d.id);
-        return {
-          vendorId,
-          rawId: d.id,
-          displayName: d.name ?? d.id,
-          discoveredAt: new Date().toISOString(),
-          suggestedFriendlyName: ref.friendlyName,
-          suggestedPrice: ref.price,
-        };
-      });
-      if (state.modelStore) {
-        state.modelStore.stageDiscovered(staged);
-        state.modelCatalog = state.modelStore.toEgressCatalog();
-      }
-      state.ledger.append({
-        action: 'MODELS_DISCOVERED',
-        actor,
-        vendorId,
-        count: staged.length,
-        timestamp: new Date().toISOString(),
-      });
+      const discovered = await discoverViaEgress(state, target);
+      const staged = stageDiscovered(state, vendorId, discovered, actor);
       return { ok: true, count: staged.length, staged };
     } catch (err: any) {
-      return { error: 'discovery_failed', message: `Model discovery failed for vendor ${vendorId}` };
+      const code = err?.message === 'credential_unbound' ? 'credential_unbound' : err?.status === 503 ? 'discovery_unavailable' : 'discovery_failed';
+      return { error: code, message: `Model discovery failed for vendor ${vendorId}` };
     }
   }
   if (name === 'admit_model') {
@@ -1574,105 +1591,21 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
 
-    let upstream: string | undefined;
-    let adapter = 'openAiCompatible';
-    let discoveryPath: string | undefined;
-
-    if (state.systems) {
-      const sys = state.systems.get(vendorId);
-      if (sys && sys.kind === 'ai-provider') {
-        upstream = sys.upstream;
-        if (sys.aiProvider) {
-          adapter = sys.aiProvider.adapter;
-          discoveryPath = sys.aiProvider.discoveryPath;
-        }
-      }
-    }
-
-    if (!upstream && AI_PROVIDER_TEMPLATES[vendorId]) {
-      const tmpl = AI_PROVIDER_TEMPLATES[vendorId];
-      upstream = tmpl.upstream;
-      adapter = tmpl.adapter;
-      discoveryPath = tmpl.discoveryPath;
-    }
-
-    if (!upstream) {
-      json(res, 400, { error: 'invalid_request', message: 'vendorId must match a registered ai-provider system or built-in template' });
+    const target = vendorTarget(state, vendorId);
+    if ('error' in target) {
+      json(res, 400, target);
       return;
     }
 
     try {
-      const parsedUrl = new URL(upstream);
-      if (parsedUrl.protocol !== 'https:') {
-        json(res, 400, { error: 'invalid_upstream', message: 'upstream must be an https URL' });
-        return;
-      }
-    } catch {
-      json(res, 400, { error: 'invalid_upstream', message: 'upstream must be a valid URL' });
-      return;
-    }
-
-    let apiKey: string | undefined;
-    const heldSecret = AI_PROVIDER_TEMPLATES[vendorId]?.heldSecret ?? (adapter === 'openAiCompatible' ? 'OPENAI_API_KEY' : undefined);
-    const secretCandidates = [heldSecret, `shared/${vendorId}/api-key`, `shared/${vendorId}/service-account-key`].filter(Boolean) as string[];
-
-    if (state.providers && state.providers.length > 0) {
-      const bound = await bindSecrets(secretCandidates, state.providers);
-      if (bound.ok) {
-        for (const s of secretCandidates) {
-          if (bound.env[s]) {
-            apiKey = bound.env[s];
-            break;
-          }
-        }
-      }
-    }
-    if (!apiKey) {
-      for (const s of secretCandidates) {
-        if (process.env[s]) {
-          apiKey = process.env[s];
-          break;
-        }
-      }
-    }
-
-    try {
-      const discovered = await discoverVendorModels({
-        upstream,
-        adapter,
-        discoveryPath,
-        apiKey,
-      });
-
-      const staged: StagedModel[] = discovered.map((d) => {
-        const ref = resolveModelReference(d.id);
-        return {
-          vendorId,
-          rawId: d.id,
-          displayName: d.name ?? d.id,
-          discoveredAt: new Date().toISOString(),
-          suggestedFriendlyName: ref.friendlyName,
-          suggestedPrice: ref.price,
-        };
-      });
-
-      if (state.modelStore) {
-        state.modelStore.stageDiscovered(staged);
-        state.modelCatalog = state.modelStore.toEgressCatalog();
-      }
-
-      state.ledger.append({
-        action: 'MODELS_DISCOVERED',
-        actor: principal.actor,
-        vendorId,
-        count: staged.length,
-        timestamp: new Date().toISOString(),
-      });
-
+      const discovered = await discoverViaEgress(state, target);
+      const staged = stageDiscovered(state, vendorId, discovered, principal.actor);
       json(res, 200, { ok: true, count: staged.length, staged });
       return;
     } catch (err: any) {
-      json(res, 502, { error: 'discovery_failed', message: `Model discovery failed for vendor ${vendorId}` });
+      const status = err?.status === 503 ? 503 : 502;
+      const error = err?.message === 'credential_unbound' ? 'credential_unbound' : status === 503 ? 'discovery_unavailable' : 'discovery_failed';
+      json(res, status, { error, message: `Model discovery failed for vendor ${vendorId}` });
       return;
     }
   }

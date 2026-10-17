@@ -167,6 +167,13 @@ resource "google_secret_manager_secret_iam_member" "gw_provider_secrets" {
   member    = "serviceAccount:${google_service_account.gatekeeper_egress.email}"
 }
 
+# The control plane presents this token to the egress for vendor discovery. It never reads provider keys (S1).
+resource "google_secret_manager_secret_iam_member" "cp_egress_token" {
+  secret_id = "${local.secrets_prefix}FACTORY_GATEKEEPER_EGRESS_TOKEN"
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.control_plane.email}"
+}
+
 resource "google_secret_manager_secret_iam_member" "gw_runtime_secrets" {
   for_each  = toset(["FACTORY_GATEKEEPER_EGRESS_TOKEN", "FACTORY_RUN_TOKEN_KEY"])
   secret_id = "${local.secrets_prefix}${each.value}"

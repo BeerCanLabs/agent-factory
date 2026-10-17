@@ -44,6 +44,7 @@ services:
       FACTORY_CALLBACK_SIGNING_KEY: dev-callback-signing-key
       FACTORY_PUBLIC_URL: http://control-plane:8088
       FACTORY_GATEKEEPER_EGRESS_URL: http://gatekeeper-egress:8081
+      FACTORY_GATEKEEPER_EGRESS_TOKEN: dev-gatekeeper-egress-token
       FACTORY_LEDGER_PATH: /data/ledger.jsonl
       # Local anchor only; not write-once. Production binds an Object Lock / immutable bucket.
       FACTORY_LEDGER_WORM_URI: file:///data/worm
@@ -83,6 +84,7 @@ services:
       <<: *factory-keys
       FACTORY_URL: http://control-plane:8088
       FACTORY_GATEKEEPER_EGRESS_TOKEN: dev-gatekeeper-egress-token
+      FACTORY_GATEKEEPER_EGRESS_HELD_SECRETS: ANTHROPIC_API_KEY,OPENAI_API_KEY
       FACTORY_GATEKEEPER_EGRESS_CONFIG: /config/gatekeeper-egress.json
     volumes:
       - ./gatekeeper-egress.json:/config/gatekeeper-egress.json:ro
