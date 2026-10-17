@@ -260,6 +260,23 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal((await wake('echo-agent', { model: 'bad model; rm -rf' })).status, 400);
     });
 
+    it('injects policy model into run and FACTORY_MODEL when wake does not specify a model (M2)', async () => {
+      state.policies.set('echo-agent', { routes: [], models: ['claude-haiku-5-5'] });
+      const run = (await wake('echo-agent')).json as RunBody;
+      assert.equal(run.model, 'claude-haiku-5-5');
+      assert.equal(state.runtime.started.at(-1)?.runEnv.FACTORY_MODEL, 'claude-haiku-5-5');
+      const ctx = (await request(port, `/api/v1/gatekeeper-egress/runs/${run.runId}`, { token: TOKENS.gatekeeperEgress })).json as { run: { model: string } };
+      assert.equal(ctx.run.model, 'claude-haiku-5-5');
+    });
+
+    it('falls back to factory default model when policy names no models (M2)', async () => {
+      const run = (await wake('echo-agent')).json as RunBody;
+      assert.equal(run.model, 'claude-haiku-4-5');
+      assert.equal(state.runtime.started.at(-1)?.runEnv.FACTORY_MODEL, 'claude-haiku-4-5');
+      const ctx = (await request(port, `/api/v1/gatekeeper-egress/runs/${run.runId}`, { token: TOKENS.gatekeeperEgress })).json as { run: { model: string } };
+      assert.equal(ctx.run.model, 'claude-haiku-4-5');
+    });
+
     it('pre-flight never reads gatekeeper-held provider keys (S1, GAP-040)', async () => {
       const prevProviders = state.providers;
       const asked: string[] = [];
