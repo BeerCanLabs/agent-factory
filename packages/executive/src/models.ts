@@ -427,10 +427,53 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
         ...(req.stop ? { stopSequences: req.stop } : {}),
       };
 
+      const functionDeclarations: Array<{ name: string; description?: string; parameters?: Record<string, unknown> }> = [];
+      if (Array.isArray(req.tools)) {
+        for (const t of req.tools) {
+          if (!t || typeof t !== 'object') continue;
+          const toolObj = t as Record<string, unknown>;
+          if (toolObj.type === 'function' && toolObj.function && typeof toolObj.function === 'object') {
+            const fn = toolObj.function as { name?: unknown; description?: unknown; parameters?: unknown };
+            if (typeof fn.name === 'string') {
+              functionDeclarations.push({
+                name: fn.name,
+                ...(typeof fn.description === 'string' ? { description: fn.description } : {}),
+                parameters: (fn.parameters && typeof fn.parameters === 'object' ? fn.parameters : { type: 'object', properties: {} }) as Record<string, unknown>,
+              });
+            }
+          } else if (typeof toolObj.name === 'string') {
+            functionDeclarations.push({
+              name: toolObj.name,
+              ...(typeof toolObj.description === 'string' ? { description: toolObj.description } : {}),
+              parameters: (toolObj.parameters && typeof toolObj.parameters === 'object' ? toolObj.parameters : { type: 'object', properties: {} }) as Record<string, unknown>,
+            });
+          }
+        }
+      }
+
+      let toolConfig: Record<string, unknown> | undefined;
+      if (functionDeclarations.length > 0 && req.tool_choice !== undefined) {
+        if (req.tool_choice === 'auto') {
+          toolConfig = { functionCallingConfig: { mode: 'AUTO' } };
+        } else if (req.tool_choice === 'any' || req.tool_choice === 'required') {
+          toolConfig = { functionCallingConfig: { mode: 'ANY' } };
+        } else if (typeof req.tool_choice === 'object' && req.tool_choice !== null) {
+          const tc = req.tool_choice as Record<string, unknown>;
+          if (tc.type === 'function' && tc.function && typeof tc.function === 'object') {
+            const fnName = (tc.function as { name?: unknown }).name;
+            if (typeof fnName === 'string') {
+              toolConfig = { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [fnName] } };
+            }
+          }
+        }
+      }
+
       const payload = {
         contents,
         ...(systemParts.length ? { systemInstruction: { parts: systemParts } } : {}),
         ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
+        ...(functionDeclarations.length > 0 ? { tools: [{ functionDeclarations }] } : {}),
+        ...(toolConfig ? { toolConfig } : {}),
       };
 
       const url = `${endpoint(region).replace(/\/$/, '')}/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(region)}/publishers/google/models/${encodeURIComponent(entry.id)}:generateContent`;
@@ -459,18 +502,46 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
       }
 
       const b = (json ?? {}) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> }; finishReason?: string }>;
+        candidates?: Array<{
+          content?: {
+            parts?: Array<{
+              text?: unknown;
+              functionCall?: { name?: string; args?: unknown };
+            }>;
+          };
+          finishReason?: string;
+        }>;
         usageMetadata?: { promptTokenCount?: unknown; candidatesTokenCount?: unknown };
       };
       const first = b.candidates?.[0];
-      const content = (first?.content?.parts ?? []).map((p) => (typeof p.text === 'string' ? p.text : '')).join('');
-      const finishReason = VERTEX_GEMINI_FINISH[first?.finishReason ?? ''] ?? 'stop';
+      const textParts: string[] = [];
+      const toolCalls: ToolCall[] = [];
+      for (const p of first?.content?.parts ?? []) {
+        if (typeof p.text === 'string') textParts.push(p.text);
+        if (p.functionCall && typeof p.functionCall === 'object' && typeof p.functionCall.name === 'string') {
+          toolCalls.push({
+            id: `call_${Math.random().toString(36).slice(2, 10)}`,
+            type: 'function',
+            function: {
+              name: p.functionCall.name,
+              arguments: typeof p.functionCall.args === 'string' ? p.functionCall.args : JSON.stringify(p.functionCall.args ?? {}),
+            },
+          });
+        }
+      }
+      const content = textParts.join('');
+      const finishReason = toolCalls.length > 0 ? 'tool_calls' : (VERTEX_GEMINI_FINISH[first?.finishReason ?? ''] ?? 'stop');
       const u = b.usageMetadata;
       const usage =
         u && typeof u.promptTokenCount === 'number' && typeof u.candidatesTokenCount === 'number'
           ? { input: u.promptTokenCount, output: u.candidatesTokenCount }
           : null;
-      return { content, finishReason, usage };
+      return {
+        content,
+        finishReason,
+        usage,
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      };
     },
   };
 }
@@ -487,6 +558,48 @@ function toAnthropicMessages(req: ChatRequest) {
     if (last && last.role === m.role) last.content += `\n${m.content}`;
     else messages.push({ role: m.role, content: m.content });
   }
+
+  const tools: Array<{ name: string; description?: string; input_schema: Record<string, unknown> }> = [];
+  if (Array.isArray(req.tools)) {
+    for (const t of req.tools) {
+      if (!t || typeof t !== 'object') continue;
+      const toolObj = t as Record<string, unknown>;
+      if (toolObj.type === 'function' && toolObj.function && typeof toolObj.function === 'object') {
+        const fn = toolObj.function as { name?: unknown; description?: unknown; parameters?: unknown };
+        if (typeof fn.name === 'string') {
+          tools.push({
+            name: fn.name,
+            ...(typeof fn.description === 'string' ? { description: fn.description } : {}),
+            input_schema: (fn.parameters && typeof fn.parameters === 'object' ? fn.parameters : { type: 'object', properties: {} }) as Record<string, unknown>,
+          });
+        }
+      } else if (typeof toolObj.name === 'string') {
+        tools.push({
+          name: toolObj.name,
+          ...(typeof toolObj.description === 'string' ? { description: toolObj.description } : {}),
+          input_schema: (toolObj.parameters && typeof toolObj.parameters === 'object' ? toolObj.parameters : { type: 'object', properties: {} }) as Record<string, unknown>,
+        });
+      }
+    }
+  }
+
+  let tool_choice: Record<string, unknown> | undefined;
+  if (tools.length > 0 && req.tool_choice !== undefined) {
+    if (req.tool_choice === 'auto') {
+      tool_choice = { type: 'auto' };
+    } else if (req.tool_choice === 'any' || req.tool_choice === 'required') {
+      tool_choice = { type: 'any' };
+    } else if (typeof req.tool_choice === 'object' && req.tool_choice !== null) {
+      const tc = req.tool_choice as Record<string, unknown>;
+      if (tc.type === 'function' && tc.function && typeof tc.function === 'object') {
+        const fnName = (tc.function as { name?: unknown }).name;
+        if (typeof fnName === 'string') {
+          tool_choice = { type: 'tool', name: fnName };
+        }
+      }
+    }
+  }
+
   return {
     max_tokens: req.maxTokens ?? 4096,
     messages,
@@ -494,21 +607,45 @@ function toAnthropicMessages(req: ChatRequest) {
     ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
     ...(req.topP !== undefined ? { top_p: req.topP } : {}),
     ...(req.stop ? { stop_sequences: req.stop } : {}),
+    ...(tools.length > 0 ? { tools } : {}),
+    ...(tool_choice ? { tool_choice } : {}),
   };
 }
 
 function fromAnthropicMessages(body: unknown): ChatResult {
   const b = (body ?? {}) as {
-    content?: Array<{ type?: string; text?: unknown }>;
+    content?: Array<{ type?: string; text?: unknown; id?: string; name?: string; input?: unknown }>;
     stop_reason?: string;
     usage?: Record<string, unknown>;
   };
-  const content = (b.content ?? []).map((c) => (typeof c.text === 'string' ? c.text : '')).join('');
+  const textParts: string[] = [];
+  const toolCalls: ToolCall[] = [];
+  for (const c of b.content ?? []) {
+    if (c.type === 'text' && typeof c.text === 'string') {
+      textParts.push(c.text);
+    } else if (c.type === 'tool_use' && typeof c.name === 'string') {
+      toolCalls.push({
+        id: typeof c.id === 'string' ? c.id : `call_${Math.random().toString(36).slice(2, 10)}`,
+        type: 'function',
+        function: {
+          name: c.name,
+          arguments: typeof c.input === 'string' ? c.input : JSON.stringify(c.input ?? {}),
+        },
+      });
+    }
+  }
+  const content = textParts.join('');
   const u = b.usage;
   const inTok = u && typeof u['input_tokens'] === 'number' ? (u['input_tokens'] as number) : undefined;
   const outTok = u && typeof u['output_tokens'] === 'number' ? (u['output_tokens'] as number) : undefined;
   const usage = inTok !== undefined && outTok !== undefined ? { input: inTok, output: outTok } : null;
-  return { content, finishReason: FINISH[b.stop_reason ?? ''] ?? 'stop', usage };
+  const finishReason = toolCalls.length > 0 ? 'tool_calls' : (FINISH[b.stop_reason ?? ''] ?? 'stop');
+  return {
+    content,
+    finishReason,
+    usage,
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
+  };
 }
 
 export function vertexAnthropic(opts: VertexOptions = {}): ModelAdapter {
@@ -632,13 +769,15 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
         console.error(`[gatekeeper-egress] ${secretName} credentials: ${err instanceof Error ? err.message : String(err)}`);
         throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no provider credentials');
       }
-      const payload = {
+      const payload: Record<string, unknown> = {
         model: entry.id,
         messages: req.messages,
         ...(req.maxTokens !== undefined ? { max_tokens: req.maxTokens } : {}),
         ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
         ...(req.topP !== undefined ? { top_p: req.topP } : {}),
         ...(req.stop ? { stop: req.stop } : {}),
+        ...(req.tools !== undefined ? { tools: req.tools } : {}),
+        ...(req.tool_choice !== undefined ? { tool_choice: req.tool_choice } : {}),
       };
       let res: Response;
       try {
@@ -666,17 +805,48 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
         throw new ModelUpstreamError(502, 'upstream_error', message, res.status);
       }
       const b = (json ?? {}) as {
-        choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }>;
+        choices?: Array<{
+          message?: {
+            content?: unknown;
+            tool_calls?: Array<{
+              id?: unknown;
+              type?: unknown;
+              function?: { name?: unknown; arguments?: unknown };
+            }>;
+          };
+          finish_reason?: string;
+        }>;
         usage?: Record<string, unknown>;
       };
       const first = b.choices?.[0];
       const content = typeof first?.message?.content === 'string' ? first.message.content : '';
-      const finishReason = typeof first?.finish_reason === 'string' ? first.finish_reason : 'stop';
+      const toolCalls: ToolCall[] = [];
+      if (Array.isArray(first?.message?.tool_calls)) {
+        for (const tc of first.message.tool_calls) {
+          const fn = tc?.function;
+          if (typeof fn?.name === 'string') {
+            toolCalls.push({
+              id: typeof tc.id === 'string' ? tc.id : `call_${Math.random().toString(36).slice(2, 10)}`,
+              type: 'function',
+              function: {
+                name: fn.name,
+                arguments: typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments ?? {}),
+              },
+            });
+          }
+        }
+      }
+      const finishReason = toolCalls.length > 0 ? 'tool_calls' : (typeof first?.finish_reason === 'string' ? first.finish_reason : 'stop');
       const u = b.usage;
       const inTok = u && typeof u['prompt_tokens'] === 'number' ? (u['prompt_tokens'] as number) : undefined;
       const outTok = u && typeof u['completion_tokens'] === 'number' ? (u['completion_tokens'] as number) : undefined;
       const usage = inTok !== undefined && outTok !== undefined ? { input: inTok, output: outTok } : null;
-      return { content, finishReason, usage };
+      return {
+        content,
+        finishReason,
+        usage,
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      };
     },
   };
 }

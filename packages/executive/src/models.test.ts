@@ -328,5 +328,167 @@ describe('Vertex AI and API-key model adapters (M1–M3)', () => {
       assert.ok(defaults[key], `defaultModelAdapters includes ${key}`);
     }
   });
+
+  it('translates tools and parses tool_calls across OpenAI/xAI, Anthropic, and Google Gemini', async () => {
+    const { openAiCompatible, anthropicMessages, vertexGemini } = await import('./models.js');
+
+    const TOOL_REQ: ChatRequest = {
+      messages: [{ role: 'user', content: 'What is the weather in Seattle?' }],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'get_weather',
+            description: 'Get weather forecast',
+            parameters: {
+              type: 'object',
+              properties: { location: { type: 'string' } },
+              required: ['location'],
+            },
+          },
+        },
+      ],
+      tool_choice: 'required',
+    };
+
+    // 1. OpenAI / xAI (openAiCompatible)
+    let openaiBody: Record<string, unknown> | undefined;
+    const openai = openAiCompatible({
+      apiKey: async () => 'test-key',
+      endpoint: 'https://api.openai.com',
+      fetch: (async (_url: string, init: RequestInit) => {
+        openaiBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: 'call_oa1',
+                      type: 'function',
+                      function: { name: 'get_weather', arguments: '{"location":"Seattle"}' },
+                    },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+            usage: { prompt_tokens: 15, completion_tokens: 8 },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    const openaiRes = await openai.complete({ provider: 'openai', id: 'gpt-4o' }, TOOL_REQ);
+    assert.deepEqual(openaiRes.toolCalls, [
+      {
+        id: 'call_oa1',
+        type: 'function',
+        function: { name: 'get_weather', arguments: '{"location":"Seattle"}' },
+      },
+    ]);
+    assert.equal(openaiRes.finishReason, 'tool_calls');
+    assert.deepEqual(openaiBody?.tools, TOOL_REQ.tools);
+    assert.equal(openaiBody?.tool_choice, 'required');
+
+    // 2. Anthropic (anthropicMessages)
+    let anthropicBody: Record<string, unknown> | undefined;
+    const anthropic = anthropicMessages({
+      apiKey: async () => 'sk-ant-test',
+      endpoint: 'https://api.anthropic.com',
+      fetch: (async (_url: string, init: RequestInit) => {
+        anthropicBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            content: [
+              { type: 'text', text: 'Checking the forecast...' },
+              { type: 'tool_use', id: 'toolu_123', name: 'get_weather', input: { location: 'Seattle' } },
+            ],
+            stop_reason: 'tool_use',
+            usage: { input_tokens: 18, output_tokens: 12 },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    const anthropicRes = await anthropic.complete({ provider: 'anthropic', id: 'claude-3-7-sonnet' }, TOOL_REQ);
+    assert.equal(anthropicRes.content, 'Checking the forecast...');
+    assert.equal(anthropicRes.finishReason, 'tool_calls');
+    assert.deepEqual(anthropicRes.toolCalls, [
+      {
+        id: 'toolu_123',
+        type: 'function',
+        function: { name: 'get_weather', arguments: '{"location":"Seattle"}' },
+      },
+    ]);
+    assert.deepEqual(anthropicBody?.tools, [
+      {
+        name: 'get_weather',
+        description: 'Get weather forecast',
+        input_schema: {
+          type: 'object',
+          properties: { location: { type: 'string' } },
+          required: ['location'],
+        },
+      },
+    ]);
+    assert.deepEqual(anthropicBody?.tool_choice, { type: 'any' });
+
+    // 3. Google Gemini (vertexGemini)
+    let geminiBody: Record<string, unknown> | undefined;
+    const gemini = vertexGemini({
+      project: 'gcp-proj-1',
+      accessToken: async () => 'ya29-token',
+      endpoint: (r) => `https://${r}.vertex.test`,
+      fetch: (async (_url: string, init: RequestInit) => {
+        geminiBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { functionCall: { name: 'get_weather', args: { location: 'Seattle' } } },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+            usageMetadata: { promptTokenCount: 14, candidatesTokenCount: 6 },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    const geminiRes = await gemini.complete({ provider: 'vertex-ai', id: 'gemini-2.5-pro' }, TOOL_REQ);
+    assert.equal(geminiRes.finishReason, 'tool_calls');
+    assert.equal(geminiRes.toolCalls?.length, 1);
+    assert.equal(geminiRes.toolCalls?.[0].function.name, 'get_weather');
+    assert.equal(geminiRes.toolCalls?.[0].function.arguments, '{"location":"Seattle"}');
+    assert.deepEqual(geminiBody?.tools, [
+      {
+        functionDeclarations: [
+          {
+            name: 'get_weather',
+            description: 'Get weather forecast',
+            parameters: {
+              type: 'object',
+              properties: { location: { type: 'string' } },
+              required: ['location'],
+            },
+          },
+        ],
+      },
+    ]);
+    assert.deepEqual(geminiBody?.toolConfig, {
+      functionCallingConfig: { mode: 'ANY' },
+    });
+  });
 });
+
 
