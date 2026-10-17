@@ -103,6 +103,7 @@ locals {
     cp_from_gw        = [aws_security_group.control_plane.id, 8088, aws_security_group.gatekeeper_egress.id, "gatekeeper-egress run context + ledger"]
     cp_from_dm        = [aws_security_group.control_plane.id, 8088, aws_security_group.gatekeeper_ingress.id, "gatekeeper-ingress wake/handoff"]
     gw_from_ag        = [aws_security_group.gatekeeper_egress.id, 8081, aws_security_group.agents.id, "agent egress"]
+    gw_from_cp        = [aws_security_group.gatekeeper_egress.id, 8081, aws_security_group.control_plane.id, "control plane model discovery"]
     dm_from_cp        = [aws_security_group.gatekeeper_ingress.id, 8090, aws_security_group.control_plane.id, "presence"]
     efs_from_cp       = [aws_security_group.efs.id, 2049, aws_security_group.control_plane.id, "ledger volume"]
     ep_from_vpc       = [aws_security_group.endpoints.id, 443, "vpc", "AWS APIs via endpoints"]
