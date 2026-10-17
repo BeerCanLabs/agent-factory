@@ -145,7 +145,7 @@ export function toConverse(req: ChatRequest): ConverseBody {
   };
 
   let toolConfig: ConverseBody['toolConfig'] | undefined;
-  if (req.tools && Array.isArray(req.tools) && req.tools.length > 0) {
+  if (req.tool_choice !== 'none' && req.tools && Array.isArray(req.tools) && req.tools.length > 0) {
     const converseTools: NonNullable<ConverseBody['toolConfig']>['tools'] = [];
     for (const t of req.tools) {
       if (!t || typeof t !== 'object') continue;
@@ -428,7 +428,7 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
       };
 
       const functionDeclarations: Array<{ name: string; description?: string; parameters?: Record<string, unknown> }> = [];
-      if (Array.isArray(req.tools)) {
+      if (req.tool_choice !== 'none' && Array.isArray(req.tools)) {
         for (const t of req.tools) {
           if (!t || typeof t !== 'object') continue;
           const toolObj = t as Record<string, unknown>;
@@ -452,7 +452,9 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
       }
 
       let toolConfig: Record<string, unknown> | undefined;
-      if (functionDeclarations.length > 0 && req.tool_choice !== undefined) {
+      if (req.tool_choice === 'none') {
+        toolConfig = { functionCallingConfig: { mode: 'NONE' } };
+      } else if (functionDeclarations.length > 0 && req.tool_choice !== undefined) {
         if (req.tool_choice === 'auto') {
           toolConfig = { functionCallingConfig: { mode: 'AUTO' } };
         } else if (req.tool_choice === 'any' || req.tool_choice === 'required') {
@@ -549,7 +551,7 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
 // ---------------------------------------------------------------------------------------------
 // vertex-anthropic & anthropic (Claude Messages API on Vertex AI or direct api.anthropic.com)
 
-function toAnthropicMessages(req: ChatRequest) {
+export function toAnthropicMessages(req: ChatRequest) {
   const system = req.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
   const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   for (const m of req.messages) {
@@ -560,7 +562,7 @@ function toAnthropicMessages(req: ChatRequest) {
   }
 
   const tools: Array<{ name: string; description?: string; input_schema: Record<string, unknown> }> = [];
-  if (Array.isArray(req.tools)) {
+  if (req.tool_choice !== 'none' && Array.isArray(req.tools)) {
     for (const t of req.tools) {
       if (!t || typeof t !== 'object') continue;
       const toolObj = t as Record<string, unknown>;
@@ -584,7 +586,7 @@ function toAnthropicMessages(req: ChatRequest) {
   }
 
   let tool_choice: Record<string, unknown> | undefined;
-  if (tools.length > 0 && req.tool_choice !== undefined) {
+  if (req.tool_choice !== 'none' && tools.length > 0 && req.tool_choice !== undefined) {
     if (req.tool_choice === 'auto') {
       tool_choice = { type: 'auto' };
     } else if (req.tool_choice === 'any' || req.tool_choice === 'required') {

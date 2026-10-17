@@ -489,6 +489,108 @@ describe('Vertex AI and API-key model adapters (M1–M3)', () => {
       functionCallingConfig: { mode: 'ANY' },
     });
   });
+
+  it('honors tool_choice: "none" across providers by suppressing tool declarations or enforcing mode NONE', async () => {
+    const { openAiCompatible, anthropicMessages, toAnthropicMessages, vertexGemini, toConverse } = await import('./models.js');
+
+    const NONE_REQ: ChatRequest = {
+      messages: [{ role: 'user', content: 'What is 2 + 2?' }],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'calculate',
+            description: 'Calculator',
+            parameters: { type: 'object', properties: { expr: { type: 'string' } } },
+          },
+        },
+      ],
+      tool_choice: 'none',
+    };
+
+    // 1. Bedrock Converse (toConverse) omits toolConfig completely
+    const converseBody = toConverse(NONE_REQ);
+    assert.equal(converseBody.toolConfig, undefined);
+
+    // 2. Anthropic (toAnthropicMessages / anthropicMessages) omits tools and tool_choice
+    const anthropicMsg = toAnthropicMessages(NONE_REQ);
+    assert.equal((anthropicMsg as Record<string, unknown>).tools, undefined);
+    assert.equal((anthropicMsg as Record<string, unknown>).tool_choice, undefined);
+
+    let anthropicBody: Record<string, unknown> | undefined;
+    const anthropic = anthropicMessages({
+      apiKey: async () => 'sk-ant-test',
+      endpoint: 'https://api.anthropic.com',
+      fetch: (async (_url: string, init: RequestInit) => {
+        anthropicBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            content: [{ type: 'text', text: '4' }],
+            stop_reason: 'end_turn',
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+    const antRes = await anthropic.complete({ provider: 'anthropic', id: 'claude-3-7-sonnet' }, NONE_REQ);
+    assert.equal(antRes.content, '4');
+    assert.equal(antRes.finishReason, 'stop');
+    assert.equal(antRes.toolCalls, undefined);
+    assert.equal(anthropicBody?.tools, undefined);
+    assert.equal(anthropicBody?.tool_choice, undefined);
+
+    // 3. Google Gemini (vertexGemini) omits tools and sets toolConfig.functionCallingConfig.mode = 'NONE'
+    let geminiBody: Record<string, unknown> | undefined;
+    const gemini = vertexGemini({
+      project: 'gcp-proj-1',
+      accessToken: async () => 'ya29-token',
+      endpoint: (r) => `https://${r}.vertex.test`,
+      fetch: (async (_url: string, init: RequestInit) => {
+        geminiBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: { parts: [{ text: '4' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+    const gemRes = await gemini.complete({ provider: 'vertex-ai', id: 'gemini-2.5-pro' }, NONE_REQ);
+    assert.equal(gemRes.content, '4');
+    assert.equal(gemRes.finishReason, 'stop');
+    assert.equal(gemRes.toolCalls, undefined);
+    assert.equal(geminiBody?.tools, undefined);
+    assert.deepEqual(geminiBody?.toolConfig, {
+      functionCallingConfig: { mode: 'NONE' },
+    });
+
+    // 4. OpenAI / xAI (openAiCompatible) passes tool_choice: 'none' and tools
+    let openaiBody: Record<string, unknown> | undefined;
+    const openai = openAiCompatible({
+      apiKey: async () => 'test-key',
+      endpoint: 'https://api.openai.com',
+      fetch: (async (_url: string, init: RequestInit) => {
+        openaiBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '4' }, finish_reason: 'stop' }],
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+    const oaiRes = await openai.complete({ provider: 'openai', id: 'gpt-4o' }, NONE_REQ);
+    assert.equal(oaiRes.content, '4');
+    assert.equal(oaiRes.finishReason, 'stop');
+    assert.equal(oaiRes.toolCalls, undefined);
+    assert.deepEqual(openaiBody?.tools, NONE_REQ.tools);
+    assert.equal(openaiBody?.tool_choice, 'none');
+  });
 });
 
 
