@@ -20,6 +20,9 @@ import type { Runtime } from './runtime.js';
 
 export type Outcome<T> = { status: number; body: T | { error: string; [k: string]: unknown } };
 
+/** The model a policy that names none grants (M2; default claude-haiku-4-5). */
+export const DEFAULT_FACTORY_MODEL = 'claude-haiku-4-5';
+
 /** What the lifecycle reads from the policy store: the budget it enforces and the routes it hands the run. */
 export type PropertyManagerPolicies = {
   get(agentId: string): { budgetUsd?: BudgetLimits; routes?: string[]; models?: string[] };
@@ -294,8 +297,6 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
   }
 
   const busy = activeRun(state, agentId);
-  const policyModel = (state.policies.has(agentId) ? state.policies.get(agentId).models?.[0] : undefined) || undefined;
-  const effectiveModel = opts.model || policyModel || state.defaultModel || 'claude-haiku-4-5';
   const run = state.runs.create({
     agentId,
     state: 'QUEUED',
@@ -305,7 +306,7 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
     callbackUrl: opts.callbackUrl,
     ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
     ...(opts.caller ? { caller: opts.caller } : {}),
-    ...(effectiveModel ? { model: effectiveModel } : {}),
+    ...(opts.model ? { model: opts.model } : {}),
   });
   record(state, run, 'RUN_QUEUED', opts.actor);
   if (busy) return { status: 202, body: run };
@@ -333,11 +334,14 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
   // P1: a started task is not a ready agent. Presence shows starting now and available only on markRunReady.
   await notifyGatekeeperIngress(state, agent.id, 'starting');
   const runToken = await state.runTokens.mint(run);
-  const effectiveModel = run.model || (state.policies.has(agent.id) ? state.policies.get(agent.id).models?.[0] : undefined) || state.defaultModel || 'claude-haiku-4-5';
-  if (!run.model && effectiveModel) {
-    run.model = effectiveModel;
-    state.runs.update(run.runId, { model: effectiveModel });
-  }
+  // M2: a run is pinned only if a caller requested it (run.model). If unpinned, inject policy's primary model
+  // (or factory default) as FACTORY_MODEL into the container environment without mutating run.model, so Gatekeeper
+  // Egress leaves pinnedModel unset and honors multi-model policy allowlists.
+  const effectiveModel =
+    run.model ||
+    (state.policies.has(agent.id) ? state.policies.get(agent.id).models?.[0] : undefined) ||
+    state.defaultModel ||
+    DEFAULT_FACTORY_MODEL;
   const runEnv: Record<string, string> = {
     FACTORY_RUN_ID: run.runId,
     FACTORY_RUN_TOKEN: runToken,
