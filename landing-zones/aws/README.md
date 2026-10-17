@@ -15,6 +15,28 @@ This landing zone provisions the reference Agent Factory architecture on AWS ECS
 - **Metrics:** an ADOT collector next to the control plane and gatekeeper-egress turns OTLP into CloudWatch metrics.
 - **Secrets:** Terraform generates every factory credential (one per caller→callee edge). Provider keys (`provider_secret_names`) are created empty for you to fill.
 
+### Security Groups & Traffic Matrix (`network.tf`)
+
+Security group rules implement the canonical traffic matrix (`../PATTERNS.md`):
+
+| Ingress Rule (`local.ingress`) | Destination SG | Port | Source SG / CIDR | Purpose |
+|---|---|---|---|---|
+| `cp_from_alb` | `control_plane` | 8088 | `alb` | API & MCP tools via ALB |
+| `garrison_from_alb` | `control_plane` | 3000 | `alb` | Garrison Web UI via ALB |
+| `cp_from_cp` | `control_plane` | 8088 | `control_plane` | Garrison/internal proxy loopback |
+| `cp_from_ag` | `control_plane` | 8088 | `agents` | Agent input/result/heartbeat/mailbox |
+| `cp_from_gw` | `control_plane` | 8088 | `gatekeeper_egress` | Run context, ledger sync, connection tokens, catalog sync |
+| `cp_from_dm` | `control_plane` | 8088 | `gatekeeper_ingress` | Ingress wake / handoff |
+| `gw_from_ag` | `gatekeeper_egress` | 8081 | `agents` | Agent LLM & API tool calls |
+| `gw_from_cp` | `gatekeeper_egress` | 8081 | `control_plane` | Control plane model discovery (`/internal/vendor-models`) |
+| `dm_from_cp` | `gatekeeper_ingress` | 8090 | `control_plane` | Typing activity indicator & presence |
+| `efs_from_cp` | `efs` | 2049 | `control_plane` | EFS ledger volume mount |
+| `ep_from_vpc` | `endpoints` | 443 | VPC CIDR | AWS PrivateLink VPC endpoints |
+
+- **Agents Egress:** Strictly bounded to `control_plane` (8088), `gatekeeper_egress` (8081), and VPC endpoints (443). Internet route table entry and NAT gateways are omitted (E1, E6).
+- **Services Egress:** `control_plane`, `gatekeeper_egress`, `gatekeeper_ingress`, and `alb` are permitted outbound `0.0.0.0/0` to reach model providers, Discord gateway, IdPs, and webhook targets.
+
+
 ## Prerequisites
 
 1. An AWS account with permissions to provision VPC, ECS, S3, Secrets Manager, and IAM roles.
