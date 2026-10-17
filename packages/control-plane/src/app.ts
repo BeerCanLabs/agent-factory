@@ -52,6 +52,7 @@ import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
+import { sanitizeOutputWithProvenance } from './provenance.js';
 
 export type FactoryState = {
 
@@ -859,7 +860,24 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 400, { error: 'status must be succeeded or failed' });
       return;
     }
-    const output = body.output === undefined ? undefined : JSON.parse(redactSecrets(JSON.stringify(body.output), state.secretValues));
+    let output = body.output === undefined ? undefined : JSON.parse(redactSecrets(JSON.stringify(body.output), state.secretValues));
+    if (output !== undefined) {
+      const runRows = state.ledger.query({ agent: run.agentId });
+      const currentRunRows = runRows.filter((r) => r.runId === run.runId);
+      const { sanitized, unverifiedClaims } = sanitizeOutputWithProvenance(output, currentRunRows);
+      if (unverifiedClaims.length > 0) {
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId: run.agentId,
+          runId: run.runId,
+          type: 'action',
+          action: 'UNVERIFIED_ACTION_CLAIM',
+          actor: SYSTEM.policy,
+          claims: unverifiedClaims,
+        });
+      }
+      output = sanitized;
+    }
     const done = await finishRun(state, run.runId, body.status === 'succeeded' ? 'DONE' : 'FAILED', {
       actor: `run:${run.agentId}`,
       result: output,

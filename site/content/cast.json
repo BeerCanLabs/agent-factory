@@ -25,14 +25,16 @@
     "style": "short",
     "shirt": "#2C4C7C"
    },
-   "rules": "A1, A2, E1, E6, S1",
+   "rules": "A1, A2, E1, E6, S1, AP1, AP2",
    "tag": "Nothing comes in or goes out without passing the desk.",
    "bio": "Stands at every door of the factory. The Gatekeeper checks who is knocking, wakes a sleeping agent when a message arrives, and is the only way an agent reaches the outside world. Agents never carry real credentials; the Gatekeeper adds them on the way out.",
    "does": [
     "Verifies a bearer token or an OIDC login and says who the caller is, with their roles",
     "Holds the Discord connection so a sleeping agent can still be reached",
     "Proxies every outbound agent call and injects the credential",
-    "Relays a refused wake, such as a budget block, back to the person"
+    "Relays a refused wake, such as a budget block, back to the person",
+    "Rejects raw pseudo-tool invocation syntax (HTTP 422) if native tools are declared (AP1)",
+    "Verifies external action claims against ledger receipts at turn boundaries before output commitment (AP2)"
    ],
    "dont": [
     "Decide what a caller may do. That is the Bouncer.",

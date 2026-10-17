@@ -250,6 +250,29 @@ export function routeProblem(r: Route, system = false, allowHttp = false): strin
 /** Model provider hosts (E5): reachable only through landing-zone provider routes, never as a factory system. */
 const MODEL_PROVIDER_HOST = /(^|\.)(api\.anthropic\.com|api\.openai\.com|api\.x\.ai|generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com|openai\.azure\.com)$|^bedrock(-runtime)?[.-]/;
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Detects pseudo-tool syntax leaks where an LLM simulates tool execution in raw text rather than emitting structured tool_calls.
+ * Returns the name of the leaked tool if detected, else undefined.
+ */
+export function detectToolSyntaxLeak(content: string, toolNames: string[]): string | undefined {
+  if (!content || toolNames.length === 0) return undefined;
+  for (const name of toolNames) {
+    const escaped = escapeRegex(name);
+    const invocationRegex = new RegExp(
+      `(?:\\b${escaped}\\s*[:(]\\s*\\{|<tool_use>\\s*<name>\\s*${escaped}\\s*</name>|\`\`\`[a-z]*\\s*${escaped}\\s*:\\s*\\{|["']name["']\\s*:\\s*["']${escaped}["'])`,
+      'i',
+    );
+    if (invocationRegex.test(content)) {
+      return name;
+    }
+  }
+  return undefined;
+}
+
 export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Server {
   for (const r of opts.routes) {
     const problem = routeProblem(r);
@@ -719,12 +742,49 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     }
     recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action, extra: { provider: entry.provider, upstreamModel: entry.id } });
 
+    const declaredToolNames: string[] = [];
+    if (Array.isArray(parsed.tools)) {
+      for (const t of parsed.tools) {
+        if (t && typeof t === 'object') {
+          const fn = (t as { function?: { name?: unknown }; name?: unknown }).function;
+          const fnName = fn && typeof fn.name === 'string' ? fn.name : (typeof (t as { name?: unknown }).name === 'string' ? (t as { name?: string }).name : undefined);
+          if (fnName) declaredToolNames.push(fnName);
+        }
+      }
+    }
+
+    if (declaredToolNames.length > 0 && (!result.toolCalls || result.toolCalls.length === 0)) {
+      const leakedTool = detectToolSyntaxLeak(result.content, declaredToolNames);
+      if (leakedTool) {
+        ledger(ctx, route, {
+          type: 'action',
+          action: 'MALFORMED_TOOL_SYNTAX',
+          model,
+          tool: leakedTool,
+          requestId,
+        });
+        return send(res, 422, {
+          error: 'malformed_tool_syntax',
+          message: `Model generated pseudo-tool syntax for '${leakedTool}' in content instead of structured tool_calls. Retry with explicit tool_choice.`,
+          tool: leakedTool,
+        });
+      }
+    }
+
     const body = {
       id: `chatcmpl-${requestId}`,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
       model,
-      choices: [{ index: 0, message: { role: 'assistant', content: result.content }, finish_reason: result.finishReason }],
+      choices: [{
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: result.content,
+          ...(result.toolCalls && result.toolCalls.length > 0 ? { tool_calls: result.toolCalls } : {}),
+        },
+        finish_reason: result.finishReason,
+      }],
       usage: { prompt_tokens: usage.input, completion_tokens: usage.output, total_tokens: usage.input + usage.output },
     };
     send(res, 200, body);

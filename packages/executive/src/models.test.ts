@@ -25,16 +25,85 @@ describe('model catalog and translation', () => {
       ],
     });
   });
+
+  it('translates tools and tool_choice to Bedrock Converse toolConfig', () => {
+    const body = toConverse({
+      messages: [{ role: 'user', content: 'post to x' }],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'publish_to_x',
+            description: 'Publish a post to X',
+            parameters: {
+              type: 'object',
+              properties: { content: { type: 'string' } },
+              required: ['content'],
+            },
+          },
+        },
+      ],
+      tool_choice: 'auto',
+    });
+    assert.deepEqual(body.toolConfig, {
+      tools: [
+        {
+          toolSpec: {
+            name: 'publish_to_x',
+            description: 'Publish a post to X',
+            inputSchema: {
+              json: {
+                type: 'object',
+                properties: { content: { type: 'string' } },
+                required: ['content'],
+              },
+            },
+          },
+        },
+      ],
+      toolChoice: { auto: {} },
+    });
+  });
 });
 
 describe('Converse response mapping', () => {
-  it('joins the text blocks, ignores the others, and reads usage', () => {
+  it('joins the text blocks, ignores unrecognized blocks, and reads usage', () => {
     const r = fromConverse({
-      output: { message: { content: [{ text: 'Hello, ' }, { toolUse: { name: 'x' } }, { text: 'Dale.' }] } },
+      output: { message: { content: [{ text: 'Hello, ' }, { unknownBlock: { foo: 'bar' } }, { text: 'Dale.' }] } },
       stopReason: 'end_turn',
       usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 },
     });
     assert.deepEqual(r, { content: 'Hello, Dale.', finishReason: 'stop', usage: { input: 12, output: 3 } });
+  });
+
+  it('extracts toolUse blocks into structured toolCalls with arguments and tool_calls finish_reason', () => {
+    const r = fromConverse({
+      output: {
+        message: {
+          content: [
+            { text: 'Let me check that.' },
+            { toolUse: { toolUseId: 'call_123', name: 'publish_to_x', input: { content: 'hello world' } } },
+          ],
+        },
+      },
+      stopReason: 'tool_use',
+      usage: { inputTokens: 20, outputTokens: 10 },
+    });
+    assert.deepEqual(r, {
+      content: 'Let me check that.',
+      finishReason: 'tool_calls',
+      usage: { input: 20, output: 10 },
+      toolCalls: [
+        {
+          id: 'call_123',
+          type: 'function',
+          function: {
+            name: 'publish_to_x',
+            arguments: JSON.stringify({ content: 'hello world' }),
+          },
+        },
+      ],
+    });
   });
 
   it('maps every Converse stop reason to an OpenAI finish_reason, defaulting to stop', () => {

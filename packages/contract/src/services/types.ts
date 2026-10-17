@@ -40,6 +40,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/gatekeeper', 'packages/auth', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/provenance.ts',
       'packages/gatekeeper/src/policy/index.ts',
       'packages/gatekeeper/src/run-token/index.ts',
       'packages/gatekeeper/src/egress/gatekeeper-egress.ts',

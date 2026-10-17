@@ -23,6 +23,14 @@ const TEST_PROVIDERS: Record<string, ConnectionProvider> = {
     authParams: {},
     refresh: false,
   },
+  x: {
+    kind: 'oauth-user',
+    provider: 'x',
+    authUrl: 'https://twitter.com/i/oauth2/authorize',
+    tokenUrl: 'https://api.twitter.com/2/oauth2/token',
+    clientSecret: 'X_OAUTH_CLIENT',
+    authParams: {},
+  },
   'google-service-account': {
     kind: 'jwt-bearer',
     provider: 'google-service-account',
@@ -289,5 +297,36 @@ describe('Keymaster connections (§6.11)', () => {
     assert.equal(tok.calls.length, 2);
     assert.equal(tok.calls[1].form.get('scope'), null);
     assert.notEqual(omnibus.accessToken, health.accessToken);
+  });
+
+  it('exchanges code and refreshes token for X connection with PKCE / refresh token', async () => {
+    const mem = memoryProvider({
+      X_OAUTH_CLIENT: JSON.stringify({ client_id: 'x-client-id', client_secret: 'x-client-secret' }),
+    });
+    const tok = fakeTokenEndpoint(() => ({
+      status: 200,
+      body: { access_token: 'x-access-token-1', refresh_token: 'x-refresh-token-1', expires_in: 7200, scope: 'tweet.read tweet.write' },
+    }));
+    const km = new ConnectionKeymaster({ providers: [mem.provider], fetch: tok.fn, getProvider: testResolver });
+    const out = await km.exchangeCode('x', { code: 'x-auth-code', redirectUri: 'https://f.example/api/v1/connections/x/callback' });
+    assert.equal(tok.calls[0].url, 'https://api.twitter.com/2/oauth2/token');
+    assert.equal(out.accessToken, 'x-access-token-1');
+    assert.equal(out.refreshToken, 'x-refresh-token-1');
+
+    await km.saveGrant('castle', {
+      provider: 'x',
+      clientRef: out.clientRef,
+      refreshToken: out.refreshToken!,
+      accessToken: out.accessToken,
+      expiresAt: out.expiresAt,
+      scopes: out.scopes,
+      obtainedAt: new Date().toISOString(),
+      grantedBy: 'dale',
+      status: 'active',
+    });
+
+    const active = await km.accessToken('castle', 'x');
+    assert.equal(active.ok, true);
+    if (active.ok) assert.equal(active.accessToken, 'x-access-token-1');
   });
 });
