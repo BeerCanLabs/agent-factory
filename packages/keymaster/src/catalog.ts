@@ -155,6 +155,28 @@ LinkedIn issues no refresh token to standard apps: the grant ends after 60 days.
 4. Paste \`{"client_id": "<Client ID>", "client_secret": "<Primary Client Secret>"}\` (both from the **Auth** tab) into the write-only field on this page and save. It is never shown again.`,
   },
   {
+    id: 'x',
+    title: 'X (Twitter) account (OAuth 2.0 consent)',
+    kind: 'oauth',
+    approved: null,
+    instructions: `1. Choose **Connect** (or **Reconnect**). You are sent to X's authorization page; the factory never sees your password.
+2. Sign in with the X account the agent should act for.
+3. Review the access X lists. It is exactly the scopes the agent declares (usually \`tweet.read tweet.write users.read offline.access\`). Choose **Authorize app**.
+4. X returns you to the factory, which stores the token for this agent only. Anything the agent posts in your name waits for your approval on the **Approvals** page first (E9).`,
+  },
+  {
+    id: 'x-oauth-client',
+    title: 'X (Twitter) OAuth 2.0 client (platform)',
+    kind: 'static',
+    approved: null,
+    instructions: `The factory's X app, shared by agents connecting an X account. Only needed once per factory.
+
+1. In the [X Developer Portal](https://developer.x.com/en/portal/dashboard), open your project app.
+2. Under **User authentication settings**, enable OAuth 2.0 with type **Web App**.
+3. Under **Callback URI / Redirect URL**, add \`<the factory's public URL>/api/v1/connections/x/callback\`.
+4. Paste \`{"client_id": "<Client ID>", "client_secret": "<Client Secret>"}\` into the write-only field on this page and save. It is never shown again.`,
+  },
+  {
     id: 'google-oauth-client',
     title: 'Google OAuth client (platform)',
     kind: 'static',

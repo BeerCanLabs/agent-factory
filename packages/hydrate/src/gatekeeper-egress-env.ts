@@ -44,6 +44,9 @@ export function gatekeeperEgressEnv(env: NodeJS.ProcessEnv): Record<string, stri
     CLOSING_CLIMB_BASE_URL: `${gw}/closing-climb`,
     // Keymaster LinkedIn connection; every write is held for the person's approval (E9).
     LINKEDIN_BASE_URL: `${gw}/linkedin`,
+    // Keymaster X connection; every write is held for the person's approval (E9).
+    X_BASE_URL: `${gw}/x`,
+    TWITTER_BASE_URL: `${gw}/x`,
     HOME_ASSISTANT_BASE_URL: `${gw}/home-assistant`,
   };
   // E10: every route the run's policy grants gets `<ROUTE_ID>_BASE_URL` (`github-git` -> `GITHUB_GIT_BASE_URL`), so a

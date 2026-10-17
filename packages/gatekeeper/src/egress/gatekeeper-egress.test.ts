@@ -5,7 +5,7 @@ import net from 'node:net';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import type { ApprovalOutcome } from '@beercanlabs/factory-bouncer';
-import { createGatekeeperEgress, type ControlClient, type Policy, type RunContext } from './gatekeeper-egress.js';
+import { createGatekeeperEgress, detectToolSyntaxLeak, type ControlClient, type Policy, type RunContext } from './gatekeeper-egress.js';
 import { ModelUpstreamError } from '@beercanlabs/factory-executive';
 import type { ProgressEvent } from '@beercanlabs/factory-inspector';
 
@@ -683,5 +683,25 @@ describe('§6.5 run progress: gatekeeper-egress reports each call it handles for
     await settle();
     assert.equal(sinkCalls, 1, 'progress adds at most one request at a time to the control plane');
     for (const ms of [failing, hungFirst, hungAfter]) assert.ok(ms < 1000, `5 calls took ${ms.toFixed(0)} ms`);
+  });
+});
+
+describe('Action Provenance & Tool Syntax Leak Detection (§6.16 AP1)', () => {
+  it('detects raw text tool invocations in various formats', () => {
+    const tools = ['publish_to_x', 'github_commit'];
+    assert.equal(detectToolSyntaxLeak('publish_to_x: {"content": "hello"}', tools), 'publish_to_x');
+    assert.equal(detectToolSyntaxLeak('publish_to_x({"content": "hello"})', tools), 'publish_to_x');
+    assert.equal(detectToolSyntaxLeak('```\npublish_to_x: {"content": "hello"}\n```', tools), 'publish_to_x');
+    assert.equal(detectToolSyntaxLeak('<tool_use><name>publish_to_x</name><input>{}</input></tool_use>', tools), 'publish_to_x');
+    assert.equal(detectToolSyntaxLeak('{"name": "publish_to_x", "parameters": {}}', tools), 'publish_to_x');
+    assert.equal(detectToolSyntaxLeak("github_commit: {'message': 'fix'}", tools), 'github_commit');
+  });
+
+  it('ignores benign text mentioning tools without call syntax', () => {
+    const tools = ['publish_to_x', 'github_commit'];
+    assert.equal(detectToolSyntaxLeak('I cannot publish_to_x because I need approval.', tools), undefined);
+    assert.equal(detectToolSyntaxLeak('The github_commit was not requested.', tools), undefined);
+    assert.equal(detectToolSyntaxLeak('', tools), undefined);
+    assert.equal(detectToolSyntaxLeak('hello world', []), undefined);
   });
 });

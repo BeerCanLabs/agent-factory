@@ -11,13 +11,31 @@ import { awsCredentialsFromEnv, signV4, type AwsCredentials } from './sigv4.js';
 export type CatalogEntry = { provider: string; id: string; region?: string; price?: Price };
 export type ModelCatalog = Record<string, CatalogEntry>;
 
+export type ToolCall = {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+};
+
 export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
-export type ChatRequest = { messages: ChatMessage[]; maxTokens?: number; temperature?: number; topP?: number; stop?: string[] };
+export type ChatRequest = {
+  messages: ChatMessage[];
+  maxTokens?: number;
+  temperature?: number;
+  topP?: number;
+  stop?: string[];
+  tools?: unknown[];
+  tool_choice?: unknown;
+};
 export type ChatResult = {
   content: string;
   /** OpenAI finish_reason: stop | length | content_filter | tool_calls */
   finishReason: string;
   usage: { input: number; output: number } | null;
+  toolCalls?: ToolCall[];
 };
 
 /** Upstream failure with the status the agent should see. `message` must not carry credentials. */
@@ -68,6 +86,12 @@ export function parseChatRequest(body: Record<string, unknown>): { ok: true; req
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
   const maxTokens = num(body.max_tokens) ?? num(body.max_completion_tokens);
   const stop = typeof body.stop === 'string' ? [body.stop] : Array.isArray(body.stop) ? body.stop.filter((s): s is string => typeof s === 'string') : undefined;
+  let tools: unknown[] | undefined;
+  if (body.tools !== undefined) {
+    if (!Array.isArray(body.tools)) return { ok: false, error: 'invalid_tools' };
+    tools = body.tools;
+  }
+  const toolChoice = body.tool_choice;
   return {
     ok: true,
     req: {
@@ -76,6 +100,8 @@ export function parseChatRequest(body: Record<string, unknown>): { ok: true; req
       ...(num(body.temperature) !== undefined ? { temperature: num(body.temperature) } : {}),
       ...(num(body.top_p) !== undefined ? { topP: num(body.top_p) } : {}),
       ...(stop?.length ? { stop } : {}),
+      ...(tools?.length ? { tools } : {}),
+      ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
     },
   };
 }
@@ -84,9 +110,21 @@ export function parseChatRequest(body: Record<string, unknown>): { ok: true; req
 // bedrock-converse
 
 type ConverseBody = {
-  messages: Array<{ role: 'user' | 'assistant'; content: Array<{ text: string }> }>;
+  messages: Array<{ role: 'user' | 'assistant'; content: Array<{ text?: string; toolUse?: unknown }> }>;
   system?: Array<{ text: string }>;
   inferenceConfig?: { maxTokens?: number; temperature?: number; topP?: number; stopSequences?: string[] };
+  toolConfig?: {
+    tools: Array<{
+      toolSpec: {
+        name: string;
+        description?: string;
+        inputSchema: {
+          json: unknown;
+        };
+      };
+    }>;
+    toolChoice?: Record<string, unknown>;
+  };
 };
 
 /** OpenAI messages → Bedrock Converse request. Consecutive same-role turns merge (Converse requires alternation). */
@@ -105,7 +143,69 @@ export function toConverse(req: ChatRequest): ConverseBody {
     ...(req.topP !== undefined ? { topP: req.topP } : {}),
     ...(req.stop ? { stopSequences: req.stop } : {}),
   };
-  return { messages, ...(system.length ? { system } : {}), ...(Object.keys(inferenceConfig).length ? { inferenceConfig } : {}) };
+
+  let toolConfig: ConverseBody['toolConfig'] | undefined;
+  if (req.tools && Array.isArray(req.tools) && req.tools.length > 0) {
+    const converseTools: NonNullable<ConverseBody['toolConfig']>['tools'] = [];
+    for (const t of req.tools) {
+      if (!t || typeof t !== 'object') continue;
+      const toolObj = t as Record<string, unknown>;
+      if (toolObj.type === 'function' && toolObj.function && typeof toolObj.function === 'object') {
+        const fn = toolObj.function as { name?: unknown; description?: unknown; parameters?: unknown };
+        if (typeof fn.name === 'string') {
+          converseTools.push({
+            toolSpec: {
+              name: fn.name,
+              ...(typeof fn.description === 'string' ? { description: fn.description } : {}),
+              inputSchema: {
+                json: fn.parameters && typeof fn.parameters === 'object' ? fn.parameters : { type: 'object', properties: {} },
+              },
+            },
+          });
+        }
+      } else if (typeof toolObj.name === 'string') {
+        converseTools.push({
+          toolSpec: {
+            name: toolObj.name,
+            ...(typeof toolObj.description === 'string' ? { description: toolObj.description } : {}),
+            inputSchema: {
+              json: toolObj.parameters && typeof toolObj.parameters === 'object' ? toolObj.parameters : { type: 'object', properties: {} },
+            },
+          },
+        });
+      }
+    }
+
+    if (converseTools.length > 0) {
+      let toolChoice: Record<string, unknown> | undefined;
+      if (req.tool_choice !== undefined) {
+        if (req.tool_choice === 'auto') {
+          toolChoice = { auto: {} };
+        } else if (req.tool_choice === 'any' || req.tool_choice === 'required') {
+          toolChoice = { any: {} };
+        } else if (typeof req.tool_choice === 'object' && req.tool_choice !== null) {
+          const tc = req.tool_choice as Record<string, unknown>;
+          if (tc.type === 'function' && tc.function && typeof tc.function === 'object') {
+            const fnName = (tc.function as { name?: unknown }).name;
+            if (typeof fnName === 'string') {
+              toolChoice = { tool: { name: fnName } };
+            }
+          }
+        }
+      }
+      toolConfig = {
+        tools: converseTools,
+        ...(toolChoice ? { toolChoice } : {}),
+      };
+    }
+  }
+
+  return {
+    messages,
+    ...(system.length ? { system } : {}),
+    ...(Object.keys(inferenceConfig).length ? { inferenceConfig } : {}),
+    ...(toolConfig ? { toolConfig } : {}),
+  };
 }
 
 const FINISH: Record<string, string> = {
@@ -118,11 +218,48 @@ const FINISH: Record<string, string> = {
 };
 
 export function fromConverse(body: unknown): ChatResult {
-  const b = (body ?? {}) as { output?: { message?: { content?: Array<{ text?: unknown }> } }; stopReason?: string; usage?: { inputTokens?: unknown; outputTokens?: unknown } };
-  const content = (b.output?.message?.content ?? []).map((c) => (typeof c.text === 'string' ? c.text : '')).join('');
+  const b = (body ?? {}) as {
+    output?: {
+      message?: {
+        content?: Array<{
+          text?: unknown;
+          toolUse?: {
+            toolUseId?: string;
+            name?: string;
+            input?: unknown;
+          };
+        }>;
+      };
+    };
+    stopReason?: string;
+    usage?: { inputTokens?: unknown; outputTokens?: unknown };
+  };
+  const content = (b.output?.message?.content ?? [])
+    .map((c) => (typeof c.text === 'string' ? c.text : ''))
+    .join('');
+  const toolCalls: ToolCall[] = [];
+  for (const c of b.output?.message?.content ?? []) {
+    if (c.toolUse && typeof c.toolUse === 'object') {
+      const tu = c.toolUse;
+      toolCalls.push({
+        id: tu.toolUseId ?? `call_${Math.random().toString(36).slice(2, 10)}`,
+        type: 'function',
+        function: {
+          name: tu.name ?? '',
+          arguments: typeof tu.input === 'string' ? tu.input : JSON.stringify(tu.input ?? {}),
+        },
+      });
+    }
+  }
   const u = b.usage;
   const usage = u && typeof u.inputTokens === 'number' && typeof u.outputTokens === 'number' ? { input: u.inputTokens, output: u.outputTokens } : null;
-  return { content, finishReason: FINISH[b.stopReason ?? ''] ?? 'stop', usage };
+  const finishReason = toolCalls.length > 0 ? 'tool_calls' : (FINISH[b.stopReason ?? ''] ?? 'stop');
+  return {
+    content,
+    finishReason,
+    usage,
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
+  };
 }
 
 export type BedrockConverseOptions = {
