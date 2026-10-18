@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Terminal,
   Cpu,
@@ -64,12 +64,50 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
       ]);
       setConvoPrompt('');
       onRefresh();
+      if (out.turnId) awaitReply(out.turnId);
     } catch (err: any) {
       setLogs((prev) => [...prev, `[ERROR] Failed to deliver turn: ${err.message}`]);
     } finally {
       setIsSendingConvo(false);
     }
   };
+
+  // AM2: turns awaiting the agent's answer, per agent, and how far this console has read each agent's replies.
+  const pendingTurns = useRef(new Map<string, { agentId: string; since: number }>());
+  const replyCursor = useRef(new Map<string, number>());
+  const awaitReply = (turnId: string) => pendingTurns.current.set(turnId, { agentId: agent.id, since: Date.now() });
+
+  // One poll loop for the agent on screen; it stops when the agent changes or the workbench closes.
+  useEffect(() => {
+    const agentId = agent.id;
+    const name = agent.name;
+    let busy = false;
+    const timer = setInterval(async () => {
+      const waiting = [...pendingTurns.current].filter(([, t]) => t.agentId === agentId);
+      if (!waiting.length || busy) return;
+      busy = true;
+      try {
+        const { replies } = await factoryApi.replies(agentId, replyCursor.current.get(agentId) ?? 0);
+        for (const r of replies) {
+          replyCursor.current.set(agentId, Math.max(replyCursor.current.get(agentId) ?? 0, r.seq));
+          if (pendingTurns.current.delete(r.turnId)) {
+            setLogs((prev) => [...prev, `[${r.at}] ${name} >> ${r.content}${r.footnote ? `  ${r.footnote}` : ''}`]);
+          }
+        }
+      } catch {
+        // keep waiting; a transient error is not the agent's answer
+      } finally {
+        busy = false;
+      }
+      for (const [turnId, t] of waiting) {
+        if (pendingTurns.current.has(turnId) && Date.now() - t.since > 180_000) {
+          pendingTurns.current.delete(turnId);
+          setLogs((prev) => [...prev, `[${new Date().toISOString()}] No reply from ${name} yet (it may answer on another channel, or not support console replies).`]);
+        }
+      }
+    }, 2_000);
+    return () => clearInterval(timer);
+  }, [agent.id, agent.name]);
 
   const handleRetire = async () => {
     if (!confirm(`Are you sure you want to begin Stage 1 Soft-Retirement for ${agent.name}? This will sever gatekeeper-ingress ingress and start a 7-day holding countdown.`)) {

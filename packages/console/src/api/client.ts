@@ -75,11 +75,16 @@ export const factoryApi = {
    * Send a conversation turn (GAP-177). The factory hands it to the agent's live run, or wakes the agent with it
    * when none is running (GAP-176). Agents read the turn's text from `content`.
    */
-  async converse(id: string, content: string): Promise<{ ok: boolean; woke?: boolean; runId?: string }> {
-    return request<{ ok: boolean; woke?: boolean; runId?: string }>(`/agents/${id}/conversation`, {
+  async converse(id: string, content: string): Promise<{ ok: boolean; woke?: boolean; runId?: string; turnId?: string }> {
+    return request<{ ok: boolean; woke?: boolean; runId?: string; turnId?: string }>(`/agents/${id}/conversation`, {
       method: 'POST',
       body: JSON.stringify({ content }),
     });
+  },
+
+  /** AM2: the agent's replies to your console turns, after sequence number `after`. Only yours. */
+  async replies(id: string, after = 0): Promise<{ replies: Array<{ seq: number; turnId: string; runId: string; content: string; footnote?: string; at: string }> }> {
+    return request(`/agents/${encodeURIComponent(id)}/replies?after=${after}`);
   },
 
   async wakeAgent(id: string, payload: Record<string, any> = {}): Promise<{ runId: string }> {

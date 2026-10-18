@@ -417,6 +417,14 @@ For interactive agents (e.g., Discord or Slack chatbots), agents often stay warm
 3. If a follow-up message arrives, reset your idle timer and handle the turn.
 4. When the idle window expires without further messages, call `write_result()` and exit `0` to scale back to zero.
 
+### Who is speaking, and where the reply goes (AM2)
+Every conversation turn the factory delivers (as the run's input or as a mailbox message) carries three fields that only the factory sets. Anything the sender wrote in their place is removed.
+- `caller`: the person speaking, as the factory verified them. `caller.actor` is their stable identity: the same person has the same `actor` whether they write in Discord or in the console. Key conversations by `caller.actor` (and your agent), never by channel.
+- `turnId`: this turn's id.
+- `replyTo`: where the answer goes.
+  - `{ "channel": "discord", "channelId": "..." }`: post the answer in that Discord channel.
+  - `{ "channel": "console" }`: send the answer back with `POST /api/v1/runs/${FACTORY_RUN_ID}/reply` and the body `{ "turnId": "...", "content": "..." }`, using your run token. The factory shows it only to the person who asked, adds the same no-tools footnote as Discord (AP3), and records a hash of it in the ledger.
+
 ### Egress to External APIs (e.g. Discord, Slack)
 Because cartridges operate inside a zero-trust VPC with no public IP or direct internet egress route, third-party API communication uses perimeter credential injection through the gatekeeper-egress:
 

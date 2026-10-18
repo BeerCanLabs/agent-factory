@@ -36,6 +36,7 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
   let cp: http.Server;
   let dir: string;
   let state: FactoryState;
+  let base: string;
   let api: (path: string, method?: string, token?: string, body?: unknown) => Promise<{ status: number; body: any }>;
 
   before(async () => {
@@ -68,6 +69,7 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     state.configs = await VersionedConfigStore.open(new FileConfigBackend(join(dir, 'config')));
     cp = createFactoryServer(state);
     const port = await listen(cp);
+    base = `http://127.0.0.1:${port}`;
     api = async (path, method = 'GET', token, body) => {
       const res = await fetch(`http://127.0.0.1:${port}${path}`, {
         method,
@@ -260,7 +262,81 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     assert.equal(rAuthorId.status, 202);
     const lastMsg = mailbox?.messages[mailbox.messages.length - 1];
     assert.ok(lastMsg);
-    assert.equal((lastMsg.payload as any).caller, undefined);
+    // AM2: the operator speaks as itself; the authorId it sent is not an identity.
+    assert.equal((lastMsg.payload as any).caller?.actor, 'token:operator');
+  });
+
+  /** The payload a conversation turn delivered: the woken run's input, or the last mailbox message. */
+  const delivered = (r: { body: any }): any =>
+    r.body.woke ? state.runs.get(r.body.runId)?.input : state.mailboxes?.get('ada')?.messages.at(-1)?.payload;
+
+  it('AM2 a console turn carries the signed-in person as caller, a factory turn id, and the console as reply address', async () => {
+    const r = await api('/api/v1/agents/ada/conversation', 'POST', OPERATOR, { content: 'hello', turnId: 'forged', replyTo: { channel: 'discord', channelId: '9' } });
+    assert.equal(r.status, 202, JSON.stringify(r.body));
+    assert.match(r.body.turnId, /^[0-9a-f-]{36}$/);
+    const p = delivered(r);
+    assert.equal(p.caller.actor, 'token:operator');
+    assert.equal(p.caller.provider, 'api', 'a service token speaks as an API client; a signed-in person as console');
+    assert.equal(p.turnId, r.body.turnId, 'the sender cannot set the turn id');
+    assert.deepEqual(p.replyTo, { channel: 'console' }, 'the sender cannot set the reply address');
+  });
+
+  it('AM2 a Discord turn carries the linked person and its channel as reply address', async () => {
+    state.identityLinks!.link('discord', '123456789', 'cloudflare:dale@example.com', 'admin', { name: 'Dale', roles: ['admin'] });
+    const r = await api('/api/v1/agents/ada/conversation', 'POST', INGRESS, {
+      input: { content: 'hi', channelId: '1490373419240521769', replyTo: { channel: 'console' } },
+      requestedBy: discord('123456789'),
+    });
+    assert.equal(r.status, 202, JSON.stringify(r.body));
+    const p = delivered(r);
+    assert.equal(p.caller.actor, 'cloudflare:dale@example.com');
+    assert.deepEqual(p.replyTo, { channel: 'discord', channelId: '1490373419240521769' });
+  });
+
+  it('AM2 a Discord message that wakes the agent is a turn with its channel as reply address; an operator cannot forge one', async () => {
+    state.identityLinks!.link('discord', '123456789', 'cloudflare:dale@example.com', 'admin', { name: 'Dale', roles: ['admin'] });
+    const fromDiscord = await wake(INGRESS, { input: { messageId: 'm-am2', content: 'hi', channelId: '555', turnId: 'x', replyTo: { channel: 'console' } }, requestedBy: discord('123456789') });
+    assert.equal(fromDiscord.status, 202, JSON.stringify(fromDiscord.body));
+    const input = state.runs.get(fromDiscord.body.runId)?.input as any;
+    assert.deepEqual(input.replyTo, { channel: 'discord', channelId: '555' });
+    assert.match(input.turnId, /^[0-9a-f-]{36}$/);
+
+    const job = await wake(OPERATOR, { input: { messageId: 'm-am2-op', turnId: 'forged', replyTo: { channel: 'discord', channelId: '1' } } });
+    assert.equal(job.status, 202);
+    const jobInput = state.runs.get(job.body.runId)?.input as any;
+    assert.equal(jobInput.turnId, undefined, 'an operator run is a job: no turn id');
+    assert.equal(jobInput.replyTo, undefined, 'and no reply address it could point anywhere');
+  });
+
+  it('AM2 the agent answers a console turn; only the person who asked reads the reply, and it is ledgered by hash', async () => {
+    const r = await api('/api/v1/agents/ada/conversation', 'POST', OPERATOR, { content: 'what is up?' });
+    assert.equal(r.status, 202);
+    const run = state.runs.list({ agentId: 'ada', active: true })[0];
+    assert.ok(run, 'a live run of ada');
+    const token = await state.runTokens.mint({ runId: run.runId, agentId: 'ada' });
+    const reply = (body: unknown, t = token) =>
+      fetch(`${base}/api/v1/runs/${run.runId}/reply`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${t}` }, body: JSON.stringify(body) });
+
+    assert.equal((await reply({ turnId: 'nope', content: 'x' })).status, 404, 'an unknown turn');
+    assert.equal((await reply({ turnId: r.body.turnId, content: '' })).status, 400, 'an empty reply');
+    assert.equal((await reply({ turnId: r.body.turnId, content: 'x' }, 'not-a-token')).status, 401);
+    const ok = await reply({ turnId: r.body.turnId, content: 'All quiet.' });
+    assert.equal(ok.status, 200, await ok.text());
+    assert.equal((await reply({ turnId: r.body.turnId, content: 'again' })).status, 404, 'one answer per turn');
+
+    const mine = await api('/api/v1/agents/ada/replies?after=0', 'GET', OPERATOR);
+    assert.equal(mine.status, 200);
+    const got = mine.body.replies.find((x: any) => x.turnId === r.body.turnId);
+    assert.equal(got?.content, 'All quiet.');
+    const later = await api(`/api/v1/agents/ada/replies?after=${got.seq}`, 'GET', OPERATOR);
+    assert.equal(later.body.replies.length, 0, 'after= skips what was read');
+    const theirs = await api('/api/v1/agents/ada/replies?after=0', 'GET', ADMIN);
+    assert.equal(theirs.body.replies.some((x: any) => x.turnId === r.body.turnId), false, 'another person, even an admin, does not get it here');
+
+    const row = state.ledger.query({ agent: 'ada' }).find((x) => x.action === 'CONVERSATION_REPLY' && x.turnId === r.body.turnId);
+    assert.ok(row, 'ledgered');
+    assert.match(String(row.replySha256), /^[0-9a-f]{64}$/);
+    assert.equal(JSON.stringify(row).includes('All quiet.'), false, 'the ledger keeps a hash, not the text');
   });
 
   it('authorizes mapped admin and owner callers and injects caller metadata into run and input', async () => {

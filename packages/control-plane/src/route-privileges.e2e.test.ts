@@ -97,6 +97,7 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/agents/nope/updates/install', privilege: 'agents.update.install', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/runs/nope/cancel', privilege: 'runs.cancel', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/conversation', privilege: 'agents.converse', role: 'operator', body: {} },
+  { method: 'GET', path: '/api/v1/agents/nope/replies', privilege: 'agents.converse', role: 'operator' },
   { method: 'POST', path: '/api/v1/agents/nope/wake', privilege: 'runs.attest-requester', role: 'operator', thenExclusive: 'gatekeeper-ingress', body: { requestedBy: { provider: 'discord', id: '1' } } },
   { method: 'POST', path: '/api/v1/hooks/hooked', privilege: 'hooks.invoke', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/schedules', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
@@ -317,6 +318,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       { method: 'POST', path: '/api/v1/runs/nope/heartbeat', body: {} },
       { method: 'GET', path: '/api/v1/runs/nope/mailbox' },
       { method: 'POST', path: '/api/v1/runs/nope/training', body: {} },
+      { method: 'POST', path: '/api/v1/runs/nope/reply', body: {} },
       { method: 'GET', path: '/api/v1/runs/nope/events' },
       { method: 'POST', path: '/api/v1/keymaster/checkout', body: {} },
     ];

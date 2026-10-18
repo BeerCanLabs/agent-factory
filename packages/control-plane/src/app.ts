@@ -33,7 +33,7 @@ import {
 } from '@beercanlabs/factory-registrar';
 import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
 import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
-import { authorize, authorizeIngress, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type AuthenticatedCaller, type Privilege } from '@beercanlabs/factory-bouncer';
+import { authorize, authorizeIngress, directCaller, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type AuthenticatedCaller, type Privilege } from '@beercanlabs/factory-bouncer';
 import { validatePolicy, type PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 
@@ -56,6 +56,22 @@ import { sanitizeOutputWithProvenance } from './provenance.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { resolveModelReference, type DiscoveredModel } from '@beercanlabs/factory-executive';
 import { ModelStore, type StoredModel, type StagedModel } from './models.js';
+
+/** AM2: a console turn the agent may answer through `POST /runs/:id/reply`. */
+export type ConsoleTurn = { agentId: string; actor: string; at: number };
+/** AM2: a reply to a console turn, readable only by the person who asked. */
+export type ConsoleReply = { seq: number; agentId: string; actor: string; turnId: string; runId: string; content: string; footnote?: string; at: string };
+
+/** AM2: how long a console turn can be answered, and how many replies the factory keeps for the console to collect. */
+const CONSOLE_TURN_TTL_MS = 60 * 60 * 1000;
+const CONSOLE_REPLIES_KEPT = 500;
+/** AM2: the longest reply a run may send to the console (characters). */
+const CONSOLE_REPLY_MAX = 32_000;
+const CONSOLE_REPLIES_PER_PERSON = 50;
+const CONSOLE_TURNS_KEPT = 5_000;
+let consoleReplySeq = 0;
+/** Reply sequence numbers grow across control-plane restarts (time-based), so a console's cursor never skips new replies. */
+const nextReplySeq = (): number => (consoleReplySeq = Math.max(Date.now() * 1000, consoleReplySeq + 1));
 
 export type FactoryState = {
 
@@ -145,6 +161,10 @@ export type FactoryState = {
   ledgerSink?: CheckpointSink;
   /** In-memory mailboxes for running tasks to receive follow-up messages while warm. */
   mailboxes?: Map<string, MailboxQueue>;
+  /** AM2: console turns awaiting a reply, by turn id: which agent was asked and who asked. */
+  consoleTurns?: Map<string, ConsoleTurn>;
+  /** AM2: replies to console turns, kept briefly for the person who asked (never for anyone else). */
+  consoleReplies?: ConsoleReply[];
 };
 
 
@@ -431,6 +451,16 @@ type VendorTarget = { upstream: string; adapter: string; discoveryPath?: string;
  * AP3.4: the footnote a text result needs. The gatekeeper-egress records a hash of every final model answer
  * (`MODEL_REPLY`, or `UNGROUNDED_REPLY` when tools were offered and none called); the result is matched by hash.
  */
+/**
+ * AM2: where a turn's reply goes. A Discord message is answered in its channel; a person conversing directly is answered
+ * in the console. Anything else (another ingress) names no address yet.
+ */
+function replyAddress(isIngress: boolean, caller: AuthenticatedCaller | undefined, input: Record<string, unknown>): { channel: string; channelId?: string } | undefined {
+  if (!isIngress) return { channel: 'console' };
+  if (caller?.provider === 'discord' && typeof input.channelId === 'string' && /^\d{1,32}$/.test(input.channelId)) return { channel: 'discord', channelId: input.channelId };
+  return undefined;
+}
+
 function resultFootnote(output: string, runRows: ReadonlyArray<Record<string, unknown>>): string | undefined {
   const text = output.trim();
   // A machine-read result (JSON) is never altered.
@@ -1146,7 +1176,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   // Agent-facing: authenticated by the run token minted at start.
-  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox|training)$/);
+  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox|training|reply)$/);
   if (runSelf && (((runSelf[2] === 'input' || runSelf[2] === 'mailbox') && req.method === 'GET') || (runSelf[2] !== 'input' && runSelf[2] !== 'mailbox' && req.method === 'POST'))) {
     const run = await authenticateRun(req, res, state, runSelf[1]);
     if (!run) return;
@@ -1172,6 +1202,51 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
           timezone: 'America/Los_Angeles',
         },
       });
+      return;
+    }
+    if (runSelf[2] === 'reply') {
+      // AM2: a run answers a console turn. The reply goes only to the person who asked, and it carries the AP3 footnote.
+      const body = (await readJson(req)) as { turnId?: unknown; content?: unknown };
+      const turn = typeof body.turnId === 'string' ? state.consoleTurns?.get(body.turnId) : undefined;
+      if (!turn || turn.agentId !== run.agentId || Date.now() - turn.at > CONSOLE_TURN_TTL_MS) {
+        json(res, 404, { error: 'unknown_turn' });
+        return;
+      }
+      if (typeof body.content !== 'string' || !body.content.trim() || body.content.length > CONSOLE_REPLY_MAX) {
+        json(res, 400, { error: `content must be a non-empty string of at most ${CONSOLE_REPLY_MAX} characters` });
+        return;
+      }
+      // One answer per turn: a run cannot flood the person (or push out other people's replies).
+      state.consoleTurns!.delete(body.turnId as string);
+      const runRows = state.ledger.query({ agent: run.agentId }).filter((r) => r.runId === run.runId);
+      // AP1: the same provenance check as a result: a reply may not claim actions the run never took.
+      const { sanitized, unverifiedClaims } = sanitizeOutputWithProvenance(redactSecrets(body.content, state.secretValues), runRows);
+      if (unverifiedClaims.length > 0) {
+        state.ledger.append({ timestamp: new Date().toISOString(), agentId: run.agentId, runId: run.runId, type: 'action', action: 'UNVERIFIED_ACTION_CLAIM', actor: SYSTEM.policy, claims: unverifiedClaims });
+      }
+      const content = typeof sanitized === 'string' ? sanitized : JSON.stringify(sanitized);
+      const footnote = resultFootnote(content, runRows);
+      const reply: ConsoleReply = { seq: nextReplySeq(), agentId: run.agentId, actor: turn.actor, turnId: body.turnId as string, runId: run.runId, content, ...(footnote ? { footnote } : {}), at: new Date().toISOString() };
+      if (!state.consoleReplies) state.consoleReplies = [];
+      state.consoleReplies.push(reply);
+      const theirs = state.consoleReplies.filter((r) => r.actor === reply.actor);
+      if (theirs.length > CONSOLE_REPLIES_PER_PERSON) {
+        const drop = new Set(theirs.slice(0, theirs.length - CONSOLE_REPLIES_PER_PERSON));
+        state.consoleReplies = state.consoleReplies.filter((r) => !drop.has(r));
+      }
+      if (state.consoleReplies.length > CONSOLE_REPLIES_KEPT) state.consoleReplies.splice(0, state.consoleReplies.length - CONSOLE_REPLIES_KEPT);
+      state.ledger.append({
+        timestamp: reply.at,
+        agentId: run.agentId,
+        runId: run.runId,
+        type: 'action',
+        action: 'CONVERSATION_REPLY',
+        actor: `run:${run.agentId}:${run.runId}`,
+        turnId: reply.turnId,
+        replySha256: createHash('sha256').update(content.trim()).digest('hex'),
+        ...(footnote ? { footnote } : {}),
+      });
+      json(res, 200, { ok: true, delivered: 'console' });
       return;
     }
     if (runSelf[2] === 'training') {
@@ -1360,10 +1435,21 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       }
       caller = ingressAuth.caller;
     }
+    // AM2: the turn id and reply address are the factory's. A message from an ingress that wakes the agent is a turn like
+    // any other (the first of a Discord session arrives here); an operator's run is a job and gets neither.
+    let input = body.input;
+    if (input && typeof input === 'object' && !Array.isArray(input)) {
+      const copy = { ...(input as Record<string, unknown>) };
+      delete copy.turnId;
+      delete copy.replyTo;
+      const replyTo = isIngress ? replyAddress(true, caller, copy) : undefined;
+      if (replyTo) Object.assign(copy, { turnId: randomUUID(), replyTo });
+      input = copy;
+    }
     const out = await createRun(state, runCreate[1], {
       actor: principal.actor,
       trigger: runCreate[2] === 'wake' ? 'manual' : 'api',
-      input: body.input,
+      input,
       callbackUrl: body.callbackUrl as string | undefined,
       model: body.model as string | undefined,
       ...(requestedBy ? { requestedBy } : {}),
@@ -1572,18 +1658,36 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       }
       caller = ingressAuth.caller;
     }
+    // AM2: every delivered turn says who is speaking. A person conversing directly (the console) speaks as themselves.
+    if (!caller && !isIngress) caller = directCaller(principal, ownersOf(state, agent.id), 'agents.converse');
+    const turnId = randomUUID();
 
     // Input hygiene: unwrap body.input if sent as { input, requestedBy }, strip unverified caller
     let payload = (rawBody && typeof rawBody === 'object' && 'input' in rawBody && rawBody.input !== undefined) ? rawBody.input : rawBody;
     if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
       const copy = { ...(payload as Record<string, unknown>) };
       delete copy.caller;
+      // AM2: the turn id and reply address are the factory's to set, never the sender's.
+      delete copy.turnId;
+      delete copy.replyTo;
       if (caller) {
         copy.caller = { ...caller };
       }
+      copy.turnId = turnId;
+      const replyTo = replyAddress(isIngress, caller, copy);
+      if (replyTo) copy.replyTo = replyTo;
       payload = copy;
-    } else if (caller && payload === undefined) {
-      payload = { caller: { ...caller } };
+    } else if (payload === undefined) {
+      payload = { ...(caller ? { caller: { ...caller } } : {}), turnId, ...(isIngress ? {} : { replyTo: { channel: 'console' } }) };
+    }
+    const shaped = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as { turnId?: string; replyTo?: { channel?: string } }) : undefined;
+    const replyTo = shaped?.replyTo;
+    const answerable = shaped?.turnId === turnId ? { turnId } : {};
+    if (replyTo?.channel === 'console' && caller) {
+      if (!state.consoleTurns) state.consoleTurns = new Map();
+      const now = Date.now();
+      for (const [id, t] of state.consoleTurns) if (now - t.at > CONSOLE_TURN_TTL_MS || state.consoleTurns.size >= CONSOLE_TURNS_KEPT) state.consoleTurns.delete(id);
+      state.consoleTurns.set(turnId, { agentId: agent.id, actor: caller.actor, at: now });
     }
 
     // GAP-176: with no run to hand it to (live or queued), the message wakes the agent through the one wake path
@@ -1610,7 +1714,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         actor: principal.actor,
         content: payload,
       });
-      json(res, 202, { ok: true, woke: true, runId: woke.runId });
+      json(res, 202, { ok: true, woke: true, runId: woke.runId, ...answerable });
       return;
     }
 
@@ -1632,7 +1736,22 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       actor: principal.actor,
       content: payload,
     });
-    json(res, 202, { ok: true });
+    json(res, 202, { ok: true, ...answerable });
+    return;
+  }
+
+  // AM2: the replies to this person's console turns with this agent, after `after` (a sequence number). Only the person
+  // who asked can read them; an admin reading someone else's conversation goes through the agent (AM5), not here.
+  const repliesMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/replies$/);
+  if (repliesMatch && req.method === 'GET') {
+    const principal = await requirePrivilege(req, res, state, 'agents.converse');
+    if (!principal) return;
+    const url = new URL(req.url ?? '/', 'http://factory.local');
+    const after = Number(url.searchParams.get('after') ?? 0) || 0;
+    const replies = (state.consoleReplies ?? [])
+      .filter((r) => r.agentId === repliesMatch[1] && r.actor === principal.actor && r.seq > after)
+      .map(({ seq, turnId, runId, content, footnote, at }) => ({ seq, turnId, runId, content, ...(footnote ? { footnote } : {}), at }));
+    json(res, 200, { replies });
     return;
   }
 

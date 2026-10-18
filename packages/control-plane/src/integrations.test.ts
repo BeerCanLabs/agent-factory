@@ -208,7 +208,12 @@ describe('SQS queue trigger', () => {
       assert.equal(mailRes.status, 200);
       const mailBody = (await mailRes.json()) as { ok: boolean; message: { payload: { text: string } } };
       assert.equal(mailBody.ok, true);
-      assert.deepEqual(mailBody.message.payload, { text: 'second' });
+      // AM2: the factory adds who is speaking, the turn id and the reply address; the message itself is unchanged.
+      const { caller, turnId, replyTo, ...message } = mailBody.message.payload as Record<string, any>;
+      assert.deepEqual(message, { text: 'second' });
+      assert.equal(caller?.provider, 'api');
+      assert.match(String(turnId), /^[0-9a-f-]{36}$/);
+      assert.deepEqual(replyTo, { channel: 'console' });
     } finally {
       await new Promise<void>((r) => srv.close(() => r()));
     }

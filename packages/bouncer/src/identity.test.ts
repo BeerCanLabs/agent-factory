@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { authorizeIngress, IdentityLinkStore } from './identity.js';
+import { authorizeIngress, directCaller, IdentityLinkStore } from './identity.js';
 
 describe('Bouncer authorizeIngress', () => {
   it('allows internal actions with no requestedBy when not ingress caller', () => {
@@ -461,3 +461,18 @@ describe('Bouncer IdentityLinkStore', () => {
   });
 });
 
+
+describe('AM2 a person conversing directly speaks as themselves', () => {
+  it('AM2 directCaller names the principal, the console as provider, and the role that let them in', () => {
+    const admin = directCaller({ actor: 'cloudflare:dale@example.com', roles: ['admin'] }, [], 'agents.converse');
+    assert.equal(admin.actor, 'cloudflare:dale@example.com');
+    assert.equal(admin.provider, 'console');
+    assert.equal(admin.role, 'admin');
+    const owner = directCaller({ actor: 'cloudflare:ann@example.com', roles: ['viewer'] }, ['CLOUDFLARE:ann@example.com'], 'agents.converse');
+    assert.equal(owner.role, 'agent-owner');
+    assert.equal(owner.isOwner, true);
+    const operator = directCaller({ actor: 'token:op', roles: ['viewer', 'operator'] }, [], 'agents.converse');
+    assert.equal(operator.role, 'operator', 'the role that holds the privilege, not the first listed');
+    assert.equal(operator.provider, 'api', 'a service token is an API client, not a person at the console');
+  });
+});

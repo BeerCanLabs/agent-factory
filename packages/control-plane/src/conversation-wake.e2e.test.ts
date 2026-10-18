@@ -69,6 +69,13 @@ async function converse(port: number, body: unknown) {
   return { status: res.status, body: (await res.json()) as { ok?: boolean; woke?: boolean; runId?: string } };
 }
 
+/** A delivered turn without what the factory adds to it (AM2: caller, turn id, reply address). */
+const message = (payload: unknown) => {
+  const { caller, turnId, replyTo, ...rest } = payload as Record<string, unknown>;
+  assert.ok(caller && turnId && replyTo, 'the factory says who is speaking, which turn this is and where to reply');
+  return rest;
+};
+
 const handoffs = (state: FactoryState) => state.ledger.query({ agent: 'rosie' }).filter((e) => e.action === 'CONVERSATION_HANDOFF');
 
 describe('a message always reaches an agent (GAP-176, §6.15)', () => {
@@ -83,7 +90,7 @@ describe('a message always reaches an agent (GAP-176, §6.15)', () => {
       assert.equal(runs.length, 1, 'exactly one run');
       assert.equal(runs[0].runId, res.body.runId);
       assert.equal(runs[0].trigger, 'conversation');
-      assert.deepEqual(runs[0].input, { content: 'hey Rosie', channelId: 'c1' });
+      assert.deepEqual(message(runs[0].input), { content: 'hey Rosie', channelId: 'c1' });
       assert.equal(runtime.started.length, 1, 'the container was started once');
       assert.equal(state.mailboxes?.get('rosie')?.messages.length ?? 0, 0, 'nothing parked in the mailbox');
       const rows = handoffs(state);
@@ -104,7 +111,7 @@ describe('a message always reaches an agent (GAP-176, §6.15)', () => {
       assert.equal(second.body.woke, undefined);
       assert.equal(state.runs.list({ agentId: 'rosie' }).length, 1, 'no second run');
       assert.equal(runtime.started.length, 1);
-      assert.deepEqual(state.mailboxes?.get('rosie')?.messages.map((m) => m.payload), [{ content: 'two' }]);
+      assert.deepEqual(state.mailboxes?.get('rosie')?.messages.map((m) => message(m.payload)), [{ content: 'two' }]);
       assert.equal(handoffs(state)[1].runId, first.body.runId);
     } finally {
       await srv.close();

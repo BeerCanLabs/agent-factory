@@ -348,3 +348,19 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
     },
   };
 }
+
+/**
+ * AM2: the caller a signed-in person is when they converse directly (the console, the API), not through an ingress:
+ * their own principal, with the role that let them in. The control plane asks for it rather than reading roles itself.
+ */
+export function directCaller(principal: Principal, owners: readonly string[], privilege: Privilege): AuthenticatedCaller {
+  const isOwner = owners.some((o) => o.toLowerCase() === principal.actor.toLowerCase());
+  const role: AuthenticatedCaller['role'] = principal.roles.includes('admin')
+    ? 'admin'
+    : isOwner
+      ? 'agent-owner'
+      : (principal.roles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ?? principal.roles[0] ?? 'operator');
+  // A service token (token:<name>) is an API client, not a person at the console.
+  const provider = principal.actor.startsWith('token:') ? 'api' : 'console';
+  return { actor: principal.actor, role, roles: [...principal.roles], isOwner, provider, id: principal.actor };
+}
