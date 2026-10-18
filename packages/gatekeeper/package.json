@@ -22,7 +22,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/egress/main.js",
-    "test": "tsx --test src/egress/gatekeeper-egress.test.ts src/egress/vendor-discovery.test.ts src/egress/model-route.test.ts src/egress/connections.test.ts src/egress/routes.test.ts src/egress/held.test.ts src/egress/signin-links.test.ts src/egress/message-limit.test.ts src/egress/system-routes.test.ts src/ingress/index.test.ts src/ingress/presence.test.ts src/ingress/http.test.ts src/ingress/discord.test.ts src/ingress/wake.test.ts src/run-token/run-token.test.ts",
+    "test": "tsx --test src/egress/gatekeeper-egress.test.ts src/egress/vendor-discovery.test.ts src/egress/model-route.test.ts src/egress/connections.test.ts src/egress/routes.test.ts src/egress/held.test.ts src/egress/signin-links.test.ts src/egress/message-limit.test.ts src/egress/system-routes.test.ts src/egress/grounding.test.ts src/ingress/index.test.ts src/ingress/presence.test.ts src/ingress/http.test.ts src/ingress/discord.test.ts src/ingress/wake.test.ts src/run-token/run-token.test.ts",
     "start:ingress": "node dist/ingress/server.js"
   },
   "dependencies": {

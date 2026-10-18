@@ -104,6 +104,14 @@ describe('E7 M3 the factory owns policy; the agent only declares (TSK-048)', { c
     assert.equal((await call(port, '/api/v1/models', 'GET')).status, 401);
   });
 
+  it('AP3 an owner can set grounding: warn-once; nothing else is accepted', async () => {
+    const ok = await call(port, '/api/v1/agents/ada/policy', 'PUT', ADMIN, { routes: ['models'], grounding: 'warn-once' });
+    assert.equal(ok.status, 200);
+    assert.equal((await call(port, '/api/v1/agents/ada/policy', 'GET', VIEWER)).body.grounding, 'warn-once');
+    const bad = await call(port, '/api/v1/agents/ada/policy', 'PUT', ADMIN, { routes: ['models'], grounding: 'always' });
+    assert.equal(bad.status, 400);
+  });
+
   it('only an admin sets policy, and re-registering keeps it (E7)', async () => {
     const policy = { routes: ['models', 'discord'], models: ['claude-haiku-4-5'], budgetUsd: { perDay: 5, perMonth: 50 } };
     assert.equal((await call(port, '/api/v1/agents/ada/policy', 'PUT', VIEWER, policy)).status, 403);

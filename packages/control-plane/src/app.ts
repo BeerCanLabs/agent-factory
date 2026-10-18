@@ -427,6 +427,30 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
 
 type VendorTarget = { upstream: string; adapter: string; discoveryPath?: string; secretName: string };
 
+/**
+ * AP3.4: the footnote a text result needs. The gatekeeper-egress records a hash of every final model answer
+ * (`MODEL_REPLY`, or `UNGROUNDED_REPLY` when tools were offered and none called); the result is matched by hash.
+ */
+function resultFootnote(output: string, runRows: ReadonlyArray<Record<string, unknown>>): string | undefined {
+  const text = output.trim();
+  // A machine-read result (JSON) is never altered.
+  if (/^[[{]/.test(text)) {
+    try {
+      JSON.parse(text);
+      return undefined;
+    } catch {
+      // not JSON: a text reply
+    }
+  }
+  const sha = createHash('sha256').update(text).digest('hex');
+  const match = [...runRows].reverse().find((r) => (r.action === 'MODEL_REPLY' || r.action === 'UNGROUNDED_REPLY') && r.replySha256 === sha);
+  if (match) return match.action === 'UNGROUNDED_REPLY' ? '[no tools called]' : undefined;
+  // "No model" only when the run used the factory model API and no provider-native route (whose answers are not recorded).
+  const modelApi = runRows.some((r) => r.route === 'models');
+  const native = runRows.some((r) => r.type === 'llm' && r.route !== 'models');
+  return modelApi && !native ? '[no model or tools used]' : undefined;
+}
+
 /** The factory default model: configuration (M2, GAP-181), never a value in code. Undefined when none is set. */
 function defaultModelOf(state: FactoryState): string | undefined {
   return state.modelStore?.getDefault() ?? state.defaultModel;
@@ -1229,6 +1253,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         });
       }
       output = sanitized;
+      // AP3.4: a text result built from an answer given without tools, or from no model answer this run, is footnoted.
+      if (body.status === 'succeeded' && typeof output === 'string' && output.trim()) {
+        const footnote = resultFootnote(output, currentRunRows);
+        if (footnote) {
+          output = `${output}\n\n${footnote}`;
+          state.ledger.append({ timestamp: new Date().toISOString(), agentId: run.agentId, runId: run.runId, type: 'action', action: 'REPLY_FOOTNOTED', actor: SYSTEM.policy, footnote });
+        }
+      }
     }
     const done = await finishRun(state, run.runId, body.status === 'succeeded' ? 'DONE' : 'FAILED', {
       actor: `run:${run.agentId}`,
