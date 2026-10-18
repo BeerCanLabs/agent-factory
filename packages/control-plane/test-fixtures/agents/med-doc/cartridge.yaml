@@ -13,3 +13,6 @@ secrets:
 compute:
   kind: oci
   ref: oci://ghcr.io/beercanlabs/med-doc:test
+
+memory:
+  archetype: purpose-built

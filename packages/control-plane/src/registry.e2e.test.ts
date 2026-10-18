@@ -87,6 +87,7 @@ describe('KPF 1: Agent Registry & Lifecycle E2E', { concurrency: false }, () => 
     // 1. Register new agent
     const regRes = await http_(cpPort, '/api/v1/registry/agents', 'POST', ADMIN, {
       id: 'sm-builder-test',
+      memory: { archetype: 'purpose-built' },
       name: 'Builder Test Agent',
       role: 'Test Assistant',
       repo: 'https://github.com/beercanlabs/SM-builder-test',
@@ -208,7 +209,7 @@ describe('KPF 1: Agent Registry & Lifecycle E2E', { concurrency: false }, () => 
   });
 
   it('re-registering an agent keeps the policy its owner set; only a first registration gets the default (GAP-048)', async () => {
-    const reg = () => http_(cpPort, '/api/v1/registry/agents', 'POST', ADMIN, { id: 'sm-rereg-test', name: 'Re-register', repo: 'https://github.com/beercanlabs/SM-rereg-test' });
+    const reg = () => http_(cpPort, '/api/v1/registry/agents', 'POST', ADMIN, { memory: { archetype: 'personal-assistant' }, id: 'sm-rereg-test', name: 'Re-register', repo: 'https://github.com/beercanlabs/SM-rereg-test' });
     state.policies.set('__global__', { routes: ['default-route'], budgetUsd: { perDay: 1 } });
     try {
       const first = await reg();

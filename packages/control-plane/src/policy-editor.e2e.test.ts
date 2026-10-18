@@ -77,6 +77,7 @@ describe('E7 M3 the factory owns policy; the agent only declares (TSK-048)', { c
     const reg = await call(port, '/api/v1/registry/agents', 'POST', ADMIN, {
       repo: 'https://github.com/beercanlabs/SM-ada',
       cartridge: {
+        memory: { archetype: 'personal-assistant' },
         id: 'ada',
         name: 'Ada',
         model: 'claude-sonnet-4-5',
@@ -119,7 +120,7 @@ describe('E7 M3 the factory owns policy; the agent only declares (TSK-048)', { c
 
     await call(port, '/api/v1/registry/agents', 'POST', ADMIN, {
       repo: 'https://github.com/beercanlabs/SM-ada',
-      cartridge: { id: 'ada', name: 'Ada', model: 'claude-sonnet-4-5', egress: { routes: ['models', 'discord', 'notion', 'github'] } },
+      cartridge: { memory: { archetype: 'personal-assistant' }, id: 'ada', name: 'Ada', model: 'claude-sonnet-4-5', egress: { routes: ['models', 'discord', 'notion', 'github'] } },
     });
     const after = await call(port, '/api/v1/agents/ada/policy', 'GET', VIEWER);
     assert.deepEqual(after.body, policy, 'a new declaration never changes what the company granted');

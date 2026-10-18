@@ -66,6 +66,9 @@ function zodIssues(prefix: string, err: { issues: { path: (string | number)[]; m
   }
 }
 
+/** AM1 (DESIGN_AUTHORITY §6.6): the archetype every agent declares. */
+const ARCHETYPE_REQUIRED = 'memory.archetype is required: purpose-built, personal-assistant or team-member (AM1)';
+
 export function validateCartridge(dir: string): ValidationResult {
   const issues: ValidationIssue[] = [];
   const cartridgeId = basename(dir);
@@ -90,6 +93,7 @@ export function validateCartridge(dir: string): ValidationResult {
       if (!parsed.success) {
         zodIssues(manifestPath, parsed.error, issues);
       } else {
+        if (!parsed.data.memory?.archetype) issue(issues, manifestPath, ARCHETYPE_REQUIRED);
         if (parsed.data.prompt) {
           const promptPath = join(dir, parsed.data.prompt);
           if (existsSync(promptPath)) {
@@ -184,7 +188,10 @@ export function validateCartridge(dir: string): ValidationResult {
     if (raw !== undefined) {
       const parsed = memorySchema.safeParse(raw);
       if (!parsed.success) zodIssues(filePath, parsed.error, issues);
+      else if (!parsed.data.archetype) issue(issues, filePath, ARCHETYPE_REQUIRED);
     }
+  } else {
+    issue(issues, join(dir, 'memory.yaml'), ARCHETYPE_REQUIRED);
   }
 
   if (entries.has('bench.yaml')) {

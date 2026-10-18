@@ -15,6 +15,9 @@ export {
   identitySchema,
   memorySchema,
   memoryArchetype,
+  ARCHETYPES,
+  LEGACY_ARCHETYPES,
+  canonicalArchetype,
   benchSchema,
   triggerSchema,
   secretName,
@@ -31,6 +34,7 @@ export {
   secretDeclarations,
 } from './schema.js';
 export type {
+  Archetype,
   CartridgeRole,
   RoleIssue,
   SecretsManifest,

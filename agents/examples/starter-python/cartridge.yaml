@@ -27,7 +27,7 @@ persistence:
   prefix: starter-python-state
 
 memory:
-  archetype: episodic
+  archetype: personal-assistant
   retentionDays: 30
   maxMessages: 20
   maxChars: 24000

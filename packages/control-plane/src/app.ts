@@ -53,7 +53,7 @@ import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
-import { AI_PROVIDER_TEMPLATES, platformCredentialName } from '@beercanlabs/factory-contract';
+import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { resolveModelReference, type DiscoveredModel } from '@beercanlabs/factory-executive';
 import { ModelStore, type StoredModel, type StagedModel } from './models.js';
 
@@ -2114,6 +2114,17 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
     // §6.8 L3: a registration names a repository and is pinned to one exact commit, never a branch.
     const rawRepo = body.repo ?? cartridge.repo;
+    // AM1: a new agent version (one registered from a repository) declares its archetype; old names are aliases for now.
+    const declaredArchetype = (cartridge.memory as { archetype?: unknown } | undefined)?.archetype;
+    const archetype = canonicalArchetype(declaredArchetype);
+    if (rawRepo !== undefined && !archetype) {
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'AGENT_REGISTRATION_REFUSED:archetype', actor: principal.actor });
+      json(res, 422, { error: 'archetype_required', message: 'memory.archetype is required: purpose-built, personal-assistant or team-member (AM1)' });
+      return;
+    }
+    const archetypeWarning = typeof declaredArchetype === 'string' && LEGACY_ARCHETYPES[declaredArchetype]
+      ? `memory.archetype "${declaredArchetype}" is deprecated; declare "${LEGACY_ARCHETYPES[declaredArchetype]}" (AM1)`
+      : undefined;
     let source: SourceRef | undefined;
     if (rawRepo !== undefined) {
       const repo = checkRepoUrl(rawRepo);
@@ -2232,7 +2243,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
     registryOf(state).save(record);
     await recordConfig(state, record.id, { actor: principal.actor, reason: changeReason(req, state.configs?.current(record.id) ? 're-registered' : 'registered') });
-    json(res, 201, record);
+    json(res, 201, archetypeWarning ? { ...record, warnings: [archetypeWarning] } : record);
     return;
   }
   

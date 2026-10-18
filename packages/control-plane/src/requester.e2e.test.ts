@@ -77,7 +77,7 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
       const text = await res.text();
       return { status: res.status, body: text ? JSON.parse(text) : null };
     };
-    const reg = await api('/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA, cartridge: { id: 'ada', name: 'ada' } });
+    const reg = await api('/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA, cartridge: { memory: { archetype: 'personal-assistant' }, id: 'ada', name: 'ada' } });
     assert.equal(reg.status, 201, JSON.stringify(reg.body));
     assert.equal((await api('/api/v1/agents/ada/owners', 'PUT', ADMIN, { owners: ['token:alice'] })).status, 200);
 

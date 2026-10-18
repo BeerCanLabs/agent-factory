@@ -116,7 +116,7 @@ describe('GAP-060 guard: policy and budget endpoints refuse ids that are not age
       const global = await call(port, '/api/v1/policies/budget', 'PUT', { routes: [], budgetUsd: { perDay: 7 } });
       assert.equal(global.status, 200);
       assert.deepEqual(state.policies.get('__global__'), { routes: [], budgetUsd: { perDay: 7 } });
-      const reg = await call(port, '/api/v1/registry/agents', 'POST', { repo: 'https://github.com/beercanlabs/SM-nick', commit: SHA, cartridge: { id: 'nick' } });
+      const reg = await call(port, '/api/v1/registry/agents', 'POST', { repo: 'https://github.com/beercanlabs/SM-nick', commit: SHA, cartridge: { memory: { archetype: 'personal-assistant' }, id: 'nick' } });
       assert.equal(reg.status, 201);
       assert.equal(reg.body.state, 'PENDING_DEPLOY', 'a first registration still gets the global default');
       assert.deepEqual(state.policies.get('nick').budgetUsd, { perDay: 7 });

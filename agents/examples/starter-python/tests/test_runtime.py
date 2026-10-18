@@ -54,7 +54,7 @@ class TestRuntime(unittest.TestCase):
 
                 result_data = json.loads(result_file.read_text("utf-8"))
                 self.assertEqual(result_data["status"], "succeeded")
-                self.assertEqual(result_data["output"]["archetype"], "episodic")
+                self.assertEqual(result_data["output"]["archetype"], "personal-assistant")  # AM1
                 self.assertIn("Processed alert for web-api", result_data["output"]["summary"])
                 # The working-memory context the agent assembled is reported, not thrown away.
                 self.assertEqual(result_data["output"]["context"]["whiteboardTurns"], 0)
@@ -85,7 +85,7 @@ class TestRuntime(unittest.TestCase):
 
                 result_data = json.loads(result_file.read_text("utf-8"))
                 self.assertEqual(result_data["status"], "succeeded")
-                self.assertEqual(result_data["output"]["archetype"], "ephemeral")
+                self.assertEqual(result_data["output"]["archetype"], "purpose-built")  # AM1: the alias resolves
                 self.assertIn("Ephemeral query processed", result_data["output"]["summary"])
 
                 db_path = mind_dir / "starter_python_state.db"
@@ -118,7 +118,7 @@ class TestRuntime(unittest.TestCase):
 
                 result_data = json.loads(result_file.read_text("utf-8"))
                 self.assertEqual(result_data["status"], "succeeded")
-                self.assertEqual(result_data["output"]["archetype"], "workspace")
+                self.assertEqual(result_data["output"]["archetype"], "team-member")  # AM1: the alias resolves
                 self.assertIn("proj-gamma", result_data["output"]["summary"])
 
                 workspace_db = mind_dir / "workspace_proj-gamma.db"

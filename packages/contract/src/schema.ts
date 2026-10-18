@@ -165,7 +165,20 @@ export const identitySchema = z
   })
   .strict();
 
-export const memoryArchetype = z.enum(['ephemeral', 'episodic', 'workspace']);
+/**
+ * AM1 (DESIGN_AUTHORITY §6.6): every agent declares one of three archetypes. The pre-AM1 names are accepted for one
+ * release as aliases (`ephemeral` -> `purpose-built`, `episodic` -> `personal-assistant`, `workspace` -> `team-member`).
+ */
+export const ARCHETYPES = ['purpose-built', 'personal-assistant', 'team-member'] as const;
+export type Archetype = (typeof ARCHETYPES)[number];
+export const LEGACY_ARCHETYPES: Readonly<Record<string, Archetype>> = { ephemeral: 'purpose-built', episodic: 'personal-assistant', workspace: 'team-member' };
+export const memoryArchetype = z.enum(['purpose-built', 'personal-assistant', 'team-member', 'ephemeral', 'episodic', 'workspace']);
+/** The AM1 archetype a declaration names (aliases resolved), or undefined when it names none. */
+export function canonicalArchetype(value: unknown): Archetype | undefined {
+  if (typeof value !== 'string') return undefined;
+  if ((ARCHETYPES as readonly string[]).includes(value)) return value as Archetype;
+  return LEGACY_ARCHETYPES[value];
+}
 
 export const memorySchema = z
   .object({
