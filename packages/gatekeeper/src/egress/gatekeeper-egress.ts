@@ -783,7 +783,9 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
    * with its own credentials and never forwards the run token.
    */
   async function handleModels(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
-    await ensureCatalog();
+    // GAP-170: wait only for the first load; afterwards serve the last catalog and refresh in the background (LG1).
+    if (lastCatalogRefresh === 0) await ensureCatalog();
+    else void ensureCatalog();
     const catalog = activeCatalog;
     const path = rest.split('?')[0].replace(/\/$/, '');
     if (req.method === 'GET' && path === '/v1/models') {

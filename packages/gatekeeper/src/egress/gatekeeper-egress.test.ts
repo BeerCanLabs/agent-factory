@@ -774,5 +774,63 @@ describe('Dynamic Model Catalog & Default Model Sync (M2, M3, GAP-168)', () => {
       await new Promise<void>((r) => gk.close(() => r()));
     }
   });
-});
 
+  it('serves the loaded catalog while a refresh hangs, so a model call never waits on the control plane (GAP-170, LG1)', async () => {
+    const runId = 'catalog-hang-test-run';
+    const currentCtx: RunContext = {
+      run: { runId, agentId: 'donna', state: 'WORKING', live: true },
+      agentState: 'WORKING',
+      policy: { routes: ['models'], models: ['model-a'] },
+      spend: { run: 0, day: 0, month: 0 },
+    };
+    let catalogCalls = 0;
+    const control: ControlClient = {
+      async runContext(id) { return id === runId ? structuredClone(currentCtx) : null; },
+      async checkStanding() { return { ok: true, standing: 'good', remainingUsd: 100 }; },
+      async ledger() {},
+      async modelCatalog() {
+        catalogCalls += 1;
+        if (catalogCalls === 1) return { models: { 'model-a': { provider: 'fake', id: 'fake-a', price: { inputPerMTok: 1, outputPerMTok: 2 } } } };
+        return new Promise<never>(() => {}); // the control plane stops answering
+      },
+    };
+
+    const gk = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: [],
+      routeRefreshIntervalMs: 0, // every request finds the catalog stale
+      modelAdapters: {
+        fake: {
+          async complete() {
+            return { content: 'hello', finishReason: 'stop', usage: { input: 10, output: 5 } };
+          },
+        },
+      },
+    });
+
+    const testPort = await listen(gk);
+    try {
+      const tok = await tokens.mint({ runId, agentId: 'donna' });
+      const body = { model: 'model-a', messages: [{ role: 'user', content: 'hi' }] };
+      // Each call must finish without waiting for the hung refresh; a regression fails here instead of hanging.
+      const completeWithin = async (ms: number) => {
+        const timedOut = Symbol('timed out');
+        const res = await Promise.race([
+          call(testPort, '/models/v1/chat/completions', { token: tok, body }),
+          new Promise<typeof timedOut>((r) => setTimeout(() => r(timedOut), ms).unref()),
+        ]);
+        assert.notEqual(res, timedOut, 'the call does not wait for the hung refresh');
+        return res as Awaited<ReturnType<typeof call>>;
+      };
+      assert.equal((await completeWithin(2_000)).status, 200);
+      assert.equal((await completeWithin(2_000)).status, 200);
+      assert.ok(catalogCalls >= 2, 'a background refresh was attempted');
+    } finally {
+      gk.closeAllConnections();
+      await new Promise<void>((r) => gk.close(() => r()));
+    }
+  });
+});
