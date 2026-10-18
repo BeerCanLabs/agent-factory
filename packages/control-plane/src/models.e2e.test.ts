@@ -256,4 +256,70 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
     const retired = JSON.parse(mcpRetire.body.result.content[0].text);
     assert.equal(retired.retired, 'gpt-4o');
   });
+
+  it('7. PUT /api/v1/models/default and MCP set_default_model update default model with ledger audit', async () => {
+    // Admit a model first
+    const admitRes = await call(port, '/api/v1/models/admit', 'POST', ADMIN, {
+      name: 'claude-sonnet-4-6',
+      provider: 'bedrockConverse',
+      id: 'us.anthropic.claude-sonnet-4-6',
+    });
+    assert.equal(admitRes.status, 201);
+
+    // Viewer is rejected with 403
+    const viewerRes = await call(port, '/api/v1/models/default', 'PUT', VIEWER, { model: 'claude-sonnet-4-6' });
+    assert.equal(viewerRes.status, 403);
+
+    // Missing model returns 400
+    const missingRes = await call(port, '/api/v1/models/default', 'PUT', ADMIN, {});
+    assert.equal(missingRes.status, 400);
+
+    // Unadmitted model returns 400
+    const unadmittedRes = await call(port, '/api/v1/models/default', 'PUT', ADMIN, { model: 'nonexistent-model' });
+    assert.equal(unadmittedRes.status, 400);
+
+    // Successfully sets default via REST
+    const setRes = await call(port, '/api/v1/models/default', 'PUT', ADMIN, { model: 'claude-sonnet-4-6' });
+    assert.equal(setRes.status, 200);
+    assert.equal(setRes.body.ok, true);
+    assert.equal(setRes.body.default, 'claude-sonnet-4-6');
+
+    // GET /api/v1/models returns new default
+    const listRes = await call(port, '/api/v1/models', 'GET', VIEWER);
+    assert.equal(listRes.body.default, 'claude-sonnet-4-6');
+
+    // GET /api/v1/models/internal/catalog returns new default
+    const internalRes = await call(port, '/api/v1/models/internal/catalog', 'GET', EGRESS);
+    assert.equal(internalRes.body.default, 'claude-sonnet-4-6');
+
+    // Ledger has MODEL_DEFAULT_UPDATED row
+    const ledgerRows = state.ledger.query({ action: 'MODEL_DEFAULT_UPDATED' });
+    assert.ok(ledgerRows.length >= 1);
+    assert.equal(ledgerRows[ledgerRows.length - 1].model, 'claude-sonnet-4-6');
+
+    // Now set back via MCP tool set_default_model
+    const mcpSet = await call(port, '/mcp', 'POST', ADMIN, {
+      jsonrpc: '2.0',
+      id: 10,
+      method: 'tools/call',
+      params: {
+        name: 'set_default_model',
+        arguments: { model: 'claude-haiku-4-5' },
+      },
+    });
+    assert.equal(mcpSet.status, 200);
+    const mcpSetBody = JSON.parse(mcpSet.body.result.content[0].text);
+    assert.equal(mcpSetBody.ok, true);
+    assert.equal(mcpSetBody.default, 'claude-haiku-4-5');
+
+    // MCP list_model_catalog reflects updated default
+    const mcpList = await call(port, '/mcp', 'POST', ADMIN, {
+      jsonrpc: '2.0',
+      id: 11,
+      method: 'tools/call',
+      params: { name: 'list_model_catalog', arguments: {} },
+    });
+    const catalogParsed = JSON.parse(mcpList.body.result.content[0].text);
+    assert.equal(catalogParsed.default, 'claude-haiku-4-5');
+  });
 });

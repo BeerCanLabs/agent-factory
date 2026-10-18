@@ -182,6 +182,13 @@ export const factoryApi = {
     });
   },
 
+  async setDefaultModel(model: string): Promise<{ ok: boolean; default: string }> {
+    return request<{ ok: boolean; default: string }>('/models/default', {
+      method: 'PUT',
+      body: JSON.stringify({ model }),
+    });
+  },
+
   async setAgentBudget(id: string, spendLimitUsd: number, period: string = 'daily'): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>(`/registry/agents/${id}/budget`, {
       method: 'PUT',

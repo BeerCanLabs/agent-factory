@@ -24,6 +24,7 @@ export const ExecutiveOfficeView: React.FC = () => {
   const [isOnboardModalOpen, setIsOnboardModalOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [retiringModel, setRetiringModel] = useState<string | null>(null);
+  const [settingDefault, setSettingDefault] = useState<string | null>(null);
 
   const loadCatalog = async () => {
     setLoading(true);
@@ -41,6 +42,19 @@ export const ExecutiveOfficeView: React.FC = () => {
   useEffect(() => {
     void loadCatalog();
   }, []);
+
+  const handleSetDefault = async (name: string) => {
+    setSettingDefault(name);
+    try {
+      await factoryApi.setDefaultModel(name);
+      setSuccessMsg(`Set "${name}" as the factory default model.`);
+      void loadCatalog();
+    } catch (e: any) {
+      setError(`Failed to set default model: ${e.message}`);
+    } finally {
+      setSettingDefault(null);
+    }
+  };
 
   const handleRetire = async (name: string) => {
     if (!confirm(`Are you sure you want to retire model "${name}"? It will be removed from all agent policies.`)) {
@@ -221,7 +235,16 @@ export const ExecutiveOfficeView: React.FC = () => {
                         <span className="text-slate-400 italic">Unpriced</span>
                       )}
                     </td>
-                    <td className="p-3 text-right">
+                    <td className="p-3 text-right space-x-2">
+                      {model.name !== catalog?.default && (
+                        <button
+                          onClick={() => void handleSetDefault(model.name)}
+                          disabled={settingDefault === model.name}
+                          className="px-2.5 py-1 text-[11px] font-medium text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded transition-colors"
+                        >
+                          {settingDefault === model.name ? 'Setting...' : 'Set as Default'}
+                        </button>
+                      )}
                       <button
                         onClick={() => void handleRetire(model.name)}
                         disabled={retiringModel === model.name}

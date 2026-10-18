@@ -105,7 +105,7 @@ export type ControlClient = {
   /** Credential names on approved systems. Vendor discovery may read these and no others. */
   platformCredentialNames?(): Promise<string[]>;
   /** GAP-162: resolve dynamic model catalog from control plane. Cached, refreshed on interval, no redeploy. */
-  modelCatalog?(): Promise<ModelCatalog>;
+  modelCatalog?(): Promise<ModelCatalog | { catalog?: ModelCatalog; models?: ModelCatalog; default?: string }>;
 };
 
 
@@ -346,6 +346,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   void ensureRoutes();
 
   let activeCatalog: ModelCatalog = { ...(opts.modelCatalog ?? {}) };
+  let activeDefaultModel: string = opts.defaultModel ?? DEFAULT_MODEL;
   let lastCatalogRefresh = 0;
   const CATALOG_REFRESH_INTERVAL_MS = opts.routeRefreshIntervalMs ?? 10_000;
   let catalogInflight: Promise<void> | undefined;
@@ -364,13 +365,17 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     try {
       const remote = await opts.control.modelCatalog();
       if (remote && typeof remote === 'object' && !Array.isArray(remote)) {
+        const rawCatalog = ('models' in remote && remote.models) ? remote.models : ('catalog' in remote && remote.catalog) ? remote.catalog : remote;
         const valid: ModelCatalog = {};
-        for (const [k, v] of Object.entries(remote)) {
+        for (const [k, v] of Object.entries(rawCatalog as Record<string, unknown>)) {
           if (v && typeof v === 'object' && typeof (v as any).provider === 'string' && typeof (v as any).id === 'string') {
             valid[k] = v as CatalogEntry;
           }
         }
         activeCatalog = valid;
+        if ('default' in remote && typeof (remote as any).default === 'string' && (remote as any).default) {
+          activeDefaultModel = (remote as any).default;
+        }
       }
     } catch (err) {
       console.error(`[gatekeeper-egress] model catalog refresh: ${err instanceof Error ? err.message : String(err)}`);
@@ -659,7 +664,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   function modelPolicyOf(ctx: RunContext): ModelPolicy {
     return {
       allowedModels: ctx.policy.models,
-      defaultModel: opts.defaultModel ?? DEFAULT_MODEL,
+      defaultModel: activeDefaultModel,
       training: ctx.agentState === 'TRAINING',
       pinnedModel: ctx.run.model,
     };
@@ -778,7 +783,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
    * with its own credentials and never forwards the run token.
    */
   async function handleModels(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
-    void ensureCatalog();
+    await ensureCatalog();
     const catalog = activeCatalog;
     const path = rest.split('?')[0].replace(/\/$/, '');
     if (req.method === 'GET' && path === '/v1/models') {

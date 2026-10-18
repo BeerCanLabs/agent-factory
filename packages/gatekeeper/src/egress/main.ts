@@ -90,8 +90,8 @@ const control: ControlClient = {
   async modelCatalog() {
     const res = await call('GET', '/api/v1/models/internal/catalog');
     if (!res.ok) throw new Error(`control plane model catalog ${res.status}`);
-    const body = (await res.json()) as { models?: ModelCatalog; catalog?: ModelCatalog };
-    return body.catalog ?? body.models ?? {};
+    const body = (await res.json()) as { models?: ModelCatalog; catalog?: ModelCatalog; default?: string };
+    return { catalog: body.catalog ?? body.models ?? {}, default: body.default };
   },
   async ledger(event) {
     try {
