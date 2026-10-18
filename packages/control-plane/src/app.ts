@@ -373,6 +373,15 @@ const TOOLS: ToolSpec[] = [
     },
     required: ['name'],
   },
+  {
+    name: 'set_default_model',
+    description: 'Set the factory default model granted to agents whose policy specifies no models (requires models.manage)',
+    privilege: 'models.manage',
+    args: {
+      model: { type: 'string' },
+    },
+    required: ['model'],
+  },
 ];
 
 export async function handleMcp(state: FactoryState, payload: Record<string, unknown>, principal: Principal): Promise<unknown> {
@@ -412,6 +421,10 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
 }
 
 type VendorTarget = { upstream: string; adapter: string; discoveryPath?: string; secretName: string };
+
+function defaultModelOf(state: FactoryState): string {
+  return state.modelStore?.getDefault() ?? state.defaultModel ?? 'claude-haiku-4-5';
+}
 
 /** Registered ai-provider, else a built-in template. HTTPS only. The secret name is held by the gatekeeper-egress. */
 function vendorTarget(state: FactoryState, vendorId: string): VendorTarget | { error: string; message?: string } {
@@ -513,7 +526,7 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
     return {
       offered: state.modelStore ? state.modelStore.listOffered() : Object.entries(state.modelCatalog ?? {}).map(([n, m]) => ({ name: n, ...m })),
       staged: state.modelStore?.listStaged() ?? [],
-      default: state.defaultModel ?? 'claude-haiku-4-5',
+      default: defaultModelOf(state),
     };
   }
   if (name === 'scan_vendor_models') {
@@ -582,6 +595,9 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
     const modelName = args.name;
     const deleted = state.modelStore.retire(modelName);
     if (!deleted) return { error: 'not_found' };
+    if (state.defaultModel === modelName) {
+      state.defaultModel = undefined;
+    }
 
     const affectedAgents: string[] = [];
     for (const agentId of state.policies.ids()) {
@@ -606,6 +622,24 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
       timestamp: new Date().toISOString(),
     });
     return { ok: true, retired: modelName, affectedAgents };
+  }
+  if (name === 'set_default_model') {
+    if (!state.modelStore) return { error: 'model_store_not_configured' };
+    const model = args.model;
+    if (!model || typeof model !== 'string') return { error: 'model is required' };
+    try {
+      state.modelStore.setDefault(model, actor);
+      state.defaultModel = model;
+      state.ledger.append({
+        action: 'MODEL_DEFAULT_UPDATED',
+        actor,
+        model,
+        timestamp: new Date().toISOString(),
+      });
+      return { ok: true, default: model };
+    } catch (err: any) {
+      return { error: 'invalid_request', message: err.message };
+    }
   }
 
   const id = args.id;
@@ -1562,7 +1596,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         : Object.entries(state.modelCatalog ?? {}).map(([name, m]) => ({ name, provider: m.provider, ...(m.price ? { price: m.price } : {}) })),
       staged: state.modelStore?.listStaged() ?? [],
       // M2: what an agent gets when its policy names no models.
-      default: state.defaultModel ?? 'claude-haiku-4-5',
+      default: defaultModelOf(state),
       templates: AI_PROVIDER_TEMPLATES,
     });
     return;
@@ -1576,7 +1610,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     json(res, 200, {
       version,
       models: state.modelStore ? state.modelStore.toEgressCatalog() : (state.modelCatalog ?? {}),
-      default: state.defaultModel ?? 'claude-haiku-4-5',
+      default: defaultModelOf(state),
     });
     return;
   }
@@ -1688,6 +1722,37 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
   }
 
+  // Set factory default model (§6.9 M2, M3, GAP-168)
+  if (path === '/api/v1/models/default' && req.method === 'PUT') {
+    const principal = await requirePrivilege(req, res, state, 'models.manage');
+    if (!principal) return;
+    const body = (await readJson(req)) as { model?: string; name?: string };
+    const modelName = body.model || body.name;
+    if (!modelName || typeof modelName !== 'string') {
+      json(res, 400, { error: 'invalid_request', message: 'model is required' });
+      return;
+    }
+    if (!state.modelStore) {
+      json(res, 500, { error: 'model_store_not_configured' });
+      return;
+    }
+    try {
+      state.modelStore.setDefault(modelName, principal.actor);
+      state.defaultModel = modelName;
+      state.ledger.append({
+        action: 'MODEL_DEFAULT_UPDATED',
+        actor: principal.actor,
+        model: modelName,
+        timestamp: new Date().toISOString(),
+      });
+      json(res, 200, { ok: true, default: modelName });
+      return;
+    } catch (err: any) {
+      json(res, 400, { error: 'invalid_request', message: err.message });
+      return;
+    }
+  }
+
   // Model retirement with policy fallback migration (§6.9 M2, GAP-162, GAP-163)
   const modelDeleteMatch = path.match(/^\/api\/v1\/models\/([^/]+)$/);
   if (modelDeleteMatch && req.method === 'DELETE') {
@@ -1703,6 +1768,9 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     if (!deleted) {
       json(res, 404, { error: 'not_found' });
       return;
+    }
+    if (state.defaultModel === modelName) {
+      state.defaultModel = undefined;
     }
 
     const affectedAgents: string[] = [];

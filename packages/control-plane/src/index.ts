@@ -171,6 +171,7 @@ function modelCatalogFromEnv(json: string | undefined): FactoryState['modelCatal
 const modelStore = new ModelStore(
   join(DATA_DIR, 'models', 'catalog.json'),
   modelCatalogFromEnv(process.env.FACTORY_MODEL_CATALOG),
+  process.env.FACTORY_DEFAULT_MODEL || undefined,
 );
 
 const state: FactoryState = {
@@ -178,7 +179,7 @@ const state: FactoryState = {
   modelStore,
   // §6.9 M3: the dynamic catalog gatekeeper-egress serves, so the admin chooses from what is actually offered.
   modelCatalog: modelStore.toEgressCatalog(),
-  defaultModel: process.env.FACTORY_DEFAULT_MODEL || undefined,
+  defaultModel: modelStore.getDefault() || process.env.FACTORY_DEFAULT_MODEL || undefined,
   registryDir: REGISTRY_DIR,
   ledger,
   inspector,

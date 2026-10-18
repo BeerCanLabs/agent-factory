@@ -39,6 +39,7 @@ export interface StagedModel {
 
 interface PersistedCatalog {
   version: number;
+  defaultModel?: string;
   models: Record<string, StoredModel>;
   staged: StagedModel[];
 }
@@ -46,19 +47,28 @@ interface PersistedCatalog {
 export class ModelStore {
   private filePath: string;
   private version = 1;
+  private defaultModel?: string;
   private models = new Map<string, StoredModel>();
   private staged: StagedModel[] = [];
 
-  constructor(filePath: string, seed?: Record<string, { provider: string; id?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }>) {
+  constructor(
+    filePath: string,
+    seed?: Record<string, { provider: string; id?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }>,
+    initialDefaultModel?: string,
+  ) {
     this.filePath = filePath;
-    this.load(seed);
+    this.load(seed, initialDefaultModel);
   }
 
-  private load(seed?: Record<string, { provider: string; id?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }>): void {
+  private load(
+    seed?: Record<string, { provider: string; id?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }>,
+    initialDefaultModel?: string,
+  ): void {
     if (existsSync(this.filePath)) {
       try {
         const raw = JSON.parse(readFileSync(this.filePath, 'utf8')) as PersistedCatalog;
         this.version = typeof raw.version === 'number' ? raw.version : 1;
+        this.defaultModel = typeof raw.defaultModel === 'string' ? raw.defaultModel : initialDefaultModel;
         this.models = new Map(Object.entries(raw.models ?? {}));
         this.staged = Array.isArray(raw.staged) ? raw.staged : [];
         return;
@@ -66,6 +76,8 @@ export class ModelStore {
         console.warn(`[control-plane] failed to read ${this.filePath}, initializing fresh store:`, err);
       }
     }
+
+    this.defaultModel = initialDefaultModel;
 
     // Bootstrap from seed (e.g. FACTORY_MODEL_CATALOG) if provided
     if (seed && Object.keys(seed).length > 0) {
@@ -93,6 +105,7 @@ export class ModelStore {
     this.version += 1;
     const data: PersistedCatalog = {
       version: this.version,
+      ...(this.defaultModel ? { defaultModel: this.defaultModel } : {}),
       models: Object.fromEntries(this.models.entries()),
       staged: this.staged,
     };
@@ -101,6 +114,18 @@ export class ModelStore {
 
   getVersion(): number {
     return this.version;
+  }
+
+  getDefault(): string | undefined {
+    return this.defaultModel;
+  }
+
+  setDefault(name: string, _actor?: string): void {
+    if (!this.models.has(name)) {
+      throw new Error(`Model '${name}' is not in the admitted model catalog`);
+    }
+    this.defaultModel = name;
+    this.persist();
   }
 
   listOffered(): StoredModel[] {
@@ -189,6 +214,9 @@ export class ModelStore {
   retire(name: string): boolean {
     const deleted = this.models.delete(name);
     if (deleted) {
+      if (this.defaultModel === name) {
+        this.defaultModel = undefined;
+      }
       this.persist();
     }
     return deleted;

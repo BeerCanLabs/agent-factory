@@ -705,3 +705,74 @@ describe('Action Provenance & Tool Syntax Leak Detection (§6.16 AP1)', () => {
     assert.equal(detectToolSyntaxLeak('hello world', []), undefined);
   });
 });
+
+describe('Dynamic Model Catalog & Default Model Sync (M2, M3, GAP-168)', () => {
+  it('updates active default model from control plane catalog sync', async () => {
+    const remoteCatalog = {
+      models: {
+        'model-a': { provider: 'fake', id: 'fake-a', price: { inputPerMTok: 1, outputPerMTok: 2 } },
+        'model-b': { provider: 'fake', id: 'fake-b', price: { inputPerMTok: 1, outputPerMTok: 2 } },
+      },
+      default: 'model-b',
+    };
+
+    const runId = 'default-model-test-run';
+    const currentCtx: RunContext = {
+      run: { runId, agentId: 'donna', state: 'WORKING', live: true },
+      agentState: 'WORKING',
+      policy: { routes: ['models'] }, // no models in policy -> gets default (M2)
+      spend: { run: 0, day: 0, month: 0 },
+    };
+
+    const control: ControlClient = {
+      async runContext(id) { return id === runId ? structuredClone(currentCtx) : null; },
+      async checkStanding() { return { ok: true, standing: 'good', remainingUsd: 100 }; },
+      async ledger() {},
+      async modelCatalog() { return remoteCatalog; },
+    };
+
+    const gk = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: [],
+      defaultModel: 'model-a',
+      modelAdapters: {
+        fake: {
+          async complete() {
+            return { content: 'hello', finishReason: 'stop', usage: { input: 10, output: 5 } };
+          },
+        },
+      },
+    });
+
+    const testPort = await listen(gk);
+    try {
+      const tok = await tokens.mint({ runId, agentId: 'donna' });
+
+      // Call model-b (the synced default model)
+      const res = await call(testPort, '/models/v1/chat/completions', {
+        token: tok,
+        body: {
+          model: 'model-b',
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+      });
+      assert.equal(res.status, 200, `Expected 200 but got ${res.status}: ${res.text}`);
+
+      // Call model-a (which was startup default, but is now superseded by model-b)
+      const resA = await call(testPort, '/models/v1/chat/completions', {
+        token: tok,
+        body: {
+          model: 'model-a',
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+      });
+      assert.equal(resA.status, 403, 'model-a is refused because policy names no models and active default is model-b');
+    } finally {
+      await new Promise<void>((r) => gk.close(() => r()));
+    }
+  });
+});
+

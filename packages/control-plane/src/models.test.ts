@@ -135,4 +135,42 @@ describe('ModelStore', () => {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it('manages, persists, and retires factory default model', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'modelstore-test-'));
+    const file = join(tmp, 'catalog.json');
+    try {
+      const seed = {
+        'claude-haiku-4-5': {
+          provider: 'bedrockConverse',
+          id: 'us.anthropic.claude-haiku-4-5',
+        },
+        'gpt-4o': {
+          provider: 'openAiCompatible',
+          id: 'gpt-4o',
+        },
+      };
+
+      const store = new ModelStore(file, seed, 'claude-haiku-4-5');
+      assert.equal(store.getDefault(), 'claude-haiku-4-5');
+
+      // Cannot set unadmitted model as default
+      assert.throws(() => store.setDefault('unknown-model'), /not in the admitted model catalog/);
+
+      // Set gpt-4o as default
+      store.setDefault('gpt-4o', 'admin@example.com');
+      assert.equal(store.getDefault(), 'gpt-4o');
+
+      // Reloads persisted default model
+      const reloaded = new ModelStore(file);
+      assert.equal(reloaded.getDefault(), 'gpt-4o');
+
+      // Retiring the active default model clears it
+      reloaded.retire('gpt-4o');
+      assert.equal(reloaded.getDefault(), undefined);
+      assert.equal(new ModelStore(file).getDefault(), undefined);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });
