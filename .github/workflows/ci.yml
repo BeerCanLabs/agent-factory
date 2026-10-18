@@ -29,28 +29,18 @@ jobs:
       - uses: actions/checkout@v4
       # Build every production image from this clean checkout, exactly as a deploy does, before anything
       # (npm install, builds) can leave artifacts behind. A deploy must never be the first place one fails.
-      # The images build concurrently; each log is printed in its own group and every failure is reported.
+      # One at a time: building them concurrently was no faster on the runner (GAP-172).
       - name: Build production images
         run: |
-          specs=(packages/control-plane/Dockerfile: packages/gatekeeper/Dockerfile: packages/gatekeeper/ingress.Dockerfile:
-                 packages/console/Dockerfile: runtimes/generic/Dockerfile:examples/echo-agent
-                 runtimes/generic/Dockerfile:examples/llm-summarizer)
-          logs="$(mktemp -d)"
-          pids=()
-          for i in "${!specs[@]}"; do
-            f="${specs[$i]%%:*}"; c="${specs[$i]#*:}"
-            docker build --platform linux/amd64 -f "$f" ${c:+--build-arg CARTRIDGE=$c} . >"$logs/$i.log" 2>&1 &
-            pids+=($!)
-          done
-          failed=0
-          for i in "${!specs[@]}"; do
-            if wait "${pids[$i]}"; then status=ok; else status=FAILED; failed=1; fi
-            echo "::group::${specs[$i]} ($status)"
-            cat "$logs/$i.log"
+          set -e
+          for spec in packages/control-plane/Dockerfile: packages/gatekeeper/Dockerfile: packages/gatekeeper/ingress.Dockerfile: \
+                      packages/console/Dockerfile: runtimes/generic/Dockerfile:examples/echo-agent \
+                      runtimes/generic/Dockerfile:examples/llm-summarizer; do
+            f="${spec%%:*}"; c="${spec#*:}"
+            echo "::group::$f ${c}"
+            docker build --platform linux/amd64 -f "$f" ${c:+--build-arg CARTRIDGE=$c} .
             echo "::endgroup::"
-            [ "$status" = ok ] || echo "::error::image build failed: ${specs[$i]}"
           done
-          exit "$failed"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
