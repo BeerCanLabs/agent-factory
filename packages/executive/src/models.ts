@@ -718,22 +718,39 @@ export type ApiKeyAdapterOptions = {
   resolveSecret?: (secretName: string) => Promise<string>;
 };
 
+async function resolveApiKey(
+  opts: ApiKeyAdapterOptions,
+  entry: CatalogEntry,
+  defaultSecret: string,
+  doFetch: typeof fetch,
+): Promise<string> {
+  const targetSecret = entry.secret ?? opts.secretName ?? defaultSecret;
+  try {
+    let key: string | undefined;
+    if (opts.apiKey) {
+      key = await opts.apiKey();
+    } else if (opts.resolveSecret) {
+      key = await opts.resolveSecret(targetSecret);
+    } else {
+      key = await resolveProviderSecret(targetSecret, doFetch);
+    }
+    if (!key) {
+      throw new Error(`secret ${targetSecret} resolved to empty value`);
+    }
+    return key;
+  } catch (err) {
+    console.error(`[gatekeeper-egress] ${targetSecret} credentials: ${err instanceof Error ? err.message : String(err)}`);
+    throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no provider credentials');
+  }
+}
+
 export function anthropicMessages(opts: ApiKeyAdapterOptions = {}): ModelAdapter {
   const doFetch = opts.fetch ?? fetch;
-  const secretName = opts.secretName ?? 'ANTHROPIC_API_KEY';
-  const defaultGetKey = opts.apiKey ?? (opts.resolveSecret ? () => opts.resolveSecret!(secretName) : () => resolveProviderSecret(secretName, doFetch));
   const base = (opts.endpoint ?? 'https://api.anthropic.com').replace(/\/$/, '');
 
   return {
     async complete(entry, req) {
-      const targetSecret = entry.secret ?? secretName;
-      let key: string;
-      try {
-        key = opts.resolveSecret ? await opts.resolveSecret(targetSecret) : await defaultGetKey();
-      } catch (err) {
-        console.error(`[gatekeeper-egress] anthropic credentials: ${err instanceof Error ? err.message : String(err)}`);
-        throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no provider credentials');
-      }
+      const key = await resolveApiKey(opts, entry, 'ANTHROPIC_API_KEY', doFetch);
       const payload = { model: entry.id, ...toAnthropicMessages(req) };
       let res: Response;
       try {
@@ -768,21 +785,12 @@ export function anthropicMessages(opts: ApiKeyAdapterOptions = {}): ModelAdapter
 
 export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter {
   const doFetch = opts.fetch ?? fetch;
-  const secretName = opts.secretName ?? 'OPENAI_API_KEY';
-  const defaultGetKey = opts.apiKey ?? (opts.resolveSecret ? () => opts.resolveSecret!(secretName) : () => resolveProviderSecret(secretName, doFetch));
   const defaultBase = (opts.endpoint ?? 'https://api.openai.com').replace(/\/$/, '');
   const chatPath = opts.chatPath ?? '/v1/chat/completions';
 
   return {
     async complete(entry, req) {
-      const targetSecret = entry.secret ?? secretName;
-      let key: string;
-      try {
-        key = opts.resolveSecret ? await opts.resolveSecret(targetSecret) : await defaultGetKey();
-      } catch (err) {
-        console.error(`[gatekeeper-egress] ${targetSecret} credentials: ${err instanceof Error ? err.message : String(err)}`);
-        throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no provider credentials');
-      }
+      const key = await resolveApiKey(opts, entry, 'OPENAI_API_KEY', doFetch);
       const base = (entry.endpoint ?? defaultBase).replace(/\/$/, '');
       const chatUrl = `${base}${chatPath.startsWith('/') ? chatPath : `/${chatPath}`}`;
       const payload: Record<string, unknown> = {

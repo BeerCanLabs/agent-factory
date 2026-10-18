@@ -394,6 +394,26 @@ describe('Vertex AI and API-key model adapters (M1–M3)', () => {
 
     await customAdapters['anthropic'].complete({ provider: 'anthropic', id: 'claude-test', secret: 'MY_CUSTOM_ANTHROPIC_KEY' }, REQ);
     assert.equal(customSecretUsed, 'MY_CUSTOM_ANTHROPIC_KEY');
+
+    // Verify entry.secret is also respected when opts.resolveSecret is omitted (resolving via resolveProviderSecret)
+    const { anthropicMessages: standaloneAnthropic } = await import('./models.js');
+    const origEnv = process.env.STANDALONE_CUSTOM_SECRET;
+    process.env.STANDALONE_CUSTOM_SECRET = 'standalone-env-key';
+    try {
+      let standaloneHeaderKey = '';
+      const standalone = standaloneAnthropic({
+        fetch: (async (_url: string, init: RequestInit) => {
+          const h = init.headers as Record<string, string>;
+          standaloneHeaderKey = h['x-api-key'];
+          return new Response(JSON.stringify({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }), { status: 200 });
+        }) as unknown as typeof fetch,
+      });
+      await standalone.complete({ provider: 'anthropic', id: 'claude-test', secret: 'STANDALONE_CUSTOM_SECRET' }, REQ);
+      assert.equal(standaloneHeaderKey, 'standalone-env-key');
+    } finally {
+      if (origEnv !== undefined) process.env.STANDALONE_CUSTOM_SECRET = origEnv;
+      else delete process.env.STANDALONE_CUSTOM_SECRET;
+    }
   });
 
   it('translates tools and parses tool_calls across OpenAI/xAI, Anthropic, and Google Gemini', async () => {

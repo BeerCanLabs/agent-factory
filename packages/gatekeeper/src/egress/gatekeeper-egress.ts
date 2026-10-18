@@ -140,6 +140,8 @@ export type GatekeeperEgressOptions = {
   serviceToken?: string;
   /** Tests: replace the vendor fetch. Production uses discoverVendorModels' own fetch. */
   discoverFetch?: typeof fetch;
+  /** Tests: replace runtime model fetch. Production uses global fetch. */
+  modelFetch?: typeof fetch;
 };
 
 
@@ -390,28 +392,31 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   const connCache = new Map<string, { token: string; expiresAtMs: number }>();
   const secretValues = new Set<string>();
   const resolveSecret = async (secretName: string): Promise<string> => {
-    const fromEnv = (process.env[secretName] ?? (secretName === 'GEMINI_API_KEY' ? process.env.GOOGLE_API_KEY : undefined))?.trim();
-    if (fromEnv) {
-      secretValues.add(fromEnv);
-      return fromEnv;
-    }
+    // 1. SecretProvider takes precedence over ambient container env (§6.9 M3, §6.11 K5)
     if (opts.providers && opts.providers.length > 0) {
       try {
         const bound = await bindSecrets([secretName], opts.providers);
         if (bound.ok && bound.env[secretName]?.trim()) {
           const val = bound.env[secretName].trim();
-          secretValues.add(val);
+          if (val.length >= 4) secretValues.add(val);
           return val;
         }
       } catch {
         // Fall through to ambient secret resolution
       }
     }
+    // 2. Container environment variables fallback
+    const fromEnv = (process.env[secretName] ?? (secretName === 'GEMINI_API_KEY' ? process.env.GOOGLE_API_KEY : undefined))?.trim();
+    if (fromEnv) {
+      if (fromEnv.length >= 4) secretValues.add(fromEnv);
+      return fromEnv;
+    }
+    // 3. Ambient provider secret lookup (GCP Secret Manager if configured)
     const ambient = await resolveProviderSecret(secretName);
-    if (ambient) secretValues.add(ambient);
+    if (ambient && ambient.length >= 4) secretValues.add(ambient);
     return ambient;
   };
-  const modelAdapters = opts.modelAdapters ?? defaultModelAdapters({ resolveSecret, fetch: opts.discoverFetch });
+  const modelAdapters = opts.modelAdapters ?? defaultModelAdapters({ resolveSecret, fetch: opts.modelFetch });
   const progress = opts.control.progress ? new ProgressEmitter((events) => opts.control.progress!(events), opts.progress) : undefined;
   /** The progress record of the call each response answers (§6.5). */
   const calls = new WeakMap<http.ServerResponse, ProgressCall>();
