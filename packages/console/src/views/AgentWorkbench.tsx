@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Terminal,
   Cpu,
@@ -44,7 +44,6 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
   const [activeTab, setActiveTab] = useState<'runtime' | 'terminal' | 'memory' | 'models' | 'skills' | 'policy' | 'owners' | 'lifecycle'>('runtime');
   const [convoPrompt, setConvoPrompt] = useState('');
   const [isSendingConvo, setIsSendingConvo] = useState(false);
-  const lastReplySeq = useRef(0);
   // Only what the factory reports (GAP-177): turns sent and how they were delivered. Replies are not shown here yet.
   const [logs, setLogs] = useState<string[]>([
     `[${new Date().toISOString()}] ${agent.name} is ${agent.state}. Turns sent here go to the agent; its replies are not shown in the console yet.`,
@@ -65,7 +64,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
       ]);
       setConvoPrompt('');
       onRefresh();
-      if (out.turnId) void awaitReply(out.turnId);
+      if (out.turnId) awaitReply(out.turnId);
     } catch (err: any) {
       setLogs((prev) => [...prev, `[ERROR] Failed to deliver turn: ${err.message}`]);
     } finally {
@@ -73,25 +72,42 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
     }
   };
 
-  /** AM2: show the agent's answer to this turn when it posts one (polls for up to three minutes). */
-  const awaitReply = async (turnId: string) => {
-    const deadline = Date.now() + 180_000;
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 2_000));
+  // AM2: turns awaiting the agent's answer, per agent, and how far this console has read each agent's replies.
+  const pendingTurns = useRef(new Map<string, { agentId: string; since: number }>());
+  const replyCursor = useRef(new Map<string, number>());
+  const awaitReply = (turnId: string) => pendingTurns.current.set(turnId, { agentId: agent.id, since: Date.now() });
+
+  // One poll loop for the agent on screen; it stops when the agent changes or the workbench closes.
+  useEffect(() => {
+    const agentId = agent.id;
+    const name = agent.name;
+    let busy = false;
+    const timer = setInterval(async () => {
+      const waiting = [...pendingTurns.current].filter(([, t]) => t.agentId === agentId);
+      if (!waiting.length || busy) return;
+      busy = true;
       try {
-        const { replies } = await factoryApi.replies(agent.id, lastReplySeq.current);
-        for (const r of replies) lastReplySeq.current = Math.max(lastReplySeq.current, r.seq);
-        const mine = replies.find((r) => r.turnId === turnId);
-        if (mine) {
-          setLogs((prev) => [...prev, `[${mine.at}] ${agent.name} >> ${mine.content}${mine.footnote ? `  ${mine.footnote}` : ''}`]);
-          return;
+        const { replies } = await factoryApi.replies(agentId, replyCursor.current.get(agentId) ?? 0);
+        for (const r of replies) {
+          replyCursor.current.set(agentId, Math.max(replyCursor.current.get(agentId) ?? 0, r.seq));
+          if (pendingTurns.current.delete(r.turnId)) {
+            setLogs((prev) => [...prev, `[${r.at}] ${name} >> ${r.content}${r.footnote ? `  ${r.footnote}` : ''}`]);
+          }
         }
       } catch {
         // keep waiting; a transient error is not the agent's answer
+      } finally {
+        busy = false;
       }
-    }
-    setLogs((prev) => [...prev, `[${new Date().toISOString()}] No reply from ${agent.name} yet (it may answer on another channel, or not support console replies).`]);
-  };
+      for (const [turnId, t] of waiting) {
+        if (pendingTurns.current.has(turnId) && Date.now() - t.since > 180_000) {
+          pendingTurns.current.delete(turnId);
+          setLogs((prev) => [...prev, `[${new Date().toISOString()}] No reply from ${name} yet (it may answer on another channel, or not support console replies).`]);
+        }
+      }
+    }, 2_000);
+    return () => clearInterval(timer);
+  }, [agent.id, agent.name]);
 
   const handleRetire = async () => {
     if (!confirm(`Are you sure you want to begin Stage 1 Soft-Retirement for ${agent.name}? This will sever gatekeeper-ingress ingress and start a 7-day holding countdown.`)) {

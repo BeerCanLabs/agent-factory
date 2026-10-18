@@ -276,7 +276,7 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     assert.match(r.body.turnId, /^[0-9a-f-]{36}$/);
     const p = delivered(r);
     assert.equal(p.caller.actor, 'token:operator');
-    assert.equal(p.caller.provider, 'console');
+    assert.equal(p.caller.provider, 'api', 'a service token speaks as an API client; a signed-in person as console');
     assert.equal(p.turnId, r.body.turnId, 'the sender cannot set the turn id');
     assert.deepEqual(p.replyTo, { channel: 'console' }, 'the sender cannot set the reply address');
   });
@@ -293,6 +293,21 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     assert.deepEqual(p.replyTo, { channel: 'discord', channelId: '1490373419240521769' });
   });
 
+  it('AM2 a Discord message that wakes the agent is a turn with its channel as reply address; an operator cannot forge one', async () => {
+    state.identityLinks!.link('discord', '123456789', 'cloudflare:dale@example.com', 'admin', { name: 'Dale', roles: ['admin'] });
+    const fromDiscord = await wake(INGRESS, { input: { messageId: 'm-am2', content: 'hi', channelId: '555', turnId: 'x', replyTo: { channel: 'console' } }, requestedBy: discord('123456789') });
+    assert.equal(fromDiscord.status, 202, JSON.stringify(fromDiscord.body));
+    const input = state.runs.get(fromDiscord.body.runId)?.input as any;
+    assert.deepEqual(input.replyTo, { channel: 'discord', channelId: '555' });
+    assert.match(input.turnId, /^[0-9a-f-]{36}$/);
+
+    const job = await wake(OPERATOR, { input: { messageId: 'm-am2-op', turnId: 'forged', replyTo: { channel: 'discord', channelId: '1' } } });
+    assert.equal(job.status, 202);
+    const jobInput = state.runs.get(job.body.runId)?.input as any;
+    assert.equal(jobInput.turnId, undefined, 'an operator run is a job: no turn id');
+    assert.equal(jobInput.replyTo, undefined, 'and no reply address it could point anywhere');
+  });
+
   it('AM2 the agent answers a console turn; only the person who asked reads the reply, and it is ledgered by hash', async () => {
     const r = await api('/api/v1/agents/ada/conversation', 'POST', OPERATOR, { content: 'what is up?' });
     assert.equal(r.status, 202);
@@ -307,6 +322,7 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     assert.equal((await reply({ turnId: r.body.turnId, content: 'x' }, 'not-a-token')).status, 401);
     const ok = await reply({ turnId: r.body.turnId, content: 'All quiet.' });
     assert.equal(ok.status, 200, await ok.text());
+    assert.equal((await reply({ turnId: r.body.turnId, content: 'again' })).status, 404, 'one answer per turn');
 
     const mine = await api('/api/v1/agents/ada/replies?after=0', 'GET', OPERATOR);
     assert.equal(mine.status, 200);

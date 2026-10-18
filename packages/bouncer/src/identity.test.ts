@@ -473,5 +473,6 @@ describe('AM2 a person conversing directly speaks as themselves', () => {
     assert.equal(owner.isOwner, true);
     const operator = directCaller({ actor: 'token:op', roles: ['viewer', 'operator'] }, [], 'agents.converse');
     assert.equal(operator.role, 'operator', 'the role that holds the privilege, not the first listed');
+    assert.equal(operator.provider, 'api', 'a service token is an API client, not a person at the console');
   });
 });

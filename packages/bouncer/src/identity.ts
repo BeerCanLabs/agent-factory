@@ -360,5 +360,7 @@ export function directCaller(principal: Principal, owners: readonly string[], pr
     : isOwner
       ? 'agent-owner'
       : (principal.roles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ?? principal.roles[0] ?? 'operator');
-  return { actor: principal.actor, role, roles: [...principal.roles], isOwner, provider: 'console', id: principal.actor };
+  // A service token (token:<name>) is an API client, not a person at the console.
+  const provider = principal.actor.startsWith('token:') ? 'api' : 'console';
+  return { actor: principal.actor, role, roles: [...principal.roles], isOwner, provider, id: principal.actor };
 }

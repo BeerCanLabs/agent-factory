@@ -67,7 +67,11 @@ const CONSOLE_TURN_TTL_MS = 60 * 60 * 1000;
 const CONSOLE_REPLIES_KEPT = 500;
 /** AM2: the longest reply a run may send to the console (characters). */
 const CONSOLE_REPLY_MAX = 32_000;
+const CONSOLE_REPLIES_PER_PERSON = 50;
+const CONSOLE_TURNS_KEPT = 5_000;
 let consoleReplySeq = 0;
+/** Reply sequence numbers grow across control-plane restarts (time-based), so a console's cursor never skips new replies. */
+const nextReplySeq = (): number => (consoleReplySeq = Math.max(Date.now() * 1000, consoleReplySeq + 1));
 
 export type FactoryState = {
 
@@ -1212,11 +1216,24 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         json(res, 400, { error: `content must be a non-empty string of at most ${CONSOLE_REPLY_MAX} characters` });
         return;
       }
-      const content = redactSecrets(body.content, state.secretValues);
-      const footnote = resultFootnote(content, state.ledger.query({ agent: run.agentId }).filter((r) => r.runId === run.runId));
-      const reply: ConsoleReply = { seq: ++consoleReplySeq, agentId: run.agentId, actor: turn.actor, turnId: body.turnId as string, runId: run.runId, content, ...(footnote ? { footnote } : {}), at: new Date().toISOString() };
+      // One answer per turn: a run cannot flood the person (or push out other people's replies).
+      state.consoleTurns!.delete(body.turnId as string);
+      const runRows = state.ledger.query({ agent: run.agentId }).filter((r) => r.runId === run.runId);
+      // AP1: the same provenance check as a result: a reply may not claim actions the run never took.
+      const { sanitized, unverifiedClaims } = sanitizeOutputWithProvenance(redactSecrets(body.content, state.secretValues), runRows);
+      if (unverifiedClaims.length > 0) {
+        state.ledger.append({ timestamp: new Date().toISOString(), agentId: run.agentId, runId: run.runId, type: 'action', action: 'UNVERIFIED_ACTION_CLAIM', actor: SYSTEM.policy, claims: unverifiedClaims });
+      }
+      const content = typeof sanitized === 'string' ? sanitized : JSON.stringify(sanitized);
+      const footnote = resultFootnote(content, runRows);
+      const reply: ConsoleReply = { seq: nextReplySeq(), agentId: run.agentId, actor: turn.actor, turnId: body.turnId as string, runId: run.runId, content, ...(footnote ? { footnote } : {}), at: new Date().toISOString() };
       if (!state.consoleReplies) state.consoleReplies = [];
       state.consoleReplies.push(reply);
+      const theirs = state.consoleReplies.filter((r) => r.actor === reply.actor);
+      if (theirs.length > CONSOLE_REPLIES_PER_PERSON) {
+        const drop = new Set(theirs.slice(0, theirs.length - CONSOLE_REPLIES_PER_PERSON));
+        state.consoleReplies = state.consoleReplies.filter((r) => !drop.has(r));
+      }
       if (state.consoleReplies.length > CONSOLE_REPLIES_KEPT) state.consoleReplies.splice(0, state.consoleReplies.length - CONSOLE_REPLIES_KEPT);
       state.ledger.append({
         timestamp: reply.at,
@@ -1418,10 +1435,21 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       }
       caller = ingressAuth.caller;
     }
+    // AM2: the turn id and reply address are the factory's. A message from an ingress that wakes the agent is a turn like
+    // any other (the first of a Discord session arrives here); an operator's run is a job and gets neither.
+    let input = body.input;
+    if (input && typeof input === 'object' && !Array.isArray(input)) {
+      const copy = { ...(input as Record<string, unknown>) };
+      delete copy.turnId;
+      delete copy.replyTo;
+      const replyTo = isIngress ? replyAddress(true, caller, copy) : undefined;
+      if (replyTo) Object.assign(copy, { turnId: randomUUID(), replyTo });
+      input = copy;
+    }
     const out = await createRun(state, runCreate[1], {
       actor: principal.actor,
       trigger: runCreate[2] === 'wake' ? 'manual' : 'api',
-      input: body.input,
+      input,
       callbackUrl: body.callbackUrl as string | undefined,
       model: body.model as string | undefined,
       ...(requestedBy ? { requestedBy } : {}),
@@ -1652,11 +1680,13 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     } else if (payload === undefined) {
       payload = { ...(caller ? { caller: { ...caller } } : {}), turnId, ...(isIngress ? {} : { replyTo: { channel: 'console' } }) };
     }
-    const replyTo = (payload as { replyTo?: { channel?: string } } | undefined)?.replyTo;
+    const shaped = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as { turnId?: string; replyTo?: { channel?: string } }) : undefined;
+    const replyTo = shaped?.replyTo;
+    const answerable = shaped?.turnId === turnId ? { turnId } : {};
     if (replyTo?.channel === 'console' && caller) {
       if (!state.consoleTurns) state.consoleTurns = new Map();
       const now = Date.now();
-      for (const [id, t] of state.consoleTurns) if (now - t.at > CONSOLE_TURN_TTL_MS) state.consoleTurns.delete(id);
+      for (const [id, t] of state.consoleTurns) if (now - t.at > CONSOLE_TURN_TTL_MS || state.consoleTurns.size >= CONSOLE_TURNS_KEPT) state.consoleTurns.delete(id);
       state.consoleTurns.set(turnId, { agentId: agent.id, actor: caller.actor, at: now });
     }
 
@@ -1684,7 +1714,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         actor: principal.actor,
         content: payload,
       });
-      json(res, 202, { ok: true, woke: true, runId: woke.runId, turnId });
+      json(res, 202, { ok: true, woke: true, runId: woke.runId, ...answerable });
       return;
     }
 
@@ -1706,7 +1736,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       actor: principal.actor,
       content: payload,
     });
-    json(res, 202, { ok: true, turnId });
+    json(res, 202, { ok: true, ...answerable });
     return;
   }
 
