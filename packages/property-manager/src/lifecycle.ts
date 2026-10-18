@@ -60,6 +60,11 @@ export type PropertyManagerState = {
   mailboxes?: Map<string, MailboxQueue>;
   /** The model a policy that names none grants (M2; FACTORY_DEFAULT_MODEL, default claude-haiku-4-5). */
   defaultModel?: string;
+  /**
+   * When this process began judging heartbeats (GAP-176). A heartbeat sent while no control plane could receive it
+   * (a deploy stops one before starting the next) is not lost: each run gets a full timeout from this moment.
+   */
+  healthSince?: number;
 };
 
 export type MailboxMessage = {
@@ -574,7 +579,8 @@ export async function haltUnhealthy(state: PropertyManagerState, runId: string, 
 export async function checkHealth(state: PropertyManagerState, now = Date.now()) {
   for (const run of state.runs.list({ active: true })) {
     if (run.state !== 'WORKING' || !run.lastHeartbeatAt) continue;
-    if (state.heartbeatTimeoutMs && now - Date.parse(run.lastHeartbeatAt) > state.heartbeatTimeoutMs) {
+    const heardAt = Math.max(Date.parse(run.lastHeartbeatAt), state.healthSince ?? 0);
+    if (state.heartbeatTimeoutMs && now - heardAt > state.heartbeatTimeoutMs) {
       await haltUnhealthy(state, run.runId, 'HEARTBEAT_LOST');
     } else if (state.maxRssMb && (run.rssMb ?? 0) > state.maxRssMb) {
       await haltUnhealthy(state, run.runId, 'MEMORY_CEILING');
@@ -623,5 +629,13 @@ export async function reconcileRuns(state: PropertyManagerState): Promise<void> 
         });
       }
     }
+  }
+  // GAP-176: agent state is not persisted on every run change, so a WORKING agent can outlive its run (a halt, a
+  // restart). Put it back to sleep so presence and wakes follow the runs, not a stale state.
+  for (const agent of state.agents.values()) {
+    if (agent.state !== 'WORKING' || activeRun(state, agent.id)) continue;
+    agent.state = 'SLEEPING';
+    registryOf(state).update(agent);
+    await notifyGatekeeperIngress(state, agent.id, 'offline');
   }
 }

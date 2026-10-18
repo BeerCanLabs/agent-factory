@@ -48,6 +48,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/gatekeeper/src/ingress/discord.ts',
       'packages/gatekeeper/src/ingress/http.ts',
       'packages/gatekeeper/src/ingress/index.ts',
+      'packages/gatekeeper/src/ingress/presence.ts',
       'packages/gatekeeper/src/ingress/server.ts',
       'packages/gatekeeper/src/ingress/wake.ts',
     ],

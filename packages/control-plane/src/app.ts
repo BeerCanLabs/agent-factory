@@ -127,6 +127,8 @@ export type FactoryState = {
   gatekeeperIngressToken?: string;
   /** A run that has sent heartbeats is halted as BLOCKED_UNHEALTHY after this much silence. 0 disables. */
   heartbeatTimeoutMs?: number;
+  /** When this process began judging heartbeats (GAP-176). */
+  healthSince?: number;
   /** Halt a run whose reported RSS exceeds this. 0 disables. */
   maxRssMb?: number;
   /** Consecutive failed runs within 10 minutes that pause the agent. 0 disables. */
@@ -267,6 +269,8 @@ export function enrichAgent(state: FactoryState, a: AgentRecord) {
     budgetExempt: isBuiltin,
     version: (a as any).version || '1.0.0',
     state: activeR ? 'RUNNING' : a.state,
+    /** A run is live now (GAP-176): what gatekeeper-ingress presence follows, never the stored `state`. */
+    liveRun: Boolean(activeR),
     currentSpendUsd: Number((s?.day ?? 0).toFixed(4)),
     currentSpendMonthlyUsd: Number((s?.month ?? 0).toFixed(4)),
     spendLimitUsd: isBuiltin ? null : Number((pol?.budgetUsd?.perDay ?? 0).toFixed(2)),
@@ -1478,6 +1482,34 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       payload = copy;
     } else if (caller && payload === undefined) {
       payload = { caller: { ...caller } };
+    }
+
+    // GAP-176: with no run to hand it to (live or queued), the message wakes the agent through the one wake path
+    // (§6.15), so it is never parked in a mailbox nobody reads.
+    if (state.runs.list({ agentId: agent.id, active: true }).length === 0) {
+      const out = await createRun(state, agent.id, {
+        actor: principal.actor,
+        trigger: 'conversation',
+        input: payload,
+        ...(requestedBy ? { requestedBy } : {}),
+        ...(caller ? { caller } : {}),
+      });
+      if (out.status >= 300) {
+        json(res, out.status, out.body);
+        return;
+      }
+      const woke = out.body as { runId: string };
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: agent.id,
+        runId: woke.runId,
+        type: 'action',
+        action: 'CONVERSATION_HANDOFF',
+        actor: principal.actor,
+        content: payload,
+      });
+      json(res, 202, { ok: true, woke: true, runId: woke.runId });
+      return;
     }
 
     await state.runtime.deliver(agent, payload);

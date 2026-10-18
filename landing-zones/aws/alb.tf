@@ -25,6 +25,9 @@ resource "aws_lb_target_group" "control" {
   protocol    = "HTTP"
   vpc_id      = aws_vpc.factory.id
   target_type = "ip"
+  # GAP-176: a stopped control plane gets SIGTERM only after draining. With the 300 s default it kept running, unreachable
+  # by agents, and halted every live run for a lost heartbeat. Agents' long polls retry, so a short drain is enough.
+  deregistration_delay = 15
   health_check {
     path = "/healthz"
   }

@@ -4,6 +4,7 @@ import { createGatekeeperIngress } from './index.js';
 import { createGatekeeperIngressHttp } from './http.js';
 import { createDiscordClient } from './discord.js';
 import { WakeRefusedError, UnauthorizedCallerError, wakeBody, wakeFailure } from './wake.js';
+import { initialPresence } from './presence.js';
 
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const FACTORY_URL = (process.env.FACTORY_URL || 'http://127.0.0.1:8088').replace(/\/$/, '');
@@ -59,6 +60,7 @@ async function reconcileFromFactory() {
       id: string;
       name?: string;
       state?: string;
+      liveRun?: boolean;
       triggers?: Array<{ type: string; secretRef?: string }>;
     }>;
     const surfaces = agents.flatMap((a) =>
@@ -67,7 +69,7 @@ async function reconcileFromFactory() {
         .map((t) => ({
           agentId: a.id,
           name: a.name,
-          initialPresence: (a.state === 'WORKING' ? 'available' : 'offline') as 'available' | 'offline',
+          initialPresence: initialPresence(a),
           secretRef: t.secretRef || 'DISCORD_BOT_TOKEN',
         })),
     );
