@@ -27,7 +27,8 @@ trap cleanup EXIT
 
 echo "== build and start"
 (cd "$ROOT" && npm run build >/dev/null)
-"${DC[@]}" --profile agents build -q
+# COMPOSE_BUILDER (CI): build with the buildx builder that already holds these layers.
+"${DC[@]}" --profile agents build -q ${COMPOSE_BUILDER:+--builder "$COMPOSE_BUILDER"}
 "${DC[@]}" up -d --wait control-plane gatekeeper-egress gatekeeper-ingress mock-provider >/dev/null
 ok "stack healthy"
 
