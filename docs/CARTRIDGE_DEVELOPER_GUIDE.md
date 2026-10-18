@@ -409,6 +409,13 @@ def ask(prompt: str, system: str = "You are a helpful assistant.") -> str:
 
 Because the format is OpenAI's, the stock OpenAI SDK also works: `OpenAI(base_url=os.environ["FACTORY_MODEL_BASE_URL"], api_key=os.environ["FACTORY_RUN_TOKEN"])` (non-streaming calls only).
 
+### Notebook rotation and closed volumes (AM3)
+Nothing in the notebook is forgotten; the notebook rotates instead. This is factory-wide policy, and every run is told it:
+- **When to rotate:** `FACTORY_NOTEBOOK_MAX_BYTES` (10 MB) and `FACTORY_NOTEBOOK_MAX_DAYS` (90 days). Rotate at whichever comes first.
+- **How to close a notebook:** move it into `$MEMORY_DIR/volumes/<name>/`, where `FACTORY_NOTEBOOK_VOLUMES_DIR` is `volumes`. Use a name such as `2026-10`: letters, digits, `.`, `_` or `-`, at most 64 characters. A closed volume is read-only. Start a new notebook that carries forward lasting knowledge, open conversations, and an index of the closed volumes.
+- **What the factory does:** it archives every volume with the agent's mind, but never hydrates one on wake. Only the current notebook is restored. You may delete a closed volume locally once it has been synced; the archive keeps it.
+- **How to read a closed volume:** create an empty file named after it in `$MEMORY_DIR/.volume-requests/`. The factory fetches the volume into `$MEMORY_DIR/volumes/<name>/`, then writes `<name>.done`, or `<name>.error` with the reason. Never use a storage SDK yourself.
+
 ### Conversational Agents: Warm-Down Window & Mailbox
 For interactive agents (e.g., Discord or Slack chatbots), agents often stay warm after their first turn to handle follow-up user messages with zero cold-start latency:
 1. Declare `runtime.warmDownSeconds: 3600` (e.g. 1 hour) in `cartridge.yaml`.
