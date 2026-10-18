@@ -202,25 +202,49 @@ type ConverseBody = {
   };
 };
 
+/** What a model accepts from the factory model API (GAP-171, GAP-175). */
+export type ModelCapabilities = {
+  /** `temperature` / `top_p`. */
+  sampling: boolean;
+  /** Forced tool choice: OpenAI `required` or a named function (Anthropic `any` / `tool`). */
+  forcedToolChoice: boolean;
+};
+
 /**
- * Whether a Claude model accepts `temperature`/`top_p` (GAP-171). Claude 4.6 and earlier do; from Opus 4.7 on they are
- * rejected with a 400, so any later or unrecognised Claude id is treated as not accepting them. Works on direct
- * (`claude-haiku-5-5`), Vertex (`claude-opus-4-5@20251101`) and Bedrock (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`) ids.
+ * The capability profile for a model id (GAP-175). Non-Claude ids accept both. For Claude, on direct (`claude-haiku-5-5`),
+ * Vertex (`claude-opus-4-5@20251101`) and Bedrock (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`) ids:
+ * - sampling: Claude 4.6 and earlier; rejected (400) from Opus 4.7 on, including Haiku 5.5 and Fable / Mythos.
+ * - forced tool choice: rejected (400) by Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1; earlier models accept it.
+ * Any later or unrecognised Claude id is treated as accepting neither.
  */
-export function claudeAcceptsSampling(modelId: string): boolean {
-  const current = /claude-(?:opus|sonnet|haiku)-(\d+)(?:-(\d{1,2})(?!\d))?/.exec(modelId);
+export function modelCapabilities(modelId: string): ModelCapabilities {
+  if (!/claude/.test(modelId)) return { sampling: true, forcedToolChoice: true };
+  const version = (major: string, minor?: string) => Number(major) * 100 + (minor === undefined ? 0 : Number(minor));
+  const current = /claude-(opus|sonnet|haiku)-(\d+)(?:-(\d{1,2})(?!\d))?/.exec(modelId);
   if (current) {
-    const major = Number(current[1]);
-    const minor = current[2] === undefined ? 0 : Number(current[2]);
-    return major < 4 || (major === 4 && minor <= 6);
+    const v = version(current[2], current[3]);
+    return {
+      sampling: v <= 406,
+      // Haiku 5.5 still accepts forced tool choice; Opus and Sonnet stop at 5.5.
+      forcedToolChoice: current[1] === 'haiku' ? v <= 505 : v < 505,
+    };
   }
+  const frontier = /claude-(?:fable|mythos)-(\d+)(?:-(\d{1,2})(?!\d))?/.exec(modelId);
+  if (frontier) return { sampling: false, forcedToolChoice: version(frontier[1], frontier[2]) < 501 };
   // Pre-4 naming: claude-3-5-sonnet, claude-2.1, claude-instant-1.2.
-  return /claude-(?:instant|\d)/.test(modelId);
+  if (/claude-(?:instant|\d)/.test(modelId)) return { sampling: true, forcedToolChoice: true };
+  return { sampling: false, forcedToolChoice: false };
+}
+
+/** Whether a Claude model accepts `temperature`/`top_p` (GAP-171). Kept for callers; see `modelCapabilities`. */
+export function claudeAcceptsSampling(modelId: string): boolean {
+  return /claude/.test(modelId) && modelCapabilities(modelId).sampling;
 }
 
 /** OpenAI messages → Bedrock Converse request. Consecutive same-role turns merge (Converse requires alternation). */
 export function toConverse(req: ChatRequest, modelId?: string): ConverseBody {
-  const sampling = !(modelId && /claude/.test(modelId)) || claudeAcceptsSampling(modelId);
+  const caps: ModelCapabilities = modelId ? modelCapabilities(modelId) : { sampling: true, forcedToolChoice: true };
+  const sampling = caps.sampling;
   const system = req.messages.filter((m) => m.role === 'system').map((m) => ({ text: m.content }));
   const messages: ConverseBody['messages'] = [];
   for (const m of req.messages) {
@@ -284,13 +308,14 @@ export function toConverse(req: ChatRequest, modelId?: string): ConverseBody {
         if (req.tool_choice === 'auto') {
           toolChoice = { auto: {} };
         } else if (req.tool_choice === 'any' || req.tool_choice === 'required') {
-          toolChoice = { any: {} };
+          // GAP-175: a model that rejects forced tool choice gets `auto`.
+          toolChoice = caps.forcedToolChoice ? { any: {} } : { auto: {} };
         } else if (typeof req.tool_choice === 'object' && req.tool_choice !== null) {
           const tc = req.tool_choice as Record<string, unknown>;
           if (tc.type === 'function' && tc.function && typeof tc.function === 'object') {
             const fnName = (tc.function as { name?: unknown }).name;
             if (typeof fnName === 'string') {
-              toolChoice = { tool: { name: fnName } };
+              toolChoice = caps.forcedToolChoice ? { tool: { name: fnName } } : { auto: {} };
             }
           }
         }
@@ -668,9 +693,13 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
 // ---------------------------------------------------------------------------------------------
 // vertex-anthropic & anthropic (Claude Messages API on Vertex AI or direct api.anthropic.com)
 
-/** `modelId` drops sampling parameters the model rejects (GAP-171); without it they pass through unchanged. */
+/**
+ * `modelId` drops sampling parameters (GAP-171) and forced tool choice (GAP-175) the model rejects; without it they pass
+ * through unchanged.
+ */
 export function toAnthropicMessages(req: ChatRequest, modelId?: string) {
-  const sampling = modelId === undefined || claudeAcceptsSampling(modelId);
+  const caps: ModelCapabilities = modelId === undefined ? { sampling: true, forcedToolChoice: true } : modelCapabilities(modelId);
+  const sampling = caps.sampling;
   const system = req.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
   type Block =
     | { type: 'text'; text: string }
@@ -730,13 +759,14 @@ export function toAnthropicMessages(req: ChatRequest, modelId?: string) {
     if (req.tool_choice === 'auto') {
       tool_choice = { type: 'auto' };
     } else if (req.tool_choice === 'any' || req.tool_choice === 'required') {
-      tool_choice = { type: 'any' };
+      // GAP-175: a model that rejects forced tool choice gets `auto`.
+      tool_choice = caps.forcedToolChoice ? { type: 'any' } : { type: 'auto' };
     } else if (typeof req.tool_choice === 'object' && req.tool_choice !== null) {
       const tc = req.tool_choice as Record<string, unknown>;
       if (tc.type === 'function' && tc.function && typeof tc.function === 'object') {
         const fnName = (tc.function as { name?: unknown }).name;
         if (typeof fnName === 'string') {
-          tool_choice = { type: 'tool', name: fnName };
+          tool_choice = caps.forcedToolChoice ? { type: 'tool', name: fnName } : { type: 'auto' };
         }
       }
     }
