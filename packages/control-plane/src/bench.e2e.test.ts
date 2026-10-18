@@ -37,16 +37,20 @@ describe('benchmark harness against a live factory', { concurrency: false }, () 
   const providerSaw: string[] = [];
 
   before(async () => {
-    // Fake provider: the "big" model always names the subject; the "small" one does not.
+    // Fake OpenAI-compatible provider behind the factory model API (GAP-174): it asks for the document through the
+    // read_document tool, then the "big" model summarizes the tool result faithfully and the "small" one does not.
     const provider = http.createServer((req, res) => {
       let b = '';
       req.on('data', (c) => (b += c));
       req.on('end', () => {
-        providerSaw.push(String(req.headers['x-api-key']));
-        const { model } = JSON.parse(b) as { model: string };
-        const text = model === 'test-big' ? 'The gatekeeper-egress meters every token.' : 'Tokens are counted.';
+        providerSaw.push(String(req.headers.authorization));
+        const { model, messages = [] } = JSON.parse(b) as { model: string; messages?: Array<{ role: string; content: string | null }> };
+        const result = [...messages].reverse().find((m) => m.role === 'tool');
+        const message = !result
+          ? { role: 'assistant', content: null, tool_calls: [{ id: 'call_doc', type: 'function', function: { name: 'read_document', arguments: '{}' } }] }
+          : { role: 'assistant', content: model === 'test-big' ? `Summary: ${result.content}`.slice(0, 200) : 'Tokens are counted.' };
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ model, content: [{ type: 'text', text }], usage: { input_tokens: 1000, output_tokens: 100 } }));
+        res.end(JSON.stringify({ model, choices: [{ message, finish_reason: 'stop' }], usage: { prompt_tokens: 1000, completion_tokens: 100 } }));
       });
     });
     const providerPort = await listen(provider);
@@ -102,11 +106,15 @@ describe('benchmark harness against a live factory', { concurrency: false }, () 
       },
     };
     const gw = createGatekeeperEgress({
-      routes: [{ id: 'anthropic', kind: 'llm', provider: 'anthropic', upstream: `http://127.0.0.1:${providerPort}`, credential: { secret: 'ANTHROPIC_API_KEY', header: 'x-api-key' } }],
-      prices: { 'test-big': { inputPerMTok: 15, outputPerMTok: 75 }, 'test-small': { inputPerMTok: 1, outputPerMTok: 5 } },
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      modelCatalog: {
+        'test-big': { provider: 'openai', id: 'test-big', endpoint: `http://127.0.0.1:${providerPort}`, price: { inputPerMTok: 15, outputPerMTok: 75 } },
+        'test-small': { provider: 'openai', id: 'test-small', endpoint: `http://127.0.0.1:${providerPort}`, price: { inputPerMTok: 1, outputPerMTok: 5 } },
+      },
       runTokens: new RunTokens(KEY),
       control,
-      providers: [envProvider({ ANTHROPIC_API_KEY: 'sk-real-bench-key' })],
+      providers: [envProvider({ OPENAI_API_KEY: 'sk-real-bench-key' })],
       contextTtlMs: 0,
     });
     const gwPort = await listen(gw);
@@ -116,7 +124,7 @@ describe('benchmark harness against a live factory', { concurrency: false }, () 
     const put = await fetch(`http://127.0.0.1:${cpPort}/api/v1/agents/llm-summarizer/policy`, {
       method: 'PUT',
       headers: { Authorization: `Bearer ${ADMIN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ routes: ['anthropic'], models: ['test-big', 'test-small'] }),
+      body: JSON.stringify({ routes: ['models'], models: ['test-big', 'test-small'] }),
     });
     assert.equal(put.status, 200);
   });
@@ -137,10 +145,10 @@ describe('benchmark harness against a live factory', { concurrency: false }, () 
     const small = s.find((x) => x.model === 'test-small')!;
     assert.equal(big.passRate, 1);
     assert.equal(small.passRate, 0.5);
-    // 1000 in + 100 out per call, one call per case, priced by the gatekeeper-egress from the ledger.
-    assert.equal(big.avgCostUsd, (1000 * 15 + 100 * 75) / 1e6);
-    assert.equal(small.avgCostUsd, (1000 * 1 + 100 * 5) / 1e6);
-    assert.ok(providerSaw.every((k) => k === 'sk-real-bench-key'), 'the worker never held the provider key');
+    // 1000 in + 100 out per call, two calls per case (the request, then the tool result), priced from the ledger.
+    assert.equal(big.avgCostUsd, (2 * (1000 * 15 + 100 * 75)) / 1e6);
+    assert.equal(small.avgCostUsd, (2 * (1000 * 1 + 100 * 5)) / 1e6);
+    assert.ok(providerSaw.length >= 8 && providerSaw.every((k) => k === 'Bearer sk-real-bench-key'), 'the worker never held the provider key');
 
     const table = matrix(s, 10_000);
     assert.match(table, /\| test-big \| 100% \(2\/2\) \|/);
