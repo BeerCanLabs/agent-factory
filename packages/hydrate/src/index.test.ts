@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NOTEBOOK_ROTATION, notebookEnv, pullMind, pullVolume, pushMind } from './index.js';
+import { NOTEBOOK_ROTATION, notebookEnv, pullMind, pullVolume, pushMind, staleSidecars } from './index.js';
 import { serveVolumeRequests } from './shim.js';
 import { existsSync } from 'node:fs';
 
@@ -72,6 +72,12 @@ describe('hydrate', () => {
           return;
         }
         const dlMatch = url.pathname.match(/^\\/storage\\/v1\\/b\\/mind-bucket\\/o\\/(.+)$/);
+        if (req.method === 'DELETE' && dlMatch) {
+          const existed = objects.delete(decodeURIComponent(dlMatch[1]));
+          res.writeHead(existed ? 204 : 404);
+          res.end();
+          return;
+        }
         if (req.method === 'GET' && dlMatch && url.searchParams.get('alt') === 'media') {
           const name = decodeURIComponent(dlMatch[1]);
           const data = objects.get(name);
@@ -138,6 +144,17 @@ describe('hydrate', () => {
       assert.equal(await checkHas('agent-1/sub/memory.db'), true);
       pullMind(store, 'agent-1', dstDir);
       assert.equal(readFileSync(join(dstDir, 'sub', 'memory.db'), 'utf8'), 'sqlite-bytes');
+
+      // A database's write-ahead log leaves the store once the run no longer has it (a clean close removes it).
+      writeFileSync(join(srcDir, 'notes.db'), SQLITE_HEADER);
+      writeFileSync(join(srcDir, 'notes.db-wal'), 'frames');
+      pushMind(store, 'agent-1', srcDir);
+      assert.equal(await checkHas('agent-1/notes.db-wal'), true);
+      rmSync(join(srcDir, 'notes.db-wal'));
+      pushMind(store, 'agent-1', srcDir);
+      assert.equal(await checkHas('agent-1/notes.db-wal'), false);
+      assert.equal(await checkHas('agent-1/notes.db'), true);
+      assert.equal(await checkHas('agent-1/sub/memory.db'), true);
     } finally {
       if (savedEndpoint === undefined) delete process.env.GCS_API_ENDPOINT;
       else process.env.GCS_API_ENDPOINT = savedEndpoint;
@@ -150,6 +167,58 @@ describe('hydrate', () => {
   });
 });
 
+
+const SQLITE_HEADER = Buffer.concat([Buffer.from('SQLite format 3\u0000', 'latin1'), Buffer.alloc(84)]);
+
+describe('a stale SQLite journal never outlives its database in the store', () => {
+  it('names only the missing journals of SQLite databases, outside closed volumes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sidecars-'));
+    try {
+      writeFileSync(join(dir, 'state.db'), SQLITE_HEADER);
+      writeFileSync(join(dir, 'open.db'), SQLITE_HEADER);
+      writeFileSync(join(dir, 'open.db-wal'), 'frames');
+      writeFileSync(join(dir, 'open.db-shm'), 'index');
+      writeFileSync(join(dir, 'notes.md'), 'not a database');
+      mkdirSync(join(dir, 'nested'));
+      writeFileSync(join(dir, 'nested', 'inner.sqlite'), SQLITE_HEADER);
+      mkdirSync(join(dir, 'volumes', 'v1'), { recursive: true });
+      writeFileSync(join(dir, 'volumes', 'v1', 'state.db'), SQLITE_HEADER);
+      assert.deepEqual(staleSidecars(join(dir, 'absent')), []);
+      assert.deepEqual(staleSidecars(dir).sort(), [
+        'nested/inner.sqlite-journal', 'nested/inner.sqlite-shm', 'nested/inner.sqlite-wal',
+        'open.db-journal',
+        'state.db-journal', 'state.db-shm', 'state.db-wal',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('S3 and GCS pushes delete exactly the stale journals after uploading', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sidecars-push-'));
+    try {
+      writeFileSync(join(dir, 'state.db'), SQLITE_HEADER);
+      writeFileSync(join(dir, 'state.db-wal'), 'frames');
+      const executed: Array<{ cmd: string; args: string[] }> = [];
+      const sync = (cmd: string, args: string[]) => void executed.push({ cmd, args });
+      pushMind({ root: '', uri: 's3://bucket' }, 'agent', dir, sync);
+      pushMind({ root: '', uri: 'gcs://bucket' }, 'agent', dir, sync);
+      assert.deepEqual(executed, [
+        { cmd: 'aws', args: ['s3', 'sync', dir, 's3://bucket/agent'] },
+        { cmd: 'aws', args: ['s3', 'sync', dir, 's3://bucket/agent', '--delete', '--exclude', '*', '--include', 'state.db-shm', '--include', 'state.db-journal'] },
+        { cmd: 'gcloud', args: ['storage', 'rsync', '-r', dir, 'gs://bucket/agent'] },
+        { cmd: 'gcloud', args: ['storage', 'rm', '--continue-on-error', 'gs://bucket/agent/state.db-shm', 'gs://bucket/agent/state.db-journal'] },
+      ]);
+      // Without SQLite databases nothing is deleted.
+      executed.length = 0;
+      rmSync(join(dir, 'state.db'));
+      pushMind({ root: '', uri: 's3://bucket' }, 'agent', dir, sync);
+      assert.equal(executed.length, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('platformEnv (mind sync is platform traffic, E6)', () => {
   it('drops proxy variables and keeps everything else', async () => {

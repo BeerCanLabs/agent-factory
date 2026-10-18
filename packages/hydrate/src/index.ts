@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readSync, readdirSync, rmSync } from 'node:fs';
 import { join, sep } from 'node:path';
 
 /** Directory stand-in or object storage (`uri: s3://bucket`, `uri: gcs://bucket`, `uri: gs://bucket`). */
@@ -14,8 +14,9 @@ export type SyncExecutor = (cmd: string, args: string[]) => void;
  * AM3 (the user's decision): a notebook rotates when it reaches 10 MB or 90 days, whichever comes first. Factory-wide
  * policy, not per agent. The agent closes the current notebook as a read-only volume under `volumes/<name>/` of
  * $MEMORY_DIR; the factory keeps closed volumes in cold storage (the same mind prefix), never hydrates them on wake, and
- * fetches one when the agent asks by writing `<name>` into `.volume-requests/`. A push never deletes from the store, so a
- * rotating agent keeps its notebook's file name (the new notebook replaces the old one in place).
+ * fetches one when the agent asks by writing `<name>` into `.volume-requests/`. A push deletes from the store only a
+ * SQLite database's stale journal (see `staleSidecars`), so a rotating agent keeps its notebook's file name (the new
+ * notebook replaces the old one in place).
  */
 export const NOTEBOOK_ROTATION = { maxBytes: 10 * 1024 * 1024, maxDays: 90 } as const;
 export const VOLUMES_DIR = 'volumes';
@@ -83,6 +84,17 @@ function walkFiles(dir, base = dir) {
   const token = await getToken();
   const headers = token ? { Authorization: 'Bearer ' + token } : {};
 
+  if (process.argv[1] === 'rm') {
+    // Delete objects; one that is already gone is not an error.
+    for (const uri of process.argv.slice(2)) {
+      const m = uri.match(/^gs:\\/\\/([^/]+)\\/(.+)$/);
+      if (!m) throw new Error('invalid gs uri: ' + uri);
+      const res = await fetch(endpoint + '/storage/v1/b/' + encodeURIComponent(m[1]) + '/o/' + encodeURIComponent(m[2]), { method: 'DELETE', headers });
+      if (!res.ok && res.status !== 404) throw new Error('GCS delete failed: ' + res.status);
+    }
+    return;
+  }
+
   if (src.startsWith('gs://')) {
     const m = src.match(/^gs:\\/\\/([^/]+)\\/?(.*)$/);
     if (!m) throw new Error('invalid gs uri: ' + src);
@@ -137,6 +149,10 @@ const SYNC_TIMEOUT_MS = 10 * 60 * 1000;
 
 function defaultSync(cmd: string, args: string[]): void {
   const env = platformEnv(process.env);
+  if (cmd === 'gcloud' && args[0] === 'storage' && args[1] === 'rm') {
+    execFileSync(process.execPath, ['-e', GCS_SYNC_SCRIPT, 'rm', ...args.slice(2).filter((a) => a.startsWith('gs://'))], { stdio: 'inherit', env, timeout: SYNC_TIMEOUT_MS });
+    return;
+  }
   if (cmd === 'gcloud' && args[0] === 'storage' && args[1] === 'rsync') {
     const src = args[args.length - 2];
     const dst = args[args.length - 1];
@@ -206,15 +222,61 @@ export function pullVolume(store: MindStore, prefix: string, name: string, dest:
   }
 }
 
+/** The files SQLite keeps beside a database for writes not yet in it. */
+const SQLITE_SIDECARS = ['-wal', '-shm', '-journal'] as const;
+
+function isSqliteDatabase(file: string): boolean {
+  try {
+    const fd = openSync(file, 'r');
+    try {
+      const head = Buffer.alloc(16);
+      return readSync(fd, head, 0, 16, 0) === 16 && head.toString('latin1') === 'SQLite format 3\u0000';
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The journals of the agent's SQLite databases that it no longer has (paths relative to `src`). Object storage keeps
+ * what a push does not delete, so a write-ahead log uploaded while the database was open outlives SQLite removing it on
+ * a clean close; the next wake pulls the newer database with that old log, SQLite replays it, and the database is
+ * corrupt. Only these are deleted from the store: a database the run has, without its journal, is complete without it.
+ * Closed volumes (AM3) and volume requests are not the run's to mirror.
+ */
+export function staleSidecars(src: string): string[] {
+  const stale: string[] = [];
+  const walk = (dir: string, rel: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!rel && (entry.name === VOLUMES_DIR || entry.name === VOLUME_REQUESTS_DIR)) continue;
+      const path = rel ? `${rel}/${entry.name}` : entry.name;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full, path);
+      else if (entry.isFile() && isSqliteDatabase(full)) {
+        for (const suffix of SQLITE_SIDECARS) if (!existsSync(full + suffix)) stale.push(path + suffix);
+      }
+    }
+  };
+  if (existsSync(src)) walk(src, '');
+  return stale;
+}
+
 export function pushMind(store: MindStore, prefix: string, src: string, sync: SyncExecutor = defaultSync): void {
   if (store.uri?.startsWith('s3://')) {
     if (!existsSync(src)) return;
     sync('aws', ['s3', 'sync', src, s3Prefix(store, prefix)]);
+    const stale = staleSidecars(src);
+    // `--delete` limited by the filters to exactly these keys: nothing else in the store is touched.
+    if (stale.length) sync('aws', ['s3', 'sync', src, s3Prefix(store, prefix), '--delete', '--exclude', '*', ...stale.flatMap((key) => ['--include', key])]);
     return;
   }
   if (store.uri?.startsWith('gcs://') || store.uri?.startsWith('gs://')) {
     if (!existsSync(src)) return;
     sync('gcloud', ['storage', 'rsync', '-r', src, gcsPrefix(store, prefix)]);
+    const stale = staleSidecars(src);
+    if (stale.length) sync('gcloud', ['storage', 'rm', '--continue-on-error', ...stale.map((key) => `${gcsPrefix(store, prefix)}/${key}`)]);
     return;
   }
   const dest = join(store.root, prefix);
