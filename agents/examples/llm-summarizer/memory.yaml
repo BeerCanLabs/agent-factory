@@ -1,1 +1,3 @@
 prefix: llm-summarizer
+# AM1: answers for anyone; nothing persists after a live session.
+archetype: purpose-built

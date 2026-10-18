@@ -79,7 +79,7 @@ describe('an owner acts on its own agents (TSK-105)', { concurrency: false }, ()
       return { status: res.status, body: text ? JSON.parse(text) : null };
     };
     for (const id of ['ada', 'bea']) {
-      const reg = await api('/api/v1/registry/agents', 'POST', ADMIN, { repo: `https://github.com/beercanlabs/SM-${id}`, commit: SHA, cartridge: { id, name: id } });
+      const reg = await api('/api/v1/registry/agents', 'POST', ADMIN, { repo: `https://github.com/beercanlabs/SM-${id}`, commit: SHA, cartridge: { memory: { archetype: 'personal-assistant' }, id, name: id } });
       assert.equal(reg.status, 201, JSON.stringify(reg.body));
     }
     assert.equal((await api('/api/v1/agents/ada/owners', 'PUT', ADMIN, { owners: ['token:alice', 'token:carol'] })).status, 200);

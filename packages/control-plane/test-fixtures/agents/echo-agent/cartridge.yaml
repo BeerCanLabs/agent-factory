@@ -15,3 +15,6 @@ secrets:
 compute:
   kind: oci
   ref: oci://ghcr.io/beercanlabs/factory-echo-agent:test
+
+memory:
+  archetype: purpose-built

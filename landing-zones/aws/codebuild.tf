@@ -64,7 +64,7 @@ resource "aws_iam_role_policy" "codebuild_policy" {
 # GIT_COMMIT (full 40-char SHA) and IMAGE_TAG (<agentId>-<commit[:12]>). It builds exactly that commit, refuses a
 # repository without tests, runs the agent's own tests, and pushes an image tagged by the commit, never a
 # mutable tag. Refusal reasons are exit codes that packages/property-manager/src/aws/codebuild.ts maps back:
-# 3 = no_tests, 4 = tests_failed, 5 = source_unavailable, 6 = hardcoded_secret; any other failure maps from its phase.
+# 3 = no_tests, 4 = tests_failed, 5 = source_unavailable, 6 = hardcoded_secret, 7 = archetype_required (AM1); any other failure maps from its phase.
 #
 # Skills (§6.14 SK4): when the control plane also sends SKILLS (the agent's adopted skills, each at an approved
 # version's pinned commit), IMAGE_TAG is <agentId>-<commit[:12]>-<12 hex of a hash of the skill pins>. The agent's image is
@@ -150,6 +150,10 @@ phases:
         GENERIC='(secret|password|passwd|api_?key|token|client_secret)[A-Za-z0-9_]*["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_/+=.-]{20,}["'"'"']'
         HITS="$(git ls-files -z | xargs -0 grep -nIE -i -- "$KNOWN|$GENERIC" 2>/dev/null | grep -v 'secret-scan:allow' | grep -E -- "$KNOWN|[\"'][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[\"']|[\"'][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[\"']" | grep -vE '(example|EXAMPLE|placeholder|your[-_]|changeme|<[a-z_]+>)' | cut -d: -f1,2 | sort -u)"
         if [ -n "$HITS" ]; then echo "ADMISSION REFUSED (hardcoded_secret):"; echo "$HITS"; exit 6; fi
+      - |
+        # AM1 / GAP-179: the commit must declare its memory archetype (cartridge.yaml memory.archetype, or memory.yaml archetype).
+        ARCH='[\"'"'"']?(purpose-built|personal-assistant|team-member|ephemeral|episodic|workspace)[\"'"'"']?[[:space:]]*(#.*)?$'
+        if ! { [ -f cartridge.yaml ] && grep -qE "^[[:space:]]+archetype:[[:space:]]*$ARCH" cartridge.yaml; } && ! { [ -f memory.yaml ] && grep -qE "^archetype:[[:space:]]*$ARCH" memory.yaml; }; then echo "ADMISSION REFUSED (archetype_required): declare memory.archetype: purpose-built, personal-assistant or team-member"; exit 7; fi
       - |
         if [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f setup.py ]; then KIND=python
         elif [ -f package.json ]; then KIND=node

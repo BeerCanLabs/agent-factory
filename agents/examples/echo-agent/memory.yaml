@@ -1,1 +1,3 @@
 prefix: echo-agent
+# AM1: answers for anyone; nothing persists after a live session.
+archetype: purpose-built

@@ -21,6 +21,9 @@ from memory import (
     ARCHETYPE_EPISODIC,
     ARCHETYPE_WORKSPACE,
     load_archetype_from_cartridge,
+    canonical_archetype,
+    ARCHETYPE_PERSONAL_ASSISTANT,
+    ARCHETYPE_TEAM_MEMBER,
     load_memory_bounds,
 )
 from memory import episodic
@@ -77,7 +80,7 @@ def main() -> int:
 
     db = None
     try:
-        if archetype_name == ARCHETYPE_EPISODIC:
+        if canonical_archetype(archetype_name) == ARCHETYPE_PERSONAL_ASSISTANT:
             db_path = memory_dir / "starter_python_state.db"
             db = sqlite3.connect(str(db_path))
             db.execute("PRAGMA journal_mode = WAL;")
@@ -117,7 +120,7 @@ def main() -> int:
                     reply_text=summary,
                 )
 
-        elif archetype_name == ARCHETYPE_WORKSPACE:
+        elif canonical_archetype(archetype_name) == ARCHETYPE_TEAM_MEMBER:
             # Like `authorId`, `project_id` is caller-supplied input, not a verified scope (GAP-116): it chooses which
             # per-project database this run opens, so it separates projects but does not protect one from another.
             project_id = str(payload.get("project_id") or "default-project")
@@ -154,7 +157,7 @@ def main() -> int:
         "status": status,
         "output": {
             "summary": summary,
-            "archetype": archetype_name,
+            "archetype": canonical_archetype(archetype_name),
             "processed_at": datetime.now(timezone.utc).isoformat(),
             "echo": payload,
             **({"context": context} if context else {}),

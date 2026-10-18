@@ -99,7 +99,7 @@ describe('agent owners on the configuration record (TSK-103)', { concurrency: fa
     cp = createFactoryServer(state);
     port = await listen(cp);
     api = call(port);
-    const reg = await api('/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA, cartridge: { id: 'ada', name: 'Ada' } });
+    const reg = await api('/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA, cartridge: { memory: { archetype: 'personal-assistant' }, id: 'ada', name: 'Ada' } });
     assert.equal(reg.status, 201, JSON.stringify(reg.body));
   });
 
@@ -162,7 +162,7 @@ describe('agent owners on the configuration record (TSK-103)', { concurrency: fa
   it('owners survive a re-registration, a policy update and a deploy', async () => {
     const owners = ['cloudflare:alice@example.com', 'token:ci'];
     assert.equal((await api('/api/v1/agents/ada/owners', 'PUT', ADMIN, { owners })).status, 200);
-    const reg = await api('/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA2, cartridge: { id: 'ada', name: 'Ada' } });
+    const reg = await api('/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA2, cartridge: { memory: { archetype: 'personal-assistant' }, id: 'ada', name: 'Ada' } });
     assert.equal(reg.status, 201, JSON.stringify(reg.body));
     assert.deepEqual(ownersOf(state, 'ada'), owners);
     assert.equal((await api('/api/v1/agents/ada/policy', 'PUT', ADMIN, { routes: ['models'] })).status, 200);
@@ -229,7 +229,7 @@ describe('agent owners on the configuration record (TSK-103)', { concurrency: fa
       const server = createFactoryServer(s2);
       const api2 = call(await listen(server));
       try {
-        assert.equal((await api2('/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA, cartridge: { id: 'ada', name: 'Ada' } })).status, 201);
+        assert.equal((await api2('/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA, cartridge: { memory: { archetype: 'personal-assistant' }, id: 'ada', name: 'Ada' } })).status, 201);
         failing = true;
         const r = await api2('/api/v1/agents/ada/owners', 'PUT', ADMIN, { owners: ['token:a'] });
         assert.equal(r.status, 500);

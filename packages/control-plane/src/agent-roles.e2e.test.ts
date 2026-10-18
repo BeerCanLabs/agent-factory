@@ -51,7 +51,7 @@ describe('the roles an agent declares (E12, TSK-172)', { concurrency: false }, (
   let ledger: MemoryLedger;
   let api: (path: string, method?: string, token?: string, body?: unknown) => Promise<{ status: number; body: any }>;
   const register = (cartridge: Record<string, unknown>, token = ADMIN) =>
-    api('/api/v1/registry/agents', 'POST', token, { repo: 'https://github.com/beercanlabs/SM-x', commit: SHA, cartridge });
+    api('/api/v1/registry/agents', 'POST', token, { repo: 'https://github.com/beercanlabs/SM-x', commit: SHA, cartridge: { memory: { archetype: 'personal-assistant' }, ...cartridge } });
 
   before(async () => {
     dir = mkdtempSync(join(tmpdir(), 'cp-agent-roles-'));

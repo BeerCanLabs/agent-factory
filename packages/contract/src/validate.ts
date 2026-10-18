@@ -66,6 +66,17 @@ function zodIssues(prefix: string, err: { issues: { path: (string | number)[]; m
   }
 }
 
+/** AM1 (DESIGN_AUTHORITY §6.6): the archetype every agent declares. */
+const ARCHETYPE_REQUIRED = 'memory.archetype is required: purpose-built, personal-assistant or team-member (AM1)';
+
+/** AM1: the archetype a `memory.yaml` beside a `cartridge.yaml` declares, if it declares a valid one. */
+function memoryYamlArchetype(dir: string, entries: Set<string>): string | undefined {
+  if (!entries.has('memory.yaml')) return undefined;
+  const raw = parseYamlFile(join(dir, 'memory.yaml'), []);
+  const parsed = memorySchema.safeParse(raw);
+  return parsed.success ? parsed.data.archetype : undefined;
+}
+
 export function validateCartridge(dir: string): ValidationResult {
   const issues: ValidationIssue[] = [];
   const cartridgeId = basename(dir);
@@ -90,6 +101,7 @@ export function validateCartridge(dir: string): ValidationResult {
       if (!parsed.success) {
         zodIssues(manifestPath, parsed.error, issues);
       } else {
+        if (!(parsed.data.memory ?? parsed.data.persistence)?.archetype && !memoryYamlArchetype(dir, entries)) issue(issues, manifestPath, ARCHETYPE_REQUIRED);
         if (parsed.data.prompt) {
           const promptPath = join(dir, parsed.data.prompt);
           if (existsSync(promptPath)) {
@@ -184,7 +196,10 @@ export function validateCartridge(dir: string): ValidationResult {
     if (raw !== undefined) {
       const parsed = memorySchema.safeParse(raw);
       if (!parsed.success) zodIssues(filePath, parsed.error, issues);
+      else if (!parsed.data.archetype) issue(issues, filePath, ARCHETYPE_REQUIRED);
     }
+  } else {
+    issue(issues, join(dir, 'memory.yaml'), ARCHETYPE_REQUIRED);
   }
 
   if (entries.has('bench.yaml')) {

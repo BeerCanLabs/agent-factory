@@ -27,3 +27,7 @@ compute:
   localCommand:
     - node
     - worker.mjs
+
+memory:
+  # AM1: answers for anyone; nothing persists after a live session.
+  archetype: purpose-built

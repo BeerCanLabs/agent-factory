@@ -324,7 +324,10 @@ export function loadCatalog(agentsRoot: string, options: { includeRetired?: bool
   const out: AgentRecord[] = [];
   for (const dir of dirs) {
     const result = validateCartridge(dir);
-    if (!result.ok) continue;
+    if (!result.ok) {
+      console.warn(`[registrar] cartridge ${result.cartridgeId} left out of the catalog: ${result.issues.map((i) => i.message).join('; ')}`);
+      continue;
+    }
     if (!options.includeRetired && RETIRED_PLACEHOLDER_IDS.has(result.cartridgeId)) continue;
 
     const entries = new Set(readdirSync(dir));

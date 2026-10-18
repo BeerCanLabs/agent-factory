@@ -86,6 +86,8 @@ describe('a cartridge on disk', () => {
       writeFileSync(join(dir, 'cartridge.yaml'), [
         'id: donna',
         'name: Donna',
+        'memory:',
+        '  archetype: personal-assistant',
         'skills:',
         '  - id: google-calendar',
         '    routes: [google-calendar]',

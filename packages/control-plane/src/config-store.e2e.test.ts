@@ -108,7 +108,7 @@ describe('SK3 deployment configuration store (TSK-052)', { concurrency: false },
   });
 
   it('register, then a policy change: history shows two versions with hashes, each ledgered without the policy', async () => {
-    const reg = await call(port, '/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA1, cartridge: { id: 'ada', name: 'Ada' } });
+    const reg = await call(port, '/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA1, cartridge: { memory: { archetype: 'personal-assistant' }, id: 'ada', name: 'Ada' } });
     assert.equal(reg.status, 201, JSON.stringify(reg.body));
     const policy = { routes: ['models'], budgetUsd: { perDay: 5 } };
     const put = await call(port, '/api/v1/agents/ada/policy', 'PUT', ADMIN, policy, { 'x-change-reason': 'ada needs models' });
@@ -150,9 +150,9 @@ describe('SK3 deployment configuration store (TSK-052)', { concurrency: false },
   });
 
   it('re-registering with nothing changed adds no version; a new commit does', async () => {
-    await call(port, '/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA1, cartridge: { id: 'ada', name: 'Ada' } });
+    await call(port, '/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA1, cartridge: { memory: { archetype: 'personal-assistant' }, id: 'ada', name: 'Ada' } });
     assert.equal(state.configs!.history('ada').length, 2);
-    await call(port, '/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA2, cartridge: { id: 'ada', name: 'Ada' } });
+    await call(port, '/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-ada', commit: SHA2, cartridge: { memory: { archetype: 'personal-assistant' }, id: 'ada', name: 'Ada' } });
     const current = (await call(port, '/api/v1/agents/ada/config', 'GET', VIEWER)).body as ConfigRecord;
     assert.equal(current.version, 3);
     assert.equal(current.source.commit, SHA2);
@@ -171,7 +171,7 @@ describe('SK3 deployment configuration store (TSK-052)', { concurrency: false },
   });
 
   it('a viewer can read but not export; an admin exports every agent, ledgered', async () => {
-    await call(port, '/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-bob', commit: SHA1, cartridge: { id: 'bob', name: 'Bob' } });
+    await call(port, '/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-bob', commit: SHA1, cartridge: { memory: { archetype: 'personal-assistant' }, id: 'bob', name: 'Bob' } });
     assert.equal((await call(port, '/api/v1/agents/bob/config', 'GET', VIEWER)).status, 200);
     const denied = await call(port, '/api/v1/config/export', 'GET', VIEWER);
     assert.equal(denied.status, 403);
@@ -211,7 +211,7 @@ describe('SK3 deployment configuration store (TSK-052)', { concurrency: false },
     const server = createFactoryServer(s);
     const p = await listen(server);
     try {
-      const reg = await call(p, '/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-cy', commit: SHA1, cartridge: { id: 'cy' } });
+      const reg = await call(p, '/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-cy', commit: SHA1, cartridge: { memory: { archetype: 'personal-assistant' }, id: 'cy' } });
       assert.equal(reg.status, 201);
       assert.equal((await call(p, '/api/v1/agents/cy/policy', 'PUT', ADMIN, { routes: ['models'] })).status, 200);
       assert.deepEqual(s.policies.get('cy'), { routes: ['models'] });

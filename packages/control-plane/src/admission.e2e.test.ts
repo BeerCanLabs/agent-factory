@@ -124,7 +124,7 @@ describe('§6.8 L3/L4: pinned registration, admission build, and SHA-tagged depl
   });
 
   it('registration pins the given commit on the agent record', async () => {
-    const res = await call('/api/v1/registry/agents', 'POST', { id: 'donna', name: 'Donna', repo: REPO, commit: C1 });
+    const res = await call('/api/v1/registry/agents', 'POST', { memory: { archetype: 'personal-assistant' }, id: 'donna', name: 'Donna', repo: REPO, commit: C1 });
     assert.equal(res.status, 201);
     assert.equal(res.body.repo, REPO);
     assert.equal(res.body.commit, C1);
@@ -136,27 +136,36 @@ describe('§6.8 L3/L4: pinned registration, admission build, and SHA-tagged depl
   });
 
   it('registration without a commit resolves the default-branch HEAD once and pins it', async () => {
-    const res = await call('/api/v1/registry/agents', 'POST', { id: 'headless', repo: 'https://github.com/example/agent.git' });
+    const res = await call('/api/v1/registry/agents', 'POST', { memory: { archetype: 'personal-assistant' }, id: 'headless', repo: 'https://github.com/example/agent.git' });
     assert.equal(res.status, 201);
     assert.equal(res.body.commit, HEAD);
     assert.deepEqual(resolved, ['https://github.com/example/agent.git']);
-    const unresolved = await call('/api/v1/registry/agents', 'POST', { id: 'nope', repo: 'https://github.com/example/unreachable.git' });
+    const unresolved = await call('/api/v1/registry/agents', 'POST', { memory: { archetype: 'personal-assistant' }, id: 'nope', repo: 'https://github.com/example/unreachable.git' });
     assert.equal(unresolved.status, 422);
     assert.equal(unresolved.body.error, 'commit_unresolved');
     assert.equal(state.agents.has('nope'), false);
   });
 
+  it('AM1 a registration from a repository must declare an archetype; a pre-AM1 name is accepted with a warning', async () => {
+    const missing = await call('/api/v1/registry/agents', 'POST', { id: 'no-archetype', repo: REPO, commit: C1 });
+    assert.equal(missing.status, 422);
+    assert.equal((missing.body as { error: string }).error, 'archetype_required');
+    const legacy = await call('/api/v1/registry/agents', 'POST', { id: 'legacy-archetype', repo: REPO, commit: C1, memory: { archetype: 'episodic' } });
+    assert.equal(legacy.status, 201);
+    assert.deepEqual((legacy.body as { warnings?: string[] }).warnings, ['memory.archetype "episodic" is deprecated; declare "personal-assistant" (AM1)']);
+  });
+
   it('registration refuses a short or mutable ref, a credentialed URL, and built-in ids', async () => {
     for (const commit of ['main', 'e3410b5', C1.toUpperCase()]) {
-      const r = await call('/api/v1/registry/agents', 'POST', { id: 'bad-commit', repo: REPO, commit });
+      const r = await call('/api/v1/registry/agents', 'POST', { memory: { archetype: 'personal-assistant' }, id: 'bad-commit', repo: REPO, commit });
       assert.equal(r.status, 400, commit);
       assert.equal(r.body.error, 'invalid_commit');
     }
-    const cred = await call('/api/v1/registry/agents', 'POST', { id: 'bad-repo', repo: 'https://x-access-token:ghp_abc@github.com/o/r.git', commit: C1 });
+    const cred = await call('/api/v1/registry/agents', 'POST', { memory: { archetype: 'personal-assistant' }, id: 'bad-repo', repo: 'https://x-access-token:ghp_abc@github.com/o/r.git', commit: C1 });
     assert.equal(cred.status, 400);
     assert.equal(cred.body.error, 'invalid_repo');
     assert.equal(checkRepoUrl('--upload-pack=touch /tmp/x'), undefined);
-    const builtin = await call('/api/v1/registry/agents', 'POST', { id: 'gatekeeper-ingress', repo: REPO, commit: C1 });
+    const builtin = await call('/api/v1/registry/agents', 'POST', { memory: { archetype: 'personal-assistant' }, id: 'gatekeeper-ingress', repo: REPO, commit: C1 });
     assert.equal(builtin.status, 409);
     assert.equal(state.agents.get('gatekeeper-ingress')?.name, 'gatekeeper-ingress');
   });
@@ -173,7 +182,7 @@ describe('§6.8 L3/L4: pinned registration, admission build, and SHA-tagged depl
   });
 
   it('deploy of an agent with no pinned source is refused rather than built from latest', async () => {
-    await call('/api/v1/registry/agents', 'POST', { id: 'unpinned', name: 'No repo' });
+    await call('/api/v1/registry/agents', 'POST', { memory: { archetype: 'personal-assistant' }, id: 'unpinned', name: 'No repo' });
     state.policies.set('unpinned', { routes: ['anthropic'] });
     const res = await call('/api/v1/registry/agents/unpinned/deploy', 'POST');
     assert.equal(res.status, 409);

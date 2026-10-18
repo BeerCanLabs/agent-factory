@@ -75,7 +75,7 @@ describe('a scheduled run carries its requester’s authority, never more (E12, 
       const text = await res.text();
       return { status: res.status, body: text ? JSON.parse(text) : null };
     };
-    const reg = await api('/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-donna', commit: SHA, cartridge: { id: 'donna', name: 'donna' } });
+    const reg = await api('/api/v1/registry/agents', 'POST', ADMIN, { repo: 'https://github.com/beercanlabs/SM-donna', commit: SHA, cartridge: { memory: { archetype: 'personal-assistant' }, id: 'donna', name: 'donna' } });
     assert.equal(reg.status, 201, JSON.stringify(reg.body));
     assert.equal((await api('/api/v1/agents/donna/owners', 'PUT', ADMIN, { owners: ['cloudflare:dale@example.com'] })).status, 200);
     const links = state.identityLinks!;

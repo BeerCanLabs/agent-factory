@@ -20,13 +20,24 @@ ARCHETYPE_EPHEMERAL = "ephemeral"
 ARCHETYPE_EPISODIC = "episodic"
 ARCHETYPE_WORKSPACE = "workspace"
 
+# AM1 (DESIGN_AUTHORITY §6.6): the three declared archetypes; the pre-AM1 names stay accepted as aliases.
+ARCHETYPE_PURPOSE_BUILT = "purpose-built"
+ARCHETYPE_PERSONAL_ASSISTANT = "personal-assistant"
+ARCHETYPE_TEAM_MEMBER = "team-member"
+
 SUPPORTED_ARCHETYPES = (
+    ARCHETYPE_PURPOSE_BUILT,
+    ARCHETYPE_PERSONAL_ASSISTANT,
+    ARCHETYPE_TEAM_MEMBER,
     ARCHETYPE_EPHEMERAL,
     ARCHETYPE_EPISODIC,
     ARCHETYPE_WORKSPACE,
 )
 
 _ARCHETYPE_MODULES = {
+    ARCHETYPE_PURPOSE_BUILT: ephemeral,
+    ARCHETYPE_PERSONAL_ASSISTANT: episodic,
+    ARCHETYPE_TEAM_MEMBER: workspace,
     ARCHETYPE_EPHEMERAL: ephemeral,
     ARCHETYPE_EPISODIC: episodic,
     ARCHETYPE_WORKSPACE: workspace,
@@ -82,11 +93,24 @@ def _parse_manifest(text: str) -> dict:
     return result
 
 
+_CANONICAL = {
+    ARCHETYPE_EPHEMERAL: ARCHETYPE_PURPOSE_BUILT,
+    ARCHETYPE_EPISODIC: ARCHETYPE_PERSONAL_ASSISTANT,
+    ARCHETYPE_WORKSPACE: ARCHETYPE_TEAM_MEMBER,
+}
+
+
+def canonical_archetype(name: str) -> str:
+    """The AM1 archetype a declaration names: pre-AM1 aliases resolve to purpose-built, personal-assistant, team-member."""
+    clean = (name or "").strip().lower()
+    return _CANONICAL.get(clean, clean)
+
+
 def get_memory_archetype(name: str):
     """Retrieve the memory archetype module by name.
 
     Args:
-        name: One of 'ephemeral', 'episodic', or 'workspace' (case-insensitive).
+        name: 'purpose-built', 'personal-assistant' or 'team-member' (or a pre-AM1 alias), case-insensitive.
 
     Returns:
         The corresponding memory module.

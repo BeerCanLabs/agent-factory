@@ -25,9 +25,18 @@ describe('cartridge connections (§6.11 K1)', () => {
 
 const repoAgents = fileURLToPath(new URL('../../../agents', import.meta.url));
 
-function fixture(files: Record<string, string>): string {
+/** A cartridge on disk. AM1: one that declares no memory gets a default archetype unless `bare` (to test the refusal). */
+function fixture(files: Record<string, string>, bare = false): string {
   const dir = mkdtempSync(join(tmpdir(), 'cartridge-'));
-  for (const [name, body] of Object.entries(files)) {
+  const withArchetype = { ...files };
+  if (!bare) {
+    if (withArchetype['cartridge.yaml'] !== undefined && !/^memory:/m.test(withArchetype['cartridge.yaml'])) {
+      withArchetype['cartridge.yaml'] = `${withArchetype['cartridge.yaml'].replace(/\n*$/, '\n')}memory:\n  archetype: purpose-built\n`;
+    } else if (withArchetype['cartridge.yaml'] === undefined && withArchetype['memory.yaml'] === undefined) {
+      withArchetype['memory.yaml'] = 'archetype: purpose-built\n';
+    }
+  }
+  for (const [name, body] of Object.entries(withArchetype)) {
     writeFileSync(join(dir, name), body);
   }
   return dir;
@@ -463,3 +472,49 @@ describe('memory archetype declarations (§GAP-115, §TSK-029)', () => {
   });
 });
 
+
+describe('AM1 every cartridge declares its archetype', () => {
+  it('refuses a cartridge.yaml or a multi-file cartridge without memory.archetype', () => {
+    const unified = fixture({ 'cartridge.yaml': 'schemaVersion: "1.0"\nid: x\nname: X\nprompt: soul.md\n', 'soul.md': '# X\n' }, true);
+    const legacy = fixture({ ...valid }, true);
+    try {
+      for (const dir of [unified, legacy]) {
+        const r = validateCartridge(dir);
+        assert.equal(r.ok, false);
+        assert.ok(r.issues.some((i) => i.message.includes('memory.archetype is required')), JSON.stringify(r.issues));
+      }
+    } finally {
+      rmSync(unified, { recursive: true, force: true });
+      rmSync(legacy, { recursive: true, force: true });
+    }
+  });
+
+  it('AM1 accepts the archetype under persistence (the alias of memory)', () => {
+    const dir = fixture({ 'cartridge.yaml': 'schemaVersion: "1.0"\nid: x\nname: X\nprompt: soul.md\npersistence:\n  enabled: true\n  archetype: purpose-built\n', 'soul.md': '# X\n' }, true);
+    try {
+      const r = validateCartridge(dir);
+      assert.equal(r.ok, true, JSON.stringify(r.issues));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('AM1 accepts a cartridge.yaml whose archetype is declared in memory.yaml beside it', () => {
+    const dir = fixture({ 'cartridge.yaml': 'schemaVersion: "1.0"\nid: x\nname: X\nprompt: soul.md\n', 'soul.md': '# X\n', 'memory.yaml': 'archetype: team-member\n' }, true);
+    try {
+      const r = validateCartridge(dir);
+      assert.equal(r.ok, true, JSON.stringify(r.issues));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts the three archetypes and resolves the pre-AM1 names as aliases', async () => {
+    const { canonicalArchetype } = await import('./schema.js');
+    for (const a of ['purpose-built', 'personal-assistant', 'team-member']) assert.equal(memoryArchetype.safeParse(a).success, true);
+    assert.equal(canonicalArchetype('ephemeral'), 'purpose-built');
+    assert.equal(canonicalArchetype('episodic'), 'personal-assistant');
+    assert.equal(canonicalArchetype('workspace'), 'team-member');
+    assert.equal(canonicalArchetype('chatbot'), undefined);
+  });
+});
