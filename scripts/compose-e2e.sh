@@ -89,7 +89,7 @@ echo "== egress policy (deny by default)"
 [ "$(api -X POST -d '{"model":"test-big"}' -o /dev/null -w '%{http_code}' $CP/api/v1/agents/llm-summarizer/runs)" = 202 ] || die "run create"
 denied="$(wait_run "$(api "$CP/api/v1/runs?agent=llm-summarizer" | jq -r '.[-1].runId')")"
 [ "$(jq -r .state <<<"$denied")" = FAILED ] && grep -q 403 <<<"$(jq -r .error <<<"$denied")" || die "deny-by-default policy let a call through: $denied"
-api -X PUT -d '{"routes":["anthropic"],"models":["test-big","test-small"]}' $CP/api/v1/agents/llm-summarizer/policy >/dev/null
+api -X PUT -d '{"routes":["models"],"models":["test-big","test-small"]}' $CP/api/v1/agents/llm-summarizer/policy >/dev/null
 ok "no policy = no egress (403 at the gatekeeper-egress)"
 
 echo "== cost vs quality harness"
@@ -99,13 +99,15 @@ grep -q '| test-big | 100% (2/2) |' <<<"$out" || die "bench matrix: $out"
 grep -q '| test-small | 50% (1/2) |' <<<"$out" || die "bench matrix: $out"
 grep -q 'Recommended: test-big' <<<"$out" || die "bench recommendation: $out"
 cost="$(api "$CP/api/v1/ledger?agent=llm-summarizer" | jq '[.[] | select(.type=="llm") | .costUsd] | add')"
-[ "$(jq -n "$cost == 0.048")" = true ] || die "ledger cost $cost != 0.048"
-ok "matrix 100%/50%, recommends test-big; ledger holds \$$cost across 4 priced calls"
+# Two priced calls per case through the factory model API: the request, then the turn with the tool result (GAP-174).
+[ "$(jq -n "$cost == 0.096")" = true ] || die "ledger cost $cost != 0.096"
+ok "matrix 100%/50%, recommends test-big; ledger holds \$$cost across 8 priced calls (tool round trips)"
 
 echo "== budget cap"
 spent="$(api "$CP/api/v1/ledger?agent=llm-summarizer" | jq '[.[] | select(.type=="llm") | .costUsd] | add')"
-cap="$(jq -n "$spent + 0.01")"
-api -X PUT -d "{\"routes\":[\"anthropic\"],\"models\":[\"test-big\",\"test-small\"],\"budgetUsd\":{\"perDay\":$cap}}" $CP/api/v1/agents/llm-summarizer/policy >/dev/null
+# A run makes two calls (0.0225 each on test-big): the cap is crossed by the second, which completes (bounded overshoot).
+cap="$(jq -n "$spent + 0.03")"
+api -X PUT -d "{\"routes\":[\"models\"],\"models\":[\"test-big\",\"test-small\"],\"budgetUsd\":{\"perDay\":$cap}}" $CP/api/v1/agents/llm-summarizer/policy >/dev/null
 first="$(wait_run "$(api -X POST -d '{"model":"test-big","input":{"text":"one"}}' $CP/api/v1/agents/llm-summarizer/runs | jq -r .runId)")"
 [ "$(jq -r .state <<<"$first")" = DONE ] || die "under-budget run: $(jq -c '{state,error}' <<<"$first")"
 sleep 1
@@ -117,7 +119,7 @@ api "$CP/api/v1/ledger?agent=llm-summarizer" | jq -e '[.[] | select(.action=="WA
 ok "day cap \$$cap: crossing call completes (bounded overshoot), next wake refused 402 before any run starts, one budget.alert, one wake refusal"
 
 echo "== kill switch"
-api -X PUT -d '{"routes":["anthropic"],"models":["test-big","test-small"]}' $CP/api/v1/agents/llm-summarizer/policy >/dev/null
+api -X PUT -d '{"routes":["models"],"models":["test-big","test-small"]}' $CP/api/v1/agents/llm-summarizer/policy >/dev/null
 api -X POST $CP/api/v1/agents/llm-summarizer/isolate >/dev/null
 [ "$(api -X POST -o /dev/null -w '%{http_code}' $CP/api/v1/agents/llm-summarizer/runs)" = 409 ] || die "isolated agent accepted a run"
 api -X POST $CP/api/v1/agents/llm-summarizer/resume >/dev/null

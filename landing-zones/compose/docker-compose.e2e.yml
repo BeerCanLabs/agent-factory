@@ -7,6 +7,9 @@ services:
       - ./e2e/mock-provider.mjs:/mock/mock-provider.mjs:ro
     networks: [egress]
   gatekeeper-egress:
+    environment:
+      # The factory model API's offering (GAP-174): the validation agent's models, served by the mock.
+      FACTORY_MODEL_CATALOG: '{"test-big":{"provider":"openai","id":"test-big","endpoint":"http://mock-provider:8080","price":{"inputPerMTok":15,"outputPerMTok":75}},"test-small":{"provider":"openai","id":"test-small","endpoint":"http://mock-provider:8080","price":{"inputPerMTok":1,"outputPerMTok":5}}}'
     volumes:
       - ./e2e/gatekeeper-egress.json:/config/gatekeeper-egress.json:ro
       - ./e2e/secrets.env:/run/factory.secrets:ro
@@ -14,5 +17,6 @@ services:
   control-plane:
     environment:
       FACTORY_LEDGER_CHECKPOINT_SECONDS: 5
+      FACTORY_MODEL_CATALOG: '{"test-big":{"provider":"openai","id":"test-big","endpoint":"http://mock-provider:8080","price":{"inputPerMTok":15,"outputPerMTok":75}},"test-small":{"provider":"openai","id":"test-small","endpoint":"http://mock-provider:8080","price":{"inputPerMTok":1,"outputPerMTok":5}}}'
     volumes:
       - ./e2e/secrets.env:/run/factory.secrets:ro
