@@ -82,6 +82,14 @@ export const factoryApi = {
     });
   },
 
+  /** AM5: ask the agent for your conversations (`list`) or a conversation's last turns (`turns`); the answer arrives as a reply. */
+  async requestConversations(id: string, body: { op: 'list' | 'turns'; conversation?: string; limit?: number }): Promise<{ ok: boolean; turnId?: string }> {
+    return request<{ ok: boolean; turnId?: string }>(`/agents/${encodeURIComponent(id)}/conversation-requests`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
   /** AM2: the agent's replies to your console turns, after sequence number `after`. Only yours. */
   async replies(id: string, after = 0): Promise<{ replies: Array<{ seq: number; turnId: string; runId: string; content: string; footnote?: string; at: string }> }> {
     return request(`/agents/${encodeURIComponent(id)}/replies?after=${after}`);

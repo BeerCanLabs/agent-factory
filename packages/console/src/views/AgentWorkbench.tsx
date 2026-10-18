@@ -73,26 +73,77 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
   };
 
   // AM2: turns awaiting the agent's answer, per agent, and how far this console has read each agent's replies.
-  const pendingTurns = useRef(new Map<string, { agentId: string; since: number }>());
+  type Pending = { agentId: string; since: number; kind: 'turn' | 'list' | 'turns' };
+  const pendingTurns = useRef(new Map<string, Pending>());
   const replyCursor = useRef(new Map<string, number>());
-  const awaitReply = (turnId: string) => pendingTurns.current.set(turnId, { agentId: agent.id, since: Date.now() });
+  const awaitReply = (turnId: string, kind: Pending['kind'] = 'turn') => pendingTurns.current.set(turnId, { agentId: agent.id, since: Date.now(), kind });
+  // AM5: the person's conversations with this agent, as the agent listed them.
+  const [conversations, setConversations] = useState<Array<{ id: string; name: string; is_active?: boolean; turn_count?: number }> | null>(null);
+  useEffect(() => setConversations(null), [agent.id]);
+
+  const askConversations = async (body: { op: 'list' | 'turns'; conversation?: string; limit?: number }) => {
+    try {
+      const out = await factoryApi.requestConversations(agent.id, body);
+      if (out.turnId) awaitReply(out.turnId, body.op);
+    } catch (err: any) {
+      setLogs((prev) => [...prev, `[ERROR] Could not ask ${agent.name} for conversations: ${err.message}`]);
+    }
+  };
+
+  /** Resume: show the conversation's last turns (from any channel), then make it the active one with the agent. */
+  const resumeConversation = async (conversation: { id: string; name: string }) => {
+    await askConversations({ op: 'turns', conversation: conversation.id, limit: 10 });
+    try {
+      const out = await factoryApi.converse(agent.id, `/resume ${conversation.id}`);
+      if (out.turnId) awaitReply(out.turnId);
+    } catch (err: any) {
+      setLogs((prev) => [...prev, `[ERROR] Could not resume: ${err.message}`]);
+    }
+  };
+
+  /** What the console shows for an answered turn: a reply as text, a conversation request as its contents. */
+  const showReply = (kind: Pending['kind'], name: string, r: { at: string; content: string; footnote?: string }) => {
+    if (kind === 'turn') {
+      setLogs((prev) => [...prev, `[${r.at}] ${name} >> ${r.content}${r.footnote ? `  ${r.footnote}` : ''}`]);
+      return;
+    }
+    let answer: any;
+    try {
+      answer = JSON.parse(r.content);
+    } catch {
+      setLogs((prev) => [...prev, `[ERROR] ${name} answered the conversation request with something other than JSON.`]);
+      return;
+    }
+    if (kind === 'list') {
+      setConversations(Array.isArray(answer.conversations) ? answer.conversations : []);
+      return;
+    }
+    const title = answer.conversation?.name ?? 'conversation';
+    const turns: Array<{ role: string; content: string; channel?: string; at?: string }> = Array.isArray(answer.turns) ? answer.turns : [];
+    setLogs((prev) => [
+      ...prev,
+      `[${r.at}] — last ${turns.length} turn(s) of "${title}" —`,
+      ...turns.map((t) => `[${t.at ?? ''}] ${t.role === 'user' ? 'You' : name}${t.channel ? ` (${t.channel})` : ''} >> ${t.content}`),
+    ]);
+  };
 
   // One poll loop for the agent on screen; it stops when the agent changes or the workbench closes.
   useEffect(() => {
     const agentId = agent.id;
     const name = agent.name;
     let busy = false;
+    let stopped = false;
     const timer = setInterval(async () => {
       const waiting = [...pendingTurns.current].filter(([, t]) => t.agentId === agentId);
       if (!waiting.length || busy) return;
       busy = true;
       try {
         const { replies } = await factoryApi.replies(agentId, replyCursor.current.get(agentId) ?? 0);
+        if (stopped) return; // the agent on screen changed while this was in flight
         for (const r of replies) {
           replyCursor.current.set(agentId, Math.max(replyCursor.current.get(agentId) ?? 0, r.seq));
-          if (pendingTurns.current.delete(r.turnId)) {
-            setLogs((prev) => [...prev, `[${r.at}] ${name} >> ${r.content}${r.footnote ? `  ${r.footnote}` : ''}`]);
-          }
+          const pending = pendingTurns.current.get(r.turnId);
+          if (pending && pendingTurns.current.delete(r.turnId)) showReply(pending.kind, name, r);
         }
       } catch {
         // keep waiting; a transient error is not the agent's answer
@@ -106,7 +157,10 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
         }
       }
     }, 2_000);
-    return () => clearInterval(timer);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
   }, [agent.id, agent.name]);
 
   const handleRetire = async () => {
@@ -360,6 +414,29 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
                   <span>{line}</span>
                 )}
               </div>
+            ))}
+          </div>
+
+          {/* AM5: your conversations with this agent, read through the agent; resume one to continue it here. */}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <button
+              onClick={() => askConversations({ op: 'list' })}
+              disabled={!permissions.canDispatchPrompt}
+              className="px-3 py-1.5 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-700 dark:text-slate-300 hover:border-emerald-500 disabled:opacity-40"
+            >
+              My conversations
+            </button>
+            {conversations?.length === 0 && <span className="text-slate-400">No conversations with {agent.name} yet.</span>}
+            {conversations?.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => resumeConversation(c)}
+                title={`Resume: show its last turns and continue it`}
+                className={`px-2.5 py-1 rounded-full border ${c.is_active ? 'border-emerald-500 text-emerald-700 dark:text-emerald-400' : 'border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400'} hover:border-emerald-500`}
+              >
+                {c.name}
+                {typeof c.turn_count === 'number' ? ` · ${c.turn_count}` : ''}
+              </button>
             ))}
           </div>
 

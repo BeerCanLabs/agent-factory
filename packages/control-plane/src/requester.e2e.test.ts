@@ -308,6 +308,42 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     assert.equal(jobInput.replyTo, undefined, 'and no reply address it could point anywhere');
   });
 
+  it('AM5 the console asks the agent for conversations; the answer comes back to the asker; reading someone else needs admin and is ledgered', async () => {
+    const ask = (token: string, body: unknown) => api('/api/v1/agents/ada/conversation-requests', 'POST', token, body);
+    assert.equal((await ask(OPERATOR, { op: 'delete' })).status, 400);
+    assert.equal((await ask(OPERATOR, { op: 'turns', limit: 99 })).status, 400);
+    assert.equal((await ask(OPERATOR, { op: 'list', subject: 'cloudflare:dale@example.com' })).status, 403, 'an operator cannot read another person');
+    assert.ok(state.ledger.query({ agent: 'ada' }).some((r) => r.action === 'CONVERSATION_REQUEST_REFUSED' && r.actor === 'token:operator'), 'a refused read is on the record');
+    assert.equal((await ask(ADMIN, { op: 'list', subject: 'auth0|weird id' })).status, 400, 'a subject the ledger could not record is refused');
+    assert.equal((await ask(INGRESS, { op: 'list' })).status, 403, 'the ingress service does not make conversation requests');
+
+    const mine = await ask(OPERATOR, { op: 'turns', conversation: 'Roadmap', limit: 5 });
+    assert.equal(mine.status, 202, JSON.stringify(mine.body));
+    const p = delivered(mine);
+    assert.equal(p.kind, 'conversation-request');
+    assert.deepEqual(p.request, { op: 'turns', conversation: 'Roadmap', limit: 5 });
+    assert.equal(p.caller.actor, 'token:operator');
+    assert.deepEqual(p.replyTo, { channel: 'console' });
+    assert.equal(p.turnId, mine.body.turnId);
+    assert.ok(state.ledger.query({ agent: 'ada' }).some((r) => r.action === 'CONVERSATION_REQUESTED' && r.turnId === mine.body.turnId));
+
+    const run = state.runs.list({ agentId: 'ada', active: true })[0];
+    const token = await state.runTokens.mint({ runId: run.runId, agentId: 'ada' });
+    const ok = await fetch(`${base}/api/v1/runs/${run.runId}/reply`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify({ turnId: mine.body.turnId, content: '{"op":"turns","turns":[]}' }) });
+    assert.equal(ok.status, 200);
+    const got = (await api('/api/v1/agents/ada/replies?after=0', 'GET', OPERATOR)).body.replies.find((r: any) => r.turnId === mine.body.turnId);
+    assert.equal(got?.content, '{"op":"turns","turns":[]}', 'a JSON answer is not footnoted');
+
+    const before = state.ledger.query({ agent: 'ada' }).length;
+    const admin = await ask(ADMIN, { op: 'list', subject: 'cloudflare:dale@example.com' });
+    assert.equal(admin.status, 202);
+    assert.equal(delivered(admin).request.subject, 'cloudflare:dale@example.com');
+    const row = state.ledger.query({ agent: 'ada' }).slice(before).find((r) => r.action === 'CONVERSATION_READ_BY_ADMIN');
+    assert.ok(row, 'an admin read of another person is ledgered');
+    assert.equal(row.actor, 'token:admin');
+    assert.equal(row.subject, 'cloudflare:dale@example.com', 'whose conversation, in clear; the request itself is hashed');
+  });
+
   it('AM2 the agent answers a console turn; only the person who asked reads the reply, and it is ledgered by hash', async () => {
     const r = await api('/api/v1/agents/ada/conversation', 'POST', OPERATOR, { content: 'what is up?' });
     assert.equal(r.status, 202);

@@ -98,6 +98,8 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/runs/nope/cancel', privilege: 'runs.cancel', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/conversation', privilege: 'agents.converse', role: 'operator', body: {} },
   { method: 'GET', path: '/api/v1/agents/nope/replies', privilege: 'agents.converse', role: 'operator' },
+  { method: 'POST', path: '/api/v1/agents/nope/conversation-requests', privilege: 'agents.converse', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/conversation-requests', privilege: 'conversations.read-others', role: 'admin', firstRole: 'operator', body: { op: 'list', subject: 'cloudflare:someone@example.com' } },
   { method: 'POST', path: '/api/v1/agents/nope/wake', privilege: 'runs.attest-requester', role: 'operator', thenExclusive: 'gatekeeper-ingress', body: { requestedBy: { provider: 'discord', id: '1' } } },
   { method: 'POST', path: '/api/v1/hooks/hooked', privilege: 'hooks.invoke', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/schedules', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
