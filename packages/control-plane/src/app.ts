@@ -491,7 +491,8 @@ function vendorTarget(state: FactoryState, vendorId: string): VendorTarget | { e
 const ADAPTER_KEYS: Record<string, string> = {
   openAiCompatible: 'openai',
   anthropicMessages: 'anthropic',
-  vertexGemini: 'vertex-gemini',
+  // An API-key Gemini vendor uses the direct Gemini adapter, like the built-in one (not Vertex's cloud identity).
+  vertexGemini: 'google',
   vertexAnthropic: 'vertex-anthropic',
   bedrockConverse: 'bedrock-converse',
 };
@@ -499,6 +500,8 @@ const ADAPTER_KEYS: Record<string, string> = {
 const BUILTIN_VENDOR_ADAPTER: Record<string, string> = Object.fromEntries(
   Object.entries(AI_PROVIDER_TEMPLATES).filter(([id]) => id !== 'custom').map(([id, t]) => [id, t.adapterKey]),
 );
+/** Cloud model services: the gatekeeper-egress's cloud identity, never a vendor key. A vendor never re-routes them. */
+const CLOUD_PROVIDERS = new Set(['bedrock-converse', 'vertex-ai', 'vertex-gemini', 'vertex-anthropic']);
 /** API-key adapter keys and the built-in vendor each implies when a caller names a provider but no vendor. */
 const API_KEY_PROVIDER_VENDOR: Record<string, string> = { openai: 'openai', anthropic: 'anthropic', 'anthropic-messages': 'anthropic', xai: 'xai', gemini: 'gemini', google: 'gemini' };
 
@@ -523,7 +526,8 @@ type AdmitInput = { name?: string; id?: string; vendorId?: string; provider?: st
 function admitModel(state: FactoryState, input: AdmitInput, actor: string): { ok: true; model: StoredModel } | { ok: false; status: number; error: string; message?: string } {
   if (!state.modelStore) return { ok: false, status: 500, error: 'model_store_not_configured' };
   if (!input.name || !input.id) return { ok: false, status: 400, error: 'invalid_request', message: 'name and id are required' };
-  let vendorId = input.vendorId;
+  const cloud = Boolean(input.provider && CLOUD_PROVIDERS.has(input.provider));
+  let vendorId = cloud ? undefined : input.vendorId;
   if (!vendorId && input.provider && API_KEY_PROVIDER_VENDOR[input.provider]) {
     // An API-key provider needs a vendor (its credential and host). A custom endpoint must be a registered vendor.
     if (input.endpoint) return { ok: false, status: 400, error: 'vendor_required', message: 'a model on a custom endpoint is admitted through its registered vendor (vendorId)' };
@@ -540,7 +544,7 @@ function admitModel(state: FactoryState, input: AdmitInput, actor: string): { ok
     fields = { provider: input.provider, ...(input.region ? { region: input.region } : {}) };
   }
   try {
-    const model = state.modelStore.admit({ name: input.name, id: input.id, ...fields, vendorId, price: input.price, actor });
+    const model = state.modelStore.admit({ name: input.name, id: input.id, ...fields, vendorId: vendorId ?? input.vendorId, price: input.price, actor });
     state.modelCatalog = state.modelStore.toEgressCatalog();
     state.ledger.append({ action: 'MODEL_ADMITTED', actor, model: model.name, provider: model.provider, vendorId: model.vendorId, price: model.price, timestamp: new Date().toISOString() });
     return { ok: true, model };
@@ -557,12 +561,17 @@ export function relinkVendorModels(state: FactoryState): string[] {
   if (!state.modelStore) return [];
   const changed: string[] = [];
   for (const m of state.modelStore.listOffered()) {
-    if (!m.vendorId) continue;
+    // Cloud model services keep their provider and region; a vendor id on them is a label only.
+    if (!m.vendorId || CLOUD_PROVIDERS.has(m.provider)) continue;
     const v = vendorCatalogFields(state, m.vendorId);
     if ('error' in v) continue;
-    if (state.modelStore.relinkVendor(m.name, v)) changed.push(m.name);
+    if (state.modelStore.relinkVendor(m.name, v, false)) changed.push(m.name);
   }
-  if (changed.length) state.modelCatalog = state.modelStore.toEgressCatalog();
+  if (changed.length) {
+    state.modelStore.save();
+    state.modelCatalog = state.modelStore.toEgressCatalog();
+    state.ledger.append({ action: 'MODEL_RELINKED', actor: SYSTEM.policy, models: changed, timestamp: new Date().toISOString() });
+  }
   return changed;
 }
 

@@ -923,6 +923,8 @@ export function anthropicMessages(opts: ApiKeyAdapterOptions = {}): ModelAdapter
       try {
         res = await doFetch(`${base}/v1/messages`, {
           method: 'POST',
+          // GAP-182: a key is bound to this host; never follow a redirect elsewhere with it.
+          redirect: 'error',
           headers: {
             'x-api-key': key,
             'anthropic-version': '2023-06-01',
@@ -974,6 +976,8 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
       try {
         res = await doFetch(chatUrl, {
           method: 'POST',
+          // GAP-182: a key is bound to this host; never follow a redirect elsewhere with it.
+          redirect: 'error',
           headers: {
             Authorization: `Bearer ${key}`,
             'Content-Type': 'application/json',

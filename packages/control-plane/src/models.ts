@@ -236,7 +236,7 @@ export class ModelStore {
    * Re-link a vendor's admitted model to the vendor's current provider, endpoint and credential (GAP-182). Returns true
    * when something changed (persisted).
    */
-  relinkVendor(name: string, fields: { provider: string; endpoint?: string; secret?: string }): boolean {
+  relinkVendor(name: string, fields: { provider: string; endpoint?: string; secret?: string }, persist = true): boolean {
     const m = this.models.get(name);
     if (!m) return false;
     const next: StoredModel = { ...m, provider: fields.provider };
@@ -246,8 +246,13 @@ export class ModelStore {
     if (fields.secret) next.secret = fields.secret;
     if (JSON.stringify(next) === JSON.stringify(m)) return false;
     this.models.set(name, next);
-    this.persist();
+    if (persist) this.persist();
     return true;
+  }
+
+  /** Persist pending changes once (after a batch of `relinkVendor(..., false)`), bumping the catalog version. */
+  save(): void {
+    this.persist();
   }
 
   updatePricing(name: string, price: { inputPerMTok: number; outputPerMTok: number }, actor?: string): StoredModel {

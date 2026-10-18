@@ -413,7 +413,14 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   /** Keymaster access tokens by agent × connection, until 60s before expiry. */
   const connCache = new Map<string, { token: string; expiresAtMs: number }>();
   const secretValues = new Set<string>();
-  const trustedModelHosts = new Set(opts.trustedModelHosts ?? []);
+  const trustedModelHosts = new Set((opts.trustedModelHosts ?? []).map((h) => h.toLowerCase()));
+  /** GAP-182: whether a key may be sent to a host: its built-in vendor host, an approved system holding it, or a trusted host. */
+  const keyBoundTo = async (secretName: string, rawHost: string): Promise<boolean> => {
+    const host = rawHost.toLowerCase();
+    if (BUILTIN_PROVIDER_HOSTS[secretName]?.includes(host) || trustedModelHosts.has(host) || cachedCredentialHosts.get(secretName)?.has(host)) return true;
+    await ensureRoutes();
+    return Boolean(cachedCredentialHosts.get(secretName)?.has(host));
+  };
   const resolveSecret = async (secretName: string, target: { host: string }): Promise<string> => {
     // GAP-169: a completion reads only a platform credential (GAP-167), the same names vendor discovery may read.
     if (!BUILTIN_PROVIDER_SECRETS.includes(secretName)) {
@@ -422,12 +429,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     }
     // GAP-182: a key goes only to its built-in vendor host, the upstream of an approved system that holds it, or a host
     // the operator trusts. Nothing is read for any other destination.
-    const host = target.host.toLowerCase();
-    const bound = BUILTIN_PROVIDER_HOSTS[secretName]?.includes(host) || cachedCredentialHosts.get(secretName)?.has(host) || trustedModelHosts.has(host);
-    if (!bound) {
-      await ensureRoutes();
-      if (!cachedCredentialHosts.get(secretName)?.has(host)) throw new Error(`secret ${secretName} is not bound to host ${host}`);
-    }
+    if (!(await keyBoundTo(secretName, target.host))) throw new Error(`secret ${secretName} is not bound to host ${target.host.toLowerCase()}`);
     // 1. SecretProvider takes precedence over ambient container env (§6.9 M3, §6.11 K5)
     if (opts.providers && opts.providers.length > 0) {
       try {
@@ -1070,6 +1072,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           if (name && /^[A-Z][A-Z0-9_]*$/.test(name)) allowed.add(name);
         }
         if (!allowed.has(secretName)) return send(res, 403, { error: 'secret_not_held' });
+        // GAP-182: discovery sends the key only to a host bound to it, like a model call.
+        if (!(await keyBoundTo(secretName, parsed.host))) return send(res, 403, { error: 'secret_not_bound_to_host' });
         const bound = await bindSecrets([secretName], opts.providers);
         if (!bound.ok || !bound.env[secretName]) return send(res, 503, { error: 'credential_unbound' });
         if (bound.env[secretName].length >= 4) secretValues.add(bound.env[secretName]);

@@ -453,4 +453,17 @@ describe('admitted models take provider, endpoint and credential from their vend
     assert.deepEqual(body.platformCredentialHosts?.DEEPSEEK_API_KEY, ['api.deepseek.example']);
     assert.deepEqual(body.platformCredentialHosts?.OPENAI_API_KEY, ['api.openai.com']);
   });
+
+  it('a cloud model service keeps its provider even with a vendor label, and relinking is ledgered once (review #197)', () => {
+    state.modelStore!.admit({ name: 'claude-on-bedrock', provider: 'bedrock-converse', id: 'us.anthropic.claude-sonnet-4-6', region: 'us-east-1', vendorId: 'anthropic' });
+    state.modelStore!.admit({ name: 'xai-old', provider: 'openAiCompatible', id: 'xai-old', vendorId: 'xai' });
+    const before = state.ledger.query().filter((e: any) => e.action === 'MODEL_RELINKED').length;
+    const changed = relinkVendorModels(state);
+    assert.ok(changed.includes('xai-old'));
+    assert.equal(changed.includes('claude-on-bedrock'), false);
+    assert.deepEqual(state.modelStore!.toEgressCatalog()['claude-on-bedrock'], { provider: 'bedrock-converse', id: 'us.anthropic.claude-sonnet-4-6', region: 'us-east-1' });
+    const rows = state.ledger.query().filter((e: any) => e.action === 'MODEL_RELINKED');
+    assert.equal(rows.length, before + 1);
+    assert.ok((rows.at(-1) as any).models.includes('xai-old'));
+  });
 });

@@ -128,7 +128,8 @@ export async function discoverVendorModels(opts: VendorDiscoveryOptions): Promis
     }
   }
 
-  const res = await fetcher(url, { method: 'GET', headers });
+  // GAP-182: the key is bound to this host; never follow a redirect elsewhere with it.
+  const res = await fetcher(url, { method: 'GET', headers, redirect: 'error' });
   if (!res.ok) {
     throw new Error(`Model discovery failed with HTTP ${res.status}`);
   }

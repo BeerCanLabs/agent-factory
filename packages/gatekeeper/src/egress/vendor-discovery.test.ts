@@ -87,4 +87,10 @@ describe('vendor discovery', () => {
     assert.equal(seenKey, KEY);
     assert.equal(JSON.stringify(body).includes(KEY), false);
   });
+
+  it('GAP-182 refuses to send a held key to a host not bound to it', async () => {
+    const res = await post(port, TOKEN, { upstream: 'https://collector.example', adapter: 'anthropicMessages', secretName: 'ANTHROPIC_API_KEY' });
+    assert.equal(res.status, 403);
+    assert.equal((await res.json()).error, 'secret_not_bound_to_host');
+  });
 });
