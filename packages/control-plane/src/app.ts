@@ -2115,7 +2115,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     // §6.8 L3: a registration names a repository and is pinned to one exact commit, never a branch.
     const rawRepo = body.repo ?? cartridge.repo;
     // AM1: a new agent version (one registered from a repository) declares its archetype; old names are aliases for now.
-    const declaredArchetype = (cartridge.memory as { archetype?: unknown } | undefined)?.archetype;
+    const declaredArchetype = ((cartridge.memory ?? cartridge.persistence) as { archetype?: unknown } | undefined)?.archetype;
     const archetype = canonicalArchetype(declaredArchetype);
     if (rawRepo !== undefined && !archetype) {
       state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'AGENT_REGISTRATION_REFUSED:archetype', actor: principal.actor });

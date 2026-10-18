@@ -101,7 +101,7 @@ export function validateCartridge(dir: string): ValidationResult {
       if (!parsed.success) {
         zodIssues(manifestPath, parsed.error, issues);
       } else {
-        if (!parsed.data.memory?.archetype && !memoryYamlArchetype(dir, entries)) issue(issues, manifestPath, ARCHETYPE_REQUIRED);
+        if (!(parsed.data.memory ?? parsed.data.persistence)?.archetype && !memoryYamlArchetype(dir, entries)) issue(issues, manifestPath, ARCHETYPE_REQUIRED);
         if (parsed.data.prompt) {
           const promptPath = join(dir, parsed.data.prompt);
           if (existsSync(promptPath)) {
