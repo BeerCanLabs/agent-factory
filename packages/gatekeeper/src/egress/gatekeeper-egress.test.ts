@@ -778,6 +778,40 @@ describe('Dynamic Model Catalog & Default Model Sync (M2, M3, GAP-168)', () => {
     }
   });
 
+  it('a null default from the control plane clears the seed, so a retired default is never served (GAP-181)', async () => {
+    const runId = 'null-default-run';
+    const currentCtx: RunContext = {
+      run: { runId, agentId: 'donna', state: 'WORKING', live: true },
+      agentState: 'WORKING',
+      policy: { routes: ['models'] },
+      spend: { run: 0, day: 0, month: 0 },
+    };
+    const control: ControlClient = {
+      async runContext(id) { return id === runId ? structuredClone(currentCtx) : null; },
+      async checkStanding() { return { ok: true, standing: 'good', remainingUsd: 100 }; },
+      async ledger() {},
+      async modelCatalog() { return { models: { 'model-a': { provider: 'fake', id: 'fake-a', price: { inputPerMTok: 1, outputPerMTok: 2 } } }, default: null }; },
+    };
+    const gk = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: [],
+      defaultModel: 'model-a',
+      modelAdapters: { fake: { async complete() { return { content: 'hi', finishReason: 'stop', usage: { input: 1, output: 1 } }; } } },
+    });
+    const testPort = await listen(gk);
+    try {
+      const tok = await tokens.mint({ runId, agentId: 'donna' });
+      const res = await call(testPort, '/models/v1/chat/completions', { token: tok, body: { messages: [{ role: 'user', content: 'hi' }] } });
+      assert.equal(res.status, 503);
+      assert.equal(res.json().error, 'no_default_model');
+    } finally {
+      await new Promise<void>((r) => gk.close(() => r()));
+    }
+  });
+
   it('serves the loaded catalog while a refresh hangs, so a model call never waits on the control plane (GAP-170, LG1)', async () => {
     const runId = 'catalog-hang-test-run';
     const currentCtx: RunContext = {

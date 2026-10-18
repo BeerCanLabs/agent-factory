@@ -374,8 +374,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         }
         activeCatalog = valid;
         catalogLoaded = true;
-        if ('default' in remote && typeof (remote as any).default === 'string' && (remote as any).default) {
-          activeDefaultModel = (remote as any).default;
+        // The control plane's default is the configuration (M2, GAP-181): when the payload carries `default`, it replaces
+        // the seed, and null clears it, so a retired default is never served.
+        if ('default' in remote) {
+          const d = (remote as { default?: unknown }).default;
+          activeDefaultModel = typeof d === 'string' && d ? d : undefined;
         }
       }
     } catch (err) {
@@ -802,7 +805,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     // model name the call carries; a differing name is recorded as `requestedModel`.
     const requestedName = typeof parsed.model === 'string' && parsed.model ? parsed.model : undefined;
     const selection = selectModel(modelPolicyOf(ctx), requestedName);
-    if (!selection.ok) return deny(res, ctx, route, selection.status, selection.code);
+    if (!selection.ok) return deny(res, ctx, route, selection.status, selection.code, 'detail' in selection ? selection.detail : undefined);
     const model = selection.model;
     calls.get(res)?.start(model);
     const entry = findModel(catalog, model);

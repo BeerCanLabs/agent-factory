@@ -31,7 +31,8 @@ export function checkModel(policy: ModelPolicy, model: string): ModelCheck {
 
 export type ModelSelection =
   | { ok: true; model: string; requested?: string }
-  | { ok: false; status: 503; code: 'no_default_model' };
+  | { ok: false; status: 503; code: 'no_default_model' }
+  | { ok: false; status: 403; code: 'model_not_allowed'; detail: { model: string } };
 
 /**
  * The model the factory serves for a call (M2, GAP-181). Agents never choose: the run's pin wins, then (in training
@@ -39,12 +40,21 @@ export type ModelSelection =
  * default. The requested name is returned only when it differs, so it can be recorded.
  */
 export function selectModel(policy: ModelPolicy, requested?: string): ModelSelection {
-  const model =
-    policy.pinnedModel ??
-    (policy.training ? requested : undefined) ??
-    policy.allowedModels?.[0] ??
-    policy.defaultModel;
-  if (!model) return { ok: false, status: 503, code: 'no_default_model' };
+  // A policy that lists models grants exactly those; an explicit empty list grants none. Only a policy that names no
+  // models at all (the field absent) falls back to the factory default (M2).
+  const granted = policy.allowedModels ?? (policy.defaultModel ? [policy.defaultModel] : []);
+  if (policy.pinnedModel) {
+    // A pin is a caller's choice for the run, never a way around the owner's grant (E7).
+    if (!policy.training && !granted.includes(policy.pinnedModel)) {
+      return { ok: false, status: 403, code: 'model_not_allowed', detail: { model: policy.pinnedModel } };
+    }
+    return { ok: true, model: policy.pinnedModel, ...(requested && requested !== policy.pinnedModel ? { requested } : {}) };
+  }
+  const model = (policy.training ? requested : undefined) ?? granted[0];
+  if (!model) {
+    if (policy.allowedModels) return { ok: false, status: 403, code: 'model_not_allowed', detail: { model: requested ?? '' } };
+    return { ok: false, status: 503, code: 'no_default_model' };
+  }
   return { ok: true, model, ...(requested && requested !== model ? { requested } : {}) };
 }
 

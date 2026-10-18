@@ -607,4 +607,22 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       await new Promise<void>((r) => bare.close(() => r()));
     }
   });
+
+  it('E7 GAP-181 a run pin the policy does not grant is refused on the factory model API', async () => {
+    ctx.policy = policy({ models: ['claude-haiku-4-5'] });
+    ctx.run.model = 'claude-sonnet-4-5';
+    const res = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5') });
+    assert.equal(res.status, 403);
+    assert.equal(res.json().error, 'model_not_allowed');
+    assert.equal(seen.length, 0, 'nothing reached a provider');
+  });
+
+  it('M2 an explicit empty model list grants none, even with a factory default configured', async () => {
+    ctx.policy = policy({ models: [] });
+    const res = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-haiku-4-5') });
+    assert.equal(res.status, 403);
+    assert.equal(res.json().error, 'model_not_allowed');
+    assert.equal(seen.length, 0);
+  });
 });
+

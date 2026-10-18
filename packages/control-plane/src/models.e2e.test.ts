@@ -328,4 +328,22 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
     const catalogParsed = JSON.parse(mcpList.body.result.content[0].text);
     assert.equal(catalogParsed.default, 'claude-haiku-4-5');
   });
+
+  it('9. MCP retire_vendor_or_model records the policy change like REST (GAP-181)', async () => {
+    state.modelStore.admit({ name: 'mcp-retire-me', provider: 'openai', id: 'mcp-retire-me' });
+    state.policies.set('finley', { routes: [], models: ['mcp-retire-me', 'other-model'] });
+    const res = await call(port, '/mcp', 'POST', ADMIN, {
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'tools/call',
+      params: { name: 'retire_vendor_or_model', arguments: { name: 'mcp-retire-me' } },
+    });
+    assert.equal(res.status, 200);
+    const out = JSON.parse(res.body.result.content[0].text);
+    assert.deepEqual(out.affectedAgents, ['finley']);
+    assert.deepEqual(state.policies.get('finley').models, ['other-model']);
+    const updated = state.ledger.query({ agent: 'finley' }).filter((e: any) => e.action === 'POLICY_UPDATED');
+    assert.equal(updated.length, 1);
+  });
 });
+

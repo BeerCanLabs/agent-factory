@@ -103,7 +103,7 @@ describe('selectModel: agents never choose (M2, GAP-181)', () => {
   });
 
   it('a run pin wins; training honors the request; a policy with no models gets the configured default', () => {
-    assert.deepEqual(selectModel({ ...base, pinnedModel: 'test-big' }, 'claude-haiku-5-5'), { ok: true, model: 'test-big', requested: 'claude-haiku-5-5' });
+    assert.deepEqual(selectModel({ ...base, pinnedModel: 'claude-sonnet-5-5' }, 'claude-haiku-5-5'), { ok: true, model: 'claude-sonnet-5-5', requested: 'claude-haiku-5-5' });
     assert.deepEqual(selectModel({ ...base, training: true }, 'claude-sonnet-5-5'), { ok: true, model: 'claude-sonnet-5-5' });
     assert.deepEqual(selectModel({ defaultModel: 'claude-opus-5-5', training: false }, 'x'), { ok: true, model: 'claude-opus-5-5', requested: 'x' });
   });
@@ -111,5 +111,20 @@ describe('selectModel: agents never choose (M2, GAP-181)', () => {
   it('with no models and no default configured, refuses with no_default_model', () => {
     assert.deepEqual(selectModel({ training: false }, 'claude-haiku-5-5'), { ok: false, status: 503, code: 'no_default_model' });
     assert.deepEqual(checkModel({ training: false }, 'claude-haiku-5-5'), { allowed: false, status: 403, code: 'model_not_allowed', detail: { model: 'claude-haiku-5-5' } });
+  });
+});
+
+describe('selectModel: the owner grant still bounds everything (E7, GAP-181 review)', () => {
+  it('a pin the policy does not grant is refused outside training, and served in training', () => {
+    const p: ModelPolicy = { allowedModels: ['claude-haiku-5-5'], defaultModel: 'claude-opus-5-5', training: false, pinnedModel: 'claude-opus-5-5' };
+    assert.deepEqual(selectModel(p), { ok: false, status: 403, code: 'model_not_allowed', detail: { model: 'claude-opus-5-5' } });
+    assert.deepEqual(selectModel({ ...p, training: true }), { ok: true, model: 'claude-opus-5-5' });
+    // A pin with no models listed must be the default.
+    assert.deepEqual(selectModel({ defaultModel: 'claude-haiku-5-5', training: false, pinnedModel: 'claude-haiku-5-5' }), { ok: true, model: 'claude-haiku-5-5' });
+  });
+
+  it('an explicit empty list grants nothing; only an absent list falls back to the default', () => {
+    assert.deepEqual(selectModel({ allowedModels: [], defaultModel: 'claude-haiku-5-5', training: false }, 'x'), { ok: false, status: 403, code: 'model_not_allowed', detail: { model: 'x' } });
+    assert.deepEqual(selectModel({ defaultModel: 'claude-haiku-5-5', training: false }), { ok: true, model: 'claude-haiku-5-5' });
   });
 });

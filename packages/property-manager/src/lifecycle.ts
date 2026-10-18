@@ -342,8 +342,10 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
   // Egress leaves pinnedModel unset and honors multi-model policy allowlists.
   const effectiveModel =
     run.model ||
-    (state.policies.has(agent.id) ? state.policies.get(agent.id).models?.[0] : undefined) ||
-    state.defaultModel;
+    // A policy that lists models gets its first; an explicit empty list grants none, so nothing is injected (M2).
+    (state.policies.has(agent.id) && state.policies.get(agent.id).models
+      ? state.policies.get(agent.id).models?.[0]
+      : state.defaultModel);
   const runEnv: Record<string, string> = {
     FACTORY_RUN_ID: run.runId,
     FACTORY_RUN_TOKEN: runToken,
