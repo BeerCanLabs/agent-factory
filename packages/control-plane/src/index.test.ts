@@ -269,10 +269,18 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal(ctx.run.model, undefined, 'gatekeeper-egress context must not have pinnedModel set');
     });
 
-    it('falls back to factory default model in FACTORY_MODEL when policy names no models (M2)', async () => {
-      const run = (await wake('echo-agent')).json as RunBody;
+    it('injects the configured factory default as FACTORY_MODEL when policy names no models (M2, GAP-181)', async () => {
+      // The default is configuration, never code: this factory has one configured.
+      const prevDefault = state.defaultModel;
+      state.defaultModel = 'claude-haiku-5-5';
+      let run: RunBody;
+      try {
+        run = (await wake('echo-agent')).json as RunBody;
+      } finally {
+        state.defaultModel = prevDefault;
+      }
       assert.equal(run.model, undefined);
-      assert.equal(state.runtime.started.at(-1)?.runEnv.FACTORY_MODEL, 'claude-haiku-4-5');
+      assert.equal(state.runtime.started.at(-1)?.runEnv.FACTORY_MODEL, 'claude-haiku-5-5');
       const ctx = (await request(port, `/api/v1/gatekeeper-egress/runs/${run.runId}`, { token: TOKENS.gatekeeperEgress })).json as { run: { model?: string } };
       assert.equal(ctx.run.model, undefined);
     });

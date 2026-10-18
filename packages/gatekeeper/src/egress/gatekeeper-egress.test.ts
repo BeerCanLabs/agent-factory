@@ -629,8 +629,9 @@ describe('§6.5 run progress: gatekeeper-egress reports each call it handles for
     ctx.policy = { routes: ['discord'], models: [] };
     assert.equal((await call(port, '/google-gmail/gmail/v1/users/me/messages', { token, method: 'GET' })).status, 403);
     assert.equal((await call(port, '/discord/x', { token, body: {} })).status, 200);
+    // The policy's model is not offered: refused before any provider call (M2, GAP-181).
     ctx.policy = { routes: ['models'], models: ['other-model'] };
-    assert.equal((await call(port, '/models/v1/chat/completions', { token, body: { model: 'claude-sonnet', messages: [{ role: 'user', content: 'x' }] } })).status, 403);
+    assert.equal((await call(port, '/models/v1/chat/completions', { token, body: { model: 'claude-sonnet', messages: [{ role: 'user', content: 'x' }] } })).status, 503);
     await settle();
     const gmail = eventsFor('google-gmail');
     assert.deepEqual(gmail.map((e) => e.kind), ['call.start', 'call.end']);
@@ -751,7 +752,7 @@ describe('Dynamic Model Catalog & Default Model Sync (M2, M3, GAP-168)', () => {
     try {
       const tok = await tokens.mint({ runId, agentId: 'donna' });
 
-      // Call model-b (the synced default model)
+      // The policy names no models, so the synced default (model-b) is served (M2).
       const res = await call(testPort, '/models/v1/chat/completions', {
         token: tok,
         body: {
@@ -760,8 +761,9 @@ describe('Dynamic Model Catalog & Default Model Sync (M2, M3, GAP-168)', () => {
         },
       });
       assert.equal(res.status, 200, `Expected 200 but got ${res.status}: ${res.text}`);
+      assert.equal(res.json().model, 'model-b');
 
-      // Call model-a (which was startup default, but is now superseded by model-b)
+      // Asking for model-a (the startup seed) still gets the synced default: agents never choose (GAP-181).
       const resA = await call(testPort, '/models/v1/chat/completions', {
         token: tok,
         body: {
@@ -769,7 +771,8 @@ describe('Dynamic Model Catalog & Default Model Sync (M2, M3, GAP-168)', () => {
           messages: [{ role: 'user', content: 'hi' }],
         },
       });
-      assert.equal(resA.status, 403, 'model-a is refused because policy names no models and active default is model-b');
+      assert.equal(resA.status, 200);
+      assert.equal(resA.json().model, 'model-b', 'the startup seed is superseded by the synced default');
     } finally {
       await new Promise<void>((r) => gk.close(() => r()));
     }

@@ -194,6 +194,12 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
     // When policy models array becomes empty, models key must be deleted for M2 default fallback!
     const donnaPolicy = state.policies.get('donna');
     assert.equal(donnaPolicy.models, undefined);
+
+    // GAP-181: the policy change is recorded like any other policy change.
+    const updated = state.ledger.query({ agent: 'donna' }).filter((e: any) => e.action === 'POLICY_UPDATED');
+    assert.equal(updated.length, 1, 'retiring a model records POLICY_UPDATED for each affected agent');
+    assert.equal(updated[0].actor, 'token:admin');
+    assert.equal(state.ledger.query().filter((e: any) => e.action === 'MODEL_RETIRED' && e.model === 'grok-2').length, 1);
   });
 
   it('7. MCP tools manage model catalog lifecycle', async () => {

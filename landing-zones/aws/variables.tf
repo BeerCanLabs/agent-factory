@@ -240,9 +240,9 @@ variable "factory_public_base_url" {
 }
 
 variable "default_model" {
-  description = "The model an agent gets when its policy names none (DESIGN_AUTHORITY M2). Must be in model_catalog."
+  description = "Seed for the factory default model (DESIGN_AUTHORITY M2): used only until an admin sets the default, which is factory configuration. Empty means no seed; must be in model_catalog when set."
   type        = string
-  default     = "claude-haiku-4-5"
+  default     = ""
 }
 
 variable "agent_source_token_hosts" {

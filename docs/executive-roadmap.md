@@ -27,10 +27,11 @@ everything in it can be checked against the code paths named below.
 - The owner's control is the policy's `models` list (`packages/gatekeeper/src/policy/index.ts`; edited in
   `packages/console/src/components/PolicyEditor.tsx`). It is an allow-list. There is no field for a selected model, a
   backup or a per-skill model.
-- A policy that names no models grants exactly the factory default (`DEFAULT_MODEL`, Claude Haiku 4.5 unless operations
-  configure another), never every model (M2, E7).
-- The gatekeeper-egress **refuses** a model the policy does not list: `modelDenial` answers 403 `model_not_allowed`, and
-  403 `model_pinned` when a run is pinned to another model. Nothing serves another model instead.
+- A policy that names no models grants exactly the factory default, never every model (M2, E7). *(2026-10-18, GAP-181:
+  the default is factory configuration, never a value in code; none configured means `no_default_model`.)*
+- *(Superseded 2026-10-18, GAP-181.)* The gatekeeper-egress used to **refuse** a model the policy does not list
+  (403 `model_not_allowed`). The factory model API now serves the run's pin, the policy's first model or the default,
+  whatever the call names, and records a differing name as `requestedModel`. Provider-native routes (M4) stay strict.
 - A run is pinned only when a caller names a model for that run (`run.model`, delivered to the agent as
   `FACTORY_MODEL`, `app.ts`).
 - **Model names are written in code and metadata:** the cartridge's `model` and `models` (`packages/contract/src/schema.ts`),

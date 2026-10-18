@@ -119,6 +119,8 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       providers: [],
       contextTtlMs: 0,
       modelCatalog: catalog,
+      // The factory default is configuration (M2, GAP-181): this factory has one.
+      defaultModel: 'claude-haiku-4-5',
       modelAdapters: {
         'bedrock-converse': bedrockConverse({ credentials: async () => AWS, endpoint: (region) => `http://127.0.0.1:${upPort}/${region}` }),
       },
@@ -201,6 +203,7 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
 
   it('charges the worst case when the provider reports no usage', async () => {
     upstreamUsage = false;
+    ctx.policy = policy({ models: ['claude-haiku-4-5'] });
     await call(port, '/models/v1/chat/completions', { token, body: chat('claude-haiku-4-5') });
     await settle();
     const e = lastLlm()!;
@@ -224,9 +227,10 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
     ctx.policy = { routes: [], models: ['claude-haiku-4-5'] };
     const ok = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-haiku-4-5') });
     assert.equal(ok.status, 200);
-    // The route is implied; which models is still the policy's list (M2).
-    const denied = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5') });
-    assert.equal(denied.json().error, 'model_not_allowed');
+    // The route is implied; which model is still the policy's (M2): asking for another serves the policy's.
+    const other = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5') });
+    assert.equal(other.status, 200);
+    assert.equal(other.json().model, 'claude-haiku-4-5');
   });
 
   it('E7 the global fallback policy implies no model access', async () => {
@@ -245,34 +249,40 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
     assert.equal(res.json().error, 'route_not_allowed');
   });
 
-  it('M2 E7 a policy that names no models grants only the factory default, Claude Haiku 4.5', async () => {
+  it('M2 E7 a policy that names no models gets the configured factory default, whatever the agent asks for', async () => {
     ctx.policy = { routes: ['models'] };
-    const denied = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5') });
-    assert.equal(denied.status, 403);
-    assert.equal(denied.json().error, 'model_not_allowed');
-    assert.equal(seen.length, 0, 'nothing reached a provider');
-    assert.equal((await call(port, '/models/v1/chat/completions', { token, body: chat('claude-haiku-4-5') })).status, 200);
+    const res = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5') });
+    assert.equal(res.status, 200);
+    assert.equal(res.json().model, 'claude-haiku-4-5');
+    assert.ok(seen.at(-1)?.path.includes(encodeURIComponent('us.anthropic.claude-haiku-4-5-20251001-v1:0')), 'the provider was asked for the default');
   });
 
-  it('denies a model the policy does not list', async () => {
+  it('M2 GAP-181 agents never choose: the policy model is served and a differing request is recorded', async () => {
     ctx.policy = policy({ models: ['claude-haiku-4-5'] });
     const res = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5') });
-    assert.equal(res.status, 403);
-    assert.equal(res.json().error, 'model_not_allowed');
-    assert.equal(seen.length, 0);
+    assert.equal(res.status, 200);
+    assert.equal(res.json().model, 'claude-haiku-4-5');
     await settle();
-    assert.ok(ledger.some((e) => e.action === 'EGRESS_DENIED_MODEL_NOT_ALLOWED'));
-    assert.equal((await call(port, '/models/v1/chat/completions', { token, body: chat('claude-haiku-4-5') })).status, 200);
+    const llm = lastLlm()!;
+    assert.equal(llm.model, 'claude-haiku-4-5');
+    assert.equal(llm.requestedModel, 'claude-sonnet-4-5');
+    // A call that names no model, or the served one, records no request.
+    await call(port, '/models/v1/chat/completions', { token, body: { messages: [{ role: 'user', content: 'hi' }], max_tokens: 256 } });
+    await settle();
+    assert.equal(lastLlm()!.requestedModel, undefined);
+    assert.ok(!ledger.some((e) => e.action === 'EGRESS_DENIED_MODEL_NOT_ALLOWED'));
   });
 
-  it('rejects a model the catalog does not offer', async () => {
-    const res = await call(port, '/models/v1/chat/completions', { token, body: chat('gpt-9') });
-    assert.equal(res.status, 400);
+  it('refuses a policy model the catalog does not offer', async () => {
+    ctx.policy = policy({ models: ['gpt-9'] });
+    const res = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5') });
+    assert.equal(res.status, 503);
     assert.equal(res.json().error, 'model_not_offered');
     assert.equal(seen.length, 0);
   });
 
   it('refuses a catalog model whose provider has no adapter', async () => {
+    ctx.policy = policy({ models: ['future-model'] });
     const res = await call(port, '/models/v1/chat/completions', { token, body: chat('future-model') });
     assert.equal(res.status, 503);
     assert.equal(res.json().error, 'provider_unavailable');
@@ -584,5 +594,17 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       await new Promise<void>((r) => server.close(() => r()));
     }
   });
-});
 
+  it('M2 GAP-181 with no factory default configured, a policy naming no models is refused (no_default_model)', async () => {
+    const bare = createGatekeeperEgress({ routes: [{ id: 'models', kind: 'models' }], prices: {}, runTokens: tokens, control, contextTtlMs: 0, modelCatalog: catalog });
+    const bPort = await listen(bare);
+    try {
+      ctx.policy = { routes: ['models'] };
+      const res = await call(bPort, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5') });
+      assert.equal(res.status, 503);
+      assert.equal(res.json().error, 'no_default_model');
+    } finally {
+      await new Promise<void>((r) => bare.close(() => r()));
+    }
+  });
+});
