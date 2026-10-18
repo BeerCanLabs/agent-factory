@@ -14,7 +14,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: npm install
+      # npm ci installs exactly the lockfile and never rewrites it (GAP-172).
+      - run: npm ci
       - run: npm test
       - run: npm run validate
       - run: (cd agents/examples/starter-python && python3 -m unittest discover -s tests)
@@ -22,12 +23,13 @@ jobs:
   compose-proof:
     # Proves the paper's claims against real containers: network isolation, run tokens, gatekeeper-egress
     # metering and budget, harness, kill switch, ledger chain + WORM anchor, tamper refusal.
-    needs: test
+    # Runs alongside `test` (GAP-172); both are required to merge.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       # Build every production image from this clean checkout, exactly as a deploy does, before anything
       # (npm install, builds) can leave artifacts behind. A deploy must never be the first place one fails.
+      # One at a time: building them concurrently was no faster on the runner (GAP-172).
       - name: Build production images
         run: |
           set -e
@@ -43,5 +45,6 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-      - run: npm install
+      # npm ci leaves package-lock.json untouched, so compose-e2e.sh reuses the images built above (GAP-172).
+      - run: npm ci
       - run: ./scripts/compose-e2e.sh
