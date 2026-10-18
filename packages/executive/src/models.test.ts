@@ -329,6 +329,93 @@ describe('Vertex AI and API-key model adapters (M1–M3)', () => {
     }
   });
 
+  it('defaultModelAdapters wires resolveSecret into anthropic and openAi adapters', async () => {
+    const { defaultModelAdapters } = await import('./models.js');
+    const resolved: string[] = [];
+    const adapters = defaultModelAdapters({
+      resolveSecret: async (name) => {
+        resolved.push(name);
+        return `secret-for-${name}`;
+      },
+      fetch: (async (url: string, init: RequestInit) => {
+        const h = init.headers as Record<string, string>;
+        if (url.includes('anthropic.com')) {
+          assert.equal(h['x-api-key'], 'secret-for-ANTHROPIC_API_KEY');
+          return new Response(
+            JSON.stringify({
+              content: [{ type: 'text', text: 'Anthropic ok' }],
+              stop_reason: 'end_turn',
+              usage: { input_tokens: 5, output_tokens: 1 },
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes('openai.com')) {
+          assert.equal(h['Authorization'], 'Bearer secret-for-OPENAI_API_KEY');
+          return new Response(
+            JSON.stringify({
+              choices: [{ message: { content: 'OpenAI ok' }, finish_reason: 'stop' }],
+              usage: { prompt_tokens: 6, completion_tokens: 2 },
+            }),
+            { status: 200 },
+          );
+        }
+        throw new Error(`unexpected url ${url}`);
+      }) as unknown as typeof fetch,
+    });
+
+    const anthropicRes = await adapters['anthropic'].complete({ provider: 'anthropic', id: 'claude-3-5-haiku' }, REQ);
+    assert.equal(anthropicRes.content, 'Anthropic ok');
+    assert.ok(resolved.includes('ANTHROPIC_API_KEY'));
+
+    const openaiRes = await adapters['openai'].complete({ provider: 'openai', id: 'gpt-4o' }, REQ);
+    assert.equal(openaiRes.content, 'OpenAI ok');
+    assert.ok(resolved.includes('OPENAI_API_KEY'));
+
+    let customSecretUsed = '';
+    const customAdapters = defaultModelAdapters({
+      resolveSecret: async (name) => {
+        customSecretUsed = name;
+        return 'custom-key';
+      },
+      fetch: (async (_url: string, init: RequestInit) => {
+        const h = init.headers as Record<string, string>;
+        assert.equal(h['x-api-key'], 'custom-key');
+        return new Response(
+          JSON.stringify({
+            content: [{ type: 'text', text: 'Custom secret ok' }],
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    await customAdapters['anthropic'].complete({ provider: 'anthropic', id: 'claude-test', secret: 'MY_CUSTOM_ANTHROPIC_KEY' }, REQ);
+    assert.equal(customSecretUsed, 'MY_CUSTOM_ANTHROPIC_KEY');
+
+    // Verify entry.secret is also respected when opts.resolveSecret is omitted (resolving via resolveProviderSecret)
+    const { anthropicMessages: standaloneAnthropic } = await import('./models.js');
+    const origEnv = process.env.STANDALONE_CUSTOM_SECRET;
+    process.env.STANDALONE_CUSTOM_SECRET = 'standalone-env-key';
+    try {
+      let standaloneHeaderKey = '';
+      const standalone = standaloneAnthropic({
+        fetch: (async (_url: string, init: RequestInit) => {
+          const h = init.headers as Record<string, string>;
+          standaloneHeaderKey = h['x-api-key'];
+          return new Response(JSON.stringify({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }), { status: 200 });
+        }) as unknown as typeof fetch,
+      });
+      await standalone.complete({ provider: 'anthropic', id: 'claude-test', secret: 'STANDALONE_CUSTOM_SECRET' }, REQ);
+      assert.equal(standaloneHeaderKey, 'standalone-env-key');
+    } finally {
+      if (origEnv !== undefined) process.env.STANDALONE_CUSTOM_SECRET = origEnv;
+      else delete process.env.STANDALONE_CUSTOM_SECRET;
+    }
+  });
+
   it('translates tools and parses tool_calls across OpenAI/xAI, Anthropic, and Google Gemini', async () => {
     const { openAiCompatible, anthropicMessages, vertexGemini } = await import('./models.js');
 

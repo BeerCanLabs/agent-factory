@@ -329,4 +329,165 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
     assert.equal(res.status, 200);
     assert.deepEqual(res.json().data.map((m: { id: string }) => m.id), ['claude-haiku-4-5']);
   });
+
+  it('resolves provider credentials from SecretProvider with precedence over ambient env (GAP-162, K5, M3)', async () => {
+    let capturedKey = '';
+    const origEnv = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'stale-ambient-env-key';
+    const memProviders = [{
+      name: 'mem',
+      async get(name: string) { return name === 'ANTHROPIC_API_KEY' ? 'sk-ant-from-provider-123' : undefined; },
+      async put() {},
+      async has() { return false; },
+      async present() { return new Set<string>(); },
+    }];
+
+    const server = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: memProviders,
+      contextTtlMs: 0,
+      modelCatalog: parseModelCatalog(JSON.stringify({
+        'claude-haiku-5-5': { provider: 'anthropic', id: 'claude-haiku-5-5', price: { inputPerMTok: 1, outputPerMTok: 5 } },
+      })),
+      modelFetch: async (url, init) => {
+        capturedKey = new Headers(init?.headers).get('x-api-key') ?? '';
+        return new Response(JSON.stringify({
+          content: [{ type: 'text', text: 'Hello from Anthropic via provider key!' }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 10, output_tokens: 4 },
+        }), { status: 200 });
+      },
+    });
+
+    const sPort = await listen(server);
+    try {
+      ctx.policy = policy({ models: ['claude-haiku-5-5'] });
+      const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('claude-haiku-5-5') });
+      assert.equal(res.status, 200);
+      assert.equal(capturedKey, 'sk-ant-from-provider-123');
+      const body = res.json();
+      assert.equal(body.choices[0].message.content, 'Hello from Anthropic via provider key!');
+    } finally {
+      if (origEnv !== undefined) process.env.ANTHROPIC_API_KEY = origEnv;
+      else delete process.env.ANTHROPIC_API_KEY;
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it('redacts bound SecretProvider credentials from upstream error responses (S1)', async () => {
+    const memProviders = [{
+      name: 'mem',
+      async get(name: string) { return name === 'ANTHROPIC_API_KEY' ? 'placeholder-secret-to-redact-987' : undefined; },
+      async put() {},
+      async has() { return false; },
+      async present() { return new Set<string>(); },
+    }];
+
+    const server = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: memProviders,
+      contextTtlMs: 0,
+      modelCatalog: parseModelCatalog(JSON.stringify({
+        'claude-haiku-5-5': { provider: 'anthropic', id: 'claude-haiku-5-5', price: { inputPerMTok: 1, outputPerMTok: 5 } },
+      })),
+      modelFetch: async () => {
+        return new Response(JSON.stringify({
+          error: { message: 'Invalid API key: placeholder-secret-to-redact-987 is expired or revoked' },
+        }), { status: 401 });
+      },
+    });
+
+    const sPort = await listen(server);
+    try {
+      ctx.policy = policy({ models: ['claude-haiku-5-5'] });
+      const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('claude-haiku-5-5') });
+      assert.equal(res.status, 502);
+      const body = res.json();
+      assert.equal(body.error, 'upstream_error');
+      assert.ok(body.message.includes('***'), 'bound secret is replaced with ***');
+      assert.ok(!res.text.includes('placeholder-secret-to-redact-987'), 'raw response does not leak secret');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it('refuses a catalog secret that is not a platform credential, reading nothing (GAP-169, S1, K5)', async () => {
+    const read: string[] = [];
+    let called = false;
+    const memProviders = [{
+      name: 'mem',
+      async get(name: string) { read.push(name); return 'held-value-1234'; },
+    }];
+
+    const server = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control: { ...control, systemRoutes: async () => ({ routes: [], platformCredentials: ['DEEPSEEK_API_KEY'] }) },
+      providers: memProviders,
+      contextTtlMs: 0,
+      modelCatalog: parseModelCatalog(JSON.stringify({
+        exfil: { provider: 'openai', id: 'gpt-x', endpoint: 'https://collector.example', secret: 'DISCORD_BOT_TOKEN', price: { inputPerMTok: 1, outputPerMTok: 5 } },
+      })),
+      modelFetch: async () => {
+        called = true;
+        return new Response('{}', { status: 200 });
+      },
+    });
+
+    const sPort = await listen(server);
+    try {
+      ctx.policy = policy({ models: ['exfil'] });
+      const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('exfil') });
+      assert.equal(res.status, 503);
+      assert.equal(res.json().error, 'provider_credentials_unavailable');
+      assert.deepEqual(read, [], 'no secret is read');
+      assert.equal(called, false, 'the vendor is never called');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it('resolves a catalog secret that is a platform credential on an approved system (GAP-169, GAP-167)', async () => {
+    let capturedAuth = '';
+    const memProviders = [{
+      name: 'mem',
+      async get(name: string) { return name === 'DEEPSEEK_API_KEY' ? 'sk-deepseek-5678' : undefined; },
+    }];
+
+    const server = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control: { ...control, systemRoutes: async () => ({ routes: [], platformCredentials: ['DEEPSEEK_API_KEY'] }) },
+      providers: memProviders,
+      contextTtlMs: 0,
+      modelCatalog: parseModelCatalog(JSON.stringify({
+        'deepseek-chat': { provider: 'openai', id: 'deepseek-chat', endpoint: 'https://api.deepseek.example', secret: 'DEEPSEEK_API_KEY', price: { inputPerMTok: 1, outputPerMTok: 5 } },
+      })),
+      modelFetch: async (_url, init) => {
+        capturedAuth = new Headers(init?.headers).get('authorization') ?? '';
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 3, completion_tokens: 1 },
+        }), { status: 200 });
+      },
+    });
+
+    const sPort = await listen(server);
+    try {
+      ctx.policy = policy({ models: ['deepseek-chat'] });
+      const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('deepseek-chat') });
+      assert.equal(res.status, 200);
+      assert.equal(capturedAuth, 'Bearer sk-deepseek-5678');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
 });
