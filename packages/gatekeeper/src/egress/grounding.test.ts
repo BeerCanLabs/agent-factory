@@ -31,14 +31,29 @@ describe('AP3 grounding pieces', () => {
 
   it('a reply takes its answer footnote; a split answer only on its last chunk; anything else is not from the model', () => {
     const book = new ReplyBook();
+    book.sawModelApiCall('run-1');
     book.remember('run-1', 'The litter box is clean.', NO_TOOLS_FOOTNOTE);
-    book.remember('run-1', 'Grounded answer from a tool. It goes on for a while.');
+    book.remember('run-1', 'Grounded answer from a tool. It goes on for quite a while.');
     assert.equal(book.footnoteFor('run-1', 'The litter box is clean.'), NO_TOOLS_FOOTNOTE);
     assert.equal(book.footnoteFor('run-1', '<@123> The litter box is clean.'), NO_TOOLS_FOOTNOTE, 'decorated reply');
     assert.equal(book.footnoteFor('run-1', 'Grounded answer from a tool.'), undefined, 'middle chunk');
-    assert.equal(book.footnoteFor('run-1', 'It goes on for a while.'), undefined, 'grounded last chunk');
+    assert.equal(book.footnoteFor('run-1', 'It goes on for quite a while.'), undefined, 'grounded last chunk');
     assert.equal(book.footnoteFor('run-1', 'Beep boop! I could not reach Home Assistant.'), NO_MODEL_FOOTNOTE);
-    assert.equal(book.footnoteFor('run-2', 'The litter box is clean.'), NO_MODEL_FOOTNOTE, 'answers are per run');
+    assert.equal(book.footnoteFor('run-2', 'The litter box is clean.'), undefined, 'a run this process never saw use the model API is not judged');
+  });
+
+  it('review #198: short answers match only exactly; an edit is not footnoted twice; a native-route run is never called model-less', () => {
+    const book = new ReplyBook();
+    book.sawModelApiCall('r');
+    book.remember('r', 'OK', NO_TOOLS_FOOTNOTE);
+    assert.equal(book.footnoteFor('r', 'OK'), NO_TOOLS_FOOTNOTE);
+    assert.equal(book.footnoteFor('r', 'Beep boop! OK, I will try later.'), NO_MODEL_FOOTNOTE, 'a short answer inside a canned message is no match');
+    book.remember('r', 'The kitchen lights are off and the doors are locked.', NO_TOOLS_FOOTNOTE);
+    assert.equal(book.footnoteFor('r', `The kitchen lights are off and the doors are locked.\n-# ${NO_TOOLS_FOOTNOTE}`), NO_TOOLS_FOOTNOTE);
+    const edited = footnoteDiscordBody(Buffer.from(JSON.stringify({ content: `The kitchen lights are off and the doors are locked.\n-# ${NO_TOOLS_FOOTNOTE}` })), () => NO_TOOLS_FOOTNOTE)!;
+    assert.equal(JSON.parse(edited.body.toString()).content, `The kitchen lights are off and the doors are locked.\n-# ${NO_TOOLS_FOOTNOTE}`, 'one footnote, not two');
+    book.sawNativeModelCall('r');
+    assert.equal(book.footnoteFor('r', 'Anything else'), undefined);
   });
 
   it('recognises Discord message creates and edits only', () => {
@@ -54,8 +69,10 @@ describe('AP3 grounding pieces', () => {
   it('the footnote is Discord subtext and the message stays within the limit', () => {
     const out = footnoteDiscordBody(Buffer.from(JSON.stringify({ content: 'hello', tts: false })), () => NO_TOOLS_FOOTNOTE)!;
     assert.deepEqual(JSON.parse(out.body.toString()), { content: `hello\n-# ${NO_TOOLS_FOOTNOTE}`, tts: false });
-    const long = footnoteDiscordBody(Buffer.from(JSON.stringify({ content: 'x'.repeat(2000) })), () => NO_MODEL_FOOTNOTE, 2000)!;
-    assert.equal(JSON.parse(long.body.toString()).content.length, 2000);
+    const raw = Buffer.from(JSON.stringify({ content: 'x'.repeat(2000) }));
+    const long = footnoteDiscordBody(raw, () => NO_MODEL_FOOTNOTE, 2000)!;
+    assert.equal(long.skipped, true, 'content is never cut to fit a footnote');
+    assert.equal(long.body, raw);
     assert.equal(footnoteDiscordBody(Buffer.from(JSON.stringify({ embeds: [] })), () => NO_MODEL_FOOTNOTE), undefined, 'no content, nothing to mark');
   });
 });
@@ -103,6 +120,7 @@ describe('AP3 through the gatekeeper-egress', { concurrency: false }, () => {
       async complete(_entry, req) {
         seenRequests.push(req);
         const a = answers.shift() ?? { content: 'done' };
+        if (a.content === '__THROW__') throw new Error('upstream down');
         return { content: a.content, finishReason: a.toolCalls ? 'tool_calls' : 'stop', usage: { input: 10, output: 2 }, ...(a.toolCalls ? { toolCalls: a.toolCalls } : {}) };
       },
     };
@@ -172,6 +190,27 @@ describe('AP3 through the gatekeeper-egress', { concurrency: false }, () => {
       assert.equal(t.ledger.some((e) => e.action === 'UNGROUNDED_REPLY'), false);
     } finally {
       await t.close();
+    }
+  });
+
+  it('AP3 warn-once: a retry that answers in text replaces the answer; a failed retry keeps the first and is ledgered', async () => {
+    const t = await setup({ routes: ['models'], models: ['fake-model'], grounding: 'warn-once' }, [{ content: 'Probably clean.' }, { content: 'I could not check: no live data.' }]);
+    try {
+      const res = await call(t.port, '/models/v1/chat/completions', t.token, { messages: [{ role: 'user', content: 'hey' }], tools: TOOLS });
+      assert.equal(res.json().choices[0].message.content, 'I could not check: no live data.');
+      await settle();
+      assert.equal(t.ledger.find((e) => e.action === 'UNGROUNDED_REPLY')?.replySha256, replySha256('I could not check: no live data.'));
+    } finally {
+      await t.close();
+    }
+    const f = await setup({ routes: ['models'], models: ['fake-model'], grounding: 'warn-once' }, [{ content: 'Probably clean.' }, { content: '__THROW__' }]);
+    try {
+      const res = await call(f.port, '/models/v1/chat/completions', f.token, { messages: [{ role: 'user', content: 'hey' }], tools: TOOLS });
+      assert.equal(res.json().choices[0].message.content, 'Probably clean.');
+      await settle();
+      assert.ok(f.ledger.some((e) => e.action === 'GROUNDING_RETRY_FAILED'));
+    } finally {
+      await f.close();
     }
   });
 

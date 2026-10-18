@@ -750,6 +750,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const model = typeof parsed?.model === 'string' ? parsed.model : undefined;
     calls.get(res)?.start(model);
     if (req.method === 'POST' && parsed) {
+      // AP3: provider-native answers are not recorded, so this run's replies are never labelled "no model".
+      replies.sawNativeModelCall(ctx.run.runId);
       if (!model) return deny(res, ctx, route, 400, 'model_required');
       const check = checkModel(modelPolicyOf(ctx), model);
       if (!check.allowed) return deny(res, ctx, route, check.status, check.code, check.detail);
@@ -830,6 +832,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const parsed = tryJson(raw) as Record<string, unknown> | undefined;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return deny(res, ctx, route, 400, 'invalid_json');
     if (parsed.stream === true) return deny(res, ctx, route, 400, 'streaming_not_supported');
+    // AP3: this process saw the run use the factory model API (answered or not).
+    replies.sawModelApiCall(ctx.run.runId);
     // M2 (GAP-181): agents never choose. The factory serves the pin, the policy's first model or the default, whatever
     // model name the call carries; a differing name is recorded as `requestedModel`.
     const requestedName = typeof parsed.model === 'string' && parsed.model ? parsed.model : undefined;
@@ -894,18 +898,24 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     let replyUsage = { input: usage.input, output: usage.output };
     const toolsOffered = declaredToolNames.length > 0;
     const grounded = !toolsOffered || toolResultsInTurn(chat.messages);
-    if (!grounded && !reply.toolCalls?.length && ctx.policy.grounding === 'warn-once') {
-      // AP3.3: one more turn with the notice; both calls are metered.
+    const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
+    const retryAffordable = isBuiltin || checkStanding({ limits: ctx.policy.budgetUsd, spend: ctx.spend, pendingUsd: unacked.get(ctx.run.runId) ?? 0 }).inGoodStanding;
+    if (!grounded && !reply.toolCalls?.length && ctx.policy.grounding === 'warn-once' && reply.content.trim() && retryAffordable && !throttled(ctx)) {
+      // AP3.3: one more turn with the notice; metered, inside the budget and throttle, and held to AP1 like any answer.
       const retryBody = { ...upstreamBody, messages: [...(upstreamBody.messages as unknown[]), { role: 'assistant', content: reply.content }, { role: 'user', content: GROUNDING_RETRY_NOTICE }] };
       const again = await complete({ entry, adapters: modelAdapters, body: retryBody });
-      if (again.ok) {
+      if (!again.ok) {
+        ledger(ctx, route, { type: 'action', action: 'GROUNDING_RETRY_FAILED', model, requestId });
+      } else {
         const retryId = randomUUID();
         const r2 = again.result;
         const u2: Usage = r2.usage ? { model, input: r2.usage.input, output: r2.usage.output, cacheRead: 0, cacheWrite: 0 } : { model, input: 0, output: again.request.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
         recordUsage(ctx, route, { usage: u2, model, price, request: retryBody, requestId: retryId, action: r2.usage ? undefined : 'METERING_GAP', extra: { provider: entry.provider, upstreamModel: entry.id } });
+        const leaked = !r2.toolCalls?.length && detectToolSyntaxLeak(r2.content, declaredToolNames);
         ledger(ctx, route, { type: 'action', action: 'GROUNDING_RETRY', model, requestId, retryRequestId: retryId, toolCalled: Boolean(r2.toolCalls?.length) });
-        reply = r2;
         replyUsage = { input: replyUsage.input + u2.input, output: replyUsage.output + u2.output };
+        // A retry that imitates a tool call, or says nothing, leaves the first answer in place.
+        if (!leaked && (r2.toolCalls?.length || r2.content.trim())) reply = r2;
       }
     }
     if (!reply.toolCalls?.length) {
@@ -1204,6 +1214,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
 
       let raw = await readBody(req, limit);
+      // AP3: a reply is matched to the model's answer as the agent sent it, before any rewrite (review #198).
+      const sentContent = isDiscordReply(route, req.method, rest) ? (tryJson(raw) as { content?: unknown } | undefined)?.content : undefined;
       if (route.stripSignInLinks && raw.length && /json/i.test(String(req.headers['content-type'] ?? ''))) {
         const parsed = tryJson(raw);
         if (parsed !== undefined) {
@@ -1229,8 +1241,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (route.kind === 'mcp') return await handleMcp(req, res, ctx, route, rest, raw);
       // AP3.4: a Discord reply built from an answer given without tools, or from no answer at all, is footnoted.
       if (isDiscordReply(route, req.method, rest)) {
-        const marked = footnoteDiscordBody(raw, (content) => replies.footnoteFor(ctx.run.runId, content), route.maxContentChars ?? 2000);
-        if (marked) {
+        const marked = footnoteDiscordBody(raw, (content) => replies.footnoteFor(ctx.run.runId, typeof sentContent === 'string' ? sentContent : content), route.maxContentChars ?? 2000);
+        if (marked?.skipped) {
+          // Content is never cut to fit a footnote: the message goes as sent, and the ledger says it was not marked.
+          ledger(ctx, route, { type: 'action', action: 'REPLY_FOOTNOTE_SKIPPED', footnote: marked.footnote });
+        } else if (marked) {
           raw = marked.body;
           ledger(ctx, route, { type: 'action', action: 'REPLY_FOOTNOTED', footnote: marked.footnote });
         }

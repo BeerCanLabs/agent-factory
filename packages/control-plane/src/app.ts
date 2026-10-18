@@ -432,10 +432,23 @@ type VendorTarget = { upstream: string; adapter: string; discoveryPath?: string;
  * (`MODEL_REPLY`, or `UNGROUNDED_REPLY` when tools were offered and none called); the result is matched by hash.
  */
 function resultFootnote(output: string, runRows: ReadonlyArray<Record<string, unknown>>): string | undefined {
-  const sha = createHash('sha256').update(output.trim()).digest('hex');
+  const text = output.trim();
+  // A machine-read result (JSON) is never altered.
+  if (/^[[{]/.test(text)) {
+    try {
+      JSON.parse(text);
+      return undefined;
+    } catch {
+      // not JSON: a text reply
+    }
+  }
+  const sha = createHash('sha256').update(text).digest('hex');
   const match = [...runRows].reverse().find((r) => (r.action === 'MODEL_REPLY' || r.action === 'UNGROUNDED_REPLY') && r.replySha256 === sha);
-  if (!match) return '[no model or tools used]';
-  return match.action === 'UNGROUNDED_REPLY' ? '[no tools called]' : undefined;
+  if (match) return match.action === 'UNGROUNDED_REPLY' ? '[no tools called]' : undefined;
+  // "No model" only when the run used the factory model API and no provider-native route (whose answers are not recorded).
+  const modelApi = runRows.some((r) => r.route === 'models');
+  const native = runRows.some((r) => r.type === 'llm' && r.route !== 'models');
+  return modelApi && !native ? '[no model or tools used]' : undefined;
 }
 
 /** The factory default model: configuration (M2, GAP-181), never a value in code. Undefined when none is set. */

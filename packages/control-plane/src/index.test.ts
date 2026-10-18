@@ -364,7 +364,13 @@ describe('control plane', { concurrency: false }, () => {
       };
       assert.equal(await finish('Probably clean.', [{ action: 'UNGROUNDED_REPLY', text: 'Probably clean.' }]), 'Probably clean.\n\n[no tools called]');
       assert.equal(await finish(' Clean, per the sensor. ', [{ action: 'MODEL_REPLY', text: 'Clean, per the sensor.' }]), ' Clean, per the sensor. ');
-      assert.equal(await finish('Beep boop!', []), 'Beep boop!\n\n[no model or tools used]');
+      assert.equal(await finish('Beep boop!', []), 'Beep boop!', 'a run that never used the model API is not judged');
+      const modelCall = { action: 'MODEL_UPSTREAM_ERROR', text: 'x' };
+      const run = (await wake('med-doc')).json as RunBody;
+      state.ledger.append({ agentId: 'med-doc', runId: run.runId, type: 'action', action: modelCall.action, route: 'models' });
+      const res = await request(port, `/api/v1/runs/${run.runId}/result`, { method: 'POST', token: tokenFor(run.runId), body: { status: 'succeeded', output: 'Beep boop!' } });
+      assert.equal((res.json as RunBody).result, 'Beep boop!\n\n[no model or tools used]', 'a canned reply after a model API call');
+      assert.equal(await finish('{"ok":true}', []), '{"ok":true}', 'a JSON result is never altered');
     });
 
     it('pre-flight: unbound secrets give 412 with a recorded run and ledger event', async () => {
