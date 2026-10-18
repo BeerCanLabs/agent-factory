@@ -12,6 +12,7 @@ const EXIT_REASONS: Record<number, AdmissionRefusal> = {
   4: 'tests_failed',
   5: 'source_unavailable',
   6: 'hardcoded_secret',
+  7: 'archetype_required',
 };
 
 const PHASE_REASONS: Record<string, AdmissionRefusal> = {

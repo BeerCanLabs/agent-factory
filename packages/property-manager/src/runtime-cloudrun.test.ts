@@ -122,6 +122,7 @@ describe('GCP Cloud Build admission (L3, L4, SK4, K1, S1)', () => {
       ['test', 'step exited with non-zero status: 3', 'no_tests', 'PRE_BUILD'],
       ['test', 'step exited with non-zero status: 4', 'tests_failed', 'PRE_BUILD'],
       ['test', 'step exited with non-zero status: 6', 'hardcoded_secret', 'PRE_BUILD'],
+      ['test', 'step exited with non-zero status: 7', 'archetype_required', 'PRE_BUILD'],
       ['clone', 'step exited with non-zero status: 5', 'source_unavailable', 'INSTALL'],
       ['build', 'step exited with non-zero status: 1', 'build_failed', 'BUILD'],
       ['push', 'step exited with non-zero status: 1', 'push_failed', 'POST_BUILD'],

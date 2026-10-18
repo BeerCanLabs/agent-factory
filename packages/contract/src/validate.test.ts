@@ -489,6 +489,16 @@ describe('AM1 every cartridge declares its archetype', () => {
     }
   });
 
+  it('AM1 accepts a cartridge.yaml whose archetype is declared in memory.yaml beside it', () => {
+    const dir = fixture({ 'cartridge.yaml': 'schemaVersion: "1.0"\nid: x\nname: X\nprompt: soul.md\n', 'soul.md': '# X\n', 'memory.yaml': 'archetype: team-member\n' }, true);
+    try {
+      const r = validateCartridge(dir);
+      assert.equal(r.ok, true, JSON.stringify(r.issues));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('accepts the three archetypes and resolves the pre-AM1 names as aliases', async () => {
     const { canonicalArchetype } = await import('./schema.js');
     for (const a of ['purpose-built', 'personal-assistant', 'team-member']) assert.equal(memoryArchetype.safeParse(a).success, true);

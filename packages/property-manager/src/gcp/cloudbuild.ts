@@ -22,6 +22,7 @@ const EXIT_REASONS: Record<number, AdmissionRefusal> = {
   4: 'tests_failed',
   5: 'source_unavailable',
   6: 'hardcoded_secret',
+  7: 'archetype_required',
 };
 
 const STEP_PHASES: Record<string, { phase: string; reason: AdmissionRefusal }> = {
@@ -111,6 +112,9 @@ KNOWN='github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]
 GENERIC='(secret|password|passwd|api_?key|token|client_secret)[A-Za-z0-9_]*["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_/+=.-]{20,}["'"'"']'
 HITS="$(git ls-files -z | xargs -0 grep -nIE -i -- "$KNOWN|$GENERIC" 2>/dev/null | grep -v 'secret-scan:allow' | grep -E -- "$KNOWN|[\\"'][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[\\"']|[\\"'][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[\\"']" | grep -vE '(example|EXAMPLE|placeholder|your[-_]|changeme|<[a-z_]+>)' | cut -d: -f1,2 | sort -u)"
 if [ -n "$HITS" ]; then echo "ADMISSION REFUSED (hardcoded_secret):"; echo "$HITS"; exit 6; fi
+# AM1 / GAP-179: the commit must declare its memory archetype (cartridge.yaml memory.archetype, or memory.yaml archetype).
+ARCH='[\\"'"'"']?(purpose-built|personal-assistant|team-member|ephemeral|episodic|workspace)[\\"'"'"']?[[:space:]]*(#.*)?$'
+if ! { [ -f cartridge.yaml ] && grep -qE "^[[:space:]]+archetype:[[:space:]]*$ARCH" cartridge.yaml; } && ! { [ -f memory.yaml ] && grep -qE "^archetype:[[:space:]]*$ARCH" memory.yaml; }; then echo "ADMISSION REFUSED (archetype_required): declare memory.archetype: purpose-built, personal-assistant or team-member"; exit 7; fi
 
 if [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f setup.py ]; then KIND=python
 elif [ -f package.json ]; then KIND=node
