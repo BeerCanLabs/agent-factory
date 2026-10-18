@@ -345,17 +345,18 @@ const TOOLS: ToolSpec[] = [
   },
   {
     name: 'admit_model',
-    description: 'Admit a discovered or new model to the factory offering with token pricing',
+    description: 'Admit a model to the factory offering with token pricing. Name its vendor (vendorId): provider, endpoint and credential come from the vendor. provider/region only for cloud model services (bedrock-converse, vertex-*).',
     privilege: 'models.manage',
     args: {
       name: { type: 'string' },
-      provider: { type: 'string' },
       id: { type: 'string' },
       vendorId: { type: 'string' },
+      provider: { type: 'string' },
+      region: { type: 'string' },
       inputPerMTok: { type: 'string' },
       outputPerMTok: { type: 'string' },
     },
-    required: ['name', 'provider', 'id'],
+    required: ['name', 'id'],
   },
   {
     name: 'update_model_pricing',
@@ -486,6 +487,94 @@ function vendorTarget(state: FactoryState, vendorId: string): VendorTarget | { e
   return { upstream, adapter, discoveryPath, secretName };
 }
 
+/** Adapter key (catalog `provider`) for a registered vendor's adapter type. */
+const ADAPTER_KEYS: Record<string, string> = {
+  openAiCompatible: 'openai',
+  anthropicMessages: 'anthropic',
+  // An API-key Gemini vendor uses the direct Gemini adapter, like the built-in one (not Vertex's cloud identity).
+  vertexGemini: 'google',
+  vertexAnthropic: 'vertex-anthropic',
+  bedrockConverse: 'bedrock-converse',
+};
+/** Built-in vendors (template id -> adapter key); a model admitted for one keeps its adapter's default endpoint. */
+const BUILTIN_VENDOR_ADAPTER: Record<string, string> = Object.fromEntries(
+  Object.entries(AI_PROVIDER_TEMPLATES).filter(([id]) => id !== 'custom').map(([id, t]) => [id, t.adapterKey]),
+);
+/** Cloud model services: the gatekeeper-egress's cloud identity, never a vendor key. A vendor never re-routes them. */
+const CLOUD_PROVIDERS = new Set(['bedrock-converse', 'vertex-ai', 'vertex-gemini', 'vertex-anthropic']);
+/** API-key adapter keys and the built-in vendor each implies when a caller names a provider but no vendor. */
+const API_KEY_PROVIDER_VENDOR: Record<string, string> = { openai: 'openai', anthropic: 'anthropic', 'anthropic-messages': 'anthropic', xai: 'xai', gemini: 'gemini', google: 'gemini' };
+
+/**
+ * GAP-182: an admitted vendor model takes its provider, endpoint and credential from the vendor itself (the registered
+ * system, or a built-in template), never from the caller. Built-in vendors keep their adapter's default endpoint.
+ */
+function vendorCatalogFields(state: FactoryState, vendorId: string): { provider: string; endpoint?: string; secret: string } | { error: string; message?: string } {
+  const target = vendorTarget(state, vendorId);
+  if ('error' in target) return target;
+  const builtin = BUILTIN_VENDOR_ADAPTER[vendorId];
+  return {
+    provider: builtin ?? ADAPTER_KEYS[target.adapter] ?? 'openai',
+    ...(builtin ? {} : { endpoint: target.upstream }),
+    secret: target.secretName,
+  };
+}
+
+type AdmitInput = { name?: string; id?: string; vendorId?: string; provider?: string; endpoint?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } };
+
+/** One admission path for REST, MCP and the console (GAP-182). */
+function admitModel(state: FactoryState, input: AdmitInput, actor: string): { ok: true; model: StoredModel } | { ok: false; status: number; error: string; message?: string } {
+  if (!state.modelStore) return { ok: false, status: 500, error: 'model_store_not_configured' };
+  if (!input.name || !input.id) return { ok: false, status: 400, error: 'invalid_request', message: 'name and id are required' };
+  const cloud = Boolean(input.provider && CLOUD_PROVIDERS.has(input.provider));
+  let vendorId = cloud ? undefined : input.vendorId;
+  if (!vendorId && input.provider && API_KEY_PROVIDER_VENDOR[input.provider]) {
+    // An API-key provider needs a vendor (its credential and host). A custom endpoint must be a registered vendor.
+    if (input.endpoint) return { ok: false, status: 400, error: 'vendor_required', message: 'a model on a custom endpoint is admitted through its registered vendor (vendorId)' };
+    vendorId = API_KEY_PROVIDER_VENDOR[input.provider];
+  }
+  let fields: { provider: string; endpoint?: string; secret?: string; region?: string };
+  if (vendorId) {
+    const v = vendorCatalogFields(state, vendorId);
+    if ('error' in v) return { ok: false, status: 400, error: v.error, message: v.message };
+    fields = v;
+  } else {
+    if (!input.provider) return { ok: false, status: 400, error: 'invalid_request', message: 'vendorId or provider is required' };
+    // Cloud model services (Bedrock, Vertex) use the gatekeeper-egress's cloud identity, not a key.
+    fields = { provider: input.provider, ...(input.region ? { region: input.region } : {}) };
+  }
+  try {
+    const model = state.modelStore.admit({ name: input.name, id: input.id, ...fields, vendorId: vendorId ?? input.vendorId, price: input.price, actor });
+    state.modelCatalog = state.modelStore.toEgressCatalog();
+    state.ledger.append({ action: 'MODEL_ADMITTED', actor, model: model.name, provider: model.provider, vendorId: model.vendorId, price: model.price, timestamp: new Date().toISOString() });
+    return { ok: true, model };
+  } catch (err) {
+    return { ok: false, status: 409, error: 'admission_failed', message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * GAP-182 repair: every admitted model with a vendor takes its vendor's current provider, endpoint and credential.
+ * Run at start (after the built-in vendors are seeded) and whenever a vendor changes. Returns the models re-linked.
+ */
+export function relinkVendorModels(state: FactoryState): string[] {
+  if (!state.modelStore) return [];
+  const changed: string[] = [];
+  for (const m of state.modelStore.listOffered()) {
+    // Cloud model services keep their provider and region; a vendor id on them is a label only.
+    if (!m.vendorId || CLOUD_PROVIDERS.has(m.provider)) continue;
+    const v = vendorCatalogFields(state, m.vendorId);
+    if ('error' in v) continue;
+    if (state.modelStore.relinkVendor(m.name, v, false)) changed.push(m.name);
+  }
+  if (changed.length) {
+    state.modelStore.save();
+    state.modelCatalog = state.modelStore.toEgressCatalog();
+    state.ledger.append({ action: 'MODEL_RELINKED', actor: SYSTEM.policy, models: changed, timestamp: new Date().toISOString() });
+  }
+  return changed;
+}
+
 /**
  * S1: the control plane never reads a provider key. The gatekeeper-egress holds it and calls the vendor.
  * Returns model ids only.
@@ -573,30 +662,12 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
     }
   }
   if (name === 'admit_model') {
-    if (!state.modelStore) return { error: 'model_store_not_configured' };
     const price = (args.inputPerMTok && args.outputPerMTok) ? {
       inputPerMTok: parseFloat(args.inputPerMTok),
       outputPerMTok: parseFloat(args.outputPerMTok),
     } : undefined;
-    const model = state.modelStore.admit({
-      name: args.name,
-      provider: args.provider,
-      id: args.id,
-      vendorId: args.vendorId,
-      price,
-      actor,
-    });
-    state.modelCatalog = state.modelStore.toEgressCatalog();
-    state.ledger.append({
-      action: 'MODEL_ADMITTED',
-      actor,
-      model: model.name,
-      provider: model.provider,
-      vendorId: model.vendorId,
-      price: model.price,
-      timestamp: new Date().toISOString(),
-    });
-    return { ok: true, model };
+    const out = admitModel(state, { name: args.name, id: args.id, vendorId: args.vendorId, provider: args.provider, region: args.region, price }, actor);
+    return out.ok ? { ok: true, model: out.model } : { error: out.error, ...(out.message ? { message: out.message } : {}) };
   }
   if (name === 'update_model_pricing') {
     if (!state.modelStore) return { error: 'model_store_not_configured' };
@@ -1680,44 +1751,13 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (path === '/api/v1/models/admit' && req.method === 'POST') {
     const principal = await requirePrivilege(req, res, state, 'models.manage');
     if (!principal) return;
-    const body = (await readJson(req)) as { name?: string; provider?: string; id?: string; endpoint?: string; vendorId?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } };
-    if (!body.name || !body.provider || !body.id) {
-      json(res, 400, { error: 'invalid_request', message: 'name, provider, and id are required' });
+    const out = admitModel(state, (await readJson(req)) as AdmitInput, principal.actor);
+    if (!out.ok) {
+      json(res, out.status, { error: out.error, ...(out.message ? { message: out.message } : {}) });
       return;
     }
-    if (!state.modelStore) {
-      json(res, 500, { error: 'model_store_not_configured' });
-      return;
-    }
-    try {
-      const model = state.modelStore.admit({
-        name: body.name,
-        provider: body.provider,
-        id: body.id,
-        endpoint: body.endpoint,
-        vendorId: body.vendorId,
-        region: body.region,
-        price: body.price,
-        actor: principal.actor,
-      });
-      state.modelCatalog = state.modelStore.toEgressCatalog();
-
-      state.ledger.append({
-        action: 'MODEL_ADMITTED',
-        actor: principal.actor,
-        model: model.name,
-        provider: model.provider,
-        vendorId: model.vendorId,
-        price: model.price,
-        timestamp: new Date().toISOString(),
-      });
-
-      json(res, 201, { ok: true, model });
-      return;
-    } catch (err: any) {
-      json(res, 409, { error: 'admission_failed', message: err.message });
-      return;
-    }
+    json(res, 201, { ok: true, model: out.model });
+    return;
   }
 
   // Dynamic token pricing update (Accountant §6.4, GAP-162)

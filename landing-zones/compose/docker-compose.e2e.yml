@@ -8,6 +8,8 @@ services:
     networks: [egress]
   gatekeeper-egress:
     environment:
+      # GAP-182: the operator trusts the mock with model provider keys (a key otherwise goes only to its vendor's host).
+      FACTORY_MODEL_TRUSTED_HOSTS: mock-provider:8080
       # The factory model API's offering (GAP-174): the validation agent's models, served by the mock.
       FACTORY_MODEL_CATALOG: '{"test-big":{"provider":"openai","id":"test-big","endpoint":"http://mock-provider:8080","price":{"inputPerMTok":15,"outputPerMTok":75}},"test-small":{"provider":"openai","id":"test-small","endpoint":"http://mock-provider:8080","price":{"inputPerMTok":1,"outputPerMTok":5}}}'
     volumes:

@@ -35,9 +35,29 @@ export type LedgerEvent = {
   scopes?: string[];
   /** Keymaster static credential (§6.11 K5.3): the secret's declared name only. Never its value. */
   credential?: string;
+  /** M2 (GAP-181): the model name an agent's call carried when the factory served another. */
+  requestedModel?: string;
+  /** The provider's own model id the factory model API called. */
+  upstreamModel?: string;
+  /** Model names a model-catalog change touched (e.g. MODEL_RELINKED, GAP-182). */
+  models?: string[];
+  /** AP3 (GAP-178): a hash of a final model answer, never its text. */
+  replySha256?: string;
+  /** AP3: the footnote a reply received. */
+  footnote?: '[no tools called]' | '[no model or tools used]';
+  /** AP3.3: the request id of the warn-once retry, and whether it called a tool. */
+  retryRequestId?: string;
+  toolCalled?: boolean;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
+  'requestedModel',
+  'upstreamModel',
+  'models',
+  'replySha256',
+  'footnote',
+  'retryRequestId',
+  'toolCalled',
   'timestamp',
   'agentId',
   'type',
@@ -172,6 +192,18 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   }
   // An ENV-style secret name (as cartridges declare them), never free text: a value pasted here is dropped.
   if (typeof raw.credential === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(raw.credential)) event.credential = raw.credential;
+  // Model names and ids: identifier characters only (e.g. claude-haiku-5-5, us.anthropic.x-v1:0, models/gemini-x).
+  const modelName = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9._:/@-]{1,128}$/.test(v);
+  if (modelName(raw.requestedModel)) event.requestedModel = raw.requestedModel;
+  if (modelName(raw.upstreamModel)) event.upstreamModel = raw.upstreamModel;
+  if (Array.isArray(raw.models)) {
+    const models = raw.models.filter(modelName).slice(0, 256);
+    if (models.length) event.models = models;
+  }
+  if (typeof raw.replySha256 === 'string' && /^[0-9a-f]{64}$/.test(raw.replySha256)) event.replySha256 = raw.replySha256;
+  if (raw.footnote === '[no tools called]' || raw.footnote === '[no model or tools used]') event.footnote = raw.footnote;
+  if (typeof raw.retryRequestId === 'string' && /^[0-9a-f-]{36}$/.test(raw.retryRequestId)) event.retryRequestId = raw.retryRequestId;
+  if (typeof raw.toolCalled === 'boolean') event.toolCalled = raw.toolCalled;
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);

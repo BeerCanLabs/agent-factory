@@ -925,3 +925,19 @@ describe('model capability profile (GAP-175, M1, M3)', () => {
     assert.deepEqual(sent.tool_choice, { type: 'auto' });
   });
 });
+
+describe('a key is never sent through a redirect (GAP-182 review)', () => {
+  it('both API-key adapters refuse redirects', async () => {
+    const { anthropicMessages, openAiCompatible } = await import('./models.js');
+    const seen: Array<RequestInit['redirect']> = [];
+    const doFetch = (async (_url: string, init: RequestInit) => {
+      seen.push(init.redirect);
+      return new Response(JSON.stringify({ content: [{ type: 'text', text: 'ok' }], choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }], stop_reason: 'end_turn' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const req: ChatRequest = { messages: [{ role: 'user', content: 'hi' }] };
+    await anthropicMessages({ apiKey: async () => 'k', fetch: doFetch }).complete({ provider: 'anthropic', id: 'claude-haiku-5-5' }, req);
+    await openAiCompatible({ apiKey: async () => 'k', fetch: doFetch }).complete({ provider: 'openai', id: 'gpt-x' }, req);
+    assert.deepEqual(seen, ['error', 'error']);
+  });
+});
+

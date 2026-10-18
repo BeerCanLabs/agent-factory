@@ -13,6 +13,9 @@ import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { IdentityLinkStore } from './identity-links.js';
+import { SystemsStore } from '@beercanlabs/factory-registrar';
+import { seedBuiltinAiProviders } from './ai-providers.js';
+import { relinkVendorModels } from './app.js';
 
 const ADMIN = 'admin-model-token';
 const VIEWER = 'viewer-model-token';
@@ -347,3 +350,120 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
   });
 });
 
+describe('admitted models take provider, endpoint and credential from their vendor (GAP-182)', { concurrency: false }, () => {
+  let cp: http.Server;
+  let port = 0;
+  let tmp: string;
+  let state: FactoryState;
+
+  before(async () => {
+    tmp = mkdtempSync(join(tmpdir(), 'vendor-admit-'));
+    const ledger = new MemoryLedger();
+    const systems = await SystemsStore.open(join(tmp, 'systems'), ledger);
+    await seedBuiltinAiProviders(systems);
+    await systems.propose({
+      id: 'deepseek',
+      name: 'DeepSeek',
+      kind: 'ai-provider',
+      upstream: 'https://api.deepseek.example',
+      aiProvider: { adapter: 'openAiCompatible', discoveryPath: '/v1/models' },
+      credential: { secret: 'DEEPSEEK_API_KEY', header: 'Authorization', format: 'Bearer {}' },
+    } as never, 'test');
+    await systems.approve('deepseek', undefined, 'test');
+    const modelStore = new ModelStore(join(tmp, 'catalog.json'));
+    state = {
+      agents: new Map(),
+      modelStore,
+      modelCatalog: modelStore.toEgressCatalog(),
+      systems,
+      registryDir: tmp,
+      ledger,
+      policies: new PolicyStore(join(tmp, 'policies')),
+      approvals: new ApprovalStore(join(tmp, 'approvals')),
+      identityLinks: new IdentityLinkStore(join(tmp, 'identity')),
+      runs: new MemoryRunStore(),
+      runtime: noopRuntime(),
+      runTokens: {} as any,
+      callbacks: {} as any,
+      providers: [],
+      spend: SpendTracker.fromLedger([], () => true),
+      version: '0.1.0',
+      auth: bearerAuth([{ name: 'admin', token: ADMIN, roles: ['admin'] }]),
+    } as unknown as FactoryState;
+    cp = createFactoryServer(state);
+    port = await listen(cp);
+  });
+
+  after(async () => {
+    await new Promise<void>((r) => cp.close(() => r()));
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('a custom vendor model gets the vendor adapter, upstream and credential, whatever the caller sends', async () => {
+    const res = await call(port, '/api/v1/models/admit', 'POST', ADMIN, {
+      name: 'deepseek-chat', id: 'deepseek-chat', vendorId: 'deepseek', provider: 'openAiCompatible', endpoint: 'https://collector.example',
+      price: { inputPerMTok: 1, outputPerMTok: 2 },
+    });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.deepEqual(state.modelStore!.toEgressCatalog()['deepseek-chat'], {
+      provider: 'openai', id: 'deepseek-chat', endpoint: 'https://api.deepseek.example', secret: 'DEEPSEEK_API_KEY', price: { inputPerMTok: 1, outputPerMTok: 2 },
+    });
+  });
+
+  it('a built-in vendor model keeps the adapter default endpoint and carries the vendor credential', async () => {
+    const res = await call(port, '/api/v1/models/admit', 'POST', ADMIN, { name: 'gemini-x', id: 'gemini-x', vendorId: 'gemini' });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.deepEqual(state.modelStore!.toEgressCatalog()['gemini-x'], { provider: 'google', id: 'gemini-x', secret: 'GEMINI_API_KEY' });
+  });
+
+  it('an API-key provider without a vendor implies the built-in vendor; a custom endpoint without one is refused', async () => {
+    const implied = await call(port, '/api/v1/models/admit', 'POST', ADMIN, { name: 'claude-x', id: 'claude-x', provider: 'anthropic' });
+    assert.equal(implied.status, 201);
+    assert.equal(state.modelStore!.toEgressCatalog()['claude-x'].secret, 'ANTHROPIC_API_KEY');
+    const refused = await call(port, '/api/v1/models/admit', 'POST', ADMIN, { name: 'x', id: 'x', provider: 'openai', endpoint: 'https://collector.example' });
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.error, 'vendor_required');
+  });
+
+  it('a cloud model service keeps the caller provider and region (no key)', async () => {
+    const res = await call(port, '/api/v1/models/admit', 'POST', ADMIN, { name: 'claude-bedrock', id: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', provider: 'bedrock-converse', region: 'us-east-1' });
+    assert.equal(res.status, 201);
+    assert.deepEqual(state.modelStore!.toEgressCatalog()['claude-bedrock'], { provider: 'bedrock-converse', id: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', region: 'us-east-1' });
+  });
+
+  it('the MCP admit tool takes the same path', async () => {
+    const res = await call(port, '/mcp', 'POST', ADMIN, {
+      jsonrpc: '2.0', id: 1, method: 'tools/call',
+      params: { name: 'admit_model', arguments: { name: 'deepseek-coder', id: 'deepseek-coder', vendorId: 'deepseek' } },
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(state.modelStore!.toEgressCatalog()['deepseek-coder'], { provider: 'openai', id: 'deepseek-coder', endpoint: 'https://api.deepseek.example', secret: 'DEEPSEEK_API_KEY' });
+  });
+
+  it('existing admissions are re-linked to their vendor (Quick Admit wrote an adapter type no adapter serves)', () => {
+    state.modelStore!.admit({ name: 'grok-old', provider: 'openAiCompatible', id: 'grok-old', vendorId: 'xai' });
+    assert.ok(relinkVendorModels(state).includes('grok-old'));
+    assert.deepEqual(state.modelStore!.toEgressCatalog()['grok-old'], { provider: 'xai', id: 'grok-old', secret: 'XAI_API_KEY' });
+    assert.equal(relinkVendorModels(state).includes('grok-old'), false, 'idempotent');
+  });
+
+  it('the routes payload binds each platform credential to its system hosts', async () => {
+    const r = await fetch(`http://127.0.0.1:${port}/api/v1/gatekeeper-egress/routes`, { headers: { authorization: `Bearer ${ADMIN}` } });
+    const body = (await r.json()) as { platformCredentialHosts?: Record<string, string[]> };
+    assert.deepEqual(body.platformCredentialHosts?.DEEPSEEK_API_KEY, ['api.deepseek.example']);
+    assert.deepEqual(body.platformCredentialHosts?.OPENAI_API_KEY, ['api.openai.com']);
+  });
+
+  it('a cloud model service keeps its provider even with a vendor label, and relinking is ledgered once (review #197)', () => {
+    state.modelStore!.admit({ name: 'claude-on-bedrock', provider: 'bedrock-converse', id: 'us.anthropic.claude-sonnet-4-6', region: 'us-east-1', vendorId: 'anthropic' });
+    state.modelStore!.admit({ name: 'xai-old', provider: 'openAiCompatible', id: 'xai-old', vendorId: 'xai' });
+    const before = state.ledger.query().filter((e: any) => e.action === 'MODEL_RELINKED').length;
+    const changed = relinkVendorModels(state);
+    assert.ok(changed.includes('xai-old'));
+    assert.equal(changed.includes('claude-on-bedrock'), false);
+    assert.deepEqual(state.modelStore!.toEgressCatalog()['claude-on-bedrock'], { provider: 'bedrock-converse', id: 'us.anthropic.claude-sonnet-4-6', region: 'us-east-1' });
+    const rows = state.ledger.query().filter((e: any) => e.action === 'MODEL_RELINKED');
+    assert.equal(rows.length, before + 1);
+    assert.ok((rows.at(-1) as any).models.includes('xai-old'));
+  });
+});

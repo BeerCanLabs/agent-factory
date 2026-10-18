@@ -115,6 +115,8 @@ describe('benchmark harness against a live factory', { concurrency: false }, () 
       runTokens: new RunTokens(KEY),
       control,
       providers: [envProvider({ OPENAI_API_KEY: 'sk-real-bench-key' })],
+      // GAP-182: the fake provider is a host the operator trusts with the key.
+      trustedModelHosts: [`127.0.0.1:${providerPort}`],
       contextTtlMs: 0,
     });
     const gwPort = await listen(gw);

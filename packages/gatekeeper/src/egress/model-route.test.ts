@@ -443,7 +443,7 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       routes: [{ id: 'models', kind: 'models' }],
       prices: {},
       runTokens: tokens,
-      control: { ...control, systemRoutes: async () => ({ routes: [], platformCredentials: ['DEEPSEEK_API_KEY'] }) },
+      control: { ...control, systemRoutes: async () => ({ routes: [], platformCredentials: ['DEEPSEEK_API_KEY'], platformCredentialHosts: { DEEPSEEK_API_KEY: ['api.deepseek.example'] } }) },
       providers: memProviders,
       contextTtlMs: 0,
       modelCatalog: parseModelCatalog(JSON.stringify({
@@ -479,7 +479,7 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       routes: [{ id: 'models', kind: 'models' }],
       prices: {},
       runTokens: tokens,
-      control: { ...control, systemRoutes: async () => ({ routes: [], platformCredentials: ['DEEPSEEK_API_KEY'] }) },
+      control: { ...control, systemRoutes: async () => ({ routes: [], platformCredentials: ['DEEPSEEK_API_KEY'], platformCredentialHosts: { DEEPSEEK_API_KEY: ['api.deepseek.example'] } }) },
       providers: memProviders,
       contextTtlMs: 0,
       modelCatalog: parseModelCatalog(JSON.stringify({
@@ -624,5 +624,64 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
     assert.equal(res.json().error, 'model_not_allowed');
     assert.equal(seen.length, 0);
   });
-});
 
+  it('GAP-182 a key goes only to its own hosts: a built-in key on a foreign endpoint is refused before anything is read', async () => {
+    const read: string[] = [];
+    let called = false;
+    const server = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control: { ...control, systemRoutes: async () => ({ routes: [], platformCredentials: [], platformCredentialHosts: {} }) },
+      providers: [{ name: 'mem', async get(name: string) { read.push(name); return 'sk-real-openai-key'; } }],
+      contextTtlMs: 0,
+      modelCatalog: parseModelCatalog(JSON.stringify({
+        'gpt-x': { provider: 'openai', id: 'gpt-x', endpoint: 'https://collector.example', price: { inputPerMTok: 1, outputPerMTok: 5 } },
+      })),
+      modelFetch: async () => {
+        called = true;
+        return new Response('{}', { status: 200 });
+      },
+    });
+    const sPort = await listen(server);
+    try {
+      ctx.policy = policy({ models: ['gpt-x'] });
+      const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('gpt-x') });
+      assert.equal(res.status, 503);
+      assert.equal(res.json().error, 'provider_credentials_unavailable');
+      assert.deepEqual(read, [], 'no key is read for an unbound host');
+      assert.equal(called, false);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it('GAP-182 a host the operator trusts may receive a model key', async () => {
+    let auth = '';
+    const server = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: [{ name: 'mem', async get(name: string) { return name === 'OPENAI_API_KEY' ? 'sk-proxy-key' : undefined; } }],
+      contextTtlMs: 0,
+      trustedModelHosts: ['proxy.internal.example'],
+      modelCatalog: parseModelCatalog(JSON.stringify({
+        'gpt-x': { provider: 'openai', id: 'gpt-x', endpoint: 'https://proxy.internal.example', price: { inputPerMTok: 1, outputPerMTok: 5 } },
+      })),
+      modelFetch: async (_url, init) => {
+        auth = new Headers(init?.headers).get('authorization') ?? '';
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200 });
+      },
+    });
+    const sPort = await listen(server);
+    try {
+      ctx.policy = policy({ models: ['gpt-x'] });
+      const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('gpt-x') });
+      assert.equal(res.status, 200, res.text);
+      assert.equal(auth, 'Bearer sk-proxy-key');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+});

@@ -878,7 +878,8 @@ export type ApiKeyAdapterOptions = {
   chatPath?: string;
   fetch?: typeof fetch;
   timeoutMs?: number;
-  resolveSecret?: (secretName: string) => Promise<string>;
+  /** Resolve a credential for a call to `target.host` (GAP-182: a key is only ever sent to a host bound to it). */
+  resolveSecret?: (secretName: string, target: { host: string }) => Promise<string>;
 };
 
 async function resolveApiKey(
@@ -886,6 +887,7 @@ async function resolveApiKey(
   entry: CatalogEntry,
   defaultSecret: string,
   doFetch: typeof fetch,
+  url: string,
 ): Promise<string> {
   const targetSecret = entry.secret ?? opts.secretName ?? defaultSecret;
   try {
@@ -893,7 +895,7 @@ async function resolveApiKey(
     if (opts.apiKey) {
       key = await opts.apiKey();
     } else if (opts.resolveSecret) {
-      key = await opts.resolveSecret(targetSecret);
+      key = await opts.resolveSecret(targetSecret, { host: new URL(url).host });
     } else {
       key = await resolveProviderSecret(targetSecret, doFetch);
     }
@@ -909,16 +911,20 @@ async function resolveApiKey(
 
 export function anthropicMessages(opts: ApiKeyAdapterOptions = {}): ModelAdapter {
   const doFetch = opts.fetch ?? fetch;
-  const base = (opts.endpoint ?? 'https://api.anthropic.com').replace(/\/$/, '');
+  const defaultBase = (opts.endpoint ?? 'https://api.anthropic.com').replace(/\/$/, '');
 
   return {
     async complete(entry, req) {
-      const key = await resolveApiKey(opts, entry, 'ANTHROPIC_API_KEY', doFetch);
+      // A registered Anthropic-compatible vendor's models carry its endpoint (GAP-182).
+      const base = (entry.endpoint ?? defaultBase).replace(/\/$/, '');
+      const key = await resolveApiKey(opts, entry, 'ANTHROPIC_API_KEY', doFetch, `${base}/v1/messages`);
       const payload = { model: entry.id, ...toAnthropicMessages(req, entry.id) };
       let res: Response;
       try {
         res = await doFetch(`${base}/v1/messages`, {
           method: 'POST',
+          // GAP-182: a key is bound to this host; never follow a redirect elsewhere with it.
+          redirect: 'error',
           headers: {
             'x-api-key': key,
             'anthropic-version': '2023-06-01',
@@ -953,9 +959,9 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
 
   return {
     async complete(entry, req) {
-      const key = await resolveApiKey(opts, entry, 'OPENAI_API_KEY', doFetch);
       const base = (entry.endpoint ?? defaultBase).replace(/\/$/, '');
       const chatUrl = `${base}${chatPath.startsWith('/') ? chatPath : `/${chatPath}`}`;
+      const key = await resolveApiKey(opts, entry, 'OPENAI_API_KEY', doFetch, chatUrl);
       const payload: Record<string, unknown> = {
         model: entry.id,
         messages: toOpenAiMessages(req.messages),
@@ -970,6 +976,8 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
       try {
         res = await doFetch(chatUrl, {
           method: 'POST',
+          // GAP-182: a key is bound to this host; never follow a redirect elsewhere with it.
+          redirect: 'error',
           headers: {
             Authorization: `Bearer ${key}`,
             'Content-Type': 'application/json',
@@ -1041,8 +1049,17 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
 /** The secret names the built-in API-key vendors use: the built-in platform credentials (GAP-167). */
 export const BUILTIN_PROVIDER_SECRETS: readonly string[] = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'XAI_API_KEY', 'GEMINI_API_KEY'];
 
+/** The only host each built-in vendor key is sent to (GAP-182). Any other host needs a binding from configuration. */
+export const BUILTIN_PROVIDER_HOSTS: Readonly<Record<string, readonly string[]>> = {
+  ANTHROPIC_API_KEY: ['api.anthropic.com'],
+  OPENAI_API_KEY: ['api.openai.com'],
+  XAI_API_KEY: ['api.x.ai'],
+  GEMINI_API_KEY: ['generativelanguage.googleapis.com'],
+};
+
 export type DefaultModelAdaptersOptions = {
-  resolveSecret?: (secretName: string) => Promise<string>;
+  /** Resolve a credential for a call to `target.host` (GAP-182: a key is only ever sent to a host bound to it). */
+  resolveSecret?: (secretName: string, target: { host: string }) => Promise<string>;
   fetch?: typeof fetch;
 };
 

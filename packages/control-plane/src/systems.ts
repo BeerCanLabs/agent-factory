@@ -22,7 +22,7 @@ import http from 'node:http';
 import { validateSystemProposal } from '@beercanlabs/factory-contract';
 import { connectionProviderFromSystem, type ConnectionProvider } from '@beercanlabs/factory-keymaster';
 import { SystemsStore as RegistrarSystemsStore } from '@beercanlabs/factory-registrar';
-import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
+import { requirePrivilege, json, readJson, relinkVendorModels, type FactoryState } from './app.js';
 
 /** The Registrar's systems store, plus the connection providers the Keymaster derives from its OAuth systems. */
 export class SystemsStore extends RegistrarSystemsStore {
@@ -59,7 +59,7 @@ export async function handleSystems(
   if (path === '/api/v1/gatekeeper-egress/routes' && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'egress.routes.read'))) return true;
     const store = systemsStore(state);
-    json(res, 200, { routes: store.activeRoutes(), platformCredentials: store.platformCredentialNames() });
+    json(res, 200, { routes: store.activeRoutes(), platformCredentials: store.platformCredentialNames(), platformCredentialHosts: store.platformCredentialHosts() });
     return true;
   }
 
@@ -128,6 +128,8 @@ export async function handleSystems(
     try {
       const def = await store.approve(id, version, principal.actor, reason);
       state.gatekeeperEgressHeldSecrets = new Set(store.platformCredentialNames());
+      // GAP-182: a vendor's admitted models follow its current upstream and credential.
+      relinkVendorModels(state);
       json(res, 200, { system: def });
     } catch (err) {
       json(res, 404, { error: err instanceof Error ? err.message : String(err) });
@@ -148,6 +150,8 @@ export async function handleSystems(
     try {
       const def = await store.reject(id, version, principal.actor, reason);
       state.gatekeeperEgressHeldSecrets = new Set(store.platformCredentialNames());
+      // GAP-182: a vendor's admitted models follow its current upstream and credential.
+      relinkVendorModels(state);
       json(res, 200, { system: def });
     } catch (err) {
       json(res, 404, { error: err instanceof Error ? err.message : String(err) });

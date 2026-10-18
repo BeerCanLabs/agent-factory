@@ -16,6 +16,8 @@ export interface StoredModel {
   provider: string;
   id: string;
   endpoint?: string;
+  /** The vendor credential the gatekeeper-egress sends (GAP-182): the vendor system's `credential.secret`. */
+  secret?: string;
   vendorId?: string;
   region?: string;
   price?: {
@@ -189,6 +191,7 @@ export class ModelStore {
     provider: string;
     id: string;
     endpoint?: string;
+    secret?: string;
     vendorId?: string;
     region?: string;
     price?: { inputPerMTok: number; outputPerMTok: number };
@@ -211,6 +214,7 @@ export class ModelStore {
       provider: params.provider,
       id: params.id,
       endpoint: params.endpoint,
+      ...(params.secret ? { secret: params.secret } : {}),
       vendorId: params.vendorId,
       region: params.region,
       price: params.price,
@@ -226,6 +230,29 @@ export class ModelStore {
 
     this.persist();
     return model;
+  }
+
+  /**
+   * Re-link a vendor's admitted model to the vendor's current provider, endpoint and credential (GAP-182). Returns true
+   * when something changed (persisted).
+   */
+  relinkVendor(name: string, fields: { provider: string; endpoint?: string; secret?: string }, persist = true): boolean {
+    const m = this.models.get(name);
+    if (!m) return false;
+    const next: StoredModel = { ...m, provider: fields.provider };
+    delete next.endpoint;
+    delete next.secret;
+    if (fields.endpoint) next.endpoint = fields.endpoint;
+    if (fields.secret) next.secret = fields.secret;
+    if (JSON.stringify(next) === JSON.stringify(m)) return false;
+    this.models.set(name, next);
+    if (persist) this.persist();
+    return true;
+  }
+
+  /** Persist pending changes once (after a batch of `relinkVendor(..., false)`), bumping the catalog version. */
+  save(): void {
+    this.persist();
   }
 
   updatePricing(name: string, price: { inputPerMTok: number; outputPerMTok: number }, actor?: string): StoredModel {
@@ -252,13 +279,14 @@ export class ModelStore {
   }
 
   /** Formats the catalog for gatekeeper-egress / Executive Consumption */
-  toEgressCatalog(): Record<string, { provider: string; id: string; endpoint?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }> {
-    const out: Record<string, { provider: string; id: string; endpoint?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }> = {};
+  toEgressCatalog(): Record<string, { provider: string; id: string; endpoint?: string; secret?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }> {
+    const out: Record<string, { provider: string; id: string; endpoint?: string; secret?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }> = {};
     for (const [name, m] of this.models.entries()) {
       out[name] = {
         provider: m.provider,
         id: m.id,
         ...(m.endpoint ? { endpoint: m.endpoint } : {}),
+        ...(m.secret ? { secret: m.secret } : {}),
         ...(m.region ? { region: m.region } : {}),
         ...(m.price ? { price: m.price } : {}),
       };

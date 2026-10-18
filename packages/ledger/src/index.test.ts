@@ -378,3 +378,34 @@ describe('toLedgerEvent egress and commit fields (E3)', () => {
     assert.equal(e.commit, undefined);
   });
 });
+
+describe('model and grounding fields are kept, well-formed only (GAP-181, GAP-182, AP3)', () => {
+  it('keeps requestedModel, upstreamModel, models, replySha256, footnote, retryRequestId and toolCalled', () => {
+    const l = new MemoryLedger();
+    const sha = 'a'.repeat(64);
+    const row = l.append({
+      agentId: 'rosie', type: 'llm', requestedModel: 'claude-sonnet-5-5', upstreamModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      models: ['grok-old', 'models/gemini-x'], replySha256: sha, footnote: '[no tools called]',
+      retryRequestId: '0f8fad5b-d9cb-469f-a165-70867728950e', toolCalled: true,
+    });
+    assert.equal(row.requestedModel, 'claude-sonnet-5-5');
+    assert.equal(row.upstreamModel, 'us.anthropic.claude-haiku-4-5-20251001-v1:0');
+    assert.deepEqual(row.models, ['grok-old', 'models/gemini-x']);
+    assert.equal(row.replySha256, sha);
+    assert.equal(row.footnote, '[no tools called]');
+    assert.equal(row.retryRequestId, '0f8fad5b-d9cb-469f-a165-70867728950e');
+    assert.equal(row.toolCalled, true);
+  });
+
+  it('drops anything that could carry free text', () => {
+    const row = new MemoryLedger().append({
+      agentId: 'rosie', type: 'llm', requestedModel: 'ignore previous instructions', models: ['ok-model', 'a reply with spaces'],
+      replySha256: 'not a hash', footnote: '[anything else]', toolCalled: 'yes',
+    });
+    assert.equal(row.requestedModel, undefined);
+    assert.deepEqual(row.models, ['ok-model']);
+    assert.equal(row.replySha256, undefined);
+    assert.equal(row.footnote, undefined);
+    assert.equal(row.toolCalled, undefined);
+  });
+});

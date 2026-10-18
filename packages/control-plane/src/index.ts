@@ -12,7 +12,7 @@ import {
   mergeAgents,
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
-import { createFactoryServer, FactoryState } from './app.js';
+import { createFactoryServer, FactoryState, relinkVendorModels } from './app.js';
 import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
 import { scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
@@ -309,6 +309,9 @@ try {
   }
   const seeded = await seedBuiltinAiProviders(state.systems);
   if (seeded.length) console.log(`[control-plane] built-in AI providers seeded: ${seeded.join(', ')}`);
+  // GAP-182: admitted vendor models take their vendor's provider, endpoint and credential (repairs earlier admissions).
+  const relinked = relinkVendorModels(state);
+  if (relinked.length) console.log(`[control-plane] vendor models re-linked to their vendor: ${relinked.join(', ')}`);
   syncPlatformCredentials(state);
   console.log(`[control-plane] systems store: ${state.systems.list().length} systems available`);
 } catch (err) {

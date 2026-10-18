@@ -360,6 +360,24 @@ export class SystemsStore {
     return names.sort();
   }
 
+  /**
+   * The hosts each platform credential may be sent to: the upstream host of every approved system that holds it
+   * (GAP-182). A key is never sent anywhere its owner did not approve.
+   */
+  platformCredentialHosts(): Record<string, string[]> {
+    const out: Record<string, Set<string>> = {};
+    for (const def of this.current.values()) {
+      const secret = def.credential?.secret;
+      if (!secret || !def.upstream) continue;
+      try {
+        (out[secret] ??= new Set()).add(new URL(def.upstream).host.toLowerCase());
+      } catch {
+        // an upstream that is not a URL binds nothing
+      }
+    }
+    return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, [...v].sort()]));
+  }
+
   /** Finds an active approved system whose credential.secret matches the given secret. */
   findActiveByCredentialSecret(secret: string, excludeId?: string): SystemDefinition | undefined {
     for (const def of this.current.values()) {

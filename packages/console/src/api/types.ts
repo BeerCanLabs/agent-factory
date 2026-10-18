@@ -537,9 +537,10 @@ export interface ScanModelsResponse {
   staged: StagedModel[];
 }
 
+/** GAP-182: name the vendor; the factory takes provider, endpoint and credential from it. `provider`/`region` only for cloud model services. */
 export interface AdmitModelRequest {
   name: string;
-  provider: string;
+  provider?: string;
   id: string;
   vendorId?: string;
   region?: string;
