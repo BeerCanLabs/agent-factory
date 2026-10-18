@@ -49,11 +49,18 @@ describe('complete', () => {
     const { adapter, calls } = recording(async () => RESULT);
     const adapters = { fake: adapter };
     assert.deepEqual(await complete({ entry: ENTRY, adapters, body: { model: 'm' } }), { ok: false, kind: 'refused', status: 400, code: 'messages_required' });
-    assert.deepEqual(await complete({ entry: ENTRY, adapters, body: { model: 'm', messages: [{ role: 'tool', content: 'x' }] } }), {
+    assert.deepEqual(await complete({ entry: ENTRY, adapters, body: { model: 'm', messages: [{ role: 'function', content: 'x' }] } }), {
       ok: false,
       kind: 'refused',
       status: 400,
       code: 'unsupported_role',
+    });
+    // A tool result must name the call it answers (GAP-173).
+    assert.deepEqual(await complete({ entry: ENTRY, adapters, body: { model: 'm', messages: [{ role: 'tool', content: 'x' }] } }), {
+      ok: false,
+      kind: 'refused',
+      status: 400,
+      code: 'invalid_tool_message',
     });
     assert.equal(calls.length, 0);
   });

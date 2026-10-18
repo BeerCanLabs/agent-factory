@@ -287,9 +287,13 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
 
   it('rejects missing tokens and unsupported message shapes', async () => {
     assert.equal((await call(port, '/models/v1/chat/completions', { body: chat() })).status, 401);
-    const res = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5', { messages: [{ role: 'tool', content: 'x' }] }) });
+    const res = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5', { messages: [{ role: 'function', content: 'x' }] }) });
     assert.equal(res.status, 400);
     assert.equal(res.json().error, 'unsupported_role');
+    // A tool result must name the call it answers (GAP-173).
+    const orphan = await call(port, '/models/v1/chat/completions', { token, body: chat('claude-sonnet-4-5', { messages: [{ role: 'tool', content: 'x' }] }) });
+    assert.equal(orphan.status, 400);
+    assert.equal(orphan.json().error, 'invalid_tool_message');
     assert.equal(seen.length, 0);
   });
 
@@ -490,4 +494,54 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       await new Promise<void>((r) => server.close(() => r()));
     }
   });
+
+  it('serves a tool-result turn end to end: the second call of Rosie reaches Anthropic as tool_use/tool_result (GAP-173, M1)', async () => {
+    let sent: { messages?: unknown; temperature?: unknown } = {};
+    const server = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: [{ name: 'mem', async get(name: string) { return name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test-1234' : undefined; } }],
+      contextTtlMs: 0,
+      modelCatalog: parseModelCatalog(JSON.stringify({
+        'claude-haiku-5-5': { provider: 'anthropic', id: 'claude-haiku-5-5', price: { inputPerMTok: 0.1, outputPerMTok: 0.5 } },
+      })),
+      modelFetch: async (_url, init) => {
+        sent = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({
+          content: [{ type: 'text', text: 'The litter box is clean!' }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 40, output_tokens: 8 },
+        }), { status: 200 });
+      },
+    });
+    const sPort = await listen(server);
+    try {
+      ctx.policy = policy({ models: ['claude-haiku-5-5'] });
+      const res = await call(sPort, '/models/v1/chat/completions', {
+        token,
+        body: {
+          model: 'claude-haiku-5-5',
+          temperature: 0.2,
+          messages: [
+            { role: 'user', content: 'hey Rosie' },
+            { role: 'assistant', content: null, tool_calls: [{ id: 'toolu_01', type: 'function', function: { name: 'get_kitty_litter_status', arguments: '{}' } }] },
+            { role: 'tool', tool_call_id: 'toolu_01', content: '{"level":"clean"}' },
+          ],
+          tools: [{ type: 'function', function: { name: 'get_kitty_litter_status', parameters: { type: 'object', properties: {} } } }],
+        },
+      });
+      assert.equal(res.status, 200, res.text);
+      assert.equal(res.json().choices[0].message.content, 'The litter box is clean!');
+      assert.deepEqual((sent.messages as unknown[]).slice(1), [
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_01', name: 'get_kitty_litter_status', input: {} }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_01', content: '{"level":"clean"}' }] },
+      ]);
+      assert.equal('temperature' in sent, false, 'no sampling params for a Claude 5.5 model (GAP-171)');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
 });
+

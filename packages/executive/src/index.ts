@@ -18,6 +18,7 @@ export {
   parseModelCatalog,
   parseChatRequest,
   toConverse,
+  toOpenAiMessages,
   claudeAcceptsSampling,
   fromConverse,
   ModelUpstreamError,

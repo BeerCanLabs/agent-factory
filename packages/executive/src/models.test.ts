@@ -727,3 +727,128 @@ describe('sampling parameters for Claude models (GAP-171, M3)', () => {
     assert.equal('top_p' in sent, false);
   });
 });
+
+describe('tool calls and tool results in the factory model API (GAP-173, M1, M3)', () => {
+  // Rosie's second turn in prod: the model asked for a tool, and the agent returns its result.
+  const BODY = {
+    model: 'claude-haiku-5-5',
+    messages: [
+      { role: 'system', content: 'You are Rosie.' },
+      { role: 'user', content: 'hey Rosie' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'toolu_01', type: 'function', function: { name: 'get_kitty_litter_status', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'toolu_01', content: '{"level":"clean"}' },
+    ],
+    tools: [{ type: 'function', function: { name: 'get_kitty_litter_status', parameters: { type: 'object', properties: {} } } }],
+  };
+
+  async function parsed() {
+    const { parseChatRequest } = await import('./models.js');
+    const out = parseChatRequest(BODY as unknown as Record<string, unknown>);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    return (out as { ok: true; req: ChatRequest }).req;
+  }
+
+  it('accepts an assistant tool call with null content and the tool result that answers it', async () => {
+    const req = await parsed();
+    assert.deepEqual(req.messages.slice(2), [
+      { role: 'assistant', content: '', toolCalls: [{ id: 'toolu_01', type: 'function', function: { name: 'get_kitty_litter_status', arguments: '{}' } }] },
+      { role: 'tool', content: '{"level":"clean"}', toolCallId: 'toolu_01' },
+    ]);
+  });
+
+  it('refuses malformed tool messages with a reason', async () => {
+    const { parseChatRequest } = await import('./models.js');
+    assert.deepEqual(parseChatRequest({ messages: [{ role: 'tool', content: 'x' }] }), { ok: false, error: 'invalid_tool_message' });
+    assert.deepEqual(parseChatRequest({ messages: [{ role: 'assistant', content: null, tool_calls: [{ function: { name: 'f' } }] }] }), { ok: false, error: 'invalid_tool_calls' });
+    assert.deepEqual(parseChatRequest({ messages: [{ role: 'assistant', content: null }] }), { ok: false, error: 'unsupported_content' });
+  });
+
+  it('translates to Anthropic tool_use and tool_result blocks', async () => {
+    const { toAnthropicMessages } = await import('./models.js');
+    const out = toAnthropicMessages(await parsed(), 'claude-haiku-5-5') as { system: string; messages: unknown[] };
+    assert.equal(out.system, 'You are Rosie.');
+    assert.deepEqual(out.messages, [
+      { role: 'user', content: 'hey Rosie' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_01', name: 'get_kitty_litter_status', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_01', content: '{"level":"clean"}' }] },
+    ]);
+  });
+
+  it('merges parallel tool results into one Anthropic user turn, results first', async () => {
+    const { parseChatRequest, toAnthropicMessages } = await import('./models.js');
+    const out = parseChatRequest({
+      messages: [
+        { role: 'user', content: 'status?' },
+        { role: 'assistant', content: 'Checking.', tool_calls: [
+          { id: 'a', type: 'function', function: { name: 'f', arguments: '{"x":1}' } },
+          { id: 'b', type: 'function', function: { name: 'g', arguments: '{}' } },
+        ] },
+        { role: 'tool', tool_call_id: 'a', content: 'A' },
+        { role: 'tool', tool_call_id: 'b', content: 'B' },
+        { role: 'user', content: 'and?' },
+      ],
+    });
+    assert.equal(out.ok, true);
+    const msgs = (toAnthropicMessages((out as { ok: true; req: ChatRequest }).req) as { messages: unknown[] }).messages;
+    assert.deepEqual(msgs, [
+      { role: 'user', content: 'status?' },
+      { role: 'assistant', content: [
+        { type: 'text', text: 'Checking.' },
+        { type: 'tool_use', id: 'a', name: 'f', input: { x: 1 } },
+        { type: 'tool_use', id: 'b', name: 'g', input: {} },
+      ] },
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'a', content: 'A' },
+        { type: 'tool_result', tool_use_id: 'b', content: 'B' },
+        { type: 'text', text: 'and?' },
+      ] },
+    ]);
+  });
+
+  it('translates to Bedrock Converse toolUse and toolResult', async () => {
+    const out = toConverse(await parsed(), 'us.anthropic.claude-haiku-5-5');
+    assert.deepEqual(out.messages, [
+      { role: 'user', content: [{ text: 'hey Rosie' }] },
+      { role: 'assistant', content: [{ toolUse: { toolUseId: 'toolu_01', name: 'get_kitty_litter_status', input: {} } }] },
+      { role: 'user', content: [{ toolResult: { toolUseId: 'toolu_01', content: [{ text: '{"level":"clean"}' }] } }] },
+    ]);
+  });
+
+  it('translates to Gemini functionCall and functionResponse, matching the result to its call by name', async () => {
+    const { vertexGemini } = await import('./models.js');
+    let sent: { contents?: unknown } = {};
+    const adapter = vertexGemini({
+      project: 'p',
+      accessToken: async () => 't',
+      fetch: (async (_url: string, init: RequestInit) => {
+        sent = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'All clean!' }] }, finishReason: 'STOP' }] }), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    await adapter.complete({ provider: 'vertex-gemini', id: 'gemini-2.5-flash' }, await parsed());
+    assert.deepEqual(sent.contents, [
+      { role: 'user', parts: [{ text: 'hey Rosie' }] },
+      { role: 'model', parts: [{ functionCall: { name: 'get_kitty_litter_status', args: {} } }] },
+      { role: 'user', parts: [{ functionResponse: { name: 'get_kitty_litter_status', response: { content: '{"level":"clean"}' } } }] },
+    ]);
+  });
+
+  it('sends OpenAI-compatible providers the OpenAI wire format back', async () => {
+    const { openAiCompatible } = await import('./models.js');
+    let sent: { messages?: unknown } = {};
+    const adapter = openAiCompatible({
+      apiKey: async () => 'k',
+      fetch: (async (_url: string, init: RequestInit) => {
+        sent = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    await adapter.complete({ provider: 'openai', id: 'gpt-x' }, await parsed());
+    assert.deepEqual(sent.messages, [
+      { role: 'system', content: 'You are Rosie.' },
+      { role: 'user', content: 'hey Rosie' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'toolu_01', type: 'function', function: { name: 'get_kitty_litter_status', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'toolu_01', content: '{"level":"clean"}' },
+    ]);
+  });
+});
