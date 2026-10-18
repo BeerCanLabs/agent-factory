@@ -20,7 +20,14 @@ export type ToolCall = {
   };
 };
 
-export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+/**
+ * One message of the factory model API (OpenAI Chat Completions, §6.9 M1). An assistant turn may carry the tool calls
+ * the model made; a `tool` message returns one call's result (GAP-173).
+ */
+export type ChatMessage =
+  | { role: 'system' | 'user'; content: string }
+  | { role: 'assistant'; content: string; toolCalls?: ToolCall[] }
+  | { role: 'tool'; content: string; toolCallId: string };
 export type ChatRequest = {
   messages: ChatMessage[];
   maxTokens?: number;
@@ -82,13 +89,24 @@ export function parseChatRequest(body: Record<string, unknown>): { ok: true; req
   if (!Array.isArray(msgs) || msgs.length === 0) return { ok: false, error: 'messages_required' };
   const messages: ChatMessage[] = [];
   for (const m of msgs as Array<Record<string, unknown>>) {
-    if (!m || (m.role !== 'system' && m.role !== 'user' && m.role !== 'assistant')) return { ok: false, error: 'unsupported_role' };
-    let content: string;
-    if (typeof m.content === 'string') content = m.content;
-    else if (Array.isArray(m.content) && m.content.every((p) => p && p.type === 'text' && typeof p.text === 'string')) {
-      content = (m.content as Array<{ text: string }>).map((p) => p.text).join('');
-    } else return { ok: false, error: 'unsupported_content' };
-    messages.push({ role: m.role, content });
+    const role = m?.role;
+    if (role === 'tool') {
+      const content = textContent(m.content);
+      if (typeof m.tool_call_id !== 'string' || !m.tool_call_id) return { ok: false, error: 'invalid_tool_message' };
+      if (content === undefined) return { ok: false, error: 'unsupported_content' };
+      messages.push({ role: 'tool', content, toolCallId: m.tool_call_id });
+    } else if (role === 'assistant') {
+      const toolCalls = parseToolCalls(m.tool_calls);
+      if (toolCalls === null) return { ok: false, error: 'invalid_tool_calls' };
+      // An assistant turn that only calls tools has null content in the OpenAI format.
+      const content = m.content == null && toolCalls?.length ? '' : textContent(m.content);
+      if (content === undefined) return { ok: false, error: 'unsupported_content' };
+      messages.push({ role: 'assistant', content, ...(toolCalls?.length ? { toolCalls } : {}) });
+    } else if (role === 'system' || role === 'user') {
+      const content = textContent(m.content);
+      if (content === undefined) return { ok: false, error: 'unsupported_content' };
+      messages.push({ role, content });
+    } else return { ok: false, error: 'unsupported_role' };
   }
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
   const maxTokens = num(body.max_tokens) ?? num(body.max_completion_tokens);
@@ -113,11 +131,61 @@ export function parseChatRequest(body: Record<string, unknown>): { ok: true; req
   };
 }
 
+/** A message's text: a string, or OpenAI text parts joined. Undefined when it holds anything else. */
+function textContent(c: unknown): string | undefined {
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c) && c.every((p) => p && p.type === 'text' && typeof p.text === 'string')) {
+    return (c as Array<{ text: string }>).map((p) => p.text).join('');
+  }
+  return undefined;
+}
+
+/** OpenAI `tool_calls` on an assistant message. Undefined when absent, null when malformed. */
+function parseToolCalls(v: unknown): ToolCall[] | null | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (!Array.isArray(v)) return null;
+  const out: ToolCall[] = [];
+  for (const tc of v as Array<Record<string, unknown> | null>) {
+    const fn = tc?.function as { name?: unknown; arguments?: unknown } | undefined;
+    if (typeof tc?.id !== 'string' || !tc.id || typeof fn?.name !== 'string') return null;
+    out.push({
+      id: tc.id,
+      type: 'function',
+      function: { name: fn.name, arguments: typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments ?? {}) },
+    });
+  }
+  return out;
+}
+
+/** A tool call's arguments as the object providers with structured tool input expect. */
+function toolArgs(tc: ToolCall): Record<string, unknown> {
+  try {
+    const v = JSON.parse(tc.function.arguments || '{}') as unknown;
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : { value: v };
+  } catch {
+    return {};
+  }
+}
+
+/** The factory's messages in the OpenAI wire format, for OpenAI-compatible providers. */
+export function toOpenAiMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
+  return messages.map((m) => {
+    if (m.role === 'tool') return { role: 'tool', tool_call_id: m.toolCallId, content: m.content };
+    if (m.role === 'assistant' && m.toolCalls?.length) return { role: 'assistant', content: m.content || null, tool_calls: m.toolCalls };
+    return { role: m.role, content: m.content };
+  });
+}
+
 // ---------------------------------------------------------------------------------------------
 // bedrock-converse
 
+type ConverseBlock = {
+  text?: string;
+  toolUse?: { toolUseId: string; name: string; input: Record<string, unknown> };
+  toolResult?: { toolUseId: string; content: Array<{ text: string }> };
+};
 type ConverseBody = {
-  messages: Array<{ role: 'user' | 'assistant'; content: Array<{ text?: string; toolUse?: unknown }> }>;
+  messages: Array<{ role: 'user' | 'assistant'; content: ConverseBlock[] }>;
   system?: Array<{ text: string }>;
   inferenceConfig?: { maxTokens?: number; temperature?: number; topP?: number; stopSequences?: string[] };
   toolConfig?: {
@@ -157,9 +225,19 @@ export function toConverse(req: ChatRequest, modelId?: string): ConverseBody {
   const messages: ConverseBody['messages'] = [];
   for (const m of req.messages) {
     if (m.role === 'system') continue;
+    const role = m.role === 'assistant' ? 'assistant' : 'user';
+    const blocks: ConverseBlock[] = [];
+    if (m.role === 'tool') {
+      blocks.push({ toolResult: { toolUseId: m.toolCallId, content: [{ text: m.content }] } });
+    } else if (m.role === 'assistant' && m.toolCalls?.length) {
+      if (m.content) blocks.push({ text: m.content });
+      for (const tc of m.toolCalls) blocks.push({ toolUse: { toolUseId: tc.id, name: tc.function.name, input: toolArgs(tc) } });
+    } else {
+      blocks.push({ text: m.content });
+    }
     const last = messages.at(-1);
-    if (last && last.role === m.role) last.content.push({ text: m.content });
-    else messages.push({ role: m.role, content: [{ text: m.content }] });
+    if (last && last.role === role) last.content.push(...blocks);
+    else messages.push({ role, content: blocks });
   }
   const inferenceConfig = {
     ...(req.maxTokens !== undefined ? { maxTokens: req.maxTokens } : {}),
@@ -435,13 +513,28 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
       }
 
       const systemParts = req.messages.filter((m) => m.role === 'system').map((m) => ({ text: m.content }));
-      const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+      type GeminiPart = { text?: string; functionCall?: { name: string; args: Record<string, unknown> }; functionResponse?: { name: string; response: { content: string } } };
+      const contents: Array<{ role: 'user' | 'model'; parts: GeminiPart[] }> = [];
+      /** Gemini matches a function response to its call by name; OpenAI by id. */
+      const callNames = new Map<string, string>();
       for (const m of req.messages) {
         if (m.role === 'system') continue;
         const role = m.role === 'assistant' ? 'model' : 'user';
+        const parts: GeminiPart[] = [];
+        if (m.role === 'tool') {
+          parts.push({ functionResponse: { name: callNames.get(m.toolCallId) ?? m.toolCallId, response: { content: m.content } } });
+        } else if (m.role === 'assistant' && m.toolCalls?.length) {
+          if (m.content) parts.push({ text: m.content });
+          for (const tc of m.toolCalls) {
+            callNames.set(tc.id, tc.function.name);
+            parts.push({ functionCall: { name: tc.function.name, args: toolArgs(tc) } });
+          }
+        } else {
+          parts.push({ text: m.content });
+        }
         const last = contents.at(-1);
-        if (last && last.role === role) last.parts.push({ text: m.content });
-        else contents.push({ role, parts: [{ text: m.content }] });
+        if (last && last.role === role) last.parts.push(...parts);
+        else contents.push({ role, parts });
       }
 
       const generationConfig = {
@@ -579,13 +672,34 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
 export function toAnthropicMessages(req: ChatRequest, modelId?: string) {
   const sampling = modelId === undefined || claudeAcceptsSampling(modelId);
   const system = req.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
-  const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  type Block =
+    | { type: 'text'; text: string }
+    | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+    | { type: 'tool_result'; tool_use_id: string; content: string };
+  const turns: Array<{ role: 'user' | 'assistant'; blocks: Block[] }> = [];
   for (const m of req.messages) {
     if (m.role === 'system') continue;
-    const last = messages.at(-1);
-    if (last && last.role === m.role) last.content += `\n${m.content}`;
-    else messages.push({ role: m.role, content: m.content });
+    const role = m.role === 'assistant' ? 'assistant' : 'user';
+    const blocks: Block[] = [];
+    if (m.role === 'tool') {
+      blocks.push({ type: 'tool_result', tool_use_id: m.toolCallId, content: m.content });
+    } else if (m.role === 'assistant' && m.toolCalls?.length) {
+      if (m.content) blocks.push({ type: 'text', text: m.content });
+      for (const tc of m.toolCalls) blocks.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: toolArgs(tc) });
+    } else {
+      blocks.push({ type: 'text', text: m.content });
+    }
+    // Consecutive same-role turns merge (the Messages API requires alternation); a run of tool results becomes one user turn.
+    const last = turns.at(-1);
+    if (last && last.role === role) last.blocks.push(...blocks);
+    else turns.push({ role, blocks });
   }
+  // Text-only turns stay plain strings; turns with tool blocks keep their blocks (empty text blocks are rejected).
+  const messages = turns.map(({ role, blocks }) =>
+    blocks.every((b) => b.type === 'text')
+      ? { role, content: blocks.map((b) => (b as { text: string }).text).join('\n') }
+      : { role, content: blocks.filter((b) => b.type !== 'text' || b.text) },
+  );
 
   const tools: Array<{ name: string; description?: string; input_schema: Record<string, unknown> }> = [];
   if (req.tool_choice !== 'none' && Array.isArray(req.tools)) {
@@ -814,7 +928,7 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
       const chatUrl = `${base}${chatPath.startsWith('/') ? chatPath : `/${chatPath}`}`;
       const payload: Record<string, unknown> = {
         model: entry.id,
-        messages: req.messages,
+        messages: toOpenAiMessages(req.messages),
         ...(req.maxTokens !== undefined ? { max_tokens: req.maxTokens } : {}),
         ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
         ...(req.topP !== undefined ? { top_p: req.topP } : {}),
