@@ -20,8 +20,6 @@ import type { Runtime } from './runtime.js';
 
 export type Outcome<T> = { status: number; body: T | { error: string; [k: string]: unknown } };
 
-/** The model a policy that names none grants (M2; default claude-haiku-4-5). */
-export const DEFAULT_FACTORY_MODEL = 'claude-haiku-4-5';
 
 /** What the lifecycle reads from the policy store: the budget it enforces and the routes it hands the run. */
 export type PropertyManagerPolicies = {
@@ -58,7 +56,7 @@ export type PropertyManagerState = {
   metrics?: FactoryMetrics;
   /** In-memory mailboxes for running tasks to receive follow-up messages while warm. */
   mailboxes?: Map<string, MailboxQueue>;
-  /** The model a policy that names none grants (M2; FACTORY_DEFAULT_MODEL, default claude-haiku-4-5). */
+  /** The model a policy that names none grants (M2): configuration, no code default (GAP-181). */
   defaultModel?: string;
   /**
    * When this process began judging heartbeats (GAP-176). A heartbeat sent while no control plane could receive it
@@ -344,9 +342,10 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
   // Egress leaves pinnedModel unset and honors multi-model policy allowlists.
   const effectiveModel =
     run.model ||
-    (state.policies.has(agent.id) ? state.policies.get(agent.id).models?.[0] : undefined) ||
-    state.defaultModel ||
-    DEFAULT_FACTORY_MODEL;
+    // A policy that lists models gets its first; an explicit empty list grants none, so nothing is injected (M2).
+    (state.policies.has(agent.id) && state.policies.get(agent.id).models
+      ? state.policies.get(agent.id).models?.[0]
+      : state.defaultModel);
   const runEnv: Record<string, string> = {
     FACTORY_RUN_ID: run.runId,
     FACTORY_RUN_TOKEN: runToken,

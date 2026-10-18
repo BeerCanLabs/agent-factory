@@ -5,13 +5,13 @@ import { factoryApi } from '../api/client.js';
 
 /**
  * TSK-059 (GAP-062): a read-only view of an agent's models. One place chooses them: the Policy tab (M2, E7).
- * The agent's repo declares a preferred model; its policy grants models from what this factory offers (M3);
- * each model call goes through the gatekeeper-egress, which refuses any model the policy does not grant.
+ * Agents never choose (GAP-181): every model call is served the run's pin, else the policy's first model, else the
+ * factory default (configuration). A model the agent's repo still declares is shown but not used.
  */
 export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void }> = ({ agent, onOpenPolicy }) => {
   const [policy, setPolicy] = useState<AgentPolicy | null>(null);
   const [offered, setOffered] = useState<OfferedModel[]>([]);
-  const [factoryDefault, setFactoryDefault] = useState('claude-haiku-4-5');
+  const [factoryDefault, setFactoryDefault] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -29,9 +29,9 @@ export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void
   const preferred = agent.requestedModels?.[0] ?? agent.model;
   const alsoDeclared = (agent.requestedModels ?? []).filter((m) => m !== preferred);
   const offeredByName = new Map(offered.map((m) => [m.name, m]));
-  // M2: a policy that names no models grants the factory default model, nothing more.
+  // M2: a policy that names no models grants the factory default model, nothing more; an empty list grants none.
   const usesDefault = Boolean(policy && !policy.models);
-  const granted = policy ? policy.models ?? [factoryDefault] : undefined;
+  const granted = policy ? policy.models ?? (factoryDefault ? [factoryDefault] : []) : undefined;
 
   const card = 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-3 shadow-sm';
   const heading = 'text-sm font-bold text-slate-900 dark:text-white';
@@ -52,23 +52,17 @@ export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void
 
   const runModel = (): { tone: 'ok' | 'warn'; text: React.ReactNode } => {
     if (!granted) return { tone: 'warn', text: <>Loading…</> };
-    if (usesDefault && preferred !== factoryDefault) {
-      return {
-        tone: 'warn',
-        text: <>The policy names no models, so this agent gets the factory default, <span className="font-mono font-semibold">{factoryDefault}</span>; calls to its preferred model are refused. Grant models in Policy to change that.</>,
-      };
-    }
-    if (granted.length === 0) return { tone: 'warn', text: <>No models are granted, so every model call is refused.</> };
-    if (preferred && granted.includes(preferred)) {
-      return { tone: 'ok', text: <>Runs use <span className="font-mono font-semibold">{preferred}</span>, the preferred model, which the policy grants.</> };
+    if (granted.length === 0) {
+      return usesDefault
+        ? { tone: 'warn', text: <>The policy names no models and no factory default is configured, so every model call is refused (<span className="font-mono">no_default_model</span>).</> }
+        : { tone: 'warn', text: <>The policy grants no models, so every model call is refused.</> };
     }
     return {
-      tone: 'warn',
+      tone: 'ok',
       text: (
         <>
-          The preferred model {preferred ? <span className="font-mono font-semibold">{preferred}</span> : '(none declared)'} is not
-          granted, so calls to it are refused. Runs can use only{' '}
-          <span className="font-mono font-semibold">{granted.join(', ')}</span>.
+          Every model call is served <span className="font-mono font-semibold">{granted[0]}</span>
+          {usesDefault ? ', the factory default' : ', the first model the policy grants'}, whatever the agent asks for.
         </>
       ),
     };
@@ -80,8 +74,8 @@ export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void
         <div className="flex items-start space-x-2 text-xs text-slate-600 dark:text-slate-300">
           <Layers className="w-4 h-4 text-emerald-500 shrink-0" />
           <p>
-            {agent.name}'s repo declares the model it prefers. The company decides which models it gets, in its policy. Each
-            model call goes through the gatekeeper-egress, which refuses any model the policy does not grant.
+            The factory assigns {agent.name}'s model: the first model its policy grants, or the factory default. Agents never
+            choose; a model the agent asks for is recorded, not served.
           </p>
         </div>
         <button
@@ -102,8 +96,8 @@ export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className={card}>
-          <h4 className={heading}>Preferred model</h4>
-          <p className={hint}>From the agent's declaration.</p>
+          <h4 className={heading}>Declared by the repo</h4>
+          <p className={hint}>Shown for reference only; agents never choose their model.</p>
           {preferred ? (
             <div className="font-mono text-xs font-bold text-slate-900 dark:text-white">{preferred}</div>
           ) : (
@@ -131,7 +125,7 @@ export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void
                   <span className="font-mono text-slate-800 dark:text-slate-200">{m}</span>
                 </span>
                 <span className="flex items-center space-x-1">
-                  {m === preferred && tag('preferred', 'ok')}
+                  {m === granted[0] && tag('served', 'ok')}
                   {price && tag(`$${price.inputPerMTok}/$${price.outputPerMTok} per M tok`, 'muted')}
                   {!offeredByName.has(m) && tag('not offered', 'warn')}
                 </span>
@@ -142,7 +136,7 @@ export const ModelsView: React.FC<{ agent: AgentRecord; onOpenPolicy: () => void
 
         <div className={card}>
           <h4 className={heading}>Model its runs use</h4>
-          <p className={hint}>The model the agent's code asks for, if the policy grants it.</p>
+          <p className={hint}>Assigned by the factory on every call.</p>
           {policy &&
             (() => {
               const r = runModel();

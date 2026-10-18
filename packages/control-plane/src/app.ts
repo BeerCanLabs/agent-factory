@@ -64,7 +64,7 @@ export type FactoryState = {
   modelStore?: ModelStore;
   /** Models the factory offers (§6.9 M3, FACTORY_MODEL_CATALOG), by neutral name. */
   modelCatalog?: Record<string, { provider: string; id?: string; region?: string; endpoint?: string; price?: { inputPerMTok: number; outputPerMTok: number } }>;
-  /** The model a policy that names none grants (M2; FACTORY_DEFAULT_MODEL, default claude-haiku-4-5). */
+  /** The model a policy that names none grants (M2): configuration seeded from FACTORY_DEFAULT_MODEL; no code default. */
   defaultModel?: string;
   registryDir?: string;
   ledger: LedgerStore;
@@ -426,8 +426,33 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
 
 type VendorTarget = { upstream: string; adapter: string; discoveryPath?: string; secretName: string };
 
-function defaultModelOf(state: FactoryState): string {
-  return state.modelStore?.getDefault() ?? state.defaultModel ?? 'claude-haiku-4-5';
+/** The factory default model: configuration (M2, GAP-181), never a value in code. Undefined when none is set. */
+function defaultModelOf(state: FactoryState): string | undefined {
+  return state.modelStore?.getDefault() ?? state.defaultModel;
+}
+
+/**
+ * Retire a model and take it out of every policy that lists it (§6.9 M2, GAP-162). Each changed policy goes through
+ * the same record as a policy change: `POLICY_UPDATED` and a configuration version (GAP-181).
+ */
+async function retireModel(state: FactoryState, modelName: string, actor: string): Promise<{ retired: false } | { retired: true; affectedAgents: string[] }> {
+  if (!state.modelStore?.retire(modelName)) return { retired: false };
+  if (state.defaultModel === modelName) state.defaultModel = undefined;
+  const affectedAgents: string[] = [];
+  for (const agentId of state.policies.ids()) {
+    const policy = state.policies.get(agentId);
+    if (!policy.models?.includes(modelName)) continue;
+    affectedAgents.push(agentId);
+    const remaining = policy.models.filter((m) => m !== modelName);
+    if (remaining.length === 0) delete policy.models;
+    else policy.models = remaining;
+    state.policies.set(agentId, policy);
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'POLICY_UPDATED', actor });
+    await recordConfig(state, agentId, { actor, reason: `model ${modelName} retired` });
+  }
+  state.modelCatalog = state.modelStore.toEgressCatalog();
+  state.ledger.append({ action: 'MODEL_RETIRED', actor, model: modelName, affectedAgents, timestamp: new Date().toISOString() });
+  return { retired: true, affectedAgents };
 }
 
 /** Registered ai-provider, else a built-in template. HTTPS only. The secret name is held by the gatekeeper-egress. */
@@ -530,7 +555,7 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
     return {
       offered: state.modelStore ? state.modelStore.listOffered() : Object.entries(state.modelCatalog ?? {}).map(([n, m]) => ({ name: n, ...m })),
       staged: state.modelStore?.listStaged() ?? [],
-      default: defaultModelOf(state),
+      default: defaultModelOf(state) ?? null,
     };
   }
   if (name === 'scan_vendor_models') {
@@ -597,35 +622,9 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'retire_vendor_or_model') {
     if (!state.modelStore) return { error: 'model_store_not_configured' };
     const modelName = args.name;
-    const deleted = state.modelStore.retire(modelName);
-    if (!deleted) return { error: 'not_found' };
-    if (state.defaultModel === modelName) {
-      state.defaultModel = undefined;
-    }
-
-    const affectedAgents: string[] = [];
-    for (const agentId of state.policies.ids()) {
-      const policy = state.policies.get(agentId);
-      if (policy.models && policy.models.includes(modelName)) {
-        affectedAgents.push(agentId);
-        const remaining = policy.models.filter((m) => m !== modelName);
-        if (remaining.length === 0) {
-          delete policy.models;
-        } else {
-          policy.models = remaining;
-        }
-        state.policies.set(agentId, policy);
-      }
-    }
-    state.modelCatalog = state.modelStore.toEgressCatalog();
-    state.ledger.append({
-      action: 'MODEL_RETIRED',
-      actor,
-      model: modelName,
-      affectedAgents,
-      timestamp: new Date().toISOString(),
-    });
-    return { ok: true, retired: modelName, affectedAgents };
+    const out = await retireModel(state, modelName, actor);
+    if (!out.retired) return { error: 'not_found' };
+    return { ok: true, retired: modelName, affectedAgents: out.affectedAgents };
   }
   if (name === 'set_default_model') {
     if (!state.modelStore) return { error: 'model_store_not_configured' };
@@ -1628,7 +1627,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         : Object.entries(state.modelCatalog ?? {}).map(([name, m]) => ({ name, provider: m.provider, ...(m.price ? { price: m.price } : {}) })),
       staged: state.modelStore?.listStaged() ?? [],
       // M2: what an agent gets when its policy names no models.
-      default: defaultModelOf(state),
+      default: defaultModelOf(state) ?? null,
       templates: AI_PROVIDER_TEMPLATES,
     });
     return;
@@ -1642,7 +1641,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     json(res, 200, {
       version,
       models: state.modelStore ? state.modelStore.toEgressCatalog() : (state.modelCatalog ?? {}),
-      default: defaultModelOf(state),
+      default: defaultModelOf(state) ?? null,
     });
     return;
   }
@@ -1796,39 +1795,12 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
 
-    const deleted = state.modelStore.retire(modelName);
-    if (!deleted) {
+    const out = await retireModel(state, modelName, principal.actor);
+    if (!out.retired) {
       json(res, 404, { error: 'not_found' });
       return;
     }
-    if (state.defaultModel === modelName) {
-      state.defaultModel = undefined;
-    }
-
-    const affectedAgents: string[] = [];
-    for (const agentId of state.policies.ids()) {
-      const policy = state.policies.get(agentId);
-      if (policy.models && policy.models.includes(modelName)) {
-        affectedAgents.push(agentId);
-        const remaining = policy.models.filter((m) => m !== modelName);
-        if (remaining.length === 0) {
-          delete policy.models;
-        } else {
-          policy.models = remaining;
-        }
-        state.policies.set(agentId, policy);
-      }
-    }
-
-    state.modelCatalog = state.modelStore.toEgressCatalog();
-    state.ledger.append({
-      action: 'MODEL_RETIRED',
-      actor: principal.actor,
-      model: modelName,
-      affectedAgents,
-      timestamp: new Date().toISOString(),
-    });
-    json(res, 200, { ok: true, retired: modelName, affectedAgents });
+    json(res, 200, { ok: true, retired: modelName, affectedAgents: out.affectedAgents });
     return;
   }
 

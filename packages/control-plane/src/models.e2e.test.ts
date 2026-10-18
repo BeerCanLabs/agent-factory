@@ -194,6 +194,12 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
     // When policy models array becomes empty, models key must be deleted for M2 default fallback!
     const donnaPolicy = state.policies.get('donna');
     assert.equal(donnaPolicy.models, undefined);
+
+    // GAP-181: the policy change is recorded like any other policy change.
+    const updated = state.ledger.query({ agent: 'donna' }).filter((e: any) => e.action === 'POLICY_UPDATED');
+    assert.equal(updated.length, 1, 'retiring a model records POLICY_UPDATED for each affected agent');
+    assert.equal(updated[0].actor, 'token:admin');
+    assert.equal(state.ledger.query().filter((e: any) => e.action === 'MODEL_RETIRED' && e.model === 'grok-2').length, 1);
   });
 
   it('7. MCP tools manage model catalog lifecycle', async () => {
@@ -322,4 +328,22 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
     const catalogParsed = JSON.parse(mcpList.body.result.content[0].text);
     assert.equal(catalogParsed.default, 'claude-haiku-4-5');
   });
+
+  it('9. MCP retire_vendor_or_model records the policy change like REST (GAP-181)', async () => {
+    state.modelStore.admit({ name: 'mcp-retire-me', provider: 'openai', id: 'mcp-retire-me' });
+    state.policies.set('finley', { routes: [], models: ['mcp-retire-me', 'other-model'] });
+    const res = await call(port, '/mcp', 'POST', ADMIN, {
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'tools/call',
+      params: { name: 'retire_vendor_or_model', arguments: { name: 'mcp-retire-me' } },
+    });
+    assert.equal(res.status, 200);
+    const out = JSON.parse(res.body.result.content[0].text);
+    assert.deepEqual(out.affectedAgents, ['finley']);
+    assert.deepEqual(state.policies.get('finley').models, ['other-model']);
+    const updated = state.ledger.query({ agent: 'finley' }).filter((e: any) => e.action === 'POLICY_UPDATED');
+    assert.equal(updated.length, 1);
+  });
 });
+

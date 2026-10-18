@@ -142,9 +142,9 @@ variable "model_catalog" {
 }
 
 variable "default_model" {
-  description = "Default model ID when a cartridge omits a model name."
+  description = "Seed for the factory default model (DESIGN_AUTHORITY M2): used only until an admin sets the default, which is factory configuration. Empty means no seed."
   type        = string
-  default     = "claude-sonnet-4-6"
+  default     = ""
 }
 
 variable "systems_import" {

@@ -168,7 +168,7 @@ export const ExecutiveOfficeView: React.FC = () => {
             <p className="text-xs text-slate-500">
               Models currently available for grant in agent policies via the Factory Model API. Default:{' '}
               <code className="font-mono text-purple-600 dark:text-purple-400 font-semibold">
-                {catalog?.default ?? 'claude-haiku-4-5'}
+                {catalog?.default ?? 'none configured'}
               </code>
             </p>
           </div>

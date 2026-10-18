@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkModel, offeredModels, type ModelPolicy } from './model-policy.js';
+import { checkModel, offeredModels, selectModel, type ModelPolicy } from './model-policy.js';
 
 const DEFAULT = 'claude-haiku-4-5';
 const policy = (over: Partial<ModelPolicy> = {}): ModelPolicy => ({ defaultModel: DEFAULT, training: false, ...over });
@@ -90,5 +90,41 @@ describe('offeredModels', () => {
   it('lists nothing from an empty catalog, and accepts any iterable', () => {
     assert.deepEqual(offeredModels(policy(), []), []);
     assert.deepEqual(offeredModels(policy({ allowedModels: [DEFAULT] }), new Set(catalog)), [DEFAULT]);
+  });
+});
+
+describe('selectModel: agents never choose (M2, GAP-181)', () => {
+  const base: ModelPolicy = { allowedModels: ['claude-haiku-5-5', 'claude-sonnet-5-5'], defaultModel: 'claude-opus-5-5', training: false };
+
+  it('serves the policy first model whatever the agent asks for, and reports a differing request', () => {
+    assert.deepEqual(selectModel(base, 'claude-sonnet-5-5'), { ok: true, model: 'claude-haiku-5-5', requested: 'claude-sonnet-5-5' });
+    assert.deepEqual(selectModel(base, 'claude-haiku-5-5'), { ok: true, model: 'claude-haiku-5-5' });
+    assert.deepEqual(selectModel(base), { ok: true, model: 'claude-haiku-5-5' });
+  });
+
+  it('a run pin wins; training honors the request; a policy with no models gets the configured default', () => {
+    assert.deepEqual(selectModel({ ...base, pinnedModel: 'claude-sonnet-5-5' }, 'claude-haiku-5-5'), { ok: true, model: 'claude-sonnet-5-5', requested: 'claude-haiku-5-5' });
+    assert.deepEqual(selectModel({ ...base, training: true }, 'claude-sonnet-5-5'), { ok: true, model: 'claude-sonnet-5-5' });
+    assert.deepEqual(selectModel({ defaultModel: 'claude-opus-5-5', training: false }, 'x'), { ok: true, model: 'claude-opus-5-5', requested: 'x' });
+  });
+
+  it('with no models and no default configured, refuses with no_default_model', () => {
+    assert.deepEqual(selectModel({ training: false }, 'claude-haiku-5-5'), { ok: false, status: 503, code: 'no_default_model' });
+    assert.deepEqual(checkModel({ training: false }, 'claude-haiku-5-5'), { allowed: false, status: 403, code: 'model_not_allowed', detail: { model: 'claude-haiku-5-5' } });
+  });
+});
+
+describe('selectModel: the owner grant still bounds everything (E7, GAP-181 review)', () => {
+  it('a pin the policy does not grant is refused outside training, and served in training', () => {
+    const p: ModelPolicy = { allowedModels: ['claude-haiku-5-5'], defaultModel: 'claude-opus-5-5', training: false, pinnedModel: 'claude-opus-5-5' };
+    assert.deepEqual(selectModel(p), { ok: false, status: 403, code: 'model_not_allowed', detail: { model: 'claude-opus-5-5' } });
+    assert.deepEqual(selectModel({ ...p, training: true }), { ok: true, model: 'claude-opus-5-5' });
+    // A pin with no models listed must be the default.
+    assert.deepEqual(selectModel({ defaultModel: 'claude-haiku-5-5', training: false, pinnedModel: 'claude-haiku-5-5' }), { ok: true, model: 'claude-haiku-5-5' });
+  });
+
+  it('an explicit empty list grants nothing; only an absent list falls back to the default', () => {
+    assert.deepEqual(selectModel({ allowedModels: [], defaultModel: 'claude-haiku-5-5', training: false }, 'x'), { ok: false, status: 403, code: 'model_not_allowed', detail: { model: 'x' } });
+    assert.deepEqual(selectModel({ defaultModel: 'claude-haiku-5-5', training: false }), { ok: true, model: 'claude-haiku-5-5' });
   });
 });

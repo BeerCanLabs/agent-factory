@@ -9,11 +9,9 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { BUILTIN_PROVIDER_SECRETS, SseMeter, checkModel, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
+import { BUILTIN_PROVIDER_SECRETS, SseMeter, checkModel, selectModel, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
-/** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
-export const DEFAULT_MODEL = 'claude-haiku-4-5';
 import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';
 import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from '@beercanlabs/factory-inspector';
 
@@ -122,8 +120,8 @@ export type GatekeeperEgressOptions = {
   /** Offered models for the `models` route (operations config, M3). */
   modelCatalog?: ModelCatalog;
   /**
-   * The model an agent gets when its policy names none (M2, E7): operations config, default `claude-haiku-4-5`. A policy
-   * with no `models` grants exactly this model, never every model.
+   * The model an agent gets when its policy names none (M2, E7): factory configuration, never a value in code. The
+   * control plane's catalog `default` replaces it once loaded. A policy with no `models` grants exactly this model.
    */
   defaultModel?: string;
   /** Adapters by catalog `provider`; defaults to the built-in ones. */
@@ -346,7 +344,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   void ensureRoutes();
 
   let activeCatalog: ModelCatalog = { ...(opts.modelCatalog ?? {}) };
-  let activeDefaultModel: string = opts.defaultModel ?? DEFAULT_MODEL;
+  let activeDefaultModel: string | undefined = opts.defaultModel;
   let lastCatalogRefresh = 0;
   /** A catalog fetch has succeeded (GAP-171). A failed boot fetch, e.g. while the control plane restarts, does not count. */
   let catalogLoaded = false;
@@ -376,8 +374,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         }
         activeCatalog = valid;
         catalogLoaded = true;
-        if ('default' in remote && typeof (remote as any).default === 'string' && (remote as any).default) {
-          activeDefaultModel = (remote as any).default;
+        // The control plane's default is the configuration (M2, GAP-181): when the payload carries `default`, it replaces
+        // the seed, and null clears it, so a retired default is never served.
+        if ('default' in remote) {
+          const d = (remote as { default?: unknown }).default;
+          activeDefaultModel = typeof d === 'string' && d ? d : undefined;
         }
       }
     } catch (err) {
@@ -800,13 +801,15 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const parsed = tryJson(raw) as Record<string, unknown> | undefined;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return deny(res, ctx, route, 400, 'invalid_json');
     if (parsed.stream === true) return deny(res, ctx, route, 400, 'streaming_not_supported');
-    const model = typeof parsed.model === 'string' ? parsed.model : undefined;
+    // M2 (GAP-181): agents never choose. The factory serves the pin, the policy's first model or the default, whatever
+    // model name the call carries; a differing name is recorded as `requestedModel`.
+    const requestedName = typeof parsed.model === 'string' && parsed.model ? parsed.model : undefined;
+    const selection = selectModel(modelPolicyOf(ctx), requestedName);
+    if (!selection.ok) return deny(res, ctx, route, selection.status, selection.code, 'detail' in selection ? selection.detail : undefined);
+    const model = selection.model;
     calls.get(res)?.start(model);
-    if (!model) return deny(res, ctx, route, 400, 'model_required');
     const entry = findModel(catalog, model);
-    if (!entry) return deny(res, ctx, route, 400, 'model_not_offered', { model });
-    const check = checkModel(modelPolicyOf(ctx), model);
-    if (!check.allowed) return deny(res, ctx, route, check.status, check.code, check.detail);
+    if (!entry) return deny(res, ctx, route, 503, 'model_not_offered', { model });
     const price = entry.price ?? priceFor(opts.prices, model);
     if (!price) return deny(res, ctx, route, 403, 'unpriced_model', { model });
     if (throttled(ctx)) return deny(res, ctx, route, 429, 'throttled');
@@ -834,7 +837,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       usage = { model, input: 0, output: chat.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
       action = 'METERING_GAP';
     }
-    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action, extra: { provider: entry.provider, upstreamModel: entry.id } });
+    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action, extra: { provider: entry.provider, upstreamModel: entry.id, ...(selection.requested ? { requestedModel: selection.requested } : {}) } });
 
     const declaredToolNames: string[] = [];
     if (Array.isArray(parsed.tools)) {
@@ -859,7 +862,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         });
         return send(res, 422, {
           error: 'malformed_tool_syntax',
-          message: `Model generated pseudo-tool syntax for '${leakedTool}' in content instead of structured tool_calls. Retry with explicit tool_choice.`,
+          message: `Model generated pseudo-tool syntax for '${leakedTool}' in content instead of structured tool_calls. Retry; call the tool through tool_calls (AP1).`,
           tool: leakedTool,
         });
       }

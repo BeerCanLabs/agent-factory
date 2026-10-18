@@ -156,9 +156,10 @@ export const factoryApi = {
   },
 
   // The offered models and the factory default an agent gets when its policy names none (M2).
-  async modelCatalog(): Promise<{ models: OfferedModel[]; default: string }> {
-    const r = await request<{ models: OfferedModel[]; default?: string }>('/models');
-    return { models: r.models, default: r.default ?? 'claude-haiku-4-5' };
+  // The default is factory configuration (GAP-181): null when none is configured, never a value in code.
+  async modelCatalog(): Promise<{ models: OfferedModel[]; default: string | null }> {
+    const r = await request<{ models: OfferedModel[]; default?: string | null }>('/models');
+    return { models: r.models, default: r.default ?? null };
   },
 
   // Dynamic Model Governance & FinOps (GAP-162)

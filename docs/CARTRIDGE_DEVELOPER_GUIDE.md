@@ -354,8 +354,8 @@ Agents call models through the gatekeeper-egress using the **factory model API**
 
 | Field | Required | Notes |
 |---|---|---|
-| `model` | yes | A neutral model name, e.g. `claude-sonnet-4-5`, `claude-haiku-4-5`. Not a provider id. |
-| `messages` | yes | `[{"role": "system" \| "user" \| "assistant", "content": "<string>"}]` |
+| `model` | no | Ignored for choosing: agents never choose a model (M2). The factory serves the model the owner assigned (the run's pin, the policy's first model, or the factory default) and records a differing name. Send `FACTORY_MODEL` if you send anything. |
+| `messages` | yes | `[{"role": "system" \| "user" \| "assistant" \| "tool", "content": "<string>"}]`; an assistant turn may carry `tool_calls`, and a `tool` message carries `tool_call_id` (GAP-173). |
 | `max_tokens` | no | Output token limit. |
 | `temperature` | no | |
 
