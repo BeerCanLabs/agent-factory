@@ -44,11 +44,9 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
   const [activeTab, setActiveTab] = useState<'runtime' | 'terminal' | 'memory' | 'models' | 'skills' | 'policy' | 'owners' | 'lifecycle'>('runtime');
   const [convoPrompt, setConvoPrompt] = useState('');
   const [isSendingConvo, setIsSendingConvo] = useState(false);
+  // Only what the factory reports (GAP-177): turns sent and how they were delivered. Replies are not shown here yet.
   const [logs, setLogs] = useState<string[]>([
-    `[${new Date().toISOString()}] Agent ${agent.name} initialized in private VPC subnet.`,
-    `[${new Date().toISOString()}] Zero-Trust Egress: HTTP_PROXY and HTTPS_PROXY mapped to gatekeeper-egress.`,
-    `[${new Date().toISOString()}] Memory: Loaded SQLite notebook (${agent.sqliteSizeKb || 0} KB) from ${agent.mindPrefix || 'S3'}.`,
-    `[${new Date().toISOString()}] State: ${agent.state}. Waiting for gatekeeper-ingress ingress trigger or operator turn.`,
+    `[${new Date().toISOString()}] ${agent.name} is ${agent.state}. Turns sent here go to the agent; its replies are not shown in the console yet.`,
   ]);
 
   const handleSendPrompt = async () => {
@@ -57,10 +55,12 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
     const msg = `[${new Date().toISOString()}] Operator >> ${convoPrompt}`;
     setLogs((prev) => [...prev, msg]);
     try {
-      await factoryApi.wakeAgent(agent.id, { prompt: convoPrompt });
+      const out = await factoryApi.converse(agent.id, convoPrompt);
       setLogs((prev) => [
         ...prev,
-        `[${new Date().toISOString()}] Mailbox delivered. Agent container warm window renewed.`,
+        out.woke
+          ? `[${new Date().toISOString()}] No run was live: the turn woke ${agent.name} (run ${out.runId}).`
+          : `[${new Date().toISOString()}] Turn handed to ${agent.name}'s live run.`,
       ]);
       setConvoPrompt('');
       onRefresh();

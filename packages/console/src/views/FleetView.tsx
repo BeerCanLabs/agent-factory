@@ -84,8 +84,14 @@ export const FleetView: React.FC<FleetViewProps> = ({
     if (!wakeModalAgent) return;
     setIsWaking(true);
     try {
-      await factoryApi.wakeAgent(wakeModalAgent.id, { prompt: wakePrompt });
-      setActionMessage(`Agent ${wakeModalAgent.name} awakened successfully.`);
+      // A prompt is a conversation turn (GAP-177): handed to a live run or waking the agent. No prompt is a plain wake.
+      if (wakePrompt.trim()) {
+        const out = await factoryApi.converse(wakeModalAgent.id, wakePrompt);
+        setActionMessage(out.woke ? `${wakeModalAgent.name} woke with your message.` : `Message handed to ${wakeModalAgent.name}'s live run.`);
+      } else {
+        await factoryApi.wakeAgent(wakeModalAgent.id, {});
+        setActionMessage(`Agent ${wakeModalAgent.name} awakened successfully.`);
+      }
       setWakeModalAgent(null);
       onRefresh();
     } catch (err: any) {
