@@ -443,7 +443,7 @@ Answer it as you would any console turn, with `POST /runs/:id/reply`, and put JS
 - for `list`: `{ "conversations": [{ "id", "name", "is_active", "turn_count" }] }`
 - for `turns`: `{ "conversation": { "id", "name" }, "turns": [{ "role", "content", "channel", "at" }] }`
 
-The person is `request.subject` when it is present, otherwise `caller.actor`. Only an admin can make the factory send a `subject`, and every such read is recorded in the ledger. A purpose-built agent keeps no conversations, so it answers with empty lists. To resume a conversation, the console then sends the ordinary turn `/resume <id>`.
+The person is `request.subject` when it is present, otherwise `caller.actor`. Look up `conversation` only among that person's conversations; the factory passes it through as given. Only an admin can make the factory send a `subject`, and every such read is recorded in the ledger. A purpose-built agent keeps no conversations, so it answers with empty lists. To resume a conversation, the console then sends the ordinary turn `/resume <id>`.
 
 ### Egress to External APIs (e.g. Discord, Slack)
 Because cartridges operate inside a zero-trust VPC with no public IP or direct internet egress route, third-party API communication uses perimeter credential injection through the gatekeeper-egress:

@@ -132,12 +132,14 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
     const agentId = agent.id;
     const name = agent.name;
     let busy = false;
+    let stopped = false;
     const timer = setInterval(async () => {
       const waiting = [...pendingTurns.current].filter(([, t]) => t.agentId === agentId);
       if (!waiting.length || busy) return;
       busy = true;
       try {
         const { replies } = await factoryApi.replies(agentId, replyCursor.current.get(agentId) ?? 0);
+        if (stopped) return; // the agent on screen changed while this was in flight
         for (const r of replies) {
           replyCursor.current.set(agentId, Math.max(replyCursor.current.get(agentId) ?? 0, r.seq));
           const pending = pendingTurns.current.get(r.turnId);
@@ -155,7 +157,10 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
         }
       }
     }, 2_000);
-    return () => clearInterval(timer);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
   }, [agent.id, agent.name]);
 
   const handleRetire = async () => {

@@ -448,10 +448,6 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
 type VendorTarget = { upstream: string; adapter: string; discoveryPath?: string; secretName: string };
 
 /**
- * AP3.4: the footnote a text result needs. The gatekeeper-egress records a hash of every final model answer
- * (`MODEL_REPLY`, or `UNGROUNDED_REPLY` when tools were offered and none called); the result is matched by hash.
- */
-/**
  * Hands a turn to the agent (GAP-176, §6.15): to its live run's mailbox, or, with no run to hand it to (live or queued),
  * by waking it through the one wake path, so it is never parked in a mailbox nobody reads.
  */
@@ -486,6 +482,14 @@ async function handOff(
   return { status: 202, body: { ok: true } };
 }
 
+/** AM2: a console turn the agent may answer, kept for an hour; the oldest are dropped past the cap. */
+function rememberConsoleTurn(state: FactoryState, turnId: string, agentId: string, actor: string): void {
+  if (!state.consoleTurns) state.consoleTurns = new Map();
+  const now = Date.now();
+  for (const [id, t] of state.consoleTurns) if (now - t.at > CONSOLE_TURN_TTL_MS || state.consoleTurns.size >= CONSOLE_TURNS_KEPT) state.consoleTurns.delete(id);
+  state.consoleTurns.set(turnId, { agentId, actor, at: now });
+}
+
 /**
  * AM2: where a turn's reply goes. A Discord message is answered in its channel; a person conversing directly is answered
  * in the console. Anything else (another ingress) names no address yet.
@@ -496,6 +500,10 @@ function replyAddress(isIngress: boolean, caller: AuthenticatedCaller | undefine
   return undefined;
 }
 
+/**
+ * AP3.4: the footnote a text result needs. The gatekeeper-egress records a hash of every final model answer
+ * (`MODEL_REPLY`, or `UNGROUNDED_REPLY` when tools were offered and none called); the result is matched by hash.
+ */
 function resultFootnote(output: string, runRows: ReadonlyArray<Record<string, unknown>>): string | undefined {
   const text = output.trim();
   // A machine-read result (JSON) is never altered.
@@ -1718,12 +1726,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const shaped = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as { turnId?: string; replyTo?: { channel?: string } }) : undefined;
     const replyTo = shaped?.replyTo;
     const answerable = shaped?.turnId === turnId ? { turnId } : {};
-    if (replyTo?.channel === 'console' && caller) {
-      if (!state.consoleTurns) state.consoleTurns = new Map();
-      const now = Date.now();
-      for (const [id, t] of state.consoleTurns) if (now - t.at > CONSOLE_TURN_TTL_MS || state.consoleTurns.size >= CONSOLE_TURNS_KEPT) state.consoleTurns.delete(id);
-      state.consoleTurns.set(turnId, { agentId: agent.id, actor: caller.actor, at: now });
-    }
+    if (replyTo?.channel === 'console' && caller) rememberConsoleTurn(state, turnId, agent.id, caller.actor);
 
     const handed = await handOff(state, agent, principal.actor, payload, { requestedBy, caller });
     json(res, handed.status, handed.status >= 300 ? handed.body : { ...handed.body, ...answerable });
@@ -1751,14 +1754,24 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 400, { error: 'limit must be a whole number from 1 to 20' });
       return;
     }
-    if (body.subject !== undefined && !text(body.subject, 256)) {
+    // The subject must be an actor the ledger can record in clear, or the admin read would go unrecorded.
+    if (body.subject !== undefined && !(typeof body.subject === 'string' && /^[A-Za-z0-9:._@+-]{1,256}$/.test(body.subject))) {
       json(res, 400, { error: 'subject must be an actor' });
       return;
     }
+    const refuse = (status: number, action: string, out: Record<string, unknown>) => {
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: convReq[1], type: 'action', action, actor: principal.actor });
+      json(res, status, out);
+    };
+    // A conversation request is a person's; the ingress service speaks for others and may not make one.
+    if (authorize({ principal, privilege: 'runs.attest-requester' }).allowed) {
+      refuse(403, 'CONVERSATION_REQUEST_REFUSED', { error: 'forbidden', reason: 'a conversation request is made by a person, not the ingress' });
+      return;
+    }
     const subject = typeof body.subject === 'string' ? body.subject : undefined;
-    const othersRead = subject !== undefined && subject.toLowerCase() !== principal.actor.toLowerCase();
+    const othersRead = subject !== undefined && subject !== principal.actor;
     if (othersRead && !authorize({ principal, privilege: 'conversations.read-others' }).allowed) {
-      json(res, 403, { error: 'forbidden', required: 'admin' });
+      refuse(403, 'CONVERSATION_REQUEST_REFUSED', { error: 'forbidden', required: 'admin' });
       return;
     }
     const agent = state.agents.get(convReq[1]);
@@ -1768,15 +1781,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     const refused = handoffRefusal(state, agent);
     if (refused) {
-      json(res, 402, { error: 'budget_exceeded', window: refused });
+      refuse(402, 'CONVERSATION_REFUSED_BUDGET_EXCEEDED', { error: 'budget_exceeded', window: refused });
       return;
     }
     const turnId = randomUUID();
     const caller = directCaller(principal, ownersOf(state, agent.id), 'agents.converse');
     const request = { op: body.op, ...(body.conversation ? { conversation: body.conversation } : {}), ...(body.limit ? { limit: body.limit } : {}), ...(othersRead ? { subject } : {}) };
     const payload = { kind: 'conversation-request', request, caller, turnId, replyTo: { channel: 'console' } };
-    if (!state.consoleTurns) state.consoleTurns = new Map();
-    state.consoleTurns.set(turnId, { agentId: agent.id, actor: principal.actor, at: Date.now() });
+    rememberConsoleTurn(state, turnId, agent.id, principal.actor);
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId: agent.id,

@@ -313,6 +313,9 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     assert.equal((await ask(OPERATOR, { op: 'delete' })).status, 400);
     assert.equal((await ask(OPERATOR, { op: 'turns', limit: 99 })).status, 400);
     assert.equal((await ask(OPERATOR, { op: 'list', subject: 'cloudflare:dale@example.com' })).status, 403, 'an operator cannot read another person');
+    assert.ok(state.ledger.query({ agent: 'ada' }).some((r) => r.action === 'CONVERSATION_REQUEST_REFUSED' && r.actor === 'token:operator'), 'a refused read is on the record');
+    assert.equal((await ask(ADMIN, { op: 'list', subject: 'auth0|weird id' })).status, 400, 'a subject the ledger could not record is refused');
+    assert.equal((await ask(INGRESS, { op: 'list' })).status, 403, 'the ingress service does not make conversation requests');
 
     const mine = await ask(OPERATOR, { op: 'turns', conversation: 'Roadmap', limit: 5 });
     assert.equal(mine.status, 202, JSON.stringify(mine.body));
