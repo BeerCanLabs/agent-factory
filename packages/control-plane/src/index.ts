@@ -198,6 +198,8 @@ const state: FactoryState = {
   ledgerSink,
   gatekeeperIngressToken: process.env.GATEKEEPER_INGRESS_TOKEN,
   heartbeatTimeoutMs: parseInt(process.env.FACTORY_HEARTBEAT_TIMEOUT_MS || '90000', 10),
+  // GAP-176: heartbeats are judged from this process's start, not across the gap a stop-then-start deploy leaves.
+  healthSince: Date.now(),
   maxRssMb: parseInt(process.env.FACTORY_MAX_RSS_MB || '0', 10),
   crashLoopThreshold: parseInt(process.env.FACTORY_CRASH_LOOP_THRESHOLD || '3', 10),
   auth: authFromEnv(),

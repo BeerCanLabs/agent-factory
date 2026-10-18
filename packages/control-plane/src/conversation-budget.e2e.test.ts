@@ -142,9 +142,12 @@ describe('a message into a live run asks the Treasurer first', () => {
     state.policies.set('donna', { routes: [], budgetUsd: { perRun: 0.5, perDay: 100 } });
     const srv = await listen(state);
     try {
-      assert.equal((await converse(srv.port, 'donna', { content: 'no run yet' })).status, 202);
-      const run = state.runs.create({ agentId: 'donna', state: 'WORKING', actor: 'test', trigger: 'manual' });
-      state.spend.add('donna', run.runId, 2, new Date().toISOString());
+      // With no run, the message wakes one (GAP-176); perRun starts counting against that run.
+      const first = await converse(srv.port, 'donna', { content: 'no run yet' });
+      assert.equal(first.status, 202);
+      const runId = (first.body as { runId?: string }).runId;
+      assert.ok(runId, 'the message woke a run');
+      state.spend.add('donna', runId, 2, new Date().toISOString());
       const res = await converse(srv.port, 'donna', { content: 'live run over its own limit' });
       assert.deepEqual(res.body, { error: 'budget_exceeded', window: 'perRun' });
     } finally {
@@ -159,6 +162,9 @@ describe('a message into a live run asks the Treasurer first', () => {
       assert.equal((await converse(srv.port, 'donna', { content: 'no policy' })).status, 202);
       // echo-agent is a built-in cartridge; doctor is a built-in system agent. Both stay exempt.
       state.agents.set('doctor', { ...BUILTIN_SYSTEM_AGENTS.find((a) => a.id === 'doctor')! });
+      // A message to an agent with no run wakes it (GAP-176), so its declared secrets must bind; budget is what is tested.
+      const declared = [...state.agents.values()].flatMap((a) => [...(a.requires ?? []), ...(a.ungated ?? [])]);
+      (state as unknown as { providers: unknown[] }).providers = [envProvider(Object.fromEntries(declared.map((n) => [n, 'test-value'])))];
       for (const id of ['echo-agent', 'doctor']) {
         state.policies.set(id, { routes: [], budgetUsd: { perDay: 1 } });
         state.spend.add(id, 'prior-run', 5, new Date().toISOString());
