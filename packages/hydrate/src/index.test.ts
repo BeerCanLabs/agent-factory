@@ -194,7 +194,7 @@ describe('a stale SQLite journal never outlives its database in the store', () =
     }
   });
 
-  it('S3 and GCS pushes delete exactly the stale journals after uploading', () => {
+  it('S3 and GCS pushes delete exactly the stale journals, before uploading', () => {
     const dir = mkdtempSync(join(tmpdir(), 'sidecars-push-'));
     try {
       writeFileSync(join(dir, 'state.db'), SQLITE_HEADER);
@@ -203,12 +203,29 @@ describe('a stale SQLite journal never outlives its database in the store', () =
       const sync = (cmd: string, args: string[]) => void executed.push({ cmd, args });
       pushMind({ root: '', uri: 's3://bucket' }, 'agent', dir, sync);
       pushMind({ root: '', uri: 'gcs://bucket' }, 'agent', dir, sync);
+      // Deleted before the upload: a newer database is never in the store beside a stale journal.
       assert.deepEqual(executed, [
-        { cmd: 'aws', args: ['s3', 'sync', dir, 's3://bucket/agent'] },
         { cmd: 'aws', args: ['s3', 'sync', dir, 's3://bucket/agent', '--delete', '--exclude', '*', '--include', 'state.db-shm', '--include', 'state.db-journal'] },
-        { cmd: 'gcloud', args: ['storage', 'rsync', '-r', dir, 'gs://bucket/agent'] },
+        { cmd: 'aws', args: ['s3', 'sync', dir, 's3://bucket/agent'] },
         { cmd: 'gcloud', args: ['storage', 'rm', '--continue-on-error', 'gs://bucket/agent/state.db-shm', 'gs://bucket/agent/state.db-journal'] },
+        { cmd: 'gcloud', args: ['storage', 'rsync', '-r', dir, 'gs://bucket/agent'] },
       ]);
+      // A failed delete stops the push before the upload.
+      const failing = (cmd: string, args: string[]) => {
+        if (args.includes('--delete')) throw new Error('denied');
+        executed.push({ cmd, args });
+      };
+      executed.length = 0;
+      assert.throws(() => pushMind({ root: '', uri: 's3://bucket' }, 'agent', dir, failing), /denied/);
+      assert.equal(executed.length, 0);
+      // S3 filters are globs: a file name's glob characters match only themselves.
+      executed.length = 0;
+      writeFileSync(join(dir, 'a[1]*.db'), SQLITE_HEADER);
+      writeFileSync(join(dir, 'a[1]*.db-shm'), 'index');
+      writeFileSync(join(dir, 'a[1]*.db-journal'), 'journal');
+      pushMind({ root: '', uri: 's3://bucket' }, 'agent', dir, sync);
+      assert.ok(executed[0].args.includes('a[[]1][*].db-wal'));
+      for (const f of ['a[1]*.db', 'a[1]*.db-shm', 'a[1]*.db-journal']) rmSync(join(dir, f));
       // Without SQLite databases nothing is deleted.
       executed.length = 0;
       rmSync(join(dir, 'state.db'));

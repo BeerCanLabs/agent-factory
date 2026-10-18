@@ -263,20 +263,26 @@ export function staleSidecars(src: string): string[] {
   return stale;
 }
 
+/** An S3 CLI filter that matches exactly this key (its filters are globs: `[`, `*` and `?` are taken literally). */
+function literalGlob(key: string): string {
+  return key.replace(/[[*?]/g, (c) => `[${c}]`);
+}
+
 export function pushMind(store: MindStore, prefix: string, src: string, sync: SyncExecutor = defaultSync): void {
   if (store.uri?.startsWith('s3://')) {
     if (!existsSync(src)) return;
-    sync('aws', ['s3', 'sync', src, s3Prefix(store, prefix)]);
+    // Stale journals leave first: uploading a newer database beside one is the corruption itself, so a failed delete
+    // throws before the upload and the next push tries again. `--delete` is limited by the filters to exactly these keys.
     const stale = staleSidecars(src);
-    // `--delete` limited by the filters to exactly these keys: nothing else in the store is touched.
-    if (stale.length) sync('aws', ['s3', 'sync', src, s3Prefix(store, prefix), '--delete', '--exclude', '*', ...stale.flatMap((key) => ['--include', key])]);
+    if (stale.length) sync('aws', ['s3', 'sync', src, s3Prefix(store, prefix), '--delete', '--exclude', '*', ...stale.flatMap((key) => ['--include', literalGlob(key)])]);
+    sync('aws', ['s3', 'sync', src, s3Prefix(store, prefix)]);
     return;
   }
   if (store.uri?.startsWith('gcs://') || store.uri?.startsWith('gs://')) {
     if (!existsSync(src)) return;
-    sync('gcloud', ['storage', 'rsync', '-r', src, gcsPrefix(store, prefix)]);
     const stale = staleSidecars(src);
     if (stale.length) sync('gcloud', ['storage', 'rm', '--continue-on-error', ...stale.map((key) => `${gcsPrefix(store, prefix)}/${key}`)]);
+    sync('gcloud', ['storage', 'rsync', '-r', src, gcsPrefix(store, prefix)]);
     return;
   }
   const dest = join(store.root, prefix);
