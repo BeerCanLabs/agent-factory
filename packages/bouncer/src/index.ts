@@ -23,6 +23,7 @@ export {
   PRINCIPAL_ACTOR,
   PROVIDERS,
   authorizeIngress,
+  directCaller,
   isProvider,
   parseActor,
   sanitizeAgentRoles,

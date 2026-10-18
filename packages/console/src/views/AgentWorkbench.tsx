@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Terminal,
   Cpu,
@@ -44,6 +44,7 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
   const [activeTab, setActiveTab] = useState<'runtime' | 'terminal' | 'memory' | 'models' | 'skills' | 'policy' | 'owners' | 'lifecycle'>('runtime');
   const [convoPrompt, setConvoPrompt] = useState('');
   const [isSendingConvo, setIsSendingConvo] = useState(false);
+  const lastReplySeq = useRef(0);
   // Only what the factory reports (GAP-177): turns sent and how they were delivered. Replies are not shown here yet.
   const [logs, setLogs] = useState<string[]>([
     `[${new Date().toISOString()}] ${agent.name} is ${agent.state}. Turns sent here go to the agent; its replies are not shown in the console yet.`,
@@ -64,11 +65,32 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
       ]);
       setConvoPrompt('');
       onRefresh();
+      if (out.turnId) void awaitReply(out.turnId);
     } catch (err: any) {
       setLogs((prev) => [...prev, `[ERROR] Failed to deliver turn: ${err.message}`]);
     } finally {
       setIsSendingConvo(false);
     }
+  };
+
+  /** AM2: show the agent's answer to this turn when it posts one (polls for up to three minutes). */
+  const awaitReply = async (turnId: string) => {
+    const deadline = Date.now() + 180_000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2_000));
+      try {
+        const { replies } = await factoryApi.replies(agent.id, lastReplySeq.current);
+        for (const r of replies) lastReplySeq.current = Math.max(lastReplySeq.current, r.seq);
+        const mine = replies.find((r) => r.turnId === turnId);
+        if (mine) {
+          setLogs((prev) => [...prev, `[${mine.at}] ${agent.name} >> ${mine.content}${mine.footnote ? `  ${mine.footnote}` : ''}`]);
+          return;
+        }
+      } catch {
+        // keep waiting; a transient error is not the agent's answer
+      }
+    }
+    setLogs((prev) => [...prev, `[${new Date().toISOString()}] No reply from ${agent.name} yet (it may answer on another channel, or not support console replies).`]);
   };
 
   const handleRetire = async () => {
