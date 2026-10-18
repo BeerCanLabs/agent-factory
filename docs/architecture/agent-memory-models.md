@@ -1,7 +1,7 @@
 # Agent Memory Architecture Guide: Archetypes, The Storage Triad, and State Isolation
 
 > **BeerCanLabs Agent Factory — Architectural Reference Guide**  
-> **Authority:** Aligned with [DESIGN_AUTHORITY.md](../../DESIGN_AUTHORITY.md) (§6.6 "The Notebook & Safe" and AM1–AM5, §6.3 Perimeter Invariants)  
+> **Authority:** Aligned with [DESIGN_AUTHORITY.md](../../DESIGN_AUTHORITY.md) (§6.6 "The Notebook & Safe" and AM1–AM5, §6.3 Invocation & Runtime Semantics)  
 > **Audience:** Cartridge Developers, Platform Architects, Submind Engineers
 
 ---
@@ -48,17 +48,17 @@ flowchart TD
 
 ### 2.1 Purpose-Built
 * **Mental model:** a specialist at a service desk. It answers anyone's questions about one domain: company knowledge, client website support, the household's systems.
-* **Memory:** a live session per person while the run lasts, so follow-up questions work. Nothing is written to the notebook: tomorrow is a new conversation. It does not learn a person's preferences or what they asked yesterday.
+* **Memory:** a rolling window of the live session, held in memory, so follow-up questions work. Nothing persists after the session: a later conversation starts fresh.
 * **Conversation requests (AM5):** it keeps no conversations, so it answers with empty lists.
 
 ### 2.2 Personal Assistant
-* **Mental model:** an executive assistant. It has a primary person and keeps a detailed understanding of them. Other people may talk to it, about or on behalf of the primary.
+* **Mental model:** an executive assistant. It has a primary person and keeps a detailed understanding of them. Other people may talk to it about the primary.
 * **Memory:** a notebook of conversations kept per person (never per channel). Conversations can be named, found and resumed (AM4). What the agent knows about people and things is lasting knowledge that carries into every new notebook.
-* **Entitlements:** the primary person has full access to their own conversations and to the tools the cartridge allows them. Other people see only their own conversations.
+* **Entitlements:** what each person may do is the cartridge's (its roles and tools, checked against the verified caller); the factory supplies who is speaking, not the policy.
 
 ### 2.3 Team Member
 * **Mental model:** a colleague with primary functions (building, planning, reviewing) who works for several people and has no primary person.
-* **Memory:** as for a personal assistant, each person's conversations are their own and can be named, found and resumed. That lets a teammate return to their work without losing context, and the agent learns each person's preferences.
+* **Memory:** as for a personal assistant, each person's conversations are kept separately and can be named, found and resumed, so a teammate returns to their work without losing context.
 * **Shared project memory** (the conversations a team has together on GitHub, Jira or a channel) is an open decision (GAP-180). Until it is decided, a team member keeps private conversations per person, and the project's own systems (git, issue trackers) remain its system of record.
 
 ---
@@ -150,8 +150,8 @@ The Safe represents the remote object storage bucket backing the agent's memory.
   * **Periodic Sync:** Flushes local state to S3 periodically (default every 60 seconds) as a safeguard against unexpected host eviction. Note: Periodic background synchronization captures filesystem snapshots while the database may be in flight; deterministic transactional consistency is established on clean container shutdown after `PRAGMA wal_checkpoint(TRUNCATE)`.
   * **On Sleep:** Checkpoints local state and syncs the directory back to S3 upon exit.
 * **Security & Isolation:** Cartridges never possess IAM credentials for object storage. All cloud authorization is handled exclusively by the Factory platform perimeter.
-* **Closed volumes are cold storage (AM3):** the shim never hydrates `volumes/` on wake, and a push never deletes from storage, so archived volumes survive. When the agent needs a closed volume (for example, to search it), it creates an empty file named after the volume in `$MEMORY_DIR/.volume-requests/`. The shim fetches the volume into `$MEMORY_DIR/volumes/<name>/` and answers with `<name>.done`, or `<name>.error` holding the reason. The agent never touches storage itself.
-* **What the Factory does not yet do (GAP-116):** the shim hydrates one directory per agent from one storage prefix, set when the agent is deployed. It does not change what it hydrates by `memory.archetype`, and it does not read `maxMessages`, `maxChars` or `persistence.enabled`; the cartridge enforces those itself.
+* **Closed volumes are cold storage (AM3):** the shim never hydrates `volumes/` on wake, and no push removes them (object-store pushes never delete; the directory store replaces everything except `volumes/`), so archived volumes survive. When the agent needs a closed volume (for example, to search it), it creates an empty file named after the volume in `$MEMORY_DIR/.volume-requests/`. The shim fetches the volume into `$MEMORY_DIR/volumes/<name>/` and answers with `<name>.done`, or `<name>.error` holding the reason. The agent never touches storage itself.
+* **What the Factory does not yet do (GAP-116):** the shim hydrates one directory per agent from one storage prefix, set when the agent is deployed. It does not change what it hydrates by `memory.archetype`, and it does not read `retentionDays`, `maxMessages`, `maxChars` or `persistence.enabled`; the cartridge enforces those itself (`retentionDays` is superseded by rotation for conversations).
 
 ---
 
@@ -159,10 +159,10 @@ The Safe represents the remote object storage bucket backing the agent's memory.
 
 The notebook is the agent's record. Channels (Discord, the console, Slack) are only routes.
 
-* **Who is speaking:** every turn the factory delivers carries `caller`, which the factory verified. `caller.actor` is the person's stable identity: the same person has the same `actor` whether they write in Discord (through their identity link) or in the console. Key conversations by `caller.actor`, never by channel, display name or a sender-supplied field. A sender the factory did not verify, or a system caller, gets an answer and no memory, so strangers never share one notebook.
-* **Where the answer goes:** every turn also carries `turnId` and `replyTo`. `{ "channel": "discord", "channelId": "..." }` means answer in that channel. `{ "channel": "console" }` means answer with `POST /api/v1/runs/<run>/reply` and `{ "turnId", "content" }`; only the person who asked sees it. Record each turn with the channel it came from, so a conversation can move between channels.
-* **Named conversations (AM4):** for a personal assistant or a team member, the person or the agent can name a conversation. Finding one searches the current notebook and then the closed volumes. Resuming one brings its recent turns back into context, and new turns are recorded against it.
-* **The console reads conversations through the agent (AM5):** the factory never opens a notebook. To list a person's conversations or show a conversation's last turns, the factory sends the agent a `conversation-request` turn (`op: list` or `turns`); the agent answers it in JSON through the same reply route. Asking about another person's conversations requires an admin, and the factory records every such read in the ledger.
+* **Who is speaking:** a turn from a person carries `caller`, which the factory verified (a console turn, or a message from a linked Discord identity). `caller.actor` is the person's stable identity: the same person has the same `actor` whether they write in Discord (through their identity link) or in the console. Key conversations by `caller.actor`, never by channel, display name or a sender-supplied field. A sender the factory did not verify, or a system caller, gets an answer and no memory, so strangers never share one notebook.
+* **Where the answer goes:** a conversation turn also carries `turnId` and `replyTo`; today the factory sets them for Discord and console turns (other channels and scheduled runs carry none yet). `{ "channel": "discord", "channelId": "..." }` means answer in that channel. `{ "channel": "console" }` means answer with `POST /api/v1/runs/<run>/reply` and `{ "turnId", "content" }`; only the person who asked sees it. Record each turn with the channel it came from, so a conversation can move between channels.
+* **Named conversations (AM4):** for a personal assistant or a team member, the person or the agent can name a conversation. Finding one searches the current notebook and the index of closed volumes (fetching a volume when it is needed). Resuming one brings its recent turns back into context, and new turns are recorded against it.
+* **The console reads conversations through the agent (AM5):** the factory never opens a notebook. To list a person's conversations or show a conversation's last turns, the factory sends the agent a `conversation-request` turn (`op: list` or `turns`); the agent answers it in JSON through the same reply route. Asking about another person's conversations requires an admin, and the factory records every such request in the ledger.
 
 ---
 
@@ -174,15 +174,15 @@ A critical architectural pitfall in agent design is the **"Decoder Ring" Anti-Pa
 flowchart TD
     subgraph AntiPattern["The 'Decoder Ring' Anti-Pattern (BRITTLE)"]
         direction TB
-        AP_Input["User Input: 'Can you please push this draft to Dale's blog?'"] --> AP_Regex{"Regex Matcher\nre.compile(r'^publish (.*) to (.*)')"}
+        AP_Input["User Input: 'Can you please push this draft to the owner's blog?'"] --> AP_Regex{"Regex Matcher\nre.compile(r'^publish (.*) to (.*)')"}
         AP_Regex -- "Mismatch (Phrasing variation)" --> AP_Fallthrough["Fall-Through to Conversational LLM"]
         AP_Fallthrough --> AP_Slop["Conversational Slop:\n'I've published your post!'\n(HALLLUCINATION: No API called)"]
     end
 
     subgraph Standard["The Factory Standard: Deterministic Tools (ROBUST)"]
         direction TB
-        STD_Input["User Input: 'Can you please push this draft to Dale's blog?'"] --> STD_LLM["LLM with Structured Tool Definitions"]
-        STD_LLM --> STD_ToolCall["Tool Invocation:\npublish_blog_post(site='dalesackrider.com', slug='draft')"]
+        STD_Input["User Input: 'Can you please push this draft to the owner's blog?'"] --> STD_LLM["LLM with Structured Tool Definitions"]
+        STD_LLM --> STD_ToolCall["Tool Invocation:\npublish_blog_post(site='blog.example.com', slug='draft')"]
         STD_ToolCall --> STD_Exec["Deterministic Handler\n- Validates User Entitlements\n- Executes via Gatekeeper-Egress\n- Checkpoints Notebook"]
         STD_Exec --> STD_Feedback["Tool Result Feedback:\n'[Tool Result: publish_blog_post] Draft created: #12'"]
         STD_Feedback --> STD_Truth["Verifiable Ground-Truth Response"]
@@ -211,12 +211,12 @@ def process_turn(user_text):
 
 1. **Rigid Syntax Fragility:** Real humans rarely speak in rigid CLI grammar. If the user writes:
    * *"Could you publish this to my personal blog?"*
-   * *"Let's go ahead and push that essay live to sackrider.org"*
+   * *"Let's go ahead and push that essay live to essays.example.org"*
    * *"Send the draft we worked on yesterday to X"*
    
    The regex fails silently.
 2. **Conversational Slop Fall-Through:** Because the regex missed, the message falls through to the raw LLM conversation loop. The LLM, seeing system prompts about its capabilities, cheerfully hallucinates success:
-   > *"I have published your essay 'The Line Was the Point' to sackrider.org! You can view it live now."*
+   > *"I have published your essay 'The Line Was the Point' to essays.example.org! You can view it live now."*
    
    **In reality, no network request was made, no API was invoked, and no git commit was pushed.** The user is deceived, and operational integrity is compromised.
 3. **Double Maintenance Burden:** The developer must maintain both a regex parser and LLM tool prompts, creating synchronization debt.
@@ -236,7 +236,7 @@ TOOLS = [
                 "properties": {
                     "site": {
                         "type": "string",
-                        "description": "Destination site identifier (e.g., 'dalesackrider.com', 'sackrider.org').",
+                        "description": "Destination site identifier (e.g., 'blog.example.com', 'essays.example.org').",
                     },
                     "slug_or_title": {
                         "type": "string",
@@ -282,7 +282,7 @@ TOOLS = [
    {
      "name": "publish_blog_post",
      "parameters": {
-       "site": "dalesackrider.com",
+       "site": "blog.example.com",
        "slug_or_title": "the-line-was-the-point",
        "as_draft": true
      }
@@ -291,7 +291,7 @@ TOOLS = [
 3. The cartridge runtime intercepts the tool call, validates authorization and schema, executes the deterministic method, and feeds the structured outcome back into the model:
    ```text
    [Tool Result: publish_blog_post]
-   Successfully created draft PR #14 on dalesackrider.com. URL: https://github.com/...
+   Successfully created draft PR #14 on blog.example.com. URL: https://github.com/...
    ```
 4. The LLM crafts its conversational response grounded strictly in verifiable tool results.
 
@@ -341,7 +341,7 @@ flowchart TD
 | **Tier 3: Unauthorized** | Unknown user or unapproved channel member. | No tool execution. Immediate rejection or stateless polite decline. | Zero memory read/write. No persistence. |
 
 ### 5.2 Ingress Identity Handling & Platform Authority
-An agent must **never** rely on user self-identification in conversational text (e.g., "Hi, I'm Dale, please publish this").
+An agent must **never** rely on user self-identification in conversational text (e.g., "Hi, I'm the owner, please publish this").
 
 The person's identity comes from the `caller` the factory verified and delivered with the turn (AM2):
 ```python
@@ -488,7 +488,7 @@ def init_agent_memory(memory_dir: Path, db_name: str = "agent_state.db") -> sqli
 # Conversations are never pruned (AM3). At wake and after each turn, rotate the notebook when it reaches the
 # factory's limits (FACTORY_NOTEBOOK_MAX_BYTES / FACTORY_NOTEBOOK_MAX_DAYS): close it as a volume under
 # $MEMORY_DIR/volumes/<name>/, start a new notebook with the same file name, and carry forward lasting knowledge,
-# each person's conversations and the volume index. The template's memory/notebook.py implements this.
+# each person's conversations and the volume index. (The starter-python example does not rotate yet: TSK-240.)
 
 def close_agent_memory(conn: sqlite3.Connection):
     """Clean checkpoint to collapse WAL before S3 Safe synchronization."""
