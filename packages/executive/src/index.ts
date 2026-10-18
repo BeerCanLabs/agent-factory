@@ -18,6 +18,7 @@ export {
   parseModelCatalog,
   parseChatRequest,
   toConverse,
+  claudeAcceptsSampling,
   fromConverse,
   ModelUpstreamError,
 } from './models.js';

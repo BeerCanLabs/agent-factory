@@ -134,8 +134,25 @@ type ConverseBody = {
   };
 };
 
+/**
+ * Whether a Claude model accepts `temperature`/`top_p` (GAP-171). Claude 4.6 and earlier do; from Opus 4.7 on they are
+ * rejected with a 400, so any later or unrecognised Claude id is treated as not accepting them. Works on direct
+ * (`claude-haiku-5-5`), Vertex (`claude-opus-4-5@20251101`) and Bedrock (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`) ids.
+ */
+export function claudeAcceptsSampling(modelId: string): boolean {
+  const current = /claude-(?:opus|sonnet|haiku)-(\d+)(?:-(\d{1,2})(?!\d))?/.exec(modelId);
+  if (current) {
+    const major = Number(current[1]);
+    const minor = current[2] === undefined ? 0 : Number(current[2]);
+    return major < 4 || (major === 4 && minor <= 6);
+  }
+  // Pre-4 naming: claude-3-5-sonnet, claude-2.1, claude-instant-1.2.
+  return /claude-(?:instant|\d)/.test(modelId);
+}
+
 /** OpenAI messages → Bedrock Converse request. Consecutive same-role turns merge (Converse requires alternation). */
-export function toConverse(req: ChatRequest): ConverseBody {
+export function toConverse(req: ChatRequest, modelId?: string): ConverseBody {
+  const sampling = !(modelId && /claude/.test(modelId)) || claudeAcceptsSampling(modelId);
   const system = req.messages.filter((m) => m.role === 'system').map((m) => ({ text: m.content }));
   const messages: ConverseBody['messages'] = [];
   for (const m of req.messages) {
@@ -146,8 +163,8 @@ export function toConverse(req: ChatRequest): ConverseBody {
   }
   const inferenceConfig = {
     ...(req.maxTokens !== undefined ? { maxTokens: req.maxTokens } : {}),
-    ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
-    ...(req.topP !== undefined ? { topP: req.topP } : {}),
+    ...(sampling && req.temperature !== undefined ? { temperature: req.temperature } : {}),
+    ...(sampling && req.topP !== undefined ? { topP: req.topP } : {}),
     ...(req.stop ? { stopSequences: req.stop } : {}),
   };
 
@@ -293,7 +310,7 @@ export function bedrockConverse(opts: BedrockConverseOptions = {}): ModelAdapter
         throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no cloud credentials');
       }
       const url = new URL(`${endpoint(region).replace(/\/$/, '')}/model/${encodeURIComponent(entry.id)}/converse`);
-      const body = JSON.stringify(toConverse(req));
+      const body = JSON.stringify(toConverse(req, entry.id));
       const headers = signV4({ method: 'POST', url, headers: { 'content-type': 'application/json', accept: 'application/json' }, body }, c, { region, service: 'bedrock' }, new Date(), { contentSha256Header: true });
       delete headers['host'];
       let res: Response;
@@ -558,7 +575,9 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
 // ---------------------------------------------------------------------------------------------
 // vertex-anthropic & anthropic (Claude Messages API on Vertex AI or direct api.anthropic.com)
 
-export function toAnthropicMessages(req: ChatRequest) {
+/** `modelId` drops sampling parameters the model rejects (GAP-171); without it they pass through unchanged. */
+export function toAnthropicMessages(req: ChatRequest, modelId?: string) {
+  const sampling = modelId === undefined || claudeAcceptsSampling(modelId);
   const system = req.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
   const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   for (const m of req.messages) {
@@ -613,8 +632,8 @@ export function toAnthropicMessages(req: ChatRequest) {
     max_tokens: req.maxTokens ?? 4096,
     messages,
     ...(system ? { system } : {}),
-    ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
-    ...(req.topP !== undefined ? { top_p: req.topP } : {}),
+    ...(sampling && req.temperature !== undefined ? { temperature: req.temperature } : {}),
+    ...(sampling && req.topP !== undefined ? { top_p: req.topP } : {}),
     ...(req.stop ? { stop_sequences: req.stop } : {}),
     ...(tools.length > 0 ? { tools } : {}),
     ...(tool_choice ? { tool_choice } : {}),
@@ -678,7 +697,7 @@ export function vertexAnthropic(opts: VertexOptions = {}): ModelAdapter {
         throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no cloud credentials');
       }
 
-      const payload = { anthropic_version: 'vertex-2023-10-16', ...toAnthropicMessages(req) };
+      const payload = { anthropic_version: 'vertex-2023-10-16', ...toAnthropicMessages(req, entry.id) };
       const url = `${endpoint(region).replace(/\/$/, '')}/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(region)}/publishers/anthropic/models/${encodeURIComponent(entry.id)}:rawPredict`;
       let res: Response;
       try {
@@ -751,7 +770,7 @@ export function anthropicMessages(opts: ApiKeyAdapterOptions = {}): ModelAdapter
   return {
     async complete(entry, req) {
       const key = await resolveApiKey(opts, entry, 'ANTHROPIC_API_KEY', doFetch);
-      const payload = { model: entry.id, ...toAnthropicMessages(req) };
+      const payload = { model: entry.id, ...toAnthropicMessages(req, entry.id) };
       let res: Response;
       try {
         res = await doFetch(`${base}/v1/messages`, {

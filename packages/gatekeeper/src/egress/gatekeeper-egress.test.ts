@@ -834,3 +834,59 @@ describe('Dynamic Model Catalog & Default Model Sync (M2, M3, GAP-168)', () => {
     }
   });
 });
+
+describe('Model catalog load after a failed boot fetch (GAP-171, M3)', () => {
+  it('waits for the control-plane catalog when the boot fetch failed, so the first call is not refused', async () => {
+    const runId = 'catalog-boot-fail-run';
+    const currentCtx: RunContext = {
+      run: { runId, agentId: 'donna', state: 'WORKING', live: true },
+      agentState: 'WORKING',
+      policy: { routes: ['models'], models: ['model-b'] },
+      spend: { run: 0, day: 0, month: 0 },
+    };
+    let catalogCalls = 0;
+    const control: ControlClient = {
+      async runContext(id) { return id === runId ? structuredClone(currentCtx) : null; },
+      async checkStanding() { return { ok: true, standing: 'good', remainingUsd: 100 }; },
+      async ledger() {},
+      async modelCatalog() {
+        catalogCalls += 1;
+        if (catalogCalls === 1) throw new Error('fetch failed'); // the control plane is restarting at boot
+        return { models: { 'model-b': { provider: 'fake', id: 'fake-b', price: { inputPerMTok: 1, outputPerMTok: 2 } } } };
+      },
+    };
+
+    const gk = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: [],
+      routeRefreshIntervalMs: 0,
+      // The landing-zone catalog does not have the model the control plane offers.
+      modelCatalog: { 'model-a': { provider: 'fake', id: 'fake-a', price: { inputPerMTok: 1, outputPerMTok: 2 } } },
+      modelAdapters: {
+        fake: {
+          async complete() {
+            return { content: 'hello', finishReason: 'stop', usage: { input: 10, output: 5 } };
+          },
+        },
+      },
+    });
+
+    const testPort = await listen(gk);
+    try {
+      await new Promise((r) => setImmediate(r));
+      assert.equal(catalogCalls, 1, 'the boot fetch ran and failed');
+      const tok = await tokens.mint({ runId, agentId: 'donna' });
+      const res = await call(testPort, '/models/v1/chat/completions', {
+        token: tok,
+        body: { model: 'model-b', messages: [{ role: 'user', content: 'hi' }] },
+      });
+      assert.equal(res.status, 200, `first call after a failed boot fetch: ${res.text}`);
+    } finally {
+      await new Promise<void>((r) => gk.close(() => r()));
+    }
+  });
+});
+

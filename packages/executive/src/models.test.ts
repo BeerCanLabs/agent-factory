@@ -681,3 +681,49 @@ describe('Vertex AI and API-key model adapters (M1–M3)', () => {
 });
 
 
+
+describe('sampling parameters for Claude models (GAP-171, M3)', () => {
+  const SAMPLED: ChatRequest = { messages: [{ role: 'user', content: 'hi' }], maxTokens: 64, temperature: 0.7, topP: 0.9 };
+
+  it('accepts sampling on Claude 4.6 and earlier, and rejects it from Opus 4.7 on or for unknown Claude ids', async () => {
+    const { claudeAcceptsSampling } = await import('./models.js');
+    const accepts = ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5', 'claude-sonnet-4-20250514', 'claude-opus-4-5@20251101',
+      'us.anthropic.claude-sonnet-4-5-20250929-v1:0', 'claude-3-5-sonnet-20241022', 'claude-3-opus-20240229'];
+    const rejects = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-7',
+      'claude-opus-4-8', 'anthropic.claude-haiku-5-5', 'claude-fable-5-1', 'claude-mythos-5-1'];
+    for (const id of accepts) assert.equal(claudeAcceptsSampling(id), true, id);
+    for (const id of rejects) assert.equal(claudeAcceptsSampling(id), false, id);
+  });
+
+  it('toAnthropicMessages drops temperature and top_p only for models that reject them', async () => {
+    const { toAnthropicMessages } = await import('./models.js');
+    const modern = toAnthropicMessages(SAMPLED, 'claude-haiku-5-5') as Record<string, unknown>;
+    assert.equal('temperature' in modern, false);
+    assert.equal('top_p' in modern, false);
+    const legacy = toAnthropicMessages(SAMPLED, 'claude-sonnet-4-6') as Record<string, unknown>;
+    assert.equal(legacy.temperature, 0.7);
+    assert.equal(legacy.top_p, 0.9);
+  });
+
+  it('toConverse drops sampling for new Claude models on Bedrock and keeps it for other Bedrock models', () => {
+    assert.deepEqual(toConverse(SAMPLED, 'us.anthropic.claude-sonnet-5-5').inferenceConfig, { maxTokens: 64 });
+    assert.deepEqual(toConverse(SAMPLED, 'meta.llama3-70b-instruct-v1:0').inferenceConfig, { maxTokens: 64, temperature: 0.7, topP: 0.9 });
+    assert.deepEqual(toConverse(SAMPLED, 'anthropic.claude-haiku-4-5').inferenceConfig, { maxTokens: 64, temperature: 0.7, topP: 0.9 });
+  });
+
+  it('the anthropic adapter never sends temperature to a Claude 5.5 model', async () => {
+    const { anthropicMessages } = await import('./models.js');
+    let sent: Record<string, unknown> = {};
+    const adapter = anthropicMessages({
+      apiKey: async () => 'test-key',
+      fetch: (async (_url: string, init: RequestInit) => {
+        sent = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    await adapter.complete({ provider: 'anthropic', id: 'claude-haiku-5-5' }, SAMPLED);
+    assert.equal(sent.model, 'claude-haiku-5-5');
+    assert.equal('temperature' in sent, false);
+    assert.equal('top_p' in sent, false);
+  });
+});
