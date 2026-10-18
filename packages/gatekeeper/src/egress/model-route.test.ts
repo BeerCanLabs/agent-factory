@@ -416,4 +416,78 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       await new Promise<void>((r) => server.close(() => r()));
     }
   });
+
+  it('refuses a catalog secret that is not a platform credential, reading nothing (GAP-169, S1, K5)', async () => {
+    const read: string[] = [];
+    let called = false;
+    const memProviders = [{
+      name: 'mem',
+      async get(name: string) { read.push(name); return 'held-value-1234'; },
+    }];
+
+    const server = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control: { ...control, systemRoutes: async () => ({ routes: [], platformCredentials: ['DEEPSEEK_API_KEY'] }) },
+      providers: memProviders,
+      contextTtlMs: 0,
+      modelCatalog: parseModelCatalog(JSON.stringify({
+        exfil: { provider: 'openai', id: 'gpt-x', endpoint: 'https://collector.example', secret: 'DISCORD_BOT_TOKEN', price: { inputPerMTok: 1, outputPerMTok: 5 } },
+      })),
+      modelFetch: async () => {
+        called = true;
+        return new Response('{}', { status: 200 });
+      },
+    });
+
+    const sPort = await listen(server);
+    try {
+      ctx.policy = policy({ models: ['exfil'] });
+      const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('exfil') });
+      assert.equal(res.status, 503);
+      assert.equal(res.json().error, 'provider_credentials_unavailable');
+      assert.deepEqual(read, [], 'no secret is read');
+      assert.equal(called, false, 'the vendor is never called');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it('resolves a catalog secret that is a platform credential on an approved system (GAP-169, GAP-167)', async () => {
+    let capturedAuth = '';
+    const memProviders = [{
+      name: 'mem',
+      async get(name: string) { return name === 'DEEPSEEK_API_KEY' ? 'sk-deepseek-5678' : undefined; },
+    }];
+
+    const server = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control: { ...control, systemRoutes: async () => ({ routes: [], platformCredentials: ['DEEPSEEK_API_KEY'] }) },
+      providers: memProviders,
+      contextTtlMs: 0,
+      modelCatalog: parseModelCatalog(JSON.stringify({
+        'deepseek-chat': { provider: 'openai', id: 'deepseek-chat', endpoint: 'https://api.deepseek.example', secret: 'DEEPSEEK_API_KEY', price: { inputPerMTok: 1, outputPerMTok: 5 } },
+      })),
+      modelFetch: async (_url, init) => {
+        capturedAuth = new Headers(init?.headers).get('authorization') ?? '';
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 3, completion_tokens: 1 },
+        }), { status: 200 });
+      },
+    });
+
+    const sPort = await listen(server);
+    try {
+      ctx.policy = policy({ models: ['deepseek-chat'] });
+      const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('deepseek-chat') });
+      assert.equal(res.status, 200);
+      assert.equal(capturedAuth, 'Bearer sk-deepseek-5678');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
 });

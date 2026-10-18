@@ -9,7 +9,7 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { SseMeter, checkModel, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
+import { BUILTIN_PROVIDER_SECRETS, SseMeter, checkModel, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
 /** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
@@ -392,6 +392,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   const connCache = new Map<string, { token: string; expiresAtMs: number }>();
   const secretValues = new Set<string>();
   const resolveSecret = async (secretName: string): Promise<string> => {
+    // GAP-169: a completion reads only a platform credential (GAP-167), the same names vendor discovery may read.
+    if (!BUILTIN_PROVIDER_SECRETS.includes(secretName)) {
+      await ensureRoutes();
+      if (!cachedPlatformCredentials.has(secretName)) throw new Error(`secret ${secretName} is not a platform credential`);
+    }
     // 1. SecretProvider takes precedence over ambient container env (§6.9 M3, §6.11 K5)
     if (opts.providers && opts.providers.length > 0) {
       try {

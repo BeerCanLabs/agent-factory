@@ -875,6 +875,9 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
   };
 }
 
+/** The secret names the built-in API-key vendors use: the built-in platform credentials (GAP-167). */
+export const BUILTIN_PROVIDER_SECRETS: readonly string[] = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'XAI_API_KEY', 'GEMINI_API_KEY'];
+
 export type DefaultModelAdaptersOptions = {
   resolveSecret?: (secretName: string) => Promise<string>;
   fetch?: typeof fetch;

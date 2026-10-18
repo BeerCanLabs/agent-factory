@@ -13,6 +13,7 @@ export {
   anthropicMessages,
   openAiCompatible,
   defaultModelAdapters,
+  BUILTIN_PROVIDER_SECRETS,
   resolveProviderSecret,
   parseModelCatalog,
   parseChatRequest,
