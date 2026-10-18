@@ -8,6 +8,9 @@ import { dirname } from 'node:path';
  * Bootstraps from FACTORY_MODEL_CATALOG if no store exists yet.
  */
 
+/** A landing-zone catalog entry (FACTORY_MODEL_CATALOG) the store bootstraps from (§6.9 M3). */
+export type ModelSeed = { provider: string; id?: string; region?: string; endpoint?: string; price?: { inputPerMTok: number; outputPerMTok: number } };
+
 export interface StoredModel {
   name: string;
   provider: string;
@@ -53,7 +56,7 @@ export class ModelStore {
 
   constructor(
     filePath: string,
-    seed?: Record<string, { provider: string; id?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }>,
+    seed?: Record<string, ModelSeed>,
     initialDefaultModel?: string,
   ) {
     this.filePath = filePath;
@@ -61,7 +64,7 @@ export class ModelStore {
   }
 
   private load(
-    seed?: Record<string, { provider: string; id?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }>,
+    seed?: Record<string, ModelSeed>,
     initialDefaultModel?: string,
   ): void {
     if (existsSync(this.filePath)) {
@@ -71,6 +74,7 @@ export class ModelStore {
         this.defaultModel = typeof raw.defaultModel === 'string' ? raw.defaultModel : initialDefaultModel;
         this.models = new Map(Object.entries(raw.models ?? {}));
         this.staged = Array.isArray(raw.staged) ? raw.staged : [];
+        this.resyncBootstrap(seed);
         return;
       } catch (err) {
         console.warn(`[control-plane] failed to read ${this.filePath}, initializing fresh store:`, err);
@@ -87,7 +91,8 @@ export class ModelStore {
           name,
           provider: m.provider,
           id: m.id ?? name,
-          region: m.region,
+          ...(m.region ? { region: m.region } : {}),
+          ...(m.endpoint ? { endpoint: m.endpoint } : {}),
           price: m.price,
           admittedAt: now,
           admittedBy: 'bootstrap',
@@ -95,6 +100,30 @@ export class ModelStore {
       }
       this.persist();
     }
+  }
+
+  /**
+   * Models the store bootstrapped from the landing zone take their provider id, region and endpoint from the current
+   * landing-zone catalog (GAP-174). Earlier seeding kept only the name, so a Bedrock entry was stored with its friendly
+   * name as the provider model id and no region. Models an admin admitted are never touched.
+   */
+  private resyncBootstrap(seed?: Record<string, ModelSeed>): void {
+    if (!seed) return;
+    let changed = false;
+    for (const [name, m] of this.models) {
+      const s = seed[name];
+      if (m.admittedBy !== 'bootstrap' || !s || s.provider !== m.provider) continue;
+      const next: StoredModel = { ...m, id: s.id ?? name };
+      delete next.region;
+      delete next.endpoint;
+      if (s.region) next.region = s.region;
+      if (s.endpoint) next.endpoint = s.endpoint;
+      if (JSON.stringify(next) !== JSON.stringify(m)) {
+        this.models.set(name, next);
+        changed = true;
+      }
+    }
+    if (changed) this.persist();
   }
 
   private persist(): void {

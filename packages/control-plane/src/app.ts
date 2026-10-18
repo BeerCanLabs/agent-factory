@@ -63,7 +63,7 @@ export type FactoryState = {
   /** Dynamic model store (§6.9 M3, GAP-162). */
   modelStore?: ModelStore;
   /** Models the factory offers (§6.9 M3, FACTORY_MODEL_CATALOG), by neutral name. */
-  modelCatalog?: Record<string, { provider: string; id?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }>;
+  modelCatalog?: Record<string, { provider: string; id?: string; region?: string; endpoint?: string; price?: { inputPerMTok: number; outputPerMTok: number } }>;
   /** The model a policy that names none grants (M2; FACTORY_DEFAULT_MODEL, default claude-haiku-4-5). */
   defaultModel?: string;
   registryDir?: string;

@@ -151,13 +151,18 @@ if (deployProviderType === 'aws') {
 function modelCatalogFromEnv(json: string | undefined): FactoryState['modelCatalog'] {
   if (!json?.trim()) return {};
   try {
-    const raw = JSON.parse(json) as Record<string, { provider?: unknown; price?: { inputPerMTok?: unknown; outputPerMTok?: unknown } }>;
+    const raw = JSON.parse(json) as Record<string, { provider?: unknown; id?: unknown; region?: unknown; endpoint?: unknown; price?: { inputPerMTok?: unknown; outputPerMTok?: unknown } }>;
     const out: NonNullable<FactoryState['modelCatalog']> = {};
     for (const [name, m] of Object.entries(raw ?? {})) {
       if (!m || typeof m.provider !== 'string') continue;
       const p = m.price;
+      // Keep the provider model id, region and endpoint (GAP-174): the store seeds from this, and the gatekeeper-egress
+      // serves what the store holds.
       out[name] = {
         provider: m.provider,
+        ...(typeof m.id === 'string' ? { id: m.id } : {}),
+        ...(typeof m.region === 'string' ? { region: m.region } : {}),
+        ...(typeof m.endpoint === 'string' ? { endpoint: m.endpoint } : {}),
         ...(p && typeof p.inputPerMTok === 'number' && typeof p.outputPerMTok === 'number' ? { price: { inputPerMTok: p.inputPerMTok, outputPerMTok: p.outputPerMTok } } : {}),
       };
     }

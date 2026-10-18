@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ModelStore } from './models.js';
@@ -174,3 +174,51 @@ describe('ModelStore', () => {
     }
   });
 });
+
+describe('ModelStore bootstrap keeps the provider model id, region and endpoint (GAP-174, M3)', () => {
+  const SEED = {
+    'claude-haiku-4-5': { provider: 'bedrock-converse', id: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', region: 'us-east-1', price: { inputPerMTok: 1, outputPerMTok: 5 } },
+    'test-big': { provider: 'openai', id: 'test-big', endpoint: 'http://mock-provider:8080', price: { inputPerMTok: 15, outputPerMTok: 75 } },
+  };
+
+  it('seeds every field the gatekeeper-egress needs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'models-seed-'));
+    try {
+      const store = new ModelStore(join(dir, 'catalog.json'), SEED);
+      const out = store.toEgressCatalog();
+      assert.deepEqual(out['claude-haiku-4-5'], { provider: 'bedrock-converse', id: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', region: 'us-east-1', price: { inputPerMTok: 1, outputPerMTok: 5 } });
+      assert.deepEqual(out['test-big'], { provider: 'openai', id: 'test-big', endpoint: 'http://mock-provider:8080', price: { inputPerMTok: 15, outputPerMTok: 75 } });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('repairs bootstrap entries an earlier seed stored without them, and leaves admitted models alone', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'models-resync-'));
+    const file = join(dir, 'catalog.json');
+    try {
+      // What prod held after #178: the friendly name as the Bedrock model id, no region.
+      writeFileSync(file, JSON.stringify({
+        version: 3,
+        defaultModel: 'claude-haiku-5-5',
+        models: {
+          'claude-haiku-4-5': { name: 'claude-haiku-4-5', provider: 'bedrock-converse', id: 'claude-haiku-4-5', price: { inputPerMTok: 1, outputPerMTok: 5 }, admittedAt: '2026-10-17T00:00:00Z', admittedBy: 'bootstrap' },
+          'claude-haiku-5-5': { name: 'claude-haiku-5-5', provider: 'anthropic', id: 'claude-haiku-5-5', vendorId: 'anthropic', admittedAt: '2026-10-17T00:00:00Z', admittedBy: 'cloudflare:admin' },
+        },
+        staged: [],
+      }));
+      const store = new ModelStore(file, SEED);
+      const out = store.toEgressCatalog();
+      assert.equal(out['claude-haiku-4-5'].id, 'us.anthropic.claude-haiku-4-5-20251001-v1:0');
+      assert.equal(out['claude-haiku-4-5'].region, 'us-east-1');
+      assert.deepEqual(out['claude-haiku-5-5'], { provider: 'anthropic', id: 'claude-haiku-5-5' });
+      assert.equal(store.getDefault(), 'claude-haiku-5-5');
+      assert.equal('test-big' in out, false, 'a seed never adds models to an existing store');
+      const persisted = JSON.parse(readFileSync(file, 'utf8')) as { models: Record<string, { id: string }> };
+      assert.equal(persisted.models['claude-haiku-4-5'].id, 'us.anthropic.claude-haiku-4-5-20251001-v1:0', 'the repair is persisted');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
