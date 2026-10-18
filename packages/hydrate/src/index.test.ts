@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pullMind, pushMind } from './index.js';
+import { NOTEBOOK_ROTATION, notebookEnv, pullMind, pullVolume, pushMind } from './index.js';
+import { serveVolumeRequests } from './shim.js';
+import { existsSync } from 'node:fs';
 
 describe('hydrate', () => {
   it('rehydrates after ephemeral disk is destroyed', () => {
@@ -29,7 +31,7 @@ describe('hydrate', () => {
     pullMind(gcsStore, 'test-agent', '/tmp/dest', syncMock);
     assert.deepEqual(executed[0], {
       cmd: 'gcloud',
-      args: ['storage', 'rsync', '-r', 'gs://my-bucket/test-agent', '/tmp/dest'],
+      args: ['storage', 'rsync', '-r', '-x', '^(volumes|.volume-requests)/', 'gs://my-bucket/test-agent', '/tmp/dest'],
     });
 
     const root = mkdtempSync(join(tmpdir(), 'gcs-push-'));
@@ -154,5 +156,92 @@ describe('platformEnv (mind sync is platform traffic, E6)', () => {
     const { platformEnv } = await import('./index.js');
     const env = platformEnv({ HTTPS_PROXY: 'http://run:t@gw', http_proxy: 'x', ALL_PROXY: 'y', AWS_REGION: 'us-east-1', MEMORY_DIR: '/m' });
     assert.deepEqual(env, { AWS_REGION: 'us-east-1', MEMORY_DIR: '/m' });
+  });
+});
+
+describe('AM3 notebooks rotate; closed volumes are cold storage', () => {
+  const file = (root: string, rel: string, body = 'x') => {
+    mkdirSync(join(root, rel, '..'), { recursive: true });
+    writeFileSync(join(root, rel), body);
+  };
+
+  it('AM3 the rotation policy is factory-wide: 10 MB or 90 days, told to every run', () => {
+    assert.deepEqual(NOTEBOOK_ROTATION, { maxBytes: 10 * 1024 * 1024, maxDays: 90 });
+    const env = notebookEnv();
+    assert.equal(env.FACTORY_NOTEBOOK_MAX_BYTES, String(10 * 1024 * 1024));
+    assert.equal(env.FACTORY_NOTEBOOK_MAX_DAYS, '90');
+    assert.equal(env.FACTORY_NOTEBOOK_VOLUMES_DIR, 'volumes');
+  });
+
+  it('AM3 a wake hydrates the current notebook only; a push keeps the closed volumes in the store', () => {
+    const store = mkdtempSync(join(tmpdir(), 'am3-store-'));
+    const work = mkdtempSync(join(tmpdir(), 'am3-work-'));
+    try {
+      file(store, 'agent/notebook.db', 'current');
+      file(store, 'agent/volumes/2026-07/notebook.db', 'old');
+      file(store, 'agent/.volume-requests/2026-07.done', '');
+      pullMind({ root: store }, 'agent', work);
+      assert.equal(existsSync(join(work, '.volume-requests')), false, 'request markers are not hydrated');
+      assert.equal(readFileSync(join(work, 'notebook.db'), 'utf8'), 'current');
+      assert.equal(existsSync(join(work, 'volumes')), false, 'closed volumes are not hydrated');
+
+      file(work, 'notebook.db', 'updated');
+      file(work, 'volumes/2026-10/notebook.db', 'just closed');
+      pushMind({ root: store }, 'agent', work);
+      assert.equal(readFileSync(join(store, 'agent/notebook.db'), 'utf8'), 'updated');
+      assert.equal(readFileSync(join(store, 'agent/volumes/2026-07/notebook.db'), 'utf8'), 'old', 'an older volume survives a push');
+      assert.equal(readFileSync(join(store, 'agent/volumes/2026-10/notebook.db'), 'utf8'), 'just closed', 'a newly closed volume is archived');
+    } finally {
+      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('AM3 object stores exclude volumes on pull and fetch one volume on request', () => {
+    const dest = mkdtempSync(join(tmpdir(), 'am3-dest-'));
+    const calls: string[][] = [];
+    // A sync that "copies" a volume when the prefix exists, and nothing (successfully) when it does not, like `s3 sync`.
+    const sync = (cmd: string, args: string[]) => {
+      calls.push([cmd, ...args]);
+      if (args[2]?.endsWith('/volumes/2026-07')) file(args[3], 'notebook.db', 'old');
+    };
+    try {
+      pullMind({ root: '', uri: 's3://bucket' }, 'agent', dest, sync);
+      pullVolume({ root: '', uri: 's3://bucket' }, 'agent', '2026-07', dest, sync);
+      assert.deepEqual(calls[0], ['aws', 's3', 'sync', 's3://bucket/agent', dest, '--exclude', 'volumes/*', '--exclude', '.volume-requests/*']);
+      assert.deepEqual(calls[1], ['aws', 's3', 'sync', 's3://bucket/agent/volumes/2026-07', join(dest, 'volumes/2026-07')]);
+      assert.throws(() => pullVolume({ root: '', uri: 's3://bucket' }, 'agent', 'never-closed', dest, sync), /no volume never-closed/, 'an empty sync is a missing volume, not a fetched one');
+      assert.equal(existsSync(join(dest, 'volumes/never-closed')), false, 'and leaves nothing behind');
+      assert.throws(() => pullVolume({ root: '', uri: 's3://bucket' }, 'agent', '../other-agent', dest, sync), /invalid volume name/);
+    } finally {
+      rmSync(dest, { recursive: true, force: true });
+    }
+  });
+
+  it('AM3 the shim answers a volume request with .done, and a bad one with .error', () => {
+    const store = mkdtempSync(join(tmpdir(), 'am3-store-'));
+    const work = mkdtempSync(join(tmpdir(), 'am3-work-'));
+    try {
+      file(store, 'agent/volumes/2026-07/notebook.db', 'old');
+      file(work, '.volume-requests/2026-07', '');
+      file(work, '.volume-requests/2026-07.error', 'stale from an earlier request');
+      file(work, '.volume-requests/missing', '');
+      serveVolumeRequests({ root: store }, 'agent', work);
+      assert.equal(existsSync(join(work, '.volume-requests/2026-07.error')), false, 'an old answer is cleared');
+      assert.equal(readFileSync(join(work, 'volumes/2026-07/notebook.db'), 'utf8'), 'old');
+      assert.ok(existsSync(join(work, '.volume-requests/2026-07.done')));
+      assert.match(readFileSync(join(work, '.volume-requests/missing.error'), 'utf8'), /no volume/);
+      assert.equal(existsSync(join(work, '.volume-requests/2026-07')), false, 'the request is consumed');
+      // Whatever the agent puts there, the shim keeps running.
+      rmSync(join(work, '.volume-requests'), { recursive: true, force: true });
+      writeFileSync(join(work, '.volume-requests'), 'not a folder');
+      assert.doesNotThrow(() => serveVolumeRequests({ root: store }, 'agent', work));
+      rmSync(join(work, '.volume-requests'), { force: true });
+      mkdirSync(join(work, '.volume-requests/odd-dir'), { recursive: true });
+      assert.doesNotThrow(() => serveVolumeRequests({ root: store }, 'agent', work));
+    } finally {
+      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
   });
 });

@@ -285,6 +285,15 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal(ctx.run.model, undefined);
     });
 
+    it('AM3 every run is told the factory-wide notebook rotation policy', async () => {
+      await wake('echo-agent');
+      const env = state.runtime.started.at(-1)?.runEnv ?? {};
+      assert.equal(env.FACTORY_NOTEBOOK_MAX_BYTES, String(10 * 1024 * 1024));
+      assert.equal(env.FACTORY_NOTEBOOK_MAX_DAYS, '90');
+      assert.equal(env.FACTORY_NOTEBOOK_VOLUMES_DIR, 'volumes');
+      assert.equal(env.FACTORY_VOLUME_REQUESTS_DIR, '.volume-requests');
+    });
+
     it('pre-flight never reads gatekeeper-held provider keys (S1, GAP-040)', async () => {
       const prevProviders = state.providers;
       const asked: string[] = [];

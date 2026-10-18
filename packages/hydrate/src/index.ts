@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 
 /** Directory stand-in or object storage (`uri: s3://bucket`, `uri: gcs://bucket`, `uri: gs://bucket`). */
 export type MindStore = {
@@ -9,6 +9,29 @@ export type MindStore = {
 };
 
 export type SyncExecutor = (cmd: string, args: string[]) => void;
+
+/**
+ * AM3 (the user's decision): a notebook rotates when it reaches 10 MB or 90 days, whichever comes first. Factory-wide
+ * policy, not per agent. The agent closes the current notebook as a read-only volume under `volumes/<name>/` of
+ * $MEMORY_DIR; the factory keeps closed volumes in cold storage (the same mind prefix), never hydrates them on wake, and
+ * fetches one when the agent asks by writing `<name>` into `.volume-requests/`. A push never deletes from the store, so a
+ * rotating agent keeps its notebook's file name (the new notebook replaces the old one in place).
+ */
+export const NOTEBOOK_ROTATION = { maxBytes: 10 * 1024 * 1024, maxDays: 90 } as const;
+export const VOLUMES_DIR = 'volumes';
+export const VOLUME_REQUESTS_DIR = '.volume-requests';
+const VOLUME_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const isVolumeName = (name: string): boolean => VOLUME_NAME.test(name) && !name.includes('..');
+
+/** AM3: what every run is told about notebook rotation and volumes. */
+export function notebookEnv(): Record<string, string> {
+  return {
+    FACTORY_NOTEBOOK_MAX_BYTES: String(NOTEBOOK_ROTATION.maxBytes),
+    FACTORY_NOTEBOOK_MAX_DAYS: String(NOTEBOOK_ROTATION.maxDays),
+    FACTORY_NOTEBOOK_VOLUMES_DIR: VOLUMES_DIR,
+    FACTORY_VOLUME_REQUESTS_DIR: VOLUME_REQUESTS_DIR,
+  };
+}
 
 const PROXY_VARS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy'];
 
@@ -55,7 +78,7 @@ function walkFiles(dir, base = dir) {
 }
 
 (async () => {
-  const [src, dst] = process.argv.slice(1);
+  const [src, dst, exclude] = process.argv.slice(1);
   const endpoint = (process.env.GCS_API_ENDPOINT || 'https://storage.googleapis.com').replace(/\\/$/, '');
   const token = await getToken();
   const headers = token ? { Authorization: 'Bearer ' + token } : {};
@@ -76,6 +99,7 @@ function walkFiles(dir, base = dir) {
         if (!name.startsWith(prefix) || name.endsWith('/')) continue;
         const rel = name.slice(prefix.length);
         if (!rel || rel.split('/').includes('..')) continue;
+        if (exclude && exclude.split(',').some((d) => rel === d || rel.startsWith(d + '/'))) continue;
         const dl = await fetch(endpoint + '/storage/v1/b/' + encodeURIComponent(bucket) + '/o/' + encodeURIComponent(name) + '?alt=media', { headers });
         if (!dl.ok) throw new Error('GCS download failed: ' + dl.status);
         const buf = Buffer.from(await dl.arrayBuffer());
@@ -108,15 +132,21 @@ function walkFiles(dir, base = dir) {
 });
 `;
 
+/** A mind or volume sync that has not finished in this long is abandoned (it blocks the shim while it runs). */
+const SYNC_TIMEOUT_MS = 10 * 60 * 1000;
+
 function defaultSync(cmd: string, args: string[]): void {
   const env = platformEnv(process.env);
   if (cmd === 'gcloud' && args[0] === 'storage' && args[1] === 'rsync') {
     const src = args[args.length - 2];
     const dst = args[args.length - 1];
-    execFileSync(process.execPath, ['-e', GCS_SYNC_SCRIPT, src, dst], { stdio: 'inherit', env });
+    // `-x ^<dir>/` excludes one top-level directory (AM3: closed volumes on pull).
+    const x = args.indexOf('-x');
+    const exclude = x >= 0 ? args[x + 1].replace(/^\^\(?/, '').replace(/\)?\/$/, '').split('|').join(',') : '';
+    execFileSync(process.execPath, ['-e', GCS_SYNC_SCRIPT, src, dst, ...(exclude ? [exclude] : [])], { stdio: 'inherit', env, timeout: SYNC_TIMEOUT_MS });
     return;
   }
-  execFileSync(cmd, args, { stdio: 'inherit', env });
+  execFileSync(cmd, args, { stdio: 'inherit', env, timeout: SYNC_TIMEOUT_MS });
 }
 
 function s3Prefix(store: MindStore, prefix: string): string {
@@ -129,11 +159,12 @@ function gcsPrefix(store: MindStore, prefix: string): string {
   return `${base}/${prefix}`;
 }
 
+/** Hydrates the current notebook. Closed volumes (AM3) stay in cold storage: they are never pulled on wake. */
 export function pullMind(store: MindStore, prefix: string, dest: string, sync: SyncExecutor = defaultSync): void {
   mkdirSync(dest, { recursive: true });
   if (store.uri?.startsWith('s3://')) {
     try {
-      sync('aws', ['s3', 'sync', s3Prefix(store, prefix), dest]);
+      sync('aws', ['s3', 'sync', s3Prefix(store, prefix), dest, '--exclude', `${VOLUMES_DIR}/*`, '--exclude', `${VOLUME_REQUESTS_DIR}/*`]);
     } catch {
       /* empty prefix on first wake */
     }
@@ -141,7 +172,7 @@ export function pullMind(store: MindStore, prefix: string, dest: string, sync: S
   }
   if (store.uri?.startsWith('gcs://') || store.uri?.startsWith('gs://')) {
     try {
-      sync('gcloud', ['storage', 'rsync', '-r', gcsPrefix(store, prefix), dest]);
+      sync('gcloud', ['storage', 'rsync', '-r', '-x', `^(${VOLUMES_DIR}|${VOLUME_REQUESTS_DIR})/`, gcsPrefix(store, prefix), dest]);
     } catch {
       /* empty prefix on first wake */
     }
@@ -152,7 +183,27 @@ export function pullMind(store: MindStore, prefix: string, dest: string, sync: S
     mkdirSync(src, { recursive: true });
     return;
   }
-  cpSync(src, dest, { recursive: true });
+  const skipped = [join(src, VOLUMES_DIR), join(src, VOLUME_REQUESTS_DIR)];
+  cpSync(src, dest, { recursive: true, filter: (from) => !skipped.some((d) => from === d || from.startsWith(d + sep)) });
+}
+
+/** AM3: fetch one closed volume from cold storage into `<dest>/volumes/<name>/`. */
+export function pullVolume(store: MindStore, prefix: string, name: string, dest: string, sync: SyncExecutor = defaultSync): void {
+  if (!isVolumeName(name)) throw new Error(`invalid volume name: ${name}`);
+  const target = join(dest, VOLUMES_DIR, name);
+  mkdirSync(target, { recursive: true });
+  const rel = `${prefix}/${VOLUMES_DIR}/${name}`;
+  if (store.uri?.startsWith('s3://')) sync('aws', ['s3', 'sync', s3Prefix(store, rel), target]);
+  else if (store.uri?.startsWith('gcs://') || store.uri?.startsWith('gs://')) sync('gcloud', ['storage', 'rsync', '-r', gcsPrefix(store, rel), target]);
+  else {
+    const src = join(store.root, rel);
+    if (existsSync(src)) cpSync(src, target, { recursive: true });
+  }
+  // A sync of a prefix that does not exist succeeds and copies nothing: that is a missing volume, not a fetched one.
+  if (readdirSync(target).length === 0) {
+    rmSync(target, { recursive: true, force: true });
+    throw new Error(`no volume ${name}`);
+  }
 }
 
 export function pushMind(store: MindStore, prefix: string, src: string, sync: SyncExecutor = defaultSync): void {
@@ -169,8 +220,9 @@ export function pushMind(store: MindStore, prefix: string, src: string, sync: Sy
   const dest = join(store.root, prefix);
   mkdirSync(dest, { recursive: true });
   if (!existsSync(src)) return;
-  // Clear contents, not the directory: in containers `dest` is often a mount point.
-  for (const name of readdirSync(dest)) rmSync(join(dest, name), { recursive: true, force: true });
+  // Clear contents, not the directory: in containers `dest` is often a mount point. Closed volumes (AM3) are cold
+  // storage: the run never hydrated them, so their absence locally is not a deletion.
+  for (const name of readdirSync(dest)) if (name !== VOLUMES_DIR) rmSync(join(dest, name), { recursive: true, force: true });
   cpSync(src, dest, { recursive: true });
 }
 

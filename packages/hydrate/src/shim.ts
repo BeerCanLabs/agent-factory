@@ -5,8 +5,9 @@
  *   hydrate mind -> point SDKs at the gatekeeper-egress -> heartbeat -> run worker -> replicate mind -> report crash.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
-import { pullMind, pushMind, type MindStore } from './index.js';
+import { readFileSync, writeFileSync, existsSync, rmSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { VOLUME_REQUESTS_DIR, isVolumeName, pullMind, pullVolume, pushMind, type MindStore } from './index.js';
 import { gatekeeperEgressEnv } from './gatekeeper-egress-env.js';
 
 export { gatekeeperEgressEnv };
@@ -63,6 +64,39 @@ function safePush(store: MindStore, prefix: string | undefined, dir: string) {
     pushMind(store, prefix, dir);
   } catch (err) {
     console.error(`[shim] mind push failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * AM3: fetch the closed volumes the agent asked for. The agent writes an empty file named after the volume into
+ * `$MEMORY_DIR/.volume-requests/`; the shim pulls the volume into `$MEMORY_DIR/volumes/<name>/` and answers with
+ * `<name>.done`, or `<name>.error` holding the reason. The agent never touches storage itself (platform traffic, E6).
+ */
+export function serveVolumeRequests(store: MindStore, prefix: string, dir: string, fetchVolume: typeof pullVolume = pullVolume): void {
+  // Whatever the agent left in the request folder, the shim keeps running (an exception here would end the run unsynced).
+  try {
+    const requests = join(dir, VOLUME_REQUESTS_DIR);
+    if (!existsSync(requests) || !statSync(requests).isDirectory()) return;
+    for (const name of readdirSync(requests)) {
+      if (name.endsWith('.done') || name.endsWith('.error')) continue;
+      const at = join(requests, name);
+      try {
+        rmSync(`${at}.done`, { force: true });
+        rmSync(`${at}.error`, { force: true });
+        if (!isVolumeName(name)) throw new Error('invalid volume name');
+        fetchVolume(store, prefix, name, dir);
+        writeFileSync(`${at}.done`, '');
+      } catch (err) {
+        try {
+          writeFileSync(`${at}.error`, err instanceof Error ? err.message : String(err));
+        } catch {}
+      }
+      try {
+        rmSync(at, { recursive: true, force: true });
+      } catch {}
+    }
+  } catch (err) {
+    console.error(`[shim] volume requests: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -129,6 +163,7 @@ export async function main(argv: string[]): Promise<number> {
   const hb = setInterval(beat, beatEvery);
   const syncEvery = Number(process.env.FACTORY_MIND_SYNC_SECONDS || '60') * 1000;
   const sync = usesStore ? setInterval(() => safePush(store, prefix, dir), syncEvery) : undefined;
+  const volumes = usesStore && prefix ? setInterval(() => serveVolumeRequests(store, prefix, dir), 1000) : undefined;
 
   const code: number = await new Promise((resolve) => {
     child.on('exit', (c, signal) => resolve(c ?? (signal ? 128 : 1)));
@@ -139,6 +174,7 @@ export async function main(argv: string[]): Promise<number> {
   });
   clearInterval(hb);
   if (sync) clearInterval(sync);
+  if (volumes) clearInterval(volumes);
   if (usesStore) safePush(store, prefix, dir);
 
   if (code === 0) {

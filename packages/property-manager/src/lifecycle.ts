@@ -7,7 +7,7 @@
  * import the control plane; `FactoryState` is assignable to it. The HTTP handlers that call these functions stay in
  * `control-plane`, where the Bouncer's privileges and the Gatekeeper's run-token rule meet a request.
  */
-import { gatekeeperEgressEnv } from '@beercanlabs/factory-hydrate';
+import { gatekeeperEgressEnv, notebookEnv } from '@beercanlabs/factory-hydrate';
 import { checkStanding, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
 import type { AuthenticatedCaller } from '@beercanlabs/factory-bouncer';
 import type { FactoryMetrics } from '@beercanlabs/factory-inspector';
@@ -351,6 +351,8 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
     FACTORY_RUN_TOKEN: runToken,
     ...(state.publicUrl ? { FACTORY_URL: state.publicUrl } : {}),
     ...(effectiveModel ? { FACTORY_MODEL: effectiveModel } : {}),
+    // AM3: the factory-wide notebook rotation policy and where closed volumes go.
+    ...notebookEnv(),
     ...(state.gatekeeperEgressUrl ? { FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl } : {}),
     ...gatekeeperEgressEnv({
       FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl,
