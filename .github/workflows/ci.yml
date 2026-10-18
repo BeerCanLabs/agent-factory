@@ -38,8 +38,8 @@ jobs:
       # Build every production image from this clean checkout, exactly as a deploy does, before anything
       # (npm install, builds) can leave artifacts behind. A deploy must never be the first place one fails.
       # One at a time: building them concurrently was no faster on the runner (GAP-172).
-      # Layers come from the nightly cache when they still match; only the nightly run on main writes it, so a
-      # pull request never fills the cache and a stale layer is at most a day old.
+      # Layers come from the nightly cache when they still match. The nightly run on main builds from scratch
+      # (no cache, fresh base images) and writes it, so a pull request never fills it and a layer is at most a day old.
       - name: Build production images
         env:
           WRITE_CACHE: ${{ github.event_name == 'schedule' }}
@@ -50,10 +50,12 @@ jobs:
                       runtimes/generic/Dockerfile:examples/llm-summarizer; do
             f="${spec%%:*}"; c="${spec#*:}"
             scope="$(echo "$f-$c" | tr '/:.' '---')"
-            to=(); [ "$WRITE_CACHE" = true ] && to=(--cache-to "type=gha,mode=max,scope=$scope")
+            # Nightly: build from scratch with fresh base images and write the result; otherwise: read only.
+            if [ "$WRITE_CACHE" = true ]; then cache=(--no-cache --pull --cache-to "type=gha,mode=max,scope=$scope")
+            else cache=(--cache-from "type=gha,scope=$scope"); fi
             echo "::group::$f ${c}"
             docker buildx build --builder "${{ steps.buildx.outputs.name }}" --load --platform linux/amd64 -f "$f" \
-              ${c:+--build-arg CARTRIDGE=$c} --cache-from "type=gha,scope=$scope" "${to[@]}" .
+              ${c:+--build-arg CARTRIDGE=$c} "${cache[@]}" .
             echo "::endgroup::"
           done
       - uses: actions/setup-node@v4
