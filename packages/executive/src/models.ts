@@ -7,8 +7,8 @@ import { awsCredentialsFromEnv, signV4, type AwsCredentials } from './sigv4.js';
  * serves each (`FACTORY_MODEL_CATALOG`); an adapter per provider translates to its native API.
  */
 
-/** One offered model. `provider` selects the adapter; `id`/`region` are provider-specific; `endpoint` is optional custom base URL. */
-export type CatalogEntry = { provider: string; id: string; endpoint?: string; region?: string; price?: Price };
+/** One offered model. `provider` selects the adapter; `id`/`region` are provider-specific; `endpoint` is optional custom base URL; `secret` is optional platform credential name. */
+export type CatalogEntry = { provider: string; id: string; endpoint?: string; region?: string; secret?: string; price?: Price };
 export type ModelCatalog = Record<string, CatalogEntry>;
 
 export type ToolCall = {
@@ -68,6 +68,7 @@ export function parseModelCatalog(json: string | undefined): ModelCatalog {
       provider: e.provider,
       id: e.id,
       ...(typeof (e as any).endpoint === 'string' ? { endpoint: (e as any).endpoint } : {}),
+      ...(typeof (e as any).secret === 'string' ? { secret: (e as any).secret } : {}),
       ...(e.region ? { region: e.region } : {}),
       ...(p ? { price: p } : {}),
     };
@@ -343,7 +344,7 @@ export async function gcpAccessTokenFromEnv(doFetch: typeof fetch = fetch): Prom
   return data.access_token;
 }
 
-async function resolveProviderSecret(secretName: string, doFetch: typeof fetch = fetch): Promise<string> {
+export async function resolveProviderSecret(secretName: string, doFetch: typeof fetch = fetch): Promise<string> {
   const fromEnv = process.env[secretName] ?? (secretName === 'GEMINI_API_KEY' ? process.env.GOOGLE_API_KEY : undefined);
   if (fromEnv) return fromEnv.trim();
 
@@ -714,19 +715,21 @@ export type ApiKeyAdapterOptions = {
   chatPath?: string;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  resolveSecret?: (secretName: string) => Promise<string>;
 };
 
 export function anthropicMessages(opts: ApiKeyAdapterOptions = {}): ModelAdapter {
   const doFetch = opts.fetch ?? fetch;
   const secretName = opts.secretName ?? 'ANTHROPIC_API_KEY';
-  const getKey = opts.apiKey ?? (() => resolveProviderSecret(secretName, doFetch));
+  const defaultGetKey = opts.apiKey ?? (opts.resolveSecret ? () => opts.resolveSecret!(secretName) : () => resolveProviderSecret(secretName, doFetch));
   const base = (opts.endpoint ?? 'https://api.anthropic.com').replace(/\/$/, '');
 
   return {
     async complete(entry, req) {
+      const targetSecret = entry.secret ?? secretName;
       let key: string;
       try {
-        key = await getKey();
+        key = opts.resolveSecret ? await opts.resolveSecret(targetSecret) : await defaultGetKey();
       } catch (err) {
         console.error(`[gatekeeper-egress] anthropic credentials: ${err instanceof Error ? err.message : String(err)}`);
         throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no provider credentials');
@@ -766,17 +769,18 @@ export function anthropicMessages(opts: ApiKeyAdapterOptions = {}): ModelAdapter
 export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter {
   const doFetch = opts.fetch ?? fetch;
   const secretName = opts.secretName ?? 'OPENAI_API_KEY';
-  const getKey = opts.apiKey ?? (() => resolveProviderSecret(secretName, doFetch));
+  const defaultGetKey = opts.apiKey ?? (opts.resolveSecret ? () => opts.resolveSecret!(secretName) : () => resolveProviderSecret(secretName, doFetch));
   const defaultBase = (opts.endpoint ?? 'https://api.openai.com').replace(/\/$/, '');
   const chatPath = opts.chatPath ?? '/v1/chat/completions';
 
   return {
     async complete(entry, req) {
+      const targetSecret = entry.secret ?? secretName;
       let key: string;
       try {
-        key = await getKey();
+        key = opts.resolveSecret ? await opts.resolveSecret(targetSecret) : await defaultGetKey();
       } catch (err) {
-        console.error(`[gatekeeper-egress] ${secretName} credentials: ${err instanceof Error ? err.message : String(err)}`);
+        console.error(`[gatekeeper-egress] ${targetSecret} credentials: ${err instanceof Error ? err.message : String(err)}`);
         throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no provider credentials');
       }
       const base = (entry.endpoint ?? defaultBase).replace(/\/$/, '');
@@ -863,17 +867,38 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
   };
 }
 
+export type DefaultModelAdaptersOptions = {
+  resolveSecret?: (secretName: string) => Promise<string>;
+  fetch?: typeof fetch;
+};
+
 /** Adapters by catalog `provider`. Supports AWS Bedrock, GCP Vertex AI (Gemini & Claude), and API-key providers (Anthropic, OpenAI, xAI, Google/Gemini). */
-export function defaultModelAdapters(): Record<string, ModelAdapter> {
-  const gemini = vertexGemini();
-  const vClaude = vertexAnthropic();
-  const anthropic = anthropicMessages();
-  const openai = openAiCompatible({ secretName: 'OPENAI_API_KEY', endpoint: 'https://api.openai.com' });
-  const xai = openAiCompatible({ secretName: 'XAI_API_KEY', endpoint: 'https://api.x.ai' });
+export function defaultModelAdapters(opts: DefaultModelAdaptersOptions = {}): Record<string, ModelAdapter> {
+  const doFetch = opts.fetch ?? fetch;
+  const gemini = vertexGemini({ fetch: doFetch });
+  const vClaude = vertexAnthropic({ fetch: doFetch });
+  const anthropic = anthropicMessages({
+    fetch: doFetch,
+    resolveSecret: opts.resolveSecret,
+  });
+  const openai = openAiCompatible({
+    secretName: 'OPENAI_API_KEY',
+    endpoint: 'https://api.openai.com',
+    fetch: doFetch,
+    resolveSecret: opts.resolveSecret,
+  });
+  const xai = openAiCompatible({
+    secretName: 'XAI_API_KEY',
+    endpoint: 'https://api.x.ai',
+    fetch: doFetch,
+    resolveSecret: opts.resolveSecret,
+  });
   const directGemini = openAiCompatible({
     secretName: 'GEMINI_API_KEY',
     endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai',
     chatPath: '/chat/completions',
+    fetch: doFetch,
+    resolveSecret: opts.resolveSecret,
   });
   return {
     'bedrock-converse': bedrockConverse(),

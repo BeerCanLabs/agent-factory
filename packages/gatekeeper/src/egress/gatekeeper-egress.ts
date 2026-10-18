@@ -9,7 +9,7 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { SseMeter, checkModel, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
+import { SseMeter, checkModel, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
 /** The factory's default model when a policy names none (M2): Claude Haiku 4.5, unless operations configure another. */
@@ -389,7 +389,29 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   /** Keymaster access tokens by agent × connection, until 60s before expiry. */
   const connCache = new Map<string, { token: string; expiresAtMs: number }>();
   const secretValues = new Set<string>();
-  const modelAdapters = opts.modelAdapters ?? defaultModelAdapters();
+  const resolveSecret = async (secretName: string): Promise<string> => {
+    const fromEnv = (process.env[secretName] ?? (secretName === 'GEMINI_API_KEY' ? process.env.GOOGLE_API_KEY : undefined))?.trim();
+    if (fromEnv) {
+      secretValues.add(fromEnv);
+      return fromEnv;
+    }
+    if (opts.providers && opts.providers.length > 0) {
+      try {
+        const bound = await bindSecrets([secretName], opts.providers);
+        if (bound.ok && bound.env[secretName]?.trim()) {
+          const val = bound.env[secretName].trim();
+          secretValues.add(val);
+          return val;
+        }
+      } catch {
+        // Fall through to ambient secret resolution
+      }
+    }
+    const ambient = await resolveProviderSecret(secretName);
+    if (ambient) secretValues.add(ambient);
+    return ambient;
+  };
+  const modelAdapters = opts.modelAdapters ?? defaultModelAdapters({ resolveSecret, fetch: opts.discoverFetch });
   const progress = opts.control.progress ? new ProgressEmitter((events) => opts.control.progress!(events), opts.progress) : undefined;
   /** The progress record of the call each response answers (§6.5). */
   const calls = new WeakMap<http.ServerResponse, ProgressCall>();

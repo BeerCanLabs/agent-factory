@@ -329,4 +329,47 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
     assert.equal(res.status, 200);
     assert.deepEqual(res.json().data.map((m: { id: string }) => m.id), ['claude-haiku-4-5']);
   });
+
+  it('resolves provider credentials from SecretProvider for default adapters (GAP-162, K5)', async () => {
+    let capturedKey = '';
+    const memProviders = [{
+      name: 'mem',
+      async get(name: string) { return name === 'ANTHROPIC_API_KEY' ? 'sk-ant-from-provider-123' : undefined; },
+      async put() {},
+      async has() { return false; },
+      async present() { return new Set<string>(); },
+    }];
+
+    const server = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: memProviders,
+      contextTtlMs: 0,
+      modelCatalog: parseModelCatalog(JSON.stringify({
+        'claude-haiku-5-5': { provider: 'anthropic', id: 'claude-haiku-5-5', price: { inputPerMTok: 1, outputPerMTok: 5 } },
+      })),
+      discoverFetch: async (url, init) => {
+        capturedKey = new Headers(init?.headers).get('x-api-key') ?? '';
+        return new Response(JSON.stringify({
+          content: [{ type: 'text', text: 'Hello from Anthropic via provider key!' }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 10, output_tokens: 4 },
+        }), { status: 200 });
+      },
+    });
+
+    const sPort = await listen(server);
+    try {
+      ctx.policy = policy({ models: ['claude-haiku-5-5'] });
+      const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('claude-haiku-5-5') });
+      assert.equal(res.status, 200);
+      assert.equal(capturedKey, 'sk-ant-from-provider-123');
+      const body = res.json();
+      assert.equal(body.choices[0].message.content, 'Hello from Anthropic via provider key!');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
 });
