@@ -348,6 +348,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   let activeCatalog: ModelCatalog = { ...(opts.modelCatalog ?? {}) };
   let activeDefaultModel: string = opts.defaultModel ?? DEFAULT_MODEL;
   let lastCatalogRefresh = 0;
+  /** A catalog fetch has succeeded (GAP-171). A failed boot fetch, e.g. while the control plane restarts, does not count. */
+  let catalogLoaded = false;
   const CATALOG_REFRESH_INTERVAL_MS = opts.routeRefreshIntervalMs ?? 10_000;
   let catalogInflight: Promise<void> | undefined;
 
@@ -373,6 +375,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           }
         }
         activeCatalog = valid;
+        catalogLoaded = true;
         if ('default' in remote && typeof (remote as any).default === 'string' && (remote as any).default) {
           activeDefaultModel = (remote as any).default;
         }
@@ -783,8 +786,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
    * with its own credentials and never forwards the run token.
    */
   async function handleModels(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
-    // GAP-170: wait only for the first load; afterwards serve the last catalog and refresh in the background (LG1).
-    if (lastCatalogRefresh === 0) await ensureCatalog();
+    // GAP-170/171: wait until a catalog has loaded; afterwards serve the last catalog and refresh in the background (LG1).
+    if (!catalogLoaded) await ensureCatalog();
     else void ensureCatalog();
     const catalog = activeCatalog;
     const path = rest.split('?')[0].replace(/\/$/, '');
