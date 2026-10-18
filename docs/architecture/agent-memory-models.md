@@ -1,7 +1,7 @@
 # Agent Memory Architecture Guide: Archetypes, The Storage Triad, and State Isolation
 
 > **BeerCanLabs Agent Factory — Architectural Reference Guide**  
-> **Authority:** Aligned with [DESIGN_AUTHORITY.md](../../DESIGN_AUTHORITY.md) (§6.6 "The Notebook & Safe", §6.3 Perimeter Invariants)  
+> **Authority:** Aligned with [DESIGN_AUTHORITY.md](../../DESIGN_AUTHORITY.md) (§6.6 "The Notebook & Safe" and AM1–AM5, §6.3 Invocation & Runtime Semantics)  
 > **Audience:** Cartridge Developers, Platform Architects, Submind Engineers
 
 ---
@@ -10,84 +10,56 @@
 
 In the BeerCanLabs Agent Factory, agent state is not an afterthought, nor is it a monolithic database shared across the fleet. Memory is a carefully structured, multi-tier subsystem engineered around three non-negotiable principles:
 
-1. **The Cartridge vs. Factory Boundary ("The Donna Test"):** Cartridges (the employees) own cognitive reasoning, prompts, personal workflows, and domain-specific knowledge models. The Factory provides the utilities (compute isolation, state hydration, model routing, perimeter egress, secret redaction).
+1. **The Cartridge vs. Factory Boundary:** Cartridges (the employees) own cognitive reasoning, prompts, personal workflows, and domain-specific knowledge models. The Factory provides the utilities (compute isolation, state hydration, model routing, perimeter egress, secret redaction).
 2. **Zero Cloud SDKs in Cartridges:** Cartridges strictly interact with local embedded filesystems (SQLite) located in `$MEMORY_DIR`. They **never** import cloud storage SDKs (`boto3`, `@google-cloud/storage`, Azure Blob SDK), never manage cloud credentials, and have no awareness of S3 buckets or remote storage URIs.
 3. **The Single-Writer Local File Standard:** To preserve fast container startup, eliminate distributed lock contention, and enable clean state synchronization, each agent instance operates on a dedicated local SQLite database checkpointed cleanly to cloud object storage by the Factory shim (`packages/hydrate/src/shim.ts`).
 
-This guide details the three canonical agent archetypes, codifies the **Storage Triad** (Whiteboard vs. Notebook vs. Safe), eliminates the **"Decoder Ring" anti-pattern** in favor of deterministic LLM tool calling, and establishes enterprise patterns for **Multi-User Isolation & Entitlements**.
+This guide details the three agent archetypes, how conversations belong to a person rather than a channel, codifies the **Storage Triad** (Whiteboard vs. Notebook vs. Safe), eliminates the **"Decoder Ring" anti-pattern** in favor of deterministic LLM tool calling, and establishes enterprise patterns for **Multi-User Isolation & Entitlements**.
 
 ---
 
-## 2. The 3 Agent Archetypes
+## 2. The 3 Agent Archetypes (AM1)
 
-Different cognitive tasks demand fundamentally distinct memory models. The Factory formalizes three canonical agent memory archetypes: **Ephemeral**, **Episodic**, and **Workspace**.
+Every agent declares exactly one archetype in `cartridge.yaml`, as `memory.archetype` (or under `persistence`, the alias of `memory`). The declaration is required: validation refuses a cartridge without one, and the admission build refuses a commit that declares none. Changing archetype is a commit and a redeploy. The pre-AM1 names `ephemeral`, `episodic` and `workspace` are accepted for one release as aliases of the three below.
 
 ```mermaid
 flowchart TD
-    subgraph Ephemeral["Ephemeral Archetype (Stateless / Knowledge)"]
+    subgraph PB["Purpose-Built (answers anyone)"]
         direction TB
-        T1_In["Inbound Query"] --> T1_WB["In-Memory Whiteboard (RAM)"]
-        T1_WB --> T1_RAG["Stateless RAG / Docs Retrieval"]
-        T1_RAG --> T1_Out["Direct Answer"]
-        T1_Sync["Zero S3 State Footprint"]
+        PB_In["Turn from any person"] --> PB_WB["Live session per person (in memory)"]
+        PB_WB --> PB_Tools["Tools: knowledge, systems"]
+        PB_Tools --> PB_Out["Answer; nothing kept after the run"]
     end
 
-    subgraph Episodic["Episodic Archetype (Personal / Principal)"]
+    subgraph PA["Personal Assistant (a primary person)"]
         direction TB
-        T2_In["Inbound Turn (Principal / Guest)"] --> T2_WB["Sliding-Window Whiteboard"]
-        T2_WB --> T2_NB["User-Partitioned SQLite + FTS5"]
-        T2_NB <--> T2_Safe["S3 Safe Hydration (Shim Sync)"]
-        T2_NB --> T2_Intents["Session Management (/new, /resume)"]
+        PA_In["Turn from the primary or another person"] --> PA_NB["Notebook: conversations per person"]
+        PA_NB --> PA_Named["Named, searchable, resumable conversations"]
+        PA_NB <--> PA_Safe["Safe (current notebook hydrated; closed volumes in cold storage)"]
     end
 
-    subgraph Workspace["Workspace Archetype (Project / Coding Worker)"]
+    subgraph TM["Team Member (primary functions, many people)"]
         direction TB
-        T3_In["Job / Issue / Webhook"] --> T3_Scratch["Project-Scoped Task Cache & AST Symbols"]
-        T3_Scratch --> T3_Queue["Task Execution & Checkpoints"]
-        T3_Queue --> T3_SoR["Git / Issue Tracker (System of Record)"]
+        TM_In["Turn from any teammate"] --> TM_NB["Notebook: each person's conversations are their own"]
+        TM_NB --> TM_Work["Skills and work for each person"]
+        TM_NB <--> TM_Safe["Safe"]
     end
 ```
 
-### 2.1 Ephemeral Archetype
-* **Core Mental Model:** The Reference Librarian / Search Kiosk.
-* **Purpose:** Single-shot query answering, documentation lookup, compliance checks, or stateless webhook triage.
-* **Memory Lifecycle:**
-  * **Whiteboard Only:** The agent maintains state only within transient process memory (in-RAM prompt buffer). Once the response is emitted, the execution container terminates without saving conversational history.
-  * **Stateless Retrieval:** Knowledge is retrieved on demand via tools (RAG search, vector index query, or external documentation endpoints routed via the `gatekeeper-egress`).
-  * **Zero SQLite Footprint:** In `cartridge.yaml`, `memory.archetype` is set to `ephemeral`. The agent writes no on-disk database files in `$MEMORY_DIR`, so there is no local state to persist. The Factory does not yet read this declaration (or `persistence.enabled`): if the deployment configures a memory store, the shim still pulls and pushes `$MEMORY_DIR`, which for an ephemeral agent holds nothing the agent wrote. A real bypass needs the Factory to honor the declaration (GAP-116).
-* **Operational Characteristics:**
-  * **Cold Start:** Fast startup since no database tables are created or restored.
-  * **Concurrency:** Highly scalable statelessly with zero database lock contention.
-  * **Cost:** Minimal disk and zero persistent object storage footprint.
-* **Reference Agents:** `SM-nick` (research/query mode), documentation Q&A cartridges, automated security triage bots.
+### 2.1 Purpose-Built
+* **Mental model:** a specialist at a service desk. It answers anyone's questions about one domain: company knowledge, client website support, the household's systems.
+* **Memory:** a rolling window of the live session, held in memory, so follow-up questions work. Nothing persists after the session: a later conversation starts fresh.
+* **Conversation requests (AM5):** it keeps no conversations, so it answers with empty lists.
 
-### 2.2 Episodic Archetype
-* **Core Mental Model:** The Trusted Executive Partner & Thought Collaborator.
-* **Purpose:** Continuous, multi-session collaborative work with an executive Principal (e.g., Dale) and designated collaborators. Manages drafts, editorial preferences, project context, and conversational continuity across days or months.
-* **Memory Lifecycle:**
-  * **Sliding-Window Whiteboard:** Assembles working memory dynamically per turn with character and message budgets (e.g., 20 messages / 24,000 characters). When older context falls outside the window, dynamic awareness banners alert the agent that historical context can be retrieved.
-  * **Episodic SQLite Notebook with FTS5:** Local database (`<agent>_state.db`) in `$MEMORY_DIR` indexing conversation turns with SQLite Full-Text Search (FTS5 BM25 with LIKE fallback).
-  * **S3 Safe Hydration:** Fully integrated with the Factory shim (`packages/hydrate/src/shim.ts`). Hydrated from cloud storage on container boot, checkpointed with `PRAGMA wal_checkpoint(TRUNCATE)` on container sleep, and synced back to S3.
-  * **Session Intents:** Built-in protocol for managing sessions: starting fresh (`/new`), naming sessions (`/name`), switching active contexts (`/resume`), listing history (`/sessions`), and exporting transcripts (`/export`).
-  * **Rolling Retention Pruning:** Raw chat turns older than a retention threshold (e.g., 14 to 30 days) are pruned on wake, while permanent assets (drafts, preferences, facts) persist indefinitely.
-* **Operational Characteristics:**
-  * **Single-Writer Safety:** Container execution is bound to a single active replica per agent to prevent write conflicts.
-  * **Compact Storage:** Aggressive pruning keeps the local SQLite notebook under 10MB, ensuring fast S3 hydration.
-* **Reference Agents:** `SM-castle` (Editorial Partner), `SM-donna` (Executive Assistant), `SM-higgins` (Chief of Staff).
+### 2.2 Personal Assistant
+* **Mental model:** an executive assistant. It has a primary person and keeps a detailed understanding of them. Other people may talk to it about the primary.
+* **Memory:** a notebook of conversations kept per person (never per channel). Conversations can be named, found and resumed (AM4). What the agent knows about people and things is lasting knowledge that carries into every new notebook.
+* **Entitlements:** what each person may do is the cartridge's (its roles and tools, checked against the verified caller); the factory supplies who is speaking, not the policy.
 
-### 2.3 Workspace Archetype
-* **Core Mental Model:** The Dedicated Engineering Contractor.
-* **Purpose:** Autonomous software engineering, issue triage, automated refactoring, code reviews, and CI failure resolution.
-* **Memory Lifecycle:**
-  * **Project & Task Workspace Memory:** Rather than maintaining user conversational chat turns, the workspace engine (`memory/workspace.py`) maintains dedicated project-scoped and task-scoped state caches: AST symbols, active git branches/diffs, test execution logs, and checkpoint key-values.
-  * **Project-Level Isolation:** To prevent cross-project memory contamination, task and state records are partitioned strictly by project ID (or separate per-project database files, `workspace_{project_id}.db`). The model is never permitted to supply or alter the project scope in tool calls. The project id the runner binds comes from the run's input, which the caller wrote (see 5.2): it separates projects but does not protect one from another until the Factory passes a verified scope (GAP-116), and all projects' files still travel together (see 3.4).
-  * **Git & Issue Trackers as System of Record (SoR):** The coding worker does **not** rely on an internal SQLite database as its permanent multi-team source of truth. Git branches, commits, pull requests, and ticketing systems (GitHub Issues, Linear, Jira) are the definitive System of Record.
-  * **Execution & Concurrency Model:** Under the Factory's current Landlord architecture, invocations for a single agent queue sequentially behind an active run (`activeRun` check in `createRun`, returning 202 when busy). The workspace memory archetype is engineered with task-isolated state caches so that as the Landlord roadmap evolves toward task-partitioned concurrency, workspace tasks can execute in parallel across tasks without database deadlocks.
-  * **Ephemeral Task Reporting:** The worker records execution progress to `/tmp/factory-result.json`, commits and pushes its code changes via the `gatekeeper-egress`, and terminates cleanly.
-* **Operational Characteristics:**
-  * **Task Isolation:** State is scoped strictly to the current project and task ID.
-  * **Zero Long-Term Lock Contention:** Eliminates distributed database deadlocks by delegating durable multi-user state concurrency to Git.
-* **Reference Agents:** `SM-switch` (Autonomous Software Engineer), `SM-archie` (Head of Engineering & Infrastructure Architect), `SM-geordi` (DevOps / SRE).
+### 2.3 Team Member
+* **Mental model:** a colleague with primary functions (building, planning, reviewing) who works for several people and has no primary person.
+* **Memory:** as for a personal assistant, each person's conversations are kept separately and can be named, found and resumed, so a teammate returns to their work without losing context.
+* **Shared project memory** (the conversations a team has together on GitHub, Jira or a channel) is an open decision (GAP-180). Until it is decided, a team member keeps private conversations per person, and the project's own systems (git, issue trackers) remain its system of record.
 
 ---
 
@@ -107,12 +79,12 @@ sequenceDiagram
     GK->>Shim: Wake Agent Container (with Run Token & Ingress Payload)
     Note over Shim,S3: Stage 1: Safe Hydration
     Shim->>S3: pullMind(MEMORY_STORE_URI, MEMORY_PREFIX)
-    S3-->>Shim: Stream snapshot to $MEMORY_DIR
+    S3-->>Shim: Current notebook to $MEMORY_DIR (closed volumes stay in cold storage)
     
     Note over Shim,FS: Stage 2: Notebook Initialization
     Shim->>FS: Launch Cartridge Process
     FS->>FS: PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
-    FS->>FS: Prune turns older than 14-30 days
+    FS->>FS: Rotate the notebook if it reached 10 MB or 90 days (AM3)
     
     Note over FS,LLM: Stage 3: Whiteboard Assembly
     FS->>LLM: load_whiteboard(session_id, budget=24KB)
@@ -138,7 +110,7 @@ sequenceDiagram
 | **Cognitive Role** | Working Memory (Immediate Attention) | Episodic & Entity Memory (Desk Drawer) | Archive & Disaster Recovery (Building Safe) |
 | **Lifespan** | Single conversational turn or reasoning step | Container execution lifecycle | Permanent / Enterprise Retention |
 | **Access Latency** | Instantaneous (within inference forward pass) | Sub-millisecond (Local NVMe/SSD SQLite) | Network-bound (100ms–1s pull/push) |
-| **Capacity Limit** | Model Context Budget (e.g., 20 turns / 24KB) | Compact single file (<10MB target) | Multi-gigabyte scalable |
+| **Capacity Limit** | Model Context Budget (e.g., 20 turns / 24KB) | Current notebook up to 10 MB or 90 days, then rotated | Multi-gigabyte scalable (closed volumes) |
 | **Engine / Format** | Tokenized Prompt Array (`messages: [...]`) | SQLite 3 (`WAL` mode + FTS5 BM25) | Compressed directory / Tarball / Object Prefix |
 | **Ownership** | Cartridge Reasoning Loop | Cartridge Application Process | Factory Shim (`packages/hydrate/src/shim.ts`) |
 | **Cloud SDKs Needed** | None | None | Factory platform only (Never in cartridge) |
@@ -168,8 +140,8 @@ The Notebook is the agent's private, persistent SQLite database located at `$MEM
   PRAGMA wal_checkpoint(TRUNCATE);
   ```
   This collapses the `-wal` and `-shm` write-ahead log files back into the primary `.db` file. This guarantees that when the Factory shim replicates the directory to S3, it copies a single, consistent, uncorrupted database without dangling file lock artifacts.
-* **Rolling Pruning on Wake:**
-  On boot, the cartridge prunes raw conversation turns older than the configured retention policy (typically 14–30 days). Permanent records (saved drafts, publishing logs, learned user preferences) are never pruned.
+* **Rotation, never pruning (AM3):**
+  Nothing in the notebook is forgotten; the notebook rotates instead. Every run is told the factory-wide limits (`FACTORY_NOTEBOOK_MAX_BYTES`, 10 MB, and `FACTORY_NOTEBOOK_MAX_DAYS`, 90 days, whichever comes first). When the current notebook reaches one, the agent closes it as a read-only volume under `$MEMORY_DIR/volumes/<name>/`. It then starts a new notebook with the **same file name**, carrying forward lasting knowledge, each person's conversations with their recent turns, and an index of the closed volumes. Older turns stay in the volume and are found by search.
 
 ### 3.4 Tier 3: The Safe (Cloud Storage Hydration)
 The Safe represents the remote object storage bucket backing the agent's memory.
@@ -178,7 +150,19 @@ The Safe represents the remote object storage bucket backing the agent's memory.
   * **Periodic Sync:** Flushes local state to S3 periodically (default every 60 seconds) as a safeguard against unexpected host eviction. Note: Periodic background synchronization captures filesystem snapshots while the database may be in flight; deterministic transactional consistency is established on clean container shutdown after `PRAGMA wal_checkpoint(TRUNCATE)`.
   * **On Sleep:** Checkpoints local state and syncs the directory back to S3 upon exit.
 * **Security & Isolation:** Cartridges never possess IAM credentials for object storage. All cloud authorization is handled exclusively by the Factory platform perimeter.
-* **What the Factory does not yet do (GAP-116):** the shim hydrates one directory per agent from one storage prefix, set when the agent is deployed. It does not read `memory.archetype`, `retentionDays`, `maxMessages`, `maxChars` or `persistence.enabled`; those are declared in the contract and enforced only by the cartridge's own code. Every file in `$MEMORY_DIR` is pulled and pushed together, so a run loads and writes back every project's database, not only the one it works on.
+* **Closed volumes are cold storage (AM3):** the shim never hydrates `volumes/` on wake, and no push removes them (object-store pushes never delete; the directory store replaces everything except `volumes/`), so archived volumes survive. When the agent needs a closed volume (for example, to search it), it creates an empty file named after the volume in `$MEMORY_DIR/.volume-requests/`. The shim fetches the volume into `$MEMORY_DIR/volumes/<name>/` and answers with `<name>.done`, or `<name>.error` holding the reason. The agent never touches storage itself.
+* **What the Factory does not yet do (GAP-116):** the shim hydrates one directory per agent from one storage prefix, set when the agent is deployed. It does not change what it hydrates by `memory.archetype`, and it does not read `retentionDays`, `maxMessages`, `maxChars` or `persistence.enabled`; the cartridge enforces those itself (`retentionDays` is superseded by rotation for conversations).
+
+---
+
+## 3A. Conversations Belong to a Person, Not a Channel (AM2, AM4, AM5)
+
+The notebook is the agent's record. Channels (Discord, the console, Slack) are only routes.
+
+* **Who is speaking:** a turn from a person carries `caller`, which the factory verified (a console turn, or a message from a linked Discord identity). `caller.actor` is the person's stable identity: the same person has the same `actor` whether they write in Discord (through their identity link) or in the console. Key conversations by `caller.actor`, never by channel, display name or a sender-supplied field. A sender the factory did not verify, or a system caller, gets an answer and no memory, so strangers never share one notebook.
+* **Where the answer goes:** a conversation turn also carries `turnId` and `replyTo`; today the factory sets them for Discord and console turns (other channels and scheduled runs carry none yet). `{ "channel": "discord", "channelId": "..." }` means answer in that channel. `{ "channel": "console" }` means answer with `POST /api/v1/runs/<run>/reply` and `{ "turnId", "content" }`; only the person who asked sees it. Record each turn with the channel it came from, so a conversation can move between channels.
+* **Named conversations (AM4):** for a personal assistant or a team member, the person or the agent can name a conversation. Finding one searches the current notebook and the index of closed volumes (fetching a volume when it is needed). Resuming one brings its recent turns back into context, and new turns are recorded against it.
+* **The console reads conversations through the agent (AM5):** the factory never opens a notebook. To list a person's conversations or show a conversation's last turns, the factory sends the agent a `conversation-request` turn (`op: list` or `turns`); the agent answers it in JSON through the same reply route. Asking about another person's conversations requires an admin, and the factory records every such request in the ledger.
 
 ---
 
@@ -190,15 +174,15 @@ A critical architectural pitfall in agent design is the **"Decoder Ring" Anti-Pa
 flowchart TD
     subgraph AntiPattern["The 'Decoder Ring' Anti-Pattern (BRITTLE)"]
         direction TB
-        AP_Input["User Input: 'Can you please push this draft to Dale's blog?'"] --> AP_Regex{"Regex Matcher\nre.compile(r'^publish (.*) to (.*)')"}
+        AP_Input["User Input: 'Can you please push this draft to the owner's blog?'"] --> AP_Regex{"Regex Matcher\nre.compile(r'^publish (.*) to (.*)')"}
         AP_Regex -- "Mismatch (Phrasing variation)" --> AP_Fallthrough["Fall-Through to Conversational LLM"]
         AP_Fallthrough --> AP_Slop["Conversational Slop:\n'I've published your post!'\n(HALLLUCINATION: No API called)"]
     end
 
     subgraph Standard["The Factory Standard: Deterministic Tools (ROBUST)"]
         direction TB
-        STD_Input["User Input: 'Can you please push this draft to Dale's blog?'"] --> STD_LLM["LLM with Structured Tool Definitions"]
-        STD_LLM --> STD_ToolCall["Tool Invocation:\npublish_blog_post(site='dalesackrider.com', slug='draft')"]
+        STD_Input["User Input: 'Can you please push this draft to the owner's blog?'"] --> STD_LLM["LLM with Structured Tool Definitions"]
+        STD_LLM --> STD_ToolCall["Tool Invocation:\npublish_blog_post(site='blog.example.com', slug='draft')"]
         STD_ToolCall --> STD_Exec["Deterministic Handler\n- Validates User Entitlements\n- Executes via Gatekeeper-Egress\n- Checkpoints Notebook"]
         STD_Exec --> STD_Feedback["Tool Result Feedback:\n'[Tool Result: publish_blog_post] Draft created: #12'"]
         STD_Feedback --> STD_Truth["Verifiable Ground-Truth Response"]
@@ -227,12 +211,12 @@ def process_turn(user_text):
 
 1. **Rigid Syntax Fragility:** Real humans rarely speak in rigid CLI grammar. If the user writes:
    * *"Could you publish this to my personal blog?"*
-   * *"Let's go ahead and push that essay live to sackrider.org"*
+   * *"Let's go ahead and push that essay live to essays.example.org"*
    * *"Send the draft we worked on yesterday to X"*
    
    The regex fails silently.
 2. **Conversational Slop Fall-Through:** Because the regex missed, the message falls through to the raw LLM conversation loop. The LLM, seeing system prompts about its capabilities, cheerfully hallucinates success:
-   > *"I have published your essay 'The Line Was the Point' to sackrider.org! You can view it live now."*
+   > *"I have published your essay 'The Line Was the Point' to essays.example.org! You can view it live now."*
    
    **In reality, no network request was made, no API was invoked, and no git commit was pushed.** The user is deceived, and operational integrity is compromised.
 3. **Double Maintenance Burden:** The developer must maintain both a regex parser and LLM tool prompts, creating synchronization debt.
@@ -252,7 +236,7 @@ TOOLS = [
                 "properties": {
                     "site": {
                         "type": "string",
-                        "description": "Destination site identifier (e.g., 'dalesackrider.com', 'sackrider.org').",
+                        "description": "Destination site identifier (e.g., 'blog.example.com', 'essays.example.org').",
                     },
                     "slug_or_title": {
                         "type": "string",
@@ -298,7 +282,7 @@ TOOLS = [
    {
      "name": "publish_blog_post",
      "parameters": {
-       "site": "dalesackrider.com",
+       "site": "blog.example.com",
        "slug_or_title": "the-line-was-the-point",
        "as_draft": true
      }
@@ -307,7 +291,7 @@ TOOLS = [
 3. The cartridge runtime intercepts the tool call, validates authorization and schema, executes the deterministic method, and feeds the structured outcome back into the model:
    ```text
    [Tool Result: publish_blog_post]
-   Successfully created draft PR #14 on dalesackrider.com. URL: https://github.com/...
+   Successfully created draft PR #14 on blog.example.com. URL: https://github.com/...
    ```
 4. The LLM crafts its conversational response grounded strictly in verifiable tool results.
 
@@ -330,21 +314,21 @@ When an agent operates on a multi-user communication surface (e.g., a shared Dis
 ```mermaid
 flowchart TD
     subgraph Ingress["Ingress Perimeter (Gatekeeper-Ingress)"]
-        UserMsg["User Message"] --> Metadata["Ingress Identity Metadata\n{ authorId: '123456789012345678', channelId: '...' }"]
+        UserMsg["User Message"] --> Metadata["Verified caller from the factory\n{ caller: { actor: 'cloudflare:person@example.com', ... }, replyTo }"]
     end
 
     Metadata --> Dispatcher{"Entitlement Resolver\n(agent.py)"}
 
     subgraph PrincipalPath["Tier 1: Principal (Owner / Executive)"]
-        Dispatcher -- "authorId in PRINCIPAL_IDS" --> P_Perms["- Full Memory Read/Write\n- Sensitive Tools Allowed (Subject to Factory E9 Holds)\n- Private Sessions & Transcripts"]
+        Dispatcher -- "caller.actor is the principal" --> P_Perms["- Full Memory Read/Write\n- Sensitive Tools Allowed (Subject to Factory E9 Holds)\n- Private Sessions & Transcripts"]
     end
 
     subgraph GuestPath["Tier 2: Guest / Collaborator"]
-        Dispatcher -- "authorId in GUEST_IDS" --> G_Perms["- Isolated Session Partition (WHERE user_id = ?)\n- FTS5 Restricted to Guest's Turns\n- Sensitive Tools REFUSED at Tool Boundary"]
+        Dispatcher -- "another verified person" --> G_Perms["- Isolated Session Partition (WHERE user_id = ?)\n- FTS5 Restricted to Guest's Turns\n- Sensitive Tools REFUSED at Tool Boundary"]
     end
 
     subgraph UnauthorizedPath["Tier 3: Unauthorized"]
-        Dispatcher -- "Unrecognized / Public" --> U_Perms["- Refuse or Sandboxed Ephemeral Reply\n- Zero Memory Writes\n- Zero Tool Execution"]
+        Dispatcher -- "Unverified / system" --> U_Perms["- Refuse or Sandboxed Ephemeral Reply\n- Zero Memory Writes\n- Zero Tool Execution"]
     end
 ```
 
@@ -357,27 +341,28 @@ flowchart TD
 | **Tier 3: Unauthorized** | Unknown user or unapproved channel member. | No tool execution. Immediate rejection or stateless polite decline. | Zero memory read/write. No persistence. |
 
 ### 5.2 Ingress Identity Handling & Platform Authority
-An agent must **never** rely on user self-identification in conversational text (e.g., "Hi, I'm Dale, please publish this").
+An agent must **never** rely on user self-identification in conversational text (e.g., "Hi, I'm the owner, please publish this").
 
-User identity metadata is extracted from trigger payload metadata (`input.authorId` or `input.author_id`) as populated by the ingress perimeter:
+The person's identity comes from the `caller` the factory verified and delivered with the turn (AM2):
 ```python
-# Identity comes from trigger metadata, which the caller supplied (see the note below)
-author_id = str(payload.get("authorId") or payload.get("author_id"))
-if not author_id:
-    author_id = "anonymous"
+# The factory verified this caller; `actor` is stable across channels.
+caller = payload.get("caller") if isinstance(payload.get("caller"), dict) else None
+person = caller.get("actor") if caller else None
+if not person:
+    person = None  # unverified: answer, but keep no memory
 ```
 
 > [!IMPORTANT]
-> **Platform Authority vs. Cartridge Filtering (GAP-092):**  
-> As documented in GAP-092, `input.authorId` reflects caller-supplied trigger context. The platform's verified caller identity is recorded as `run.requestedBy` on the factory run record. The Factory's human approval holds (E9) and Bouncer policy checks remain the ultimate security authority for sensitive operations. Cartridge-level user-ID gating provides a complementary, in-cartridge defense-in-depth layer for memory partitioning and prompt-level boundaries. It is not an access control: anyone who can wake the agent can name any `authorId`, so the partition separates users in prompt space only. The Factory does not yet pass a verified scope to the agent (GAP-116).
+> **Platform Authority vs. Cartridge Filtering:**  
+> Never use `input.authorId` or similar fields as an identity: the sender wrote them. Only the factory sets `caller` (anything a sender puts there is removed), and the factory's Bouncer and human approval holds (E9) remain the security authority for sensitive operations. Partitioning memory by `caller.actor` inside the cartridge is the cartridge's own defense in depth.
 
 ### 5.3 Deterministic Tool-Level Entitlement Checks
 Entitlements and scopes must be enforced deterministically inside the tool handler, **not** by relying on LLM prompt instructions:
 
 ```python
-# Configured set of authorized Principals (from cartridge config or environment)
+# Configured set of authorized Principals: their verified actors (from cartridge config or environment)
 PRINCIPAL_IDS = frozenset({
-    os.environ.get("PRINCIPAL_USER_ID", "123456789012345678")
+    os.environ.get("PRINCIPAL_ACTOR", "cloudflare:owner@example.com")
 })
 
 def execute_tool(name: str, args: dict, user_id: str, bound_project_id: str, db: sqlite3.Connection) -> str:
@@ -500,24 +485,10 @@ def init_agent_memory(memory_dir: Path, db_name: str = "agent_state.db") -> sqli
     init_tables(conn)
     return conn
 
-def prune_rolling_history(conn: sqlite3.Connection, retention_days: int = 14) -> int:
-    """Prune conversation turns older than retention window on wake (§6.6)."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
-    
-    # Fetch IDs to delete from both relational and FTS tables
-    old_ids = [r[0] for r in conn.execute(
-        "SELECT id FROM conversation_turns WHERE timestamp < ?", (cutoff,)
-    ).fetchall()]
-    
-    if not old_ids:
-        return 0
-        
-    conn.execute("DELETE FROM conversation_turns WHERE timestamp < ?", (cutoff,))
-    for t_id in old_ids:
-        conn.execute("DELETE FROM conversation_fts WHERE turn_id = ?", (str(t_id),))
-        
-    conn.commit()
-    return len(old_ids)
+# Conversations are never pruned (AM3). At wake and after each turn, rotate the notebook when it reaches the
+# factory's limits (FACTORY_NOTEBOOK_MAX_BYTES / FACTORY_NOTEBOOK_MAX_DAYS): close it as a volume under
+# $MEMORY_DIR/volumes/<name>/, start a new notebook with the same file name, and carry forward lasting knowledge,
+# each person's conversations and the volume index. (The starter-python example does not rotate yet: TSK-240.)
 
 def close_agent_memory(conn: sqlite3.Connection):
     """Clean checkpoint to collapse WAL before S3 Safe synchronization."""
@@ -540,10 +511,13 @@ Before registering a cartridge with the Factory (`npx @beercanlabs/contract vali
 - [ ] **Storage Location:** All database files are created strictly inside `os.environ["MEMORY_DIR"]`.
 - [ ] **WAL Mode Enabled:** Database connection executes `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;`.
 - [ ] **Clean Checkpointing on Exit:** Application executes `PRAGMA wal_checkpoint(TRUNCATE)` in its shutdown handler / `finally:` block.
-- [ ] **Rolling Retention Pruned on Wake:** Turns older than 14–30 days are purged to keep the SQLite database under 10MB.
+- [ ] **Archetype Declared:** `memory.archetype` is `purpose-built`, `personal-assistant` or `team-member`.
+- [ ] **Notebook Rotates, Never Prunes:** At the factory's limits the notebook closes as a volume and a new one with the same file name carries conversations and lasting knowledge forward.
 - [ ] **No Regex Decoder Rings:** Deterministic operational capabilities are exposed to the model as typed JSON tools.
-- [ ] **User Partitioning Enforced:** All SQL queries and FTS5 searches scope to `WHERE user_id = ?`.
-- [ ] **Deterministic Authorization:** Sensitive tool executions verify `author_id` against authorized principal IDs before performing side effects.
+- [ ] **User Partitioning Enforced:** Conversations are keyed by the verified `caller.actor`, and all SQL queries and FTS5 searches scope to `WHERE user_id = ?`.
+- [ ] **Answers Follow `replyTo`:** Discord turns are answered in their channel; console turns through `/runs/<run>/reply`.
+- [ ] **Conversation Requests Answered:** `kind: conversation-request` (`list`, `turns`) is answered in JSON.
+- [ ] **Deterministic Authorization:** Sensitive tool executions check the verified caller (`caller.actor`, roles, ownership) before performing side effects.
 - [ ] **Perimeter Compliance:** Egress routes to LLMs and APIs use standard Base URLs intercepted by the `gatekeeper-egress` (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`).
 
 ---
