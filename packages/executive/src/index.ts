@@ -14,6 +14,7 @@ export {
   openAiCompatible,
   defaultModelAdapters,
   BUILTIN_PROVIDER_SECRETS,
+  BUILTIN_PROVIDER_HOSTS,
   resolveProviderSecret,
   parseModelCatalog,
   parseChatRequest,

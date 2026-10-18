@@ -9,7 +9,7 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { BUILTIN_PROVIDER_SECRETS, SseMeter, checkModel, selectModel, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
+import { BUILTIN_PROVIDER_HOSTS, BUILTIN_PROVIDER_SECRETS, SseMeter, checkModel, selectModel, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
 import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';
@@ -99,7 +99,7 @@ export type ControlClient = {
    */
   progress?(events: ProgressEvent[]): Promise<void>;
   /** E10: resolve non-model routes from the factory. Cached, refreshed on change, no redeploy. */
-  systemRoutes?(): Promise<Route[] | { routes: Route[]; platformCredentials?: string[] }>;
+  systemRoutes?(): Promise<Route[] | { routes: Route[]; platformCredentials?: string[]; platformCredentialHosts?: Record<string, string[]> }>;
   /** Credential names on approved systems. Vendor discovery may read these and no others. */
   platformCredentialNames?(): Promise<string[]>;
   /** GAP-162: resolve dynamic model catalog from control plane. Cached, refreshed on interval, no redeploy. */
@@ -140,6 +140,11 @@ export type GatekeeperEgressOptions = {
   discoverFetch?: typeof fetch;
   /** Tests: replace runtime model fetch. Production uses global fetch. */
   modelFetch?: typeof fetch;
+  /**
+   * Hosts the operator trusts with any model provider key (landing-zone configuration, e.g. a self-hosted model proxy or
+   * the Compose proof's mock). GAP-182: otherwise a key goes only to its built-in vendor host or its system's upstream.
+   */
+  trustedModelHosts?: readonly string[];
 };
 
 
@@ -298,6 +303,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
 
   let inflight: Promise<void> | undefined;
   const cachedPlatformCredentials = new Set<string>();
+  /** Hosts each platform credential may be sent to: the upstreams of the approved systems that hold it (GAP-182). */
+  const cachedCredentialHosts = new Map<string, Set<string>>();
   /** Refresh factory systems when stale or on an unknown id; concurrent callers share one fetch. */
   async function ensureRoutes(targetRouteId?: string): Promise<void> {
     if (!opts.control.systemRoutes) return;
@@ -312,7 +319,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const miss = Boolean(targetRouteId && !routes.has(targetRouteId) && now - lastMissRefresh >= MISS_REFRESH_INTERVAL_MS);
     if (!miss && now - lastRouteRefresh < ROUTE_REFRESH_INTERVAL_MS) return;
     if (miss) lastMissRefresh = now;
-    let remotePayload: Route[] | { routes: Route[]; platformCredentials?: string[] };
+    let remotePayload: Route[] | { routes: Route[]; platformCredentials?: string[]; platformCredentialHosts?: Record<string, string[]> };
     try {
       remotePayload = await opts.control.systemRoutes();
     } catch (err) {
@@ -326,6 +333,12 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       cachedPlatformCredentials.clear();
       for (const name of remotePayload.platformCredentials) {
         if (/^[A-Z][A-Z0-9_]*$/.test(name)) cachedPlatformCredentials.add(name);
+      }
+    }
+    if (!Array.isArray(remotePayload) && remotePayload.platformCredentialHosts && typeof remotePayload.platformCredentialHosts === 'object') {
+      cachedCredentialHosts.clear();
+      for (const [name, hosts] of Object.entries(remotePayload.platformCredentialHosts)) {
+        if (/^[A-Z][A-Z0-9_]*$/.test(name) && Array.isArray(hosts)) cachedCredentialHosts.set(name, new Set(hosts.filter((h) => typeof h === 'string')));
       }
     }
     routes.clear();
@@ -400,11 +413,20 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   /** Keymaster access tokens by agent × connection, until 60s before expiry. */
   const connCache = new Map<string, { token: string; expiresAtMs: number }>();
   const secretValues = new Set<string>();
-  const resolveSecret = async (secretName: string): Promise<string> => {
+  const trustedModelHosts = new Set(opts.trustedModelHosts ?? []);
+  const resolveSecret = async (secretName: string, target: { host: string }): Promise<string> => {
     // GAP-169: a completion reads only a platform credential (GAP-167), the same names vendor discovery may read.
     if (!BUILTIN_PROVIDER_SECRETS.includes(secretName)) {
       await ensureRoutes();
       if (!cachedPlatformCredentials.has(secretName)) throw new Error(`secret ${secretName} is not a platform credential`);
+    }
+    // GAP-182: a key goes only to its built-in vendor host, the upstream of an approved system that holds it, or a host
+    // the operator trusts. Nothing is read for any other destination.
+    const host = target.host.toLowerCase();
+    const bound = BUILTIN_PROVIDER_HOSTS[secretName]?.includes(host) || cachedCredentialHosts.get(secretName)?.has(host) || trustedModelHosts.has(host);
+    if (!bound) {
+      await ensureRoutes();
+      if (!cachedCredentialHosts.get(secretName)?.has(host)) throw new Error(`secret ${secretName} is not bound to host ${host}`);
     }
     // 1. SecretProvider takes precedence over ambient container env (§6.9 M3, §6.11 K5)
     if (opts.providers && opts.providers.length > 0) {

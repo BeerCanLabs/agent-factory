@@ -84,8 +84,8 @@ const control: ControlClient = {
   async systemRoutes() {
     const res = await call('GET', '/api/v1/gatekeeper-egress/routes');
     if (!res.ok) throw new Error(`control plane system routes ${res.status}`);
-    const body = (await res.json()) as { routes?: Route[]; platformCredentials?: string[] };
-    return { routes: body.routes ?? [], platformCredentials: body.platformCredentials ?? [] };
+    const body = (await res.json()) as { routes?: Route[]; platformCredentials?: string[]; platformCredentialHosts?: Record<string, string[]> };
+    return { routes: body.routes ?? [], platformCredentials: body.platformCredentials ?? [], platformCredentialHosts: body.platformCredentialHosts ?? {} };
   },
   async modelCatalog() {
     const res = await call('GET', '/api/v1/models/internal/catalog');
@@ -124,6 +124,8 @@ const server = createGatekeeperEgress({
   modelCatalog,
   defaultModel: process.env.FACTORY_DEFAULT_MODEL || undefined,
   serviceToken: TOKEN,
+  // GAP-182: hosts the operator trusts with model provider keys beyond each key's own vendor (comma-separated host[:port]).
+  trustedModelHosts: (process.env.FACTORY_MODEL_TRUSTED_HOSTS ?? '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),
 });
 
 const port = parseInt(process.env.PORT || '8081', 10);

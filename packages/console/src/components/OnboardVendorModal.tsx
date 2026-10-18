@@ -176,14 +176,11 @@ export const OnboardVendorModal: React.FC<OnboardVendorModalProps> = ({
         usedNames.add(modelName);
 
         const price = admittingPrices[rawId] ?? { input: 1.0, output: 5.0 };
-        const providerKey = currentTemplate?.adapterKey ?? 'openai';
-
+        // GAP-182: the factory takes provider, endpoint and credential from the vendor.
         await factoryApi.admitModel({
           name: modelName,
-          provider: providerKey,
           id: rawId,
           vendorId: isCustom ? customId : vendorId,
-          endpoint: isCustom ? customUpstream.trim() : undefined,
           price: {
             inputPerMTok: price.input,
             outputPerMTok: price.output,

@@ -76,7 +76,6 @@ export const ExecutiveOfficeView: React.FC = () => {
     try {
       await factoryApi.admitModel({
         name: staged.suggestedFriendlyName || staged.rawId,
-        provider: 'openAiCompatible',
         id: staged.rawId,
         vendorId: staged.vendorId,
         price: staged.suggestedPrice ?? { inputPerMTok: 2.0, outputPerMTok: 10.0 },
