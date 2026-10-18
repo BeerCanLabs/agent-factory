@@ -380,6 +380,15 @@ describe('toLedgerEvent egress and commit fields (E3)', () => {
 });
 
 describe('model and grounding fields are kept, well-formed only (GAP-181, GAP-182, AP3)', () => {
+  it('AM5 keeps the subject of an admin conversation read, and only a well-formed actor', () => {
+    const ledger = new MemoryLedger();
+    ledger.append({ timestamp: '2026-10-18T00:00:00Z', agentId: 'a', type: 'action', action: 'CONVERSATION_READ_BY_ADMIN', actor: 'cloudflare:admin@example.com', subject: 'cloudflare:dale@example.com' });
+    ledger.append({ timestamp: '2026-10-18T00:00:01Z', agentId: 'a', type: 'action', action: 'CONVERSATION_READ_BY_ADMIN', actor: 'x', subject: 'not an actor <script>' });
+    const [kept, dropped] = ledger.query();
+    assert.equal(kept.subject, 'cloudflare:dale@example.com');
+    assert.equal(dropped.subject, undefined);
+  });
+
   it('keeps requestedModel, upstreamModel, models, replySha256, footnote, retryRequestId and toolCalled', () => {
     const l = new MemoryLedger();
     const sha = 'a'.repeat(64);

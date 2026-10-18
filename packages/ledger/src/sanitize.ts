@@ -48,6 +48,8 @@ export type LedgerEvent = {
   /** AP3.3: the request id of the warn-once retry, and whether it called a tool. */
   retryRequestId?: string;
   toolCalled?: boolean;
+  /** AM5: whose conversation an admin read (an actor, never content). */
+  subject?: string;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
@@ -58,6 +60,7 @@ const ALLOWED = new Set<keyof LedgerEvent>([
   'footnote',
   'retryRequestId',
   'toolCalled',
+  'subject',
   'timestamp',
   'agentId',
   'type',
@@ -204,6 +207,7 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (raw.footnote === '[no tools called]' || raw.footnote === '[no model or tools used]') event.footnote = raw.footnote;
   if (typeof raw.retryRequestId === 'string' && /^[0-9a-f-]{36}$/.test(raw.retryRequestId)) event.retryRequestId = raw.retryRequestId;
   if (typeof raw.toolCalled === 'boolean') event.toolCalled = raw.toolCalled;
+  if (typeof raw.subject === 'string' && /^[A-Za-z0-9:._@+-]{1,256}$/.test(raw.subject)) event.subject = raw.subject;
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);

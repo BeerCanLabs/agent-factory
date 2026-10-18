@@ -82,6 +82,8 @@ export const PRIVILEGES = [
   'agents.update.read',
   'agents.update.install',
   'models.manage',
+  // AM5: read another person's conversations through the agent (the console resume of someone else's conversation).
+  'conversations.read-others',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -266,6 +268,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'agents.update.read',
     'agents.update.install',
     'models.manage',
+    'conversations.read-others',
   ],
 };
 

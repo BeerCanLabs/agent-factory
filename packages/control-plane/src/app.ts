@@ -452,6 +452,41 @@ type VendorTarget = { upstream: string; adapter: string; discoveryPath?: string;
  * (`MODEL_REPLY`, or `UNGROUNDED_REPLY` when tools were offered and none called); the result is matched by hash.
  */
 /**
+ * Hands a turn to the agent (GAP-176, §6.15): to its live run's mailbox, or, with no run to hand it to (live or queued),
+ * by waking it through the one wake path, so it is never parked in a mailbox nobody reads.
+ */
+async function handOff(
+  state: FactoryState,
+  agent: AgentRecord,
+  actor: string,
+  payload: unknown,
+  opts: { requestedBy?: { provider: string; id: string }; caller?: AuthenticatedCaller },
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  if (state.runs.list({ agentId: agent.id, active: true }).length === 0) {
+    const out = await createRun(state, agent.id, {
+      actor,
+      trigger: 'conversation',
+      input: payload,
+      ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
+      ...(opts.caller ? { caller: opts.caller } : {}),
+    });
+    if (out.status >= 300) return { status: out.status, body: out.body as Record<string, unknown> };
+    const woke = out.body as { runId: string };
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, runId: woke.runId, type: 'action', action: 'CONVERSATION_HANDOFF', actor, content: payload });
+    return { status: 202, body: { ok: true, woke: true, runId: woke.runId } };
+  }
+  await state.runtime.deliver(agent, payload);
+  deliverToMailbox(state, agent.id, payload);
+  const currentRun = activeRun(state, agent.id);
+  if (currentRun) {
+    if (currentRun.input === undefined) currentRun.input = payload;
+    scheduleTimeout(state, currentRun);
+  }
+  state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, runId: currentRun?.runId, type: 'action', action: 'CONVERSATION_HANDOFF', actor, content: payload });
+  return { status: 202, body: { ok: true } };
+}
+
+/**
  * AM2: where a turn's reply goes. A Discord message is answered in its channel; a person conversing directly is answered
  * in the console. Anything else (another ingress) names no address yet.
  */
@@ -1690,53 +1725,72 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       state.consoleTurns.set(turnId, { agentId: agent.id, actor: caller.actor, at: now });
     }
 
-    // GAP-176: with no run to hand it to (live or queued), the message wakes the agent through the one wake path
-    // (§6.15), so it is never parked in a mailbox nobody reads.
-    if (state.runs.list({ agentId: agent.id, active: true }).length === 0) {
-      const out = await createRun(state, agent.id, {
-        actor: principal.actor,
-        trigger: 'conversation',
-        input: payload,
-        ...(requestedBy ? { requestedBy } : {}),
-        ...(caller ? { caller } : {}),
-      });
-      if (out.status >= 300) {
-        json(res, out.status, out.body);
-        return;
-      }
-      const woke = out.body as { runId: string };
-      state.ledger.append({
-        timestamp: new Date().toISOString(),
-        agentId: agent.id,
-        runId: woke.runId,
-        type: 'action',
-        action: 'CONVERSATION_HANDOFF',
-        actor: principal.actor,
-        content: payload,
-      });
-      json(res, 202, { ok: true, woke: true, runId: woke.runId, ...answerable });
+    const handed = await handOff(state, agent, principal.actor, payload, { requestedBy, caller });
+    json(res, handed.status, handed.status >= 300 ? handed.body : { ...handed.body, ...answerable });
+    return;
+  }
+
+  // AM5: the console asks the agent, through the factory, for a person's conversations or a conversation's last turns.
+  // The factory never opens a notebook: it relays the request as a turn and the agent answers it (`/runs/:id/reply`).
+  // Reading someone else's conversations needs `conversations.read-others` and is ledgered.
+  const convReq = path.match(/^\/api\/v1\/agents\/([^/]+)\/conversation-requests$/);
+  if (convReq && req.method === 'POST') {
+    const principal = await requirePrivilege(req, res, state, 'agents.converse', { agentId: convReq[1] });
+    if (!principal) return;
+    const body = (await readJson(req)) as { op?: unknown; conversation?: unknown; limit?: unknown; subject?: unknown };
+    const text = (v: unknown, max: number): v is string => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
+    if (body.op !== 'list' && body.op !== 'turns') {
+      json(res, 400, { error: "op must be 'list' or 'turns'" });
       return;
     }
-
-    await state.runtime.deliver(agent, payload);
-    deliverToMailbox(state, agent.id, payload);
-    const currentRun = activeRun(state, agent.id);
-    if (currentRun) {
-      if (currentRun.input === undefined) {
-        currentRun.input = payload;
-      }
-      scheduleTimeout(state, currentRun);
+    if (body.conversation !== undefined && !text(body.conversation, 128)) {
+      json(res, 400, { error: 'conversation must be a name or id of at most 128 characters' });
+      return;
     }
+    if (body.limit !== undefined && !(Number.isInteger(body.limit) && (body.limit as number) >= 1 && (body.limit as number) <= 20)) {
+      json(res, 400, { error: 'limit must be a whole number from 1 to 20' });
+      return;
+    }
+    if (body.subject !== undefined && !text(body.subject, 256)) {
+      json(res, 400, { error: 'subject must be an actor' });
+      return;
+    }
+    const subject = typeof body.subject === 'string' ? body.subject : undefined;
+    const othersRead = subject !== undefined && subject.toLowerCase() !== principal.actor.toLowerCase();
+    if (othersRead && !authorize({ principal, privilege: 'conversations.read-others' }).allowed) {
+      json(res, 403, { error: 'forbidden', required: 'admin' });
+      return;
+    }
+    const agent = state.agents.get(convReq[1]);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    const refused = handoffRefusal(state, agent);
+    if (refused) {
+      json(res, 402, { error: 'budget_exceeded', window: refused });
+      return;
+    }
+    const turnId = randomUUID();
+    const caller = directCaller(principal, ownersOf(state, agent.id), 'agents.converse');
+    const request = { op: body.op, ...(body.conversation ? { conversation: body.conversation } : {}), ...(body.limit ? { limit: body.limit } : {}), ...(othersRead ? { subject } : {}) };
+    const payload = { kind: 'conversation-request', request, caller, turnId, replyTo: { channel: 'console' } };
+    if (!state.consoleTurns) state.consoleTurns = new Map();
+    state.consoleTurns.set(turnId, { agentId: agent.id, actor: principal.actor, at: Date.now() });
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId: agent.id,
-      runId: currentRun?.runId,
+      runId: activeRun(state, agent.id)?.runId,
       type: 'action',
-      action: 'CONVERSATION_HANDOFF',
+      // AM5: an admin reading another person's conversation is always on the record.
+      action: othersRead ? 'CONVERSATION_READ_BY_ADMIN' : 'CONVERSATION_REQUESTED',
       actor: principal.actor,
-      content: payload,
+      turnId,
+      ...(othersRead ? { subject } : {}),
+      content: request,
     });
-    json(res, 202, { ok: true, ...answerable });
+    const handed = await handOff(state, agent, principal.actor, payload, { caller });
+    json(res, handed.status, handed.status >= 300 ? handed.body : { ...handed.body, turnId });
     return;
   }
 

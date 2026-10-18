@@ -432,6 +432,19 @@ Every conversation turn the factory delivers (as the run's input or as a mailbox
   - `{ "channel": "discord", "channelId": "..." }`: post the answer in that Discord channel.
   - `{ "channel": "console" }`: send the answer back with `POST /api/v1/runs/${FACTORY_RUN_ID}/reply` and the body `{ "turnId": "...", "content": "..." }`, using your run token. The factory shows it only to the person who asked, adds the same no-tools footnote as Discord (AP3), and records a hash of it in the ledger.
 
+### Conversation requests from the console (AM5)
+The console never opens your notebook. To list a person's conversations or show a conversation's recent turns, the factory sends your agent a turn of this shape:
+
+```json
+{ "kind": "conversation-request", "request": { "op": "list" | "turns", "conversation": "...", "limit": 10, "subject": "..." }, "caller": {...}, "turnId": "...", "replyTo": { "channel": "console" } }
+```
+
+Answer it as you would any console turn, with `POST /runs/:id/reply`, and put JSON in `content`:
+- for `list`: `{ "conversations": [{ "id", "name", "is_active", "turn_count" }] }`
+- for `turns`: `{ "conversation": { "id", "name" }, "turns": [{ "role", "content", "channel", "at" }] }`
+
+The person is `request.subject` when it is present, otherwise `caller.actor`. Only an admin can make the factory send a `subject`, and every such read is recorded in the ledger. A purpose-built agent keeps no conversations, so it answers with empty lists. To resume a conversation, the console then sends the ordinary turn `/resume <id>`.
+
 ### Egress to External APIs (e.g. Discord, Slack)
 Because cartridges operate inside a zero-trust VPC with no public IP or direct internet egress route, third-party API communication uses perimeter credential injection through the gatekeeper-egress:
 
