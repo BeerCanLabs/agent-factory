@@ -543,5 +543,46 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       await new Promise<void>((r) => server.close(() => r()));
     }
   });
+
+  it('sends tool_choice required to Claude Sonnet 5.5 as auto, which it accepts (GAP-175, M3)', async () => {
+    let sent: { tool_choice?: unknown } = {};
+    const server = createGatekeeperEgress({
+      routes: [{ id: 'models', kind: 'models' }],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: [{ name: 'mem', async get(name: string) { return name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test-5678' : undefined; } }],
+      contextTtlMs: 0,
+      modelCatalog: parseModelCatalog(JSON.stringify({
+        'claude-sonnet-5-5': { provider: 'anthropic', id: 'claude-sonnet-5-5', price: { inputPerMTok: 2, outputPerMTok: 10 } },
+      })),
+      modelFetch: async (_url, init) => {
+        sent = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({
+          content: [{ type: 'tool_use', id: 'toolu_02', name: 'get_kitty_litter_status', input: {} }],
+          stop_reason: 'tool_use',
+          usage: { input_tokens: 20, output_tokens: 5 },
+        }), { status: 200 });
+      },
+    });
+    const sPort = await listen(server);
+    try {
+      ctx.policy = policy({ models: ['claude-sonnet-5-5'] });
+      const res = await call(sPort, '/models/v1/chat/completions', {
+        token,
+        body: {
+          model: 'claude-sonnet-5-5',
+          messages: [{ role: 'user', content: 'check the litter box' }],
+          tools: [{ type: 'function', function: { name: 'get_kitty_litter_status', parameters: { type: 'object', properties: {} } } }],
+          tool_choice: 'required',
+        },
+      });
+      assert.equal(res.status, 200, res.text);
+      assert.deepEqual(sent.tool_choice, { type: 'auto' });
+      assert.equal(res.json().choices[0].message.tool_calls[0].function.name, 'get_kitty_litter_status');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
 });
 

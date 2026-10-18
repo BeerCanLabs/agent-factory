@@ -852,3 +852,76 @@ describe('tool calls and tool results in the factory model API (GAP-173, M1, M3)
     ]);
   });
 });
+
+describe('model capability profile (GAP-175, M1, M3)', () => {
+  const FORCED: ChatRequest = {
+    messages: [{ role: 'user', content: 'check the litter box' }],
+    tools: [{ type: 'function', function: { name: 'get_kitty_litter_status', parameters: { type: 'object', properties: {} } } }],
+    tool_choice: 'required',
+  };
+  const NAMED: ChatRequest = { ...FORCED, tool_choice: { type: 'function', function: { name: 'get_kitty_litter_status' } } };
+
+  it('knows which models accept sampling and forced tool choice', async () => {
+    const { modelCapabilities } = await import('./models.js');
+    const table: Array<[string, boolean, boolean]> = [
+      // id, sampling, forcedToolChoice
+      ['claude-haiku-4-5', true, true],
+      ['claude-sonnet-4-6', true, true],
+      ['claude-opus-4-6', true, true],
+      ['claude-sonnet-4-20250514', true, true],
+      ['claude-3-5-sonnet-20241022', true, true],
+      ['claude-opus-4-7', false, true],
+      ['claude-opus-4-8', false, true],
+      ['claude-opus-5', false, true],
+      ['claude-sonnet-5', false, true],
+      ['claude-haiku-5-5', false, true],
+      ['anthropic.claude-haiku-5-5', false, true],
+      ['claude-opus-5-5', false, false],
+      ['claude-sonnet-5-5', false, false],
+      ['us.anthropic.claude-sonnet-5-5', false, false],
+      ['claude-fable-5', false, true],
+      ['claude-fable-5-1', false, false],
+      ['claude-mythos-5-1', false, false],
+      ['claude-opus-6', false, false],
+      ['claude-haiku-6', false, false],
+      ['claude-something-new', false, false],
+      ['gpt-4o', true, true],
+      ['meta.llama3-70b-instruct-v1:0', true, true],
+    ];
+    for (const [id, sampling, forcedToolChoice] of table) {
+      assert.deepEqual(modelCapabilities(id), { sampling, forcedToolChoice }, id);
+    }
+  });
+
+  it('toAnthropicMessages sends auto instead of any/tool to models that reject forced tool choice', async () => {
+    const { toAnthropicMessages } = await import('./models.js');
+    const choice = (req: ChatRequest, id?: string) => (toAnthropicMessages(req, id) as { tool_choice?: unknown }).tool_choice;
+    assert.deepEqual(choice(FORCED, 'claude-sonnet-5-5'), { type: 'auto' });
+    assert.deepEqual(choice(NAMED, 'claude-opus-5-5'), { type: 'auto' });
+    assert.deepEqual(choice(FORCED, 'claude-haiku-5-5'), { type: 'any' });
+    assert.deepEqual(choice(NAMED, 'claude-sonnet-4-6'), { type: 'tool', name: 'get_kitty_litter_status' });
+    assert.deepEqual(choice(FORCED), { type: 'any' });
+  });
+
+  it('toConverse sends auto to Claude models on Bedrock that reject forced tool choice, and leaves others alone', () => {
+    assert.deepEqual(toConverse(FORCED, 'us.anthropic.claude-sonnet-5-5').toolConfig?.toolChoice, { auto: {} });
+    assert.deepEqual(toConverse(NAMED, 'anthropic.claude-opus-5-5').toolConfig?.toolChoice, { auto: {} });
+    assert.deepEqual(toConverse(FORCED, 'anthropic.claude-haiku-4-5').toolConfig?.toolChoice, { any: {} });
+    assert.deepEqual(toConverse(NAMED, 'meta.llama3-70b-instruct-v1:0').toolConfig?.toolChoice, { tool: { name: 'get_kitty_litter_status' } });
+  });
+
+  it('the Vertex-Anthropic adapter sends auto for a model that rejects forced tool choice', async () => {
+    const { vertexAnthropic } = await import('./models.js');
+    let sent: { tool_choice?: unknown } = {};
+    const adapter = vertexAnthropic({
+      project: 'p',
+      accessToken: async () => 't',
+      fetch: (async (_url: string, init: RequestInit) => {
+        sent = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    await adapter.complete({ provider: 'vertex-anthropic', id: 'claude-sonnet-5-5' }, FORCED);
+    assert.deepEqual(sent.tool_choice, { type: 'auto' });
+  });
+});

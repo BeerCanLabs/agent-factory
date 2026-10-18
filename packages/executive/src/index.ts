@@ -20,6 +20,7 @@ export {
   toConverse,
   toOpenAiMessages,
   claudeAcceptsSampling,
+  modelCapabilities,
   fromConverse,
   ModelUpstreamError,
 } from './models.js';
@@ -33,6 +34,7 @@ export type {
   ChatRequest,
   ChatResult,
   ModelAdapter,
+  ModelCapabilities,
   ModelCatalog,
 } from './models.js';
 export {
