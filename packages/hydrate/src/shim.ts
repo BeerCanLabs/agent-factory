@@ -5,7 +5,7 @@
  *   hydrate mind -> point SDKs at the gatekeeper-egress -> heartbeat -> run worker -> replicate mind -> report crash.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { VOLUME_REQUESTS_DIR, isVolumeName, pullMind, pullVolume, pushMind, type MindStore } from './index.js';
 import { gatekeeperEgressEnv } from './gatekeeper-egress-env.js';
@@ -73,19 +73,30 @@ function safePush(store: MindStore, prefix: string | undefined, dir: string) {
  * `<name>.done`, or `<name>.error` holding the reason. The agent never touches storage itself (platform traffic, E6).
  */
 export function serveVolumeRequests(store: MindStore, prefix: string, dir: string, fetchVolume: typeof pullVolume = pullVolume): void {
-  const requests = join(dir, VOLUME_REQUESTS_DIR);
-  if (!existsSync(requests)) return;
-  for (const name of readdirSync(requests)) {
-    if (name.endsWith('.done') || name.endsWith('.error')) continue;
-    const at = join(requests, name);
-    try {
-      if (!isVolumeName(name)) throw new Error('invalid volume name');
-      fetchVolume(store, prefix, name, dir);
-      writeFileSync(`${at}.done`, '');
-    } catch (err) {
-      writeFileSync(`${at}.error`, err instanceof Error ? err.message : String(err));
+  // Whatever the agent left in the request folder, the shim keeps running (an exception here would end the run unsynced).
+  try {
+    const requests = join(dir, VOLUME_REQUESTS_DIR);
+    if (!existsSync(requests) || !statSync(requests).isDirectory()) return;
+    for (const name of readdirSync(requests)) {
+      if (name.endsWith('.done') || name.endsWith('.error')) continue;
+      const at = join(requests, name);
+      try {
+        rmSync(`${at}.done`, { force: true });
+        rmSync(`${at}.error`, { force: true });
+        if (!isVolumeName(name)) throw new Error('invalid volume name');
+        fetchVolume(store, prefix, name, dir);
+        writeFileSync(`${at}.done`, '');
+      } catch (err) {
+        try {
+          writeFileSync(`${at}.error`, err instanceof Error ? err.message : String(err));
+        } catch {}
+      }
+      try {
+        rmSync(at, { recursive: true, force: true });
+      } catch {}
     }
-    rmSync(at, { force: true });
+  } catch (err) {
+    console.error(`[shim] volume requests: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

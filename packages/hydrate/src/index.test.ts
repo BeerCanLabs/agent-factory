@@ -31,7 +31,7 @@ describe('hydrate', () => {
     pullMind(gcsStore, 'test-agent', '/tmp/dest', syncMock);
     assert.deepEqual(executed[0], {
       cmd: 'gcloud',
-      args: ['storage', 'rsync', '-r', '-x', '^volumes/', 'gs://my-bucket/test-agent', '/tmp/dest'],
+      args: ['storage', 'rsync', '-r', '-x', '^(volumes|.volume-requests)/', 'gs://my-bucket/test-agent', '/tmp/dest'],
     });
 
     const root = mkdtempSync(join(tmpdir(), 'gcs-push-'));
@@ -179,7 +179,9 @@ describe('AM3 notebooks rotate; closed volumes are cold storage', () => {
     try {
       file(store, 'agent/notebook.db', 'current');
       file(store, 'agent/volumes/2026-07/notebook.db', 'old');
+      file(store, 'agent/.volume-requests/2026-07.done', '');
       pullMind({ root: store }, 'agent', work);
+      assert.equal(existsSync(join(work, '.volume-requests')), false, 'request markers are not hydrated');
       assert.equal(readFileSync(join(work, 'notebook.db'), 'utf8'), 'current');
       assert.equal(existsSync(join(work, 'volumes')), false, 'closed volumes are not hydrated');
 
@@ -196,13 +198,24 @@ describe('AM3 notebooks rotate; closed volumes are cold storage', () => {
   });
 
   it('AM3 object stores exclude volumes on pull and fetch one volume on request', () => {
+    const dest = mkdtempSync(join(tmpdir(), 'am3-dest-'));
     const calls: string[][] = [];
-    const sync = (cmd: string, args: string[]) => void calls.push([cmd, ...args]);
-    pullMind({ root: '', uri: 's3://bucket' }, 'agent', '/tmp/am3-dest', sync);
-    pullVolume({ root: '', uri: 's3://bucket' }, 'agent', '2026-07', '/tmp/am3-dest', sync);
-    assert.deepEqual(calls[0], ['aws', 's3', 'sync', 's3://bucket/agent', '/tmp/am3-dest', '--exclude', 'volumes/*']);
-    assert.deepEqual(calls[1], ['aws', 's3', 'sync', 's3://bucket/agent/volumes/2026-07', '/tmp/am3-dest/volumes/2026-07']);
-    assert.throws(() => pullVolume({ root: '', uri: 's3://bucket' }, 'agent', '../other-agent', '/tmp/am3-dest', sync), /invalid volume name/);
+    // A sync that "copies" a volume when the prefix exists, and nothing (successfully) when it does not, like `s3 sync`.
+    const sync = (cmd: string, args: string[]) => {
+      calls.push([cmd, ...args]);
+      if (args[2]?.endsWith('/volumes/2026-07')) file(args[3], 'notebook.db', 'old');
+    };
+    try {
+      pullMind({ root: '', uri: 's3://bucket' }, 'agent', dest, sync);
+      pullVolume({ root: '', uri: 's3://bucket' }, 'agent', '2026-07', dest, sync);
+      assert.deepEqual(calls[0], ['aws', 's3', 'sync', 's3://bucket/agent', dest, '--exclude', 'volumes/*', '--exclude', '.volume-requests/*']);
+      assert.deepEqual(calls[1], ['aws', 's3', 'sync', 's3://bucket/agent/volumes/2026-07', join(dest, 'volumes/2026-07')]);
+      assert.throws(() => pullVolume({ root: '', uri: 's3://bucket' }, 'agent', 'never-closed', dest, sync), /no volume never-closed/, 'an empty sync is a missing volume, not a fetched one');
+      assert.equal(existsSync(join(dest, 'volumes/never-closed')), false, 'and leaves nothing behind');
+      assert.throws(() => pullVolume({ root: '', uri: 's3://bucket' }, 'agent', '../other-agent', dest, sync), /invalid volume name/);
+    } finally {
+      rmSync(dest, { recursive: true, force: true });
+    }
   });
 
   it('AM3 the shim answers a volume request with .done, and a bad one with .error', () => {
@@ -211,12 +224,21 @@ describe('AM3 notebooks rotate; closed volumes are cold storage', () => {
     try {
       file(store, 'agent/volumes/2026-07/notebook.db', 'old');
       file(work, '.volume-requests/2026-07', '');
+      file(work, '.volume-requests/2026-07.error', 'stale from an earlier request');
       file(work, '.volume-requests/missing', '');
       serveVolumeRequests({ root: store }, 'agent', work);
+      assert.equal(existsSync(join(work, '.volume-requests/2026-07.error')), false, 'an old answer is cleared');
       assert.equal(readFileSync(join(work, 'volumes/2026-07/notebook.db'), 'utf8'), 'old');
       assert.ok(existsSync(join(work, '.volume-requests/2026-07.done')));
       assert.match(readFileSync(join(work, '.volume-requests/missing.error'), 'utf8'), /no volume/);
       assert.equal(existsSync(join(work, '.volume-requests/2026-07')), false, 'the request is consumed');
+      // Whatever the agent puts there, the shim keeps running.
+      rmSync(join(work, '.volume-requests'), { recursive: true, force: true });
+      writeFileSync(join(work, '.volume-requests'), 'not a folder');
+      assert.doesNotThrow(() => serveVolumeRequests({ root: store }, 'agent', work));
+      rmSync(join(work, '.volume-requests'), { force: true });
+      mkdirSync(join(work, '.volume-requests/odd-dir'), { recursive: true });
+      assert.doesNotThrow(() => serveVolumeRequests({ root: store }, 'agent', work));
     } finally {
       rmSync(store, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
