@@ -13,6 +13,7 @@ import { BUILTIN_PROVIDER_HOSTS, BUILTIN_PROVIDER_SECRETS, SseMeter, checkModel,
 import type { Meter } from '@opentelemetry/api';
 
 import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';
+import { GROUNDING_RETRY_NOTICE, NO_TOOLS_FOOTNOTE, ReplyBook, footnoteDiscordBody, isDiscordReply, replySha256, toolNamesOf, toolResultsInTurn, withGroundingNote } from './grounding.js';
 import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from '@beercanlabs/factory-inspector';
 
 export type Route = {
@@ -66,6 +67,8 @@ export type Policy = {
   tools?: Record<string, ToolRule>;
   budgetUsd?: { perRun?: number; perDay?: number; perMonth?: number };
   tokensPerMinute?: number;
+  /** AP3.3: give the model one more turn with the notice before returning an answer given without tools. */
+  grounding?: 'warn-once';
 };
 
 export type RunContext = {
@@ -413,6 +416,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   /** Keymaster access tokens by agent × connection, until 60s before expiry. */
   const connCache = new Map<string, { token: string; expiresAtMs: number }>();
   const secretValues = new Set<string>();
+  /** AP3: each run's recent final answers, to footnote the replies built from them. */
+  const replies = new ReplyBook();
   const trustedModelHosts = new Set((opts.trustedModelHosts ?? []).map((h) => h.toLowerCase()));
   /** GAP-182: whether a key may be sent to a host: its built-in vendor host, an approved system holding it, or a trusted host. */
   const keyBoundTo = async (secretName: string, rawHost: string): Promise<boolean> => {
@@ -839,7 +844,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (throttled(ctx)) return deny(res, ctx, route, 429, 'throttled');
     const requestId = randomUUID();
     const t0 = performance.now();
-    const done = await complete({ entry, adapters: modelAdapters, body: parsed });
+    // AP3.1: a request that offers tools carries the standing note.
+    const declaredToolNames = toolNamesOf(parsed.tools);
+    const upstreamBody = declaredToolNames.length > 0 ? withGroundingNote(parsed) : parsed;
+    const done = await complete({ entry, adapters: modelAdapters, body: upstreamBody });
     if (!done.ok && done.kind === 'refused') return deny(res, ctx, route, done.status, done.code, done.detail);
     if (!done.ok) {
       const e = done.error;
@@ -863,17 +871,6 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     }
     recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action, extra: { provider: entry.provider, upstreamModel: entry.id, ...(selection.requested ? { requestedModel: selection.requested } : {}) } });
 
-    const declaredToolNames: string[] = [];
-    if (Array.isArray(parsed.tools)) {
-      for (const t of parsed.tools) {
-        if (t && typeof t === 'object') {
-          const fn = (t as { function?: { name?: unknown }; name?: unknown }).function;
-          const fnName = fn && typeof fn.name === 'string' ? fn.name : (typeof (t as { name?: unknown }).name === 'string' ? (t as { name?: string }).name : undefined);
-          if (fnName) declaredToolNames.push(fnName);
-        }
-      }
-    }
-
     if (declaredToolNames.length > 0 && (!result.toolCalls || result.toolCalls.length === 0)) {
       const leakedTool = detectToolSyntaxLeak(result.content, declaredToolNames);
       if (leakedTool) {
@@ -892,6 +889,31 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
     }
 
+    // AP3: a final answer (no tool calls) given with tools offered and no tool result in this turn is ungrounded.
+    let reply = result;
+    let replyUsage = { input: usage.input, output: usage.output };
+    const toolsOffered = declaredToolNames.length > 0;
+    const grounded = !toolsOffered || toolResultsInTurn(chat.messages);
+    if (!grounded && !reply.toolCalls?.length && ctx.policy.grounding === 'warn-once') {
+      // AP3.3: one more turn with the notice; both calls are metered.
+      const retryBody = { ...upstreamBody, messages: [...(upstreamBody.messages as unknown[]), { role: 'assistant', content: reply.content }, { role: 'user', content: GROUNDING_RETRY_NOTICE }] };
+      const again = await complete({ entry, adapters: modelAdapters, body: retryBody });
+      if (again.ok) {
+        const retryId = randomUUID();
+        const r2 = again.result;
+        const u2: Usage = r2.usage ? { model, input: r2.usage.input, output: r2.usage.output, cacheRead: 0, cacheWrite: 0 } : { model, input: 0, output: again.request.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
+        recordUsage(ctx, route, { usage: u2, model, price, request: retryBody, requestId: retryId, action: r2.usage ? undefined : 'METERING_GAP', extra: { provider: entry.provider, upstreamModel: entry.id } });
+        ledger(ctx, route, { type: 'action', action: 'GROUNDING_RETRY', model, requestId, retryRequestId: retryId, toolCalled: Boolean(r2.toolCalls?.length) });
+        reply = r2;
+        replyUsage = { input: replyUsage.input + u2.input, output: replyUsage.output + u2.output };
+      }
+    }
+    if (!reply.toolCalls?.length) {
+      // AP3.2: remember the answer (text in memory only) and record its hash, so replies built from it can be footnoted.
+      replies.remember(ctx.run.runId, reply.content, grounded ? undefined : NO_TOOLS_FOOTNOTE);
+      ledger(ctx, route, { type: 'action', action: grounded ? 'MODEL_REPLY' : 'UNGROUNDED_REPLY', model, requestId, replySha256: replySha256(reply.content) });
+    }
+
     const body = {
       id: `chatcmpl-${requestId}`,
       object: 'chat.completion',
@@ -901,12 +923,12 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         index: 0,
         message: {
           role: 'assistant',
-          content: result.content,
-          ...(result.toolCalls && result.toolCalls.length > 0 ? { tool_calls: result.toolCalls } : {}),
+          content: reply.content,
+          ...(reply.toolCalls && reply.toolCalls.length > 0 ? { tool_calls: reply.toolCalls } : {}),
         },
-        finish_reason: result.finishReason,
+        finish_reason: reply.finishReason,
       }],
-      usage: { prompt_tokens: usage.input, completion_tokens: usage.output, total_tokens: usage.input + usage.output },
+      usage: { prompt_tokens: replyUsage.input, completion_tokens: replyUsage.output, total_tokens: replyUsage.input + replyUsage.output },
     };
     send(res, 200, body);
     if (opts.traces?.enabled) {
@@ -1205,6 +1227,14 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (route.kind === 'llm') return await handleLlm(req, res, ctx, route, rest, raw);
       if (route.kind === 'models') return await handleModels(req, res, ctx, route, rest, raw);
       if (route.kind === 'mcp') return await handleMcp(req, res, ctx, route, rest, raw);
+      // AP3.4: a Discord reply built from an answer given without tools, or from no answer at all, is footnoted.
+      if (isDiscordReply(route, req.method, rest)) {
+        const marked = footnoteDiscordBody(raw, (content) => replies.footnoteFor(ctx.run.runId, content), route.maxContentChars ?? 2000);
+        if (marked) {
+          raw = marked.body;
+          ledger(ctx, route, { type: 'action', action: 'REPLY_FOOTNOTED', footnote: marked.footnote });
+        }
+      }
       if (checkHold({ hold: route.hold, method: req.method ?? 'GET' }).held && (await holdOrRelease(req, res, ctx, route, rest, raw))) return;
       if (route.connection) return await handleConnection(req, res, ctx, route, rest, raw);
       const cred = await credential(route, ctx);

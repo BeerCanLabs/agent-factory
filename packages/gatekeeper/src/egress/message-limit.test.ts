@@ -98,11 +98,15 @@ describe('a message route with a content limit', { concurrency: false }, () => {
     token = await tokens.mint({ runId, agentId: 'donna' });
   });
 
-  it('a message at the limit goes through unchanged', async () => {
+  it('a message at the limit goes through, still within the limit with its AP3 footnote', async () => {
     const content = 'x'.repeat(2000);
     const res = await post(port, '/discord/channels/1/messages', token, { content });
     assert.equal(res.status, 200);
-    assert.equal(JSON.parse(seen[0]).content, content);
+    // Not from a model answer, so AP3 footnotes it; the footnote fits by trimming, never past the limit.
+    const sent = JSON.parse(seen[0]).content as string;
+    assert.ok(sent.length <= 2000, `sent ${sent.length} characters`);
+    assert.ok(sent.endsWith('\n-# [no model or tools used]'));
+    assert.ok(sent.startsWith('x'.repeat(1900)));
   });
 
   it('a longer message is refused with the limit and the length, and is not forwarded', async () => {

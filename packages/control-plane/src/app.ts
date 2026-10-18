@@ -427,6 +427,17 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
 
 type VendorTarget = { upstream: string; adapter: string; discoveryPath?: string; secretName: string };
 
+/**
+ * AP3.4: the footnote a text result needs. The gatekeeper-egress records a hash of every final model answer
+ * (`MODEL_REPLY`, or `UNGROUNDED_REPLY` when tools were offered and none called); the result is matched by hash.
+ */
+function resultFootnote(output: string, runRows: ReadonlyArray<Record<string, unknown>>): string | undefined {
+  const sha = createHash('sha256').update(output.trim()).digest('hex');
+  const match = [...runRows].reverse().find((r) => (r.action === 'MODEL_REPLY' || r.action === 'UNGROUNDED_REPLY') && r.replySha256 === sha);
+  if (!match) return '[no model or tools used]';
+  return match.action === 'UNGROUNDED_REPLY' ? '[no tools called]' : undefined;
+}
+
 /** The factory default model: configuration (M2, GAP-181), never a value in code. Undefined when none is set. */
 function defaultModelOf(state: FactoryState): string | undefined {
   return state.modelStore?.getDefault() ?? state.defaultModel;
@@ -1229,6 +1240,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         });
       }
       output = sanitized;
+      // AP3.4: a text result built from an answer given without tools, or from no model answer this run, is footnoted.
+      if (body.status === 'succeeded' && typeof output === 'string' && output.trim()) {
+        const footnote = resultFootnote(output, currentRunRows);
+        if (footnote) {
+          output = `${output}\n\n${footnote}`;
+          state.ledger.append({ timestamp: new Date().toISOString(), agentId: run.agentId, runId: run.runId, type: 'action', action: 'REPLY_FOOTNOTED', actor: SYSTEM.policy, footnote });
+        }
+      }
     }
     const done = await finishRun(state, run.runId, body.status === 'succeeded' ? 'DONE' : 'FAILED', {
       actor: `run:${run.agentId}`,

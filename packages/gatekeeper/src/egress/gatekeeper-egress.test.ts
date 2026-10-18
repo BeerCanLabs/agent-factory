@@ -244,7 +244,8 @@ describe('gatekeeper-egress', { concurrency: false }, () => {
     const res = await call(port, '/discord/channels/123/messages', { token, body: { content: 'hello discord' } });
     assert.equal(res.status, 200);
     assert.equal(seen[0].headers.authorization, 'Bot bot-agent-secret');
-    assert.equal(JSON.parse(seen[0].body).content, 'hello discord');
+    // Unchanged apart from the AP3 footnote (this message is not a model answer).
+    assert.equal(JSON.parse(seen[0].body).content, 'hello discord\n-# [no model or tools used]');
   });
 
   it('injects the shared Notion key in place of the run token, keeps Notion-Version, and ledgers the call (S1, K5.5)', async () => {

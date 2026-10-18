@@ -207,6 +207,8 @@ export interface AgentPolicy {
   tools?: Record<string, unknown>;
   budgetUsd?: { perRun?: number; perDay?: number; perMonth?: number };
   tokensPerMinute?: number;
+  /** AP3.3: one more model turn with the notice before an answer given without tools is returned. */
+  grounding?: 'warn-once';
 }
 
 /** A model this factory offers (M3). */

@@ -352,6 +352,21 @@ describe('control plane', { concurrency: false }, () => {
       );
     });
 
+    it('AP3 a text result is footnoted by its answer hash: no tools called, grounded, or no model answer', async () => {
+      const { createHash } = await import('node:crypto');
+      const sha = (t: string) => createHash('sha256').update(t.trim()).digest('hex');
+      const finish = async (output: string, rows: Array<{ action: string; text: string }>) => {
+        const run = (await wake('med-doc')).json as RunBody;
+        for (const r of rows) state.ledger.append({ agentId: 'med-doc', runId: run.runId, type: 'action', action: r.action, replySha256: sha(r.text) });
+        const res = await request(port, `/api/v1/runs/${run.runId}/result`, { method: 'POST', token: tokenFor(run.runId), body: { status: 'succeeded', output } });
+        assert.equal(res.status, 200, JSON.stringify(res.json));
+        return (res.json as RunBody).result;
+      };
+      assert.equal(await finish('Probably clean.', [{ action: 'UNGROUNDED_REPLY', text: 'Probably clean.' }]), 'Probably clean.\n\n[no tools called]');
+      assert.equal(await finish(' Clean, per the sensor. ', [{ action: 'MODEL_REPLY', text: 'Clean, per the sensor.' }]), ' Clean, per the sensor. ');
+      assert.equal(await finish('Beep boop!', []), 'Beep boop!\n\n[no model or tools used]');
+    });
+
     it('pre-flight: unbound secrets give 412 with a recorded run and ledger event', async () => {
       const res = await wake('finops-officer');
       assert.equal(res.status, 412);

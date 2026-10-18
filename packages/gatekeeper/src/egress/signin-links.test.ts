@@ -112,7 +112,8 @@ describe('K4 sign-in links in agent messages', { concurrency: false }, () => {
   it("K4 the factory's own connect links and ordinary links pass unchanged", async () => {
     const content = `Connect: ${REAL}. Read https://dalesackrider.com/posts/factory and https://www.linkedin.com/feed/update/urn:li:share:1/`;
     await post(port, '/discord/channels/1/messages', token, { content });
-    assert.equal(JSON.parse(seen[0]).content, content);
+    // Unchanged apart from the AP3 footnote (this message is not a model answer).
+    assert.equal(JSON.parse(seen[0]).content, `${content}\n-# [no model or tools used]`);
     assert.equal(ledger.filter((e) => e.action === 'SIGN_IN_LINK_REMOVED').length, 0);
   });
 
