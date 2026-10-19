@@ -11,7 +11,11 @@ import {
   NO_TOOLS_FOOTNOTE,
   ReplyBook,
   footnoteDiscordBody,
+  READ_WINDOW_MS,
   isDiscordReply,
+  isDiscordRoute,
+  isReadMethod,
+  mcpResultOk,
   replySha256,
   toolResultsInTurn,
   withGroundingNote,
@@ -99,6 +103,27 @@ function call(port: number, path: string, token: string, body: unknown, method =
   });
 }
 
+describe('AP3.2 what counts as consulting', () => {
+  it('AP3 reads count, writes and Discord traffic do not; MCP failures inside a 200 do not; old reads expire', () => {
+    assert.equal(isReadMethod('GET'), true);
+    assert.equal(isReadMethod('POST'), false);
+    assert.equal(isDiscordRoute({ id: 'discord' }), true);
+    assert.equal(isDiscordRoute({ id: 'chat', upstream: 'https://discord.com/api/v10' }), true);
+    assert.equal(isDiscordRoute({ id: 'health', upstream: 'https://health.example' }), false);
+    assert.equal(mcpResultOk('{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}'), true);
+    assert.equal(mcpResultOk('{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[]}}'), false);
+    assert.equal(mcpResultOk('{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"x"}}'), false);
+    assert.equal(mcpResultOk('event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"content":[]}}\n\n'), true);
+    const book = new ReplyBook();
+    book.sawDataRead('r', 0);
+    const mark = book.readMark('r', 1);
+    assert.equal(book.consultedBefore('r', mark, 1000), true);
+    assert.equal(book.consultedBefore('r', mark, READ_WINDOW_MS + 1), false, 'a read older than the window grounds nothing');
+    book.answered('r', mark);
+    assert.equal(book.consultedBefore('r', book.readMark('r', 2), 3), false, 'an answer uses its reads up');
+  });
+});
+
 describe('AP3 through the gatekeeper-egress', { concurrency: false }, () => {
   async function setup(policy: Policy, answers: Array<{ content: string; toolCalls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> }>) {
     const runId = `ap3-${Math.random().toString(36).slice(2)}`;
@@ -116,17 +141,28 @@ describe('AP3 through the gatekeeper-egress', { concurrency: false }, () => {
           res.end('{"steps":4200}');
           return;
         }
-        posted.push(JSON.parse(b).content);
+        const content = b ? JSON.parse(b).content : undefined;
+        if (typeof content === 'string') posted.push(content);
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('{}');
       });
     });
     const dPort = await listen(discord);
+    let release: (content: string) => void = () => {};
+    const gated = (() => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((r) => (resolve = r));
+      return { promise, resolve };
+    })();
     const adapter: ModelAdapter = {
       async complete(_entry, req) {
         seenRequests.push(req);
-        const a = answers.shift() ?? { content: 'done' };
+        let a = answers.shift() ?? { content: 'done' };
         if (a.content === '__THROW__') throw new Error('upstream down');
+        if (a.content === '__GATED__') {
+          gated.resolve();
+          a = { content: await new Promise<string>((r) => (release = r)) };
+        }
         return { content: a.content, finishReason: a.toolCalls ? 'tool_calls' : 'stop', usage: { input: 10, output: 2 }, ...(a.toolCalls ? { toolCalls: a.toolCalls } : {}) };
       },
     };
@@ -151,7 +187,7 @@ describe('AP3 through the gatekeeper-egress', { concurrency: false }, () => {
       await new Promise<void>((r) => gk.close(() => r()));
       await new Promise<void>((r) => discord.close(() => r()));
     };
-    return { port, token, ledger, seenRequests, posted, close };
+    return { port, token, ledger, seenRequests, posted, close, waitGated: () => gated.promise, release: (c: string) => release(c) };
   }
   const TOOLS = [{ type: 'function', function: { name: 'get_kitty_litter_status', parameters: { type: 'object', properties: {} } } }];
   const settle = () => new Promise((r) => setTimeout(r, 20));
@@ -199,31 +235,64 @@ describe('AP3 through the gatekeeper-egress', { concurrency: false }, () => {
     }
   });
 
-  it('AP3 data the run fetched through a route grounds the next answer, once; a failed fetch or a reply post does not', async () => {
+  it('AP3 a read the run made through a data route grounds its next answer, once; failures, writes and Discord traffic do not', async () => {
     const t = await setup({ routes: ['models', 'discord', 'health'], models: ['fake-model'] }, [
+      { content: 'Nothing fetched yet.' },
       { content: 'You have 4,200 steps today.' },
       { content: 'Still 4,200, I believe.' },
-      { content: 'No data, sorry.' },
-      { content: 'Posted first, then answered.' },
+      { content: 'Wrote it down.' },
+      { content: 'Typed first, then answered.' },
     ]);
     const ask = (q: string) => call(t.port, '/models/v1/chat/completions', t.token, { messages: [{ role: 'system', content: 'Health data: {"steps":4200}' }, { role: 'user', content: q }], tools: TOOLS });
     try {
-      // The agent's own code fetches the data and gives it to the model as text (no tool messages).
+      // A read the upstream refused grounds nothing, even on a fresh run.
+      assert.equal((await call(t.port, '/health/fail', t.token, undefined, 'GET')).status, 500);
+      await ask('steps?');
+      // The agent's own code reads the data and gives it to the model as text (no tool messages).
       assert.equal((await call(t.port, '/health/steps', t.token, undefined, 'GET')).status, 200);
       await ask('steps?');
       await call(t.port, '/discord/channels/123/messages', t.token, { content: 'You have 4,200 steps today.' });
-      // The answer closed the turn: the next one, with nothing fetched, is ungrounded.
+      // That answer used the read up: the next one, with nothing new read, is ungrounded.
       await ask('and now?');
-      // A fetch the upstream refused grounds nothing.
-      assert.equal((await call(t.port, '/health/fail', t.token, undefined, 'GET')).status, 500);
-      await ask('try again');
-      // Posting a reply is not consulting anything.
-      await call(t.port, '/discord/channels/123/messages', t.token, { content: 'working on it' });
+      // A successful write consults nothing.
+      assert.equal((await call(t.port, '/health/log', t.token, { steps: 1 })).status, 200);
+      await ask('log it');
+      // Nothing on the Discord route is a lookup: typing, reads of the channel, deletes.
+      await call(t.port, '/discord/channels/123/typing', t.token, {});
+      await call(t.port, '/discord/channels/123/messages', t.token, undefined, 'GET');
+      await call(t.port, '/discord/channels/123/messages/9', t.token, undefined, 'DELETE');
       await ask('one more');
       await settle();
       const kinds = t.ledger.filter((e) => e.action === 'MODEL_REPLY' || e.action === 'UNGROUNDED_REPLY').map((e) => e.action);
-      assert.deepEqual(kinds, ['MODEL_REPLY', 'UNGROUNDED_REPLY', 'UNGROUNDED_REPLY', 'UNGROUNDED_REPLY']);
+      assert.deepEqual(kinds, ['UNGROUNDED_REPLY', 'MODEL_REPLY', 'UNGROUNDED_REPLY', 'UNGROUNDED_REPLY', 'UNGROUNDED_REPLY']);
       assert.equal(t.posted[0], 'You have 4,200 steps today.', 'a grounded answer reaches Discord without a footnote');
+    } finally {
+      await t.close();
+    }
+  });
+
+  it('AP3 a helper call without tools uses up no reads; a read landing during a model call grounds the next answer, not that one', async () => {
+    const t = await setup({ routes: ['models', 'discord', 'health'], models: ['fake-model'] }, [
+      { content: 'summary' },
+      { content: 'Grounded after the summary.' },
+      { content: '__GATED__' },
+      { content: 'Built on the read that landed late.' },
+    ]);
+    const ask = (q: string, tools = true) => call(t.port, '/models/v1/chat/completions', t.token, { messages: [{ role: 'user', content: q }], ...(tools ? { tools: TOOLS } : {}) });
+    try {
+      await call(t.port, '/health/steps', t.token, undefined, 'GET');
+      await ask('summarise this', false);
+      await ask('answer');
+      // The model call is in flight when the read lands: that read cannot be in its prompt.
+      const inFlight = ask('slow answer');
+      await t.waitGated();
+      await call(t.port, '/health/steps', t.token, undefined, 'GET');
+      t.release('Answered before the read landed.');
+      await inFlight;
+      await ask('next');
+      await settle();
+      const kinds = t.ledger.filter((e) => e.action === 'MODEL_REPLY' || e.action === 'UNGROUNDED_REPLY').map((e) => e.action);
+      assert.deepEqual(kinds, ['MODEL_REPLY', 'MODEL_REPLY', 'UNGROUNDED_REPLY', 'MODEL_REPLY']);
     } finally {
       await t.close();
     }
