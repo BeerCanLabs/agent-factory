@@ -25,7 +25,17 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
       const run = state.runs.get(e.runId);
       const isLive = Boolean(run) && run!.agentId === e.agentId && !isTerminal(run!.state);
       if (isLive) {
-        liveEvents.push({ agentId: e.agentId, route: e.route, model: e.model, kind: e.kind });
+        liveEvents.push({
+          agentId: e.agentId,
+          route: e.route,
+          model: e.model,
+          kind: e.kind,
+          durationMs: e.durationMs,
+          status: e.status,
+          outcome: e.outcome,
+          inputTokens: e.inputTokens,
+          outputTokens: e.outputTokens,
+        });
       }
       return isLive;
     });
@@ -59,7 +69,17 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
   return false;
 }
 
-type ActivityEvent = { agentId: string; route?: string; model?: string; kind?: string };
+type ActivityEvent = {
+  agentId: string;
+  route?: string;
+  model?: string;
+  kind?: string;
+  durationMs?: number;
+  status?: number;
+  outcome?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+};
 
 /**
  * Activity goes to gatekeeper-ingress one request at a time and in order, so a late `call.start` cannot overtake a

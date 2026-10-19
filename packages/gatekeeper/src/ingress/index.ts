@@ -20,6 +20,11 @@ export type AgentActivity = {
   route?: string;
   model?: string;
   kind?: string;
+  durationMs?: number;
+  status?: number;
+  outcome?: 'ok' | 'denied' | 'error' | 'timeout';
+  inputTokens?: number;
+  outputTokens?: number;
 };
 
 export type DiscordClient = {

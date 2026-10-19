@@ -27,6 +27,8 @@ export type ProgressEvent = {
   status?: number;
   durationMs?: number;
   outcome?: ProgressOutcome;
+  inputTokens?: number;
+  outputTokens?: number;
 };
 
 export type ProgressSink = (events: ProgressEvent[]) => Promise<void>;
@@ -116,6 +118,7 @@ export class ProgressCall {
   private ended = false;
   model?: string;
   outcome?: ProgressOutcome;
+  usage?: { inputTokens?: number; outputTokens?: number };
 
   constructor(
     private readonly emitter: ProgressEmitter,
@@ -144,11 +147,15 @@ export class ProgressCall {
     this.start();
     this.ended = true;
     const outcome: ProgressOutcome = this.outcome ?? (status === 504 || status === 408 ? 'timeout' : status !== undefined && status < 400 ? 'ok' : 'error');
+    const inT = typeof this.usage?.inputTokens === 'number' && Number.isFinite(this.usage.inputTokens) && this.usage.inputTokens >= 0 ? this.usage.inputTokens : undefined;
+    const outT = typeof this.usage?.outputTokens === 'number' && Number.isFinite(this.usage.outputTokens) && this.usage.outputTokens >= 0 ? this.usage.outputTokens : undefined;
     this.emitter.emit({
       ...this.base('call.end'),
       ...(status !== undefined && status >= 100 && status < 600 ? { status } : {}),
       durationMs: Math.round(performance.now() - this.t0),
       outcome,
+      ...(inT !== undefined ? { inputTokens: inT } : {}),
+      ...(outT !== undefined ? { outputTokens: outT } : {}),
     });
   }
 }

@@ -714,8 +714,18 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     ctx: RunContext,
     route: Route,
     call: { usage: Usage; model: string | undefined; price: Price | undefined; request: unknown; requestId: string; action?: string; extra?: Record<string, unknown> },
+    res?: http.ServerResponse,
   ) {
     const { usage, model, price } = call;
+    if (res) {
+      const callProgress = calls.get(res);
+      if (callProgress) {
+        callProgress.usage = {
+          inputTokens: (callProgress.usage?.inputTokens ?? 0) + usage.input + usage.cacheRead + usage.cacheWrite,
+          outputTokens: (callProgress.usage?.outputTokens ?? 0) + usage.output,
+        };
+      }
+    }
     const cost = price ? costUsd(usage, price) : 0;
     const attrs = { route: route.id, model: usage.model ?? model ?? 'unknown', agent: ctx.run.agentId };
     m?.tokens.add(usage.input + usage.cacheRead + usage.cacheWrite, { ...attrs, direction: 'input' });
@@ -796,7 +806,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       action = 'METERING_GAP';
     }
     if (!usage) return;
-    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action });
+    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action }, res);
     if (opts.traces?.enabled) {
       writeTrace(
         { ...opts.traces, dir: `${opts.traces.dir}/${ctx.run.agentId}` },
@@ -878,7 +888,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       usage = { model, input: 0, output: chat.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
       action = 'METERING_GAP';
     }
-    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action, extra: { provider: entry.provider, upstreamModel: entry.id, ...(selection.requested ? { requestedModel: selection.requested } : {}) } });
+    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action, extra: { provider: entry.provider, upstreamModel: entry.id, ...(selection.requested ? { requestedModel: selection.requested } : {}) } }, res);
 
     if (declaredToolNames.length > 0 && (!result.toolCalls || result.toolCalls.length === 0)) {
       const leakedTool = detectToolSyntaxLeak(result.content, declaredToolNames);
@@ -916,7 +926,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         const retryId = randomUUID();
         const r2 = again.result;
         const u2: Usage = r2.usage ? { model, input: r2.usage.input, output: r2.usage.output, cacheRead: 0, cacheWrite: 0 } : { model, input: 0, output: again.request.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
-        recordUsage(ctx, route, { usage: u2, model, price, request: retryBody, requestId: retryId, action: r2.usage ? undefined : 'METERING_GAP', extra: { provider: entry.provider, upstreamModel: entry.id } });
+        recordUsage(ctx, route, { usage: u2, model, price, request: retryBody, requestId: retryId, action: r2.usage ? undefined : 'METERING_GAP', extra: { provider: entry.provider, upstreamModel: entry.id } }, res);
         const leaked = !r2.toolCalls?.length && detectToolSyntaxLeak(r2.content, declaredToolNames);
         ledger(ctx, route, { type: 'action', action: 'GROUNDING_RETRY', model, requestId, retryRequestId: retryId, toolCalled: Boolean(r2.toolCalls?.length) });
         replyUsage = { input: replyUsage.input + u2.input, output: replyUsage.output + u2.output };
