@@ -13,7 +13,7 @@ import { BUILTIN_PROVIDER_HOSTS, BUILTIN_PROVIDER_SECRETS, SseMeter, checkModel,
 import type { Meter } from '@opentelemetry/api';
 
 import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';
-import { GROUNDING_RETRY_NOTICE, NO_TOOLS_FOOTNOTE, ReplyBook, footnoteDiscordBody, isDiscordReply, replySha256, toolNamesOf, toolResultsInTurn, withGroundingNote } from './grounding.js';
+import { GROUNDING_RETRY_NOTICE, NO_TOOLS_FOOTNOTE, ReplyBook, footnoteDiscordBody, isDiscordReply, isDiscordRoute, isReadMethod, mcpResultOk, replySha256, toolNamesOf, toolResultsInTurn, withGroundingNote } from './grounding.js';
 import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from '@beercanlabs/factory-inspector';
 
 export type Route = {
@@ -587,6 +587,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       // The upstream rejected the token: drop it so the next call asks the Keymaster again.
       for (const k of connCache.keys()) if (k.startsWith(`${ctx.run.agentId}\u0000${route.connection}\u0000`)) connCache.delete(k);
     }
+    if (status >= 200 && status < 300 && isReadMethod(req.method) && !isDiscordRoute(route)) replies.sawDataRead(ctx.run.runId);
     ledger(ctx, route, { type: 'action', action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS', connection: route.connection, host, status });
   }
 
@@ -834,6 +835,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (parsed.stream === true) return deny(res, ctx, route, 400, 'streaming_not_supported');
     // AP3: this process saw the run use the factory model API (answered or not).
     replies.sawModelApiCall(ctx.run.runId);
+    // AP3.2: only reads made before this request can be in its prompt.
+    const readMark = replies.readMark(ctx.run.runId);
+    // Judged on arrival: a read's age and whether it is still unused are as of this request, not its answer.
+    const readsGround = replies.consultedBefore(ctx.run.runId, readMark);
     // M2 (GAP-181): agents never choose. The factory serves the pin, the policy's first model or the default, whatever
     // model name the call carries; a differing name is recorded as `requestedModel`.
     const requestedName = typeof parsed.model === 'string' && parsed.model ? parsed.model : undefined;
@@ -897,7 +902,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     let reply = result;
     let replyUsage = { input: usage.input, output: usage.output };
     const toolsOffered = declaredToolNames.length > 0;
-    const grounded = !toolsOffered || toolResultsInTurn(chat.messages);
+    // AP3.2: grounded by tool results the model was given, or by data this run fetched through a route since its last answer.
+    const grounded = !toolsOffered || toolResultsInTurn(chat.messages) || readsGround;
     const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
     const retryAffordable = isBuiltin || checkStanding({ limits: ctx.policy.budgetUsd, spend: ctx.spend, pendingUsd: unacked.get(ctx.run.runId) ?? 0 }).inGoodStanding;
     if (!grounded && !reply.toolCalls?.length && ctx.policy.grounding === 'warn-once' && reply.content.trim() && retryAffordable && !throttled(ctx)) {
@@ -921,6 +927,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (!reply.toolCalls?.length) {
       // AP3.2: remember the answer (text in memory only) and record its hash, so replies built from it can be footnoted.
       replies.remember(ctx.run.runId, reply.content, grounded ? undefined : NO_TOOLS_FOOTNOTE);
+      // A helper call without tools (summarise, extract) is not the turn's answer and uses up nothing.
+      if (toolsOffered) replies.answered(ctx.run.runId, readMark);
       ledger(ctx, route, { type: 'action', action: grounded ? 'MODEL_REPLY' : 'UNGROUNDED_REPLY', model, requestId, replySha256: replySha256(reply.content) });
     }
 
@@ -1036,11 +1044,20 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     }
     const cred = await credential(route, ctx);
     if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
-    const status = await forward(req, res, route, rest, raw, cred);
+    // AP3.2: a tool call counts as consulting only when its result is not an error (MCP reports failures inside a 200).
+    const answer: Buffer[] = [];
+    let answerBytes = 0;
+    const status = await forward(req, res, route, rest, raw, cred, () => ({
+      chunk: (b) => {
+        if (answerBytes < 256 * 1024) answer.push(b);
+        answerBytes += b.length;
+      },
+    }));
     if (status === 401) {
       evictCredential(route, ctx);
       ledger(ctx, route, { type: 'action', action: 'RUNTIME_AUTH_FAILURE' });
     }
+    if (status >= 200 && status < 300 && toolCalls.length && mcpResultOk(Buffer.concat(answer).toString('utf8'))) replies.sawDataRead(ctx.run.runId);
     for (const c of calls) {
       if (!c?.method) continue;
       ledger(ctx, route, {
@@ -1255,6 +1272,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       const cred = await credential(route, ctx);
       if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
       const status = await forward(req, res, route, rest, raw, cred);
+      // AP3.2: a successful read consults the system; a write, or anything on the Discord route, does not.
+      if (status >= 200 && status < 300 && isReadMethod(req.method) && !isDiscordRoute(route)) replies.sawDataRead(ctx.run.runId);
       ledger(ctx, route, { type: 'action', action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS' });
       if (status === 401) evictCredential(route, ctx);
     } catch (err) {

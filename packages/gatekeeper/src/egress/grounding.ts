@@ -60,7 +60,57 @@ export function replySha256(text: string): string {
 }
 
 type Answer = { text: string; footnote?: string };
-type RunBook = { answers: Answer[]; modelApiCalls: number; nativeModelCalls: number; at: number };
+type RunBook = {
+  answers: Answer[];
+  modelApiCalls: number;
+  nativeModelCalls: number;
+  /** AP3.2: when the run's data reads happened; `readBase` is the absolute index of `reads[0]`. */
+  reads: number[];
+  readBase: number;
+  /** Reads before this absolute index were used up by an answer given with tools offered. */
+  readsUsed: number;
+  at: number;
+};
+
+/** A read older than this grounds nothing: a warm run's lookup from an hour ago is not what the model just said. */
+export const READ_WINDOW_MS = 15 * 60 * 1000;
+const MAX_READS = 100;
+
+/** The read methods: only these count as consulting a system (AP3.2). A write, even a successful one, consults nothing. */
+export function isReadMethod(method: string | undefined): boolean {
+  return method === 'GET' || method === 'HEAD';
+}
+
+/** Any traffic on the Discord route is delivery (posts, edits, typing, reactions, deletes), never a lookup (AP3.2). */
+export function isDiscordRoute(route: { id: string; upstream?: string }): boolean {
+  if (route.id === 'discord') return true;
+  try {
+    const host = new URL(route.upstream ?? '').host.toLowerCase();
+    return host === 'discord.com' || host.endsWith('.discord.com');
+  } catch {
+    return false;
+  }
+}
+
+/** Whether an MCP response (JSON or SSE) carries a tool result that is not an error: MCP reports failures inside a 200. */
+export function mcpResultOk(body: string): boolean {
+  const docs: unknown[] = [];
+  const text = body.trim();
+  const lines = text.startsWith('{') || text.startsWith('[') ? [text] : text.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim());
+  for (const l of lines) {
+    try {
+      const v = JSON.parse(l);
+      docs.push(...(Array.isArray(v) ? v : [v]));
+    } catch {
+      // not JSON
+    }
+  }
+  return docs.some((d) => {
+    if (!d || typeof d !== 'object') return false;
+    const m = d as { result?: { isError?: unknown }; error?: unknown };
+    return m.result !== undefined && !m.error && m.result?.isError !== true;
+  });
+}
 
 /** Below this length an answer must match exactly: a short "OK" inside other text is no evidence (review #198). */
 const MIN_PARTIAL_MATCH = 24;
@@ -77,7 +127,7 @@ export class ReplyBook {
   private book(runId: string, now: number): RunBook {
     for (const [id, b] of this.runs) if (now - b.at >= this.ttlMs) this.runs.delete(id);
     let b = this.runs.get(runId);
-    if (!b) this.runs.set(runId, (b = { answers: [], modelApiCalls: 0, nativeModelCalls: 0, at: now }));
+    if (!b) this.runs.set(runId, (b = { answers: [], modelApiCalls: 0, nativeModelCalls: 0, reads: [], readBase: 0, readsUsed: 0, at: now }));
     b.at = now;
     return b;
   }
@@ -90,6 +140,43 @@ export class ReplyBook {
   /** A provider-native model call (M4): its answers are not recorded, so the run's replies cannot be judged. */
   sawNativeModelCall(runId: string, now = Date.now()): void {
     this.book(runId, now).nativeModelCalls++;
+  }
+
+  /**
+   * AP3.2: a read the run made through a data route and the upstream answered (2xx). Data the agent's own code fetched
+   * and gave the model as text grounds an answer as much as a tool result does: the factory carried the read out.
+   */
+  sawDataRead(runId: string, now = Date.now()): void {
+    const b = this.book(runId, now);
+    b.reads.push(now);
+    if (b.reads.length > MAX_READS) {
+      const drop = b.reads.length - MAX_READS;
+      b.reads.splice(0, drop);
+      b.readBase += drop;
+    }
+  }
+
+  /** Where the run's reads stand when a model request arrives: only reads before it can be in that request's prompt. */
+  readMark(runId: string, now = Date.now()): number {
+    const b = this.book(runId, now);
+    return b.readBase + b.reads.length;
+  }
+
+  /** Whether an unused, recent read happened before `mark` (this process's record, never the agent's word). */
+  consultedBefore(runId: string, mark: number, now = Date.now()): boolean {
+    const b = this.runs.get(runId);
+    if (!b) return false;
+    for (let i = Math.max(b.readsUsed, b.readBase); i < mark; i++) {
+      const t = b.reads[i - b.readBase];
+      if (t !== undefined && now - t < READ_WINDOW_MS) return true;
+    }
+    return false;
+  }
+
+  /** A final answer given with tools offered uses up the reads before its request; later reads ground the next one. */
+  answered(runId: string, mark: number): void {
+    const b = this.runs.get(runId);
+    if (b) b.readsUsed = Math.max(b.readsUsed, mark);
   }
 
   remember(runId: string, text: string, footnote?: string, now = Date.now()): void {
