@@ -86,10 +86,10 @@ async function listen(server: http.Server): Promise<number> {
   return a.port;
 }
 
-function call(port: number, path: string, token: string, body: unknown): Promise<{ status: number; json: () => any }> {
+function call(port: number, path: string, token: string, body: unknown, method = 'POST'): Promise<{ status: number; json: () => any }> {
   return new Promise((resolve, reject) => {
-    const data = Buffer.from(JSON.stringify(body));
-    const req = http.request({ host: '127.0.0.1', port, path, method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` } }, (res) => {
+    const data = body === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(body));
+    const req = http.request({ host: '127.0.0.1', port, path, method, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` } }, (res) => {
       let text = '';
       res.on('data', (c) => (text += c));
       res.on('end', () => resolve({ status: res.statusCode ?? 0, json: () => JSON.parse(text) }));
@@ -110,6 +110,12 @@ describe('AP3 through the gatekeeper-egress', { concurrency: false }, () => {
       let b = '';
       req.on('data', (c) => (b += c));
       req.on('end', () => {
+        // A data system on the same test server: /data/fail answers 500, anything else 200.
+        if (req.url?.startsWith('/data')) {
+          res.writeHead(req.url.startsWith('/data/fail') ? 500 : 200, { 'content-type': 'application/json' });
+          res.end('{"steps":4200}');
+          return;
+        }
         posted.push(JSON.parse(b).content);
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('{}');
@@ -131,7 +137,7 @@ describe('AP3 through the gatekeeper-egress', { concurrency: false }, () => {
       async ledger(e) { ledger.push(e); return true; },
     } as ControlClient;
     const gk = createGatekeeperEgress({
-      routes: [{ id: 'models', kind: 'models' }, { id: 'discord', kind: 'http', upstream: `http://127.0.0.1:${dPort}/discord` }],
+      routes: [{ id: 'models', kind: 'models' }, { id: 'discord', kind: 'http', upstream: `http://127.0.0.1:${dPort}/discord` }, { id: 'health', kind: 'http', upstream: `http://127.0.0.1:${dPort}/data` }],
       prices: {},
       runTokens: tokens,
       control,
@@ -188,6 +194,36 @@ describe('AP3 through the gatekeeper-egress', { concurrency: false }, () => {
       await settle();
       assert.equal(t.ledger.filter((e) => e.action === 'MODEL_REPLY').length, 2);
       assert.equal(t.ledger.some((e) => e.action === 'UNGROUNDED_REPLY'), false);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it('AP3 data the run fetched through a route grounds the next answer, once; a failed fetch or a reply post does not', async () => {
+    const t = await setup({ routes: ['models', 'discord', 'health'], models: ['fake-model'] }, [
+      { content: 'You have 4,200 steps today.' },
+      { content: 'Still 4,200, I believe.' },
+      { content: 'No data, sorry.' },
+      { content: 'Posted first, then answered.' },
+    ]);
+    const ask = (q: string) => call(t.port, '/models/v1/chat/completions', t.token, { messages: [{ role: 'system', content: 'Health data: {"steps":4200}' }, { role: 'user', content: q }], tools: TOOLS });
+    try {
+      // The agent's own code fetches the data and gives it to the model as text (no tool messages).
+      assert.equal((await call(t.port, '/health/steps', t.token, undefined, 'GET')).status, 200);
+      await ask('steps?');
+      await call(t.port, '/discord/channels/123/messages', t.token, { content: 'You have 4,200 steps today.' });
+      // The answer closed the turn: the next one, with nothing fetched, is ungrounded.
+      await ask('and now?');
+      // A fetch the upstream refused grounds nothing.
+      assert.equal((await call(t.port, '/health/fail', t.token, undefined, 'GET')).status, 500);
+      await ask('try again');
+      // Posting a reply is not consulting anything.
+      await call(t.port, '/discord/channels/123/messages', t.token, { content: 'working on it' });
+      await ask('one more');
+      await settle();
+      const kinds = t.ledger.filter((e) => e.action === 'MODEL_REPLY' || e.action === 'UNGROUNDED_REPLY').map((e) => e.action);
+      assert.deepEqual(kinds, ['MODEL_REPLY', 'UNGROUNDED_REPLY', 'UNGROUNDED_REPLY', 'UNGROUNDED_REPLY']);
+      assert.equal(t.posted[0], 'You have 4,200 steps today.', 'a grounded answer reaches Discord without a footnote');
     } finally {
       await t.close();
     }

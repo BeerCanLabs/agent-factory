@@ -60,7 +60,7 @@ export function replySha256(text: string): string {
 }
 
 type Answer = { text: string; footnote?: string };
-type RunBook = { answers: Answer[]; modelApiCalls: number; nativeModelCalls: number; at: number };
+type RunBook = { answers: Answer[]; modelApiCalls: number; nativeModelCalls: number; dataCalls: number; at: number };
 
 /** Below this length an answer must match exactly: a short "OK" inside other text is no evidence (review #198). */
 const MIN_PARTIAL_MATCH = 24;
@@ -77,7 +77,7 @@ export class ReplyBook {
   private book(runId: string, now: number): RunBook {
     for (const [id, b] of this.runs) if (now - b.at >= this.ttlMs) this.runs.delete(id);
     let b = this.runs.get(runId);
-    if (!b) this.runs.set(runId, (b = { answers: [], modelApiCalls: 0, nativeModelCalls: 0, at: now }));
+    if (!b) this.runs.set(runId, (b = { answers: [], modelApiCalls: 0, nativeModelCalls: 0, dataCalls: 0, at: now }));
     b.at = now;
     return b;
   }
@@ -92,10 +92,26 @@ export class ReplyBook {
     this.book(runId, now).nativeModelCalls++;
   }
 
+  /**
+   * AP3.2: a call the run made through a data route and the upstream answered (2xx). Data the agent's own code fetched
+   * and gave the model as text grounds the next answer as much as a tool result does: the factory carried the call out.
+   */
+  sawDataCall(runId: string, now = Date.now()): void {
+    this.book(runId, now).dataCalls++;
+  }
+
+  /** Whether the run fetched data through a route since its last final answer (this process's record, never the agent's word). */
+  consultedSinceAnswer(runId: string, now = Date.now()): boolean {
+    const b = this.runs.get(runId);
+    return Boolean(b && now - b.at < this.ttlMs && b.dataCalls > 0);
+  }
+
   remember(runId: string, text: string, footnote?: string, now = Date.now()): void {
+    const b = this.book(runId, now);
+    // A final answer closes the turn: the next answer is grounded only by what is fetched after it.
+    b.dataCalls = 0;
     const t = normaliseReply(text);
     if (!t) return;
-    const b = this.book(runId, now);
     b.answers.push({ text: t, ...(footnote ? { footnote } : {}) });
     b.answers = b.answers.slice(-this.keep);
   }

@@ -587,6 +587,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       // The upstream rejected the token: drop it so the next call asks the Keymaster again.
       for (const k of connCache.keys()) if (k.startsWith(`${ctx.run.agentId}\u0000${route.connection}\u0000`)) connCache.delete(k);
     }
+    if (status >= 200 && status < 300) replies.sawDataCall(ctx.run.runId);
     ledger(ctx, route, { type: 'action', action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS', connection: route.connection, host, status });
   }
 
@@ -897,7 +898,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     let reply = result;
     let replyUsage = { input: usage.input, output: usage.output };
     const toolsOffered = declaredToolNames.length > 0;
-    const grounded = !toolsOffered || toolResultsInTurn(chat.messages);
+    // AP3.2: grounded by tool results the model was given, or by data this run fetched through a route since its last answer.
+    const grounded = !toolsOffered || toolResultsInTurn(chat.messages) || replies.consultedSinceAnswer(ctx.run.runId);
     const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
     const retryAffordable = isBuiltin || checkStanding({ limits: ctx.policy.budgetUsd, spend: ctx.spend, pendingUsd: unacked.get(ctx.run.runId) ?? 0 }).inGoodStanding;
     if (!grounded && !reply.toolCalls?.length && ctx.policy.grounding === 'warn-once' && reply.content.trim() && retryAffordable && !throttled(ctx)) {
@@ -1041,6 +1043,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       evictCredential(route, ctx);
       ledger(ctx, route, { type: 'action', action: 'RUNTIME_AUTH_FAILURE' });
     }
+    if (status >= 200 && status < 300 && calls.some((c) => c?.method === 'tools/call')) replies.sawDataCall(ctx.run.runId);
     for (const c of calls) {
       if (!c?.method) continue;
       ledger(ctx, route, {
@@ -1255,6 +1258,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       const cred = await credential(route, ctx);
       if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
       const status = await forward(req, res, route, rest, raw, cred);
+      // Delivering a reply is not consulting anything (AP3.2).
+      if (status >= 200 && status < 300 && !isDiscordReply(route, req.method, rest)) replies.sawDataCall(ctx.run.runId);
       ledger(ctx, route, { type: 'action', action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS' });
       if (status === 401) evictCredential(route, ctx);
     } catch (err) {
