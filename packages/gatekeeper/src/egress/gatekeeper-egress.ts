@@ -587,7 +587,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       // The upstream rejected the token: drop it so the next call asks the Keymaster again.
       for (const k of connCache.keys()) if (k.startsWith(`${ctx.run.agentId}\u0000${route.connection}\u0000`)) connCache.delete(k);
     }
-    if (status >= 200 && status < 300 && isReadMethod(req.method)) replies.sawDataRead(ctx.run.runId);
+    if (status >= 200 && status < 300 && isReadMethod(req.method) && !isDiscordRoute(route)) replies.sawDataRead(ctx.run.runId);
     ledger(ctx, route, { type: 'action', action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS', connection: route.connection, host, status });
   }
 
@@ -837,6 +837,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     replies.sawModelApiCall(ctx.run.runId);
     // AP3.2: only reads made before this request can be in its prompt.
     const readMark = replies.readMark(ctx.run.runId);
+    // Judged on arrival: a read's age and whether it is still unused are as of this request, not its answer.
+    const readsGround = replies.consultedBefore(ctx.run.runId, readMark);
     // M2 (GAP-181): agents never choose. The factory serves the pin, the policy's first model or the default, whatever
     // model name the call carries; a differing name is recorded as `requestedModel`.
     const requestedName = typeof parsed.model === 'string' && parsed.model ? parsed.model : undefined;
@@ -901,7 +903,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     let replyUsage = { input: usage.input, output: usage.output };
     const toolsOffered = declaredToolNames.length > 0;
     // AP3.2: grounded by tool results the model was given, or by data this run fetched through a route since its last answer.
-    const grounded = !toolsOffered || toolResultsInTurn(chat.messages) || replies.consultedBefore(ctx.run.runId, readMark);
+    const grounded = !toolsOffered || toolResultsInTurn(chat.messages) || readsGround;
     const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
     const retryAffordable = isBuiltin || checkStanding({ limits: ctx.policy.budgetUsd, spend: ctx.spend, pendingUsd: unacked.get(ctx.run.runId) ?? 0 }).inGoodStanding;
     if (!grounded && !reply.toolCalls?.length && ctx.policy.grounding === 'warn-once' && reply.content.trim() && retryAffordable && !throttled(ctx)) {
