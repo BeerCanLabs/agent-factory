@@ -418,10 +418,24 @@ export async function finishRun(
   if (!cur) throw new Error(`unknown run ${runId}`);
   if (isTerminal(cur.state)) {
     if (cur.state === 'TIMED_OUT' && (terminal === 'DONE' || terminal === 'FAILED')) {
-      // Late result arrival for a timed-out run updates the terminal outcome
-    } else {
-      return cur;
+      const done = state.runs.update(runId, {
+        state: terminal,
+        ...(extra.exitCode !== undefined ? { exitCode: extra.exitCode } : {}),
+        ...(extra.result !== undefined ? { result: extra.result } : {}),
+        ...(extra.error !== undefined ? { error: extra.error } : {}),
+      });
+      record(state, done, `RUN_${terminal}`, extra.actor);
+      const agent = state.agents.get(cur.agentId);
+      if (terminal === 'FAILED' && agent && !activeRun(state, cur.agentId)) {
+        if (agent.state !== 'PAUSED' && agent.state !== 'ISOLATED') {
+          agent.state = 'ERROR';
+          registryOf(state).update(agent);
+        }
+      }
+      void fireCallback(state, done);
+      return done;
     }
+    return cur;
   }
   const agent = state.agents.get(cur.agentId);
 
@@ -458,7 +472,7 @@ export async function finishRun(
         console.error(`[control-plane] stop ${agent.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    if (agent.state === 'WORKING' || (cur.state === 'TIMED_OUT' && terminal === 'FAILED')) {
+    if (agent.state === 'WORKING') {
       agent.state = (terminal === 'DONE' || terminal === 'TIMED_OUT') ? 'SLEEPING' : 'ERROR';
       registryOf(state).update(agent);
     }
