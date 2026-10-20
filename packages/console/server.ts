@@ -8,10 +8,18 @@ const __dirname = path.dirname(__filename);
 
 function loadConsoleVersion(): string {
   try {
-    const pkgPath = path.join(__dirname, 'package.json');
-    if (fs.existsSync(pkgPath)) {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-      if (typeof pkg.version === 'string') return pkg.version;
+    const candidates = [
+      path.join(__dirname, 'package.json'),
+      path.join(__dirname, '..', 'package.json'),
+      path.join(process.cwd(), 'package.json'),
+    ];
+    for (const pkgPath of candidates) {
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        if (typeof pkg.version === 'string' && pkg.version.trim()) {
+          return pkg.version.trim();
+        }
+      }
     }
   } catch {
     // fallback
