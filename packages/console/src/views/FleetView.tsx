@@ -76,12 +76,19 @@ export const FleetView: React.FC<FleetViewProps> = ({
   const runningCount = displayedAgents.filter((a) => a.state === 'RUNNING').length;
   const sleepingCount = displayedAgents.filter((a) => a.state === 'SLEEPING').length;
   const totalMonthlyCost = displayedAgents.reduce(
-    (sum, a) => sum + (a.currentSpendMonthlyUsd ?? a.currentSpendUsd ?? 0),
+    (sum, a) => sum + (Number.isFinite(a.currentSpendMonthlyUsd) && (a.currentSpendMonthlyUsd ?? 0) > 0
+      ? (a.currentSpendMonthlyUsd ?? 0)
+      : (Number.isFinite(a.currentSpendUsd) ? (a.currentSpendUsd ?? 0) : 0)),
     0
   );
   const totalMonthlyBudget = displayedAgents
     .filter((a) => !a.isBuiltin && a.category !== 'builtin' && !a.budgetExempt)
-    .reduce((sum, a) => sum + (a.spendLimitMonthlyUsd ?? (a.spendLimitUsd ? a.spendLimitUsd * 30 : 0)), 0);
+    .reduce((sum, a) => {
+      const monthly = Number.isFinite(a.spendLimitMonthlyUsd) && (a.spendLimitMonthlyUsd ?? 0) > 0
+        ? a.spendLimitMonthlyUsd!
+        : (Number.isFinite(a.spendLimitUsd) && (a.spendLimitUsd ?? 0) > 0 ? a.spendLimitUsd! * 30 : 0);
+      return sum + monthly;
+    }, 0);
 
   const handleWake = async () => {
     if (!wakeModalAgent) return;

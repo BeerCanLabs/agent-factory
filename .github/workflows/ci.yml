@@ -33,22 +33,39 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # Console UI changes run independently of kernel container proof (GAP-187, TSK-255).
+      # Console UI changes run independently of kernel container proof (GAP-187, TSK-255, TSK-256).
       - name: Check changed paths
         id: check_paths
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          # Only pull requests can skip container proof; schedules and pushes always run proof
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Event is ${{ github.event_name }}. Running full kernel container proof."
             echo "skip_proof=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          BASE="origin/${{ github.base_ref || 'main' }}"
-          git fetch origin "${{ github.base_ref || 'main' }}" --depth=1 || true
-          CHANGED=$(git diff --name-only "$BASE"...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || true)
+
+          # On PR merge commits (refs/pull/*/merge), HEAD^1 is the target base branch
+          CHANGED=""
+          if git rev-parse --verify HEAD^1 >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
+          else
+            BASE="origin/${{ github.base_ref || 'main' }}"
+            git fetch origin "${{ github.base_ref || 'main' }}" || true
+            CHANGED=$(git diff --name-only "$BASE"...HEAD 2>/dev/null || true)
+          fi
+
+          if [ -z "$CHANGED" ]; then
+            echo "Unable to reliably determine changed files. Failing safe: running container proof."
+            echo "skip_proof=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           NON_CONSOLE=$(echo "$CHANGED" | grep -v '^packages/console/' | grep -v '^DESIGN_AUTHORITY.md' || true)
-          if [ -z "$NON_CONSOLE" ] && [ -n "$CHANGED" ]; then
-            echo "Changes are isolated to packages/console/ (GAP-187). Skipping kernel container proof."
+          if [ -z "$NON_CONSOLE" ]; then
+            echo "Changes are strictly isolated to packages/console/ (GAP-187). Skipping kernel container proof."
             echo "skip_proof=true" >> "$GITHUB_OUTPUT"
           else
+            echo "Changes include non-console files (${NON_CONSOLE//$'\n'/, }). Running kernel container proof."
             echo "skip_proof=false" >> "$GITHUB_OUTPUT"
           fi
       - uses: docker/setup-buildx-action@v3
