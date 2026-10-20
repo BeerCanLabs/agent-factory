@@ -625,6 +625,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     body: Buffer,
     authHeader: string | undefined,
     onResponse?: (status: number, isSse: boolean) => { chunk: (b: Buffer) => void },
+    beforeEnd?: () => void,
   ): Promise<number> {
     const t0 = performance.now();
     const done = (status: number) => {
@@ -673,6 +674,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           res.write(c);
         });
         upRes.on('end', () => {
+          if (beforeEnd) {
+            try {
+              beforeEnd();
+            } catch (err) {
+              console.error('[gatekeeper-egress] forward beforeEnd error:', err);
+            }
+          }
           res.end();
           done(status);
           resolve(status);
@@ -782,11 +790,38 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const price = priceFor(opts.prices, model);
     let jsonChunks: Buffer[] = [];
     let meter: SseMeter | undefined;
+    let recordedUsage: Usage | null = null;
+    let respBody: Buffer | undefined;
 
-    const status = await forward(req, res, route, rest, body, cred, (_s, isSse) => {
-      if (isSse) meter = new SseMeter(provider, opts.traces?.enabled ? 1_000_000 : 0);
-      return { chunk: (c) => (meter ? meter.feed(c) : jsonChunks.push(c)) };
-    });
+    const beforeEnd = () => {
+      if (req.method !== 'POST' || !parsed) return;
+      respBody = meter ? undefined : Buffer.concat(jsonChunks);
+      let usage: Usage | null = meter ? meter.result() : usageFromJson(provider, tryJson(respBody!));
+      let action: string | undefined;
+      if (!usage && res.statusCode < 400) {
+        const maxOut = typeof parsed.max_tokens === 'number' ? parsed.max_tokens : typeof parsed.max_output_tokens === 'number' ? parsed.max_output_tokens : 4096;
+        usage = { model, input: 0, output: maxOut, cacheRead: 0, cacheWrite: 0 };
+        action = 'METERING_GAP';
+      }
+      if (usage) {
+        recordedUsage = usage;
+        recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action }, res);
+      }
+    };
+
+    const status = await forward(
+      req,
+      res,
+      route,
+      rest,
+      body,
+      cred,
+      (_s, isSse) => {
+        if (isSse) meter = new SseMeter(provider, opts.traces?.enabled ? 1_000_000 : 0);
+        return { chunk: (c) => (meter ? meter.feed(c) : jsonChunks.push(c)) };
+      },
+      beforeEnd,
+    );
 
     if (status === 401) {
       evictCredential(route, ctx);
@@ -795,18 +830,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     }
     if (req.method !== 'POST' || !parsed) return;
 
-    const respBody = meter ? undefined : Buffer.concat(jsonChunks);
-    jsonChunks = [];
-    let usage: Usage | null = meter ? meter.result() : usageFromJson(provider, tryJson(respBody!));
-    let action: string | undefined;
-    if (!usage && status < 400) {
-      // No usage reported: charge the worst case the request allowed rather than nothing.
-      const maxOut = typeof parsed.max_tokens === 'number' ? parsed.max_tokens : typeof parsed.max_output_tokens === 'number' ? parsed.max_output_tokens : 4096;
-      usage = { model, input: 0, output: maxOut, cacheRead: 0, cacheWrite: 0 };
-      action = 'METERING_GAP';
+    if (!recordedUsage && !meter && jsonChunks.length) {
+      respBody = Buffer.concat(jsonChunks);
     }
-    if (!usage) return;
-    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action }, res);
+    jsonChunks = [];
+
     if (opts.traces?.enabled) {
       writeTrace(
         { ...opts.traces, dir: `${opts.traces.dir}/${ctx.run.agentId}` },

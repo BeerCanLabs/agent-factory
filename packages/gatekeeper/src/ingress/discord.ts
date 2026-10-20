@@ -47,14 +47,17 @@ export type DiscordClientOptions = {
   progressMessage?: boolean;
 };
 
-const ROUTE_LABELS: Record<string, string> = {
-  'google-gmail': '📧 Gmail',
-  'google-calendar': '📅 Calendar',
-  'google-drive': '📁 Drive',
-  'notion': '🗂 Notion',
-  'github': '🐙 GitHub',
-  'tavily': '🔍 Tavily',
-};
+function isModelActivity(activity: { model?: string; route?: string }): boolean {
+  return Boolean(activity.model || activity.route?.startsWith('model') || activity.route === 'models');
+}
+
+function isMessagingActivity(activity: { route?: string }): boolean {
+  return Boolean(activity.route === 'discord' || activity.route?.startsWith('discord-'));
+}
+
+function isInternalActivity(activity: { route?: string }): boolean {
+  return Boolean(activity.route === 'control-plane' || activity.route === 'auth');
+}
 
 function formatDuration(ms?: number): string {
   if (ms === undefined) return '';
@@ -63,34 +66,26 @@ function formatDuration(ms?: number): string {
 }
 
 function routeLabel(route?: string, model?: string): string {
-  const isModel = Boolean(model || route?.startsWith('model') || route === 'models');
-  if (isModel) {
+  if (model || route?.startsWith('model') || route === 'models') {
     return model ? `🧠 ${model}` : '🧠 Thinking';
   }
   if (!route) return '🔧 tool';
-  if (ROUTE_LABELS[route]) return ROUTE_LABELS[route];
   if (route.startsWith('proxy-')) return `🌐 ${route.slice(6)}`;
   return `🔧 ${route}`;
 }
 
 function formatSummary(stats: ProgressStats, failed = false): string {
-  const parts: string[] = [];
-  if (stats.thoughtMs > 0) {
-    parts.push(`thought for ${formatDuration(stats.thoughtMs)}`);
-  }
-  if (stats.toolCallsCount > 0) {
-    parts.push(`called ${stats.toolCallsCount} tool${stats.toolCallsCount === 1 ? '' : 's'}`);
-  }
-  if (stats.inputTokens > 0 || stats.outputTokens > 0) {
-    parts.push(`spent ${stats.inputTokens.toLocaleString()} input tokens and ${stats.outputTokens.toLocaleString()} output tokens`);
-  }
   const prefix = failed ? '⚠️' : '✓';
-  if (parts.length === 0) {
+  const hasModelActivity = stats.thoughtMs > 0 || stats.inputTokens > 0 || stats.outputTokens > 0;
+  if (!hasModelActivity && stats.toolCallsCount === 0) {
     const elapsed = Date.now() - stats.startedAt;
     return `${prefix} Done in ${formatDuration(elapsed)}`;
   }
-  const joined = parts.join(', ');
-  return `${prefix} ${joined.charAt(0).toUpperCase() + joined.slice(1)}`;
+  const thoughtDuration = formatDuration(stats.thoughtMs > 0 ? stats.thoughtMs : (Date.now() - stats.startedAt));
+  const toolStr = `${stats.toolCallsCount} tool${stats.toolCallsCount === 1 ? '' : 's'}`;
+  const inputTokensStr = stats.inputTokens.toLocaleString();
+  const outputTokensStr = stats.outputTokens.toLocaleString();
+  return `${prefix} Thought for ${thoughtDuration}, called ${toolStr}, spent ${inputTokensStr} input tokens and ${outputTokensStr} output tokens`;
 }
 
 function renderProgressContent(turn: ActiveTurnSession): string {
@@ -442,8 +437,11 @@ export function createDiscordClient(
       if (activeTurns.size === 0) return;
 
       // Progress names the route (an identifier, E3), not the tool inside it.
-      const isModel = Boolean(activity.model || activity.route?.startsWith('model'));
-      const routeName = activity.route && !isModel ? activity.route : undefined;
+      const isModel = isModelActivity(activity);
+      const isMessaging = isMessagingActivity(activity);
+      const isInternal = isInternalActivity(activity);
+      const isTool = !isModel && !isMessaging && !isInternal && Boolean(activity.route);
+      const routeName = isTool ? activity.route : undefined;
 
       let text: string;
       if (activity.kind === 'call.end') {
@@ -471,27 +469,29 @@ export function createDiscordClient(
             turn.stats.thoughtMs += activity.durationMs ?? 0;
             turn.stats.inputTokens += activity.inputTokens ?? 0;
             turn.stats.outputTokens += activity.outputTokens ?? 0;
-          } else if (routeName) {
+          } else if (isTool) {
             turn.stats.toolCallsCount += 1;
           }
         }
 
-        const label = routeLabel(activity.route, activity.model);
-        if (activity.kind === 'call.start') {
-          turn.stats.recentLines.push(`${label}…`);
-        } else if (activity.kind === 'call.end') {
-          const outcomeSymbol = activity.outcome === 'error' || activity.outcome === 'timeout' || (activity.status !== undefined && activity.status >= 400) ? '⚠️' : '✓';
-          const durStr = activity.durationMs !== undefined ? ` ${formatDuration(activity.durationMs)}` : '';
-          const finishedLine = `${label} ${outcomeSymbol}${durStr}`.trim();
-          const lastIdx = turn.stats.recentLines.map((l) => l.replace(/…$/, '')).lastIndexOf(label);
-          if (lastIdx !== -1) {
-            turn.stats.recentLines[lastIdx] = finishedLine;
-          } else {
-            turn.stats.recentLines.push(finishedLine);
+        if (!isMessaging && !isInternal) {
+          const label = routeLabel(activity.route, activity.model);
+          if (activity.kind === 'call.start') {
+            turn.stats.recentLines.push(`${label}…`);
+          } else if (activity.kind === 'call.end') {
+            const outcomeSymbol = activity.outcome === 'error' || activity.outcome === 'timeout' || (activity.status !== undefined && activity.status >= 400) ? '⚠️' : '✓';
+            const durStr = activity.durationMs !== undefined ? ` ${formatDuration(activity.durationMs)}` : '';
+            const finishedLine = `${label} ${outcomeSymbol}${durStr}`.trim();
+            const lastIdx = turn.stats.recentLines.map((l) => l.replace(/…$/, '')).lastIndexOf(label);
+            if (lastIdx !== -1) {
+              turn.stats.recentLines[lastIdx] = finishedLine;
+            } else {
+              turn.stats.recentLines.push(finishedLine);
+            }
           }
-        }
 
-        scheduleEdit(turn);
+          scheduleEdit(turn);
+        }
       }
     },
     async refuseWake(channelId: string, window: string, kind: 'wake' | 'handoff' = 'wake') {

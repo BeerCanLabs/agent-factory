@@ -309,7 +309,7 @@ describe('gatekeeper-ingress discord client', () => {
 
     // Wait for throttled edit
     await sleep(1100);
-    assert.ok(sentMessage.content.includes('📅 Calendar ✓ 1.2s'), sentMessage.content);
+    assert.ok(sentMessage.content.includes('🔧 google-calendar ✓ 1.2s'), sentMessage.content);
     assert.ok(sentMessage.content.includes('🧠 claude-sonnet-4-6 ✓ 3.2s'), sentMessage.content);
 
     // Bot replies
@@ -325,6 +325,53 @@ describe('gatekeeper-ingress discord client', () => {
     assert.equal(
       sentMessage.content,
       '✓ Thought for 3.2s, called 1 tool, spent 1,200 input tokens and 180 output tokens',
+    );
+    await discord.destroy();
+  });
+
+  it('does not treat discord messaging egress or internal routes as tool calls', async () => {
+    const { mockClient } = createMockClient();
+    const discord = createDiscordClient(mockClient as any);
+    await discord.setPresence('available');
+
+    let sentMessage: any = null;
+    const channel = {
+      sendTyping: async () => {},
+      send: async (options: any) => {
+        sentMessage = {
+          id: 'progress-msg-1',
+          content: typeof options === 'string' ? options : options.content,
+          edit: async (c: string) => {
+            sentMessage.content = c;
+          },
+        };
+        return sentMessage;
+      },
+    };
+
+    mockClient.emit(Events.MessageCreate, userMsg(channel));
+
+    // Agent executes model call, then posts to discord route
+    await discord.recordActivity?.({ route: 'models', model: 'haiku', kind: 'call.end', durationMs: 500, inputTokens: 100, outputTokens: 20 });
+    await discord.recordActivity?.({ route: 'discord', kind: 'call.start' });
+    await discord.recordActivity?.({ route: 'discord', kind: 'call.end', durationMs: 200, outcome: 'ok' });
+    await discord.recordActivity?.({ route: 'control-plane', kind: 'call.start' });
+    await discord.recordActivity?.({ route: 'control-plane', kind: 'call.end', durationMs: 50 });
+
+    // Bot replies
+    mockClient.emit(Events.MessageCreate, {
+      id: 'bot-reply-1',
+      channelId: 'ch1',
+      guildId: null,
+      author: { id: 'bot-id-123', bot: true },
+      channel,
+      content: 'Hello!',
+    });
+
+    // Tool calls count must remain 0
+    assert.equal(
+      sentMessage.content,
+      '✓ Thought for 0.5s, called 0 tools, spent 100 input tokens and 20 output tokens',
     );
     await discord.destroy();
   });
@@ -376,7 +423,7 @@ describe('gatekeeper-ingress discord client', () => {
 
     assert.equal(
       standbyMessage.content,
-      '✓ Thought for 0.8s, spent 400 input tokens and 50 output tokens',
+      '✓ Thought for 0.8s, called 0 tools, spent 400 input tokens and 50 output tokens',
     );
     await discord.destroy();
   });
