@@ -457,6 +457,140 @@ describe('control plane', { concurrency: false }, () => {
       }
     });
 
+    it('run timeout leaves agent in SLEEPING state (GAP-188)', async () => {
+      state.idleMs = 20;
+      try {
+        const run = (await wake()).json as RunBody;
+        await sleep(60);
+        assert.equal(state.runs.get(run.runId)?.state, 'TIMED_OUT');
+        assert.equal(state.agents.get('echo-agent')?.state, 'SLEEPING');
+      } finally {
+        state.idleMs = 0;
+      }
+    });
+
+    it('late POST /result for a TIMED_OUT run updates run to DONE, writes ledger, and keeps agent SLEEPING (GAP-188)', async () => {
+      state.idleMs = 20;
+      try {
+        const run = (await wake()).json as RunBody;
+        const token = tokenFor(run.runId);
+        await sleep(60);
+        assert.equal(state.runs.get(run.runId)?.state, 'TIMED_OUT');
+        assert.equal(state.agents.get('echo-agent')?.state, 'SLEEPING');
+
+        const res = await request(port, `/api/v1/runs/${run.runId}/result`, {
+          method: 'POST',
+          token,
+          body: { status: 'succeeded', output: { summary: 'finished successfully' } },
+        });
+        assert.equal(res.status, 200);
+        const updated = state.runs.get(run.runId);
+        assert.equal(updated?.state, 'DONE');
+        assert.deepEqual(updated?.result, { summary: 'finished successfully' });
+        assert.equal(state.agents.get('echo-agent')?.state, 'SLEEPING');
+        assert.ok(actions('echo-agent').some((e) => e.action === 'RUN_DONE' && e.runId === run.runId));
+      } finally {
+        state.idleMs = 0;
+      }
+    });
+
+    it('late POST /result with failure updates run to FAILED and transitions agent to ERROR (GAP-188)', async () => {
+      state.idleMs = 20;
+      try {
+        const run = (await wake()).json as RunBody;
+        const token = tokenFor(run.runId);
+        await sleep(60);
+        assert.equal(state.runs.get(run.runId)?.state, 'TIMED_OUT');
+        assert.equal(state.agents.get('echo-agent')?.state, 'SLEEPING');
+
+        const res = await request(port, `/api/v1/runs/${run.runId}/result`, {
+          method: 'POST',
+          token,
+          body: { status: 'failed', error: 'late failure' },
+        });
+        assert.equal(res.status, 200);
+        const updated = state.runs.get(run.runId);
+        assert.equal(updated?.state, 'FAILED');
+        assert.equal(updated?.error, 'late failure');
+        assert.equal(state.agents.get('echo-agent')?.state, 'ERROR');
+        assert.ok(actions('echo-agent').some((e) => e.action === 'RUN_FAILED' && e.runId === run.runId));
+      } finally {
+        state.idleMs = 0;
+        state.agents.get('echo-agent')!.state = 'SLEEPING';
+      }
+    });
+
+    it('scheduleTimeout grants full warmDownSeconds plus proportional grace without colliding with matching idleMs (GAP-188)', async () => {
+      const agent = state.agents.get('echo-agent')!;
+      const prev = agent.warmDownSeconds;
+      agent.warmDownSeconds = 1; // 1000ms warm-down
+      state.idleMs = 1000; // matching idleMs (1000ms)
+      try {
+        const run = (await wake()).json as RunBody;
+        // Turn completed: at 500ms, agent is still within 1000ms + 100ms grace
+        await sleep(500);
+        assert.equal(state.runs.get(run.runId)?.state, 'WORKING');
+        // Past 1100ms, timeout fires
+        await sleep(700);
+        assert.equal(state.runs.get(run.runId)?.state, 'TIMED_OUT');
+        assert.equal(state.agents.get('echo-agent')?.state, 'SLEEPING');
+      } finally {
+        agent.warmDownSeconds = prev;
+        state.idleMs = 0;
+      }
+    });
+
+    it('late POST /result on TIMED_OUT run does not disrupt an active subsequent run or overwrite PAUSED (GAP-188)', async () => {
+      state.idleMs = 20;
+      try {
+        const run1 = (await wake()).json as RunBody;
+        const token1 = tokenFor(run1.runId);
+        await sleep(60);
+        assert.equal(state.runs.get(run1.runId)?.state, 'TIMED_OUT');
+
+        // Start a second run
+        const run2 = (await wake()).json as RunBody;
+        assert.equal(state.runs.get(run2.runId)?.state, 'WORKING');
+        assert.equal(state.agents.get('echo-agent')?.state, 'WORKING');
+        assert.ok(state.idleTimers.has('echo-agent'), 'Run 2 must hold an idle timer');
+
+        // Late result from Run 1 arrives while Run 2 is WORKING
+        const res = await request(port, `/api/v1/runs/${run1.runId}/result`, {
+          method: 'POST',
+          token: token1,
+          body: { status: 'failed', error: 'late fail on run 1' },
+        });
+        assert.equal(res.status, 200);
+        assert.equal(state.runs.get(run1.runId)?.state, 'FAILED');
+        // Run 2 and agent state must remain WORKING and untouched
+        assert.equal(state.runs.get(run2.runId)?.state, 'WORKING');
+        assert.equal(state.agents.get('echo-agent')?.state, 'WORKING');
+        assert.ok(state.idleTimers.has('echo-agent'), 'Run 2 idle timer must NOT be deleted by late result on Run 1');
+
+        // Clean up Run 2
+        await request(port, `/api/v1/runs/${run2.runId}/cancel`, { method: 'POST', token: TOKENS.operator });
+
+        // Also test kill-switch preservation: if agent is PAUSED, late FAILED result doesn't overwrite PAUSED
+        const run3 = (await wake()).json as RunBody;
+        const token3 = tokenFor(run3.runId);
+        await sleep(60);
+        assert.equal(state.runs.get(run3.runId)?.state, 'TIMED_OUT');
+
+        state.agents.get('echo-agent')!.state = 'PAUSED';
+        const res2 = await request(port, `/api/v1/runs/${run3.runId}/result`, {
+          method: 'POST',
+          token: token3,
+          body: { status: 'failed', error: 'late fail on run 3' },
+        });
+        assert.equal(res2.status, 200);
+        assert.equal(state.runs.get(run3.runId)?.state, 'FAILED');
+        assert.equal(state.agents.get('echo-agent')?.state, 'PAUSED');
+      } finally {
+        state.idleMs = 0;
+        state.agents.get('echo-agent')!.state = 'SLEEPING';
+      }
+    });
+
     it('webhooks authenticate by cartridge secret and pass the body as input', async () => {
       const res = await request(port, '/api/v1/hooks/echo-agent', {
         method: 'POST',

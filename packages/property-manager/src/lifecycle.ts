@@ -173,13 +173,31 @@ export function scheduleTimeout(state: PropertyManagerState, run: Run) {
   const prev = state.idleTimers.get(run.agentId);
   if (prev) clearTimeout(prev);
   const agent = state.agents.get(run.agentId);
-  const idleWindowMs = (agent?.warmDownSeconds && agent.warmDownSeconds > 0)
+  const declaredWarmDownMs = (agent?.warmDownSeconds && agent.warmDownSeconds > 0)
     ? agent.warmDownSeconds * 1000
-    : (state.idleMs > 0 ? state.idleMs : 3_600_000);
-  // idleMs is a hard wall-clock cap from run start: activity can extend the idle window, never past the cap.
-  const started = run.startedAt ? Date.parse(run.startedAt) : Date.now();
-  const capMs = state.idleMs > 0 ? state.idleMs - (Date.now() - started) : Infinity;
-  const timeoutMs = Math.max(0, Math.min(idleWindowMs, capMs));
+    : undefined;
+  let timeoutMs: number;
+  if (declaredWarmDownMs !== undefined) {
+    const graceMs = Math.min(15_000, Math.floor(declaredWarmDownMs * 0.1));
+    const started = run.startedAt ? Date.parse(run.startedAt) : Date.now();
+    if (state.idleMs > 0 && state.idleMs < declaredWarmDownMs) {
+      // Operator wall-clock cap strictly overrides a longer agent warm-down window
+      const capMs = Math.max(0, state.idleMs - (Date.now() - started));
+      timeoutMs = Math.min(declaredWarmDownMs, capMs);
+    } else if (state.idleMs > declaredWarmDownMs) {
+      // Wall-clock cap allows the idle window plus grace, but bounds total run duration
+      const capMs = Math.max(0, (state.idleMs + graceMs) - (Date.now() - started));
+      timeoutMs = Math.max(0, Math.min(declaredWarmDownMs + graceMs, capMs));
+    } else {
+      // Default idleMs matches or is unset: grant full warm-down window plus grace
+      timeoutMs = declaredWarmDownMs + graceMs;
+    }
+  } else {
+    const idleWindowMs = state.idleMs > 0 ? state.idleMs : 3_600_000;
+    const started = run.startedAt ? Date.parse(run.startedAt) : Date.now();
+    const capMs = state.idleMs > 0 ? state.idleMs - (Date.now() - started) : Infinity;
+    timeoutMs = Math.max(0, Math.min(idleWindowMs, capMs));
+  }
   const t = setTimeout(() => {
     const cur = state.runs.get(run.runId);
     if (cur && !isTerminal(cur.state)) void finishRun(state, run.runId, 'TIMED_OUT', { actor: SYSTEM.idle });
@@ -398,7 +416,27 @@ export async function finishRun(
 ): Promise<Run> {
   const cur = state.runs.get(runId);
   if (!cur) throw new Error(`unknown run ${runId}`);
-  if (isTerminal(cur.state)) return cur;
+  if (isTerminal(cur.state)) {
+    if (cur.state === 'TIMED_OUT' && (terminal === 'DONE' || terminal === 'FAILED')) {
+      const done = state.runs.update(runId, {
+        state: terminal,
+        ...(extra.exitCode !== undefined ? { exitCode: extra.exitCode } : {}),
+        ...(extra.result !== undefined ? { result: extra.result } : {}),
+        ...(extra.error !== undefined ? { error: extra.error } : {}),
+      });
+      record(state, done, `RUN_${terminal}`, extra.actor);
+      const agent = state.agents.get(cur.agentId);
+      if (terminal === 'FAILED' && agent && !activeRun(state, cur.agentId)) {
+        if (agent.state !== 'PAUSED' && agent.state !== 'ISOLATED') {
+          agent.state = 'ERROR';
+          registryOf(state).update(agent);
+        }
+      }
+      void fireCallback(state, done);
+      return done;
+    }
+    return cur;
+  }
   const agent = state.agents.get(cur.agentId);
 
   const done = state.runs.update(runId, {
@@ -434,7 +472,10 @@ export async function finishRun(
         console.error(`[control-plane] stop ${agent.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    if (agent.state === 'WORKING') agent.state = terminal === 'DONE' ? 'SLEEPING' : 'ERROR';
+    if (agent.state === 'WORKING') {
+      agent.state = (terminal === 'DONE' || terminal === 'TIMED_OUT') ? 'SLEEPING' : 'ERROR';
+      registryOf(state).update(agent);
+    }
     if (agent.pendingDrain && agent.stagedCommit) {
       console.log(`[property-manager] Applying pending drained update for ${agent.id} at ${agent.stagedCommit}...`);
       agent.commit = agent.stagedCommit;
