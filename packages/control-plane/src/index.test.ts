@@ -457,6 +457,69 @@ describe('control plane', { concurrency: false }, () => {
       }
     });
 
+    it('run timeout leaves agent in SLEEPING state (GAP-188)', async () => {
+      state.idleMs = 20;
+      try {
+        const run = (await wake()).json as RunBody;
+        await sleep(60);
+        assert.equal(state.runs.get(run.runId)?.state, 'TIMED_OUT');
+        assert.equal(state.agents.get('echo-agent')?.state, 'SLEEPING');
+      } finally {
+        state.idleMs = 0;
+      }
+    });
+
+    it('late POST /result for a TIMED_OUT run updates run to DONE, writes ledger, and keeps agent SLEEPING (GAP-188)', async () => {
+      state.idleMs = 20;
+      try {
+        const run = (await wake()).json as RunBody;
+        const token = tokenFor(run.runId);
+        await sleep(60);
+        assert.equal(state.runs.get(run.runId)?.state, 'TIMED_OUT');
+        assert.equal(state.agents.get('echo-agent')?.state, 'SLEEPING');
+
+        const res = await request(port, `/api/v1/runs/${run.runId}/result`, {
+          method: 'POST',
+          token,
+          body: { status: 'succeeded', output: { summary: 'finished successfully' } },
+        });
+        assert.equal(res.status, 200);
+        const updated = state.runs.get(run.runId);
+        assert.equal(updated?.state, 'DONE');
+        assert.deepEqual(updated?.result, { summary: 'finished successfully' });
+        assert.equal(state.agents.get('echo-agent')?.state, 'SLEEPING');
+        assert.ok(actions('echo-agent').some((e) => e.action === 'RUN_DONE' && e.runId === run.runId));
+      } finally {
+        state.idleMs = 0;
+      }
+    });
+
+    it('late POST /result with failure updates run to FAILED and transitions agent to ERROR (GAP-188)', async () => {
+      state.idleMs = 20;
+      try {
+        const run = (await wake()).json as RunBody;
+        const token = tokenFor(run.runId);
+        await sleep(60);
+        assert.equal(state.runs.get(run.runId)?.state, 'TIMED_OUT');
+        assert.equal(state.agents.get('echo-agent')?.state, 'SLEEPING');
+
+        const res = await request(port, `/api/v1/runs/${run.runId}/result`, {
+          method: 'POST',
+          token,
+          body: { status: 'failed', error: 'late failure' },
+        });
+        assert.equal(res.status, 200);
+        const updated = state.runs.get(run.runId);
+        assert.equal(updated?.state, 'FAILED');
+        assert.equal(updated?.error, 'late failure');
+        assert.equal(state.agents.get('echo-agent')?.state, 'ERROR');
+        assert.ok(actions('echo-agent').some((e) => e.action === 'RUN_FAILED' && e.runId === run.runId));
+      } finally {
+        state.idleMs = 0;
+        state.agents.get('echo-agent')!.state = 'SLEEPING';
+      }
+    });
+
     it('webhooks authenticate by cartridge secret and pass the body as input', async () => {
       const res = await request(port, '/api/v1/hooks/echo-agent', {
         method: 'POST',
