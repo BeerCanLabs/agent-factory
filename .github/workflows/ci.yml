@@ -31,16 +31,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Console UI changes run independently of kernel container proof (GAP-187, TSK-255).
+      - name: Check changed paths
+        id: check_paths
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "skip_proof=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BASE="origin/${{ github.base_ref || 'main' }}"
+          git fetch origin "${{ github.base_ref || 'main' }}" --depth=1 || true
+          CHANGED=$(git diff --name-only "$BASE"...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || true)
+          NON_CONSOLE=$(echo "$CHANGED" | grep -v '^packages/console/' | grep -v '^DESIGN_AUTHORITY.md' || true)
+          if [ -z "$NON_CONSOLE" ] && [ -n "$CHANGED" ]; then
+            echo "Changes are isolated to packages/console/ (GAP-187). Skipping kernel container proof."
+            echo "skip_proof=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip_proof=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/setup-buildx-action@v3
+        if: steps.check_paths.outputs.skip_proof != 'true'
         id: buildx
       # Exposes the Actions cache service to the build commands below.
       - uses: crazy-max/ghaction-github-runtime@v3
+        if: steps.check_paths.outputs.skip_proof != 'true'
       # Build every production image from this clean checkout, exactly as a deploy does, before anything
       # (npm install, builds) can leave artifacts behind. A deploy must never be the first place one fails.
       # One at a time: building them concurrently was no faster on the runner (GAP-172).
       # Layers come from the nightly cache when they still match. The nightly run on main builds from scratch
       # (no cache, fresh base images) and writes it, so a pull request never fills it and a layer is at most a day old.
       - name: Build production images
+        if: steps.check_paths.outputs.skip_proof != 'true'
         env:
           WRITE_CACHE: ${{ github.event_name == 'schedule' }}
         run: |
@@ -59,12 +82,15 @@ jobs:
             echo "::endgroup::"
           done
       - uses: actions/setup-node@v4
+        if: steps.check_paths.outputs.skip_proof != 'true'
         with:
           node-version: '22'
           cache: npm
       # npm ci leaves package-lock.json untouched, so compose-e2e.sh reuses the images built above (GAP-172).
       - run: npm ci
+        if: steps.check_paths.outputs.skip_proof != 'true'
       # The same builder as above, so compose reuses the layers just built.
       - run: ./scripts/compose-e2e.sh
+        if: steps.check_paths.outputs.skip_proof != 'true'
         env:
           COMPOSE_BUILDER: ${{ steps.buildx.outputs.name }}
