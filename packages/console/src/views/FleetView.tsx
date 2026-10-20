@@ -75,10 +75,13 @@ export const FleetView: React.FC<FleetViewProps> = ({
     filterCategory === 'USER' ? userAgents : filterCategory === 'BUILTIN' ? builtinAgents : agents;
   const runningCount = displayedAgents.filter((a) => a.state === 'RUNNING').length;
   const sleepingCount = displayedAgents.filter((a) => a.state === 'SLEEPING').length;
-  const totalSpend = displayedAgents.reduce((sum, a) => sum + (a.currentSpendUsd || 0), 0);
-  const totalBudget = displayedAgents
+  const totalMonthlyCost = displayedAgents.reduce(
+    (sum, a) => sum + (a.currentSpendMonthlyUsd ?? a.currentSpendUsd ?? 0),
+    0
+  );
+  const totalMonthlyBudget = displayedAgents
     .filter((a) => !a.isBuiltin && a.category !== 'builtin' && !a.budgetExempt)
-    .reduce((sum, a) => sum + (a.spendLimitUsd || 0), 0);
+    .reduce((sum, a) => sum + (a.spendLimitMonthlyUsd ?? (a.spendLimitUsd ? a.spendLimitUsd * 30 : 0)), 0);
 
   const handleWake = async () => {
     if (!wakeModalAgent) return;
@@ -361,11 +364,11 @@ export const FleetView: React.FC<FleetViewProps> = ({
 
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 shadow-sm transition-colors">
           <div className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center justify-between">
-            <span>24h Egress Spend</span>
+            <span>Total Monthly Cost</span>
             <DollarSign className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-white mt-1">${totalSpend.toFixed(2)}</div>
-          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">of ${totalBudget.toFixed(2)} allocated budget</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white mt-1">${totalMonthlyCost.toFixed(2)}</div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">of ${totalMonthlyBudget.toFixed(2)} allocated budget</div>
         </div>
 
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 shadow-sm transition-colors">

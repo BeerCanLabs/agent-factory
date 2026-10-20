@@ -6,6 +6,20 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function loadConsoleVersion(): string {
+  try {
+    const pkgPath = path.join(__dirname, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      if (typeof pkg.version === 'string') return pkg.version;
+    }
+  } catch {
+    // fallback
+  }
+  return '0.2.0';
+}
+const CONSOLE_VERSION = loadConsoleVersion();
+
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -51,7 +65,7 @@ export function createConsoleServer(opts: ConsoleOptions): http.Server {
     // 1. Health check for the load balancer
     if (pathname === '/healthz' || pathname === '/api/v1/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, service: 'factory-console', version: '0.1.0' }));
+      return res.end(JSON.stringify({ ok: true, service: 'factory-console', version: CONSOLE_VERSION }));
     }
 
     // 2. Who the control plane says the caller is (verified there, never decoded here).

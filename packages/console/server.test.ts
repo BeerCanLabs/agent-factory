@@ -83,4 +83,11 @@ describe('A2 console forwards the caller, adds no credential', () => {
     assert.equal(seen.length, 1);
     assert.equal(seen[0]['cf-access-jwt-assertion'], 'jwt-for-admin');
   });
+
+  it('/healthz returns ok and dynamic console version from package.json', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body, { ok: true, service: 'factory-console', version: '0.2.0' });
+  });
 });
