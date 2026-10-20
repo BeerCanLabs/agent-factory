@@ -609,6 +609,8 @@ describe('§6.5 run progress: gatekeeper-egress reports each call it handles for
     const evs = eventsFor('models');
     assert.deepEqual(evs.map((e) => [e.kind, e.model]), [['call.start', 'claude-sonnet'], ['call.end', 'claude-sonnet']]);
     assert.equal(evs[1].outcome, 'ok');
+    assert.equal(typeof evs[1].inputTokens, 'number');
+    assert.equal(typeof evs[1].outputTokens, 'number');
   });
 
   it('E3 S1 progress events carry only metadata: no bodies, query strings, headers or secrets', async () => {
@@ -617,7 +619,7 @@ describe('§6.5 run progress: gatekeeper-egress reports each call it handles for
     await call(port, '/models/v1/chat/completions', { token, body: { model: 'claude-sonnet', messages: [{ role: 'user', content: 'private prompt text' }] } });
     await settle();
     assert.ok(delivered.length >= 6);
-    const allowed = new Set(['runId', 'agentId', 'at', 'kind', 'callId', 'route', 'model', 'status', 'durationMs', 'outcome']);
+    const allowed = new Set(['runId', 'agentId', 'at', 'kind', 'callId', 'route', 'model', 'status', 'durationMs', 'outcome', 'inputTokens', 'outputTokens']);
     for (const e of delivered) for (const k of Object.keys(e)) assert.ok(allowed.has(k), `unexpected field ${k}`);
     const wire = JSON.stringify(delivered);
     for (const leak of [BOT_CREDENTIAL, CONN_TOKEN, token, 'private message body', 'private prompt text', 'secret-query', '?', '/channels', 'authorization']) {

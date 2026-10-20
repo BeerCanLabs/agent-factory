@@ -266,4 +266,194 @@ describe('gatekeeper-ingress discord client', () => {
     assert.equal(activities.at(-1)?.name, 'Thinking...');
     await discord.destroy();
   });
+
+  it('posts in-channel progress message and updates it to summary on reply', async () => {
+    const { mockClient } = createMockClient();
+    const discord = createDiscordClient(mockClient as any);
+    await discord.setPresence('available');
+
+    let sentMessage: any = null;
+    const edits: string[] = [];
+    const channel = {
+      sendTyping: async () => {},
+      send: async (options: any) => {
+        sentMessage = {
+          id: 'progress-msg-1',
+          content: typeof options === 'string' ? options : options.content,
+          edit: async (c: string) => {
+            edits.push(c);
+            sentMessage.content = c;
+          },
+        };
+        return sentMessage;
+      },
+    };
+
+    mockClient.emit(Events.MessageCreate, userMsg(channel));
+    assert.ok(sentMessage, 'posted progress message');
+    assert.equal(sentMessage.content, '⏳ Working…');
+
+    // Agent executes tool and model call
+    await discord.recordActivity?.({ route: 'google-calendar', kind: 'call.start' });
+    await discord.recordActivity?.({ route: 'google-calendar', kind: 'call.end', durationMs: 1200, outcome: 'ok' });
+    await discord.recordActivity?.({ route: 'models', model: 'claude-sonnet-4-6', kind: 'call.start' });
+    await discord.recordActivity?.({
+      route: 'models',
+      model: 'claude-sonnet-4-6',
+      kind: 'call.end',
+      durationMs: 3200,
+      outcome: 'ok',
+      inputTokens: 1200,
+      outputTokens: 180,
+    });
+
+    // Wait for throttled edit
+    await sleep(1100);
+    assert.ok(sentMessage.content.includes('🔧 google-calendar ✓ 1.2s'), sentMessage.content);
+    assert.ok(sentMessage.content.includes('🧠 claude-sonnet-4-6 ✓ 3.2s'), sentMessage.content);
+
+    // Bot replies
+    mockClient.emit(Events.MessageCreate, {
+      id: 'bot-reply-1',
+      channelId: 'ch1',
+      guildId: null,
+      author: { id: 'bot-id-123', bot: true },
+      channel,
+      content: 'Here is your calendar.',
+    });
+
+    assert.equal(
+      sentMessage.content,
+      '✓ Thought for 3.2s, called 1 tool, spent 1,200 input tokens and 180 output tokens',
+    );
+    await discord.destroy();
+  });
+
+  it('does not treat discord messaging egress or internal routes as tool calls', async () => {
+    const { mockClient } = createMockClient();
+    const discord = createDiscordClient(mockClient as any);
+    await discord.setPresence('available');
+
+    let sentMessage: any = null;
+    const channel = {
+      sendTyping: async () => {},
+      send: async (options: any) => {
+        sentMessage = {
+          id: 'progress-msg-1',
+          content: typeof options === 'string' ? options : options.content,
+          edit: async (c: string) => {
+            sentMessage.content = c;
+          },
+        };
+        return sentMessage;
+      },
+    };
+
+    mockClient.emit(Events.MessageCreate, userMsg(channel));
+
+    // Agent executes model call, then posts to discord route
+    await discord.recordActivity?.({ route: 'models', model: 'haiku', kind: 'call.end', durationMs: 500, inputTokens: 100, outputTokens: 20 });
+    await discord.recordActivity?.({ route: 'discord', kind: 'call.start' });
+    await discord.recordActivity?.({ route: 'discord', kind: 'call.end', durationMs: 200, outcome: 'ok' });
+    await discord.recordActivity?.({ route: 'control-plane', kind: 'call.start' });
+    await discord.recordActivity?.({ route: 'control-plane', kind: 'call.end', durationMs: 50 });
+
+    // Bot replies
+    mockClient.emit(Events.MessageCreate, {
+      id: 'bot-reply-1',
+      channelId: 'ch1',
+      guildId: null,
+      author: { id: 'bot-id-123', bot: true },
+      channel,
+      content: 'Hello!',
+    });
+
+    // Tool calls count must remain 0
+    assert.equal(
+      sentMessage.content,
+      '✓ Thought for 0.5s, called 0 tools, spent 100 input tokens and 20 output tokens',
+    );
+    await discord.destroy();
+  });
+
+  it('standby session transitions to summary when agent replies', async () => {
+    const { mockClient } = createMockClient();
+    const discord = createDiscordClient(mockClient as any);
+    // Offline presence triggers standby session
+    let standbyMessage: any = null;
+    const channel = {
+      sendTyping: async () => {},
+      send: async (options: any) => {
+        standbyMessage = {
+          id: 'standby-msg-1',
+          content: typeof options === 'string' ? options : options.content,
+          edit: async (c: string) => {
+            standbyMessage.content = c;
+          },
+          delete: async () => {},
+        };
+        return standbyMessage;
+      },
+    };
+
+    mockClient.emit(Events.MessageCreate, userMsg(channel));
+    await sleep(20);
+    assert.ok(standbyMessage.content.includes('Standby while I get'));
+
+    // Agent wakes and makes a call
+    await discord.recordActivity?.({
+      route: 'models',
+      model: 'haiku',
+      kind: 'call.end',
+      durationMs: 800,
+      outcome: 'ok',
+      inputTokens: 400,
+      outputTokens: 50,
+    });
+
+    // Bot replies
+    mockClient.emit(Events.MessageCreate, {
+      id: 'bot-reply-1',
+      channelId: 'ch1',
+      guildId: null,
+      author: { id: 'bot-id-123', bot: true },
+      channel,
+      content: 'Hello!',
+    });
+
+    assert.equal(
+      standbyMessage.content,
+      '✓ Thought for 0.8s, called 0 tools, spent 400 input tokens and 50 output tokens',
+    );
+    await discord.destroy();
+  });
+
+  it('turn lease expiration updates progress message with warning', async () => {
+    const { mockClient } = createMockClient();
+    const discord = createDiscordClient(mockClient as any, { turnLeaseMs: 40, typingIntervalMs: 10 });
+    await discord.setPresence('available');
+
+    let sentMessage: any = null;
+    const channel = {
+      sendTyping: async () => {},
+      send: async (options: any) => {
+        sentMessage = {
+          id: 'progress-msg-1',
+          content: typeof options === 'string' ? options : options.content,
+          edit: async (c: string) => {
+            sentMessage.content = c;
+          },
+        };
+        return sentMessage;
+      },
+    };
+
+    mockClient.emit(Events.MessageCreate, userMsg(channel));
+    await discord.recordActivity?.({ route: 'tavily', kind: 'call.end', durationMs: 500 });
+
+    await sleep(150);
+    assert.ok(sentMessage.content.startsWith('⚠️'), sentMessage.content);
+    assert.ok(sentMessage.content.toLowerCase().includes('called 1 tool'), sentMessage.content);
+    await discord.destroy();
+  });
 });

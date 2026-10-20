@@ -47,4 +47,25 @@ describe('§6.5 progress emitter: bounded, batched, best effort', () => {
       console.warn = warn;
     }
   });
+
+  it('§6.5 ProgressCall emits inputTokens and outputTokens on call.end when usage is recorded', async () => {
+    const emitted: ProgressEvent[] = [];
+    const em = new ProgressEmitter(async (b) => void emitted.push(...b), { flushMs: 60_000, batchSize: 50 });
+    const { ProgressCall } = await import('./progress.js');
+    const call = new ProgressCall(em, 'run-1', 'donna', 'models');
+    call.start('claude-sonnet');
+    call.usage = { inputTokens: 1500, outputTokens: 250 };
+    call.end(200);
+    await em.flush();
+    em.stop();
+
+    assert.equal(emitted.length, 2);
+    assert.equal(emitted[0].kind, 'call.start');
+    assert.equal(emitted[1].kind, 'call.end');
+    assert.equal(emitted[1].inputTokens, 1500);
+    assert.equal(emitted[1].outputTokens, 250);
+    assert.equal(emitted[1].model, 'claude-sonnet');
+    assert.equal(emitted[1].status, 200);
+    assert.equal(emitted[1].outcome, 'ok');
+  });
 });

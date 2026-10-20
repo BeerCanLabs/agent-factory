@@ -625,6 +625,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     body: Buffer,
     authHeader: string | undefined,
     onResponse?: (status: number, isSse: boolean) => { chunk: (b: Buffer) => void },
+    beforeEnd?: () => void,
   ): Promise<number> {
     const t0 = performance.now();
     const done = (status: number) => {
@@ -673,6 +674,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           res.write(c);
         });
         upRes.on('end', () => {
+          if (beforeEnd) {
+            try {
+              beforeEnd();
+            } catch (err) {
+              console.error('[gatekeeper-egress] forward beforeEnd error:', err);
+            }
+          }
           res.end();
           done(status);
           resolve(status);
@@ -714,8 +722,18 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     ctx: RunContext,
     route: Route,
     call: { usage: Usage; model: string | undefined; price: Price | undefined; request: unknown; requestId: string; action?: string; extra?: Record<string, unknown> },
+    res?: http.ServerResponse,
   ) {
     const { usage, model, price } = call;
+    if (res) {
+      const callProgress = calls.get(res);
+      if (callProgress) {
+        callProgress.usage = {
+          inputTokens: (callProgress.usage?.inputTokens ?? 0) + usage.input + usage.cacheRead + usage.cacheWrite,
+          outputTokens: (callProgress.usage?.outputTokens ?? 0) + usage.output,
+        };
+      }
+    }
     const cost = price ? costUsd(usage, price) : 0;
     const attrs = { route: route.id, model: usage.model ?? model ?? 'unknown', agent: ctx.run.agentId };
     m?.tokens.add(usage.input + usage.cacheRead + usage.cacheWrite, { ...attrs, direction: 'input' });
@@ -772,11 +790,38 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const price = priceFor(opts.prices, model);
     let jsonChunks: Buffer[] = [];
     let meter: SseMeter | undefined;
+    let recordedUsage: Usage | null = null;
+    let respBody: Buffer | undefined;
 
-    const status = await forward(req, res, route, rest, body, cred, (_s, isSse) => {
-      if (isSse) meter = new SseMeter(provider, opts.traces?.enabled ? 1_000_000 : 0);
-      return { chunk: (c) => (meter ? meter.feed(c) : jsonChunks.push(c)) };
-    });
+    const beforeEnd = () => {
+      if (req.method !== 'POST' || !parsed) return;
+      respBody = meter ? undefined : Buffer.concat(jsonChunks);
+      let usage: Usage | null = meter ? meter.result() : usageFromJson(provider, tryJson(respBody!));
+      let action: string | undefined;
+      if (!usage && res.statusCode < 400) {
+        const maxOut = typeof parsed.max_tokens === 'number' ? parsed.max_tokens : typeof parsed.max_output_tokens === 'number' ? parsed.max_output_tokens : 4096;
+        usage = { model, input: 0, output: maxOut, cacheRead: 0, cacheWrite: 0 };
+        action = 'METERING_GAP';
+      }
+      if (usage) {
+        recordedUsage = usage;
+        recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action }, res);
+      }
+    };
+
+    const status = await forward(
+      req,
+      res,
+      route,
+      rest,
+      body,
+      cred,
+      (_s, isSse) => {
+        if (isSse) meter = new SseMeter(provider, opts.traces?.enabled ? 1_000_000 : 0);
+        return { chunk: (c) => (meter ? meter.feed(c) : jsonChunks.push(c)) };
+      },
+      beforeEnd,
+    );
 
     if (status === 401) {
       evictCredential(route, ctx);
@@ -785,18 +830,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     }
     if (req.method !== 'POST' || !parsed) return;
 
-    const respBody = meter ? undefined : Buffer.concat(jsonChunks);
-    jsonChunks = [];
-    let usage: Usage | null = meter ? meter.result() : usageFromJson(provider, tryJson(respBody!));
-    let action: string | undefined;
-    if (!usage && status < 400) {
-      // No usage reported: charge the worst case the request allowed rather than nothing.
-      const maxOut = typeof parsed.max_tokens === 'number' ? parsed.max_tokens : typeof parsed.max_output_tokens === 'number' ? parsed.max_output_tokens : 4096;
-      usage = { model, input: 0, output: maxOut, cacheRead: 0, cacheWrite: 0 };
-      action = 'METERING_GAP';
+    if (!recordedUsage && !meter && jsonChunks.length) {
+      respBody = Buffer.concat(jsonChunks);
     }
-    if (!usage) return;
-    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action });
+    jsonChunks = [];
+
     if (opts.traces?.enabled) {
       writeTrace(
         { ...opts.traces, dir: `${opts.traces.dir}/${ctx.run.agentId}` },
@@ -878,7 +916,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       usage = { model, input: 0, output: chat.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
       action = 'METERING_GAP';
     }
-    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action, extra: { provider: entry.provider, upstreamModel: entry.id, ...(selection.requested ? { requestedModel: selection.requested } : {}) } });
+    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action, extra: { provider: entry.provider, upstreamModel: entry.id, ...(selection.requested ? { requestedModel: selection.requested } : {}) } }, res);
 
     if (declaredToolNames.length > 0 && (!result.toolCalls || result.toolCalls.length === 0)) {
       const leakedTool = detectToolSyntaxLeak(result.content, declaredToolNames);
@@ -916,7 +954,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         const retryId = randomUUID();
         const r2 = again.result;
         const u2: Usage = r2.usage ? { model, input: r2.usage.input, output: r2.usage.output, cacheRead: 0, cacheWrite: 0 } : { model, input: 0, output: again.request.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
-        recordUsage(ctx, route, { usage: u2, model, price, request: retryBody, requestId: retryId, action: r2.usage ? undefined : 'METERING_GAP', extra: { provider: entry.provider, upstreamModel: entry.id } });
+        recordUsage(ctx, route, { usage: u2, model, price, request: retryBody, requestId: retryId, action: r2.usage ? undefined : 'METERING_GAP', extra: { provider: entry.provider, upstreamModel: entry.id } }, res);
         const leaked = !r2.toolCalls?.length && detectToolSyntaxLeak(r2.content, declaredToolNames);
         ledger(ctx, route, { type: 'action', action: 'GROUNDING_RETRY', model, requestId, retryRequestId: retryId, toolCalled: Boolean(r2.toolCalls?.length) });
         replyUsage = { input: replyUsage.input + u2.input, output: replyUsage.output + u2.output };
