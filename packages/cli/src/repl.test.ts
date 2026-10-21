@@ -41,4 +41,10 @@ describe('§6.17 CL5 the terminal conversation', () => {
     assert.match(text, /manager> /, 'an unknown agent returns the person to the manager');
     assert.match(text, /Unknown command/);
   });
+
+  it('CL2 says plainly when no Factory Manager has been admitted, and /connect still works', async () => {
+    const { text } = await session(['how much have we spent?', '/connect donna', 'hi', '/exit'], (f) => f.agents.set('donna', () => 'hello from donna'));
+    assert.match(text, /no Factory Manager on this factory/);
+    assert.match(text, /hello from donna/);
+  });
 });

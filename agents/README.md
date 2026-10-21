@@ -10,5 +10,6 @@ Each cartridge consumes factory APIs:
 | `examples/llm-summarizer` | test fixture for model metering and bench scoring |
 | `examples/starter-python` | reference decoupled Python agent starter |
 | `staff/personal-trainer` | optional house staff; not loaded by the baked catalog; admit it to deploy it |
+| `staff/factory-manager` | optional house staff; the front desk for the `factory` command-line client (`docs/CLI.md`); admit it to deploy it |
 
 Crash routing and budget alerts are **event routes** in the control plane (by cartridge id). Remediation logic stays in the agent.

@@ -109,6 +109,10 @@ export async function repl(o: ReplOptions): Promise<void> {
           io.say(err instanceof NeedsLoginError ? err.message : `Your sign-in expired. Run: factory login ${o.instance}`);
           break;
         }
+        if (err instanceof ConversationRefused && !agent && err.status === 404) {
+          io.say(`There is no Factory Manager on this factory (no agent called ${o.managerAgent}). An admin has to admit it; see docs/CLI.md. /connect <agent> still works.`);
+          continue;
+        }
         io.say(err instanceof ConversationRefused ? err.message : `Error: ${err instanceof Error ? err.message : String(err)}`);
         if (err instanceof ConversationRefused && agent && err.status === 404) agent = undefined;
       }
