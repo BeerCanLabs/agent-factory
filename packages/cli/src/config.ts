@@ -1,4 +1,5 @@
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { isAgentId } from './ids.js';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -16,9 +17,6 @@ export function parseTheme(raw: string): ThemeName {
   throw new Error(`theme must be one of: ${THEMES.join(', ')}`);
 }
 
-/** Every agent id that enters the CLI (a setting, `/connect`, the manager's say-so) passes this, so none can be a path. */
-export const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
-export const isAgentId = (v: unknown): v is string => typeof v === 'string' && AGENT_ID.test(v) && !v.includes('..');
 export function parseAgentId(raw: string): string {
   const id = raw.trim();
   if (!isAgentId(id)) throw new Error('an agent id is letters, digits, . _ - (at most 64 characters)');

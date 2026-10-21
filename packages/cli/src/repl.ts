@@ -7,7 +7,8 @@ import { AuthRequiredError, ConversationRefused, FactoryClient } from './client.
 import { talk, renderReply, stripControl, type Io } from './conversation.js';
 import { ManagerSession } from './manager.js';
 import { AccessSession, NeedsLoginError, type Cloudflared, type CredentialStore } from './credentials.js';
-import { DEFAULT_MANAGER, THEMES, configPath, isAgentId, loadConfig, normalizeInstance, parseManager, parseTheme, saveConfig, type CliConfig } from './config.js';
+import { DEFAULT_MANAGER, THEMES, configPath, loadConfig, normalizeInstance, parseManager, parseTheme, saveConfig, type CliConfig } from './config.js';
+import { isAgentId } from './ids.js';
 import { splash } from './splash.js';
 import { styleFor, type Style } from './theme.js';
 

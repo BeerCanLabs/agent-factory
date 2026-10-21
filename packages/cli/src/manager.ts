@@ -3,7 +3,7 @@
  * Each tool request is run here, as the signed-in person, and its result goes back as the next turn.
  */
 import { talk, renderReply, stripControl, type Io } from './conversation.js';
-import { isAgentId } from './config.js';
+import { isAgentId } from './ids.js';
 import type { FactoryClient } from './client.js';
 import { AuthRequiredError, ConversationRefused } from './client.js';
 import { CONNECT_TOOL, ToolArgumentError, redact, toolByName, toolsFor, trim, type Tool } from './tools.js';

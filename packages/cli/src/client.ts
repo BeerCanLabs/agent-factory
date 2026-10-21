@@ -4,7 +4,7 @@
  * header of its own.
  */
 
-import { isAgentId } from './config.js';
+import { isAgentId } from './ids.js';
 
 export class AuthRequiredError extends Error {
   constructor(message = 'not signed in, or the sign-in expired') {
