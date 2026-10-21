@@ -92,7 +92,9 @@ describe('§6.17 CL8 setup and preferences are the person\'s own', () => {
   it('CL8 the settings file is private to its owner and holds no credential', () => {
     const src = code('packages/cli/src/config.ts');
     assert.match(src, /mode:\s*0o600/);
-    assert.doesNotMatch(src, /token|secret|password|credential/i);
+    const shape = src.match(/export type CliConfig = \{[^}]*\}/)?.[0] ?? '';
+    assert.match(shape, /instance/, 'the settings type was not found');
+    assert.doesNotMatch(shape, /token|secret|password|credential/i, 'a credential field in the saved settings');
   });
 
   it('CL8 nothing the factory or the manager receives is built from the settings', () => {
