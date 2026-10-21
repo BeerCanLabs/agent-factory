@@ -43,6 +43,8 @@ export function sanitizeProgress(raw: unknown): ProgressEvent | undefined {
   if (typeof r.status === 'number' && Number.isInteger(r.status) && r.status >= 100 && r.status < 600) e.status = r.status;
   if (typeof r.durationMs === 'number' && Number.isFinite(r.durationMs) && r.durationMs >= 0) e.durationMs = Math.round(r.durationMs);
   if (typeof r.outcome === 'string' && OUTCOMES.has(r.outcome as ProgressOutcome)) e.outcome = r.outcome as ProgressOutcome;
+  if (typeof r.inputTokens === 'number' && Number.isFinite(r.inputTokens) && r.inputTokens >= 0 && r.inputTokens <= Number.MAX_SAFE_INTEGER) e.inputTokens = Math.round(r.inputTokens);
+  if (typeof r.outputTokens === 'number' && Number.isFinite(r.outputTokens) && r.outputTokens >= 0 && r.outputTokens <= Number.MAX_SAFE_INTEGER) e.outputTokens = Math.round(r.outputTokens);
   return e;
 }
 
