@@ -369,7 +369,7 @@ class App {
         this.io.say(`There is no Factory Manager on this factory (no agent called ${this.managerAgent}). An admin has to admit it; see docs/CLI.md. /connect <agent> still works.`);
         return;
       }
-      this.io.say(err instanceof ConversationRefused ? err.message : `Error: ${err instanceof Error ? err.message : String(err)}`);
+      this.io.say(stripControl(err instanceof ConversationRefused ? err.message : `Error: ${err instanceof Error ? err.message : String(err)}`));
       if (err instanceof ConversationRefused && this.agent && err.status === 404) this.agent = undefined;
     }
   }
