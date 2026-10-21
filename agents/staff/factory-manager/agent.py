@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from session import ModelClient, Notebook, turn
+from session import ModelClient, Notebook, encode, turn
 
 HERE = Path(__file__).parent
 WARM_SECONDS = int(os.environ.get("MANAGER_WARM_SECONDS", "900"))
@@ -59,10 +59,25 @@ def reply(payload: dict, answer: dict) -> None:
     reply_to = payload.get("replyTo") or {}
     turn_id = payload.get("turnId")
     if reply_to.get("channel") == "console" and isinstance(turn_id, str):
-        _call("POST", "reply", {"turnId": turn_id, "content": json.dumps(answer, ensure_ascii=False)})
+        content = json.dumps(answer["body"]) if answer.get("type") == "raw" else encode(answer)
+        sent = _call("POST", "reply", {"turnId": turn_id, "content": content})
+        if sent.get("error"):
+            print(f"[factory-manager] reply was not delivered: {sent['error']}", flush=True)
+
+
+def conversation_request(payload: dict) -> dict:
+    """AM5: the console asks every agent for a person's conversations. The manager keeps none a console should list."""
+    request = payload.get("request") or {}
+    if request.get("op") == "turns":
+        return {"type": "raw", "body": {"conversation": None, "turns": []}}
+    return {"type": "raw", "body": {"conversations": []}}
 
 
 def handle(payload: dict, soul: str, memory: Path, model: ModelClient) -> dict:
+    if payload.get("kind") == "conversation-request":
+        answer = conversation_request(payload)
+        reply(payload, answer)
+        return {"type": "message", "text": ""}
     caller = payload.get("caller") or {}
     actor = caller.get("actor") if isinstance(caller, dict) else None
     if not isinstance(actor, str) or not actor:

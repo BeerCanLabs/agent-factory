@@ -83,7 +83,7 @@ Every model call it makes is metered through the gatekeeper-egress and charged t
 - **Sign-in.** `cloudflared access login` for the browser flow; the assertion goes in the Keychain through `security -i` (never on a command line). Requests carry it as `cf-access-token`; the proxy turns it into the assertion the control plane verifies.
 - **Conversation.** A turn is `POST /api/v1/agents/:id/conversation`; the answer is read from `GET /api/v1/agents/:id/replies`, the console's own reply path (AM2). The manager and any agent you connect to use the same two calls.
 - **Tools.** Each turn the CLI sends the manager the tools your roles allow. The manager answers with a message, tool requests, or a request to connect you (`agents/staff/factory-manager/README.md` has the shapes). The CLI runs the tools, returns the results as the next turn, and stops a manager that asks for more than 8 rounds.
-- **Answers are grounded (CL7).** The manager is told to quote only figures from tool results. The factory adds its usual footnote to an answer given without tools, and the CLI shows it.
+- **Answers are grounded (CL7).** The manager is told to quote only figures from tool results. It sends a plain answer as plain text so the factory can add its usual `[no tools called]` footnote to one given without tools, and the CLI shows it. Tool and connect requests are the only JSON.
 
 ## Tests
 

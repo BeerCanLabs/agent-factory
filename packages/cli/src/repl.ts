@@ -4,10 +4,10 @@
  */
 import { createInterface } from 'node:readline';
 import { AuthRequiredError, ConversationRefused, FactoryClient } from './client.js';
-import { talk, renderReply, type Io } from './conversation.js';
+import { talk, renderReply, stripControl, type Io } from './conversation.js';
 import { ManagerSession } from './manager.js';
 import { AccessSession, NeedsLoginError, type Cloudflared, type CredentialStore } from './credentials.js';
-import { DEFAULT_MANAGER, THEMES, configPath, loadConfig, normalizeInstance, parseManager, parseTheme, saveConfig, type CliConfig } from './config.js';
+import { DEFAULT_MANAGER, THEMES, configPath, isAgentId, loadConfig, normalizeInstance, parseManager, parseTheme, saveConfig, type CliConfig } from './config.js';
 import { splash } from './splash.js';
 import { styleFor, type Style } from './theme.js';
 
@@ -27,7 +27,11 @@ export const HELP = [
 ].join('\n');
 
 /** Lines from the terminal, queued so none is lost between questions, and `null` once input has closed. */
-export type Lines = { ask(prompt: string): Promise<string | null>; close(): void };
+export type Lines = {
+  /** `fresh` drops anything typed ahead first, so a line typed before the question cannot answer it. */
+  ask(prompt: string, opts?: { fresh?: boolean }): Promise<string | null>;
+  close(): void;
+};
 
 export function lineReader(input: NodeJS.ReadableStream, out: NodeJS.WritableStream): Lines {
   const rl = createInterface({ input, terminal: false });
@@ -40,7 +44,8 @@ export function lineReader(input: NodeJS.ReadableStream, out: NodeJS.WritableStr
     for (const w of waiting.splice(0)) w(null);
   });
   return {
-    ask: (prompt) => {
+    ask: (prompt, opts) => {
+      if (opts?.fresh) queue.length = 0;
       out.write(prompt);
       if (queue.length) return Promise.resolve(queue.shift()!);
       if (closed) return Promise.resolve(null);
@@ -50,12 +55,12 @@ export function lineReader(input: NodeJS.ReadableStream, out: NodeJS.WritableStr
   };
 }
 
-export function terminalIo(lines: Lines, out: NodeJS.WritableStream, style: Style, isTTY: boolean): Io {
+export function terminalIo(lines: Lines, out: NodeJS.WritableStream, style: () => Style, isTTY: boolean): Io {
   let timer: NodeJS.Timeout | undefined;
   return {
     say: (t) => out.write(`${t}\n`),
-    note: (t) => out.write(`${style.dim(t)}\n`),
-    confirm: async (q) => /^y(es)?$/i.test(((await lines.ask(`${q} [y/N] `)) ?? '').trim()),
+    note: (t) => out.write(`${style().dim(stripControl(t))}\n`),
+    confirm: async (q) => /^y(es)?$/i.test(((await lines.ask(`${q} [y/N] `, { fresh: true })) ?? '').trim()),
     busy: (on) => {
       if (on && !timer && isTTY) {
         let n = 0;
@@ -93,6 +98,9 @@ type Me = { actor: string; roles: string[] };
 class App {
   config: CliConfig = {};
   instanceFromEnv = false;
+  envProblem?: string;
+  /** Why the last attempt to read who is signed in failed, when it was not a refusal. */
+  private lastError?: unknown;
   me?: Me;
   agent?: string;
   private session?: AccessSession;
@@ -114,12 +122,7 @@ class App {
     this.isTTY = o.isTTY ?? Boolean((out as NodeJS.WriteStream).isTTY);
     this.style = styleFor(undefined, { isTTY: this.isTTY, env: this.env });
     this.lines = lineReader(o.input ?? process.stdin, out);
-    this.io = {
-      say: (t) => out.write(`${t}\n`),
-      note: (t) => out.write(`${this.style.dim(t)}\n`),
-      confirm: async (q) => /^y(es)?$/i.test(((await this.lines.ask(`${q} [y/N] `)) ?? '').trim()),
-      busy: terminalIo(this.lines, out, this.style, this.isTTY).busy,
-    };
+    this.io = terminalIo(this.lines, out, () => this.style, this.isTTY);
   }
 
   get instance(): string | undefined {
@@ -127,18 +130,21 @@ class App {
   }
 
   get managerAgent(): string {
-    return this.o.managerOverride || this.env.FACTORY_MANAGER_AGENT?.trim() || this.config.manager || DEFAULT_MANAGER;
+    const given = this.o.managerOverride || this.env.FACTORY_MANAGER_AGENT?.trim();
+    return isAgentId(given) ? given : this.config.manager || DEFAULT_MANAGER;
   }
 
   async load(): Promise<void> {
     this.config = await loadConfig(this.file);
     const fromEnv = this.env.FACTORY_URL?.trim();
     if (fromEnv) {
+      // FACTORY_URL wins. A bad one is never quietly replaced by the saved address: confirmed changes would land on the wrong factory.
       try {
         this.config.instance = normalizeInstance(fromEnv);
         this.instanceFromEnv = true;
-      } catch {
-        /* a bad FACTORY_URL falls back to the saved address */
+      } catch (err) {
+        this.config.instance = undefined;
+        this.envProblem = `FACTORY_URL is set but is not a usable address (${err instanceof Error ? err.message : String(err)}). Unset it or fix it.`;
       }
     }
     this.applyTheme();
@@ -168,6 +174,7 @@ class App {
   async refreshMe(): Promise<void> {
     this.me = undefined;
     this.manager = undefined;
+    this.lastError = undefined;
     if (!this.client) return;
     try {
       this.me = await this.client.whoami();
@@ -181,12 +188,14 @@ class App {
         intervalMs: this.o.intervalMs,
         timeoutMs: this.o.timeoutMs,
       });
-    } catch {
+    } catch (err) {
       this.me = undefined;
+      this.lastError = err;
     }
   }
 
   showSplash(): void {
+    if (this.envProblem) this.out.write(`${this.style.bad(this.envProblem)}\n`);
     this.out.write(`${splash({ version: this.o.version, config: { ...this.config, manager: this.managerAgent }, instanceFromEnv: this.instanceFromEnv, me: this.me }, this.style)}\n`);
   }
 
@@ -289,10 +298,9 @@ class App {
       this.io.say(`Signed in as ${this.me.actor} (${this.me.roles.join(', ') || 'no role'}) at ${this.instance}.`);
       const choice = ((await this.lines.ask('  1) Sign out   2) Sign in as a different user   3) Cancel [3]: ')) ?? '3').trim();
       if (choice === '1') {
-        await this.signOut();
-        this.io.say('Signed out.');
+        if (await this.signOut()) this.io.say('Signed out.');
       } else if (choice === '2') {
-        await this.signOut();
+        if (!(await this.signOut())) return;
         this.io.say('Signed out. If the browser signs you straight back in as the same person, sign out of your identity provider there first.');
         await this.signIn();
       }
@@ -301,11 +309,19 @@ class App {
     await this.signIn();
   }
 
-  private async signOut(): Promise<void> {
-    await this.session?.logout();
+  private async signOut(): Promise<boolean> {
+    let ok = true;
+    try {
+      await this.session?.logout();
+    } catch (err) {
+      ok = false;
+      this.io.say(`${this.style.bad('Could not remove the saved sign-in:')} ${stripControl(err instanceof Error ? err.message : String(err))}`);
+    }
     this.me = undefined;
     this.manager = undefined;
     this.agent = undefined;
+    if (this.env.FACTORY_CLI_ACCESS_TOKEN?.trim()) this.io.say('FACTORY_CLI_ACCESS_TOKEN is set in your environment, so the next request still uses it. Unset it to be signed out.');
+    return ok;
   }
 
   private async signIn(): Promise<void> {
@@ -314,7 +330,8 @@ class App {
       await this.session!.login();
       await this.refreshMe();
       if (this.me) this.io.say(`${this.style.good('Signed in')} as ${this.me.actor} (${this.me.roles.join(', ') || 'no role'}).`);
-      else this.io.say(`${this.style.bad('Signed in, but the factory did not accept it.')} Check the address with /config.`);
+      else if (this.lastError instanceof AuthRequiredError || this.lastError instanceof NeedsLoginError) this.io.say(`${this.style.bad('Signed in, but the factory did not accept it.')} Check the address with /config.`);
+      else this.io.say(`${this.style.bad('Signed in, but could not reach the factory:')} ${stripControl(this.lastError instanceof Error ? this.lastError.message : 'unknown error')}. Try /login again.`);
     } catch (err) {
       this.io.say(`${this.style.bad('Sign-in failed:')} ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -343,7 +360,7 @@ class App {
       const outcome = await this.manager!.ask(line);
       if (outcome.kind === 'connect') {
         this.agent = outcome.agent;
-        this.io.say(`Connected to ${this.agent}. /manager to go back.`);
+        this.io.say(`Connected to ${this.agent}. /manager to go back.`); // an id passes isAgentId, so it holds no control characters
       }
     } catch (err) {
       if (err instanceof NeedsLoginError || err instanceof AuthRequiredError) return this.expired();
@@ -379,7 +396,7 @@ export async function repl(o: ReplOptions): Promise<void> {
       } else if (/^\/connect\b/.test(line)) {
         const m = line.match(/^\/connect\s+(\S+)$/);
         if (!app.me) app.io.say('Sign in first: /login.');
-        else if (!m) app.io.say('Usage: /connect <agent>');
+        else if (!m || !isAgentId(m[1])) app.io.say('Usage: /connect <agent id>');
         else {
           app.agent = m[1];
           app.io.say(`Connected to ${app.agent}. /manager to go back.`);

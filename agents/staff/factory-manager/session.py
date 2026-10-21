@@ -17,6 +17,7 @@ from pathlib import Path
 CONNECT = "connect_to_agent"
 MAX_MESSAGES = 40
 MAX_RESULT_CHARS = 12_000
+MAX_HISTORY_CHARS = 60_000
 
 RULES = """\
 Rules for this conversation:
@@ -54,14 +55,24 @@ class Notebook:
         self.path.write_text(json.dumps({"messages": trim(messages)}), "utf-8")
 
 
+def _size(messages: list[dict]) -> int:
+    return sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
+
+
 def trim(messages: list[dict]) -> list[dict]:
-    """Keeps the newest messages, starting at a person's message so a tool result never loses its request."""
-    if len(messages) <= MAX_MESSAGES:
-        return messages
-    cut = len(messages) - MAX_MESSAGES
-    while cut < len(messages) and messages[cut].get("role") != "user":
-        cut += 1
-    return messages[cut:]
+    """Keeps the newest messages, starting at a person's message so a tool result never loses its request.
+
+    Bounded by count and by size: old tool results are the bulk of a long conversation, and each turn pays to resend them.
+    """
+    out = messages
+    while len(out) > 1 and (len(out) > MAX_MESSAGES or _size(out) > MAX_HISTORY_CHARS):
+        cut = 1
+        while cut < len(out) and out[cut].get("role") != "user":
+            cut += 1
+        if cut >= len(out):
+            break  # one turn is all that is left; keep it whole
+        out = out[cut:]
+    return out
 
 
 def pending_call_ids(messages: list[dict]) -> list[str]:
@@ -203,6 +214,21 @@ def reply_from_model(result: dict, messages: list[dict]) -> dict:
             messages.append({"role": "tool", "tool_call_id": c["id"], "content": _clip({"ok": c is connect, "result": "The person is now talking to the agent directly."})})
         return {"type": "connect", "agent": connect["arguments"]["agent"], **({"text": text} if text else {})}
     return {"type": "tool_calls", "calls": calls, **({"text": text} if text else {})}
+
+
+def encode(answer: dict) -> str:
+    """What goes in the reply's `content` (AM2, CL7).
+
+    A plain answer goes as plain text, so the factory can footnote one given without tools (AP3): it never alters a
+    machine-read JSON result. Tool requests and connect requests are protocol and go as JSON. An answer that would itself
+    read as protocol is wrapped, so a model cannot make the CLI act by writing JSON in its words.
+    """
+    if answer.get("type") == "message":
+        text = str(answer.get("text", ""))
+        if text.lstrip()[:1] in ("{", "["):
+            return json.dumps(answer, ensure_ascii=False)
+        return text
+    return json.dumps(answer, ensure_ascii=False)
 
 
 def turn(payload: dict, soul: str, notebook: Notebook, model: ModelClient) -> dict:

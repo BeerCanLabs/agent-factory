@@ -38,8 +38,11 @@ async function main(argv: string[]): Promise<number> {
   if (cmd === 'login') {
     if (!arg) throw new Error('usage: factory login <address>');
     const instance = normalizeInstance(arg);
+    const saved = await loadConfig();
+    // A sign-in belongs to one factory (CL8): moving to another address signs out of the old one, as /config does.
+    if (saved.instance && saved.instance !== instance) await new AccessSession(saved.instance, defaultStore()).logout();
     await new AccessSession(instance, defaultStore()).login();
-    await saveConfig({ ...(await loadConfig()), instance });
+    await saveConfig({ ...saved, instance });
     process.stdout.write(`Signed in to ${instance}.\n`);
     return 0;
   }

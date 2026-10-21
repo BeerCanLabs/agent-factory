@@ -2,7 +2,8 @@
  * A conversation with the Factory Manager (§6.17 CL2 to CL5). The manager is a cartridge: it reasons, the CLI acts.
  * Each tool request is run here, as the signed-in person, and its result goes back as the next turn.
  */
-import { talk, renderReply, type Io } from './conversation.js';
+import { talk, renderReply, stripControl, type Io } from './conversation.js';
+import { isAgentId } from './config.js';
 import type { FactoryClient } from './client.js';
 import { AuthRequiredError, ConversationRefused } from './client.js';
 import { CONNECT_TOOL, ToolArgumentError, redact, toolByName, toolsFor, trim, type Tool } from './tools.js';
@@ -11,6 +12,8 @@ import { parseManagerReply, type ManagerTurn, type ToolCall, type ToolResult } f
 export type Outcome = { kind: 'done' } | { kind: 'connect'; agent: string };
 
 export const MAX_ROUNDS = 8;
+/** Tool requests honoured in one round; the rest are refused so one reply cannot run an unbounded number of calls. */
+export const MAX_CALLS_PER_ROUND = 8;
 
 export type ManagerOptions = {
   client: FactoryClient;
@@ -57,18 +60,25 @@ export class ManagerSession {
         this.o.io.say(renderReply(reply, parsed.text));
         return { kind: 'done' };
       }
-      if (parsed.text) this.o.io.say(parsed.text);
-      if (parsed.type === 'connect') return { kind: 'connect', agent: parsed.agent };
+      if (parsed.text) this.o.io.say(stripControl(parsed.text));
+      if (parsed.type === 'connect') return this.connect(parsed.agent);
       const connect = parsed.calls.find((c) => c.name === CONNECT_TOOL.name);
       if (connect) {
-        const agent = connect.arguments.agent;
-        if (typeof agent === 'string' && agent) return { kind: 'connect', agent };
+        return this.connect(connect.arguments.agent);
       }
       const results: ToolResult[] = [];
-      for (const call of parsed.calls) results.push(await this.run(call));
+      for (const [n, call] of parsed.calls.entries()) {
+        results.push(n < MAX_CALLS_PER_ROUND ? await this.run(call) : { id: call.id, name: call.name, ok: false, error: `too many tool calls in one round (at most ${MAX_CALLS_PER_ROUND})` });
+      }
       input = this.turn({ toolResults: results });
     }
     this.o.io.say('The manager kept asking for more tools, so I stopped. Ask again, more specifically.');
+    return { kind: 'done' };
+  }
+
+  private connect(agent: unknown): Outcome {
+    if (isAgentId(agent)) return { kind: 'connect', agent };
+    this.o.io.say('The manager asked to connect you to something that is not an agent id, so I did not.');
     return { kind: 'done' };
   }
 
@@ -79,7 +89,7 @@ export class ManagerSession {
     if (!tool || !this.tools.includes(tool)) return { ...base, ok: false, error: `${call.name} is not available to this person` };
     const summary = `${call.name}${Object.keys(call.arguments).length ? ' ' + JSON.stringify(call.arguments) : ''}`;
     if (tool.spec.mutating) {
-      if (!(await this.o.io.confirm(`The manager wants to run: ${summary}\nThis changes the factory. Allow it?`))) {
+      if (!(await this.o.io.confirm(`\x1b[0m${stripControl(`The manager wants to run: ${summary}`)}\nThis changes the factory. Allow it?`))) {
         return { ...base, ok: false, declined: true, error: 'The person declined this change.' };
       }
     } else {

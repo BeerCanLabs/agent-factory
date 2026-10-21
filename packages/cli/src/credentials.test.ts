@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AccessSession, FileStore, KeychainStore, NeedsLoginError, expiryOf, isFresh, type CredentialStore } from './credentials.js';
+import { AccessSession, FileStore, KeychainStore, NeedsLoginError, clearCloudflaredTokens, expiryOf, isFresh, redactJwt, type CredentialStore } from './credentials.js';
 
 const jwt = (exp: number) => `h.${Buffer.from(JSON.stringify({ exp })).toString('base64url')}.s`;
 const NOW = 1_800_000_000_000;
@@ -80,5 +80,23 @@ describe('§6.17 CL1 sign-in', () => {
     assert.equal(await store.get('i'), 't');
     await store.delete('i');
     assert.equal(await store.get('i'), undefined);
+  });
+
+  it('CL6 a token that cloudflared prints during login is hidden, and the sign-in link is not', () => {
+    const token = `${Buffer.from('{"alg":"RS256"}').toString('base64url')}.${Buffer.from('{"exp":123}').toString('base64url')}.c2ln`;
+    const out = redactJwt(`A browser window should have opened at https://f.example.com/cdn-cgi/access/cli?x=1\nSuccessfully fetched your token:\n\n${token}\n`);
+    assert.doesNotMatch(out, /eyJ/);
+    assert.match(out, /\[token hidden\]/);
+    assert.match(out, /https:\/\/f\.example\.com\/cdn-cgi\/access\/cli\?x=1/);
+    const real = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln';
+    assert.equal(redactJwt(`token ${real} end`), 'token [token hidden] end');
+  });
+
+  it('CL1 sign-out clears the cached token of that host only, not one whose name merely starts the same', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cf-'));
+    const { writeFile, readdir } = await import('node:fs/promises');
+    for (const n of ['f.example.com-abc123-token', 'f.example.com-evil.net-abc123-token', 'f.example.com-notes.txt', 'other.example.com-abc123-token']) await writeFile(join(dir, n), 'x');
+    assert.equal(await clearCloudflaredTokens('https://f.example.com', dir), 1);
+    assert.deepEqual((await readdir(dir)).sort(), ['f.example.com-evil.net-abc123-token', 'f.example.com-notes.txt', 'other.example.com-abc123-token']);
   });
 });

@@ -106,12 +106,29 @@ export const isFresh = (token: string, now = Date.now(), skewSeconds = 60): bool
 /** Runs `cloudflared`, the proxy's own client. `interactive` hands it the terminal (the browser sign-in prints a link). */
 export type Cloudflared = (args: string[], interactive: boolean) => Promise<{ code: number; stdout: string }>;
 
+/** CL6: `cloudflared access login` can print the token it fetched. Whatever of it looks like a JWT never reaches the terminal. */
+export const redactJwt = (text: string): string => text.replace(/eyJ[\w-]+\.[\w-]+\.[\w-]*/g, '[token hidden]');
+
 export const runCloudflared: Cloudflared = (args, interactive) =>
   interactive
     ? new Promise((resolve, reject) => {
-        const child = spawn('cloudflared', args, { stdio: 'inherit' });
+        // The sign-in link still reaches the person; the token, if printed, does not.
+        const child = spawn('cloudflared', args, { stdio: ['inherit', 'pipe', 'inherit'] });
+        let pending = '';
+        const flush = (final: boolean) => {
+          const lines = pending.split('\n');
+          pending = final ? '' : (lines.pop() ?? '');
+          for (const l of lines) if (l || !final) process.stdout.write(`${redactJwt(l)}\n`);
+        };
+        child.stdout?.on('data', (d: Buffer) => {
+          pending += d.toString('utf8');
+          flush(false);
+        });
         child.on('error', reject);
-        child.on('close', (code) => resolve({ code: code ?? 1, stdout: '' }));
+        child.on('close', (code) => {
+          if (pending) process.stdout.write(`${redactJwt(pending)}\n`);
+          resolve({ code: code ?? 1, stdout: '' });
+        });
       })
     : run('cloudflared', args);
 
@@ -127,7 +144,8 @@ export async function clearCloudflaredTokens(instance: string, dir = join(homedi
   } catch {
     return 0;
   }
-  const mine = names.filter((n) => n.startsWith(`${host}-`) && n.endsWith('-token'));
+  // Exactly `<host>-<application tag>-token`: another host whose name merely starts with this one is not ours.
+  const mine = names.filter((n) => n.startsWith(`${host}-`) && n.endsWith('-token') && /^[0-9A-Za-z]+$/.test(n.slice(host.length + 1, -'-token'.length)));
   await Promise.all(mine.map((n) => rm(join(dir, n), { force: true })));
   return mine.length;
 }

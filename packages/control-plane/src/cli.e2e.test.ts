@@ -9,6 +9,7 @@ import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, cloudflareAccessAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { FactoryClient, ManagerSession, ConversationRefused, talk } from '@beercanlabs/factory-cli';
+import { createHash } from 'node:crypto';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { createTreasury } from './spend.js';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
@@ -41,6 +42,7 @@ let close: () => Promise<void>;
 let stopManager: () => void;
 const heard: Array<Record<string, unknown>> = [];
 let script: (turn: Record<string, any>) => unknown = () => ({ type: 'message', text: 'unset' });
+let ungrounded = false;
 
 /** What the proxy does for the CLI: it turns `cf-access-token` into the assertion header the origin reads (A1). */
 const viaProxy: typeof fetch = (input, init) => {
@@ -64,10 +66,17 @@ function playManager(): () => void {
       seen.add(t.turnId);
       heard.push(t);
       const token = await state.runTokens.mint({ runId: run.runId, agentId: 'factory-manager' });
+      const answer = script(t) as { type: string; text?: string };
+      // As the cartridge does: a plain answer goes as plain text (so the factory can footnote it), protocol as JSON.
+      const content = answer.type === 'message' && !/^[[{]/.test((answer.text ?? '').trim()) ? (answer.text ?? '') : JSON.stringify(answer);
+      if (ungrounded && answer.type === 'message') {
+        // The gatekeeper-egress records a hash of a final model answer given with tools offered and none called (AP3).
+        state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'factory-manager', runId: run.runId, type: 'llm', action: 'UNGROUNDED_REPLY', actor: 'gatekeeper-egress', replySha256: createHash('sha256').update(content.trim()).digest('hex') });
+      }
       await fetch(`${base}/api/v1/runs/${run.runId}/reply`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify({ turnId: t.turnId, content: JSON.stringify(script(t)) }),
+        body: JSON.stringify({ turnId: t.turnId, content }),
       });
     }
   }, 10);
@@ -185,7 +194,21 @@ describe('§6.17 the factory CLI against the control plane', () => {
     script = (t) => ({ type: 'message', text: `you said ${t.content}` });
     const client = clientFor(ADMIN_EMAIL);
     const reply = await talk(client, 'factory-manager', { content: 'hi' }, { busy: () => {} }, { intervalMs: 10 });
-    assert.equal(JSON.parse(reply.content).text, 'you said hi');
+    assert.equal(reply.content, 'you said hi');
     assert.deepEqual(Object.keys(heard.at(-1) ?? {}).filter((k) => k === 'tools'), [], 'a direct conversation carries no manager tools');
+  });
+
+  it('CL7 an answer given without tools reaches the person with the factory\'s footnote', async () => {
+    ungrounded = true;
+    try {
+      script = () => ({ type: 'message', text: 'Probably about ten dollars.' });
+      const said: string[] = [];
+      const roles = (await clientFor(ADMIN_EMAIL).whoami()).roles;
+      await session(ADMIN_EMAIL, roles, said).ask('roughly how much?');
+      assert.equal(said.length, 1);
+      assert.match(said[0], /^Probably about ten dollars\.\n+\[no tools called\]$/);
+    } finally {
+      ungrounded = false;
+    }
   });
 });

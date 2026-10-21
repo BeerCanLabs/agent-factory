@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { FactoryClient } from './client.js';
-import { ManagerSession, MAX_ROUNDS } from './manager.js';
+import { ManagerSession, MAX_CALLS_PER_ROUND, MAX_ROUNDS } from './manager.js';
 import type { Io } from './conversation.js';
 import { fakeFactory, type FakeFactory } from './testing.js';
 
@@ -106,11 +106,43 @@ describe('§6.17 CL5 connect to an agent', () => {
 });
 
 describe('§6.17 CL7 answers are grounded', () => {
-  it('CL7 shows the factory\'s footnote on a manager answer', async () => {
+  it('CL7 shows the factory\'s footnote on a plain manager answer', async () => {
     const { f, said, session } = setup(['admin']);
-    f.agents.set('factory-manager', () => ({ content: JSON.stringify({ type: 'message', text: 'Probably about ten dollars.' }), footnote: '[no tools called]' }));
+    f.agents.set('factory-manager', () => ({ content: 'Probably about ten dollars.', footnote: '[no tools called]' }));
     await session.ask('how much?');
     assert.equal(said.length, 1);
-    assert.match(said[0], /Probably about ten dollars\.\n\[no tools called\]/);
+    assert.equal(said[0], 'Probably about ten dollars.\n[no tools called]');
+  });
+});
+
+describe('§6.17 CL4 limits on what a manager reply can do', () => {
+  it('CL4 honours at most MAX_CALLS_PER_ROUND tool requests in a round and refuses the rest', async () => {
+    const { f, session } = setup(['admin']);
+    let results: any[] = [];
+    f.routes.set('GET /api/v1/agents', () => ({ status: 200, body: [] }));
+    const many = Array.from({ length: MAX_CALLS_PER_ROUND + 3 }, (_, n) => [`c${n}`, 'list_agents'] as [string, string]);
+    script(f, [() => calls(...many), (i) => ((results = i.toolResults as any[]), { type: 'message', text: 'done' })]);
+    await session.ask('everything');
+    assert.equal(results.filter((r) => r.ok).length, MAX_CALLS_PER_ROUND);
+    assert.match(results.at(-1).error, /too many tool calls/);
+    assert.equal(f.seen.filter((s) => s.path === '/api/v1/agents').length, MAX_CALLS_PER_ROUND);
+  });
+
+  it('CL5 will not connect to something that is not an agent id', async () => {
+    for (const agent of ['..', '../x', 'a/b']) {
+      const { f, said, session } = setup(['admin']);
+      script(f, [() => ({ type: 'connect', agent })]);
+      assert.deepEqual(await session.ask('connect me'), { kind: 'done' }, agent);
+      assert.match(said.at(-1) ?? '', /not an agent id/);
+    }
+  });
+
+  it('CL6 control characters in what the manager says never reach the terminal, and a change prompt starts from a reset', async () => {
+    const { f, said, asked, session } = setup(['admin'], [false]);
+    script(f, [() => ({ type: 'tool_calls', text: 'hi\x1b[8m hidden \x07', calls: [{ id: 'a', name: 'pause_agent', arguments: { id: 'donna\x1b[2J' } }] })]);
+    await session.ask('x');
+    assert.doesNotMatch(said[0], /[\x00-\x08\x0b-\x1f\x7f]/);
+    assert.match(asked[0], /^\x1b\[0m/);
+    assert.doesNotMatch(asked[0].slice(4), /\x1b/);
   });
 });

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -16,12 +16,15 @@ export function parseTheme(raw: string): ThemeName {
   throw new Error(`theme must be one of: ${THEMES.join(', ')}`);
 }
 
-const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
-export function parseManager(raw: string): string {
+/** Every agent id that enters the CLI (a setting, `/connect`, the manager's say-so) passes this, so none can be a path. */
+export const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+export const isAgentId = (v: unknown): v is string => typeof v === 'string' && AGENT_ID.test(v) && !v.includes('..');
+export function parseAgentId(raw: string): string {
   const id = raw.trim();
-  if (!AGENT_ID.test(id)) throw new Error('an agent id is letters, digits, . _ - (at most 64 characters)');
+  if (!isAgentId(id)) throw new Error('an agent id is letters, digits, . _ - (at most 64 characters)');
   return id;
 }
+export const parseManager = parseAgentId;
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
   const base = env.XDG_CONFIG_HOME || join(homedir(), '.config');
@@ -56,7 +59,7 @@ export async function loadConfig(path = configPath()): Promise<CliConfig> {
       }
     }
     if (typeof parsed.theme === 'string' && (THEMES as readonly string[]).includes(parsed.theme)) out.theme = parsed.theme as ThemeName;
-    if (typeof parsed.manager === 'string' && AGENT_ID.test(parsed.manager)) out.manager = parsed.manager;
+    if (isAgentId(parsed.manager)) out.manager = parsed.manager;
     return out;
   } catch {
     return {};
@@ -64,6 +67,8 @@ export async function loadConfig(path = configPath()): Promise<CliConfig> {
 }
 
 export async function saveConfig(config: CliConfig, path = configPath()): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFile(path, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  await chmod(path, 0o600); // `mode` only applies when the file is created
+
 }

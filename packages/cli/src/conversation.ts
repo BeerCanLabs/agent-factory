@@ -20,7 +20,16 @@ export async function talk(client: FactoryClient, agentId: string, input: Record
   }
 }
 
+/**
+ * Text that came from a model or an agent reaches the terminal without control characters: an escape sequence could hide
+ * the next prompt or overwrite lines above it. Newlines and tabs stay.
+ */
+export function stripControl(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '');
+}
+
 /** The text of a reply, with the factory's footnote when it added one (AP3, CL7). */
 export function renderReply(reply: Reply, text = reply.content): string {
-  return reply.footnote ? `${text}\n${reply.footnote}` : text;
+  return stripControl(reply.footnote ? `${text}\n${reply.footnote}` : text);
 }

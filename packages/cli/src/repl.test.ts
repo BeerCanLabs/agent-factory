@@ -14,13 +14,14 @@ const memory = (): CredentialStore & { data: Map<string, string> } => {
   return { data, get: async (i) => data.get(i), set: async (i, t) => void data.set(i, t), delete: async (i) => void data.delete(i) };
 };
 
-type Setup = { config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; stored?: boolean; factory?: (f: FakeFactory) => void; login?: 'ok' | 'fail' };
+type Setup = { cloudflaredFiles?: string[]; config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; stored?: boolean; factory?: (f: FakeFactory) => void; login?: 'ok' | 'fail' };
 
 async function run(lines: string[], s: Setup = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'cli-repl-'));
   const configFile = join(dir, 'config.json');
   const cfDir = join(dir, 'cloudflared');
   await mkdir(cfDir);
+  for (const n of s.cloudflaredFiles ?? []) await writeFile(join(cfDir, n), 'cached');
   if (s.config) await writeFile(configFile, JSON.stringify(s.config));
   const token = jwt();
   const f = fakeFactory(token);
@@ -47,8 +48,9 @@ async function run(lines: string[], s: Setup = {}) {
   for (const l of lines) input.write(l + '\n');
   input.end();
   await done;
+  const cfFiles = async () => (await readdir(cfDir)).sort();
   const saved = async () => JSON.parse(await readFile(configFile, 'utf8')) as Record<string, unknown>;
-  return { f, text, store, saved, cloudflaredCalls, cfDir, token };
+  return { f, text, store, saved, cloudflaredCalls, cfDir, token, cfFiles, configFile };
 }
 
 describe('§6.17 CL8 opens with nothing set up', () => {
@@ -134,18 +136,24 @@ describe('§6.17 CL1 /login', () => {
     assert.match(text, /Signed in\s+no/);
   });
 
-  it('CL1 signed in, /login offers sign out, and signing out forgets the sign-in everywhere', async () => {
-    const { text, store, cfDir } = await run(['/login', '1', 'what is up', '/exit'], {
+  it('CL1 signed in, /login offers sign out, and signing out forgets the sign-in in the store and in cloudflared', async () => {
+    const { text, store, cfFiles } = await run(['/login', '1', 'what is up', '/exit'], {
       config: { instance: 'https://f.example.com' },
       stored: true,
-      factory: () => {},
+      cloudflaredFiles: ['f.example.com-abc123-token', 'other.example.com-abc123-token'],
     });
-    await writeFile(join(cfDir, 'f.example.com-abc123-token'), 'cached');
     assert.match(text, /Signed in as access:dale@example\.com/);
     assert.match(text, /1\) Sign out/);
     assert.match(text, /Signed out\./);
     assert.equal(store.data.has('https://f.example.com'), false);
+    assert.deepEqual(await cfFiles(), ['other.example.com-abc123-token'], "this factory's cached token is gone, another's is not");
     assert.match(text, /You are not signed in\. Type \/login\./);
+  });
+
+  it('CL1 changing the address removes the old factory\'s sign-in everywhere', async () => {
+    const { store, cfFiles } = await run(['/config address other.example.com', '/exit'], { config: { instance: 'https://f.example.com' }, stored: true, cloudflaredFiles: ['f.example.com-abc123-token'] });
+    assert.equal(store.data.has('https://f.example.com'), false);
+    assert.deepEqual(await cfFiles(), []);
   });
 
   it('CL1 sign out clears the token cloudflared cached for that host only', async () => {
@@ -210,5 +218,39 @@ describe('§6.17 CL5 the terminal conversation once signed in', () => {
   it('CL8 the configured manager agent is the one spoken to', async () => {
     const { f } = await run(['hi', '/exit'], { ...signedIn, config: { ...signedIn.config, manager: 'chief' }, factory: (f) => f.agents.set('chief', () => JSON.stringify({ type: 'message', text: 'at your service' })) });
     assert.ok(f.seen.some((s) => s.path === '/api/v1/agents/chief/conversation'));
+  });
+
+  it('CL4 a line typed ahead cannot answer a confirmation', async () => {
+    const { f } = await run(['pause donna', 'y', '/exit'], {
+      ...signedIn,
+      factory: (f) => {
+        f.routes.set('POST /api/v1/agents/donna/pause', () => ({ status: 200, body: { ok: true } }));
+        f.agents.set('factory-manager', (i) => JSON.stringify((i as any).toolResults ? { type: 'message', text: 'ok' } : { type: 'tool_calls', calls: [{ id: '1', name: 'pause_agent', arguments: { id: 'donna' } }] }));
+      },
+    });
+    assert.ok(!f.seen.some((s) => s.path.endsWith('/pause')), 'the "y" was typed before the question, so it is not an answer');
+  });
+
+  it('CL5 /connect and the manager id accept only agent ids', async () => {
+    const { text, f } = await run(['/connect ..', '/connect a/b', '/exit'], signedIn);
+    assert.match(text, /Usage: \/connect <agent id>/);
+    assert.equal(f.seen.filter((x) => x.path.includes('/conversation')).length, 0);
+  });
+});
+
+describe('§6.17 CL8 settings and environment', () => {
+  it('CL8 the settings file is private even when it already existed with wider rights', async () => {
+    const { configFile } = await run(['/config theme dark', '/exit'], { config: { theme: 'light' } });
+    const { chmod, stat } = await import('node:fs/promises');
+    await chmod(configFile, 0o644);
+    assert.equal((await stat(configFile)).mode & 0o777, 0o644);
+    const again = await run(['/config theme dark', '/exit'], { config: { theme: 'light' } });
+    assert.equal((await stat(again.configFile)).mode & 0o777, 0o600);
+  });
+
+  it('CL8 a bad FACTORY_URL is reported and never replaced by the saved address', async () => {
+    const { text } = await run(['/whoami', '/exit'], { env: { FACTORY_URL: 'http://remote.example.com' }, config: { instance: 'https://saved.example.com' } });
+    assert.match(text, /FACTORY_URL is set but is not a usable address/);
+    assert.match(text, /Factory\s+not set/);
   });
 });

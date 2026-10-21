@@ -4,6 +4,8 @@
  * header of its own.
  */
 
+import { isAgentId } from './config.js';
+
 export class AuthRequiredError extends Error {
   constructor(message = 'not signed in, or the sign-in expired') {
     super(message);
@@ -82,6 +84,7 @@ export class FactoryClient {
 
   /** Sends one conversation turn to an agent; the answer is read with `waitForReply` (CL5). */
   async converse(agentId: string, input: Record<string, unknown>): Promise<{ turnId: string }> {
+    this.checkAgent(agentId);
     const r = await this.request('POST', `/api/v1/agents/${encodeURIComponent(agentId)}/conversation`, input);
     const b = r.body as { turnId?: unknown; error?: unknown; reason?: unknown; window?: unknown };
     if (r.status >= 300) throw new ConversationRefused(agentId, r.status, r.body);
@@ -89,7 +92,12 @@ export class FactoryClient {
     return { turnId: b.turnId };
   }
 
+  private checkAgent(agentId: string): void {
+    if (!isAgentId(agentId)) throw new ConversationRefused(agentId, 404, null);
+  }
+
   async replies(agentId: string, after: number): Promise<Reply[]> {
+    this.checkAgent(agentId);
     const r = await this.request('GET', `/api/v1/agents/${encodeURIComponent(agentId)}/replies?after=${after}`);
     if (r.status !== 200) throw new Error(`could not read replies (HTTP ${r.status})`);
     const list = (r.body as { replies?: Reply[] })?.replies;
@@ -102,12 +110,11 @@ export class FactoryClient {
     return all.reduce((n, r) => Math.max(n, r.seq), 0);
   }
 
-  async waitForReply(agentId: string, turnId: string, opts: { after: number; timeoutMs?: number; intervalMs?: number; signal?: AbortSignal }): Promise<Reply> {
+  async waitForReply(agentId: string, turnId: string, opts: { after: number; timeoutMs?: number; intervalMs?: number }): Promise<Reply> {
     const deadline = Date.now() + (opts.timeoutMs ?? 5 * 60_000);
     const interval = opts.intervalMs ?? 1500;
     let cursor = opts.after;
     for (;;) {
-      if (opts.signal?.aborted) throw new Error('cancelled');
       const batch = await this.replies(agentId, cursor);
       for (const r of batch) {
         cursor = Math.max(cursor, r.seq);
@@ -134,7 +141,7 @@ export class ConversationRefused extends Error {
     const b = (body ?? {}) as { error?: unknown; reason?: unknown; required?: unknown };
     if (status === 402) return `${agentId} is over its budget, so the factory will not wake it.`;
     if (status === 403) return `You do not hold the role needed to talk to ${agentId}${typeof b.required === 'string' ? ` (needs ${b.required})` : ''}.`;
-    if (status === 404) return `There is no agent called ${agentId}.`;
+    if (status === 404) return `There is no agent called ${isAgentId(agentId) ? agentId : JSON.stringify(String(agentId).slice(0, 64))}.`;
     return `The factory refused the message (HTTP ${status}${typeof b.error === 'string' ? `: ${b.error}` : ''}).`;
   }
 }
