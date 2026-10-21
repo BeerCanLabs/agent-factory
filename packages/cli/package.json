@@ -1,0 +1,25 @@
+{
+  "name": "@beercanlabs/factory-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Factory CLI: a terminal client for a factory instance. Talk to the Factory Manager, or connect to an agent (DESIGN_AUTHORITY.md §6.17).",
+  "type": "module",
+  "bin": {
+    "factory": "dist/main.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "test": "tsx --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@beercanlabs/factory-auth": "0.1.0",
+    "@beercanlabs/factory-bouncer": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
