@@ -208,6 +208,14 @@ describe('§6.5 run progress events: run-scoped, bounded, headless', { concurren
       assert.equal(body.events[0].agentId, 'donna');
       assert.equal(body.events[0].route, 'github');
       assert.equal(body.events[0].kind, 'call.start');
+
+      // GAP-189: a model call's tokens survive the sanitizer and reach the ingress, which sums them for the turn summary.
+      await report([ev(run.runId, 'donna', { route: 'anthropic', model: 'claude-test', kind: 'call.end', inputTokens: 1200, outputTokens: 300 })]);
+      for (let i = 0; i < 200 && received.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+      assert.equal(received.length, 2);
+      const tokenEvent = (received[1].body as { events: Array<{ inputTokens?: number; outputTokens?: number }> }).events[0];
+      assert.equal(tokenEvent.inputTokens, 1200);
+      assert.equal(tokenEvent.outputTokens, 300);
     } finally {
       delete state.gatekeeperIngressUrl;
       delete state.gatekeeperIngressToken;

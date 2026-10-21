@@ -46,6 +46,19 @@ describe('§6.15 the Inspector contract', () => {
     assert.deepEqual((await inspector.readProgress('run-2', undefined, 0)).events, [], 'a run that was not live has no ring');
   });
 
+  it('reportProgress keeps valid token counts and drops invalid ones (GAP-189)', async () => {
+    const inspector = createInspector();
+    inspector.reportProgress(
+      [report('r', { kind: 'call.end', inputTokens: 1200, outputTokens: 300 }), report('r', { kind: 'call.end', inputTokens: -5, outputTokens: 'many' })],
+      () => true,
+    );
+    const [good, bad] = (await inspector.readProgress('r', undefined, 0)).events;
+    assert.equal(good.inputTokens, 1200);
+    assert.equal(good.outputTokens, 300);
+    assert.equal(bad.inputTokens, undefined);
+    assert.equal(bad.outputTokens, undefined);
+  });
+
   it('readProgress waits for the next event and resumes from a cursor', async () => {
     const inspector = createInspector();
     inspector.reportProgress([report('run-1')], () => true);
