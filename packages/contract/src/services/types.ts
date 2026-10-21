@@ -206,6 +206,7 @@ export const RESERVED_PACKAGES: Record<string, FactoryServiceName> = {};
  */
 export const PLATFORM_TOOL_PACKAGES: Record<string, PlatformRole> = {
   bench: 'diagnostic-tool',
+  cli: 'operator-ui',
   conformance: 'conformance-suite',
   console: 'operator-ui',
 };

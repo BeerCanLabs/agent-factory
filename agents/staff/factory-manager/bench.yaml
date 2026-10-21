@@ -1,0 +1,6 @@
+cases:
+  - id: offers-help
+    input:
+      content: help
+    expect:
+      contains: ["factory"]
