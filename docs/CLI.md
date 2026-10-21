@@ -4,25 +4,48 @@
 
 It is a client of the factory's existing API (KPF): it adds no interface and no logic the web console lacks.
 
-## Install and sign in (macOS)
+## Install (macOS)
 
 ```
 brew install cloudflared          # the identity-aware proxy's own client
-npm install && npm run build      # in a clone of this repository
+npm install && npm run build -w @beercanlabs/factory-auth -w @beercanlabs/factory-ledger -w @beercanlabs/factory-bouncer -w @beercanlabs/factory-cli
 npm link -w @beercanlabs/factory-cli   # puts `factory` on your PATH
-
-factory login agent-factory.example.com
+factory
 ```
 
-`factory login` opens your browser for the factory's single sign-on (Cloudflare Access on AWS). The signed assertion is kept in the macOS Keychain and renewed when it expires. The CLI never holds a `FACTORY_TOKEN` and sends no identity of its own; the factory verifies the assertion (A2). `factory logout` forgets it, and `factory whoami` shows who you are and your roles.
+`factory` opens with a splash screen even when nothing is set up. It shows the factory it points at, who is signed in, and what to type next. Set up from inside it:
 
-`FACTORY_URL` overrides the saved address. `FACTORY_CLI_ACCESS_TOKEN` supplies an Access assertion directly (for example from `cloudflared access token`) when you cannot use the browser flow.
+| Command | |
+|---|---|
+| `/config` | walks the settings (Enter keeps each one); or set one directly: `/config address <url>`, `/config theme <auto\|dark\|light\|mono>`, `/config manager <agent>` |
+| `/login` | signs you in. Signed in already, it offers to sign you out or sign in as a different user |
+| `/connect <agent>` | talk to an agent directly |
+| `/manager` | back to the Factory Manager |
+| `/whoami`, `/help`, `/exit` | |
+
+`/login` opens your browser for the factory's single sign-on (Cloudflare Access on AWS). The signed assertion is kept in the macOS Keychain and renewed when it expires. The CLI never holds a `FACTORY_TOKEN` and sends no identity of its own; the factory verifies the assertion (A2). Signing out also removes the copy `cloudflared` keeps in `~/.cloudflared`. If the browser signs you straight back in as the same person when you switch users, sign out of your identity provider in the browser first.
+
+Settings live in `~/.config/factory-cli/config.json` (readable by you only) and are never sent to the factory or the manager. Changing the factory address signs you out of the old one. The theme is `auto` and `dark` for dark terminals, `light` for light ones, `mono` for no colour; colour is also off when `NO_COLOR` is set or output is not a terminal.
+
+Shortcuts for scripts: `factory login <address>`, `factory logout`, `factory whoami`. `FACTORY_URL` overrides the saved address, `FACTORY_MANAGER_AGENT` or `--manager <id>` the manager, and `FACTORY_CLI_ACCESS_TOKEN` supplies an Access assertion directly (for example from `cloudflared access token`) when you cannot use the browser flow.
 
 ## Use
 
 ```
 $ factory
-Connected to https://agent-factory.example.com as cloudflare:dale@example.com (admin, operator, ...). Type /help.
+  ┏━╸┏━┓┏━╸╺┳╸┏━┓┏━┓╻ ╻
+  ┣╸ ┣━┫┃   ┃ ┃ ┃┣┳┛┗┳┛
+  ╹  ╹ ╹┗━╸ ╹ ┗━┛╹┗╸ ╹
+  Agent Factory CLI 0.1.0
+
+  Factory   not set
+  Signed in no
+  Manager   factory-manager
+
+  Start: /config to set your factory address, then /login to sign in.
+
+factory> /config address agent-factory.example.com
+factory> /login
 manager> what have we spent this month?
 > get_spend_report {"period":"current"}
 So far this month: $212.40 (AI $171.10, infrastructure $41.30), 71% of the $300 total budget.
@@ -31,18 +54,9 @@ The manager wants to run: set_agent_budget {"id":"donna","spendLimitUsd":5,"peri
 This changes the factory. Allow it? [y/N] y
 Donna's budget is now $5 a day.
 manager> let me talk to donna
-Connecting you to donna.
 Connected to donna. /manager to go back.
 donna> good morning
-...
 ```
-
-| Command | |
-|---|---|
-| `/connect <agent>` | talk to an agent directly |
-| `/manager` | back to the Factory Manager |
-| `/whoami` | who you are signed in as |
-| `/help`, `/exit` | |
 
 ## What the manager can do for you
 

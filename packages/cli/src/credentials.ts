@@ -3,7 +3,7 @@
  * (`cloudflared access login`) and kept in the macOS Keychain. The CLI holds no FACTORY_TOKEN and nothing it makes up.
  */
 import { execFile, spawn } from 'node:child_process';
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -115,6 +115,23 @@ export const runCloudflared: Cloudflared = (args, interactive) =>
       })
     : run('cloudflared', args);
 
+/**
+ * `cloudflared` keeps its own copy of a sign-in (`<host>-<aud>-token` in ~/.cloudflared) and hands it back without asking,
+ * so signing out, or in as someone else, has to remove it too.
+ */
+export async function clearCloudflaredTokens(instance: string, dir = join(homedir(), '.cloudflared')): Promise<number> {
+  const host = new URL(instance).hostname;
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return 0;
+  }
+  const mine = names.filter((n) => n.startsWith(`${host}-`) && n.endsWith('-token'));
+  await Promise.all(mine.map((n) => rm(join(dir, n), { force: true })));
+  return mine.length;
+}
+
 export class NeedsLoginError extends Error {
   constructor(instance: string) {
     super(`not signed in to ${instance}. Run: factory login ${instance}`);
@@ -129,6 +146,7 @@ export class AccessSession {
     private readonly cloudflared: Cloudflared = runCloudflared,
     private readonly env: NodeJS.ProcessEnv = process.env,
     private readonly now: () => number = Date.now,
+    private readonly cloudflaredDir?: string,
   ) {}
 
   /** The assertion to send. `refresh` skips the stored one and asks the proxy's client for a new one (silently). */
@@ -171,7 +189,9 @@ export class AccessSession {
     await this.store.set(this.instance, fetched);
   }
 
+  /** Forgets the sign-in here and in `cloudflared`, so the next login asks the proxy again. */
   async logout(): Promise<void> {
     await this.store.delete(this.instance);
+    await clearCloudflaredTokens(this.instance, this.cloudflaredDir);
   }
 }

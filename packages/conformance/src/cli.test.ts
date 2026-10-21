@@ -87,3 +87,22 @@ describe('§6.17 CL6 the CLI never handles a secret (K5, S1)', () => {
     }
   });
 });
+
+describe('§6.17 CL8 setup and preferences are the person\'s own', () => {
+  it('CL8 the settings file is private to its owner and holds no credential', () => {
+    const src = code('packages/cli/src/config.ts');
+    assert.match(src, /mode:\s*0o600/);
+    assert.doesNotMatch(src, /token|secret|password|credential/i);
+  });
+
+  it('CL8 nothing the factory or the manager receives is built from the settings', () => {
+    for (const f of ['client.ts', 'manager.ts', 'tools.ts', 'protocol.ts']) {
+      assert.doesNotMatch(code(`packages/cli/src/${f}`), /from '\.\/(config|theme|splash)\.js'/, f);
+    }
+  });
+
+  it('CL8 colour honours NO_COLOR and a non-terminal', () => {
+    assert.match(code('packages/cli/src/theme.ts'), /NO_COLOR/);
+    assert.match(code('packages/cli/src/theme.ts'), /isTTY/);
+  });
+});
