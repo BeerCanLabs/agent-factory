@@ -330,3 +330,77 @@ describe('§6.17 CL9 OIDC through the terminal', () => {
     assert.match(text, /Sign-in\s+Cloudflare Access/);
   });
 });
+
+describe('§6.17 CL11 commands in the conversation, with no manager needed', () => {
+  const signedIn = { config: { instance: 'https://f.example.com', auth: 'cloudflare-access' as const }, stored: true };
+  const withAgents = (roles: string[] = ['admin']) => (f: FakeFactory) => {
+    f.roles = roles;
+    f.routes.set('GET /api/v1/agents', () => ({ status: 200, body: [{ id: 'donna', state: 'SLEEPING' }, { id: 'rosie', state: 'WORKING' }] }));
+    f.routes.set('GET /api/v1/spend', () => ({ status: 200, body: { totalUsd: 12.5, apiKey: 'sk-live-1' } }));
+    f.routes.set('POST /api/v1/agents/donna/pause', () => ({ status: 200, body: { ok: true } }));
+  };
+
+  it('CL11 /agents and /spend work with no Factory Manager on the factory, and show the factory\'s own figures', async () => {
+    const { text } = await run(['/agents', '/spend', '/exit'], { ...signedIn, factory: withAgents() });
+    assert.match(text, /ID\s+STATE\ndonna\s+SLEEPING\nrosie\s+WORKING/);
+    assert.match(text, /totalUsd\s+12\.5/);
+    assert.match(text, /apiKey\s+\[hidden\]/);
+    assert.doesNotMatch(text, /sk-live/);
+  });
+
+  it('CL11 --json gives the raw answer in the conversation too', async () => {
+    const { text } = await run(['/spend --json', '/exit'], { ...signedIn, factory: withAgents() });
+    assert.match(text, /"totalUsd": 12\.5/);
+  });
+
+  it('CL3 a viewer can read but is told their roles do not allow a change, and nothing is sent', async () => {
+    const { text, f } = await run(['/agents', '/budget donna 5 daily', '/pause donna', '/exit'], { ...signedIn, factory: withAgents(['viewer']) });
+    assert.match(text, /donna\s+SLEEPING/);
+    assert.equal((text.match(/Your roles do not allow/g) ?? []).length, 1, 'a viewer may pause (the factory decides for owners), not set a budget');
+    assert.ok(!f.seen.some((s) => s.method === 'PUT'));
+  });
+
+  it('CL4 a command that changes state asks, and a line typed ahead cannot answer it', async () => {
+    const { f, text } = await run(['/pause donna', 'y', '/exit'], { ...signedIn, factory: withAgents() });
+    assert.match(text, /Run: pause_agent \{"id":"donna"\}/);
+    assert.match(text, /Not run\./);
+    assert.ok(!f.seen.some((s) => s.path.endsWith('/pause')));
+    const yes = await run(['/pause donna --yes', '/exit'], { ...signedIn, factory: withAgents() });
+    assert.ok(yes.f.seen.some((s) => s.path.endsWith('/pause')));
+    assert.match(yes.text, /Done: the kill-switch/);
+  });
+
+  it('CL11 when the manager cannot answer, free text says why and points at the commands', async () => {
+    const none = await run(['how much have we spent?', '/exit'], { ...signedIn, factory: withAgents() });
+    assert.match(none.text, /no Factory Manager on this factory/);
+    assert.match(none.text, /\/agents, \/spend, \/status, \/approvals/);
+
+    const viewer = await run(['how much have we spent?', '/exit'], {
+      ...signedIn,
+      factory: (f) => {
+        withAgents(['viewer'])(f);
+        f.routes.set('POST /api/v1/agents/factory-manager/conversation', () => ({ status: 403, body: { error: 'forbidden', required: 'operator' } }));
+      },
+    });
+    assert.match(viewer.text, /needs operator/);
+    assert.match(viewer.text, /You can still use commands/);
+
+    const broke = await run(['hi', '/exit'], { ...signedIn, factory: (f) => f.routes.set('POST /api/v1/agents/factory-manager/conversation', () => ({ status: 402, body: { error: 'budget_exceeded' } })) });
+    assert.match(broke.text, /over its budget/);
+    assert.match(broke.text, /You can still use commands/);
+  });
+
+  it('CL11 commands need a sign-in and say so, and /help lists them', async () => {
+    const out = await run(['/agents', '/help', '/exit'], { config: { instance: 'https://f.example.com' } });
+    assert.match(out.text, /You are not signed in\. Type \/login\./);
+    assert.match(out.text, /Commands \(no manager needed/);
+    assert.match(out.text, /\/budget <agent> <amount> daily\|monthly/);
+    const unset = await run(['/agents', '/exit']);
+    assert.match(unset.text, /No factory is set up yet/);
+  });
+
+  it('CL11 an unknown slash command is still unknown', async () => {
+    const { text } = await run(['/frobnicate', '/exit'], { ...signedIn, factory: withAgents() });
+    assert.match(text, /Unknown command/);
+  });
+});

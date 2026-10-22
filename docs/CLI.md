@@ -58,6 +58,40 @@ Connected to donna. /manager to go back.
 donna> good morning
 ```
 
+## Commands (no manager needed)
+
+Everything the Factory Manager can read or do, you can also ask for directly. The manager is optional; commands work with none admitted, with one that is over budget, and for people who cannot talk to it (a viewer can read costs and agents). Commands run the same tools the manager uses, as you: only what your roles allow is offered, a change asks first, and it is recorded under your identity.
+
+```
+manager> /agents
+ID       STATE
+donna    SLEEPING
+rosie    WORKING
+manager> /spend
+totalUsd  212.4
+manager> /budget donna 5 daily
+Run: set_agent_budget {"id":"donna","spendLimitUsd":5,"period":"daily"}
+This changes the factory. Allow it? [y/N] y
+Done: set an agent's spend limit.
+```
+
+| | |
+|---|---|
+| Look | `/agents`, `/agent <id>`, `/policy <agent>`, `/status`, `/runs [agent] [--active] [--limit n]`, `/run <id>`, `/ledger [agent] [--limit n]`, `/models`, `/skills`, `/incidents`, `/schedules` |
+| Money | `/spend`, `/report [current\|last]`, `/compute`, `/budgets`, `/budget <agent> <amount> daily\|monthly`, `/factory-budget total=<$> ai=<$> infra=<$> alert=0.8,1` |
+| Agents | `/pause`, `/resume`, `/isolate`, `/wake`, `/reset`, `/retire`, `/reinstate` `<agent>`; `/cancel <run id>` |
+| Approvals | `/approvals`, `/approve <id> [notes]`, `/reject <id> [notes]` |
+
+`/help` lists them all. Add `--json` for the factory's answer as JSON (values under secret-looking names are hidden). They also run outside the conversation, for scripts:
+
+```
+factory agents
+factory spend --json | jq .totalUsd
+factory budget donna 5 daily --yes
+```
+
+A command that changes state asks on a terminal, and is refused elsewhere unless you pass `--yes`. A script's arguments are taken exactly as given (an argument that contains quotes or the text `--yes` is just text); put `--` before any argument that begins with `--`, for example `factory approve 12 -- "--careful with this"`. Amounts are written plainly (`5`, `$12.50`, `1,250`), not `1e3`. Text from the factory and from agents is shown with control and invisible formatting characters removed (so it cannot hide or reorder what you read); that also drops zero-width joiners, which splits some emoji sequences and affects a few scripts such as Persian. Exit status is 0 on success and 1 on any failure (not signed in, a role you do not hold, a refusal from the factory). Free text with no usable manager says why (not admitted, over budget, or your role) and points at these commands.
+
 ## How people sign in
 
 A deployment signs people in one of two ways, and the CLI follows whichever it finds at `/login`:

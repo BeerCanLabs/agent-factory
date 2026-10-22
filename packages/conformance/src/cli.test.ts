@@ -142,3 +142,29 @@ describe('§6.17 CL8 setup and preferences are the person\'s own', () => {
     assert.match(code('packages/cli/src/theme.ts'), /isTTY/);
   });
 });
+
+describe('§6.17 CL11 the CLI works without the manager', () => {
+  it('CL11 commands and the manager run a tool in one place, and commands hold no role table or factory call of their own', () => {
+    for (const f of ['commands.ts', 'render.ts', 'runner.ts', 'manager.ts']) {
+      assert.doesNotMatch(code(`packages/cli/src/${f}`), /\.run\(this\.o\.client|tool\.run\(|client\.request\(|\bfetch\(/, `${f} calls the factory itself`);
+    }
+    assert.match(code('packages/cli/src/exec.ts'), /tool\.run\(o\.client, call\.arguments\)/);
+    assert.match(code('packages/cli/src/manager.ts'), /executeTool\(/);
+    assert.match(code('packages/cli/src/runner.ts'), /executeTool\(/);
+    assert.match(code('packages/cli/src/runner.ts'), /toolsFor\(/);
+    for (const f of ['commands.ts', 'runner.ts', 'render.ts']) {
+      assert.doesNotMatch(code(`packages/cli/src/${f}`), /['"](admin|operator|approver|viewer)['"]/, `${f} has its own idea of a role`);
+    }
+  });
+
+  it('CL11 what reaches the terminal from a command has control characters removed', () => {
+    assert.match(code('packages/cli/src/render.ts'), /oneLine|stripControl/);
+    assert.match(code('packages/cli/src/runner.ts'), /oneLine|stripControl/);
+    assert.match(code('packages/cli/src/conversation.ts'), /\\p\{Cf\}/, 'format and bidirectional characters are removed too');
+  });
+
+  it('CL11 a change needs confirmation or --yes, and the confirmation is the one place that decides', () => {
+    assert.match(code('packages/cli/src/exec.ts'), /tool\.spec\.mutating[\s\S]{0,300}io\.confirm\(/);
+    assert.match(code('packages/cli/src/main.ts'), /add --yes to run it from a script/);
+  });
+});
