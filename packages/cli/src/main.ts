@@ -65,6 +65,14 @@ async function setConfig(key: string, value: string): Promise<string> {
   return `${key} set.`;
 }
 
+// `factory ledger --json | head`: a reader that closes early is not an error worth a stack trace.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') process.exit(0);
+    throw err;
+  });
+}
+
 /** Writes, and returns once the data has been handed on. A pipe takes it in pieces; exiting before then cuts the output off. */
 const writeAll = (stream: NodeJS.WriteStream, text: string): Promise<void> => new Promise((resolve) => void stream.write(text, () => resolve()));
 

@@ -197,4 +197,20 @@ describe('§6.17 CL11 commands as subcommands, for scripts', () => {
       await srv.close();
     }
   });
+
+  it('CL11 a reader that closes early (| head) is not an error and prints no stack trace', async () => {
+    const srv = await fakeServer(['viewer']);
+    try {
+      const home = await mkdtemp(join(tmpdir(), 'cli-cmd-'));
+      const errFile = join(home, 'stderr.txt');
+      const script = `"${process.execPath}" --import tsx "${MAIN}" skills --json 2>"${errFile}" | head -c 10 >/dev/null; cat "${errFile}"`;
+      const child = spawn('bash', ['-c', script], { env: { PATH: process.env.PATH ?? '', HOME: home, XDG_CONFIG_HOME: join(home, '.config'), ...env(srv.url) }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      child.stdout.on('data', (c: Buffer) => (out += c));
+      await new Promise<number>((r) => child.on('close', (c) => r(c ?? 1)));
+      assert.doesNotMatch(out, /EPIPE|\n\s+at |Error/, `the CLI crashed when its reader went away: ${out.slice(0, 300)}`);
+    } finally {
+      await srv.close();
+    }
+  });
 });
