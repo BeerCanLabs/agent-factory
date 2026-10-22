@@ -65,6 +65,9 @@ async function setConfig(key: string, value: string): Promise<string> {
   return `${key} set.`;
 }
 
+/** Writes, and returns once the data has been handed on. A pipe takes it in pieces; exiting before then cuts the output off. */
+const writeAll = (stream: NodeJS.WriteStream, text: string): Promise<void> => new Promise((resolve) => void stream.write(text, () => resolve()));
+
 /** `factory <command> ...` outside the conversation (§6.17 CL11): output on stdout, anything else on stderr, a failure exits 1. */
 async function runOneCommand(argv: string[]): Promise<number> {
   const instance = await instanceInUse();
@@ -74,7 +77,7 @@ async function runOneCommand(argv: string[]): Promise<number> {
   const session = makeSession(kind, instance, { store });
   const client = new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh) });
   const me = await client.whoami();
-  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY); // the question is on stderr, so it must be seen
   const io = {
     note: (t: string) => void process.stderr.write(`${t}\n`),
     confirm: async (q: string) => {
@@ -90,26 +93,26 @@ async function runOneCommand(argv: string[]): Promise<number> {
       }
     },
   };
-  const line = argv.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ');
-  const out = await runCommand({ client, roles: me.roles, actor: me.actor, line, io });
-  (out.ok ? process.stdout : process.stderr).write(`${out.output}\n`);
+  // The script's own arguments, exactly: a note that contains quotes or --yes is one argument, not more words (CL4).
+  const out = await runCommand({ client, roles: me.roles, actor: me.actor, argv, io });
+  await writeAll(out.ok ? process.stdout : process.stderr, `${out.output}\n`);
   return out.ok ? 0 : 1;
 }
 
 async function main(argv: string[]): Promise<number> {
   const [cmd, arg] = argv;
-  if (cmd === '--help' || cmd === '-h' || cmd === 'help') { process.stdout.write(USAGE); return 0; }
-  if (cmd === '--version' || cmd === '-v') { process.stdout.write(`${version}\n`); return 0; }
+  if (cmd === '--help' || cmd === '-h' || cmd === 'help') { await writeAll(process.stdout, USAGE); return 0; }
+  if (cmd === '--version' || cmd === '-v') { await writeAll(process.stdout, `${version}\n`); return 0; }
 
   if (cmd === 'config') {
     if (arg === 'get') {
       const c = await loadConfig();
-      process.stdout.write(`address  ${c.instance ?? '(not set)'}\nauth     ${c.auth ?? 'auto'}\ntheme    ${c.theme ?? 'auto'}\nmanager  ${c.manager ?? 'factory-manager'}\n`);
+      await writeAll(process.stdout, `address  ${c.instance ?? '(not set)'}\nauth     ${c.auth ?? 'auto'}\ntheme    ${c.theme ?? 'auto'}\nmanager  ${c.manager ?? 'factory-manager'}\n`);
       return 0;
     }
     if (arg === 'set') {
       if (!argv[2] || argv[3] === undefined) throw new Error('usage: factory config set <key> <value>');
-      process.stdout.write(`${await setConfig(argv[2], argv.slice(3).join(' '))}\n`);
+      await writeAll(process.stdout, `${await setConfig(argv[2], argv.slice(3).join(' '))}\n`);
       return 0;
     }
     throw new Error('usage: factory config get | factory config set <key> <value>');
@@ -125,11 +128,11 @@ async function main(argv: string[]): Promise<number> {
       if (saved.instance === instance && saved.auth === 'cloudflare-access') return { type: 'cloudflare-access' } as const;
       throw err;
     });
-    await makeSession(found.type, instance, { store, say: (t) => process.stdout.write(`${t}\n`) }, found.type === 'oidc' ? found : undefined).login();
+    await makeSession(found.type, instance, { store, say: (t) => void process.stdout.write(`${t}\n`) }, found.type === 'oidc' ? found : undefined).login();
     // A sign-in belongs to one factory (CL8): the old address is signed out once the new one is signed in.
     if (saved.instance && saved.instance !== instance) await forgetSignIn(saved.instance, store);
     await saveConfig({ ...saved, instance, auth: found.type });
-    process.stdout.write(`Signed in to ${instance}.\n`);
+    await writeAll(process.stdout, `Signed in to ${instance}.\n`);
     return 0;
   }
 
@@ -138,17 +141,17 @@ async function main(argv: string[]): Promise<number> {
     const store = defaultStore();
     const kind = await knownMethod(instance, (await loadConfig()).auth, store);
     if (!kind) {
-      if (cmd === 'logout') { process.stdout.write(`Not signed in to ${instance}.\n`); return 0; }
+      if (cmd === 'logout') { await writeAll(process.stdout, `Not signed in to ${instance}.\n`); return 0; }
       throw new Error(`not signed in to ${instance}. Run: factory login ${instance}`);
     }
     const session = makeSession(kind, instance, { store });
     if (cmd === 'logout') {
       await session.logout();
-      process.stdout.write(`Signed out of ${instance}.\n`);
+      await writeAll(process.stdout, `Signed out of ${instance}.\n`);
       return 0;
     }
     const me = await new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh) }).whoami();
-    process.stdout.write(`${me.actor} (${me.roles.join(', ') || 'no role'}) at ${instance}\n`);
+    await writeAll(process.stdout, `${me.actor} (${me.roles.join(', ') || 'no role'}) at ${instance}\n`);
     return 0;
   }
 

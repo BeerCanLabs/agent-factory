@@ -87,7 +87,8 @@ describe('§6.17 CL11 commands against the real control plane', () => {
   it('CL11 every read command works for a viewer, with no manager, and prints something readable', async () => {
     const { run } = await as(VIEWER);
     const problems: string[] = [];
-    for (const line of READS) {
+    const made = state.runs.create({ agentId: 'donna', state: 'DONE', actor: 'test', trigger: 'test' });
+    for (const line of [...READS, `run ${made.runId}`]) {
       const out = await run(line);
       if (!out.ok) problems.push(`${line}: ${out.output}`);
       else if (/\[object Object\]|undefined/.test(out.output)) problems.push(`${line}: unreadable output: ${out.output.slice(0, 120)}`);
@@ -97,8 +98,8 @@ describe('§6.17 CL11 commands against the real control plane', () => {
   });
 
   it('CL11 the reads in the list cover every read command there is', () => {
-    const covered = new Set(READS.map((l) => l.split(' ')[0]));
-    const reads = COMMANDS.filter((c) => !['budget', 'factory-budget', 'pause', 'resume', 'isolate', 'wake', 'reset', 'cancel', 'retire', 'reinstate', 'approve', 'reject', 'run'].includes(c.name));
+    const covered = new Set([...READS, 'run x'].map((l) => l.split(' ')[0]));
+    const reads = COMMANDS.filter((c) => !['budget', 'factory-budget', 'pause', 'resume', 'isolate', 'wake', 'reset', 'cancel', 'retire', 'reinstate', 'approve', 'reject'].includes(c.name));
     assert.deepEqual(reads.filter((c) => !covered.has(c.name)).map((c) => c.name), []);
   });
 

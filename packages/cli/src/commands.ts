@@ -28,14 +28,18 @@ const none = (args: string[]): Record<string, never> => {
 };
 const idOf = (what: string) => (args: string[]) => ({ id: one(args, what) });
 
+/** Dollars, written plainly: 5, $12.50, 1,250. Not 1e3, 0x10, 1,5 or a bare $. */
+const MONEY = /^\$?(\d+|\d{1,3}(,\d{3})+)(\.\d{1,2})?$/;
+const MAX_DOLLARS = 1_000_000_000;
 export function money(raw: string, what = 'an amount'): number {
+  if (!MONEY.test(raw)) throw new UsageError(`${what} must be a number of dollars, like 5 or $12.50`);
   const n = Number(raw.replace(/^\$/, '').replace(/,/g, ''));
-  if (!raw || !Number.isFinite(n) || n < 0) throw new UsageError(`${what} must be a number of dollars, like 5 or $12.50`);
+  if (n > MAX_DOLLARS) throw new UsageError(`${what} is too large`);
   return n;
 }
 
-const PERIODS: Record<string, 'daily' | 'monthly'> = { daily: 'daily', day: 'daily', monthly: 'monthly', month: 'monthly' };
-const FACTORY_KEYS: Record<string, string> = { total: 'totalMonthUsd', ai: 'aiMonthUsd', infra: 'infraMonthUsd' };
+const PERIODS = new Map<string, 'daily' | 'monthly'>([['daily', 'daily'], ['day', 'daily'], ['monthly', 'monthly'], ['month', 'monthly']]);
+const FACTORY_KEYS = new Map<string, string>([['total', 'totalMonthUsd'], ['ai', 'aiMonthUsd'], ['infra', 'infraMonthUsd']]);
 
 export const COMMANDS: CommandSpec[] = [
   { name: 'agents', tool: 'list_agents', usage: '/agents', summary: 'every agent with its state', group: 'Look', parse: (a) => none(a) },
@@ -72,7 +76,7 @@ export const COMMANDS: CommandSpec[] = [
     group: 'Money',
     parse: (a) => {
       if (a.length !== 3) throw new UsageError('usage: /budget <agent> <amount> daily|monthly');
-      const period = PERIODS[a[2].toLowerCase()];
+      const period = PERIODS.get(a[2].toLowerCase());
       if (!period) throw new UsageError('the period is daily or monthly');
       return { id: a[0], spendLimitUsd: money(a[1], 'the amount'), period };
     },
@@ -87,13 +91,17 @@ export const COMMANDS: CommandSpec[] = [
       if (!a.length) throw new UsageError('usage: /factory-budget total=500 ai=300 infra=200 alert=0.8,1');
       const out: Record<string, unknown> = {};
       for (const pair of a) {
-        const [k, v] = pair.split('=');
-        if (v === undefined || v === '') throw new UsageError(`"${pair}" is not name=value`);
+        const eq = pair.indexOf('=');
+        const k = eq < 0 ? '' : pair.slice(0, eq);
+        const v = eq < 0 ? '' : pair.slice(eq + 1);
+        if (!k || !v || v.includes('=')) throw new UsageError(`"${pair}" is not name=value`);
+        const key = k === 'alert' ? 'alertAt' : FACTORY_KEYS.get(k);
+        if (key && key in out) throw new UsageError(`${k} is given twice`);
         if (k === 'alert') {
           const list = v.split(',').map(Number);
           if (!list.length || list.some((n) => !Number.isFinite(n) || n <= 0 || n > 10)) throw new UsageError('alert is fractions like 0.8,1');
           out.alertAt = list;
-        } else if (FACTORY_KEYS[k]) out[FACTORY_KEYS[k]] = money(v, k);
+        } else if (key) out[key] = money(v, k);
         else throw new UsageError(`unknown budget "${k}": use total, ai, infra or alert`);
       }
       return out;
@@ -146,6 +154,10 @@ export function parseFlags(tokens: string[]): { args: string[]; flags: Flags } {
   const args: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
+    if (t === '--') {
+      args.push(...tokens.slice(i + 1)); // everything after -- is an argument, even if it looks like an option
+      break;
+    }
     if (t === '--json') flags.json = true;
     else if (t === '--yes' || t === '-y') flags.yes = true;
     else if (t === '--active') flags.active = true;

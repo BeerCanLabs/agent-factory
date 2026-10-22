@@ -3,7 +3,7 @@
  * adds no figure of its own. Everything that reaches the terminal has control characters removed (CL6 and the escape-sequence
  * rule), and values under secret-looking names were already hidden by `redact`.
  */
-import { stripControl } from './conversation.js';
+import { oneLine, stripControl } from './conversation.js';
 
 const MAX_ROWS = 40;
 const MAX_CELL = 48;
@@ -14,8 +14,14 @@ const isScalar = (v: unknown): v is string | number | boolean | null | undefined
 
 export function cell(v: unknown, max = MAX_CELL): string {
   const text = isScalar(v) ? String(v ?? '') : JSON.stringify(v);
-  const clean = stripControl(text).replace(/\s+/g, ' ').trim();
+  const clean = oneLine(text).replace(/\s+/g, ' ');
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+function allColumns(rows: Record<string, unknown>[]): string[] {
+  const keys = new Set<string>();
+  for (const r of rows.slice(0, 20)) for (const k of Object.keys(r)) keys.add(k);
+  return [...keys];
 }
 
 function columnsFor(rows: Record<string, unknown>[]): string[] {
@@ -36,6 +42,8 @@ export function table(rows: Record<string, unknown>[]): string {
   const line = (parts: string[]) => parts.map((p, i) => p.padEnd(widths[i])).join('  ').trimEnd();
   const out = [line(cols.map((c) => c.toUpperCase())), ...cells.map(line)];
   if (rows.length > shown.length) out.push(`… ${rows.length - shown.length} more (use --limit, or --json for all of it)`);
+  const hidden = allColumns(rows).length - cols.length;
+  if (hidden > 0) out.push(`(${hidden} more column${hidden === 1 ? '' : 's'} not shown; --json has everything)`);
   return out.join('\n');
 }
 
@@ -45,8 +53,8 @@ export function keyValues(o: Record<string, unknown>, indent = ''): string {
   const width = Math.min(24, Math.max(...entries.map(([k]) => k.length)));
   return entries
     .map(([k, v]) => {
-      if (isObj(v) && Object.keys(v).length && Object.values(v).every(isScalar) && indent.length < 4) return `${indent}${stripControl(k)}:\n${keyValues(v, `${indent}  `)}`;
-      return `${indent}${stripControl(k).padEnd(width)}  ${cell(v, 100)}`;
+      if (isObj(v) && Object.keys(v).length && Object.values(v).every(isScalar) && indent.length < 4) return `${indent}${oneLine(k)}:\n${keyValues(v, `${indent}  `)}`;
+      return `${indent}${oneLine(k).padEnd(width)}  ${cell(v, 100)}`;
     })
     .join('\n');
 }

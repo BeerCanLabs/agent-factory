@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -91,6 +91,8 @@ async function fakeServer(roles: string[]) {
     if (req.url === '/api/v1/agents') return json(200, [{ id: 'donna', state: 'SLEEPING' }, { id: 'rosie', state: 'WORKING' }]);
     if (req.url === '/api/v1/spend') return json(200, { totalUsd: 12.5, apiKey: 'sk-live-1' });
     if (req.url === '/api/v1/registry/agents/donna/budget' && req.method === 'PUT') return json(200, { ok: true });
+    if (req.url === '/api/v1/approvals/12' && req.method === 'POST') return json(200, { ok: true });
+    if (req.url === '/api/v1/skills') return json(200, Array.from({ length: 3000 }, (_, i) => ({ id: `skill-${i}`, description: 'x'.repeat(150) })));
     json(404, { error: 'not_found' });
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
@@ -156,5 +158,43 @@ describe('§6.17 CL11 commands as subcommands, for scripts', () => {
     const help = await factory(home, ['--help']);
     assert.match(help.out, /factory spend --json/);
     assert.match(help.out, /\/budget <agent> <amount> daily\|monthly/);
+  });
+
+  it('CL4 an argument that contains quotes and --yes is one argument: it cannot answer the question for the person', async () => {
+    const srv = await fakeServer(['admin']);
+    try {
+      const home = await mkdtemp(join(tmpdir(), 'cli-cmd-'));
+      for (const note of ['x" --yes "y', 'ok --yes', 'a"b c']) {
+        const r = await factory(home, ['approve', '12', note], env(srv.url));
+        assert.equal(r.code, 1, `${note}: ${r.out}${r.err}`);
+        assert.match(r.err, /add --yes to run it from a script/, note);
+      }
+      assert.ok(!srv.seen.some((s) => s.method === 'POST'), 'nothing was approved');
+      // The person's own --yes still works, and notes arrive whole.
+      const ok = await factory(home, ['approve', '12', 'x" and more', '--yes'], env(srv.url));
+      assert.equal(ok.code, 0, ok.err);
+      assert.deepEqual(JSON.parse(srv.seen.find((s) => s.method === 'POST')!.body), { decision: 'approve', notes: 'x" and more' });
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('CL11 a large --json answer through a real, slow shell pipe arrives whole and valid, and the CLI exits 0', async () => {
+    const srv = await fakeServer(['viewer']);
+    try {
+      const home = await mkdtemp(join(tmpdir(), 'cli-cmd-'));
+      // A shell pipe, as `factory skills --json | jq` is: the reader is slow, and the pipe holds only 64 KiB.
+      const script = `set -o pipefail; "${process.execPath}" --import tsx "${MAIN}" skills --json | (sleep 1; cat)`;
+      const child = spawn('bash', ['-c', script], { env: { PATH: process.env.PATH ?? '', HOME: home, XDG_CONFIG_HOME: join(home, '.config'), ...env(srv.url) }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const chunks: Buffer[] = [];
+      child.stdout.on('data', (c: Buffer) => chunks.push(c));
+      const code = await new Promise<number>((r) => child.on('close', (c) => r(c ?? 1)));
+      const text = Buffer.concat(chunks).toString('utf8');
+      assert.equal(code, 0, 'the CLI\'s own exit status (pipefail)');
+      assert.ok(text.length > 200_000, `only ${text.length} bytes arrived`);
+      assert.equal((JSON.parse(text) as unknown[]).length, 3000);
+    } finally {
+      await srv.close();
+    }
   });
 });

@@ -90,7 +90,7 @@ factory spend --json | jq .totalUsd
 factory budget donna 5 daily --yes
 ```
 
-A command that changes state asks on a terminal, and is refused elsewhere unless you pass `--yes`. Exit status is 0 on success and 1 on any failure (not signed in, a role you do not hold, a refusal from the factory). Free text with no usable manager says why (not admitted, over budget, or your role) and points at these commands.
+A command that changes state asks on a terminal, and is refused elsewhere unless you pass `--yes`. A script's arguments are taken exactly as given (an argument that contains quotes or the text `--yes` is just text); put `--` before any argument that begins with `--`, for example `factory approve 12 -- "--careful with this"`. Amounts are written plainly (`5`, `$12.50`, `1,250`), not `1e3`. Exit status is 0 on success and 1 on any failure (not signed in, a role you do not hold, a refusal from the factory). Free text with no usable manager says why (not admitted, over budget, or your role) and points at these commands.
 
 ## How people sign in
 

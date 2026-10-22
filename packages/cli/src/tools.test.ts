@@ -55,6 +55,12 @@ describe('§6.17 CL4 tools make one factory call as the person', () => {
 });
 
 describe('§6.17 CL6 nothing sensitive reaches the terminal', () => {
+  it('CL6 text under a secret-looking name is hidden whatever its container, while counts stay visible', () => {
+    const out = redact({ tokens: ['abc'], secrets: { a: 'xyz' }, credentials: [{ v: 's' }], webhookSecret: 'x', inputTokens: 1200, tokensIn: 5, tokenUsage: { in: 3, out: 4 }, apiKey: 123, password: false, note: 'fine', nothing_token: null, empty_secret: '' }) as Record<string, unknown>;
+    assert.deepEqual(out, { tokens: '[hidden]', secrets: '[hidden]', credentials: '[hidden]', webhookSecret: '[hidden]', inputTokens: 1200, tokensIn: 5, tokenUsage: { in: 3, out: 4 }, apiKey: 123, password: false, note: 'fine', nothing_token: null, empty_secret: '' });
+    assert.doesNotMatch(JSON.stringify(out), /abc|xyz/);
+  });
+
   it('CL6 hides string values under secret-looking names, at any depth, and keeps numbers', () => {
     const out = redact({ id: 'a', apiKey: 'sk-123', nested: [{ client_secret: 'x', tokensIn: 5, authorization: 'Bearer y' }], password: 'p' });
     assert.deepEqual(out, { id: 'a', apiKey: '[hidden]', nested: [{ client_secret: '[hidden]', tokensIn: 5, authorization: '[hidden]' }], password: '[hidden]' });

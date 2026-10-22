@@ -50,10 +50,29 @@ describe('§6.17 CL11 the CLI works without the manager: the command table', () 
     assert.throws(() => parseFlags(['--limit', 'x']), /whole number/);
     assert.equal(findCommand('nope'), undefined);
     assert.equal(money('1,250.5'), 1250.5);
+    assert.equal(money('$12.50'), 12.5);
+    assert.equal(money('0'), 0);
   });
 
   it('CL11 words in quotes stay together and flags are found anywhere', () => {
     assert.deepEqual(tokenize('approve 1 "a b  c" d'), ['approve', '1', 'a b  c', 'd']);
     assert.deepEqual(parseFlags(['--json', 'x', '-y']), { args: ['x'], flags: { json: true, yes: true, active: false } });
+  });
+
+  it('CL11 money is written plainly: no exponents, hex, lone $, odd commas or absurd sizes', () => {
+    for (const bad of ['1e3', '0x10', '0b11', '1e308', '1e-7', '$', '', '1,5', '1,50,000', '-5', '5.', '.5', '5.123', 'Infinity', 'NaN', '2000000000', ' 5']) {
+      assert.throws(() => money(bad), UsageError, JSON.stringify(bad));
+    }
+    assert.throws(() => parse('budget donna $ daily'), UsageError);
+    assert.throws(() => parse('budget donna 1e3 daily'), UsageError);
+  });
+
+  it('CL11 factory budgets: one = per setting, no duplicates, no names from the object prototype', () => {
+    for (const bad of ['total=5=6', 'total=5 total=6', 'constructor=3', 'toString=1', '__proto__=1', 'total=5 constructor=3', '=5', 'total=']) {
+      assert.throws(() => parse(`factory-budget ${bad}`), UsageError, bad);
+    }
+    assert.throws(() => parse('budget donna 5 constructor'), UsageError);
+    assert.throws(() => parse('budget donna 5 toString'), UsageError);
+    assert.deepEqual(parse('factory-budget total=5 alert=0.5'), { totalMonthUsd: 5, alertAt: [0.5] });
   });
 });

@@ -158,8 +158,9 @@ describe('§6.17 CL11 the CLI works without the manager', () => {
   });
 
   it('CL11 what reaches the terminal from a command has control characters removed', () => {
-    assert.match(code('packages/cli/src/render.ts'), /stripControl/);
-    assert.match(code('packages/cli/src/runner.ts'), /stripControl/);
+    assert.match(code('packages/cli/src/render.ts'), /oneLine|stripControl/);
+    assert.match(code('packages/cli/src/runner.ts'), /oneLine|stripControl/);
+    assert.match(code('packages/cli/src/conversation.ts'), /\\p\{Cf\}/, 'format and bidirectional characters are removed too');
   });
 
   it('CL11 a change needs confirmation or --yes, and the confirmation is the one place that decides', () => {

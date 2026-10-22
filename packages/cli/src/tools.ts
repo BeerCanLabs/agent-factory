@@ -164,11 +164,19 @@ export const toolByName = (name: string): Tool | undefined => TOOLS.find((t) => 
 
 const HIDDEN = /secret|token|password|passwd|api[-_]?key|authorization|credential|private[-_]?key/i;
 
-/** CL6: whatever the factory returns, a value under a secret-looking name never reaches the terminal or the manager. */
+/** A non-empty string, or a list or object with one anywhere in it. A bare number or boolean is a count or a flag (`inputTokens`), not a secret. */
+function carriesText(v: unknown): boolean {
+  if (typeof v === 'string') return v !== '';
+  if (Array.isArray(v)) return v.some(carriesText);
+  if (v && typeof v === 'object') return Object.values(v as Record<string, unknown>).some(carriesText);
+  return false;
+}
+
+/** CL6: whatever the factory returns, text under a secret-looking name (a string, or a list or object holding one) never reaches the terminal or the manager; counts such as `inputTokens` stay. */
 export function redact(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redact);
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, typeof v === 'string' && HIDDEN.test(k) ? '[hidden]' : redact(v)]));
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, HIDDEN.test(k) && carriesText(v) ? '[hidden]' : redact(v)]));
   }
   return value;
 }

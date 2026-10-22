@@ -25,8 +25,15 @@ export async function talk(client: FactoryClient, agentId: string, input: Record
  * the next prompt or overwrite lines above it. Newlines and tabs stay.
  */
 export function stripControl(s: string): string {
+  // C0 and C1 controls, line and paragraph separators, and every format character (\p{Cf}): the bidirectional overrides and
+  // isolates that can make "donna" display as something else, zero-width characters, the byte-order mark.
   // eslint-disable-next-line no-control-regex
-  return s.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '');
+  return s.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/gu, '');
+}
+
+/** One line of display-safe text, for a name, an error or a key: no line can be made to look like another. */
+export function oneLine(s: string): string {
+  return stripControl(s.replace(/[\r\n\t]+/g, ' ')).trim();
 }
 
 /** The text of a reply, with the factory's footnote when it added one (AP3, CL7). */

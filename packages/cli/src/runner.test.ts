@@ -111,4 +111,59 @@ describe('§6.17 CL11 running a command', () => {
       }
     }
   });
+
+  it('CL4 an argument from a script is one argument, whatever quotes and --yes it contains', async () => {
+    // A bare --yes among a script's own arguments is the flag, typed by the person; these are text that merely contains it.
+    const hostile = ['ok --yes', 'x" --yes "y', 'a"b c', ' --yes', '--yes ', "it's --yes", '"--yes"', 'a --yes" "b'];
+    for (const note of hostile) {
+      const { f, asked, run } = setup([false]);
+      route(f, 'POST /api/v1/approvals/12', { ok: true });
+      const out = await runCommand({ client: new FactoryClient({ baseUrl: 'https://f.example.com', fetch: f.fetch, credential: async () => 'good-token' }), roles: ['admin'], actor: 'a', argv: ['approve', '12', note], io: { note: () => {}, confirm: async (q) => (asked.push(q), false) } });
+      void run;
+      // Text that merely contains --yes is asked about like any note; a note that begins with -- is an unknown option. Neither sends anything.
+      assert.ok(!f.seen.some((s) => s.method === 'POST'), `${JSON.stringify(note)} reached the factory`);
+      assert.equal(out.ok, false, note);
+      assert.ok(out.declined === true || /unknown option/.test(out.output), `${JSON.stringify(note)} neither asked nor refused: ${out.output}`);
+      if (!/^\s*--/.test(note)) assert.equal(asked.length, 1, `a note of ${JSON.stringify(note)} skipped the question`);
+    }
+  });
+
+  it('CL4 with argv the notes are carried whole to the approval, and --yes typed by the person still works', async () => {
+    const { f } = setup();
+    route(f, 'POST /api/v1/approvals/12', { ok: true });
+    const client = new FactoryClient({ baseUrl: 'https://f.example.com', fetch: f.fetch, credential: async () => 'good-token' });
+    const io = { note: () => {}, confirm: async () => false };
+    const done = await runCommand({ client, roles: ['admin'], actor: 'a', argv: ['approve', '12', 'fine with "quotes" and spaces', '--yes'], io });
+    assert.equal(done.ok, true, done.output);
+    assert.deepEqual(f.seen.find((s) => s.method === 'POST')?.body, { decision: 'approve', notes: 'fine with "quotes" and spaces' });
+  });
+
+  it('CL4 in the conversation, a --yes inside quotes is part of the notes, not the flag', async () => {
+    const { f, asked, run } = setup([false]);
+    route(f, 'POST /api/v1/approvals/12', { ok: true });
+    const out = await run('/approve 12 "ok --yes"', ['admin']);
+    assert.equal(asked.length, 1);
+    assert.equal(out.declined, true);
+    assert.ok(!f.seen.some((s) => s.method === 'POST'));
+  });
+
+  it('CL6 an error from the factory cannot add a line or reorder text on the terminal', async () => {
+    const { f, run } = setup();
+    route(f, 'GET /api/v1/models', { error: 'bad\nFAKE_ROW  1', message: 'x\u202egnp.exe' }, 500);
+    const out = await run('models', ['viewer']);
+    assert.equal(out.output.split('\n').length, 1, out.output);
+    assert.doesNotMatch(out.output, /\u202e|\n/);
+  });
+
+  it('CL4 after -- everything is an argument, so a note that starts with -- can be sent, and still asks first', async () => {
+    const { f } = setup();
+    route(f, 'POST /api/v1/approvals/12', { ok: true });
+    const asked: string[] = [];
+    const client = new FactoryClient({ baseUrl: 'https://f.example.com', fetch: f.fetch, credential: async () => 'good-token' });
+    const io = { note: () => {}, confirm: async (q: string) => (asked.push(q), true) };
+    const out = await runCommand({ client, roles: ['admin'], actor: 'a', argv: ['approve', '12', '--', '--yes is not a flag here'], io });
+    assert.equal(out.ok, true, out.output);
+    assert.equal(asked.length, 1, 'the question was asked');
+    assert.deepEqual(f.seen.find((s) => s.method === 'POST')?.body, { decision: 'approve', notes: '--yes is not a flag here' });
+  });
 });

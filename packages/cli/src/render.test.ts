@@ -8,9 +8,11 @@ describe('§6.17 CL11 showing what the factory returned', () => {
       { id: 'donna', state: 'SLEEPING', name: 'Donna', blob: { a: 1 }, secretish: 1 },
       { id: 'rosie', state: 'WORKING', name: 'Rosie' },
     ]);
-    const [head, ...rows] = out.split('\n');
+    const [head, ...rest] = out.split('\n');
+    const rows = rest.filter((l) => !l.startsWith('('));
     assert.match(head, /^ID\s+NAME\s+STATE/);
     assert.equal(rows.length, 2);
+    assert.match(rest.at(-1) ?? '', /^\(1 more column not shown; --json has everything\)$/, 'the nested value is not a column, and it says so');
     assert.match(rows[0], /^donna\s+Donna\s+SLEEPING/);
   });
 
@@ -35,5 +37,17 @@ describe('§6.17 CL11 showing what the factory returned', () => {
     for (const out of [render([{ id: evil }]), render({ [evil]: evil }), render(evil), keyValues({ a: { b: evil } })]) {
       assert.doesNotMatch(out, /[\x00-\x08\x0b-\x1f\x7f]/, JSON.stringify(out));
     }
+  });
+
+  it('CL6 a key or a value cannot add a line or reorder text with bidirectional characters', () => {
+    const out = keyValues({ 'id  x\nFAKE_ROW': 1 });
+    assert.equal(out.split('\n').length, 1, out);
+    assert.doesNotMatch(table([{ id: 'donna\u202egnp.exe\u202c' }]), /\u202e/);
+  });
+
+  it('CL11 says when columns were left out, so a missing figure is not mistaken for none', () => {
+    const wide = [{ id: 'a', c1: 1, c2: 2, c3: 3, c4: 4, c5: 5, c6: 6, c7: 7, c8: 8, nested: { x: 1 } }];
+    const out = table(wide);
+    assert.match(out, /\(\d+ more columns? not shown; --json has everything\)/);
   });
 });
