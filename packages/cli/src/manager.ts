@@ -5,8 +5,8 @@
 import { talk, renderReply, stripControl, type Io } from './conversation.js';
 import { isAgentId } from './ids.js';
 import type { FactoryClient } from './client.js';
-import { AuthRequiredError, ConversationRefused } from './client.js';
-import { CONNECT_TOOL, ToolArgumentError, redact, toolByName, toolsFor, trim, type Tool } from './tools.js';
+import { executeTool } from './exec.js';
+import { CONNECT_TOOL, toolsFor, type Tool } from './tools.js';
 import { parseManagerReply, type ManagerTurn, type ToolCall, type ToolResult } from './protocol.js';
 
 export type Outcome = { kind: 'done' } | { kind: 'connect'; agent: string };
@@ -26,13 +26,6 @@ export type ManagerOptions = {
   timeoutMs?: number;
   intervalMs?: number;
 };
-
-function failure(status: number, body: unknown): string {
-  const b = (body ?? {}) as { error?: unknown; message?: unknown; required?: unknown; reason?: unknown };
-  const parts = [typeof b.error === 'string' ? b.error : undefined, typeof b.message === 'string' ? b.message : undefined, typeof b.reason === 'string' ? b.reason : undefined].filter(Boolean);
-  const need = typeof b.required === 'string' ? ` (needs the ${b.required} role)` : '';
-  return `HTTP ${status}${parts.length ? `: ${parts.join(' - ')}` : ''}${need}`;
-}
 
 export class ManagerSession {
   private readonly tools: Tool[];
@@ -83,26 +76,7 @@ export class ManagerSession {
   }
 
   private async run(call: ToolCall): Promise<ToolResult> {
-    const base = { id: call.id, name: call.name };
-    const tool = toolByName(call.name);
     // CL3: only a tool that was offered runs, whatever the manager asks for.
-    if (!tool || !this.tools.includes(tool)) return { ...base, ok: false, error: `${call.name} is not available to this person` };
-    const summary = `${call.name}${Object.keys(call.arguments).length ? ' ' + JSON.stringify(call.arguments) : ''}`;
-    if (tool.spec.mutating) {
-      if (!(await this.o.io.confirm(`\x1b[0m${stripControl(`The manager wants to run: ${summary}`)}\nThis changes the factory. Allow it?`))) {
-        return { ...base, ok: false, declined: true, error: 'The person declined this change.' };
-      }
-    } else {
-      this.o.io.note(`> ${summary}`);
-    }
-    try {
-      const r = await tool.run(this.o.client, call.arguments);
-      if (r.status >= 300) return { ...base, ok: false, error: failure(r.status, r.body) };
-      return { ...base, ok: true, result: trim(redact(r.body)) };
-    } catch (err) {
-      if (err instanceof AuthRequiredError) throw err;
-      if (err instanceof ToolArgumentError || err instanceof ConversationRefused) return { ...base, ok: false, error: err.message };
-      return { ...base, ok: false, error: err instanceof Error ? err.message : String(err) };
-    }
+    return (await executeTool({ client: this.o.client, offered: this.tools, call, io: this.o.io, asker: 'The manager wants to run' })).result;
   }
 }

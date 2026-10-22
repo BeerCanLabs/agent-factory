@@ -5,6 +5,8 @@ import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 const MAIN = fileURLToPath(new URL('./main.ts', import.meta.url));
 
@@ -72,5 +74,87 @@ describe('§6.17 CL10 factory config, which the ops repository\'s installer uses
     const bad = await factory(home, ['frobnicate']);
     assert.equal(bad.code, 1);
     assert.match(bad.err, /unknown command "frobnicate"/);
+  });
+});
+
+
+/** A factory that answers the few routes the commands use, and remembers what it was asked. */
+async function fakeServer(roles: string[]) {
+  const seen: Array<{ method: string; path: string; token?: string; body: string }> = [];
+  const server = http.createServer(async (req, res) => {
+    let body = '';
+    for await (const c of req) body += c;
+    seen.push({ method: req.method ?? '', path: req.url ?? '', token: req.headers['cf-access-token'] as string | undefined, body });
+    const json = (status: number, v: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(v));
+    if (req.headers['cf-access-token'] !== 'assertion-1') return json(401, {});
+    if (req.url === '/api/v1/whoami') return json(200, { actor: 'access:dale@example.com', roles });
+    if (req.url === '/api/v1/agents') return json(200, [{ id: 'donna', state: 'SLEEPING' }, { id: 'rosie', state: 'WORKING' }]);
+    if (req.url === '/api/v1/spend') return json(200, { totalUsd: 12.5, apiKey: 'sk-live-1' });
+    if (req.url === '/api/v1/registry/agents/donna/budget' && req.method === 'PUT') return json(200, { ok: true });
+    json(404, { error: 'not_found' });
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  return { seen, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
+describe('§6.17 CL11 commands as subcommands, for scripts', () => {
+  const env = (url: string) => ({ FACTORY_URL: url, FACTORY_CLI_ACCESS_TOKEN: 'assertion-1' });
+
+  it('CL11 a read prints a table, or the raw answer with --json, and exits 0', async () => {
+    const srv = await fakeServer(['viewer']);
+    try {
+      const home = await mkdtemp(join(tmpdir(), 'cli-cmd-'));
+      const table = await factory(home, ['agents'], env(srv.url));
+      assert.equal(table.code, 0, table.err);
+      assert.match(table.out, /ID\s+STATE\ndonna\s+SLEEPING\nrosie\s+WORKING/);
+      const json = await factory(home, ['spend', '--json'], env(srv.url));
+      assert.deepEqual(JSON.parse(json.out), { totalUsd: 12.5, apiKey: '[hidden]' });
+      assert.ok(srv.seen.filter((s) => s.path === '/api/v1/agents').every((s) => s.token === 'assertion-1'));
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('CL4 a change from a script is refused without --yes and sends nothing; with --yes it runs', async () => {
+    const srv = await fakeServer(['admin']);
+    try {
+      const home = await mkdtemp(join(tmpdir(), 'cli-cmd-'));
+      const refused = await factory(home, ['budget', 'donna', '5', 'daily'], env(srv.url));
+      assert.equal(refused.code, 1);
+      assert.match(refused.err, /add --yes to run it from a script/);
+      assert.ok(!srv.seen.some((s) => s.method === 'PUT'));
+      const done = await factory(home, ['budget', 'donna', '5', 'daily', '--yes'], env(srv.url));
+      assert.equal(done.code, 0, done.err);
+      assert.match(done.out, /^Done: set an agent's spend limit/);
+      assert.deepEqual(JSON.parse(srv.seen.find((s) => s.method === 'PUT')!.body), { spendLimitUsd: 5, period: 'daily' });
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('CL3 a person without the role is told so and nothing is sent; not being signed in is an error, not a hang', async () => {
+    const srv = await fakeServer(['viewer']);
+    try {
+      const home = await mkdtemp(join(tmpdir(), 'cli-cmd-'));
+      const denied = await factory(home, ['budget', 'donna', '5', 'daily', '--yes'], env(srv.url));
+      assert.equal(denied.code, 1);
+      assert.match(denied.err, /Your roles do not allow \/budget/);
+      assert.ok(!srv.seen.some((s) => s.method === 'PUT'));
+      const anon = await factory(home, ['agents'], { FACTORY_URL: srv.url });
+      assert.equal(anon.code, 1);
+      assert.match(anon.err, /not signed in/);
+      const usage = await factory(home, ['budget', 'donna'], env(srv.url));
+      assert.equal(usage.code, 1);
+      assert.match(usage.err, /usage: \/budget/);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('CL11 --help lists the commands', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'cli-cmd-'));
+    const help = await factory(home, ['--help']);
+    assert.match(help.out, /factory spend --json/);
+    assert.match(help.out, /\/budget <agent> <amount> daily\|monthly/);
   });
 });

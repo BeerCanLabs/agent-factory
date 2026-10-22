@@ -11,6 +11,8 @@ export type FakeFactory = {
   agents: Map<string, (input: Record<string, unknown>, n: number) => string | { content: string; footnote: string } | undefined>;
   routes: Map<string, (body: unknown) => { status: number; body: unknown }>;
   token: string;
+  /** The roles `whoami` reports. */
+  roles: string[];
   /** Accepts an `Authorization` value as a signed-in person (an OIDC sign-in). */
   acceptBearer?: (value: string) => boolean;
 };
@@ -18,7 +20,7 @@ export type FakeFactory = {
 const realFetch = fetch;
 
 export function fakeFactory(token = 'good-token'): FakeFactory {
-  const f: FakeFactory = { seen: [], replies: [], agents: new Map(), routes: new Map(), token, fetch: undefined as unknown as typeof fetch };
+  const f: FakeFactory = { seen: [], replies: [], agents: new Map(), routes: new Map(), roles: ['admin'], token, fetch: undefined as unknown as typeof fetch };
   let turns = 0;
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   f.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -30,7 +32,7 @@ export function fakeFactory(token = 'good-token'): FakeFactory {
     f.seen.push({ method, path: url.pathname + url.search, headers, body });
     const authed = headers['cf-access-token'] === f.token || Boolean(headers.authorization && f.acceptBearer?.(headers.authorization));
     if (!authed) return new Response(null, { status: 302, headers: { location: 'https://example.cloudflareaccess.com/cdn-cgi/access/login/f.example.com' } });
-    if (url.pathname === '/api/v1/whoami') return json(200, { actor: 'access:dale@example.com', roles: ['admin'] });
+    if (url.pathname === '/api/v1/whoami') return json(200, { actor: 'access:dale@example.com', roles: f.roles });
     const custom = f.routes.get(`${method} ${url.pathname}`);
     if (custom) {
       const out = custom(body);

@@ -6,6 +6,9 @@ import { defaultStore, forgetSignIn } from './credentials.js';
 import { discoverAuth } from './discover.js';
 import { knownMethod, makeSession } from './methods.js';
 import { repl } from './repl.js';
+import { commandHelp } from './commands.js';
+import { isCommand, runCommand } from './runner.js';
+import { createInterface } from 'node:readline/promises';
 
 const version = (() => {
   try {
@@ -25,6 +28,11 @@ const USAGE = `factory ${version}
   factory config set <key> <value>  keys: address, auth (auto|cloudflare-access|oidc), theme, manager
   factory --manager <id>          use a manager agent with another id for this run
   factory --version
+
+Any command from the conversation also runs on its own, for scripts: factory spend --json, factory runs donna --active,
+factory budget donna 5 daily --yes. A command that changes state asks first on a terminal and needs --yes anywhere else.
+
+${commandHelp()}
 `;
 
 /** The address in use: FACTORY_URL, else the saved one. */
@@ -55,6 +63,37 @@ async function setConfig(key: string, value: string): Promise<string> {
   else throw new Error('unknown setting. Keys: address, auth, theme, manager');
   await saveConfig(config);
   return `${key} set.`;
+}
+
+/** `factory <command> ...` outside the conversation (§6.17 CL11): output on stdout, anything else on stderr, a failure exits 1. */
+async function runOneCommand(argv: string[]): Promise<number> {
+  const instance = await instanceInUse();
+  const store = defaultStore();
+  const kind = await knownMethod(instance, (await loadConfig()).auth, store);
+  if (!kind) throw new Error(`not signed in to ${instance}. Run: factory login ${instance}`);
+  const session = makeSession(kind, instance, { store });
+  const client = new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh) });
+  const me = await client.whoami();
+  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const io = {
+    note: (t: string) => void process.stderr.write(`${t}\n`),
+    confirm: async (q: string) => {
+      if (!tty) {
+        process.stderr.write(`${q.split('\n')[0]}\nThis changes the factory; add --yes to run it from a script.\n`);
+        return false;
+      }
+      const rl = createInterface({ input: process.stdin, output: process.stderr });
+      try {
+        return /^y(es)?$/i.test((await rl.question(`${q} [y/N] `)).trim());
+      } finally {
+        rl.close();
+      }
+    },
+  };
+  const line = argv.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ');
+  const out = await runCommand({ client, roles: me.roles, actor: me.actor, line, io });
+  (out.ok ? process.stdout : process.stderr).write(`${out.output}\n`);
+  return out.ok ? 0 : 1;
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -112,6 +151,8 @@ async function main(argv: string[]): Promise<number> {
     process.stdout.write(`${me.actor} (${me.roles.join(', ') || 'no role'}) at ${instance}\n`);
     return 0;
   }
+
+  if (cmd && isCommand(cmd)) return await runOneCommand(argv);
 
   const m = argv.indexOf('--manager');
   const stray = argv.filter((_, i) => m < 0 || (i !== m && i !== m + 1));

@@ -14,9 +14,11 @@ import type { Session } from './session.js';
 import { DEFAULT_MANAGER, THEMES, configPath, loadConfig, normalizeInstance, parseAuth, parseManager, parseTheme, saveConfig, type CliConfig } from './config.js';
 import { isAgentId } from './ids.js';
 import { splash } from './splash.js';
+import { commandHelp, findCommand } from './commands.js';
+import { runCommand } from './runner.js';
 import { styleFor, type Style } from './theme.js';
 
-export const HELP = [
+const BASIC_HELP = [
   'Talk to the Factory Manager in plain words: costs, agents, budgets, approvals.',
   'It can also connect you to an agent so you talk to it directly.',
   '',
@@ -30,6 +32,9 @@ export const HELP = [
   '',
   'Direct forms: /config address <url>, /config theme <auto|dark|light|mono>, /config manager <agent>, /config auth <auto|cloudflare-access|oidc>.',
 ].join('\n');
+
+/** Commands work with no Factory Manager at all, and for anyone whose roles allow them (add --json for raw output). */
+export const HELP = `${BASIC_HELP}\n\nCommands (no manager needed; they show only what your roles allow):\n${commandHelp()}`;
 
 /** Lines from the terminal, queued so none is lost between questions, and `null` once input has closed. */
 export type Lines = {
@@ -396,6 +401,23 @@ class App {
     }
   }
 
+  // commands ------------------------------------------------------------------------------------------------------
+
+  /** One of the person's own commands (CL11). Needs a sign-in, not a manager. */
+  async command(line: string): Promise<void> {
+    if (!this.me || !this.client) {
+      this.io.say(this.instance ? 'You are not signed in. Type /login.' : 'No factory is set up yet. Type /config to set the address, then /login.');
+      return;
+    }
+    try {
+      const out = await runCommand({ client: this.client, roles: this.me.roles, actor: this.me.actor, line, io: this.io });
+      this.io.say(out.output);
+    } catch (err) {
+      if (err instanceof NeedsLoginError || err instanceof AuthRequiredError) return this.expired();
+      this.io.say(stripControl(`Error: ${err instanceof Error ? err.message : String(err)}`));
+    }
+  }
+
   // conversation --------------------------------------------------------------------------------------------------
 
   private expired(): void {
@@ -423,8 +445,14 @@ class App {
       }
     } catch (err) {
       if (err instanceof NeedsLoginError || err instanceof AuthRequiredError) return this.expired();
-      if (err instanceof ConversationRefused && !this.agent && err.status === 404) {
-        this.io.say(`There is no Factory Manager on this factory (no agent called ${this.managerAgent}). An admin has to admit it; see docs/CLI.md. /connect <agent> still works.`);
+      if (err instanceof ConversationRefused && !this.agent && [402, 403, 404].includes(err.status)) {
+        const why =
+          err.status === 404
+            ? `There is no Factory Manager on this factory (no agent called ${this.managerAgent}). An admin has to admit it; see docs/CLI.md.`
+            : err.status === 402
+              ? 'The Factory Manager is over its budget, so it cannot answer.'
+              : `${err.message}`;
+        this.io.say(`${why}\nYou can still use commands (/agents, /spend, /status, /approvals ... /help lists them) and /connect <agent>.`);
         return;
       }
       this.io.say(stripControl(err instanceof ConversationRefused ? err.message : `Error: ${err instanceof Error ? err.message : String(err)}`));
@@ -460,7 +488,8 @@ export async function repl(o: ReplOptions): Promise<void> {
           app.agent = m[1];
           app.io.say(`Connected to ${app.agent}. /manager to go back.`);
         }
-      } else if (line.startsWith('/')) app.io.say('Unknown command. /help lists them.');
+      } else if (line.startsWith('/') && findCommand(line.slice(1).split(/\s+/)[0])) await app.command(line);
+      else if (line.startsWith('/')) app.io.say('Unknown command. /help lists them.');
       else await app.say(line);
     }
   } finally {
