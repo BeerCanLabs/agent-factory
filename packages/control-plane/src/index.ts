@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Checkpointer, FileLedger, LedgerLease, LeaseHeldError, archiveAndStartSegment, checkpointSinkFromEnv, hydrateLedgerFromSink, readSegment, secretValuesFromEnv, segmentWormUri } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
-import { accessAuthFromEnv, authFromEnv } from '@beercanlabs/factory-auth';
+import { accessAuthFromEnv, authFromEnv, cliDiscoveryFromEnv } from '@beercanlabs/factory-auth';
 import {
   BUILTIN_SYSTEM_AGENTS,
   configBackendFromEnv,
@@ -205,6 +205,7 @@ const state: FactoryState = {
   auth: authFromEnv(),
   // §6.12 A2: FACTORY_ACCESS_TEAM_DOMAIN + FACTORY_ACCESS_AUD; unset disables Access identity (bearer tokens only).
   access: accessAuthFromEnv(),
+  cliDiscovery: cliDiscoveryFromEnv(),
   version: VERSION,
   providers: providersFromEnv(),
   runs: Object.assign(new FileRunStore(RUNS_DIR), { onChange: (run: Parameters<typeof inspector.publishRun>[0]) => inspector.publishRun(run) }),

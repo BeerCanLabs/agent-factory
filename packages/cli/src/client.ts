@@ -5,6 +5,7 @@
  */
 
 import { isAgentId } from './ids.js';
+import type { Credential } from './session.js';
 
 export class AuthRequiredError extends Error {
   constructor(message = 'not signed in, or the sign-in expired') {
@@ -18,8 +19,11 @@ export type Reply = { seq: number; turnId: string; runId: string; content: strin
 
 export type ClientOptions = {
   baseUrl: string;
-  /** Returns the person's current assertion; `refresh` asks for a new one after a 401. */
-  credential: (refresh: boolean) => Promise<string>;
+  /**
+   * The person's current credential; `refresh` asks for a new one after a refusal. A bare string is a Cloudflare Access
+   * assertion. The method that signed the person in decides the header (§6.17 CL9).
+   */
+  credential: (refresh: boolean) => Promise<Credential | string>;
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
 };
@@ -40,11 +44,12 @@ export class FactoryClient {
   }
 
   private async send(method: string, path: string, body: unknown, refresh: boolean): Promise<FactoryResponse> {
-    const token = await this.credential(refresh);
+    const given = await this.credential(refresh);
+    const cred: Credential = typeof given === 'string' ? { name: 'cf-access-token', value: given } : given;
     const res = await this.doFetch(`${this.baseUrl}${path}`, {
       method,
       headers: {
-        'cf-access-token': token,
+        [cred.name]: cred.value,
         accept: 'application/json',
         ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
       },

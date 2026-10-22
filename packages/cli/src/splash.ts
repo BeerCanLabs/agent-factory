@@ -8,6 +8,8 @@ export type SplashState = {
   /** Where the address came from when it is not the config file. */
   instanceFromEnv?: boolean;
   me?: { actor: string; roles: string[] };
+  /** How this factory signs people in, when known. */
+  signIn?: string;
 };
 
 const BANNER = [
@@ -21,6 +23,7 @@ export function splash(st: SplashState, style: Style): string {
   const lines = [...BANNER.map((l) => style.accent(l)), style.dim(`  Agent Factory CLI ${st.version}`), ''];
   const row = (k: string, v: string) => `  ${style.dim(k.padEnd(10))}${v}`;
   lines.push(row('Factory', st.config.instance ? `${st.config.instance}${st.instanceFromEnv ? style.dim(' (FACTORY_URL)') : ''}` : style.bad('not set')));
+  if (st.config.instance) lines.push(row('Sign-in', st.signIn ?? style.dim('found out at /login')));
   lines.push(row('Signed in', st.me ? `${st.me.actor} ${style.dim(`(${st.me.roles.join(', ') || 'no role'})`)}` : style.bad('no')));
   lines.push(row('Manager', st.config.manager ?? DEFAULT_MANAGER));
   lines.push('');

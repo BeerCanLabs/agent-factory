@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { repl } from './repl.js';
 import { fakeFactory, type FakeFactory } from './testing.js';
 import type { CredentialStore } from './credentials.js';
+import { fakeProvider, type Provider } from './testing-oidc.js';
+import type { Discovered } from './discover.js';
 
 const jwt = (exp = Math.floor(Date.now() / 1000) + 3600) => `h.${Buffer.from(JSON.stringify({ exp })).toString('base64url')}.s`;
 const memory = (): CredentialStore & { data: Map<string, string> } => {
@@ -14,7 +16,7 @@ const memory = (): CredentialStore & { data: Map<string, string> } => {
   return { data, get: async (i) => data.get(i), set: async (i, t) => void data.set(i, t), delete: async (i) => void data.delete(i) };
 };
 
-type Setup = { cloudflaredFiles?: string[]; config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; stored?: boolean; factory?: (f: FakeFactory) => void; login?: 'ok' | 'fail' };
+type Setup = { discover?: (instance: string) => Promise<Discovered>; provider?: Provider; storedRaw?: string; cloudflaredFiles?: string[]; config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; stored?: boolean; factory?: (f: FakeFactory) => void; login?: 'ok' | 'fail' };
 
 async function run(lines: string[], s: Setup = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'cli-repl-'));
@@ -28,6 +30,7 @@ async function run(lines: string[], s: Setup = {}) {
   s.factory?.(f);
   const store = memory();
   if (s.stored) store.data.set('https://f.example.com', token);
+  if (s.storedRaw) store.data.set('https://f.example.com', s.storedRaw);
   const cloudflaredCalls: string[][] = [];
   const cloudflared = async (args: string[]) => {
     cloudflaredCalls.push(args);
@@ -44,7 +47,7 @@ async function run(lines: string[], s: Setup = {}) {
   const output = new PassThrough();
   let text = '';
   output.on('data', (d) => (text += d));
-  const done = repl({ version: 'test', store, input, output, env: s.env ?? {}, configFile, cloudflared: wrapped, cloudflaredDir: cfDir, fetch: f.fetch, sleep: async () => {}, intervalMs: 0, timeoutMs: 1000, isTTY: false });
+  const done = repl({ version: 'test', store, input, output, env: s.env ?? {}, configFile, cloudflared: wrapped, cloudflaredDir: cfDir, fetch: f.fetch, sleep: async () => {}, intervalMs: 0, timeoutMs: 3000, isTTY: false, discover: s.discover, openBrowser: s.provider?.openBrowser });
   for (const l of lines) input.write(l + '\n');
   input.end();
   await done;
@@ -252,5 +255,78 @@ describe('§6.17 CL8 settings and environment', () => {
     const { text } = await run(['/whoami', '/exit'], { env: { FACTORY_URL: 'http://remote.example.com' }, config: { instance: 'https://saved.example.com' } });
     assert.match(text, /FACTORY_URL is set but is not a usable address/);
     assert.match(text, /Factory\s+not set/);
+  });
+});
+
+describe('§6.17 CL9 OIDC through the terminal', () => {
+  const oidcOf = (p: Provider): Discovered => ({ type: 'oidc', issuer: p.issuer, clientId: 'cli-client-1', scopes: ['openid', 'email'], tokenUse: 'id_token' });
+  const accept = (f: FakeFactory) => (f.acceptBearer = (v) => /^Bearer .+\..+\./.test(v));
+
+  it('CL9 /login finds the factory uses OIDC, signs in at the provider, remembers the method, and the next run starts signed in', async () => {
+    const provider = await fakeProvider();
+    try {
+      const first = await run(['/login', '/whoami', '/exit'], { config: { instance: 'https://f.example.com' }, provider, discover: async () => oidcOf(provider), factory: accept });
+      assert.match(first.text, /Signing in to https:\/\/f\.example\.com with OIDC \(127\.0\.0\.1\)/);
+      assert.match(first.text, /Signed in as access:dale@example\.com/);
+      assert.equal((await first.saved()).auth, 'oidc');
+      assert.ok(first.store.data.get('https://f.example.com')?.startsWith('{'), 'the OIDC sign-in is in the store');
+      assert.equal(provider.log.authorize.length, 1);
+
+      // A second run with the saved hint and sign-in needs no browser and no discovery.
+      const kept = first.store.data.get('https://f.example.com')!;
+      const second = await run(['/exit'], { config: { instance: 'https://f.example.com', auth: 'oidc' }, storedRaw: kept, provider, discover: async () => { throw new Error('should not be asked'); }, factory: accept });
+      assert.match(second.text, /Signed in\s+access:dale@example\.com/);
+      assert.match(second.text, /Sign-in\s+OIDC/);
+      assert.equal(provider.log.authorize.length, 1);
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('CL9 "sign in as a different user" asks the provider to authenticate again', async () => {
+    const provider = await fakeProvider();
+    try {
+      const { text } = await run(['/login', '/login', '2', '/exit'], { config: { instance: 'https://f.example.com' }, provider, discover: async () => oidcOf(provider), factory: accept });
+      assert.match(text, /2\) Sign in as a different user/);
+      assert.equal(provider.log.authorize.length, 2);
+      assert.equal(provider.log.authorize[0].get('prompt'), null);
+      assert.equal(provider.log.authorize[1].get('prompt'), 'login');
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('CL9 an OIDC sign-in saved by this version is picked up even when the settings carry no hint', async () => {
+    const provider = await fakeProvider();
+    try {
+      const first = await run(['/login', '/exit'], { config: { instance: 'https://f.example.com' }, provider, discover: async () => oidcOf(provider), factory: accept });
+      const kept = first.store.data.get('https://f.example.com')!;
+      const { text } = await run(['/exit'], { config: { instance: 'https://f.example.com' }, storedRaw: kept, factory: accept });
+      assert.match(text, /Signed in\s+access:dale@example\.com/);
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('CL9 when the factory cannot say how to sign in, the person is told and stays signed out', async () => {
+    const { text } = await run(['/login', '/exit'], { config: { instance: 'https://f.example.com' }, discover: async () => { throw new Error('https://f.example.com does not say how to sign in.'); } });
+    assert.match(text, /Could not find out how to sign in: https:\/\/f\.example\.com does not say/);
+    assert.match(text, /Signed in\s+no/);
+  });
+
+  it('CL8 /config auth sets or clears the method; a bad value changes nothing; a new address forgets the method', async () => {
+    const { text, saved } = await run(['/config auth oidc', '/config auth nope', '/exit'], { config: { instance: 'https://f.example.com' } });
+    assert.match(text, /Sign-in method set to oidc/);
+    assert.match(text, /auth must be one of: auto, cloudflare-access, oidc/);
+    assert.equal((await saved()).auth, 'oidc');
+    const cleared = await run(['/config auth auto', '/exit'], { config: { instance: 'https://f.example.com', auth: 'oidc' } });
+    assert.equal((await cleared.saved()).auth, undefined);
+    const moved = await run(['/config address other.example.com', '/exit'], { config: { instance: 'https://f.example.com', auth: 'oidc' } });
+    assert.equal((await moved.saved()).auth, undefined, 'how the old address signed in says nothing about the new one');
+  });
+
+  it('CL9 the splash names how this factory signs people in once it is known', async () => {
+    const { text } = await run(['/exit'], { config: { instance: 'https://f.example.com', auth: 'cloudflare-access' } });
+    assert.match(text, /Sign-in\s+Cloudflare Access/);
   });
 });
