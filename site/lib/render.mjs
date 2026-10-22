@@ -16,6 +16,7 @@ export function makeSite({ cast, contracts, blueprints, house = { intro: '', mem
   const url = {
     home: () => root,
     staff: () => root + 'staff/',
+    adopt: () => root + 'adopt/',
     member: (id, flow) => root + 'staff/' + id + '/' + (flow ? '#flow-' + flow : ''),
     contracts: () => root + 'contracts/',
     contract: (id) => root + 'contracts/' + id + '/',
@@ -133,12 +134,55 @@ export function makeSite({ cast, contracts, blueprints, house = { intro: '', mem
   }
 
 
+  function adopt() {
+    const body =
+      '<section class="sec-head"><div class="eyebrow">For Non-Profits</div><h1>Autonomous Agent Factory for Social Impact</h1>' +
+      '<p class="lead">BeerCanLabs provides open-source, royalty-free agent infrastructure designed specifically for non-profit organizations with low or no dedicated IT staff.</p></section>' +
+      '<section class="split">' +
+      '<div class="card"><div class="eyebrow">Real Non-Profit Impact</div><h2>How agents help small teams</h2>' +
+      '<p>Small non-profits face endless administrative tasks. Our specialized agents automate toil without requiring coding knowledge:</p>' +
+      '<ul>' +
+      '<li><b>Donor Stewardship:</b> Draft personalized acknowledgement letters and annual giving updates.</li>' +
+      '<li><b>Volunteer Coordination:</b> Process volunteer applications, send briefings, and coordinate schedules.</li>' +
+      '<li><b>Grant Research:</b> Cross-reference program documentation against RFP requirements.</li>' +
+      '<li><b>Board & Operations:</b> Prepare meeting agendas, meeting minutes, and operational summaries.</li>' +
+      '</ul></div>' +
+      '<div class="card ink"><div class="eyebrow" style="color:var(--panel-2)">Predictable FinOps</div><h2>Zero budget surprises ($10–$50/mo)</h2>' +
+      '<p>Non-profits cannot afford runaway cloud bills. The factory was built from day one with automated financial safeguards:</p>' +
+      '<ul>' +
+      '<li><b>Scale to Zero:</b> Cloud Run compute turns off when agents are not running. You pay only for active seconds.</li>' +
+      '<li><b>Hard Monthly Dollar Caps:</b> Each agent has a monthly budget ceiling. If reached, it sleeps automatically. Overdraft is physically impossible.</li>' +
+      '<li><b>Efficient Models:</b> Optimized for economical, high-intelligence models costing pennies per day.</li>' +
+      '</ul></div></section>' +
+      '<section class="split">' +
+      '<div class="card"><div class="eyebrow">Low-IT Deployment</div><h2>1-Click Cloud Deployment</h2>' +
+      '<p>You do not need an infrastructure team to run the factory. Adopters deploy directly into their own Google Cloud or AWS accounts:</p>' +
+      '<ol>' +
+      '<li>Click the deployment template for Google Cloud Run or AWS.</li>' +
+      '<li>Set your administrator email and model provider API key.</li>' +
+      '<li>Log in to the web console and begin activating your agents.</li>' +
+      '</ol>' +
+      '<p>Visit the <a href="' + url.infra() + '">infrastructure blueprints</a> to see how each service maps cleanly to your cloud.</p></div>' +
+      '<div class="card"><div class="eyebrow">Data Privacy & Sovereignty</div><h2>Your donor data stays yours</h2>' +
+      '<p>Trust is everything for a non-profit. The Agent Factory enforces strict data boundaries:</p>' +
+      '<ul>' +
+      '<li><b>Self-Hosted & Private:</b> All data, databases, and conversation records stay inside your own cloud account.</li>' +
+      '<li><b>Zero Training:</b> Standard configurations use commercial API endpoints that never use your data for model training.</li>' +
+      '<li><b>Credential Isolation:</b> Secret keys are held in secure cloud vaults and never exposed to the agents themselves.</li>' +
+      '</ul></div></section>' +
+      '<section class="hero" style="margin-top:2rem"><div class="eyebrow">Open Source & Royalty-Free</div>' +
+      '<h2>Ready to explore the factory?</h2>' +
+      '<p class="lead">Review the cast of factory services or inspect the full open-source codebase.</p>' +
+      '<div class="rule"><a class="btn" href="' + url.staff() + '">Meet the staff</a><a class="btn alt" href="' + url.infra() + '">Cloud blueprints</a><a class="btn alt" href="' + REPO_URL + '" rel="noopener">GitHub repository</a></div></section>';
+    return { title: 'For Non-Profits | Beer Can Labs', description: 'Open-source, royalty-free agent hosting for non-profits with low IT skills and strict budget controls.', body, nav: 'adopt' };
+  }
+
   function notFound() {
     return { title: 'Not found | Beer Can Labs', description: 'That page does not exist.', nav: '', body: '<section class="hero"><div class="eyebrow">404</div><h1>That page is not here.</h1><p class="lead">It may have moved. Start from the home page, the staff or the blueprints.</p><div class="rule"><a class="btn" href="' + url.home() + '">Home</a><a class="btn alt" href="' + url.staff() + '">Staff</a></div></section>' };
   }
 
   /* ---------- shell ---------- */
-  const NAV = [['home', 'Home', url.home()], ['staff', 'Staff', url.staff()], ['infra', 'Infrastructure', url.infra()]];
+  const NAV = [['home', 'Home', url.home()], ['staff', 'Staff', url.staff()], ['adopt', 'For Non-Profits', url.adopt()], ['infra', 'Infrastructure', url.infra()]];
 
   function shell(page, path) {
     const canonical = siteUrl + path;
@@ -156,7 +200,7 @@ export function makeSite({ cast, contracts, blueprints, house = { intro: '', mem
 
   /** Every page of the site: [path, page]. */
   function pages() {
-    const out = [['/', home()], ['/staff/', staff()], ['/contracts/', contractIndex()], ['/infrastructure/', infra()]];
+    const out = [['/', home()], ['/staff/', staff()], ['/adopt/', adopt()], ['/contracts/', contractIndex()], ['/infrastructure/', infra()]];
     for (const m of members) out.push(['/staff/' + m.id + '/', member(m)]);
     for (const m of house.members) out.push(['/staff/' + m.id + '/', houseMember(m)]);
     for (const c of contracts) out.push(['/contracts/' + c.id + '/', contract(c)]);

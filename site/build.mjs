@@ -28,5 +28,7 @@ put('sitemap.xml', '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http:
 put('robots.txt', 'User-agent: *\nAllow: /\nSitemap: ' + siteUrl + '/sitemap.xml\n');
 cpSync(join(here, 'styles.css'), join(dist, 'styles.css'));
 cpSync(join(here, 'static'), dist, { recursive: true });
+cpSync(join(here, 'content'), join(dist, 'content'), { recursive: true });
+cpSync(join(here, 'content', 'cast.json'), join(dist, 'cast.json'));
 
 console.log('site: built ' + (pages.length + 1) + ' pages into site/dist');
