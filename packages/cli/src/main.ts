@@ -81,7 +81,11 @@ async function main(argv: string[]): Promise<number> {
     const instance = normalizeInstance(arg);
     const store = defaultStore();
     const saved = await loadConfig();
-    const found = await discoverAuth(instance);
+    // The factory may not be askable (a proxy that does not redirect, a network blip): the installer's saved hint stands in.
+    const found = await discoverAuth(instance).catch((err: unknown) => {
+      if (saved.instance === instance && saved.auth === 'cloudflare-access') return { type: 'cloudflare-access' } as const;
+      throw err;
+    });
     await makeSession(found.type, instance, { store, say: (t) => process.stdout.write(`${t}\n`) }, found.type === 'oidc' ? found : undefined).login();
     // A sign-in belongs to one factory (CL8): the old address is signed out once the new one is signed in.
     if (saved.instance && saved.instance !== instance) await forgetSignIn(saved.instance, store);

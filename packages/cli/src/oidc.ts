@@ -29,6 +29,10 @@ export type OidcDeps = {
 };
 
 const SKEW_SECONDS = 60;
+const NETWORK_TIMEOUT_MS = 15_000;
+/** The Keychain holds `oidc1:` plus the sign-in as base64url, so no quoting of JSON is involved on the `security` command line. */
+export const STORED_PREFIX = 'oidc1:';
+export const encodeStored = (s: unknown): string => STORED_PREFIX + Buffer.from(JSON.stringify(s)).toString('base64url');
 
 export const base64url = (b: Buffer): string => b.toString('base64url');
 export const newVerifier = (): string => base64url(randomBytes(32));
@@ -61,7 +65,7 @@ function secureUrl(raw: unknown, what: string): string {
 export type ProviderMetadata = { authorizationEndpoint: string; tokenEndpoint: string };
 
 export async function fetchProviderMetadata(issuer: string, doFetch: typeof fetch): Promise<ProviderMetadata> {
-  const res = await doFetch(`${issuer.replace(/\/$/, '')}/.well-known/openid-configuration`, { redirect: 'error' });
+  const res = await doFetch(`${issuer.replace(/\/$/, '')}/.well-known/openid-configuration`, { redirect: 'error', signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`the provider's configuration could not be read (HTTP ${res.status})`);
   const doc = (await res.json()) as { issuer?: unknown; authorization_endpoint?: unknown; token_endpoint?: unknown };
   // A provider must say it is the issuer we were told about; otherwise a document served elsewhere could stand in for it.
@@ -71,6 +75,7 @@ export async function fetchProviderMetadata(issuer: string, doFetch: typeof fetc
 
 /** A one-shot listener for the provider's redirect. It binds 127.0.0.1 only and answers nothing but /callback. */
 export async function startLoopback(port = 0): Promise<{ redirectUri: string; wait(state: string, timeoutMs: number): Promise<string>; close(): void }> {
+  let timer: NodeJS.Timeout | undefined;
   let onResult: ((r: { code?: string; error?: string }) => void) | undefined;
   let expected = '';
   const server = http.createServer((req, res) => {
@@ -91,7 +96,9 @@ export async function startLoopback(port = 0): Promise<{ redirectUri: string; wa
     onResult?.(error ? { error: error.slice(0, 200).replace(/[^\w .:/-]/g, '') } : { code: code ?? undefined });
   });
   await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
+    server.once('error', (err: NodeJS.ErrnoException) =>
+      reject(err.code === 'EADDRINUSE' ? new Error(`port ${port} is in use; close whatever holds it (another sign-in?) and try again`) : err),
+    );
     server.listen(port, '127.0.0.1', () => resolve());
   });
   const bound = (server.address() as AddressInfo).port;
@@ -100,7 +107,7 @@ export async function startLoopback(port = 0): Promise<{ redirectUri: string; wa
     wait: (state, timeoutMs) =>
       new Promise<string>((resolve, reject) => {
         expected = state;
-        const timer = setTimeout(() => reject(new Error('the sign-in was not completed in time')), timeoutMs);
+        timer = setTimeout(() => reject(new Error('the sign-in was not completed in time')), timeoutMs);
         onResult = (r) => {
           clearTimeout(timer);
           if (r.error) reject(new Error(`the provider refused the sign-in (${r.error})`));
@@ -108,7 +115,10 @@ export async function startLoopback(port = 0): Promise<{ redirectUri: string; wa
           else resolve(r.code);
         };
       }),
-    close: () => server.close(),
+    close: () => {
+      clearTimeout(timer); // a sign-in that ends early must not keep the process alive
+      server.close();
+    },
   };
 }
 
@@ -118,6 +128,12 @@ export const openBrowser = (url: string): Promise<void> =>
     if (!cmd) return resolve();
     execFile(cmd, [url], () => resolve()); // best effort: the link is always printed too
   });
+
+class ProviderRefusal extends Error {
+  constructor(message: string, readonly definitive: boolean) {
+    super(message);
+  }
+}
 
 type TokenResponse = { id_token?: string; access_token?: string; refresh_token?: string; expires_in?: number; error?: string };
 
@@ -143,9 +159,9 @@ export class OidcSession implements Session {
 
   private async read(): Promise<Stored | undefined> {
     const raw = await this.store.get(this.instance);
-    if (!raw?.startsWith('{')) return undefined;
+    if (!raw?.startsWith(STORED_PREFIX)) return undefined;
     try {
-      const v = JSON.parse(raw) as Stored;
+      const v = JSON.parse(Buffer.from(raw.slice(STORED_PREFIX.length), 'base64url').toString('utf8')) as Stored;
       return v.kind === 'oidc' && typeof v.token === 'string' && typeof v.exp === 'number' ? v : undefined;
     } catch {
       return undefined;
@@ -159,7 +175,15 @@ export class OidcSession implements Session {
     return { name: 'authorization', value: `Bearer ${s.token}` };
   }
 
-  private async refresh(s: Stored): Promise<Stored> {
+  private inflight?: Promise<Stored>;
+
+  /** One renewal at a time: with rotating refresh tokens a second, concurrent one would spend the token the first just replaced. */
+  private refresh(s: Stored): Promise<Stored> {
+    this.inflight ??= this.renew(s).finally(() => (this.inflight = undefined));
+    return this.inflight;
+  }
+
+  private async renew(s: Stored): Promise<Stored> {
     if (!s.refreshToken) {
       // Nothing to renew with: the sign-in is over once the token is.
       if (s.exp - SKEW_SECONDS > this.now() / 1000) return s;
@@ -167,8 +191,18 @@ export class OidcSession implements Session {
       throw new NeedsLoginError(this.instance);
     }
     const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: s.refreshToken, client_id: s.clientId });
-    const t = await this.tokenRequest(s.tokenEndpoint, body).catch(() => undefined);
-    const next = t ? this.fromResponse(t, s.tokenEndpoint, s.issuer, s.clientId, s.tokenUse, undefined, s.refreshToken) : undefined;
+    let t: TokenResponse;
+    try {
+      t = await this.tokenRequest(s.tokenEndpoint, body);
+    } catch (err) {
+      // Only the provider saying the grant is over ends the sign-in. A network error or a 5xx must not cost the person it.
+      if (err instanceof ProviderRefusal && err.definitive) {
+        await this.store.delete(this.instance);
+        throw new NeedsLoginError(this.instance);
+      }
+      throw new Error(`could not renew the sign-in just now (${err instanceof Error ? err.message : 'network error'}); try again`);
+    }
+    const next = this.fromResponse(t, s.tokenEndpoint, s.issuer, s.clientId, s.tokenUse, undefined, s.refreshToken);
     if (!next) {
       await this.store.delete(this.instance);
       throw new NeedsLoginError(this.instance);
@@ -178,7 +212,7 @@ export class OidcSession implements Session {
   }
 
   private async save(s: Stored): Promise<void> {
-    await this.store.set(this.instance, JSON.stringify(s));
+    await this.store.set(this.instance, encodeStored(s));
   }
 
   private async tokenRequest(endpoint: string, body: URLSearchParams): Promise<TokenResponse> {
@@ -187,9 +221,14 @@ export class OidcSession implements Session {
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
       body: body.toString(),
       redirect: 'error',
+      signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS),
     });
     const t = (await res.json().catch(() => ({}))) as TokenResponse;
-    if (!res.ok || t.error) throw new Error(`the provider refused the request${t.error ? ` (${String(t.error).slice(0, 80).replace(/[^\w .-]/g, '')})` : ` (HTTP ${res.status})`}`);
+    if (!res.ok || t.error) {
+      const why = t.error ? ` (${String(t.error).slice(0, 80).replace(/[^\w .-]/g, '')})` : ` (HTTP ${res.status})`;
+      // A 4xx from the token endpoint is the provider ending the grant (invalid_grant, invalid_client); a 5xx is its trouble, not ours.
+      throw new ProviderRefusal(`the provider refused the request${why}`, res.status >= 400 && res.status < 500);
+    }
     return t;
   }
 
@@ -210,7 +249,7 @@ export class OidcSession implements Session {
 
   async login(opts: { differentUser?: boolean } = {}): Promise<void> {
     const cfg = this.config;
-    if (!cfg) throw new Error('this factory has not told the CLI how to sign in; use /login again');
+    if (!cfg) throw new Error('this factory has not told the CLI how to sign in; check its address with /config');
     const meta = await fetchProviderMetadata(cfg.issuer, this.deps.fetch);
     const verifier = newVerifier();
     const state = randomToken();
@@ -218,7 +257,8 @@ export class OidcSession implements Session {
     const loop = await startLoopback(cfg.redirectPort);
     try {
       const url = new URL(meta.authorizationEndpoint);
-      url.search = new URLSearchParams({
+      // Set, never replace the query: some providers carry a tenant or policy parameter in the endpoint itself.
+      for (const [k, v] of Object.entries({
         response_type: 'code',
         client_id: cfg.clientId,
         redirect_uri: loop.redirectUri,
@@ -228,7 +268,7 @@ export class OidcSession implements Session {
         code_challenge: challengeOf(verifier),
         code_challenge_method: 'S256',
         ...(opts.differentUser ? { prompt: 'login' } : {}),
-      }).toString();
+      })) url.searchParams.set(k, v);
       this.deps.say(`Opening your browser to sign in at ${new URL(cfg.issuer).hostname}. If it does not open, visit:\n${url.toString()}`);
       const waiting = loop.wait(state, this.deps.timeoutMs ?? 5 * 60_000);
       waiting.catch(() => {}); // an early refusal must not be unhandled while the browser is being opened; it is awaited below

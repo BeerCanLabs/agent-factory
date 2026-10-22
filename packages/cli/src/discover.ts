@@ -36,7 +36,7 @@ export function parseDiscovery(doc: unknown): Discovered | undefined {
 export async function discoverAuth(instance: string, doFetch: typeof fetch = fetch): Promise<Discovered> {
   let res: Response;
   try {
-    res = await doFetch(`${instance.replace(/\/$/, '')}${DISCOVERY_PATH}`, { redirect: 'manual', headers: { accept: 'application/json' } });
+    res = await doFetch(`${instance.replace(/\/$/, '')}${DISCOVERY_PATH}`, { redirect: 'manual', headers: { accept: 'application/json' }, signal: AbortSignal.timeout(15_000) });
   } catch {
     throw new Error(`could not reach ${instance}`);
   }

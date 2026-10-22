@@ -17,7 +17,7 @@ factory
 
 | Command | |
 |---|---|
-| `/config` | walks the settings (Enter keeps each one); or set one directly: `/config address <url>`, `/config theme <auto\|dark\|light\|mono>`, `/config manager <agent>` |
+| `/config` | walks the settings (Enter keeps each one); or set one directly: `/config address <url>`, `/config theme <auto\|dark\|light\|mono>`, `/config manager <agent>`, `/config auth <auto\|cloudflare-access\|oidc>` (normally found by `/login`) |
 | `/login` | signs you in. Signed in already, it offers to sign you out or sign in as a different user |
 | `/connect <agent>` | talk to an agent directly |
 | `/manager` | back to the Factory Manager |

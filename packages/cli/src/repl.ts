@@ -159,7 +159,7 @@ class App {
     }
     this.applyTheme();
     // An earlier version kept only an Access assertion and no hint; use it rather than make the person sign in again.
-    if (this.instance && !this.config.auth) this.config.auth = await knownMethod(this.instance, undefined, this.o.store);
+    if (this.instance && !this.config.auth) this.config.auth = await knownMethod(this.instance, undefined, this.o.store, this.env);
     this.connect();
     await this.refreshMe();
   }

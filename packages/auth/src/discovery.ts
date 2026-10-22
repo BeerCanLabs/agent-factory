@@ -46,5 +46,10 @@ export function cliDiscoveryFromEnv(env: NodeJS.ProcessEnv = process.env): CliDi
     redirectPort = Number(portRaw);
     if (!Number.isInteger(redirectPort) || redirectPort < 1024 || redirectPort > 65535) throw new Error('FACTORY_OIDC_CLI_REDIRECT_PORT must be a port from 1024 to 65535');
   }
+  // An ID token's audience is the client id it was issued to; the factory checks it against FACTORY_OIDC_AUDIENCE.
+  const audience = env.FACTORY_OIDC_AUDIENCE?.trim();
+  if (tokenUse === 'id_token' && audience && audience !== clientId) {
+    console.warn(`[auth] FACTORY_OIDC_CLI_TOKEN_USE is id_token but FACTORY_OIDC_AUDIENCE (${audience}) is not the CLI's client id: the factory will refuse the CLI's tokens unless the provider adds that audience`);
+  }
   return { auth: { type: 'oidc', issuer: issuer.replace(/\/$/, ''), clientId, scopes: list, tokenUse, ...(redirectPort ? { redirectPort } : {}) } };
 }

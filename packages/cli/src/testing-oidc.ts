@@ -6,9 +6,9 @@ import type { AddressInfo } from 'node:net';
 export type Provider = {
   issuer: string;
   /** What the "browser" did, and what the token endpoint was asked, in order. */
-  log: { authorize: URLSearchParams[]; token: URLSearchParams[]; refresh: URLSearchParams[] };
+  log: { authorize: URLSearchParams[]; token: URLSearchParams[]; refresh: URLSearchParams[]; /** bodies that reached a place the token endpoint redirected to */ stolen: string[] };
   /** Overrides for misbehaving providers. */
-  behave: { wrongNonce?: boolean; wrongIssuerInMetadata?: boolean; refuseRefresh?: boolean; omitIdToken?: boolean; error?: string; strayRequestFirst?: boolean; noRefreshToken?: boolean; plainHttpEndpoints?: boolean };
+  behave: { wrongNonce?: boolean; wrongIssuerInMetadata?: boolean; refuseRefresh?: boolean; omitIdToken?: boolean; error?: string; strayRequestFirst?: boolean; noRefreshToken?: boolean; plainHttpEndpoints?: boolean; refreshStatus?: number; authorizeQuery?: string; tokenRedirect?: boolean };
   issuedExp: number;
   openBrowser: (url: string) => Promise<void>;
   close: () => Promise<void>;
@@ -19,7 +19,7 @@ export const fakeJwt = (claims: Record<string, unknown>) => `${b64({ alg: 'none'
 
 export async function fakeProvider(opts: { clientId?: string; sign?: (claims: Record<string, unknown>) => Promise<string> | string } = {}): Promise<Provider> {
   const clientId = opts.clientId ?? 'cli-client-1';
-  const log: Provider['log'] = { authorize: [], token: [], refresh: [] };
+  const log: Provider['log'] = { authorize: [], token: [], refresh: [], stolen: [] };
   const codes = new Map<string, { challenge: string; redirectUri: string; nonce: string }>();
   let n = 0;
   const p = { behave: {} as Provider['behave'], issuedExp: Math.floor(Date.now() / 1000) + 3600 } as Provider;
@@ -28,15 +28,23 @@ export async function fakeProvider(opts: { clientId?: string; sign?: (claims: Re
     const send = (status: number, body: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
     if (url.pathname === '/.well-known/openid-configuration') {
       const base = p.behave.plainHttpEndpoints ? 'http://idp.example.com' : p.issuer;
-      return send(200, { issuer: p.behave.wrongIssuerInMetadata ? 'https://evil.example.com' : p.issuer, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token` });
+      return send(200, { issuer: p.behave.wrongIssuerInMetadata ? 'https://evil.example.com' : p.issuer, authorization_endpoint: `${base}/authorize${p.behave.authorizeQuery ?? ''}`, token_endpoint: `${base}/token` });
+    }
+    if (url.pathname === '/stolen') {
+      let raw = '';
+      for await (const c of req) raw += c;
+      log.stolen.push(raw);
+      return send(200, {});
     }
     if (url.pathname === '/token' && req.method === 'POST') {
       let raw = '';
       for await (const c of req) raw += c;
       const form = new URLSearchParams(raw);
+      if (p.behave.tokenRedirect && form.get('grant_type') === 'authorization_code') return res.writeHead(307, { location: `${p.issuer}/stolen` }).end();
       if (form.get('client_id') !== clientId || form.has('client_secret')) return send(401, { error: 'invalid_client' });
       if (form.get('grant_type') === 'refresh_token') {
         log.refresh.push(form);
+        if (p.behave.refreshStatus) return send(p.behave.refreshStatus, {});
         if (p.behave.refuseRefresh || form.get('refresh_token') !== 'refresh-1') return send(400, { error: 'invalid_grant' });
         const id = await (opts.sign ?? fakeJwt)({ iss: p.issuer, aud: clientId, sub: 'user-1', email: 'dale@example.com', exp: p.issuedExp });
         return send(200, { id_token: id, access_token: 'access-2', refresh_token: 'refresh-2', expires_in: 3600 });

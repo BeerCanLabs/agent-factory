@@ -269,7 +269,7 @@ describe('§6.17 CL9 OIDC through the terminal', () => {
       assert.match(first.text, /Signing in to https:\/\/f\.example\.com with OIDC \(127\.0\.0\.1\)/);
       assert.match(first.text, /Signed in as access:dale@example\.com/);
       assert.equal((await first.saved()).auth, 'oidc');
-      assert.ok(first.store.data.get('https://f.example.com')?.startsWith('{'), 'the OIDC sign-in is in the store');
+      assert.ok(first.store.data.get('https://f.example.com')?.startsWith('oidc1:'), 'the OIDC sign-in is in the store');
       assert.equal(provider.log.authorize.length, 1);
 
       // A second run with the saved hint and sign-in needs no browser and no discovery.

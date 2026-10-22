@@ -34,4 +34,21 @@ describe('§6.17 CL9 the CLI discovery document', () => {
     assert.throws(() => cliDiscoveryFromEnv({ ...base, FACTORY_OIDC_CLI_CLIENT_ID: 'a b' }), /client id/);
     assert.ok(cliDiscoveryFromEnv({ ...base, FACTORY_OIDC_ISSUER: 'http://localhost:9000' }), 'loopback http is for development');
   });
+
+  it('CL9 warns, and still publishes, when the factory\'s audience is not the CLI\'s client id for an ID token', () => {
+    const warned: string[] = [];
+    const orig = console.warn;
+    console.warn = (m: string) => void warned.push(m);
+    try {
+      assert.ok(cliDiscoveryFromEnv({ ...base, FACTORY_OIDC_AUDIENCE: 'factory-api' }));
+      assert.equal(warned.length, 1);
+      assert.match(warned[0], /FACTORY_OIDC_AUDIENCE \(factory-api\)/);
+      warned.length = 0;
+      cliDiscoveryFromEnv({ ...base, FACTORY_OIDC_AUDIENCE: 'cli-client-1' });
+      cliDiscoveryFromEnv({ ...base, FACTORY_OIDC_AUDIENCE: 'factory-api', FACTORY_OIDC_CLI_TOKEN_USE: 'access_token' });
+      assert.equal(warned.length, 0);
+    } finally {
+      console.warn = orig;
+    }
+  });
 });

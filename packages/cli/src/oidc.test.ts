@@ -1,7 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { OidcSession, challengeOf, fetchProviderMetadata, newVerifier, type OidcConfig } from './oidc.js';
+import { OidcSession, challengeOf, fetchProviderMetadata, newVerifier, startLoopback, type OidcConfig } from './oidc.js';
+import { networkInterfaces } from 'node:os';
 import { NeedsLoginError, type CredentialStore } from './credentials.js';
 import { fakeJwt, fakeProvider, type Provider } from './testing-oidc.js';
 
@@ -10,6 +11,7 @@ const memory = (): CredentialStore & { data: Map<string, string> } => {
   return { data, get: async (i) => data.get(i), set: async (i, t) => void data.set(i, t), delete: async (i) => void data.delete(i) };
 };
 const INSTANCE = 'https://f.example.com';
+const decode = (raw: string) => JSON.parse(Buffer.from(raw.slice('oidc1:'.length), 'base64url').toString('utf8'));
 
 async function setup(configure: (p: Provider) => void = () => {}, over: Partial<OidcConfig> = {}, now = () => Date.now()) {
   const provider = await fakeProvider();
@@ -39,7 +41,7 @@ describe('§6.17 CL9 OIDC sign-in (authorization code with PKCE)', () => {
       const cred = await session.credential();
       assert.equal(cred.name, 'authorization');
       assert.match(cred.value, /^Bearer h?[\w-]+\.[\w-]+\.sig$|^Bearer .+\..+\./);
-      const kept = JSON.parse(store.data.get(INSTANCE)!);
+      const kept = decode(store.data.get(INSTANCE)!);
       assert.equal(kept.refreshToken, 'refresh-1');
     } finally {
       await provider.close();
@@ -139,7 +141,7 @@ describe('§6.17 CL9 keeping an OIDC sign-in alive', () => {
       const cred = await session.credential();
       assert.equal(provider.log.refresh.length, 1);
       assert.equal(provider.log.refresh[0].get('refresh_token'), 'refresh-1');
-      assert.equal(JSON.parse(store.data.get(INSTANCE)!).refreshToken, 'refresh-2', 'a rotated refresh token replaces the old');
+      assert.equal(decode(store.data.get(INSTANCE)!).refreshToken, 'refresh-2', 'a rotated refresh token replaces the old');
       assert.match(cred.value, /^Bearer /);
       await session.credential(); // fresh now: no second refresh
       assert.equal(provider.log.refresh.length, 1);
@@ -206,5 +208,93 @@ describe('§6.17 CL9 keeping an OIDC sign-in alive', () => {
     assert.notEqual(newVerifier(), v);
     assert.ok(v.length >= 43, 'RFC 7636 minimum length');
     assert.equal(fakeJwt({ a: 1 }).split('.').length, 3);
+  });
+});
+
+describe('§6.17 CL9 an OIDC sign-in survives trouble that is not the provider ending it', () => {
+  it('CL9 a network error or a 5xx while renewing keeps the sign-in, and says to try again', async () => {
+    let clock = Date.now();
+    const { provider, session, store } = await setup(() => {}, {}, () => clock);
+    try {
+      await session.login();
+      const kept = store.data.get(INSTANCE);
+      clock += 3600_000 + 120_000;
+      provider.behave.refreshStatus = 503;
+      await assert.rejects(session.credential(), (e: Error) => !(e instanceof NeedsLoginError) && /try again/.test(e.message));
+      assert.equal(store.data.get(INSTANCE), kept, 'a provider outage does not cost the person their sign-in');
+      await provider.close(); // now the network itself fails
+      await assert.rejects(session.credential(), (e: Error) => !(e instanceof NeedsLoginError) && /try again/.test(e.message));
+      assert.equal(store.data.get(INSTANCE), kept);
+    } finally {
+      await provider.close().catch(() => {});
+    }
+  });
+
+  it('CL9 requests made at the same moment share one renewal, so a rotating refresh token is spent once', async () => {
+    let clock = Date.now();
+    const { provider, session } = await setup(() => {}, {}, () => clock);
+    try {
+      await session.login();
+      clock += 3600_000 + 120_000;
+      const [a, b, c] = await Promise.all([session.credential(), session.credential(), session.credential()]);
+      assert.equal(provider.log.refresh.length, 1);
+      assert.equal(a.value, b.value);
+      assert.equal(b.value, c.value);
+    } finally {
+      await provider.close();
+    }
+  });
+});
+
+describe('§6.17 CL9 the sign-in request and the loopback listener', () => {
+  it('CL9 keeps the query a provider\'s authorization endpoint already carries', async () => {
+    const { provider, session } = await setup((p) => (p.behave.authorizeQuery = '?p=B2C_1_signin'));
+    try {
+      await session.login();
+      assert.equal(provider.log.authorize[0].get('p'), 'B2C_1_signin');
+      assert.equal(provider.log.authorize[0].get('code_challenge_method'), 'S256');
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('CL9 does not follow a redirect from the token endpoint, so the code and verifier go nowhere else', async () => {
+    const { provider, session, store } = await setup((p) => (p.behave.tokenRedirect = true));
+    try {
+      await assert.rejects(session.login());
+      assert.equal(store.data.size, 0);
+      assert.deepEqual(provider.log.stolen, [], 'the authorization code and PKCE verifier were sent on to the redirect target');
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('CL9 the listener answers only /callback with the right state, and only on the loopback interface', async () => {
+    const loop = await startLoopback();
+    const port = Number(new URL(loop.redirectUri).port);
+    try {
+      assert.equal(new URL(loop.redirectUri).hostname, '127.0.0.1');
+      assert.equal((await fetch(`http://127.0.0.1:${port}/other`)).status, 404);
+      assert.equal((await fetch(`http://127.0.0.1:${port}/callback?code=x&state=nope`)).status, 400);
+      assert.equal((await fetch(`http://127.0.0.1:${port}/callback`, { method: 'POST' })).status, 404);
+      const lan = Object.values(networkInterfaces()).flat().find((i) => i && i.family === 'IPv4' && !i.internal);
+      if (lan) await assert.rejects(fetch(`http://${lan.address}:${port}/callback?code=x&state=nope`), 'the listener is reachable from outside this machine');
+      const waiting = loop.wait('right', 2000);
+      assert.equal((await fetch(`http://127.0.0.1:${port}/callback?code=abc&state=right`)).status, 200);
+      assert.equal(await waiting, 'abc');
+      assert.equal((await fetch(`http://127.0.0.1:${port}/callback?code=again&state=right`)).status, 200, 'a second callback after success is harmless');
+    } finally {
+      loop.close();
+    }
+  });
+
+  it('CL9 a fixed port that is already in use is reported plainly', async () => {
+    const first = await startLoopback();
+    const port = Number(new URL(first.redirectUri).port);
+    try {
+      await assert.rejects(startLoopback(port), /port \d+ is in use/);
+    } finally {
+      first.close();
+    }
   });
 });
