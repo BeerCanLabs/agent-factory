@@ -1,5 +1,6 @@
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { isAgentId } from './ids.js';
+import { SIGN_IN_METHODS, type SignInMethod } from './session.js';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -7,7 +8,15 @@ export const THEMES = ['auto', 'dark', 'light', 'mono'] as const;
 export type ThemeName = (typeof THEMES)[number];
 
 /** The CLI's own settings (§6.17 CL1, CL8). No credential is kept here, and none of it is sent to the factory. */
-export type CliConfig = { instance?: string; theme?: ThemeName; manager?: string };
+/** `auth` is a hint about how this address signs people in (set by /login or the ops repository's installer). */
+export type CliConfig = { instance?: string; theme?: ThemeName; manager?: string; auth?: SignInMethod };
+
+export function parseAuth(raw: string): SignInMethod | undefined {
+  const v = raw.trim().toLowerCase();
+  if (v === 'auto' || v === '') return undefined;
+  if ((SIGN_IN_METHODS as readonly string[]).includes(v)) return v as SignInMethod;
+  throw new Error(`auth must be one of: auto, ${SIGN_IN_METHODS.join(', ')}`);
+}
 
 export const DEFAULT_MANAGER = 'factory-manager';
 
@@ -58,6 +67,7 @@ export async function loadConfig(path = configPath()): Promise<CliConfig> {
     }
     if (typeof parsed.theme === 'string' && (THEMES as readonly string[]).includes(parsed.theme)) out.theme = parsed.theme as ThemeName;
     if (isAgentId(parsed.manager)) out.manager = parsed.manager;
+    if (typeof parsed.auth === 'string' && (SIGN_IN_METHODS as readonly string[]).includes(parsed.auth)) out.auth = parsed.auth as SignInMethod;
     return out;
   } catch {
     return {};

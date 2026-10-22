@@ -17,17 +17,17 @@ factory
 
 | Command | |
 |---|---|
-| `/config` | walks the settings (Enter keeps each one); or set one directly: `/config address <url>`, `/config theme <auto\|dark\|light\|mono>`, `/config manager <agent>` |
+| `/config` | walks the settings (Enter keeps each one); or set one directly: `/config address <url>`, `/config theme <auto\|dark\|light\|mono>`, `/config manager <agent>`, `/config auth <auto\|cloudflare-access\|oidc>` (normally found by `/login`) |
 | `/login` | signs you in. Signed in already, it offers to sign you out or sign in as a different user |
 | `/connect <agent>` | talk to an agent directly |
 | `/manager` | back to the Factory Manager |
 | `/whoami`, `/help`, `/exit` | |
 
-`/login` opens your browser for the factory's single sign-on (Cloudflare Access on AWS). The signed assertion is kept in the macOS Keychain and renewed when it expires. The CLI never holds a `FACTORY_TOKEN` and sends no identity of its own; the factory verifies the assertion (A2). Signing out also removes the copy `cloudflared` keeps in `~/.cloudflared`. If the browser signs you straight back in as the same person when you switch users, sign out of your identity provider in the browser first.
+`/login` signs you in by whatever the factory uses (see "How people sign in" below). The credential is kept in the macOS Keychain and renewed when it can be. The CLI never holds a `FACTORY_TOKEN` and sends no identity of its own; the factory verifies what it is sent (A2). Signing out removes the Keychain item, and for Cloudflare Access also the copy `cloudflared` keeps in `~/.cloudflared`. If the browser signs you straight back in as the same person when you switch users, sign out of your identity provider in the browser first (OIDC asks the provider to authenticate again).
 
 Settings live in `~/.config/factory-cli/config.json` (readable by you only) and are never sent to the factory or the manager. Changing the factory address signs you out of the old one. The theme is `auto` and `dark` for dark terminals, `light` for light ones, `mono` for no colour; colour is also off when `NO_COLOR` is set or output is not a terminal.
 
-Shortcuts for scripts: `factory login <address>`, `factory logout`, `factory whoami`. `FACTORY_URL` overrides the saved address, `FACTORY_MANAGER_AGENT` or `--manager <id>` the manager, and `FACTORY_CLI_ACCESS_TOKEN` supplies an Access assertion directly (for example from `cloudflared access token`) when you cannot use the browser flow.
+Shortcuts for scripts: `factory login <address>`, `factory logout`, `factory whoami`, `factory config get`, and `factory config set <address|auth|theme|manager> <value>` (the ops repository's installer uses the last one). `FACTORY_URL` overrides the saved address, `FACTORY_MANAGER_AGENT` or `--manager <id>` the manager, and `FACTORY_CLI_ACCESS_TOKEN` supplies an Access assertion directly (for example from `cloudflared access token`) when you cannot use the browser flow.
 
 ## Use
 
@@ -57,6 +57,26 @@ manager> let me talk to donna
 Connected to donna. /manager to go back.
 donna> good morning
 ```
+
+## How people sign in
+
+A deployment signs people in one of two ways, and the CLI follows whichever it finds at `/login`:
+
+- **Cloudflare Access** (a proxy in front of the factory, as on `submind-aws`). Nothing is reachable before sign-in (A1), so the CLI recognises it by the proxy's redirect and runs `cloudflared access login`. Requests carry the assertion as `cf-access-token`.
+- **OIDC** (any provider the factory verifies: Entra, Google, Cognito, Okta). The factory publishes a small public document at `GET /.well-known/factory-cli` (issuer, public client id, scopes, which token to present, optionally a fixed loopback port). The CLI signs in with authorization code and PKCE (S256) with a state and a nonce, redirecting to `http://127.0.0.1:<port>/callback` on your own machine, holds no client secret, and sends the token as `Authorization: Bearer`. A refresh token, when the provider issues one, keeps you signed in.
+
+### For the person deploying a factory: enabling OIDC sign-in for the CLI
+
+The factory already verifies OIDC tokens with `FACTORY_OIDC_ISSUER` and `FACTORY_OIDC_AUDIENCE`. To let the CLI sign in, register a **public / native application** at the provider (no client secret) with PKCE enabled and a loopback redirect, then set:
+
+| Setting | Meaning |
+|---|---|
+| `FACTORY_OIDC_CLI_CLIENT_ID` | the application's client id. Setting it turns the discovery document on |
+| `FACTORY_OIDC_CLI_SCOPES` | default `openid email profile`. Add `offline_access` where the provider needs it for refresh tokens |
+| `FACTORY_OIDC_CLI_TOKEN_USE` | `id_token` (default) or `access_token`; it must be the token whose `aud` is `FACTORY_OIDC_AUDIENCE` |
+| `FACTORY_OIDC_CLI_REDIRECT_PORT` | only for providers that match the redirect address exactly (register `http://127.0.0.1:<port>/callback`); otherwise register `http://127.0.0.1` and any port is accepted |
+
+Roles come from the token as for the web console (`FACTORY_OIDC_ROLES_CLAIM`, `FACTORY_ADMIN_EMAILS`). The landing zones do not pass the `FACTORY_OIDC_CLI_*` settings through yet (GAP-192); set them in the deployment's environment. Tested here against a fake provider and a locally signed token, not a real provider: expect to check audience and refresh behaviour with yours.
 
 ## What the manager can do for you
 

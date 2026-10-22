@@ -6,8 +6,12 @@ import { createInterface } from 'node:readline';
 import { AuthRequiredError, ConversationRefused, FactoryClient } from './client.js';
 import { talk, renderReply, stripControl, type Io } from './conversation.js';
 import { ManagerSession } from './manager.js';
-import { AccessSession, NeedsLoginError, type Cloudflared, type CredentialStore } from './credentials.js';
-import { DEFAULT_MANAGER, THEMES, configPath, loadConfig, normalizeInstance, parseManager, parseTheme, saveConfig, type CliConfig } from './config.js';
+import { NeedsLoginError, forgetSignIn, type Cloudflared, type CredentialStore } from './credentials.js';
+import { discoverAuth, type Discovered } from './discover.js';
+import { knownMethod, makeSession } from './methods.js';
+import type { OidcConfig } from './oidc.js';
+import type { Session } from './session.js';
+import { DEFAULT_MANAGER, THEMES, configPath, loadConfig, normalizeInstance, parseAuth, parseManager, parseTheme, saveConfig, type CliConfig } from './config.js';
 import { isAgentId } from './ids.js';
 import { splash } from './splash.js';
 import { styleFor, type Style } from './theme.js';
@@ -24,7 +28,7 @@ export const HELP = [
   '  /help              this text',
   '  /exit              leave',
   '',
-  'Direct forms: /config address <url>, /config theme <auto|dark|light|mono>, /config manager <agent>.',
+  'Direct forms: /config address <url>, /config theme <auto|dark|light|mono>, /config manager <agent>, /config auth <auto|cloudflare-access|oidc>.',
 ].join('\n');
 
 /** Lines from the terminal, queued so none is lost between questions, and `null` once input has closed. */
@@ -87,6 +91,9 @@ export type ReplOptions = {
   managerOverride?: string;
   cloudflared?: Cloudflared;
   cloudflaredDir?: string;
+  /** Finds out how the factory signs people in (§6.17 CL9). */
+  discover?: (instance: string) => Promise<Discovered>;
+  openBrowser?: (url: string) => Promise<void>;
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   intervalMs?: number;
@@ -104,7 +111,9 @@ class App {
   private lastError?: unknown;
   me?: Me;
   agent?: string;
-  private session?: AccessSession;
+  private session?: Session;
+  /** What the factory said about signing in, when this run has asked. */
+  private oidc?: OidcConfig;
   private client?: FactoryClient;
   private manager?: ManagerSession;
   style: Style;
@@ -149,6 +158,8 @@ class App {
       }
     }
     this.applyTheme();
+    // An earlier version kept only an Access assertion and no hint; use it rather than make the person sign in again.
+    if (this.instance && !this.config.auth) this.config.auth = await knownMethod(this.instance, undefined, this.o.store, this.env);
     this.connect();
     await this.refreshMe();
   }
@@ -167,8 +178,22 @@ class App {
       this.client = undefined;
       return;
     }
-    this.session = new AccessSession(this.instance, this.o.store, this.o.cloudflared, this.env, undefined, this.o.cloudflaredDir);
-    this.client = new FactoryClient({ baseUrl: this.instance, credential: (r) => this.session!.token(r), fetch: this.o.fetch, sleep: this.o.sleep });
+    this.session = this.config.auth ? this.buildSession(this.config.auth) : undefined;
+    this.client = new FactoryClient({
+      baseUrl: this.instance,
+      credential: (r) => (this.session ? this.session.credential(r) : Promise.reject(new NeedsLoginError(this.instance!))),
+      fetch: this.o.fetch,
+      sleep: this.o.sleep,
+    });
+  }
+
+  private buildSession(kind: NonNullable<CliConfig['auth']>): Session {
+    return makeSession(
+      kind,
+      this.instance!,
+      { store: this.o.store, fetch: this.o.fetch, say: (t) => this.io.say(t), openBrowser: this.o.openBrowser, cloudflared: this.o.cloudflared, cloudflaredDir: this.o.cloudflaredDir, env: this.env, signInTimeoutMs: this.o.timeoutMs },
+      this.oidc,
+    );
   }
 
   /** Who is signed in, if anyone, asked of the factory. Never opens a browser. */
@@ -197,7 +222,7 @@ class App {
 
   showSplash(): void {
     if (this.envProblem) this.out.write(`${this.style.bad(this.envProblem)}\n`);
-    this.out.write(`${splash({ version: this.o.version, config: { ...this.config, manager: this.managerAgent }, instanceFromEnv: this.instanceFromEnv, me: this.me }, this.style)}\n`);
+    this.out.write(`${splash({ version: this.o.version, config: { ...this.config, manager: this.managerAgent }, instanceFromEnv: this.instanceFromEnv, me: this.me, signIn: this.session?.describe() }, this.style)}\n`);
   }
 
   prompt(): string {
@@ -209,8 +234,8 @@ class App {
   // /config -------------------------------------------------------------------------------------------------------
 
   private async save(): Promise<void> {
-    const { instance, theme, manager } = this.config;
-    const persisted: CliConfig = { ...(this.instanceFromEnv ? {} : instance ? { instance } : {}), ...(theme ? { theme } : {}), ...(manager ? { manager } : {}) };
+    const { instance, theme, manager, auth } = this.config;
+    const persisted: CliConfig = { ...(this.instanceFromEnv ? {} : instance ? { instance } : {}), ...(theme ? { theme } : {}), ...(manager ? { manager } : {}), ...(auth ? { auth } : {}) };
     // An address that came from FACTORY_URL is not ours to write; keep the one already saved.
     if (this.instanceFromEnv) {
       const saved = await loadConfig(this.file);
@@ -229,8 +254,11 @@ class App {
       this.io.say(`The factory address is already ${next}.`);
       return;
     }
-    if (this.session) await this.session.logout(); // a sign-in belongs to one factory
+    // A sign-in belongs to one factory, so the old one goes, and so does what we knew about how it signs people in.
+    if (this.instance) await forgetSignIn(this.instance, this.o.store, this.o.cloudflaredDir);
     this.config.instance = next;
+    this.config.auth = undefined;
+    this.oidc = undefined;
     await this.save();
     this.connect();
     this.io.say(`Factory address set to ${next}. Use /login to sign in.`);
@@ -241,6 +269,15 @@ class App {
     await this.save();
     this.applyTheme();
     this.io.say(`Theme set to ${this.config.theme}.`);
+  }
+
+  async setAuth(raw: string): Promise<void> {
+    this.config.auth = parseAuth(raw);
+    this.oidc = undefined;
+    await this.save();
+    this.connect();
+    await this.refreshMe();
+    this.io.say(this.config.auth ? `Sign-in method set to ${this.config.auth}.` : 'The sign-in method will be found out at the next /login.');
   }
 
   async setManager(raw: string): Promise<void> {
@@ -257,8 +294,9 @@ class App {
       if (key === 'address' || key === 'url') return await this.requireValue(value, 'address', (v) => this.setAddress(v));
       if (key === 'theme') return await this.requireValue(value, 'theme', (v) => this.setTheme(v));
       if (key === 'manager') return await this.requireValue(value, 'manager', (v) => this.setManager(v));
+      if (key === 'auth') return await this.requireValue(value, 'auth', (v) => this.setAuth(v));
       if (key) {
-        this.io.say('Unknown setting. /config address <url>, /config theme <name>, /config manager <agent>.');
+        this.io.say('Unknown setting. /config address <url>, /config theme <name>, /config manager <agent>, /config auth <method>.');
         return;
       }
       this.io.say(`${this.style.bold('Settings')}  (Enter keeps the current value)`);
@@ -293,7 +331,7 @@ class App {
         this.io.say(`${this.style.bad('Not changed:')} ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
-      if (!this.session) return;
+      if (!this.instance) return;
     }
     if (this.me) {
       this.io.say(`Signed in as ${this.me.actor} (${this.me.roles.join(', ') || 'no role'}) at ${this.instance}.`);
@@ -303,11 +341,30 @@ class App {
       } else if (choice === '2') {
         if (!(await this.signOut())) return;
         this.io.say('Signed out. If the browser signs you straight back in as the same person, sign out of your identity provider there first.');
-        await this.signIn();
+        await this.signIn({ differentUser: true });
       }
       return;
     }
     await this.signIn();
+  }
+
+  /** Asks the factory how it signs people in, and builds the session for it. A factory that cannot be asked keeps the saved hint. */
+  private async chooseMethod(): Promise<boolean> {
+    const find = this.o.discover ?? ((i: string) => discoverAuth(i, this.o.fetch));
+    try {
+      const found = await find(this.instance!);
+      this.oidc = found.type === 'oidc' ? found : undefined;
+      if (this.config.auth !== found.type) {
+        this.config.auth = found.type;
+        await this.save();
+      }
+      this.session = this.buildSession(found.type);
+      return true;
+    } catch (err) {
+      if (this.session) return true; // could not ask; use what is known
+      this.io.say(`${this.style.bad('Could not find out how to sign in:')} ${stripControl(err instanceof Error ? err.message : String(err))}`);
+      return false;
+    }
   }
 
   private async signOut(): Promise<boolean> {
@@ -325,10 +382,11 @@ class App {
     return ok;
   }
 
-  private async signIn(): Promise<void> {
+  private async signIn(opts: { differentUser?: boolean } = {}): Promise<void> {
     try {
-      this.io.say(`Signing in to ${this.instance} ...`);
-      await this.session!.login();
+      if (!(await this.chooseMethod())) return;
+      this.io.say(`Signing in to ${this.instance} with ${this.session!.describe()} ...`);
+      await this.session!.login(opts);
       await this.refreshMe();
       if (this.me) this.io.say(`${this.style.good('Signed in')} as ${this.me.actor} (${this.me.roles.join(', ') || 'no role'}).`);
       else if (this.lastError instanceof AuthRequiredError || this.lastError instanceof NeedsLoginError) this.io.say(`${this.style.bad('Signed in, but the factory did not accept it.')} Check the address with /config.`);

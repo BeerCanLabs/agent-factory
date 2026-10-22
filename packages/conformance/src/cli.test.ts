@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { files, read, repoRoot } from './support.js';
 
-const cliSource = files('packages/cli/src', (f) => f.endsWith('.ts') && !f.endsWith('.test.ts') && !f.endsWith('testing.ts'));
+const cliSource = files('packages/cli/src', (f) => f.endsWith('.ts') && !f.endsWith('.test.ts') && !/\/testing(-oidc)?\.ts$/.test(f));
 const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 const code = (f: string) => stripComments(read(f));
 /** The `/api/v1/...` paths a source file names, with each `${...}` placeholder replaced by \u0001. */
@@ -68,13 +68,47 @@ describe('§6.17 CL5 the CLI adds no interface', () => {
     assert.deepEqual(missing, []);
   });
 
-  it('CL5 the CLI opens no socket of its own: it uses fetch and the console\'s reply path', () => {
-    for (const f of cliSource) {
+  it('CL5 the CLI opens no socket of its own but the sign-in\'s one-shot loopback listener: it uses fetch and the console\'s reply path', () => {
+    for (const f of cliSource.filter((x) => !x.endsWith('/oidc.ts'))) {
       const src = code(f);
       assert.doesNotMatch(src, /node:net|node:http|WebSocket|createServer|listen\(/, f);
     }
     assert.match(code('packages/cli/src/client.ts'), /\/conversation/);
     assert.match(code('packages/cli/src/client.ts'), /\/replies\?after=/);
+  });
+});
+
+describe('§6.17 CL9 sign-in methods and discovery', () => {
+  const oidc = code('packages/cli/src/oidc.ts');
+
+  it('CL9 the OIDC sign-in is PKCE S256 with a state and a nonce, holds no client secret, and listens on loopback only', () => {
+    assert.match(oidc, /code_challenge_method: 'S256'/);
+    assert.match(oidc, /code_verifier/);
+    assert.match(oidc, /state/);
+    assert.match(oidc, /nonce/);
+    assert.doesNotMatch(oidc, /client_secret/);
+    assert.match(oidc, /server\.listen\(port, '127\.0\.0\.1'/);
+    assert.match(oidc, /url\.pathname !== '\/callback'/);
+  });
+
+  it('CL9 only the OIDC session sends an Authorization header, and only the token it was given by the provider', () => {
+    for (const f of cliSource) {
+      const hit = /name: 'authorization'/.test(code(f));
+      assert.equal(hit, f.endsWith('/oidc.ts'), `${f}: an Authorization credential outside the OIDC session`);
+    }
+    assert.match(oidc, /value: `Bearer \$\{s\.token\}`/);
+  });
+
+  it('CL9 the discovery document is built in one place from deployment configuration and served from state, not rebuilt', () => {
+    const doc = code('packages/auth/src/discovery.ts');
+    assert.match(doc, /FACTORY_OIDC_CLI_CLIENT_ID/);
+    assert.doesNotMatch(doc, /FACTORY_TOKEN|SECRET|client_secret|FACTORY_ACCESS_AUD/);
+    const app = read('packages/control-plane/src/app.ts');
+    assert.match(app, /path === '\/\.well-known\/factory-cli'[\s\S]{0,300}state\.cliDiscovery/);
+  });
+
+  it('CL9 the CLI accepts a Cloudflare redirect only from the proxy\'s own domain', () => {
+    assert.match(code('packages/cli/src/discover.ts'), /endsWith\('\.cloudflareaccess\.com'\)/);
   });
 });
 

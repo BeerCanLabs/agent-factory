@@ -296,7 +296,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
   });
 
   it('public routes and the OAuth callback answer every credential alike, and whoami needs only a verified principal', async () => {
-    for (const path of ['/ui', '/healthz', '/', '/api/v1/health', '/api/v1/connections/p/callback']) {
+    for (const path of ['/ui', '/healthz', '/', '/api/v1/health', '/.well-known/factory-cli', '/api/v1/connections/p/callback']) {
       for (const cred of CREDENTIALS) {
         const r = await call(port, 'GET', path, cred);
         assert.ok(r.status !== 401 && r.status !== 403, `${path} as ${cred}: ${r.status}`);

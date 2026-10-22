@@ -11,7 +11,11 @@ export type FakeFactory = {
   agents: Map<string, (input: Record<string, unknown>, n: number) => string | { content: string; footnote: string } | undefined>;
   routes: Map<string, (body: unknown) => { status: number; body: unknown }>;
   token: string;
+  /** Accepts an `Authorization` value as a signed-in person (an OIDC sign-in). */
+  acceptBearer?: (value: string) => boolean;
 };
+
+const realFetch = fetch;
 
 export function fakeFactory(token = 'good-token'): FakeFactory {
   const f: FakeFactory = { seen: [], replies: [], agents: new Map(), routes: new Map(), token, fetch: undefined as unknown as typeof fetch };
@@ -19,11 +23,13 @@ export function fakeFactory(token = 'good-token'): FakeFactory {
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   f.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.hostname === '127.0.0.1') return realFetch(input, init); // the identity provider in tests
     const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [k.toLowerCase(), v]));
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     const method = init?.method ?? 'GET';
     f.seen.push({ method, path: url.pathname + url.search, headers, body });
-    if (headers['cf-access-token'] !== f.token) return new Response(null, { status: 302, headers: { location: 'https://login.example/' } });
+    const authed = headers['cf-access-token'] === f.token || Boolean(headers.authorization && f.acceptBearer?.(headers.authorization));
+    if (!authed) return new Response(null, { status: 302, headers: { location: 'https://example.cloudflareaccess.com/cdn-cgi/access/login/f.example.com' } });
     if (url.pathname === '/api/v1/whoami') return json(200, { actor: 'access:dale@example.com', roles: ['admin'] });
     const custom = f.routes.get(`${method} ${url.pathname}`);
     if (custom) {

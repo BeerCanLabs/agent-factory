@@ -6,6 +6,7 @@ import { execFile, spawn } from 'node:child_process';
 import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import type { Credential, Session } from './session.js';
 
 export interface CredentialStore {
   get(instance: string): Promise<string | undefined>;
@@ -150,6 +151,12 @@ export async function clearCloudflaredTokens(instance: string, dir = join(homedi
   return mine.length;
 }
 
+/** Forgets whatever sign-in the CLI holds for an address, whichever method made it. Used when the address changes. */
+export async function forgetSignIn(instance: string, store: CredentialStore, cloudflaredDir?: string): Promise<void> {
+  await store.delete(instance);
+  await clearCloudflaredTokens(instance, cloudflaredDir);
+}
+
 export class NeedsLoginError extends Error {
   constructor(instance: string) {
     super(`not signed in to ${instance}. Run: factory login ${instance}`);
@@ -157,7 +164,9 @@ export class NeedsLoginError extends Error {
   }
 }
 
-export class AccessSession {
+export class AccessSession implements Session {
+  readonly kind = 'cloudflare-access' as const;
+
   constructor(
     private readonly instance: string,
     private readonly store: CredentialStore,
@@ -193,8 +202,16 @@ export class AccessSession {
     }
   }
 
+  describe(): string {
+    return 'Cloudflare Access';
+  }
+
+  async credential(refresh = false): Promise<Credential> {
+    return { name: 'cf-access-token', value: await this.token(refresh) };
+  }
+
   /** The browser sign-in. `cloudflared` opens the proxy's login page and keeps its own session; we keep a copy of the assertion. */
-  async login(): Promise<void> {
+  async login(_opts: { differentUser?: boolean } = {}): Promise<void> {
     let r;
     try {
       r = await this.cloudflared(['access', 'login', this.instance], true);
