@@ -183,7 +183,11 @@ export class OidcSession implements Session {
     return this.inflight;
   }
 
-  private async renew(s: Stored): Promise<Stored> {
+  private async renew(seen: Stored): Promise<Stored> {
+    // Another caller may have renewed (and rotated the refresh token) since `seen` was read; use theirs rather than spend a token twice.
+    const latest = await this.read();
+    if (latest && latest.token !== seen.token && latest.exp - SKEW_SECONDS > this.now() / 1000) return latest;
+    const s = latest ?? seen;
     if (!s.refreshToken) {
       // Nothing to renew with: the sign-in is over once the token is.
       if (s.exp - SKEW_SECONDS > this.now() / 1000) return s;
@@ -226,8 +230,8 @@ export class OidcSession implements Session {
     const t = (await res.json().catch(() => ({}))) as TokenResponse;
     if (!res.ok || t.error) {
       const why = t.error ? ` (${String(t.error).slice(0, 80).replace(/[^\w .-]/g, '')})` : ` (HTTP ${res.status})`;
-      // A 4xx from the token endpoint is the provider ending the grant (invalid_grant, invalid_client); a 5xx is its trouble, not ours.
-      throw new ProviderRefusal(`the provider refused the request${why}`, res.status >= 400 && res.status < 500);
+      // 400, 401 and 403 are the provider ending the grant (invalid_grant, invalid_client). A 5xx, a 429 or a 408 is trouble to wait out, not an end.
+      throw new ProviderRefusal(`the provider refused the request${why}`, res.status === 400 || res.status === 401 || res.status === 403);
     }
     return t;
   }

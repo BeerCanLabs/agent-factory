@@ -246,6 +246,65 @@ describe('§6.17 CL9 an OIDC sign-in survives trouble that is not the provider e
   });
 });
 
+describe('§6.17 CL9 renewal edge cases', () => {
+  it('CL9 a 429 or 408 from the provider is waited out, not treated as the end of the sign-in', async () => {
+    for (const status of [429, 408]) {
+      let clock = Date.now();
+      const { provider, session, store } = await setup(() => {}, {}, () => clock);
+      try {
+        await session.login();
+        const kept = store.data.get(INSTANCE);
+        clock += 3600_000 + 120_000;
+        provider.behave.refreshStatus = status;
+        await assert.rejects(session.credential(), (e: Error) => !(e instanceof NeedsLoginError));
+        assert.equal(store.data.get(INSTANCE), kept, `HTTP ${status}`);
+      } finally {
+        await provider.close();
+      }
+    }
+  });
+
+  it('CL9 a caller that read the sign-in before another renewed it uses the renewed one instead of spending the old refresh token', async () => {
+    let clock = Date.now();
+    const provider = await fakeProvider();
+    try {
+      const data = new Map<string, string>();
+      let hold: (() => void) | undefined;
+      let slowNext = false;
+      const store: CredentialStore = {
+        get: async (i) => {
+          const v = data.get(i);
+          if (slowNext) {
+            slowNext = false;
+            await new Promise<void>((r) => (hold = r)); // this reader sees the sign-in as it was, and is slow
+          }
+          return v;
+        },
+        set: async (i, t) => void data.set(i, t),
+        delete: async (i) => void data.delete(i),
+      };
+      const config: OidcConfig = { issuer: provider.issuer, clientId: 'cli-client-1', scopes: ['openid'], tokenUse: 'id_token' };
+      const deps = { fetch, openBrowser: provider.openBrowser, say: () => {}, timeoutMs: 3000, now: () => clock };
+      const a = new OidcSession(INSTANCE, store, deps, config);
+      const b = new OidcSession(INSTANCE, store, deps, config);
+      await a.login();
+      provider.issuedExp = Math.floor(clock / 1000) + 7200;
+      clock += 3600_000 + 120_000;
+      slowNext = true;
+      const late = b.credential(); // reads the expired sign-in, then waits
+      await new Promise((r) => setTimeout(r, 20));
+      await a.credential(); // renews first: refresh-1 becomes refresh-2
+      hold!();
+      const got = await late;
+      assert.match(got.value, /^Bearer /);
+      assert.equal(provider.log.refresh.length, 1, 'the old refresh token was spent once, not twice');
+      assert.ok(data.has(INSTANCE), 'the renewed sign-in was not deleted');
+    } finally {
+      await provider.close();
+    }
+  });
+});
+
 describe('§6.17 CL9 the sign-in request and the loopback listener', () => {
   it('CL9 keeps the query a provider\'s authorization endpoint already carries', async () => {
     const { provider, session } = await setup((p) => (p.behave.authorizeQuery = '?p=B2C_1_signin'));
