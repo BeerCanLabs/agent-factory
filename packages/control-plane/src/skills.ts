@@ -286,19 +286,29 @@ async function decide(
   }
   const principal = identified.principal;
   const registry = skillRegistry(state);
-  const rec = registry.get(id, version);
-  const owner = rec ? ownerOf(rec) : undefined;
-  const ownerScoped = !!rec && visibilityOf(rec) === 'private' && !!owner && rec.status === 'pending';
-  const allowed = ownerScoped
-    ? authorize({ principal, privilege: 'skills.decide.private', resource: { agentId: owner!, owners: ownersOf(state, owner!) } })
-    : authorize({ principal, privilege: 'skills.decide' });
-  if (!allowed.allowed) {
-    json(res, 403, { error: 'forbidden', required: allowed.required });
+  const authorizeFor = (r: SkillVersionRecord | undefined) => {
+    const owner = r ? ownerOf(r) : undefined;
+    const ownerScoped = !!r && visibilityOf(r) === 'private' && !!owner && r.status === 'pending';
+    return ownerScoped
+      ? authorize({ principal, privilege: 'skills.decide.private', resource: { agentId: owner!, owners: ownersOf(state, owner!) } })
+      : authorize({ principal, privilege: 'skills.decide' });
+  };
+  const first = authorizeFor(registry.get(id, version));
+  if (!first.allowed) {
+    json(res, 403, { error: 'forbidden', required: first.required });
     return;
   }
   const body = await readJson(req);
   if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 2000)) {
     json(res, 400, { error: 'invalid_reason', message: 'reason must be a string of at most 2000 characters' });
+    return;
+  }
+  // The body took time to arrive: read the version again and decide again, so a decision made meanwhile (an admin's
+  // rejection, a failed check) is the one this request is judged against. Nothing yields between here and the save.
+  const rec = registry.get(id, version);
+  const again = authorizeFor(rec);
+  if (!again.allowed) {
+    json(res, 403, { error: 'forbidden', required: again.required });
     return;
   }
   if (!rec) {

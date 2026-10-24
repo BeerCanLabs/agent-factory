@@ -202,6 +202,28 @@ describe('CF5 skill approval by owner (private) or admin (public) (TSK-271)', { 
       assert.equal((await decide('print', '0.4.0', 'approve', ADMIN)).status, 200, 'an admin may still change their mind');
     });
 
+    it('is judged as it is when the request body arrives: an admin’s rejection during a stalled request still stands', async () => {
+      await register(privateManifest('print', '0.5.0', 'higgins'), HIGGINS_OWNER);
+      recordSkillChecks(state, 'print', '0.5.0', { passed: true });
+      const payload = JSON.stringify({});
+      const stalled = new Promise<{ status: number }>((resolve, reject) => {
+        const r = http.request(
+          { host: '127.0.0.1', port, path: '/api/v1/registry/skills/print/versions/0.5.0/approve', method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${HIGGINS_OWNER}`, 'content-length': String(payload.length) } },
+          (res) => { res.resume(); resolve({ status: res.statusCode ?? 0 }); },
+        );
+        r.on('error', reject);
+        r.write('{');
+        // The owner's request is open and waiting for its body; the admin decides in the meantime.
+        setTimeout(async () => {
+          assert.equal((await decide('print', '0.5.0', 'reject', ADMIN, { reason: 'no' })).status, 200);
+          r.end('}');
+        }, 150);
+      });
+      assert.equal((await stalled).status, 403);
+      assert.equal(state.configs!.current('higgins')!.skills!.some((k) => k.version === '0.5.0'), false);
+      assert.equal(actions('SKILL_APPROVED').filter((e) => e.agentId === 'skill:print@0.5.0').length, 0);
+    });
+
     it('can be turned down by its owner while pending', async () => {
       await register(privateManifest('print', '0.2.0', 'higgins'), HIGGINS_OWNER);
       const r = await decide('print', '0.2.0', 'reject', HIGGINS_OWNER);
