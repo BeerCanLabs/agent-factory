@@ -433,6 +433,41 @@ class TestSkills(Base):
         self.assertNotIn("skill_shadow", sys.modules)
         self.assertNotIn(str(folder), sys.path)
 
+    def test_a_skill_that_exits_at_import_does_not_stop_the_agent(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "quits"
+        folder.mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: quits\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+        (folder / "entry.py").write_text("import sys\nsys.exit(3)\n")
+        tools, problems = load_skills([{"id": "quits"}])
+        self.assertEqual(tools, [])
+        self.assertEqual(len(problems), 1)
+
+    def test_namespace_packages_are_not_shared_and_standard_modules_are_kept(self):
+        for sid, word in (("na", "A"), ("nb", "B")):
+            folder = Path(os.environ["SKILLS_DIR"]) / sid
+            (folder / "nsp").mkdir(parents=True)
+            (folder / "skill.yaml").write_text(f"id: {sid}\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+            (folder / "nsp" / "m.py").write_text(f"V = '{word}'\n")
+            (folder / "entry.py").write_text("import colorsys\nfrom nsp import m\nV = m.V\ndef tools():\n    return [{'name': 'tool_" + sid + "', 'description': 'x', 'parameters': {}, 'handler': lambda a, c: V}]\n")
+        sys.modules.pop("colorsys", None)
+        tools, problems = load_skills([{"id": "na"}, {"id": "nb"}])
+        from runtime.skills import run_tool
+        self.assertEqual(problems, [])
+        self.assertEqual([run_tool(t, "{}", {}) for t in tools], ["A", "B"])
+        self.assertNotIn("nsp", sys.modules)
+        self.assertIn("colorsys", sys.modules, "a standard module a skill imported is the runtime's too")
+
+    def test_an_import_after_loading_is_not_found(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "lazy"
+        folder.mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: lazy\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+        (folder / "helper.py").write_text("V = 1\n")
+        (folder / "entry.py").write_text("def _h(a, c):\n    import helper\n    return str(helper.V)\ndef tools():\n    return [{'name': 'lazy_tool', 'description': 'x', 'parameters': {}, 'handler': _h}]\n")
+        tools, problems = load_skills([{"id": "lazy"}])
+        from runtime.skills import run_tool
+        self.assertEqual(problems, [])
+        self.assertIn("error", run_tool(tools[0], "{}", {}), "its folder is not importable once loaded; import at the top of the entry")
+
     def test_a_skill_entry_cannot_leave_its_folder(self):
         self.write_skill(entry="../../outside.py")
         tools, problems = load_skills([{"id": "notes"}])

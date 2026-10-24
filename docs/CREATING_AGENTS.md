@@ -46,5 +46,5 @@ runtime rebuilt under the same tag changes the base of agents built after it, so
 variables `shared_runtime_image`, `shared_runtime_commit` and `shared_runtime_repo`, creates the runtime's registry
 (`factory-agent-runtime`) and the skills builder project, and tells the control plane its name
 (`FACTORY_SKILLS_BUILDER_PROJECT`, default `factory-skills-builder`). A skill an agent adopts is Python using only the standard
-library (nothing is installed for it), as a file, module or package in its folder, importing its own modules at the top of its entry (they are not importable later, and never shared with another skill). On a compose host the control plane also needs `FACTORY_RUNTIME_IMAGE` for its Docker runtime, which is the same
+library (nothing is installed for it), as a file, module or package in its folder, importing its own modules at the top of its entry (they are not importable later, and never shared with another skill; a module named `runtime` is the runtime's, not the skill's). On a compose host the control plane also needs `FACTORY_RUNTIME_IMAGE` for its Docker runtime, which is the same
 variable.

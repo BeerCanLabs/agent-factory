@@ -79,9 +79,17 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
                 except ValueError:
                     pass
                 for added in set(sys.modules) - known:
-                    origin = getattr(sys.modules[added], "__file__", None)
-                    if added != spec.name and not added.startswith(spec.name + ".") and origin and root_folder in Path(origin).resolve().parents:
+                    if added == spec.name or added.startswith(spec.name + "."):
+                        continue
+                    mod = sys.modules[added]
+                    origin = getattr(mod, "__file__", None)
+                    # A namespace package has no file: it is the skill's own when every place it is found is in the folder.
+                    places = [str(x) for x in getattr(mod, "__path__", [])] if origin is None else []
+                    if (origin and root_folder in Path(origin).resolve().parents) or (places and all(root_folder in [Path(x).resolve(), *Path(x).resolve().parents] for x in places)):
                         del sys.modules[added]
+                importlib.invalidate_caches()
+                for place in [k for k in sys.path_importer_cache if k.startswith(str(root_folder))]:
+                    del sys.path_importer_cache[place]
             for t in module.tools():
                 name = str(t["name"])
                 if name in seen or not re.match(r"^[A-Za-z0-9_-]{1,64}$", name):
@@ -89,7 +97,7 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
                     continue
                 seen.add(name)
                 tools.append(Tool(sid, name, str(t.get("description", "")), t.get("parameters") or {"type": "object", "properties": {}}, t["handler"]))
-        except Exception as err:  # a broken skill must not stop the agent answering
+        except (Exception, SystemExit) as err:  # a broken skill (even one that exits at import) must not stop the agent answering
             problems.append(f"skill {sid}: {err}")
     return tools, problems
 
