@@ -231,6 +231,12 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
     assert.equal((await call('POST', '/api/v1/agents/nova/updates/check', {})).status, 409);
     assert.equal((await call('POST', '/api/v1/agents/nova/updates/install', { commit: 'f'.repeat(40) })).status, 409);
     assert.equal(state.agents.get('nova')!.commit, RUNTIME_SHA);
+    // The MCP tools are the same routes by another door.
+    for (const name of ['check_agent_update', 'install_agent_update']) {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ADMIN}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { id: 'nova' } } }) });
+      assert.ok((await res.text()).includes('configuration_agent'), name);
+    }
+    assert.equal(state.agents.get('nova')!.deployedCommit, undefined, 'nothing marked it deployed');
   });
 
   it('deploys an agent created from a configuration on the runtime image, only with a policy and without adopted skills; nothing else is touched', async () => {

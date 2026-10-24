@@ -854,6 +854,7 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'check_agent_update') {
     const agent = state.agents.get(id);
     if (!agent) return { error: 'not_found' };
+    if (agent.createdFrom === 'configuration') return { error: 'configuration_agent' };
     const res = await checkAgentUpdate(agent, process.env.FACTORY_AGENT_SOURCE_TOKEN);
     Object.assign(agent, res);
     registryOf(state).save(agent);
@@ -862,6 +863,7 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'install_agent_update') {
     const agent = state.agents.get(id);
     if (!agent) return { error: 'not_found' };
+    if (agent.createdFrom === 'configuration') return { error: 'configuration_agent' };
     const mode = (args.mode === 'restart_now' ? 'restart_now' : 'drain') as 'drain' | 'restart_now';
     const targetCommit = agent.offeredCommit ?? agent.commit;
     const targetVersion = agent.offeredVersion;
