@@ -13,7 +13,7 @@ person in some channel and brings their answer back. This page says which adapte
 | Channel | Can ask? | How | Where it lives |
 |---|---|---|---|
 | Console | Yes | The Approvals view lists pending held actions and tool calls; the signed-in person approves or rejects (`POST /api/v1/approvals/:id`). A configuration change (a role assignment) is decided through the same route and by the API; the console view does not give it its own preview yet. | `packages/console/src/views/ApprovalsView.tsx` |
-| Discord | Yes, by text reply | `gatekeeper-ingress` posts the factory's question in the channel where a person who may decide it last wrote to the agent, with a one-time code. The person replies `approve CODE` or `reject CODE` (mention the bot in a server channel). The ingress consumes the reply before any wake or hand-off, so the agent never sees it. Discord has no button handling in the ingress today, so there are no buttons. | `packages/gatekeeper/src/ingress/`, `packages/control-plane/src/channel-approvals.ts` |
+| Discord | Yes, by text reply | `gatekeeper-ingress` posts the factory's question in the direct message where a person who may decide it wrote to the agent in the last hour, with a one-time code (never in a server channel: the question shows what the agent wants to send). The person replies `approve CODE` or `reject CODE`. The ingress consumes the reply before any wake or hand-off, so the agent never sees it. Discord has no button handling in the ingress today, so there are no buttons. | `packages/gatekeeper/src/ingress/`, `packages/control-plane/src/channel-approvals.ts` |
 | API | Yes | `POST /api/v1/approvals/:id` as a signed-in principal. | `packages/control-plane/src/app.ts` |
 | Slack, Teams, web chat, email, a link | No | Not built. | |
 
@@ -27,9 +27,10 @@ person in some channel and brings their answer back. This page says which adapte
    email address). The factory resolves that to a person through the identity link (TSK-107, TSK-108); an unlinked
    person decides nothing. Only the ingress holds the privilege to say who replied in a channel
    (`approvals.channel`, exclusive to the `gatekeeper-ingress` role), as only it says who asked.
-4. **A reply decides once, unchanged, in the place it was asked, within a day.** Another person's reply, another channel's,
+4. **The person sees everything that will be sent.** A request the channel cannot show in full (a long path or body, a binary body, many headers) is not asked there; it waits for the console.
+5. **A reply decides once, unchanged, in the place it was asked, within a day.** Another person's reply, another channel's,
    a spent or unknown code, all change nothing, and refusals are ledgered.
-5. **Chat approval is as good as any other.** There are no classes of change and no per-channel trust setting.
+6. **Chat approval is as good as any other.** There are no classes of change and no per-channel trust setting.
 
 ## What a link or email adapter needs
 
@@ -53,5 +54,7 @@ Until one of these is built, a person with no chat channel approves in the conso
 - A person who holds only a global admin or approver role, with no ownership of the agent and no part in the run, cannot
   decide by chat reply; they use the console. A chat reply carries no factory role.
 - Approvals by an MCP tool call (a tool the agent calls that waits on its run) are not asked in a channel.
-- The ingress remembers where each person last wrote in memory only: after a restart, a pending question is asked when that
-  person next writes to the agent.
+- A person who writes to the agent only in server channels is never asked in chat (a server channel would show the request
+  to everyone in it); they use the console or a direct message.
+- The ingress remembers where each person last wrote in memory only, for an hour: after a restart or a quiet hour, a
+  pending question is asked when that person next writes to the agent.
