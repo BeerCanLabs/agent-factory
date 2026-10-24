@@ -54,6 +54,7 @@ import { handleRunProgress } from './progress-routes.js';
 import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercanlabs/factory-inspector';
 import { handleSchedules, requesterOfRun } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
+import { handleChannelApprovals } from './channel-approvals.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
@@ -897,14 +898,16 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
  */
 /** A configuration change names a person's external identity: only those who may decide it read what it says (CF4). Used by every list. */
 function visibleApprovals(state: FactoryState, reader: Principal, all: Approval[]): Approval[] {
-  return all.map((a) => {
+  return all.map((raw) => {
+    // CF4: the code ties a channel reply to an approval; it is the ingress's, never listed.
+    const a: Approval = raw.ask ? { ...raw, ask: { ...raw.ask, code: '' } } : raw;
     if (a.kind !== 'change' || mayApproveChange(state, reader, a.agentId)) return a;
     const { change: _hidden, ...rest } = a;
     return rest;
   });
 }
 
-function mayDecide(state: FactoryState, principal: Principal, approvalId: string): { ok: true } | { ok: false; required: Role } {
+export function mayDecide(state: FactoryState, principal: { actor: string; roles: Role[] }, approvalId: string): { ok: true } | { ok: false; required: Role } {
   const global = authorize({ principal, privilege: 'approvals.decide' });
   const approval = state.approvals.get(approvalId);
   // CF4: a configuration change is the agent's owners' to decide, or an admin's; the run's requester rule (E9) does not apply,
@@ -916,7 +919,15 @@ function mayDecide(state: FactoryState, principal: Principal, approvalId: string
   // The run is the record of who asked. If it is gone nobody can say, so no owner or requester decides (fail closed);
   // an admin or approver already passed above.
   if (!run) return { ok: false, required: global.required };
-  const requester = run.requestedBy ? { actor: state.identityLinks?.resolve(run.requestedBy.provider, run.requestedBy.id) } : undefined;
+  // A scheduled run carries its schedule's requester, not a `requestedBy` of its own: an owner never decides what a schedule
+  // does in another person's name, and a schedule that cannot be read leaves no requester, so no owner (fail closed).
+  let requester: { actor: string | undefined } | undefined = run.requestedBy ? { actor: state.identityLinks?.resolve(run.requestedBy.provider, run.requestedBy.id) } : undefined;
+  if (run.trigger === 'schedule') {
+    const who = requesterOfRun(state, run);
+    if (!who) return { ok: false, required: global.required };
+    if (who.kind === 'identity') requester = { actor: state.identityLinks?.resolve(who.provider, who.id) };
+    else if (who.kind === 'principal') requester = { actor: who.actor };
+  }
   const scoped = authorize({
     principal,
     privilege: 'approvals.decide',
@@ -925,7 +936,7 @@ function mayDecide(state: FactoryState, principal: Principal, approvalId: string
   return scoped.allowed ? { ok: true } : { ok: false, required: scoped.required };
 }
 
-async function decideApproval(state: FactoryState, id: string, decision: unknown, principal: Principal, notes?: unknown): Promise<Outcome<unknown>> {
+export async function decideApproval(state: FactoryState, id: string, decision: unknown, principal: Principal, notes?: unknown, via?: { provider: string; channelId: string }): Promise<Outcome<unknown>> {
   const actor = principal.actor;
   const may = mayDecide(state, principal, id);
   if (!may.ok) return { status: 403, body: { error: 'forbidden', required: may.required } };
@@ -949,6 +960,8 @@ async function decideApproval(state: FactoryState, id: string, decision: unknown
     approvalId: decided.approvalId,
     mcpName: decided.tool,
     route: decided.route,
+    // CF4: decided in a channel: where, as the ingress attested it, written before anything is allowed.
+    ...(via ? { requestId: `${via.provider}:${via.channelId}` } : {}),
   });
   if (decided.kind === 'change') {
     // The decision is ledgered above before anything is applied. The agent is not told and carries nothing.
@@ -1106,6 +1119,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (await handleAgentSettings(state, req, res, path)) return;
   if (await handleAgentCreation(state, req, res, path)) return;
   if (await handleAgentBundle(state, req, res, path)) return;
+  if (path.startsWith('/api/v1/ingress/') && (await handleChannelApprovals(state, req, res, path))) return;
   if (await handleRoleAssignments(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;

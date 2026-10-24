@@ -38,7 +38,7 @@ type RouteRow = {
   role: Role;
   /** A role the route asks for first, before `role` (the schedule routes ask for a viewer, then for an operator). */
   firstRole?: Role;
-  /** `gatekeeper-egress` only: an admin gets a 403 after authentication. */
+  /** Held by its role alone (the row's `role`, a service role): an admin gets a 403 after authentication. */
   exclusive?: boolean;
   /** Asked after `role`, and held by this service role alone: no single-role credential passes, so the credentials that pass `role` are named this role. The requester.e2e test covers the credential that passes both. */
   thenExclusive?: Role;
@@ -95,6 +95,9 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/mcp', privilege: 'mcp.use', role: 'viewer', body: { jsonrpc: '2.0', id: 1, method: 'ping' } },
   // operator
   { method: 'POST', path: '/api/v1/agents/nope/runs', privilege: 'agents.wake', role: 'operator', body: {} },
+  { method: 'POST', path: '/api/v1/ingress/approval-prompts', privilege: 'approvals.channel', role: 'gatekeeper-ingress', exclusive: true, body: {} },
+  { method: 'POST', path: '/api/v1/ingress/approvals/nope/asked', privilege: 'approvals.channel', role: 'gatekeeper-ingress', exclusive: true, body: {} },
+  { method: 'POST', path: '/api/v1/ingress/approvals/decision', privilege: 'approvals.channel', role: 'gatekeeper-ingress', exclusive: true, body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/wake', privilege: 'agents.wake', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/pause', privilege: 'agents.pause', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/resume', privilege: 'agents.resume', role: 'operator', body: {} },
@@ -284,7 +287,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
           if (r.status !== 401) failures.push(`${label} (want 401)`);
           continue;
         }
-        const allowed = row.thenExclusive ? false : row.exclusive ? cred === 'gatekeeper-egress' : oldHasRole(roles, row.role);
+        const allowed = row.thenExclusive ? false : row.exclusive ? cred === row.role : oldHasRole(roles, row.role);
         const named = row.firstRole && !oldHasRole(roles, row.firstRole) ? row.firstRole : row.thenExclusive && oldHasRole(roles, row.role) ? row.thenExclusive : row.role;
         if (allowed) {
           if (r.status === 401 || r.status === 403) failures.push(`${label} (want it to pass)`);

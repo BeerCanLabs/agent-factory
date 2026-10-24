@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -30,6 +30,19 @@ export type ChangeRequest = {
   roles: string[];
 };
 
+/** CF4: asking in a channel. The code ties a reply to this approval; the ingress, not the agent, reads the reply. */
+export type ChannelAsk = {
+  code: string;
+  /** Set once the ingress has posted the factory's preview, with where (the only place a reply decides it). */
+  provider?: string;
+  channelId?: string;
+  askedAt?: string;
+};
+
+/** How long a question asked in a channel stays decidable (CF4: pending approvals expire). */
+export const CHANNEL_ASK_TTL_MS = 24 * 60 * 60 * 1000;
+const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+
 export type Approval = {
   approvalId: string;
   runId: string;
@@ -46,6 +59,8 @@ export type Approval = {
   change?: ChangeRequest;
   /** A pending change is not decidable after this time (CF4). */
   expiresAt?: string;
+  /** CF4: the in-channel question for this approval, once the factory has issued its code. */
+  ask?: ChannelAsk;
   decidedBy?: string;
   decidedAt?: string;
   /** The approver's notes, delivered to the agent with the decision (e.g. what to change). */
@@ -130,6 +145,38 @@ export class ApprovalStore {
   pendingChanges(agentId: string): Approval[] {
     const now = Date.now();
     return [...this.items.values()].filter((a) => a.kind === 'change' && a.agentId === agentId && a.state === 'pending' && a.expiresAt && Date.parse(a.expiresAt) > now);
+  }
+
+  /** CF4: the code that ties a channel reply to this pending approval; the same code on every call. */
+  issueChannelCode(id: string): Approval | undefined {
+    const a = this.items.get(id);
+    if (!a || a.state !== 'pending') return undefined;
+    if (a.ask) return { ...a };
+    const taken = new Set([...this.items.values()].filter((x) => x.state === 'pending' && x.ask).map((x) => x.ask!.code));
+    let code = '';
+    do {
+      code = Array.from({ length: 6 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join('');
+    } while (taken.has(code));
+    const next = { ...a, ask: { code } };
+    this.save(next);
+    return { ...next };
+  }
+
+  /** CF4: the ingress posted the question in this channel. Recorded once; a reply decides only where it was asked. */
+  markAsked(id: string, provider: string, channelId: string, at: Date = new Date()): Approval | undefined {
+    const a = this.items.get(id);
+    if (!a || a.state !== 'pending' || !a.ask) return undefined;
+    if (a.ask.channelId) return { ...a };
+    const next = { ...a, ask: { ...a.ask, provider, channelId, askedAt: at.toISOString() } };
+    this.save(next);
+    return { ...next };
+  }
+
+  /** The pending approval a code belongs to, whatever the case the person typed. */
+  byCode(code: string): Approval | undefined {
+    const want = code.toUpperCase();
+    for (const a of this.items.values()) if (a.state === 'pending' && a.ask?.code === want) return { ...a };
+    return undefined;
   }
 
   get(id: string): Approval | undefined {

@@ -14,6 +14,8 @@ export type Conversation = {
   messageId: string;
   content: string;
   authorId: string;
+  /** Written in a direct message to the bot (not a server channel). Absent: not known to be. */
+  direct?: boolean;
 };
 
 export type AgentActivity = {
@@ -39,6 +41,13 @@ export type DiscordClient = {
   refuseUnauthorized?(channelId: string): Promise<void>;
   recordActivity?(activity: AgentActivity): Promise<void>;
   onMessage(handler: (msg: Omit<Conversation, 'agentId'>) => void): void;
+  /**
+   * CF4: asked about every message before anything else is done with it (no standby, no wake, no hand-off). It answers
+   * true when the message was an answer to an approval question: the agent never sees it.
+   */
+  setInterceptor?(fn: (msg: Omit<Conversation, 'agentId'>) => Promise<boolean>): void;
+  /** CF4: post text in a channel without pinging anyone; returns whether it was posted. */
+  send?(channelId: string, text: string): Promise<boolean>;
   destroy(): Promise<void>;
 };
 
@@ -46,9 +55,25 @@ export function fakeDiscordClient(): DiscordClient & {
   refusals: Array<{ channelId: string; window: string; kind: 'wake' | 'handoff' }>;
   unauthorizedRefusals: string[];
   activities: AgentActivity[];
+  sent: Array<{ channelId: string; text: string }>;
+  /** A message arriving from Discord: the interceptor first, then the handlers, as the real client does. */
+  inbound(msg: Omit<Conversation, 'agentId'>): Promise<void>;
 } {
   const handlers: Array<(msg: Omit<Conversation, 'agentId'>) => void> = [];
+  let interceptor: ((msg: Omit<Conversation, 'agentId'>) => Promise<boolean>) | undefined;
   return {
+    sent: [] as Array<{ channelId: string; text: string }>,
+    setInterceptor(fn) {
+      interceptor = fn;
+    },
+    async send(channelId, text) {
+      this.sent.push({ channelId, text });
+      return true;
+    },
+    async inbound(msg) {
+      if (interceptor && (await interceptor(msg))) return;
+      for (const h of handlers) h(msg);
+    },
     connected: false,
     presence: 'offline',
     refusals: [] as Array<{ channelId: string; window: string; kind: 'wake' | 'handoff' }>,
@@ -88,6 +113,24 @@ export type DiscordSurface = {
   initialPresence?: Presence;
 };
 
+/** CF4: what the ingress asks of the factory about approvals. All three need the ingress's own credential. */
+export type ApprovalPrompt = { approvalId: string; code: string; deciders: string[]; text: string };
+export type ApprovalReply = { agentId: string; code: string; decision: 'approve' | 'reject'; identity: string; channelId: string };
+export type ApprovalReplyResult = { result: 'unknown' } | { result: 'answered'; text: string };
+export type ApprovalAdapter = {
+  prompts(agentId: string): Promise<ApprovalPrompt[]>;
+  asked(approvalId: string, channelId: string): Promise<void>;
+  /** `unknown`: not a question the factory asked there, so the message is an ordinary one. */
+  decide(reply: ApprovalReply): Promise<ApprovalReplyResult>;
+};
+
+/** `approve CODE` or `reject CODE` (the factory's own six-character code alphabet), after any mention of the bot, and nothing else. */
+const APPROVAL_REPLY = /^(?:\s*<@[!&]?\d+>)*\s*(approve|reject)\s+([A-HJ-KM-NP-Za-hj-km-np-z2-9]{6})\s*$/i;
+/** Where a person may be asked: a direct message they wrote recently, a bounded number per agent. */
+const MAX_REMEMBERED_AUTHORS = 500;
+const REMEMBER_MS = 60 * 60 * 1000;
+const MAX_POSTED = 1000;
+
 export type GatekeeperIngress = {
   status(): { discord: 'idle' | 'connected'; presence: Presence; agentId?: string };
   reconcile(surfaces: DiscordSurface[]): Promise<void>;
@@ -101,6 +144,8 @@ export type GatekeeperIngress = {
   onAgentWorking(agentId: string): Promise<void>;
   /** Outbound tool/model progress reported for the agent; pulses typing and sets custom activity. */
   onAgentActivity?(agentId: string, activity: AgentActivity): Promise<void>;
+  /** CF4: post the factory's pending approval questions where the person who may decide each last spoke. */
+  askPending(): Promise<void>;
 };
 
 export function createGatekeeperIngress(opts: {
@@ -110,8 +155,38 @@ export function createGatekeeperIngress(opts: {
   /** Rejects if the factory did not accept the wake, so presence falls back to offline. */
   wake: (agentId: string, msg?: unknown) => Promise<void>;
   handoff: (msg: Conversation) => Promise<void>;
+  /** CF4: absent, the ingress asks for no approvals and consumes no replies. */
+  approvals?: ApprovalAdapter;
 }): GatekeeperIngress {
   const agents = new Map<string, { ref: string; discord: DiscordClient }>();
+  // Where each person last wrote to each agent: the only channels a question is asked in.
+  const lastSeen = new Map<string, Map<string, { channelId: string; at: number }>>();
+  // Questions already posted whose `asked` has not been recorded: posted once, only recorded again.
+  const posted = new Map<string, string>();
+
+  /** CF4: true when the message answered an approval question. The agent never sees such a message. */
+  async function intercept(agentId: string, discord: DiscordClient, msg: Omit<Conversation, 'agentId'>): Promise<boolean> {
+    // A question shows what the agent wants to send, so it is asked only in a direct message, never in a server channel.
+    if (msg.authorId && msg.direct === true) {
+      const mine = lastSeen.get(agentId) ?? new Map<string, { channelId: string; at: number }>();
+      lastSeen.set(agentId, mine);
+      mine.delete(msg.authorId);
+      mine.set(msg.authorId, { channelId: msg.channelId, at: Date.now() });
+      if (mine.size > MAX_REMEMBERED_AUTHORS) mine.delete(mine.keys().next().value as string);
+    }
+    const m = opts.approvals && typeof msg.content === 'string' ? APPROVAL_REPLY.exec(msg.content) : null;
+    if (!m || !opts.approvals || !msg.authorId) return false;
+    try {
+      const out = await opts.approvals.decide({ agentId, code: m[2], decision: m[1].toLowerCase() as 'approve' | 'reject', identity: msg.authorId, channelId: msg.channelId });
+      if (out.result === 'unknown') return false;
+      await discord.send?.(msg.channelId, out.text).catch(() => false);
+      return true;
+    } catch (err) {
+      console.error(`[gatekeeper-ingress] approval reply for ${agentId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      await discord.send?.(msg.channelId, 'I could not reach the factory just now. Please send your answer again in a minute.').catch(() => false);
+      return true;
+    }
+  }
   const connecting = new Set<string>();
   let isReconciling = false;
 
@@ -168,6 +243,7 @@ export function createGatekeeperIngress(opts: {
             await discord.login(bound.env[surface.secretRef]);
             await discord.setPresence(surface.initialPresence ?? 'offline');
             
+            discord.setInterceptor?.((msg) => intercept(surface.agentId, discord, msg));
             discord.onMessage((msg) => {
               void gatekeeperIngress.receive({ ...msg, agentId: surface.agentId });
             });
@@ -211,6 +287,42 @@ export function createGatekeeperIngress(opts: {
         else console.error(`[gatekeeper-ingress] wake ${msg.agentId} failed: ${err instanceof Error ? err.message : String(err)}`);
         // Re-read: the control plane may have moved presence on while the wake was in flight.
         if ((state.discord.presence as Presence) === 'starting') await state.discord.setPresence('offline');
+      }
+    },
+    async askPending() {
+      const approvals = opts.approvals;
+      if (!approvals) return;
+      for (const [agentId, state] of agents) {
+        if (!state.discord.connected || !state.discord.send) continue;
+        let prompts: ApprovalPrompt[];
+        try {
+          prompts = await approvals.prompts(agentId);
+        } catch (err) {
+          console.error(`[gatekeeper-ingress] approval prompts for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
+          continue;
+        }
+        for (const p of prompts) {
+          let channelId = posted.get(p.approvalId);
+          if (!channelId) {
+            // Only in a direct message a person who may decide it wrote to this agent in the last hour; the most recent.
+            const mine = lastSeen.get(agentId);
+            const where = p.deciders
+              .map((id) => mine?.get(id))
+              .filter((x): x is { channelId: string; at: number } => !!x && Date.now() - x.at < REMEMBER_MS)
+              .sort((a, b) => b.at - a.at)[0];
+            if (!where) continue;
+            if (!(await state.discord.send(where.channelId, p.text).catch(() => false))) continue;
+            channelId = where.channelId;
+            posted.set(p.approvalId, channelId);
+            if (posted.size > MAX_POSTED) posted.delete(posted.keys().next().value as string);
+          }
+          try {
+            await approvals.asked(p.approvalId, channelId);
+            posted.delete(p.approvalId);
+          } catch (err) {
+            console.error(`[gatekeeper-ingress] recording the question ${p.approvalId} failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
       }
     },
     async onAgentIdle(agentId) {

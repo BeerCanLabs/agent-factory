@@ -36,6 +36,7 @@ const CENSUS: Record<string, Role> = {
   'hooks.invoke': 'operator',
   'schedules.write': 'operator',
   'runs.attest-requester': 'gatekeeper-ingress',
+  'approvals.channel': 'gatekeeper-ingress',
   'approvals.decide': 'approver',
   'ledger.ingest': 'ingest',
   'ledger.attest-run-actor': 'gatekeeper-egress',
@@ -97,6 +98,7 @@ const EXCLUSIVE: Record<string, Role> = {
   'ledger.attest-run-actor': 'gatekeeper-egress',
   'egress.connections.token': 'gatekeeper-egress',
   'runs.attest-requester': 'gatekeeper-ingress',
+  'approvals.channel': 'gatekeeper-ingress',
 };
 
 // The old rule (`hasRole` in auth), copied.
@@ -120,7 +122,7 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 83);
+    assert.equal(PRIVILEGES.length, 84);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 
@@ -152,6 +154,12 @@ describe('authorize', () => {
   it('an operator, even with every other role, cannot name the requester of a run', () => {
     const everyoneButIngress = ROLES.filter((r) => r !== 'gatekeeper-ingress');
     assert.deepEqual(authorize({ principal: principal([...everyoneButIngress]), privilege: 'runs.attest-requester' }), { allowed: false, required: 'gatekeeper-ingress' });
+  });
+
+  it('only the ingress may say who replied to an approval in a channel (CF4)', () => {
+    const everyoneButIngress = ROLES.filter((r) => r !== 'gatekeeper-ingress');
+    assert.deepEqual(authorize({ principal: principal([...everyoneButIngress]), privilege: 'approvals.channel' }), { allowed: false, required: 'gatekeeper-ingress' });
+    assert.ok(authorize({ principal: principal(['gatekeeper-ingress']), privilege: 'approvals.channel' }).allowed);
   });
 
   it('keeps the five hasRole assertions from auth, for equivalent privileges', () => {

@@ -456,4 +456,44 @@ describe('gatekeeper-ingress discord client', () => {
     assert.ok(sentMessage.content.toLowerCase().includes('called 1 tool'), sentMessage.content);
     await discord.destroy();
   });
+
+  describe('CF4 approval answers on the real client', () => {
+    it('hands every message to the interceptor first, with whether it is a direct message, and an answered message gets no standby, no typing and no hand-off', async () => {
+      const { mockClient } = createMockClient();
+      const discord = createDiscordClient(mockClient as any);
+      const seen: Array<{ content: string; direct?: boolean }> = [];
+      const handled: string[] = [];
+      discord.onMessage((m) => handled.push(m.content));
+      discord.setInterceptor?.(async (m) => {
+        seen.push({ content: m.content, direct: m.direct });
+        return m.content === 'approve ABCDEF';
+      });
+      let typing = 0;
+      let sent = 0;
+      const channel = { sendTyping: async () => void typing++, send: async () => (sent++, { id: 's' }), messages: { fetch: async () => undefined } };
+      const msg = (id: string, content: string, guildId: string | null) => ({ id, channelId: 'ch', guildId, author: { id: 'u1', bot: false }, channel, mentions: { has: () => true }, content });
+      mockClient.emit(Events.MessageCreate, msg('a', 'approve ABCDEF', null));
+      await new Promise((r) => setTimeout(r, 20));
+      assert.deepEqual(handled, [], 'the agent never sees it');
+      assert.equal(typing, 0);
+      assert.equal(sent, 0, 'no standby message either');
+      mockClient.emit(Events.MessageCreate, msg('b', 'hello', 'guild-1'));
+      await new Promise((r) => setTimeout(r, 20));
+      assert.deepEqual(handled, ['hello']);
+      assert.deepEqual(seen, [{ content: 'approve ABCDEF', direct: true }, { content: 'hello', direct: false }]);
+      await discord.destroy();
+    });
+
+    it('posts a question without letting anything in it ping anyone', async () => {
+      const { mockClient } = createMockClient();
+      const posts: unknown[] = [];
+      (mockClient as any).channels.fetch = async () => ({ send: async (o: unknown) => void posts.push(o) });
+      const discord = createDiscordClient(mockClient as any);
+      assert.equal(await discord.send?.('ch', 'hello @everyone'), true);
+      assert.deepEqual(posts, [{ content: 'hello @everyone', allowedMentions: { parse: [] } }]);
+      (mockClient as any).channels.fetch = async () => undefined;
+      assert.equal(await discord.send?.('ch', 'x'), false);
+      await discord.destroy();
+    });
+  });
 });
