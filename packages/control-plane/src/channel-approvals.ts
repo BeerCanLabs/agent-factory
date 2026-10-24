@@ -28,28 +28,50 @@ const CHANNEL_ID = /^[A-Za-z0-9._-]{1,128}$/;
 const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CODE = /^[A-Za-z0-9]{4,12}$/;
 const MAX_PROMPTS = 10;
-const BODY_PREVIEW = 400;
+const MAX_PATH = 200;
+const MAX_BODY = 400;
+const MAX_HEADERS = 8;
+const MAX_HEADER = 120;
+const REFUSAL_WINDOW_MS = 10 * 60 * 1000;
+const recentRefusals = new Map<string, number>();
 
-/** Channel text is shown to people: no markup that could pass as the factory's own words or ping anyone. */
-function plain(value: string, max: number): string {
-  return value.replace(/[`<>@]/g, "'").replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, max);
+/**
+ * Agent-written text shown to a person, as plain characters in a code span: no markup, no mentions, no look-alike or
+ * invisible characters (bidi overrides, zero-width, C1 controls, line and paragraph separators) that could pass one
+ * thing off as another. It never cuts: a caller that cannot show the whole of something refuses instead (see below).
+ */
+function plain(value: string): string {
+  return value
+    .replace(/[`<>@]/g, "'")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+/g, ' ')
+    .trim();
 }
+const span = (value: string) => `\`${plain(value)}\``;
 
-/** The question, rendered from the factory's stored copy of the request. */
-export function renderQuestion(a: Approval, code: string): string {
+/**
+ * The question, rendered from the factory's stored copy of the request. E9: the person approves exactly what will be
+ * sent, so a request the channel cannot show in full (a long path or body, a binary body, many headers) is not asked
+ * here at all: undefined, and it waits for the console, which shows all of it.
+ */
+export function renderQuestion(a: Approval, code: string): string | undefined {
   const lines: string[] = [];
   if (a.kind === 'change' && a.change) {
-    const roles = a.change.roles.length ? a.change.roles.map((r) => plain(r, 64)).join(', ') : 'no roles (removes them)';
-    lines.push(`**Approval needed.** Give ${plain(a.change.provider, 32)}:${plain(a.change.identity, 128)} ${roles} on ${plain(a.agentId, 128)}.`);
-  } else if (a.request) {
-    lines.push(`**Approval needed.** ${plain(a.agentId, 128)} wants to send this on route ${plain(a.route, 64)}:`);
-    lines.push(`\`${plain(a.request.method, 12)} ${plain(a.request.path, 200)}\``);
-    if (a.request.bodyEncoding === 'utf8' && a.request.body) lines.push(`\`\`\`\n${plain(a.request.body.replace(/\n/g, ' '), BODY_PREVIEW)}\n\`\`\``);
-    else if (a.request.body) lines.push('(a binary body; open the console to see its size)');
+    const { roles: given, identity } = a.change;
+    if (given.length > 20 || given.some((r) => r.length > 64) || identity.length > 128) return undefined;
+    const roles = given.length ? given.map(span).join(', ') : 'no roles (this removes them)';
+    lines.push(`**Approval needed.** Give ${span(`${a.change.provider}:${a.change.identity}`)} ${roles} on ${span(a.agentId)}.`);
+  } else if (a.kind === 'held' && a.request) {
+    const r = a.request;
+    const headers = Object.entries(r.headers ?? {});
+    if (r.path.length > MAX_PATH || (r.body && (r.bodyEncoding !== 'utf8' || r.body.length > MAX_BODY)) || headers.length > MAX_HEADERS || headers.some(([k, v]) => `${k}: ${v}`.length > MAX_HEADER)) return undefined;
+    lines.push(`**Approval needed.** ${span(a.agentId)} wants to send this on route ${span(a.route)}:`);
+    lines.push(span(`${r.method} ${r.path}`));
+    for (const [k, v] of headers) lines.push(span(`${k}: ${v}`));
+    if (r.body) lines.push(`\`\`\`\n${plain(r.body.replace(/\n/g, ' '))}\n\`\`\``);
   } else {
-    lines.push(`**Approval needed** for ${plain(a.agentId, 128)}.`);
+    return undefined;
   }
-  lines.push(`Reply \`approve ${code}\` or \`reject ${code}\` (mention me when you are in a server channel). Only the person it was asked of can decide it; it expires in 24 hours.`);
+  lines.push(`Reply \`approve ${code}\` or \`reject ${code}\`. Only the person it was asked of can decide it; it expires in 24 hours.`);
   return lines.join('\n');
 }
 
@@ -93,9 +115,13 @@ export async function handleChannelApprovals(state: FactoryState, req: http.Inco
       if (a.agentId !== agentId || a.ask?.channelId || !askable(state, a)) continue;
       const deciders = decidersOf(state, a);
       if (!deciders.length) continue;
+      // Something the channel cannot show in full is never asked here, and no code is issued for it (E9).
+      if (renderQuestion(a, 'AAAAAA') === undefined) continue;
       const withCode = state.approvals.issueChannelCode(a.approvalId);
       if (!withCode?.ask) continue;
-      prompts.push({ approvalId: a.approvalId, code: withCode.ask.code, deciders, text: renderQuestion(withCode, withCode.ask.code) });
+      const text = renderQuestion(withCode, withCode.ask.code);
+      if (text === undefined) continue;
+      prompts.push({ approvalId: a.approvalId, code: withCode.ask.code, deciders, text });
       if (prompts.length >= MAX_PROMPTS) break;
     }
     return json(res, 200, { prompts }), true;
@@ -127,16 +153,23 @@ export async function handleChannelApprovals(state: FactoryState, req: http.Inco
 
   // A reply. The ingress read the author from Discord; nothing the agent or the message says is an identity.
   const code = str(body.code, CODE);
+  const agentId = str(body.agentId, AGENT_ID);
   const decision = body.decision === 'approve' || body.decision === 'reject' ? body.decision : undefined;
   const provider = str(body.provider, /^discord$/);
   const identity = str(body.identity, EXTERNAL_ID);
   const channelId = str(body.channelId, CHANNEL_ID);
-  if (!code || !decision || !provider || !identity || !channelId) return json(res, 400, { error: 'invalid_reply' }), true;
+  if (!code || !agentId || !decision || !provider || !identity || !channelId) return json(res, 400, { error: 'invalid_reply' }), true;
   const a = state.approvals.byCode(code);
   // A code that is not pending, or was asked somewhere else, is just a message: the ingress passes it on as one.
-  if (!a || a.ask?.provider !== provider || a.ask.channelId !== channelId) return json(res, 404, { error: 'unknown_code' }), true;
+  if (!a || a.agentId !== agentId || a.ask?.provider !== provider || a.ask.channelId !== channelId) return json(res, 404, { error: 'unknown_code' }), true;
   const refuse = (status: number, error: string, text: string, who: string) => {
-    state.ledger.append({
+    // One row per approval, person and reason in a window: a code anyone in the channel can read must not fill the ledger.
+    const key = `${a.approvalId}|${who}|${error}`;
+    const now = Date.now();
+    if ((recentRefusals.get(key) ?? 0) + REFUSAL_WINDOW_MS < now) {
+      recentRefusals.set(key, now);
+      if (recentRefusals.size > 1000) recentRefusals.delete(recentRefusals.keys().next().value as string);
+      state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId: a.agentId,
       runId: a.runId,
@@ -145,7 +178,8 @@ export async function handleChannelApprovals(state: FactoryState, req: http.Inco
       actor: who,
       approvalId: a.approvalId,
       requestId: `${provider}:${channelId}`,
-    });
+      });
+    }
     return json(res, status, { error, text }), true;
   };
   if (expired(a)) return refuse(410, 'expired', 'That question has expired. Ask the agent again.', `${provider}:${identity}`);

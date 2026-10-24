@@ -898,7 +898,9 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
  */
 /** A configuration change names a person's external identity: only those who may decide it read what it says (CF4). Used by every list. */
 function visibleApprovals(state: FactoryState, reader: Principal, all: Approval[]): Approval[] {
-  return all.map((a) => {
+  return all.map((raw) => {
+    // CF4: the code ties a channel reply to an approval; it is the ingress's, never listed.
+    const a: Approval = raw.ask ? { ...raw, ask: { ...raw.ask, code: '' } } : raw;
     if (a.kind !== 'change' || mayApproveChange(state, reader, a.agentId)) return a;
     const { change: _hidden, ...rest } = a;
     return rest;
@@ -917,7 +919,15 @@ export function mayDecide(state: FactoryState, principal: { actor: string; roles
   // The run is the record of who asked. If it is gone nobody can say, so no owner or requester decides (fail closed);
   // an admin or approver already passed above.
   if (!run) return { ok: false, required: global.required };
-  const requester = run.requestedBy ? { actor: state.identityLinks?.resolve(run.requestedBy.provider, run.requestedBy.id) } : undefined;
+  // A scheduled run carries its schedule's requester, not a `requestedBy` of its own: an owner never decides what a schedule
+  // does in another person's name, and a schedule that cannot be read leaves no requester, so no owner (fail closed).
+  let requester: { actor: string | undefined } | undefined = run.requestedBy ? { actor: state.identityLinks?.resolve(run.requestedBy.provider, run.requestedBy.id) } : undefined;
+  if (run.trigger === 'schedule') {
+    const who = requesterOfRun(state, run);
+    if (!who) return { ok: false, required: global.required };
+    if (who.kind === 'identity') requester = { actor: state.identityLinks?.resolve(who.provider, who.id) };
+    else if (who.kind === 'principal') requester = { actor: who.actor };
+  }
   const scoped = authorize({
     principal,
     privilege: 'approvals.decide',

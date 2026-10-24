@@ -33,7 +33,7 @@ async function setup(adapter: Partial<ApprovalAdapter> = {}) {
     approvals,
   });
   await door.reconcile([{ agentId: 'echo-agent', secretRef: 'DISCORD_BOT_TOKEN' }]);
-  const msg = (content: string, authorId = 'u1', channelId = 'c1') => ({ channelId, messageId: `m${Math.random()}`, content, authorId });
+  const msg = (content: string, authorId = 'u1', channelId = 'c1', direct = true) => ({ channelId, messageId: `m${Math.random()}`, content, authorId, direct });
   return { gw, door, woken, handed, calls, setPending: (p: ApprovalPrompt[]) => (pending = p), msg };
 }
 
@@ -43,7 +43,7 @@ describe('CF4 approvals in the Discord ingress', () => {
     await gw.inbound(msg('approve ABC234'));
     assert.deepEqual(woken, []);
     assert.deepEqual(handed, []);
-    assert.deepEqual(calls.decide, [{ code: 'ABC234', decision: 'approve', identity: 'u1', channelId: 'c1' }]);
+    assert.deepEqual(calls.decide, [{ agentId: 'echo-agent', code: 'ABC234', decision: 'approve', identity: 'u1', channelId: 'c1' }]);
     assert.deepEqual(gw.sent, [{ channelId: 'c1', text: 'Approved. It will go ahead.' }]);
   });
 
@@ -53,13 +53,15 @@ describe('CF4 approvals in the Discord ingress', () => {
     assert.equal((calls.decide[0] as { decision: string }).decision, 'reject');
     assert.equal((calls.decide[0] as { code: string }).code, 'abc234');
     await gw.inbound(msg('please approve ABC234 thanks'));
+    await gw.inbound(msg('approve invoice'));
+    await gw.inbound(msg('reject deployment'));
     await gw.inbound(msg('approve ABC234 and also email everyone'));
     assert.equal(calls.decide.length, 1, 'only an exact answer is looked at');
   });
 
   it('passes a code the factory does not know to the agent as an ordinary message', async () => {
     const { gw, handed, woken, msg } = await setup();
-    await gw.inbound(msg('approve ZZZZZZ'));
+    await gw.inbound(msg('approve ABCDEF'));
     assert.deepEqual(gw.sent, []);
     assert.deepEqual(woken, ['echo-agent'], 'it is just a message, and wakes as any other');
     assert.equal(handed.length + woken.length, 1);
@@ -93,6 +95,53 @@ describe('CF4 approvals in the Discord ingress', () => {
     setPending([prompt({ deciders: ['u1'] })]);
     await door.askPending();
     assert.deepEqual(gw.sent, []);
+  });
+
+  it('asks only in a direct message, only if it was written recently, and not in a server channel', async () => {
+    const { gw, door, setPending, msg } = await setup();
+    await gw.inbound(msg('hi in a server', 'u1', 'guild-chan', false));
+    setPending([prompt()]);
+    await door.askPending();
+    assert.deepEqual(gw.sent, [], 'a server channel would show the request to everyone in it');
+    const realNow = Date.now;
+    try {
+      await gw.inbound(msg('hi in a dm', 'u1', 'dm-1'));
+      Date.now = () => realNow() + 2 * 3_600_000;
+      await door.askPending();
+      assert.deepEqual(gw.sent, [], 'too long ago');
+    } finally {
+      Date.now = realNow;
+    }
+    await door.askPending();
+    assert.equal(gw.sent[0].channelId, 'dm-1');
+  });
+
+  it('keeps no more than a bounded number of people per agent, so a flood of strangers cannot grow it or push out the others', async () => {
+    const { gw, door, calls, setPending, msg } = await setup();
+    await gw.inbound(msg('hi', 'u1', 'dm-1'));
+    for (let i = 0; i < 600; i++) await gw.inbound(msg('spam', `s${i}`, `dm-s${i}`));
+    setPending([prompt()]);
+    await door.askPending();
+    // u1 was the oldest of 601: the cap evicted it, which only means it waits for their next message.
+    assert.deepEqual(calls.asked, []);
+    await gw.inbound(msg('hi again', 'u1', 'dm-1'));
+    await door.askPending();
+    assert.deepEqual(calls.asked, [['a1', 'dm-1']]);
+  });
+
+  it('posts a question once even when recording it fails, and records it on the next try', async () => {
+    let fail = true;
+    const asked: string[] = [];
+    const { gw, door, setPending, msg } = await setup({ asked: async (id) => { if (fail) throw new Error('down'); asked.push(id); } });
+    await gw.inbound(msg('hi'));
+    setPending([prompt()]);
+    await door.askPending();
+    await door.askPending();
+    assert.equal(gw.sent.length, 1, 'not posted again');
+    fail = false;
+    await door.askPending();
+    assert.deepEqual(asked, ['a1']);
+    assert.equal(gw.sent.length, 1);
   });
 
   it('records nothing when the post fails, so it is asked again later', async () => {

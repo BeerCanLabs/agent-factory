@@ -14,6 +14,8 @@ export type Conversation = {
   messageId: string;
   content: string;
   authorId: string;
+  /** Written in a direct message to the bot (not a server channel). Absent: not known to be. */
+  direct?: boolean;
 };
 
 export type AgentActivity = {
@@ -113,7 +115,7 @@ export type DiscordSurface = {
 
 /** CF4: what the ingress asks of the factory about approvals. All three need the ingress's own credential. */
 export type ApprovalPrompt = { approvalId: string; code: string; deciders: string[]; text: string };
-export type ApprovalReply = { code: string; decision: 'approve' | 'reject'; identity: string; channelId: string };
+export type ApprovalReply = { agentId: string; code: string; decision: 'approve' | 'reject'; identity: string; channelId: string };
 export type ApprovalReplyResult = { result: 'unknown' } | { result: 'answered'; text: string };
 export type ApprovalAdapter = {
   prompts(agentId: string): Promise<ApprovalPrompt[]>;
@@ -122,9 +124,12 @@ export type ApprovalAdapter = {
   decide(reply: ApprovalReply): Promise<ApprovalReplyResult>;
 };
 
-/** `approve CODE` or `reject CODE`, after any mentions of the bot, and nothing else in the message. */
-const APPROVAL_REPLY = /^(?:\s*<@[!&]?\d+>)*\s*(approve|reject)\s+([A-Za-z0-9]{4,12})\s*$/i;
-const MAX_REMEMBERED_AUTHORS = 2000;
+/** `approve CODE` or `reject CODE` (the factory's own six-character code alphabet), after any mention of the bot, and nothing else. */
+const APPROVAL_REPLY = /^(?:\s*<@[!&]?\d+>)*\s*(approve|reject)\s+([A-HJ-KM-NP-Za-hj-km-np-z2-9]{6})\s*$/i;
+/** Where a person may be asked: a direct message they wrote recently, a bounded number per agent. */
+const MAX_REMEMBERED_AUTHORS = 500;
+const REMEMBER_MS = 60 * 60 * 1000;
+const MAX_POSTED = 1000;
 
 export type GatekeeperIngress = {
   status(): { discord: 'idle' | 'connected'; presence: Presence; agentId?: string };
@@ -155,20 +160,24 @@ export function createGatekeeperIngress(opts: {
 }): GatekeeperIngress {
   const agents = new Map<string, { ref: string; discord: DiscordClient }>();
   // Where each person last wrote to each agent: the only channels a question is asked in.
-  const lastSeen = new Map<string, { channelId: string; at: number }>();
-  const seenKey = (agentId: string, authorId: string) => `${agentId}\u0000${authorId}`;
+  const lastSeen = new Map<string, Map<string, { channelId: string; at: number }>>();
+  // Questions already posted whose `asked` has not been recorded: posted once, only recorded again.
+  const posted = new Map<string, string>();
 
   /** CF4: true when the message answered an approval question. The agent never sees such a message. */
   async function intercept(agentId: string, discord: DiscordClient, msg: Omit<Conversation, 'agentId'>): Promise<boolean> {
-    if (msg.authorId) {
-      lastSeen.delete(seenKey(agentId, msg.authorId));
-      lastSeen.set(seenKey(agentId, msg.authorId), { channelId: msg.channelId, at: Date.now() });
-      if (lastSeen.size > MAX_REMEMBERED_AUTHORS) lastSeen.delete(lastSeen.keys().next().value as string);
+    // A question shows what the agent wants to send, so it is asked only in a direct message, never in a server channel.
+    if (msg.authorId && msg.direct === true) {
+      const mine = lastSeen.get(agentId) ?? new Map<string, { channelId: string; at: number }>();
+      lastSeen.set(agentId, mine);
+      mine.delete(msg.authorId);
+      mine.set(msg.authorId, { channelId: msg.channelId, at: Date.now() });
+      if (mine.size > MAX_REMEMBERED_AUTHORS) mine.delete(mine.keys().next().value as string);
     }
     const m = opts.approvals && typeof msg.content === 'string' ? APPROVAL_REPLY.exec(msg.content) : null;
     if (!m || !opts.approvals || !msg.authorId) return false;
     try {
-      const out = await opts.approvals.decide({ code: m[2], decision: m[1].toLowerCase() as 'approve' | 'reject', identity: msg.authorId, channelId: msg.channelId });
+      const out = await opts.approvals.decide({ agentId, code: m[2], decision: m[1].toLowerCase() as 'approve' | 'reject', identity: msg.authorId, channelId: msg.channelId });
       if (out.result === 'unknown') return false;
       await discord.send?.(msg.channelId, out.text).catch(() => false);
       return true;
@@ -293,14 +302,26 @@ export function createGatekeeperIngress(opts: {
           continue;
         }
         for (const p of prompts) {
-          // Only where a person who may decide it has spoken to this agent; the most recent such place.
-          const where = p.deciders
-            .map((id) => lastSeen.get(seenKey(agentId, id)))
-            .filter((x): x is { channelId: string; at: number } => !!x)
-            .sort((a, b) => b.at - a.at)[0];
-          if (!where) continue;
-          if (!(await state.discord.send(where.channelId, p.text).catch(() => false))) continue;
-          await approvals.asked(p.approvalId, where.channelId).catch((err) => console.error(`[gatekeeper-ingress] recording the question ${p.approvalId} failed: ${err instanceof Error ? err.message : String(err)}`));
+          let channelId = posted.get(p.approvalId);
+          if (!channelId) {
+            // Only in a direct message a person who may decide it wrote to this agent in the last hour; the most recent.
+            const mine = lastSeen.get(agentId);
+            const where = p.deciders
+              .map((id) => mine?.get(id))
+              .filter((x): x is { channelId: string; at: number } => !!x && Date.now() - x.at < REMEMBER_MS)
+              .sort((a, b) => b.at - a.at)[0];
+            if (!where) continue;
+            if (!(await state.discord.send(where.channelId, p.text).catch(() => false))) continue;
+            channelId = where.channelId;
+            posted.set(p.approvalId, channelId);
+            if (posted.size > MAX_POSTED) posted.delete(posted.keys().next().value as string);
+          }
+          try {
+            await approvals.asked(p.approvalId, channelId);
+            posted.delete(p.approvalId);
+          } catch (err) {
+            console.error(`[gatekeeper-ingress] recording the question ${p.approvalId} failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
       }
     },

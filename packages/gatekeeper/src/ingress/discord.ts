@@ -341,7 +341,7 @@ export function createDiscordClient(
       // CF4: an answer to an approval question is the factory's, not the agent's: consumed here, before any standby or wake.
       if (interceptor) {
         try {
-          if (await interceptor({ channelId: message.channelId, messageId: message.id, content: message.content, authorId: message.author.id })) return;
+          if (await interceptor({ channelId: message.channelId, messageId: message.id, content: message.content, authorId: message.author.id, direct: isDM })) return;
         } catch (err) {
           console.warn('[gatekeeper-ingress] approval interceptor failed:', err);
         }
