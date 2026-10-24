@@ -56,6 +56,9 @@ services:
       FACTORY_DOCKER_NETWORK: factory-agents
       FACTORY_DOCKER_MIND_VOLUME: factory-mind
       FACTORY_DOCKER_IMAGES: echo-agent=factory-agent-echo:dev,llm-summarizer=factory-agent-llm-summarizer:dev
+      # RT1, CF6: the pinned shared runtime. New agents are created from a configuration and run on this image.
+      FACTORY_RUNTIME_IMAGE: factory-agent-runtime:dev
+      FACTORY_RUNTIME_COMMIT: 0123456789abcdef0123456789abcdef01234567
       MEMORY_STORE_DIR: /data/mind
       MEMORY_EPHEMERAL_DIR: /tmp/ephemeral
       FACTORY_IDLE_MS: 300000
@@ -128,6 +131,13 @@ services:
       dockerfile: runtimes/generic/Dockerfile
       args: { CARTRIDGE: examples/llm-summarizer }
     image: factory-agent-llm-summarizer:dev
+  # The shared runtime (RT1): one image for every agent created from a configuration.
+  agent-runtime:
+    profiles: [agents]
+    build:
+      context: ../..
+      dockerfile: runtimes/agent-runtime/Dockerfile
+    image: factory-agent-runtime:dev
 
 networks:
   agents:

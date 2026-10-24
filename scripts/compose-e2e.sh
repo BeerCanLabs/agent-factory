@@ -126,6 +126,24 @@ api -X POST $CP/api/v1/agents/llm-summarizer/isolate >/dev/null
 api -X POST $CP/api/v1/agents/llm-summarizer/resume >/dev/null
 ok "isolate refuses new runs; resume restores"
 
+echo "== a new agent runs on the shared runtime, created from a configuration (RT1, CF6)"
+SOUL="You are Nova, a careful assistant. SOUL-MARKER-7731."
+[ "$(api -X POST -d '{"repo":"https://github.com/beercanlabs/SM-fresh","commit":"1111111111111111111111111111111111111111","cartridge":{"id":"fresh","name":"fresh","memory":{"archetype":"personal-assistant"}}}' -o /dev/null -w '%{http_code}' $CP/api/v1/registry/agents)" = 422 ] || die "a new agent id was registered from a repository"
+created="$(api -X POST -d "{\"id\":\"nova\",\"name\":\"Nova\",\"model\":\"test-small\",\"soul\":\"$SOUL\",\"memory\":{\"archetype\":\"personal-assistant\"}}" $CP/api/v1/agents)"
+jq -e '.id == "nova" and .createdFrom == "configuration" and (.repo | test("agent-factory"))' >/dev/null <<<"$created" || die "create from configuration: $created"
+api -X PUT -d '{"routes":["models"],"models":["test-small"]}' $CP/api/v1/agents/nova/policy >/dev/null
+[ "$(api -X POST -d '{"content":"hello nova"}' -o /dev/null -w '%{http_code}' $CP/api/v1/agents/nova/conversation)" = 202 ] || die "turn to the new agent"
+reply=""
+for _ in $(seq 1 60); do
+  reply="$(api "$CP/api/v1/agents/nova/replies" | jq -r '.replies[0].content // empty')"
+  [ -n "$reply" ] && break
+  sleep 1
+done
+[ "$reply" = "Tokens are counted." ] || die "the new agent did not answer through the shared runtime (got: '$reply')"
+api "$CP/api/v1/ledger?agent=nova" | jq -e '[.[] | select(.type=="llm")] | length >= 1' >/dev/null || die "the new agent's model call is not in the ledger"
+if api "$CP/api/v1/ledger" | grep -q 'SOUL-MARKER-7731'; then die "the soul is in the ledger"; fi
+ok "a repository registration of a new id is refused; a new agent is created from a configuration, answers on the shared runtime image, its model call is priced in the ledger, its soul is not"
+
 echo "== ledger integrity"
 api "$CP/api/v1/ledger/verify" | jq -e '.ok == true' >/dev/null || die "ledger does not verify"
 api "$CP/api/v1/ledger?agent=llm-summarizer" | jq -e 'all(.[]; (.prompt == null) and (.messages == null) and (.content == null))' >/dev/null || die "payload text in ledger"

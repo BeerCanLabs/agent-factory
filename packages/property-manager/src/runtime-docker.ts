@@ -41,6 +41,8 @@ export type DockerRuntimeOptions = {
   api: DockerApi;
   /** agentId -> image. Agents not listed cannot be started. */
   images: Record<string, string>;
+  /** CF6: the pinned shared runtime image (RT1), run for every agent created from a configuration. Those agents have no entry above. */
+  sharedImage?: string;
   /** The internal-only network agents join; its only exits are the control plane and the gatekeeper-egress. */
   network: string;
   /** Named volume holding every agent's mind; each run mounts only its own subpath. */
@@ -68,7 +70,7 @@ export function dockerRuntime(opts: DockerRuntimeOptions): Runtime {
   return {
     running: (id) => running.has(id),
     async start(agent, secrets, ctx) {
-      const image = opts.images[agent.id];
+      const image = opts.images[agent.id] ?? (agent.createdFrom === 'configuration' ? opts.sharedImage : undefined);
       if (!image) throw new Error(`no image mapped for ${agent.id} (FACTORY_DOCKER_IMAGES)`);
       const prefix = agent.memoryPrefix ?? agent.id;
       if (opts.mindVolume) opts.ensureMindPath?.(prefix);

@@ -50,6 +50,16 @@ describe('dockerRuntime', () => {
     await assert.rejects(rt.start({ ...agent, id: 'other' }, {}, { runId: 'r3', runEnv: {} }), /no image mapped/);
   });
 
+  it('runs the shared runtime image only for an agent created from a configuration (CF6, RT1)', async () => {
+    const { api, calls } = fakeApi();
+    const rt = dockerRuntime({ api, images: { 'echo-agent': 'own-image' }, sharedImage: 'shared-runtime:1', network: 'n' });
+    await rt.start({ ...agent, id: 'nova', createdFrom: 'configuration' }, {}, { runId: 'r4', runEnv: {} });
+    assert.equal(calls[0].body.Image, 'shared-runtime:1');
+    await rt.start(agent, {}, { runId: 'r5', runEnv: {} });
+    assert.equal(calls[2].body.Image, 'own-image', 'a mapped agent keeps its own image');
+    await assert.rejects(rt.start({ ...agent, id: 'other' }, {}, { runId: 'r6', runEnv: {} }), /no image mapped/, 'an unmapped repository agent never gets the shared image');
+  });
+
   it('parses agent=image maps', () => {
     assert.deepEqual(parseImageMap('echo-agent=factory-runtime:dev, llm-summarizer=registry/x:1'), { 'echo-agent': 'factory-runtime:dev', 'llm-summarizer': 'registry/x:1' });
   });

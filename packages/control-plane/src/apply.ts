@@ -189,6 +189,12 @@ export function applyConfig(state: FactoryState, agentId: string, actor: string,
     return { status: 'failed', reason: built.error };
   }
   if (sameSkills(agent.deployedSkills ?? [], built.skills)) return { status: 'unchanged', reason: 'image_matches' };
+  // CF6: an agent created from a configuration runs the pinned runtime image; an image with adopted skills in it is built by
+  // the deployment's build service (GAP-200), never from this repository's root as if it were a cartridge.
+  if (agent.createdFrom === 'configuration') {
+    row(state, agentId, 'AGENT_CONFIG_APPLY_SKIPPED', actor, undefined, requestId);
+    return { status: 'skipped', reason: 'skills_image_not_supported' };
+  }
 
   if (!state.deployProvider) {
     row(state, agentId, 'AGENT_CONFIG_APPLY_SKIPPED', actor, undefined, requestId);

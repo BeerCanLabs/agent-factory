@@ -158,6 +158,8 @@ export type AgentRecord = {
   spendLimitMonthlyUsd?: number;
   currentSpendUsd?: number;
   currentSpendMonthlyUsd?: number;
+  /** CF6: set for an agent created from a configuration: it runs on the shared runtime (RT1) and has no repository of its own. */
+  createdFrom?: 'configuration';
   /** Registered source (§6.8 L3): git repository and the exact commit pinned for admission. */
   repo?: string;
   commit?: string;

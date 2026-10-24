@@ -57,6 +57,7 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/registry/agents/castle', privilege: 'agents.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/agents/castle/policy', privilege: 'policy.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/agents/castle/roles', privilege: 'agents.roles.read', role: 'admin' },
+  { method: 'POST', path: '/api/v1/agents', privilege: 'agents.create', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/agents/castle/settings', privilege: 'agents.settings.read', role: 'admin' },
   { method: 'GET', path: '/api/v1/agents/castle/role-assignments', privilege: 'agents.roles.assign', role: 'admin' },
   { method: 'PUT', path: '/api/v1/agents/castle/role-assignments/discord/1', privilege: 'agents.roles.assign', role: 'admin', body: { roles: [] } },

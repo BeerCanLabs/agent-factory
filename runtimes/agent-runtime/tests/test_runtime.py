@@ -151,6 +151,28 @@ class TestLoop(Base):
         self.assertNotIn("my favourite colour is green", [m["content"] for m in seen["messages"]], "another person's turns are not")
         self.assertTrue((self.mind / "agent_state.db").exists(), "the notebook is in the agent's own MEMORY_DIR")
 
+    def test_the_factory_is_reached_directly_even_when_the_container_has_an_egress_proxy(self):
+        # A container's HTTP(S)_PROXY points at the gatekeeper-egress for third-party hosts, which refuses the factory.
+        saved = {k: os.environ.pop(k, None) for k in ("NO_PROXY", "no_proxy")}
+        os.environ["HTTP_PROXY"] = os.environ["http_proxy"] = "http://127.0.0.1:9"
+        try:
+            code, fake, out = self.wake(PA, [turn("hello")])
+        finally:
+            for k in ("HTTP_PROXY", "http_proxy"):
+                os.environ.pop(k, None)
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+        self.assertEqual(code, 0)
+        self.assertEqual(out["status"], "succeeded")
+        # A fresh interpreter with a proxy in its environment: the factory's opener must have no proxy handler at all.
+        import subprocess, sys
+        probe = "import urllib.request; from runtime import factory; print(len([h for h in factory._DIRECT.handlers if isinstance(h, urllib.request.ProxyHandler)]))"
+        env = {**os.environ, "HTTP_PROXY": "http://127.0.0.1:9", "http_proxy": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9"}
+        env.pop("NO_PROXY", None); env.pop("no_proxy", None)
+        got = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env, cwd=str(Path(__file__).resolve().parents[1]))
+        self.assertEqual(got.stdout.strip(), "0", got.stderr)
+
     def test_purpose_built_keeps_nothing_between_wakes(self):
         cfg = {**PA, "memory": {"archetype": "purpose-built"}}
         self.wake(cfg, [turn("secret one")])

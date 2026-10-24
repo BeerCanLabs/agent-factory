@@ -210,6 +210,13 @@ const state: FactoryState = {
   providers: providersFromEnv(),
   runs: Object.assign(new FileRunStore(RUNS_DIR), { onChange: (run: Parameters<typeof inspector.publishRun>[0]) => inspector.publishRun(run) }),
   runTokens: new RunTokens(process.env.FACTORY_RUN_TOKEN_KEY),
+  // CF6: new agents are created from a configuration, not registered from a repository. Agents already registered are untouched.
+  newAgentsFromConfigurationOnly: true,
+  repositoryAgentIds: new Set((process.env.FACTORY_REPOSITORY_AGENT_IDS ?? '').split(',').map((v) => v.trim()).filter(Boolean)),
+  // RT1: the pinned shared runtime new agents run on. Unset, no agent can be created from a configuration.
+  sharedRuntime: process.env.FACTORY_RUNTIME_IMAGE && process.env.FACTORY_RUNTIME_COMMIT
+    ? { repo: process.env.FACTORY_RUNTIME_REPO || 'https://github.com/BeerCanLabs/agent-factory', commit: process.env.FACTORY_RUNTIME_COMMIT, image: process.env.FACTORY_RUNTIME_IMAGE }
+    : undefined,
   callbacks: callbackPolicyFromEnv(),
   publicBaseUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
   publicUrl: process.env.FACTORY_PUBLIC_URL || process.env.FACTORY_URL || 'http://control-plane.factory.internal:8088',
@@ -224,6 +231,7 @@ const state: FactoryState = {
       ? dockerRuntime({
           api: dockerApi(process.env.DOCKER_HOST || 'unix:///var/run/docker.sock'),
           images: parseImageMap(process.env.FACTORY_DOCKER_IMAGES),
+          sharedImage: process.env.FACTORY_RUNTIME_IMAGE,
           network: process.env.FACTORY_DOCKER_NETWORK || 'factory-agents',
           mindVolume: process.env.FACTORY_DOCKER_MIND_VOLUME,
           ensureMindPath: (prefix) => mkdirSync(join(MEMORY_STORE, prefix), { recursive: true }),
