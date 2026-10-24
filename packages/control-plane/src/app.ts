@@ -460,8 +460,15 @@ async function handOff(
   agent: AgentRecord,
   actor: string,
   payload: unknown,
-  opts: { requestedBy?: { provider: string; id: string }; caller?: AuthenticatedCaller },
+  opts: { requestedBy?: { provider: string; id: string }; caller?: AuthenticatedCaller; factoryKind?: 'conversation-request' },
 ): Promise<{ status: number; body: Record<string, unknown> }> {
+  // `factoryKind` is the factory's alone (RT1): whatever the sender wrote is removed, and only a request built here carries it.
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const own = { ...(payload as Record<string, unknown>) };
+    delete own.factoryKind;
+    if (opts.factoryKind) own.factoryKind = opts.factoryKind;
+    payload = own;
+  }
   const active = state.runs.list({ agentId: agent.id, active: true });
   // E12 item 4: a run's roles are those of the person it was started for. A message from a person whose roles deny a
   // skill route must not be handled inside someone else's run, where it would have that person's reach. It waits.
@@ -480,6 +487,8 @@ async function handOff(
       input: payload,
       ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
       ...(opts.caller ? { caller: opts.caller } : {}),
+      ...(opts.factoryKind ? { factoryKind: opts.factoryKind } : {}),
+      factoryTurn: true,
     });
     if (out.status >= 300) return { status: out.status, body: out.body as Record<string, unknown> };
     const woke = out.body as { runId: string };
@@ -950,6 +959,7 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
   };
   const plain = {
     type: 'approval',
+    factoryKind: 'approval' as const,
     approvalId: a.approvalId,
     route: a.route,
     decision: a.state === 'approved' ? 'approved' : 'rejected',
@@ -974,7 +984,7 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
       : typeof who === 'object' && who.kind === 'identity'
         ? { requestedBy: { provider: who.provider, id: who.id } }
         : {};
-  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input: who === 'unknown' ? plain : full, ...forPerson });
+  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input: who === 'unknown' ? plain : full, factoryKind: 'approval', ...forPerson });
   if (out.status < 300) return 'run';
   state.ledger.append({
     timestamp: new Date().toISOString(),
@@ -1551,6 +1561,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       model: body.model as string | undefined,
       ...(requestedBy ? { requestedBy } : {}),
       ...(caller ? { caller } : {}),
+      factoryTurn: true,
     });
     json(res, out.status, out.body);
     return;
@@ -1855,7 +1866,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       ...(othersRead ? { subject } : {}),
       content: request,
     });
-    const handed = await handOff(state, agent, principal.actor, payload, { caller });
+    const handed = await handOff(state, agent, principal.actor, payload, { caller, factoryKind: 'conversation-request' });
     json(res, handed.status, handed.status >= 300 ? handed.body : { ...handed.body, turnId });
     return;
   }
