@@ -931,13 +931,21 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
   // E12: whatever the decision starts or joins carries the reach of the person whose run asked, never the decider's own.
   // The decider's notes and the held request's path are free text written by people and agents who may be restricted,
   // so they travel only where the receiving run has no more reach than their source.
-  const origin = state.runs.get(a.runId);
-  const who = origin ? requesterOfRun(state, origin) : undefined;
+  // A run the factory started itself (a queue, an event) has no person: that is not "unknown". Only a run whose person
+  // should exist but cannot be read (a missing origin, a scheduled run whose schedule is gone) is unplaceable.
+  type Who = NonNullable<ReturnType<typeof requesterOfRun>> | 'none' | 'unknown';
+  const whoOf = (r: Run | undefined): Who => {
+    if (!r) return 'unknown';
+    return requesterOfRun(state, r) ?? (r.trigger === 'schedule' ? 'unknown' : 'none');
+  };
+  const who = whoOf(state.runs.get(a.runId));
   const sameRequester = (r: Run | undefined): boolean => {
-    const there = r ? requesterOfRun(state, r) : undefined;
-    if (!who || !there) return false;
+    const there = whoOf(r);
+    if (who === 'unknown' || there === 'unknown') return false;
+    if (who === 'none' || there === 'none') return who === there;
     if (who.kind === 'identity') return there.kind === 'identity' && there.provider === who.provider && there.id === who.id;
-    return who.kind === there.kind && (who.kind !== 'principal' || (there.kind === 'principal' && there.actor === who.actor));
+    if (who.kind === 'principal') return there.kind === 'principal' && there.actor === who.actor;
+    return there.kind === who.kind;
   };
   const plain = {
     type: 'approval',
@@ -960,12 +968,12 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
   // A person's request stays that person's. An origin that cannot be placed starts a run that holds nothing: a
   // requester no identity link resolves to is restricted to nothing.
   const forPerson =
-    who?.kind === 'identity'
-      ? { requestedBy: { provider: who.provider, id: who.id } }
-      : !who
-        ? { requestedBy: { provider: 'factory', id: 'unplaceable-origin' } }
+    who === 'unknown'
+      ? { requestedBy: { provider: 'factory', id: 'unplaceable-origin' } }
+      : typeof who === 'object' && who.kind === 'identity'
+        ? { requestedBy: { provider: who.provider, id: who.id } }
         : {};
-  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input: who ? full : plain, ...forPerson });
+  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input: who === 'unknown' ? plain : full, ...forPerson });
   if (out.status < 300) return 'run';
   state.ledger.append({
     timestamp: new Date().toISOString(),

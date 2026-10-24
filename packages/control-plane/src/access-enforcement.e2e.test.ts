@@ -366,6 +366,17 @@ describe('the gatekeeper-egress enforces a person’s roles (E12 item 4, TSK-174
     assert.equal((third.input as { request?: unknown }).request, undefined, 'nor the agent-written request path');
     assert.deepEqual(accessForRun(state, third, state.agents.get('donna')!), { restricted: true, routes: { 'google-calendar': 'denied', 'google-gmail': 'denied', print: 'denied' } }, 'a run whose origin cannot be placed holds nothing');
     state.runs.update(third.runId, { state: 'DONE' } as never);
+    // A run the factory started itself (a queue, an event) has no person: the decision run is as before, notes kept.
+    for (const [trigger, who] of [['queue', 'queue:donna'], ['event', 'factory:event-router']] as const) {
+      const sys = await liveRun({ trigger, actor: who });
+      const hs = await hold(sys.run.runId, trigger === 'queue' ? 6 : 7);
+      state.runs.update(sys.run.runId, { state: 'DONE' } as never);
+      await call(`/api/v1/approvals/${hs.body.approvalId}`, ADMIN, { decision: 'reject', notes: `from ${trigger}` });
+      const sysRun = state.runs.list({ agentId: 'donna' }).filter((r) => r.trigger === 'approval').pop()!;
+      assert.equal((sysRun.input as { notes?: string }).notes, `from ${trigger}`);
+      assert.equal(sysRun.requestedBy, undefined, trigger);
+      state.runs.update(sysRun.runId, { state: 'DONE' } as never);
+    }
     // A decision joining someone else's live run carries no free text; joining the same person's run it does.
     const hers2 = await asPerson('201');
     const h4 = await hold(hers2.run.runId, 4);
