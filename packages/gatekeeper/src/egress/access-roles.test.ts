@@ -60,7 +60,7 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
     ctx = {
       run: { runId, agentId: 'donna', state: 'WORKING', live: true },
       agentState: 'WORKING',
-      policy: { routes: ['google-gmail', 'google-calendar', 'discord', 'toString', 'tools-mcp', 'conn-gmail'] },
+      policy: { routes: ['google-gmail', 'google-calendar', 'discord', 'toString', 'tools-mcp', 'conn-gmail', 'local-svc'] },
       spend: { run: 0, day: 0, month: 0 },
       ...(access !== undefined ? { access: access as RunContext['access'] } : {}),
     };
@@ -82,6 +82,7 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
         { id: 'google-calendar', kind: 'http', upstream: `http://127.0.0.1:${up}/cal` },
         { id: 'discord', kind: 'http', upstream: `http://127.0.0.1:${up}/discord` },
         { id: 'toString', kind: 'http', upstream: `http://127.0.0.1:${up}/ts` },
+        { id: 'local-svc', kind: 'http', upstream: `http://localhost:${up}/l` },
         { id: 'tools-mcp', kind: 'mcp', upstream: `http://127.0.0.1:${up}/mcp` },
         { id: 'conn-gmail', kind: 'http', upstream: `http://127.0.0.1:${up}/conn`, connection: 'google' },
       ],
@@ -227,5 +228,36 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
     assert.equal(await status('127.0.0.1'), 403);
     await new Promise((r) => setTimeout(r, 20));
     assert.ok(ledger.some((e) => e.action === 'EGRESS_DENIED_ROLE_NOT_ALLOWED' && e.host === '127.0.0.1'), 'the CONNECT refusal is ledgered');
+  });
+
+  it('a denied route’s host is matched without regard to case or a trailing dot, on CONNECT and on the forward proxy', async () => {
+    await run({ restricted: true, routes: { 'local-svc': 'denied' } });
+    const up = (upstream.address() as { port: number }).port;
+    const connect = (host: string) =>
+      new Promise<number>((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port, method: 'CONNECT', path: `${host}:${up}`, headers: { 'proxy-authorization': `Bearer ${token}` } });
+        req.on('connect', (res, socket) => { socket.destroy(); resolve(res.statusCode ?? 0); });
+        req.on('error', reject);
+        req.end();
+      });
+    const proxy = (host: string) =>
+      new Promise<number>((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port, path: `http://${host}:${up}/x`, method: 'GET', headers: { host: `${host}:${up}`, 'proxy-authorization': `Bearer ${token}`, authorization: `Bearer ${token}` } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode ?? 0)); });
+        req.on('error', reject);
+        req.end();
+      });
+    for (const host of ['localhost', 'LOCALHOST', 'localhost.', 'LocalHost.']) {
+      ledger.length = 0;
+      assert.equal(await connect(host), 403, `CONNECT ${host}`);
+      await new Promise((r) => setTimeout(r, 20));
+      assert.ok(ledger.some((e) => e.action === 'EGRESS_DENIED_ROLE_NOT_ALLOWED'), `CONNECT ${host} ledgered`);
+    }
+    for (const host of ['localhost', 'LOCALHOST', 'localhost.']) {
+      ledger.length = 0;
+      assert.equal(await proxy(host), 403, `proxy ${host}`);
+      await new Promise((r) => setTimeout(r, 20));
+      assert.ok(ledger.some((e) => e.action === 'EGRESS_DENIED_ROLE_NOT_ALLOWED'), `proxy ${host} ledgered`);
+    }
+    assert.equal(upstreamSaw.length, 0);
   });
 });
