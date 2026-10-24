@@ -54,32 +54,55 @@ export function agentConfigForRun(state: FactoryState, run: Run, res: http.Serve
   });
 }
 
-export async function handleAgentCreation(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
-  if (path !== '/api/v1/agents' || req.method !== 'POST') return false;
-  const principal = await requirePrivilege(req, res, state, 'agents.create');
-  if (!principal) return true;
-  const body = (await readJson(req)) as Record<string, unknown>;
+/** Nothing of a failed creation is left behind: neither the agent, its registry file nor its configuration, so the id can be tried again. */
+export async function discardCreated(state: FactoryState, id: string, actor: string, reason: string): Promise<void> {
+  state.agents.delete(id);
+  try {
+    registryOf(state).remove(id);
+  } catch {
+    // the record may not have been written
+  }
+  await removeConfig(state, id, { actor, reason }).catch(() => undefined);
+}
+
+export type NewConfiguredAgent = {
+  id: unknown;
+  name?: unknown;
+  role?: unknown;
+  model?: unknown;
+  soul?: unknown;
+  roles?: unknown;
+  memory?: unknown;
+  /** Skill ids a role may name although the agent has not adopted them yet: an import's skills are adopted afterwards, by an admin (CF3, CF5). */
+  rolesMayNameSkills?: ReadonlySet<string>;
+  reason?: string;
+};
+export type Created = { status: number; body: Record<string, unknown>; record?: AgentRecord };
+
+/** Creates an agent from a configuration (CF6): the one place that does it, for `POST /agents` and for an import (CF3). */
+export async function createFromConfiguration(state: FactoryState, principal: { actor: string }, spec: NewConfiguredAgent): Promise<Created> {
   const pin = state.sharedRuntime;
-  if (!state.configs || !pin || !FULL_SHA.test(pin.commit) || !pin.image) return json(res, 503, { error: 'shared_runtime_not_configured', message: 'this factory has no pinned shared runtime (FACTORY_RUNTIME_IMAGE, FACTORY_RUNTIME_COMMIT)' }), true;
+  if (!state.configs || !pin || !FULL_SHA.test(pin.commit) || !pin.image) return { status: 503, body: { error: 'shared_runtime_not_configured', message: 'this factory has no pinned shared runtime (FACTORY_RUNTIME_IMAGE, FACTORY_RUNTIME_COMMIT)' } };
 
-  const id = typeof body.id === 'string' ? body.id : '';
-  if (!AGENT_ID.test(id) || id.startsWith('__')) return json(res, 400, { error: 'invalid_id', message: 'id must be 1 to 128 letters, digits, dot, dash or underscore, starting with a letter or digit' }), true;
+  const id = typeof spec.id === 'string' ? spec.id : '';
+  if (!AGENT_ID.test(id) || id.startsWith('__')) return { status: 400, body: { error: 'invalid_id', message: 'id must be 1 to 128 letters, digits, dot, dash or underscore, starting with a letter or digit' } };
   // The id is taken before anything is awaited, so two creations of one id cannot both succeed.
-  if (state.agents.has(id) || BUILTIN_AGENT_IDS.has(id) || state.repositoryAgentIds?.has(id)) return json(res, 409, { error: 'agent_exists', message: `${id} already exists (or is reserved)` }), true;
-  if (state.configs.current(id)) return json(res, 409, { error: 'configuration_exists', message: `a configuration for ${id} is still stored` }), true;
-  const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 120) : id;
-  const role = typeof body.role === 'string' && body.role.trim() ? body.role.trim().slice(0, 120) : 'Agent';
+  if (state.agents.has(id) || BUILTIN_AGENT_IDS.has(id) || state.repositoryAgentIds?.has(id)) return { status: 409, body: { error: 'agent_exists', message: `${id} already exists (or is reserved)` } };
+  if (state.configs.current(id)) return { status: 409, body: { error: 'configuration_exists', message: `a configuration for ${id} is still stored` } };
+  const name = typeof spec.name === 'string' && spec.name.trim() ? spec.name.trim().slice(0, 120) : id;
+  const role = typeof spec.role === 'string' && spec.role.trim() ? spec.role.trim().slice(0, 120) : 'Agent';
 
-  const settings = applySettingsChange(undefined, Object.fromEntries((['soul', 'roles', 'memory'] as const).filter((k) => body[k] !== undefined).map((k) => [k, body[k]])));
-  if (!settings.ok) return json(res, 400, { error: 'invalid_settings', message: settings.error }), true;
-  if (!settings.settings.memory?.archetype) return json(res, 422, { error: 'archetype_required', message: 'memory.archetype is required: purpose-built, personal-assistant or team-member (AM1)' }), true;
+  const given: Record<string, unknown> = { soul: spec.soul, roles: spec.roles, memory: spec.memory };
+  const settings = applySettingsChange(undefined, Object.fromEntries(Object.entries(given).filter(([, v]) => v !== undefined)));
+  if (!settings.ok) return { status: 400, body: { error: 'invalid_settings', message: settings.error } };
+  if (!settings.settings.memory?.archetype) return { status: 422, body: { error: 'archetype_required', message: 'memory.archetype is required: purpose-built, personal-assistant or team-member (AM1)' } };
   // No skills are adopted yet, so a role can name none (CF2): they are adopted afterwards, then named.
   for (const r of settings.settings.roles ?? []) {
     for (const skill of Object.keys(r.skills)) {
-      if (skill !== '*') return json(res, 422, { error: 'unknown_skill', role: r.name, skill, message: `role "${r.name}" names skill "${skill}", which a new agent has not adopted` }), true;
+      if (skill !== '*' && !spec.rolesMayNameSkills?.has(skill)) return { status: 422, body: { error: 'unknown_skill', role: r.name, skill, message: `role "${r.name}" names skill "${skill}", which a new agent has not adopted` } };
     }
   }
-  const model = typeof body.model === 'string' && body.model ? body.model : (state.defaultModel ?? 'gemini-2.0-flash');
+  const model = typeof spec.model === 'string' && spec.model ? spec.model : (state.defaultModel ?? 'gemini-2.0-flash');
 
   const record: AgentRecord = {
     id,
@@ -107,7 +130,7 @@ export async function handleAgentCreation(state: FactoryState, req: http.Incomin
     const parts = changedParts(undefined, settings.settings);
     const { record: stored } = await state.configs.put(
       { ...configOf(state, id), skills: [], owners: [principal.actor.toLowerCase()], agent: settings.settings },
-      { updatedBy: principal.actor, reason: 'created from a configuration' },
+      { updatedBy: principal.actor, reason: spec.reason ?? 'created from a configuration' },
     );
     registryOf(state).save(record);
     ledgerVersion(state, stored, principal.actor);
@@ -121,19 +144,21 @@ export async function handleAgentCreation(state: FactoryState, req: http.Incomin
       requestId: `config:${id}:v${stored.version}`,
       payloadSha256: payloadHash({ parts, hash: stored.hash }),
     });
-    json(res, 201, { ...record, owners: stored.owners ?? [], configurationVersion: stored.version });
+    return { status: 201, body: { ...record, owners: stored.owners ?? [], configurationVersion: stored.version }, record };
   } catch (err) {
-    // Nothing of a failed creation is left behind: neither the agent, its registry file nor its configuration, so the id can be tried again.
-    state.agents.delete(id);
-    try {
-      registryOf(state).remove(id);
-    } catch {
-      // the record may not have been written
-    }
-    await removeConfig(state, id, { actor: principal.actor, reason: 'creation failed' }).catch(() => undefined);
+    await discardCreated(state, id, principal.actor, 'creation failed');
     console.error(`[control-plane] agent ${id} not created: ${err instanceof Error ? err.message : String(err)}`);
-    json(res, 500, { error: 'agent_not_created' });
+    return { status: 500, body: { error: 'agent_not_created' } };
   }
+}
+
+export async function handleAgentCreation(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
+  if (path !== '/api/v1/agents' || req.method !== 'POST') return false;
+  const principal = await requirePrivilege(req, res, state, 'agents.create');
+  if (!principal) return true;
+  const body = (await readJson(req)) as Record<string, unknown>;
+  const out = await createFromConfiguration(state, principal, { id: body.id, name: body.name, role: body.role, model: body.model, soul: body.soul, roles: body.roles, memory: body.memory });
+  json(res, out.status, out.body);
   return true;
 }
 

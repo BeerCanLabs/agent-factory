@@ -751,6 +751,33 @@ async function agentSkillsList(state: FactoryState, req: http.IncomingMessage, r
   });
 }
 
+/** Asks to adopt a skill version for an agent (SK3): validated, ledgered, and held for an admin's decision. Nothing is adopted here. */
+export async function requestAdoptionFor(
+  state: FactoryState,
+  agentId: string,
+  skillId: string,
+  version: string,
+  requestedBy: string,
+  reason?: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  // Under the agent's lock: an approval being written clears the request it approved, so a newer request for the same
+  // skill must wait for it, or the approval would clear that one too and the asker's 201 would be a lie.
+  return withAgentLock(state, agentId, async () => {
+    const check = adoptCheck(state, agentId, skillId, version);
+    if (!check.ok) return { status: REFUSAL_STATUS[check.error], body: { error: check.error, skillId, version, message: check.message } };
+    if (currentSkills(state, agentId).some((k) => k.id === skillId && k.version === version)) {
+      return { status: 409, body: { error: 'already_adopted', skillId, version, message: `${agentId} already runs ${skillId}@${version}` } };
+    }
+    const store = adoptionStore(state);
+    const earlier = store.get(agentId, skillId);
+    const record = store.request({ agentId, skillId, version, requestedBy, ...(reason ? { reason } : {}), accessAdded: accessAddedFor(state, agentId, check.record) });
+    ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REQUESTED', requestedBy, skillId, version, reason, check.record.commit);
+    // A newer request for the same skill replaces a pending one; say so, so the asker is not surprised.
+    const replaced = earlier?.state === 'requested' ? { replacedRequest: { version: earlier.version, requestedBy: earlier.requestedBy, requestedAt: earlier.requestedAt } } : {};
+    return { status: 201, body: { ...record, ...replaced } };
+  });
+}
+
 async function requestAdoption(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, agentId: string): Promise<void> {
   const principal = await requirePrivilege(req, res, state, 'skills.adopt.request', { agentId });
   if (!principal) return;
@@ -763,22 +790,7 @@ async function requestAdoption(state: FactoryState, req: http.IncomingMessage, r
   if (typeof skillId !== 'string' || !SKILL_ID.test(skillId) || typeof version !== 'string' || !SEMVER.test(version)) {
     return json(res, 400, { error: 'invalid_skill', message: 'skillId (kebab-case) and version (semantic version) are required' });
   }
-  // Under the agent's lock: an approval being written clears the request it approved, so a newer request for the same
-  // skill must wait for it, or the approval would clear that one too and the asker's 201 would be a lie.
-  const out = await withAgentLock(state, agentId, async () => {
-    const check = adoptCheck(state, agentId, skillId, version);
-    if (!check.ok) return { status: REFUSAL_STATUS[check.error], body: { error: check.error, skillId, version, message: check.message } };
-    if (currentSkills(state, agentId).some((k) => k.id === skillId && k.version === version)) {
-      return { status: 409, body: { error: 'already_adopted', skillId, version, message: `${agentId} already runs ${skillId}@${version}` } };
-    }
-    const store = adoptionStore(state);
-    const earlier = store.get(agentId, skillId);
-    const record = store.request({ agentId, skillId, version, requestedBy: principal.actor, ...(reason ? { reason } : {}), accessAdded: accessAddedFor(state, agentId, check.record) });
-    ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REQUESTED', principal.actor, skillId, version, reason, check.record.commit);
-    // A newer request for the same skill replaces a pending one; say so, so the asker is not surprised.
-    const replaced = earlier?.state === 'requested' ? { replacedRequest: { version: earlier.version, requestedBy: earlier.requestedBy, requestedAt: earlier.requestedAt } } : {};
-    return { status: 201, body: { ...record, ...replaced } };
-  });
+  const out = await requestAdoptionFor(state, agentId, skillId, version, principal.actor, reason);
   json(res, out.status, out.body);
 }
 
