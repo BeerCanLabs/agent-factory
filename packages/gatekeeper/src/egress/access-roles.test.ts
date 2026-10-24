@@ -60,7 +60,7 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
     ctx = {
       run: { runId, agentId: 'donna', state: 'WORKING', live: true },
       agentState: 'WORKING',
-      policy: { routes: ['google-gmail', 'google-calendar', 'discord', 'toString'] },
+      policy: { routes: ['google-gmail', 'google-calendar', 'discord', 'toString', 'tools-mcp', 'conn-gmail'] },
       spend: { run: 0, day: 0, month: 0 },
       ...(access !== undefined ? { access: access as RunContext['access'] } : {}),
     };
@@ -82,6 +82,8 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
         { id: 'google-calendar', kind: 'http', upstream: `http://127.0.0.1:${up}/cal` },
         { id: 'discord', kind: 'http', upstream: `http://127.0.0.1:${up}/discord` },
         { id: 'toString', kind: 'http', upstream: `http://127.0.0.1:${up}/ts` },
+        { id: 'tools-mcp', kind: 'mcp', upstream: `http://127.0.0.1:${up}/mcp` },
+        { id: 'conn-gmail', kind: 'http', upstream: `http://127.0.0.1:${up}/conn`, connection: 'google' },
       ],
       prices: {},
       runTokens: tokens,
@@ -199,5 +201,31 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
       req.end();
     });
     assert.equal(ok, 200);
+  });
+
+  it('an MCP route and a connection route are refused the same way, before anything is forwarded or minted', async () => {
+    await run({ restricted: true, routes: { 'tools-mcp': 'denied', 'conn-gmail': 'denied', 'google-calendar': 'allowed' } });
+    for (const route of ['tools-mcp', 'conn-gmail']) {
+      const r = await get(port, `/${route}/x`, token);
+      assert.equal(r.status, 403, route);
+      assert.deepEqual(r.json, { error: 'role_not_allowed', route });
+    }
+    assert.equal(upstreamSaw.length, 0);
+    assert.equal(ledger.filter((e) => e.action === 'EGRESS_DENIED_ROLE_NOT_ALLOWED').length, 2);
+  });
+
+  it('a CONNECT refusal of a denied route’s host is ledgered', async () => {
+    await run({ restricted: true, routes: { 'google-gmail': 'denied' } });
+    const up = (upstream.address() as { port: number }).port;
+    const status = (host: string) =>
+      new Promise<number>((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port, method: 'CONNECT', path: `${host}:${up}`, headers: { 'proxy-authorization': `Bearer ${token}` } });
+        req.on('connect', (res, socket) => { socket.destroy(); resolve(res.statusCode ?? 0); });
+        req.on('error', reject);
+        req.end();
+      });
+    assert.equal(await status('127.0.0.1'), 403);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(ledger.some((e) => e.action === 'EGRESS_DENIED_ROLE_NOT_ALLOWED' && e.host === '127.0.0.1'), 'the CONNECT refusal is ledgered');
   });
 });

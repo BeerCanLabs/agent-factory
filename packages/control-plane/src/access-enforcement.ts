@@ -69,7 +69,7 @@ export function accessForRequester(state: FactoryState, agent: AgentRecord, requ
 function restrictedTo(agent: AgentRecord, held: readonly string[]): RunAccess {
   const roles = (agent.roles ?? []).filter((r) => r.name.toLowerCase() !== 'owner');
   const e = effectiveAccess(roles, held, skillIdsOf(agent), agent.skillRoutes ?? {});
-  return { restricted: true, routes: e.routes };
+  return { restricted: true, routes: { ...e.routes } };
 }
 
 /** True when the person has at least one skill route denied: only then can their message leak authority into another's run. */

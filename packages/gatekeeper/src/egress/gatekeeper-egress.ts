@@ -267,12 +267,13 @@ export function readRoleAccess(access: unknown): RoleAccess {
 function roleDeniedHost(access: RoleAccess, routes: Map<string, Route>, host: string): boolean {
   if (access.kind === 'open') return false;
   if (access.kind === 'unreadable') return true;
+  const norm = (h: string) => h.toLowerCase().replace(/\.$/, '');
   for (const [id, verdict] of access.routes) {
     if (verdict === 'allowed') continue;
     const up = routes.get(id)?.upstream;
     if (!up) continue;
     try {
-      if (new URL(up).hostname === host) return true;
+      if (norm(new URL(up).hostname) === norm(host)) return true;
     } catch {}
   }
   return false;
