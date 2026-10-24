@@ -99,6 +99,21 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
     state.repositoryAgentIds = new Set(['house-staff']);
   });
 
+  it('a release of the runtime repository does not offer an update to a configuration agent', async () => {
+    const rec = { id: 'hooked-cfg', name: 'h', role: 'Agent', state: 'SLEEPING', provider: 'cloud', artifact: IMAGE, requires: [], ungated: [], gated: [], triggers: [], dir: '/x', repo: 'https://github.com/BeerCanLabs/agent-factory', commit: RUNTIME_SHA, createdFrom: 'configuration' } as never;
+    state.agents.set('hooked-cfg', rec);
+    const res = await fetch(`http://127.0.0.1:${port}/api/v1/hooks/github`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-github-event': 'release' },
+      body: JSON.stringify({ action: 'published', repository: { html_url: 'https://github.com/BeerCanLabs/agent-factory' }, release: { tag_name: 'v9.9.9', target_commitish: 'f'.repeat(40) } }),
+    });
+    assert.ok(res.status < 500);
+    const after = state.agents.get('hooked-cfg')!;
+    assert.equal(after.offeredCommit, undefined);
+    assert.equal(after.updateAvailable, undefined);
+    state.agents.delete('hooked-cfg');
+  });
+
   it('only an admin creates an agent; a bare owner, a viewer and a run token cannot', async () => {
     assert.equal((await call('POST', '/api/v1/agents', NEW, OWNER)).status, 403);
     assert.equal((await call('POST', '/api/v1/agents', NEW, VIEWER)).status, 403);
