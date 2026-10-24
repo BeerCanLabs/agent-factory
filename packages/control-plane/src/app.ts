@@ -41,7 +41,7 @@ import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
-import { accessForRun } from './access-enforcement.js';
+import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
 import { applyTrainingForCaller, handleSkillTraining } from './skill-training.js';
@@ -461,7 +461,18 @@ async function handOff(
   payload: unknown,
   opts: { requestedBy?: { provider: string; id: string }; caller?: AuthenticatedCaller },
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  if (state.runs.list({ agentId: agent.id, active: true }).length === 0) {
+  const active = state.runs.list({ agentId: agent.id, active: true });
+  // E12 item 4: a run's roles are those of the person it was started for. A message from a person whose roles deny a
+  // skill route must not be handled inside someone else's run, where it would have that person's reach. It waits.
+  if (active.length > 0 && opts.requestedBy) {
+    const sender = accessForRequester(state, agent, { kind: 'identity', provider: opts.requestedBy.provider, id: opts.requestedBy.id });
+    const sameAsRun = active.every((r) => r.requestedBy && r.requestedBy.provider === opts.requestedBy!.provider && r.requestedBy.id === opts.requestedBy!.id);
+    if (hasDeniedRoute(sender) && !sameAsRun) {
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'HANDOFF_REFUSED_BUSY_FOR_ANOTHER_PERSON', actor });
+      return { status: 409, body: { error: 'busy_with_another_person', message: 'the agent is working for someone else; try again in a moment' } };
+    }
+  }
+  if (active.length === 0) {
     const out = await createRun(state, agent.id, {
       actor,
       trigger: 'conversation',

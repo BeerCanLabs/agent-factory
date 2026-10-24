@@ -23,6 +23,7 @@ import { accessForRun } from './access-enforcement.js';
 
 const ADMIN = 'admin-access-enf';
 const EGRESS = 'egress-access-enf';
+const INGRESS = 'ingress-access-enf';
 const SHA = '4'.repeat(40);
 const GMAIL_KEY = 'fake-gmail-credential-0000';
 const KEY = 'access-enf-run-token-key-0123456789ab';
@@ -89,6 +90,7 @@ describe('the gatekeeper-egress enforces a person’s roles (E12 item 4, TSK-174
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
         { name: 'gatekeeper-egress', token: EGRESS, roles: ['gatekeeper-egress'] },
+        { name: 'gatekeeper-ingress', token: INGRESS, roles: ['operator', 'gatekeeper-ingress'] },
       ]),
       version: '0.1.0',
       providers: [envProvider({})],
@@ -267,6 +269,53 @@ describe('the gatekeeper-egress enforces a person’s roles (E12 item 4, TSK-174
     const forged = { ...state, identityLinks: { resolveLink: () => ({ provider: 'discord', id: '9', actor: 'cloudflare:x@example.com', agentRoles: { donna: ['Owner'] } }) } } as unknown as FactoryState;
     const run = state.runs.create({ agentId: 'donna', state: 'WORKING', actor: 'x', trigger: 'api', requestedBy: discord('9') } as never);
     assert.deepEqual(accessForRun(forged, run, state.agents.get('donna')!), { restricted: true, routes: { 'google-calendar': 'denied', 'google-gmail': 'denied', print: 'denied' } });
+  });
+
+  it('a message from a restricted person is never handled inside someone else’s live run (the run’s reach is its requester’s)', async () => {
+    const port = (cp.address() as { port: number }).port;
+    const converse = (id: string) =>
+      fetch(`http://127.0.0.1:${port}/api/v1/agents/donna/conversation`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${INGRESS}` }, body: JSON.stringify({ input: { content: 'hi' }, requestedBy: discord(id) }) });
+    for (const r of state.runs.list({ agentId: 'donna', active: true })) state.runs.update(r.runId, { state: 'DONE' } as never);
+    // Dale's run is live: Stephanie (Gmail denied) is told to wait; her message goes nowhere.
+    const owners = await liveRun({ requestedBy: discord('100'), actor: 'factory:ingress' });
+    const refused = await converse('201');
+    assert.equal(refused.status, 409, await refused.clone().text());
+    assert.equal((await refused.json()).error, 'busy_with_another_person');
+    assert.ok(ledger.query().some((e) => (e as { action?: string }).action === 'HANDOFF_REFUSED_BUSY_FOR_ANOTHER_PERSON'));
+    // A person with nothing denied (an admin, an operator) is delivered as before.
+    assert.equal((await converse('203')).status, 202, 'an admin');
+    assert.equal((await converse('204')).status, 202, 'an operator');
+    state.runs.update(owners.run.runId, { state: 'DONE' } as never);
+    // Stephanie's own live run takes Stephanie's messages; and the owner's message into her run is fine (less reach).
+    await liveRun({ requestedBy: discord('201'), actor: 'factory:ingress' });
+    assert.equal((await converse('201')).status, 202);
+    assert.equal((await converse('203')).status, 202);
+    for (const r of state.runs.list({ agentId: 'donna', active: true })) state.runs.update(r.runId, { state: 'DONE' } as never);
+  });
+
+  it('a skill that has routes but is missing from the declared ids is still restricted (the sources are joined, not preferred)', () => {
+    const rec = { ...state.agents.get('donna')!, skillIds: ['google-calendar'], roles: [{ name: 'Family', skills: { 'google-calendar': { allow: ['*'], deny: [] } } }] };
+    const run = state.runs.create({ agentId: 'donna', state: 'WORKING', actor: 'x', trigger: 'api', requestedBy: discord('201') } as never);
+    assert.deepEqual(accessForRun(state, run, rec as never), { restricted: true, routes: { 'google-calendar': 'allowed', 'google-gmail': 'denied', print: 'denied' } });
+  });
+
+  it('an agent whose id is an object property name reads no role from the prototype', () => {
+    const rec = { ...state.agents.get('donna')!, id: 'toString' };
+    const run = state.runs.create({ agentId: 'toString', state: 'WORKING', actor: 'x', trigger: 'api', requestedBy: discord('201') } as never);
+    // A link read from disk is a plain object, with a prototype: the guard, not luck, keeps `toString` out.
+    const plainLink = { ...state, identityLinks: { resolveLink: () => ({ provider: 'discord', id: '201', actor: 'cloudflare:stephanie@example.com', agentRoles: { donna: ['Family'] } }) } } as unknown as FactoryState;
+    assert.deepEqual(accessForRun(plainLink, run, rec as never), { restricted: true, routes: { 'google-calendar': 'denied', 'google-gmail': 'denied', print: 'denied' } });
+  });
+
+  it('a built-in agent is the factory’s own and carries no person’s roles', async () => {
+    const donnaRec = state.agents.get('donna')!;
+    state.agents.set('donna', { ...donnaRec, isBuiltin: true } as never);
+    try {
+      const { token } = await asPerson('201');
+      assert.equal((await forwardCall(token, 'google-gmail')).status, 200);
+    } finally {
+      state.agents.set('donna', donnaRec);
+    }
   });
 
   it('the run read the egress uses carries the answer, and only the egress may read it', async () => {

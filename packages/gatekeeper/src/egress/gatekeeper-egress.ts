@@ -242,6 +242,42 @@ function isHostAllowed(policy: Policy, routes: Map<string, Route>, destHost: str
   return false;
 }
 
+/**
+ * E12 item 4: how the egress reads the factory's answer about a run's requesting person. Absent (an older control plane)
+ * or exactly `{ restricted: false }` is open; a well-formed restricted answer carries each route as `allowed` or
+ * `denied`; anything else is unreadable and fails closed, never open.
+ */
+export type RoleAccess = { kind: 'open' } | { kind: 'routes'; routes: Map<string, 'allowed' | 'denied'> } | { kind: 'unreadable' };
+
+export function readRoleAccess(access: unknown): RoleAccess {
+  if (access === undefined) return { kind: 'open' };
+  if (!access || typeof access !== 'object' || Array.isArray(access)) return { kind: 'unreadable' };
+  const a = access as { restricted?: unknown; routes?: unknown };
+  if (a.restricted === false) return { kind: 'open' };
+  if (a.restricted !== true || !a.routes || typeof a.routes !== 'object' || Array.isArray(a.routes)) return { kind: 'unreadable' };
+  const routes = new Map<string, 'allowed' | 'denied'>();
+  for (const [k, v] of Object.entries(a.routes as Record<string, unknown>)) {
+    if (v !== 'allowed' && v !== 'denied') return { kind: 'unreadable' };
+    routes.set(k, v);
+  }
+  return { kind: 'routes', routes };
+}
+
+/** True when a raw host is the upstream of a route the person may not use (or the answer is unreadable). */
+function roleDeniedHost(access: RoleAccess, routes: Map<string, Route>, host: string): boolean {
+  if (access.kind === 'open') return false;
+  if (access.kind === 'unreadable') return true;
+  for (const [id, verdict] of access.routes) {
+    if (verdict === 'allowed') continue;
+    const up = routes.get(id)?.upstream;
+    if (!up) continue;
+    try {
+      if (new URL(up).hostname === host) return true;
+    } catch {}
+  }
+  return false;
+}
+
 function tryJson(buf: Buffer): unknown {
   if (!buf.length) return undefined;
   try {
@@ -1218,6 +1254,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           await ensureRoutes();
         }
 
+        // E12 item 4: a skill route's own host is not a way around the route's refusal.
+        if (roleDeniedHost(readRoleAccess(ctx.access), routes, parsed.hostname)) {
+          markOutcome(res, 'denied');
+          void opts.control.ledger({ agentId: ctx.run.agentId, runId: ctx.run.runId, actor: `run:${ctx.run.agentId}`, type: 'action', action: 'EGRESS_DENIED_ROLE_NOT_ALLOWED', host: parsed.hostname }).catch(() => {});
+          return send(res, 403, { error: 'role_not_allowed', host: parsed.hostname });
+        }
+
         if (!isHostAllowed(ctx.policy, routes, parsed.hostname)) {
           markOutcome(res, 'denied');
           void opts.control.ledger({
@@ -1264,7 +1307,9 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       const modelsImplied = route.kind === 'models' && ctx.policySet === true;
       if (!modelsImplied && !ctx.policy.routes.includes(route.id)) return deny(res, ctx, route, 403, 'route_not_allowed', { route: route.id });
       // E12 item 4: a person's roles, applied before the body is read and before any credential is injected.
-      if (ctx.access?.restricted && Object.prototype.hasOwnProperty.call(ctx.access.routes, route.id) && ctx.access.routes[route.id] !== 'allowed') {
+      const roleAccess = readRoleAccess(ctx.access);
+      if (roleAccess.kind === 'unreadable') return deny(res, ctx, route, 503, 'access_unreadable');
+      if (roleAccess.kind === 'routes' && roleAccess.routes.has(route.id) && roleAccess.routes.get(route.id) !== 'allowed') {
         return deny(res, ctx, route, 403, 'role_not_allowed', { route: route.id });
       }
       const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
@@ -1368,6 +1413,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
 
       if (opts.control.systemRoutes && Date.now() - lastRouteRefresh > ROUTE_REFRESH_INTERVAL_MS) {
         await ensureRoutes();
+      }
+
+      if (roleDeniedHost(readRoleAccess(ctx.access), routes, destHost)) {
+        void opts.control.ledger({ agentId: ctx.run.agentId, runId: ctx.run.runId, actor: `run:${ctx.run.agentId}`, type: 'action', action: 'EGRESS_DENIED_ROLE_NOT_ALLOWED', host: destHost }).catch(() => {});
+        return refuse('403 Forbidden', 403);
       }
 
       if (!isHostAllowed(ctx.policy, routes, destHost)) {

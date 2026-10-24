@@ -55,14 +55,14 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
   };
   const providers: SecretProvider[] = [{ name: 'test', async get(name) { return name === 'GMAIL_KEY' ? GMAIL_KEY : undefined; } }];
 
-  async function run(access: RunContext['access']) {
+  async function run(access: unknown) {
     const runId = `run-${++seq}`;
     ctx = {
       run: { runId, agentId: 'donna', state: 'WORKING', live: true },
       agentState: 'WORKING',
       policy: { routes: ['google-gmail', 'google-calendar', 'discord', 'toString'] },
       spend: { run: 0, day: 0, month: 0 },
-      ...(access ? { access } : {}),
+      ...(access !== undefined ? { access: access as RunContext['access'] } : {}),
     };
     token = await tokens.mint({ runId, agentId: 'donna' });
     upstreamSaw.length = 0;
@@ -137,5 +137,67 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
     // `toString` is a route the factory defines; the answer lists no such route, so roles do not narrow it.
     const r = await get(port, '/toString/x', token);
     assert.equal(r.status, 200);
+  });
+
+  it('an answer the egress cannot read fails closed, never open', async () => {
+    for (const bad of [null, 'restricted', 7, [], { restricted: 'yes' }, {}, { restricted: true }, { restricted: true, routes: null }, { restricted: true, routes: [] }, { restricted: true, routes: { 'google-gmail': 'maybe' } }]) {
+      await run(bad);
+      const r = await get(port, '/google-calendar/events', token);
+      assert.equal(r.status, 503, JSON.stringify(bad));
+      assert.equal(r.json.error, 'access_unreadable');
+      assert.equal(upstreamSaw.length, 0, JSON.stringify(bad));
+    }
+  });
+
+  it('a denied route’s own host is not a way around it: the forward proxy and CONNECT refuse that host', async () => {
+    await run({ restricted: true, routes: { 'google-gmail': 'denied', 'google-calendar': 'allowed' } });
+    const up = (upstream.address() as { port: number }).port;
+    const viaProxy = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: `http://127.0.0.1:${up}/gmail/x`, method: 'GET', headers: { host: `127.0.0.1:${up}`, 'proxy-authorization': `Bearer ${token}`, authorization: `Bearer ${token}` } }, (res) => {
+        let text = '';
+        res.on('data', (c) => (text += c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, text }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(viaProxy.status, 403, viaProxy.text);
+    assert.equal(JSON.parse(viaProxy.text).error, 'role_not_allowed');
+    const tunnel = await new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, method: 'CONNECT', path: `127.0.0.1:${up}`, headers: { 'proxy-authorization': `Bearer ${token}`, authorization: `Bearer ${token}` } });
+      req.on('connect', (res, socket) => {
+        socket.destroy();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(tunnel, 403);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(ledger.some((e) => e.action === 'EGRESS_DENIED_ROLE_NOT_ALLOWED' && e.host === '127.0.0.1'));
+    // And an answer that cannot be read closes the host paths too.
+    await run({ restricted: 'yes' });
+    const unreadable = await new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: `http://127.0.0.1:${up}/gmail/x`, method: 'GET', headers: { host: `127.0.0.1:${up}`, 'proxy-authorization': `Bearer ${token}`, authorization: `Bearer ${token}` } }, (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode ?? 0));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(unreadable, 403);
+    await run({ restricted: true, routes: { 'google-gmail': 'denied', 'google-calendar': 'allowed' } });
+    assert.equal(upstreamSaw.length, 0);
+    // The same host is reachable for a run that is not restricted.
+    await run({ restricted: false });
+    const ok = await new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: `http://127.0.0.1:${up}/gmail/x`, method: 'GET', headers: { host: `127.0.0.1:${up}`, 'proxy-authorization': `Bearer ${token}`, authorization: `Bearer ${token}` } }, (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode ?? 0));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(ok, 200);
   });
 });
