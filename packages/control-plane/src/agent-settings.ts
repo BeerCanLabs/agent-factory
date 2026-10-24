@@ -16,6 +16,7 @@ import { payloadHash } from '@beercanlabs/factory-ledger';
 import { authorize } from '@beercanlabs/factory-bouncer';
 import type { Principal } from '@beercanlabs/factory-auth';
 import { applySettingsChange, changedParts, type AgentRecord, type AgentSettings, type DeclaredRole } from '@beercanlabs/factory-registrar';
+import { BUILTIN_AGENT_IDS } from '@beercanlabs/factory-registrar';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { changeReason, configOf, ledgerVersion, ownersOf } from './config-store.js';
 import { skillRegistry } from './skills.js';
@@ -38,7 +39,8 @@ export function effectiveRoles(state: FactoryState, agent: Pick<AgentRecord, 'id
 export function effectiveSkills(state: FactoryState, agent: Pick<AgentRecord, 'id' | 'skillIds' | 'skillRoutes'>): { skillIds: string[]; skillRoutes: Record<string, string[]> } {
   const skillIds = [...(agent.skillIds ?? [])];
   const skillRoutes: Record<string, string[]> = { ...(agent.skillRoutes ?? {}) };
-  if (!settingsOf(state, agent.id)) return { skillIds, skillRoutes };
+  // Adopted skills' routes count only for an agent whose section holds roles: a soul or memory change alone is not an access change.
+  if (!settingsOf(state, agent.id)?.roles) return { skillIds, skillRoutes };
   for (const adopted of state.configs?.current(agent.id)?.skills ?? []) {
     if (!skillIds.includes(adopted.id)) skillIds.push(adopted.id);
     if (Object.prototype.hasOwnProperty.call(skillRoutes, adopted.id)) continue;
@@ -50,7 +52,7 @@ export function effectiveSkills(state: FactoryState, agent: Pick<AgentRecord, 'i
 
 /** The agent as access decisions see it: the roles and skill routes in force. Same record when there is no section. */
 export function agentInForce(state: FactoryState, agent: AgentRecord): AgentRecord {
-  if (!settingsOf(state, agent.id)) return agent;
+  if (!settingsOf(state, agent.id)?.roles) return agent;
   const { skillIds, skillRoutes } = effectiveSkills(state, agent);
   return { ...agent, roles: effectiveRoles(state, agent), skillIds, skillRoutes };
 }
@@ -59,6 +61,9 @@ export function agentInForce(state: FactoryState, agent: AgentRecord): AgentReco
 export function canReadSettings(state: FactoryState, principal: Principal, agentId: string): boolean {
   return authorize({ principal, privilege: 'agents.settings.read', resource: { agentId, owners: ownersOf(state, agentId) } }).allowed;
 }
+
+/** One change at a time per agent: the read, merge and write of a settings change are not interleaved. */
+const locks = new Map<string, Promise<void>>();
 
 const SETTINGS = /^\/api\/v1\/agents\/([^/]+)\/settings$/;
 
@@ -72,13 +77,21 @@ export async function handleAgentSettings(state: FactoryState, req: http.Incomin
   const agent = state.agents.get(agentId);
   if (!state.configs) return json(res, 503, { error: 'config_store_unavailable' }), true;
   if (agentId.startsWith('__') || !agent) return json(res, 404, { error: 'not_found' }), true;
-  const current = state.configs.current(agentId);
   if (!write) {
+    const current = state.configs.current(agentId);
     json(res, 200, { agentId, managed: !!current?.agent, ...(current?.agent ? { settings: current.agent } : {}), version: current?.version ?? null });
     return true;
   }
-  if (agent.isBuiltin || agent.category === 'builtin') return json(res, 400, { error: 'builtin_agents_have_no_settings' }), true;
-  const next = applySettingsChange(current?.agent, await readJson(req));
+  if (agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id)) return json(res, 400, { error: 'builtin_agents_have_no_settings' }), true;
+  // The body is read first, then the read-merge-write runs alone for this agent: two changes never overwrite each other.
+  const body = await readJson(req);
+  const previous = locks.get(agentId) ?? Promise.resolve();
+  let release!: () => void;
+  locks.set(agentId, new Promise<void>((r) => (release = r)));
+  await previous;
+  try {
+    const current = state.configs.current(agentId);
+  const next = applySettingsChange(current?.agent, body);
   if (!next.ok) return json(res, 400, { error: 'invalid_settings', message: next.error }), true;
   if (next.settings.roles) {
     // A role may name only a skill the agent declares or has adopted, so those stay the ceiling (CF2).
@@ -118,4 +131,7 @@ export async function handleAgentSettings(state: FactoryState, req: http.Incomin
     json(res, 500, { error: 'settings_not_stored' });
   }
   return true;
+  } finally {
+    release();
+  }
 }

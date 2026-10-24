@@ -146,7 +146,12 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
     const viewer = await call('GET', '/api/v1/agents/mine/config', undefined, VIEWER);
     assert.equal(viewer.status, 200);
     assert.ok(!JSON.stringify(viewer.body).includes('SECRET-SOUL-TEXT'));
-    assert.ok(viewer.body.agent.soulSha256);
+    assert.equal(viewer.body.agent.soulSet, true);
+    assert.equal(viewer.body.agent.soul, undefined);
+    const versions = await call('GET', `/api/v1/agents/mine/config/versions/${viewer.body.version}`, undefined, VIEWER);
+    assert.equal(versions.status, 200);
+    assert.ok(!JSON.stringify(versions.body).includes('SECRET-SOUL-TEXT'), 'a single version is redacted too');
+    assert.ok(JSON.stringify((await call('GET', `/api/v1/agents/mine/config/versions/${viewer.body.version}`, undefined, OWNER)).body).includes('SECRET-SOUL-TEXT'));
     const hist = await call('GET', '/api/v1/agents/mine/config/history', undefined, VIEWER);
     assert.ok(!JSON.stringify(hist.body).includes('SECRET-SOUL-TEXT'));
     const owner = await call('GET', '/api/v1/agents/mine/config', undefined, OWNER);
@@ -181,6 +186,53 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
     // Without the section the cartridge's roles apply again: Guest does not exist there, so it holds nothing.
     assert.equal((await call('PUT', '/api/v1/agents/mine/settings', { roles: null }, OWNER)).status, 200);
     assert.deepEqual(accessForRun(state, run, state.agents.get('mine')!), { restricted: true, routes: { 'google-calendar': 'denied' } });
+  });
+
+  it('a built-in agent has no settings', async () => {
+    const reg = await call('POST', '/api/v1/registry/agents', { repo: 'https://github.com/beercanlabs/SM-bi', commit: SHA, cartridge: cartridge('bi') });
+    assert.equal(reg.status, 201);
+    state.agents.set('bi', { ...state.agents.get('bi')!, isBuiltin: true } as never);
+    assert.equal((await call('PUT', '/api/v1/agents/bi/settings', { soul: 'x' })).status, 400);
+  });
+
+  it('two changes at once never overwrite each other', async () => {
+    const [a, b] = await Promise.all([
+      call('PUT', '/api/v1/agents/theirs/settings', { soul: 'concurrent soul' }),
+      call('PUT', '/api/v1/agents/theirs/settings', { memory: { archetype: 'purpose-built' } }),
+    ]);
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200);
+    const got = (await call('GET', '/api/v1/agents/theirs/settings')).body.settings;
+    assert.equal(got.soul, 'concurrent soul');
+    assert.equal(got.memory.archetype, 'purpose-built');
+    // A body that arrives slowly is merged against the settings as they are when it lands.
+    const slow = await new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/api/v1/agents/theirs/settings', method: 'PUT', headers: { 'content-type': 'application/json', authorization: `Bearer ${ADMIN}`, 'transfer-encoding': 'chunked' } }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode ?? 0)); });
+      req.on('error', reject);
+      req.write('{"memory":{"archetype":"team-member"}');
+      setTimeout(async () => {
+        await call('PUT', '/api/v1/agents/theirs/settings', { soul: 'landed meanwhile' });
+        req.end('}');
+      }, 100);
+    });
+    assert.equal(slow, 200);
+    const final = (await call('GET', '/api/v1/agents/theirs/settings')).body.settings;
+    assert.equal(final.soul, 'landed meanwhile');
+    assert.equal(final.memory.archetype, 'team-member');
+    await call('PUT', '/api/v1/agents/theirs/settings', { soul: null, memory: null });
+  });
+
+  it('a person can be given a role the factory defines, through the identity link, while the cartridge does not define it', async () => {
+    assert.equal((await call('PUT', '/api/v1/agents/mine/settings', { roles: [{ name: 'Guest', skills: { 'google-calendar': { allow: ['*'] } } }] }, OWNER)).status, 200);
+    const link = await call('PUT', '/api/v1/identity-links/discord/301', { actor: 'cloudflare:guest@example.com', agentRoles: { mine: ['Guest'] } });
+    assert.equal(link.status, 200, JSON.stringify(link.body));
+    const refused = await call('PUT', '/api/v1/identity-links/discord/302', { actor: 'cloudflare:x@example.com', agentRoles: { mine: ['Family'] } });
+    assert.equal(refused.status, 400, 'the cartridge’s Family is replaced by the factory’s roles');
+    // The egress sees the factory's role: Guest may use the calendar route, which the cartridge's roles never named for it.
+    const run = state.runs.create({ agentId: 'mine', state: 'WORKING', actor: 'x', trigger: 'api', requestedBy: { provider: 'discord', id: '301' } } as never);
+    assert.deepEqual(accessForRun(state, run, state.agents.get('mine')!), { restricted: true, routes: { 'google-calendar': 'allowed' } });
+    await call('PUT', '/api/v1/agents/mine/settings', { roles: null }, OWNER);
+    assert.equal((accessForRun(state, run, state.agents.get('mine')!) as { routes: Record<string, string> }).routes['google-calendar'], 'denied', 'without the section the cartridge’s roles apply: Guest is not one of them');
   });
 
   it('refuses malformed settings and built-in or unknown agents', async () => {
