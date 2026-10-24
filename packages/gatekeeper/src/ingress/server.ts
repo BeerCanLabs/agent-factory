@@ -1,6 +1,6 @@
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth } from '@beercanlabs/factory-auth';
-import { createGatekeeperIngress } from './index.js';
+import { createGatekeeperIngress, type ApprovalAdapter, type ApprovalPrompt } from './index.js';
 import { createGatekeeperIngressHttp } from './http.js';
 import { createDiscordClient } from './discord.js';
 import { WakeRefusedError, UnauthorizedCallerError, wakeBody, wakeFailure } from './wake.js';
@@ -13,7 +13,47 @@ const presenceAuth = bearerAuth(
   process.env.GATEKEEPER_INGRESS_TOKEN ? [{ name: 'control-plane', token: process.env.GATEKEEPER_INGRESS_TOKEN, roles: ['operator'] }] : [],
 );
 
+const factoryHeaders = () => ({
+  'Content-Type': 'application/json',
+  ...(FACTORY_TOKEN ? { Authorization: `Bearer ${FACTORY_TOKEN}` } : {}),
+});
+
+/** CF4: the factory asks, the ingress posts and reads the answer; this token must hold `gatekeeper-ingress` (approvals.channel). */
+const approvals: ApprovalAdapter = {
+  async prompts(agentId) {
+    const res = await fetch(`${FACTORY_URL}/api/v1/ingress/approval-prompts`, { method: 'POST', headers: factoryHeaders(), body: JSON.stringify({ agentId }) });
+    if (!res.ok) throw new Error(`factory answered ${res.status}`);
+    return ((await res.json()) as { prompts?: ApprovalPrompt[] }).prompts ?? [];
+  },
+  async asked(approvalId, channelId) {
+    const res = await fetch(`${FACTORY_URL}/api/v1/ingress/approvals/${encodeURIComponent(approvalId)}/asked`, {
+      method: 'POST',
+      headers: factoryHeaders(),
+      body: JSON.stringify({ provider: 'discord', channelId }),
+    });
+    if (!res.ok) throw new Error(`factory answered ${res.status}`);
+  },
+  async decide(reply) {
+    const res = await fetch(`${FACTORY_URL}/api/v1/ingress/approvals/decision`, {
+      method: 'POST',
+      headers: factoryHeaders(),
+      body: JSON.stringify({ ...reply, provider: 'discord' }),
+    });
+    if (res.status === 404) return { result: 'unknown' };
+    const body = (await res.json().catch(() => ({}))) as { text?: unknown };
+    if (res.status >= 500) throw new Error(`factory answered ${res.status}`);
+    // The factory's own answer (a decision or a refusal) carries the text to show. Anything without it (a rejected
+    // credential, a malformed request) is not an answer: the message goes on as an ordinary one.
+    if (typeof body.text !== 'string' || !body.text) {
+      console.error(`[gatekeeper-ingress] approval reply: factory answered ${res.status} without a decision`);
+      return { result: 'unknown' };
+    }
+    return { result: 'answered', text: body.text };
+  },
+};
+
 const door = createGatekeeperIngress({
+  approvals,
   discordFactory: createDiscordClient,
   providers: providersFromEnv(),
   wake: async (agentId, msg) => {
@@ -95,3 +135,11 @@ async function pollReconcile() {
   setTimeout(() => void pollReconcile(), 30_000);
 }
 void pollReconcile();
+
+async function pollApprovals() {
+  try {
+    await door.askPending();
+  } catch {}
+  setTimeout(() => void pollApprovals(), 10_000);
+}
+void pollApprovals();

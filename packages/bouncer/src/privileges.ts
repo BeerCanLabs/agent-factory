@@ -34,6 +34,7 @@ export const PRIVILEGES = [
   'hooks.invoke',
   'schedules.write',
   'runs.attest-requester',
+  'approvals.channel',
   'approvals.decide',
   'ledger.ingest',
   'ledger.attest-run-actor',
@@ -196,6 +197,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
   // wake agents and hand off messages.
   'gatekeeper-ingress': [
     'runs.attest-requester',
+    'approvals.channel',
   ],
   // Everything except the exclusive privileges.
   admin: [

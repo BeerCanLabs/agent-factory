@@ -151,6 +151,7 @@ export function createDiscordClient(
   opts: DiscordClientOptions = {},
 ): DiscordClient {
   const handlers: Array<(msg: Omit<Conversation, 'agentId'>) => void> = [];
+  let interceptor: ((msg: Omit<Conversation, 'agentId'>) => Promise<boolean>) | undefined;
   const standbySessions = new Map<string, StandbySession>(); // channelId -> StandbySession
   const activeTurns = new Map<string, ActiveTurnSession>(); // channelId -> ActiveTurnSession
   const turnLeaseMs = opts.turnLeaseMs ?? (Number(process.env.GATEKEEPER_INGRESS_TURN_LEASE_MS) || 30_000);
@@ -337,6 +338,15 @@ export function createDiscordClient(
 
       console.log(`[gatekeeper-ingress] Discord message received in channel ${message.channelId} from ${message.author.id}`);
 
+      // CF4: an answer to an approval question is the factory's, not the agent's: consumed here, before any standby or wake.
+      if (interceptor) {
+        try {
+          if (await interceptor({ channelId: message.channelId, messageId: message.id, content: message.content, authorId: message.author.id })) return;
+        } catch (err) {
+          console.warn('[gatekeeper-ingress] approval interceptor failed:', err);
+        }
+      }
+
       // If the agent cannot take a turn yet (asleep or still starting), start a standby session with recurring
       // typing and timers; the agent's first reply in the channel clears it.
       if (currentPresence !== 'available' && !standbySessions.has(message.channelId)) {
@@ -508,6 +518,21 @@ export function createDiscordClient(
         }
       } catch (err) {
         console.warn('[gatekeeper-ingress] Failed to post the wake refusal:', err);
+      }
+    },
+    setInterceptor(fn: (msg: Omit<Conversation, 'agentId'>) => Promise<boolean>) {
+      interceptor = fn;
+    },
+    async send(channelId: string, text: string) {
+      try {
+        const channel = await client.channels.fetch(channelId);
+        if (!channel || !('send' in channel)) return false;
+        // Nothing in the text pings anyone, whatever it quotes from a request.
+        await channel.send({ content: text, allowedMentions: { parse: [] } });
+        return true;
+      } catch (err) {
+        console.warn('[gatekeeper-ingress] Failed to post an approval message:', err);
+        return false;
       }
     },
     async refuseUnauthorized(channelId: string) {

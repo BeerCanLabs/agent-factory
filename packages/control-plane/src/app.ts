@@ -54,6 +54,7 @@ import { handleRunProgress } from './progress-routes.js';
 import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercanlabs/factory-inspector';
 import { handleSchedules, requesterOfRun } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
+import { handleChannelApprovals } from './channel-approvals.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
@@ -904,7 +905,7 @@ function visibleApprovals(state: FactoryState, reader: Principal, all: Approval[
   });
 }
 
-function mayDecide(state: FactoryState, principal: Principal, approvalId: string): { ok: true } | { ok: false; required: Role } {
+export function mayDecide(state: FactoryState, principal: { actor: string; roles: Role[] }, approvalId: string): { ok: true } | { ok: false; required: Role } {
   const global = authorize({ principal, privilege: 'approvals.decide' });
   const approval = state.approvals.get(approvalId);
   // CF4: a configuration change is the agent's owners' to decide, or an admin's; the run's requester rule (E9) does not apply,
@@ -925,7 +926,7 @@ function mayDecide(state: FactoryState, principal: Principal, approvalId: string
   return scoped.allowed ? { ok: true } : { ok: false, required: scoped.required };
 }
 
-async function decideApproval(state: FactoryState, id: string, decision: unknown, principal: Principal, notes?: unknown): Promise<Outcome<unknown>> {
+export async function decideApproval(state: FactoryState, id: string, decision: unknown, principal: Principal, notes?: unknown, via?: { provider: string; channelId: string }): Promise<Outcome<unknown>> {
   const actor = principal.actor;
   const may = mayDecide(state, principal, id);
   if (!may.ok) return { status: 403, body: { error: 'forbidden', required: may.required } };
@@ -949,6 +950,8 @@ async function decideApproval(state: FactoryState, id: string, decision: unknown
     approvalId: decided.approvalId,
     mcpName: decided.tool,
     route: decided.route,
+    // CF4: decided in a channel: where, as the ingress attested it, written before anything is allowed.
+    ...(via ? { requestId: `${via.provider}:${via.channelId}` } : {}),
   });
   if (decided.kind === 'change') {
     // The decision is ledgered above before anything is applied. The agent is not told and carries nothing.
@@ -1106,6 +1109,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (await handleAgentSettings(state, req, res, path)) return;
   if (await handleAgentCreation(state, req, res, path)) return;
   if (await handleAgentBundle(state, req, res, path)) return;
+  if (path.startsWith('/api/v1/ingress/') && (await handleChannelApprovals(state, req, res, path))) return;
   if (await handleRoleAssignments(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;
