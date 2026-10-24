@@ -69,6 +69,13 @@ describe('the build’s input (SK4)', () => {
     assert.deepEqual(Object.keys(JSON.parse(e.SKILLS)[0]).sort(), ['commit', 'id', 'path', 'repo', 'version'], 'only what the build needs');
   });
 
+  it('starts the agent builder project by default, with exactly the variables it always had', async () => {
+    const { client, calls } = sent();
+    await buildAgentImage('higgins', { repo: 'https://github.com/BeerCanLabs/SM-higgins', commit: C }, { client, pollMs: 0 });
+    assert.equal(calls[0].input.projectName, 'factory-agent-builder');
+    assert.deepEqual(Object.keys(env(calls)).sort(), ['AGENT_ID', 'GIT_COMMIT', 'IMAGE_TAG', 'REPO_URL']);
+  });
+
   it('sends no SKILLS for an agent without skills, and the tag it always had', async () => {
     const { client, calls } = sent();
     await buildAgentImage('higgins', { repo: 'https://github.com/BeerCanLabs/SM-higgins', commit: C }, { client, pollMs: 0 });

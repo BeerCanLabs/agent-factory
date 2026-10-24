@@ -3,7 +3,8 @@
 The factory's image build (SK4) places each adopted skill's folder at `/opt/factory/skills/<id>/`, pinned to the version
 the factory recorded, and lists them in `/opt/factory/skills.json`. The runtime loads only the skills the agent's
 configuration lists, never whatever else is in the folder. A skill's `skill.yaml` names its `entry` module; the module defines `tools()`, a list of
-`{"name", "description", "parameters", "handler"}` where `handler(arguments: dict, context: dict) -> str`.
+`{"name", "description", "parameters", "handler"}` where `handler(arguments: dict, context: dict) -> str`. The entry is a
+file, a module or a package inside the skill folder; the folder is importable, nothing else is installed (standard library only).
 A skill reaches only the routes the agent's policy grants: the gatekeeper-egress decides, not this loader.
 """
 from __future__ import annotations
@@ -49,9 +50,17 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
             # `entry` is a path inside the skill folder or a dotted module (docs/SKILLS.md section 1).
             relative = named if named.endswith(".py") else named.replace(".", "/") + ".py"
             target = (folder / relative).resolve()
+            # A dotted entry may name a package (`entry: tavily_search` with `tavily_search/__init__.py`), which SK1 accepts.
+            if not named.endswith(".py") and not target.exists():
+                target = (folder / named.replace(".", "/") / "__init__.py").resolve()
             if folder.resolve() not in target.parents:
                 raise ValueError("entry leaves the skill folder")
-            spec = importlib.util.spec_from_file_location(f"skill_{sid.replace('-', '_')}", target)
+            # The skill's own folder is importable, so its modules can import each other. Standard library only otherwise:
+            # nothing is installed for a skill (docs/SKILLS.md).
+            if str(folder.resolve()) not in sys.path:
+                sys.path.insert(0, str(folder.resolve()))
+            name = f"skill_{sid.replace('-', '_')}"
+            spec = importlib.util.spec_from_file_location(name, target, submodule_search_locations=[str(target.parent)] if target.name == "__init__.py" else None)
             if spec is None or spec.loader is None:
                 raise ValueError("cannot load entry")
             module = importlib.util.module_from_spec(spec)

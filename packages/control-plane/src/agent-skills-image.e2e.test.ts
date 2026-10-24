@@ -34,6 +34,8 @@ describe('an agent with adopted skills runs the shared runtime with them layered
   const registered: Array<{ agentId: string; image: string; env?: Record<string, string> }> = [];
   const builds: Array<{ agentId: string; base: { image: string; commit: string }; skills: BuildSkill[] }> = [];
   let refuse: AdmissionRefusedError | undefined;
+  /** While set, a skills build waits for it: the deploy is in flight. */
+  let hold: Promise<void> | undefined;
   const call = async (method: string, path: string, body?: unknown) => {
     const res = await fetch(`http://127.0.0.1:${port}${path}`, {
       method,
@@ -90,8 +92,9 @@ describe('an agent with adopted skills runs the shared runtime with them layered
         buildImage: async () => { throw new Error('a configuration agent is never built from a repository'); },
         buildSkillsImage: async (agentId: string, base: { image: string; commit: string }, skills: BuildSkill[]) => {
           builds.push({ agentId, base, skills });
+          if (hold) await hold;
           if (refuse) throw refuse;
-          return SKILLS_IMAGE(agentId, skills);
+          return `registry.example/dynamic:${imageTagFor(agentId, base.commit, skills)}`;
         },
         provisionIdentity: async () => ({ identity: 'id', executionIdentity: 'exec' }),
         registerCompute: async (agentId: string, image: string, _s: string[], _i: string, _e?: string, _m?: string, env?: Record<string, string>) => { registered.push({ agentId, image, env }); },
@@ -161,6 +164,72 @@ describe('an agent with adopted skills runs the shared runtime with them layered
     assert.equal(a.admission?.status, 'refused');
     assert.equal(registered.length, before, 'no compute was registered');
     assert.equal(builds.at(-1)!.skills[0].id, skill.id);
+  });
+
+  it('a deploy in flight is on the record while it builds, refuses a second one, and a skill adopted meanwhile is applied when it ends', async () => {
+    await create('orion');
+    const first = await adoptSkill('orion', 'orion-notes');
+    let release!: () => void;
+    hold = new Promise<void>((r) => (release = r));
+    assert.equal((await call('POST', '/api/v1/registry/agents/orion/deploy', {})).status, 202);
+    const a = state.agents.get('orion')!;
+    assert.equal(a.state, 'DEPLOYING');
+    assert.equal(a.admission?.status, 'building');
+    assert.equal(a.admission?.commit, RUNTIME_SHA, 'admitted at the runtime commit, not a repository commit');
+    assert.equal((await call('POST', '/api/v1/registry/agents/orion/deploy', {})).body.error, 'invalid_state', 'no second deploy beside the first');
+    const second = await adoptSkill('orion', 'orion-extra');
+    release();
+    hold = undefined;
+    await waitFor(() => a.artifact === SKILLS_IMAGE('orion', [first, second]), 'the skill adopted during the build to be applied after it');
+    assert.deepEqual(a.deployedSkills?.map((k) => k.id).sort(), ['orion-extra', 'orion-notes']);
+    assert.equal(a.state, 'SLEEPING');
+    assert.equal(a.admission?.status, 'admitted');
+  });
+
+  it('builds on the runtime the factory pins now, not the one the agent was created on', async () => {
+    await create('lyra');
+    assert.equal((await call('POST', '/api/v1/registry/agents/lyra/deploy', {})).status, 200);
+    const pin = state.sharedRuntime!;
+    const NEWER = 'a'.repeat(40);
+    state.sharedRuntime = { repo: pin.repo, commit: NEWER, image: 'registry.example/factory-agent-runtime:newer' };
+    try {
+      const skill = await adoptSkill('lyra', 'lyra-notes');
+      await waitFor(() => builds.at(-1)?.agentId === 'lyra' && state.agents.get('lyra')!.deployedSkills?.length === 1, 'the apply');
+      assert.deepEqual(builds.at(-1)!.base, { image: 'registry.example/factory-agent-runtime:newer', commit: NEWER });
+      const a = state.agents.get('lyra')!;
+      assert.equal(a.deployedCommit, NEWER);
+      assert.equal(a.admission?.commit, NEWER);
+      assert.equal(a.artifact, `registry.example/dynamic:${imageTagFor('lyra', NEWER, [skill])}`);
+    } finally {
+      state.sharedRuntime = pin;
+    }
+  });
+
+  it('a deploy brings a paused agent online, as for a repository agent; a refused redeploy leaves a running one as it was', async () => {
+    const a = state.agents.get('lyra')!;
+    const refused = () => ledger.query({ agent: 'lyra' }).filter((e) => e.action === 'AGENT_ADMISSION_REFUSED:hardcoded_secret').length;
+    a.state = 'PAUSED';
+    refuse = new AdmissionRefusedError('hardcoded_secret', 'a credential in a skill');
+    try {
+      assert.equal((await call('POST', '/api/v1/registry/agents/lyra/deploy', {})).status, 202);
+      await waitFor(() => refused() === 1, 'the first refusal');
+      assert.equal(a.state, 'PAUSED', 'a refused deploy leaves a paused agent paused');
+    } finally {
+      refuse = undefined;
+    }
+    assert.equal((await call('POST', '/api/v1/registry/agents/lyra/deploy', {})).status, 202);
+    await waitFor(() => a.state === 'SLEEPING', 'the deploy to bring it online');
+    const image = a.artifact;
+    refuse = new AdmissionRefusedError('hardcoded_secret', 'a credential in a skill');
+    try {
+      assert.equal((await call('POST', '/api/v1/registry/agents/lyra/deploy', {})).status, 202);
+      await waitFor(() => refused() === 2, 'the second refusal');
+    } finally {
+      refuse = undefined;
+    }
+    assert.equal(a.state, 'SLEEPING', 'the running version stays in place');
+    assert.notEqual(a.artifact, undefined);
+    assert.equal(a.artifact, image);
   });
 
   it('a provider that cannot build skills refuses to deploy the agent without them, and does not apply a skill to a running one', async () => {

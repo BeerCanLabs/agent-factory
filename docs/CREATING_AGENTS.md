@@ -39,7 +39,12 @@ A new runtime version does not re-deploy agents that already run an older one.
 
 ## What a deployment needs
 
-`FACTORY_RUNTIME_IMAGE` (the shared runtime image) and `FACTORY_RUNTIME_COMMIT` (the full commit it was built from) pin the
-runtime; `FACTORY_RUNTIME_REPO` names its repository (default `BeerCanLabs/agent-factory`). Without them no agent can be
-created. On a compose host the control plane also needs `FACTORY_RUNTIME_IMAGE` for its Docker runtime, which is the same
+`FACTORY_RUNTIME_IMAGE` (the shared runtime image, by tag in the runtime's own registry, never a digest or `:latest`; a
+runtime rebuilt under the same tag changes the base of agents built after it, so the tag names the commit) and
+`FACTORY_RUNTIME_COMMIT` (the full commit it was built from) pin the runtime; `FACTORY_RUNTIME_REPO` names its repository
+(default `BeerCanLabs/agent-factory`). Without them no agent can be created. On AWS the landing zone sets them from the
+variables `shared_runtime_image`, `shared_runtime_commit` and `shared_runtime_repo`, creates the runtime's registry
+(`factory-agent-runtime`) and the skills builder project, and tells the control plane its name
+(`FACTORY_SKILLS_BUILDER_PROJECT`, default `factory-skills-builder`). A skill an agent adopts is Python using only the standard
+library (nothing is installed for it), as a file, module or package in its folder. On a compose host the control plane also needs `FACTORY_RUNTIME_IMAGE` for its Docker runtime, which is the same
 variable.

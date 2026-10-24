@@ -390,6 +390,21 @@ class TestSkills(Base):
         tools, problems = load_skills([{"id": "notes"}])
         self.assertEqual((problems, [t.name for t in tools]), ([], ["add_note"]))
 
+    def test_a_package_entry_and_a_sibling_import_load(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "pkg-skill"
+        (folder / "pkg_skill").mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: pkg-skill\nversion: 1.0.0\nlanguage: python\nentry: pkg_skill\n")
+        (folder / "helper.py").write_text("WORD = 'sibling'\n")
+        (folder / "pkg_skill" / "__init__.py").write_text(
+            "import helper\nfrom . import inner\n"
+            "def tools():\n"
+            "    return [{'name': 'pkg_tool', 'description': 'x', 'parameters': {}, 'handler': lambda a, c: helper.WORD + inner.WORD}]\n")
+        (folder / "pkg_skill" / "inner.py").write_text("WORD = '+inner'\n")
+        tools, problems = load_skills([{"id": "pkg-skill"}])
+        self.assertEqual((problems, [t.name for t in tools]), ([], ["pkg_tool"]))
+        from runtime.skills import run_tool
+        self.assertEqual(run_tool(tools[0], "{}", {}), "sibling+inner")
+
     def test_a_skill_entry_cannot_leave_its_folder(self):
         self.write_skill(entry="../../outside.py")
         tools, problems = load_skills([{"id": "notes"}])

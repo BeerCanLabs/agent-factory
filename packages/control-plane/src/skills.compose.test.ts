@@ -306,6 +306,26 @@ describe('the skills buildspec for an agent on the shared runtime (CF6, SK4, TSK
     assert.equal(readFileSync(join(work, 'compose-skills.sh'), 'utf8'), readFileSync(SCRIPT, 'utf8'));
   });
 
+  it('maps a failed pull and a refused skill to the exit codes the provider reads, and can run docker and read private skill repositories', () => {
+    const { commands } = render();
+    assert.ok(commands.pre_build.some((c) => /docker pull "\$BASE_IMAGE" \|\| exit 5/.test(c)), 'a base that cannot be pulled is exit 5');
+    assert.ok(commands.pre_build.some((c) => c.includes('compose-skills.sh /tmp/factory-skills; RC=$?') && c.includes('exit "$RC"')), 'the composer’s exit code (5 pin, 6 credential) is the build’s');
+    assert.ok(commands.install.some((c) => c.includes('RUNTIME_COMMIT') && c.includes('[0-9a-f]{40}')), 'the runtime commit is a full SHA');
+    const block = tf.slice(tf.indexOf('resource "aws_codebuild_project" "factory_skills_builder"'));
+    const project = block.slice(0, block.indexOf('buildspec'));
+    assert.match(project, /privileged_mode\s*=\s*true/, 'a docker build needs it');
+    for (const name of ['ECR_REPO_URI', 'RUNTIME_REPO_URI', 'GIT_TOKEN_SECRET_ID', 'SOURCE_TOKEN_HOSTS']) assert.match(project, new RegExp(`name\\s*=\\s*"${name}"`), name);
+  });
+
+  it('pins the runtime for the control plane only when one is set, and refuses a runtime that cannot work', () => {
+    const ecs = readFileSync(join(dir, 'ecs.tf'), 'utf8');
+    assert.match(ecs, /var\.shared_runtime_image == "" \? \[\] : \[[\s\S]*?FACTORY_RUNTIME_IMAGE[\s\S]*?FACTORY_RUNTIME_COMMIT[\s\S]*?FACTORY_RUNTIME_REPO[\s\S]*?\]\)/, 'the three settings come together, or not at all');
+    const vars = readFileSync(join(dir, 'variables.tf'), 'utf8');
+    assert.match(vars, /condition\s*=\s*var\.shared_runtime_image == "" \? true : can\(regex\("\^\[0-9a-f\]\{40\}\$", var\.shared_runtime_commit\)\)/, 'a full commit when an image is set');
+    assert.match(vars, /can\(regex\("\/factory-agent-runtime:\[A-Za-z0-9_\.-\]\+\$", var\.shared_runtime_image\)\)/, 'a tag in the runtime registry, not a digest');
+    assert.match(vars, /!contains\(keys\(var\.agents\), "runtime"\)/, 'no agent shares the runtime’s registry');
+  });
+
   it('is given the registries by the same project the control plane starts, and the control plane is told its name and the runtime', () => {
     const block = tf.slice(tf.indexOf('resource "aws_codebuild_project" "factory_skills_builder"'));
     assert.match(block, /name\s+= "factory-skills-builder"/);

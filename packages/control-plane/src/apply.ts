@@ -185,7 +185,6 @@ export function applyConfig(state: FactoryState, agentId: string, actor: string,
   const agent = state.agents.get(agentId);
   if (!agent) return { status: 'skipped', reason: 'unknown_agent' };
   if (agent.isBuiltin || BUILTIN_AGENT_IDS.has(agent.id)) return { status: 'skipped', reason: 'builtin_agent' };
-  if (!agent.deployedCommit) return { status: 'skipped', reason: 'not_deployed' };
   if (agent.state === 'RETIRED_PENDING_PURGE' || agent.state === 'PURGED') return { status: 'skipped', reason: `agent_${agent.state.toLowerCase()}` };
   const requestId = `config:${agentId}:v${state.configs?.current(agentId)?.version ?? 0}`;
 
@@ -195,6 +194,9 @@ export function applyConfig(state: FactoryState, agentId: string, actor: string,
     flags.set(agentId, { actor, reason });
     return { status: 'pending' };
   }
+  // Never deployed: its first deploy builds the skills in. (Checked after the deploy-in-progress case above, so a skill
+  // adopted while that first deploy builds is applied when it ends, not dropped.)
+  if (!agent.deployedCommit) return { status: 'skipped', reason: 'not_deployed' };
 
   const built = buildSkillsFor(state, agentId);
   if (!built.ok) {
