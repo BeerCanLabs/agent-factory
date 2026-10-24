@@ -468,6 +468,44 @@ class TestSkills(Base):
         self.assertEqual(problems, [])
         self.assertIn("error", run_tool(tools[0], "{}", {}), "its folder is not importable once loaded; import at the top of the entry")
 
+    def test_the_path_is_put_back_whatever_the_skill_did_to_it(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "pathy"
+        folder.mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: pathy\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+        (folder / "entry.py").write_text("import os, sys\nsys.path.append(os.path.dirname(__file__))\nsys.path.insert(0, '/tmp/evil-skill-path')\ndef tools():\n    return []\n")
+        before = list(sys.path)
+        tools, problems = load_skills([{"id": "pathy"}])
+        self.assertEqual(problems, [])
+        self.assertEqual(sys.path, before)
+
+    def test_a_failed_package_leaves_no_submodule_and_a_partly_foreign_namespace_package_is_kept(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "bad-pkg"
+        (folder / "bad_pkg").mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: bad-pkg\nversion: 1.0.0\nlanguage: python\nentry: bad_pkg\n")
+        (folder / "bad_pkg" / "__init__.py").write_text("from . import sub\nraise RuntimeError('late')\n")
+        (folder / "bad_pkg" / "sub.py").write_text("X = 1\n")
+        tools, problems = load_skills([{"id": "bad-pkg"}])
+        self.assertIn("late", problems[0])
+        self.assertFalse([m for m in sys.modules if m.startswith("skill_bad_pkg")])
+        # A namespace package found partly outside the skill folder is not the skill's to remove.
+        other = Path(self.tmp.name) / "elsewhere"
+        (other / "shared_ns").mkdir(parents=True)
+        (other / "shared_ns" / "x.py").write_text("V = 1\n")
+        sk = Path(os.environ["SKILLS_DIR"]) / "ns-mixed"
+        (sk / "shared_ns").mkdir(parents=True)
+        (sk / "skill.yaml").write_text("id: ns-mixed\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+        (sk / "shared_ns" / "y.py").write_text("V = 2\n")
+        (sk / "entry.py").write_text("import shared_ns\nfrom shared_ns import x, y\ndef tools():\n    return []\n")
+        sys.path.append(str(other))
+        try:
+            tools, problems = load_skills([{"id": "ns-mixed"}])
+            self.assertEqual(problems, [])
+            self.assertIn("shared_ns", sys.modules, "found in the skill folder and elsewhere: not the skill's alone")
+        finally:
+            sys.path.remove(str(other))
+            for m in [m for m in sys.modules if m.startswith("shared_ns")]:
+                del sys.modules[m]
+
     def test_a_skill_entry_cannot_leave_its_folder(self):
         self.write_skill(entry="../../outside.py")
         tools, problems = load_skills([{"id": "notes"}])

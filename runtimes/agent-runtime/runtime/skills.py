@@ -67,17 +67,18 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
             module = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = module
             known = set(sys.modules)
+            path_list, path_before = sys.path, list(sys.path)
             sys.path.append(str(root_folder))
             try:
                 spec.loader.exec_module(module)
             except BaseException:
-                sys.modules.pop(spec.name, None)
-                raise
+                # A failed load leaves nothing of the skill: not the entry, and not its submodules.
+                for gone in [m for m in sys.modules if m == spec.name or m.startswith(spec.name + ".")]:
+                    sys.modules.pop(gone, None)
+                raise  # policy: only Exception and SystemExit are a broken skill (below); KeyboardInterrupt still stops the runtime
             finally:
-                try:
-                    sys.path.remove(str(root_folder))
-                except ValueError:
-                    pass
+                # Its modules are judged while its folder is still on the path; then the path is put back as it was, whatever the
+                # skill did to it (added its own folder again, inserted another).
                 for added in set(sys.modules) - known:
                     if added == spec.name or added.startswith(spec.name + "."):
                         continue
@@ -87,8 +88,10 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
                     places = [str(x) for x in getattr(mod, "__path__", [])] if origin is None else []
                     if (origin and root_folder in Path(origin).resolve().parents) or (places and all(root_folder in [Path(x).resolve(), *Path(x).resolve().parents] for x in places)):
                         del sys.modules[added]
+                sys.path = path_list
+                path_list[:] = path_before
                 importlib.invalidate_caches()
-                for place in [k for k in sys.path_importer_cache if k.startswith(str(root_folder))]:
+                for place in [k for k in sys.path_importer_cache if k == str(root_folder) or k.startswith(str(root_folder) + os.sep)]:
                     del sys.path_importer_cache[place]
             for t in module.tools():
                 name = str(t["name"])
