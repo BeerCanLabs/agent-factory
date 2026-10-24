@@ -31,10 +31,11 @@
 import http from 'node:http';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENT_ID, type ConfigContent, type ConfigRecord } from '@beercanlabs/factory-registrar';
+import { AGENT_ID, type AgentSettings, type ConfigContent, type ConfigRecord } from '@beercanlabs/factory-registrar';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { parseActor } from './identity-links.js';
 import { isReservedPolicyId } from '@beercanlabs/factory-gatekeeper/policy';
+import { canReadSettings } from './agent-settings.js';
 
 /**
  * The agent's configuration as the factory holds it now. Adopted skills and owners carry forward: a registration, a
@@ -49,6 +50,8 @@ export function configOf(state: FactoryState, agentId: string): ConfigContent {
     skills: previous?.skills ?? [],
     policy: state.policies.has(agentId) ? state.policies.get(agentId) : null,
     ...(previous?.owners ? { owners: previous.owners } : {}),
+    // CF1: the agent's own settings carry forward like owners and skills, so no other change ever drops them.
+    ...(previous?.agent ? { agent: previous.agent } : {}),
   };
 }
 
@@ -82,7 +85,7 @@ export async function recordConfig(state: FactoryState, agentId: string, change:
   const store = state.configs;
   if (!store || agentId.startsWith('__')) return undefined;
   try {
-    const { record, created } = await store.put(configOf(state, agentId), { updatedBy: change.actor, reason: change.reason });
+    const { record, created } = await store.put(configOf(state, agentId), { updatedBy: change.actor, reason: change.reason, replaces: [] });
     if (created) ledgerVersion(state, record, change.actor);
     return record;
   } catch (err) {
@@ -267,7 +270,7 @@ async function handleOwners(state: FactoryState, req: http.IncomingMessage, res:
   try {
     const { record, created } = await state.configs.put(
       { ...content, ...(checked.owners.length ? { owners: checked.owners } : {}) },
-      { updatedBy: principal.actor, reason: changeReason(req, 'owners changed') },
+      { updatedBy: principal.actor, reason: changeReason(req, 'owners changed'), replaces: ['owners'] },
     );
     if (created) ledgerVersion(state, record, principal.actor);
     json(res, 200, record);
@@ -304,7 +307,16 @@ export async function handleConfig(state: FactoryState, req: http.IncomingMessag
   }
   const m = path.match(AGENT_CONFIG);
   if (!m) return false;
-  if (!(await requirePrivilege(req, res, state, 'config.read', { agentId: decodeURIComponent(m[1]) }))) return true;
+  const reader = await requirePrivilege(req, res, state, 'config.read', { agentId: decodeURIComponent(m[1]) });
+  if (!reader) return true;
+  // CF1: the agent's own settings (soul, roles, memory) are for those who may read them, not every viewer; a viewer
+  // learns only which parts are set. The record's `hash` is kept, and no longer verifies against the shown content.
+  const seesSettings = canReadSettings(state, reader, decodeURIComponent(m[1]));
+  const shown = (r: ConfigRecord): ConfigRecord => {
+    if (seesSettings || !r.agent) return r;
+    const flags = { ...(r.agent.soul ? { soulSet: true } : {}), ...(r.agent.roles ? { rolesSet: true } : {}), ...(r.agent.memory ? { memorySet: true } : {}) };
+    return { ...r, agent: flags as unknown as AgentSettings };
+  };
   if (!state.configs) {
     json(res, 503, { error: 'config_store_unavailable' });
     return true;
@@ -316,13 +328,13 @@ export async function handleConfig(state: FactoryState, req: http.IncomingMessag
     return true;
   }
   if (!m[2]) {
-    json(res, 200, history[history.length - 1]);
+    json(res, 200, shown(history[history.length - 1]));
   } else if (m[2] === 'history') {
-    json(res, 200, { agentId, current: history[history.length - 1].version, versions: history });
+    json(res, 200, { agentId, current: history[history.length - 1].version, versions: history.map(shown) });
   } else {
     const n = /^[1-9]\d*$/.test(m[3]) ? Number(m[3]) : NaN;
     const record = history.find((r) => r.version === n);
-    if (record) json(res, 200, record);
+    if (record) json(res, 200, shown(record));
     else json(res, 404, { error: 'version_not_found' });
   }
   return true;

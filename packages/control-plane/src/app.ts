@@ -41,6 +41,7 @@ import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
+import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
@@ -1061,6 +1062,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
+  if (await handleAgentSettings(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills') || /^\/api\/v1\/agents\/[^/]+\/skills(\/|$)/.test(path)) && (await handleSkills(state, req, res, path))) return;
@@ -2521,11 +2523,13 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
   if (rolesMatch && req.method === 'GET') {
     const agentId = decodeURIComponent(rolesMatch[1]);
     if (!(await requirePrivilege(req, res, state, 'agents.roles.read', { agentId }))) return;
-    const agent = state.agents.get(agentId);
-    if (!agent) {
+    const recorded = state.agents.get(agentId);
+    if (!recorded) {
       json(res, 404, { error: 'not_found' });
       return;
     }
+    // CF1: the roles and skill routes in force: the factory's section when it holds roles, the cartridge's otherwise.
+    const agent = agentInForce(state, recorded);
     const roles = agent.roles ?? [];
     // `?held=Family,Realtor`: what someone who holds those roles may use, by the rule the egress will apply (E12, TSK-174;
     // nothing enforces it there yet). More than 20 names is refused, not silently cut.

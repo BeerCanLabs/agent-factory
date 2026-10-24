@@ -379,3 +379,33 @@ describe('adoption provenance', () => {
     }
   });
 });
+
+describe('a change takes the parts it does not author from the latest record, at write time (CF1)', () => {
+  const settings = { soul: 'be kind' };
+  it('does not put back an older owners list, soul or adoption set, and applies only its own part', async () => {
+    const dir = tmp();
+    try {
+      const store = await VersionedConfigStore.open(new FileConfigBackend(dir));
+      await store.put(content(), meta);
+      const stale = content(); // read before the two changes below landed
+      await store.put(content({ owners: ['token:a'] }), { ...meta, replaces: ['owners'] });
+      await store.put(content({ agent: settings }), { ...meta, replaces: ['agent'] });
+      await store.put(content({ skills: [{ id: 'notes', version: '1.0.0' } as never] }), { ...meta, replaces: ['skills'] });
+      // A policy change built from the stale read: replaces nothing, so all three survive.
+      const after = await store.put({ ...stale, policy: { routes: ['models', 'gmail'] } }, { ...meta, replaces: [] });
+      assert.equal(after.created, true);
+      assert.deepEqual(store.current('ada')!.owners, ['token:a']);
+      assert.deepEqual(store.current('ada')!.agent, settings);
+      assert.deepEqual(store.current('ada')!.skills.map((s) => s.id), ['notes']);
+      assert.deepEqual(store.current('ada')!.policy, { routes: ['models', 'gmail'] });
+      // An owners change authors only owners: it cannot clear the soul.
+      await store.put(content({ owners: ['token:b'] }), { ...meta, replaces: ['owners'] });
+      assert.deepEqual(store.current('ada')!.agent, settings);
+      // Without `replaces`, the content is stored exactly as given (every existing caller and test).
+      await store.put(content({ owners: ['token:b'] }), meta);
+      assert.equal(store.current('ada')!.agent, undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
