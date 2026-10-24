@@ -59,6 +59,8 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/agents/castle/roles', privilege: 'agents.roles.read', role: 'admin' },
   { method: 'POST', path: '/api/v1/agents', privilege: 'agents.create', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/agents/castle/settings', privilege: 'agents.settings.read', role: 'admin' },
+  { method: 'GET', path: '/api/v1/agents/castle/role-assignments', privilege: 'agents.roles.assign', role: 'admin' },
+  { method: 'PUT', path: '/api/v1/agents/castle/role-assignments/discord/1', privilege: 'agents.roles.assign', role: 'admin', body: { roles: [] } },
   { method: 'PUT', path: '/api/v1/agents/castle/settings', privilege: 'agents.settings.set', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/agents/castle/config', privilege: 'config.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/agents/castle/config/history', privilege: 'config.read', role: 'viewer' },
@@ -324,6 +326,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       { method: 'GET', path: '/api/v1/runs/nope/mailbox' },
       { method: 'POST', path: '/api/v1/runs/nope/training', body: {} },
       { method: 'POST', path: '/api/v1/runs/nope/reply', body: {} },
+      { method: 'POST', path: '/api/v1/runs/nope/role-requests', body: {} },
       { method: 'GET', path: '/api/v1/runs/nope/events' },
       { method: 'POST', path: '/api/v1/keymaster/checkout', body: {} },
     ];

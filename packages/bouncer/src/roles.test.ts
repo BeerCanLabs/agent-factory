@@ -21,6 +21,7 @@ const OWNER_RIGHTS: Privilege[] = [
   'agents.roles.read',
   'agents.settings.read',
   'agents.settings.set',
+  'agents.roles.assign',
   'approvals.decide',
   'agents.update.read',
   'agents.update.install',
