@@ -53,6 +53,22 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
     roles: { Family: { skills: { 'google-calendar': { allow: ['*'] } } } },
   });
 
+  /** Makes every store write take 40 ms, so changes started a few ms apart genuinely overlap. */
+  const slowStore = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const backend = (state.configs as unknown as { backend: { write: (r: unknown) => Promise<void> } }).backend;
+    const real = backend.write.bind(backend);
+    backend.write = async (r) => {
+      await new Promise((done) => setTimeout(done, 40));
+      return real(r);
+    };
+    try {
+      return await fn();
+    } finally {
+      backend.write = real;
+    }
+  };
+  const later = <T>(ms: number, fn: () => Promise<T>) => new Promise<T>((r) => setTimeout(() => r(fn()), ms));
+
   before(async () => {
     dir = mkdtempSync(join(tmpdir(), 'cp-settings-'));
     ledger = new MemoryLedger();
@@ -192,28 +208,31 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
   });
 
   it('a change of another kind made while a settings change is being stored is not put back, and does not put back the settings', async () => {
-    const backend = (state.configs as unknown as { backend: { write: (r: unknown) => Promise<void> } }).backend;
-    const real = backend.write.bind(backend);
-    backend.write = async (r) => {
-      await new Promise((done) => setTimeout(done, 40));
-      return real(r);
-    };
-    try {
+    // Settings first, then owners and policy built from a record that does not yet hold the soul.
+    await slowStore(async () => {
       const [soul, owners, policy] = await Promise.all([
         call('PUT', '/api/v1/agents/theirs/settings', { soul: 'raced soul' }),
-        new Promise<{ status: number }>((r) => setTimeout(() => r(call('PUT', '/api/v1/agents/theirs/owners', { owners: ['token:other-svc', 'token:owner-svc'] })), 10)),
-        new Promise<{ status: number }>((r) => setTimeout(() => r(call('PUT', '/api/v1/agents/theirs/policy', { routes: ['google-calendar'] })), 20)),
+        later(10, () => call('PUT', '/api/v1/agents/theirs/owners', { owners: ['token:other-svc', 'token:owner-svc'] })),
+        later(20, () => call('PUT', '/api/v1/agents/theirs/policy', { routes: ['google-calendar'] })),
       ]);
       assert.deepEqual([soul.status, owners.status, policy.status], [200, 200, 200]);
-    } finally {
-      backend.write = real;
-    }
-    const now = state.configs!.current('theirs')!;
-    assert.equal(now.agent?.soul, 'raced soul');
+    });
+    let now = state.configs!.current('theirs')!;
+    assert.equal(now.agent?.soul, 'raced soul', 'owners and policy changes built from an older record did not drop the soul');
     assert.deepEqual(now.owners, ['token:other-svc', 'token:owner-svc']);
-    assert.deepEqual(now.policy?.routes, ['google-calendar'], 'the policy change landed too');
+    assert.deepEqual(now.policy?.routes, ['google-calendar']);
+    // The other way: owners first, then a settings change built from a record that does not yet hold the new owners.
+    await slowStore(async () => {
+      const [owners, soul] = await Promise.all([
+        call('PUT', '/api/v1/agents/theirs/owners', { owners: ['token:other-svc'] }),
+        later(10, () => call('PUT', '/api/v1/agents/theirs/settings', { soul: 'second soul' })),
+      ]);
+      assert.deepEqual([owners.status, soul.status], [200, 200]);
+    });
+    now = state.configs!.current('theirs')!;
+    assert.deepEqual(now.owners, ['token:other-svc'], 'a settings change built from an older record did not put back the older owners');
+    assert.equal(now.agent?.soul, 'second soul');
     await call('PUT', '/api/v1/agents/theirs/settings', { soul: null });
-    await call('PUT', '/api/v1/agents/theirs/owners', { owners: ['token:other-svc'] });
   });
 
   it('a built-in agent has no settings', async () => {
@@ -224,10 +243,10 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
   });
 
   it('two changes at once never overwrite each other', async () => {
-    const [a, b] = await Promise.all([
+    const [a, b] = await slowStore(() => Promise.all([
       call('PUT', '/api/v1/agents/theirs/settings', { soul: 'concurrent soul' }),
-      call('PUT', '/api/v1/agents/theirs/settings', { memory: { archetype: 'purpose-built' } }),
-    ]);
+      later(10, () => call('PUT', '/api/v1/agents/theirs/settings', { memory: { archetype: 'purpose-built' } })),
+    ]));
     assert.equal(a.status, 200);
     assert.equal(b.status, 200);
     const got = (await call('GET', '/api/v1/agents/theirs/settings')).body.settings;
@@ -295,6 +314,23 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
     // A skill neither declared nor adopted is still refused.
     assert.equal((await call('PUT', '/api/v1/agents/mine/settings', { roles: [{ name: 'Guest', skills: { gmail: { deny: ['*'] } } }] }, OWNER)).status, 422);
     assert.equal((await call('PUT', '/api/v1/agents/mine/settings', { roles: null }, OWNER)).status, 200);
+  });
+
+  it('an adoption removed while a settings change is being stored does not drop the soul, and the soul change does not put the adoption back', async () => {
+    assert.equal((await call('PUT', '/api/v1/agents/mine/settings', { soul: 'before' }, OWNER)).status, 200);
+    await slowStore(async () => {
+      const [soul, removed] = await Promise.all([
+        call('PUT', '/api/v1/agents/mine/settings', { soul: 'after the race' }, OWNER),
+        later(10, () => call('DELETE', '/api/v1/agents/mine/skills/print', { reason: 'race' }, OWNER)),
+      ]);
+      assert.equal(soul.status, 200);
+      assert.equal(removed.status, 200, JSON.stringify(removed.body));
+    });
+    const now = state.configs!.current('mine')!;
+    assert.equal(now.agent?.soul, 'after the race');
+    assert.ok(!now.skills.some((k) => k.id === 'print'), 'the removal stands');
+    // And the reverse: the removal's write is queued first, the soul change was built before it landed.
+    assert.equal((await call('PUT', '/api/v1/agents/mine/settings', { soul: null }, OWNER)).status, 200);
   });
 
   it('the other agent was never touched', async () => {

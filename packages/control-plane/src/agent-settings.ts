@@ -90,6 +90,8 @@ export async function handleAgentSettings(state: FactoryState, req: http.Incomin
   locks.set(agentId, new Promise<void>((r) => (release = r)));
   await previous;
   try {
+    // A purge that landed while this waited for the body or the lock must not be undone by recreating a record.
+    if (!state.agents.has(agentId)) return json(res, 404, { error: 'not_found' }), true;
     const current = state.configs.current(agentId);
     const next = applySettingsChange(current?.agent, body);
     if (!next.ok) return json(res, 400, { error: 'invalid_settings', message: next.error }), true;

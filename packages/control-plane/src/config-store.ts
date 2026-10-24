@@ -310,7 +310,7 @@ export async function handleConfig(state: FactoryState, req: http.IncomingMessag
   const reader = await requirePrivilege(req, res, state, 'config.read', { agentId: decodeURIComponent(m[1]) });
   if (!reader) return true;
   // CF1: the agent's own settings (soul, roles, memory) are for those who may read them, not every viewer; a viewer
-  // learns only which parts are set. A version's identity is its hash, which is not withheld.
+  // learns only which parts are set. The record's `hash` is kept, and no longer verifies against the shown content.
   const seesSettings = canReadSettings(state, reader, decodeURIComponent(m[1]));
   const shown = (r: ConfigRecord): ConfigRecord => {
     if (seesSettings || !r.agent) return r;
