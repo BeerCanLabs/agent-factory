@@ -215,4 +215,45 @@ describe('owners assign roles; an agent may only ask (CF2, CF4, TSK-265)', { con
     assert.equal(rolesOf('discord', '201'), undefined);
     await call('PUT', '/api/v1/agents/mine/settings', { roles: null }, OWNER);
   });
+  it('a pending role request never holds the run: deciding a tool approval releases it', async () => {
+    const mine = await runFor({ provider: 'discord', id: '100' });
+    const ask = await call('POST', `/api/v1/runs/${mine.run.runId}/role-requests`, { provider: 'discord', identity: '201', roles: ['Family'] }, mine.token);
+    assert.equal(ask.status, 202);
+    const held = await call('POST', '/api/v1/gatekeeper-egress/approvals', { runId: mine.run.runId, route: 'google-calendar', tool: 'create_event', argsSha256: 'a'.repeat(64) });
+    assert.equal(held.status, 201, JSON.stringify(held.body));
+    assert.equal(state.runs.get(mine.run.runId)!.state, 'BLOCKED_FOR_HUMAN');
+    assert.equal((await call('POST', `/api/v1/approvals/${held.body.approvalId}`, { decision: 'approve' }, ADMIN)).status, 200);
+    assert.notEqual(state.runs.get(mine.run.runId)!.state, 'BLOCKED_FOR_HUMAN', 'the change request did not keep the run blocked');
+    assert.equal((await call('POST', `/api/v1/approvals/${ask.body.approvalId}`, { decision: 'reject' }, OWNER)).status, 200);
+  });
+
+  it('what a change request says (a person’s external identity) is read only by those who may decide it', async () => {
+    const mine = await runFor({ provider: 'discord', id: '100' });
+    const ask = await call('POST', `/api/v1/runs/${mine.run.runId}/role-requests`, { provider: 'discord', identity: '201', roles: ['Family'] }, mine.token);
+    const listed = async (token: string) => {
+      const got = await call('GET', '/api/v1/approvals?state=pending', undefined, token);
+      assert.equal(got.status, 200, token);
+      return got.body.find((a: { approvalId: string }) => a.approvalId === ask.body.approvalId);
+    };
+    for (const token of [VIEWER, APPROVER]) {
+      const row = await listed(token);
+      assert.ok(row, 'the request is listed, so approvers know something waits');
+      assert.ok(row.change === undefined && !JSON.stringify(row).includes('"201"'), `${token} does not read the change`);
+    }
+    assert.equal((await call('GET', '/api/v1/approvals?state=pending', undefined, OWNER)).status, 403, 'a bare owner has no list; they are asked in their own channel (TSK-267)');
+    assert.equal((await listed(ADMIN)).change.identity, '201');
+    await call('POST', `/api/v1/approvals/${ask.body.approvalId}`, { decision: 'reject' }, OWNER);
+  });
+
+  it('an owner acting alone in a signed-in console session is the requester; another signed-in person is not', async () => {
+    const asPrincipal = async (actor: string) => {
+      const run = state.runs.create({ agentId: 'mine', state: 'WORKING', actor, trigger: 'api' } as never);
+      return call('POST', `/api/v1/runs/${run.runId}/role-requests`, { provider: 'discord', identity: '201', roles: ['Family'] }, await tokens.mint({ runId: run.runId, agentId: 'mine' }));
+    };
+    const other = await asPrincipal('token:other-svc');
+    assert.equal(other.status, 403);
+    const owner = await asPrincipal('token:owner-svc');
+    assert.equal(owner.status, 202, JSON.stringify(owner.body));
+    await call('POST', `/api/v1/approvals/${owner.body.approvalId}`, { decision: 'reject' }, OWNER);
+  });
 });

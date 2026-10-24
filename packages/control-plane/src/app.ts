@@ -931,7 +931,8 @@ async function decideApproval(state: FactoryState, id: string, decision: unknown
     const delivered = await deliverDecision(state, decided, actor);
     return { status: 200, body: { ...decided, delivered } };
   }
-  if (!state.approvals.list({ state: 'pending', runId: decided.runId }).length) {
+  // A pending configuration change (an agent's role request) never holds a run: only tool and route approvals do.
+  if (!state.approvals.list({ state: 'pending', runId: decided.runId }).filter((a) => a.kind !== 'change').length) {
     unblockRun(state, decided.runId, 'BLOCKED_FOR_HUMAN', actor);
   }
   return { status: 200, body: decided };
@@ -2319,10 +2320,17 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/approvals' && req.method === 'GET') {
-    if (!(await requirePrivilege(req, res, state, 'approvals.read'))) return;
+    const reader = await requirePrivilege(req, res, state, 'approvals.read');
+    if (!reader) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
     const st = url.searchParams.get('state') as 'pending' | null;
-    json(res, 200, state.approvals.list({ ...(st ? { state: st } : {}), ...(url.searchParams.get('runId') ? { runId: url.searchParams.get('runId')! } : {}) }));
+    const all = state.approvals.list({ ...(st ? { state: st } : {}), ...(url.searchParams.get('runId') ? { runId: url.searchParams.get('runId')! } : {}) });
+    // A configuration change names a person's external identity: only those who may decide it read what it says.
+    json(res, 200, all.map((a) => {
+      if (a.kind !== 'change' || mayApproveChange(state, reader, a.agentId)) return a;
+      const { change: _hidden, ...rest } = a;
+      return rest;
+    }));
     return;
   }
 

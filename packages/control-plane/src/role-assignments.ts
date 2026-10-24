@@ -98,10 +98,13 @@ export function mayApproveChange(state: FactoryState, principal: { actor: string
 /** The run's verified requester, when it is one of the agent's owners; undefined otherwise. */
 function ownerRequester(state: FactoryState, run: Run): string | undefined {
   const who = requesterOfRun(state, run);
+  const isOwner = (a: string) => ownersOf(state, run.agentId).some((o) => o.toLowerCase() === a.toLowerCase());
+  // An owner acting alone in a signed-in console or API session is the requester too (until in-channel approvals, TSK-267).
+  if (who?.kind === 'principal') return isOwner(who.actor) ? who.actor : undefined;
   if (who?.kind !== 'identity') return undefined;
   const actor = state.identityLinks?.resolve(who.provider, who.id);
   if (!actor) return undefined;
-  return ownersOf(state, run.agentId).some((o) => o.toLowerCase() === actor.toLowerCase()) ? actor : undefined;
+  return isOwner(actor) ? actor : undefined;
 }
 
 /** The agent asks. Accepted only when the run's verified requester is an owner; held for that owner's approval. */
