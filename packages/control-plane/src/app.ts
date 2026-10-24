@@ -42,6 +42,7 @@ import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymas
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
+import { handleAgentBundle } from './agent-bundle.js';
 import { agentConfigForRun, deployConfigured, handleAgentCreation, registrationRefusal, type SharedRuntimePin } from './agent-creation.js';
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
@@ -1104,6 +1105,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleAgentSettings(state, req, res, path)) return;
   if (await handleAgentCreation(state, req, res, path)) return;
+  if (await handleAgentBundle(state, req, res, path)) return;
   if (await handleRoleAssignments(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;
