@@ -12,10 +12,10 @@
  */
 import http from 'node:http';
 import { payloadHash } from '@beercanlabs/factory-ledger';
-import { buildBundle, parseBundle } from '@beercanlabs/factory-registrar';
+import { buildBundle, canAdopt, parseBundle } from '@beercanlabs/factory-registrar';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { createFromConfiguration, discardCreated } from './agent-creation.js';
-import { adoptionStore, approvedSkill, requestAdoptionFor } from './skills.js';
+import { adoptionStore, requestAdoptionFor, skillRegistry } from './skills.js';
 
 const BUNDLE = /^\/api\/v1\/agents\/([^/]+)\/bundle$/;
 const IMPORT = '/api/v1/agents/import';
@@ -53,8 +53,8 @@ export async function handleAgentBundle(state: FactoryState, req: http.IncomingM
     soul: bundle.settings.soul,
     roles: bundle.settings.roles,
     memory: bundle.settings.memory,
-    // A role may name only a skill this factory can adopt: an unavailable one would be a ceiling that is not there (CF2).
-    rolesMayNameSkills: new Set(bundle.skills.filter((s) => approvedSkill(state, s.id, s.version)).map((s) => s.id)),
+    // A role may name only a skill this very agent can be given (approved, not retired, public or its own): anything else would be a ceiling that is not there (CF2).
+    rolesMayNameSkills: new Set(bundle.skills.filter((s) => canAdopt(skillRegistry(state), bundle.agent.id, s.id, s.version).ok).map((s) => s.id)),
     reason: 'imported from a bundle',
   });
   if (created.status !== 201) return json(res, created.status, created.body), true;
@@ -69,14 +69,26 @@ export async function handleAgentBundle(state: FactoryState, req: http.IncomingM
     const refused = new Set(skills.filter((s) => s.state !== 'requested').map((s) => s.id));
     const named = (bundle.settings.roles ?? []).flatMap((r) => Object.keys(r.skills)).find((k) => refused.has(k));
     if (named) throw new Error(`role names ${named}, whose adoption could not be requested`);
-    state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_IMPORTED', actor: principal.actor, payloadSha256: payloadHash(bundle) });
     if (bundle.policy) {
       state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_IMPORT_POLICY_REQUESTED', actor: principal.actor, payloadSha256: payloadHash(bundle.policy) });
     }
+    // Last, so that a success row is never written for an import that is then rolled back.
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_IMPORTED', actor: principal.actor, payloadSha256: payloadHash(bundle) });
   } catch (err) {
     // All or nothing: the agent, its configuration and the requests made for it are removed, so the import can be tried again.
-    for (const s of bundle.skills) adoptionStore(state).clear(id, s.id);
+    for (const s of bundle.skills) {
+      try {
+        adoptionStore(state).clear(id, s.id);
+      } catch {
+        // the store may not hold one
+      }
+    }
     await discardCreated(state, id, principal.actor, 'import failed');
+    try {
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_IMPORT_FAILED', actor: principal.actor, payloadSha256: payloadHash(bundle) });
+    } catch {
+      // the ledger is what failed, perhaps
+    }
     console.error(`[control-plane] import of ${id} failed: ${err instanceof Error ? err.message : String(err)}`);
     return json(res, 500, { error: 'import_failed' }), true;
   }

@@ -183,6 +183,14 @@ describe('an agent moves as one bundle (CF3, TSK-266)', { concurrency: false }, 
     const ghost = await into('ghosted', [{ id: 'ghost-skill', version: '1.0.0' }], roleNaming('ghost-skill'));
     assert.equal(ghost.status, 422, 'unavailable in this factory');
     assert.equal(ghost.body.error, 'unknown_skill');
+    // A private skill of another agent is the usual cross-factory case: refused as a client error, before anything is made.
+    assert.equal((await call('POST', '/api/v1/registry/skills', { repo: 'https://github.com/BeerCanLabs/skill-own', path: '.', commit: SHA, manifest: { ...manifest, id: 'own-skill', visibility: 'private', owner: 'nova' } })).status, 201);
+    recordSkillChecks(state, 'own-skill', '1.0.0', { passed: true });
+    await call('POST', '/api/v1/registry/skills/own-skill/versions/1.0.0/approve', {});
+    const priv = await into('privd', [{ id: 'own-skill', version: '1.0.0' }], roleNaming('own-skill'));
+    assert.equal(priv.status, 422, JSON.stringify(priv.body));
+    assert.equal(priv.body.error, 'unknown_skill');
+    assert.equal(state.agents.has('privd'), false);
     const absent = await into('absent', [], roleNaming('discord-progress'));
     assert.equal(absent.status, 422, 'not in the bundle');
     for (const id of ['ghosted', 'absent']) assert.equal(state.agents.has(id) || !!state.configs!.current(id), false);
@@ -200,6 +208,7 @@ describe('an agent moves as one bundle (CF3, TSK-266)', { concurrency: false }, 
       const failed = await into('half', [{ id: 'discord-progress', version: '1.0.0' }], roleNaming('discord-progress'));
       assert.equal(failed.status, 500);
       assert.deepEqual(failed.body, { error: 'import_failed' }, 'no raw message');
+      assert.ok(actions().includes('AGENT_IMPORT_FAILED') && !ledger.query().some((e) => e.agentId === 'half' && e.action === 'AGENT_IMPORTED'));
     } finally {
       (ledger as any).append = realAppend;
     }
