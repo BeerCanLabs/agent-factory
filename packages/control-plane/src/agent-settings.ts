@@ -76,7 +76,7 @@ export async function handleAgentSettings(state: FactoryState, req: http.Incomin
   if (!principal) return true;
   const agent = state.agents.get(agentId);
   if (!state.configs) return json(res, 503, { error: 'config_store_unavailable' }), true;
-  if (agentId.startsWith('__') || !agent) return json(res, 404, { error: 'not_found' }), true;
+  if (!agent) return json(res, 404, { error: 'not_found' }), true;
   if (!write) {
     const current = state.configs.current(agentId);
     json(res, 200, { agentId, managed: !!current?.agent, ...(current?.agent ? { settings: current.agent } : {}), version: current?.version ?? null });
@@ -91,46 +91,48 @@ export async function handleAgentSettings(state: FactoryState, req: http.Incomin
   await previous;
   try {
     const current = state.configs.current(agentId);
-  const next = applySettingsChange(current?.agent, body);
-  if (!next.ok) return json(res, 400, { error: 'invalid_settings', message: next.error }), true;
-  if (next.settings.roles) {
-    // A role may name only a skill the agent declares or has adopted, so those stay the ceiling (CF2).
-    const known = new Set(effectiveSkills(state, agent).skillIds);
-    for (const adopted of current?.skills ?? []) known.add(adopted.id);
-    for (const role of next.settings.roles) {
-      for (const skill of Object.keys(role.skills)) {
-        if (skill !== '*' && !known.has(skill)) {
-          return json(res, 422, { error: 'unknown_skill', role: role.name, skill, message: `role "${role.name}" names skill "${skill}", which the agent neither declares nor has adopted` }), true;
+    const next = applySettingsChange(current?.agent, body);
+    if (!next.ok) return json(res, 400, { error: 'invalid_settings', message: next.error }), true;
+    if (next.settings.roles) {
+      // A role may name only a skill the agent declares or has adopted, so those stay the ceiling (CF2).
+      const known = new Set(effectiveSkills(state, agent).skillIds);
+      for (const adopted of current?.skills ?? []) known.add(adopted.id);
+      for (const role of next.settings.roles) {
+        for (const skill of Object.keys(role.skills)) {
+          if (skill !== '*' && !known.has(skill)) {
+            return json(res, 422, { error: 'unknown_skill', role: role.name, skill, message: `role "${role.name}" names skill "${skill}", which the agent neither declares nor has adopted` }), true;
+          }
         }
       }
     }
-  }
-  const parts = changedParts(current?.agent, next.settings);
-  const { agent: _was, ...content } = configOf(state, agentId);
-  try {
-    const { record, created } = await state.configs.put(
-      { ...content, ...(Object.keys(next.settings).length ? { agent: next.settings } : {}) },
-      { updatedBy: principal.actor, reason: changeReason(req, `settings changed: ${parts.join(', ') || 'none'}`) },
-    );
-    if (created) {
-      ledgerVersion(state, record, principal.actor);
-      // Which parts changed, by name; never the soul or the roles themselves.
-      state.ledger.append({
-        timestamp: new Date().toISOString(),
-        agentId,
-        type: 'action',
-        action: 'AGENT_SETTINGS_CHANGED',
-        actor: principal.actor,
-        requestId: `config:${agentId}:v${record.version}`,
-        payloadSha256: payloadHash({ parts, hash: record.hash }),
-      });
+    const parts = changedParts(current?.agent, next.settings);
+    const { agent: _was, ...content } = configOf(state, agentId);
+    try {
+      // `replaces: ['agent']`: owners, adoptions and policy are taken from the latest record when the store writes, so a
+      // concurrent change of another kind is never put back (and this change never puts back an older one).
+      const { record, created } = await state.configs.put(
+        { ...content, ...(Object.keys(next.settings).length ? { agent: next.settings } : {}) },
+        { updatedBy: principal.actor, reason: changeReason(req, `settings changed: ${parts.join(', ') || 'none'}`), replaces: ['agent'] },
+      );
+      if (created) {
+        ledgerVersion(state, record, principal.actor);
+        // Which parts changed, by name; never the soul or the roles themselves.
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId,
+          type: 'action',
+          action: 'AGENT_SETTINGS_CHANGED',
+          actor: principal.actor,
+          requestId: `config:${agentId}:v${record.version}`,
+          payloadSha256: payloadHash({ parts, hash: record.hash }),
+        });
+      }
+      json(res, 200, { agentId, managed: !!record.agent, ...(record.agent ? { settings: record.agent } : {}), version: record.version, changed: created ? parts : [] });
+    } catch (err) {
+      console.error(`[control-plane] settings for ${agentId} not stored: ${err instanceof Error ? err.message : String(err)}`);
+      json(res, 500, { error: 'settings_not_stored' });
     }
-    json(res, 200, { agentId, managed: !!record.agent, ...(record.agent ? { settings: record.agent } : {}), version: record.version, changed: created ? parts : [] });
-  } catch (err) {
-    console.error(`[control-plane] settings for ${agentId} not stored: ${err instanceof Error ? err.message : String(err)}`);
-    json(res, 500, { error: 'settings_not_stored' });
-  }
-  return true;
+    return true;
   } finally {
     release();
   }

@@ -89,7 +89,14 @@ export type ConfigExport = {
   agents: Array<{ agentId: string; current: number; versions: ConfigRecord[] }>;
 };
 
-export type ConfigMeta = { updatedBy: string; reason: string; skillAdoptions?: SkillAdoptionProvenance[] };
+/**
+ * `replaces` names the parts of the content this change is the author of (`owners`, `agent`, `skills`). Every other
+ * stored part is taken from the latest record at the moment of the write, inside the store's queue, so a change made
+ * from an earlier read of the record can never put back an older owners list, soul or adoption set (CF1). Policy and
+ * source are the live state the control plane passes, never carried. Omitted, `content` is stored as given.
+ */
+export type ConfigPart = 'owners' | 'agent' | 'skills';
+export type ConfigMeta = { updatedBy: string; reason: string; skillAdoptions?: SkillAdoptionProvenance[]; replaces?: ConfigPart[] };
 
 /** The provider-neutral store. Reads are synchronous, from memory; only `put` reaches the backend. */
 export interface ConfigStore {
@@ -486,6 +493,17 @@ export function configBackendFromEnv(uri: string | undefined, fallbackDir: strin
   return new FileConfigBackend(u);
 }
 
+/** The content with every part the change does not author taken from the latest record (see `ConfigMeta.replaces`). */
+function carryUnreplaced(content: ConfigContent, latest: ConfigRecord | undefined, replaces: ConfigPart[]): ConfigContent {
+  const own = new Set<ConfigPart>(replaces);
+  const out: ConfigContent = { agentId: content.agentId, source: content.source, policy: content.policy, skills: own.has('skills') ? content.skills : (latest?.skills ?? []) };
+  const owners = own.has('owners') ? content.owners : latest?.owners;
+  if (owners) out.owners = owners;
+  const agent = own.has('agent') ? content.agent : latest?.agent;
+  if (agent) out.agent = agent;
+  return out;
+}
+
 /** The store: every version in memory, written through to its backend on change. */
 export class VersionedConfigStore implements ConfigStore {
   private readonly versions = new Map<string, ConfigRecord[]>();
@@ -547,8 +565,9 @@ export class VersionedConfigStore implements ConfigStore {
     return next;
   }
 
-  private async write(content: ConfigContent, meta: ConfigMeta): Promise<{ record: ConfigRecord; created: boolean }> {
-    checkAgentId(content.agentId);
+  private async write(given: ConfigContent, meta: ConfigMeta): Promise<{ record: ConfigRecord; created: boolean }> {
+    checkAgentId(given.agentId);
+    const content = meta.replaces ? carryUnreplaced(given, this.current(given.agentId), meta.replaces) : given;
     for (const a of meta.skillAdoptions ?? []) {
       // Provenance describes an adoption this version carries; one that is not in `skills` would describe nothing.
       if (!content.skills.some((k) => k.id === a.id && k.version === a.version)) {

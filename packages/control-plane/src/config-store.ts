@@ -31,7 +31,7 @@
 import http from 'node:http';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENT_ID, type ConfigContent, type ConfigRecord } from '@beercanlabs/factory-registrar';
+import { AGENT_ID, type AgentSettings, type ConfigContent, type ConfigRecord } from '@beercanlabs/factory-registrar';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { parseActor } from './identity-links.js';
 import { isReservedPolicyId } from '@beercanlabs/factory-gatekeeper/policy';
@@ -85,7 +85,7 @@ export async function recordConfig(state: FactoryState, agentId: string, change:
   const store = state.configs;
   if (!store || agentId.startsWith('__')) return undefined;
   try {
-    const { record, created } = await store.put(configOf(state, agentId), { updatedBy: change.actor, reason: change.reason });
+    const { record, created } = await store.put(configOf(state, agentId), { updatedBy: change.actor, reason: change.reason, replaces: [] });
     if (created) ledgerVersion(state, record, change.actor);
     return record;
   } catch (err) {
@@ -270,7 +270,7 @@ async function handleOwners(state: FactoryState, req: http.IncomingMessage, res:
   try {
     const { record, created } = await state.configs.put(
       { ...content, ...(checked.owners.length ? { owners: checked.owners } : {}) },
-      { updatedBy: principal.actor, reason: changeReason(req, 'owners changed') },
+      { updatedBy: principal.actor, reason: changeReason(req, 'owners changed'), replaces: ['owners'] },
     );
     if (created) ledgerVersion(state, record, principal.actor);
     json(res, 200, record);
@@ -309,12 +309,13 @@ export async function handleConfig(state: FactoryState, req: http.IncomingMessag
   if (!m) return false;
   const reader = await requirePrivilege(req, res, state, 'config.read', { agentId: decodeURIComponent(m[1]) });
   if (!reader) return true;
-  // CF1: the soul is for those who may read the agent's settings, not every viewer; a version says only its hash.
-  const seesSoul = canReadSettings(state, reader, decodeURIComponent(m[1]));
+  // CF1: the agent's own settings (soul, roles, memory) are for those who may read them, not every viewer; a viewer
+  // learns only which parts are set. A version's identity is its hash, which is not withheld.
+  const seesSettings = canReadSettings(state, reader, decodeURIComponent(m[1]));
   const shown = (r: ConfigRecord): ConfigRecord => {
-    if (seesSoul || !r.agent?.soul) return r;
-    const { soul: _soul, ...rest } = r.agent;
-    return { ...r, agent: { ...rest, soulSet: true } as never };
+    if (seesSettings || !r.agent) return r;
+    const flags = { ...(r.agent.soul ? { soulSet: true } : {}), ...(r.agent.roles ? { rolesSet: true } : {}), ...(r.agent.memory ? { memorySet: true } : {}) };
+    return { ...r, agent: flags as unknown as AgentSettings };
   };
   if (!state.configs) {
     json(res, 503, { error: 'config_store_unavailable' });

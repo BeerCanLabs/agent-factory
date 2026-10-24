@@ -19,6 +19,8 @@ import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { IdentityLinkStore } from './identity-links.js';
 import { accessForRun } from './access-enforcement.js';
 import { agentInForce } from './agent-settings.js';
+import { loadSkills, recordSkillChecks } from './skills.js';
+import { configOf } from './config-store.js';
 
 const ADMIN = 'admin-settings';
 const OWNER = 'owner-settings';
@@ -80,6 +82,7 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
       identityLinks: new IdentityLinkStore(join(dir, 'links')),
     } as unknown as FactoryState;
     state.configs = await VersionedConfigStore.open(new FileConfigBackend(join(dir, 'config')));
+    loadSkills(state, join(dir, 'skills'));
     cp = createFactoryServer(state);
     await new Promise<void>((r) => cp.listen(0, '127.0.0.1', r));
     port = (cp.address() as { port: number }).port;
@@ -142,12 +145,12 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
     assert.equal(again.body.version, put.body.version);
   });
 
-  it('a viewer reading the configuration sees a hash of the soul, never the soul; the owner sees it', async () => {
+  it('a viewer reading the configuration sees which parts are set, never the soul, roles or memory; the owner sees them', async () => {
     const viewer = await call('GET', '/api/v1/agents/mine/config', undefined, VIEWER);
     assert.equal(viewer.status, 200);
     assert.ok(!JSON.stringify(viewer.body).includes('SECRET-SOUL-TEXT'));
-    assert.equal(viewer.body.agent.soulSet, true);
-    assert.equal(viewer.body.agent.soul, undefined);
+    assert.deepEqual(viewer.body.agent, { soulSet: true, memorySet: true }, 'a viewer learns which parts are set, not what they say');
+    assert.ok(!JSON.stringify(viewer.body).includes('team-member'), 'nor the memory settings');
     const versions = await call('GET', `/api/v1/agents/mine/config/versions/${viewer.body.version}`, undefined, VIEWER);
     assert.equal(versions.status, 200);
     assert.ok(!JSON.stringify(versions.body).includes('SECRET-SOUL-TEXT'), 'a single version is redacted too');
@@ -186,6 +189,31 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
     // Without the section the cartridge's roles apply again: Guest does not exist there, so it holds nothing.
     assert.equal((await call('PUT', '/api/v1/agents/mine/settings', { roles: null }, OWNER)).status, 200);
     assert.deepEqual(accessForRun(state, run, state.agents.get('mine')!), { restricted: true, routes: { 'google-calendar': 'denied' } });
+  });
+
+  it('a change of another kind made while a settings change is being stored is not put back, and does not put back the settings', async () => {
+    const backend = (state.configs as unknown as { backend: { write: (r: unknown) => Promise<void> } }).backend;
+    const real = backend.write.bind(backend);
+    backend.write = async (r) => {
+      await new Promise((done) => setTimeout(done, 40));
+      return real(r);
+    };
+    try {
+      const [soul, owners, policy] = await Promise.all([
+        call('PUT', '/api/v1/agents/theirs/settings', { soul: 'raced soul' }),
+        new Promise<{ status: number }>((r) => setTimeout(() => r(call('PUT', '/api/v1/agents/theirs/owners', { owners: ['token:other-svc', 'token:owner-svc'] })), 10)),
+        new Promise<{ status: number }>((r) => setTimeout(() => r(call('PUT', '/api/v1/agents/theirs/policy', { routes: ['google-calendar'] })), 20)),
+      ]);
+      assert.deepEqual([soul.status, owners.status, policy.status], [200, 200, 200]);
+    } finally {
+      backend.write = real;
+    }
+    const now = state.configs!.current('theirs')!;
+    assert.equal(now.agent?.soul, 'raced soul');
+    assert.deepEqual(now.owners, ['token:other-svc', 'token:owner-svc']);
+    assert.deepEqual(now.policy?.routes, ['google-calendar'], 'the policy change landed too');
+    await call('PUT', '/api/v1/agents/theirs/settings', { soul: null });
+    await call('PUT', '/api/v1/agents/theirs/owners', { owners: ['token:other-svc'] });
   });
 
   it('a built-in agent has no settings', async () => {
@@ -240,6 +268,33 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
       assert.equal((await call('PUT', '/api/v1/agents/mine/settings', body, OWNER)).status, 400, JSON.stringify(body));
     }
     assert.equal((await call('PUT', '/api/v1/agents/ghost/settings', { soul: 'x' })).status, 404);
+  });
+
+  it('a role may name a skill the agent has adopted, and the adopted skill’s routes are what the egress then enforces', async () => {
+    const manifest = { id: 'print', version: '1.0.0', name: 'print', description: 'Print.', language: 'python', entry: 'print', visibility: 'private', owner: 'mine', requires: { routes: ['print'] } };
+    assert.equal((await call('POST', '/api/v1/registry/skills', { repo: 'https://github.com/BeerCanLabs/skill-print', path: '.', commit: SHA, manifest })).status, 201);
+    recordSkillChecks(state, 'print', '1.0.0', { passed: true });
+    const approved = await call('POST', '/api/v1/registry/skills/print/versions/1.0.0/approve', {});
+    assert.deepEqual(approved.body.adopted, ['mine'], JSON.stringify(approved.body));
+    // Not declared by the cartridge, adopted: the ceiling accepts it.
+    const set = await call('PUT', '/api/v1/agents/mine/settings', { roles: [{ name: 'Guest', skills: { print: { deny: ['*'] }, 'google-calendar': { allow: ['*'] } } }] }, OWNER);
+    assert.equal(set.status, 200, JSON.stringify(set.body));
+    state.identityLinks!.link('discord', '302', 'cloudflare:guest2@example.com', 'admin', { name: 'Guest Two', agentRoles: { mine: ['Guest'] } });
+    const run = state.runs.create({ agentId: 'mine', state: 'WORKING', actor: 'factory:ingress', trigger: 'api', requestedBy: { provider: 'discord', id: '302' } } as never);
+    const access = accessForRun(state, run, state.agents.get('mine')!);
+    assert.equal(access.routes?.print, 'denied', 'the adopted skill’s manifest route is judged by the role');
+    assert.equal(access.routes?.['google-calendar'], 'allowed', 'and the role’s own allowance on a declared skill still holds');
+    // A skill the cartridge declares keeps the cartridge's routes even when the same id is adopted with others.
+    const dup = { id: 'google-calendar', version: '1.0.0', name: 'gc', description: 'Calendar.', language: 'python', entry: 'gc', requires: { routes: ['elsewhere'] } };
+    assert.equal((await call('POST', '/api/v1/registry/skills', { repo: 'https://github.com/BeerCanLabs/skill-gc', path: '.', commit: SHA, manifest: dup })).status, 201);
+    recordSkillChecks(state, 'google-calendar', '1.0.0', { passed: true });
+    assert.equal((await call('POST', '/api/v1/registry/skills/google-calendar/versions/1.0.0/approve', {})).status, 200);
+    const skills = [...state.configs!.current('mine')!.skills, { id: 'google-calendar', version: '1.0.0' }];
+    await state.configs!.put({ ...configOf(state, 'mine'), skills }, { updatedBy: 'test', reason: 'adopt', replaces: ['skills'] });
+    assert.equal(accessForRun(state, run, state.agents.get('mine')!).routes?.elsewhere, undefined, 'the cartridge’s routes win');
+    // A skill neither declared nor adopted is still refused.
+    assert.equal((await call('PUT', '/api/v1/agents/mine/settings', { roles: [{ name: 'Guest', skills: { gmail: { deny: ['*'] } } }] }, OWNER)).status, 422);
+    assert.equal((await call('PUT', '/api/v1/agents/mine/settings', { roles: null }, OWNER)).status, 200);
   });
 
   it('the other agent was never touched', async () => {
