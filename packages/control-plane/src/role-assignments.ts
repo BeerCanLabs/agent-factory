@@ -119,11 +119,10 @@ export async function handleRoleRequest(state: FactoryState, run: Run, req: http
   const identity = typeof body.identity === 'string' ? body.identity : '';
   const c = check(state, run.agentId, provider, identity, body.roles);
   if (!c.ok) return json(res, c.status, c.body);
-  if (state.approvals.pendingChanges(run.agentId).length >= MAX_PENDING_PER_AGENT) {
-    return json(res, 429, { error: 'too_many_pending_requests' });
-  }
   const change: ChangeRequest = { type: 'role-assignment', provider, identity, roles: c.roles };
-  const { approval, created } = state.approvals.requestChange({ runId: run.runId, agentId: run.agentId, change, ttlMs: ROLE_REQUEST_TTL_MS });
+  const made = state.approvals.requestChange({ runId: run.runId, agentId: run.agentId, change, ttlMs: ROLE_REQUEST_TTL_MS, maxPending: MAX_PENDING_PER_AGENT });
+  if ('limited' in made) return json(res, 429, { error: 'too_many_pending_requests' });
+  const { approval, created } = made;
   if (created) {
     state.ledger.append({
       timestamp: new Date().toISOString(),

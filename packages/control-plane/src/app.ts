@@ -751,7 +751,7 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'list_agents') return [...state.agents.values()];
   if (name === 'query_ledger') return state.ledger.query({ agent: args.agent });
   if (name === 'get_run') return state.runs.get(args.runId) ?? { error: 'not_found' };
-  if (name === 'list_approvals') return state.approvals.list({ state: 'pending' });
+  if (name === 'list_approvals') return visibleApprovals(state, principal, state.approvals.list({ state: 'pending' }));
   if (name === 'decide_approval') return (await decideApproval(state, args.approvalId, args.decision, principal, args.notes)).body;
   if (name === 'list_model_catalog') {
     return {
@@ -876,10 +876,22 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
  * Discord id is not linked to a person lets no owner decide. This runs before anything changes, and a caller who may
  * not decide is refused whether or not the approval exists.
  */
+/** A configuration change names a person's external identity: only those who may decide it read what it says (CF4). Used by every list. */
+function visibleApprovals(state: FactoryState, reader: Principal, all: Approval[]): Approval[] {
+  return all.map((a) => {
+    if (a.kind !== 'change' || mayApproveChange(state, reader, a.agentId)) return a;
+    const { change: _hidden, ...rest } = a;
+    return rest;
+  });
+}
+
 function mayDecide(state: FactoryState, principal: Principal, approvalId: string): { ok: true } | { ok: false; required: Role } {
   const global = authorize({ principal, privilege: 'approvals.decide' });
-  if (global.allowed) return { ok: true };
   const approval = state.approvals.get(approvalId);
+  // CF4: a configuration change is the agent's owners' to decide, or an admin's; the run's requester rule (E9) does not apply,
+  // so any owner of the agent may, and a run that is gone changes nothing. The global approver role does not decide it.
+  if (approval?.kind === 'change') return mayApproveChange(state, principal, approval.agentId) ? { ok: true } : { ok: false, required: 'admin' };
+  if (global.allowed) return { ok: true };
   if (!approval) return { ok: false, required: global.required };
   const run = state.runs.get(approval.runId);
   // The run is the record of who asked. If it is gone nobody can say, so no owner or requester decides (fail closed);
@@ -2326,11 +2338,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const st = url.searchParams.get('state') as 'pending' | null;
     const all = state.approvals.list({ ...(st ? { state: st } : {}), ...(url.searchParams.get('runId') ? { runId: url.searchParams.get('runId')! } : {}) });
     // A configuration change names a person's external identity: only those who may decide it read what it says.
-    json(res, 200, all.map((a) => {
-      if (a.kind !== 'change' || mayApproveChange(state, reader, a.agentId)) return a;
-      const { change: _hidden, ...rest } = a;
-      return rest;
-    }));
+    json(res, 200, visibleApprovals(state, reader, all));
     return;
   }
 

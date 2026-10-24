@@ -100,13 +100,15 @@ export class ApprovalStore {
    * CF4: a change request for this agent. An identical open request (pending, not expired) is returned as is.
    * It is bound to the run that asked, because that run's verified requester is who may decide it.
    */
-  requestChange(k: { runId: string; agentId: string; change: ChangeRequest; ttlMs: number }): { approval: Approval; created: boolean } {
+  requestChange(k: { runId: string; agentId: string; change: ChangeRequest; ttlMs: number; maxPending?: number }): { approval: Approval; created: boolean } | { limited: true } {
     const now = Date.now();
     const same = JSON.stringify(k.change);
     for (const a of this.items.values()) {
       if (a.kind !== 'change' || a.agentId !== k.agentId || a.state !== 'pending' || JSON.stringify(a.change) !== same) continue;
       if (a.expiresAt && Date.parse(a.expiresAt) > now) return { approval: { ...a }, created: false };
     }
+    // An identical open request is answered above, so the cap never turns a repeat into a refusal.
+    if (k.maxPending !== undefined && this.pendingChanges(k.agentId).length >= k.maxPending) return { limited: true };
     const a: Approval = {
       runId: k.runId,
       agentId: k.agentId,

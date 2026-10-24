@@ -23,6 +23,7 @@ const ADMIN = 'admin-settings';
 const OWNER = 'owner-settings';
 const OTHER = 'other-owner-settings';
 const VIEWER = 'viewer-settings';
+const CASED = 'cased-settings';
 const APPROVER = 'approver-settings';
 const SHA = '5'.repeat(40);
 const KEY = 'settings-run-token-key-0123456789abc';
@@ -63,6 +64,7 @@ describe('owners assign roles; an agent may only ask (CF2, CF4, TSK-265)', { con
         { name: 'owner-svc', token: OWNER, roles: [] },
         { name: 'other-svc', token: OTHER, roles: [] },
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
+        { name: 'Cased-Svc', token: CASED, roles: [] },
         { name: 'approver', token: APPROVER, roles: ['approver', 'viewer'] },
       ]),
       version: '0.1.0',
@@ -199,7 +201,7 @@ describe('owners assign roles; an agent may only ask (CF2, CF4, TSK-265)', { con
     assert.notEqual(second, first, 'a rejected request is not reopened by asking again');
     assert.equal((await call('POST', `/api/v1/approvals/${second}`, { decision: 'approve' }, ADMIN)).body.applied, true);
     await call('PUT', '/api/v1/agents/mine/role-assignments/discord/201', { roles: [] }, ADMIN);
-    const stale = state.approvals.requestChange({ runId: mine.run.runId, agentId: 'mine', change: { type: 'role-assignment', provider: 'discord', identity: '201', roles: ['Family'] }, ttlMs: 1 });
+    const stale = state.approvals.requestChange({ runId: mine.run.runId, agentId: 'mine', change: { type: 'role-assignment', provider: 'discord', identity: '201', roles: ['Family'] }, ttlMs: 1 }) as { approval: { approvalId: string } };
     await new Promise((r) => setTimeout(r, 15));
     assert.equal((await call('POST', `/api/v1/approvals/${stale.approval.approvalId}`, { decision: 'approve' }, OWNER)).status, 409);
     assert.equal(rolesOf('discord', '201'), undefined);
@@ -255,5 +257,76 @@ describe('owners assign roles; an agent may only ask (CF2, CF4, TSK-265)', { con
     const owner = await asPrincipal('token:owner-svc');
     assert.equal(owner.status, 202, JSON.stringify(owner.body));
     await call('POST', `/api/v1/approvals/${owner.body.approvalId}`, { decision: 'reject' }, OWNER);
+  });
+
+  const mcp = async (token: string, name: string) => {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: {} } }) });
+    return JSON.stringify(await res.json());
+  };
+
+  it('the MCP approvals list hides a change from those who may not decide it, as the REST list does', async () => {
+    const mine = await runFor({ provider: 'discord', id: '100' });
+    const ask = await call('POST', `/api/v1/runs/${mine.run.runId}/role-requests`, { provider: 'discord', identity: '201', roles: ['Family'] }, mine.token);
+    assert.ok((await mcp(VIEWER, 'list_approvals')).includes(ask.body.approvalId), 'listed, so approvers know something waits');
+    assert.ok(!(await mcp(VIEWER, 'list_approvals')).includes('201'), 'but not what it says');
+    assert.ok(!(await mcp(APPROVER, 'list_approvals')).includes('201'));
+    assert.ok((await mcp(ADMIN, 'list_approvals')).includes('201'));
+    await call('POST', `/api/v1/approvals/${ask.body.approvalId}`, { decision: 'reject' }, OWNER);
+  });
+
+  it('any owner of the agent decides a change, not only the owner who was asking; owners compare case-insensitively', async () => {
+    assert.equal((await call('PUT', '/api/v1/agents/mine/owners', { owners: ['token:owner-svc', 'token:other-svc', 'token:cased-svc'] })).status, 200);
+    try {
+      const mine = await runFor({ provider: 'discord', id: '100' });
+      const principalRun = state.runs.create({ agentId: 'mine', state: 'WORKING', actor: 'token:Cased-Svc', trigger: 'api' } as never);
+      const viaPrincipal = await call('POST', `/api/v1/runs/${principalRun.runId}/role-requests`, { provider: 'discord', identity: '201', roles: ['Family'] }, await tokens.mint({ runId: principalRun.runId, agentId: 'mine' }));
+      assert.equal(viaPrincipal.status, 202, 'a principal whose actor is capitalised differently from the stored (lower-case) owner is still the requester');
+      assert.equal((await call('POST', `/api/v1/approvals/${viaPrincipal.body.approvalId}`, { decision: 'reject' }, CASED)).status, 200, 'and decides');
+      const ask = await call('POST', `/api/v1/runs/${mine.run.runId}/role-requests`, { provider: 'discord', identity: '201', roles: ['Family'] }, mine.token);
+      assert.equal((await call('POST', `/api/v1/approvals/${ask.body.approvalId}`, { decision: 'approve' }, OTHER)).body.applied, true, 'the second owner decides a request the first owner raised');
+      assert.equal(state.approvals.get(ask.body.approvalId)!.state, 'consumed', 'applied and used up');
+      assert.equal((await call('POST', `/api/v1/approvals/${ask.body.approvalId}`, { decision: 'approve' }, OTHER)).status, 409);
+      await call('PUT', '/api/v1/agents/mine/role-assignments/discord/201', { roles: [] }, ADMIN);
+    } finally {
+      await call('PUT', '/api/v1/agents/mine/owners', { owners: ['token:owner-svc'] });
+    }
+  });
+
+  it('at most five requests wait per agent; asking the same thing again is not refused and not ledgered twice; an expired request neither counts nor is reused', async () => {
+    const links = state.identityLinks!;
+    for (let i = 0; i < 6; i++) links.link('discord', `50${i}`, `cloudflare:p${i}@example.com`, 'admin', { name: `P${i}` });
+    const mine = await runFor({ provider: 'discord', id: '100' });
+    const ask = (id: string) => call('POST', `/api/v1/runs/${mine.run.runId}/role-requests`, { provider: 'discord', identity: id, roles: ['Family'] }, mine.token);
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) ids.push((await ask(`50${i}`)).body.approvalId);
+    assert.equal((await ask('505')).status, 429);
+    const again = await ask('500');
+    assert.equal(again.status, 200, 'an identical request at the cap is answered, not refused');
+    assert.equal(again.body.approvalId, ids[0]);
+    assert.equal(ledger.query().filter((e) => (e as { action?: string }).action === 'ROLE_ASSIGNMENT_REQUESTED' && (e as { approvalId?: string }).approvalId === ids[0]).length, 1, 'ledgered once');
+    for (const id of ids) await call('POST', `/api/v1/approvals/${id}`, { decision: 'reject' }, OWNER);
+    // Expired requests: five that lapsed do not block, and a lapsed identical request is not handed back.
+    const lapsed = [0, 1, 2, 3, 4].map((i) => state.approvals.requestChange({ runId: mine.run.runId, agentId: 'mine', change: { type: 'role-assignment', provider: 'discord', identity: `50${i}`, roles: ['Family'] }, ttlMs: 1 }) as { approval: { approvalId: string } });
+    await new Promise((r) => setTimeout(r, 15));
+    const fresh = await ask('500');
+    assert.equal(fresh.status, 202, 'lapsed requests do not count against the cap');
+    assert.notEqual(fresh.body.approvalId, lapsed[0].approval.approvalId, 'a lapsed request is not returned as the live one');
+    await call('POST', `/api/v1/approvals/${fresh.body.approvalId}`, { decision: 'reject' }, OWNER);
+  });
+
+  it('a direct change keeps a role the agent no longer defines, drops duplicates, accepts only well-formed identities and is ledgered only when it changes something', async () => {
+    const links = state.identityLinks!;
+    links.link('discord', '600', 'cloudflare:legacy@example.com', 'admin', { name: 'Legacy', agentRoles: { mine: ['Legacy'] } });
+    const put = (id: string, roles: unknown) => call('PUT', `/api/v1/agents/mine/role-assignments/discord/${id}`, { roles }, OWNER);
+    assert.equal((await put('600', ['Legacy', 'Family'])).status, 200, 'a role the person already has stays assignable');
+    assert.equal((await put('600', ['Other'])).status, 400, 'a role the agent never defined does not');
+    const dup = await put('600', ['Family', 'Family']);
+    assert.deepEqual(dup.body.roles, ['Family']);
+    const assigned = () => ledger.query().filter((e) => (e as { action?: string }).action === 'AGENT_ROLES_ASSIGNED').length;
+    const before = assigned();
+    assert.equal((await put('600', ['Family'])).body.changed, false);
+    assert.equal(assigned(), before, 'nothing changed, nothing ledgered');
+    assert.equal((await put('a%20b', ['Family'])).body.error, 'unknown_identity');
+    await put('600', []);
   });
 });
