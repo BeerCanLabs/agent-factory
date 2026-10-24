@@ -329,4 +329,25 @@ describe('owners assign roles; an agent may only ask (CF2, CF4, TSK-265)', { con
     assert.equal((await put('a%20b', ['Family'])).body.error, 'unknown_identity');
     await put('600', []);
   });
+
+  it('an approved change is used up even when applying it fails, and the agent cannot spend it at the egress', async () => {
+    const mine = await runFor({ provider: 'discord', id: '100' });
+    const ask = await call('POST', `/api/v1/runs/${mine.run.runId}/role-requests`, { provider: 'discord', identity: '201', roles: ['Family'] }, mine.token);
+    const links = state.identityLinks!;
+    const real = links.link.bind(links);
+    (links as { link: unknown }).link = () => {
+      throw new Error('disk full');
+    };
+    try {
+      const out = await call('POST', `/api/v1/approvals/${ask.body.approvalId}`, { decision: 'approve' }, OWNER);
+      assert.ok(out.status >= 400, JSON.stringify(out.body));
+    } finally {
+      (links as { link: unknown }).link = real;
+    }
+    assert.equal(state.approvals.get(ask.body.approvalId)!.state, 'consumed', 'not left approved for anyone to carry');
+    assert.equal(rolesOf('discord', '201'), undefined);
+    const again = await call('POST', `/api/v1/runs/${mine.run.runId}/role-requests`, { provider: 'discord', identity: '201', roles: ['Family'] }, mine.token);
+    assert.equal(again.status, 202, 'the owner can be asked again');
+    await call('POST', `/api/v1/approvals/${again.body.approvalId}`, { decision: 'reject' }, OWNER);
+  });
 });

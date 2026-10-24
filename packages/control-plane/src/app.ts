@@ -934,8 +934,13 @@ async function decideApproval(state: FactoryState, id: string, decision: unknown
   if (decided.kind === 'change') {
     // The decision is ledgered above before anything is applied. The agent is not told and carries nothing.
     if (decision !== 'approve') return { status: 200, body: decided };
-    const applied = applyApprovedChange(state, decided, actor);
-    state.approvals.consume(decided.approvalId);
+    // Used up whether or not applying succeeds: an approval the agent was told the id of is never left spendable.
+    let applied: { status: number; body: Record<string, unknown> };
+    try {
+      applied = applyApprovedChange(state, decided, actor);
+    } finally {
+      state.approvals.consumeChange(decided.approvalId);
+    }
     return { status: 200, body: { ...decided, applied: applied.status === 200, ...(applied.status === 200 ? {} : { reason: applied.body.error }) } };
   }
   if (decided.kind === 'held') {

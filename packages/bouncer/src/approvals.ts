@@ -154,9 +154,22 @@ export class ApprovalStore {
     return { ...next };
   }
 
+  /**
+   * Burns an approved approval for a tool or a secret (the Keymaster, the gatekeeper-egress). A configuration change is never
+   * something an agent can spend: it is applied by the factory and used up with `consumeChange`.
+   */
   consume(id: string): Approval | undefined {
     const a = this.items.get(id);
-    if (!a || a.state !== 'approved') return undefined;
+    if (!a || a.state !== 'approved' || a.kind === 'change') return undefined;
+    const next = { ...a, state: 'consumed' as const };
+    this.save(next);
+    return { ...next };
+  }
+
+  /** The factory's own use of an approved configuration change. */
+  consumeChange(id: string): Approval | undefined {
+    const a = this.items.get(id);
+    if (!a || a.state !== 'approved' || a.kind !== 'change') return undefined;
     const next = { ...a, state: 'consumed' as const };
     this.save(next);
     return { ...next };
