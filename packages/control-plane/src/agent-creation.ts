@@ -54,6 +54,17 @@ export function agentConfigForRun(state: FactoryState, run: Run, res: http.Serve
   });
 }
 
+/** Nothing of a failed creation is left behind: neither the agent, its registry file nor its configuration, so the id can be tried again. */
+export async function discardCreated(state: FactoryState, id: string, actor: string, reason: string): Promise<void> {
+  state.agents.delete(id);
+  try {
+    registryOf(state).remove(id);
+  } catch {
+    // the record may not have been written
+  }
+  await removeConfig(state, id, { actor, reason }).catch(() => undefined);
+}
+
 export type NewConfiguredAgent = {
   id: unknown;
   name?: unknown;
@@ -135,14 +146,7 @@ export async function createFromConfiguration(state: FactoryState, principal: { 
     });
     return { status: 201, body: { ...record, owners: stored.owners ?? [], configurationVersion: stored.version }, record };
   } catch (err) {
-    // Nothing of a failed creation is left behind: neither the agent, its registry file nor its configuration, so the id can be tried again.
-    state.agents.delete(id);
-    try {
-      registryOf(state).remove(id);
-    } catch {
-      // the record may not have been written
-    }
-    await removeConfig(state, id, { actor: principal.actor, reason: 'creation failed' }).catch(() => undefined);
+    await discardCreated(state, id, principal.actor, 'creation failed');
     console.error(`[control-plane] agent ${id} not created: ${err instanceof Error ? err.message : String(err)}`);
     return { status: 500, body: { error: 'agent_not_created' } };
   }

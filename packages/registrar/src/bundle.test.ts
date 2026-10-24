@@ -50,6 +50,7 @@ describe('CF3 agent bundle', () => {
     assert.equal(refused((b) => (b.agent.name = '')), false);
     assert.equal(refused((b) => (b.origin = 'else')), false);
     assert.equal(refused((b) => b.skills.push({ id: 'notes', version: '2.0.0' })), false, 'a skill twice');
+    assert.equal(refused((b) => (b.skills[0].id = '../x')), false);
     assert.equal(refused((b) => (b.skills[0].version = 'latest')), false);
     assert.equal(refused((b) => (b.skills = Array.from({ length: 51 }, (_, i) => ({ id: `s${i}`, version: '1.0.0' })))), false);
     assert.equal(refused((b) => (b.policy = 'open')), false);

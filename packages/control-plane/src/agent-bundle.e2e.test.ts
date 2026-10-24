@@ -15,7 +15,7 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { IdentityLinkStore } from './identity-links.js';
-import { loadSkills, recordSkillChecks } from './skills.js';
+import { adoptionStore, loadSkills, recordSkillChecks } from './skills.js';
 
 const ADMIN = 'admin-bundle';
 const OWNER = 'owner-bundle';
@@ -166,6 +166,39 @@ describe('an agent moves as one bundle (CF3, TSK-266)', { concurrency: false }, 
     assert.equal(cfg.agent!.roles!.length, 2, 'a role may name a skill that is being requested');
     assert.ok(actions().includes('AGENT_IMPORTED') && actions().includes('AGENT_IMPORT_POLICY_REQUESTED') && actions().includes('SKILL_ADOPTION_REQUESTED'));
     assert.ok(!JSON.stringify(ledger.query()).includes('BUNDLE-SOUL-MARKER'));
+  });
+
+  it('an import is all or nothing: a role may name only a skill this factory can adopt, and a failure leaves nothing', async () => {
+    const bundle = (await call('GET', '/api/v1/agents/nova/bundle')).body;
+    const roleNaming = (skill: string) => [{ name: 'R', skills: { [skill]: { allow: ['*'] } } }];
+    const into = (id: string, skills: unknown[], roles: unknown) => call('POST', '/api/v1/agents/import', { ...bundle, agent: { ...bundle.agent, id }, skills, settings: { ...bundle.settings, roles } });
+    const ghost = await into('ghosted', [{ id: 'ghost-skill', version: '1.0.0' }], roleNaming('ghost-skill'));
+    assert.equal(ghost.status, 422, 'unavailable in this factory');
+    assert.equal(ghost.body.error, 'unknown_skill');
+    const absent = await into('absent', [], roleNaming('discord-progress'));
+    assert.equal(absent.status, 422, 'not in the bundle');
+    for (const id of ['ghosted', 'absent']) assert.equal(state.agents.has(id) || !!state.configs!.current(id), false);
+    assert.equal((await into('bad-skill-id', [{ id: '../x', version: '1.0.0' }], [])).status, 400);
+    const noSettings = { ...bundle, agent: { ...bundle.agent, id: 'no-settings' } };
+    delete noSettings.settings;
+    assert.equal((await call('POST', '/api/v1/agents/import', noSettings)).status, 422);
+    // A failure after the agent exists: the ledger refuses the adoption row.
+    const realAppend = ledger.append.bind(ledger);
+    (ledger as any).append = (e: { action: string }) => {
+      if (e.action === 'SKILL_ADOPTION_REQUESTED') throw new Error('boom');
+      return realAppend(e as never);
+    };
+    try {
+      const failed = await into('half', [{ id: 'discord-progress', version: '1.0.0' }], roleNaming('discord-progress'));
+      assert.equal(failed.status, 500);
+      assert.deepEqual(failed.body, { error: 'import_failed' }, 'no raw message');
+    } finally {
+      (ledger as any).append = realAppend;
+    }
+    assert.equal(state.agents.has('half'), false);
+    assert.equal(adoptionStore(state).get('half', 'discord-progress'), undefined, 'no request is left for the removed agent');
+    assert.equal(state.configs!.current('half'), undefined);
+    assert.equal((await into('half', [{ id: 'discord-progress', version: '1.0.0' }], roleNaming('discord-progress'))).status, 201, 'the id can be tried again');
   });
 
   it('is an admin\'s act, and refuses an id that exists (registered or retired) and anything malformed', async () => {

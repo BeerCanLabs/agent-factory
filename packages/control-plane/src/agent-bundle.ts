@@ -14,8 +14,8 @@ import http from 'node:http';
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { buildBundle, parseBundle } from '@beercanlabs/factory-registrar';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
-import { createFromConfiguration } from './agent-creation.js';
-import { requestAdoptionFor } from './skills.js';
+import { createFromConfiguration, discardCreated } from './agent-creation.js';
+import { adoptionStore, approvedSkill, requestAdoptionFor } from './skills.js';
 
 const BUNDLE = /^\/api\/v1\/agents\/([^/]+)\/bundle$/;
 const IMPORT = '/api/v1/agents/import';
@@ -53,19 +53,32 @@ export async function handleAgentBundle(state: FactoryState, req: http.IncomingM
     soul: bundle.settings.soul,
     roles: bundle.settings.roles,
     memory: bundle.settings.memory,
-    rolesMayNameSkills: new Set(bundle.skills.map((s) => s.id)),
+    // A role may name only a skill this factory can adopt: an unavailable one would be a ceiling that is not there (CF2).
+    rolesMayNameSkills: new Set(bundle.skills.filter((s) => approvedSkill(state, s.id, s.version)).map((s) => s.id)),
     reason: 'imported from a bundle',
   });
   if (created.status !== 201) return json(res, created.status, created.body), true;
   const id = bundle.agent.id;
   const skills: Array<{ id: string; version: string; state: string; error?: string }> = [];
-  for (const s of bundle.skills) {
-    const asked = await requestAdoptionFor(state, id, s.id, s.version, principal.actor, 'imported from a bundle');
-    skills.push(asked.status === 201 ? { ...s, state: 'requested' } : { ...s, state: 'unavailable', error: String(asked.body.error ?? asked.status) });
-  }
-  state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_IMPORTED', actor: principal.actor, payloadSha256: payloadHash(bundle) });
-  if (bundle.policy) {
-    state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_IMPORT_POLICY_REQUESTED', actor: principal.actor, payloadSha256: payloadHash(bundle.policy) });
+  try {
+    for (const s of bundle.skills) {
+      const asked = await requestAdoptionFor(state, id, s.id, s.version, principal.actor, 'imported from a bundle');
+      skills.push(asked.status === 201 ? { ...s, state: 'requested' } : { ...s, state: 'unavailable', error: String(asked.body.error ?? asked.status) });
+    }
+    // A role that names a skill whose request was refused would be a ceiling that is not there (CF2): the import is not made.
+    const refused = new Set(skills.filter((s) => s.state !== 'requested').map((s) => s.id));
+    const named = (bundle.settings.roles ?? []).flatMap((r) => Object.keys(r.skills)).find((k) => refused.has(k));
+    if (named) throw new Error(`role names ${named}, whose adoption could not be requested`);
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_IMPORTED', actor: principal.actor, payloadSha256: payloadHash(bundle) });
+    if (bundle.policy) {
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_IMPORT_POLICY_REQUESTED', actor: principal.actor, payloadSha256: payloadHash(bundle.policy) });
+    }
+  } catch (err) {
+    // All or nothing: the agent, its configuration and the requests made for it are removed, so the import can be tried again.
+    for (const s of bundle.skills) adoptionStore(state).clear(id, s.id);
+    await discardCreated(state, id, principal.actor, 'import failed');
+    console.error(`[control-plane] import of ${id} failed: ${err instanceof Error ? err.message : String(err)}`);
+    return json(res, 500, { error: 'import_failed' }), true;
   }
   json(res, 201, { ...created.body, skills, ...(bundle.policy ? { policyRequested: bundle.policy, policyApplied: false } : {}) });
   return true;
