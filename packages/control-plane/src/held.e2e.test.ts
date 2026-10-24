@@ -129,6 +129,7 @@ describe('E9 held requests in the control plane', { concurrency: false }, () => 
     assert.equal(ok.body.delivered, 'mailbox');
     const msg = state.mailboxes!.get('castle')!.messages[0].payload as Record<string, unknown>;
     assert.equal(msg.type, 'approval');
+    assert.equal(msg.factoryKind, 'approval', 'RT1: the factory marks a decision, so the runtime never answers it as a person\'s turn');
     assert.equal(msg.decision, 'approved');
     assert.equal(msg.approvalId, body.approvalId);
 
@@ -152,6 +153,7 @@ describe('E9 held requests in the control plane', { concurrency: false }, () => 
     assert.ok(woke, 'a new run carries the decision');
     const input = woke!.input as Record<string, unknown>;
     assert.equal(input.decision, 'rejected');
+    assert.equal(input.factoryKind, 'approval', 'RT1: the run a decision starts is marked by the factory');
     assert.equal(input.notes, 'Too salesy. Lead with the outage story.');
 
     const refused = await hold(liveRun().runId);
