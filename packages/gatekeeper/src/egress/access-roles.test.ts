@@ -260,4 +260,26 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
     }
     assert.equal(upstreamSaw.length, 0);
   });
+
+  it('an allowed route cannot be used to reach another route’s path on the same origin (dot segments, also percent-encoded)', async () => {
+    await run({ restricted: true, routes: { 'google-calendar': 'allowed', 'google-gmail': 'denied' } });
+    for (const path of ['/google-calendar/../gmail/messages', '/google-calendar/%2e%2e/gmail/messages', '/google-calendar/%2E%2E/gmail/messages', '/google-calendar/a/../../gmail/messages']) {
+      const r = await get(port, path, token);
+      assert.equal(r.status, 400, path);
+      assert.equal(r.json.error, 'bad_path');
+    }
+    assert.equal(upstreamSaw.length, 0, 'the credential-bearing upstream was never reached');
+    assert.equal((await get(port, '/google-calendar/a/b/../c', token)).status, 200, 'a dot segment that stays inside the route still works');
+  });
+
+  it('a denied route’s host does not close a different allowed host', async () => {
+    await run({ restricted: true, routes: { 'local-svc': 'denied', 'google-calendar': 'allowed' } });
+    const up = (upstream.address() as { port: number }).port;
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: `http://127.0.0.1:${up}/x`, method: 'GET', headers: { host: `127.0.0.1:${up}`, 'proxy-authorization': `Bearer ${token}`, authorization: `Bearer ${token}` } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode ?? 0)); });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.notEqual(status, 403, 'only the denied route’s own host is refused');
+  });
 });

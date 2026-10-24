@@ -293,6 +293,16 @@ describe('the gatekeeper-egress enforces a person’s roles (E12 item 4, TSK-174
     for (const r of state.runs.list({ agentId: 'donna', active: true })) state.runs.update(r.runId, { state: 'DONE' } as never);
   });
 
+  it('the same id under another provider is not the same person in the hand-off check', async () => {
+    const port = (cp.address() as { port: number }).port;
+    for (const r of state.runs.list({ agentId: 'donna', active: true })) state.runs.update(r.runId, { state: 'DONE' } as never);
+    await liveRun({ requestedBy: discord('201'), actor: 'factory:ingress' });
+    state.identityLinks!.link('slack', '201', 'cloudflare:stranger@example.com', 'admin', { name: 'Stranger', agentRoles: { donna: ['Family'] } });
+    const r = await fetch(`http://127.0.0.1:${port}/api/v1/agents/donna/conversation`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${INGRESS}` }, body: JSON.stringify({ input: { content: 'hi' }, requestedBy: { provider: 'slack', id: '201' } }) });
+    assert.equal(r.status, 409);
+    for (const x of state.runs.list({ agentId: 'donna', active: true })) state.runs.update(x.runId, { state: 'DONE' } as never);
+  });
+
   it('a skill that has routes but is missing from the declared ids is still restricted (the sources are joined, not preferred)', () => {
     const rec = { ...state.agents.get('donna')!, skillIds: ['google-calendar'], roles: [{ name: 'Family', skills: { 'google-calendar': { allow: ['*'], deny: [] } } }] };
     const run = state.runs.create({ agentId: 'donna', state: 'WORKING', actor: 'x', trigger: 'api', requestedBy: discord('201') } as never);
@@ -316,6 +326,50 @@ describe('the gatekeeper-egress enforces a person’s roles (E12 item 4, TSK-174
     } finally {
       state.agents.set('donna', donnaRec);
     }
+  });
+
+  it('a run started by a decision carries the reach of the person whose run asked, never the decider’s; unplaceable origins get no notes', async () => {
+    const call = async (path: string, token: string, body: unknown) => {
+      const r = await fetch(`http://127.0.0.1:${(cp.address() as { port: number }).port}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+      return { status: r.status, body: await r.json() };
+    };
+    const hold = (runId: string, n: number) =>
+      call('/api/v1/gatekeeper-egress/holds', EGRESS, { runId, route: 'google-gmail', argsSha256: String(n).repeat(64).slice(0, 64), request: { method: 'post', path: `/send${n}`, headers: {}, body: '{}', bodyEncoding: 'utf8', preview: 'mail' } });
+    for (const r of state.runs.list({ agentId: 'donna', active: true })) state.runs.update(r.runId, { state: 'DONE' } as never);
+    // Stephanie's run asks; it ends; the owner (admin token) rejects with notes: the new run is Stephanie's, restricted.
+    const hers = await asPerson('201');
+    const h1 = await hold(hers.run.runId, 1);
+    assert.ok(h1.body.approvalId, JSON.stringify(h1.body));
+    state.runs.update(hers.run.runId, { state: 'DONE' } as never);
+    assert.equal((await call(`/api/v1/approvals/${h1.body.approvalId}`, ADMIN, { decision: 'reject', notes: 'steer: use gmail' })).body.delivered, 'run');
+    const woke = state.runs.list({ agentId: 'donna' }).find((r) => r.trigger === 'approval')!;
+    assert.deepEqual(woke.requestedBy, discord('201'));
+    assert.equal(accessForRun(state, woke, state.agents.get('donna')!).restricted, true);
+    assert.equal((accessForRun(state, woke, state.agents.get('donna')!) as { routes: Record<string, string> }).routes['google-gmail'], 'denied');
+    state.runs.update(woke.runId, { state: 'DONE' } as never);
+    // A run of the factory's own (no requester): the decision run is the principal's, notes kept.
+    const own = await liveRun({ actor: 'token:admin' });
+    const h2 = await hold(own.run.runId, 2);
+    state.runs.update(own.run.runId, { state: 'DONE' } as never);
+    await call(`/api/v1/approvals/${h2.body.approvalId}`, ADMIN, { decision: 'reject', notes: 'fine' });
+    const second = state.runs.list({ agentId: 'donna' }).filter((r) => r.trigger === 'approval').pop()!;
+    assert.equal((second.input as { notes?: string }).notes, 'fine');
+    assert.equal(accessForRun(state, second, state.agents.get('donna')!).restricted, false);
+    state.runs.update(second.runId, { state: 'DONE' } as never);
+    // A scheduled run whose schedule is gone cannot be placed: the decision run gets no free text.
+    const orphan = await liveRun({ trigger: 'schedule', input: { scheduleId: 'gone' }, actor: 'factory:timekeeper' });
+    const h3 = await hold(orphan.run.runId, 3);
+    state.runs.update(orphan.run.runId, { state: 'DONE' } as never);
+    await call(`/api/v1/approvals/${h3.body.approvalId}`, ADMIN, { decision: 'reject', notes: 'steer' });
+    const third = state.runs.list({ agentId: 'donna' }).filter((r) => r.trigger === 'approval').pop()!;
+    assert.equal((third.input as { notes?: string }).notes, undefined);
+    state.runs.update(third.runId, { state: 'DONE' } as never);
+  });
+
+  it('a person with explicit non-admin roles is not an admin because their email is on the list (as the Bouncer reads a link)', () => {
+    state.identityLinks!.link('discord', '209', 'cloudflare:boss-email@example.com', 'admin', { name: 'ListedButRoled', roles: ['viewer'], agentRoles: { donna: ['Family'] } });
+    const run = state.runs.create({ agentId: 'donna', state: 'WORKING', actor: 'x', trigger: 'api', requestedBy: discord('209') } as never);
+    assert.equal(accessForRun(state, run, state.agents.get('donna')!).restricted, true);
   });
 
   it('the run read the egress uses carries the answer, and only the egress may read it', async () => {

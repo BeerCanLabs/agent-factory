@@ -57,7 +57,8 @@ export function accessForRequester(state: FactoryState, agent: AgentRecord, requ
   if (owners.includes(actor)) return NOT_RESTRICTED;
   const roles = link.roles ?? [];
   const email = actor.startsWith('cloudflare:') ? actor.slice('cloudflare:'.length).trim() : '';
-  const isAdmin = roles.includes('admin') || (email !== '' && adminEmails().includes(email));
+  // As the Bouncer reads a link (`authorizeIngress`): explicit roles replace the email-admin default.
+  const isAdmin = roles.includes('admin') || (roles.length === 0 && email !== '' && adminEmails().includes(email));
   // Admins are not restricted (E12 item 4). A factory operator is admitted to every agent (E12 item 3) and is likewise
   // not narrowed to a role: to limit a person to an agent role, they hold no operator role.
   if (isAdmin || roles.includes('operator')) return NOT_RESTRICTED;

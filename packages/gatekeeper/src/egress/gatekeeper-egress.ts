@@ -684,7 +684,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       const base = new URL(route.upstream);
       // Build by string so `//host` in the path can never switch origin (and carry the credential elsewhere).
       const dest = new URL(base.origin + base.pathname.replace(/\/$/, '') + rest);
-      if (dest.origin !== base.origin) {
+      // A dot segment (`..`, also percent-encoded) is resolved by URL parsing: the call must stay inside the route's own
+      // path, or an allowed route would be a way to another route's path on the same origin (E12 item 4).
+      const prefix = base.pathname.replace(/\/$/, '');
+      if (dest.origin !== base.origin || (prefix && dest.pathname !== prefix && !dest.pathname.startsWith(prefix + '/'))) {
         send(res, 400, { error: 'bad_path' });
         resolve(400);
         return;

@@ -113,8 +113,8 @@ function ledgerSchedule(state: FactoryState, caller: ScheduleCaller, action: 'SC
 
 /**
  * Who a run is for, as the factory itself recorded it. Never what a request says: a run that creates a schedule is
- * read from the run's own record, so an agent cannot name its requester. `undefined` means the factory cannot tell,
- * and the caller refuses (fail closed).
+ * read from the run's own record, so an agent cannot name its requester. `undefined` means the factory cannot tell the requester of a run that is not scheduled; the E12 enforcement
+ * (`accessForRequester`) reads that as no requesting person, and a scheduled run's `undefined` as unknown (restricted).
  */
 export function requesterOfRun(state: FactoryState, run: Run): ScheduleRequester | undefined {
   // The cartridge's own declared cron is the agent's own work.

@@ -48,7 +48,7 @@ import { applyTrainingForCaller, handleSkillTraining } from './skill-training.js
 import { buildSkillsFor, isDeploying, runDeploy } from './apply.js';
 import { handleRunProgress } from './progress-routes.js';
 import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercanlabs/factory-inspector';
-import { handleSchedules } from './schedules.js';
+import { handleSchedules, requesterOfRun } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
@@ -942,7 +942,13 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
     deliverToMailbox(state, a.agentId, payload);
     return 'mailbox';
   }
-  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input: payload });
+  // E12: the run that follows a decision carries the reach of the person whose run asked, never the decider's own. The
+  // decider's notes are free text, so a run whose originating requester cannot be placed does not receive them.
+  const origin = state.runs.get(a.runId);
+  const who = origin ? requesterOfRun(state, origin) : undefined;
+  const forPerson = who?.kind === 'identity' ? { requestedBy: { provider: who.provider, id: who.id } } : {};
+  const input = origin && who ? payload : { ...payload, notes: undefined };
+  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input, ...forPerson });
   if (out.status < 300) return 'run';
   state.ledger.append({
     timestamp: new Date().toISOString(),
