@@ -35,6 +35,8 @@ import { AGENT_ID, type ConfigContent, type ConfigRecord } from '@beercanlabs/fa
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { parseActor } from './identity-links.js';
 import { isReservedPolicyId } from '@beercanlabs/factory-gatekeeper/policy';
+import { payloadHash } from '@beercanlabs/factory-ledger';
+import { canReadSettings } from './agent-settings.js';
 
 /**
  * The agent's configuration as the factory holds it now. Adopted skills and owners carry forward: a registration, a
@@ -49,6 +51,8 @@ export function configOf(state: FactoryState, agentId: string): ConfigContent {
     skills: previous?.skills ?? [],
     policy: state.policies.has(agentId) ? state.policies.get(agentId) : null,
     ...(previous?.owners ? { owners: previous.owners } : {}),
+    // CF1: the agent's own settings carry forward like owners and skills, so no other change ever drops them.
+    ...(previous?.agent ? { agent: previous.agent } : {}),
   };
 }
 
@@ -304,7 +308,15 @@ export async function handleConfig(state: FactoryState, req: http.IncomingMessag
   }
   const m = path.match(AGENT_CONFIG);
   if (!m) return false;
-  if (!(await requirePrivilege(req, res, state, 'config.read', { agentId: decodeURIComponent(m[1]) }))) return true;
+  const reader = await requirePrivilege(req, res, state, 'config.read', { agentId: decodeURIComponent(m[1]) });
+  if (!reader) return true;
+  // CF1: the soul is for those who may read the agent's settings, not every viewer; a version says only its hash.
+  const seesSoul = canReadSettings(state, reader, decodeURIComponent(m[1]));
+  const shown = (r: ConfigRecord): ConfigRecord => {
+    if (seesSoul || !r.agent?.soul) return r;
+    const { soul, ...rest } = r.agent;
+    return { ...r, agent: { ...rest, soulSha256: payloadHash(soul) } as never };
+  };
   if (!state.configs) {
     json(res, 503, { error: 'config_store_unavailable' });
     return true;
@@ -316,13 +328,13 @@ export async function handleConfig(state: FactoryState, req: http.IncomingMessag
     return true;
   }
   if (!m[2]) {
-    json(res, 200, history[history.length - 1]);
+    json(res, 200, shown(history[history.length - 1]));
   } else if (m[2] === 'history') {
-    json(res, 200, { agentId, current: history[history.length - 1].version, versions: history });
+    json(res, 200, { agentId, current: history[history.length - 1].version, versions: history.map(shown) });
   } else {
     const n = /^[1-9]\d*$/.test(m[3]) ? Number(m[3]) : NaN;
     const record = history.find((r) => r.version === n);
-    if (record) json(res, 200, record);
+    if (record) json(res, 200, shown(record));
     else json(res, 404, { error: 'version_not_found' });
   }
   return true;

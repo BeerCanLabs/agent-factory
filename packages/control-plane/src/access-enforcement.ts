@@ -7,6 +7,7 @@ import type { AgentRecord } from '@beercanlabs/factory-registrar';
 import type { FactoryState } from './app.js';
 import { ownersOf } from './config-store.js';
 import { requesterOfRun } from './schedules.js';
+import { agentInForce } from './agent-settings.js';
 
 /**
  * `restricted: false`: the rule does not apply to this run. `restricted: true`: each route some skill declares is
@@ -42,6 +43,7 @@ export function accessForRun(state: FactoryState, run: Run, agent: AgentRecord):
  */
 export function accessForRequester(state: FactoryState, agent: AgentRecord, requester: ReturnType<typeof requesterOfRun>, scheduled = false): RunAccess {
   const agentId = agent.id;
+  agent = agentInForce(state, agent);
   // E12 item 5: no requesting person (a cartridge cron, a system caller) is not restricted. A scheduled run whose
   // requester cannot be read (the schedule is gone or malformed) is not "no person": it is unknown, and fails closed.
   if (!requester) return scheduled ? restrictedTo(agent, []) : NOT_RESTRICTED;

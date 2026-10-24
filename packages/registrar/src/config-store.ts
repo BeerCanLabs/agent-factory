@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import type { AgentSettings } from './agent-settings.js';
 
 /** A filesystem-safe UTC timestamp for archive folders: `2026-10-01T12-00-00-000Z`. */
 export function archiveStamp(now = new Date()): string {
@@ -48,6 +49,11 @@ export type ConfigContent = {
   policy: ConfigPolicy | null;
   /** SK3, GAP-088: who owns the agent, as principal actors (`cloudflare:`, `oidc:`, `token:`). Absent when none, never `[]`. */
   owners?: string[];
+  /**
+   * CF1: the agent's soul, roles and memory settings, held by the factory. Absent for every agent that has none (all of
+   * them today), and then not part of the hash.
+   */
+  agent?: AgentSettings;
 };
 
 /**
@@ -129,7 +135,8 @@ function sortValue(value: unknown): unknown {
 
 export function configHash(c: ConfigContent): string {
   // `owners` only when set, so the hash of every record that has none is what it was before owners existed.
-  const content: ConfigContent = { agentId: c.agentId, source: c.source, skills: c.skills, policy: c.policy, ...(c.owners ? { owners: c.owners } : {}) };
+  // `agent` likewise (CF1): a record with no settings hashes exactly as it did before settings existed.
+  const content: ConfigContent = { agentId: c.agentId, source: c.source, skills: c.skills, policy: c.policy, ...(c.owners ? { owners: c.owners } : {}), ...(c.agent && Object.keys(c.agent).length ? { agent: c.agent } : {}) };
   return createHash('sha256').update(canonicalJson(content)).digest('hex');
 }
 
@@ -558,6 +565,7 @@ export class VersionedConfigStore implements ConfigStore {
       skills: structuredClone(content.skills),
       policy: structuredClone(content.policy),
       ...(content.owners ? { owners: [...content.owners] } : {}),
+      ...(content.agent && Object.keys(content.agent).length ? { agent: structuredClone(content.agent) } : {}),
       updatedAt: new Date().toISOString(),
       updatedBy: meta.updatedBy,
       reason: meta.reason,
