@@ -144,6 +144,8 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
 
   it('the owner sets the soul and memory: a new version, ledgered by part name only, the soul never in the ledger', async () => {
     const soul = 'You are Mine. SECRET-SOUL-TEXT.';
+    const versioned = () => ledger.query().filter((e) => (e as { action?: string }).action === 'CONFIG_VERSIONED' && (e as { agentId?: string }).agentId === 'mine').length;
+    const versionedBefore = versioned();
     const put = await call('PUT', '/api/v1/agents/mine/settings', { soul, memory: { archetype: 'team-member' } }, OWNER);
     assert.equal(put.status, 200, JSON.stringify(put.body));
     assert.deepEqual(put.body.changed.sort(), ['memory', 'soul']);
@@ -154,6 +156,7 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
     const rows = ledger.query().filter((e) => (e as { action?: string }).action === 'AGENT_SETTINGS_CHANGED');
     assert.equal(rows.length, 1);
     assert.equal(rows[0].actor, 'token:owner-svc');
+    assert.equal(versioned() - versionedBefore, 1, 'and the new configuration version is ledgered like any other');
     assert.ok(!JSON.stringify(ledger.query()).includes('SECRET-SOUL-TEXT'));
     // The same change again is not a new version.
     const again = await call('PUT', '/api/v1/agents/mine/settings', { soul }, OWNER);
@@ -233,6 +236,23 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
     assert.deepEqual(now.owners, ['token:other-svc'], 'a settings change built from an older record did not put back the older owners');
     assert.equal(now.agent?.soul, 'second soul');
     await call('PUT', '/api/v1/agents/theirs/settings', { soul: null });
+  });
+
+  it('a settings change that was waiting for its body when the agent was purged is refused and recreates nothing', async () => {
+    const reg = await call('POST', '/api/v1/registry/agents', { repo: 'https://github.com/beercanlabs/SM-gone', commit: SHA, cartridge: cartridge('gone') });
+    assert.equal(reg.status, 201);
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/api/v1/agents/gone/settings', method: 'PUT', headers: { 'content-type': 'application/json', authorization: `Bearer ${ADMIN}`, 'transfer-encoding': 'chunked' } }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode ?? 0)); });
+      req.on('error', reject);
+      req.write('{"soul":"for a purged agent"');
+      setTimeout(async () => {
+        state.agents.delete('gone');
+        await state.configs!.remove('gone', 'test', 'purged');
+        req.end('}');
+      }, 80);
+    });
+    assert.equal(status, 404);
+    assert.equal(state.configs!.current('gone'), undefined, 'no configuration record, and no soul, was recreated for it');
   });
 
   it('a built-in agent has no settings', async () => {
