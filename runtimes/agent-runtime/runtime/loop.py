@@ -139,12 +139,15 @@ def main(factory: Factory | None = None) -> int:
     try:
         config = factory.config()
     except Exception as err:  # FactoryError or an unreachable factory: with no configuration there is nothing to run
-        write_result({"status": "failed", "output": {"error": f"no agent configuration: {getattr(err, 'status', type(err).__name__)}"}})
+        reason = f"no agent configuration: {getattr(err, 'status', type(err).__name__)}"
+        print(f"[runtime] {reason}", file=sys.stderr)
+        write_result({"status": "failed", "output": {"error": reason}})
         return 1
     soul = str(config.get("soul") or "")
     try:
         mind = open_mind(config.get("memory") or {}, Path(os.environ.get("MEMORY_DIR", "/tmp/mind")))
     except ValueError as err:
+        print(f"[runtime] {err}", file=sys.stderr)
         write_result({"status": "failed", "output": {"error": str(err)}})
         return 1
     loaded, problems = load_skills(config.get("skills") or [], reserved={spec["function"]["name"] for spec, _ in mind.tools()})

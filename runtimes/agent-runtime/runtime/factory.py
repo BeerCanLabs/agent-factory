@@ -9,6 +9,11 @@ import urllib.request
 from typing import Any
 
 
+# The factory, the factory model API and the Discord route are the agent network's own services, reached directly. The
+# container's HTTP(S)_PROXY points at the gatekeeper-egress for third-party hosts, which would refuse these.
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 class FactoryError(Exception):
     def __init__(self, status: int, body: Any):
         super().__init__(f"factory answered {status}: {body}")
@@ -48,7 +53,7 @@ class Factory:
             headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _DIRECT.open(req, timeout=timeout) as resp:
                 text = resp.read().decode("utf-8")
                 return json.loads(text) if text else None
         except urllib.error.HTTPError as err:
