@@ -55,17 +55,33 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
                 target = (folder / named.replace(".", "/") / "__init__.py").resolve()
             if folder.resolve() not in target.parents:
                 raise ValueError("entry leaves the skill folder")
-            # The skill's own folder is importable, so its modules can import each other. Standard library only otherwise:
-            # nothing is installed for a skill (docs/SKILLS.md).
-            if str(folder.resolve()) not in sys.path:
-                sys.path.insert(0, str(folder.resolve()))
+            # The skill's own folder is importable while it loads, so its modules can import each other at the top of the
+            # entry. It is last on the path (it never shadows the standard library or the runtime) and is taken off again, with
+            # the modules it brought, so two skills never share a module and one cannot replace another's. Standard library
+            # only otherwise: nothing is installed for a skill (docs/SKILLS.md).
+            root_folder = folder.resolve()
             name = f"skill_{sid.replace('-', '_')}"
             spec = importlib.util.spec_from_file_location(name, target, submodule_search_locations=[str(target.parent)] if target.name == "__init__.py" else None)
             if spec is None or spec.loader is None:
                 raise ValueError("cannot load entry")
             module = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = module
-            spec.loader.exec_module(module)
+            known = set(sys.modules)
+            sys.path.append(str(root_folder))
+            try:
+                spec.loader.exec_module(module)
+            except BaseException:
+                sys.modules.pop(spec.name, None)
+                raise
+            finally:
+                try:
+                    sys.path.remove(str(root_folder))
+                except ValueError:
+                    pass
+                for added in set(sys.modules) - known:
+                    origin = getattr(sys.modules[added], "__file__", None)
+                    if added != spec.name and not added.startswith(spec.name + ".") and origin and root_folder in Path(origin).resolve().parents:
+                        del sys.modules[added]
             for t in module.tools():
                 name = str(t["name"])
                 if name in seen or not re.match(r"^[A-Za-z0-9_-]{1,64}$", name):

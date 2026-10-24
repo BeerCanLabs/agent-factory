@@ -405,6 +405,34 @@ class TestSkills(Base):
         from runtime.skills import run_tool
         self.assertEqual(run_tool(tools[0], "{}", {}), "sibling+inner")
 
+    def test_two_skills_with_a_module_of_the_same_name_each_get_their_own(self):
+        for sid, word in (("sk-a", "from-a"), ("sk-b", "from-b")):
+            folder = Path(os.environ["SKILLS_DIR"]) / sid
+            folder.mkdir(parents=True)
+            (folder / "skill.yaml").write_text(f"id: {sid}\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+            (folder / "helper.py").write_text(f"WORD = '{word}'\n")
+            (folder / "entry.py").write_text("import helper\nWORD = helper.WORD\ndef tools():\n    return [{'name': 't_" + sid.replace('-', '_') + "', 'description': 'x', 'parameters': {}, 'handler': lambda a, c: WORD}]\n")
+        tools, problems = load_skills([{"id": "sk-a"}, {"id": "sk-b"}])
+        from runtime.skills import run_tool
+        self.assertEqual(problems, [])
+        self.assertEqual([run_tool(t, "{}", {}) for t in tools], ["from-a", "from-b"])
+        self.assertNotIn("helper", sys.modules)
+        self.assertNotIn(str(Path(os.environ["SKILLS_DIR"]) / "sk-a"), sys.path)
+
+    def test_a_skill_cannot_shadow_the_standard_library_and_a_failed_one_leaves_nothing_behind(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "shadow"
+        folder.mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: shadow\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+        (folder / "csv.py").write_text("raise SystemExit('shadowed')\n")
+        (folder / "entry.py").write_text("import csv\nraise RuntimeError('boom')\n")
+        tools, problems = load_skills([{"id": "shadow"}])
+        self.assertEqual(tools, [])
+        self.assertIn("boom", problems[0])
+        import csv
+        self.assertTrue(hasattr(csv, "reader"))
+        self.assertNotIn("skill_shadow", sys.modules)
+        self.assertNotIn(str(folder), sys.path)
+
     def test_a_skill_entry_cannot_leave_its_folder(self):
         self.write_skill(entry="../../outside.py")
         tools, problems = load_skills([{"id": "notes"}])
