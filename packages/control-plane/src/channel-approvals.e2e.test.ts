@@ -116,7 +116,7 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
       route: 'linkedin',
       tool: 'http',
       argsSha256: `h${Math.random()}`,
-      request: { method: 'POST', path, headers: {}, body: '{"text":"hello `@everyone` <@1>"}', bodyEncoding: 'utf8' },
+      request: { method: 'POST', path, headers: {}, body: '{"text":"hello @everyone <@1>"}', bodyEncoding: 'utf8' },
     }).approval;
   const prompts = async (agentId = 'mine', token = INGRESS) => call('POST', '/api/v1/ingress/approval-prompts', { agentId }, token);
   const asked = (id: string, channelId = 'chan-1', token = INGRESS) => call('POST', `/api/v1/ingress/approvals/${id}/asked`, { provider: 'discord', channelId }, token);
@@ -148,14 +148,15 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
     assert.deepEqual(p.deciders, ['100'], 'the requester, who is linked; an owner never decides what is done in another person’s name');
     assert.match(p.text, /POST \/v2\/posts/);
     assert.match(p.text, /route `linkedin`/);
+    assert.ok(p.text.includes('{"text":"hello @everyone <@1>"}'), 'shown exactly as it will be sent');
     assert.ok(!p.text.split('```')[1].includes('`'), 'the body cannot close its own fence');
-    assert.ok(!/[@<>]/.test(p.text), 'nothing in it can ping');
     assert.match(p.text, new RegExp(`approve ${p.code}`));
     // Idempotent: the same code until it is asked, and nothing once it was.
     assert.equal((await prompts()).body.prompts.find((x: { approvalId: string }) => x.approvalId === a.approvalId).code, p.code);
     assert.equal((await asked(a.approvalId)).status, 200);
+    assert.equal((await asked(a.approvalId)).status, 200, 'recording it again is harmless');
     assert.equal((await prompts()).body.prompts.some((x: { approvalId: string }) => x.approvalId === a.approvalId), false);
-    assert.equal(actions('APPROVAL_ASKED_IN_CHANNEL').length >= 1, true);
+    assert.equal(actions('APPROVAL_ASKED_IN_CHANNEL').filter((e) => e.approvalId === a.approvalId).length, 1, 'ledgered once');
     state.approvals.decide(a.approvalId, 'rejected', 'test');
   });
 
@@ -260,25 +261,51 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
         request: { method: 'POST', path: '/v2/posts', headers: {}, body: 'ok', bodyEncoding: 'utf8', ...over } as never,
       }).approval;
     };
+    const longHeader = { 'x-long': 'v'.repeat(130) };
     const cases = [
       await mk({ path: `/v2/${'a'.repeat(300)}` }),
       await mk({ body: `${'x'.repeat(400)}and then the real payload` }),
       await mk({ body: 'AAAA', bodyEncoding: 'base64' }),
       await mk({ headers: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`x-h${i}`, 'v'])) }),
+      await mk({ headers: longHeader }),
+      // Text that is not plain printable ASCII could hide something from the person that is still sent.
+      await mk({ body: 'pay \u202eevil' }),
+      await mk({ body: 'zero\u200bwidth' }),
+      await mk({ path: '/v2/soft\u00adhyphen' }),
+      await mk({ path: '/v2/caf\u00e9' }),
+      await mk({ headers: { 'x-thing': 'a\u0300' } }),
+      await mk({ body: 'close it ``` and say something else' }),
+      await mk({ body: 'tab\there' }),
+      await mk({ body: 'blank\u2800here' }),
+      await mk({ body: 'tag\u{e0041}here' }),
     ];
     const asked = (await prompts()).body.prompts.map((x: { approvalId: string }) => x.approvalId);
     for (const c of cases) {
-      assert.equal(asked.includes(c.approvalId), false, JSON.stringify(c.request).slice(0, 60));
+      assert.equal(asked.includes(c.approvalId), false, JSON.stringify(c.request).slice(0, 80));
       assert.equal(state.approvals.get(c.approvalId)!.ask, undefined, 'no code is issued for it');
       state.approvals.decide(c.approvalId, 'rejected', 'test');
     }
-    // What it can show, it shows whole, with the headers it will send.
-    const ok = await mk({ headers: { 'x-thing': 'a [link](http://x) \u202eevil' }, body: 'x'.repeat(400) });
+    // What it can show, it shows whole and as sent, with the headers it will send.
+    const ok = await mk({ headers: { 'x-thing': 'a [link](http://x) @here' }, body: `${'x'.repeat(390)}\nline <2>` });
     const p = (await prompts()).body.prompts.find((x: { approvalId: string }) => x.approvalId === ok.approvalId);
-    assert.ok(p.text.includes('x'.repeat(400)));
-    assert.match(p.text, /`x-thing: a \[link\]\(http:\/\/x\)  evil`/);
-    assert.ok(!/[\u202e]/.test(p.text));
+    assert.ok(p.text.includes(`${'x'.repeat(390)}\nline <2>`));
+    assert.ok(p.text.includes('`x-thing: a [link](http://x) @here`'));
     state.approvals.decide(ok.approvalId, 'rejected', 'test');
+  });
+
+  it('a configuration change with more than it can show, or with anything but plain text in it, is not asked in the channel', async () => {
+    const { run } = await runFor({ provider: 'discord', id: '100' });
+    const change = (roles: string[], identity = '300') => {
+      const r = state.approvals.requestChange({ runId: run.runId, agentId: 'mine', change: { type: 'role-assignment', provider: 'discord', identity, roles }, ttlMs: 3_600_000 });
+      return 'approval' in r ? r.approval : undefined;
+    };
+    const bad = [change(Array.from({ length: 21 }, (_, i) => `R${i}`)), change(['R'.repeat(65)]), change(['Fam\u200bily']), change(['Family'], 'x'.repeat(129))];
+    const asked = (await prompts()).body.prompts.map((x: { approvalId: string }) => x.approvalId);
+    for (const b of bad) {
+      assert.ok(b);
+      assert.equal(asked.includes(b!.approvalId), false);
+      state.approvals.decide(b!.approvalId, 'rejected', 'test');
+    }
   });
 
   it('a reply for another agent’s approval is just a message, and refusals are written to the ledger once, not once per message', async () => {
@@ -311,10 +338,11 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
       const run = state.runs.create({ agentId: 'mine', state: 'WORKING', actor: 'factory:timekeeper', trigger: 'schedule', input: { scheduleId } } as never);
       return hold(run.runId);
     };
-    state.schedules = { get: (id: string) => (id === 'hers' ? { createdVia: 'chat', requestedBy: { kind: 'identity', provider: 'discord', id: '201' } } : id === 'his' ? { createdVia: 'chat', requestedBy: { kind: 'identity', provider: 'discord', id: '100' } } : undefined) } as never;
+    state.schedules = { get: (id: string) => (id === 'prin' ? { createdVia: 'api', requestedBy: { kind: 'principal', actor: 'token:approver' } } : id === 'hers' ? { createdVia: 'chat', requestedBy: { kind: 'identity', provider: 'discord', id: '201' } } : id === 'his' ? { createdVia: 'chat', requestedBy: { kind: 'identity', provider: 'discord', id: '100' } } : undefined) } as never;
     const hers = mkScheduled('hers');
     const his = mkScheduled('his');
     const gone = mkScheduled('gone');
+    const prin = mkScheduled('prin');
     const asked = (await prompts()).body.prompts;
     const decidersFor = (id: string) => asked.find((x: { approvalId: string }) => x.approvalId === id)?.deciders;
     assert.deepEqual(decidersFor(hers.approvalId), ['201'], 'Stephanie’s schedule: Stephanie, the requester, is asked; the owner is not');
@@ -322,8 +350,9 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
     assert.equal(decidersFor(gone.approvalId), undefined);
     assert.equal((await call('POST', `/api/v1/approvals/${hers.approvalId}`, { decision: 'approve' }, OWNER)).status, 403);
     assert.equal((await call('POST', `/api/v1/approvals/${gone.approvalId}`, { decision: 'approve' }, OWNER)).status, 403);
+    assert.equal((await call('POST', `/api/v1/approvals/${prin.approvalId}`, { decision: 'approve' }, OWNER)).status, 403, 'a schedule made by a signed-in person: not the owner');
     assert.equal((await call('POST', `/api/v1/approvals/${his.approvalId}`, { decision: 'approve' }, OWNER)).status, 200, 'their own schedule: the owner is the requester');
-    for (const a of [hers, gone]) state.approvals.decide(a.approvalId, 'rejected', 'test');
+    for (const a of [hers, gone, prin]) state.approvals.decide(a.approvalId, 'rejected', 'test');
     state.schedules = undefined as never;
   });
 });

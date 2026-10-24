@@ -36,38 +36,33 @@ const REFUSAL_WINDOW_MS = 10 * 60 * 1000;
 const recentRefusals = new Map<string, number>();
 
 /**
- * Agent-written text shown to a person, as plain characters in a code span: no markup, no mentions, no look-alike or
- * invisible characters (bidi overrides, zero-width, C1 controls, line and paragraph separators) that could pass one
- * thing off as another. It never cuts: a caller that cannot show the whole of something refuses instead (see below).
+ * E9: the person approves exactly what will be sent. Agent-written text is shown only when it is plain printable ASCII
+ * (a body may span lines) with no backtick, so nothing can be hidden in it (invisible, bidi, look-alike or combining
+ * characters) and nothing can break out of the code span or fence it is shown in. Anything else is not sanitised into
+ * something different from what is sent: it is not asked in the channel at all, and waits for the console, which shows it.
  */
-function plain(value: string): string {
-  return value
-    .replace(/[`<>@]/g, "'")
-    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+/g, ' ')
-    .trim();
-}
-const span = (value: string) => `\`${plain(value)}\``;
+const SHOWABLE = /^[\x20-\x5f\x61-\x7e]*$/;
+const SHOWABLE_BODY = /^[\x20-\x5f\x61-\x7e\n]*$/;
+const span = (value: string) => `\`${value}\``;
 
-/**
- * The question, rendered from the factory's stored copy of the request. E9: the person approves exactly what will be
- * sent, so a request the channel cannot show in full (a long path or body, a binary body, many headers) is not asked
- * here at all: undefined, and it waits for the console, which shows all of it.
- */
+/** The question, rendered from the factory's stored copy of the request; undefined when the channel cannot show all of it. */
 export function renderQuestion(a: Approval, code: string): string | undefined {
   const lines: string[] = [];
   if (a.kind === 'change' && a.change) {
-    const { roles: given, identity } = a.change;
-    if (given.length > 20 || given.some((r) => r.length > 64) || identity.length > 128) return undefined;
+    const { roles: given, identity, provider } = a.change;
+    const all = [a.agentId, provider, identity, ...given];
+    if (given.length > 20 || given.some((r) => r.length > 64) || identity.length > 128 || !all.every((v) => SHOWABLE.test(v))) return undefined;
     const roles = given.length ? given.map(span).join(', ') : 'no roles (this removes them)';
-    lines.push(`**Approval needed.** Give ${span(`${a.change.provider}:${a.change.identity}`)} ${roles} on ${span(a.agentId)}.`);
+    lines.push(`**Approval needed.** Give ${span(`${provider}:${identity}`)} ${roles} on ${span(a.agentId)}.`);
   } else if (a.kind === 'held' && a.request) {
     const r = a.request;
     const headers = Object.entries(r.headers ?? {});
     if (r.path.length > MAX_PATH || (r.body && (r.bodyEncoding !== 'utf8' || r.body.length > MAX_BODY)) || headers.length > MAX_HEADERS || headers.some(([k, v]) => `${k}: ${v}`.length > MAX_HEADER)) return undefined;
+    if (![a.agentId, a.route, r.method, r.path, ...headers.flat()].every((v) => SHOWABLE.test(v)) || (r.body && !SHOWABLE_BODY.test(r.body))) return undefined;
     lines.push(`**Approval needed.** ${span(a.agentId)} wants to send this on route ${span(a.route)}:`);
     lines.push(span(`${r.method} ${r.path}`));
     for (const [k, v] of headers) lines.push(span(`${k}: ${v}`));
-    if (r.body) lines.push(`\`\`\`\n${plain(r.body.replace(/\n/g, ' '))}\n\`\`\``);
+    if (r.body) lines.push(`\`\`\`\n${r.body}\n\`\`\``);
   } else {
     return undefined;
   }
