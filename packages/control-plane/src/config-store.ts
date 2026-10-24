@@ -35,7 +35,6 @@ import { AGENT_ID, type ConfigContent, type ConfigRecord } from '@beercanlabs/fa
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { parseActor } from './identity-links.js';
 import { isReservedPolicyId } from '@beercanlabs/factory-gatekeeper/policy';
-import { payloadHash } from '@beercanlabs/factory-ledger';
 import { canReadSettings } from './agent-settings.js';
 
 /**
@@ -314,8 +313,8 @@ export async function handleConfig(state: FactoryState, req: http.IncomingMessag
   const seesSoul = canReadSettings(state, reader, decodeURIComponent(m[1]));
   const shown = (r: ConfigRecord): ConfigRecord => {
     if (seesSoul || !r.agent?.soul) return r;
-    const { soul, ...rest } = r.agent;
-    return { ...r, agent: { ...rest, soulSha256: payloadHash(soul) } as never };
+    const { soul: _soul, ...rest } = r.agent;
+    return { ...r, agent: { ...rest, soulSet: true } as never };
   };
   if (!state.configs) {
     json(res, 503, { error: 'config_store_unavailable' });
