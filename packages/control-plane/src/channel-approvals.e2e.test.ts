@@ -254,10 +254,10 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
   });
 
   it('never shows less than it would send: a long path or body, a binary body, or many headers are not asked in the channel', async () => {
-    const mk = async (over: Record<string, unknown>) => {
+    const mk = async (over: Record<string, unknown>, route = 'linkedin') => {
       const { run } = await runFor({ provider: 'discord', id: '100' });
       return state.approvals.hold({
-        runId: run.runId, agentId: 'mine', route: 'linkedin', tool: 'http', argsSha256: `h${Math.random()}`,
+        runId: run.runId, agentId: 'mine', route, tool: 'http', argsSha256: `h${Math.random()}`,
         request: { method: 'POST', path: '/v2/posts', headers: {}, body: 'ok', bodyEncoding: 'utf8', ...over } as never,
       }).approval;
     };
@@ -278,6 +278,18 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
       await mk({ body: 'tab\there' }),
       await mk({ body: 'blank\u2800here' }),
       await mk({ body: 'tag\u{e0041}here' }),
+      await mk({ body: 'carriage\rreturn' }),
+      // The same rule for every field a span shows: a backtick would close it; anything hidden would not be seen.
+      await mk({ path: '/v2/`x`' }),
+      await mk({ headers: { 'x-`k`': 'v' } }),
+      await mk({ headers: { 'x-k': 'v`' } }),
+      await mk({ method: 'PO`ST' }),
+      await mk({}, 'link`edin'),
+      await mk({ method: 'PO\u200bST' }),
+      await mk({ headers: { 'x-k\u200b': 'v' } }),
+      await mk({}, 'link\u200bedin'),
+      await mk({ method: 'P'.repeat(13) }),
+      await mk({}, 'r'.repeat(65)),
     ];
     const asked = (await prompts()).body.prompts.map((x: { approvalId: string }) => x.approvalId);
     for (const c of cases) {
@@ -299,7 +311,11 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
       const r = state.approvals.requestChange({ runId: run.runId, agentId: 'mine', change: { type: 'role-assignment', provider: 'discord', identity, roles }, ttlMs: 3_600_000 });
       return 'approval' in r ? r.approval : undefined;
     };
-    const bad = [change(Array.from({ length: 21 }, (_, i) => `R${i}`)), change(['R'.repeat(65)]), change(['Fam\u200bily']), change(['Family'], 'x'.repeat(129))];
+    const changeVia = (provider: string, roles: string[], identity = '300') => {
+      const r = state.approvals.requestChange({ runId: run.runId, agentId: 'mine', change: { type: 'role-assignment', provider, identity, roles }, ttlMs: 3_600_000 });
+      return 'approval' in r ? r.approval : undefined;
+    };
+    const bad = [changeVia('disc\u200bord', ['Family']), changeVia('discord', ['Family'], '30\u200b0'), changeVia('discord', ['Fam`ily']), changeVia('discord', ['Family'], '3`0'), change(Array.from({ length: 21 }, (_, i) => `R${i}`)), change(['R'.repeat(65)]), change(['Fam\u200bily']), change(['Family'], 'x'.repeat(129))];
     const asked = (await prompts()).body.prompts.map((x: { approvalId: string }) => x.approvalId);
     for (const b of bad) {
       assert.ok(b);

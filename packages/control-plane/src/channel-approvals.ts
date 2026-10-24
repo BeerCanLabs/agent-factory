@@ -29,6 +29,8 @@ const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CODE = /^[A-Za-z0-9]{4,12}$/;
 const MAX_PROMPTS = 10;
 const MAX_PATH = 200;
+const MAX_ROUTE = 64;
+const MAX_METHOD = 12;
 const MAX_BODY = 400;
 const MAX_HEADERS = 8;
 const MAX_HEADER = 120;
@@ -57,7 +59,7 @@ export function renderQuestion(a: Approval, code: string): string | undefined {
   } else if (a.kind === 'held' && a.request) {
     const r = a.request;
     const headers = Object.entries(r.headers ?? {});
-    if (r.path.length > MAX_PATH || (r.body && (r.bodyEncoding !== 'utf8' || r.body.length > MAX_BODY)) || headers.length > MAX_HEADERS || headers.some(([k, v]) => `${k}: ${v}`.length > MAX_HEADER)) return undefined;
+    if (a.route.length > MAX_ROUTE || r.method.length > MAX_METHOD || r.path.length > MAX_PATH || (r.body && (r.bodyEncoding !== 'utf8' || r.body.length > MAX_BODY)) || headers.length > MAX_HEADERS || headers.some(([k, v]) => `${k}: ${v}`.length > MAX_HEADER)) return undefined;
     if (![a.agentId, a.route, r.method, r.path, ...headers.flat()].every((v) => SHOWABLE.test(v)) || (r.body && !SHOWABLE_BODY.test(r.body))) return undefined;
     lines.push(`**Approval needed.** ${span(a.agentId)} wants to send this on route ${span(a.route)}:`);
     lines.push(span(`${r.method} ${r.path}`));
