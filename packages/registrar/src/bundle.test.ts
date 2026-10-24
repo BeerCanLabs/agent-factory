@@ -19,6 +19,8 @@ describe('CF3 agent bundle', () => {
     assert.equal(b.origin, 'configuration');
     assert.equal(b.source, undefined, 'the runtime pin is the importing factory\'s own');
     assert.deepEqual(b.skills, [{ id: 'notes', version: '1.0.0' }]);
+    const wide = buildBundle(agent, { ...content, skills: [{ id: 'notes', version: '1.0.0', extra: 'leak' }] } as never);
+    assert.deepEqual(wide.skills, [{ id: 'notes', version: '1.0.0' }], 'only id and version leave');
     assert.equal(b.settings!.soul, 'You are Nova.');
     assert.ok(!JSON.stringify(b).includes('dale@example.com'), 'no owner');
   });
@@ -58,6 +60,10 @@ describe('CF3 agent bundle', () => {
     assert.equal(refused((b) => (b.settings.extra = 1)), false, 'unknown settings');
     assert.equal(refused((b) => (b.settings.memory.archetype = 'wizard')), false);
     assert.equal(refused((b) => (b.settings.soul = 'x'.repeat(70000))), false);
+    assert.equal(refused((b) => (b.skills[0].id = 'Bad_Id')), false, 'a malformed skill id');
+    assert.equal(refused((b) => (b.agent.model = 'm'.repeat(201))), false);
+    assert.equal(refused((b) => (b.agent.name = 'n'.repeat(121))), false);
+    assert.equal(refused((b) => (b.agent.name = '   ')), false);
     assert.equal(refused(() => undefined), true);
   });
 

@@ -145,6 +145,14 @@ describe('an agent moves as one bundle (CF3, TSK-266)', { concurrency: false }, 
     assert.ok(actions().includes('AGENT_IMPORT_REFUSED:bundle_not_importable'));
   });
 
+  it('refuses a hand-built bundle that claims a repository origin yet carries settings', async () => {
+    const bundle = (await call('GET', '/api/v1/agents/nova/bundle')).body;
+    const forged = await call('POST', '/api/v1/agents/import', { ...bundle, origin: 'repository', agent: { ...bundle.agent, id: 'forged' } });
+    assert.equal(forged.status, 422);
+    assert.equal(forged.body.error, 'bundle_not_importable');
+    assert.equal(state.agents.has('forged'), false);
+  });
+
   it('imports a bundle as a new agent owned by the importer; it grants nothing: the policy is only reported, skills are only requested', async () => {
     assert.equal((await call('POST', '/api/v1/registry/skills', { repo: 'https://github.com/BeerCanLabs/skill-progress', path: '.', commit: SHA, manifest })).status, 201);
     recordSkillChecks(state, 'discord-progress', '1.0.0', { passed: true });
