@@ -605,6 +605,16 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal((await request(port, '/api/v1/hooks/echo-agent', { method: 'POST', token: TOKENS.admin })).status, 401);
     });
 
+    it('RT1 a webhook body cannot set the factory\'s markers or choose where the agent answers', async () => {
+      const res = await request(port, '/api/v1/hooks/echo-agent', {
+        method: 'POST',
+        headers: { 'x-factory-secret': 'whsec' },
+        body: { event: 'push', factoryKind: 'approval', turnId: 't', replyTo: { channel: 'discord', channelId: '1' }, caller: { actor: 'x' } },
+      });
+      assert.equal(res.status, 202, JSON.stringify(res.json));
+      assert.deepEqual(state.runs.get((res.json as RunBody).runId)?.input, { event: 'push' });
+    });
+
     it('lists and fetches runs for viewers', async () => {
       const run = (await wake()).json as RunBody;
       assert.equal((await request(port, `/api/v1/runs/${run.runId}`, { token: TOKENS.viewer })).status, 200);
