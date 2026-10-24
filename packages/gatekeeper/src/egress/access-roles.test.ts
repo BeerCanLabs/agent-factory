@@ -60,7 +60,7 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
     ctx = {
       run: { runId, agentId: 'donna', state: 'WORKING', live: true },
       agentState: 'WORKING',
-      policy: { routes: ['google-gmail', 'google-calendar', 'discord', 'toString', 'tools-mcp', 'conn-gmail', 'local-svc'] },
+      policy: { routes: ['google-gmail', 'google-calendar', 'discord', 'toString', 'tools-mcp', 'conn-gmail', 'local-svc', 'cal-sibling'] },
       spend: { run: 0, day: 0, month: 0 },
       ...(access !== undefined ? { access: access as RunContext['access'] } : {}),
     };
@@ -83,6 +83,7 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
         { id: 'discord', kind: 'http', upstream: `http://127.0.0.1:${up}/discord` },
         { id: 'toString', kind: 'http', upstream: `http://127.0.0.1:${up}/ts` },
         { id: 'local-svc', kind: 'http', upstream: `http://localhost:${up}/l` },
+        { id: 'cal-sibling', kind: 'http', upstream: `http://127.0.0.1:${up}/calx` },
         { id: 'tools-mcp', kind: 'mcp', upstream: `http://127.0.0.1:${up}/mcp` },
         { id: 'conn-gmail', kind: 'http', upstream: `http://127.0.0.1:${up}/conn`, connection: 'google' },
       ],
@@ -281,5 +282,19 @@ describe('E12 item 4: the gatekeeper-egress enforces the requesting person’s r
       req.end();
     });
     assert.notEqual(status, 403, 'only the denied route’s own host is refused');
+  });
+
+  it('a sibling path that merely starts with the route’s prefix is outside it; encoded separators are refused for a restricted person', async () => {
+    await run({ restricted: true, routes: { 'google-calendar': 'allowed', 'cal-sibling': 'denied' } });
+    const sib = await get(port, '/google-calendar/../calx/y', token);
+    assert.equal(sib.status, 400);
+    for (const path of ['/google-calendar/..%2fcalx/y', '/google-calendar/%2e%2e%2fcalx', '/google-calendar/..;/calx', '/google-calendar/a%5cb']) {
+      const r = await get(port, path, token);
+      assert.equal(r.status, 400, path);
+    }
+    assert.equal(upstreamSaw.length, 0);
+    // Not restricted: an encoded slash is left as the agent wrote it (nothing changes for existing agents).
+    await run({ restricted: false });
+    assert.equal((await get(port, '/google-calendar/a%2fb', token)).status, 200);
   });
 });

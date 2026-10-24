@@ -1316,6 +1316,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (roleAccess.kind === 'routes' && roleAccess.routes.has(route.id) && roleAccess.routes.get(route.id) !== 'allowed') {
         return deny(res, ctx, route, 403, 'role_not_allowed', { route: route.id });
       }
+      // A restricted person's path is judged as written: encoded separators and `;` are left for the upstream to decode,
+      // and could cross from an allowed route to a denied one that shares its origin.
+      if (roleAccess.kind === 'routes' && [...roleAccess.routes.values()].some((v) => v !== 'allowed') && /%2f|%5c|%2e|;/i.test(rest)) {
+        return deny(res, ctx, route, 400, 'bad_path');
+      }
       const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
       if ((route.kind === 'llm' || route.kind === 'models') && !isBuiltin) {
         if (ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED') return deny(res, ctx, route, 402, 'budget_exceeded', { window: 'blocked' });

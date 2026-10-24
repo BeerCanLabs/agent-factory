@@ -31,7 +31,7 @@ import {
   type SkillChecker,
   type SkillSource,
 } from '@beercanlabs/factory-registrar';
-import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
+import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
 import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
 import { authorize, authorizeIngress, directCaller, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type AuthenticatedCaller, type Privilege } from '@beercanlabs/factory-bouncer';
 import { validatePolicy, type PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
@@ -928,27 +928,44 @@ async function decideApproval(state: FactoryState, id: string, decision: unknown
  * run. Approved: send the identical request again to release it. Rejected: nothing was sent; `notes` say why.
  */
 async function deliverDecision(state: FactoryState, a: Approval, actor: string): Promise<'mailbox' | 'run' | 'not_delivered'> {
-  const payload = {
+  // E12: whatever the decision starts or joins carries the reach of the person whose run asked, never the decider's own.
+  // The decider's notes and the held request's path are free text written by people and agents who may be restricted,
+  // so they travel only where the receiving run has no more reach than their source.
+  const origin = state.runs.get(a.runId);
+  const who = origin ? requesterOfRun(state, origin) : undefined;
+  const sameRequester = (r: Run | undefined): boolean => {
+    const there = r ? requesterOfRun(state, r) : undefined;
+    if (!who || !there) return false;
+    if (who.kind === 'identity') return there.kind === 'identity' && there.provider === who.provider && there.id === who.id;
+    return who.kind === there.kind && (who.kind !== 'principal' || (there.kind === 'principal' && there.actor === who.actor));
+  };
+  const plain = {
     type: 'approval',
     approvalId: a.approvalId,
     route: a.route,
-    request: a.request ? { method: a.request.method, path: a.request.path } : undefined,
     decision: a.state === 'approved' ? 'approved' : 'rejected',
-    ...(a.notes ? { notes: a.notes } : {}),
     decidedBy: a.decidedBy,
     decidedAt: a.decidedAt,
   };
-  if (activeRun(state, a.agentId)) {
-    deliverToMailbox(state, a.agentId, payload);
+  const full = {
+    ...plain,
+    request: a.request ? { method: a.request.method, path: a.request.path } : undefined,
+    ...(a.notes ? { notes: a.notes } : {}),
+  };
+  const live = activeRun(state, a.agentId);
+  if (live) {
+    deliverToMailbox(state, a.agentId, sameRequester(live) ? full : plain);
     return 'mailbox';
   }
-  // E12: the run that follows a decision carries the reach of the person whose run asked, never the decider's own. The
-  // decider's notes are free text, so a run whose originating requester cannot be placed does not receive them.
-  const origin = state.runs.get(a.runId);
-  const who = origin ? requesterOfRun(state, origin) : undefined;
-  const forPerson = who?.kind === 'identity' ? { requestedBy: { provider: who.provider, id: who.id } } : {};
-  const input = origin && who ? payload : { ...payload, notes: undefined };
-  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input, ...forPerson });
+  // A person's request stays that person's. An origin that cannot be placed starts a run that holds nothing: a
+  // requester no identity link resolves to is restricted to nothing.
+  const forPerson =
+    who?.kind === 'identity'
+      ? { requestedBy: { provider: who.provider, id: who.id } }
+      : !who
+        ? { requestedBy: { provider: 'factory', id: 'unplaceable-origin' } }
+        : {};
+  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input: who ? full : plain, ...forPerson });
   if (out.status < 300) return 'run';
   state.ledger.append({
     timestamp: new Date().toISOString(),

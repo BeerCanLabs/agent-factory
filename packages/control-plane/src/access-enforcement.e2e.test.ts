@@ -363,7 +363,29 @@ describe('the gatekeeper-egress enforces a person’s roles (E12 item 4, TSK-174
     await call(`/api/v1/approvals/${h3.body.approvalId}`, ADMIN, { decision: 'reject', notes: 'steer' });
     const third = state.runs.list({ agentId: 'donna' }).filter((r) => r.trigger === 'approval').pop()!;
     assert.equal((third.input as { notes?: string }).notes, undefined);
+    assert.equal((third.input as { request?: unknown }).request, undefined, 'nor the agent-written request path');
+    assert.deepEqual(accessForRun(state, third, state.agents.get('donna')!), { restricted: true, routes: { 'google-calendar': 'denied', 'google-gmail': 'denied', print: 'denied' } }, 'a run whose origin cannot be placed holds nothing');
     state.runs.update(third.runId, { state: 'DONE' } as never);
+    // A decision joining someone else's live run carries no free text; joining the same person's run it does.
+    const hers2 = await asPerson('201');
+    const h4 = await hold(hers2.run.runId, 4);
+    const ownersRun = await liveRun({ requestedBy: discord('100'), actor: 'factory:ingress' });
+    state.runs.update(hers2.run.runId, { state: 'DONE' } as never);
+    const joined = await call(`/api/v1/approvals/${h4.body.approvalId}`, ADMIN, { decision: 'reject', notes: 'steer into owner run' });
+    assert.equal(joined.body.delivered, 'mailbox');
+    const queue = (state as unknown as { mailboxes: Map<string, { messages: Array<{ payload: Record<string, unknown> }> }> }).mailboxes.get('donna')!;
+    const msg = queue.messages[queue.messages.length - 1].payload;
+    assert.equal(msg.decision, 'rejected');
+    assert.equal(msg.notes, undefined, 'another person’s live run gets the decision without free text');
+    assert.equal(msg.request, undefined);
+    // The same person's own live run does get it.
+    state.runs.update(ownersRun.run.runId, { state: 'DONE' } as never);
+    const mine = await liveRun({ requestedBy: discord('201'), actor: 'factory:ingress' });
+    const h5 = await hold(mine.run.runId, 5);
+    assert.equal((await call(`/api/v1/approvals/${h5.body.approvalId}`, ADMIN, { decision: 'reject', notes: 'for me' })).body.delivered, 'mailbox');
+    assert.equal(queue.messages[queue.messages.length - 1].payload.notes, 'for me');
+    state.runs.update(mine.run.runId, { state: 'DONE' } as never);
+    state.runs.update(ownersRun.run.runId, { state: 'DONE' } as never);
   });
 
   it('a person with explicit non-admin roles is not an admin because their email is on the list (as the Bouncer reads a link)', () => {
