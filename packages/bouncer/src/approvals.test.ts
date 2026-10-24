@@ -113,3 +113,40 @@ describe('ApprovalStore persistence and list', () => {
     assert.deepEqual(s.list({ runId: 'r2' }).map((x) => x.runId), ['r2']);
   });
 });
+
+describe('ApprovalStore configuration changes (CF4)', () => {
+  const change = { type: 'role-assignment' as const, provider: 'discord', identity: '1', roles: ['Family'] };
+  it('an approved change cannot be burned as a tool or secret approval; only the factory uses it up', () => {
+    const s = new ApprovalStore();
+    const { approval } = s.requestChange({ runId: 'r', agentId: 'a', change, ttlMs: 60_000 }) as { approval: { approvalId: string } };
+    s.decide(approval.approvalId, 'approved', 'owner');
+    assert.equal(s.consume(approval.approvalId), undefined, 'the Keymaster and the egress cannot spend it');
+    assert.equal(s.get(approval.approvalId)!.state, 'approved');
+    assert.equal(s.consumeChange(approval.approvalId)!.state, 'consumed');
+    assert.equal(s.consumeChange(approval.approvalId), undefined, 'once');
+  });
+
+  it('a tool approval cannot be used up as a change', () => {
+    const s = new ApprovalStore();
+    const a = s.request({ runId: 'r', agentId: 'a', route: 'x', tool: 't', argsSha256: 'h' });
+    s.decide(a.approvalId, 'approved', 'owner');
+    assert.equal(s.consumeChange(a.approvalId), undefined);
+  });
+
+  it('an identical request from another agent is a different request', () => {
+    const s = new ApprovalStore();
+    const one = s.requestChange({ runId: 'r1', agentId: 'a', change, ttlMs: 60_000 }) as { approval: { approvalId: string } };
+    const two = s.requestChange({ runId: 'r2', agentId: 'b', change, ttlMs: 60_000 }) as { approval: { approvalId: string }; created: boolean };
+    assert.equal(two.created, true);
+    assert.notEqual(two.approval.approvalId, one.approval.approvalId);
+  });
+
+  it('refuses a new request at the cap and answers an identical one', () => {
+    const s = new ApprovalStore();
+    const first = s.requestChange({ runId: 'r', agentId: 'a', change, ttlMs: 60_000, maxPending: 1 }) as { approval: { approvalId: string } };
+    assert.deepEqual(s.requestChange({ runId: 'r', agentId: 'a', change: { ...change, identity: '2' }, ttlMs: 60_000, maxPending: 1 }), { limited: true });
+    const same = s.requestChange({ runId: 'r', agentId: 'a', change, ttlMs: 60_000, maxPending: 1 }) as { approval: { approvalId: string }; created: boolean };
+    assert.equal(same.created, false);
+    assert.equal(same.approval.approvalId, first.approval.approvalId);
+  });
+});

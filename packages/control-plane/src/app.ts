@@ -42,6 +42,7 @@ import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymas
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
+import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
@@ -759,7 +760,7 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   if (name === 'list_agents') return [...state.agents.values()];
   if (name === 'query_ledger') return state.ledger.query({ agent: args.agent });
   if (name === 'get_run') return state.runs.get(args.runId) ?? { error: 'not_found' };
-  if (name === 'list_approvals') return state.approvals.list({ state: 'pending' });
+  if (name === 'list_approvals') return visibleApprovals(state, principal, state.approvals.list({ state: 'pending' }));
   if (name === 'decide_approval') return (await decideApproval(state, args.approvalId, args.decision, principal, args.notes)).body;
   if (name === 'list_model_catalog') {
     return {
@@ -884,10 +885,22 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
  * Discord id is not linked to a person lets no owner decide. This runs before anything changes, and a caller who may
  * not decide is refused whether or not the approval exists.
  */
+/** A configuration change names a person's external identity: only those who may decide it read what it says (CF4). Used by every list. */
+function visibleApprovals(state: FactoryState, reader: Principal, all: Approval[]): Approval[] {
+  return all.map((a) => {
+    if (a.kind !== 'change' || mayApproveChange(state, reader, a.agentId)) return a;
+    const { change: _hidden, ...rest } = a;
+    return rest;
+  });
+}
+
 function mayDecide(state: FactoryState, principal: Principal, approvalId: string): { ok: true } | { ok: false; required: Role } {
   const global = authorize({ principal, privilege: 'approvals.decide' });
-  if (global.allowed) return { ok: true };
   const approval = state.approvals.get(approvalId);
+  // CF4: a configuration change is the agent's owners' to decide, or an admin's; the run's requester rule (E9) does not apply,
+  // so any owner of the agent may, and a run that is gone changes nothing. The global approver role does not decide it.
+  if (approval?.kind === 'change') return mayApproveChange(state, principal, approval.agentId) ? { ok: true } : { ok: false, required: 'admin' };
+  if (global.allowed) return { ok: true };
   if (!approval) return { ok: false, required: global.required };
   const run = state.runs.get(approval.runId);
   // The run is the record of who asked. If it is gone nobody can say, so no owner or requester decides (fail closed);
@@ -909,6 +922,11 @@ async function decideApproval(state: FactoryState, id: string, decision: unknown
   if (decision !== 'approve' && decision !== 'reject') return { status: 400, body: { error: 'decision must be approve or reject' } };
   if (notes !== undefined && notes !== null && (typeof notes !== 'string' || notes.length > 4000)) return { status: 400, body: { error: 'notes must be text, at most 4000 characters' } };
   const note = typeof notes === 'string' && notes.trim() ? notes.trim() : undefined;
+  // CF4: a configuration change is decided only by an admin or an owner of that agent, and applied by the factory.
+  const pending = state.approvals.get(id);
+  if (pending?.kind === 'change' && !mayApproveChange(state, principal, pending.agentId)) {
+    return { status: 403, body: { error: 'forbidden', required: 'agent-owner' } };
+  }
   const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor, note);
   if (!decided) return { status: 409, body: { error: 'approval not pending' } };
   state.ledger.append({
@@ -922,12 +940,25 @@ async function decideApproval(state: FactoryState, id: string, decision: unknown
     mcpName: decided.tool,
     route: decided.route,
   });
+  if (decided.kind === 'change') {
+    // The decision is ledgered above before anything is applied. The agent is not told and carries nothing.
+    if (decision !== 'approve') return { status: 200, body: decided };
+    // Used up whether or not applying succeeds: an approval the agent was told the id of is never left spendable.
+    let applied: { status: number; body: Record<string, unknown> };
+    try {
+      applied = applyApprovedChange(state, decided, actor);
+    } finally {
+      state.approvals.consumeChange(decided.approvalId);
+    }
+    return { status: 200, body: { ...decided, applied: applied.status === 200, ...(applied.status === 200 ? {} : { reason: applied.body.error }) } };
+  }
   if (decided.kind === 'held') {
     // E9: the decision goes to the agent; no run waited for it.
     const delivered = await deliverDecision(state, decided, actor);
     return { status: 200, body: { ...decided, delivered } };
   }
-  if (!state.approvals.list({ state: 'pending', runId: decided.runId }).length) {
+  // A pending configuration change (an agent's role request) never holds a run: only tool and route approvals do.
+  if (!state.approvals.list({ state: 'pending', runId: decided.runId }).filter((a) => a.kind !== 'change').length) {
     unblockRun(state, decided.runId, 'BLOCKED_FOR_HUMAN', actor);
   }
   return { status: 200, body: decided };
@@ -1063,6 +1094,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleAgentSettings(state, req, res, path)) return;
+  if (await handleRoleAssignments(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills') || /^\/api\/v1\/agents\/[^/]+\/skills(\/|$)/.test(path)) && (await handleSkills(state, req, res, path))) return;
@@ -1283,10 +1315,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   // Agent-facing: authenticated by the run token minted at start.
-  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox|training|reply)$/);
+  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox|training|reply|role-requests)$/);
   if (runSelf && (((runSelf[2] === 'input' || runSelf[2] === 'mailbox') && req.method === 'GET') || (runSelf[2] !== 'input' && runSelf[2] !== 'mailbox' && req.method === 'POST'))) {
     const run = await authenticateRun(req, res, state, runSelf[1]);
     if (!run) return;
+    if (runSelf[2] === 'role-requests') {
+      await handleRoleRequest(state, run, req, res);
+      return;
+    }
     if (runSelf[2] === 'heartbeat') {
       const hb = await readJson(req);
       const rssMb = typeof hb.rssMb === 'number' && Number.isFinite(hb.rssMb) ? hb.rssMb : undefined;
@@ -2312,10 +2348,13 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/approvals' && req.method === 'GET') {
-    if (!(await requirePrivilege(req, res, state, 'approvals.read'))) return;
+    const reader = await requirePrivilege(req, res, state, 'approvals.read');
+    if (!reader) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
     const st = url.searchParams.get('state') as 'pending' | null;
-    json(res, 200, state.approvals.list({ ...(st ? { state: st } : {}), ...(url.searchParams.get('runId') ? { runId: url.searchParams.get('runId')! } : {}) }));
+    const all = state.approvals.list({ ...(st ? { state: st } : {}), ...(url.searchParams.get('runId') ? { runId: url.searchParams.get('runId')! } : {}) });
+    // A configuration change names a person's external identity: only those who may decide it read what it says.
+    json(res, 200, visibleApprovals(state, reader, all));
     return;
   }
 
