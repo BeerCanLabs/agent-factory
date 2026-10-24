@@ -113,6 +113,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/bouncer', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/access-enforcement.ts',
       'packages/control-plane/src/identity-links.ts',
     ],
   },

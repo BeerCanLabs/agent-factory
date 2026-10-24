@@ -82,6 +82,12 @@ export type RunContext = {
   policySet?: boolean;
   policy: Policy;
   spend: { run: number; day: number; month: number };
+  /**
+   * E12 item 4: what the run's requesting person may reach through skill routes, decided by the factory from their roles
+   * (never by the agent). Absent is read as unrestricted so an older control plane keeps working. When restricted, a
+   * route a skill declares that is not `allowed` is refused; a route no skill declares is not restricted by roles.
+   */
+  access?: { restricted: false } | { restricted: true; routes: Record<string, 'allowed' | 'denied'> };
 };
 
 /** How the gatekeeper-egress talks to the control plane. HTTP in production, in-memory in tests. */
@@ -1257,6 +1263,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (ctx.run.state === 'BLOCKED_UNHEALTHY') return deny(res, ctx, route, 503, 'unhealthy');
       const modelsImplied = route.kind === 'models' && ctx.policySet === true;
       if (!modelsImplied && !ctx.policy.routes.includes(route.id)) return deny(res, ctx, route, 403, 'route_not_allowed', { route: route.id });
+      // E12 item 4: a person's roles, applied before the body is read and before any credential is injected.
+      if (ctx.access?.restricted && Object.prototype.hasOwnProperty.call(ctx.access.routes, route.id) && ctx.access.routes[route.id] !== 'allowed') {
+        return deny(res, ctx, route, 403, 'role_not_allowed', { route: route.id });
+      }
       const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
       if ((route.kind === 'llm' || route.kind === 'models') && !isBuiltin) {
         if (ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED') return deny(res, ctx, route, 402, 'budget_exceeded', { window: 'blocked' });

@@ -41,6 +41,7 @@ import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
+import { accessForRun } from './access-enforcement.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
 import { applyTrainingForCaller, handleSkillTraining } from './skill-training.js';
@@ -2130,6 +2131,9 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       policySet: state.policies.has(run.agentId),
       policy: isBuiltin ? { ...pol, budgetUsd: undefined } : pol,
       spend: state.spend.get(run.agentId, run.runId),
+      // E12 item 4: what the run's requesting person may reach through skill routes; the egress applies it.
+      // A built-in agent is the factory's own and has no person's roles.
+      access: isBuiltin ? { restricted: false } : accessForRun(state, run, agent),
     });
     return;
   }
