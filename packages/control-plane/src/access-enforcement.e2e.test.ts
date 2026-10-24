@@ -396,6 +396,38 @@ describe('the gatekeeper-egress enforces a person’s roles (E12 item 4, TSK-174
     assert.equal((await call(`/api/v1/approvals/${h5.body.approvalId}`, ADMIN, { decision: 'reject', notes: 'for me' })).body.delivered, 'mailbox');
     assert.equal(queue.messages[queue.messages.length - 1].payload.notes, 'for me');
     state.runs.update(mine.run.runId, { state: 'DONE' } as never);
+    // Her request joining a live run the factory started itself (no person, wider reach): decision alone.
+    const hers3 = await asPerson('201');
+    const h6 = await hold(hers3.run.runId, 8);
+    state.runs.update(hers3.run.runId, { state: 'DONE' } as never);
+    const queueRun = await liveRun({ trigger: 'queue', actor: 'queue:donna' });
+    await call(`/api/v1/approvals/${h6.body.approvalId}`, ADMIN, { decision: 'reject', notes: 'into the queue run' });
+    const qmsg = queue.messages[queue.messages.length - 1].payload;
+    assert.equal(qmsg.decision, 'rejected');
+    assert.equal(qmsg.notes, undefined);
+    assert.equal(qmsg.request, undefined);
+    state.runs.update(queueRun.run.runId, { state: 'DONE' } as never);
+    // The same id under another provider is another person.
+    const hers4 = await asPerson('201');
+    const h7 = await hold(hers4.run.runId, 9);
+    state.runs.update(hers4.run.runId, { state: 'DONE' } as never);
+    const slackRun = await liveRun({ requestedBy: { provider: 'slack', id: '201' }, actor: 'factory:ingress' });
+    await call(`/api/v1/approvals/${h7.body.approvalId}`, ADMIN, { decision: 'reject', notes: 'across providers' });
+    assert.equal(queue.messages[queue.messages.length - 1].payload.notes, undefined);
+    state.runs.update(slackRun.run.runId, { state: 'DONE' } as never);
+    // An origin run the factory no longer holds is unknown: a run that holds nothing, decision alone.
+    const gone = await asPerson('201');
+    const h8 = await hold(gone.run.runId, 1 + 9);
+    state.runs.update(gone.run.runId, { state: 'DONE' } as never);
+    const store = state.runs as unknown as { runs?: Map<string, unknown>; byId?: Map<string, unknown> };
+    const inner = store.runs ?? store.byId;
+    assert.ok(inner, 'the in-memory store exposes its map to the test');
+    inner!.delete(gone.run.runId);
+    await call(`/api/v1/approvals/${h8.body.approvalId}`, ADMIN, { decision: 'reject', notes: 'origin gone' });
+    const orphaned = state.runs.list({ agentId: 'donna' }).filter((r) => r.trigger === 'approval').pop()!;
+    assert.deepEqual(orphaned.requestedBy, { provider: 'factory', id: 'unplaceable-origin' });
+    assert.equal((orphaned.input as { notes?: string }).notes, undefined);
+    state.runs.update(orphaned.runId, { state: 'DONE' } as never);
     state.runs.update(ownersRun.run.runId, { state: 'DONE' } as never);
   });
 
