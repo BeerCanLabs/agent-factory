@@ -31,7 +31,7 @@ import {
   type SkillChecker,
   type SkillSource,
 } from '@beercanlabs/factory-registrar';
-import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
+import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
 import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
 import { authorize, authorizeIngress, directCaller, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type AuthenticatedCaller, type Privilege } from '@beercanlabs/factory-bouncer';
 import { validatePolicy, type PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
@@ -41,13 +41,14 @@ import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
+import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
 import { applyTrainingForCaller, handleSkillTraining } from './skill-training.js';
 import { buildSkillsFor, isDeploying, runDeploy } from './apply.js';
 import { handleRunProgress } from './progress-routes.js';
 import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercanlabs/factory-inspector';
-import { handleSchedules } from './schedules.js';
+import { handleSchedules, requesterOfRun } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
@@ -460,7 +461,18 @@ async function handOff(
   payload: unknown,
   opts: { requestedBy?: { provider: string; id: string }; caller?: AuthenticatedCaller },
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  if (state.runs.list({ agentId: agent.id, active: true }).length === 0) {
+  const active = state.runs.list({ agentId: agent.id, active: true });
+  // E12 item 4: a run's roles are those of the person it was started for. A message from a person whose roles deny a
+  // skill route must not be handled inside someone else's run, where it would have that person's reach. It waits.
+  if (active.length > 0 && opts.requestedBy) {
+    const sender = accessForRequester(state, agent, { kind: 'identity', provider: opts.requestedBy.provider, id: opts.requestedBy.id });
+    const sameAsRun = active.every((r) => r.requestedBy && r.requestedBy.provider === opts.requestedBy!.provider && r.requestedBy.id === opts.requestedBy!.id);
+    if (hasDeniedRoute(sender) && !sameAsRun) {
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'HANDOFF_REFUSED_BUSY_FOR_ANOTHER_PERSON', actor });
+      return { status: 409, body: { error: 'busy_with_another_person', message: 'the agent is working for someone else; try again in a moment' } };
+    }
+  }
+  if (active.length === 0) {
     const out = await createRun(state, agent.id, {
       actor,
       trigger: 'conversation',
@@ -916,21 +928,52 @@ async function decideApproval(state: FactoryState, id: string, decision: unknown
  * run. Approved: send the identical request again to release it. Rejected: nothing was sent; `notes` say why.
  */
 async function deliverDecision(state: FactoryState, a: Approval, actor: string): Promise<'mailbox' | 'run' | 'not_delivered'> {
-  const payload = {
+  // E12: whatever the decision starts or joins carries the reach of the person whose run asked, never the decider's own.
+  // The decider's notes and the held request's path are free text written by people and agents who may be restricted,
+  // so they travel only where the receiving run has no more reach than their source.
+  // A run the factory started itself (a queue, an event) has no person: that is not "unknown". Only a run whose person
+  // should exist but cannot be read (a missing origin, a scheduled run whose schedule is gone) is unplaceable.
+  type Who = NonNullable<ReturnType<typeof requesterOfRun>> | 'none' | 'unknown';
+  const whoOf = (r: Run | undefined): Who => {
+    if (!r) return 'unknown';
+    return requesterOfRun(state, r) ?? (r.trigger === 'schedule' ? 'unknown' : 'none');
+  };
+  const who = whoOf(state.runs.get(a.runId));
+  const sameRequester = (r: Run | undefined): boolean => {
+    const there = whoOf(r);
+    if (who === 'unknown' || there === 'unknown') return false;
+    if (who === 'none' || there === 'none') return who === there;
+    if (who.kind === 'identity') return there.kind === 'identity' && there.provider === who.provider && there.id === who.id;
+    if (who.kind === 'principal') return there.kind === 'principal' && there.actor === who.actor;
+    return there.kind === who.kind;
+  };
+  const plain = {
     type: 'approval',
     approvalId: a.approvalId,
     route: a.route,
-    request: a.request ? { method: a.request.method, path: a.request.path } : undefined,
     decision: a.state === 'approved' ? 'approved' : 'rejected',
-    ...(a.notes ? { notes: a.notes } : {}),
     decidedBy: a.decidedBy,
     decidedAt: a.decidedAt,
   };
-  if (activeRun(state, a.agentId)) {
-    deliverToMailbox(state, a.agentId, payload);
+  const full = {
+    ...plain,
+    request: a.request ? { method: a.request.method, path: a.request.path } : undefined,
+    ...(a.notes ? { notes: a.notes } : {}),
+  };
+  const live = activeRun(state, a.agentId);
+  if (live) {
+    deliverToMailbox(state, a.agentId, sameRequester(live) ? full : plain);
     return 'mailbox';
   }
-  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input: payload });
+  // A person's request stays that person's. An origin that cannot be placed starts a run that holds nothing: a
+  // requester no identity link resolves to is restricted to nothing.
+  const forPerson =
+    who === 'unknown'
+      ? { requestedBy: { provider: 'factory', id: 'unplaceable-origin' } }
+      : typeof who === 'object' && who.kind === 'identity'
+        ? { requestedBy: { provider: who.provider, id: who.id } }
+        : {};
+  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input: who === 'unknown' ? plain : full, ...forPerson });
   if (out.status < 300) return 'run';
   state.ledger.append({
     timestamp: new Date().toISOString(),
@@ -2130,6 +2173,9 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       policySet: state.policies.has(run.agentId),
       policy: isBuiltin ? { ...pol, budgetUsd: undefined } : pol,
       spend: state.spend.get(run.agentId, run.runId),
+      // E12 item 4: what the run's requesting person may reach through skill routes; the egress applies it.
+      // A built-in agent is the factory's own and has no person's roles.
+      access: isBuiltin ? { restricted: false } : accessForRun(state, run, agent),
     });
     return;
   }

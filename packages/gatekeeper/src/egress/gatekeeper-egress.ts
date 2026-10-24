@@ -82,6 +82,12 @@ export type RunContext = {
   policySet?: boolean;
   policy: Policy;
   spend: { run: number; day: number; month: number };
+  /**
+   * E12 item 4: what the run's requesting person may reach through skill routes, decided by the factory from their roles
+   * (never by the agent). Absent is read as unrestricted so an older control plane keeps working. When restricted, a
+   * route a skill declares that is not `allowed` is refused; a route no skill declares is not restricted by roles.
+   */
+  access?: { restricted: false } | { restricted: true; routes: Record<string, 'allowed' | 'denied'> };
 };
 
 /** How the gatekeeper-egress talks to the control plane. HTTP in production, in-memory in tests. */
@@ -232,6 +238,43 @@ function isHostAllowed(policy: Policy, routes: Map<string, Route>, destHost: str
     if (h.startsWith('*.') && (destHost === h.slice(2) || destHost.endsWith('.' + h.slice(2)))) {
       return true;
     }
+  }
+  return false;
+}
+
+/**
+ * E12 item 4: how the egress reads the factory's answer about a run's requesting person. Absent (an older control plane)
+ * or exactly `{ restricted: false }` is open; a well-formed restricted answer carries each route as `allowed` or
+ * `denied`; anything else is unreadable and fails closed, never open.
+ */
+export type RoleAccess = { kind: 'open' } | { kind: 'routes'; routes: Map<string, 'allowed' | 'denied'> } | { kind: 'unreadable' };
+
+export function readRoleAccess(access: unknown): RoleAccess {
+  if (access === undefined) return { kind: 'open' };
+  if (!access || typeof access !== 'object' || Array.isArray(access)) return { kind: 'unreadable' };
+  const a = access as { restricted?: unknown; routes?: unknown };
+  if (a.restricted === false) return { kind: 'open' };
+  if (a.restricted !== true || !a.routes || typeof a.routes !== 'object' || Array.isArray(a.routes)) return { kind: 'unreadable' };
+  const routes = new Map<string, 'allowed' | 'denied'>();
+  for (const [k, v] of Object.entries(a.routes as Record<string, unknown>)) {
+    if (v !== 'allowed' && v !== 'denied') return { kind: 'unreadable' };
+    routes.set(k, v);
+  }
+  return { kind: 'routes', routes };
+}
+
+/** True when a raw host is the upstream of a route the person may not use (or the answer is unreadable). */
+function roleDeniedHost(access: RoleAccess, routes: Map<string, Route>, host: string): boolean {
+  if (access.kind === 'open') return false;
+  if (access.kind === 'unreadable') return true;
+  const norm = (h: string) => h.toLowerCase().replace(/\.$/, '');
+  for (const [id, verdict] of access.routes) {
+    if (verdict === 'allowed') continue;
+    const up = routes.get(id)?.upstream;
+    if (!up) continue;
+    try {
+      if (norm(new URL(up).hostname) === norm(host)) return true;
+    } catch {}
   }
   return false;
 }
@@ -641,7 +684,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       const base = new URL(route.upstream);
       // Build by string so `//host` in the path can never switch origin (and carry the credential elsewhere).
       const dest = new URL(base.origin + base.pathname.replace(/\/$/, '') + rest);
-      if (dest.origin !== base.origin) {
+      // A dot segment (`..`, also percent-encoded) is resolved by URL parsing: the call must stay inside the route's own
+      // path, or an allowed route would be a way to another route's path on the same origin (E12 item 4).
+      const prefix = base.pathname.replace(/\/$/, '');
+      if (dest.origin !== base.origin || (prefix && dest.pathname !== prefix && !dest.pathname.startsWith(prefix + '/'))) {
         send(res, 400, { error: 'bad_path' });
         resolve(400);
         return;
@@ -1212,6 +1258,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           await ensureRoutes();
         }
 
+        // E12 item 4: a skill route's own host is not a way around the route's refusal.
+        if (roleDeniedHost(readRoleAccess(ctx.access), routes, parsed.hostname)) {
+          markOutcome(res, 'denied');
+          void opts.control.ledger({ agentId: ctx.run.agentId, runId: ctx.run.runId, actor: `run:${ctx.run.agentId}`, type: 'action', action: 'EGRESS_DENIED_ROLE_NOT_ALLOWED', host: parsed.hostname }).catch(() => {});
+          return send(res, 403, { error: 'role_not_allowed', host: parsed.hostname });
+        }
+
         if (!isHostAllowed(ctx.policy, routes, parsed.hostname)) {
           markOutcome(res, 'denied');
           void opts.control.ledger({
@@ -1257,6 +1310,17 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (ctx.run.state === 'BLOCKED_UNHEALTHY') return deny(res, ctx, route, 503, 'unhealthy');
       const modelsImplied = route.kind === 'models' && ctx.policySet === true;
       if (!modelsImplied && !ctx.policy.routes.includes(route.id)) return deny(res, ctx, route, 403, 'route_not_allowed', { route: route.id });
+      // E12 item 4: a person's roles, applied before the body is read and before any credential is injected.
+      const roleAccess = readRoleAccess(ctx.access);
+      if (roleAccess.kind === 'unreadable') return deny(res, ctx, route, 503, 'access_unreadable');
+      if (roleAccess.kind === 'routes' && roleAccess.routes.has(route.id) && roleAccess.routes.get(route.id) !== 'allowed') {
+        return deny(res, ctx, route, 403, 'role_not_allowed', { route: route.id });
+      }
+      // A restricted person's path is judged as written: encoded separators and `;` are left for the upstream to decode,
+      // and could cross from an allowed route to a denied one that shares its origin.
+      if (roleAccess.kind === 'routes' && [...roleAccess.routes.values()].some((v) => v !== 'allowed') && /%2f|%5c|%2e|;/i.test(rest)) {
+        return deny(res, ctx, route, 400, 'bad_path');
+      }
       const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
       if ((route.kind === 'llm' || route.kind === 'models') && !isBuiltin) {
         if (ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED') return deny(res, ctx, route, 402, 'budget_exceeded', { window: 'blocked' });
@@ -1358,6 +1422,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
 
       if (opts.control.systemRoutes && Date.now() - lastRouteRefresh > ROUTE_REFRESH_INTERVAL_MS) {
         await ensureRoutes();
+      }
+
+      if (roleDeniedHost(readRoleAccess(ctx.access), routes, destHost)) {
+        void opts.control.ledger({ agentId: ctx.run.agentId, runId: ctx.run.runId, actor: `run:${ctx.run.agentId}`, type: 'action', action: 'EGRESS_DENIED_ROLE_NOT_ALLOWED', host: destHost }).catch(() => {});
+        return refuse('403 Forbidden', 403);
       }
 
       if (!isHostAllowed(ctx.policy, routes, destHost)) {
