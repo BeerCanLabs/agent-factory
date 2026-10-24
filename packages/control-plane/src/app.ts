@@ -42,6 +42,7 @@ import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymas
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
+import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
@@ -900,6 +901,11 @@ async function decideApproval(state: FactoryState, id: string, decision: unknown
   if (decision !== 'approve' && decision !== 'reject') return { status: 400, body: { error: 'decision must be approve or reject' } };
   if (notes !== undefined && notes !== null && (typeof notes !== 'string' || notes.length > 4000)) return { status: 400, body: { error: 'notes must be text, at most 4000 characters' } };
   const note = typeof notes === 'string' && notes.trim() ? notes.trim() : undefined;
+  // CF4: a configuration change is decided only by an admin or an owner of that agent, and applied by the factory.
+  const pending = state.approvals.get(id);
+  if (pending?.kind === 'change' && !mayApproveChange(state, principal, pending.agentId)) {
+    return { status: 403, body: { error: 'forbidden', required: 'agent-owner' } };
+  }
   const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor, note);
   if (!decided) return { status: 409, body: { error: 'approval not pending' } };
   state.ledger.append({
@@ -913,6 +919,13 @@ async function decideApproval(state: FactoryState, id: string, decision: unknown
     mcpName: decided.tool,
     route: decided.route,
   });
+  if (decided.kind === 'change') {
+    // The decision is ledgered above before anything is applied. The agent is not told and carries nothing.
+    if (decision !== 'approve') return { status: 200, body: decided };
+    const applied = applyApprovedChange(state, decided, actor);
+    state.approvals.consume(decided.approvalId);
+    return { status: 200, body: { ...decided, applied: applied.status === 200, ...(applied.status === 200 ? {} : { reason: applied.body.error }) } };
+  }
   if (decided.kind === 'held') {
     // E9: the decision goes to the agent; no run waited for it.
     const delivered = await deliverDecision(state, decided, actor);
@@ -1053,6 +1066,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleAgentSettings(state, req, res, path)) return;
+  if (await handleRoleAssignments(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills') || /^\/api\/v1\/agents\/[^/]+\/skills(\/|$)/.test(path)) && (await handleSkills(state, req, res, path))) return;
@@ -1273,10 +1287,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   // Agent-facing: authenticated by the run token minted at start.
-  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox|training|reply)$/);
+  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox|training|reply|role-requests)$/);
   if (runSelf && (((runSelf[2] === 'input' || runSelf[2] === 'mailbox') && req.method === 'GET') || (runSelf[2] !== 'input' && runSelf[2] !== 'mailbox' && req.method === 'POST'))) {
     const run = await authenticateRun(req, res, state, runSelf[1]);
     if (!run) return;
+    if (runSelf[2] === 'role-requests') {
+      await handleRoleRequest(state, run, req, res);
+      return;
+    }
     if (runSelf[2] === 'heartbeat') {
       const hb = await readJson(req);
       const rssMb = typeof hb.rssMb === 'number' && Number.isFinite(hb.rssMb) ? hb.rssMb : undefined;
