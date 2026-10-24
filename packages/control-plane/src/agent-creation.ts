@@ -14,19 +14,24 @@ import { payloadHash } from '@beercanlabs/factory-ledger';
 import { AGENT_ID, BUILTIN_AGENT_IDS, FULL_SHA, applySettingsChange, changedParts, registryOf, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { buildSkillsFor } from './apply.js';
-import { changeReason, configOf, ledgerVersion, recordConfig } from './config-store.js';
+import { changeReason, configOf, ledgerVersion, recordConfig, removeConfig } from './config-store.js';
 import type { Run } from '@beercanlabs/factory-property-manager';
 
 /** The runtime version the factory pins new agents to (RT1): its repository and commit, and the image that runs it. */
 export type SharedRuntimePin = { repo: string; commit: string; image: string };
 
 /** Why registering `agentId` from a repository is refused, or undefined when it is allowed (CF6). */
-export function registrationRefusal(state: FactoryState, agentId: string): { error: string; message: string } | undefined {
+export function registrationRefusal(state: FactoryState, agentId: string): { status: number; error: string; message: string } | undefined {
+  // An agent created from a configuration has no repository to re-register from, whatever the rule says about new ids.
+  if (state.agents.get(agentId)?.createdFrom === 'configuration') {
+    return { status: 409, error: 'configuration_agent', message: `${agentId} was created from a configuration and has no repository; change it with PUT /api/v1/agents/${agentId}/settings` };
+  }
   if (!state.newAgentsFromConfigurationOnly) return undefined;
   // An id the factory has registered and not purged keeps its repository flow: retired and reinstated agents, and every
   // agent running today. Ids the operator names as admitted from source (L2, FACTORY_REPOSITORY_AGENT_IDS) are exempt. A purged id is new.
   if (state.agents.has(agentId) || state.repositoryAgentIds?.has(agentId) || BUILTIN_AGENT_IDS.has(agentId)) return undefined;
   return {
+    status: 422,
     error: 'new_agents_use_configuration',
     message: `${agentId} is a new agent. New agents are created from a configuration, not registered from a repository: POST /api/v1/agents with { id, name, memory: { archetype }, soul, roles } (docs/CREATING_AGENTS.md). Agents that are already registered keep their repository.`,
   };
@@ -118,7 +123,14 @@ export async function handleAgentCreation(state: FactoryState, req: http.Incomin
     });
     json(res, 201, { ...record, owners: stored.owners ?? [], configurationVersion: stored.version });
   } catch (err) {
+    // Nothing of a failed creation is left behind: neither the agent, its registry file nor its configuration, so the id can be tried again.
     state.agents.delete(id);
+    try {
+      registryOf(state).remove(id);
+    } catch {
+      // the record may not have been written
+    }
+    await removeConfig(state, id, { actor: principal.actor, reason: 'creation failed' }).catch(() => undefined);
     console.error(`[control-plane] agent ${id} not created: ${err instanceof Error ? err.message : String(err)}`);
     json(res, 500, { error: 'agent_not_created' });
   }

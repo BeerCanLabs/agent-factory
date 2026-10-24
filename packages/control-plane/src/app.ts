@@ -1252,7 +1252,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       const release = body.release;
       if (repoUrl && release?.tag_name) {
         const matched = [...state.agents.values()].find((a) => {
-          if (!a.repo) return false;
+          if (!a.repo || a.createdFrom === 'configuration') return false;
           const aRepo = extractGitHubRepo(a.repo);
           const bRepo = extractGitHubRepo(repoUrl);
           return aRepo && bRepo && aRepo.owner.toLowerCase() === bRepo.owner.toLowerCase() && aRepo.repo.toLowerCase() === bRepo.repo.toLowerCase();
@@ -1634,6 +1634,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 404, { error: 'not_found' });
       return;
     }
+    if (agent.createdFrom === 'configuration') return json(res, 409, { error: 'configuration_agent', message: 'an agent created from a configuration runs the pinned runtime, which the factory moves, not a repository release' });
     const update = await checkAgentUpdate(agent, process.env.FACTORY_AGENT_SOURCE_TOKEN);
     Object.assign(agent, update);
     registryOf(state).save(agent);
@@ -1651,6 +1652,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 404, { error: 'not_found' });
       return;
     }
+    if (agent.createdFrom === 'configuration') return json(res, 409, { error: 'configuration_agent', message: 'an agent created from a configuration runs the pinned runtime, which the factory moves, not a repository release' });
     const body = await readJson(req);
     const mode = (body.mode === 'restart_now' ? 'restart_now' : 'drain') as 'drain' | 'restart_now';
     const targetCommit = (body.commit as string | undefined) ?? agent.offeredCommit ?? agent.commit;
@@ -2397,8 +2399,9 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const agentId = typeof cartridge.id === 'string' ? cartridge.id : (typeof body.id === 'string' ? body.id : randomUUID());
     const refused = registrationRefusal(state, agentId);
     if (refused) {
-      state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'AGENT_REGISTRATION_REFUSED:new_agents_use_configuration', actor: principal.actor });
-      json(res, 422, refused);
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: `AGENT_REGISTRATION_REFUSED:${refused.error}`, actor: principal.actor });
+      const { status, ...refusal } = refused;
+      json(res, status, refusal);
       return;
     }
     if (BUILTIN_AGENT_IDS.has(agentId)) {

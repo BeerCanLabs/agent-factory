@@ -3,7 +3,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
@@ -34,6 +34,7 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
   let port = 0;
   const tokens = new RunTokens(KEY);
   const deployed: Array<{ agentId: string; image: string }> = [];
+  const built: number[] = [];
   const call = async (method: string, path: string, body?: unknown, token = ADMIN) => {
     const res = await fetch(`http://127.0.0.1:${port}${path}`, {
       method,
@@ -74,7 +75,7 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
       identityLinks: new IdentityLinkStore(join(dir, 'links')),
       sharedRuntime: { repo: 'https://github.com/BeerCanLabs/agent-factory', commit: RUNTIME_SHA, image: IMAGE },
       deployProvider: {
-        buildImage: async () => { throw new Error('a configuration agent is never built from a repository'); },
+        buildImage: async () => { built.push(1); throw new Error('a configuration agent is never built from a repository'); },
         provisionIdentity: async () => ({ identity: 'id', executionIdentity: 'exec' }),
         registerCompute: async (agentId: string, image: string) => { deployed.push({ agentId, image }); },
       },
@@ -153,6 +154,38 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
       state.sharedRuntime = pin;
     }
     assert.equal(state.agents.has('unpinned'), false);
+    state.sharedRuntime = { ...pin!, commit: 'abc123' };
+    try {
+      assert.equal((await call('POST', '/api/v1/agents', { ...NEW, id: 'unpinned' })).status, 503, 'a runtime pinned to a short commit is not a pin');
+    } finally {
+      state.sharedRuntime = pin;
+    }
+  });
+
+  it('two creations of one id at once give one agent', async () => {
+    const both = await Promise.all([call('POST', '/api/v1/agents', { ...NEW, id: 'twin' }), call('POST', '/api/v1/agents', { ...NEW, id: 'twin' })]);
+    assert.deepEqual(both.map((r) => r.status).sort(), [201, 409]);
+  });
+
+  it('leaves nothing behind when a creation fails part way, so the id can be tried again', async () => {
+    const realAppend = ledger.append.bind(ledger);
+    let failed = false;
+    (ledger as { append: unknown }).append = (row: { action?: string }) => {
+      if (row.action === 'AGENT_CREATED_FROM_CONFIGURATION' && !failed) {
+        failed = true;
+        throw new Error('ledger down');
+      }
+      return realAppend(row as never);
+    };
+    try {
+      assert.equal((await call('POST', '/api/v1/agents', { ...NEW, id: 'flaky' })).status, 500);
+    } finally {
+      (ledger as { append: unknown }).append = realAppend;
+    }
+    assert.equal(state.agents.has('flaky'), false);
+    assert.equal(state.configs!.current('flaky'), undefined, 'no orphaned configuration');
+    assert.equal(existsSync(join(dir, 'registry', 'flaky.json')), false, 'and no registry file to come back after a restart');
+    assert.equal((await call('POST', '/api/v1/agents', { ...NEW, id: 'flaky' })).status, 201, 'the id is free');
   });
 
   it('serves the run on the shared runtime its own agent’s configuration, and no one else', async () => {
@@ -188,6 +221,16 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
     assert.equal((await reg('house-staff')).status, 201, 'L2 staff an operator admits');
     state.agents.delete('old');
     assert.equal((await reg('old')).status, 422, 'a purged id is new');
+    // An agent created from a configuration is never re-registered from a repository, which would strip its configuration.
+    const again = await reg('nova');
+    assert.equal(again.status, 409);
+    assert.equal(again.body.error, 'configuration_agent');
+    assert.equal(state.agents.get('nova')!.createdFrom, 'configuration');
+    assert.equal(state.agents.get('nova')!.commit, RUNTIME_SHA);
+    // Nor does the repository update machinery move it off the pinned runtime.
+    assert.equal((await call('POST', '/api/v1/agents/nova/updates/check', {})).status, 409);
+    assert.equal((await call('POST', '/api/v1/agents/nova/updates/install', { commit: 'f'.repeat(40) })).status, 409);
+    assert.equal(state.agents.get('nova')!.commit, RUNTIME_SHA);
   });
 
   it('deploys an agent created from a configuration on the runtime image, only with a policy and without adopted skills; nothing else is touched', async () => {
@@ -207,5 +250,8 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
     const withSkill = await deploy();
     assert.equal(withSkill.body.error, 'skills_image_not_supported', JSON.stringify(withSkill.body));
     assert.equal(deployed.length, 1, 'nothing was deployed without its skill');
+    assert.deepEqual(built, [], 'and the configuration apply never builds this repository as if it were a cartridge');
+    assert.ok(ledger.query({ agent: 'nova' }).some((e) => e.action === 'AGENT_CONFIG_APPLY_SKIPPED'), 'the skipped apply is on the record');
+    assert.equal(state.agents.get('nova')!.artifact, IMAGE);
   });
 });
