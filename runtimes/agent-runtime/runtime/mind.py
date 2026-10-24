@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -18,7 +17,6 @@ from memory import (
 )
 from memory import ephemeral, episodic, workspace
 
-SAFE_PART = re.compile(r"[^A-Za-z0-9._-]")
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -137,8 +135,10 @@ class TeamMember(Mind):
         return self._dbs[project]
 
     def _ids(self, payload: dict) -> tuple[str, str]:
-        project = SAFE_PART.sub("_", str(payload.get("project_id") or "default-project"))[:64] or "default-project"
-        task = SAFE_PART.sub("_", str(payload.get("task_id") or "default-task"))[:64] or "default-task"
+        # The engine keeps different ids apart (a short hash of the original is part of the file name), so they pass as given,
+        # bounded in length; sanitising them here would let `a/b` and `a_b` share a notebook.
+        project = str(payload.get("project_id") or "default-project").strip()[:200] or "default-project"
+        task = str(payload.get("task_id") or "default-task").strip()[:200] or "default-task"
         return project, task
 
     def history(self, who, payload):

@@ -234,6 +234,8 @@ export type CreateRunOptions = {
   model?: string;
   requestedBy?: { provider: string; id: string };
   caller?: AuthenticatedCaller;
+  /** What the factory itself says this input is (`conversation-request`, `approval`); the only way it gets onto an input. */
+  factoryKind?: 'conversation-request' | 'approval';
 };
 
 /** The single entry point for waking an agent: manual, webhook, cron, event route, gatekeeper-ingress. */
@@ -253,6 +255,9 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
   if (opts.input && typeof opts.input === 'object' && !Array.isArray(opts.input)) {
     const copy = { ...(opts.input as Record<string, unknown>) };
     delete copy.caller;
+    // `factoryKind` is the factory's alone: whatever a sender wrote there is removed, so an agent can trust it (RT1).
+    delete copy.factoryKind;
+    if (opts.factoryKind) copy.factoryKind = opts.factoryKind;
     if (opts.caller) {
       copy.caller = { ...opts.caller };
     }

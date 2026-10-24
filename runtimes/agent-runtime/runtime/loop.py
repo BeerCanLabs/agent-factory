@@ -35,8 +35,10 @@ def caller_of(payload: dict) -> dict:
 
 
 def who_of(payload: dict) -> str:
+    """The notebook a turn belongs to: the verified person, else `system` for a wake the factory itself started (cron,
+    schedule, queue or event: no person speaks). A person's message always carries the `caller` the factory set."""
     actor = caller_of(payload).get("actor")
-    return str(actor) if actor else "system"
+    return str(actor) if isinstance(actor, str) and actor else "system"
 
 
 def text_of(payload: dict) -> str:
@@ -47,7 +49,8 @@ def system_prompt(soul: str, payload: dict) -> str:
     caller = caller_of(payload)
     speaking = ""
     if caller.get("actor"):
-        name = caller.get("name") or caller["actor"]
+        # A display name is typed by a person: one short plain line, never a way to add instructions.
+        name = " ".join(str(caller.get("name") or caller["actor"]).split())[:60]
         speaking = f"\n\nYou are speaking with {name}."
     now = datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
     return f"{soul.strip() or DEFAULT_SOUL}{speaking}\n\nIt is {now}."
@@ -103,17 +106,29 @@ def deliver(factory: Factory, payload: dict, reply: str) -> None:
 
 
 def answer_request(mind: Mind, payload: dict) -> str:
-    """AM5: the console asks the agent, never the factory's own copy, for a person's conversations."""
+    """AM5: the console asks the agent, never the factory's own copy, for a person's conversations. Only a request the
+    factory built (`factoryKind`) is one, so a person's message cannot ask for another person's conversations; an admin's
+    request names its subject, anyone else's is about themselves."""
+    asker = caller_of(payload).get("actor")
+    if not isinstance(asker, str) or not asker:
+        return json.dumps({"error": "a conversation request needs a verified asker"})
     req = payload.get("request") if isinstance(payload.get("request"), dict) else {}
-    subject = req.get("subject") or caller_of(payload).get("actor") or "system"
-    out = mind.conversations(str(subject), str(req.get("op", "list")), req.get("conversation"), int(req.get("limit") or 10))
-    return json.dumps(out)
+    subject = req.get("subject") if isinstance(req.get("subject"), str) and req.get("subject") else asker
+    try:
+        limit = int(req.get("limit") or 10)
+    except (TypeError, ValueError):
+        limit = 10
+    op = req.get("op") if req.get("op") in ("list", "turns") else "list"
+    conversation = req.get("conversation") if isinstance(req.get("conversation"), str) else None
+    return json.dumps(mind.conversations(subject, op, conversation, limit))
 
 
 def handle(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], payload: dict) -> str | None:
-    if payload.get("type") == "approval":
+    # `factoryKind` is set by the factory and removed from anything a person sends, so only the factory can make one.
+    kind = payload.get("factoryKind")
+    if kind == "approval":
         return None  # a decision for an action the agent asked for: the factory applies it, the loop has nothing to say
-    reply = answer_request(mind, payload) if payload.get("kind") == "conversation-request" else converse(factory, soul, mind, tools, payload)
+    reply = answer_request(mind, payload) if kind == "conversation-request" else converse(factory, soul, mind, tools, payload)
     deliver(factory, payload, reply)
     return reply
 
@@ -132,26 +147,37 @@ def main(factory: Factory | None = None) -> int:
     except ValueError as err:
         write_result({"status": "failed", "output": {"error": str(err)}})
         return 1
-    loaded, problems = load_skills(config.get("skills") or [])
+    loaded, problems = load_skills(config.get("skills") or [], reserved={spec["function"]["name"] for spec, _ in mind.tools()})
     tools = {t.name: t for t in loaded}
     for p in problems:
         print(f"[runtime] {p}", file=sys.stderr)
-    last = None
+    turns = 0
     try:
         payload = factory.input()
-        last = handle(factory, soul, mind, tools, payload)
+        handle(factory, soul, mind, tools, payload)
+        turns += 1
         # A conversational agent stays warm to answer follow-ups without a cold start; the idle window is the factory's.
         warm = int(config.get("warmDownSeconds") or 0)
         deadline = time.time() + warm
         while warm and time.time() < deadline:
             factory.heartbeat()
+            asked = time.time()
             message = factory.next_message(min(20000, max(1, int((deadline - time.time()) * 1000))))
             if not message:
+                if time.time() - asked < 0.05:
+                    time.sleep(0.25)  # an answer that comes back at once is not a reason to spin
                 continue
             nxt = message.get("payload")
             if isinstance(nxt, dict):
-                reply = handle(factory, soul, mind, tools, nxt)
-                last = reply if reply is not None else last
+                try:
+                    handle(factory, soul, mind, tools, nxt)
+                except Exception as err:  # one person's message must not end the others' turns
+                    print(f"[runtime] a turn failed: {type(err).__name__}", file=sys.stderr)
+                    try:
+                        deliver(factory, nxt, "I could not process that message.")
+                    except Exception:
+                        pass
+                turns += 1
                 deadline = time.time() + warm
     except Exception as err:  # a turn that cannot be answered is a failed run, reported, never a silent success
         mind.close()
@@ -160,6 +186,6 @@ def main(factory: Factory | None = None) -> int:
         return 1
     finally:
         mind.close()
-    write_result({"status": "succeeded", "output": {"summary": last or "", "archetype": mind.archetype, "processed_at": datetime.now(timezone.utc).isoformat()}})
+    write_result({"status": "succeeded", "output": {"summary": f"handled {turns} turn(s)", "archetype": mind.archetype, "processed_at": datetime.now(timezone.utc).isoformat()}})
     print("[runtime] done")
     return 0

@@ -7,6 +7,8 @@ import { files, read, repoRoot } from './support.js';
 
 const RUNTIME = 'runtimes/agent-runtime';
 const sources = () => files(`${RUNTIME}/runtime`, (p) => p.endsWith('.py'));
+/** The memory engine is part of the runtime image, so it is held to the same rules. */
+const allSources = () => files(RUNTIME, (p) => p.endsWith('.py') && !p.includes('/tests/'));
 
 describe('RT1 one shared runtime runs the loop for an agent from its configuration', () => {
   it('its own tests pass: a configuration alone answers a message, by archetype, with adopted skills, replying where the turn came from', () => {
@@ -31,22 +33,25 @@ describe('RT1 one shared runtime runs the loop for an agent from its configurati
 
 describe('RT2 the loop has no extension points', () => {
   it('RT2 only the skill loader loads code, and only from the folder of a skill the factory listed', () => {
-    const dynamic = /\b(?:__import__|import_module|exec|eval|entry_points|pkg_resources|runpy)\s*\(|\bentry_points\b/;
-    assert.deepEqual(sources().filter((f) => !f.endsWith('/skills.py') && (dynamic.test(read(f)) || /\bimportlib\b/.test(read(f)))), [], 'only skills.py may load code');
+    const dynamic = /\b(?:__import__|import_module|exec|eval|entry_points|pkg_resources|runpy|pickle|marshal|subprocess|ctypes)\b|(?<![.\w])compile\s*\(|\bimportlib\b/;
+    assert.deepEqual(allSources().filter((f) => !f.endsWith('/skills.py') && dynamic.test(read(f))), [], 'only skills.py may load code');
     const skills = read(`${RUNTIME}/runtime/skills.py`);
-    assert.ok(!dynamic.test(skills), 'the skill loader uses no eval, exec or import_module');
+    assert.ok(!/\b(?:__import__|import_module|exec|eval|pickle|subprocess)\s*\(/.test(skills), 'the skill loader uses no eval, exec or import_module');
     assert.match(skills, /folder\.resolve\(\) not in target\.parents/, 'a skill entry cannot leave its folder');
   });
 
-  it('RT2 no environment variable or file names code to run: the runtime reads a fixed list of variables', () => {
+  it('RT2 the runtime reads a fixed list of environment variables, by any way of reading them', () => {
     const allowed = new Set([
       'FACTORY_URL', 'FACTORY_RUN_ID', 'FACTORY_RUN_TOKEN', 'FACTORY_MODEL_BASE_URL', 'FACTORY_MODEL', 'DISCORD_BASE_URL',
       'FACTORY_RESULT_FILE', 'MEMORY_DIR', 'SKILLS_DIR',
     ]);
     const used = new Set<string>();
-    for (const f of sources()) {
-      for (const m of read(f).matchAll(/(?:os\.environ(?:\.get)?|env\.get)\(\s*["']([A-Z_]+)["']/g)) used.add(m[1]);
-      for (const m of read(f).matchAll(/os\.environ\[\s*["']([A-Z_]+)["']\s*\]/g)) used.add(m[1]);
+    for (const f of allSources()) {
+      const src = read(f);
+      assert.ok(!/\bos\.environ\s*(?:\.(?:items|keys|values|copy|update)|\)|$)|\bdict\(\s*(?:os\.)?environ|\bos\.environb\b/m.test(src.replace(/os\.environ(?:\.get)?\(\s*["'][A-Z_]+["']/g, '').replace(/os\.environ\[\s*["'][A-Z_]+["']\s*\]/g, '')) || f.endsWith('/factory.py'), `${f} reads the whole environment`);
+      for (const m of src.matchAll(/(?:os\.environ(?:\.get)?|os\.getenv|\bgetenv|\benv\.get)\(\s*["']([A-Z_]+)["']/g)) used.add(m[1]);
+      for (const m of src.matchAll(/os\.environ\[\s*["']([A-Z_]+)["']\s*\]/g)) used.add(m[1]);
+      for (const m of src.matchAll(/(?:os\.getenv|\bgetenv)\(\s*(?!["'])/g)) assert.fail(`${f}: an environment variable read by a computed name`);
     }
     assert.deepEqual([...used].filter((v) => !allowed.has(v)), []);
     assert.ok(![...used].some((v) => /PLUGIN|HOOK|EXTENSION|MODULE|ENTRY/.test(v)));

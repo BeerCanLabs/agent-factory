@@ -28,12 +28,12 @@ class Tool:
         return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": self.parameters}}
 
 
-def load_skills(adopted: list[dict], skills_dir: str | None = None) -> tuple[list[Tool], list[str]]:
+def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: set[str] | None = None) -> tuple[list[Tool], list[str]]:
     """The tools of the skills the factory says this agent has adopted, and what could not be loaded (never fatal)."""
     root = Path(skills_dir or os.environ.get("SKILLS_DIR", "/opt/factory/skills"))
     tools: list[Tool] = []
     problems: list[str] = []
-    seen: set[str] = set()
+    seen: set[str] = set(reserved or ())  # a skill cannot shadow the archetype's own tools
     for item in adopted or []:
         sid = str(item.get("id", ""))
         if not SAFE_ID.match(sid):

@@ -418,3 +418,7 @@ defines `tools()`, a list of `{name, description, parameters, handler}`; `handle
 the ones it asks for. A skill reaches only what its agent's policy grants, and for the person speaking only what their
 role allows (E12): the gatekeeper-egress decides on every call, not the runtime. There are no other hooks: behaviour that
 does not fit the soul, the skills, the roles or the memory archetype is built as a skill.
+
+A skill runs inside the runtime's process, so it can read the run token in its environment. That is why skills are
+reviewed code (SK1) and why the token is valid only for this run's own routes. A skill cannot use the name of one of the
+archetype's own tools (for example `recall_conversation`): the loader refuses it and the agent keeps working without it.

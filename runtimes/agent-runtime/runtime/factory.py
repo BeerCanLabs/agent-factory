@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -25,7 +26,20 @@ class Factory:
         self.discord_base = (env.get("DISCORD_BASE_URL") or "").rstrip("/")
         self.model = env.get("FACTORY_MODEL") or ""
 
+    def _origins(self) -> set[str]:
+        out = set()
+        for base in (self.url, self.model_base, self.discord_base):
+            if base:
+                parts = urllib.parse.urlsplit(base)
+                out.add(f"{parts.scheme}://{parts.netloc}")
+        return out
+
     def _call(self, method: str, url: str, body: Any = None, timeout: float = 300) -> Any:
+        # The run token goes only to the factory, the factory model API and the gatekeeper-egress's Discord route, never to
+        # any other host (a third party must not be able to act as this run).
+        parts = urllib.parse.urlsplit(url)
+        if f"{parts.scheme}://{parts.netloc}" not in self._origins():
+            raise FactoryError(0, f"refusing to send the run token to {parts.netloc or url}")
         data = None if body is None else json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -68,8 +82,12 @@ class Factory:
         self._call("POST", f"{self.url}/api/v1/runs/{self.run_id}/reply", {"turnId": turn_id, "content": content}, timeout=30)
 
     def reply_discord(self, channel_id: str, content: str) -> None:
-        base = self.discord_base or "https://discord.com/api/v10"
-        self._call("POST", f"{base}/channels/{channel_id}/messages", {"content": content[:1900]}, timeout=30)
+        # Only through the gatekeeper-egress's Discord route (DISCORD_BASE_URL), never straight to discord.com.
+        if not self.discord_base:
+            raise FactoryError(0, "DISCORD_BASE_URL is not set: no Discord reply")
+        if not channel_id.isdigit() or len(channel_id) > 32:
+            raise FactoryError(0, "channel id is not a Discord id")
+        self._call("POST", f"{self.discord_base}/channels/{channel_id}/messages", {"content": content[:1900]}, timeout=30)
 
     def next_message(self, wait_ms: int) -> dict | None:
         got = self._call("GET", f"{self.url}/api/v1/runs/{self.run_id}/mailbox?timeout={wait_ms}", timeout=wait_ms / 1000 + 15)
