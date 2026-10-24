@@ -192,6 +192,16 @@ describe('CF5 skill approval by owner (private) or admin (public) (TSK-271)', { 
       assert.equal(admin.status, 200, JSON.stringify(admin.body));
     });
 
+    it('is not put back by its owner once an admin has revoked or rejected it', async () => {
+      // 0.1.0 was revoked by the admin in the test above; 0.4.0 is rejected by the admin while pending.
+      assert.equal((await decide('print', '0.1.0', 'approve', HIGGINS_OWNER)).status, 403, 'revoked by an admin');
+      await register(privateManifest('print', '0.4.0', 'higgins'), HIGGINS_OWNER);
+      recordSkillChecks(state, 'print', '0.4.0', { passed: true });
+      assert.equal((await decide('print', '0.4.0', 'reject', ADMIN, { reason: 'no' })).status, 200);
+      assert.equal((await decide('print', '0.4.0', 'approve', HIGGINS_OWNER)).status, 403, 'rejected by an admin');
+      assert.equal((await decide('print', '0.4.0', 'approve', ADMIN)).status, 200, 'an admin may still change their mind');
+    });
+
     it('can be turned down by its owner while pending', async () => {
       await register(privateManifest('print', '0.2.0', 'higgins'), HIGGINS_OWNER);
       const r = await decide('print', '0.2.0', 'reject', HIGGINS_OWNER);

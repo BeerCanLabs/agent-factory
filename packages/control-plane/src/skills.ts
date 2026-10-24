@@ -288,7 +288,7 @@ async function decide(
   const registry = skillRegistry(state);
   const rec = registry.get(id, version);
   const owner = rec ? ownerOf(rec) : undefined;
-  const ownerScoped = !!rec && visibilityOf(rec) === 'private' && !!owner && !(decision === 'reject' && rec.status === 'approved');
+  const ownerScoped = !!rec && visibilityOf(rec) === 'private' && !!owner && rec.status === 'pending';
   const allowed = ownerScoped
     ? authorize({ principal, privilege: 'skills.decide.private', resource: { agentId: owner!, owners: ownersOf(state, owner!) } })
     : authorize({ principal, privilege: 'skills.decide' });
