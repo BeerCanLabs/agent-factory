@@ -69,9 +69,15 @@ export async function buildAgentImage(
   // Only set when there are skills: the project defines no SKILLS of its own, and an empty override may be refused.
   const env = { AGENT_ID: agentId, REPO_URL: source.repo, GIT_COMMIT: source.commit, IMAGE_TAG: tag, ...(skillsValue ? { SKILLS: skillsValue } : {}) };
 
+  await runBuild(client, opts.projectName ?? process.env.FACTORY_AGENT_BUILDER_PROJECT ?? 'factory-agent-builder', env, opts.pollMs);
+  return `${ecrRepoUri}:${tag}`;
+}
+
+/** Starts one CodeBuild build with these variables and polls until it ends: returns on success, throws the admission failure otherwise. */
+async function runBuild(client: Pick<CodeBuildClient, 'send'>, projectName: string, env: Record<string, string>, pollMs = 5000): Promise<void> {
   const startRes = await client.send(
     new StartBuildCommand({
-      projectName: opts.projectName ?? process.env.FACTORY_AGENT_BUILDER_PROJECT ?? 'factory-agent-builder',
+      projectName,
       environmentVariablesOverride: Object.entries(env).map(([name, value]) => ({ name, value, type: 'PLAINTEXT' })),
     }),
   );
@@ -79,11 +85,38 @@ export async function buildAgentImage(
   if (!buildId) throw new Error('Failed to start CodeBuild: build ID not returned');
 
   for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, opts.pollMs ?? 5000));
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
     const batchRes = await client.send(new BatchGetBuildsCommand({ ids: [buildId] }));
     const build = batchRes.builds?.[0];
     if (!build) throw new Error(`Build ${buildId} not found in CodeBuild`);
-    if (build.buildStatus === 'SUCCEEDED') return `${ecrRepoUri}:${tag}`;
+    if (build.buildStatus === 'SUCCEEDED') return;
     if (build.buildStatus && TERMINAL_FAILURES.has(build.buildStatus)) throw admissionFailure(build);
   }
+}
+
+/**
+ * The image of an agent created from a configuration that has adopted skills (CF6, SK4, TSK-272): the pinned shared
+ * runtime image (`base`, built from `base.commit`) plus one layer holding the skills and their manifest, built by the
+ * `factory-skills-builder` project (landing-zones/aws/codebuild.tf). There is no agent source to clone or test. The tag
+ * is `<agentId>-<runtime commit[:12]>-<skills hash[:12]>` (`imageTagFor`), so a new runtime or other skills is another
+ * image, and the same pins are the same bytes; the build refuses a base that is not in the runtime's registry.
+ */
+export async function buildSkillsImage(
+  agentId: string,
+  base: { image: string; commit: string },
+  skills: readonly BuildSkill[],
+  opts: { client?: Pick<CodeBuildClient, 'send'>; pollMs?: number; projectName?: string } = {},
+): Promise<string> {
+  const ecrRepoUri = process.env.FACTORY_ECR_REPO_URI;
+  if (!ecrRepoUri) throw new Error('FACTORY_ECR_REPO_URI environment variable is required');
+  if (skills.length === 0) throw new Error('buildSkillsImage needs at least one skill; an agent without skills runs the runtime image itself');
+  const skillsValue = skillsEnv(skills);
+  if (skillsValue.length > MAX_SKILLS_ENV_CHARS) {
+    throw new AdmissionRefusedError('build_failed', `${skills.length} skills do not fit the build's environment (${skillsValue.length} > ${MAX_SKILLS_ENV_CHARS} characters)`);
+  }
+  const client = opts.client ?? new CodeBuildClient({ region: process.env.AWS_REGION || 'us-east-1' });
+  const tag = imageTagFor(agentId, base.commit, skills);
+  const env = { AGENT_ID: agentId, BASE_IMAGE: base.image, RUNTIME_COMMIT: base.commit, IMAGE_TAG: tag, SKILLS: skillsValue };
+  await runBuild(client, opts.projectName ?? process.env.FACTORY_SKILLS_BUILDER_PROJECT ?? 'factory-skills-builder', env, opts.pollMs);
+  return `${ecrRepoUri}:${tag}`;
 }

@@ -92,6 +92,20 @@ export async function runDeploy(state: FactoryState, job: DeployJob): Promise<De
   }
 }
 
+/**
+ * The image an agent created from a configuration runs (CF6, SK4, TSK-272): the pinned shared runtime image itself, or,
+ * when it has adopted skills, that image with the skills layered on by the provider's build. There is no agent source
+ * to build, so nothing else is admitted. A provider without the build refuses, so no such agent runs without its skills.
+ */
+async function buildConfigured(state: FactoryState, agentId: string, skills: BuildSkill[]): Promise<string> {
+  const pin = state.sharedRuntime;
+  if (!pin) throw new Error('the shared runtime is not configured (FACTORY_RUNTIME_IMAGE and FACTORY_RUNTIME_COMMIT)');
+  if (skills.length === 0) return pin.image;
+  const build = state.deployProvider?.buildSkillsImage;
+  if (!build) throw new Error('this deployment cannot build an image with skills on the shared runtime (skills_image_not_supported)');
+  return build.call(state.deployProvider, agentId, { image: pin.image, commit: pin.commit }, skills);
+}
+
 async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult> {
   const { agent, actor, source, skills, previousState } = job;
   const agentId = agent.id;
@@ -100,7 +114,7 @@ async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult
   const withSkills = skills.length > 0 ? ` with ${skills.length} skill(s)` : '';
   console.log(`[control-plane] Admission build for ${agentId} at ${commit}${withSkills}...`);
   const outcome = await admit(source, {
-    build: (src) => dp.buildImage(agentId, src, skills.length ? skills : undefined),
+    build: (src) => (agent.createdFrom === 'configuration' ? buildConfigured(state, agentId, skills) : dp.buildImage(agentId, src, skills.length ? skills : undefined)),
     isRefusal: (err): err is AdmissionRefusedError => err instanceof AdmissionRefusedError,
     redact: (message) => redactSecrets(message, state.secretValues ?? []),
   });
@@ -189,9 +203,14 @@ export function applyConfig(state: FactoryState, agentId: string, actor: string,
     return { status: 'failed', reason: built.error };
   }
   if (sameSkills(agent.deployedSkills ?? [], built.skills)) return { status: 'unchanged', reason: 'image_matches' };
-  // CF6: an agent created from a configuration runs the pinned runtime image; an image with adopted skills in it is built by
-  // the deployment's build service (GAP-200), never from this repository's root as if it were a cartridge.
-  if (agent.createdFrom === 'configuration') {
+  // CF6: an agent created from a configuration runs the pinned runtime image; one with adopted skills runs it with the
+  // skills layered on (TSK-272), built only by a provider that can, never from a repository as if it were a cartridge.
+  const configured = agent.createdFrom === 'configuration';
+  if (configured && !state.sharedRuntime) {
+    row(state, agentId, 'AGENT_CONFIG_APPLY_SKIPPED', actor, undefined, requestId);
+    return { status: 'skipped', reason: 'shared_runtime_not_configured' };
+  }
+  if (configured && built.skills.length > 0 && !state.deployProvider?.buildSkillsImage) {
     row(state, agentId, 'AGENT_CONFIG_APPLY_SKIPPED', actor, undefined, requestId);
     return { status: 'skipped', reason: 'skills_image_not_supported' };
   }
@@ -205,7 +224,7 @@ export function applyConfig(state: FactoryState, agentId: string, actor: string,
     row(state, agentId, 'AGENT_CONFIG_APPLY_SKIPPED', actor, undefined, requestId);
     return { status: 'skipped', reason: 'policy_required' };
   }
-  const pin = pinSource(agent, {});
+  const pin = configured ? ({ ok: true, source: { repo: state.sharedRuntime!.repo, commit: state.sharedRuntime!.commit } } as const) : pinSource(agent, {});
   if (!pin.ok) {
     row(state, agentId, 'AGENT_CONFIG_APPLY_SKIPPED', actor, undefined, requestId);
     return { status: 'skipped', reason: pin.error };

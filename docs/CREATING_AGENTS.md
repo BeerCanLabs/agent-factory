@@ -29,8 +29,13 @@ by its owner with `PUT /api/v1/agents/:id/settings`.
 ## Deploy
 
 `POST /api/v1/registry/agents/:id/deploy` registers the agent's compute on the pinned shared runtime image, once its policy has
-at least one route. There is no build. An agent that has adopted skills needs an image built with them (SK4); that build is
-not provided yet, so deploying such an agent is refused with `skills_image_not_supported`.
+at least one route. There is no build of the agent's own code. An agent that has adopted skills (SK4) runs the same runtime
+image with its approved skills and their manifest layered on top: the deployment's provider builds that image (on AWS, the
+`factory-skills-builder` CodeBuild project), tagged with the runtime commit and a hash of the skill pins, so one container
+still runs one agent and nothing is shared at run time. The deploy then runs in the background (`202`, poll the agent). Adopting
+or removing a skill on a deployed agent applies the same way, and removing the last one puts the agent back on the runtime
+image. A provider that cannot build it refuses (`skills_image_not_supported`) rather than deploy the agent without its skills.
+A new runtime version does not re-deploy agents that already run an older one.
 
 ## What a deployment needs
 

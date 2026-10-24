@@ -243,6 +243,80 @@ describe('the admission buildspec that runs it (landing-zones/aws/codebuild.tf)'
   });
 });
 
+describe('the skills buildspec for an agent on the shared runtime (CF6, SK4, TSK-272; landing-zones/aws/codebuild.tf)', () => {
+  const dir = join(dirname(SCRIPT));
+  const tf = readFileSync(join(dir, 'codebuild.tf'), 'utf8');
+  const RUNTIME_REPO = '111111111111.dkr.ecr.us-east-1.amazonaws.com/factory-agent-runtime';
+  const C = 'c'.repeat(40);
+
+  /** The factory-skills-builder buildspec as Terraform renders it. */
+  function render(): { commands: Record<string, string[]>; text: string } {
+    const block = tf.slice(tf.indexOf('resource "aws_codebuild_project" "factory_skills_builder"'));
+    const heredoc = block.match(/buildspec = <<EOF\n([\s\S]*?)\nEOF\n/)?.[1];
+    assert.ok(heredoc, 'the factory-skills-builder buildspec is in codebuild.tf');
+    const file = readFileSync(SCRIPT, 'utf8');
+    const embedded = file.replace(/\n$/, '').split('\n').map((l, i) => (i === 0 ? l : l === '' ? '' : `        ${l}`)).join('\n');
+    const rendered = heredoc.replace('${indent(8, file("${path.module}/compose-skills.sh"))}', () => embedded).replaceAll('$${', () => '${');
+    const spec = parseYaml(rendered) as { phases: Record<string, { commands: string[] }> };
+    return { commands: Object.fromEntries(Object.entries(spec.phases).map(([k, v]) => [k, v.commands])), text: rendered };
+  }
+
+  it('is valid YAML with all four phases, and builds on the base it was given, not on a repository', () => {
+    const { commands } = render();
+    assert.deepEqual(Object.keys(commands), ['install', 'pre_build', 'build', 'post_build']);
+    const text = Object.values(commands).flat().join('\n');
+    assert.ok(text.includes('--build-arg "BASE=$BASE_IMAGE"'), 'the skills layer goes on the base image');
+    assert.ok(!/git .*clone .*REPO_URL|npm ci|pytest/.test(text), 'no agent source is cloned, installed or tested');
+    assert.ok(text.includes('docker push "$ECR_REPO_URI:$IMAGE_TAG"'));
+  });
+
+  /** Runs the install-phase guards (everything before the script is written) with these variables; the exit status. */
+  function guard(env: Record<string, string>): number | null {
+    const { install } = render().commands;
+    const checks = install.filter((c) => !c.includes('FACTORY_COMPOSE_SKILLS') && !c.startsWith('echo'));
+    return spawnSync('bash', ['-c', checks.join('\n')], { env: { PATH: process.env.PATH ?? '', RUNTIME_REPO_URI: RUNTIME_REPO, ...env }, encoding: 'utf8' }).status;
+  }
+  const good = { AGENT_ID: 'nova', RUNTIME_COMMIT: C, IMAGE_TAG: 'nova-cccccccccccc-0123456789ab', BASE_IMAGE: `${RUNTIME_REPO}:abcdef1`, SKILLS: '[{"id":"x"}]' };
+
+  it('lets the factory’s own tag, runtime and skills through, and nothing else', () => {
+    assert.equal(guard(good), 0);
+    assert.notEqual(guard({ ...good, IMAGE_TAG: 'nova-cccccccccccc' }), 0, 'a tag without the skills hash');
+    assert.notEqual(guard({ ...good, IMAGE_TAG: 'nova-dddddddddddd-0123456789ab' }), 0, 'another runtime commit in the tag');
+    assert.notEqual(guard({ ...good, IMAGE_TAG: 'other-cccccccccccc-0123456789ab' }), 0, 'another agent’s tag');
+    assert.notEqual(guard({ ...good, IMAGE_TAG: 'nova-cccccccccccc-0123456789AB' }), 0, 'not lower-case hex');
+    assert.notEqual(guard({ ...good, RUNTIME_COMMIT: 'main' }), 0, 'not a full commit');
+    assert.notEqual(guard({ ...good, SKILLS: '' }), 0, 'nothing to layer');
+  });
+
+  it('layers only the runtime’s own image', () => {
+    assert.notEqual(guard({ ...good, BASE_IMAGE: '111111111111.dkr.ecr.us-east-1.amazonaws.com/factory-dynamic-agents:other-aaaaaaaaaaaa' }), 0, 'another repository in the registry');
+    assert.notEqual(guard({ ...good, BASE_IMAGE: 'docker.io/library/alpine:3' }), 0, 'an image from elsewhere');
+    assert.notEqual(guard({ ...good, BASE_IMAGE: `${RUNTIME_REPO}-evil:abc` }), 0, 'a repository that only starts with the same name');
+    assert.notEqual(guard({ ...good, BASE_IMAGE: `${RUNTIME_REPO}:a b` }), 0, 'a space');
+    assert.notEqual(guard({ ...good, BASE_IMAGE: `${RUNTIME_REPO}:a;rm -rf /` }), 0, 'a command');
+    assert.notEqual(guard({ ...good, BASE_IMAGE: `${RUNTIME_REPO}@sha256:abc` }), 0, 'a digest form is not the tag the factory pins');
+  });
+
+  it('writes exactly compose-skills.sh to disk', () => {
+    const install = render().commands.install.find((c) => c.includes('FACTORY_COMPOSE_SKILLS'));
+    assert.ok(install);
+    const work = mkdtempSync(join(root0(), 'skills-buildspec-'));
+    const run = spawnSync('bash', ['-c', install.replaceAll('/tmp/compose-skills.sh', join(work, 'compose-skills.sh'))], { env: { PATH: process.env.PATH ?? '' }, encoding: 'utf8' });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(readFileSync(join(work, 'compose-skills.sh'), 'utf8'), readFileSync(SCRIPT, 'utf8'));
+  });
+
+  it('is given the registries by the same project the control plane starts, and the control plane is told its name and the runtime', () => {
+    const block = tf.slice(tf.indexOf('resource "aws_codebuild_project" "factory_skills_builder"'));
+    assert.match(block, /name\s+= "factory-skills-builder"/);
+    assert.match(block, /RUNTIME_REPO_URI[\s\S]*?aws_ecr_repository\.repo\["agent-runtime"\]\.repository_url/);
+    const ecs = readFileSync(join(dir, 'ecs.tf'), 'utf8');
+    assert.match(ecs, /FACTORY_SKILLS_BUILDER_PROJECT.*aws_codebuild_project\.factory_skills_builder\.name/);
+    for (const v of ['FACTORY_RUNTIME_IMAGE', 'FACTORY_RUNTIME_COMMIT', 'FACTORY_RUNTIME_REPO']) assert.ok(ecs.includes(`"${v}"`), v);
+    assert.ok(readFileSync(join(dir, 'storage.tf'), 'utf8').includes('"agent-runtime"'), 'the runtime has its registry');
+  });
+});
+
 function root0(): string {
   return tmpdir();
 }

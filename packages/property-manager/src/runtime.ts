@@ -164,6 +164,14 @@ export type DeployProvider = {
    * Returns the image URI. Throws AdmissionRefusedError with the reason when the commit is refused.
    */
   buildImage(agentId: string, source: SourceRef, skills?: BuildSkill[]): Promise<string>;
+  /**
+   * The image of an agent created from a configuration that adopted skills (CF6, SK4): the pinned shared runtime image
+   * (`base`: its image and the commit it was built from) with the skills and their manifest layered on top, tagged
+   * `imageTagFor(agentId, base.commit, skills)`. There is no agent source to check out or test. Optional: a provider
+   * without it cannot run such an agent, and the factory refuses to deploy one rather than deploy it without its skills.
+   * Throws AdmissionRefusedError with the reason when a skill is refused. Returns the image URI.
+   */
+  buildSkillsImage?(agentId: string, base: { image: string; commit: string }, skills: BuildSkill[]): Promise<string>;
   /** Provision IAM / roles / service accounts for the agent. */
   provisionIdentity(agentId: string, secrets: string[]): Promise<{ identity: string; executionIdentity?: string }>;
   /** Register the agent's compute definition (ECS task def, Cloud Run job, etc.). */
