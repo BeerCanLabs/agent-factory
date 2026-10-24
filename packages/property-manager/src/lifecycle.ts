@@ -236,6 +236,8 @@ export type CreateRunOptions = {
   caller?: AuthenticatedCaller;
   /** What the factory itself says this input is (`conversation-request`, `approval`); the only way it gets onto an input. */
   factoryKind?: 'conversation-request' | 'approval';
+  /** The caller has already set `turnId` and `replyTo` itself (a conversation turn). Otherwise a sender's are removed: they are the factory's. */
+  factoryTurn?: boolean;
 };
 
 /** The single entry point for waking an agent: manual, webhook, cron, event route, gatekeeper-ingress. */
@@ -257,6 +259,11 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
     delete copy.caller;
     // `factoryKind` is the factory's alone: whatever a sender wrote there is removed, so an agent can trust it (RT1).
     delete copy.factoryKind;
+    // `turnId` and `replyTo` choose where an agent answers; a webhook, queue message or operator body must not set them.
+    if (!opts.factoryTurn) {
+      delete copy.turnId;
+      delete copy.replyTo;
+    }
     if (opts.factoryKind) copy.factoryKind = opts.factoryKind;
     if (opts.caller) {
       copy.caller = { ...opts.caller };

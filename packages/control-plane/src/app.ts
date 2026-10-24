@@ -487,6 +487,7 @@ async function handOff(
       ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
       ...(opts.caller ? { caller: opts.caller } : {}),
       ...(opts.factoryKind ? { factoryKind: opts.factoryKind } : {}),
+      factoryTurn: true,
     });
     if (out.status >= 300) return { status: out.status, body: out.body as Record<string, unknown> };
     const woke = out.body as { runId: string };
@@ -1558,6 +1559,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       model: body.model as string | undefined,
       ...(requestedBy ? { requestedBy } : {}),
       ...(caller ? { caller } : {}),
+      factoryTurn: true,
     });
     json(res, out.status, out.body);
     return;

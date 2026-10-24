@@ -159,6 +159,16 @@ class TestLoop(Base):
         self.assertNotIn("secret one", [m["content"] for m in seen["m"]])
         self.assertFalse(list(self.mind.glob("*.db")))
 
+    def test_purpose_built_does_not_mix_two_people_in_one_warm_run(self):
+        cfg = {**PA, "memory": {"archetype": "purpose-built"}, "warmDownSeconds": 1}
+        seen = []
+        fake = FakeFactory(cfg, [turn("alice's private plan", actor="cloudflare:alice@example.com")], lambda m, t: seen.append([x["content"] for x in m]) or {"role": "assistant", "content": "ok"})
+        fake.mailbox.append({"payload": turn("what did I say?", actor="cloudflare:bob@example.com")})
+        self.fakes.append(fake)
+        loop.main(Factory(fake.env()))
+        self.assertEqual(len(seen), 2, "both people were answered in the one run")
+        self.assertNotIn("alice's private plan", seen[1])
+
     def test_team_member_keeps_work_by_project(self):
         cfg = {**PA, "memory": {"archetype": "team-member"}}
         self.wake(cfg, [turn("ship the report", project_id="alpha", task_id="t9")], lambda m, t: {"role": "assistant", "content": "on it"})

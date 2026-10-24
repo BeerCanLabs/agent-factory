@@ -55,13 +55,20 @@ class PurposeBuilt(Mind):
     archetype = ARCHETYPE_PURPOSE_BUILT
 
     def __init__(self, bounds: dict):
-        self.board = ephemeral.EphemeralWhiteboard(max_messages=bounds["max_messages"], max_chars=bounds["max_chars"])
+        self.bounds = bounds
+        # One board per person: people who join one warm run never see each other's turns (AM2).
+        self.boards: dict[str, ephemeral.EphemeralWhiteboard] = {}
+
+    def _board(self, who: str) -> ephemeral.EphemeralWhiteboard:
+        if who not in self.boards:
+            self.boards[who] = ephemeral.EphemeralWhiteboard(max_messages=self.bounds["max_messages"], max_chars=self.bounds["max_chars"])
+        return self.boards[who]
 
     def history(self, who, payload):
-        return self.board.load_whiteboard()
+        return self._board(who).load_whiteboard()
 
     def remember(self, who, payload, user_text, reply, surface, channel_id):
-        self.board.remember_turn(user_text, reply)
+        self._board(who).remember_turn(user_text, reply)
 
 
 class PersonalAssistant(Mind):

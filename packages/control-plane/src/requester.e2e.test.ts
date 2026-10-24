@@ -320,6 +320,26 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     assert.equal((state.runs.get(wake.body.runId)?.input as any)?.factoryKind, undefined, 'a wake input');
   });
 
+  it('RT1 with no live run, a conversation turn and a conversation request each start a run that carries the factory\'s markers', async () => {
+    const quiet = () => {
+      for (const r of state.runs.list({ agentId: 'ada', active: true })) state.runs.update(r.runId, { state: 'DONE' } as never);
+    };
+    quiet();
+    const turn = await api('/api/v1/agents/ada/conversation', 'POST', OPERATOR, { content: 'cold', factoryKind: 'approval', turnId: 'forged', replyTo: { channel: 'discord', channelId: '9' } });
+    assert.equal(turn.body.woke, true, JSON.stringify(turn.body));
+    const turnInput = state.runs.get(turn.body.runId)?.input as any;
+    assert.equal(turnInput.factoryKind, undefined);
+    assert.equal(turnInput.turnId, turn.body.turnId, 'the factory\'s turn id survives the wake');
+    assert.deepEqual(turnInput.replyTo, { channel: 'console' }, 'and its reply address');
+    quiet();
+    const req = await api('/api/v1/agents/ada/conversation-requests', 'POST', OPERATOR, { op: 'list' });
+    assert.equal(req.body.woke, true, JSON.stringify(req.body));
+    const reqInput = state.runs.get(req.body.runId)?.input as any;
+    assert.equal(reqInput.factoryKind, 'conversation-request', 'a request that starts the run is still marked');
+    assert.equal(reqInput.turnId, req.body.turnId);
+    assert.deepEqual(reqInput.replyTo, { channel: 'console' });
+  });
+
   it('AM5 the console asks the agent for conversations; the answer comes back to the asker; reading someone else needs admin and is ledgered', async () => {
     const ask = (token: string, body: unknown) => api('/api/v1/agents/ada/conversation-requests', 'POST', token, body);
     assert.equal((await ask(OPERATOR, { op: 'delete' })).status, 400);
