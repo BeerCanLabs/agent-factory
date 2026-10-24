@@ -19,6 +19,8 @@ const OWNER_RIGHTS: Privilege[] = [
   'skills.training.fund',
   'skills.training.run',
   'agents.roles.read',
+  'agents.settings.read',
+  'agents.settings.set',
   'approvals.decide',
   'agents.update.read',
   'agents.update.install',

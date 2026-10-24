@@ -20,6 +20,7 @@ import {
   type IdentityProvider,
 } from '@beercanlabs/factory-bouncer';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
+import { effectiveRoles } from './agent-settings.js';
 
 export {
   IdentityLinkStore,
@@ -164,7 +165,7 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
       if (!agent) {
         return json(res, 400, { error: 'unknown_agent', agentId, message: `agent '${agentId}' is not registered, so it has no roles to give` }), true;
       }
-      const assignable = (agent.roles ?? []).map((r) => r.name).filter((n) => n.toLowerCase() !== 'owner');
+      const assignable = effectiveRoles(state, agent).map((r) => r.name).filter((n) => n.toLowerCase() !== 'owner');
       const refused = list.filter((r) => !assignable.includes(r) && !already.includes(r));
       if (refused.length) {
         return json(res, 400, {

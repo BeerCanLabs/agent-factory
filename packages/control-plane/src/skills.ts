@@ -578,7 +578,7 @@ async function writeSkills(
   if (!store) return { ok: false, error: 'config_store_unavailable' };
   try {
     const sorted = [...skills].sort((a, b) => a.id.localeCompare(b.id));
-    const { record, created } = await store.put({ ...configOf(state, agentId), skills: sorted }, { updatedBy: meta.actor, reason: meta.reason, ...(meta.provenance?.length ? { skillAdoptions: meta.provenance } : {}) });
+    const { record, created } = await store.put({ ...configOf(state, agentId), skills: sorted }, { updatedBy: meta.actor, reason: meta.reason, replaces: ['skills'], ...(meta.provenance?.length ? { skillAdoptions: meta.provenance } : {}) });
     if (created) ledgerVersion(state, record, meta.actor);
     return { ok: true, created, version: record.version, hash: record.hash };
   } catch (err) {
