@@ -403,3 +403,18 @@ which resumes them (an agent an operator had paused stays paused). A revoked ver
 
 Approval returns `409 checks_pending` while the checks run (or when no checker is configured), and `409 checks_failed`
 with the reasons when they failed. See section 4.
+
+## How the shared agent runtime uses a skill
+
+**Skills are Python only. That is the current implementation, not a design limit:** the factory's skill checks run only
+for Python today (section 4), so the shared runtime loads only Python skills. Other languages are a later update to the
+checks and the runtime, and nothing here adds one.
+
+An agent created from a configuration (DESIGN_AUTHORITY.md §6.18 RT1) runs on the shared runtime
+(`runtimes/agent-runtime`). It loads exactly the skills its configuration in the factory lists, from the folders the
+image build placed at `/opt/factory/skills/<id>/` (SK4), and nothing else in that folder. Each skill's `entry` module
+defines `tools()`, a list of `{name, description, parameters, handler}`; `handler(arguments, context)` returns text, and
+`context` carries the verified `caller` and `turnId` of the turn. The model is offered those tools and the runtime runs
+the ones it asks for. A skill reaches only what its agent's policy grants, and for the person speaking only what their
+role allows (E12): the gatekeeper-egress decides on every call, not the runtime. There are no other hooks: behaviour that
+does not fit the soul, the skills, the roles or the memory archetype is built as a skill.
