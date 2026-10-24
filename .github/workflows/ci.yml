@@ -24,6 +24,7 @@ jobs:
       - run: npm run validate
       - run: (cd agents/examples/starter-python && python3 -m unittest discover -s tests)
       - run: (cd agents/staff/factory-manager && python3 -m unittest discover -s tests)
+      - run: (cd runtimes/agent-runtime && python3 -m unittest discover -s tests)
 
   compose-proof:
     # Proves the paper's claims against real containers: network isolation, run tokens, gatekeeper-egress

@@ -159,7 +159,7 @@ resource "aws_efs_access_point" "ledger" {
 }
 
 resource "aws_ecr_repository" "repo" {
-  for_each             = toset(concat(["control-plane", "gatekeeper-ingress", "gatekeeper-egress", "garrison"], [for id in keys(var.agents) : "agent-${id}"]))
+  for_each             = toset(concat(["control-plane", "gatekeeper-ingress", "gatekeeper-egress", "garrison", "agent-runtime"], [for id in keys(var.agents) : "agent-${id}"]))
   name                 = "factory-${each.key}"
   image_tag_mutability = "MUTABLE"
   # Platform images are rebuilt from their commit SHA, so a repository removed from this set is deleted with its

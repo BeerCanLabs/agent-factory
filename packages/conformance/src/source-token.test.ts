@@ -8,17 +8,20 @@ describe('S1 the source token goes only to allowed source hosts', () => {
   const tf = read('landing-zones/aws/codebuild.tf');
   const projects = [...tf.matchAll(/resource "aws_codebuild_project" "(\w+)" \{[\s\S]*?\n\}/g)];
 
-  it('both CodeBuild projects that clone registered repositories are covered', () => {
+  it('every CodeBuild project that clones registered repositories is covered', () => {
     const names = projects.map((m) => m[1]).sort();
     assert.ok(names.includes('factory_agent_builder'), names.join(','));
     assert.ok(names.includes('factory_skill_checker'), names.join(','));
+    assert.ok(names.includes('factory_skills_builder'), names.join(','));
   });
 
   for (const [block, name] of projects.map((m) => [m[0], m[1]] as const)) {
     if (!/GIT_TOKEN_SECRET_ID/.test(block)) continue;
     it(`${name} fetches the token only for an allowed host, from var.agent_source_token_hosts`, () => {
       assert.match(block, /name\s*=\s*"SOURCE_TOKEN_HOSTS"[\s\S]*?var\.agent_source_token_hosts/, 'SOURCE_TOKEN_HOSTS comes from the variable');
-      const fetches = [...block.matchAll(/if \[ -n "\$GIT_TOKEN_SECRET_ID" \]([^\n]*)then/g)];
+      // The skills builder (TSK-272) reads the token only in compose-skills.sh, which the buildspec embeds.
+      const script = /compose-skills\.sh/.test(block) ? read('landing-zones/aws/compose-skills.sh') : '';
+      const fetches = [...block.matchAll(/if \[ -n "\$GIT_TOKEN_SECRET_ID" \]([^\n]*)then/g), ...script.matchAll(/if \[ -n "\$\{GIT_TOKEN_SECRET_ID:-\}" \]([^\n]*)then/g)];
       assert.ok(fetches.length > 0, 'the build reads the token somewhere');
       for (const f of fetches) assert.match(f[1], /\[ -n "\$allowed" \]/, 'every token read is gated on the host check');
     });

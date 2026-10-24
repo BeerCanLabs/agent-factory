@@ -65,6 +65,11 @@ variable "agents" {
     memory  = optional(number, 1024)
   }))
   default = {}
+  validation {
+    # factory-agent-runtime is the shared agent runtime's registry (CF6, RT1); an agent named "runtime" would share it.
+    condition     = !contains(keys(var.agents), "runtime")
+    error_message = "an agent cannot be named \"runtime\": its registry factory-agent-runtime is the shared agent runtime's."
+  }
 }
 
 variable "provider_secret_names" {
@@ -249,4 +254,30 @@ variable "agent_source_token_hosts" {
   type        = list(string)
   default     = ["github.com"]
   description = "Hosts the agent source token may be sent to. Admission and skill-check builds, and the control plane's skill.yaml fetch, clone any other host without it, so a registration can never send the token elsewhere."
+}
+
+variable "shared_runtime_image" {
+  description = "The shared agent runtime image (runtimes/agent-runtime, DESIGN_AUTHORITY RT1) in this deployment's factory-agent-runtime registry, by tag (never a digest or :latest), the tag naming the commit it was built from. Agents created from a configuration run it, and an agent with skills is built on it. Empty: none can be created (the control plane answers 503)."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.shared_runtime_image == "" ? true : can(regex("/factory-agent-runtime:[A-Za-z0-9_.-]+$", var.shared_runtime_image))
+    error_message = "shared_runtime_image must be <registry>/factory-agent-runtime:<tag>."
+  }
+}
+
+variable "shared_runtime_commit" {
+  description = "The full agent-factory commit shared_runtime_image was built from. Required when shared_runtime_image is set."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.shared_runtime_image == "" ? true : can(regex("^[0-9a-f]{40}$", var.shared_runtime_commit))
+    error_message = "shared_runtime_commit must be the full 40-character commit of the runtime image."
+  }
+}
+
+variable "shared_runtime_repo" {
+  description = "The repository shared_runtime_commit is in."
+  type        = string
+  default     = "https://github.com/BeerCanLabs/agent-factory"
 }

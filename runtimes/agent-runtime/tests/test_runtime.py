@@ -390,6 +390,122 @@ class TestSkills(Base):
         tools, problems = load_skills([{"id": "notes"}])
         self.assertEqual((problems, [t.name for t in tools]), ([], ["add_note"]))
 
+    def test_a_package_entry_and_a_sibling_import_load(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "pkg-skill"
+        (folder / "pkg_skill").mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: pkg-skill\nversion: 1.0.0\nlanguage: python\nentry: pkg_skill\n")
+        (folder / "helper.py").write_text("WORD = 'sibling'\n")
+        (folder / "pkg_skill" / "__init__.py").write_text(
+            "import helper\nfrom . import inner\n"
+            "def tools():\n"
+            "    return [{'name': 'pkg_tool', 'description': 'x', 'parameters': {}, 'handler': lambda a, c: helper.WORD + inner.WORD}]\n")
+        (folder / "pkg_skill" / "inner.py").write_text("WORD = '+inner'\n")
+        tools, problems = load_skills([{"id": "pkg-skill"}])
+        self.assertEqual((problems, [t.name for t in tools]), ([], ["pkg_tool"]))
+        from runtime.skills import run_tool
+        self.assertEqual(run_tool(tools[0], "{}", {}), "sibling+inner")
+
+    def test_two_skills_with_a_module_of_the_same_name_each_get_their_own(self):
+        for sid, word in (("sk-a", "from-a"), ("sk-b", "from-b")):
+            folder = Path(os.environ["SKILLS_DIR"]) / sid
+            folder.mkdir(parents=True)
+            (folder / "skill.yaml").write_text(f"id: {sid}\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+            (folder / "helper.py").write_text(f"WORD = '{word}'\n")
+            (folder / "entry.py").write_text("import helper\nWORD = helper.WORD\ndef tools():\n    return [{'name': 't_" + sid.replace('-', '_') + "', 'description': 'x', 'parameters': {}, 'handler': lambda a, c: WORD}]\n")
+        tools, problems = load_skills([{"id": "sk-a"}, {"id": "sk-b"}])
+        from runtime.skills import run_tool
+        self.assertEqual(problems, [])
+        self.assertEqual([run_tool(t, "{}", {}) for t in tools], ["from-a", "from-b"])
+        self.assertNotIn("helper", sys.modules)
+        self.assertNotIn(str(Path(os.environ["SKILLS_DIR"]) / "sk-a"), sys.path)
+
+    def test_a_skill_cannot_shadow_the_standard_library_and_a_failed_one_leaves_nothing_behind(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "shadow"
+        folder.mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: shadow\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+        (folder / "csv.py").write_text("raise SystemExit('shadowed')\n")
+        (folder / "entry.py").write_text("import csv\nraise RuntimeError('boom')\n")
+        tools, problems = load_skills([{"id": "shadow"}])
+        self.assertEqual(tools, [])
+        self.assertIn("boom", problems[0])
+        import csv
+        self.assertTrue(hasattr(csv, "reader"))
+        self.assertNotIn("skill_shadow", sys.modules)
+        self.assertNotIn(str(folder), sys.path)
+
+    def test_a_skill_that_exits_at_import_does_not_stop_the_agent(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "quits"
+        folder.mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: quits\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+        (folder / "entry.py").write_text("import sys\nsys.exit(3)\n")
+        tools, problems = load_skills([{"id": "quits"}])
+        self.assertEqual(tools, [])
+        self.assertEqual(len(problems), 1)
+
+    def test_namespace_packages_are_not_shared_and_standard_modules_are_kept(self):
+        for sid, word in (("na", "A"), ("nb", "B")):
+            folder = Path(os.environ["SKILLS_DIR"]) / sid
+            (folder / "nsp").mkdir(parents=True)
+            (folder / "skill.yaml").write_text(f"id: {sid}\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+            (folder / "nsp" / "m.py").write_text(f"V = '{word}'\n")
+            (folder / "entry.py").write_text("import colorsys\nfrom nsp import m\nV = m.V\ndef tools():\n    return [{'name': 'tool_" + sid + "', 'description': 'x', 'parameters': {}, 'handler': lambda a, c: V}]\n")
+        sys.modules.pop("colorsys", None)
+        tools, problems = load_skills([{"id": "na"}, {"id": "nb"}])
+        from runtime.skills import run_tool
+        self.assertEqual(problems, [])
+        self.assertEqual([run_tool(t, "{}", {}) for t in tools], ["A", "B"])
+        self.assertNotIn("nsp", sys.modules)
+        self.assertIn("colorsys", sys.modules, "a standard module a skill imported is the runtime's too")
+
+    def test_an_import_after_loading_is_not_found(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "lazy"
+        folder.mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: lazy\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+        (folder / "helper.py").write_text("V = 1\n")
+        (folder / "entry.py").write_text("def _h(a, c):\n    import helper\n    return str(helper.V)\ndef tools():\n    return [{'name': 'lazy_tool', 'description': 'x', 'parameters': {}, 'handler': _h}]\n")
+        tools, problems = load_skills([{"id": "lazy"}])
+        from runtime.skills import run_tool
+        self.assertEqual(problems, [])
+        self.assertIn("error", run_tool(tools[0], "{}", {}), "its folder is not importable once loaded; import at the top of the entry")
+
+    def test_the_path_is_put_back_whatever_the_skill_did_to_it(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "pathy"
+        folder.mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: pathy\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+        (folder / "entry.py").write_text("import os, sys\nsys.path.append(os.path.dirname(__file__))\nsys.path.insert(0, '/tmp/evil-skill-path')\ndef tools():\n    return []\n")
+        before = list(sys.path)
+        tools, problems = load_skills([{"id": "pathy"}])
+        self.assertEqual(problems, [])
+        self.assertEqual(sys.path, before)
+
+    def test_a_failed_package_leaves_no_submodule_and_a_partly_foreign_namespace_package_is_kept(self):
+        folder = Path(os.environ["SKILLS_DIR"]) / "bad-pkg"
+        (folder / "bad_pkg").mkdir(parents=True)
+        (folder / "skill.yaml").write_text("id: bad-pkg\nversion: 1.0.0\nlanguage: python\nentry: bad_pkg\n")
+        (folder / "bad_pkg" / "__init__.py").write_text("from . import sub\nraise RuntimeError('late')\n")
+        (folder / "bad_pkg" / "sub.py").write_text("X = 1\n")
+        tools, problems = load_skills([{"id": "bad-pkg"}])
+        self.assertIn("late", problems[0])
+        self.assertFalse([m for m in sys.modules if m.startswith("skill_bad_pkg")])
+        # A namespace package found partly outside the skill folder is not the skill's to remove.
+        other = Path(self.tmp.name) / "elsewhere"
+        (other / "shared_ns").mkdir(parents=True)
+        (other / "shared_ns" / "x.py").write_text("V = 1\n")
+        sk = Path(os.environ["SKILLS_DIR"]) / "ns-mixed"
+        (sk / "shared_ns").mkdir(parents=True)
+        (sk / "skill.yaml").write_text("id: ns-mixed\nversion: 1.0.0\nlanguage: python\nentry: entry.py\n")
+        (sk / "shared_ns" / "y.py").write_text("V = 2\n")
+        (sk / "entry.py").write_text("import shared_ns\nfrom shared_ns import x, y\ndef tools():\n    return []\n")
+        sys.path.append(str(other))
+        try:
+            tools, problems = load_skills([{"id": "ns-mixed"}])
+            self.assertEqual(problems, [])
+            self.assertIn("shared_ns", sys.modules, "found in the skill folder and elsewhere: not the skill's alone")
+        finally:
+            sys.path.remove(str(other))
+            for m in [m for m in sys.modules if m.startswith("shared_ns")]:
+                del sys.modules[m]
+
     def test_a_skill_entry_cannot_leave_its_folder(self):
         self.write_skill(entry="../../outside.py")
         tools, problems = load_skills([{"id": "notes"}])

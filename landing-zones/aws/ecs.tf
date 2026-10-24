@@ -87,6 +87,8 @@ resource "aws_ecs_task_definition" "control_plane" {
         # Agent admission builds (§6.8 L3/L4) push <agentId>-<commit[:12]> images here.
         { name = "FACTORY_ECR_REPO_URI", value = aws_ecr_repository.dynamic_agents.repository_url },
         { name = "FACTORY_AGENT_BUILDER_PROJECT", value = aws_codebuild_project.factory_agent_builder.name },
+        # CF6, SK4: an agent created from a configuration with adopted skills runs the shared runtime with them layered on.
+        { name = "FACTORY_SKILLS_BUILDER_PROJECT", value = aws_codebuild_project.factory_skills_builder.name },
         { name = "FACTORY_AGENT_SOURCE_TOKEN_HOSTS", value = join(",", var.agent_source_token_hosts) },
         { name = "FACTORY_LEDGER_PATH", value = "/data/ledger.jsonl" },
         { name = "FACTORY_LEDGER_WORM_URI", value = "s3://${aws_s3_bucket.ledger_worm.bucket}/ledger" },
@@ -115,6 +117,11 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "MEMORY_STORE_DIR", value = "/tmp/mind" },
         { name = "MEMORY_EPHEMERAL_DIR", value = "/tmp/ephemeral" },
         { name = "FACTORY_IDLE_MS", value = "3600000" },
+        ], var.shared_runtime_image == "" ? [] : [
+        # RT1, CF6: the pinned shared runtime new agents run on. Unset, POST /api/v1/agents answers 503.
+        { name = "FACTORY_RUNTIME_IMAGE", value = var.shared_runtime_image },
+        { name = "FACTORY_RUNTIME_COMMIT", value = var.shared_runtime_commit },
+        { name = "FACTORY_RUNTIME_REPO", value = var.shared_runtime_repo },
       ])
       secrets = concat([
         { name = "FACTORY_TOKEN", valueFrom = local.secret["FACTORY_TOKEN"] },

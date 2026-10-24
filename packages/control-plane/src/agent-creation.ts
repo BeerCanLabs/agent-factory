@@ -11,9 +11,9 @@
  */
 import http from 'node:http';
 import { payloadHash } from '@beercanlabs/factory-ledger';
-import { AGENT_ID, BUILTIN_AGENT_IDS, FULL_SHA, applySettingsChange, changedParts, registryOf, type AgentRecord } from '@beercanlabs/factory-registrar';
+import { AGENT_ID, BUILTIN_AGENT_IDS, FULL_SHA, applySettingsChange, beginAdmission, changedParts, registryOf, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
-import { buildSkillsFor } from './apply.js';
+import { buildSkillsFor, runDeploy } from './apply.js';
 import { changeReason, configOf, ledgerVersion, recordConfig, removeConfig } from './config-store.js';
 import type { Run } from '@beercanlabs/factory-property-manager';
 
@@ -165,8 +165,8 @@ export async function handleAgentCreation(state: FactoryState, req: http.Incomin
 /**
  * Deploys an agent created from a configuration (CF6): there is no repository to build, so the agent's compute is
  * registered on the pinned shared runtime image and nothing else. The image is built only when the agent adopts skills
- * (SK4); that build belongs to the deployment's build service and is not provided yet, so an agent with adopted skills is
- * refused here rather than deployed without them.
+ * (SK4, TSK-272): the provider layers the approved skills on the runtime image, and the deploy then runs in the background
+ * as a repository agent's does. A provider that cannot build it refuses here, rather than deploy the agent without them.
  */
 export async function deployConfigured(state: FactoryState, agent: AgentRecord, actor: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const dp = state.deployProvider;
@@ -179,7 +179,20 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
   const built = buildSkillsFor(state, agent.id);
   if (!built.ok) return json(res, 409, { error: built.error, message: built.message });
   if (built.skills.length > 0) {
-    return json(res, 409, { error: 'skills_image_not_supported', message: 'an agent created from a configuration that has adopted skills needs an image built with them (SK4); that build is not available yet' });
+    // SK4, TSK-272: the runtime image with the skills layered on, built by the provider; slow, so it runs after the answer
+    // as a repository agent's deploy does. A provider that cannot build it refuses, rather than deploy without the skills.
+    if (!dp.buildSkillsImage) {
+      return json(res, 409, { error: 'skills_image_not_supported', message: 'this deployment cannot build an image with an agent\'s adopted skills on the shared runtime (SK4)' });
+    }
+    const previousState = agent.state;
+    const source = { repo: pin.repo, commit: pin.commit };
+    agent.state = 'DEPLOYING';
+    agent.admission = beginAdmission(pin.commit);
+    registryOf(state).save(agent);
+    await recordConfig(state, agent.id, { actor, reason: changeReason(req, `deploy of runtime ${pin.commit} with ${built.skills.length} skill(s)`) });
+    json(res, 202, agent);
+    void runDeploy(state, { agent, actor, source, skills: built.skills, previousState, isApply: false });
+    return;
   }
   const previous = agent.state;
   agent.state = 'DEPLOYING';

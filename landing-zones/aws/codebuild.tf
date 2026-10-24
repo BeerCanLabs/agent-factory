@@ -201,6 +201,89 @@ EOF
   }
 }
 
+# Skills on the shared runtime (§6.18 CF6, §6.14 SK4, TSK-272). An agent created from a configuration has no repository to
+# build; when it has adopted skills, the control plane starts this project with AGENT_ID, BASE_IMAGE (the pinned shared
+# runtime image), RUNTIME_COMMIT (the commit that image was built from), SKILLS (the pins) and IMAGE_TAG
+# (<agentId>-<runtime commit[:12]>-<12 hex of a hash of the skill pins>). It fetches each skill at its commit, checks it
+# (compose-skills.sh, the same checks as an agent's image), adds one layer holding the skills and /opt/factory/skills.json
+# on the runtime image, and pushes the result. It reads no agent source and runs no agent tests. BASE_IMAGE must be in the
+# runtime's own registry. Exit codes are the agent builder's: 5 = a pin or base that is not acceptable, 6 = a hard-coded credential.
+resource "aws_codebuild_project" "factory_skills_builder" {
+  name         = "factory-skills-builder"
+  service_role = aws_iam_role.codebuild.arn
+
+  artifacts {
+    type = "NO_ARTIFACTS"
+  }
+
+  environment {
+    compute_type    = "BUILD_GENERAL1_SMALL"
+    image           = "aws/codebuild/amazonlinux2-x86_64-standard:5.0"
+    type            = "LINUX_CONTAINER"
+    privileged_mode = true
+
+    environment_variable {
+      name  = "ECR_REPO_URI"
+      value = aws_ecr_repository.dynamic_agents.repository_url
+    }
+    environment_variable {
+      name  = "RUNTIME_REPO_URI"
+      value = aws_ecr_repository.repo["agent-runtime"].repository_url
+    }
+    environment_variable {
+      name  = "GIT_TOKEN_SECRET_ID"
+      value = var.agent_source_token_secret_arn
+    }
+    environment_variable {
+      name  = "SOURCE_TOKEN_HOSTS"
+      value = join(" ", var.agent_source_token_hosts)
+    }
+  }
+
+  source {
+    type      = "NO_SOURCE"
+    buildspec = <<EOF
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+  install:
+    on-failure: ABORT
+    commands:
+      - echo "Skills build for $AGENT_ID on $BASE_IMAGE -> $IMAGE_TAG"
+      - '[[ "$RUNTIME_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 5'
+      - '[ -n "$SKILLS" ] || exit 5'
+      - |
+        PREFIX="$AGENT_ID-$(echo $RUNTIME_COMMIT | cut -c1-12)"
+        [ "$${IMAGE_TAG:0:$${#PREFIX}+1}" = "$PREFIX-" ] && [[ "$${IMAGE_TAG:$${#PREFIX}+1}" =~ ^[0-9a-f]{12}$ ]] || exit 5
+      # The base is the factory's own runtime image, by registry path: no other image is layered on.
+      - '[[ "$BASE_IMAGE" =~ ^[A-Za-z0-9./:_-]+$ ]] && [ "$${BASE_IMAGE%%:*}" = "$RUNTIME_REPO_URI" ] || exit 5'
+      - |
+        cat > /tmp/compose-skills.sh <<'FACTORY_COMPOSE_SKILLS'
+        ${indent(8, file("${path.module}/compose-skills.sh"))}
+        FACTORY_COMPOSE_SKILLS
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPO_URI
+      - docker pull "$BASE_IMAGE" || exit 5
+      - |
+        bash /tmp/compose-skills.sh /tmp/factory-skills; RC=$?
+        [ "$RC" -eq 0 ] || exit "$RC"
+  build:
+    on-failure: ABORT
+    commands:
+      - docker build --label "org.opencontainers.image.revision=$RUNTIME_COMMIT" --build-arg "BASE=$BASE_IMAGE" -t "$ECR_REPO_URI:$IMAGE_TAG" /tmp/factory-skills || exit 1
+  post_build:
+    on-failure: ABORT
+    commands:
+      - docker push "$ECR_REPO_URI:$IMAGE_TAG"
+EOF
+  }
+}
+
 # SK1 skill checks (DESIGN_AUTHORITY.md §6.14, TSK-054): its own role, with no image registry access. The build runs a
 # registered skill's code and tests, so it holds only what fetching the source and writing its log need.
 resource "aws_iam_role" "codebuild_skill_checker" {

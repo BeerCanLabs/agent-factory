@@ -2,7 +2,7 @@
 // launched with when an agent has adopted skills. An agent with none must be exactly what it was before skills existed.
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_SKILLS_ENV_CHARS, buildAgentImage, skillsEnv } from '@beercanlabs/factory-property-manager/aws/codebuild';
+import { MAX_SKILLS_ENV_CHARS, buildAgentImage, buildSkillsImage, skillsEnv } from '@beercanlabs/factory-property-manager/aws/codebuild';
 import { agentEnvironment } from '@beercanlabs/factory-property-manager/aws/ecs';
 import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, imageTagFor, skillsHash, type BuildSkill } from '@beercanlabs/factory-property-manager';
 
@@ -69,6 +69,13 @@ describe('the build’s input (SK4)', () => {
     assert.deepEqual(Object.keys(JSON.parse(e.SKILLS)[0]).sort(), ['commit', 'id', 'path', 'repo', 'version'], 'only what the build needs');
   });
 
+  it('starts the agent builder project by default, with exactly the variables it always had', async () => {
+    const { client, calls } = sent();
+    await buildAgentImage('higgins', { repo: 'https://github.com/BeerCanLabs/SM-higgins', commit: C }, { client, pollMs: 0 });
+    assert.equal(calls[0].input.projectName, 'factory-agent-builder');
+    assert.deepEqual(Object.keys(env(calls)).sort(), ['AGENT_ID', 'GIT_COMMIT', 'IMAGE_TAG', 'REPO_URL']);
+  });
+
   it('sends no SKILLS for an agent without skills, and the tag it always had', async () => {
     const { client, calls } = sent();
     await buildAgentImage('higgins', { repo: 'https://github.com/BeerCanLabs/SM-higgins', commit: C }, { client, pollMs: 0 });
@@ -104,5 +111,70 @@ describe('the container’s environment at launch (SK4)', () => {
     assert.equal(agentEnvironment('mind-bucket', 'higgins').length, 3);
     const env = agentEnvironment('mind-bucket', 'higgins', { MEMORY_PREFIX: 'someone-else', FACTORY_MIND_BUCKET: 'other' });
     assert.deepEqual(env.map((e) => e.value), ['mind-bucket', 's3://mind-bucket', 'higgins']);
+  });
+});
+
+describe('the skills build on the shared runtime (CF6, SK4, TSK-272)', () => {
+  const BASE = { image: '111111111111.dkr.ecr.us-east-1.amazonaws.com/factory-agent-runtime:abcdef1', commit: C };
+  const previous = process.env.FACTORY_ECR_REPO_URI;
+  const sent = (status = 'SUCCEEDED', message = '') => {
+    const starts: Array<{ projectName?: string; env: Record<string, string> }> = [];
+    const client = {
+      send: async (cmd: { input: { projectName?: string; environmentVariablesOverride?: Array<{ name: string; value: string }> }; constructor: { name: string } }) => {
+        if (cmd.constructor.name === 'StartBuildCommand') {
+          starts.push({ projectName: cmd.input.projectName, env: Object.fromEntries((cmd.input.environmentVariablesOverride ?? []).map((e) => [e.name, e.value])) });
+          return { build: { id: 'b1' } };
+        }
+        return { builds: [{ buildStatus: status, phases: status === 'SUCCEEDED' ? [] : [{ phaseType: 'PRE_BUILD', phaseStatus: 'FAILED', contexts: [{ message }] }] }] };
+      },
+    };
+    return { client, starts };
+  };
+  const withUri = async (fn: () => Promise<void>) => {
+    process.env.FACTORY_ECR_REPO_URI = '111111111111.dkr.ecr.us-east-1.amazonaws.com/agents';
+    try { await fn(); } finally { if (previous === undefined) delete process.env.FACTORY_ECR_REPO_URI; else process.env.FACTORY_ECR_REPO_URI = previous; }
+  };
+
+  it('starts the skills builder with the base, the runtime commit, the pins and a tag that carries the runtime and the skills', () => withUri(async () => {
+    const { client, starts } = sent();
+    const uri = await buildSkillsImage('nova', BASE, [S2, S1], { client, pollMs: 0 });
+    assert.equal(starts.length, 1);
+    assert.equal(starts[0].projectName, 'factory-skills-builder', 'its own project, never the agent builder (which clones and tests a repository)');
+    const e = starts[0].env;
+    assert.deepEqual(Object.keys(e).sort(), ['AGENT_ID', 'BASE_IMAGE', 'IMAGE_TAG', 'RUNTIME_COMMIT', 'SKILLS']);
+    assert.equal(e.BASE_IMAGE, BASE.image);
+    assert.equal(e.RUNTIME_COMMIT, C);
+    assert.equal(e.IMAGE_TAG, imageTagFor('nova', C, [S1, S2]));
+    assert.match(e.IMAGE_TAG, /^nova-a{12}-[0-9a-f]{12}$/);
+    assert.deepEqual(JSON.parse(e.SKILLS).map((s: { id: string }) => s.id), ['print', 'tavily-search']);
+    assert.equal(uri, `111111111111.dkr.ecr.us-east-1.amazonaws.com/agents:${e.IMAGE_TAG}`);
+  }));
+
+  it('uses the project the deployment names', () => withUri(async () => {
+    const { client, starts } = sent();
+    process.env.FACTORY_SKILLS_BUILDER_PROJECT = 'custom-skills';
+    try { await buildSkillsImage('nova', BASE, [S1], { client, pollMs: 0 }); } finally { delete process.env.FACTORY_SKILLS_BUILDER_PROJECT; }
+    assert.equal(starts[0].projectName, 'custom-skills');
+  }));
+
+  it('turns a failed build into the admission refusal the builder’s exit code names, and never an image', () => withUri(async () => {
+    const { client } = sent('FAILED', 'COMMAND_EXECUTION_ERROR: exit status 6');
+    await assert.rejects(buildSkillsImage('nova', BASE, [S1], { client, pollMs: 0 }), (err: unknown) => err instanceof AdmissionRefusedError && err.reason === 'hardcoded_secret');
+    const unsourced = sent('FAILED', 'exit status 5');
+    await assert.rejects(buildSkillsImage('nova', BASE, [S1], { client: unsourced.client, pollMs: 0 }), (err: unknown) => err instanceof AdmissionRefusedError && err.reason === 'source_unavailable');
+  }));
+
+  it('refuses no skills and too many skills before starting anything', () => withUri(async () => {
+    const { client, starts } = sent();
+    await assert.rejects(buildSkillsImage('nova', BASE, [], { client, pollMs: 0 }), /at least one skill/);
+    const many = Array.from({ length: 40 }, (_, i) => ({ ...S1, id: `skill-${i}`, commit: String(i % 10).repeat(40) }));
+    await assert.rejects(buildSkillsImage('nova', BASE, many, { client, pollMs: 0 }), (err: unknown) => err instanceof AdmissionRefusedError && /do not fit/.test(err.message));
+    assert.equal(starts.length, 0);
+  }));
+
+  it('needs the registry the image goes to', async () => {
+    delete process.env.FACTORY_ECR_REPO_URI;
+    await assert.rejects(buildSkillsImage('nova', BASE, [S1], { client: sent().client, pollMs: 0 }), /FACTORY_ECR_REPO_URI/);
+    if (previous !== undefined) process.env.FACTORY_ECR_REPO_URI = previous;
   });
 });
