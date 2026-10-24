@@ -290,12 +290,38 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
       await mk({}, 'link\u200bedin'),
       await mk({ method: 'P'.repeat(13) }),
       await mk({}, 'r'.repeat(65)),
+      // Control characters and line breaks in the fields that are one line.
+      await mk({ path: '/v2/a\nb' }),
+      await mk({ path: '/v2/a\u0000b' }),
+      await mk({ path: '/v2/a\tb' }),
+      await mk({ headers: { 'x-k': 'v\nw' } }),
+      await mk({ headers: { 'x-k': 'v\u001bw' } }),
+      await mk({ headers: { 'x-k\n': 'v' } }),
+      await mk({ method: 'PO\nST' }),
+      await mk({}, 'link\nedin'),
+      // One past each limit (the limit itself is allowed, below).
+      await mk({ path: `/${'a'.repeat(200)}` }),
+      await mk({ body: 'x'.repeat(401) }),
+      await mk({ headers: { 'x-k': 'v'.repeat(120 - 'x-k: '.length + 1) } }),
+      await mk({ headers: { ['k'.repeat(60)]: 'v'.repeat(60) } }),
     ];
     const asked = (await prompts()).body.prompts.map((x: { approvalId: string }) => x.approvalId);
     for (const c of cases) {
       assert.equal(asked.includes(c.approvalId), false, JSON.stringify(c.request).slice(0, 80));
       assert.equal(state.approvals.get(c.approvalId)!.ask, undefined, 'no code is issued for it');
       state.approvals.decide(c.approvalId, 'rejected', 'test');
+    }
+    // Exactly at each limit is shown.
+    const edge = [
+      await mk({ path: `/${'a'.repeat(199)}` }),
+      await mk({ body: 'x'.repeat(400) }),
+      await mk({ headers: { 'x-k': 'v'.repeat(120 - 'x-k: '.length) } }),
+      await mk({ method: 'P'.repeat(12) }, 'r'.repeat(64)),
+    ];
+    const edgeAsked = (await prompts()).body.prompts.map((x: { approvalId: string }) => x.approvalId);
+    for (const e of edge) {
+      assert.ok(edgeAsked.includes(e.approvalId), JSON.stringify(e.request).slice(0, 60));
+      state.approvals.decide(e.approvalId, 'rejected', 'test');
     }
     // What it can show, it shows whole and as sent, with the headers it will send.
     const ok = await mk({ headers: { 'x-thing': 'a [link](http://x) @here' }, body: `${'x'.repeat(390)}\nline <2>` });

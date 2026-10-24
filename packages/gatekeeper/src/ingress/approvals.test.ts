@@ -52,6 +52,7 @@ describe('CF4 approvals in the Discord ingress', () => {
     await gw.inbound(msg('<@123456> REJECT abc234'));
     assert.equal((calls.decide[0] as { decision: string }).decision, 'reject');
     assert.equal((calls.decide[0] as { code: string }).code, 'abc234');
+    await gw.inbound(msg('please approve ABC234'));
     await gw.inbound(msg('please approve ABC234 thanks'));
     await gw.inbound(msg('approve invoice'));
     await gw.inbound(msg('reject deployment'));
