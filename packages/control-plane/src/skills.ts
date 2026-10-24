@@ -38,7 +38,7 @@ import { payloadHash } from '@beercanlabs/factory-ledger';
 import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, type SkillManifest } from '@beercanlabs/factory-contract';
 import { authorize } from '@beercanlabs/factory-bouncer';
 import type { Principal } from '@beercanlabs/factory-auth';
-import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import { identify, json, readJson, requirePrivilege, type FactoryState } from './app.js';
 import { applyKillSwitch } from '@beercanlabs/factory-property-manager';
 import { registryOf } from '@beercanlabs/factory-registrar';
 import { triggerApply } from './apply.js';
@@ -275,15 +275,42 @@ async function decide(
   version: string,
   decision: 'approve' | 'reject',
 ): Promise<void> {
-  const principal = await requirePrivilege(req, res, state, 'skills.decide');
-  if (!principal) return;
+  // CF5: a public skill version is decided by an admin (`skills.decide`). A private version is also decided by an owner of
+  // its owner agent (`skills.decide.private`, agent-scoped), who may approve it or turn down one that is pending; revoking a
+  // version that is already approved, and every decision on a skill that is not private to an agent, stays an admin's.
+  // An unknown version asks for the admin privilege first, so nothing is revealed to a caller who could decide nothing.
+  const identified = await identify(req, state);
+  if (!identified.ok) {
+    json(res, 401, { error: 'unauthorized' });
+    return;
+  }
+  const principal = identified.principal;
+  const registry = skillRegistry(state);
+  const authorizeFor = (r: SkillVersionRecord | undefined) => {
+    const owner = r ? ownerOf(r) : undefined;
+    const ownerScoped = !!r && visibilityOf(r) === 'private' && !!owner && r.status === 'pending';
+    return ownerScoped
+      ? authorize({ principal, privilege: 'skills.decide.private', resource: { agentId: owner!, owners: ownersOf(state, owner!) } })
+      : authorize({ principal, privilege: 'skills.decide' });
+  };
+  const first = authorizeFor(registry.get(id, version));
+  if (!first.allowed) {
+    json(res, 403, { error: 'forbidden', required: first.required });
+    return;
+  }
   const body = await readJson(req);
   if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 2000)) {
     json(res, 400, { error: 'invalid_reason', message: 'reason must be a string of at most 2000 characters' });
     return;
   }
-  const registry = skillRegistry(state);
+  // The body took time to arrive: read the version again and decide again, so a decision made meanwhile (an admin's
+  // rejection, a failed check) is the one this request is judged against. Nothing yields between here and the save.
   const rec = registry.get(id, version);
+  const again = authorizeFor(rec);
+  if (!again.allowed) {
+    json(res, 403, { error: 'forbidden', required: again.required });
+    return;
+  }
   if (!rec) {
     json(res, 404, { error: 'not_found', id, version });
     return;

@@ -165,6 +165,8 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/systems/nope/reject', privilege: 'systems.decide', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/approve`, privilege: 'skills.decide', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/reject`, privilege: 'skills.decide', role: 'admin', body: {} },
+  // CF5: asked instead of `skills.decide` for a version private to an agent; an unknown version asks for the admin one first.
+  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/approve`, privilege: 'skills.decide.private', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/checks`, privilege: 'skills.checks.run', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/agents/castle/skills', privilege: 'skills.adopt.request', role: 'admin', body: {} },
   { method: 'DELETE', path: `/api/v1/agents/castle/skills/${SKILL}`, privilege: 'skills.adopt.remove', role: 'admin' },

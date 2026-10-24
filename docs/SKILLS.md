@@ -2,7 +2,7 @@
 
 A **skill** is a reusable piece of agent code, such as "post run progress to Discord" or "read a Google Calendar", that
 any agent can adopt. The factory keeps a registry of skills. Each version is registered from an exact commit, checked
-at admission and approved by a factory admin before any agent can use it (DESIGN_AUTHORITY.md §6.14 SK1).
+at admission and approved before any agent can use it: a public skill by a factory admin, a private skill by an admin or by an owner of its agent once the factory's checks have passed (DESIGN_AUTHORITY.md §6.14 SK1, §6.18 CF5). Approving a version grants nothing.
 
 This guide covers the manifest, registration, the approval flow, what a skill's requirements mean, and how agents adopt
 skills.
@@ -384,7 +384,7 @@ exist.
 
 ## Who can register, and what counts as the same skill
 
-- Any authenticated user can register a public skill. Registering never makes it usable: an admin approves each version.
+- Any authenticated user can register a public skill. Registering never makes it usable: each version is approved (an admin for a public skill; for a private skill an admin or an owner of its agent, after the checks pass).
 - A private skill can be registered by an admin or an owner of the agent it names.
 - A skill's visibility and owner never change. A new version that would change either is refused: register a new skill.
 - A skill is its source. Every version of a skill id comes from the same repository and path. A different repository
