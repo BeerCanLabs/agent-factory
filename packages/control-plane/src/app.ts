@@ -42,6 +42,7 @@ import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymas
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
+import { agentConfigForRun, deployConfigured, handleAgentCreation, registrationRefusal, type SharedRuntimePin } from './agent-creation.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
@@ -99,6 +100,12 @@ export type FactoryState = {
   runtime: Runtime;
   /** Provider-specific deploy lifecycle (build → identity → compute). Absent = deploy endpoint returns 501. */
   deployProvider?: DeployProvider;
+  /** RT1: the shared runtime version new agents are pinned to (FACTORY_RUNTIME_*). Absent: new agents cannot be created. */
+  sharedRuntime?: SharedRuntimePin;
+  /** CF6: refuse to register a new agent id from a repository; new agents are created from a configuration. Set in production. */
+  newAgentsFromConfigurationOnly?: boolean;
+  /** L2: ids an operator admits from source (house staff); the refusal above does not apply to them. From FACTORY_REPOSITORY_AGENT_IDS. */
+  repositoryAgentIds?: ReadonlySet<string>;
   /** Pins a registration that names no commit to the repository's default-branch HEAD. Default: `git ls-remote`. */
   resolveCommit?: CommitResolver;
   runs: RunStore;
@@ -1053,6 +1060,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleAgentSettings(state, req, res, path)) return;
+  if (await handleAgentCreation(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/registry/skills') || path.startsWith('/api/v1/skills') || /^\/api\/v1\/agents\/[^/]+\/skills(\/|$)/.test(path)) && (await handleSkills(state, req, res, path))) return;
@@ -1273,10 +1281,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   // Agent-facing: authenticated by the run token minted at start.
-  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox|training|reply)$/);
-  if (runSelf && (((runSelf[2] === 'input' || runSelf[2] === 'mailbox') && req.method === 'GET') || (runSelf[2] !== 'input' && runSelf[2] !== 'mailbox' && req.method === 'POST'))) {
+  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox|training|reply|agent-config)$/);
+  if (runSelf && (((runSelf[2] === 'input' || runSelf[2] === 'mailbox' || runSelf[2] === 'agent-config') && req.method === 'GET') || (runSelf[2] !== 'input' && runSelf[2] !== 'mailbox' && runSelf[2] !== 'agent-config' && req.method === 'POST'))) {
     const run = await authenticateRun(req, res, state, runSelf[1]);
     if (!run) return;
+    if (runSelf[2] === 'agent-config') {
+      agentConfigForRun(state, run, res);
+      return;
+    }
     if (runSelf[2] === 'heartbeat') {
       const hb = await readJson(req);
       const rssMb = typeof hb.rssMb === 'number' && Number.isFinite(hb.rssMb) ? hb.rssMb : undefined;
@@ -2333,6 +2345,12 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const body = await readJson(req);
     const cartridge = (body.cartridge && typeof body.cartridge === 'object' ? body.cartridge : body) as Record<string, unknown>;
     const agentId = typeof cartridge.id === 'string' ? cartridge.id : (typeof body.id === 'string' ? body.id : randomUUID());
+    const refused = registrationRefusal(state, agentId);
+    if (refused) {
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'AGENT_REGISTRATION_REFUSED:new_agents_use_configuration', actor: principal.actor });
+      json(res, 422, refused);
+      return;
+    }
     if (BUILTIN_AGENT_IDS.has(agentId)) {
       json(res, 409, { error: 'builtin_agent', message: `${agentId} is a built-in system agent and cannot be registered` });
       return;
@@ -2712,6 +2730,12 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
     }
     if (agent.state === 'DEPLOYING' || isDeploying(state, agentId) || agent.state === 'RETIRED_PENDING_PURGE' || agent.state === 'PURGED') {
       json(res, 409, { error: 'invalid_state', message: `Agent is ${agent.state}` });
+      return;
+    }
+
+    // CF6: an agent created from a configuration has no repository to admit; it runs on the pinned shared runtime.
+    if (agent.createdFrom === 'configuration') {
+      await deployConfigured(state, agent, principal.actor, req, res);
       return;
     }
 

@@ -679,6 +679,7 @@ The following gaps exist between current repository code, `SPEC.md`, and the can
 | `skills.retire` | admin | `POST /api/v1/registry/skills/:id/retire` |
 | `agents.roles.read` | admin, and the `agent-owner` of that agent | `GET /api/v1/agents/:id/roles` (agent-scoped; E12: the roles an agent declares and the routes its skills use. Not a viewer's: a role can name a private skill) |
 | `agents.settings.read` | admin, and the `agent-owner` of that agent | `GET /api/v1/agents/:id/settings` (agent-scoped; CF1: the soul, roles and memory settings the factory holds. Not a viewer's: the soul is the agent's persona) |
+| `agents.create` | admin | `POST /api/v1/agents` (CF6: create a new agent from a configuration; the creator becomes its owner. An admin's act: widening it to others is a policy decision) |
 | `agents.settings.set` | admin, and the `agent-owner` of that agent | `PUT /api/v1/agents/:id/settings` (agent-scoped; CF1: a new configuration version; the change is the signed-in person's own, CF4) |
 | `spend.budget.set` | admin | `PUT /api/v1/spend/budgets` |
 
