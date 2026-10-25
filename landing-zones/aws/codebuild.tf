@@ -398,7 +398,6 @@ phases:
         import subprocess
         import sys
 
-        SKIP_DIRS = {'.git', 'node_modules', '.venv', 'venv', '__pycache__', '.pytest_cache', '.mypy_cache', '.tox', '.github'}
         DOC_EXT = {'.md', '.rst', '.txt', '.adoc'}
         CONFIG_EXT = {'.js', '.mjs', '.cjs', '.ts', '.sh', '.json', '.yaml', '.yml', '.cfg', '.ini', '.toml', '.env'}
         METADATA_FILES = {'skill.yaml', 'pyproject.toml', 'setup.cfg', 'package.json', 'package-lock.json'}
@@ -429,7 +428,7 @@ phases:
         def rel_files(root):
             out = []
             for base, dirs, files in os.walk(root):
-                dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+                dirs.sort()
                 for name in sorted(files):
                     out.append(os.path.relpath(os.path.join(base, name), root).replace(os.sep, '/'))
             return out

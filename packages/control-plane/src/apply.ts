@@ -27,7 +27,14 @@ export function buildSkillsFor(state: FactoryState, agentId: string): { ok: true
       const why = !rec ? 'is not registered' : rec.retired ? 'is retired' : `is ${rec.status}`;
       return { ok: false, error: 'skill_unavailable', message: `${adopted.id}@${adopted.version} ${why}; an agent can be built only with approved, unretired skills (SK1, SK6)` };
     }
-    skills.push({ id: rec.id, version: rec.version, repo: rec.repo, path: rec.path, commit: rec.commit });
+    skills.push({
+      id: rec.id,
+      version: rec.version,
+      repo: rec.repo,
+      path: rec.path,
+      commit: rec.commit,
+      ...(rec.packageHash ? { packageHash: rec.packageHash } : {}),
+    });
   }
   return { ok: true, skills };
 }

@@ -13,7 +13,7 @@ const MAIN = fileURLToPath(new URL('./main.ts', import.meta.url));
 /** Runs the real entry point with its own HOME, as the installer does. */
 async function factory(home: string, args: string[], env: Record<string, string> = {}): Promise<{ code: number; out: string; err: string }> {
   return new Promise((resolve) => {
-    execFile(process.execPath, ['--import', 'tsx', MAIN, ...args], { env: { PATH: process.env.PATH ?? '', HOME: home, XDG_CONFIG_HOME: join(home, '.config'), ...env }, encoding: 'utf8' }, (error, out, err) => {
+    execFile(process.execPath, ['--import', 'tsx', MAIN, ...args], { env: { PATH: process.env.PATH ?? '', HOME: home, XDG_CONFIG_HOME: join(home, '.config'), FACTORY_CLI_STORE: 'file', ...env }, encoding: 'utf8' }, (error, out, err) => {
       resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0, out, err });
     });
   });
@@ -211,6 +211,63 @@ describe('§6.17 CL11 commands as subcommands, for scripts', () => {
       assert.doesNotMatch(out, /EPIPE|\n\s+at |Error/, `the CLI crashed when its reader went away: ${out.slice(0, 300)}`);
     } finally {
       await srv.close();
+    }
+  });
+
+  it('A6 factory skill pack builds a conforming package file', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'cli-skill-'));
+    const skillDir = join(home, 'my-skill');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(join(skillDir, 'skill.yaml'), 'spec: 1\nid: my-skill\nname: My Skill\nversion: 1.0.0\nlanguage: python\ndescription: test skill\nentry: entry.py\n');
+    await writeFile(join(skillDir, 'entry.py'), 'def tools(): return []\n');
+    await writeFile(join(skillDir, 'test_entry.py'), 'def test_one(): pass\n');
+
+    const outTar = join(home, 'output.tar.gz');
+    const r = await factory(home, ['skill', 'pack', skillDir, '--out', outTar]);
+    assert.equal(r.code, 0, r.err);
+    assert.match(r.out, /Packed skill my-skill@1\.0\.0/);
+
+    const { existsSync } = await import('node:fs');
+    assert.ok(existsSync(outTar));
+  });
+
+  it('A6 factory skill register packs and uploads to /api/v1/registry/skills', async () => {
+    let receivedGzip: Buffer | undefined;
+    let receivedContentType: string | undefined;
+    const server = http.createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c);
+      const bodyBuf = Buffer.concat(chunks);
+      if (req.url === '/api/v1/whoami') {
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ actor: 'access:dale@example.com', roles: ['admin'] }));
+        return;
+      }
+      if (req.url === '/api/v1/registry/skills' && req.method === 'POST') {
+        receivedGzip = bodyBuf;
+        receivedContentType = req.headers['content-type'];
+        res.writeHead(201, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const home = await mkdtemp(join(tmpdir(), 'cli-reg-'));
+      const skillDir = join(home, 'reg-skill');
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(join(skillDir, 'skill.yaml'), 'spec: 1\nid: reg-skill\nname: Reg Skill\nversion: 1.0.0\nlanguage: python\ndescription: reg test\nentry: entry.py\n');
+      await writeFile(join(skillDir, 'entry.py'), 'def tools(): return []\n');
+      await writeFile(join(skillDir, 'test_reg.py'), 'def test_one(): pass\n');
+
+      const r = await factory(home, ['skill', 'register', skillDir], env(url));
+      assert.equal(r.code, 0, r.err);
+      assert.match(r.out, /Registered skill reg-skill@1\.0\.0/);
+      assert.equal(receivedContentType, 'application/gzip');
+      assert.ok(receivedGzip && receivedGzip.length > 0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 });

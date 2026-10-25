@@ -43,17 +43,21 @@ export class FactoryClient {
     this.sleep = opts.sleep ?? defaultSleep;
   }
 
-  private async send(method: string, path: string, body: unknown, refresh: boolean): Promise<FactoryResponse> {
+  private async send(method: string, path: string, body: unknown, refresh: boolean, contentType?: string): Promise<FactoryResponse> {
     const given = await this.credential(refresh);
     const cred: Credential = typeof given === 'string' ? { name: 'cf-access-token', value: given } : given;
+    const isRaw = Buffer.isBuffer(body) || body instanceof Uint8Array;
+    const headers: Record<string, string> = {
+      [cred.name]: cred.value,
+      accept: 'application/json',
+    };
+    if (body !== undefined) {
+      headers['content-type'] = contentType ?? (isRaw ? 'application/gzip' : 'application/json');
+    }
     const res = await this.doFetch(`${this.baseUrl}${path}`, {
       method,
-      headers: {
-        [cred.name]: cred.value,
-        accept: 'application/json',
-        ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      headers,
+      body: isRaw ? (body as any) : (body !== undefined ? JSON.stringify(body) : undefined),
       redirect: 'manual',
     });
     // The identity-aware proxy answers an unauthenticated request with a redirect to its login page, not a 401.
@@ -75,6 +79,16 @@ export class FactoryClient {
     } catch (err) {
       if (!(err instanceof AuthRequiredError)) throw err;
       return this.send(method, path, body, true);
+    }
+  }
+
+  /** Uploads a raw buffer (e.g. skill package gzip). */
+  async upload(path: string, data: Buffer | Uint8Array, contentType = 'application/gzip'): Promise<FactoryResponse> {
+    try {
+      return await this.send('POST', path, data, false, contentType);
+    } catch (err) {
+      if (!(err instanceof AuthRequiredError)) throw err;
+      return this.send('POST', path, data, true, contentType);
     }
   }
 

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import zlib from 'node:zlib';
 import { parse as parseYaml } from 'yaml';
 import {
@@ -17,11 +17,17 @@ export const MAX_MANIFEST_SIZE = 64 * 1024;         // 64 KiB (A19)
 
 export const COMPILED_EXTENSIONS = new Set([
   '.pyc',
+  '.pyo',
   '.so',
   '.pyd',
   '.dll',
   '.dylib',
   '.exe',
+  '.bin',
+  '.wasm',
+  '.class',
+  '.jar',
+  '.whl',
 ]);
 
 export type PackageFileInfo = {
@@ -47,14 +53,15 @@ export type SkillPackageValidation = ValidatedSkillPackage | FailedSkillPackage;
 
 /**
  * Checks whether a buffer represents a single gzip stream with no trailing bytes (A19).
+ * Uses a single-pass inflateRaw with maxOutputLength bound to prevent decompression bombs.
  * Returns the uncompressed buffer if valid, or null if invalid.
  */
 function gunzipSingleStream(gz: Buffer, issues: string[]): Buffer | null {
   if (gz.length < 18) {
-    issues.push('package: buffer too small to be a gzip archive');
+    issues.push('package: buffer too small to be a gzip archive (minimum 18 bytes)');
     return null;
   }
-  // Gzip magic 0x1f, 0x8b, and Deflate compression (0x08)
+  // Gzip magic 0x1f, 0x8b, and Deflate compression method (0x08)
   if (gz[0] !== 0x1f || gz[1] !== 0x8b || gz[2] !== 0x08) {
     issues.push('package: not a gzip stream (invalid magic or compression method)');
     return null;
@@ -89,25 +96,93 @@ function gunzipSingleStream(gz: Buffer, issues: string[]): Buffer | null {
   }
 
   try {
-    // Decompress the deflate block using inflateRawSync with maxOutputLength bound
-    const uncompressed = zlib.inflateRawSync(gz.subarray(pos), {
-      maxOutputLength: MAX_EXPANDED_SIZE + 1024,
-    });
+    // Single stream inflate with exact maxOutputLength limit of 20 MiB bound (A1, A19)
+    const res = zlib.inflateRawSync(gz.subarray(pos), {
+      info: true,
+      maxOutputLength: MAX_EXPANDED_SIZE + 1,
+    }) as unknown as { buffer: Buffer | ArrayBuffer; engine?: { bytesWritten?: number } };
 
-    // Check gzip trailer: 4 bytes CRC32, 4 bytes ISIZE
-    // To verify that there is no trailing data, we check with createGunzip
-    const gunzipped = zlib.gunzipSync(gz);
-    if (gunzipped.length !== uncompressed.length) {
-      issues.push('package: must be a single gzip stream with no concatenated streams (A19)');
+    const outBuf = Buffer.isBuffer(res.buffer) ? res.buffer : Buffer.from(res.buffer);
+
+    if (outBuf.length > MAX_EXPANDED_SIZE) {
+      issues.push(`package: expanded size ${outBuf.length} exceeds 20 MiB limit (A1)`);
       return null;
     }
 
-    // Double check with inflate stream to verify exact input bytes consumed
-    return gunzipped;
+    const deflateConsumed = res.engine?.bytesWritten ?? (gz.length - pos - 8);
+    const expectedTotal = pos + deflateConsumed + 8;
+    if (expectedTotal !== gz.length) {
+      if (expectedTotal < gz.length) {
+        issues.push('package: must be a single gzip stream with no concatenated streams or trailing data (A19)');
+      } else {
+        issues.push('package: truncated gzip archive (missing or truncated trailer) (A19)');
+      }
+      return null;
+    }
+
+    // Verify gzip trailer: 4 bytes CRC-32 (LE), 4 bytes ISIZE (LE)
+    const trailerCrc = gz.readUInt32LE(pos + deflateConsumed);
+    const computedCrc = zlib.crc32(outBuf);
+    if (trailerCrc !== computedCrc) {
+      issues.push(`package: gzip CRC32 mismatch (computed ${computedCrc.toString(16)}, trailer ${trailerCrc.toString(16)})`);
+      return null;
+    }
+
+    const trailerIsize = gz.readUInt32LE(pos + deflateConsumed + 4);
+    const expectedIsize = outBuf.length >>> 0;
+    if (trailerIsize !== expectedIsize) {
+      issues.push(`package: gzip ISIZE mismatch (decompressed ${expectedIsize}, trailer ${trailerIsize})`);
+      return null;
+    }
+
+    return outBuf;
   } catch (err) {
-    issues.push(`package: decompression failed (${err instanceof Error ? err.message : String(err)})`);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('larger than') || (err as { code?: string })?.code === 'ERR_BUFFER_TOO_LARGE') {
+      issues.push('package: expanded size exceeds 20 MiB limit (A1)');
+    } else {
+      issues.push(`package: decompression failed (${msg})`);
+    }
     return null;
   }
+}
+
+/**
+ * Parses a fixed-width octal field strictly from a tar block (A19).
+ */
+function parseOctal(buf: Buffer, start: number, length: number, fieldName: string, issues: string[]): number | null {
+  const slice = buf.subarray(start, start + length);
+  let str = slice.toString('ascii').replace(/[\0 ]+$/, '').trim();
+  if (str === '') return 0;
+  if (!/^[0-7]+$/.test(str)) {
+    issues.push(`package: malformed octal in tar field "${fieldName}" (A19)`);
+    return null;
+  }
+  const val = parseInt(str, 8);
+  if (Number.isNaN(val) || val < 0) {
+    issues.push(`package: malformed octal in tar field "${fieldName}" (A19)`);
+    return null;
+  }
+  return val;
+}
+
+/**
+ * Computes and verifies the header checksum of a 512-byte tar header block (A19).
+ */
+function verifyTarHeaderChecksum(block: Buffer): boolean {
+  let sum = 0;
+  for (let i = 0; i < 512; i++) {
+    if (i >= 148 && i < 156) {
+      sum += 32; // treat chksum field as 8 ASCII spaces
+    } else {
+      sum += block[i];
+    }
+  }
+
+  const chkSlice = block.subarray(148, 156).toString('ascii').replace(/[\0 ]+$/, '').trim();
+  if (!/^[0-7]+$/.test(chkSlice)) return false;
+  const recorded = parseInt(chkSlice, 8);
+  return sum === recorded;
 }
 
 /**
@@ -146,10 +221,22 @@ export function validateSkillPackage(gz: Buffer): SkillPackageValidation {
     const block = tar.subarray(offset, offset + 512);
 
     // Check for two consecutive 512-byte zero blocks indicating end of archive
-    if (block.every((b) => b === 0)) {
+    let isZeroBlock = true;
+    for (let i = 0; i < 512; i++) {
+      if (block[i] !== 0) {
+        isZeroBlock = false;
+        break;
+      }
+    }
+    if (isZeroBlock) {
       offset += 512;
-      // If next block is also zero block, or EOF reached
       continue;
+    }
+
+    // Header checksum verification (A19)
+    if (!verifyTarHeaderChecksum(block)) {
+      issues.push(`package: tar header checksum verification failed at offset ${offset} (A19)`);
+      return { ok: false, issues };
     }
 
     // Name (bytes 0..99)
@@ -177,12 +264,16 @@ export function validateSkillPackage(gz: Buffer): SkillPackageValidation {
     }
 
     // Mode (bytes 100..107, octal)
-    const modeStr = block.subarray(100, 108).toString('ascii').replace(/\0/g, '').trim();
-    const mode = parseInt(modeStr || '0', 8);
+    const mode = parseOctal(block, 100, 8, 'mode', issues);
+    if (mode === null) {
+      return { ok: false, issues };
+    }
 
     // Size (bytes 124..135, octal)
-    const sizeStr = block.subarray(124, 136).toString('ascii').replace(/\0/g, '').trim();
-    const size = parseInt(sizeStr || '0', 8);
+    const size = parseOctal(block, 124, 12, 'size', issues);
+    if (size === null) {
+      return { ok: false, issues };
+    }
 
     // Typeflag (byte 156)
     const typeflag = String.fromCharCode(block[156]);
@@ -195,16 +286,16 @@ export function validateSkillPackage(gz: Buffer): SkillPackageValidation {
       issues.push(`package: GNU long-name headers are refused (${cleanPath}) (A19)`);
     }
 
-    // Only allow regular files ('0' or '\0') and directories ('5')
+    // Only allow regular files ('0' or '\0') and directories ('5') (A19)
     const isRegular = typeflag === '0' || typeflag === '\0';
     const isDir = typeflag === '5';
     if (!isRegular && !isDir) {
       issues.push(`package: entry "${cleanPath}" has forbidden type "${typeflag}"; only regular files and directories are accepted (A19)`);
     }
 
-    // Setuid / setgid bits refused (A19)
-    if ((mode & 0o6000) !== 0) {
-      issues.push(`package: entry "${cleanPath}" has setuid/setgid bits set (A19)`);
+    // Setuid / setgid / sticky bits refused (A19)
+    if ((mode & 0o7000) !== 0) {
+      issues.push(`package: entry "${cleanPath}" has forbidden setuid/setgid/sticky bits set (${(mode & 0o7000).toString(8)}) (A19)`);
     }
 
     // Path constraints (A1, A19)
@@ -221,11 +312,15 @@ export function validateSkillPackage(gz: Buffer): SkillPackageValidation {
     if (segments.includes('..') || segments.includes('.')) {
       issues.push(`package: relative traversal segment in "${cleanPath}" is refused (A19)`);
     }
-    if (/[\u0000-\u001f\u007f]/.test(cleanPath)) {
-      issues.push(`package: control character in path "${cleanPath}" is refused (A19)`);
+    for (let i = 0; i < cleanPath.length; i++) {
+      const code = cleanPath.charCodeAt(i);
+      if (code < 32 || code === 127) {
+        issues.push(`package: control character in path "${cleanPath}" is refused (A19)`);
+        break;
+      }
     }
 
-    // Check forbidden names .git and __pycache__
+    // Check forbidden names .git and __pycache__ (A19)
     if (segments.some((s) => s === '.git' || s === '__pycache__')) {
       issues.push(`package: forbidden entry "${cleanPath}" contains .git or __pycache__ (A19)`);
     }
@@ -241,6 +336,13 @@ export function validateSkillPackage(gz: Buffer): SkillPackageValidation {
       issues.push(`package: case-colliding entry "${cleanPath}" (A19)`);
     }
     seenCaseFolded.add(folded);
+
+    // Verify content length does not exceed archive
+    const contentBlocks = Math.ceil(size / 512);
+    if (offset + 512 + contentBlocks * 512 > tar.length) {
+      issues.push(`package: truncated content for file "${cleanPath}" (A19)`);
+      return { ok: false, issues };
+    }
 
     // File size and compiled binary checks
     if (isRegular) {
@@ -263,9 +365,7 @@ export function validateSkillPackage(gz: Buffer): SkillPackageValidation {
         } else {
           const contentStart = offset + 512;
           const contentEnd = contentStart + size;
-          if (contentEnd <= tar.length) {
-            skillYamlContent = tar.subarray(contentStart, contentEnd).toString('utf8');
-          }
+          skillYamlContent = tar.subarray(contentStart, contentEnd).toString('utf8');
         }
       }
 
@@ -284,6 +384,8 @@ export function validateSkillPackage(gz: Buffer): SkillPackageValidation {
           hasTests = true;
         }
       }
+    } else if (isDir && size !== 0) {
+      issues.push(`package: directory "${cleanPath}" has non-zero size ${size} (A19)`);
     }
 
     files.push({
@@ -293,7 +395,6 @@ export function validateSkillPackage(gz: Buffer): SkillPackageValidation {
     });
 
     // Advance offset: 512 byte header + padded content blocks
-    const contentBlocks = Math.ceil(size / 512);
     offset += 512 + contentBlocks * 512;
   }
 
@@ -366,15 +467,31 @@ export async function packSkillDirectory(dir: string): Promise<Buffer> {
   function writeHeader(name: string, size: number, isDir: boolean, mode = isDir ? 0o755 : 0o644): void {
     const block = Buffer.alloc(512, 0);
 
-    // Split into prefix and name if needed (name up to 100, prefix up to 155)
+    // In POSIX ustar format, name can be split at a slash such that:
+    // prefix is at most 155 bytes, name is at most 100 bytes (A19).
     let namePart = name;
     let prefixPart = '';
-    if (name.length > 100) {
-      const idx = name.lastIndexOf('/', 100);
-      if (idx !== -1 && idx <= 155) {
-        prefixPart = name.substring(0, idx);
-        namePart = name.substring(idx + 1);
+    const byteLen = Buffer.byteLength(name, 'utf8');
+    if (byteLen > 100) {
+      if (byteLen > MAX_PATH_LENGTH) {
+        throw new Error(`path exceeds 255 byte tar ustar limit: ${name}`);
       }
+      let split = -1;
+      for (let i = Math.min(name.length - 1, 155); i >= 0; i--) {
+        if (
+          name[i] === '/' &&
+          Buffer.byteLength(name.substring(0, i), 'utf8') <= 155 &&
+          Buffer.byteLength(name.substring(i + 1), 'utf8') <= 100
+        ) {
+          split = i;
+          break;
+        }
+      }
+      if (split === -1) {
+        throw new Error(`path cannot be split into ustar prefix (<=155) and name (<=100): ${name}`);
+      }
+      prefixPart = name.substring(0, split);
+      namePart = name.substring(split + 1);
     }
 
     block.write(namePart, 0, 100, 'utf8');
@@ -384,8 +501,8 @@ export async function packSkillDirectory(dir: string): Promise<Buffer> {
     block.write(size.toString(8).padStart(11, '0') + '\0', 124, 12, 'ascii'); // size
     block.write('00000000000\0', 136, 12, 'ascii'); // mtime (0 for reproducibility)
 
-    // Checksum placeholder
-    block.fill(32, 148, 156); // 8 spaces
+    // Checksum placeholder: 8 ASCII spaces
+    block.fill(32, 148, 156);
 
     // Typeflag
     block[156] = isDir ? 53 : 48; // '5' or '0'
@@ -443,4 +560,85 @@ export async function packSkillDirectory(dir: string): Promise<Buffer> {
 
   const tarBuffer = Buffer.concat(tarBlocks);
   return zlib.gzipSync(tarBuffer);
+}
+
+/**
+ * Safely extracts a verified skill package to target directory (A19).
+ * Enforces all A19 security constraints on extraction.
+ */
+export function extractSkillPackage(gz: Buffer, targetDir: string): ValidatedSkillPackage {
+  const validation = validateSkillPackage(gz);
+  if (!validation.ok) {
+    throw new Error(`cannot extract invalid skill package: ${validation.issues.join('; ')}`);
+  }
+
+  const issues: string[] = [];
+  const tar = gunzipSingleStream(gz, issues);
+  if (!tar) {
+    throw new Error(`failed to decompress skill package: ${issues.join('; ')}`);
+  }
+
+  const resolvedTarget = resolve(targetDir);
+  mkdirSync(resolvedTarget, { recursive: true });
+
+  let offset = 0;
+  while (offset + 512 <= tar.length) {
+    const block = tar.subarray(offset, offset + 512);
+
+    let isZeroBlock = true;
+    for (let i = 0; i < 512; i++) {
+      if (block[i] !== 0) {
+        isZeroBlock = false;
+        break;
+      }
+    }
+    if (isZeroBlock) {
+      offset += 512;
+      continue;
+    }
+
+    let nameEnd = block.indexOf(0, 0);
+    if (nameEnd === -1 || nameEnd > 100) nameEnd = 100;
+    const namePart = block.subarray(0, nameEnd).toString('utf8');
+
+    let prefixPart = '';
+    const magic = block.subarray(257, 263).toString('ascii');
+    if (magic.startsWith('ustar')) {
+      let prefixEnd = block.indexOf(0, 345);
+      if (prefixEnd === -1 || prefixEnd > 500) prefixEnd = 500;
+      if (prefixEnd > 345) {
+        prefixPart = block.subarray(345, prefixEnd).toString('utf8');
+      }
+    }
+
+    const rawPath = prefixPart ? `${prefixPart}/${namePart}` : namePart;
+    const cleanPath = rawPath.replace(/\/+$/, '');
+    if (!cleanPath) {
+      offset += 512;
+      continue;
+    }
+
+    const size = parseOctal(block, 124, 12, 'size', issues) ?? 0;
+    const typeflag = String.fromCharCode(block[156]);
+    const isRegular = typeflag === '0' || typeflag === '\0';
+    const isDir = typeflag === '5';
+
+    const destPath = resolve(resolvedTarget, cleanPath);
+    if (!destPath.startsWith(resolvedTarget + '/') && destPath !== resolvedTarget) {
+      throw new Error(`package entry "${cleanPath}" escapes target directory (A19)`);
+    }
+
+    if (isDir) {
+      mkdirSync(destPath, { recursive: true });
+    } else if (isRegular) {
+      mkdirSync(dirname(destPath), { recursive: true });
+      const content = tar.subarray(offset + 512, offset + 512 + size);
+      writeFileSync(destPath, content, { mode: 0o644 });
+    }
+
+    const contentBlocks = Math.ceil(size / 512);
+    offset += 512 + contentBlocks * 512;
+  }
+
+  return validation;
 }

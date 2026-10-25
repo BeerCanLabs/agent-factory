@@ -78,7 +78,7 @@ import {
  * The checker this deployment uses (see the header). Called once per control plane; `undefined` means none is
  * configured. The CodeBuild checker is loaded only when selected, so the kernel does not load a cloud SDK otherwise.
  */
-export async function skillCheckerFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<SkillChecker | undefined> {
+export async function skillCheckerFromEnv(env: NodeJS.ProcessEnv = process.env, packageStore?: SkillPackageStore): Promise<SkillChecker | undefined> {
   const provider =
     env.FACTORY_DEPLOY_PROVIDER ||
     (env.FACTORY_RUNTIME === 'ecs' ? 'aws' : env.FACTORY_RUNTIME === 'cloudrun' ? 'gcp' : undefined);
@@ -93,7 +93,7 @@ export async function skillCheckerFromEnv(env: NodeJS.ProcessEnv = process.env):
     const { cloudBuildSkillChecker } = await import('./gcp/skill-checker.js');
     return cloudBuildSkillChecker();
   }
-  if (kind === 'local') return localSkillChecker();
+  if (kind === 'local') return localSkillChecker({ packageStore });
   if (kind !== 'none') console.warn(`[control-plane] FACTORY_SKILL_CHECKER=${kind} is not a checker (codebuild, cloudbuild, local, none); skill checks are off`);
   return undefined;
 }
@@ -125,14 +125,18 @@ function readRawBuffer(req: http.IncomingMessage, limit = MAX_PACKAGE_BYTES): Pr
     const chunks: Buffer[] = [];
     let received = 0;
     let exceeded = false;
-    req.on('data', (chunk: Buffer) => {
+    const onData = (chunk: Buffer) => {
       received += chunk.length;
       if (received > limit) {
         exceeded = true;
+        req.pause();
+        req.destroy();
+        resolve({ ok: false, tooLarge: true });
         return;
       }
       chunks.push(chunk);
-    });
+    };
+    req.on('data', onData);
     req.on('end', () => {
       if (exceeded) {
         resolve({ ok: false, tooLarge: true });
@@ -140,7 +144,10 @@ function readRawBuffer(req: http.IncomingMessage, limit = MAX_PACKAGE_BYTES): Pr
         resolve({ ok: true, buffer: Buffer.concat(chunks) });
       }
     });
-    req.on('error', reject);
+    req.on('error', (err) => {
+      if (exceeded) return;
+      reject(err);
+    });
   });
 }
 
@@ -214,6 +221,8 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     const { manifest, sha256 } = pkg;
     const registry = skillRegistry(state);
     const reasons: string[] = [];
+    const identity = registry.identityIssue(manifest);
+    if (identity) reasons.push(`manifest.visibility: ${identity}`);
     if (registry.get(manifest.id, manifest.version)) {
       reasons.push(`version: ${manifest.id}@${manifest.version} is already registered; versions are immutable, register a new version`);
     }
@@ -565,7 +574,8 @@ async function checkerFor(state: FactoryState): Promise<SkillChecker | undefined
   if (state.skillChecker !== undefined) return state.skillChecker ?? undefined;
   let checker = envCheckers.get(state);
   if (!checker) {
-    checker = skillCheckerFromEnv().catch((err) => {
+    const store = packageStoreOf(state);
+    checker = skillCheckerFromEnv(process.env, store).catch((err) => {
       console.warn('[control-plane] skill checker unavailable; skill checks are off:', err);
       return undefined;
     });

@@ -8,6 +8,7 @@ import { knownMethod, makeSession } from './methods.js';
 import { repl } from './repl.js';
 import { commandHelp } from './commands.js';
 import { isCommand, runCommand } from './runner.js';
+import { handleSkillPack, handleSkillRegister } from './skill.js';
 import { createInterface } from 'node:readline/promises';
 
 const version = (() => {
@@ -26,6 +27,8 @@ const USAGE = `factory ${version}
   factory whoami                  show who you are signed in as
   factory config get              show the settings
   factory config set <key> <value>  keys: address, auth (auto|cloudflare-access|oidc), theme, manager
+  factory skill pack <dir> [--out <file>]   pack a skill folder into a conforming .tar.gz package
+  factory skill register <dir>              pack and upload a skill package to the registry
   factory --manager <id>          use a manager agent with another id for this run
   factory --version
 
@@ -124,6 +127,24 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     throw new Error('usage: factory config get | factory config set <key> <value>');
+  }
+
+  if (cmd === 'skill') {
+    const sub = arg;
+    const rest = argv.slice(2);
+    if (sub === 'pack') {
+      return await handleSkillPack(rest, (t) => writeAll(process.stdout, t));
+    }
+    if (sub === 'register') {
+      const instance = await instanceInUse();
+      const store = defaultStore();
+      const kind = await knownMethod(instance, (await loadConfig()).auth, store);
+      if (!kind) throw new Error(`not signed in to ${instance}. Run: factory login ${instance}`);
+      const session = makeSession(kind, instance, { store });
+      const client = new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh) });
+      return await handleSkillRegister(client, rest, (t) => writeAll(process.stdout, t), (t) => writeAll(process.stderr, t));
+    }
+    throw new Error('usage: factory skill pack <dir> [--out <file>] | factory skill register <dir>');
   }
 
   if (cmd === 'login') {

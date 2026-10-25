@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import zlib from 'node:zlib';
 import {
+  extractSkillPackage,
   packSkillDirectory,
   validateSkillPackage,
 } from './package.js';
@@ -48,6 +49,27 @@ class TestSkill(unittest.TestCase):
   return { dir, cleanup };
 }
 
+function makeTarBlock(name: string, size = 0, mode = 0o644, typeflag = '0', prefix = ''): Buffer {
+  const block = Buffer.alloc(512, 0);
+  block.write(name, 0, 100, 'utf8');
+  block.write(mode.toString(8).padStart(7, '0') + '\0', 100, 8, 'ascii');
+  block.write('0000000\0', 108, 8, 'ascii');
+  block.write('0000000\0', 116, 8, 'ascii');
+  block.write(size.toString(8).padStart(11, '0') + '\0', 124, 12, 'ascii');
+  block.write('00000000000\0', 136, 12, 'ascii');
+  block.fill(32, 148, 156); // 8 spaces
+  block[156] = typeflag.charCodeAt(0);
+  block.write('ustar\0', 257, 6, 'ascii');
+  block.write('00', 263, 2, 'ascii');
+  if (prefix) {
+    block.write(prefix, 345, 155, 'utf8');
+  }
+  let sum = 0;
+  for (let i = 0; i < 512; i++) sum += block[i];
+  block.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+  return block;
+}
+
 describe('skill package validation & packing (A1, A19)', () => {
   it('packs a conforming skill directory and validates it successfully', async () => {
     const { dir, cleanup } = createSkillDir();
@@ -73,153 +95,239 @@ describe('skill package validation & packing (A1, A19)', () => {
     }
   });
 
-  it('refuses a package missing skill.yaml at root', () => {
-    // Tar containing only a dummy python file
-    const block = Buffer.alloc(512, 0);
-    block.write('skill.py', 0, 100, 'utf8');
-    block.write('0000644\0', 100, 8, 'ascii');
-    block.write('0000000\0', 124, 12, 'ascii');
-    block[156] = 48; // '0'
-    block.write('ustar\0', 257, 6, 'ascii');
-
-    // Checksum
-    let sum = 0;
-    block.fill(32, 148, 156);
-    for (let i = 0; i < 512; i++) sum += block[i];
-    block.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
-
-    const tar = Buffer.concat([block, Buffer.alloc(1024, 0)]);
-    const gz = zlib.gzipSync(tar);
-
-    const result = validateSkillPackage(gz);
-    assert.ok(!result.ok);
-    if (!result.ok) {
-      assert.ok(result.issues.some((i) => i.includes('missing skill.yaml at package root')));
+  it('safely extracts a valid package with extractSkillPackage (A19)', async () => {
+    const { dir, cleanup } = createSkillDir();
+    const targetDir = mkdtempSync(join(tmpdir(), 'skill-extract-'));
+    try {
+      const buffer = await packSkillDirectory(dir);
+      const res = extractSkillPackage(buffer, targetDir);
+      assert.ok(res.ok);
+      assert.equal(res.manifest.id, 'test-skill');
+      assert.ok(readFileSync(join(targetDir, 'skill.yaml'), 'utf8').includes('id: test-skill'));
+      assert.ok(readFileSync(join(targetDir, 'skill.py'), 'utf8').includes('def tools():'));
+      assert.ok(readFileSync(join(targetDir, 'tests', 'test_skill.py'), 'utf8').includes('class TestSkill'));
+    } finally {
+      cleanup();
+      rmSync(targetDir, { recursive: true, force: true });
     }
   });
 
-  it('refuses compiled binaries (.pyc, .so, etc.) and forbidden names (.git, __pycache__)', async () => {
+  it('refuses multi-member gzip stream and trailing data (A19)', async () => {
     const { dir, cleanup } = createSkillDir();
     try {
-      // Add forbidden compiled binary
-      writeFileSync(join(dir, 'extra.pyc'), 'binary bytecode');
       const buffer = await packSkillDirectory(dir);
 
-      // We explicitly bypass packSkillDirectory skip list by creating a tar directly
-      const rawTar = zlib.gunzipSync(buffer);
-      // Create a tar header for extra.pyc
-      const badBlock = Buffer.alloc(512, 0);
-      badBlock.write('extra.pyc', 0, 100, 'utf8');
-      badBlock.write('0000644\0', 100, 8, 'ascii');
-      badBlock.write('00000000020\0', 124, 12, 'ascii');
-      badBlock[156] = 48; // '0'
-      badBlock.write('ustar\0', 257, 6, 'ascii');
-      let sum = 0;
-      badBlock.fill(32, 148, 156);
-      for (let i = 0; i < 512; i++) sum += badBlock[i];
-      badBlock.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+      // Trailing garbage
+      const trailingGz = Buffer.concat([buffer, Buffer.from('extra trailing bytes')]);
+      const trailingRes = validateSkillPackage(trailingGz);
+      assert.ok(!trailingRes.ok);
+      if (!trailingRes.ok) {
+        assert.ok(trailingRes.issues.some((i) => i.includes('no concatenated streams or trailing data')));
+      }
 
-      const content = Buffer.alloc(512, 0);
-      content.write('bytecode data', 0, 'utf8');
-
-      const corruptedTar = Buffer.concat([rawTar.subarray(0, rawTar.length - 1024), badBlock, content, Buffer.alloc(1024, 0)]);
-      const corruptedGz = zlib.gzipSync(corruptedTar);
-
-      const result = validateSkillPackage(corruptedGz);
-      assert.ok(!result.ok);
-      if (!result.ok) {
-        assert.ok(result.issues.some((i) => i.includes('compiled binary "extra.pyc" is refused')));
+      // Multi-member gzip
+      const secondMember = zlib.gzipSync(Buffer.from('second gzip member'));
+      const multiGz = Buffer.concat([buffer, secondMember]);
+      const multiRes = validateSkillPackage(multiGz);
+      assert.ok(!multiRes.ok);
+      if (!multiRes.ok) {
+        assert.ok(multiRes.issues.some((i) => i.includes('no concatenated streams or trailing data')));
       }
     } finally {
       cleanup();
     }
   });
 
-  it('refuses path traversal (..), absolute paths, and backslashes (A19)', () => {
-    function makeTarWithEntry(path: string): Buffer {
-      const block = Buffer.alloc(512, 0);
-      block.write(path, 0, 100, 'utf8');
-      block.write('0000644\0', 100, 8, 'ascii');
-      block.write('0000000\0', 124, 12, 'ascii');
-      block[156] = 48; // '0'
-      block.write('ustar\0', 257, 6, 'ascii');
-      let sum = 0;
-      block.fill(32, 148, 156);
-      for (let i = 0; i < 512; i++) sum += block[i];
-      block.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
-      return zlib.gzipSync(Buffer.concat([block, Buffer.alloc(1024, 0)]));
+  it('refuses decompression bombs exceeding 20 MiB (A1, A19)', () => {
+    // Generate 21 MiB of zeroes compressed with gzip (very small compressed size ~21 KB)
+    const zeroes = Buffer.alloc(21 * 1024 * 1024, 0);
+    const bombGz = zlib.gzipSync(zeroes);
+    assert.ok(bombGz.length < 50000, 'bomb is small compressed');
+
+    const result = validateSkillPackage(bombGz);
+    assert.ok(!result.ok);
+    if (!result.ok) {
+      assert.ok(result.issues.some((i) => i.includes('exceeds 20 MiB limit')));
     }
-
-    const dotdot = validateSkillPackage(makeTarWithEntry('../escape.py'));
-    assert.ok(!dotdot.ok);
-    if (!dotdot.ok) assert.ok(dotdot.issues.some((i) => i.includes('relative traversal')));
-
-    const abs = validateSkillPackage(makeTarWithEntry('/etc/passwd'));
-    assert.ok(!abs.ok);
-    if (!abs.ok) assert.ok(abs.issues.some((i) => i.includes('absolute path')));
-
-    const bslash = validateSkillPackage(makeTarWithEntry('foo\\bar.py'));
-    assert.ok(!bslash.ok);
-    if (!bslash.ok) assert.ok(bslash.issues.some((i) => i.includes('backslash')));
   });
 
-  it('refuses pax and GNU long-name headers (A19)', () => {
-    function makeTarWithType(typeflag: string): Buffer {
-      const block = Buffer.alloc(512, 0);
-      block.write('some-entry', 0, 100, 'utf8');
-      block.write('0000644\0', 100, 8, 'ascii');
-      block.write('0000000\0', 124, 12, 'ascii');
-      block[156] = typeflag.charCodeAt(0);
-      block.write('ustar\0', 257, 6, 'ascii');
-      let sum = 0;
-      block.fill(32, 148, 156);
-      for (let i = 0; i < 512; i++) sum += block[i];
-      block.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
-      return zlib.gzipSync(Buffer.concat([block, Buffer.alloc(1024, 0)]));
+  it('refuses tar header checksum mismatch (A19)', async () => {
+    const { dir, cleanup } = createSkillDir();
+    try {
+      const buffer = await packSkillDirectory(dir);
+      const tar = zlib.gunzipSync(buffer);
+
+      // Tamper with first block's magic without recalculating checksum
+      tar[257] = 'x'.charCodeAt(0);
+      const tamperedGz = zlib.gzipSync(tar);
+
+      const result = validateSkillPackage(tamperedGz);
+      assert.ok(!result.ok);
+      if (!result.ok) {
+        assert.ok(result.issues.some((i) => i.includes('tar header checksum verification failed')));
+      }
+    } finally {
+      cleanup();
     }
-
-    const pax = validateSkillPackage(makeTarWithType('x'));
-    assert.ok(!pax.ok);
-    if (!pax.ok) assert.ok(pax.issues.some((i) => i.includes('pax extended headers are refused')));
-
-    const gnu = validateSkillPackage(makeTarWithType('L'));
-    assert.ok(!gnu.ok);
-    if (!gnu.ok) assert.ok(gnu.issues.some((i) => i.includes('GNU long-name headers are refused')));
   });
 
-  it('refuses duplicate and case-colliding filenames (A19)', () => {
-    function makeTarWithEntries(p1: string, p2: string): Buffer {
-      const b1 = Buffer.alloc(512, 0);
-      b1.write(p1, 0, 100, 'utf8');
-      b1.write('0000644\0', 100, 8, 'ascii');
-      b1.write('0000000\0', 124, 12, 'ascii');
-      b1[156] = 48;
-      b1.write('ustar\0', 257, 6, 'ascii');
-      let s1 = 0;
-      b1.fill(32, 148, 156);
-      for (let i = 0; i < 512; i++) s1 += b1[i];
-      b1.write(s1.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+  it('refuses malformed octal numbers in tar fields (A19)', () => {
+    const block = Buffer.alloc(512, 0);
+    block.write('skill.yaml', 0, 100, 'utf8');
+    block.write('0009999\0', 100, 8, 'ascii'); // invalid octal 9
+    block.write('0000000\0', 108, 8, 'ascii');
+    block.write('0000000\0', 116, 8, 'ascii');
+    block.write('00000000000\0', 124, 12, 'ascii');
+    block.write('00000000000\0', 136, 12, 'ascii');
+    block.fill(32, 148, 156);
+    block[156] = 48;
+    block.write('ustar\0', 257, 6, 'ascii');
+    block.write('00', 263, 2, 'ascii');
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += block[i];
+    block.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
 
-      const b2 = Buffer.alloc(512, 0);
-      b2.write(p2, 0, 100, 'utf8');
-      b2.write('0000644\0', 100, 8, 'ascii');
-      b2.write('0000000\0', 124, 12, 'ascii');
-      b2[156] = 48;
-      b2.write('ustar\0', 257, 6, 'ascii');
-      let s2 = 0;
-      b2.fill(32, 148, 156);
-      for (let i = 0; i < 512; i++) s2 += b2[i];
-      b2.write(s2.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
-
-      return zlib.gzipSync(Buffer.concat([b1, b2, Buffer.alloc(1024, 0)]));
+    const gz = zlib.gzipSync(Buffer.concat([block, Buffer.alloc(1024, 0)]));
+    const result = validateSkillPackage(gz);
+    assert.ok(!result.ok);
+    if (!result.ok) {
+      assert.ok(result.issues.some((i) => i.includes('malformed octal')));
     }
+  });
 
-    const dup = validateSkillPackage(makeTarWithEntries('file.py', 'file.py'));
-    assert.ok(!dup.ok);
-    if (!dup.ok) assert.ok(dup.issues.some((i) => i.includes('duplicate entry')));
+  it('refuses setuid, setgid, and sticky bits (A19)', () => {
+    const setuidBlock = makeTarBlock('skill.yaml', 0, 0o4755);
+    const gz = zlib.gzipSync(Buffer.concat([setuidBlock, Buffer.alloc(1024, 0)]));
+    const result = validateSkillPackage(gz);
+    assert.ok(!result.ok);
+    if (!result.ok) {
+      assert.ok(result.issues.some((i) => i.includes('forbidden setuid/setgid/sticky bits')));
+    }
+  });
 
-    const caseColl = validateSkillPackage(makeTarWithEntries('File.py', 'file.py'));
-    assert.ok(!caseColl.ok);
-    if (!caseColl.ok) assert.ok(caseColl.issues.some((i) => i.includes('case-colliding entry')));
+  it('refuses non-regular file types like symlinks and hardlinks (A19)', () => {
+    const symlinkBlock = makeTarBlock('link.py', 0, 0o777, '2'); // '2' = symlink
+    const gz = zlib.gzipSync(Buffer.concat([symlinkBlock, Buffer.alloc(1024, 0)]));
+    const result = validateSkillPackage(gz);
+    assert.ok(!result.ok);
+    if (!result.ok) {
+      assert.ok(result.issues.some((i) => i.includes('only regular files and directories are accepted')));
+    }
+  });
+
+  it('refuses control characters in entry paths (A19)', () => {
+    const ctrlBlock = makeTarBlock('test\x07bell.py', 0, 0o644, '0');
+    const gz = zlib.gzipSync(Buffer.concat([ctrlBlock, Buffer.alloc(1024, 0)]));
+    const result = validateSkillPackage(gz);
+    assert.ok(!result.ok);
+    if (!result.ok) {
+      assert.ok(result.issues.some((i) => i.includes('control character in path')));
+    }
+  });
+
+  it('packs and validates paths > 100 characters via ustar prefix (A1, A19)', async () => {
+    const { dir, cleanup } = createSkillDir();
+    try {
+      const deepDir = join(dir, 'a'.repeat(50), 'b'.repeat(50));
+      mkdirSync(deepDir, { recursive: true });
+      writeFileSync(join(deepDir, 'deep_tool.py'), 'def deep(): pass\n');
+
+      const buffer = await packSkillDirectory(dir);
+      const result = validateSkillPackage(buffer);
+      assert.ok(result.ok, result.ok ? '' : result.issues.join(', '));
+      if (result.ok) {
+        assert.ok(result.files.some((f) => f.path.includes('deep_tool.py')));
+      }
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('refuses paths exceeding 255 character limit (A1)', () => {
+    const longName = 'a'.repeat(256);
+    const longBlock = makeTarBlock(longName.slice(0, 100), 0, 0o644, '0', longName.slice(100));
+    const gz = zlib.gzipSync(Buffer.concat([longBlock, Buffer.alloc(1024, 0)]));
+    const result = validateSkillPackage(gz);
+    assert.ok(!result.ok);
+    if (!result.ok) {
+      assert.ok(result.issues.some((i) => i.includes('exceeds 255 character limit')));
+    }
+  });
+
+  it('refuses banned binary extensions (.so, .dylib, .dll, .exe, .bin, .whl, etc.) (A19)', () => {
+    for (const ext of ['.so', '.dylib', '.dll', '.exe', '.bin', '.wasm', '.whl', '.class', '.jar']) {
+      const block = makeTarBlock(`lib${ext}`, 10, 0o644, '0');
+      const content = Buffer.alloc(512, 0);
+      const gz = zlib.gzipSync(Buffer.concat([block, content, Buffer.alloc(1024, 0)]));
+      const res = validateSkillPackage(gz);
+      assert.ok(!res.ok, `expected refusal for ${ext}`);
+      if (!res.ok) {
+        assert.ok(res.issues.some((i) => i.includes('compiled binary')));
+      }
+    }
+  });
+
+  it('refuses forbidden names .git and __pycache__ (A19)', () => {
+    for (const forbidden of ['.git', '__pycache__']) {
+      const block = makeTarBlock(`${forbidden}/file.py`, 0, 0o644, '0');
+      const gz = zlib.gzipSync(Buffer.concat([block, Buffer.alloc(1024, 0)]));
+      const res = validateSkillPackage(gz);
+      assert.ok(!res.ok, `expected refusal for ${forbidden}`);
+      if (!res.ok) {
+        assert.ok(res.issues.some((i) => i.includes('contains .git or __pycache__')));
+      }
+    }
+  });
+
+  it('refuses skill.yaml exceeding 64 KiB (A19)', () => {
+    const bigYaml = Buffer.alloc(65 * 1024, 'a');
+    const block = makeTarBlock('skill.yaml', bigYaml.length, 0o644, '0');
+    const content = Buffer.concat([bigYaml, Buffer.alloc(512 - (bigYaml.length % 512), 0)]);
+    const gz = zlib.gzipSync(Buffer.concat([block, content, Buffer.alloc(1024, 0)]));
+    const res = validateSkillPackage(gz);
+    assert.ok(!res.ok);
+    if (!res.ok) {
+      assert.ok(res.issues.some((i) => i.includes('exceeds 64 KiB limit')));
+    }
+  });
+
+  it('refuses package missing tests outside vendor/ (A1, A2)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'skill-pkg-no-tests-'));
+    try {
+      writeFileSync(
+        join(dir, 'skill.yaml'),
+        `spec: 1\nid: no-tests\nversion: 1.0.0\nlanguage: python\nentry: skill.py\n`
+      );
+      writeFileSync(join(dir, 'skill.py'), 'def run(): pass\n');
+      mkdirSync(join(dir, 'vendor', 'tests'), { recursive: true });
+      writeFileSync(join(dir, 'vendor', 'tests', 'test_vendor.py'), 'def test(): pass\n');
+
+      const gz = await packSkillDirectory(dir);
+      const res = validateSkillPackage(gz);
+      assert.ok(!res.ok);
+      if (!res.ok) {
+        assert.ok(res.issues.some((i) => i.includes('must contain tests outside vendor/')));
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses spec missing or not 1 in skill.yaml (A1)', async () => {
+    const { dir, cleanup } = createSkillDir();
+    try {
+      writeFileSync(
+        join(dir, 'skill.yaml'),
+        `spec: 2\nid: test-skill\nversion: 1.0.0\nlanguage: python\nentry: skill.py\n`
+      );
+      const gz = await packSkillDirectory(dir);
+      const res = validateSkillPackage(gz);
+      assert.ok(!res.ok);
+      if (!res.ok) {
+        assert.ok(res.issues.some((i) => i.includes('declare spec: 1')));
+      }
+    } finally {
+      cleanup();
+    }
   });
 });

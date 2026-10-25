@@ -97,7 +97,58 @@ while IFS=$'\t' read -r kind id version a b c; do
     fi
     folder="$WORK/pkg_$id"
     mkdir -p "$folder" || exit 5
-    tar -xzf "$tarball" -C "$folder" || { echo "cannot extract package ${pkg_hash}"; exit 5; }
+    python3 - "$tarball" "$folder" <<'PY' || { echo "cannot extract package ${pkg_hash}"; exit 5; }
+import sys, os, tarfile
+
+tar_path, dest = sys.argv[1], sys.argv[2]
+dest = os.path.realpath(dest)
+MAX_EXPANDED = 20 * 1024 * 1024
+MAX_FILE = 2 * 1024 * 1024
+MAX_ENTRIES = 500
+
+total_bytes = 0
+entries = 0
+
+with tarfile.open(tar_path, "r:gz") as tar:
+    for member in tar:
+        entries += 1
+        if entries > MAX_ENTRIES:
+            sys.exit(f"package exceeds max entries ({MAX_ENTRIES})")
+        name = member.name.replace("\\", "/")
+        if name.startswith("/") or ".." in name.split("/"):
+            sys.exit(f"illegal path in package: {name}")
+        target = os.path.realpath(os.path.join(dest, name))
+        if not (target == dest or target.startswith(dest + os.sep)):
+            sys.exit(f"path escapes target: {name}")
+        if member.issym() or member.islnk() or member.isfifo() or member.isdev():
+            sys.exit(f"illegal entry type in package: {name}")
+        if member.isfile():
+            if member.size > MAX_FILE:
+                sys.exit(f"file too large in package: {name}")
+            total_bytes += member.size
+            if total_bytes > MAX_EXPANDED:
+                sys.exit(f"package exceeds max expanded size ({MAX_EXPANDED})")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            f_in = tar.extractfile(member)
+            if f_in is None:
+                sys.exit(f"cannot read member: {name}")
+            with open(target, "wb") as f_out:
+                bytes_written = 0
+                while True:
+                    chunk = f_in.read(65536)
+                    if not chunk:
+                        break
+                    bytes_written += len(chunk)
+                    if bytes_written > MAX_FILE:
+                        sys.exit(f"file decompression bomb: {name}")
+                    f_out.write(chunk)
+            os.chmod(target, member.mode & 0o777)
+        elif member.isdir():
+            os.makedirs(target, exist_ok=True)
+            os.chmod(target, member.mode & 0o777)
+        else:
+            sys.exit(f"unsupported entry type: {name}")
+PY
     [ -f "$folder/skill.yaml" ] || { echo "no skill.yaml in package $id@$version"; exit 5; }
   else
     repo="$a"

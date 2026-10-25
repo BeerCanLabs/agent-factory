@@ -117,6 +117,7 @@ export {
   COMPILED_EXTENSIONS,
   validateSkillPackage,
   packSkillDirectory,
+  extractSkillPackage,
 } from './package.js';
 export type {
   PackageFileInfo,

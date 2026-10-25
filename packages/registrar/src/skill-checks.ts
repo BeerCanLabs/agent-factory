@@ -31,8 +31,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
-import zlib from 'node:zlib';
-import type { SkillManifest } from '@beercanlabs/factory-contract';
+import { extractSkillPackage, type SkillManifest } from '@beercanlabs/factory-contract';
 import type { SkillPackageStore } from './package-store.js';
 
 const execFileAsync = promisify(execFile);
@@ -142,45 +141,19 @@ export function localSkillChecker(opts: { python?: string; git?: string; timeout
     const env = { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', GIT_TERMINAL_PROMPT: '0' };
     try {
       let skillTargetDir: string;
-      if (req.packageHash && opts.packageStore) {
+      if (req.packageHash) {
+        if (!opts.packageStore) {
+          return { passed: false, failures: [`package: package store not configured for checker`] };
+        }
         const pkgBuffer = await opts.packageStore.get(req.packageHash);
         if (!pkgBuffer) {
           return { passed: false, failures: [`package: package bytes not found for hash ${req.packageHash}`] };
         }
         const pkgDir = join(work, 'pkg');
-        mkdirSync(pkgDir, { recursive: true });
-        const tar = zlib.gunzipSync(pkgBuffer);
-        let offset = 0;
-        while (offset + 512 <= tar.length) {
-          const block = tar.subarray(offset, offset + 512);
-          if (block.every((b) => b === 0)) {
-            offset += 512;
-            continue;
-          }
-          let nameEnd = block.indexOf(0, 0);
-          if (nameEnd === -1 || nameEnd > 100) nameEnd = 100;
-          const namePart = block.subarray(0, nameEnd).toString('utf8');
-          let prefixPart = '';
-          const magic = block.subarray(257, 263).toString('ascii');
-          if (magic.startsWith('ustar')) {
-            let prefixEnd = block.indexOf(0, 345);
-            if (prefixEnd === -1 || prefixEnd > 500) prefixEnd = 500;
-            if (prefixEnd > 345) prefixPart = block.subarray(345, prefixEnd).toString('utf8');
-          }
-          const rawPath = prefixPart ? `${prefixPart}/${namePart}` : namePart;
-          const cleanPath = rawPath.replace(/\/+$/, '');
-          const sizeStr = block.subarray(124, 136).toString('ascii').replace(/\0/g, '').trim();
-          const size = parseInt(sizeStr || '0', 8);
-          const typeflag = String.fromCharCode(block[156]);
-          if (cleanPath && (typeflag === '5' || rawPath.endsWith('/'))) {
-            mkdirSync(join(pkgDir, cleanPath), { recursive: true });
-          } else if (cleanPath && (typeflag === '0' || typeflag === '\0')) {
-            const dest = join(pkgDir, cleanPath);
-            mkdirSync(dirname(dest), { recursive: true });
-            const content = tar.subarray(offset + 512, offset + 512 + size);
-            writeFileSync(dest, content);
-          }
-          offset += 512 + Math.ceil(size / 512) * 512;
+        try {
+          extractSkillPackage(pkgBuffer, pkgDir);
+        } catch (err) {
+          return { passed: false, failures: [`package extraction failed: ${err instanceof Error ? err.message : String(err)}`] };
         }
         skillTargetDir = pkgDir;
       } else {
@@ -259,7 +232,6 @@ import re
 import subprocess
 import sys
 
-SKIP_DIRS = {'.git', 'node_modules', '.venv', 'venv', '__pycache__', '.pytest_cache', '.mypy_cache', '.tox', '.github'}
 DOC_EXT = {'.md', '.rst', '.txt', '.adoc'}
 CONFIG_EXT = {'.js', '.mjs', '.cjs', '.ts', '.sh', '.json', '.yaml', '.yml', '.cfg', '.ini', '.toml', '.env'}
 METADATA_FILES = {'skill.yaml', 'pyproject.toml', 'setup.cfg', 'package.json', 'package-lock.json'}
@@ -290,7 +262,7 @@ MAX_RESULT_CHARS = 1000
 def rel_files(root):
     out = []
     for base, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        dirs.sort()
         for name in sorted(files):
             out.append(os.path.relpath(os.path.join(base, name), root).replace(os.sep, '/'))
     return out

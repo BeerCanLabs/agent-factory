@@ -69,9 +69,9 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
             sys.modules[spec.name] = module
             known = set(sys.modules)
             path_list, path_before = sys.path, list(sys.path)
+            sys.path.append(str(root_folder))
             if vendor_folder.is_dir() and root_folder in vendor_folder.parents:
                 sys.path.append(str(vendor_folder))
-            sys.path.append(str(root_folder))
             try:
                 spec.loader.exec_module(module)
             except BaseException:
