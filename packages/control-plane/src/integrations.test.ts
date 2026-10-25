@@ -105,8 +105,8 @@ describe('WebSocket event stream', () => {
   });
 });
 
-describe('a start that outlives a pause (TSK-274)', () => {
-  it('stops the task and fails the run instead of recording WORKING over an isolated agent', async () => {
+describe('a start that outlives an isolate (TSK-274)', () => {
+  it('stops the task and cancels the run instead of recording WORKING over an isolated agent', async () => {
     const { state } = setup();
     const stopped: Array<string | undefined> = [];
     state.runtime = {

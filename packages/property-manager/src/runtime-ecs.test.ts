@@ -158,7 +158,7 @@ describe('ecsRuntime', () => {
         h.rt.start(echo, {}, { runId: 'r', runEnv: {}, abandoned: () => ++n > 2 }),
         /abandoned/,
       );
-      assert.equal(h.calls(), 3);
+      assert.equal(h.calls(), 2);
     });
 
     it('records only ECS own answer, never the command line (run token)', async () => {

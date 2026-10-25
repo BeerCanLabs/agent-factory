@@ -402,14 +402,9 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
       return !now || now.state !== 'STARTING' || agent.state === 'PAUSED' || agent.state === 'ISOLATED';
     };
     startsInFlight.add(run.runId);
-    let handle: string | undefined;
-    try {
-      ({ handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv, abandoned }));
-    } finally {
-      startsInFlight.delete(run.runId);
-    }
+    const { handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv, abandoned });
     if (abandoned()) {
-      await state.runtime.stop(agent, handle).catch(() => undefined);
+      await state.runtime.stop(agent, handle).catch((e) => console.warn(`could not stop the abandoned task of run ${run.runId}: ${e instanceof Error ? e.message : e}`));
       const now = state.runs.get(run.runId);
       if (now && !isTerminal(now.state)) {
         return finishRun(state, run.runId, 'CANCELLED', {
@@ -424,10 +419,13 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
     // The run token is never recorded: a CLI failure message can carry the whole command line.
     const message = (err instanceof Error ? err.message : String(err)).split(runToken).join('[redacted]');
     const now = state.runs.get(run.runId);
-    if (now && !isTerminal(now.state) && (agent.state === 'PAUSED' || agent.state === 'ISOLATED')) {
+    if (now && !isTerminal(now.state) && message.startsWith('RunTask abandoned')) {
       return finishRun(state, run.runId, 'CANCELLED', { actor: SYSTEM.runtime, error: `start abandoned: ${message}` });
     }
     return finishRun(state, run.runId, 'FAILED', { actor: SYSTEM.runtime, error: `start failed: ${message}` });
+  } finally {
+    // After the abandon handling too, so the reconciler cannot reap the run while its task is being stopped.
+    startsInFlight.delete(run.runId);
   }
   agent.state = 'WORKING';
   record(state, cur, 'RUN_STARTED', run.actor);
