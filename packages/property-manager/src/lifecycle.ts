@@ -369,8 +369,16 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
 
   let cur = state.runs.update(run.runId, { state: 'STARTING' });
   // P1: a started task is not a ready agent. Presence shows starting now and available only on markRunReady.
-  await notifyGatekeeperIngress(state, agent.id, 'starting');
-  const runToken = await state.runTokens.mint(run);
+  // In flight from here: the notification and the token mint can take seconds, and the reconciler must not reap the run.
+  startsInFlight.add(run.runId);
+  let runToken: string;
+  try {
+    await notifyGatekeeperIngress(state, agent.id, 'starting');
+    runToken = await state.runTokens.mint(run);
+  } catch (e) {
+    startsInFlight.delete(run.runId);
+    throw e;
+  }
   // M2: a run is pinned only if a caller requested it (run.model). If unpinned, inject policy's primary model
   // (or factory default) as FACTORY_MODEL into the container environment without mutating run.model, so Gatekeeper
   // Egress leaves pinnedModel unset and honors multi-model policy allowlists.
@@ -401,7 +409,6 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
       const now = state.runs.get(run.runId);
       return !now || now.state !== 'STARTING' || agent.state === 'PAUSED' || agent.state === 'ISOLATED';
     };
-    startsInFlight.add(run.runId);
     const { handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv, abandoned });
     if (abandoned()) {
       await state.runtime.stop(agent, handle).catch((e) => console.warn(`could not stop the abandoned task of run ${run.runId}: ${e instanceof Error ? e.message : e}`));
@@ -420,7 +427,7 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
     const message = (err instanceof Error ? err.message : String(err)).split(runToken).join('[redacted]');
     const now = state.runs.get(run.runId);
     if (now && !isTerminal(now.state) && message.startsWith('RunTask abandoned')) {
-      return finishRun(state, run.runId, 'CANCELLED', { actor: SYSTEM.runtime, error: `start abandoned: ${message}` });
+      return finishRun(state, run.runId, 'CANCELLED', { actor: SYSTEM.runtime, error: message });
     }
     return finishRun(state, run.runId, 'FAILED', { actor: SYSTEM.runtime, error: `start failed: ${message}` });
   } finally {

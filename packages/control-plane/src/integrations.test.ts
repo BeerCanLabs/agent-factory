@@ -131,6 +131,21 @@ describe('a start that outlives an isolate (TSK-274)', () => {
 });
 
 describe('a start that waits for a new agent task role (TSK-274)', () => {
+  it('records CANCELLED, not FAILED, when the runtime abandons its own start', async () => {
+    const { state } = setup();
+    state.runtime = {
+      ...noopRuntime(),
+      async start(_a: unknown, _s: unknown, ctx: { abandoned?: () => boolean }) {
+        state.agents.get('echo-agent')!.state = 'PAUSED';
+        assert.ok(ctx.abandoned?.());
+        throw new Error('RunTask abandoned: the run was cancelled or the agent paused while waiting for its task role');
+      },
+    } as typeof state.runtime;
+    const run = (await createRun(state, 'echo-agent', { actor: 'token:x', trigger: 'api' })).body as { state: string; error?: string };
+    assert.equal(run.state, 'CANCELLED');
+    assert.match(run.error ?? '', /RunTask abandoned/);
+  });
+
   it('is not reaped as lost by the reconciler while its start is in flight', async () => {
     const { state } = setup();
     let release!: () => void;
