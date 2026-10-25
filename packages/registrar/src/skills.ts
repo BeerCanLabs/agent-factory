@@ -19,6 +19,8 @@ export type SkillChecks = 'pending-build' | 'passed' | 'failed';
 export type SkillVersionRecord = {
   id: string;
   version: string;
+  /** A4: The package hash is the pin. SHA256 of the uploaded gzip tarball. */
+  packageHash?: string;
   repo: string;
   /** The skill's folder inside the repository; `.` is the repository root. */
   path: string;
@@ -91,7 +93,7 @@ export type SkillSummary = {
   versions: Array<
     Pick<
       SkillVersionRecord,
-      'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'checkRun' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt' | 'reason' | 'revoked' | 'retired' | 'retiredBy' | 'retiredAt' | 'retiredReason'
+      'version' | 'status' | 'packageHash' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'checkRun' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt' | 'reason' | 'revoked' | 'retired' | 'retiredBy' | 'retiredAt' | 'retiredReason'
     >
   >;
 };

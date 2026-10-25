@@ -60,6 +60,7 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
             # the modules it brought, so two skills never share a module and one cannot replace another's. Standard library
             # only otherwise: nothing is installed for a skill (docs/SKILLS.md).
             root_folder = folder.resolve()
+            vendor_folder = (root_folder / "vendor").resolve()
             name = f"skill_{sid.replace('-', '_')}"
             spec = importlib.util.spec_from_file_location(name, target, submodule_search_locations=[str(target.parent)] if target.name == "__init__.py" else None)
             if spec is None or spec.loader is None:
@@ -68,6 +69,8 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
             sys.modules[spec.name] = module
             known = set(sys.modules)
             path_list, path_before = sys.path, list(sys.path)
+            if vendor_folder.is_dir() and root_folder in vendor_folder.parents:
+                sys.path.append(str(vendor_folder))
             sys.path.append(str(root_folder))
             try:
                 spec.loader.exec_module(module)
@@ -91,7 +94,7 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
                 sys.path = path_list
                 path_list[:] = path_before
                 importlib.invalidate_caches()
-                for place in [k for k in sys.path_importer_cache if k == str(root_folder) or k.startswith(str(root_folder) + os.sep)]:
+                for place in [k for k in sys.path_importer_cache if k == str(root_folder) or k.startswith(str(root_folder) + os.sep) or (vendor_folder.is_dir() and (k == str(vendor_folder) or k.startswith(str(vendor_folder) + os.sep)))]:
                     del sys.path_importer_cache[place]
             for t in module.tools():
                 name = str(t["name"])

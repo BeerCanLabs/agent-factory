@@ -1,10 +1,10 @@
 # A fixture skill for the deployment's end-to-end check of agents created from a configuration (TSK-272): it has one tool
 # that returns a code no model could know, so an agent can only say the code if the skill is in its image and was called.
 # It needs no route and no credential, and does nothing else.
+spec: 1
 id: e2e-ping
 version: 1.0.0
 name: E2E ping
 description: Returns a fixed check code, so an end-to-end test can tell the skill was installed and called.
 language: python
 entry: e2e_ping
-visibility: public

@@ -29,6 +29,13 @@ export const skillCredentialSchema = z
   })
   .strict();
 
+export const skillSourceSchema = z
+  .object({
+    repo: z.string().optional(),
+    commit: z.string().optional(),
+  })
+  .strict();
+
 export const skillRequiresSchema = z
   .object({
     routes: z.array(z.string().min(1)).default([]),
@@ -65,6 +72,7 @@ export const skillActionSchema = z
 
 export const skillManifestSchema = z
   .object({
+    spec: z.literal(1).optional(),
     id: z.string().max(64).regex(SKILL_ID, 'skill id must be kebab-case (e.g. discord-progress)'),
     version: z.string().max(64).regex(SEMVER, 'version must be a semantic version (e.g. 1.2.0)'),
     name: z.string().min(1),
@@ -74,8 +82,9 @@ export const skillManifestSchema = z
       .string()
       .min(1)
       .refine((e) => !e.startsWith('/') && !e.split(/[\\/]/).includes('..'), 'entry must be a module or a path inside the skill'),
-    visibility: z.enum(SKILL_VISIBILITIES).default('public'),
+    visibility: z.enum(SKILL_VISIBILITIES).optional(),
     owner: z.string().max(64).regex(SKILL_OWNER, 'owner must be an agent id (lowercase letters, digits, - and _)').optional(),
+    source: skillSourceSchema.optional(),
     requires: skillRequiresSchema.default({}),
     actions: z.array(skillActionSchema).default([]),
   })
@@ -85,18 +94,43 @@ export type SkillManifest = z.infer<typeof skillManifestSchema>;
 export type SkillAction = z.infer<typeof skillActionSchema>;
 export type SkillRequires = z.infer<typeof skillRequiresSchema>;
 export type SkillCredential = z.infer<typeof skillCredentialSchema>;
+export type SkillSourceRecord = z.infer<typeof skillSourceSchema>;
 
 export type SkillIssue = { path: string; message: string };
 export type SkillValidation = { ok: true; manifest: SkillManifest } | { ok: false; issues: SkillIssue[] };
 
-/** Validates a parsed `skill.yaml` against the schema, filling defaults (public, and an absent `requires` or `actions` list is empty). */
+/** Validates a parsed `skill.yaml` against the schema, filling defaults (public for legacy, and an absent `requires` or `actions` list is empty). */
 export function validateSkillManifest(raw: unknown): SkillValidation {
   const parsed = skillManifestSchema.safeParse(raw);
-  if (parsed.success) return { ok: true, manifest: parsed.data };
-  return {
-    ok: false,
-    issues: parsed.error.issues.map((i) => ({ path: i.path.length ? i.path.join('.') : '(root)', message: i.message })),
-  };
+  if (!parsed.success) {
+    return {
+      ok: false,
+      issues: parsed.error.issues.map((i) => ({ path: i.path.length ? i.path.join('.') : '(root)', message: i.message })),
+    };
+  }
+
+  const manifest = parsed.data;
+  const rawObj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  const issues: SkillIssue[] = [];
+
+  if (manifest.spec === 1) {
+    if (manifest.language !== 'python') {
+      issues.push({ path: 'language', message: 'skills are Python only (H11)' });
+    }
+    if ('visibility' in rawObj && rawObj.visibility !== undefined) {
+      issues.push({ path: 'visibility', message: 'a spec: 1 manifest drops visibility; visibility is replaced by publication (A22)' });
+    }
+    if ('owner' in rawObj && rawObj.owner !== undefined) {
+      issues.push({ path: 'owner', message: 'a spec: 1 manifest drops owner; ownership comes from registration (A22)' });
+    }
+  } else {
+    if (!manifest.visibility) {
+      manifest.visibility = 'public';
+    }
+  }
+
+  if (issues.length > 0) return { ok: false, issues };
+  return { ok: true, manifest };
 }
 
 /** A gatekeeper-egress route id or a factory model name: a plain name, never a host, URL, port or provider path. */
@@ -156,11 +190,13 @@ export function skillDesignIssues(manifest: SkillManifest, opts: SkillDesignOpti
   dupes(manifest.requires.credentials.map((c) => c.name), 'requires.credentials');
   dupes(manifest.requires.connections.map((c) => c.provider), 'requires.connections');
 
-  if (manifest.visibility === 'private' && !manifest.owner) {
-    issues.push({ path: 'owner', message: 'a private skill must name its owner agent (SK1)' });
-  }
-  if (manifest.visibility === 'public' && manifest.owner) {
-    issues.push({ path: 'owner', message: `a public skill has no owner; "${manifest.owner}" is named, so declare visibility: private or drop owner (SK1)` });
+  if (manifest.spec !== 1) {
+    if (manifest.visibility === 'private' && !manifest.owner) {
+      issues.push({ path: 'owner', message: 'a private skill must name its owner agent (SK1)' });
+    }
+    if (manifest.visibility === 'public' && manifest.owner) {
+      issues.push({ path: 'owner', message: `a public skill has no owner; "${manifest.owner}" is named, so declare visibility: private or drop owner (SK1)` });
+    }
   }
 
   const routes = new Set(manifest.requires.routes);

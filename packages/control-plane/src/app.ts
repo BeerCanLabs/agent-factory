@@ -29,6 +29,7 @@ import {
   type CommitResolver,
   type ConfigStore,
   type SkillChecker,
+  type SkillPackageStore,
   type SkillSource,
 } from '@beercanlabs/factory-registrar';
 import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
@@ -117,6 +118,11 @@ export type FactoryState = {
   policies: PolicyStore;
   /** §6.14 SK3: every agent's versioned deployment configuration, held in memory and written through on change. */
   configs?: ConfigStore;
+  /**
+   * §6.14 SK1, SK6, TSK-276: store for skill package tarballs (`SkillPackageStore`).
+   * Backed by file or S3 (landing zone); tests use `MemorySkillPackageStore`.
+   */
+  skillPackageStore?: SkillPackageStore;
   /**
    * §6.14 SK1: runs the factory's checks on a registered skill version's code. Unset: chosen from the environment
    * (the Registrar's `skillCheckerFromEnv`); null: none.
@@ -254,10 +260,22 @@ export async function requirePrivilege(
     json(res, 401, { error: 'unauthorized' });
     return null;
   }
+  let ownsAnyAgent: boolean | undefined;
+  if (privilege === 'skills.register') {
+    const actorLower = result.principal.actor.toLowerCase();
+    const candidateIds = new Set([
+      ...(state.configs?.agentIds() ?? []),
+      ...state.agents.keys(),
+    ]);
+    ownsAnyAgent = Array.from(candidateIds).some((id) =>
+      ownersOf(state, id).some((o) => o.toLowerCase() === actorLower),
+    );
+  }
   const decision = authorize({
     principal: result.principal,
     privilege,
     ...(resource ? { resource: { agentId: resource.agentId, owners: ownersOf(state, resource.agentId) } } : {}),
+    ...(ownsAnyAgent !== undefined ? { ownsAnyAgent } : {}),
   });
   if (!decision.allowed) {
     json(res, 403, { error: 'forbidden', required: decision.required });

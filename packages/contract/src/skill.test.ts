@@ -87,4 +87,50 @@ describe('skill manifest: visibility, owner and actions (SK1, SK2)', () => {
     const dup = skillDesignIssues(parse({ requires: { routes: ['discord'] }, actions: [post, { ...post, method: 'PUT' }] }));
     assert.ok(dup.some((i) => i.path === 'actions' && /more than once/.test(i.message)));
   });
+
+  it('spec: 1 packages accept optional source and require python (A1, A3, H11)', () => {
+    const r = validateSkillManifest({
+      ...base,
+      spec: 1,
+      source: { repo: 'https://github.com/BeerCanLabs/skill-demo', commit: '1111111111111111111111111111111111111111' },
+    });
+    assert.ok(r.ok);
+    if (r.ok) {
+      assert.equal(r.manifest.spec, 1);
+      assert.equal(r.manifest.visibility, undefined);
+      assert.equal(r.manifest.source?.repo, 'https://github.com/BeerCanLabs/skill-demo');
+    }
+
+    const nonPython = validateSkillManifest({
+      ...base,
+      spec: 1,
+      language: 'node',
+    });
+    assert.ok(!nonPython.ok);
+    if (!nonPython.ok) {
+      assert.ok(nonPython.issues.some((i) => i.path === 'language' && /Python only/.test(i.message)));
+    }
+  });
+
+  it('spec: 1 manifests refuse visibility and owner fields (A22)', () => {
+    const withVis = validateSkillManifest({
+      ...base,
+      spec: 1,
+      visibility: 'public',
+    });
+    assert.ok(!withVis.ok);
+    if (!withVis.ok) {
+      assert.ok(withVis.issues.some((i) => i.path === 'visibility' && /drops visibility/.test(i.message)));
+    }
+
+    const withOwner = validateSkillManifest({
+      ...base,
+      spec: 1,
+      owner: 'nova',
+    });
+    assert.ok(!withOwner.ok);
+    if (!withOwner.ok) {
+      assert.ok(withOwner.issues.some((i) => i.path === 'owner' && /drops owner/.test(i.message)));
+    }
+  });
 });

@@ -12,7 +12,7 @@ const ROLE_ORDER: readonly Role[] = ['viewer', 'operator', 'approver', 'ingest',
  */
 export type AuthorizeResource = { agentId: string; owners: readonly string[]; requester?: { actor?: string }; memberRoles?: readonly string[] };
 
-export type AuthorizeRequest = { principal: Principal; privilege: Privilege; resource?: AuthorizeResource };
+export type AuthorizeRequest = { principal: Principal; privilege: Privilege; resource?: AuthorizeResource; ownsAnyAgent?: boolean };
 export type AuthorizeResult = { allowed: true } | { allowed: false; required: Role };
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
@@ -26,10 +26,13 @@ const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCas
  * agent-scoped privilege: `agent-owner` when the caller is one of the agent's owners, `requester` when the caller is
  * the run's requesting user, and `agent-member` when the caller holds a role on this agent (E12). An owner decides
  * (`approvals.decide`) only when the run has no requesting user.
+ *
+ * A8: `skills.register` is fleet-wide, held by admin and by anyone who owns any agent (`ownsAnyAgent`).
  */
 export function authorize(req: AuthorizeRequest): AuthorizeResult {
-  const { principal, privilege, resource } = req;
+  const { principal, privilege, resource, ownsAnyAgent } = req;
   if (principal.roles.some((r) => ROLE_PRIVILEGES[r]?.includes(privilege))) return { allowed: true };
+  if (privilege === 'skills.register' && ownsAnyAgent === true) return { allowed: true };
   if (resource && AGENT_SCOPED.has(privilege)) {
     const actor = principal.actor;
     const owner =

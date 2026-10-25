@@ -446,7 +446,14 @@ phases:
             return data.decode('utf-8', errors='replace')
 
 
+        def is_vendor(rel):
+            parts = rel.split('/')
+            return parts[0] == 'vendor' or any(p == 'vendor' for p in parts[:-1])
+
+
         def is_test(rel):
+            if is_vendor(rel):
+                return False
             parts = rel.split('/')
             name = parts[-1]
             return any(p in ('test', 'tests', 'testing') for p in parts[:-1]) or name.startswith('test_') or name.endswith('_test.py') or name == 'conftest.py'
@@ -538,7 +545,7 @@ phases:
                     failures.append('build: %s:%s does not parse as Python (%s)' % (rel, e.lineno, e.msg))
                     continue
                 docs = docstring_nodes(tree)
-                exempt = is_test(rel) or is_doc(rel)
+                exempt = is_test(rel) or is_doc(rel) or is_vendor(rel)
                 for node in ast.walk(tree):
                     for name in module_of(node):
                         sdk = sdk_of(name)
@@ -554,7 +561,7 @@ phases:
         def check_other_hosts(root, files, failures):
             for rel in files:
                 name = rel.split('/')[-1]
-                if rel.endswith('.py') or name in METADATA_FILES or is_test(rel) or is_doc(rel):
+                if rel.endswith('.py') or name in METADATA_FILES or is_test(rel) or is_doc(rel) or is_vendor(rel):
                     continue
                 if os.path.splitext(name)[1].lower() not in CONFIG_EXT:
                     continue
@@ -574,6 +581,8 @@ phases:
 
         def check_dependencies(root, files, failures):
             for rel in files:
+                if is_vendor(rel):
+                    continue
                 name = rel.split('/')[-1]
                 deps = []
                 if re.match(r'^requirements.*\.(txt|in)$', name):
@@ -765,21 +774,16 @@ phases:
             if sys.version_info < (3, 11):
                 failures.append('tests: Python 3.11 or later is required (the check ran %d.%d)' % sys.version_info[:2])
                 return
-            reqs = [f for f in ('requirements.txt', 'requirements-dev.txt', 'requirements-test.txt') if f in files]
             pytest = has_pytest_config(root, files)
             python = sys.executable
             env = test_env()
-            if reqs or pytest:
-                import venv as venvlib
-                venvlib.create(venv, with_pip=True, clear=True)
-                python = os.path.join(venv, 'bin', 'python')
-                for req in reqs:
-                    if run([python, '-m', 'pip', 'install', '-q', '-r', req], root, env)[0] != 0:
-                        failures.append('build: pip could not install %s' % req)
-                        return
-                if pytest and run([python, '-m', 'pip', 'install', '-q', 'pytest'], root, env)[0] != 0:
-                    failures.append('build: pip could not install pytest')
-                    return
+            vendor = os.path.join(root, 'vendor')
+            pp = [root]
+            if os.path.isdir(vendor):
+                pp.append(vendor)
+            if env.get('PYTHONPATH'):
+                pp.append(env['PYTHONPATH'])
+            env['PYTHONPATH'] = os.pathsep.join(pp)
             code, out = run([python, '-m', 'unittest', 'discover', '-v'], root, env)
             ran = re.search(r'^Ran (\d+) tests?', out, re.MULTILINE)
             if ran is None or int(ran.group(1)) == 0:
@@ -788,7 +792,7 @@ phases:
             elif code != 0:
                 failures.append('tests: python -m unittest discover failed (%s)' % summary(out))
             if pytest:
-                code, out = run([python, '-m', 'pytest', '-q'], root, env)
+                code, out = run([python, '-m', 'pytest', '--ignore=vendor', '-q'], root, env)
                 if code == 5:
                     failures.append('tests: pytest is configured but collected no tests')
                 elif code != 0:

@@ -19,7 +19,7 @@ trap 'rm -rf "$WORK"' EXIT
 rm -rf "$OUT"
 mkdir -p "$OUT/skills" || exit 5
 
-# Check the pins as data, then list them one per line: id, version, repo, path, commit (tab separated).
+# Check the pins as data, then list them one per line: kind, id, version, a, b, c (tab separated).
 LIST="$(python3 - <<'PY'
 import json, os, re, sys
 
@@ -35,25 +35,40 @@ if not isinstance(skills, list) or not skills:
     refuse("SKILLS is not a non-empty list")
 seen = set()
 for s in skills:
-    if not isinstance(s, dict) or set(s) != {"id", "version", "repo", "path", "commit"}:
-        refuse("a skill pin has the wrong keys")
-    if not all(isinstance(v, str) for v in s.values()):
-        refuse("a skill pin has a value that is not a string")
-    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", s["id"]) or len(s["id"]) > 64:
+    if not isinstance(s, dict):
+        refuse("a skill pin is not an object")
+    sid = str(s.get("id", ""))
+    sversion = str(s.get("version", ""))
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", sid) or len(sid) > 64:
         refuse("a skill id is not kebab-case")
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?", s["version"]):
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?", sversion):
         refuse("a skill version is not a semantic version")
-    if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9._~/-]+", s["repo"]):
-        refuse("a skill repository is not a plain https URL without credentials")
-    if not re.fullmatch(r"[0-9a-f]{40}", s["commit"]):
-        refuse("a skill commit is not a full SHA")
-    p = s["path"]
-    if p != "." and (p.startswith("/") or ".." in p.split("/") or not re.fullmatch(r"[A-Za-z0-9._/-]+", p)):
-        refuse("a skill path leaves its repository")
-    if s["id"] in seen:
-        refuse("a skill is listed twice")
-    seen.add(s["id"])
-    print("\t".join([s["id"], s["version"], s["repo"], s["path"], s["commit"]]))
+    if "packageHash" in s:
+        if set(s) != {"id", "version", "packageHash"}:
+            refuse("a skill package pin has the wrong keys")
+        pkg_hash = str(s["packageHash"])
+        if not re.fullmatch(r"[0-9a-f]{64}", pkg_hash):
+            refuse("a skill packageHash is not a full 64-character SHA256")
+        if sid in seen:
+            refuse("a skill is listed twice")
+        seen.add(sid)
+        print("\t".join(["PACKAGE", sid, sversion, pkg_hash, "", ""]))
+    else:
+        if set(s) != {"id", "version", "repo", "path", "commit"}:
+            refuse("a skill pin has the wrong keys")
+        if not all(isinstance(v, str) for v in s.values()):
+            refuse("a skill pin has a value that is not a string")
+        if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9._~/-]+", s["repo"]):
+            refuse("a skill repository is not a plain https URL without credentials")
+        if not re.fullmatch(r"[0-9a-f]{40}", s["commit"]):
+            refuse("a skill commit is not a full SHA")
+        p = s["path"]
+        if p != "." and (p.startswith("/") or ".." in p.split("/") or not re.fullmatch(r"[A-Za-z0-9._/-]+", p)):
+            refuse("a skill path leaves its repository")
+        if sid in seen:
+            refuse("a skill is listed twice")
+        seen.add(sid)
+        print("\t".join(["REPO", sid, sversion, s["repo"], s["path"], s["commit"]]))
 PY
 )" || exit 5
 
@@ -61,31 +76,57 @@ PY
 KNOWN='github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|ntn_[A-Za-z0-9]{30,}|secret_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
 GENERIC='(secret|password|passwd|api_?key|token|client_secret)[A-Za-z0-9_]*["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_/+=.-]{20,}["'"'"']'
 
-while IFS=$'\t' read -r id version repo path commit; do
-  [ -n "$id" ] || continue
-  echo "skill $id@$version from $repo at ${commit:0:12}"
+while IFS=$'\t' read -r kind id version a b c; do
+  [ -n "$kind" ] || continue
+  if [ "$kind" = "PACKAGE" ]; then
+    pkg_hash="$a"
+    echo "skill $id@$version from package ${pkg_hash:0:12}"
+    tarball=""
+    if [ -n "${SKILL_PACKAGES_DIR:-}" ] && [ -f "${SKILL_PACKAGES_DIR}/${pkg_hash}.tar.gz" ]; then
+      tarball="${SKILL_PACKAGES_DIR}/${pkg_hash}.tar.gz"
+    elif [ -n "${SKILL_PACKAGES_S3_URI:-}" ]; then
+      tarball="$WORK/${pkg_hash}.tar.gz"
+      aws s3 cp "${SKILL_PACKAGES_S3_URI%/}/${pkg_hash}.tar.gz" "$tarball" >/dev/null 2>&1 || { echo "cannot download package ${pkg_hash} from S3"; exit 5; }
+    fi
+    if [ -z "$tarball" ] || [ ! -f "$tarball" ]; then
+      echo "cannot find package tarball for ${pkg_hash}"; exit 5
+    fi
+    computed_hash="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$tarball")"
+    if [ "$computed_hash" != "$pkg_hash" ]; then
+      echo "package checksum mismatch for ${pkg_hash} (got ${computed_hash})"; exit 5
+    fi
+    folder="$WORK/pkg_$id"
+    mkdir -p "$folder" || exit 5
+    tar -xzf "$tarball" -C "$folder" || { echo "cannot extract package ${pkg_hash}"; exit 5; }
+    [ -f "$folder/skill.yaml" ] || { echo "no skill.yaml in package $id@$version"; exit 5; }
+  else
+    repo="$a"
+    path="$b"
+    commit="$c"
+    echo "skill $id@$version from $repo at ${commit:0:12}"
 
-  # The source token goes only to an allowed source host, as for the agent's own clone.
-  AUTH=()
-  host="$(printf '%s' "$repo" | sed -E 's#^https://([^/@:]+).*#\1#' | tr 'A-Z' 'a-z')"
-  allowed=""
-  for h in ${SOURCE_TOKEN_HOSTS:-}; do [ "$host" = "$h" ] && allowed=1; done
-  if [ -n "${GIT_TOKEN_SECRET_ID:-}" ] && [ -n "$allowed" ]; then
-    GIT_TOKEN="$(aws secretsmanager get-secret-value --secret-id "$GIT_TOKEN_SECRET_ID" --query SecretString --output text)" || exit 5
-    AUTH=(-c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 | tr -d '\n')")
-    unset GIT_TOKEN
+    # The source token goes only to an allowed source host, as for the agent's own clone.
+    AUTH=()
+    host="$(printf '%s' "$repo" | sed -E 's#^https://([^/@:]+).*#\1#' | tr 'A-Z' 'a-z')"
+    allowed=""
+    for h in ${SOURCE_TOKEN_HOSTS:-}; do [ "$host" = "$h" ] && allowed=1; done
+    if [ -n "${GIT_TOKEN_SECRET_ID:-}" ] && [ -n "$allowed" ]; then
+      GIT_TOKEN="$(aws secretsmanager get-secret-value --secret-id "$GIT_TOKEN_SECRET_ID" --query SecretString --output text)" || exit 5
+      AUTH=(-c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 | tr -d '\n')")
+      unset GIT_TOKEN
+    fi
+
+    clone="$WORK/$id"
+    GIT_TERMINAL_PROMPT=0 git ${AUTH[@]+"${AUTH[@]}"} clone --no-checkout -- "$repo" "$clone" >/dev/null 2>&1 || { echo "cannot clone $repo"; exit 5; }
+    unset AUTH
+    ( cd "$clone" && git checkout --detach "$commit" >/dev/null 2>&1 && [ "$(git rev-parse HEAD)" = "$commit" ] ) || { echo "$repo has no commit $commit"; exit 5; }
+
+    # The skill's folder, resolved: it must stay inside the clone (a symlinked folder would copy the build host's files).
+    root="$(cd "$clone" && pwd -P)"
+    folder="$(cd "$clone/$path" 2>/dev/null && pwd -P)" || { echo "$path is not a folder in $repo"; exit 5; }
+    case "$folder" in "$root"|"$root"/*) ;; *) echo "$path leaves the repository"; exit 5 ;; esac
+    [ -f "$folder/skill.yaml" ] || { echo "no skill.yaml in $path"; exit 5; }
   fi
-
-  clone="$WORK/$id"
-  GIT_TERMINAL_PROMPT=0 git ${AUTH[@]+"${AUTH[@]}"} clone --no-checkout -- "$repo" "$clone" >/dev/null 2>&1 || { echo "cannot clone $repo"; exit 5; }
-  unset AUTH
-  ( cd "$clone" && git checkout --detach "$commit" >/dev/null 2>&1 && [ "$(git rev-parse HEAD)" = "$commit" ] ) || { echo "$repo has no commit $commit"; exit 5; }
-
-  # The skill's folder, resolved: it must stay inside the clone (a symlinked folder would copy the build host's files).
-  root="$(cd "$clone" && pwd -P)"
-  folder="$(cd "$clone/$path" 2>/dev/null && pwd -P)" || { echo "$path is not a folder in $repo"; exit 5; }
-  case "$folder" in "$root"|"$root"/*) ;; *) echo "$path leaves the repository"; exit 5 ;; esac
-  [ -f "$folder/skill.yaml" ] || { echo "no skill.yaml in $path"; exit 5; }
 
   # The folder at the pin must be the skill that was approved: same id and version.
   python3 - "$folder/skill.yaml" "$id" "$version" <<'PY' || { echo "skill.yaml at the pin is not $id@$version"; exit 5; }
@@ -98,7 +139,11 @@ sys.exit(0 if top("id") == sys.argv[2] and top("version") == sys.argv[3] else 1)
 PY
 
   # K1: no credential in the skill's code (file:line only, never the value).
-  HITS="$(cd "$folder" && git ls-files -z -- . | xargs -0 grep -nIE -i -- "$KNOWN|$GENERIC" 2>/dev/null | grep -v 'secret-scan:allow' | grep -E -- "$KNOWN|[\"'][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[\"']|[\"'][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[\"']" | grep -vE '(example|EXAMPLE|placeholder|your[-_]|changeme|<[a-z_]+>)' | cut -d: -f1,2 | sort -u)"
+  if ( cd "$folder" && git rev-parse --is-inside-work-tree >/dev/null 2>&1 ); then
+    HITS="$(cd "$folder" && git ls-files -z -- . | xargs -0 grep -nIE -i -- "$KNOWN|$GENERIC" 2>/dev/null | grep -v 'secret-scan:allow' | grep -E -- "$KNOWN|[\"'][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[\"']|[\"'][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[\"']" | grep -vE '(example|EXAMPLE|placeholder|your[-_]|changeme|<[a-z_]+>)' | cut -d: -f1,2 | sort -u)"
+  else
+    HITS="$(cd "$folder" && find . -type f -print0 | xargs -0 grep -nIE -i -- "$KNOWN|$GENERIC" 2>/dev/null | grep -v 'secret-scan:allow' | grep -E -- "$KNOWN|[\"'][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[\"']|[\"'][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[\"']" | grep -vE '(example|EXAMPLE|placeholder|your[-_]|changeme|<[a-z_]+>)' | cut -d: -f1,2 | sort -u)"
+  fi
   if [ -n "$HITS" ]; then echo "ADMISSION REFUSED (hardcoded_secret) in skill $id:"; echo "$HITS"; exit 6; fi
 
   mkdir -p "$OUT/skills/$id" || exit 5

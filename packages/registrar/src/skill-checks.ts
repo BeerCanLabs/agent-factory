@@ -27,16 +27,26 @@
  * `pending-build` until a checker is configured.
  */
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { promisify } from 'node:util';
+import zlib from 'node:zlib';
 import type { SkillManifest } from '@beercanlabs/factory-contract';
+import type { SkillPackageStore } from './package-store.js';
 
 const execFileAsync = promisify(execFile);
 
 /** One skill version to check: the pin and the manifest it was registered with. */
-export type SkillCheckRequest = { id: string; version: string; repo: string; path: string; commit: string; manifest: SkillManifest };
+export type SkillCheckRequest = {
+  id: string;
+  version: string;
+  repo?: string;
+  path?: string;
+  commit?: string;
+  packageHash?: string;
+  manifest: SkillManifest;
+};
 
 export type SkillCheckOutcome = { passed: boolean; failures: string[] };
 
@@ -84,9 +94,10 @@ export function skillCheckEnv(req: SkillCheckRequest): Record<string, string> {
   return {
     SKILL_ID: req.id,
     SKILL_VERSION: req.version,
-    REPO_URL: req.repo,
-    GIT_COMMIT: req.commit,
-    SKILL_PATH: req.path,
+    ...(req.repo ? { REPO_URL: req.repo } : {}),
+    ...(req.commit ? { GIT_COMMIT: req.commit } : {}),
+    ...(req.path ? { SKILL_PATH: req.path } : {}),
+    ...(req.packageHash ? { PACKAGE_HASH: req.packageHash } : {}),
     SKILL_MANIFEST_B64: manifestB64(req.manifest),
   };
 }
@@ -119,7 +130,7 @@ export function fakeSkillChecker(outcome: (req: SkillCheckRequest) => SkillCheck
  * the skill's folder. For development, not production: it runs the skill's tests in the control plane's own
  * environment. Runs live in memory, so a restart loses them (re-run the checks).
  */
-export function localSkillChecker(opts: { python?: string; git?: string; timeoutMs?: number } = {}): SkillChecker {
+export function localSkillChecker(opts: { python?: string; git?: string; timeoutMs?: number; packageStore?: SkillPackageStore } = {}): SkillChecker {
   const runs = new Map<string, Promise<SkillCheckOutcome>>();
   const python = opts.python ?? 'python3';
   const git = opts.git ?? 'git';
@@ -130,19 +141,65 @@ export function localSkillChecker(opts: { python?: string; git?: string; timeout
     const work = mkdtempSync(join(tmpdir(), 'skill-check-'));
     const env = { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', GIT_TERMINAL_PROMPT: '0' };
     try {
-      const repoDir = join(work, 'repo');
-      try {
-        await execFileAsync(git, ['clone', '--no-checkout', '--quiet', '--', req.repo, repoDir], { env, timeout });
-        await execFileAsync(git, ['-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--detach', req.commit], { cwd: repoDir, env, timeout });
-        const { stdout } = await execFileAsync(git, ['rev-parse', 'HEAD'], { cwd: repoDir, env, encoding: 'utf8' });
-        if (stdout.trim() !== req.commit) throw new Error('checked out a different commit');
-      } catch {
-        return { passed: false, failures: [`source: could not fetch ${req.repo} at ${req.commit}`] };
+      let skillTargetDir: string;
+      if (req.packageHash && opts.packageStore) {
+        const pkgBuffer = await opts.packageStore.get(req.packageHash);
+        if (!pkgBuffer) {
+          return { passed: false, failures: [`package: package bytes not found for hash ${req.packageHash}`] };
+        }
+        const pkgDir = join(work, 'pkg');
+        mkdirSync(pkgDir, { recursive: true });
+        const tar = zlib.gunzipSync(pkgBuffer);
+        let offset = 0;
+        while (offset + 512 <= tar.length) {
+          const block = tar.subarray(offset, offset + 512);
+          if (block.every((b) => b === 0)) {
+            offset += 512;
+            continue;
+          }
+          let nameEnd = block.indexOf(0, 0);
+          if (nameEnd === -1 || nameEnd > 100) nameEnd = 100;
+          const namePart = block.subarray(0, nameEnd).toString('utf8');
+          let prefixPart = '';
+          const magic = block.subarray(257, 263).toString('ascii');
+          if (magic.startsWith('ustar')) {
+            let prefixEnd = block.indexOf(0, 345);
+            if (prefixEnd === -1 || prefixEnd > 500) prefixEnd = 500;
+            if (prefixEnd > 345) prefixPart = block.subarray(345, prefixEnd).toString('utf8');
+          }
+          const rawPath = prefixPart ? `${prefixPart}/${namePart}` : namePart;
+          const cleanPath = rawPath.replace(/\/+$/, '');
+          const sizeStr = block.subarray(124, 136).toString('ascii').replace(/\0/g, '').trim();
+          const size = parseInt(sizeStr || '0', 8);
+          const typeflag = String.fromCharCode(block[156]);
+          if (cleanPath && (typeflag === '5' || rawPath.endsWith('/'))) {
+            mkdirSync(join(pkgDir, cleanPath), { recursive: true });
+          } else if (cleanPath && (typeflag === '0' || typeflag === '\0')) {
+            const dest = join(pkgDir, cleanPath);
+            mkdirSync(dirname(dest), { recursive: true });
+            const content = tar.subarray(offset + 512, offset + 512 + size);
+            writeFileSync(dest, content);
+          }
+          offset += 512 + Math.ceil(size / 512) * 512;
+        }
+        skillTargetDir = pkgDir;
+      } else {
+        const repoDir = join(work, 'repo');
+        try {
+          await execFileAsync(git, ['clone', '--no-checkout', '--quiet', '--', req.repo ?? '', repoDir], { env, timeout });
+          await execFileAsync(git, ['-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--detach', req.commit ?? 'HEAD'], { cwd: repoDir, env, timeout });
+          const { stdout } = await execFileAsync(git, ['rev-parse', 'HEAD'], { cwd: repoDir, env, encoding: 'utf8' });
+          if (stdout.trim() !== req.commit) throw new Error('checked out a different commit');
+        } catch {
+          return { passed: false, failures: [`source: could not fetch ${req.repo} at ${req.commit}`] };
+        }
+        skillTargetDir = join(repoDir, req.path ?? '.');
       }
+
       const script = join(work, 'skill_check.py');
       const out = join(work, 'result.json');
       writeFileSync(script, SKILL_CHECK_SCRIPT, 'utf8');
-      const args = [script, '--dir', join(repoDir, req.path), '--manifest-b64', manifestB64(req.manifest), '--venv', join(work, 'venv'), '--out', out];
+      const args = [script, '--dir', skillTargetDir, '--manifest-b64', manifestB64(req.manifest), '--venv', join(work, 'venv'), '--out', out];
       try {
         await execFileAsync(python, args, { env, timeout, maxBuffer: 16 * 1024 * 1024 });
       } catch (err) {
@@ -250,7 +307,14 @@ def read_text(root, rel):
     return data.decode('utf-8', errors='replace')
 
 
+def is_vendor(rel):
+    parts = rel.split('/')
+    return parts[0] == 'vendor' or any(p == 'vendor' for p in parts[:-1])
+
+
 def is_test(rel):
+    if is_vendor(rel):
+        return False
     parts = rel.split('/')
     name = parts[-1]
     return any(p in ('test', 'tests', 'testing') for p in parts[:-1]) or name.startswith('test_') or name.endswith('_test.py') or name == 'conftest.py'
@@ -342,7 +406,7 @@ def check_python(root, files, failures):
             failures.append('build: %s:%s does not parse as Python (%s)' % (rel, e.lineno, e.msg))
             continue
         docs = docstring_nodes(tree)
-        exempt = is_test(rel) or is_doc(rel)
+        exempt = is_test(rel) or is_doc(rel) or is_vendor(rel)
         for node in ast.walk(tree):
             for name in module_of(node):
                 sdk = sdk_of(name)
@@ -358,7 +422,7 @@ def check_python(root, files, failures):
 def check_other_hosts(root, files, failures):
     for rel in files:
         name = rel.split('/')[-1]
-        if rel.endswith('.py') or name in METADATA_FILES or is_test(rel) or is_doc(rel):
+        if rel.endswith('.py') or name in METADATA_FILES or is_test(rel) or is_doc(rel) or is_vendor(rel):
             continue
         if os.path.splitext(name)[1].lower() not in CONFIG_EXT:
             continue
@@ -378,6 +442,8 @@ def requirement_name(spec):
 
 def check_dependencies(root, files, failures):
     for rel in files:
+        if is_vendor(rel):
+            continue
         name = rel.split('/')[-1]
         deps = []
         if re.match(r'^requirements.*\.(txt|in)$', name):
@@ -569,21 +635,16 @@ def run_python_tests(root, files, venv, failures):
     if sys.version_info < (3, 11):
         failures.append('tests: Python 3.11 or later is required (the check ran %d.%d)' % sys.version_info[:2])
         return
-    reqs = [f for f in ('requirements.txt', 'requirements-dev.txt', 'requirements-test.txt') if f in files]
     pytest = has_pytest_config(root, files)
     python = sys.executable
     env = test_env()
-    if reqs or pytest:
-        import venv as venvlib
-        venvlib.create(venv, with_pip=True, clear=True)
-        python = os.path.join(venv, 'bin', 'python')
-        for req in reqs:
-            if run([python, '-m', 'pip', 'install', '-q', '-r', req], root, env)[0] != 0:
-                failures.append('build: pip could not install %s' % req)
-                return
-        if pytest and run([python, '-m', 'pip', 'install', '-q', 'pytest'], root, env)[0] != 0:
-            failures.append('build: pip could not install pytest')
-            return
+    vendor = os.path.join(root, 'vendor')
+    pp = [root]
+    if os.path.isdir(vendor):
+        pp.append(vendor)
+    if env.get('PYTHONPATH'):
+        pp.append(env['PYTHONPATH'])
+    env['PYTHONPATH'] = os.pathsep.join(pp)
     code, out = run([python, '-m', 'unittest', 'discover', '-v'], root, env)
     ran = re.search(r'^Ran (\d+) tests?', out, re.MULTILINE)
     if ran is None or int(ran.group(1)) == 0:
@@ -592,7 +653,7 @@ def run_python_tests(root, files, venv, failures):
     elif code != 0:
         failures.append('tests: python -m unittest discover failed (%s)' % summary(out))
     if pytest:
-        code, out = run([python, '-m', 'pytest', '-q'], root, env)
+        code, out = run([python, '-m', 'pytest', '--ignore=vendor', '-q'], root, env)
         if code == 5:
             failures.append('tests: pytest is configured but collected no tests')
         elif code != 0:

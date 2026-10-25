@@ -5,6 +5,7 @@ export * from './bundle.js';
 export * from './catalog.js';
 export * from './adoptions.js';
 export * from './config-store.js';
+export * from './package-store.js';
 export * from './registry.js';
 export * from './skill-checks.js';
 export * from './skills.js';

@@ -106,3 +106,21 @@ export * from './services/index.js';
 
 export { effectiveAccess } from './access.js';
 export type { AccessRole, EffectiveAccess, RouteAccess, SkillAccess } from './access.js';
+
+export {
+  MAX_COMPRESSED_SIZE,
+  MAX_EXPANDED_SIZE,
+  MAX_FILES,
+  MAX_FILE_SIZE,
+  MAX_PATH_LENGTH,
+  MAX_MANIFEST_SIZE,
+  COMPILED_EXTENSIONS,
+  validateSkillPackage,
+  packSkillDirectory,
+} from './package.js';
+export type {
+  PackageFileInfo,
+  ValidatedSkillPackage,
+  FailedSkillPackage,
+  SkillPackageValidation,
+} from './package.js';
