@@ -120,6 +120,7 @@ export function ecsRuntime(opts: {
             );
           }
           await sleep(delayMs);
+          if (ctx.abandoned?.()) throw new Error('RunTask abandoned: the run was cancelled or the agent paused while waiting for its task role');
         }
       }
       const parsed = JSON.parse(out || '{}') as { tasks?: Array<{ taskArn?: string }>; failures?: Array<{ reason?: string }> };

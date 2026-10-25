@@ -346,6 +346,10 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
   return { status: 202, body: await startRun(state, run, bound.env) };
 }
 
+/** Runs whose runtime.start is in flight in this process. The reconciler must not call them lost: a start can wait
+ * about 90s for a new agent's task role, and only a run with no start in flight (a restart) is truly lost. */
+const startsInFlight = new Set<string>();
+
 async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<string, string>): Promise<Run> {
   const agent = state.agents.get(run.agentId)!;
   let env = secrets;
@@ -397,12 +401,18 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
       const now = state.runs.get(run.runId);
       return !now || now.state !== 'STARTING' || agent.state === 'PAUSED' || agent.state === 'ISOLATED';
     };
-    const { handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv, abandoned });
+    startsInFlight.add(run.runId);
+    let handle: string | undefined;
+    try {
+      ({ handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv, abandoned }));
+    } finally {
+      startsInFlight.delete(run.runId);
+    }
     if (abandoned()) {
       await state.runtime.stop(agent, handle).catch(() => undefined);
       const now = state.runs.get(run.runId);
       if (now && !isTerminal(now.state)) {
-        return finishRun(state, run.runId, 'FAILED', {
+        return finishRun(state, run.runId, 'CANCELLED', {
           actor: SYSTEM.runtime,
           error: 'start abandoned: the agent was paused or isolated while the run was starting',
         });
@@ -411,10 +421,13 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
     }
     cur = state.runs.update(run.runId, { state: 'WORKING', taskHandle: handle, startedAt: new Date().toISOString() });
   } catch (err) {
-    return finishRun(state, run.runId, 'FAILED', {
-      actor: SYSTEM.runtime,
-      error: `start failed: ${err instanceof Error ? err.message : String(err)}`,
-    });
+    // The run token is never recorded: a CLI failure message can carry the whole command line.
+    const message = (err instanceof Error ? err.message : String(err)).split(runToken).join('[redacted]');
+    const now = state.runs.get(run.runId);
+    if (now && !isTerminal(now.state) && (agent.state === 'PAUSED' || agent.state === 'ISOLATED')) {
+      return finishRun(state, run.runId, 'CANCELLED', { actor: SYSTEM.runtime, error: `start abandoned: ${message}` });
+    }
+    return finishRun(state, run.runId, 'FAILED', { actor: SYSTEM.runtime, error: `start failed: ${message}` });
   }
   agent.state = 'WORKING';
   record(state, cur, 'RUN_STARTED', run.actor);
@@ -671,7 +684,7 @@ export async function routeEvents(state: PropertyManagerState, event: { type: st
 /** Poll runtimes whose tasks outlive this process; finish runs whose tasks stopped. */
 export async function reconcileRuns(state: PropertyManagerState): Promise<void> {
   for (const run of state.runs.list({ active: true })) {
-    if (run.state === 'QUEUED') continue;
+    if (run.state === 'QUEUED' || startsInFlight.has(run.runId)) continue;
     if (!state.runtime.status || !run.taskHandle) {
       if (!state.runtime.running(run.agentId)) {
         await finishRun(state, run.runId, 'FAILED', { actor: SYSTEM.reconciler, error: 'task lost: control plane restarted' });

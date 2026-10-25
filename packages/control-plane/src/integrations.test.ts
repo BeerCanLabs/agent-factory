@@ -12,7 +12,7 @@ import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { loadCatalog } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { createRun, finishRun, MemoryRunStore, noopRuntime, pollQueueOnce, SYSTEM } from '@beercanlabs/factory-property-manager';
+import { createRun, finishRun, reconcileRuns, MemoryRunStore, noopRuntime, pollQueueOnce, SYSTEM } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
@@ -123,10 +123,51 @@ describe('a start that outlives a pause (TSK-274)', () => {
     } as typeof state.runtime;
     const out = await createRun(state, 'echo-agent', { actor: 'token:x', trigger: 'api' });
     const run = out.body as { state: string; error?: string };
-    assert.equal(run.state, 'FAILED');
+    assert.equal(run.state, 'CANCELLED');
     assert.match(run.error ?? '', /start abandoned/);
     assert.deepEqual(stopped, ['arn:task/late']);
     assert.equal(state.agents.get('echo-agent')!.state, 'ISOLATED');
+  });
+});
+
+describe('a start that waits for a new agent task role (TSK-274)', () => {
+  it('is not reaped as lost by the reconciler while its start is in flight', async () => {
+    const { state } = setup();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let seen: string | undefined;
+    state.runtime = {
+      ...noopRuntime(),
+      running: () => false,
+      status: async () => ({ state: 'unknown' as const }),
+      async start(_a: unknown, _s: unknown, ctx: { runId: string }) {
+        seen = ctx.runId;
+        await reconcileRuns(state);
+        assert.equal(state.runs.get(ctx.runId)?.state, 'STARTING');
+        await gate;
+        return { handle: 'arn:task/ok' };
+      },
+    } as typeof state.runtime;
+    const p = createRun(state, 'echo-agent', { actor: 'token:x', trigger: 'api' });
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    const run = (await p).body as { state: string };
+    assert.ok(seen);
+    assert.equal(run.state, 'WORKING');
+  });
+
+  it('never records the run token when a start fails', async () => {
+    const { state } = setup();
+    state.runtime = {
+      ...noopRuntime(),
+      async start(_a: unknown, _s: unknown, ctx: { runEnv: Record<string, string> }) {
+        throw new Error(`Command failed: aws ecs run-task --overrides ${ctx.runEnv.FACTORY_RUN_TOKEN}\nAccessDenied`);
+      },
+    } as typeof state.runtime;
+    const run = (await createRun(state, 'echo-agent', { actor: 'token:x', trigger: 'api' })).body as { state: string; error?: string };
+    assert.equal(run.state, 'FAILED');
+    assert.match(run.error ?? '', /AccessDenied/);
+    assert.match(run.error ?? '', /\[redacted\]/);
   });
 });
 
