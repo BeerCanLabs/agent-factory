@@ -106,3 +106,5 @@ export * from './services/index.js';
 
 export { effectiveAccess } from './access.js';
 export type { AccessRole, EffectiveAccess, RouteAccess, SkillAccess } from './access.js';
+
+export * from './package.js';
