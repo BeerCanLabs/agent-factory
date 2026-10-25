@@ -372,36 +372,38 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
   // In flight from here: the notification and the token mint can take seconds, and the reconciler must not reap the run.
   startsInFlight.add(run.runId);
   let runToken: string;
+  let runEnv: Record<string, string>;
   try {
     await notifyGatekeeperIngress(state, agent.id, 'starting');
     runToken = await state.runTokens.mint(run);
+    // M2: a run is pinned only if a caller requested it (run.model). If unpinned, inject policy's primary model
+    // (or factory default) as FACTORY_MODEL into the container environment without mutating run.model, so Gatekeeper
+    // Egress leaves pinnedModel unset and honors multi-model policy allowlists.
+    const effectiveModel =
+      run.model ||
+      // A policy that lists models gets its first; an explicit empty list grants none, so nothing is injected (M2).
+      (state.policies.has(agent.id) && state.policies.get(agent.id).models
+        ? state.policies.get(agent.id).models?.[0]
+        : state.defaultModel);
+    runEnv = {
+      FACTORY_RUN_ID: run.runId,
+      FACTORY_RUN_TOKEN: runToken,
+      ...(state.publicUrl ? { FACTORY_URL: state.publicUrl } : {}),
+      ...(effectiveModel ? { FACTORY_MODEL: effectiveModel } : {}),
+      // AM3: the factory-wide notebook rotation policy and where closed volumes go.
+      ...notebookEnv(),
+      ...(state.gatekeeperEgressUrl ? { FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl } : {}),
+      ...gatekeeperEgressEnv({
+        FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl,
+        FACTORY_RUN_TOKEN: runToken,
+        FACTORY_EGRESS_ROUTES: (state.policies.has(agent.id) ? state.policies.get(agent.id).routes ?? [] : []).join(','),
+      }),
+    };
   } catch (e) {
+    // Nothing is starting yet (the env build can throw too), so the reconciler may judge the run again.
     startsInFlight.delete(run.runId);
     throw e;
   }
-  // M2: a run is pinned only if a caller requested it (run.model). If unpinned, inject policy's primary model
-  // (or factory default) as FACTORY_MODEL into the container environment without mutating run.model, so Gatekeeper
-  // Egress leaves pinnedModel unset and honors multi-model policy allowlists.
-  const effectiveModel =
-    run.model ||
-    // A policy that lists models gets its first; an explicit empty list grants none, so nothing is injected (M2).
-    (state.policies.has(agent.id) && state.policies.get(agent.id).models
-      ? state.policies.get(agent.id).models?.[0]
-      : state.defaultModel);
-  const runEnv: Record<string, string> = {
-    FACTORY_RUN_ID: run.runId,
-    FACTORY_RUN_TOKEN: runToken,
-    ...(state.publicUrl ? { FACTORY_URL: state.publicUrl } : {}),
-    ...(effectiveModel ? { FACTORY_MODEL: effectiveModel } : {}),
-    // AM3: the factory-wide notebook rotation policy and where closed volumes go.
-    ...notebookEnv(),
-    ...(state.gatekeeperEgressUrl ? { FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl } : {}),
-    ...gatekeeperEgressEnv({
-      FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl,
-      FACTORY_RUN_TOKEN: runToken,
-      FACTORY_EGRESS_ROUTES: (state.policies.has(agent.id) ? state.policies.get(agent.id).routes ?? [] : []).join(','),
-    }),
-  };
   try {
     // A start can wait (a new agent's task role propagating), so a reset, cancel, pause or isolate that lands meanwhile
     // must win: the runtime stops retrying and a task that still came up is stopped, never recorded as WORKING.
