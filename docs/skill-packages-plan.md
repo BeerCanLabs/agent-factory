@@ -21,14 +21,14 @@ Every decision below carries one label.
 
 - **Human aligned:** Dale agreed to it. Changing it needs human approval: Dale's explicit yes in chat, or approval of a
   pull request by `@dsackr`.
-- **Agent decided:** an agent chose it so work could proceed. An agent may change it after approval by a committee:
+- **Agent decided:** an agent chose it so work could proceed. An agent may also make decisions that mature a human-aligned decision, filling in how it works, as long as they do not conflict with it; these are agent decided and follow the rule here. A decision that conflicts with a human-aligned one is not an agent decision to make: it is human-gated. An agent may change it after approval by a committee:
   three fresh reviewer agents, started by the orchestrating session that is carrying out the change and not by the agent
   that wrote the proposal, each given only the decision, its rationale and the proposed change. Each reviewer sets the
   severity of its own findings. The change passes with at least two of the three approving (a 2 to 1 vote passes) and no
   High finding left standing; a High finding stands until the reviewer who raised it withdraws it after a revised
   proposal. A reviewer that does not answer counts as not approving. A revised proposal starts a new vote by the same three reviewers. The change, the votes and the reasons go in the
-  decision log in the same pull request. **A change that touches a human-aligned decision or a Design Authority
-  invariant is human-gated, whatever the committee says.**
+  decision log in the same pull request. **A change that conflicts with a human-aligned decision, or with a Design Authority
+  invariant, is human-gated, whatever the committee says.**
 
 A decision never changes label by being changed. Decisions stay in this file with their labels: slice 1 copies into
 the Design Authority only the amendments in the table below, and Dale's approval of slice 1 is his confirmation of every
@@ -142,4 +142,5 @@ Identity-provider group mapping; languages other than Python; migrating existing
 | :--- | :--- | :--- | :--- | :--- |
 | 2026-10-25 | H1 to H11 | Plan drafted | Human aligned | Dale |
 | 2026-10-25 | A1 to A27 | Plan drafted and revised after three rounds of review of PR #235 | Agent decided | none yet |
-| 2026-10-25 | A9, A18, A24, A25 | Narrow human-aligned H4 and H5 (group reach excludes transfer; assignment needs owner membership; transfer needs acceptance; skills only) | Agent decided | pending Dale's confirmation |
+| 2026-10-25 | A9, A18, A24, A25 | Narrow human-aligned H4 and H5 (group reach excludes transfer; assignment needs owner membership; transfer needs acceptance; skills only) | Agent decided | Dale confirmed all four (chat, 2026-10-25) |
+| 2026-10-25 | rule | Agent decisions may mature a human-aligned decision so long as they do not conflict with it; a conflict is human-gated | Human aligned | Dale (chat, 2026-10-25) |
