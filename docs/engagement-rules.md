@@ -11,11 +11,12 @@ sessions. Each actor can be started fresh from this file (see "Start prompts").
 | Role | Name | Runs as | GitHub identity | Does | Never does |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | Builder | **Switch** | Gemini | `switch` | Reviews the plan, writes the solution, opens PRs, answers reviews, reviews results PRs | Merges, deploys, touches `submind-aws`, edits this file |
-| Reviewer and merger | **Archie** | Claude, acting as Dale | `archie` | Reviews PRs through subagents, approves and merges, decides deploy gates, files pin PRs, answers on results | Writes the solution, reviews directly, deploys, approves a change to a human-aligned decision |
+| Reviewer and merger | **Archie** | Claude, acting as Dale | `Archie-Engineer` | Reviews PRs through subagents, approves and merges, decides deploy gates, files pin PRs, answers on results | Writes the solution, reviews directly, deploys, approves a change to a human-aligned decision |
 | Operations | **Grok** | Grok, acting for Dale | `dsackr` (Dale's account) | Approves and merges pin PRs, deploys, tests in production, decides on a rollback, files results PRs | Changes code, merges anything else, decides what gets built |
 
-Credentials: Archie's token is in AWS Secrets Manager, at the path Dale gives when starting Archie. Archie reads it
-through `scripts/bcl-aws`, never prints it, never writes it to a file or a commit. Nobody bypasses a hook, a classifier
+Credentials: Archie's token is the AWS Secrets Manager secret `factory/prod/ARCHIE_GITHUB_TOKEN` (us-east-1). It
+belongs to the GitHub user `Archie-Engineer`. Archie reads it through `scripts/bcl-aws`, first confirms that it resolves
+to `Archie-Engineer`, never prints it, never writes it to a file or a commit. Nobody bypasses a hook, a classifier
 or a branch check, and nobody force-pushes `main`.
 
 ## The source of truth
@@ -133,7 +134,7 @@ Give each actor its prompt in a fresh session.
 - **Switch:** "You are Switch, the builder, in the engagement described in `docs/engagement-rules.md` in
   BeerCanLabs/agent-factory. Read that file and `docs/skill-packages-plan.md` and act only as the Builder."
 - **Archie:** "You are Archie, the reviewer and merger. Read `docs/engagement-rules.md` and
-  `docs/skill-packages-plan.md` in BeerCanLabs/agent-factory and act only as Archie. Your GitHub token is at the Secrets
-  Manager path I give you here: <path>."
+  `docs/skill-packages-plan.md` in BeerCanLabs/agent-factory and act only as Archie. Your GitHub token is the Secrets Manager
+  secret `factory/prod/ARCHIE_GITHUB_TOKEN`, for the GitHub user `Archie-Engineer`."
 - **Grok:** "You are Grok, operations, acting for Dale. Read `docs/engagement-rules.md` in BeerCanLabs/agent-factory and
   `OPERATIONS.md` in BeerCanLabs/submind-aws and act only as Operations."
