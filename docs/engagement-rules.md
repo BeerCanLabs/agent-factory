@@ -19,6 +19,36 @@ belongs to the GitHub user `Archie-Engineer`. Archie reads it through `scripts/b
 to `Archie-Engineer`, never prints it, never writes it to a file or a commit. Nobody bypasses a hook, a classifier
 or a branch check, and nobody force-pushes `main`.
 
+## Working on one machine
+
+All three actors run on the same computer, so they must not share a working tree or an identity.
+
+- **One clone each, under `~/repos/BeerCanLabs/`.** An actor creates its clone at start if it is missing, and never
+  uses Dale's own checkouts (`agent-factory`, `submind-aws`) or another actor's clone.
+  - Switch: `agent-factory-switch`
+  - Archie: `agent-factory-archie` (its subagents may use temporary clones) and `submind-aws-archie` (pin PRs)
+  - Grok: `agent-factory-ops` (results PRs) and `submind-aws-ops`
+- **Install and build inside your own clone** (`npm ci`, `npm run build`): the repository's hooks run the conformance
+  tests there and fail without them. Nobody bypasses a hook.
+- **Identity is per command, never global.** The GitHub CLI's saved login on this machine is Dale's, and Grok uses it.
+  Archie and Switch use their own tokens by setting `GH_TOKEN` for each command only. Nobody runs `gh auth login` or
+  `gh auth switch`, edits global git configuration, or writes a token to a file. Set `user.name` and `user.email` in
+  your own clone only. Each actor starts by confirming whose identity its commands resolve to (`gh api user --jq .login`
+  returns `switch`, `Archie-Engineer`, or `dsackr`).
+
+## Kickoff
+
+Before the loop starts, Dale merges this file. That is the only approval needed before starting. Then:
+
+1. Switch reads the plan, reviews it, and adjusts agent-decided items it sees fit under "The source of truth".
+2. Switch opens slice 1 (the Design Authority amendments) as its first PR. If Switch adjusted the plan, that PR comes
+   first and is reviewed like any other.
+3. **Switch brings slice 1 to Dale in its own session**: the PR link, then each amendment in plain words (what the
+   recorded decision said, what it becomes, which decision of Dale's causes it), then one question: "Approve slice 1?"
+4. Dale approves in either of two ways: approving the PR on GitHub, or telling Archie in Archie's session to approve
+   slice 1. In the second case Archie posts Dale's words in a comment on the PR, verbatim, and then approves and merges.
+5. The loop starts when slice 1 is merged. Slice 1 is the only PR that waits for Dale.
+
 ## The source of truth
 
 The plan decides what to build. Its labels apply here unchanged:
@@ -129,12 +159,20 @@ continues.
 
 ## Start prompts
 
-Give each actor its prompt in a fresh session.
+Dale merges this file first. Each actor then starts in a fresh session with its own prompt.
 
-- **Switch:** "You are Switch, the builder, in the engagement described in `docs/engagement-rules.md` in
-  BeerCanLabs/agent-factory. Read that file and `docs/skill-packages-plan.md` and act only as the Builder."
-- **Archie:** "You are Archie, the reviewer and merger. Read `docs/engagement-rules.md` and
-  `docs/skill-packages-plan.md` in BeerCanLabs/agent-factory and act only as Archie. Your GitHub token is the Secrets Manager
-  secret `factory/prod/ARCHIE_GITHUB_TOKEN`, for the GitHub user `Archie-Engineer`."
-- **Grok:** "You are Grok, operations, acting for Dale. Read `docs/engagement-rules.md` in BeerCanLabs/agent-factory and
-  `OPERATIONS.md` in BeerCanLabs/submind-aws and act only as Operations."
+- **Switch:** "You are Switch, the Builder. Read `docs/engagement-rules.md` and `docs/skill-packages-plan.md` on `main`
+  of BeerCanLabs/agent-factory, and act only as the Builder. Work in `~/repos/BeerCanLabs/agent-factory-switch` (clone
+  it if missing, install and build there). Use your own GitHub identity `switch`; confirm it first. Start with the
+  Kickoff section: review the plan, then open slice 1 and bring it to me for approval."
+- **Archie:** "You are Archie, the reviewer and merger. Read `docs/engagement-rules.md` and `docs/skill-packages-plan.md`
+  on `main` of BeerCanLabs/agent-factory, and act only as Archie. Your GitHub token is the Secrets Manager secret
+  `factory/prod/ARCHIE_GITHUB_TOKEN` for the user `Archie-Engineer`, read through `scripts/bcl-aws`; set it as
+  `GH_TOKEN` per command and confirm it resolves to `Archie-Engineer` before anything else. Work in
+  `~/repos/BeerCanLabs/agent-factory-archie`. Review every PR Switch opens, following the rules exactly, and run until
+  I stop you or the plan is done."
+- **Grok:** "You are Grok, Operations, acting for me. Read `docs/engagement-rules.md` on `main` of
+  BeerCanLabs/agent-factory and `OPERATIONS.md` in BeerCanLabs/submind-aws, and act only as Operations. Use the saved
+  GitHub login (`dsackr`); confirm it first. Work in `~/repos/BeerCanLabs/agent-factory-ops` and
+  `~/repos/BeerCanLabs/submind-aws-ops`. Wait for Archie's pin PRs, then deploy, test, roll back only if the factory
+  is non-functional, and file results PRs, following the rules exactly."
