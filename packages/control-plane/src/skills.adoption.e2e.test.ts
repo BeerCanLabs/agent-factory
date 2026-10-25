@@ -138,8 +138,10 @@ describe('adoption: request, approve, remove, retire, and private skills (TSK-15
       assert.ok(unknown.body.reasons.some((r: string) => /agent ghost is not registered/.test(r)), JSON.stringify(unknown.body));
       for (const token of [STRANGER, DONNA_OWNER]) {
         const refused = await call('/api/v1/registry/skills', 'POST', token, { repo: REPO, path: '.', commit: SHA, manifest: privateManifest('print', '0.1.0', 'higgins') });
-        assert.equal(refused.status, 422, token);
-        assert.ok(refused.body.reasons.some((r: string) => /only an admin or an owner of higgins/.test(r)), JSON.stringify(refused.body));
+        assert.equal(refused.status, token === STRANGER ? 403 : 422, token);
+        if (token === DONNA_OWNER) {
+          assert.ok(refused.body.reasons.some((r: string) => /only an admin or an owner of higgins/.test(r)), JSON.stringify(refused.body));
+        }
       }
     });
 

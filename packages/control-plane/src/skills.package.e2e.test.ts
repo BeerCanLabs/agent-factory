@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { loadSkills, packageStoreOf } from './skills.js';
 import { bearerAuth } from '@beercanlabs/factory-auth';
@@ -95,7 +96,7 @@ describe('Skill Packages Intake & Store (Slice 2, TSK-276)', { concurrency: fals
     port = await listen(cp);
 
     // Pack examples/skills/e2e-ping fixture
-    const pingDir = join(process.cwd(), 'examples', 'skills', 'e2e-ping');
+    const pingDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'examples', 'skills', 'e2e-ping');
     e2ePingPackage = await packSkillDirectory(pingDir);
   });
 

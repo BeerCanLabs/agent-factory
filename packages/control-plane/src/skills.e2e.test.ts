@@ -14,6 +14,7 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
+import { FileConfigBackend, VersionedConfigStore } from '@beercanlabs/factory-registrar';
 import { approvedSkill, loadSkills, recordSkillChecks, setSkillUsage, skillRegistry } from './skills.js';
 
 const ADMIN = 'admin-skills-token';
@@ -86,6 +87,9 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
       runTokens: { issue: async () => '', verify: async () => undefined } as unknown as FactoryState['runTokens'],
       secretValues: new Set(),
     } as FactoryState;
+    const configs = await VersionedConfigStore.open(new FileConfigBackend(join(dataDir, 'config')));
+    await configs.put({ agentId: 'bot', owners: ['token:operator'], skills: [] }, { by: 'setup', reason: 'initial setup' });
+    state.configs = configs;
     loadSkills(state, join(dataDir, 'skills'));
     cp = createFactoryServer(state);
     port = await listen(cp);
@@ -241,8 +245,14 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     assert.equal(skillRegistry(fresh).versions('discord-progress').length, 2);
   });
 
-  it('SK1 any authenticated user may register a skill (a viewer), and a folder path is normalised; it still needs approval', async () => {
+  it('SK1 an authenticated viewer without agent ownership is refused (403, A8); with agent ownership, folder path is normalised; it still needs approval', async () => {
     const m = { ...manifest('0.1.0'), id: 'viewer-skill' };
+    const denied = await call(port, '/api/v1/registry/skills', 'POST', VIEWER, { repo: 'https://github.com/example/skills', path: 'skills/viewer-skill/', commit: SHA1, manifest: m });
+    assert.equal(denied.status, 403);
+    assert.deepEqual(denied.body, { error: 'forbidden', required: 'admin' });
+
+    // With agent ownership in the factory, viewer has skills.register (A8)
+    await state.configs!.put({ agentId: 'viewer-agent', owners: ['token:viewer'], skills: [] }, { by: 'setup', reason: 'setup' });
     const reg = await call(port, '/api/v1/registry/skills', 'POST', VIEWER, { repo: 'https://github.com/example/skills', path: 'skills/viewer-skill/', commit: SHA1, manifest: m });
     assert.equal(reg.status, 201, JSON.stringify(reg.body));
     assert.equal(reg.body.path, 'skills/viewer-skill');

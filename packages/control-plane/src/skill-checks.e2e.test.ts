@@ -127,6 +127,9 @@ describe('SK1 skill checks: started at registration, recorded when they end, req
       secretValues: new Set(),
       skillChecker: fake,
     } as FactoryState;
+    const configs = await VersionedConfigStore.open(new FileConfigBackend(join(dataDir, 'config')));
+    await configs.put({ agentId: 'bot', owners: ['token:operator'], skills: [] }, { by: 'setup', reason: 'initial setup' });
+    state.configs = configs;
     loadSkills(state, join(dataDir, 'skills'));
     cp = createFactoryServer(state);
     port = await listen(cp);
