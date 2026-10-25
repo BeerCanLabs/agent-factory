@@ -95,4 +95,69 @@ describe('ecsRuntime', () => {
     });
     await assert.rejects(rt.start(echo, {}, { runId: 'r', runEnv: {} }), /RESOURCE:CPU/);
   });
+
+  describe('a just-created task role (IAM propagation)', () => {
+    const assumeErr = () =>
+      new Error(
+        'Command failed: aws ecs run-task\nAn error occurred (ClientException) when calling the RunTask operation: ECS was unable to assume the role ' +
+          "'arn:aws:iam::1:role/AgentTaskRole-x' that was provided for this task. Please verify that the role being passed has the proper trust relationship",
+      );
+    function harness(cliImpl: (n: number) => Promise<string>) {
+      let t = 0;
+      const sleeps: number[] = [];
+      let calls = 0;
+      const rt = ecsRuntime({
+        cluster: 'c',
+        taskMap: { 'echo-agent': 'f' },
+        subnets: [],
+        securityGroups: [],
+        assumeRoleRetryWindowMs: 60_000,
+        assumeRoleRetryDelayMs: 5_000,
+        now: () => t,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+          t += ms;
+        },
+        cli: async () => cliImpl(++calls),
+      });
+      return { rt, sleeps, calls: () => calls };
+    }
+
+    it('retries RunTask until the role is assumable, then starts the task', async () => {
+      const h = harness(async (n) => {
+        if (n < 4) throw assumeErr();
+        return JSON.stringify({ tasks: [{ taskArn: 'arn:task/ok' }] });
+      });
+      const { handle } = await h.rt.start(echo, {}, { runId: 'r', runEnv: {} });
+      assert.equal(handle, 'arn:task/ok');
+      assert.equal(h.calls(), 4);
+      assert.deepEqual(h.sleeps, [5_000, 5_000, 5_000]);
+    });
+
+    it('does not retry any other error', async () => {
+      const h = harness(async () => {
+        throw new Error('An error occurred (AccessDeniedException) when calling the RunTask operation: nope');
+      });
+      await assert.rejects(h.rt.start(echo, {}, { runId: 'r', runEnv: {} }), /AccessDeniedException/);
+      assert.equal(h.calls(), 1);
+      assert.deepEqual(h.sleeps, []);
+    });
+
+    it('does not retry a RunTask that returns failures', async () => {
+      const h = harness(async () => JSON.stringify({ tasks: [], failures: [{ reason: 'RESOURCE:CPU' }] }));
+      await assert.rejects(h.rt.start(echo, {}, { runId: 'r', runEnv: {} }), /RESOURCE:CPU/);
+      assert.equal(h.calls(), 1);
+    });
+
+    it('fails with a clear reason once the window is exhausted', async () => {
+      const h = harness(async () => {
+        throw assumeErr();
+      });
+      await assert.rejects(
+        h.rt.start(echo, {}, { runId: 'r', runEnv: {} }),
+        /could not assume the task role after 13 attempts over 60s.*unable to assume the role/s,
+      );
+      assert.equal(h.calls(), 13);
+    });
+  });
 });
