@@ -105,6 +105,31 @@ describe('WebSocket event stream', () => {
   });
 });
 
+describe('a start that outlives a pause (TSK-274)', () => {
+  it('stops the task and fails the run instead of recording WORKING over an isolated agent', async () => {
+    const { state } = setup();
+    const stopped: Array<string | undefined> = [];
+    state.runtime = {
+      ...noopRuntime(),
+      async start() {
+        // The kill switch lands while the runtime waits for a new agent's task role.
+        state.agents.get('echo-agent')!.state = 'ISOLATED';
+        return { handle: 'arn:task/late' };
+      },
+      async stop(_agent: unknown, handle?: string) {
+        stopped.push(handle);
+        return 0;
+      },
+    } as typeof state.runtime;
+    const out = await createRun(state, 'echo-agent', { actor: 'token:x', trigger: 'api' });
+    const run = out.body as { state: string; error?: string };
+    assert.equal(run.state, 'FAILED');
+    assert.match(run.error ?? '', /start abandoned/);
+    assert.deepEqual(stopped, ['arn:task/late']);
+    assert.equal(state.agents.get('echo-agent')!.state, 'ISOLATED');
+  });
+});
+
 describe('event bus', () => {
   it('ships only bus-worthy events to the sink, in batches', async () => {
     const { inspector, state } = setup();

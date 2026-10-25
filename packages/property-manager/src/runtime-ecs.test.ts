@@ -149,6 +149,29 @@ describe('ecsRuntime', () => {
       assert.equal(h.calls(), 1);
     });
 
+    it('stops retrying once the run is abandoned', async () => {
+      const h = harness(async () => {
+        throw assumeErr();
+      });
+      let n = 0;
+      await assert.rejects(
+        h.rt.start(echo, {}, { runId: 'r', runEnv: {}, abandoned: () => ++n > 2 }),
+        /abandoned/,
+      );
+      assert.equal(h.calls(), 3);
+    });
+
+    it('records only ECS own answer, never the command line (run token)', async () => {
+      const h = harness(async () => {
+        throw new Error('Command failed: aws ecs run-task --overrides FACTORY_RUN_TOKEN=tok-secret\n' + assumeErr().message.split('\n')[1]);
+      });
+      await assert.rejects(h.rt.start(echo, {}, { runId: 'r', runEnv: {} }), (e: Error) => {
+        assert.match(e.message, /unable to assume the role/);
+        assert.equal(e.message.includes('tok-secret'), false);
+        return true;
+      });
+    });
+
     it('fails with a clear reason once the window is exhausted', async () => {
       const h = harness(async () => {
         throw assumeErr();

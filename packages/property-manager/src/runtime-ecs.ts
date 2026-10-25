@@ -109,8 +109,11 @@ export function ecsRuntime(opts: {
           break;
         } catch (err) {
           if (!isRoleNotYetAssumable(err)) throw err;
+          if (ctx.abandoned?.()) throw new Error('RunTask abandoned: the run was cancelled or the agent paused while waiting for its task role');
           if (now() + delayMs > deadline) {
-            const detail = err instanceof Error ? err.message : String(err);
+            // Only ECS's own answer: the command line carries the run token and egress environment.
+            const full = err instanceof Error ? err.message : String(err);
+            const detail = full.startsWith('Command failed:') ? full.slice(full.indexOf('\n') + 1).trim() : full;
             throw new Error(
               `RunTask failed: ECS could not assume the task role after ${attempts} attempts over ${Math.round(windowMs / 1000)}s ` +
                 `(IAM propagation of a new role did not finish, or the role's trust policy is wrong): ${detail}`,

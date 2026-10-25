@@ -6,7 +6,13 @@ import { gatekeeperEgressEnv, pullMind, pushMind, type MindStore } from '@beerca
 import { canonicalJson, type AgentRecord } from '@beercanlabs/factory-registrar';
 
 /** `runEnv` is non-secret run metadata (FACTORY_RUN_ID, FACTORY_URL, ...) plus the short-lived run token. */
-export type RunContext = { runId: string; runEnv: Record<string, string> };
+export type RunContext = {
+  runId: string;
+  runEnv: Record<string, string>;
+  /** True once the run no longer wants its compute (cancelled, reset, or the agent paused or isolated). A runtime that waits
+   * between attempts checks it so a long start cannot outlive the decision to stop. */
+  abandoned?: () => boolean;
+};
 
 export type TaskStatus =
   | { state: 'running' }

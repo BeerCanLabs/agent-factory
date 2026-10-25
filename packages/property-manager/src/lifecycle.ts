@@ -391,7 +391,24 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
     }),
   };
   try {
-    const { handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv });
+    // A start can wait (a new agent's task role propagating), so a reset, cancel, pause or isolate that lands meanwhile
+    // must win: the runtime stops retrying and a task that still came up is stopped, never recorded as WORKING.
+    const abandoned = () => {
+      const now = state.runs.get(run.runId);
+      return !now || now.state !== 'STARTING' || agent.state === 'PAUSED' || agent.state === 'ISOLATED';
+    };
+    const { handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv, abandoned });
+    if (abandoned()) {
+      await state.runtime.stop(agent, handle).catch(() => undefined);
+      const now = state.runs.get(run.runId);
+      if (now && !isTerminal(now.state)) {
+        return finishRun(state, run.runId, 'FAILED', {
+          actor: SYSTEM.runtime,
+          error: 'start abandoned: the agent was paused or isolated while the run was starting',
+        });
+      }
+      return now ?? run;
+    }
     cur = state.runs.update(run.runId, { state: 'WORKING', taskHandle: handle, startedAt: new Date().toISOString() });
   } catch (err) {
     return finishRun(state, run.runId, 'FAILED', {
