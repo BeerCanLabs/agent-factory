@@ -67,6 +67,17 @@ describe('CF3 agent bundle', () => {
     assert.equal(refused(() => undefined), true);
   });
 
+  it('a hand-built bundle claiming a repository origin may still carry settings; the import, not the parser, refuses it', () => {
+    const b = JSON.parse(JSON.stringify(buildBundle(agent, content as never)));
+    b.origin = 'repository';
+    const parsed = parseBundle(b);
+    assert.equal(parsed.ok, true);
+    if (parsed.ok) {
+      assert.equal(parsed.bundle.origin, 'repository');
+      assert.ok(parsed.bundle.settings, 'settings are kept so the import can see the contradiction and refuse (agent-bundle.e2e.test.ts)');
+    }
+  });
+
   it('keeps nothing but the known fields (an owner or a token smuggled in is dropped)', () => {
     const b = JSON.parse(JSON.stringify(buildBundle(agent, content as never)));
     b.owners = ['token:evil'];

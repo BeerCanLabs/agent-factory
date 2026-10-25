@@ -158,6 +158,8 @@ resource "aws_efs_access_point" "ledger" {
   }
 }
 
+# "agent-runtime" (factory-agent-runtime, the shared agent runtime's registry, CF6/RT1) is created in every deployment, whether
+# or not shared_runtime_image is set; var.agents refuses the key "runtime" so no agent shares it.
 resource "aws_ecr_repository" "repo" {
   for_each             = toset(concat(["control-plane", "gatekeeper-ingress", "gatekeeper-egress", "garrison", "agent-runtime"], [for id in keys(var.agents) : "agent-${id}"]))
   name                 = "factory-${each.key}"

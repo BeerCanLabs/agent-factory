@@ -47,7 +47,14 @@ describe('composing adopted skills into a build context (SK4)', () => {
     const tavily = makeRepo('skill-tavily-search', { 'skill.yaml': skillYaml('tavily-search', '0.1.0'), 'tavily_search/__init__.py': 'def search(q):\n    return q\n', 'README.md': '# t\n' });
     const mono = makeRepo('skills-mono', { 'print/skill.yaml': skillYaml('print', '0.1.1'), 'print/print_api.py': 'X = 1\n', 'other/skill.yaml': skillYaml('other', '9.9.9') });
     const leaky = makeRepo('skill-leaky', { 'skill.yaml': skillYaml('leaky', '1.0.0'), 'leaky/__init__.py': 'API_TOKEN = "Zk3mPq9xLw2RtYh7VbN5cJd8Fg4Ss1Aa"\n' });  // secret-scan:allow (a made-up value, the fixture the script must refuse)
+    const loadable = makeRepo('skill-loadable', {
+      'skill.yaml': skillYaml('loadable', '1.0.0'),
+      'helper.py': "WORD = 'sibling'\n",
+      'loadable/__init__.py': "import helper\nfrom . import inner\ndef tools():\n    return [{'name': 'loadable_tool', 'description': 'x', 'parameters': {}, 'handler': lambda a, c: helper.WORD + inner.WORD}]\n",
+      'loadable/inner.py': "WORD = '+inner'\n",
+    });
     pins = {
+      loadable: { repo: `https://${HOST}/skill-loadable`, path: '.', commit: loadable },
       tavily: { repo: `https://${HOST}/skill-tavily-search`, path: '.', commit: tavily },
       print: { repo: `https://${HOST}/skills-mono`, path: 'print', commit: mono },
       leaky: { repo: `https://${HOST}/skill-leaky`, path: '.', commit: leaky },
@@ -81,6 +88,22 @@ describe('composing adopted skills into a build context (SK4)', () => {
     return { cwd, status: r.status, out: `${r.stdout}${r.stderr}`, dir: join(cwd, '.factory-skills') };
   }
   const pin = (key: keyof typeof pins, id: string, version: string) => ({ id, version, ...pins[key] });
+
+  it('produces what the runtime loads: a package entry with a sibling import, through load_skills (SK4, TSK-272)', () => {
+    const r = compose([pin('loadable', 'loadable', '1.0.0')]);
+    assert.equal(r.status, 0, r.out);
+    const runtime = join(dirname(SCRIPT), '..', '..', 'runtimes', 'agent-runtime');
+    const program = [
+      'import json, sys',
+      'sys.path.insert(0, sys.argv[1])',
+      'from runtime.skills import load_skills, run_tool',
+      'tools, problems = load_skills([{"id": "loadable"}], sys.argv[2])',
+      'print(json.dumps({"problems": problems, "tools": [t.name for t in tools], "result": run_tool(tools[0], "{}", {}) if tools else None}))',
+    ].join('\n');
+    const py = spawnSync('python3', ['-I', '-c', program, runtime, join(r.dir, 'skills')], { encoding: 'utf8' });
+    assert.equal(py.status, 0, py.stderr);
+    assert.deepEqual(JSON.parse(py.stdout), { problems: [], tools: ['loadable_tool'], result: 'sibling+inner' });
+  });
 
   it('puts each skill at exactly its pinned commit in the context, without .git, and lists them in the manifest', () => {
     const r = compose([pin('tavily', 'tavily-search', '0.1.0'), pin('print', 'print', '0.1.1')]);
