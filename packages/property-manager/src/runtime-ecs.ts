@@ -19,6 +19,19 @@ export function defaultEcsCli(region?: string): EcsCli {
 }
 
 /**
+ * A role created moments before its first RunTask is not yet assumable everywhere: IAM is eventually consistent, and
+ * ECS answers with a ClientException ("ECS was unable to assume the role ... verify that the role being passed has the
+ * proper trust relationship") even though the trust policy is right. Only that error is retried.
+ */
+export function isRoleNotYetAssumable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /ECS was unable to assume the role/i.test(msg);
+}
+
+export const ASSUME_ROLE_RETRY_WINDOW_MS = 90_000;
+export const ASSUME_ROLE_RETRY_DELAY_MS = 5_000;
+
+/**
  * Agents run as ECS tasks started from zero. Secret values are never passed in RunTask overrides
  * (those are visible to DescribeTasks and CloudTrail): the task definition's `secrets` block injects
  * them from Secrets Manager. Overrides carry only run metadata and the short-lived run token.
@@ -31,9 +44,19 @@ export function ecsRuntime(opts: {
   assignPublicIp?: boolean;
   workerContainer?: string;
   cli?: EcsCli;
+  /** How long RunTask is retried while a just-created task role propagates (default 90s). */
+  assumeRoleRetryWindowMs?: number;
+  assumeRoleRetryDelayMs?: number;
+  /** Injectable for tests. */
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 }): Runtime {
   const cli = opts.cli ?? defaultEcsCli(process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1');
   const container = opts.workerContainer ?? 'worker';
+  const windowMs = opts.assumeRoleRetryWindowMs ?? ASSUME_ROLE_RETRY_WINDOW_MS;
+  const delayMs = opts.assumeRoleRetryDelayMs ?? ASSUME_ROLE_RETRY_DELAY_MS;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const now = opts.now ?? Date.now;
   const running = new Map<string, string>();
 
   return {
@@ -60,7 +83,7 @@ export function ecsRuntime(opts: {
           { name: workerName, environment: Object.entries(ctx.runEnv).map(([name, value]) => ({ name, value })) },
         ],
       });
-      const out = await cli([
+      const runTaskArgs = [
         'ecs',
         'run-task',
         '--cluster',
@@ -75,7 +98,31 @@ export function ecsRuntime(opts: {
         overrides,
         '--started-by',
         `factory:${ctx.runId}`.slice(0, 36),
-      ]);
+      ];
+      const deadline = now() + windowMs;
+      let attempts = 0;
+      let out: string;
+      for (;;) {
+        attempts += 1;
+        try {
+          out = await cli(runTaskArgs);
+          break;
+        } catch (err) {
+          if (!isRoleNotYetAssumable(err)) throw err;
+          if (ctx.abandoned?.()) throw new Error('RunTask abandoned: the run was cancelled or the agent paused while waiting for its task role');
+          if (now() + delayMs > deadline) {
+            // Only ECS's own answer: the command line carries the run token and egress environment.
+            const full = err instanceof Error ? err.message : String(err);
+            const detail = full.startsWith('Command failed:') ? full.slice(full.indexOf('\n') + 1).trim() : full;
+            throw new Error(
+              `RunTask failed: ECS could not assume the task role after ${attempts} attempts over ${Math.round(windowMs / 1000)}s ` +
+                `(IAM propagation of a new role did not finish, or the role's trust policy is wrong): ${detail}`,
+            );
+          }
+          await sleep(delayMs);
+          if (ctx.abandoned?.()) throw new Error('RunTask abandoned: the run was cancelled or the agent paused while waiting for its task role');
+        }
+      }
       const parsed = JSON.parse(out || '{}') as { tasks?: Array<{ taskArn?: string }>; failures?: Array<{ reason?: string }> };
       const arn = parsed.tasks?.[0]?.taskArn;
       if (!arn) throw new Error(`RunTask failed: ${parsed.failures?.map((f) => f.reason).join(', ') || 'no task returned'}`);

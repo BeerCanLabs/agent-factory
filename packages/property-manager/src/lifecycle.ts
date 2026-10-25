@@ -346,6 +346,10 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
   return { status: 202, body: await startRun(state, run, bound.env) };
 }
 
+/** Runs whose runtime.start is in flight in this process. The reconciler must not call them lost: a start can wait
+ * about 90s for a new agent's task role, and only a run with no start in flight (a restart) is truly lost. */
+const startsInFlight = new Set<string>();
+
 async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<string, string>): Promise<Run> {
   const agent = state.agents.get(run.agentId)!;
   let env = secrets;
@@ -365,39 +369,72 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
 
   let cur = state.runs.update(run.runId, { state: 'STARTING' });
   // P1: a started task is not a ready agent. Presence shows starting now and available only on markRunReady.
-  await notifyGatekeeperIngress(state, agent.id, 'starting');
-  const runToken = await state.runTokens.mint(run);
-  // M2: a run is pinned only if a caller requested it (run.model). If unpinned, inject policy's primary model
-  // (or factory default) as FACTORY_MODEL into the container environment without mutating run.model, so Gatekeeper
-  // Egress leaves pinnedModel unset and honors multi-model policy allowlists.
-  const effectiveModel =
-    run.model ||
-    // A policy that lists models gets its first; an explicit empty list grants none, so nothing is injected (M2).
-    (state.policies.has(agent.id) && state.policies.get(agent.id).models
-      ? state.policies.get(agent.id).models?.[0]
-      : state.defaultModel);
-  const runEnv: Record<string, string> = {
-    FACTORY_RUN_ID: run.runId,
-    FACTORY_RUN_TOKEN: runToken,
-    ...(state.publicUrl ? { FACTORY_URL: state.publicUrl } : {}),
-    ...(effectiveModel ? { FACTORY_MODEL: effectiveModel } : {}),
-    // AM3: the factory-wide notebook rotation policy and where closed volumes go.
-    ...notebookEnv(),
-    ...(state.gatekeeperEgressUrl ? { FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl } : {}),
-    ...gatekeeperEgressEnv({
-      FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl,
-      FACTORY_RUN_TOKEN: runToken,
-      FACTORY_EGRESS_ROUTES: (state.policies.has(agent.id) ? state.policies.get(agent.id).routes ?? [] : []).join(','),
-    }),
-  };
+  // In flight from here: the notification and the token mint can take seconds, and the reconciler must not reap the run.
+  startsInFlight.add(run.runId);
+  let runToken: string;
+  let runEnv: Record<string, string>;
   try {
-    const { handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv });
+    await notifyGatekeeperIngress(state, agent.id, 'starting');
+    runToken = await state.runTokens.mint(run);
+    // M2: a run is pinned only if a caller requested it (run.model). If unpinned, inject policy's primary model
+    // (or factory default) as FACTORY_MODEL into the container environment without mutating run.model, so Gatekeeper
+    // Egress leaves pinnedModel unset and honors multi-model policy allowlists.
+    const effectiveModel =
+      run.model ||
+      // A policy that lists models gets its first; an explicit empty list grants none, so nothing is injected (M2).
+      (state.policies.has(agent.id) && state.policies.get(agent.id).models
+        ? state.policies.get(agent.id).models?.[0]
+        : state.defaultModel);
+    runEnv = {
+      FACTORY_RUN_ID: run.runId,
+      FACTORY_RUN_TOKEN: runToken,
+      ...(state.publicUrl ? { FACTORY_URL: state.publicUrl } : {}),
+      ...(effectiveModel ? { FACTORY_MODEL: effectiveModel } : {}),
+      // AM3: the factory-wide notebook rotation policy and where closed volumes go.
+      ...notebookEnv(),
+      ...(state.gatekeeperEgressUrl ? { FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl } : {}),
+      ...gatekeeperEgressEnv({
+        FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl,
+        FACTORY_RUN_TOKEN: runToken,
+        FACTORY_EGRESS_ROUTES: (state.policies.has(agent.id) ? state.policies.get(agent.id).routes ?? [] : []).join(','),
+      }),
+    };
+  } catch (e) {
+    // Nothing is starting yet (the env build can throw too), so the reconciler may judge the run again.
+    startsInFlight.delete(run.runId);
+    throw e;
+  }
+  try {
+    // A start can wait (a new agent's task role propagating), so a reset, cancel, pause or isolate that lands meanwhile
+    // must win: the runtime stops retrying and a task that still came up is stopped, never recorded as WORKING.
+    const abandoned = () => {
+      const now = state.runs.get(run.runId);
+      return !now || now.state !== 'STARTING' || agent.state === 'PAUSED' || agent.state === 'ISOLATED';
+    };
+    const { handle } = await state.runtime.start(agent, env, { runId: run.runId, runEnv, abandoned });
+    if (abandoned()) {
+      await state.runtime.stop(agent, handle).catch((e) => console.warn(`could not stop the abandoned task of run ${run.runId}: ${e instanceof Error ? e.message : e}`));
+      const now = state.runs.get(run.runId);
+      if (now && !isTerminal(now.state)) {
+        return finishRun(state, run.runId, 'CANCELLED', {
+          actor: SYSTEM.runtime,
+          error: 'start abandoned: the agent was paused or isolated while the run was starting',
+        });
+      }
+      return now ?? run;
+    }
     cur = state.runs.update(run.runId, { state: 'WORKING', taskHandle: handle, startedAt: new Date().toISOString() });
   } catch (err) {
-    return finishRun(state, run.runId, 'FAILED', {
-      actor: SYSTEM.runtime,
-      error: `start failed: ${err instanceof Error ? err.message : String(err)}`,
-    });
+    // The run token is never recorded: a CLI failure message can carry the whole command line.
+    const message = (err instanceof Error ? err.message : String(err)).split(runToken).join('[redacted]');
+    const now = state.runs.get(run.runId);
+    if (now && !isTerminal(now.state) && message.startsWith('RunTask abandoned')) {
+      return finishRun(state, run.runId, 'CANCELLED', { actor: SYSTEM.runtime, error: message });
+    }
+    return finishRun(state, run.runId, 'FAILED', { actor: SYSTEM.runtime, error: `start failed: ${message}` });
+  } finally {
+    // After the abandon handling too, so the reconciler cannot reap the run while its task is being stopped.
+    startsInFlight.delete(run.runId);
   }
   agent.state = 'WORKING';
   record(state, cur, 'RUN_STARTED', run.actor);
@@ -654,7 +691,7 @@ export async function routeEvents(state: PropertyManagerState, event: { type: st
 /** Poll runtimes whose tasks outlive this process; finish runs whose tasks stopped. */
 export async function reconcileRuns(state: PropertyManagerState): Promise<void> {
   for (const run of state.runs.list({ active: true })) {
-    if (run.state === 'QUEUED') continue;
+    if (run.state === 'QUEUED' || startsInFlight.has(run.runId)) continue;
     if (!state.runtime.status || !run.taskHandle) {
       if (!state.runtime.running(run.agentId)) {
         await finishRun(state, run.runId, 'FAILED', { actor: SYSTEM.reconciler, error: 'task lost: control plane restarted' });
