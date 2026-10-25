@@ -12,7 +12,7 @@ sessions. Each actor can be started fresh from this file (see "Start prompts").
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | Builder | **Switch** | Gemini | `switch` | Reviews the plan, writes the solution, opens PRs, answers reviews, reviews results PRs | Merges, deploys, touches `submind-aws`, edits this file |
 | Reviewer and merger | **Archie** | Claude, acting as Dale | `archie` | Reviews PRs through subagents, approves and merges, decides deploy gates, files pin PRs, answers on results | Writes the solution, reviews directly, deploys, approves a change to a human-aligned decision |
-| Operations | **Grok** | Grok, acting for Dale | `dsackr` (Dale's account) | Merges pin PRs, deploys, tests in production, rolls back, files results PRs | Changes code, merges anything else, decides what gets built |
+| Operations | **Grok** | Grok, acting for Dale | `dsackr` (Dale's account) | Approves and merges pin PRs, deploys, tests in production, decides on a rollback, files results PRs | Changes code, merges anything else, decides what gets built |
 
 Credentials: Archie's token is in AWS Secrets Manager, at the path Dale gives when starting Archie. Archie reads it
 through `scripts/bcl-aws`, never prints it, never writes it to a file or a commit. Nobody bypasses a hook, a classifier
@@ -88,15 +88,21 @@ the gate closes.
 
 ## Pin PR, deploy and results (Archie, Grok, Switch)
 
-1. **Archie files the pin PR** against `submind-aws`, moving the `upstream/agent-factory` pin to the merged commit, then
+1. **Archie files the pin PR** against `submind-aws` (Archie does not merge it), moving the `upstream/agent-factory` pin to the merged commit, then
    waits for the results.
-2. **Grok merges the pin PR** after checking that the SHA is the merged commit on agent-factory `main` and that
-   `scripts/check.sh` passes. Grok then follows `submind-aws/OPERATIONS.md` and runs `deploy-aws`, watches it to the end,
-   and runs the production tests the gating PR needs (including `config-agent-e2e` where the plan calls for it). Grok
+2. **Grok approves the pin PR with auto-merge** after checking that the SHA is the merged commit on agent-factory
+   `main` and that `scripts/check.sh` passes. Where the repository does not offer auto-merge, Grok merges it with `gh`
+   once the checks pass. Grok then follows `submind-aws/OPERATIONS.md` and runs `deploy-aws`, watches it to the end, and
+   runs the production tests the gating PR needs (including `config-agent-e2e` where the plan calls for it). Grok
    records the previous pin before it starts.
-3. **If the deploy's checks or a production test fail, Grok rolls back at once.** It repins to the previous known-good
-   pin, merges that, runs `deploy-aws`, and confirms the checks pass, before doing anything else. Rolling forward goes
-   through the loop.
+3. **Grok decides whether to roll back, and rolls back only when the factory in AWS is non-functional.** Non-functional
+   means a platform check in the deploy fails (a service is not on the pinned SHA or unhealthy, the control plane or a
+   Gatekeeper does not answer, the echo or llm-summarizer run does not complete, a service crashes, or the ledger does
+   not verify), or an existing agent can no longer run. Then Grok repins to the previous known-good pin, merges that,
+   runs `deploy-aws`, and confirms the checks pass, before doing anything else. A failed production test of the new
+   behavior, or a bug Grok finds, is **not** a reason to roll back while the factory still works: Grok files it in
+   the results PR and the loop forward-fixes. Grok writes its reasoning for rolling back, or for not rolling back, in
+   the results PR.
 4. **Grok files a results PR** in agent-factory, adding one file under `docs/engagement/results/` named for the pin.
    It states the pin and previous pin, the run IDs and links, each check's result, the production tests and their
    output, any rollback taken, and what Grok observed. It states facts only and proposes no code.
@@ -104,8 +110,8 @@ the gate closes.
    different approach.
 6. **Archie answers once**, as a review with feedback. If they still disagree, Archie records an open question for Dale
    and goes no further. Switch may proceed on the points where they agree.
-7. **Archie merges the results PR.** The gate closes when a passing results PR is merged. A failed deploy keeps the gate
-   open until a fix PR is merged and a later results PR passes.
+7. **Archie merges the results PR.** The gate closes when a passing results PR is merged. A failed deploy or failed production
+   test keeps the gate open until a fix PR is merged and a later results PR passes.
 
 ## Open questions
 
