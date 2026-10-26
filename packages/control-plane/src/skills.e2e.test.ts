@@ -16,7 +16,13 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
+import { VersionedConfigStore, type ConfigBackend, type ConfigRecord } from '@beercanlabs/factory-registrar';
 import { approvedSkill, loadSkills, recordSkillChecks, setSkillUsage, skillPackageStore, skillRegistry } from './skills.js';
+
+const memoryBackend = (): ConfigBackend => {
+  const records: ConfigRecord[] = [];
+  return { description: 'memory', loadAll: async () => records, write: async (r) => { records.push(r); }, remove: async () => {} };
+};
 
 const ADMIN = 'admin-skills-token';
 const OPERATOR = 'operator-skills-token';
@@ -95,6 +101,9 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
       runTokens: { issue: async () => '', verify: async () => undefined } as unknown as FactoryState['runTokens'],
       secretValues: new Set(),
     } as FactoryState;
+    state.configs = await VersionedConfigStore.open(memoryBackend());
+    await state.configs.put({ agentId: 'operator-agent', source: {}, skills: [], policy: null, owners: ['token:operator'] }, { updatedBy: 'test', reason: 'owners' });
+    await state.configs.put({ agentId: 'other-agent', source: {}, skills: [], policy: null, owners: ['token:other-owner'] }, { updatedBy: 'test', reason: 'owners' });
     loadSkills(state, join(dataDir, 'skills'));
     cp = createFactoryServer(state);
     port = await listen(cp);
@@ -403,6 +412,9 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
       runTokens: { issue: async () => '', verify: async () => undefined } as unknown as FactoryState['runTokens'],
       secretValues: new Set(),
     } as FactoryState;
+    state.configs = await VersionedConfigStore.open(memoryBackend());
+    await state.configs.put({ agentId: 'operator-agent', source: {}, skills: [], policy: null, owners: ['token:operator'] }, { updatedBy: 'test', reason: 'owners' });
+    await state.configs.put({ agentId: 'other-agent', source: {}, skills: [], policy: null, owners: ['token:other-owner'] }, { updatedBy: 'test', reason: 'owners' });
     loadSkills(state, join(dataDir, 'skills'));
     cp = createFactoryServer(state);
     port = await listen(cp);
@@ -515,53 +527,37 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
   });
 
   it('refuses package upload if configured checker does not support packages (501 not implemented, Finding 1)', async () => {
-    // 1. Env-resolved codebuild checker (production AWS)
-    const prevProvider = process.env.FACTORY_DEPLOY_PROVIDER;
-    const prevChecker = process.env.FACTORY_SKILL_CHECKER;
-    process.env.FACTORY_DEPLOY_PROVIDER = 'aws';
-    delete process.env.FACTORY_SKILL_CHECKER;
-
-    const awsState = { ...state, agents: new Map(state.agents) } as FactoryState;
-    loadSkills(awsState, join(dataDir, 'skills-aws'));
-    const awsServer = createFactoryServer(awsState);
-    const awsPort = await listen(awsServer);
+    // 1. Checker with supportsPackages: false
+    const unsupportedState = {
+      ...state,
+      agents: new Map(state.agents),
+      skillChecker: {
+        name: 'legacy-checker',
+        supportsPackages: false,
+        check: async () => ({ status: 'passed' as const, summary: 'ok' }),
+      },
+    } as FactoryState;
+    loadSkills(unsupportedState, join(dataDir, 'skills-unsupported'));
+    const unsuppServer = createFactoryServer(unsupportedState);
+    const unsuppPort = await listen(unsuppServer);
     try {
-      const pkg = makeValidPackage('aws-checker-skill', '1.0.0');
-      const res = await call(awsPort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+      const pkg = makeValidPackage('unsupp-checker-skill', '1.0.0');
+      const res = await call(unsuppPort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
       assert.equal(res.status, 501);
       assert.equal(res.body.error, 'package_checks_unsupported');
-      assert.ok(res.body.message.includes('codebuild'));
+      assert.ok(res.body.message.includes('legacy-checker'));
     } finally {
-      awsServer.close();
-      if (prevProvider !== undefined) process.env.FACTORY_DEPLOY_PROVIDER = prevProvider;
-      else delete process.env.FACTORY_DEPLOY_PROVIDER;
-      if (prevChecker !== undefined) process.env.FACTORY_SKILL_CHECKER = prevChecker;
-      else delete process.env.FACTORY_SKILL_CHECKER;
+      unsuppServer.close();
     }
 
-    // 2. Env-resolved cloudbuild checker (production GCP)
-    process.env.FACTORY_DEPLOY_PROVIDER = 'gcp';
-    delete process.env.FACTORY_SKILL_CHECKER;
-
-    const gcpState = { ...state, agents: new Map(state.agents) } as FactoryState;
-    loadSkills(gcpState, join(dataDir, 'skills-gcp'));
-    const gcpServer = createFactoryServer(gcpState);
-    const gcpPort = await listen(gcpServer);
-    try {
-      const pkg = makeValidPackage('gcp-checker-skill', '1.0.0');
-      const res = await call(gcpPort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
-      assert.equal(res.status, 501);
-      assert.equal(res.body.error, 'package_checks_unsupported');
-      assert.ok(res.body.message.includes('cloudbuild'));
-    } finally {
-      gcpServer.close();
-      if (prevProvider !== undefined) process.env.FACTORY_DEPLOY_PROVIDER = prevProvider;
-      else delete process.env.FACTORY_DEPLOY_PROVIDER;
-      if (prevChecker !== undefined) process.env.FACTORY_SKILL_CHECKER = prevChecker;
-      else delete process.env.FACTORY_SKILL_CHECKER;
-    }
+    // 2. AWS CodeBuild and GCP CloudBuild checkers support packages in Sub-slice 2d
+    const { codeBuildSkillChecker } = await import('./aws/skill-checker.js');
+    const { cloudBuildSkillChecker } = await import('./gcp/skill-checker.js');
+    assert.equal(codeBuildSkillChecker().supportsPackages, true);
+    assert.equal(cloudBuildSkillChecker().supportsPackages, true);
 
     // 3. No checker configured at all (FACTORY_SKILL_CHECKER=none or undefined)
+    const prevChecker = process.env.FACTORY_SKILL_CHECKER;
     process.env.FACTORY_SKILL_CHECKER = 'none';
 
     const noneState = { ...state, agents: new Map(state.agents) } as FactoryState;
@@ -629,7 +625,7 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
     assert.equal(versions[0].registeredBy, winner.body.registeredBy);
   });
 
-  it('refuses adoption of packaged skills (501 package_adoption_unsupported, Sub-slice 2d, A14)', async () => {
+  it('allows adoption of approved packaged skills (Sub-slice 2d, A14)', async () => {
     // Approve math-tools 1.0.0
     const reg = skillRegistry(state);
     const rec = reg.get('math-tools', '1.0.0');
@@ -641,9 +637,19 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
       skillId: 'math-tools',
       version: '1.0.0',
     });
-    assert.equal(res.status, 501);
-    assert.equal(res.body.error, 'package_adoption_unsupported');
-    assert.ok(res.body.message.includes('Sub-slice 2d'));
+    assert.equal(res.status, 201);
+    assert.equal(res.body.state, 'requested');
+    assert.equal(res.body.skillId, 'math-tools');
+    assert.equal(res.body.version, '1.0.0');
+
+    // Admin approves the adoption request
+    const appRes = await call(port, '/api/v1/agents/operator-agent/skills/math-tools/adoption/approve', 'POST', ADMIN, {});
+    assert.equal(appRes.status, 200);
+
+    // Verify GET /api/v1/agents/operator-agent/skills lists the adopted package skill
+    const getRes = await call(port, '/api/v1/agents/operator-agent/skills', 'GET', ADMIN);
+    assert.equal(getRes.status, 200);
+    assert.ok(getRes.body.adopted.some((s: any) => s.id === 'math-tools' && s.version === '1.0.0'));
   });
 
   it('enforces A15 owner rule: new version of existing skill must come from owner or admin (Finding 1)', async () => {

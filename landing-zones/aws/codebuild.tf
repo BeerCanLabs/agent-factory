@@ -36,7 +36,8 @@ resource "aws_iam_role_policy" "codebuild_policy" {
           "ecr:InitiateLayerUpload",
           "ecr:UploadLayerPart",
           "ecr:CompleteLayerUpload",
-          "ecr:PutImage"
+          "ecr:PutImage",
+          "s3:GetObject"
         ]
         Resource = "*"
       },
@@ -45,7 +46,8 @@ resource "aws_iam_role_policy" "codebuild_policy" {
         Action = [
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
-          "logs:PutLogEvents"
+          "logs:PutLogEvents",
+          "s3:GetObject"
         ]
         Resource = "*"
       }
@@ -315,7 +317,8 @@ resource "aws_iam_role_policy" "codebuild_skill_checker" {
         Action = [
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
-          "logs:PutLogEvents"
+          "logs:PutLogEvents",
+          "s3:GetObject"
         ]
         Resource = "*"
       }
@@ -874,7 +877,29 @@ phases:
       - echo "Skill check for $SKILL_ID@$SKILL_VERSION at $REPO_URL@$GIT_COMMIT ($SKILL_PATH)"
       - |
         SKILL_CHECK_RESULT='{"passed":false,"failures":["checks: the check did not run"]}'
-        if ! [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || [[ "$SKILL_PATH" == /* || "$SKILL_PATH" == *..* ]]; then
+        if [ -n "$PACKAGE_HASH" ]; then
+          if ! [[ "$PACKAGE_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+            SKILL_CHECK_RESULT='{"passed":false,"failures":["source: package hash must be 64 hex characters"]}'
+          else
+            mkdir -p "skill-repo/$SKILL_PATH"
+            PKG_FILE="/tmp/$PACKAGE_HASH.tar.gz"
+            if [ -n "$PACKAGE_STORE_URI" ] && [[ "$PACKAGE_STORE_URI" =~ ^s3:// ]]; then
+              aws s3 cp "$${PACKAGE_STORE_URI%/}/packages/$PACKAGE_HASH.tar.gz" "$PKG_FILE" || \
+              aws s3 cp "$${PACKAGE_STORE_URI%/}/$PACKAGE_HASH.tar.gz" "$PKG_FILE" || true
+            elif [ -n "$PACKAGE_STORE_DIR" ] && [ -f "$PACKAGE_STORE_DIR/packages/$PACKAGE_HASH.tar.gz" ]; then
+              cp "$PACKAGE_STORE_DIR/packages/$PACKAGE_HASH.tar.gz" "$PKG_FILE"
+            elif [ -n "$PACKAGE_STORE_DIR" ] && [ -f "$PACKAGE_STORE_DIR/$PACKAGE_HASH.tar.gz" ]; then
+              cp "$PACKAGE_STORE_DIR/$PACKAGE_HASH.tar.gz" "$PKG_FILE"
+            fi
+            if [ -f "$PKG_FILE" ] && [ "$$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$PKG_FILE")" = "$PACKAGE_HASH" ]; then
+              tar -xzf "$PKG_FILE" -C "skill-repo/$SKILL_PATH" || true
+              python3 /tmp/skill_check.py --dir "skill-repo/$SKILL_PATH" --venv /tmp/skill-check-venv --out /tmp/skill-check.json || true
+              if [ -s /tmp/skill-check.json ]; then SKILL_CHECK_RESULT="$(cat /tmp/skill-check.json)"; fi
+            else
+              SKILL_CHECK_RESULT='{"passed":false,"failures":["source: could not fetch package '$PACKAGE_HASH' from package store"]}'
+            fi
+          fi
+        elif ! [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || [[ "$SKILL_PATH" == /* || "$SKILL_PATH" == *..* ]]; then
           SKILL_CHECK_RESULT='{"passed":false,"failures":["source: the pin must be a full commit and a folder inside the repository"]}'
         else
           AUTH=()

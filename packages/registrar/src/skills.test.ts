@@ -367,6 +367,22 @@ describe('who may adopt what (SK1, SK3)', () => {
     assert.equal(why('higgins', 'print', '0.1.1'), 'ok');
   });
 
+  it('an approved packaged skill can be adopted (A14, Sub-slice 2d)', () => {
+    const r = new SkillRegistry();
+    r.save(record('1.0.0', {
+      id: 'pkg-skill',
+      status: 'approved',
+      packageHash: 'a'.repeat(64),
+      manifest: { ...manifest('1.0.0'), id: 'pkg-skill' } as unknown as SkillManifest,
+    }));
+    const c = canAdopt(r, 'higgins', 'pkg-skill', '1.0.0');
+    assert.equal(c.ok, true);
+    if (c.ok) {
+      assert.equal(c.record.id, 'pkg-skill');
+      assert.equal(c.record.packageHash, 'a'.repeat(64));
+    }
+  });
+
   it('lists for an agent the public skills and its own private skills, never another agent’s, never retired or unapproved ones', () => {
     const r = reg();
     assert.deepEqual(availableTo(r, 'higgins').map((s) => [s.id, s.version]), [['discord-progress', '1.0.0'], ['print', '0.1.1']]);

@@ -227,7 +227,7 @@ export function readBufferBody(req: http.IncomingMessage, limit = 5 * 1024 * 102
   if (clHeader !== undefined) {
     const declaredLength = parseInt(clHeader, 10);
     if (!Number.isNaN(declaredLength) && declaredLength > limit) {
-      req.pause();
+      req.on('data', () => {});
       req.resume();
       return Promise.reject(Object.assign(new Error('payload too large (package capped at 5 MiB) (A1, A5)'), { status: 413 }));
     }
@@ -242,8 +242,8 @@ export function readBufferBody(req: http.IncomingMessage, limit = 5 * 1024 * 102
       totalLength += chunk.length;
       if (totalLength > limit) {
         rejected = true;
-        req.pause();
-        req.destroy();
+        req.on('data', () => {});
+        req.resume();
         reject(Object.assign(new Error('payload too large (package capped at 5 MiB) (A1, A5)'), { status: 413 }));
         return;
       }

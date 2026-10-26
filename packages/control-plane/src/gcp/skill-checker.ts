@@ -105,7 +105,47 @@ ${SKILL_CHECK_SCRIPT.replace(/\n$/, '')}
 PY
 echo "Skill check for $SKILL_ID@$SKILL_VERSION at $REPO_URL@$GIT_COMMIT ($SKILL_PATH)"
 SKILL_CHECK_RESULT='{"passed":false,"failures":["checks: the check did not run"]}'
-if ! [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || [[ "$SKILL_PATH" == /* || "$SKILL_PATH" == *..* ]]; then
+if [ -n "$PACKAGE_HASH" ]; then
+  if ! [[ "$PACKAGE_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+    SKILL_CHECK_RESULT='{"passed":false,"failures":["source: package hash must be 64 hex characters"]}'
+  else
+    mkdir -p "skill-repo/$SKILL_PATH"
+    PKG_FILE="/tmp/$PACKAGE_HASH.tar.gz"
+    if [ -n "$PACKAGE_STORE_URI" ] && [[ "$PACKAGE_STORE_URI" =~ ^gcs://|^gs:// ]]; then
+      python3 - "$PACKAGE_STORE_URI" "$PACKAGE_HASH" "$PKG_FILE" <<'DL' || true
+import json, os, sys, urllib.parse, urllib.request
+uri, pkg_hash, dest = sys.argv[1:4]
+raw = uri.split("://", 1)[1]
+bucket = raw.split("/", 1)[0]
+prefix = raw.split("/", 1)[1] if "/" in raw else ""
+if prefix and not prefix.endswith("/"): prefix += "/"
+req = urllib.request.Request("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token", headers={"Metadata-Flavor": "Google"})
+tok = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())["access_token"]
+for k in [f"{prefix}packages/{pkg_hash}.tar.gz", f"{prefix}{pkg_hash}.tar.gz"]:
+    try:
+        url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{urllib.parse.quote(k, safe='')}?alt=media"
+        dl = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+        with urllib.request.urlopen(dl, timeout=30) as r, open(dest, "wb") as f:
+            f.write(r.read())
+        sys.exit(0)
+    except Exception:
+        continue
+sys.exit(5)
+DL
+    elif [ -n "$PACKAGE_STORE_DIR" ] && [ -f "$PACKAGE_STORE_DIR/packages/$PACKAGE_HASH.tar.gz" ]; then
+      cp "$PACKAGE_STORE_DIR/packages/$PACKAGE_HASH.tar.gz" "$PKG_FILE"
+    elif [ -n "$PACKAGE_STORE_DIR" ] && [ -f "$PACKAGE_STORE_DIR/$PACKAGE_HASH.tar.gz" ]; then
+      cp "$PACKAGE_STORE_DIR/$PACKAGE_HASH.tar.gz" "$PKG_FILE"
+    fi
+    if [ -f "$PKG_FILE" ] && [ "$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$PKG_FILE")" = "$PACKAGE_HASH" ]; then
+      tar -xzf "$PKG_FILE" -C "skill-repo/$SKILL_PATH" || true
+      python3 /tmp/skill_check.py --dir "skill-repo/$SKILL_PATH" --venv /tmp/skill-check-venv --out /tmp/skill-check.json || true
+      if [ -s /tmp/skill-check.json ]; then SKILL_CHECK_RESULT="$(cat /tmp/skill-check.json)"; fi
+    else
+      SKILL_CHECK_RESULT='{"passed":false,"failures":["source: could not fetch package '$PACKAGE_HASH' from package store"]}'
+    fi
+  fi
+elif ! [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || [[ "$SKILL_PATH" == /* || "$SKILL_PATH" == *..* ]]; then
   SKILL_CHECK_RESULT='{"passed":false,"failures":["source: the pin must be a full commit and a folder inside the repository"]}'
 else
   AUTH=()
@@ -191,7 +231,7 @@ export function cloudBuildSkillChecker(
   const api = opts.api ?? defaultGcpCloudBuildApi();
   return {
     name: 'cloudbuild',
-    supportsPackages: false,
+    supportsPackages: true,
     async start(req) {
       const projectId = opts.projectId ?? process.env.FACTORY_GCP_PROJECT;
       if (!projectId) throw new Error('FACTORY_GCP_PROJECT environment variable is not set');
@@ -207,6 +247,7 @@ export function cloudBuildSkillChecker(
         FACTORY_GCP_PROJECT: projectId,
         SOURCE_TOKEN_HOSTS: sourceTokenHosts,
         GIT_TOKEN_SECRET_ID: gitTokenSecretId,
+        ...(process.env.FACTORY_SKILL_PACKAGES_URI ? { PACKAGE_STORE_URI: process.env.FACTORY_SKILL_PACKAGES_URI } : {}),
       };
       const stepEnv = Object.entries(envMap).map(([k, v]) => `${k}=${v}`);
 

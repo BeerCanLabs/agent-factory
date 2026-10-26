@@ -16,9 +16,12 @@ export function codeBuildSkillChecker(
   const projectName = opts.projectName ?? process.env.FACTORY_SKILL_CHECKER_PROJECT ?? 'factory-skill-checker';
   return {
     name: 'codebuild',
-    supportsPackages: false,
+    supportsPackages: true,
     async start(req) {
-      const env = skillCheckEnv(req);
+      const env = {
+        ...skillCheckEnv(req),
+        ...(process.env.FACTORY_SKILL_PACKAGES_URI ? { PACKAGE_STORE_URI: process.env.FACTORY_SKILL_PACKAGES_URI } : {}),
+      };
       const res = await client.send(
         new StartBuildCommand({
           projectName,

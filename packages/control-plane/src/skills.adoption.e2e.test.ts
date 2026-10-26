@@ -292,6 +292,46 @@ describe('adoption: request, approve, remove, retire, and private skills (TSK-15
       assert.deepEqual(both.map((r) => r.status), [200, 200], JSON.stringify(both.map((r) => r.body)));
       assert.deepEqual(skillsOf('donna'), ['discord-progress@0.1.0', 'factory-schedules@0.1.0']);
     });
+
+    it('adopts an approved packaged skill and exposes packageHash for builder intake (Sub-slice 2d, A14)', async () => {
+      const hash = 'a'.repeat(64);
+      const pkgRec = {
+        id: 'pkg-tool',
+        version: '1.0.0',
+        packageHash: hash,
+        repo: '',
+        commit: hash,
+        path: '.',
+        manifest: publicManifest('pkg-tool', '1.0.0'),
+        status: 'approved' as const,
+        tests: 'passed' as const,
+        registeredBy: 'token:admin',
+        registeredAt: new Date().toISOString(),
+      };
+      const { skillRegistry } = await import('./skills.js');
+      skillRegistry(state).save(pkgRec);
+
+      const ask = { skillId: 'pkg-tool', version: '1.0.0', reason: 'adopt packaged tool' };
+      const asked = await call('/api/v1/agents/higgins/skills', 'POST', HIGGINS_OWNER, ask);
+      assert.equal(asked.status, 201, JSON.stringify(asked.body));
+      assert.equal(asked.body.state, 'requested');
+
+      const approved = await call('/api/v1/agents/higgins/skills/pkg-tool/adoption/approve', 'POST', ADMIN, {});
+      assert.equal(approved.status, 200);
+
+      const agent = await call('/api/v1/agents/higgins/skills', 'GET', HIGGINS_OWNER);
+      assert.ok(agent.body.adopted.some((a: any) => a.id === 'pkg-tool' && a.version === '1.0.0'));
+
+      const { buildSkillsFor } = await import('./apply.js');
+      const built = buildSkillsFor(state, 'higgins');
+      assert.equal(built.ok, true);
+      const found = (built as any).skills.find((s: any) => s.id === 'pkg-tool');
+      assert.ok(found);
+      assert.equal(found.packageHash, hash);
+
+      // Clean up so subsequent tests see higgins in its original state
+      await call('/api/v1/agents/higgins/skills/pkg-tool', 'DELETE', HIGGINS_OWNER);
+    });
   });
 
   describe('removing an adoption (SK3, SK6)', () => {

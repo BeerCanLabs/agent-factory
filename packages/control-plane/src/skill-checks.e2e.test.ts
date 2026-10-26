@@ -57,6 +57,7 @@ function heldChecker() {
   let n = 0;
   const checker: SkillChecker & { requests: typeof requests; finish(runId: string, o: SkillCheckOutcome): void } = {
     name: 'held',
+    supportsPackages: true,
     requests,
     async start(req) {
       const runId = `held-${++n}`;

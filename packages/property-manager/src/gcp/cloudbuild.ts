@@ -39,7 +39,13 @@ export function skillsEnv(skills: readonly BuildSkill[]): string {
   return JSON.stringify(
     [...skills]
       .sort((a, b) => a.id.localeCompare(b.id))
-      .map(({ id, version, repo, path, commit }) => ({ id, version, repo, path, commit })),
+      .map((s) => ({
+        id: s.id,
+        version: s.version,
+        ...(s.packageHash
+          ? { packageHash: s.packageHash }
+          : { repo: s.repo, path: s.path, commit: s.commit }),
+      })),
   );
 }
 
@@ -155,34 +161,109 @@ if not isinstance(skills, list) or not skills:
     refuse("SKILLS is not a non-empty list")
 seen = set()
 for s in skills:
-    if not isinstance(s, dict) or set(s) != {"id", "version", "repo", "path", "commit"}:
-        refuse("a skill pin has the wrong keys")
-    if not all(isinstance(v, str) for v in s.values()):
-        refuse("a skill pin has a value that is not a string")
-    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", s["id"]) or len(s["id"]) > 64:
+    if not isinstance(s, dict):
+        refuse("a skill pin is not a dict")
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", str(s.get("id", ""))) or len(str(s.get("id", ""))) > 64:
         refuse("a skill id is not kebab-case")
-    if not re.fullmatch(r"[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?", s["version"]):
+    if not re.fullmatch(r"[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?", str(s.get("version", ""))):
         refuse("a skill version is not a semantic version")
-    if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9._~/-]+", s["repo"]):
-        refuse("a skill repository is not a plain https URL without credentials")
-    if not re.fullmatch(r"[0-9a-f]{40}", s["commit"]):
-        refuse("a skill commit is not a full SHA")
-    p = s["path"]
-    if p != "." and (p.startswith("/") or ".." in p.split("/") or not re.fullmatch(r"[A-Za-z0-9._/-]+", p)):
-        refuse("a skill path leaves its repository")
-    if s["id"] in seen:
+    if s.get("id") in seen:
         refuse("a skill is listed twice")
     seen.add(s["id"])
-    print("\\t".join([s["id"], s["version"], s["repo"], s["path"], s["commit"]]))
+
+    if "packageHash" in s:
+        pkg_hash = str(s.get("packageHash", ""))
+        if not re.fullmatch(r"[0-9a-f]{64}", pkg_hash):
+            refuse("a skill packageHash is not a full 64-character SHA-256")
+        print("|".join([s["id"], s["version"], "", "", "", pkg_hash]))
+    else:
+        if set(s) != {"id", "version", "repo", "path", "commit"}:
+            refuse("a skill pin has the wrong keys")
+        if not all(isinstance(v, str) for v in s.values()):
+            refuse("a skill pin has a value that is not a string")
+        if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9._~/-]+", s["repo"]):
+            refuse("a skill repository is not a plain https URL without credentials")
+        if not re.fullmatch(r"[0-9a-f]{40}", s["commit"]):
+            refuse("a skill commit is not a full SHA")
+        p = s["path"]
+        if p != "." and (p.startswith("/") or ".." in p.split("/") or not re.fullmatch(r"[A-Za-z0-9._/-]+", p)):
+            refuse("a skill path leaves its repository")
+        print("|".join([s["id"], s["version"], s["repo"], s["path"], s["commit"], ""]))
 PY
 )" || exit 5
-  while IFS=$'\\t' read -r id version repo path commit; do
+  while IFS='|' read -r id version repo path commit package_hash; do
     [ -n "$id" ] || continue
-    AUTH=()
-    host="$(printf '%s' "$repo" | sed -E 's#^https://([^/@:]+).*#\\1#' | tr 'A-Z' 'a-z')"; allowed=""
-    for h in \${SOURCE_TOKEN_HOSTS:-}; do [ "$host" = "$h" ] && allowed=1; done
-    if [ -n "\${GIT_TOKEN_SECRET_ID:-}" ] && [ -n "$allowed" ]; then
-      GIT_TOKEN="$(python3 - <<'PY'
+    if [ -n "$package_hash" ]; then
+      echo "skill $id@$version from package \${package_hash:0:12}"
+      PKG_FILE="$WORK/$package_hash.tar.gz"
+      if [ -n "\${PACKAGE_STORE_URI:-}" ] && [[ "$PACKAGE_STORE_URI" =~ ^gcs://|^gs:// ]]; then
+        python3 - "$PACKAGE_STORE_URI" "$package_hash" "$PKG_FILE" <<'PY' || exit 5
+import json, os, sys, urllib.parse, urllib.request
+uri, pkg_hash, dest = sys.argv[1:4]
+raw = uri.split("://", 1)[1]
+bucket = raw.split("/", 1)[0]
+prefix = raw.split("/", 1)[1] if "/" in raw else ""
+if prefix and not prefix.endswith("/"): prefix += "/"
+req = urllib.request.Request("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token", headers={"Metadata-Flavor": "Google"})
+tok = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())["access_token"]
+for k in [f"{prefix}packages/{pkg_hash}.tar.gz", f"{prefix}{pkg_hash}.tar.gz"]:
+    try:
+        url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{urllib.parse.quote(k, safe='')}?alt=media"
+        dl = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+        with urllib.request.urlopen(dl, timeout=30) as r, open(dest, "wb") as f:
+            f.write(r.read())
+        sys.exit(0)
+    except Exception:
+        continue
+sys.exit(5)
+PY
+      elif [ -n "\${PACKAGE_STORE_DIR:-}" ] && [ -f "$PACKAGE_STORE_DIR/packages/$package_hash.tar.gz" ]; then
+        cp "$PACKAGE_STORE_DIR/packages/$package_hash.tar.gz" "$PKG_FILE"
+      elif [ -n "\${PACKAGE_STORE_DIR:-}" ] && [ -f "$PACKAGE_STORE_DIR/$package_hash.tar.gz" ]; then
+        cp "$PACKAGE_STORE_DIR/$package_hash.tar.gz" "$PKG_FILE"
+      elif [ -n "\${FACTORY_SKILL_PACKAGES_DIR:-}" ] && [ -f "$FACTORY_SKILL_PACKAGES_DIR/packages/$package_hash.tar.gz" ]; then
+        cp "$FACTORY_SKILL_PACKAGES_DIR/packages/$package_hash.tar.gz" "$PKG_FILE"
+      elif [ -n "\${FACTORY_SKILL_PACKAGES_DIR:-}" ] && [ -f "$FACTORY_SKILL_PACKAGES_DIR/$package_hash.tar.gz" ]; then
+        cp "$FACTORY_SKILL_PACKAGES_DIR/$package_hash.tar.gz" "$PKG_FILE"
+      elif [ -f "./packages/$package_hash.tar.gz" ]; then
+        cp "./packages/$package_hash.tar.gz" "$PKG_FILE"
+      elif [ -f "./$package_hash.tar.gz" ]; then
+        cp "./$package_hash.tar.gz" "$PKG_FILE"
+      else
+        echo "package $package_hash not found in store"
+        exit 5
+      fi
+
+      ACTUAL_HASH="$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$PKG_FILE")" || exit 5
+      if [ "$ACTUAL_HASH" != "$package_hash" ]; then
+        echo "package $package_hash hash mismatch: $ACTUAL_HASH"
+        exit 5
+      fi
+
+      mkdir -p "$WORK/pkg-$id" || exit 5
+      python3 - "$PKG_FILE" "$WORK/pkg-$id" <<'PY' || exit 5
+import os, sys, tarfile
+pkg_file, dest_dir = sys.argv[1:3]
+os.makedirs(dest_dir, exist_ok=True)
+with tarfile.open(pkg_file, "r:gz") as tar:
+    if hasattr(tarfile, "data_filter"):
+        tar.extractall(dest_dir, filter="data")
+    else:
+        dest_abs = os.path.abspath(dest_dir)
+        for member in tar.getmembers():
+            target_path = os.path.abspath(os.path.join(dest_dir, member.name))
+            if not target_path.startswith(dest_abs):
+                raise ValueError("path traversal in tar")
+            tar.extract(member, dest_dir)
+PY
+      folder="$WORK/pkg-$id"
+    else
+      echo "skill $id@$version from $repo at \${commit:0:12}"
+      AUTH=()
+      host="$(printf '%s' "$repo" | sed -E 's#^https://([^/@:]+).*#\\1#' | tr 'A-Z' 'a-z')"; allowed=""
+      for h in \${SOURCE_TOKEN_HOSTS:-}; do [ "$host" = "$h" ] && allowed=1; done
+      if [ -n "\${GIT_TOKEN_SECRET_ID:-}" ] && [ -n "$allowed" ]; then
+        GIT_TOKEN="$(python3 - <<'PY'
 import base64, json, os, urllib.request
 req = urllib.request.Request(
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
@@ -200,16 +281,18 @@ payload = json.loads(urllib.request.urlopen(sreq, timeout=10).read().decode())["
 print(base64.b64decode(payload).decode("utf-8").strip())
 PY
 )" || exit 5
-      AUTH=(-c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 | tr -d '\\n')")
-      unset GIT_TOKEN
+        AUTH=(-c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 | tr -d '\\n')")
+        unset GIT_TOKEN
+      fi
+      clone="$WORK/$id"
+      GIT_TERMINAL_PROMPT=0 git \${AUTH[@]+"\${AUTH[@]}"} clone --no-checkout -- "$repo" "$clone" >/dev/null 2>&1 || exit 5
+      unset AUTH
+      ( cd "$clone" && git checkout --detach "$commit" >/dev/null 2>&1 && [ "$(git rev-parse HEAD)" = "$commit" ] ) || exit 5
+      root="$(cd "$clone" && pwd -P)"
+      folder="$(cd "$clone/$path" 2>/dev/null && pwd -P)" || exit 5
+      case "$folder" in "$root"|"$root"/*) ;; *) exit 5 ;; esac
     fi
-    clone="$WORK/$id"
-    GIT_TERMINAL_PROMPT=0 git \${AUTH[@]+"\${AUTH[@]}"} clone --no-checkout -- "$repo" "$clone" >/dev/null 2>&1 || exit 5
-    unset AUTH
-    ( cd "$clone" && git checkout --detach "$commit" >/dev/null 2>&1 && [ "$(git rev-parse HEAD)" = "$commit" ] ) || exit 5
-    root="$(cd "$clone" && pwd -P)"
-    folder="$(cd "$clone/$path" 2>/dev/null && pwd -P)" || exit 5
-    case "$folder" in "$root"|"$root"/*) ;; *) exit 5 ;; esac
+
     [ -f "$folder/skill.yaml" ] || exit 5
     python3 - "$folder/skill.yaml" "$id" "$version" <<'PY' || exit 5
 import re, sys
@@ -219,7 +302,7 @@ def top(key):
     return m.group(1).strip() if m else None
 sys.exit(0 if top("id") == sys.argv[2] and top("version") == sys.argv[3] else 1)
 PY
-    SHITS="$(cd "$folder" && git ls-files -z -- . | xargs -0 grep -nIE -i -- "$KNOWN|$GENERIC" 2>/dev/null | grep -v 'secret-scan:allow' | grep -E -- "$KNOWN|[\\"'][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[\\"']|[\\"'][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[\\"']" | grep -vE '(example|EXAMPLE|placeholder|your[-_]|changeme|<[a-z_]+>)' | cut -d: -f1,2 | sort -u)"
+    SHITS="$(cd "$folder" && ( if [ -d .git ]; then git ls-files -z -- .; else find . -type f -print0; fi ) | xargs -0 grep -nIE -i -- "$KNOWN|$GENERIC" 2>/dev/null | grep -v 'secret-scan:allow' | grep -E -- "$KNOWN|[\\"'][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[\\"']|[\\"'][A-Za-z0-9_/+=.-]*[0-9][A-Za-z0-9_/+=.-]*[a-z][A-Za-z0-9_/+=.-]*[\\"']" | grep -vE '(example|EXAMPLE|placeholder|your[-_]|changeme|<[a-z_]+>)' | cut -d: -f1,2 | sed 's#^\./##' | sort -u)"
     if [ -n "$SHITS" ]; then echo "ADMISSION REFUSED (hardcoded_secret) in skill $id:"; echo "$SHITS"; exit 6; fi
     mkdir -p "$OUT/skills/$id" || exit 5
     ( cd "$folder" && tar --exclude=.git -cf - . ) | ( cd "$OUT/skills/$id" && tar -xf - ) || exit 5

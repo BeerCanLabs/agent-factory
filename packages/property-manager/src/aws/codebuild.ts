@@ -41,7 +41,17 @@ export const MAX_SKILLS_ENV_CHARS = 3500;
  * body, a requirement or a credential.
  */
 export function skillsEnv(skills: readonly BuildSkill[]): string {
-  return JSON.stringify([...skills].sort((a, b) => a.id.localeCompare(b.id)).map(({ id, version, repo, path, commit }) => ({ id, version, repo, path, commit })));
+  return JSON.stringify(
+    [...skills]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((s) => ({
+        id: s.id,
+        version: s.version,
+        ...(s.packageHash
+          ? { packageHash: s.packageHash }
+          : { repo: s.repo, path: s.path, commit: s.commit }),
+      })),
+  );
 }
 
 /**

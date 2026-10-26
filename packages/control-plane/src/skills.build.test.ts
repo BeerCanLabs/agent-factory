@@ -150,6 +150,20 @@ describe('the skills build on the shared runtime (CF6, SK4, TSK-272)', () => {
     assert.equal(uri, `111111111111.dkr.ecr.us-east-1.amazonaws.com/agents:${e.IMAGE_TAG}`);
   }));
 
+  it('sends packageHash in SKILLS and includes packageHash in tag for packaged skills (A4, A14)', () => withUri(async () => {
+    const pkgSkill: BuildSkill = { id: 'pkg-weather', version: '1.0.0', packageHash: 'e'.repeat(64) };
+    const { client, starts } = sent();
+    const uri = await buildSkillsImage('nova', BASE, [pkgSkill], { client, pollMs: 0 });
+    assert.equal(starts.length, 1);
+    const e = starts[0].env;
+    const parsedSkills = JSON.parse(e.SKILLS);
+    assert.deepEqual(parsedSkills, [
+      { id: 'pkg-weather', version: '1.0.0', packageHash: 'e'.repeat(64) },
+    ]);
+    assert.equal(e.IMAGE_TAG, imageTagFor('nova', C, [pkgSkill]));
+    assert.equal(uri, `111111111111.dkr.ecr.us-east-1.amazonaws.com/agents:${e.IMAGE_TAG}`);
+  }));
+
   it('uses the project the deployment names', () => withUri(async () => {
     const { client, starts } = sent();
     process.env.FACTORY_SKILLS_BUILDER_PROJECT = 'custom-skills';
