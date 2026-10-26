@@ -33,6 +33,12 @@ const BANNED_SEGMENTS = new Set([
   '__pycache__',
 ]);
 
+export interface ValidatedSkillPackageEntry {
+  path: string;
+  isDir: boolean;
+  content: Buffer;
+}
+
 export type ValidatedSkillPackage =
   | {
       ok: true;
@@ -40,6 +46,7 @@ export type ValidatedSkillPackage =
       sha256: string;
       files: string[];
       totalExpandedBytes: number;
+      entries: ValidatedSkillPackageEntry[];
     }
   | {
       ok: false;
@@ -342,6 +349,7 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
   }
 
   const files: string[] = [];
+  const entries: ValidatedSkillPackageEntry[] = [];
   const allFiles = new Set<string>();
   const allDirs = new Set<string>();
   const parentDirs = new Set<string>();
@@ -497,6 +505,9 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
     }
 
     if (isDir) {
+      if (!allDirs.has(normalized)) {
+        entries.push({ path: normalized, isDir: true, content: Buffer.alloc(0) });
+      }
       allDirs.add(normalized);
       // Register all parent directories of directory entry (N4)
       for (let p = 1; p < parts.length; p++) {
@@ -601,6 +612,8 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
           hasTests = true;
         }
       }
+
+      entries.push({ path: normalized, isDir: false, content });
     }
 
     // Only regular files advance the walk with content blocks; directories never have content blocks (B2, N1)
@@ -672,12 +685,13 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
     sha256,
     files,
     totalExpandedBytes,
+    entries,
   };
 }
 
 /**
  * Safely extracts a validated skill package to targetDir (A19).
- * Verifies package first via validateSkillPackage; unpacks only regular files and directories.
+ * Single-pass extraction reusing parsed and validated entries from validateSkillPackage.
  */
 export async function extractSkillPackage(
   buffer: Buffer,
@@ -694,59 +708,17 @@ export async function extractSkillPackage(
   const resolvedTarget = resolve(targetDir);
   mkdirSync(resolvedTarget, { recursive: true, mode: 0o755 });
 
-  const issues: string[] = [];
-  const tar = gunzipSingleStream(buffer, issues);
-  if (!tar) {
-    return { ok: false, issues };
-  }
-
-  let offset = 0;
-  while (offset + 512 <= tar.length) {
-    const block = tar.subarray(offset, offset + 512);
-    let isZeroBlock = true;
-    for (let i = 0; i < 512; i++) {
-      if (block[i] !== 0) {
-        isZeroBlock = false;
-        break;
-      }
-    }
-    if (isZeroBlock) break;
-
-    let nameEnd = block.indexOf(0, 0);
-    if (nameEnd === -1 || nameEnd > 100) nameEnd = 100;
-    const namePart = block.subarray(0, nameEnd).toString('utf8');
-
-    const magic = block.subarray(257, 263).toString('ascii');
-    const isUstar = magic.startsWith('ustar');
-
-    let prefixPart = '';
-    if (isUstar) {
-      let prefixEnd = block.indexOf(0, 345);
-      if (prefixEnd === -1 || prefixEnd > 500) prefixEnd = 500;
-      prefixPart = block.subarray(345, prefixEnd).toString('utf8');
-    }
-    const rawPath = prefixPart ? `${prefixPart}/${namePart}` : namePart;
-    const typeflag = block[156];
-    const size = parseNumericField(block, 124, 12, 'size', issues) ?? 0;
-
-    offset += 512;
-    const content = tar.subarray(offset, offset + size);
-    offset += Math.ceil(size / 512) * 512;
-
-    const { normalized, isValid } = normalizeTarPath(rawPath, issues);
-    if (!isValid || !normalized) continue;
-
-    const dest = resolve(resolvedTarget, normalized);
+  for (const entry of validated.entries) {
+    const dest = resolve(resolvedTarget, entry.path);
     if (!dest.startsWith(resolvedTarget + sep) && dest !== resolvedTarget) {
-      issues.push(`path leaves target directory: ${normalized}`);
-      return { ok: false, issues };
+      return { ok: false, issues: [`path leaves target directory: ${entry.path}`] };
     }
 
-    if (typeflag === 0x35 || normalized.endsWith('/')) {
+    if (entry.isDir) {
       mkdirSync(dest, { recursive: true, mode: 0o755 });
     } else {
       mkdirSync(dirname(dest), { recursive: true, mode: 0o755 });
-      writeFileSync(dest, content, { mode: 0o644 });
+      writeFileSync(dest, entry.content, { mode: 0o644 });
     }
   }
 

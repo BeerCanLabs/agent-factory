@@ -88,6 +88,24 @@ describe('skill registry store', () => {
     assert.equal(registry.get('discord-progress', '1.0.0')?.status, 'pending');
   });
 
+  it('saveIfAbsent saves when absent and returns false when version already exists', () => {
+    const dir = tmp();
+    try {
+      const reg = new SkillRegistry(dir);
+      const rec = record('1.0.0');
+      assert.equal(reg.saveIfAbsent(rec), true);
+      assert.equal(reg.get('discord-progress', '1.0.0')?.version, '1.0.0');
+      // Attempting to save again returns false
+      assert.equal(reg.saveIfAbsent(rec), false);
+
+      // A different version succeeds
+      assert.equal(reg.saveIfAbsent(record('1.1.0')), true);
+      assert.equal(reg.get('discord-progress', '1.1.0')?.version, '1.1.0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('skips an unreadable record and says so through warn, keeping the others', () => {
     const dir = tmp();
     const warnings: Array<[string, unknown]> = [];

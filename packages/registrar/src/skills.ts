@@ -165,11 +165,30 @@ export class SkillRegistry {
       const folder = join(this.dir, rec.id);
       mkdirSync(folder, { recursive: true });
       const path = join(folder, `${rec.version}.json`);
-      const tmp = `${path}.${process.pid}.tmp`;
+      const tmp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
       writeFileSync(tmp, JSON.stringify(rec, null, 2), 'utf8');
       renameSync(tmp, path);
     }
     this.put(rec);
+  }
+
+  /**
+   * Atomically saves the record if id@version is not already registered.
+   * Returns true if saved, false if already present (A15).
+   */
+  saveIfAbsent(rec: SkillVersionRecord): boolean {
+    if (this.skills.get(rec.id)?.has(rec.version)) {
+      return false;
+    }
+    if (this.dir) {
+      const folder = join(this.dir, rec.id);
+      const path = join(folder, `${rec.version}.json`);
+      if (existsSync(path)) {
+        return false;
+      }
+    }
+    this.save(rec);
+    return true;
   }
 
   get(id: string, version: string): SkillVersionRecord | undefined {

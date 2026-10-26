@@ -853,5 +853,55 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
         rmSync(tmp, { recursive: true, force: true });
       }
     });
+
+    it('refuses extraction when package attempts directory traversal escape', async () => {
+      const { mkdtempSync, rmSync, existsSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+
+      const tmp = mkdtempSync(join(tmpdir(), 'skill-extract-test-'));
+      try {
+        const outDir = join(tmp, 'extracted');
+        const escapeTar = makeTarball([
+          { header: createTarHeader({ name: 'skill.yaml', size: Buffer.byteLength(VALID_SKILL_YAML) }), content: Buffer.from(VALID_SKILL_YAML) },
+          { header: createTarHeader({ name: 'test_a.py', size: Buffer.byteLength(VALID_TEST_PY) }), content: Buffer.from(VALID_TEST_PY) },
+          { header: createTarHeader({ name: '../escape.py', size: 10 }), content: Buffer.from('pwned=True') },
+        ]);
+        const gz = zlib.gzipSync(escapeTar);
+        const res = await extractSkillPackage(gz, outDir);
+        assert.equal(res.ok, false);
+        if (!res.ok) {
+          assert.ok(res.issues.some((i) => i.includes('directory traversal not allowed in path')));
+        }
+        assert.equal(existsSync(join(tmp, 'escape.py')), false);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses extraction when package contains symlink entry', async () => {
+      const { mkdtempSync, rmSync, existsSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+
+      const tmp = mkdtempSync(join(tmpdir(), 'skill-extract-test-'));
+      try {
+        const outDir = join(tmp, 'extracted');
+        const symlinkTar = makeTarball([
+          { header: createTarHeader({ name: 'skill.yaml', size: Buffer.byteLength(VALID_SKILL_YAML) }), content: Buffer.from(VALID_SKILL_YAML) },
+          { header: createTarHeader({ name: 'test_a.py', size: Buffer.byteLength(VALID_TEST_PY) }), content: Buffer.from(VALID_TEST_PY) },
+          { header: createTarHeader({ name: 'symlink_escape', typeflag: '2' }) },
+        ]);
+        const gz = zlib.gzipSync(symlinkTar);
+        const res = await extractSkillPackage(gz, outDir);
+        assert.equal(res.ok, false);
+        if (!res.ok) {
+          assert.ok(res.issues.some((i) => i.includes("entry type '2' not permitted")));
+        }
+        assert.equal(existsSync(join(outDir, 'symlink_escape')), false);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
   });
 });

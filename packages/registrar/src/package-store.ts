@@ -104,12 +104,11 @@ export class LocalSkillPackageStore implements SkillPackageStore {
       if (existingHash !== sha256) {
         throw new Error(`stored package corrupted: sha256 mismatch for ${sha256} (got ${existingHash}) (A4, S3)`);
       }
-      return (await this.getRecord(sha256)) ?? {
-        sha256,
-        size: existingBuffer.length,
-        storedAt: new Date().toISOString(),
-        quarantined: false,
-      };
+      const rec = await this.getRecord(sha256);
+      if (!rec) {
+        throw new Error(`store inconsistency: package ${sha256} exists on disk but getRecord returned null`);
+      }
+      return rec;
     }
 
     // Atomic write via temp file with cleanup on failure
@@ -124,12 +123,11 @@ export class LocalSkillPackageStore implements SkillPackageStore {
       throw err;
     }
 
-    return (await this.getRecord(sha256)) ?? {
-      sha256,
-      size: buffer.length,
-      storedAt: new Date().toISOString(),
-      quarantined: false,
-    };
+    const rec = await this.getRecord(sha256);
+    if (!rec) {
+      throw new Error(`store inconsistency: package ${sha256} written to disk but getRecord returned null`);
+    }
+    return rec;
   }
 
   async get(sha256: string): Promise<Buffer | null> {

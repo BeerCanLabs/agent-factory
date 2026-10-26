@@ -172,8 +172,25 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
   const now = new Date().toISOString();
   const contentType = (req.headers['content-type'] ?? '').toLowerCase();
   const isJson = contentType.includes('application/json');
+  const isGzip = contentType.includes('application/gzip') || contentType.includes('application/x-gzip');
 
-  if (!isJson) {
+  if (!isJson && !isGzip) {
+    json(res, 415, {
+      error: 'unsupported_media_type',
+      message: 'skill registration accepts application/json (repository) or application/gzip (package)',
+    });
+    return;
+  }
+
+  if (isGzip) {
+    if (state.skillChecker && !state.skillChecker.supportsPackages) {
+      json(res, 501, {
+        error: 'package_checks_unsupported',
+        message: `the configured skill checker (${state.skillChecker.name}) does not support package checks (A14)`,
+      });
+      return;
+    }
+
     let buffer: Buffer;
     try {
       buffer = await readBufferBody(req, 5 * 1024 * 1024);
@@ -210,12 +227,37 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     if (registry.get(manifest.id, manifest.version)) {
       reasons.push(`version: ${manifest.id}@${manifest.version} is already registered; versions are immutable, register a new version`);
     }
-    const known = registry.versions(manifest.id);
-    if (known.length && known.every((v) => v.retired)) {
+
+    const existing = registry.versions(manifest.id);
+    if (existing.length) {
+      const first = existing[0];
+      if (first.repo) {
+        reasons.push(`id: ${manifest.id} is registered from a repository; cannot mix repository and package versions for this id (A15)`);
+      }
+      const isOwner = first.registeredBy.toLowerCase() === principal.actor.toLowerCase();
+      const isAdmin = authorize({ principal, privilege: 'skills.decide' }).allowed;
+      if (!isOwner && !isAdmin) {
+        reasons.push(`id: ${manifest.id} is owned by ${first.registeredBy}; new versions must come from the owner or an admin (A15)`);
+      }
+    }
+
+    const identity = registry.identityIssue(manifest);
+    if (identity) reasons.push(`manifest.visibility: ${identity}`);
+
+    if (existing.length && existing.every((v) => v.retired)) {
       reasons.push(`id: ${manifest.id} is retired; no new version can be registered (SK6), so give the skill a different id`);
     }
+
     for (const i of skillDesignIssues(manifest, { gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets })) {
       reasons.push(`manifest.${i.path}: ${i.message}`);
+    }
+
+    if (manifest.visibility === 'private' && manifest.owner) {
+      if (!state.agents.has(manifest.owner)) {
+        reasons.push(`manifest.owner: agent ${manifest.owner} is not registered`);
+      } else if (!authorize({ principal, privilege: 'skills.adopt.request', resource: { agentId: manifest.owner, owners: ownersOf(state, manifest.owner) } }).allowed) {
+        reasons.push(`manifest.owner: only an admin or an owner of ${manifest.owner} may register a skill private to it`);
+      }
     }
 
     if (reasons.length) {
@@ -249,7 +291,22 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     };
 
     try {
-      registry.save(rec);
+      const saved = registry.saveIfAbsent(rec);
+      if (!saved) {
+        state.ledger.append({
+          timestamp: now,
+          agentId: ledgerKey(manifest.id, manifest.version),
+          type: 'action',
+          action: 'SKILL_REFUSED',
+          actor: principal.actor,
+          payloadSha256: payloadHash([`version: ${manifest.id}@${manifest.version} is already registered; versions are immutable, register a new version`]),
+        });
+        json(res, 422, {
+          error: 'skill_refused',
+          reasons: [`version: ${manifest.id}@${manifest.version} is already registered; versions are immutable, register a new version`],
+        });
+        return;
+      }
     } catch (err) {
       console.warn(`[control-plane] failed to persist skill ${rec.id}@${rec.version}:`, err);
       json(res, 500, { error: 'persist_failed', message: 'the skill record could not be written; nothing was registered' });
@@ -311,8 +368,12 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
       }
       // SK1: a skill is its source. A different repository or path is a different skill, never a new version of this one.
       const existing = registry.versions(manifest.id)[0];
-      if (existing && repo && path && (existing.repo !== repo || existing.path !== path)) {
-        reasons.push(`id: ${manifest.id} is registered from ${existing.repo} (${existing.path}); a different repository or path is a different skill, so give it a different id`);
+      if (existing) {
+        if (!existing.repo) {
+          reasons.push(`id: ${manifest.id} is registered from a package; cannot mix repository and package versions for this id (A15)`);
+        } else if (repo && path && (existing.repo !== repo || existing.path !== path)) {
+          reasons.push(`id: ${manifest.id} is registered from ${existing.repo} (${existing.path}); a different repository or path is a different skill, so give it a different id`);
+        }
       }
       for (const i of skillDesignIssues(manifest, { gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets })) {
         reasons.push(`manifest.${i.path}: ${i.message}`);
@@ -362,7 +423,23 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     registeredAt: now,
   };
   try {
-    registry.save(rec);
+    const saved = registry.saveIfAbsent(rec);
+    if (!saved) {
+      state.ledger.append({
+        timestamp: now,
+        agentId: ledgerKey(rec.id, rec.version),
+        type: 'action',
+        action: 'SKILL_REFUSED',
+        actor: principal.actor,
+        ...(commit ? { commit } : {}),
+        payloadSha256: payloadHash([`version: ${rec.id}@${rec.version} is already registered; versions are immutable, register a new version`]),
+      });
+      json(res, 422, {
+        error: 'skill_refused',
+        reasons: [`version: ${rec.id}@${rec.version} is already registered; versions are immutable, register a new version`],
+      });
+      return;
+    }
   } catch (err) {
     console.warn(`[control-plane] failed to persist skill ${rec.id}@${rec.version}:`, err);
     json(res, 500, { error: 'persist_failed', message: 'the skill record could not be written; nothing was registered' });

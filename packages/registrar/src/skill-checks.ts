@@ -44,6 +44,8 @@ export type SkillCheckOutcome = { passed: boolean; failures: string[] };
 export interface SkillChecker {
   /** Recorded on the version (`checkRun.checker`), so a restarted control plane resumes only its own runs. */
   readonly name: string;
+  /** Whether this checker supports checking packaged skills (A14). */
+  readonly supportsPackages?: boolean;
   /** Starts a check and returns its run id. Throws when the run cannot be started. */
   start(req: SkillCheckRequest): Promise<string>;
   /** Resolves when the run ends. A run that ended without a result resolves as a failure that says why. */
@@ -93,12 +95,16 @@ export function skillCheckEnv(req: SkillCheckRequest): Record<string, string> {
 }
 
 /** For tests: every check ends with `outcome(req)` (default: pass). `requests` records what was started. */
-export function fakeSkillChecker(outcome: (req: SkillCheckRequest) => SkillCheckOutcome | Promise<SkillCheckOutcome> = () => ({ passed: true, failures: [] })) {
+export function fakeSkillChecker(
+  outcome: (req: SkillCheckRequest) => SkillCheckOutcome | Promise<SkillCheckOutcome> = () => ({ passed: true, failures: [] }),
+  opts: { supportsPackages?: boolean } = {},
+) {
   const runs = new Map<string, Promise<SkillCheckOutcome>>();
   const requests: Array<SkillCheckRequest & { runId: string }> = [];
   let n = 0;
   const checker: SkillChecker & { requests: typeof requests } = {
     name: 'fake',
+    supportsPackages: opts.supportsPackages ?? true,
     requests,
     async start(req) {
       const runId = `fake-${++n}`;
@@ -133,7 +139,12 @@ export function localSkillChecker(opts: { python?: string; git?: string; timeout
     try {
       const repoDir = join(work, 'repo');
       if (req.packageHash && opts.packageStore) {
-        const pkgBuf = await opts.packageStore.get(req.packageHash);
+        let pkgBuf: Buffer | null;
+        try {
+          pkgBuf = await opts.packageStore.get(req.packageHash);
+        } catch (err: any) {
+          return { passed: false, failures: [`source: package store error: ${cleanFailure(err?.message || String(err))}`] };
+        }
         if (!pkgBuf) {
           return { passed: false, failures: [`source: package ${req.packageHash} not found in store`] };
         }
@@ -174,6 +185,7 @@ export function localSkillChecker(opts: { python?: string; git?: string; timeout
 
   return {
     name: 'local',
+    supportsPackages: Boolean(opts.packageStore),
     async start(req) {
       const runId = `local-${process.pid}-${Date.now()}-${++n}`;
       runs.set(runId, check(req));
@@ -264,7 +276,7 @@ def read_text(root, rel):
 
 def is_vendor(rel):
     parts = rel.split('/')
-    return 'vendor' in parts[:-1] or rel.startswith('vendor/')
+    return len(parts) > 1 and parts[0] == 'vendor'
 
 
 def is_test(rel):
@@ -517,7 +529,7 @@ def load_yaml(text):
 def normalize(value):
     """Drops empty values, so a default the registry filled in ([] for an absent list) matches its absence."""
     if isinstance(value, dict):
-        out = dict((k, normalize(v)) for k, v in value.items())
+        out = dict((k, normalize(v)) for k, v in value.items() if k != 'spec')
         return dict((k, v) for k, v in out.items() if v not in (None, [], {}, ''))
     if isinstance(value, list):
         return [normalize(v) for v in value]
@@ -614,7 +626,7 @@ def run_python_tests(root, files, venv, failures):
     elif code != 0:
         failures.append('tests: python -m unittest discover failed (%s)' % summary(out))
     if pytest:
-        code, out = run([python, '-m', 'pytest', '-q'], root, env)
+        code, out = run([python, '-m', 'pytest', '-q', '--ignore=vendor'], root, env)
         if code == 5:
             failures.append('tests: pytest is configured but collected no tests')
         elif code != 0:

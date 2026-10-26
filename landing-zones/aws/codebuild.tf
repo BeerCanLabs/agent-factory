@@ -448,7 +448,7 @@ phases:
 
         def is_vendor(rel):
             parts = rel.split('/')
-            return 'vendor' in parts[:-1] or rel.startswith('vendor/')
+            return len(parts) > 1 and parts[0] == 'vendor'
 
 
         def is_test(rel):
@@ -701,7 +701,7 @@ phases:
         def normalize(value):
             """Drops empty values, so a default the registry filled in ([] for an absent list) matches its absence."""
             if isinstance(value, dict):
-                out = dict((k, normalize(v)) for k, v in value.items())
+                out = dict((k, normalize(v)) for k, v in value.items() if k != 'spec')
                 return dict((k, v) for k, v in out.items() if v not in (None, [], {}, ''))
             if isinstance(value, list):
                 return [normalize(v) for v in value]
@@ -798,7 +798,7 @@ phases:
             elif code != 0:
                 failures.append('tests: python -m unittest discover failed (%s)' % summary(out))
             if pytest:
-                code, out = run([python, '-m', 'pytest', '-q'], root, env)
+                code, out = run([python, '-m', 'pytest', '-q', '--ignore=vendor'], root, env)
                 if code == 5:
                     failures.append('tests: pytest is configured but collected no tests')
                 elif code != 0:

@@ -223,6 +223,16 @@ export async function readJson(req: http.IncomingMessage): Promise<Record<string
  * Reads a raw binary body from a request, capped at limit bytes (default 5 MiB for packages, A1, A5).
  */
 export function readBufferBody(req: http.IncomingMessage, limit = 5 * 1024 * 1024): Promise<Buffer> {
+  const clHeader = req.headers['content-length'];
+  if (clHeader !== undefined) {
+    const declaredLength = parseInt(clHeader, 10);
+    if (!Number.isNaN(declaredLength) && declaredLength > limit) {
+      req.pause();
+      req.resume();
+      return Promise.reject(Object.assign(new Error('payload too large (package capped at 5 MiB) (A1, A5)'), { status: 413 }));
+    }
+  }
+
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalLength = 0;

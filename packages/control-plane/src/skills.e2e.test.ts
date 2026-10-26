@@ -20,6 +20,7 @@ import { approvedSkill, loadSkills, recordSkillChecks, setSkillUsage, skillPacka
 
 const ADMIN = 'admin-skills-token';
 const OPERATOR = 'operator-skills-token';
+const OTHER_OWNER = 'other-owner-token';
 const VIEWER = 'viewer-skills-token';
 const REPO = 'https://github.com/BeerCanLabs/skill-discord-progress';
 const SHA1 = 'a'.repeat(40);
@@ -70,12 +71,14 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     state = {
       agents: new Map([
         ['operator-agent', { id: 'operator-agent', name: 'Operator Agent', owners: ['token:operator'] } as any],
+        ['other-agent', { id: 'other-agent', name: 'Other Agent', owners: ['token:other-owner'] } as any],
       ]),
       registryDir: join(dataDir, 'registry'),
       ledger,
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
         { name: 'operator', token: OPERATOR, roles: ['operator'] },
+        { name: 'other-owner', token: OTHER_OWNER, roles: ['operator'] },
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
       ]),
       version: '0.1.0',
@@ -373,12 +376,14 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
     state = {
       agents: new Map([
         ['operator-agent', { id: 'operator-agent', name: 'Operator Agent', owners: ['token:operator'] } as any],
+        ['other-agent', { id: 'other-agent', name: 'Other Agent', owners: ['token:other-owner'] } as any],
       ]),
       registryDir: join(dataDir, 'registry'),
       ledger,
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
         { name: 'operator', token: OPERATOR, roles: ['operator'] },
+        { name: 'other-owner', token: OTHER_OWNER, roles: ['operator'] },
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
       ]),
       version: '0.1.0',
@@ -495,5 +500,103 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
     const entry = actions().find((e) => e.action === 'SKILL_REFUSED' && e.agentId === 'skill:math-tools@1.0.0');
     assert.ok(entry);
     assert.equal(entry.actor, 'token:admin');
+  });
+
+  it('refuses non-gzip / non-json content type (415 unsupported media type, Nit 6)', async () => {
+    const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, Buffer.from('hello'), {
+      'content-type': 'text/plain',
+    });
+    assert.equal(res.status, 415);
+    assert.equal(res.body.error, 'unsupported_media_type');
+  });
+
+  it('refuses package upload if configured checker does not support packages (501 not implemented, Finding 3)', async () => {
+    const oldChecker = state.skillChecker;
+    state.skillChecker = {
+      name: 'codebuild',
+      supportsPackages: false,
+      start: async () => 'test-run',
+      result: async () => ({ passed: false, failures: [] }),
+    };
+    try {
+      const pkg = makeValidPackage('checker-test-skill', '1.0.0');
+      const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+      assert.equal(res.status, 501);
+      assert.equal(res.body.error, 'package_checks_unsupported');
+    } finally {
+      state.skillChecker = oldChecker;
+    }
+  });
+
+  it('atomic duplicate check under concurrent uploads (Promise.all, Finding 2)', async () => {
+    const pkg = makeValidPackage('concurrent-skill', '1.0.0');
+    const [r1, r2] = await Promise.all([
+      call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg),
+      call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg),
+    ]);
+    const statuses = [r1.status, r2.status].sort();
+    assert.deepEqual(statuses, [201, 422]);
+  });
+
+  it('enforces A15 owner rule: new version of existing skill must come from owner or admin (Finding 1)', async () => {
+    // 1. operator registers version 1.0.0 -> owner is token:operator
+    const pkg1 = makeValidPackage('owner-rule-skill', '1.0.0');
+    const r1 = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, pkg1);
+    assert.equal(r1.status, 201);
+    assert.equal(r1.body.registeredBy, 'token:operator');
+
+    // 2. other-owner (not owner, not admin) tries to register 1.1.0 -> 422
+    const pkg2 = makeValidPackage('owner-rule-skill', '1.1.0');
+    const r2 = await call(port, '/api/v1/registry/skills', 'POST', OTHER_OWNER, pkg2);
+    assert.equal(r2.status, 422);
+    assert.equal(r2.body.error, 'skill_refused');
+    assert.ok(r2.body.reasons.some((r: string) => r.includes('new versions must come from the owner or an admin (A15)')));
+
+    // 3. admin registers 1.1.0 -> 201
+    const r3 = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg2);
+    assert.equal(r3.status, 201);
+
+    // 4. original owner (operator) registers 1.2.0 -> 201
+    const pkg3 = makeValidPackage('owner-rule-skill', '1.2.0');
+    const r4 = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, pkg3);
+    assert.equal(r4.status, 201);
+  });
+
+  it('forbids mixing repository and package registrations for the same id (Finding 1, A15)', async () => {
+    // 1. Register repo-first as repository skill
+    const repoRes = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, {
+      repo: REPO,
+      path: 'discord_progress',
+      commit: SHA1,
+      manifest: manifest('1.0.0', { routes: ['discord'], credentials: [{ name: 'DISCORD_BOT_TOKEN', source: 'discord' }] }),
+    });
+    // Manifest id in manifest() is discord-progress
+    assert.equal(repoRes.status, 201);
+
+    // 2. Try to register discord-progress 2.0.0 via package upload -> 422
+    const pkgDiscord = makeValidPackage('discord-progress', '2.0.0');
+    const pkgRes = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkgDiscord);
+    assert.equal(pkgRes.status, 422);
+    assert.equal(pkgRes.body.error, 'skill_refused');
+    assert.ok(pkgRes.body.reasons.some((r: string) => r.includes('cannot mix repository and package versions for this id (A15)')));
+
+    // 3. Try to register math-tools (previously package-registered) via repository JSON -> 422
+    const mixedRepoRes = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, {
+      repo: REPO,
+      path: 'math_tools',
+      commit: SHA1,
+      manifest: {
+        id: 'math-tools',
+        version: '2.0.0',
+        name: 'Math Tools',
+        description: 'desc',
+        language: 'python',
+        entry: 'entry.py',
+        requires: { routes: [], credentials: [] },
+      },
+    });
+    assert.equal(mixedRepoRes.status, 422);
+    assert.equal(mixedRepoRes.body.error, 'skill_refused');
+    assert.ok(mixedRepoRes.body.reasons.some((r: string) => r.includes('cannot mix repository and package versions for this id (A15)')));
   });
 });
