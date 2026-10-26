@@ -235,7 +235,7 @@ export function cloudBuildSkillChecker(
   const api = opts.api ?? defaultGcpCloudBuildApi();
   return {
     name: 'cloudbuild',
-    supportsPackages: true,
+    supportsPackages: false,
     async start(req) {
       const projectId = opts.projectId ?? process.env.FACTORY_GCP_PROJECT;
       if (!projectId) throw new Error('FACTORY_GCP_PROJECT environment variable is not set');

@@ -605,11 +605,29 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
       unsuppServer.close();
     }
 
-    // 2. AWS CodeBuild and GCP CloudBuild checkers support packages in Sub-slice 2d
+    // 2. AWS CodeBuild checker supports packages in Sub-slice 2d; GCP CloudBuild remains false (honest 501) until GCP landing zone slice (Finding G1)
     const { codeBuildSkillChecker } = await import('./aws/skill-checker.js');
     const { cloudBuildSkillChecker } = await import('./gcp/skill-checker.js');
     assert.equal(codeBuildSkillChecker().supportsPackages, true);
-    assert.equal(cloudBuildSkillChecker().supportsPackages, true);
+    assert.equal(cloudBuildSkillChecker().supportsPackages, false);
+
+    const gcpState = {
+      ...state,
+      agents: new Map(state.agents),
+      skillChecker: cloudBuildSkillChecker(),
+    } as FactoryState;
+    loadSkills(gcpState, join(dataDir, 'skills-gcp-unsupp'));
+    const gcpServer = createFactoryServer(gcpState);
+    const gcpPort = await listen(gcpServer);
+    try {
+      const pkg = makeValidPackage('gcp-unsupp-skill', '1.0.0');
+      const res = await call(gcpPort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+      assert.equal(res.status, 501);
+      assert.equal(res.body.error, 'package_checks_unsupported');
+      assert.ok(res.body.message.includes('cloudbuild'));
+    } finally {
+      gcpServer.close();
+    }
 
     // 3. No checker configured at all (FACTORY_SKILL_CHECKER=none or undefined)
     const prevChecker = process.env.FACTORY_SKILL_CHECKER;
