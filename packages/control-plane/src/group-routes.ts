@@ -14,6 +14,7 @@
 
 import type http from 'node:http';
 import { payloadHash } from '@beercanlabs/factory-ledger';
+import { validateGroupId } from '@beercanlabs/factory-contract';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 
 const GROUP_BASE = /^\/api\/v1\/groups$/;
@@ -79,7 +80,13 @@ export async function handleGroupRoutes(
   // Member management: /api/v1/groups/:id/members or /api/v1/groups/:id/members/:member
   const membersMatch = pathname.match(GROUP_MEMBERS);
   if (membersMatch) {
-    const id = decodeURIComponent(membersMatch[1]);
+    const rawId = decodeURIComponent(membersMatch[1]);
+    let id: string;
+    try {
+      id = validateGroupId(rawId);
+    } catch (err: any) {
+      return json(res, 400, { error: 'invalid_group_id', message: err.message }), true;
+    }
 
     if (req.method === 'POST') {
       const principal = await requirePrivilege(req, res, state, 'groups.manage');
@@ -159,7 +166,13 @@ export async function handleGroupRoutes(
   // Single group CRUD: /api/v1/groups/:id
   const itemMatch = pathname.match(GROUP_ITEM);
   if (itemMatch) {
-    const id = decodeURIComponent(itemMatch[1]);
+    const rawId = decodeURIComponent(itemMatch[1]);
+    let id: string;
+    try {
+      id = validateGroupId(rawId);
+    } catch (err: any) {
+      return json(res, 400, { error: 'invalid_group_id', message: err.message }), true;
+    }
 
     if (req.method === 'GET') {
       const principal = await requirePrivilege(req, res, state, 'groups.manage');

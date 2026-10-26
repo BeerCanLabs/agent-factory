@@ -131,11 +131,35 @@ describe('Group routes (/api/v1/groups) (H6, A10, A17, A26)', () => {
       roles: ['admin'],
     });
     assert.equal(badRole.status, 400);
-    assert.match(badRole.body.message, /admin role forbidden/);
+    assert.match(badRole.body.message, /built-in factory role forbidden/);
+
+    const badApprover = await request('POST', '/api/v1/groups', ADMIN_TOKEN, {
+      id: 'approvers',
+      name: 'Approvers',
+      roles: ['approver'],
+    });
+    assert.equal(badApprover.status, 400);
+    assert.match(badApprover.body.message, /built-in factory role forbidden/);
+
+    const badOperator = await request('POST', '/api/v1/groups', ADMIN_TOKEN, {
+      id: 'operators',
+      name: 'Operators',
+      roles: ['operator'],
+    });
+    assert.equal(badOperator.status, 400);
+    assert.match(badOperator.body.message, /built-in factory role forbidden/);
+
+    const badUnknown = await request('POST', '/api/v1/groups', ADMIN_TOKEN, {
+      id: 'custom-role',
+      name: 'Custom',
+      roles: ['super-power'],
+    });
+    assert.equal(badUnknown.status, 400);
+    assert.match(badUnknown.body.message, /allowed roles are/);
 
     const badId = await request('POST', '/api/v1/groups', ADMIN_TOKEN, {
-      id: 'INVALID_CAPS',
-      name: 'Caps',
+      id: 'invalid id with spaces',
+      name: 'Spaces',
     });
     assert.equal(badId.status, 400);
 
@@ -144,13 +168,13 @@ describe('Group routes (/api/v1/groups) (H6, A10, A17, A26)', () => {
       id: 'platform-team',
       name: 'Platform Engineering',
       description: 'Engineers managing platform capabilities',
-      roles: ['skills.register', 'skill-author'],
+      roles: ['skills.register', 'skill-owner'],
       members: ['alice@example.com'],
     });
     assert.equal(created.status, 201);
     assert.equal(created.body.group.id, 'platform-team');
     assert.equal(created.body.group.name, 'Platform Engineering');
-    assert.deepEqual(created.body.group.roles, ['skill-author', 'skills.register']);
+    assert.deepEqual(created.body.group.roles, ['skill-owner', 'skills.register']);
     assert.deepEqual(created.body.group.members, ['alice@example.com']);
 
     // Verify ledger row for creation
@@ -173,7 +197,26 @@ describe('Group routes (/api/v1/groups) (H6, A10, A17, A26)', () => {
     const getMissing = await request('GET', '/api/v1/groups/non-existent', ADMIN_TOKEN);
     assert.equal(getMissing.status, 404);
 
+    const getBadId = await request('GET', '/api/v1/groups/bad%20id', ADMIN_TOKEN);
+    assert.equal(getBadId.status, 400);
+    assert.equal(getBadId.body.error, 'invalid_group_id');
+
+    // Case-insensitive lookup works on GET
+    const getUpper = await request('GET', '/api/v1/groups/PLATFORM-TEAM', ADMIN_TOKEN);
+    assert.equal(getUpper.status, 200);
+    assert.equal(getUpper.body.group.id, 'platform-team');
+
     // 6. Update group
+    const badUpdateRole = await request('PUT', '/api/v1/groups/platform-team', ADMIN_TOKEN, {
+      roles: ['admin'],
+    });
+    assert.equal(badUpdateRole.status, 400);
+
+    const badUpdateApprover = await request('PUT', '/api/v1/groups/platform-team', ADMIN_TOKEN, {
+      roles: ['approver'],
+    });
+    assert.equal(badUpdateApprover.status, 400);
+
     const updated = await request('PUT', '/api/v1/groups/platform-team', ADMIN_TOKEN, {
       name: 'Platform & Infrastructure',
       description: 'Platform and infra engineers',
@@ -188,6 +231,12 @@ describe('Group routes (/api/v1/groups) (H6, A10, A17, A26)', () => {
     assert.ok(updateRow, 'GROUP_UPDATED ledger event should be emitted');
 
     // 7. Add member
+    const badGroupAddMem = await request('POST', '/api/v1/groups/bad%20id/members', ADMIN_TOKEN, {
+      member: 'bob@example.com',
+    });
+    assert.equal(badGroupAddMem.status, 400);
+    assert.equal(badGroupAddMem.body.error, 'invalid_group_id');
+
     const addMem = await request('POST', '/api/v1/groups/platform-team/members', ADMIN_TOKEN, {
       member: 'bob@example.com',
     });
@@ -208,6 +257,10 @@ describe('Group routes (/api/v1/groups) (H6, A10, A17, A26)', () => {
     assert.equal(filterCharlie.body.groups.length, 0);
 
     // 9. Remove member via path
+    const badGroupRmMem = await request('DELETE', '/api/v1/groups/bad%20id/members/bob@example.com', ADMIN_TOKEN);
+    assert.equal(badGroupRmMem.status, 400);
+    assert.equal(badGroupRmMem.body.error, 'invalid_group_id');
+
     const rmMem = await request('DELETE', '/api/v1/groups/platform-team/members/bob@example.com', ADMIN_TOKEN);
     assert.equal(rmMem.status, 200);
     assert.deepEqual(rmMem.body.group.members, ['alice@example.com']);

@@ -9,9 +9,11 @@ describe('groups contract (H6, A10, A17)', () => {
     assert.equal(validateGroupId('sec.ops'), 'sec.ops');
     assert.equal(validateGroupId('dev_1'), 'dev_1');
     assert.equal(validateGroupId('a'), 'a');
+    // Normalizes uppercase and whitespace
+    assert.equal(validateGroupId('UPPER'), 'upper');
+    assert.equal(validateGroupId('  team-bravo  '), 'team-bravo');
 
     assert.throws(() => validateGroupId(''), /invalid/);
-    assert.throws(() => validateGroupId('UPPER'), /invalid/);
     assert.throws(() => validateGroupId('-starts-dash'), /invalid/);
     assert.throws(() => validateGroupId('ends-dash-'), /invalid/);
     assert.throws(() => validateGroupId('with space'), /invalid/);
@@ -31,11 +33,18 @@ describe('groups contract (H6, A10, A17)', () => {
 
   it('validates group roles and rejects forbidden roles (A17)', () => {
     assert.deepEqual(validateGroupRoles(['skill-owner']), ['skill-owner']);
-    assert.deepEqual(validateGroupRoles(['skill-owner', 'custom-role']), ['custom-role', 'skill-owner']);
+    assert.deepEqual(validateGroupRoles(['skills.register', 'skill-owner']), ['skill-owner', 'skills.register']);
     assert.deepEqual(validateGroupRoles(undefined), []);
 
-    assert.throws(() => validateGroupRoles(['admin']), /admin role forbidden/);
-    assert.throws(() => validateGroupRoles(['skill-owner', 'admin']), /admin role forbidden/);
+    // Built-in factory roles rejected (A17)
+    assert.throws(() => validateGroupRoles(['admin']), /built-in factory role forbidden/);
+    assert.throws(() => validateGroupRoles(['operator']), /built-in factory role forbidden/);
+    assert.throws(() => validateGroupRoles(['approver']), /built-in factory role forbidden/);
+    assert.throws(() => validateGroupRoles(['viewer']), /built-in factory role forbidden/);
+
+    // Unknown roles rejected (A17 allowlist)
+    assert.throws(() => validateGroupRoles(['unknown-role']), /allowed roles are skill-owner, skills.register/);
+
     assert.throws(() => validateGroupRoles('not-array'), /array/);
     assert.throws(() => validateGroupRoles([123]), /non-empty string/);
   });

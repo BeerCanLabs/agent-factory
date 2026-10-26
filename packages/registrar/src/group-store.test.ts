@@ -16,13 +16,13 @@ describe('GroupStore (H6, A10, A17)', () => {
         id: 'engineering',
         name: 'Engineering Team',
         description: 'Core backend and systems engineers',
-        roles: ['skill-developer'],
+        roles: ['skill-owner'],
         members: ['alice@example.com', 'bob@example.com'],
       });
 
       assert.equal(created.id, 'engineering');
       assert.equal(created.name, 'Engineering Team');
-      assert.deepEqual(created.roles, ['skill-developer']);
+      assert.deepEqual(created.roles, ['skill-owner']);
       assert.deepEqual(created.members, ['alice@example.com', 'bob@example.com']);
       assert.ok(created.createdAt);
       assert.ok(created.updatedAt);
@@ -38,7 +38,7 @@ describe('GroupStore (H6, A10, A17)', () => {
       assert.ok(reloaded);
       assert.equal(reloaded.id, 'engineering');
       assert.equal(reloaded.name, 'Engineering Team');
-      assert.deepEqual(reloaded.roles, ['skill-developer']);
+      assert.deepEqual(reloaded.roles, ['skill-owner']);
       assert.deepEqual(reloaded.members, ['alice@example.com', 'bob@example.com']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -62,18 +62,43 @@ describe('GroupStore (H6, A10, A17)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'group-store-test-'));
     try {
       const store = await GroupStore.open(dir);
-      // Admin role forbidden on create
+      // Built-in factory roles forbidden on create
       assert.throws(() => {
         store.createGroup({ id: 'admins-group', name: 'Admins', roles: ['admin'] });
-      }, /cannot be assigned to a group \(A17: admin role forbidden\)/);
+      }, /built-in factory role forbidden/);
+      assert.throws(() => {
+        store.createGroup({ id: 'operators-group', name: 'Operators', roles: ['operator'] });
+      }, /built-in factory role forbidden/);
+      assert.throws(() => {
+        store.createGroup({ id: 'approvers-group', name: 'Approvers', roles: ['approver'] });
+      }, /built-in factory role forbidden/);
+      assert.throws(() => {
+        store.createGroup({ id: 'viewers-group', name: 'Viewers', roles: ['viewer'] });
+      }, /built-in factory role forbidden/);
 
-      // Create valid group
+      // Unknown roles forbidden on create
+      assert.throws(() => {
+        store.createGroup({ id: 'custom-group', name: 'Custom', roles: ['unknown-role'] });
+      }, /allowed roles are skill-owner, skills.register/);
+
+      // Create valid group with allowed roles (skill-owner, skills.register)
       store.createGroup({ id: 'devs', name: 'Developers', roles: ['skills.register'] });
 
-      // Admin role forbidden on update
+      // Built-in factory roles forbidden on update
       assert.throws(() => {
         store.updateGroup('devs', { roles: ['admin'] });
-      }, /cannot be assigned to a group \(A17: admin role forbidden\)/);
+      }, /built-in factory role forbidden/);
+      assert.throws(() => {
+        store.updateGroup('devs', { roles: ['approver'] });
+      }, /built-in factory role forbidden/);
+      assert.throws(() => {
+        store.updateGroup('devs', { roles: ['operator'] });
+      }, /built-in factory role forbidden/);
+
+      // Unknown roles forbidden on update
+      assert.throws(() => {
+        store.updateGroup('devs', { roles: ['nonexistent-role'] });
+      }, /allowed roles are skill-owner, skills.register/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -169,13 +194,13 @@ describe('GroupStore (H6, A10, A17)', () => {
       store.createGroup({
         id: 'team-a',
         name: 'Team A',
-        roles: ['role-1', 'skills.register'],
+        roles: ['skill-owner'],
         members: ['dave@example.com'],
       });
       store.createGroup({
         id: 'team-b',
         name: 'Team B',
-        roles: ['role-2', 'skills.register'],
+        roles: ['skills.register'],
         members: ['dave@example.com', 'eve@example.com'],
       });
 
@@ -184,10 +209,10 @@ describe('GroupStore (H6, A10, A17)', () => {
       assert.deepEqual(daveGroups.map((g) => g.id).sort(), ['team-a', 'team-b']);
 
       const daveRoles = store.getUserRoles('dave@example.com');
-      assert.deepEqual(daveRoles, ['role-1', 'role-2', 'skills.register']);
+      assert.deepEqual(daveRoles, ['skill-owner', 'skills.register']);
 
       const eveRoles = store.getUserRoles('eve@example.com');
-      assert.deepEqual(eveRoles, ['role-2', 'skills.register']);
+      assert.deepEqual(eveRoles, ['skills.register']);
 
       const unknownRoles = store.getUserRoles('stranger@example.com');
       assert.deepEqual(unknownRoles, []);
