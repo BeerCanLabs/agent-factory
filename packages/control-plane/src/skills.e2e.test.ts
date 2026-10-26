@@ -70,8 +70,8 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     ledger = new MemoryLedger();
     state = {
       agents: new Map([
-        ['operator-agent', { id: 'operator-agent', name: 'Operator Agent', owners: ['token:operator'] } as any],
-        ['other-agent', { id: 'other-agent', name: 'Other Agent', owners: ['token:other-owner'] } as any],
+        ['operator-agent', { id: 'operator-agent', name: 'Operator Agent', owners: ['operator', 'token:operator'] } as any],
+        ['other-agent', { id: 'other-agent', name: 'Other Agent', owners: ['other-owner', 'token:other-owner'] } as any],
       ]),
       registryDir: join(dataDir, 'registry'),
       ledger,
@@ -101,6 +101,7 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
   });
 
   after(() => {
+    delete process.env.FACTORY_SKILL_CHECKER;
     cp.close();
     rmSync(dataDir, { recursive: true, force: true });
   });
@@ -347,8 +348,9 @@ function makeTarball(entries: Array<{ header: Buffer; content?: Buffer }>): Buff
   return Buffer.concat(blocks);
 }
 
-function makeValidPackage(id = 'test-packaged-skill', version = '1.0.0'): Buffer {
-  const yaml = `spec: 1\nid: ${id}\nname: Packaged Skill\nversion: ${version}\nlanguage: python\ndescription: Test packaged skill\nentry: entry.py\n`;
+function makeValidPackage(id = 'test-packaged-skill', version = '1.0.0', opts: { description?: string } = {}): Buffer {
+  const desc = opts.description ?? 'Test packaged skill';
+  const yaml = `spec: 1\nid: ${id}\nname: Packaged Skill\nversion: ${version}\nlanguage: python\ndescription: ${desc}\nentry: entry.py\n`;
   const entry = `def tools():\n    return []\n`;
   const test = `def test_smoke():\n    assert True\n`;
   const yBuf = Buffer.from(yaml, 'utf8');
@@ -371,12 +373,13 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
   const actions = () => ledger.query().filter((e) => e.agentId.startsWith('skill:'));
 
   before(async () => {
+    process.env.FACTORY_SKILL_CHECKER = 'local';
     dataDir = mkdtempSync(join(tmpdir(), 'cp-pkg-upload-'));
     ledger = new MemoryLedger();
     state = {
       agents: new Map([
-        ['operator-agent', { id: 'operator-agent', name: 'Operator Agent', owners: ['token:operator'] } as any],
-        ['other-agent', { id: 'other-agent', name: 'Other Agent', owners: ['token:other-owner'] } as any],
+        ['operator-agent', { id: 'operator-agent', name: 'Operator Agent', owners: ['operator', 'token:operator'] } as any],
+        ['other-agent', { id: 'other-agent', name: 'Other Agent', owners: ['other-owner', 'token:other-owner'] } as any],
       ]),
       registryDir: join(dataDir, 'registry'),
       ledger,
@@ -406,6 +409,7 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
   });
 
   after(() => {
+    delete process.env.FACTORY_SKILL_CHECKER;
     cp.close();
     rmSync(dataDir, { recursive: true, force: true });
   });
@@ -510,32 +514,136 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
     assert.equal(res.body.error, 'unsupported_media_type');
   });
 
-  it('refuses package upload if configured checker does not support packages (501 not implemented, Finding 3)', async () => {
-    const oldChecker = state.skillChecker;
-    state.skillChecker = {
-      name: 'codebuild',
-      supportsPackages: false,
-      start: async () => 'test-run',
-      result: async () => ({ passed: false, failures: [] }),
-    };
+  it('refuses package upload if configured checker does not support packages (501 not implemented, Finding 1)', async () => {
+    // 1. Env-resolved codebuild checker (production AWS)
+    const prevProvider = process.env.FACTORY_DEPLOY_PROVIDER;
+    const prevChecker = process.env.FACTORY_SKILL_CHECKER;
+    process.env.FACTORY_DEPLOY_PROVIDER = 'aws';
+    delete process.env.FACTORY_SKILL_CHECKER;
+
+    const awsState = { ...state, agents: new Map(state.agents) } as FactoryState;
+    loadSkills(awsState, join(dataDir, 'skills-aws'));
+    const awsServer = createFactoryServer(awsState);
+    const awsPort = await listen(awsServer);
     try {
-      const pkg = makeValidPackage('checker-test-skill', '1.0.0');
-      const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+      const pkg = makeValidPackage('aws-checker-skill', '1.0.0');
+      const res = await call(awsPort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
       assert.equal(res.status, 501);
       assert.equal(res.body.error, 'package_checks_unsupported');
+      assert.ok(res.body.message.includes('codebuild'));
     } finally {
-      state.skillChecker = oldChecker;
+      awsServer.close();
+      if (prevProvider !== undefined) process.env.FACTORY_DEPLOY_PROVIDER = prevProvider;
+      else delete process.env.FACTORY_DEPLOY_PROVIDER;
+      if (prevChecker !== undefined) process.env.FACTORY_SKILL_CHECKER = prevChecker;
+      else delete process.env.FACTORY_SKILL_CHECKER;
+    }
+
+    // 2. Env-resolved cloudbuild checker (production GCP)
+    process.env.FACTORY_DEPLOY_PROVIDER = 'gcp';
+    delete process.env.FACTORY_SKILL_CHECKER;
+
+    const gcpState = { ...state, agents: new Map(state.agents) } as FactoryState;
+    loadSkills(gcpState, join(dataDir, 'skills-gcp'));
+    const gcpServer = createFactoryServer(gcpState);
+    const gcpPort = await listen(gcpServer);
+    try {
+      const pkg = makeValidPackage('gcp-checker-skill', '1.0.0');
+      const res = await call(gcpPort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+      assert.equal(res.status, 501);
+      assert.equal(res.body.error, 'package_checks_unsupported');
+      assert.ok(res.body.message.includes('cloudbuild'));
+    } finally {
+      gcpServer.close();
+      if (prevProvider !== undefined) process.env.FACTORY_DEPLOY_PROVIDER = prevProvider;
+      else delete process.env.FACTORY_DEPLOY_PROVIDER;
+      if (prevChecker !== undefined) process.env.FACTORY_SKILL_CHECKER = prevChecker;
+      else delete process.env.FACTORY_SKILL_CHECKER;
+    }
+
+    // 3. No checker configured at all (FACTORY_SKILL_CHECKER=none or undefined)
+    process.env.FACTORY_SKILL_CHECKER = 'none';
+
+    const noneState = { ...state, agents: new Map(state.agents) } as FactoryState;
+    loadSkills(noneState, join(dataDir, 'skills-none'));
+    const noneServer = createFactoryServer(noneState);
+    const nonePort = await listen(noneServer);
+    try {
+      const pkg = makeValidPackage('none-checker-skill', '1.0.0');
+      const res = await call(nonePort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+      assert.equal(res.status, 501);
+      assert.equal(res.body.error, 'package_checks_unsupported');
+      assert.ok(res.body.message.includes('no skill checker is configured'));
+    } finally {
+      noneServer.close();
+      if (prevChecker !== undefined) process.env.FACTORY_SKILL_CHECKER = prevChecker;
+      else delete process.env.FACTORY_SKILL_CHECKER;
     }
   });
 
-  it('atomic duplicate check under concurrent uploads (Promise.all, Finding 2)', async () => {
-    const pkg = makeValidPackage('concurrent-skill', '1.0.0');
+  it('atomic duplicate check under concurrent uploads with different packages (Promise.all, Finding 2, Nit 3)', async () => {
+    const pkg1 = makeValidPackage('concurrent-skill', '1.0.0', { description: 'package variant A' });
+    const pkg2 = makeValidPackage('concurrent-skill', '1.0.0', { description: 'package variant B' });
+    const hash1 = createHash('sha256').update(pkg1).digest('hex');
+    const hash2 = createHash('sha256').update(pkg2).digest('hex');
+    assert.notEqual(hash1, hash2, 'two package variants must have different hashes');
+
     const [r1, r2] = await Promise.all([
-      call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg),
-      call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg),
+      call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg1),
+      call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg2),
     ]);
     const statuses = [r1.status, r2.status].sort();
     assert.deepEqual(statuses, [201, 422]);
+
+    const winner = r1.status === 201 ? r1 : r2;
+    const loser = r1.status === 201 ? r2 : r1;
+    const expectedHash = r1.status === 201 ? hash1 : hash2;
+
+    assert.equal(winner.body.packageHash, expectedHash);
+    assert.equal(loser.body.error, 'skill_refused');
+    assert.ok(loser.body.reasons.some((r: string) => /already registered/.test(r)));
+
+    const stored = skillRegistry(state).get('concurrent-skill', '1.0.0');
+    assert.ok(stored);
+    assert.equal(stored.packageHash, expectedHash);
+  });
+
+  it('races two different users on a brand-new skill id (Finding 2)', async () => {
+    const pkgA = makeValidPackage('race-new-id', '1.0.0');
+    const pkgB = makeValidPackage('race-new-id', '1.0.1');
+
+    const [resA, resB] = await Promise.all([
+      call(port, '/api/v1/registry/skills', 'POST', OPERATOR, pkgA),
+      call(port, '/api/v1/registry/skills', 'POST', OTHER_OWNER, pkgB),
+    ]);
+
+    const statuses = [resA.status, resB.status].sort();
+    assert.deepEqual(statuses, [201, 422]);
+
+    const winner = resA.status === 201 ? resA : resB;
+    const loser = resA.status === 201 ? resB : resA;
+
+    assert.ok(loser.body.reasons.some((r: string) => r.includes('new versions must come from the owner or an admin (A15)')));
+    const versions = skillRegistry(state).versions('race-new-id');
+    assert.equal(versions.length, 1);
+    assert.equal(versions[0].registeredBy, winner.body.registeredBy);
+  });
+
+  it('refuses adoption of packaged skills (501 package_adoption_unsupported, Sub-slice 2d, A14)', async () => {
+    // Approve math-tools 1.0.0
+    const reg = skillRegistry(state);
+    const rec = reg.get('math-tools', '1.0.0');
+    assert.ok(rec);
+    rec.status = 'approved';
+    reg.save(rec);
+
+    const res = await call(port, '/api/v1/agents/operator-agent/skills', 'POST', ADMIN, {
+      skillId: 'math-tools',
+      version: '1.0.0',
+    });
+    assert.equal(res.status, 501);
+    assert.equal(res.body.error, 'package_adoption_unsupported');
+    assert.ok(res.body.message.includes('Sub-slice 2d'));
   });
 
   it('enforces A15 owner rule: new version of existing skill must come from owner or admin (Finding 1)', async () => {

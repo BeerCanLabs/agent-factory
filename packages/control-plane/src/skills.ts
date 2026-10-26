@@ -183,10 +183,13 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
   }
 
   if (isGzip) {
-    if (state.skillChecker && !state.skillChecker.supportsPackages) {
+    const checker = await checkerFor(state);
+    if (!checker || !checker.supportsPackages) {
       json(res, 501, {
         error: 'package_checks_unsupported',
-        message: `the configured skill checker (${state.skillChecker.name}) does not support package checks (A14)`,
+        message: checker
+          ? `the configured skill checker (${checker.name}) does not support package checks (A14)`
+          : 'no skill checker is configured; package checks cannot run (A14)',
       });
       return;
     }
@@ -218,46 +221,25 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
         actor: principal.actor,
         payloadSha256: payloadHash(validated.issues),
       });
-      json(res, 422, { error: 'package_invalid', reasons: validated.issues });
+      json(res, 422, {
+        error: 'package_invalid',
+        message: 'the skill package is invalid (A1, A19)',
+        reasons: validated.issues,
+      });
       return;
     }
 
     const manifest = validated.manifest;
+
+    // Content-addressed store is written first; content-addressed blobs are idempotent (A4, A21).
+    const store = skillPackageStore(state);
+    await store.put(validated.sha256, buffer);
+
+    // Synchronous section: check design issues, owner rule (A15), and save atomically without await.
     const reasons: string[] = [];
-    if (registry.get(manifest.id, manifest.version)) {
-      reasons.push(`version: ${manifest.id}@${manifest.version} is already registered; versions are immutable, register a new version`);
-    }
-
-    const existing = registry.versions(manifest.id);
-    if (existing.length) {
-      const first = existing[0];
-      if (first.repo) {
-        reasons.push(`id: ${manifest.id} is registered from a repository; cannot mix repository and package versions for this id (A15)`);
-      }
-      const isOwner = first.registeredBy.toLowerCase() === principal.actor.toLowerCase();
-      const isAdmin = authorize({ principal, privilege: 'skills.decide' }).allowed;
-      if (!isOwner && !isAdmin) {
-        reasons.push(`id: ${manifest.id} is owned by ${first.registeredBy}; new versions must come from the owner or an admin (A15)`);
-      }
-    }
-
-    const identity = registry.identityIssue(manifest);
-    if (identity) reasons.push(`manifest.visibility: ${identity}`);
-
-    if (existing.length && existing.every((v) => v.retired)) {
-      reasons.push(`id: ${manifest.id} is retired; no new version can be registered (SK6), so give the skill a different id`);
-    }
 
     for (const i of skillDesignIssues(manifest, { gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets })) {
       reasons.push(`manifest.${i.path}: ${i.message}`);
-    }
-
-    if (manifest.visibility === 'private' && manifest.owner) {
-      if (!state.agents.has(manifest.owner)) {
-        reasons.push(`manifest.owner: agent ${manifest.owner} is not registered`);
-      } else if (!authorize({ principal, privilege: 'skills.adopt.request', resource: { agentId: manifest.owner, owners: ownersOf(state, manifest.owner) } }).allowed) {
-        reasons.push(`manifest.owner: only an admin or an owner of ${manifest.owner} may register a skill private to it`);
-      }
     }
 
     if (reasons.length) {
@@ -269,12 +251,37 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
         actor: principal.actor,
         payloadSha256: payloadHash(reasons),
       });
-      json(res, 422, { error: 'skill_refused', reasons });
+      json(res, 422, {
+        error: 'skill_refused',
+        id: manifest.id,
+        version: manifest.version,
+        message: `skill ${manifest.id}@${manifest.version} was not registered`,
+        reasons,
+      });
       return;
     }
 
-    const store = skillPackageStore(state);
-    await store.put(validated.sha256, buffer);
+    const validateExisting = (existing: SkillVersionRecord[]): { ok: boolean; reason?: string } => {
+      if (existing.length) {
+        const first = existing[0];
+        if (first.repo) {
+          return { ok: false, reason: `id: ${manifest.id} is registered from a repository; cannot mix repository and package versions for this id (A15)` };
+        }
+        const isOwner = first.registeredBy.toLowerCase() === principal.actor.toLowerCase();
+        const isAdmin = authorize({ principal, privilege: 'skills.decide' }).allowed;
+        if (!isOwner && !isAdmin) {
+          return { ok: false, reason: `id: ${manifest.id} is owned by ${first.registeredBy}; new versions must come from the owner or an admin (A15)` };
+        }
+        const identity = registry.identityIssue(manifest);
+        if (identity) {
+          return { ok: false, reason: `manifest.visibility: ${identity}` };
+        }
+        if (existing.every((v) => v.retired)) {
+          return { ok: false, reason: `id: ${manifest.id} is retired; no new version can be registered (SK6), so give the skill a different id` };
+        }
+      }
+      return { ok: true };
+    };
 
     const rec: SkillVersionRecord = {
       id: manifest.id,
@@ -291,19 +298,23 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     };
 
     try {
-      const saved = registry.saveIfAbsent(rec);
-      if (!saved) {
+      const saveResult = registry.saveIfAbsent(rec, validateExisting);
+      if (!saveResult.saved) {
+        const refusalReasons = [saveResult.reason!];
         state.ledger.append({
           timestamp: now,
           agentId: ledgerKey(manifest.id, manifest.version),
           type: 'action',
           action: 'SKILL_REFUSED',
           actor: principal.actor,
-          payloadSha256: payloadHash([`version: ${manifest.id}@${manifest.version} is already registered; versions are immutable, register a new version`]),
+          payloadSha256: payloadHash(refusalReasons),
         });
         json(res, 422, {
           error: 'skill_refused',
-          reasons: [`version: ${manifest.id}@${manifest.version} is already registered; versions are immutable, register a new version`],
+          id: manifest.id,
+          version: manifest.version,
+          message: `skill ${manifest.id}@${manifest.version} was not registered`,
+          reasons: refusalReasons,
         });
         return;
       }
@@ -834,13 +845,28 @@ function accessAddedFor(state: FactoryState, agentId: string, rec: SkillVersionR
 const retiring = new WeakMap<FactoryState, Set<string>>();
 const isRetiring = (state: FactoryState, id: string): boolean => retiring.get(state)?.has(id) === true;
 
-/** `canAdopt`, and also refuses a skill that is being retired (SK6). */
+/** `canAdopt`, and also refuses a skill that is being retired (SK6) or packaged skill (Sub-slice 2d). */
 function adoptCheck(state: FactoryState, agentId: string, id: string, version: string): ReturnType<typeof canAdopt> {
   if (isRetiring(state, id)) return { ok: false, error: 'skill_retired', message: `skill ${id} is being retired (SK6)` };
-  return canAdopt(skillRegistry(state), agentId, id, version);
+  const check = canAdopt(skillRegistry(state), agentId, id, version);
+  if (!check.ok) return check;
+  if (check.record.packageHash) {
+    return {
+      ok: false,
+      error: 'package_adoption_unsupported',
+      message: `skill ${id}@${version} is a packaged skill; packaged skill image building and adoption will be delivered in Sub-slice 2d (A14)`,
+    };
+  }
+  return check;
 }
 
-const REFUSAL_STATUS = { not_found: 404, skill_private: 403, skill_retired: 409, skill_not_approved: 409 } as const;
+const REFUSAL_STATUS = {
+  not_found: 404,
+  skill_private: 403,
+  skill_retired: 409,
+  skill_not_approved: 409,
+  package_adoption_unsupported: 501,
+} as const;
 
 /**
  * SK6: pauses an agent because it runs a skill that is being revoked or retired, and remembers why, so that redeploying
@@ -880,6 +906,7 @@ async function autoAdoptPrivate(state: FactoryState, rec: SkillVersionRecord, pr
   const owner = ownerOf(rec);
   if (visibilityOf(rec) !== 'private' || !owner) return undefined;
   if (isRetiring(state, rec.id) || rec.retired) return { adopted: [] };
+  if (rec.packageHash) return { adopted: [], failed: 'package_adoption_unsupported' };
   const adoptions = adoptionStore(state);
   if (adoptions.blocksAutoAdopt(owner, rec.id)) return { adopted: [] };
   if (!state.agents.has(owner)) {

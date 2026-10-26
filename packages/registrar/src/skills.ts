@@ -173,22 +173,35 @@ export class SkillRegistry {
   }
 
   /**
-   * Atomically saves the record if id@version is not already registered.
-   * Returns true if saved, false if already present (A15).
+   * Saves `rec` only if no record exists for `rec.id@rec.version` AND, if provided,
+   * `validate` succeeds against existing versions of `rec.id`.
+   * Synchronous and atomic on the in-memory map.
    */
-  saveIfAbsent(rec: SkillVersionRecord): boolean {
+  saveIfAbsent(rec: SkillVersionRecord): boolean;
+  saveIfAbsent(rec: SkillVersionRecord, validate: (existing: SkillVersionRecord[]) => { ok: boolean; reason?: string }): { saved: boolean; reason?: string };
+  saveIfAbsent(
+    rec: SkillVersionRecord,
+    validate?: (existing: SkillVersionRecord[]) => { ok: boolean; reason?: string },
+  ): boolean | { saved: boolean; reason?: string } {
     if (this.skills.get(rec.id)?.has(rec.version)) {
-      return false;
+      return validate ? { saved: false, reason: `version: ${rec.id}@${rec.version} is already registered; versions are immutable, register a new version` } : false;
     }
     if (this.dir) {
       const folder = join(this.dir, rec.id);
       const path = join(folder, `${rec.version}.json`);
       if (existsSync(path)) {
-        return false;
+        return validate ? { saved: false, reason: `version: ${rec.id}@${rec.version} is already registered; versions are immutable, register a new version` } : false;
+      }
+    }
+    const existing = this.versions(rec.id);
+    if (validate) {
+      const check = validate(existing);
+      if (!check.ok) {
+        return { saved: false, reason: check.reason ?? 'registration_refused' };
       }
     }
     this.save(rec);
-    return true;
+    return validate ? { saved: true } : true;
   }
 
   get(id: string, version: string): SkillVersionRecord | undefined {
@@ -272,7 +285,7 @@ export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummar
   };
 }
 
-export type AdoptRefusal = 'not_found' | 'skill_private' | 'skill_retired' | 'skill_not_approved';
+export type AdoptRefusal = 'not_found' | 'skill_private' | 'skill_retired' | 'skill_not_approved' | 'package_adoption_unsupported';
 export type AdoptCheck = { ok: true; record: SkillVersionRecord } | { ok: false; error: AdoptRefusal; message: string };
 
 /**
@@ -288,6 +301,9 @@ export function canAdopt(registry: SkillRegistry, agentId: string, id: string, v
   }
   if (rec.retired) return { ok: false, error: 'skill_retired', message: `skill ${id} is retired (SK6)` };
   if (rec.status !== 'approved') return { ok: false, error: 'skill_not_approved', message: `skill ${id}@${version} is ${rec.status}; only an approved version can be adopted (SK1)` };
+  if (rec.packageHash) {
+    return { ok: false, error: 'package_adoption_unsupported', message: `skill ${id}@${version} is a packaged skill; packaged skill image building and adoption will be delivered in Sub-slice 2d (A14)` };
+  }
   return { ok: true, record: rec };
 }
 

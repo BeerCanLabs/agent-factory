@@ -16,6 +16,7 @@ export function codeBuildSkillChecker(
   const projectName = opts.projectName ?? process.env.FACTORY_SKILL_CHECKER_PROJECT ?? 'factory-skill-checker';
   return {
     name: 'codebuild',
+    supportsPackages: false,
     async start(req) {
       const env = skillCheckEnv(req);
       const res = await client.send(

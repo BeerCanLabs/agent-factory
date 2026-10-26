@@ -101,6 +101,23 @@ describe('skill registry store', () => {
       // A different version succeeds
       assert.equal(reg.saveIfAbsent(record('1.1.0')), true);
       assert.equal(reg.get('discord-progress', '1.1.0')?.version, '1.1.0');
+
+      // With validate callback
+      const dupRes = reg.saveIfAbsent(record('1.0.0'), () => ({ ok: true }));
+      assert.equal(dupRes.saved, false);
+      assert.ok(dupRes.reason?.includes('already registered'));
+
+      const failRes = reg.saveIfAbsent(record('2.0.0'), (existing) => {
+        return existing[0]?.registeredBy === 'other' ? { ok: true } : { ok: false, reason: 'owner_mismatch' };
+      });
+      assert.equal(failRes.saved, false);
+      assert.equal(failRes.reason, 'owner_mismatch');
+
+      const passRes = reg.saveIfAbsent(record('2.0.0'), (existing) => {
+        return existing[0]?.registeredBy === 'admin' ? { ok: true } : { ok: false, reason: 'owner_mismatch' };
+      });
+      assert.equal(passRes.saved, true);
+      assert.equal(reg.get('discord-progress', '2.0.0')?.version, '2.0.0');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
