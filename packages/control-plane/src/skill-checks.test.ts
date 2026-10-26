@@ -454,6 +454,29 @@ describe('SK1 the CodeBuild skill checker and its project', () => {
     assert.match(run, /export SKILL_CHECK_RESULT/);
   });
 
+  it('every buildspec in landing-zones/aws/codebuild.tf fits within CodeBuild 25,600 character limit', () => {
+    const tf = readFileSync(join(REPO_ROOT, 'landing-zones', 'aws', 'codebuild.tf'), 'utf8');
+    const composeScript = readFileSync(join(REPO_ROOT, 'landing-zones', 'aws', 'compose-skills.sh'), 'utf8');
+    const embeddedCompose = composeScript.replace(/\n$/, '').split('\n').map((l, i) => (i === 0 ? l : l === '' ? '' : `        ${l}`)).join('\n');
+    const projects = tf.matchAll(/resource "aws_codebuild_project" "([^"]+)" \{[\s\S]*?buildspec = <<EOF\n([\s\S]*?)\nEOF/g);
+    let count = 0;
+    for (const match of projects) {
+      const [, name, heredoc] = match;
+      count++;
+      const rendered = heredoc
+        .replace('${indent(8, file("${path.module}/compose-skills.sh"))}', () => embeddedCompose)
+        .replaceAll('$${', () => '${')
+        .replaceAll('%%{', () => '%{');
+      // CodeBuild enforces max 25,600 chars; AWS API transmissions normalize newlines to CRLF
+      const crlfLen = rendered.replace(/\r?\n/g, '\r\n').length;
+      assert.ok(
+        crlfLen <= 25600,
+        `codebuild project ${name} rendered buildspec length with CRLF (${crlfLen}) exceeds 25,600 character limit`,
+      );
+    }
+    assert.equal(count, 3, 'checked all 3 CodeBuild projects (agent-builder, skills-builder, skill-checker)');
+  });
+
   it('codeBuildSkillChecker injects PACKAGE_HASH and PACKAGE_STORE_URI for packaged skills', async () => {
     process.env.FACTORY_SKILL_PACKAGES_URI = 's3://factory-skill-packages-bucket/packages';
     try {
