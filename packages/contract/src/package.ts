@@ -736,13 +736,26 @@ function createTarHeader(name: string, size: number, typeflag: '0' | '5', mode: 
   let prefix = '';
   let fileName = name;
 
-  if (Buffer.byteLength(name, 'utf8') > 100) {
-    const slashIdx = name.lastIndexOf('/', 155);
-    if (slashIdx === -1 || slashIdx > 155 || name.length - slashIdx - 1 > 100) {
+  const nameBytes = Buffer.byteLength(name, 'utf8');
+  if (nameBytes > 100) {
+    let splitSlash = -1;
+    for (let i = name.length - 1; i >= 0; i--) {
+      if (name[i] === '/') {
+        const p = name.slice(0, i);
+        const f = name.slice(i + 1);
+        const pBytes = Buffer.byteLength(p, 'utf8');
+        const fBytes = Buffer.byteLength(f, 'utf8');
+        if (pBytes <= 155 && fBytes <= 100) {
+          splitSlash = i;
+          break;
+        }
+      }
+    }
+    if (splitSlash === -1) {
       throw new Error(`path too long for ustar format: ${name}`);
     }
-    prefix = name.slice(0, slashIdx);
-    fileName = name.slice(slashIdx + 1);
+    prefix = name.slice(0, splitSlash);
+    fileName = name.slice(splitSlash + 1);
   }
 
   header.write(fileName, 0, 100, 'utf8');
@@ -775,8 +788,9 @@ function createTarHeader(name: string, size: number, typeflag: '0' | '5', mode: 
  */
 export async function packSkillPackage(
   sourceDir: string,
+  opts: { onWarning?: (msg: string) => void } = {},
 ): Promise<
-  | { ok: true; buffer: Buffer; sha256: string; manifest: SkillManifest; files: string[] }
+  | { ok: true; buffer: Buffer; sha256: string; manifest: SkillManifest; files: string[]; warnings: string[] }
   | { ok: false; issues: string[] }
 > {
   const { readdirSync, statSync, readFileSync } = await import('node:fs');
@@ -794,6 +808,7 @@ export async function packSkillPackage(
   }
 
   const blocks: Buffer[] = [];
+  const warnings: string[] = [];
 
   function collect(currentDir: string): { relativePath: string; fullPath: string; isDir: boolean }[] {
     const entries = readdirSync(currentDir, { withFileTypes: true });
@@ -802,6 +817,12 @@ export async function packSkillPackage(
       if (ent.name === '.git' || ent.name === '__pycache__' || ent.name === '.DS_Store') continue;
       const full = resolve(currentDir, ent.name);
       const rel = relative(root, full).replace(/\\/g, '/');
+      if (ent.isSymbolicLink()) {
+        const msg = `skipping symlink: ${rel}`;
+        warnings.push(msg);
+        opts.onWarning?.(msg);
+        continue;
+      }
       if (ent.isDirectory()) {
         result.push({ relativePath: rel + '/', fullPath: full, isDir: true });
         result.push(...collect(full));
@@ -861,5 +882,6 @@ export async function packSkillPackage(
     sha256: validation.sha256,
     manifest: validation.manifest,
     files: validation.files,
+    warnings,
   };
 }

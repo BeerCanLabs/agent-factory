@@ -84,7 +84,6 @@ export class FileStore implements CredentialStore {
 }
 
 export function defaultStore(platform = process.platform): CredentialStore {
-  if (process.env.FACTORY_CLI_STORE === 'file') return new FileStore();
   return platform === 'darwin' ? new KeychainStore() : new FileStore();
 }
 

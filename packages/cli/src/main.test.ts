@@ -1,22 +1,57 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { main } from './main.js';
+import { FileStore } from './credentials.js';
 
 const MAIN = fileURLToPath(new URL('./main.ts', import.meta.url));
 
 /** Runs the real entry point with its own HOME, as the installer does. */
 async function factory(home: string, args: string[], env: Record<string, string> = {}): Promise<{ code: number; out: string; err: string }> {
-  return new Promise((resolve) => {
-    execFile(process.execPath, ['--import', 'tsx', MAIN, ...args], { env: { PATH: process.env.PATH ?? '', HOME: home, XDG_CONFIG_HOME: join(home, '.config'), FACTORY_CLI_STORE: 'file', ...env }, encoding: 'utf8' }, (error, out, err) => {
-      resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0, out, err });
+  const store = new FileStore(join(home, '.config', 'factory-cli', 'credentials.json'));
+  let out = '';
+  let err = '';
+  const origEnv = { ...process.env };
+  try {
+    process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = join(home, '.config');
+    for (const [k, v] of Object.entries(env)) {
+      process.env[k] = v;
+    }
+    const code = await main(args, {
+      store,
+      streams: {
+        stdout: {
+          write: (s: string, cb?: () => void) => {
+            out += s;
+            cb?.();
+            return true;
+          },
+        },
+        stderr: {
+          write: (s: string, cb?: () => void) => {
+            err += s;
+            cb?.();
+            return true;
+          },
+        },
+      },
     });
-  });
+    return { code, out, err };
+  } catch (e: unknown) {
+    return { code: 1, out, err: err + (e instanceof Error ? e.message : String(e)) + '\n' };
+  } finally {
+    for (const k of Object.keys(process.env)) {
+      if (!(k in origEnv)) delete process.env[k];
+    }
+    Object.assign(process.env, origEnv);
+  }
 }
 
 describe('§6.17 CL10 factory config, which the ops repository\'s installer uses', () => {
@@ -79,13 +114,23 @@ describe('§6.17 CL10 factory config, which the ops repository\'s installer uses
 
 
 /** A factory that answers the few routes the commands use, and remembers what it was asked. */
-async function fakeServer(roles: string[]) {
+async function fakeServer(roles: string[], opts: { onSkillUpload?: (req: http.IncomingMessage, body: string, attempts: number) => { status: number; body: unknown } } = {}) {
   const seen: Array<{ method: string; path: string; token?: string; body: string }> = [];
+  let uploadAttempts = 0;
   const server = http.createServer(async (req, res) => {
     let body = '';
     for await (const c of req) body += c;
     seen.push({ method: req.method ?? '', path: req.url ?? '', token: req.headers['cf-access-token'] as string | undefined, body });
     const json = (status: number, v: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(v));
+    if (req.url === '/api/v1/registry/skills' && req.method === 'POST') {
+      uploadAttempts++;
+      if (opts.onSkillUpload) {
+        const out = opts.onSkillUpload(req, body, uploadAttempts);
+        return json(out.status, out.body);
+      }
+      if (req.headers['cf-access-token'] !== 'assertion-1') return json(401, {});
+      return json(201, { id: 'e2e-ping', version: '1.0.0', packageHash: '0123456789abcdef' });
+    }
     if (req.headers['cf-access-token'] !== 'assertion-1') return json(401, {});
     if (req.url === '/api/v1/whoami') return json(200, { actor: 'access:dale@example.com', roles });
     if (req.url === '/api/v1/agents') return json(200, [{ id: 'donna', state: 'SLEEPING' }, { id: 'rosie', state: 'WORKING' }]);
@@ -227,5 +272,85 @@ describe('§6.17 CL11 commands as subcommands, for scripts', () => {
     const bad = await factory(home, ['skill', 'pack']);
     assert.equal(bad.code, 1);
     assert.match(bad.err, /usage: factory skill pack <dir>/);
+  });
+
+  it('factory skill register with pre-built .tar.gz reports id and version on 201 (F1)', async () => {
+    const srv = await fakeServer(['admin']);
+    try {
+      const home = await mkdtemp(join(tmpdir(), 'cli-skill-'));
+      const fixtureDir = fileURLToPath(new URL('../../../examples/skills/e2e-ping', import.meta.url));
+      const outFile = join(home, 'e2e-ping-1.0.0.tar.gz');
+      const packRes = await factory(home, ['skill', 'pack', fixtureDir, '--out', outFile]);
+      assert.equal(packRes.code, 0, packRes.err);
+
+      const regRes = await factory(home, ['skill', 'register', outFile], env(srv.url));
+      assert.equal(regRes.code, 0, regRes.err);
+      assert.match(regRes.out, /Registered e2e-ping@1\.0\.0 \(HTTP 201 Created\)/);
+      assert.doesNotMatch(regRes.out, /undefined/);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('factory skill register against 422 prints formatted reasons (F1)', async () => {
+    const srv = await fakeServer(['admin'], {
+      onSkillUpload: () => ({
+        status: 422,
+        body: {
+          error: 'skill_refused',
+          reasons: ['manifest invalid: missing name', 'signature missing'],
+        },
+      }),
+    });
+    try {
+      const home = await mkdtemp(join(tmpdir(), 'cli-skill-'));
+      const fixtureDir = fileURLToPath(new URL('../../../examples/skills/e2e-ping', import.meta.url));
+      const regRes = await factory(home, ['skill', 'register', fixtureDir], env(srv.url));
+      assert.equal(regRes.code, 1);
+      assert.match(regRes.err, /Registration failed \(HTTP 422\):/);
+      assert.match(regRes.err, /manifest invalid: missing name/);
+      assert.match(regRes.err, /signature missing/);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('factory skill register handles 401 retry and unauthenticated refusal cleanly (F1)', async () => {
+    let attempts = 0;
+    const srv = await fakeServer(['admin'], {
+      onSkillUpload: (req) => {
+        attempts++;
+        if (attempts === 1) return { status: 401, body: { error: 'unauthorized' } };
+        return { status: 201, body: { id: 'e2e-ping', version: '1.0.0', packageHash: '0123' } };
+      },
+    });
+    try {
+      const home = await mkdtemp(join(tmpdir(), 'cli-skill-'));
+      const fixtureDir = fileURLToPath(new URL('../../../examples/skills/e2e-ping', import.meta.url));
+      // First, with valid token on retry:
+      const okRes = await factory(home, ['skill', 'register', fixtureDir], env(srv.url));
+      assert.equal(okRes.code, 0, okRes.err);
+      assert.match(okRes.out, /Registered e2e-ping@1\.0\.0/);
+
+      // Second, not signed in at all (no token in env):
+      const failRes = await factory(home, ['skill', 'register', fixtureDir], { FACTORY_URL: srv.url });
+      assert.equal(failRes.code, 1);
+      assert.match(failRes.err, /not signed in/);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('factory skill register missing path prints clear error and exits 1 without ENOENT (F1)', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'cli-skill-'));
+    const missing = join(home, 'non-existent-skill.tar.gz');
+    const res = await factory(home, ['skill', 'register', missing]);
+    assert.equal(res.code, 1);
+    assert.match(res.err, /skill source not found: .*non-existent-skill\.tar\.gz/);
+    assert.doesNotMatch(res.err, /ENOENT/);
+
+    const noArg = await factory(home, ['skill', 'register']);
+    assert.equal(noArg.code, 1);
+    assert.match(noArg.err, /usage: factory skill register <dir\|package\.tar\.gz>/);
   });
 });

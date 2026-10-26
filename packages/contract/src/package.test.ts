@@ -1,6 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   validateSkillPackage,
   extractSkillPackage,
@@ -926,6 +930,28 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
       assert.equal(res.ok, false);
       if (!res.ok) {
         assert.ok(res.issues.some((i) => i.includes('could not read source directory')));
+      }
+    });
+
+    it('reports skipped symlinks with a message (F4)', async () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'pack-symlink-'));
+      try {
+        const { symlinkSync } = await import('node:fs');
+        const fixtureDir = fileURLToPath(new URL('../../../examples/skills/e2e-ping', import.meta.url));
+        const { cpSync } = await import('node:fs');
+        cpSync(fixtureDir, tmp, { recursive: true });
+        symlinkSync(join(tmp, 'e2e_ping.py'), join(tmp, 'link_to_ping.py'));
+
+        const warned: string[] = [];
+        const res = await packSkillPackage(tmp, { onWarning: (w) => warned.push(w) });
+        assert.equal(res.ok, true);
+        if (res.ok) {
+          assert.ok(res.warnings.some((w) => w.includes('skipping symlink: link_to_ping.py')));
+          assert.ok(warned.some((w) => w.includes('skipping symlink: link_to_ping.py')));
+          assert.equal(res.files.includes('link_to_ping.py'), false);
+        }
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
       }
     });
   });
