@@ -522,7 +522,7 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
     // Banned segments and extensions
     const segments = normalized.split('/');
     for (const seg of segments) {
-      if (BANNED_SEGMENTS.has(seg)) {
+      if (BANNED_SEGMENTS.has(seg.toLowerCase())) {
         pushIssue(issues, `banned path segment "${seg}" in entry (A19): "${normalized}"`);
       }
     }

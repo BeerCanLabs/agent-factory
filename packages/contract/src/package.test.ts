@@ -595,8 +595,22 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
       }
     });
 
-    it('refuses banned directory segments (.git, __pycache__)', async () => {
-      for (const seg of ['.git', '__pycache__']) {
+    it('refuses N1: . entry with directory typeflag 5 and size 512 containing smuggled header', async () => {
+      const forgedHeader = createTarHeader({ name: 'x/.git/hooks/pre-commit', size: 100 });
+      const dotHeader = createTarHeader({ name: '.', typeflag: '5', size: 512 });
+      const tar = makeTarball([
+        { header: dotHeader, content: forgedHeader },
+      ]);
+      const gz = zlib.gzipSync(tar);
+      const result = await validateSkillPackage(gz);
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.ok(result.issues.some((i) => i.includes('root directory entry has non-zero size')));
+      }
+    });
+
+    it('refuses banned directory segments case-insensitively (.git, .GIT, __pycache__)', async () => {
+      for (const seg of ['.git', '.GIT', '__pycache__', '__PYCACHE__']) {
         const header = createTarHeader({ name: `${seg}/file.py` });
         const tar = makeTarball([{ header }]);
         const gz = zlib.gzipSync(tar);
