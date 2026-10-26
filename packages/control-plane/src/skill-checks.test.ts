@@ -4,7 +4,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -475,6 +475,91 @@ describe('SK1 the CodeBuild skill checker and its project', () => {
       );
     }
     assert.equal(count, 3, 'checked all 3 CodeBuild projects (agent-builder, skills-builder, skill-checker)');
+  });
+
+  it('rendered factory-skill-checker build commands run under bash and produce valid SKILL_CHECK_RESULT', () => {
+    const tf = readFileSync(join(REPO_ROOT, 'landing-zones', 'aws', 'codebuild.tf'), 'utf8');
+    const project = tf.match(/resource "aws_codebuild_project" "factory_skill_checker" \{[\s\S]*?\n\}\n/)?.[0];
+    assert.ok(project, 'factory_skill_checker project exists');
+    const buildspec = project.match(/buildspec = <<EOF\n([\s\S]*?)\nEOF\n/)?.[1];
+    assert.ok(buildspec, 'buildspec exists');
+    const spec = YAML.parse(buildspec.replaceAll('$${', '${').replaceAll('%%{', '%{')) as {
+      phases: { install: { commands: string[] }; build: { commands: string[] } };
+    };
+
+    // Ensure skill_check.py is written as the install phase does
+    const installWriter = spec.phases.install.commands.find((c) => c.startsWith("cat > /tmp/skill_check.py <<'PY'\n"));
+    assert.ok(installWriter, 'install phase has python check script writer');
+    const rInstall = spawnSync('bash', ['-c', installWriter], { encoding: 'utf8' });
+    assert.equal(rInstall.status, 0, `install script writer must succeed: ${rInstall.stderr}`);
+
+    const buildCmd = spec.phases.build.commands[1];
+    assert.ok(buildCmd, 'build phase command exists');
+
+    // Case 1: Fake PACKAGE_HASH with empty package store / missing package file
+    const workDir1 = mkdtempSync(join(tmpdir(), 'cb-test-missing-'));
+    try {
+      const fakeHash = 'a'.repeat(64);
+      const envMissing = {
+        PATH: process.env.PATH ?? '',
+        HOME: process.env.HOME ?? '',
+        SKILL_ID: 'e2e-ping',
+        SKILL_VERSION: '1.0.0',
+        REPO_URL: 'https://factory.internal/packages',
+        GIT_COMMIT: '0'.repeat(40),
+        SKILL_PATH: '.',
+        PACKAGE_HASH: fakeHash,
+        PACKAGE_STORE_URI: 's3://empty-store/packages',
+      };
+      const rMissing = spawnSync('bash', ['-e', '-c', buildCmd], { cwd: workDir1, env: envMissing, encoding: 'utf8' });
+      assert.equal(rMissing.status, 0, `missing package run must exit 0: ${rMissing.stderr}`);
+      const missingOut = rMissing.stdout.trim().split('\n').at(-1) ?? '';
+      assert.ok(missingOut.startsWith('SKILL_CHECK_RESULT='), `must export SKILL_CHECK_RESULT: ${missingOut}`);
+      const missingResult = parseSkillCheckResult(missingOut);
+      assert.equal(missingResult.passed, false);
+      assert.ok(missingResult.failures.some((f) => f.includes('could not fetch package') && f.includes(fakeHash)));
+    } finally {
+      rmSync(workDir1, { recursive: true, force: true });
+    }
+
+    // Case 2: Valid package (e2e-ping fixture)
+    const workDir2 = mkdtempSync(join(tmpdir(), 'cb-test-valid-'));
+    const fixtureDir = join(REPO_ROOT, 'examples', 'skills', 'e2e-ping');
+    const manifest = YAML.parse(readFileSync(join(fixtureDir, 'skill.yaml'), 'utf8')) as SkillManifest;
+    const manifestB64 = Buffer.from(JSON.stringify(manifest)).toString('base64');
+    const tmpPkg = join(workDir2, `test-pkg-${Date.now()}.tar.gz`);
+    try {
+      spawnSync('tar', ['-czf', tmpPkg, '-C', fixtureDir, '.'], { encoding: 'utf8' });
+      const pkgBytes = readFileSync(tmpPkg);
+      const realHash = createHash('sha256').update(pkgBytes).digest('hex');
+      const targetPkg = `/tmp/${realHash}.tar.gz`;
+      renameSync(tmpPkg, targetPkg);
+      try {
+        const envValid = {
+          PATH: process.env.PATH ?? '',
+          HOME: process.env.HOME ?? '',
+          SKILL_ID: 'e2e-ping',
+          SKILL_VERSION: '1.0.0',
+          REPO_URL: 'https://factory.internal/packages',
+          GIT_COMMIT: '0'.repeat(40),
+          SKILL_PATH: '.',
+          PACKAGE_HASH: realHash,
+          PACKAGE_STORE_URI: '',
+          SKILL_MANIFEST_B64: manifestB64,
+        };
+        const rValid = spawnSync('bash', ['-e', '-c', buildCmd], { cwd: workDir2, env: envValid, encoding: 'utf8' });
+        assert.equal(rValid.status, 0, `valid package run must exit 0: ${rValid.stderr}`);
+        const validOut = rValid.stdout.trim().split('\n').at(-1) ?? '';
+        assert.ok(validOut.startsWith('SKILL_CHECK_RESULT='), `must export SKILL_CHECK_RESULT: ${validOut}`);
+        const validResult = parseSkillCheckResult(validOut);
+        assert.equal(validResult.passed, true, `valid package must pass: ${JSON.stringify(validResult.failures)}`);
+        assert.deepEqual(validResult.failures, []);
+      } finally {
+        rmSync(targetPkg, { force: true });
+      }
+    } finally {
+      rmSync(workDir2, { recursive: true, force: true });
+    }
   });
 
   it('codeBuildSkillChecker injects PACKAGE_HASH and PACKAGE_STORE_URI for packaged skills', async () => {
