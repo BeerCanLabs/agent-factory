@@ -717,10 +717,10 @@ phases:
             mkdir -p "skill-repo/$SKILL_PATH"
             PKG_FILE="/tmp/$PACKAGE_HASH.tar.gz"
             if [ -n "$PACKAGE_STORE_URI" ] && [[ "$PACKAGE_STORE_URI" =~ ^s3:// ]]; then
-              aws s3 cp "$${PACKAGE_STORE_URI%/}/packages/$PACKAGE_HASH.tar.gz" "$PKG_FILE" || \
-              aws s3 cp "$${PACKAGE_STORE_URI%/}/$PACKAGE_HASH.tar.gz" "$PKG_FILE" || true
+              aws s3 cp "$${PACKAGE_STORE_URI%/}/packages/$PACKAGE_HASH.tar.gz" "$PKG_FILE" 2>/dev/null || \
+              aws s3 cp "$${PACKAGE_STORE_URI%/}/$PACKAGE_HASH.tar.gz" "$PKG_FILE" 2>/dev/null || true
             fi
-            if [ -f "$PKG_FILE" ] && [ "$$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$PKG_FILE")" = "$PACKAGE_HASH" ]; then
+            if [ -f "$PKG_FILE" ] && [ "$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$PKG_FILE")" = "$PACKAGE_HASH" ]; then
               if ! tar -xzf "$PKG_FILE" -C "skill-repo/$SKILL_PATH"; then
                 SKILL_CHECK_RESULT='{"passed":false,"failures":["package: extraction failed (corrupt or invalid tar.gz)"]}'
               elif ! python3 /tmp/skill_check.py --dir "skill-repo/$SKILL_PATH" --venv /tmp/skill-check-venv --out /tmp/skill-check.json; then
@@ -729,7 +729,7 @@ phases:
                 SKILL_CHECK_RESULT="$(cat /tmp/skill-check.json)"
               fi
             else
-              SKILL_CHECK_RESULT='{"passed":false,"failures":["source: could not fetch package '$PACKAGE_HASH' from package store"]}'
+              SKILL_CHECK_RESULT="{\"passed\":false,\"failures\":[\"source: could not fetch package $PACKAGE_HASH from package store\"]}"
             fi
           fi
         elif ! [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || [[ "$SKILL_PATH" == /* || "$SKILL_PATH" == *..* ]]; then
