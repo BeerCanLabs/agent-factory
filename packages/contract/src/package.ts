@@ -1,12 +1,10 @@
 /**
- * Skill package specification, validator, and safe extraction (A1, A19).
+ * Skill package specification and validator (A1, A19, A22, H7).
  *
- * Implements strict single-pass decompression bounds, ustar header checksums,
- * strict octal parsing, path normalization, hierarchy conflict guards,
- * typeflag guards, setuid guards, and Python `tarfile` agreement.
+ * Implements single-pass decompression bounds, ustar header checksums,
+ * strict octal parsing aligned with Python `tarfile`, path normalization,
+ * hierarchy conflict guards, typeflag guards, setuid guards, and bounded work.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
 import zlib from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
@@ -18,6 +16,7 @@ export const MAX_FILES = 500; // 500 files total (A1, A19)
 export const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2 MiB per file (A1, A19)
 export const MAX_PATH_LENGTH = 255; // 255 bytes max path (POSIX ustar prefix + name) (A19)
 export const MAX_SKILL_YAML_SIZE = 64 * 1024; // 64 KiB max for skill.yaml (A19)
+export const MAX_ISSUES = 50; // Bounded issues output (A19)
 
 const BANNED_EXTENSIONS = new Set([
   '.pyc',
@@ -51,40 +50,78 @@ export type ValidatedSkillPackage =
       issues: string[];
     };
 
-/**
- * Strict fixed-width octal parser for tar header fields (A19).
- * Rejects NaN, non-octal characters, and truncated fields.
- */
-export function parseOctal(buf: Buffer, offset: number, length: number, fieldName: string, issues: string[]): number | null {
-  const field = buf.subarray(offset, offset + length);
-  let str = '';
-  for (let i = 0; i < field.length; i++) {
-    const b = field[i];
-    if (b === 0 || b === 0x20) {
-      if (str.length > 0) break; // trailing NUL or space after digits
-      continue; // leading spaces/NULs
-    }
-    if (b >= 0x30 && b <= 0x37) {
-      str += String.fromCharCode(b);
-    } else {
-      issues.push(`malformed octal in tar header ${fieldName} at offset ${offset} (A19)`);
-      return null;
-    }
+function pushIssue(issues: string[], msg: string): void {
+  if (issues.length < MAX_ISSUES) {
+    issues.push(msg);
   }
-  if (str.length === 0) return 0;
-  const val = parseInt(str, 8);
-  if (Number.isNaN(val)) {
-    issues.push(`invalid octal in tar header ${fieldName} at offset ${offset} (A19)`);
+}
+
+/**
+ * Strict numeric field parser for tar header fields aligned with Python `tarfile` (A19).
+ *
+ * Python's `tarfile.nti` stops at the first NUL terminator and strips spaces.
+ * This parser stops at the first NUL, rejects any non-zero bytes after the terminator,
+ * rejects non-octal characters, rejects base-256 binary encoding, and enforces safe bounds.
+ */
+function parseNumericField(
+  buf: Buffer,
+  offset: number,
+  length: number,
+  fieldName: string,
+  issues: string[]
+): number | null {
+  const field = buf.subarray(offset, offset + length);
+  if (field.length === 0) return 0;
+
+  // Refuse base-256 binary encoding (A19)
+  if ((field[0] & 0x80) !== 0) {
+    pushIssue(issues, `base-256 binary encoding not permitted in tar header ${fieldName} at offset ${offset} (A19)`);
     return null;
   }
+
+  // Find first NUL terminator
+  const nulIdx = field.indexOf(0);
+  const beforeNul = nulIdx !== -1 ? field.subarray(0, nulIdx) : field;
+
+  // After the first NUL, all remaining bytes in the fixed-width field must be padding (NUL or space)
+  if (nulIdx !== -1) {
+    for (let i = nulIdx + 1; i < field.length; i++) {
+      if (field[i] !== 0 && field[i] !== 0x20) {
+        pushIssue(
+          issues,
+          `malformed tar header ${fieldName} at offset ${offset}: non-padding byte after NUL terminator (A19)`
+        );
+        return null;
+      }
+    }
+  }
+
+  const rawStr = beforeNul.toString('ascii');
+  const trimmed = rawStr.trim();
+  if (trimmed === '') {
+    return 0;
+  }
+
+  // Stricter than Python: only octal digits 0-7 allowed (no embedded spaces or trailing non-octal chars)
+  if (!/^[0-7]+$/.test(trimmed)) {
+    pushIssue(issues, `malformed octal in tar header ${fieldName} at offset ${offset}: "${rawStr}" (A19)`);
+    return null;
+  }
+
+  const val = parseInt(trimmed, 8);
+  if (!Number.isSafeInteger(val) || val < 0) {
+    pushIssue(issues, `invalid numeric value in tar header ${fieldName} at offset ${offset} (A19)`);
+    return null;
+  }
+
   return val;
 }
 
 /**
  * Validates tar header checksum against unsigned and signed sums (A19).
  */
-export function verifyTarHeaderChecksum(block: Buffer, offset: number, issues: string[]): boolean {
-  const recordedChecksum = parseOctal(block, 148, 8, 'chksum', issues);
+function verifyTarHeaderChecksum(block: Buffer, offset: number, issues: string[]): boolean {
+  const recordedChecksum = parseNumericField(block, 148, 8, 'chksum', issues);
   if (recordedChecksum === null) return false;
 
   let unsignedSum = 0;
@@ -97,30 +134,94 @@ export function verifyTarHeaderChecksum(block: Buffer, offset: number, issues: s
   }
 
   if (recordedChecksum !== unsignedSum && recordedChecksum !== signedSum) {
-    issues.push(`invalid tar header checksum at offset ${offset} (recorded ${recordedChecksum}, calculated ${unsignedSum}) (A19)`);
+    pushIssue(
+      issues,
+      `invalid tar header checksum at offset ${offset} (recorded ${recordedChecksum}, calculated ${unsignedSum}) (A19)`
+    );
     return false;
   }
   return true;
 }
 
 /**
+ * Normalizes a tar path component by resolving '.', collapsing '//',
+ * stripping leading './' and checking for illegal characters (B1, A19).
+ */
+function normalizeTarPath(rawPath: string, issues: string[]): {
+  normalized: string;
+  isExplicitDir: boolean;
+  isValid: boolean;
+} {
+  if (!rawPath || rawPath.trim() === '') {
+    pushIssue(issues, 'empty entry path in tar header (A19)');
+    return { normalized: '', isExplicitDir: false, isValid: false };
+  }
+
+  if (/[\x00-\x1f\x7f]/.test(rawPath)) {
+    pushIssue(issues, `file path contains illegal control characters (A19): "${rawPath}"`);
+    return { normalized: '', isExplicitDir: false, isValid: false };
+  }
+
+  if (Buffer.byteLength(rawPath, 'utf8') > MAX_PATH_LENGTH) {
+    pushIssue(
+      issues,
+      `path length (${Buffer.byteLength(rawPath, 'utf8')} bytes) exceeds limit of ${MAX_PATH_LENGTH} (A19): "${rawPath}"`
+    );
+    return { normalized: '', isExplicitDir: false, isValid: false };
+  }
+
+  if (rawPath.startsWith('/') || rawPath.startsWith('\\')) {
+    pushIssue(issues, `path must not be absolute (A19): "${rawPath}"`);
+    return { normalized: '', isExplicitDir: false, isValid: false };
+  }
+
+  if (rawPath.includes('\\')) {
+    pushIssue(issues, `path must not contain backslashes (A19): "${rawPath}"`);
+    return { normalized: '', isExplicitDir: false, isValid: false };
+  }
+
+  const isExplicitDir = rawPath.endsWith('/');
+  const rawParts = rawPath.split('/');
+  const cleanParts: string[] = [];
+
+  for (const part of rawParts) {
+    if (part === '' || part === '.') {
+      continue;
+    }
+    if (part === '..') {
+      pushIssue(issues, `directory traversal not allowed in path (A19): "${rawPath}"`);
+      return { normalized: '', isExplicitDir: false, isValid: false };
+    }
+    cleanParts.push(part);
+  }
+
+  const normalized = cleanParts.join('/');
+  if (!normalized) {
+    // Root directory reference like '.' or './'
+    return { normalized: '', isExplicitDir: true, isValid: true };
+  }
+
+  return { normalized, isExplicitDir, isValid: true };
+}
+
+/**
  * Single-pass gzip decompressor enforcing single-stream execution and output size limits (A19).
  */
-export function gunzipSingleStream(gz: Buffer, issues: string[]): Buffer | null {
+function gunzipSingleStream(gz: Buffer, issues: string[]): Buffer | null {
   if (gz.length < 18) {
-    issues.push('gzip archive too short to contain a valid gzip header and trailer (A19)');
+    pushIssue(issues, 'gzip archive too short to contain a valid gzip header and trailer (A19)');
     return null;
   }
 
   // Verify gzip magic
   if (gz[0] !== 0x1f || gz[1] !== 0x8b) {
-    issues.push('package is not a valid gzip file (bad magic) (A19)');
+    pushIssue(issues, 'package is not a valid gzip file (bad magic) (A19)');
     return null;
   }
 
   // Compression method must be deflate (8)
   if (gz[2] !== 0x08) {
-    issues.push(`unsupported gzip compression method: ${gz[2]} (expected 8) (A19)`);
+    pushIssue(issues, `unsupported gzip compression method: ${gz[2]} (expected 8) (A19)`);
     return null;
   }
 
@@ -130,7 +231,7 @@ export function gunzipSingleStream(gz: Buffer, issues: string[]): Buffer | null 
   // FEXTRA
   if (flags & 0x04) {
     if (pos + 2 > gz.length) {
-      issues.push('truncated gzip header in FEXTRA (A19)');
+      pushIssue(issues, 'truncated gzip header in FEXTRA (A19)');
       return null;
     }
     const xlen = gz.readUInt16LE(pos);
@@ -155,7 +256,7 @@ export function gunzipSingleStream(gz: Buffer, issues: string[]): Buffer | null 
   }
 
   if (pos >= gz.length - 8) {
-    issues.push('truncated gzip header before deflate stream (A19)');
+    pushIssue(issues, 'truncated gzip header before deflate stream (A19)');
     return null;
   }
 
@@ -169,30 +270,30 @@ export function gunzipSingleStream(gz: Buffer, issues: string[]): Buffer | null 
     res = rawRes as unknown as { buffer: Buffer | ArrayBuffer; engine?: { bytesWritten?: number } };
   } catch (err: any) {
     if (err?.code === 'ERR_BUFFER_TOO_LARGE' || err?.message?.includes('maxOutputLength')) {
-      issues.push(`package expanded size exceeds ${MAX_EXPANDED_SIZE} bytes (A19)`);
+      pushIssue(issues, `package expanded size exceeds ${MAX_EXPANDED_SIZE} bytes (A19)`);
       return null;
     }
-    issues.push(`failed to decompress gzip stream: ${err?.message || String(err)} (A19)`);
+    pushIssue(issues, `failed to decompress gzip stream: ${err?.message || String(err)} (A19)`);
     return null;
   }
 
   const outBuf = Buffer.isBuffer(res.buffer) ? res.buffer : Buffer.from(res.buffer);
 
   if (outBuf.length > MAX_EXPANDED_SIZE) {
-    issues.push(`package expanded size exceeds ${MAX_EXPANDED_SIZE} bytes (A19)`);
+    pushIssue(issues, `package expanded size exceeds ${MAX_EXPANDED_SIZE} bytes (A19)`);
     return null;
   }
 
   // Consumed deflate bytes check
   const deflateConsumed = res.engine?.bytesWritten;
   if (typeof deflateConsumed !== 'number' || deflateConsumed <= 0) {
-    issues.push('could not determine consumed deflate stream length (A19)');
+    pushIssue(issues, 'could not determine consumed deflate stream length (A19)');
     return null;
   }
 
   // Verify single-stream: pos + deflateConsumed + 8 (trailer) must exactly equal gz.length
   if (pos + deflateConsumed + 8 !== gz.length) {
-    issues.push('package contains trailing data or multiple gzip members; only single-stream gzip is permitted (A19)');
+    pushIssue(issues, 'package contains trailing data or multiple gzip members; only single-stream gzip is permitted (A19)');
     return null;
   }
 
@@ -202,13 +303,13 @@ export function gunzipSingleStream(gz: Buffer, issues: string[]): Buffer | null 
 
   const actualCrc = zlib.crc32(outBuf);
   if (trailerCrc !== actualCrc) {
-    issues.push(`gzip CRC32 mismatch (expected ${trailerCrc}, calculated ${actualCrc}) (A19)`);
+    pushIssue(issues, `gzip CRC32 mismatch (expected ${trailerCrc}, calculated ${actualCrc}) (A19)`);
     return null;
   }
 
   const actualIsize = (outBuf.length >>> 0) & 0xffffffff;
   if (trailerIsize !== actualIsize) {
-    issues.push(`gzip ISIZE mismatch (expected ${trailerIsize}, calculated ${actualIsize}) (A19)`);
+    pushIssue(issues, `gzip ISIZE mismatch (expected ${trailerIsize}, calculated ${actualIsize}) (A19)`);
     return null;
   }
 
@@ -216,13 +317,13 @@ export function gunzipSingleStream(gz: Buffer, issues: string[]): Buffer | null 
 }
 
 /**
- * Validates a skill package buffer according to A1, A19, and A22.
+ * Validates a skill package buffer according to A1, A19, A22, and H7.
  */
 export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSkillPackage> {
   const issues: string[] = [];
 
   if (buffer.length > MAX_PACKAGE_SIZE) {
-    issues.push(`package size (${buffer.length} bytes) exceeds maximum of ${MAX_PACKAGE_SIZE} bytes (A19)`);
+    pushIssue(issues, `package size (${buffer.length} bytes) exceeds maximum of ${MAX_PACKAGE_SIZE} bytes (A19)`);
     return { ok: false, issues };
   }
 
@@ -246,8 +347,12 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
   let seenEndMarker = false;
 
   while (offset < tar.length) {
+    if (issues.length >= MAX_ISSUES) {
+      break;
+    }
+
     if (offset + 512 > tar.length) {
-      issues.push('archive ends with truncated tar header block (A19)');
+      pushIssue(issues, 'archive ends with truncated tar header block (A19)');
       break;
     }
 
@@ -268,7 +373,7 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
     }
 
     if (seenEndMarker) {
-      issues.push('archive contains non-zero data after end-of-archive marker (A19)');
+      pushIssue(issues, 'archive contains non-zero data after end-of-archive marker (A19)');
       break;
     }
 
@@ -295,7 +400,7 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
     const isUstar = magic.startsWith('ustar');
 
     if (hasPrefix && !isUstar) {
-      issues.push(`header has non-empty prefix field without POSIX ustar magic (A19): "${namePart}"`);
+      pushIssue(issues, `header has non-empty prefix field without POSIX ustar magic (A19): "${namePart}"`);
     }
 
     let prefixPart = '';
@@ -307,156 +412,166 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
 
     const rawPath = prefixPart ? `${prefixPart}/${namePart}` : namePart;
 
-    if (!rawPath || rawPath.trim() === '') {
-      issues.push(`empty entry path at header offset ${offset} (A19)`);
-      offset += 512;
-      continue;
+    // Validate and parse all header numeric fields (mode, uid, gid, size, mtime, devmajor, devminor) (B3)
+    const mode = parseNumericField(block, 100, 8, 'mode', issues);
+    parseNumericField(block, 108, 8, 'uid', issues);
+    parseNumericField(block, 116, 8, 'gid', issues);
+    const size = parseNumericField(block, 124, 12, 'size', issues);
+    parseNumericField(block, 136, 12, 'mtime', issues);
+    if (isUstar) {
+      parseNumericField(block, 329, 8, 'devmajor', issues);
+      parseNumericField(block, 337, 8, 'devminor', issues);
     }
 
-    if (/[\x00-\x1f\x7f]/.test(rawPath)) {
-      issues.push(`file path contains illegal control characters (A19): "${rawPath}"`);
-    }
-
-    if (Buffer.byteLength(rawPath, 'utf8') > MAX_PATH_LENGTH) {
-      issues.push(`path length (${Buffer.byteLength(rawPath, 'utf8')} bytes) exceeds limit of ${MAX_PATH_LENGTH} (A19): "${rawPath}"`);
-    }
-
-    if (rawPath.startsWith('/') || rawPath.startsWith('\\')) {
-      issues.push(`path must not be absolute (A19): "${rawPath}"`);
-    }
-
-    if (rawPath.includes('\\')) {
-      issues.push(`path must not contain backslashes (A19): "${rawPath}"`);
-    }
-
-    const segments = rawPath.split('/');
-    if (segments.some((s) => s === '..')) {
-      issues.push(`directory traversal not allowed in path (A19): "${rawPath}"`);
-    }
-
-    const mode = parseOctal(block, 100, 8, 'mode', issues) ?? 0;
-    if (mode & 0o4000) issues.push(`setuid bit forbidden (A19): "${rawPath}"`);
-    if (mode & 0o2000) issues.push(`setgid bit forbidden (A19): "${rawPath}"`);
-    if (mode & 0o1000) issues.push(`sticky bit forbidden (A19): "${rawPath}"`);
-
-    const size = parseOctal(block, 124, 12, 'size', issues) ?? 0;
     const typeflag = String.fromCharCode(block[156]);
-
     const isRegular = typeflag === '0' || typeflag === '\0';
-    const isDir = typeflag === '5';
+    const isTypeDir = typeflag === '5';
 
-    if (!isRegular && !isDir) {
-      issues.push(`entry type '${typeflag}' not permitted (only regular files and directories allowed) (A19): "${rawPath}"`);
-    }
-
-    if (isRegular && (namePart.endsWith('/') || rawPath.endsWith('/'))) {
-      issues.push(`regular file entry name ends in slash (A19): "${rawPath}"`);
-    }
-
-    const cleanPath = rawPath.replace(/\/+$/, '');
-    if (!cleanPath) {
+    // Normalize path (B1)
+    const { normalized, isExplicitDir, isValid } = normalizeTarPath(rawPath, issues);
+    if (!isValid) {
       offset += 512;
       continue;
     }
 
-    const lower = cleanPath.toLowerCase();
-    if (seenPathsLower.has(lower) && seenPathsLower.get(lower) !== cleanPath) {
-      issues.push(`case-colliding paths in package (A19): "${seenPathsLower.get(lower)}" vs "${cleanPath}"`);
+    // Root directory reference (.)
+    if (normalized === '') {
+      offset += 512;
+      continue;
+    }
+
+    const isDir = isTypeDir || isExplicitDir;
+
+    // Reject non-regular and non-directory entries (pax, gnu, symlink, hardlink, dev, fifo) (B6)
+    if (!isRegular && !isDir) {
+      pushIssue(issues, `entry type '${typeflag}' not permitted (only regular files and directories allowed) (A19): "${normalized}"`);
+      offset += 512;
+      continue;
+    }
+
+    // Enforce size === 0 for directory entries (B2)
+    if (isDir) {
+      if (size !== null && size !== 0) {
+        pushIssue(issues, `directory entry has non-zero size (${size}) (A19): "${normalized}"`);
+      }
+    }
+
+    // Enforce setuid, setgid, sticky bit guards (A19)
+    if (mode !== null) {
+      if (mode & 0o4000) pushIssue(issues, `setuid bit forbidden (A19): "${normalized}"`);
+      if (mode & 0o2000) pushIssue(issues, `setgid bit forbidden (A19): "${normalized}"`);
+      if (mode & 0o1000) pushIssue(issues, `sticky bit forbidden (A19): "${normalized}"`);
+    }
+
+    // Regular file ending in slash
+    if (isRegular && (namePart.endsWith('/') || rawPath.endsWith('/'))) {
+      pushIssue(issues, `regular file entry name ends in slash (A19): "${normalized}"`);
+    }
+
+    // Check case collisions on normalized canonical path (B1)
+    const lower = normalized.toLowerCase().normalize('NFC');
+    if (seenPathsLower.has(lower) && seenPathsLower.get(lower) !== normalized) {
+      pushIssue(issues, `case-colliding paths in package (A19): "${seenPathsLower.get(lower)}" vs "${normalized}"`);
     } else {
-      seenPathsLower.set(lower, cleanPath);
+      seenPathsLower.set(lower, normalized);
     }
 
     if (isDir) {
-      allDirs.add(cleanPath);
-    } else if (isRegular) {
-      if (allFiles.has(cleanPath)) {
-        issues.push(`duplicate file entry in package (A19): "${cleanPath}"`);
+      allDirs.add(normalized);
+      if (allDirs.size > MAX_FILES) {
+        pushIssue(issues, `directory count exceeds maximum of ${MAX_FILES} (A19)`);
+        break;
       }
-      allFiles.add(cleanPath);
-      files.push(cleanPath);
+    } else if (isRegular) {
+      if (allFiles.has(normalized)) {
+        pushIssue(issues, `duplicate file entry in package (A19): "${normalized}"`);
+      }
+      allFiles.add(normalized);
+      files.push(normalized);
 
       // Record all parent directories
-      const parts = cleanPath.split('/');
+      const parts = normalized.split('/');
       for (let p = 1; p < parts.length; p++) {
         parentDirs.add(parts.slice(0, p).join('/'));
       }
     }
 
-    // Banned files/segments check
-    for (const seg of segments.filter(Boolean)) {
+    // Banned segments and extensions
+    const segments = normalized.split('/');
+    for (const seg of segments) {
       if (BANNED_SEGMENTS.has(seg)) {
-        issues.push(`banned path segment "${seg}" in entry (A19): "${cleanPath}"`);
+        pushIssue(issues, `banned path segment "${seg}" in entry (A19): "${normalized}"`);
       }
     }
 
-    const ext = cleanPath.substring(cleanPath.lastIndexOf('.')).toLowerCase();
+    const dotIdx = normalized.lastIndexOf('.');
+    const ext = dotIdx !== -1 ? normalized.substring(dotIdx).toLowerCase() : '';
     if (BANNED_EXTENSIONS.has(ext)) {
-      issues.push(`banned file extension "${ext}" in entry (A19): "${cleanPath}"`);
+      pushIssue(issues, `banned file extension "${ext}" in entry (A19): "${normalized}"`);
     }
 
     if (isRegular) {
-      if (size > MAX_FILE_SIZE) {
-        issues.push(`file size (${size} bytes) exceeds limit of ${MAX_FILE_SIZE} (A19): "${cleanPath}"`);
+      const fileSize = size ?? 0;
+      if (fileSize > MAX_FILE_SIZE) {
+        pushIssue(issues, `file size (${fileSize} bytes) exceeds limit of ${MAX_FILE_SIZE} (A19): "${normalized}"`);
       }
-      totalExpandedBytes += size;
+      totalExpandedBytes += fileSize;
       if (totalExpandedBytes > MAX_EXPANDED_SIZE) {
-        issues.push(`total expanded package size exceeds limit of ${MAX_EXPANDED_SIZE} bytes (A19)`);
+        pushIssue(issues, `total expanded package size exceeds limit of ${MAX_EXPANDED_SIZE} bytes (A19)`);
       }
 
       if (files.length > MAX_FILES) {
-        issues.push(`file count exceeds maximum of ${MAX_FILES} (A19)`);
+        pushIssue(issues, `file count exceeds maximum of ${MAX_FILES} (A19)`);
+        break;
       }
 
-      const contentBlocks = Math.ceil(size / 512);
+      const contentBlocks = Math.ceil(fileSize / 512);
       const contentStart = offset + 512;
-      const contentEnd = contentStart + size;
+      const contentEnd = contentStart + fileSize;
 
       if (contentStart + contentBlocks * 512 > tar.length) {
-        issues.push(`truncated file content for "${cleanPath}" (A19)`);
+        pushIssue(issues, `truncated file content for "${normalized}" (A19)`);
         break;
       }
 
       const content = tar.subarray(contentStart, contentEnd);
 
-      // Check binary header magic
+      // Binary header magic checks
       if (content.length >= 4) {
-        // ELF
         if (content[0] === 0x7f && content[1] === 0x45 && content[2] === 0x4c && content[3] === 0x46) {
-          issues.push(`compiled binary file (ELF) forbidden (A19): "${cleanPath}"`);
+          pushIssue(issues, `compiled binary file (ELF) forbidden (A19): "${normalized}"`);
         }
-        // Mach-O
         if (
           (content[0] === 0xfe && content[1] === 0xed && content[2] === 0xfa && (content[3] === 0xce || content[3] === 0xcf)) ||
           ((content[0] === 0xce || content[0] === 0xcf) && content[1] === 0xfa && content[2] === 0xed && content[3] === 0xfe)
         ) {
-          issues.push(`compiled binary file (Mach-O) forbidden (A19): "${cleanPath}"`);
+          pushIssue(issues, `compiled binary file (Mach-O) forbidden (A19): "${normalized}"`);
         }
       }
-      // PE / MZ
       if (content.length >= 2 && content[0] === 0x4d && content[1] === 0x5a) {
-        issues.push(`compiled binary file (PE/EXE) forbidden (A19): "${cleanPath}"`);
+        pushIssue(issues, `compiled binary file (PE/EXE) forbidden (A19): "${normalized}"`);
       }
 
-      // Check null bytes in source/text files
+      // Check unexpected null bytes in source/text files
       const textExts = ['.py', '.yaml', '.yml', '.json', '.txt', '.md'];
       if (textExts.includes(ext) && content.includes(0)) {
-        issues.push(`unexpected null bytes in source file (A19): "${cleanPath}"`);
+        pushIssue(issues, `unexpected null bytes in source file (A19): "${normalized}"`);
       }
 
-      if (cleanPath === 'skill.yaml') {
-        if (size > MAX_SKILL_YAML_SIZE) {
-          issues.push(`skill.yaml size (${size} bytes) exceeds limit of ${MAX_SKILL_YAML_SIZE} (A19)`);
+      if (normalized === 'skill.yaml') {
+        if (fileSize > MAX_SKILL_YAML_SIZE) {
+          pushIssue(issues, `skill.yaml size (${fileSize} bytes) exceeds limit of ${MAX_SKILL_YAML_SIZE} (A19)`);
         } else {
           skillYamlContent = content.toString('utf8');
         }
       }
 
-      // Check test files outside vendor/
-      if (!cleanPath.startsWith('vendor/')) {
-        const basename = cleanPath.split('/').pop() || '';
+      // Check tests outside vendor/
+      if (!normalized.startsWith('vendor/')) {
+        const basename = normalized.split('/').pop() || '';
         if (
-          cleanPath.startsWith('tests/') ||
-          cleanPath.includes('/tests/') ||
+          normalized.startsWith('tests/') ||
+          normalized.includes('/tests/') ||
           basename.startsWith('test_') ||
           basename.endsWith('_test.py')
         ) {
@@ -465,22 +580,23 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
       }
     }
 
-    const contentBlocks = Math.ceil(size / 512);
+    // Only regular files advance the walk with content blocks; directories never have content blocks (B2)
+    const contentBlocks = isRegular ? Math.ceil((size ?? 0) / 512) : 0;
     offset += 512 + contentBlocks * 512;
   }
 
   // Hierarchy conflict guard: a path cannot be both a regular file and a directory parent
   for (const file of allFiles) {
     if (allDirs.has(file)) {
-      issues.push(`path is declared as both a regular file and a directory (A19): "${file}"`);
+      pushIssue(issues, `path is declared as both a regular file and a directory (A19): "${file}"`);
     }
     if (parentDirs.has(file)) {
-      issues.push(`entry is both a regular file and a directory parent (A19): "${file}"`);
+      pushIssue(issues, `entry is both a regular file and a directory parent (A19): "${file}"`);
     }
   }
 
   if (!skillYamlContent) {
-    issues.push('package must contain a skill.yaml at root (A1, A19)');
+    pushIssue(issues, 'package must contain a skill.yaml at root (A1, A19)');
     return { ok: false, issues };
   }
 
@@ -488,39 +604,39 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
   try {
     parsedYaml = parseYaml(skillYamlContent);
   } catch (err: any) {
-    issues.push(`skill.yaml is not valid YAML: ${err?.message || String(err)}`);
+    pushIssue(issues, `skill.yaml is not valid YAML: ${err?.message || String(err)}`);
     return { ok: false, issues };
   }
 
   if (!parsedYaml || typeof parsedYaml !== 'object' || Array.isArray(parsedYaml)) {
-    issues.push('skill.yaml must be an object');
+    pushIssue(issues, 'skill.yaml must be an object');
     return { ok: false, issues };
   }
 
   const rawManifest = parsedYaml as Record<string, unknown>;
 
   if (rawManifest.spec !== 1) {
-    issues.push(`skill package skill.yaml must declare spec: 1 (got ${JSON.stringify(rawManifest.spec)}) (A22)`);
+    pushIssue(issues, `skill package skill.yaml must declare spec: 1 (got ${JSON.stringify(rawManifest.spec)}) (A22)`);
   }
 
   if ('visibility' in rawManifest) {
-    issues.push('skill packages drop visibility field from skill.yaml (A22, H11)');
+    pushIssue(issues, 'skill packages drop visibility field from skill.yaml (A22, H7)');
   }
 
   if ('owner' in rawManifest) {
-    issues.push('skill packages drop owner field from skill.yaml (A22, H11)');
+    pushIssue(issues, 'skill packages drop owner field from skill.yaml (A22, H7)');
   }
 
   const { spec: _spec, ...manifestBody } = rawManifest;
   const manifestChecked = validateSkillManifest(manifestBody);
   if (!manifestChecked.ok) {
     for (const issue of manifestChecked.issues) {
-      issues.push(`manifest.${issue.path}: ${issue.message}`);
+      pushIssue(issues, `manifest.${issue.path}: ${issue.message}`);
     }
   }
 
   if (!hasTests) {
-    issues.push('package must contain tests outside vendor/ (A1, A2)');
+    pushIssue(issues, 'package must contain tests outside vendor/ (A1, A2)');
   }
 
   if (issues.length > 0 || !manifestChecked.ok) {
@@ -534,210 +650,4 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
     files,
     totalExpandedBytes,
   };
-}
-
-/**
- * Safely extracts a verified skill package to target directory (A19).
- * Enforces all A19 security constraints on extraction.
- */
-export function extractSkillPackage(gz: Buffer, targetDir: string): ValidatedSkillPackage {
-  const issues: string[] = [];
-  const tar = gunzipSingleStream(gz, issues);
-  if (!tar) {
-    throw new Error(`cannot extract invalid skill package: ${issues.join('; ')}`);
-  }
-
-  const resolvedTarget = resolve(targetDir);
-  mkdirSync(resolvedTarget, { recursive: true });
-
-  let offset = 0;
-  let seenEndMarker = false;
-
-  while (offset < tar.length) {
-    if (offset + 512 > tar.length) break;
-    const block = tar.subarray(offset, offset + 512);
-
-    let isZeroBlock = true;
-    for (let i = 0; i < 512; i++) {
-      if (block[i] !== 0) {
-        isZeroBlock = false;
-        break;
-      }
-    }
-    if (isZeroBlock) {
-      seenEndMarker = true;
-      offset += 512;
-      continue;
-    }
-    if (seenEndMarker) break;
-
-    let nameEnd = block.indexOf(0, 0);
-    if (nameEnd === -1 || nameEnd > 100) nameEnd = 100;
-    const namePart = block.subarray(0, nameEnd).toString('utf8');
-
-    let prefixPart = '';
-    const magic = block.subarray(257, 263).toString('ascii');
-    if (magic.startsWith('ustar')) {
-      let prefixEnd = block.indexOf(0, 345);
-      if (prefixEnd === -1 || prefixEnd > 500) prefixEnd = 500;
-      if (prefixEnd > 345) {
-        prefixPart = block.subarray(345, prefixEnd).toString('utf8');
-      }
-    }
-
-    const rawPath = prefixPart ? `${prefixPart}/${namePart}` : namePart;
-    const cleanPath = rawPath.replace(/\/+$/, '');
-    if (!cleanPath) {
-      offset += 512;
-      continue;
-    }
-
-    const size = parseOctal(block, 124, 12, 'size', issues) ?? 0;
-    const typeflag = String.fromCharCode(block[156]);
-    const isRegular = typeflag === '0' || typeflag === '\0';
-    const isDir = typeflag === '5';
-
-    const destPath = resolve(resolvedTarget, cleanPath);
-    if (!destPath.startsWith(resolvedTarget + '/') && destPath !== resolvedTarget) {
-      throw new Error(`package entry "${cleanPath}" escapes target directory (A19)`);
-    }
-
-    if (isDir) {
-      mkdirSync(destPath, { recursive: true });
-    } else if (isRegular) {
-      mkdirSync(dirname(destPath), { recursive: true });
-      const content = tar.subarray(offset + 512, offset + 512 + size);
-      writeFileSync(destPath, content, { mode: 0o644 });
-    }
-
-    const contentBlocks = Math.ceil(size / 512);
-    offset += 512 + contentBlocks * 512;
-  }
-
-  try {
-    const manifestContent = readFileSync(join(resolvedTarget, 'skill.yaml'), 'utf8');
-    const parsed = parseYaml(manifestContent) as Record<string, unknown>;
-    const { spec: _spec, ...manifestBody } = parsed;
-    const checked = validateSkillManifest(manifestBody);
-    if (!checked.ok) {
-      throw new Error(`invalid skill manifest in extracted package: ${checked.issues.map((i) => i.message).join('; ')}`);
-    }
-    const sha256 = createHash('sha256').update(gz).digest('hex');
-    return {
-      ok: true,
-      manifest: checked.manifest,
-      sha256,
-      files: [],
-      totalExpandedBytes: 0,
-    };
-  } catch (err: any) {
-    throw new Error(`cannot extract skill package: ${err?.message || String(err)}`);
-  }
-}
-
-/**
- * Builds a conforming .tar.gz buffer from a directory (A6).
- */
-export async function packSkillDirectory(dir: string): Promise<Buffer> {
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-    throw new Error(`directory not found: ${dir}`);
-  }
-
-  const tarBlocks: Buffer[] = [];
-
-  function writeHeader(name: string, size: number, isDir: boolean, mode = isDir ? 0o755 : 0o644): void {
-    const block = Buffer.alloc(512, 0);
-
-    // In POSIX ustar format, name can be split at a slash such that:
-    // prefix is at most 155 bytes, name is at most 100 bytes (A19).
-    let namePart = name;
-    let prefixPart = '';
-    const byteLen = Buffer.byteLength(name, 'utf8');
-    if (byteLen > 100) {
-      if (byteLen > MAX_PATH_LENGTH) {
-        throw new Error(`path exceeds 255 byte tar ustar limit: ${name}`);
-      }
-      let split = -1;
-      for (let i = Math.min(name.length - 1, 155); i >= 0; i--) {
-        if (
-          name[i] === '/' &&
-          Buffer.byteLength(name.substring(0, i), 'utf8') <= 155 &&
-          Buffer.byteLength(name.substring(i + 1), 'utf8') <= 100
-        ) {
-          split = i;
-          break;
-        }
-      }
-      if (split === -1) {
-        throw new Error(`path cannot be split into ustar prefix (<=155) and name (<=100): ${name}`);
-      }
-      prefixPart = name.substring(0, split);
-      namePart = name.substring(split + 1);
-    }
-
-    block.write(namePart, 0, 100, 'utf8');
-    block.write(mode.toString(8).padStart(7, '0') + '\0', 100, 8, 'ascii'); // mode
-    block.write('0000000\0', 108, 8, 'ascii'); // uid
-    block.write('0000000\0', 116, 8, 'ascii'); // gid
-    block.write(size.toString(8).padStart(11, '0') + '\0', 124, 12, 'ascii'); // size
-    block.write('00000000000\0', 136, 12, 'ascii'); // mtime (deterministic: 0)
-    block.write(isDir ? '5' : '0', 156, 1, 'ascii'); // typeflag
-    block.write('ustar\0', 257, 6, 'ascii'); // magic
-    block.write('00', 263, 2, 'ascii'); // version
-    if (prefixPart) {
-      block.write(prefixPart, 345, 155, 'utf8'); // prefix
-    }
-
-    // Compute checksum treating chksum field as 8 spaces (0x20)
-    let sum = 0;
-    for (let i = 0; i < 512; i++) {
-      sum += (i >= 148 && i < 156) ? 0x20 : block[i];
-    }
-    block.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
-
-    tarBlocks.push(block);
-  }
-
-  function addDir(currentPath: string): void {
-    const entries = readdirSync(currentPath, { withFileTypes: true });
-    // Sort deterministically (byte-wise)
-    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-
-    for (const entry of entries) {
-      if (BANNED_SEGMENTS.has(entry.name)) continue;
-
-      const fullPath = join(currentPath, entry.name);
-      const relPath = fullPath.substring(dir.length).replace(/^[/\\]+/, '').replace(/\\/g, '/');
-
-      if (entry.isDirectory()) {
-        writeHeader(`${relPath}/`, 0, true);
-        addDir(fullPath);
-      } else if (entry.isFile()) {
-        const content = readFileSync(fullPath);
-        writeHeader(relPath, content.length, false);
-
-        // Add content padded to 512-byte block
-        tarBlocks.push(content);
-        const remainder = content.length % 512;
-        if (remainder > 0) {
-          tarBlocks.push(Buffer.alloc(512 - remainder, 0));
-        }
-      }
-    }
-  }
-
-  addDir(dir);
-
-  // Two 512-byte zero blocks at end of tar archive
-  tarBlocks.push(Buffer.alloc(1024, 0));
-
-  const tarBuffer = Buffer.concat(tarBlocks);
-  const gz = zlib.gzipSync(tarBuffer);
-
-  const checked = await validateSkillPackage(gz);
-  if (!checked.ok) {
-    throw new Error(`cannot pack skill: ${checked.issues.join('; ')}`);
-  }
-
-  return gz;
 }
