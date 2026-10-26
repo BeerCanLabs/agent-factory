@@ -70,6 +70,9 @@ describe('SkillPackageStore Provider Abstraction & Immutability (A4, A21, S3)', 
             const keyIdx = args.indexOf('--key');
             const bodyIdx = args.indexOf('--body');
             const key = args[keyIdx + 1];
+            if (args.includes('--if-none-match') && s3Objects.has(key)) {
+              throw new Error('PreconditionFailed: 412 At least one of the pre-conditions you specified did not hold');
+            }
             const bodyFile = args[bodyIdx + 1];
             const buf = readFileSync(bodyFile);
             if (!s3Objects.has(key)) {
@@ -148,6 +151,9 @@ describe('SkillPackageStore Provider Abstraction & Immutability (A4, A21, S3)', 
               buf = Buffer.from(body);
             } else {
               buf = Buffer.alloc(0);
+            }
+            if (url.searchParams.get('ifGenerationMatch') === '0' && gcsObjects.has(name)) {
+              return new Response('Precondition Failed', { status: 412 });
             }
             if (!gcsObjects.has(name)) {
               gcsObjects.set(name, { buf, storedAt: new Date().toISOString() });
@@ -278,6 +284,25 @@ describe('SkillPackageStore Provider Abstraction & Immutability (A4, A21, S3)', 
           assert.equal(rec1.sha256, hash);
           assert.equal(rec2.sha256, hash);
           assert.equal(rec1.storedAt, rec2.storedAt);
+          assert.equal(await store.has(hash), true);
+        } finally {
+          cleanup();
+        }
+      });
+
+      it('concurrent put / 412 handling: verifies winner bytes on race condition', async () => {
+        const { store, cleanup } = setup();
+        try {
+          const buf = Buffer.from('concurrent package content');
+          const hash = sha256Of(buf);
+
+          const [rec1, rec2] = await Promise.all([
+            store.put(hash, buf),
+            store.put(hash, buf),
+          ]);
+
+          assert.equal(rec1.sha256, hash);
+          assert.equal(rec2.sha256, hash);
           assert.equal(await store.has(hash), true);
         } finally {
           cleanup();

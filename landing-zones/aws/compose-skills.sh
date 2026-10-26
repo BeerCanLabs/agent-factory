@@ -77,24 +77,23 @@ while IFS='|' read -r id version repo path commit package_hash; do
     echo "skill $id@$version from package ${package_hash:0:12}"
     PKG_FILE="$WORK/$package_hash.tar.gz"
 
-    if [ -n "${PACKAGE_STORE_URI:-}" ] && [[ "$PACKAGE_STORE_URI" =~ ^s3:// ]]; then
-      aws s3 cp "${PACKAGE_STORE_URI%/}/packages/$package_hash.tar.gz" "$PKG_FILE" >/dev/null 2>&1 || \
-      aws s3 cp "${PACKAGE_STORE_URI%/}/$package_hash.tar.gz" "$PKG_FILE" >/dev/null 2>&1 || exit 5
-    elif [ -n "${FACTORY_SKILL_PACKAGES_URI:-}" ] && [[ "$FACTORY_SKILL_PACKAGES_URI" =~ ^s3:// ]]; then
-      aws s3 cp "${FACTORY_SKILL_PACKAGES_URI%/}/packages/$package_hash.tar.gz" "$PKG_FILE" >/dev/null 2>&1 || \
-      aws s3 cp "${FACTORY_SKILL_PACKAGES_URI%/}/$package_hash.tar.gz" "$PKG_FILE" >/dev/null 2>&1 || exit 5
-    elif [ -n "${PACKAGE_STORE_DIR:-}" ] && [ -f "$PACKAGE_STORE_DIR/packages/$package_hash.tar.gz" ]; then
-      cp "$PACKAGE_STORE_DIR/packages/$package_hash.tar.gz" "$PKG_FILE"
-    elif [ -n "${PACKAGE_STORE_DIR:-}" ] && [ -f "$PACKAGE_STORE_DIR/$package_hash.tar.gz" ]; then
-      cp "$PACKAGE_STORE_DIR/$package_hash.tar.gz" "$PKG_FILE"
-    elif [ -n "${FACTORY_SKILL_PACKAGES_DIR:-}" ] && [ -f "$FACTORY_SKILL_PACKAGES_DIR/packages/$package_hash.tar.gz" ]; then
-      cp "$FACTORY_SKILL_PACKAGES_DIR/packages/$package_hash.tar.gz" "$PKG_FILE"
-    elif [ -n "${FACTORY_SKILL_PACKAGES_DIR:-}" ] && [ -f "$FACTORY_SKILL_PACKAGES_DIR/$package_hash.tar.gz" ]; then
-      cp "$FACTORY_SKILL_PACKAGES_DIR/$package_hash.tar.gz" "$PKG_FILE"
-    elif [ -f "./packages/$package_hash.tar.gz" ]; then
-      cp "./packages/$package_hash.tar.gz" "$PKG_FILE"
-    elif [ -f "./$package_hash.tar.gz" ]; then
-      cp "./$package_hash.tar.gz" "$PKG_FILE"
+    STORE_URI="${PACKAGE_STORE_URI:-${FACTORY_SKILL_PACKAGES_URI:-}}"
+    STORE_DIR="${PACKAGE_STORE_DIR:-${FACTORY_SKILL_PACKAGES_DIR:-}}"
+    if [ -n "$STORE_URI" ] && [[ "$STORE_URI" =~ ^s3:// ]]; then
+      aws s3 cp "${STORE_URI%/}/packages/$package_hash.tar.gz" "$PKG_FILE" >/dev/null 2>&1 || \
+      aws s3 cp "${STORE_URI%/}/$package_hash.tar.gz" "$PKG_FILE" >/dev/null 2>&1 || {
+        echo "package $package_hash could not be fetched from $STORE_URI"
+        exit 5
+      }
+    elif [ -n "$STORE_DIR" ] && [ -d "$STORE_DIR" ]; then
+      if [ -f "$STORE_DIR/packages/$package_hash.tar.gz" ]; then
+        cp "$STORE_DIR/packages/$package_hash.tar.gz" "$PKG_FILE"
+      elif [ -f "$STORE_DIR/$package_hash.tar.gz" ]; then
+        cp "$STORE_DIR/$package_hash.tar.gz" "$PKG_FILE"
+      else
+        echo "package $package_hash not found in store directory $STORE_DIR"
+        exit 5
+      fi
     else
       echo "package $package_hash not found in store"
       exit 5

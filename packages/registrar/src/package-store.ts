@@ -696,6 +696,14 @@ export class GcsSkillPackageStore implements SkillPackageStore {
       throw new Error(`GCS package write failed (${res.status})`);
     }
 
+    if (res.status === 412) {
+      const existingBuf = await this.get(sha256);
+      if (!existingBuf || createHash('sha256').update(existingBuf).digest('hex') !== sha256) {
+        throw new Error(`stored package corrupted: sha256 mismatch for ${sha256} (A4, S3)`);
+      }
+      return (await this.getRecord(sha256))!;
+    }
+
     const rec = await this.getRecord(sha256);
     if (!rec) {
       throw new Error(`store inconsistency: package ${sha256} written to GCS but getRecord returned null`);

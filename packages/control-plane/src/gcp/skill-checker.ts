@@ -138,9 +138,13 @@ DL
       cp "$PACKAGE_STORE_DIR/$PACKAGE_HASH.tar.gz" "$PKG_FILE"
     fi
     if [ -f "$PKG_FILE" ] && [ "$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$PKG_FILE")" = "$PACKAGE_HASH" ]; then
-      tar -xzf "$PKG_FILE" -C "skill-repo/$SKILL_PATH" || true
-      python3 /tmp/skill_check.py --dir "skill-repo/$SKILL_PATH" --venv /tmp/skill-check-venv --out /tmp/skill-check.json || true
-      if [ -s /tmp/skill-check.json ]; then SKILL_CHECK_RESULT="$(cat /tmp/skill-check.json)"; fi
+      if ! tar -xzf "$PKG_FILE" -C "skill-repo/$SKILL_PATH"; then
+        SKILL_CHECK_RESULT='{"passed":false,"failures":["package: extraction failed (corrupt or invalid tar.gz)"]}'
+      elif ! python3 /tmp/skill_check.py --dir "skill-repo/$SKILL_PATH" --venv /tmp/skill-check-venv --out /tmp/skill-check.json; then
+        SKILL_CHECK_RESULT='{"passed":false,"failures":["check: skill check execution failed"]}'
+      elif [ -s /tmp/skill-check.json ]; then
+        SKILL_CHECK_RESULT="$(cat /tmp/skill-check.json)"
+      fi
     else
       SKILL_CHECK_RESULT='{"passed":false,"failures":["source: could not fetch package '$PACKAGE_HASH' from package store"]}'
     fi

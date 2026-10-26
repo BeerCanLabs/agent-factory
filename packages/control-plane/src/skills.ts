@@ -201,7 +201,7 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
       buffer = await readBufferBody(req, 5 * 1024 * 1024);
     } catch (err: any) {
       if (err?.status === 413) {
-        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.writeHead(413, { 'Content-Type': 'application/json', Connection: 'close' });
         res.end(JSON.stringify({ error: 'payload_too_large', message: err.message }));
         return;
       }

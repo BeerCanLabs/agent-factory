@@ -36,8 +36,7 @@ resource "aws_iam_role_policy" "codebuild_policy" {
           "ecr:InitiateLayerUpload",
           "ecr:UploadLayerPart",
           "ecr:CompleteLayerUpload",
-          "ecr:PutImage",
-          "s3:GetObject"
+          "ecr:PutImage"
         ]
         Resource = "*"
       },
@@ -46,10 +45,15 @@ resource "aws_iam_role_policy" "codebuild_policy" {
         Action = [
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
-          "logs:PutLogEvents",
-          "s3:GetObject"
+          "logs:PutLogEvents"
         ]
         Resource = "*"
+      },
+      {
+        Sid      = "SkillPackagesRead"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "${aws_s3_bucket.skill_packages.arn}/*"
       }
       ], var.agent_source_token_secret_arn == "" ? [] : [
       {
@@ -99,6 +103,10 @@ resource "aws_codebuild_project" "factory_agent_builder" {
     environment_variable {
       name  = "SOURCE_TOKEN_HOSTS"
       value = join(" ", var.agent_source_token_hosts)
+    }
+    environment_variable {
+      name  = "PACKAGE_STORE_URI"
+      value = "s3://${aws_s3_bucket.skill_packages.bucket}/packages"
     }
   }
 
@@ -240,6 +248,10 @@ resource "aws_codebuild_project" "factory_skills_builder" {
       name  = "SOURCE_TOKEN_HOSTS"
       value = join(" ", var.agent_source_token_hosts)
     }
+    environment_variable {
+      name  = "PACKAGE_STORE_URI"
+      value = "s3://${aws_s3_bucket.skill_packages.bucket}/packages"
+    }
   }
 
   source {
@@ -317,10 +329,15 @@ resource "aws_iam_role_policy" "codebuild_skill_checker" {
         Action = [
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
-          "logs:PutLogEvents",
-          "s3:GetObject"
+          "logs:PutLogEvents"
         ]
         Resource = "*"
+      },
+      {
+        Sid      = "SkillPackagesRead"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "${aws_s3_bucket.skill_packages.arn}/*"
       }
       ], var.agent_source_token_secret_arn == "" ? [] : [
       {
@@ -364,6 +381,10 @@ resource "aws_codebuild_project" "factory_skill_checker" {
     environment_variable {
       name  = "SOURCE_TOKEN_HOSTS"
       value = join(" ", var.agent_source_token_hosts)
+    }
+    environment_variable {
+      name  = "PACKAGE_STORE_URI"
+      value = "s3://${aws_s3_bucket.skill_packages.bucket}/packages"
     }
   }
 
@@ -892,9 +913,13 @@ phases:
               cp "$PACKAGE_STORE_DIR/$PACKAGE_HASH.tar.gz" "$PKG_FILE"
             fi
             if [ -f "$PKG_FILE" ] && [ "$$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$PKG_FILE")" = "$PACKAGE_HASH" ]; then
-              tar -xzf "$PKG_FILE" -C "skill-repo/$SKILL_PATH" || true
-              python3 /tmp/skill_check.py --dir "skill-repo/$SKILL_PATH" --venv /tmp/skill-check-venv --out /tmp/skill-check.json || true
-              if [ -s /tmp/skill-check.json ]; then SKILL_CHECK_RESULT="$(cat /tmp/skill-check.json)"; fi
+              if ! tar -xzf "$PKG_FILE" -C "skill-repo/$SKILL_PATH"; then
+                SKILL_CHECK_RESULT='{"passed":false,"failures":["package: extraction failed (corrupt or invalid tar.gz)"]}'
+              elif ! python3 /tmp/skill_check.py --dir "skill-repo/$SKILL_PATH" --venv /tmp/skill-check-venv --out /tmp/skill-check.json; then
+                SKILL_CHECK_RESULT='{"passed":false,"failures":["check: skill check execution failed"]}'
+              elif [ -s /tmp/skill-check.json ]; then
+                SKILL_CHECK_RESULT="$(cat /tmp/skill-check.json)"
+              fi
             else
               SKILL_CHECK_RESULT='{"passed":false,"failures":["source: could not fetch package '$PACKAGE_HASH' from package store"]}'
             fi

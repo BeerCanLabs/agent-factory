@@ -48,7 +48,7 @@ async function call(port: number, path: string, method = 'GET', token?: string, 
     body: body === undefined ? undefined : isBuffer ? body : JSON.stringify(body),
   });
   const text = await res.text();
-  return { status: res.status, body: text ? JSON.parse(text) : null };
+  return { status: res.status, headers: res.headers, body: text ? JSON.parse(text) : null };
 }
 
 function manifest(version: string, requires: Record<string, unknown> = { routes: ['discord'], credentials: [{ name: 'DISCORD_BOT_TOKEN', source: 'discord' }] }) {
@@ -487,11 +487,66 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
     assert.equal(res.body.registeredBy, 'token:operator');
   });
 
-  it('refuses upload exceeding 5 MiB route cap (413 payload too large, A5)', async () => {
+  it('refuses upload exceeding 5 MiB route cap (413 payload too large, Connection: close, A5)', async () => {
     const oversized = Buffer.alloc(5 * 1024 * 1024 + 1024, 0);
     const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, oversized);
     assert.equal(res.status, 413);
+    assert.equal(res.headers.get('connection'), 'close');
     assert.equal(res.body.error, 'payload_too_large');
+  });
+
+  it('refuses streaming upload exceeding 5 MiB without Content-Length (413 and connection close, capped drain, A5)', async () => {
+    const res = await new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: any }>((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/v1/registry/skills',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/gzip',
+            authorization: `Bearer ${ADMIN}`,
+          },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (c) => { data += c; });
+          res.on('end', () => {
+            resolve({
+              status: res.statusCode ?? 0,
+              headers: res.headers,
+              body: data ? JSON.parse(data) : null,
+            });
+          });
+        },
+      );
+      req.on('error', () => {
+        // Socket may be reset/closed by server on 413
+      });
+      const chunk = Buffer.alloc(64 * 1024, 0);
+      let chunksWritten = 0;
+      const totalChunks = Math.ceil((5 * 1024 * 1024 + 256 * 1024) / chunk.length);
+      function writeMore() {
+        while (chunksWritten < totalChunks) {
+          chunksWritten++;
+          try {
+            const canContinue = req.write(chunk);
+            if (!canContinue) {
+              req.once('drain', writeMore);
+              return;
+            }
+          } catch {
+            return;
+          }
+        }
+        try { req.end(); } catch {}
+      }
+      writeMore();
+    });
+
+    assert.equal(res.status, 413);
+    assert.equal(res.headers['connection'], 'close');
+    assert.equal(res.body?.error, 'payload_too_large');
   });
 
   it('refuses corrupted or invalid package (422 unprocessable entity, ledgered, A5, A19)', async () => {

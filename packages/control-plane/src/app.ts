@@ -219,6 +219,19 @@ export async function readJson(req: http.IncomingMessage): Promise<Record<string
   return parsed as Record<string, unknown>;
 }
 
+const DEFAULT_DRAIN_CAP = 256 * 1024;
+
+function capDrain(req: http.IncomingMessage, maxBytes = DEFAULT_DRAIN_CAP): void {
+  let drained = 0;
+  req.on('data', (chunk: Buffer) => {
+    drained += chunk.length;
+    if (drained > maxBytes) {
+      req.destroy();
+    }
+  });
+  req.resume();
+}
+
 /**
  * Reads a raw binary body from a request, capped at limit bytes (default 5 MiB for packages, A1, A5).
  */
@@ -227,8 +240,8 @@ export function readBufferBody(req: http.IncomingMessage, limit = 5 * 1024 * 102
   if (clHeader !== undefined) {
     const declaredLength = parseInt(clHeader, 10);
     if (!Number.isNaN(declaredLength) && declaredLength > limit) {
-      req.on('data', () => {});
-      req.resume();
+      // Drain up to the declared length (capped at 10 MiB) so client can read the 413 response cleanly
+      capDrain(req, Math.min(declaredLength, 10 * 1024 * 1024));
       return Promise.reject(Object.assign(new Error('payload too large (package capped at 5 MiB) (A1, A5)'), { status: 413 }));
     }
   }
@@ -242,8 +255,7 @@ export function readBufferBody(req: http.IncomingMessage, limit = 5 * 1024 * 102
       totalLength += chunk.length;
       if (totalLength > limit) {
         rejected = true;
-        req.on('data', () => {});
-        req.resume();
+        capDrain(req, DEFAULT_DRAIN_CAP);
         reject(Object.assign(new Error('payload too large (package capped at 5 MiB) (A1, A5)'), { status: 413 }));
         return;
       }
