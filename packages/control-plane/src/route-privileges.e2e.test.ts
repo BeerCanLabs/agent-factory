@@ -5,8 +5,12 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth, RunTokens, type Role } from '@beercanlabs/factory-auth';
+import { GroupStore } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { createInspector } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
@@ -181,6 +185,14 @@ const ROUTES: RouteRow[] = [
   { method: 'PUT', path: `/api/v1/skills/${SKILL}/training-baseline`, privilege: 'skills.training.run', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/skills/${SKILL}/training-runs`, privilege: 'skills.training.run', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/skills/${SKILL}/training-recommendation`, privilege: 'skills.training.run', role: 'admin', body: {} },
+  // TSK-277 (Slice 3a): Groups management (A8, A10)
+  { method: 'GET', path: '/api/v1/groups', privilege: 'groups.manage', role: 'admin' },
+  { method: 'POST', path: '/api/v1/groups', privilege: 'groups.manage', role: 'admin', body: {} },
+  { method: 'GET', path: '/api/v1/groups/nope', privilege: 'groups.manage', role: 'admin' },
+  { method: 'PUT', path: '/api/v1/groups/nope', privilege: 'groups.manage', role: 'admin', body: {} },
+  { method: 'DELETE', path: '/api/v1/groups/nope', privilege: 'groups.manage', role: 'admin' },
+  { method: 'POST', path: '/api/v1/groups/nope/members', privilege: 'groups.manage', role: 'admin', body: {} },
+  { method: 'DELETE', path: '/api/v1/groups/nope/members', privilege: 'groups.manage', role: 'admin', body: {} },
 ];
 
 async function listen(server: http.Server): Promise<number> {
@@ -238,8 +250,10 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
   let cp: http.Server;
   let port = 0;
   let state: FactoryState;
+  let tmpDir: string;
 
   before(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'route-priv-groups-'));
     state = {
       agents: new Map(),
       ledger: new MemoryLedger(),
@@ -255,6 +269,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       spend: new SpendTracker(),
       treasury: createTreasury(),
       approvals: new ApprovalStore(),
+      groups: await GroupStore.open(join(tmpDir, 'groups')),
       idleMs: 0,
       idleTimers: new Map(),
       secretValues: new Set<string>(),
@@ -270,6 +285,9 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
   after(async () => {
     cp.closeAllConnections?.();
     await new Promise<void>((r) => cp.close(() => r()));
+    if (tmpDir) {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('covers every route of the census', () => {

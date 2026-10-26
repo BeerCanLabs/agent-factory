@@ -31,6 +31,7 @@ import {
   type SkillChecker,
   type SkillPackageStore,
   type SkillSource,
+  type GroupStore,
 } from '@beercanlabs/factory-registrar';
 import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
 import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
@@ -55,6 +56,7 @@ import { handleRunProgress } from './progress-routes.js';
 import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercanlabs/factory-inspector';
 import { handleSchedules, requesterOfRun } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
+import { handleGroupRoutes } from './group-routes.js';
 import { handleChannelApprovals } from './channel-approvals.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
@@ -144,6 +146,8 @@ export type FactoryState = {
   schedules?: ScheduleStore;
   /** GAP-088: which person a Discord user is, set by an admin. Absent: nobody is linked. */
   identityLinks?: IdentityLinkStore;
+  /** User groups and group membership store (H6, A10, A17, GAP-203). */
+  groups?: GroupStore;
   /** Systems as factory data (§6.3.1 E10): approved external system definitions. */
   systems?: SystemsStore;
   /** URL agents use to reach the control plane (result reporting, input fetch). */
@@ -1205,6 +1209,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (await handleRunProgress(state, req, res, path)) return;
   if (path.startsWith('/api/v1/schedules') && (await handleSchedules(state, req, res, path))) return;
   if (path.startsWith('/api/v1/identity-links') && (await handleIdentityLinks(state, req, res, path))) return;
+  if (path.startsWith('/api/v1/groups') && (await handleGroupRoutes(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/systems') || path === '/api/v1/gatekeeper-egress/routes') && (await handleSystems(state, req, res, path))) return;
   if (path.startsWith('/api/v1/spend/') && (await handleSpend(state, req, res, path))) return;
 

@@ -11,3 +11,4 @@ export * from './skills.js';
 export * from './source.js';
 export * from './systems.js';
 export * from './package-store.js';
+export * from './group-store.js';
