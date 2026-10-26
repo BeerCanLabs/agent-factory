@@ -285,7 +285,7 @@ export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummar
   };
 }
 
-export type AdoptRefusal = 'not_found' | 'skill_private' | 'skill_retired' | 'skill_not_approved' | 'package_adoption_unsupported';
+export type AdoptRefusal = 'not_found' | 'skill_private' | 'skill_retired' | 'skill_not_approved';
 export type AdoptCheck = { ok: true; record: SkillVersionRecord } | { ok: false; error: AdoptRefusal; message: string };
 
 /**
@@ -301,9 +301,6 @@ export function canAdopt(registry: SkillRegistry, agentId: string, id: string, v
   }
   if (rec.retired) return { ok: false, error: 'skill_retired', message: `skill ${id} is retired (SK6)` };
   if (rec.status !== 'approved') return { ok: false, error: 'skill_not_approved', message: `skill ${id}@${version} is ${rec.status}; only an approved version can be adopted (SK1)` };
-  if (rec.packageHash) {
-    return { ok: false, error: 'package_adoption_unsupported', message: `skill ${id}@${version} is a packaged skill; packaged skill image building and adoption will be delivered in Sub-slice 2d (A14)` };
-  }
   return { ok: true, record: rec };
 }
 

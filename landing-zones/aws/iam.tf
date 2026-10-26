@@ -163,6 +163,19 @@ resource "aws_iam_role_policy" "control_plane" {
         Resource = "${aws_s3_bucket.config.arn}/*"
       },
       {
+        # §6.14 SK1, A21: content-addressed package store for uploaded skill packages.
+        Sid      = "SkillPackagesStoreList"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.skill_packages.arn
+      },
+      {
+        Sid      = "SkillPackagesStoreReadWrite"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Resource = "${aws_s3_bucket.skill_packages.arn}/*"
+      },
+      {
         Effect   = "Allow"
         Action   = ["elasticfilesystem:ClientMount", "elasticfilesystem:ClientWrite"]
         Resource = [aws_efs_file_system.ledger.arn, aws_efs_access_point.ledger.arn]

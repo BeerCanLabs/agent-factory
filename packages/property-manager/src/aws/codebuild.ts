@@ -41,7 +41,17 @@ export const MAX_SKILLS_ENV_CHARS = 3500;
  * body, a requirement or a credential.
  */
 export function skillsEnv(skills: readonly BuildSkill[]): string {
-  return JSON.stringify([...skills].sort((a, b) => a.id.localeCompare(b.id)).map(({ id, version, repo, path, commit }) => ({ id, version, repo, path, commit })));
+  return JSON.stringify(
+    [...skills]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((s) => ({
+        id: s.id,
+        version: s.version,
+        ...(s.packageHash
+          ? { packageHash: s.packageHash }
+          : { repo: s.repo, path: s.path, commit: s.commit }),
+      })),
+  );
 }
 
 /**
@@ -105,7 +115,7 @@ export async function buildSkillsImage(
   agentId: string,
   base: { image: string; commit: string },
   skills: readonly BuildSkill[],
-  opts: { client?: Pick<CodeBuildClient, 'send'>; pollMs?: number; projectName?: string } = {},
+  opts: { client?: Pick<CodeBuildClient, 'send'>; pollMs?: number; projectName?: string; packageStoreUri?: string } = {},
 ): Promise<string> {
   const ecrRepoUri = process.env.FACTORY_ECR_REPO_URI;
   if (!ecrRepoUri) throw new Error('FACTORY_ECR_REPO_URI environment variable is required');
@@ -116,7 +126,15 @@ export async function buildSkillsImage(
   }
   const client = opts.client ?? new CodeBuildClient({ region: process.env.AWS_REGION || 'us-east-1' });
   const tag = imageTagFor(agentId, base.commit, skills);
-  const env = { AGENT_ID: agentId, BASE_IMAGE: base.image, RUNTIME_COMMIT: base.commit, IMAGE_TAG: tag, SKILLS: skillsValue };
+  const packageStoreUri = opts.packageStoreUri ?? process.env.FACTORY_SKILL_PACKAGES_URI;
+  const env: Record<string, string> = {
+    AGENT_ID: agentId,
+    BASE_IMAGE: base.image,
+    RUNTIME_COMMIT: base.commit,
+    IMAGE_TAG: tag,
+    SKILLS: skillsValue,
+    ...(packageStoreUri ? { PACKAGE_STORE_URI: packageStoreUri } : {}),
+  };
   await runBuild(client, opts.projectName ?? process.env.FACTORY_SKILLS_BUILDER_PROJECT ?? 'factory-skills-builder', env, opts.pollMs);
   return `${ecrRepoUri}:${tag}`;
 }

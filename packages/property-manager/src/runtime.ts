@@ -112,8 +112,15 @@ export function noopRuntime(): Runtime & { started: NoopStart[] } {
 /** A pinned agent source: a git repository at one exact commit (L3/L4). Never a branch or "latest". */
 export type SourceRef = { repo: string; commit: string };
 
-/** A skill to build into an agent's image (SK4): an approved version at its pinned commit. */
-export type BuildSkill = { id: string; version: string; repo: string; path: string; commit: string };
+/** A skill to build into an agent's image (SK4): an approved version at its pinned commit or package hash (A14). */
+export type BuildSkill = {
+  id: string;
+  version: string;
+  repo?: string;
+  path?: string;
+  commit?: string;
+  packageHash?: string;
+};
 
 /** Where the image holds the adopted skills and the manifest that lists them (SK4); named in the agent's launch environment. */
 export const SKILLS_DIR = '/opt/factory/skills';
@@ -121,8 +128,15 @@ export const SKILLS_MANIFEST_PATH = '/opt/factory/skills.json';
 export const SKILLS_MANIFEST_ENV = 'FACTORY_SKILLS_MANIFEST';
 
 /** Hash of the skill pins an image contains: order-independent, and not of the configuration (a policy change rebuilds nothing). */
-export function skillsHash(skills: ReadonlyArray<Pick<BuildSkill, 'id' | 'version' | 'commit'>>): string {
-  const pins = skills.map((s) => ({ id: s.id, version: s.version, commit: s.commit })).sort((a, b) => a.id.localeCompare(b.id));
+export function skillsHash(skills: ReadonlyArray<Pick<BuildSkill, 'id' | 'version'> & Partial<Pick<BuildSkill, 'commit' | 'packageHash'>>>): string {
+  const pins = skills
+    .map((s) => ({
+      id: s.id,
+      version: s.version,
+      ...(s.packageHash ? { packageHash: s.packageHash } : {}),
+      ...(s.commit !== undefined && !s.packageHash ? { commit: s.commit } : {}),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
   return createHash('sha256').update(canonicalJson(pins)).digest('hex');
 }
 
@@ -131,7 +145,11 @@ export function skillsHash(skills: ReadonlyArray<Pick<BuildSkill, 'id' | 'versio
  * before skills existed, and `<agentId>-<commit[:12]>-<skillsHash[:12]>` for one that has them (SK4), so the same source
  * with different skills is a different image and a policy or owner change is not.
  */
-export function imageTagFor(agentId: string, commit: string, skills: ReadonlyArray<Pick<BuildSkill, 'id' | 'version' | 'commit'>> = []): string {
+export function imageTagFor(
+  agentId: string,
+  commit: string,
+  skills: ReadonlyArray<Pick<BuildSkill, 'id' | 'version'> & Partial<Pick<BuildSkill, 'commit' | 'packageHash'>>> = [],
+): string {
   const base = `${agentId}-${commit.slice(0, 12)}`;
   return skills.length ? `${base}-${skillsHash(skills).slice(0, 12)}` : base;
 }

@@ -48,6 +48,12 @@ resource "aws_iam_role_policy" "codebuild_policy" {
           "logs:PutLogEvents"
         ]
         Resource = "*"
+      },
+      {
+        Sid      = "SkillPackagesRead"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "${aws_s3_bucket.skill_packages.arn}/*"
       }
       ], var.agent_source_token_secret_arn == "" ? [] : [
       {
@@ -97,6 +103,10 @@ resource "aws_codebuild_project" "factory_agent_builder" {
     environment_variable {
       name  = "SOURCE_TOKEN_HOSTS"
       value = join(" ", var.agent_source_token_hosts)
+    }
+    environment_variable {
+      name  = "PACKAGE_STORE_URI"
+      value = "s3://${aws_s3_bucket.skill_packages.bucket}/packages"
     }
   }
 
@@ -238,6 +248,10 @@ resource "aws_codebuild_project" "factory_skills_builder" {
       name  = "SOURCE_TOKEN_HOSTS"
       value = join(" ", var.agent_source_token_hosts)
     }
+    environment_variable {
+      name  = "PACKAGE_STORE_URI"
+      value = "s3://${aws_s3_bucket.skill_packages.bucket}/packages"
+    }
   }
 
   source {
@@ -318,6 +332,12 @@ resource "aws_iam_role_policy" "codebuild_skill_checker" {
           "logs:PutLogEvents"
         ]
         Resource = "*"
+      },
+      {
+        Sid      = "SkillPackagesRead"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "${aws_s3_bucket.skill_packages.arn}/*"
       }
       ], var.agent_source_token_secret_arn == "" ? [] : [
       {
@@ -361,6 +381,10 @@ resource "aws_codebuild_project" "factory_skill_checker" {
     environment_variable {
       name  = "SOURCE_TOKEN_HOSTS"
       value = join(" ", var.agent_source_token_hosts)
+    }
+    environment_variable {
+      name  = "PACKAGE_STORE_URI"
+      value = "s3://${aws_s3_bucket.skill_packages.bucket}/packages"
     }
   }
 
@@ -874,7 +898,33 @@ phases:
       - echo "Skill check for $SKILL_ID@$SKILL_VERSION at $REPO_URL@$GIT_COMMIT ($SKILL_PATH)"
       - |
         SKILL_CHECK_RESULT='{"passed":false,"failures":["checks: the check did not run"]}'
-        if ! [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || [[ "$SKILL_PATH" == /* || "$SKILL_PATH" == *..* ]]; then
+        if [ -n "$PACKAGE_HASH" ]; then
+          if ! [[ "$PACKAGE_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+            SKILL_CHECK_RESULT='{"passed":false,"failures":["source: package hash must be 64 hex characters"]}'
+          else
+            mkdir -p "skill-repo/$SKILL_PATH"
+            PKG_FILE="/tmp/$PACKAGE_HASH.tar.gz"
+            if [ -n "$PACKAGE_STORE_URI" ] && [[ "$PACKAGE_STORE_URI" =~ ^s3:// ]]; then
+              aws s3 cp "$${PACKAGE_STORE_URI%/}/packages/$PACKAGE_HASH.tar.gz" "$PKG_FILE" || \
+              aws s3 cp "$${PACKAGE_STORE_URI%/}/$PACKAGE_HASH.tar.gz" "$PKG_FILE" || true
+            elif [ -n "$PACKAGE_STORE_DIR" ] && [ -f "$PACKAGE_STORE_DIR/packages/$PACKAGE_HASH.tar.gz" ]; then
+              cp "$PACKAGE_STORE_DIR/packages/$PACKAGE_HASH.tar.gz" "$PKG_FILE"
+            elif [ -n "$PACKAGE_STORE_DIR" ] && [ -f "$PACKAGE_STORE_DIR/$PACKAGE_HASH.tar.gz" ]; then
+              cp "$PACKAGE_STORE_DIR/$PACKAGE_HASH.tar.gz" "$PKG_FILE"
+            fi
+            if [ -f "$PKG_FILE" ] && [ "$$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$PKG_FILE")" = "$PACKAGE_HASH" ]; then
+              if ! tar -xzf "$PKG_FILE" -C "skill-repo/$SKILL_PATH"; then
+                SKILL_CHECK_RESULT='{"passed":false,"failures":["package: extraction failed (corrupt or invalid tar.gz)"]}'
+              elif ! python3 /tmp/skill_check.py --dir "skill-repo/$SKILL_PATH" --venv /tmp/skill-check-venv --out /tmp/skill-check.json; then
+                SKILL_CHECK_RESULT='{"passed":false,"failures":["check: skill check execution failed"]}'
+              elif [ -s /tmp/skill-check.json ]; then
+                SKILL_CHECK_RESULT="$(cat /tmp/skill-check.json)"
+              fi
+            else
+              SKILL_CHECK_RESULT='{"passed":false,"failures":["source: could not fetch package '$PACKAGE_HASH' from package store"]}'
+            fi
+          fi
+        elif ! [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || [[ "$SKILL_PATH" == /* || "$SKILL_PATH" == *..* ]]; then
           SKILL_CHECK_RESULT='{"passed":false,"failures":["source: the pin must be a full commit and a folder inside the repository"]}'
         else
           AUTH=()

@@ -3,6 +3,7 @@
 // has no test-only switch: what is tested is what CodeBuild runs.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -200,6 +201,79 @@ describe('composing adopted skills into a build context (SK4)', () => {
 
     assert.equal(compose(tavily, { ...env, SOURCE_TOKEN_HOSTS: `github.com ${HOST}` }).status, 0);
     assert.match(readFileSync(calls, 'utf8'), /get-secret-value --secret-id arn:aws:secretsmanager/, 'read for an allowed host');
+  });
+
+  it('composes a packaged skill from package store by packageHash (A4, A14)', () => {
+    const pkgDir = mkdtempSync(join(root, 'pkg-store-'));
+    const makePkg = (id: string, version: string, files: Record<string, string> = {}) => {
+      const srcDir = mkdtempSync(join(root, 'pkg-src-'));
+      writeFileSync(join(srcDir, 'skill.yaml'), `spec: 1\nid: ${id}\nversion: ${version}\nname: ${id}\nlanguage: python\nentry: ${id.replace(/-/g, '_')}\n`);
+      for (const [p, content] of Object.entries(files)) {
+        const full = join(srcDir, p);
+        mkdirSync(dirname(full), { recursive: true });
+        writeFileSync(full, content);
+      }
+      const tarPath = join(root, `pkg-${randomUUID()}.tar.gz`);
+      execFileSync('tar', ['-czf', tarPath, '-C', srcDir, '.']);
+      const buf = readFileSync(tarPath);
+      rmSync(tarPath, { force: true });
+      rmSync(srcDir, { recursive: true, force: true });
+      const hash = createHash('sha256').update(buf).digest('hex');
+      mkdirSync(join(pkgDir, 'packages'), { recursive: true });
+      writeFileSync(join(pkgDir, 'packages', `${hash}.tar.gz`), buf);
+      return { hash, buf };
+    };
+
+    const pkg = makePkg('packaged-skill', '1.0.0', {
+      'packaged_skill/__init__.py': 'def tools(): return []\n',
+    });
+
+    const r = compose([{ id: 'packaged-skill', version: '1.0.0', packageHash: pkg.hash }], {
+      PACKAGE_STORE_DIR: pkgDir,
+    });
+    assert.equal(r.status, 0, r.out);
+    assert.ok(existsSync(join(r.dir, 'skills', 'packaged-skill', 'packaged_skill', '__init__.py')));
+    assert.deepEqual(JSON.parse(readFileSync(join(r.dir, 'skills.json'), 'utf8')), {
+      skills: [
+        { id: 'packaged-skill', version: '1.0.0', language: 'python', entry: 'packaged_skill', path: '/opt/factory/skills/packaged-skill' },
+      ],
+    });
+  });
+
+  it('refuses a packaged skill with mismatched hash or missing from store (exit 5)', () => {
+    const badHash = 'b'.repeat(64);
+    const r1 = compose([{ id: 'missing-pkg', version: '1.0.0', packageHash: badHash }]);
+    assert.equal(r1.status, 5);
+
+    const storeDir = mkdtempSync(join(root, 'pkg-mismatch-'));
+    mkdirSync(join(storeDir, 'packages'), { recursive: true });
+    writeFileSync(join(storeDir, 'packages', `${badHash}.tar.gz`), Buffer.from('corrupted bytes'));
+    const r2 = compose([{ id: 'bad-pkg', version: '1.0.0', packageHash: badHash }], {
+      PACKAGE_STORE_DIR: storeDir,
+    });
+    assert.equal(r2.status, 5);
+  });
+
+  it('refuses a packaged skill with a hard-coded credential (exit 6)', () => {
+    const pkgDir = mkdtempSync(join(root, 'pkg-secret-'));
+    const srcDir = mkdtempSync(join(root, 'src-secret-'));
+    writeFileSync(join(srcDir, 'skill.yaml'), `spec: 1\nid: secret-pkg\nversion: 1.0.0\nname: secret-pkg\nlanguage: python\nentry: secret_pkg\n`);
+    mkdirSync(join(srcDir, 'secret_pkg'), { recursive: true });
+    writeFileSync(join(srcDir, 'secret_pkg', '__init__.py'), 'API_TOKEN = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"\n'); // secret-scan:allow
+    const tarPath = join(root, `pkg-${randomUUID()}.tar.gz`);
+    execFileSync('tar', ['-czf', tarPath, '-C', srcDir, '.']);
+    const buf = readFileSync(tarPath);
+    rmSync(tarPath, { force: true });
+    rmSync(srcDir, { recursive: true, force: true });
+    const hash = createHash('sha256').update(buf).digest('hex');
+    mkdirSync(join(pkgDir, 'packages'), { recursive: true });
+    writeFileSync(join(pkgDir, 'packages', `${hash}.tar.gz`), buf);
+
+    const r = compose([{ id: 'secret-pkg', version: '1.0.0', packageHash: hash }], {
+      PACKAGE_STORE_DIR: pkgDir,
+    });
+    assert.equal(r.status, 6, r.out);
+    assert.match(r.out, /ADMISSION REFUSED \(hardcoded_secret\) in skill secret-pkg/);
   });
 });
 

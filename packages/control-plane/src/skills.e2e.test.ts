@@ -16,7 +16,13 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
+import { VersionedConfigStore, type ConfigBackend, type ConfigRecord } from '@beercanlabs/factory-registrar';
 import { approvedSkill, loadSkills, recordSkillChecks, setSkillUsage, skillPackageStore, skillRegistry } from './skills.js';
+
+const memoryBackend = (): ConfigBackend => {
+  const records: ConfigRecord[] = [];
+  return { description: 'memory', loadAll: async () => records, write: async (r) => { records.push(r); }, remove: async () => {} };
+};
 
 const ADMIN = 'admin-skills-token';
 const OPERATOR = 'operator-skills-token';
@@ -42,7 +48,7 @@ async function call(port: number, path: string, method = 'GET', token?: string, 
     body: body === undefined ? undefined : isBuffer ? body : JSON.stringify(body),
   });
   const text = await res.text();
-  return { status: res.status, body: text ? JSON.parse(text) : null };
+  return { status: res.status, headers: res.headers, body: text ? JSON.parse(text) : null };
 }
 
 function manifest(version: string, requires: Record<string, unknown> = { routes: ['discord'], credentials: [{ name: 'DISCORD_BOT_TOKEN', source: 'discord' }] }) {
@@ -95,6 +101,9 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
       runTokens: { issue: async () => '', verify: async () => undefined } as unknown as FactoryState['runTokens'],
       secretValues: new Set(),
     } as FactoryState;
+    state.configs = await VersionedConfigStore.open(memoryBackend());
+    await state.configs.put({ agentId: 'operator-agent', source: {}, skills: [], policy: null, owners: ['token:operator'] }, { updatedBy: 'test', reason: 'owners' });
+    await state.configs.put({ agentId: 'other-agent', source: {}, skills: [], policy: null, owners: ['token:other-owner'] }, { updatedBy: 'test', reason: 'owners' });
     loadSkills(state, join(dataDir, 'skills'));
     cp = createFactoryServer(state);
     port = await listen(cp);
@@ -403,6 +412,9 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
       runTokens: { issue: async () => '', verify: async () => undefined } as unknown as FactoryState['runTokens'],
       secretValues: new Set(),
     } as FactoryState;
+    state.configs = await VersionedConfigStore.open(memoryBackend());
+    await state.configs.put({ agentId: 'operator-agent', source: {}, skills: [], policy: null, owners: ['token:operator'] }, { updatedBy: 'test', reason: 'owners' });
+    await state.configs.put({ agentId: 'other-agent', source: {}, skills: [], policy: null, owners: ['token:other-owner'] }, { updatedBy: 'test', reason: 'owners' });
     loadSkills(state, join(dataDir, 'skills'));
     cp = createFactoryServer(state);
     port = await listen(cp);
@@ -475,11 +487,66 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
     assert.equal(res.body.registeredBy, 'token:operator');
   });
 
-  it('refuses upload exceeding 5 MiB route cap (413 payload too large, A5)', async () => {
+  it('refuses upload exceeding 5 MiB route cap (413 payload too large, Connection: close, A5)', async () => {
     const oversized = Buffer.alloc(5 * 1024 * 1024 + 1024, 0);
     const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, oversized);
     assert.equal(res.status, 413);
+    assert.equal(res.headers.get('connection'), 'close');
     assert.equal(res.body.error, 'payload_too_large');
+  });
+
+  it('refuses streaming upload exceeding 5 MiB without Content-Length (413 and connection close, capped drain, A5)', async () => {
+    const res = await new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: any }>((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/v1/registry/skills',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/gzip',
+            authorization: `Bearer ${ADMIN}`,
+          },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (c) => { data += c; });
+          res.on('end', () => {
+            resolve({
+              status: res.statusCode ?? 0,
+              headers: res.headers,
+              body: data ? JSON.parse(data) : null,
+            });
+          });
+        },
+      );
+      req.on('error', () => {
+        // Socket may be reset/closed by server on 413
+      });
+      const chunk = Buffer.alloc(64 * 1024, 0);
+      let chunksWritten = 0;
+      const totalChunks = Math.ceil((5 * 1024 * 1024 + 256 * 1024) / chunk.length);
+      function writeMore() {
+        while (chunksWritten < totalChunks) {
+          chunksWritten++;
+          try {
+            const canContinue = req.write(chunk);
+            if (!canContinue) {
+              req.once('drain', writeMore);
+              return;
+            }
+          } catch {
+            return;
+          }
+        }
+        try { req.end(); } catch {}
+      }
+      writeMore();
+    });
+
+    assert.equal(res.status, 413);
+    assert.equal(res.headers['connection'], 'close');
+    assert.equal(res.body?.error, 'payload_too_large');
   });
 
   it('refuses corrupted or invalid package (422 unprocessable entity, ledgered, A5, A19)', async () => {
@@ -515,53 +582,55 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
   });
 
   it('refuses package upload if configured checker does not support packages (501 not implemented, Finding 1)', async () => {
-    // 1. Env-resolved codebuild checker (production AWS)
-    const prevProvider = process.env.FACTORY_DEPLOY_PROVIDER;
-    const prevChecker = process.env.FACTORY_SKILL_CHECKER;
-    process.env.FACTORY_DEPLOY_PROVIDER = 'aws';
-    delete process.env.FACTORY_SKILL_CHECKER;
-
-    const awsState = { ...state, agents: new Map(state.agents) } as FactoryState;
-    loadSkills(awsState, join(dataDir, 'skills-aws'));
-    const awsServer = createFactoryServer(awsState);
-    const awsPort = await listen(awsServer);
+    // 1. Checker with supportsPackages: false
+    const unsupportedState = {
+      ...state,
+      agents: new Map(state.agents),
+      skillChecker: {
+        name: 'legacy-checker',
+        supportsPackages: false,
+        check: async () => ({ status: 'passed' as const, summary: 'ok' }),
+      },
+    } as FactoryState;
+    loadSkills(unsupportedState, join(dataDir, 'skills-unsupported'));
+    const unsuppServer = createFactoryServer(unsupportedState);
+    const unsuppPort = await listen(unsuppServer);
     try {
-      const pkg = makeValidPackage('aws-checker-skill', '1.0.0');
-      const res = await call(awsPort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+      const pkg = makeValidPackage('unsupp-checker-skill', '1.0.0');
+      const res = await call(unsuppPort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
       assert.equal(res.status, 501);
       assert.equal(res.body.error, 'package_checks_unsupported');
-      assert.ok(res.body.message.includes('codebuild'));
+      assert.ok(res.body.message.includes('legacy-checker'));
     } finally {
-      awsServer.close();
-      if (prevProvider !== undefined) process.env.FACTORY_DEPLOY_PROVIDER = prevProvider;
-      else delete process.env.FACTORY_DEPLOY_PROVIDER;
-      if (prevChecker !== undefined) process.env.FACTORY_SKILL_CHECKER = prevChecker;
-      else delete process.env.FACTORY_SKILL_CHECKER;
+      unsuppServer.close();
     }
 
-    // 2. Env-resolved cloudbuild checker (production GCP)
-    process.env.FACTORY_DEPLOY_PROVIDER = 'gcp';
-    delete process.env.FACTORY_SKILL_CHECKER;
+    // 2. AWS CodeBuild checker supports packages in Sub-slice 2d; GCP CloudBuild remains false (honest 501) until GCP landing zone slice (Finding G1)
+    const { codeBuildSkillChecker } = await import('./aws/skill-checker.js');
+    const { cloudBuildSkillChecker } = await import('./gcp/skill-checker.js');
+    assert.equal(codeBuildSkillChecker().supportsPackages, true);
+    assert.equal(cloudBuildSkillChecker().supportsPackages, false);
 
-    const gcpState = { ...state, agents: new Map(state.agents) } as FactoryState;
-    loadSkills(gcpState, join(dataDir, 'skills-gcp'));
+    const gcpState = {
+      ...state,
+      agents: new Map(state.agents),
+      skillChecker: cloudBuildSkillChecker(),
+    } as FactoryState;
+    loadSkills(gcpState, join(dataDir, 'skills-gcp-unsupp'));
     const gcpServer = createFactoryServer(gcpState);
     const gcpPort = await listen(gcpServer);
     try {
-      const pkg = makeValidPackage('gcp-checker-skill', '1.0.0');
+      const pkg = makeValidPackage('gcp-unsupp-skill', '1.0.0');
       const res = await call(gcpPort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
       assert.equal(res.status, 501);
       assert.equal(res.body.error, 'package_checks_unsupported');
       assert.ok(res.body.message.includes('cloudbuild'));
     } finally {
       gcpServer.close();
-      if (prevProvider !== undefined) process.env.FACTORY_DEPLOY_PROVIDER = prevProvider;
-      else delete process.env.FACTORY_DEPLOY_PROVIDER;
-      if (prevChecker !== undefined) process.env.FACTORY_SKILL_CHECKER = prevChecker;
-      else delete process.env.FACTORY_SKILL_CHECKER;
     }
 
     // 3. No checker configured at all (FACTORY_SKILL_CHECKER=none or undefined)
+    const prevChecker = process.env.FACTORY_SKILL_CHECKER;
     process.env.FACTORY_SKILL_CHECKER = 'none';
 
     const noneState = { ...state, agents: new Map(state.agents) } as FactoryState;
@@ -629,7 +698,7 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
     assert.equal(versions[0].registeredBy, winner.body.registeredBy);
   });
 
-  it('refuses adoption of packaged skills (501 package_adoption_unsupported, Sub-slice 2d, A14)', async () => {
+  it('allows adoption of approved packaged skills (Sub-slice 2d, A14)', async () => {
     // Approve math-tools 1.0.0
     const reg = skillRegistry(state);
     const rec = reg.get('math-tools', '1.0.0');
@@ -641,9 +710,19 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
       skillId: 'math-tools',
       version: '1.0.0',
     });
-    assert.equal(res.status, 501);
-    assert.equal(res.body.error, 'package_adoption_unsupported');
-    assert.ok(res.body.message.includes('Sub-slice 2d'));
+    assert.equal(res.status, 201);
+    assert.equal(res.body.state, 'requested');
+    assert.equal(res.body.skillId, 'math-tools');
+    assert.equal(res.body.version, '1.0.0');
+
+    // Admin approves the adoption request
+    const appRes = await call(port, '/api/v1/agents/operator-agent/skills/math-tools/adoption/approve', 'POST', ADMIN, {});
+    assert.equal(appRes.status, 200);
+
+    // Verify GET /api/v1/agents/operator-agent/skills lists the adopted package skill
+    const getRes = await call(port, '/api/v1/agents/operator-agent/skills', 'GET', ADMIN);
+    assert.equal(getRes.status, 200);
+    assert.ok(getRes.body.adopted.some((s: any) => s.id === 'math-tools' && s.version === '1.0.0'));
   });
 
   it('enforces A15 owner rule: new version of existing skill must come from owner or admin (Finding 1)', async () => {

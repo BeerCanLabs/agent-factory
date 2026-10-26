@@ -23,6 +23,7 @@ import {
   type SkillCheckOutcome,
 } from '@beercanlabs/factory-registrar';
 import { codeBuildSkillChecker, skillCheckOutcome } from './aws/skill-checker.js';
+import { cloudBuildSkillChecker } from './gcp/skill-checker.js';
 import { skillCheckerFromEnv } from './skills.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -453,6 +454,37 @@ describe('SK1 the CodeBuild skill checker and its project', () => {
     assert.match(run, /export SKILL_CHECK_RESULT/);
   });
 
+  it('codeBuildSkillChecker injects PACKAGE_HASH and PACKAGE_STORE_URI for packaged skills', async () => {
+    process.env.FACTORY_SKILL_PACKAGES_URI = 's3://factory-skill-packages-bucket/packages';
+    try {
+      const sent: Array<{ name: string; input: Record<string, unknown> }> = [];
+      const client = {
+        async send(cmd: { constructor: { name: string }; input: Record<string, unknown> }) {
+          sent.push({ name: cmd.constructor.name, input: cmd.input });
+          return { build: { id: 'factory-skill-checker:pkg-1' } };
+        },
+      };
+      const checker = codeBuildSkillChecker({ client: client as never, pollMs: 1 });
+      const pkgHash = 'e'.repeat(64);
+      await checker.start({
+        id: 'pkg-skill',
+        version: '1.0.0',
+        repo: 'https://factory.internal/packages',
+        path: '.',
+        commit: '0'.repeat(40),
+        manifest: MANIFEST,
+        packageHash: pkgHash,
+      });
+      const env = Object.fromEntries(
+        (sent[0].input.environmentVariablesOverride as Array<{ name: string; value: string }>).map((e) => [e.name, e.value]),
+      );
+      assert.equal(env.PACKAGE_HASH, pkgHash);
+      assert.equal(env.PACKAGE_STORE_URI, 's3://factory-skill-packages-bucket/packages');
+    } finally {
+      delete process.env.FACTORY_SKILL_PACKAGES_URI;
+    }
+  });
+
   it('SKILL_CHECK_SCRIPT embeds unchanged in a template literal and in Terraform', () => {
     assert.doesNotMatch(SKILL_CHECK_SCRIPT, /`|\$\{|%\{/);
     assert.ok(SKILL_CHECK_SCRIPT.startsWith('"""Factory checks'));
@@ -466,3 +498,44 @@ describe('SK1 the CodeBuild skill checker and its project', () => {
     assert.equal(await skillCheckerFromEnv({ FACTORY_RUNTIME: 'ecs', FACTORY_SKILL_CHECKER: 'none' }), undefined);
   });
 });
+
+describe('SK1 the GCP Cloud Build skill checker', () => {
+  it('cloudBuildSkillChecker injects PACKAGE_HASH and PACKAGE_STORE_URI for packaged skills', async () => {
+    process.env.FACTORY_SKILL_PACKAGES_URI = 'gs://factory-skill-packages-bucket/packages';
+    try {
+      let createdBuild: Record<string, unknown> | null = null;
+      const api = {
+        async createBuild(_proj: string, build: Record<string, unknown>) {
+          createdBuild = build;
+          return { id: 'gcp-build-1' };
+        },
+        async getBuild(_proj: string, _id: string) {
+          return { status: 'SUCCESS', results: { buildStepOutputs: [Buffer.from('{"passed":true,"failures":[]}').toString('base64')] } };
+        },
+      };
+      const checker = cloudBuildSkillChecker({ api, projectId: 'test-gcp-project', serviceAccount: 'test-sa', pollMs: 1 });
+      const pkgHash = 'f'.repeat(64);
+      const runId = await checker.start({
+        id: 'gcp-pkg-skill',
+        version: '1.0.0',
+        repo: 'https://factory.internal/packages',
+        path: '.',
+        commit: '0'.repeat(40),
+        manifest: MANIFEST,
+        packageHash: pkgHash,
+      });
+      assert.equal(runId, 'gcp-build-1');
+      assert.ok(createdBuild);
+      const steps = (createdBuild as any).steps;
+      assert.equal(steps.length, 1);
+      const envList: string[] = steps[0].env;
+      assert.ok(envList.includes(`PACKAGE_HASH=${pkgHash}`));
+      assert.ok(envList.includes('PACKAGE_STORE_URI=gs://factory-skill-packages-bucket/packages'));
+      const outcome = await checker.result(runId);
+      assert.equal(outcome.passed, true);
+    } finally {
+      delete process.env.FACTORY_SKILL_PACKAGES_URI;
+    }
+  });
+});
+

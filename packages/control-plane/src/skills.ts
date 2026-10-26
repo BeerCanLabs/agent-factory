@@ -49,6 +49,7 @@ import {
   LocalSkillPackageStore,
   SkillRegistry,
   type SkillPackageStore,
+  skillPackageStoreFromUri,
   adopters,
   availableTo,
   canAdopt,
@@ -145,7 +146,8 @@ export function skillPackageStore(state: FactoryState): SkillPackageStore {
   if (state.skillPackages) return state.skillPackages;
   let store = packageStores.get(state);
   if (!store) {
-    store = new LocalSkillPackageStore(defaultSkillPackagesDir());
+    const uri = process.env.FACTORY_SKILL_PACKAGES_URI;
+    store = uri ? skillPackageStoreFromUri(uri) : new LocalSkillPackageStore(defaultSkillPackagesDir());
     packageStores.set(state, store);
   }
   return store;
@@ -231,10 +233,6 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
 
     const manifest = validated.manifest;
 
-    // Content-addressed store is written first; content-addressed blobs are idempotent (A4, A21).
-    const store = skillPackageStore(state);
-    await store.put(validated.sha256, buffer);
-
     // Synchronous section: check design issues, owner rule (A15), and save atomically without await.
     const reasons: string[] = [];
 
@@ -282,6 +280,32 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
       }
       return { ok: true };
     };
+
+    // Pre-check validateExisting on loaded versions before writing blob to package store (A15, A21)
+    const preliminaryCheck = validateExisting(registry.versions(manifest.id));
+    if (!preliminaryCheck.ok) {
+      const refusalReasons = [preliminaryCheck.reason!];
+      state.ledger.append({
+        timestamp: now,
+        agentId: ledgerKey(manifest.id, manifest.version),
+        type: 'action',
+        action: 'SKILL_REFUSED',
+        actor: principal.actor,
+        payloadSha256: payloadHash(refusalReasons),
+      });
+      json(res, 422, {
+        error: 'skill_refused',
+        id: manifest.id,
+        version: manifest.version,
+        message: `skill ${manifest.id}@${manifest.version} was not registered`,
+        reasons: refusalReasons,
+      });
+      return;
+    }
+
+    // Content-addressed store is written after synchronous design and metadata validation (A4, A21).
+    const store = skillPackageStore(state);
+    await store.put(validated.sha256, buffer);
 
     const rec: SkillVersionRecord = {
       id: manifest.id,
@@ -834,10 +858,10 @@ function accessAddedFor(state: FactoryState, agentId: string, rec: SkillVersionR
   const policy = state.policies.has(agentId) ? state.policies.get(agentId) : undefined;
   const r = rec.manifest.requires;
   return {
-    routes: r.routes.filter((x) => !policy?.routes.includes(x)),
-    models: r.models.filter((x) => !policy?.models?.includes(x)),
-    credentials: r.credentials.map((c) => c.name),
-    connections: r.connections.map((c) => c.provider),
+    routes: (r?.routes ?? []).filter((x) => !policy?.routes.includes(x)),
+    models: (r?.models ?? []).filter((x) => !policy?.models?.includes(x)),
+    credentials: (r?.credentials ?? []).map((c) => c.name),
+    connections: (r?.connections ?? []).map((c) => c.provider),
   };
 }
 
@@ -845,19 +869,10 @@ function accessAddedFor(state: FactoryState, agentId: string, rec: SkillVersionR
 const retiring = new WeakMap<FactoryState, Set<string>>();
 const isRetiring = (state: FactoryState, id: string): boolean => retiring.get(state)?.has(id) === true;
 
-/** `canAdopt`, and also refuses a skill that is being retired (SK6) or packaged skill (Sub-slice 2d). */
+/** `canAdopt`, and also refuses a skill that is being retired (SK6). */
 function adoptCheck(state: FactoryState, agentId: string, id: string, version: string): ReturnType<typeof canAdopt> {
   if (isRetiring(state, id)) return { ok: false, error: 'skill_retired', message: `skill ${id} is being retired (SK6)` };
-  const check = canAdopt(skillRegistry(state), agentId, id, version);
-  if (!check.ok) return check;
-  if (check.record.packageHash) {
-    return {
-      ok: false,
-      error: 'package_adoption_unsupported',
-      message: `skill ${id}@${version} is a packaged skill; packaged skill image building and adoption will be delivered in Sub-slice 2d (A14)`,
-    };
-  }
-  return check;
+  return canAdopt(skillRegistry(state), agentId, id, version);
 }
 
 const REFUSAL_STATUS = {
@@ -865,7 +880,6 @@ const REFUSAL_STATUS = {
   skill_private: 403,
   skill_retired: 409,
   skill_not_approved: 409,
-  package_adoption_unsupported: 501,
 } as const;
 
 /**
@@ -906,7 +920,6 @@ async function autoAdoptPrivate(state: FactoryState, rec: SkillVersionRecord, pr
   const owner = ownerOf(rec);
   if (visibilityOf(rec) !== 'private' || !owner) return undefined;
   if (isRetiring(state, rec.id) || rec.retired) return { adopted: [] };
-  if (rec.packageHash) return { adopted: [], failed: 'package_adoption_unsupported' };
   const adoptions = adoptionStore(state);
   if (adoptions.blocksAutoAdopt(owner, rec.id)) return { adopted: [] };
   if (!state.agents.has(owner)) {

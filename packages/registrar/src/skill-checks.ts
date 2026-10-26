@@ -91,6 +91,7 @@ export function skillCheckEnv(req: SkillCheckRequest): Record<string, string> {
     GIT_COMMIT: req.commit,
     SKILL_PATH: req.path,
     SKILL_MANIFEST_B64: manifestB64(req.manifest),
+    ...(req.packageHash ? { PACKAGE_HASH: req.packageHash } : {}),
   };
 }
 
