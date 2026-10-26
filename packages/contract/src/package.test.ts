@@ -1,9 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   validateSkillPackage,
   extractSkillPackage,
+  packSkillPackage,
   MAX_PACKAGE_SIZE,
   MAX_EXPANDED_SIZE,
   MAX_FILE_SIZE,
@@ -899,6 +904,52 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
           assert.ok(res.issues.some((i) => i.includes("entry type '2' not permitted")));
         }
         assert.equal(existsSync(join(outDir, 'symlink_escape')), false);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('packSkillPackage (A1, A6, A19)', () => {
+    it('packs examples/skills/e2e-ping successfully and validates', async () => {
+      const { fileURLToPath } = await import('node:url');
+      const fixtureDir = fileURLToPath(new URL('../../../examples/skills/e2e-ping', import.meta.url));
+      const res = await packSkillPackage(fixtureDir);
+      assert.equal(res.ok, true);
+      if (res.ok) {
+        assert.equal(res.manifest.id, 'e2e-ping');
+        assert.equal(res.manifest.version, '1.0.0');
+        assert.ok(res.sha256.length === 64);
+        assert.ok(res.files.includes('skill.yaml'));
+        assert.ok(res.files.includes('e2e_ping.py'));
+      }
+    });
+
+    it('refuses when sourceDir does not exist or is not a directory', async () => {
+      const res = await packSkillPackage('/path/that/definitely/does/not/exist/999');
+      assert.equal(res.ok, false);
+      if (!res.ok) {
+        assert.ok(res.issues.some((i) => i.includes('could not read source directory')));
+      }
+    });
+
+    it('reports skipped symlinks with a message (F4)', async () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'pack-symlink-'));
+      try {
+        const { symlinkSync } = await import('node:fs');
+        const fixtureDir = fileURLToPath(new URL('../../../examples/skills/e2e-ping', import.meta.url));
+        const { cpSync } = await import('node:fs');
+        cpSync(fixtureDir, tmp, { recursive: true });
+        symlinkSync(join(tmp, 'e2e_ping.py'), join(tmp, 'link_to_ping.py'));
+
+        const warned: string[] = [];
+        const res = await packSkillPackage(tmp, { onWarning: (w) => warned.push(w) });
+        assert.equal(res.ok, true);
+        if (res.ok) {
+          assert.ok(res.warnings.some((w) => w.includes('skipping symlink: link_to_ping.py')));
+          assert.ok(warned.some((w) => w.includes('skipping symlink: link_to_ping.py')));
+          assert.equal(res.files.includes('link_to_ping.py'), false);
+        }
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }

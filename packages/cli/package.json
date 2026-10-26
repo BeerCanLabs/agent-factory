@@ -15,7 +15,8 @@
   },
   "dependencies": {
     "@beercanlabs/factory-auth": "0.1.0",
-    "@beercanlabs/factory-bouncer": "0.1.0"
+    "@beercanlabs/factory-bouncer": "0.1.0",
+    "@beercanlabs/factory-contract": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
