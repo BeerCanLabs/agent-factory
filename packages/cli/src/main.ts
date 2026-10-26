@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { FactoryClient } from './client.js';
 import { loadConfig, normalizeInstance, parseAuth, parseManager, parseTheme, saveConfig, type CliConfig } from './config.js';
@@ -65,14 +65,6 @@ async function setConfig(key: string, value: string, store: CredentialStore): Pr
   else throw new Error('unknown setting. Keys: address, auth, theme, manager');
   await saveConfig(config);
   return `${key} set.`;
-}
-
-// `factory ledger --json | head`: a reader that closes early is not an error worth a stack trace.
-for (const stream of [process.stdout, process.stderr]) {
-  stream.on('error', (err: NodeJS.ErrnoException) => {
-    if (err.code === 'EPIPE') process.exit(0);
-    throw err;
-  });
 }
 
 export type MainStreams = {
@@ -268,14 +260,21 @@ const isMain = (): boolean => {
   try {
     const entry = process.argv[1];
     if (!entry) return false;
-    const thisFile = fileURLToPath(import.meta.url);
-    return entry === thisFile || entry.endsWith('/bin/factory') || entry.endsWith('\\bin\\factory');
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
   } catch {
     return false;
   }
 };
 
 if (isMain()) {
+  // `factory ledger --json | head`: a reader that closes early is not an error worth a stack trace.
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EPIPE') process.exit(0);
+      throw err;
+    });
+  }
+
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (err) => {

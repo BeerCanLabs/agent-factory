@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -352,5 +352,31 @@ describe('§6.17 CL11 commands as subcommands, for scripts', () => {
     const noArg = await factory(home, ['skill', 'register']);
     assert.equal(noArg.code, 1);
     assert.match(noArg.err, /usage: factory skill register <dir\|package\.tar\.gz>/);
+  });
+
+  it('runs real CLI through symlink with any name (e.g. node_modules/.bin/factory or custom) (G1)', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'cli-symlink-'));
+    try {
+      const binDir = join(home, 'node_modules', '.bin');
+      await mkdir(binDir, { recursive: true });
+      const link1 = join(binDir, 'factory');
+      const link2 = join(home, 'custom-factory-tool');
+      const { symlinkSync } = await import('node:fs');
+      symlinkSync(MAIN, link1);
+      symlinkSync(MAIN, link2);
+
+      for (const link of [link1, link2]) {
+        const out = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+          execFile(process.execPath, ['--import', 'tsx', link, '--version'], { encoding: 'utf8' }, (error, stdout, stderr) => {
+            resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0, stdout, stderr });
+          });
+        });
+        assert.equal(out.code, 0, `failed for symlink ${link}: ${out.stderr}`);
+        assert.match(out.stdout, /^\d+\.\d+\.\d+\n$/, `output from ${link}`);
+      }
+    } finally {
+      const { rmSync } = await import('node:fs');
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
