@@ -129,6 +129,40 @@ export class FactoryClient {
       await this.sleep(interval);
     }
   }
+
+  /** Uploads a raw skill package tarball (.tar.gz) via POST /api/v1/registry/skills (A5, A6). */
+  async uploadSkillPackage(buffer: Buffer): Promise<FactoryResponse> {
+    const sendWith = async (refresh: boolean) => {
+      const given = await this.credential(refresh);
+      const cred: Credential = typeof given === 'string' ? { name: 'cf-access-token', value: given } : given;
+      const res = await this.doFetch(`${this.baseUrl}/api/v1/registry/skills`, {
+        method: 'POST',
+        headers: {
+          [cred.name]: cred.value,
+          accept: 'application/json',
+          'content-type': 'application/gzip',
+        },
+        body: new Uint8Array(buffer),
+        redirect: 'manual',
+      });
+      if (res.status === 401 || (res.status >= 300 && res.status < 400)) throw new AuthRequiredError();
+      const text = await res.text();
+      let parsed: unknown = text;
+      try {
+        parsed = text ? JSON.parse(text) : null;
+      } catch {
+        /* keep the text */
+      }
+      return { status: res.status, body: parsed };
+    };
+
+    try {
+      return await sendWith(false);
+    } catch (err) {
+      if (!(err instanceof AuthRequiredError)) throw err;
+      return await sendWith(true);
+    }
+  }
 }
 
 /** The factory refused a message (budget, role, unknown agent). `describe` words it for a person. */
