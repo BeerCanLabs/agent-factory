@@ -104,7 +104,11 @@ export class LocalSkillPackageStore implements SkillPackageStore {
       if (existingHash !== sha256) {
         throw new Error(`stored package corrupted: sha256 mismatch for ${sha256} (got ${existingHash}) (A4, S3)`);
       }
-      return (await this.getRecord(sha256))!;
+      const rec = await this.getRecord(sha256);
+      if (!rec) {
+        throw new Error(`store inconsistency: package ${sha256} exists on disk but getRecord returned null`);
+      }
+      return rec;
     }
 
     // Atomic write via temp file with cleanup on failure
@@ -119,7 +123,11 @@ export class LocalSkillPackageStore implements SkillPackageStore {
       throw err;
     }
 
-    return (await this.getRecord(sha256))!;
+    const rec = await this.getRecord(sha256);
+    if (!rec) {
+      throw new Error(`store inconsistency: package ${sha256} written to disk but getRecord returned null`);
+    }
+    return rec;
   }
 
   async get(sha256: string): Promise<Buffer | null> {
@@ -145,7 +153,7 @@ export class LocalSkillPackageStore implements SkillPackageStore {
     try {
       if (!existsSync(target)) return null;
       const stat = statSync(target);
-      const storedAt = stat.birthtime?.toISOString() || stat.mtime.toISOString();
+      const storedAt = stat.birthtimeMs > 0 ? stat.birthtime.toISOString() : stat.mtime.toISOString();
       const markerPath = this.quarantineMarkerPath(sha256);
       let quarantined = false;
       let quarantineReason: string | undefined;
@@ -276,7 +284,12 @@ export class MemorySkillPackageStore implements SkillPackageStore {
       }
     }
 
-    return (await this.getRecord(sha256))!;
+    return (await this.getRecord(sha256)) ?? {
+      sha256,
+      size: entry.buffer.length,
+      storedAt: entry.storedAt,
+      quarantined: false,
+    };
   }
 
   async get(sha256: string): Promise<Buffer | null> {

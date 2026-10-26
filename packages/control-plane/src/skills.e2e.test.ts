@@ -3,6 +3,8 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { createHash } from 'node:crypto';
+import zlib from 'node:zlib';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,10 +16,11 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
-import { approvedSkill, loadSkills, recordSkillChecks, setSkillUsage, skillRegistry } from './skills.js';
+import { approvedSkill, loadSkills, recordSkillChecks, setSkillUsage, skillPackageStore, skillRegistry } from './skills.js';
 
 const ADMIN = 'admin-skills-token';
 const OPERATOR = 'operator-skills-token';
+const OTHER_OWNER = 'other-owner-token';
 const VIEWER = 'viewer-skills-token';
 const REPO = 'https://github.com/BeerCanLabs/skill-discord-progress';
 const SHA1 = 'a'.repeat(40);
@@ -30,11 +33,13 @@ async function listen(server: http.Server): Promise<number> {
   return a.port;
 }
 
-async function call(port: number, path: string, method = 'GET', token?: string, body?: unknown) {
+async function call(port: number, path: string, method = 'GET', token?: string, body?: unknown, headers: Record<string, string> = {}) {
+  const isBuffer = Buffer.isBuffer(body);
+  const defaultContentType = isBuffer ? 'application/gzip' : 'application/json';
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
     method,
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { 'content-type': defaultContentType, ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers },
+    body: body === undefined ? undefined : isBuffer ? body : JSON.stringify(body),
   });
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
@@ -64,12 +69,16 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     dataDir = mkdtempSync(join(tmpdir(), 'cp-skills-'));
     ledger = new MemoryLedger();
     state = {
-      agents: new Map(),
+      agents: new Map([
+        ['operator-agent', { id: 'operator-agent', name: 'Operator Agent', owners: ['operator', 'token:operator'] } as any],
+        ['other-agent', { id: 'other-agent', name: 'Other Agent', owners: ['other-owner', 'token:other-owner'] } as any],
+      ]),
       registryDir: join(dataDir, 'registry'),
       ledger,
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
         { name: 'operator', token: OPERATOR, roles: ['operator'] },
+        { name: 'other-owner', token: OTHER_OWNER, roles: ['operator'] },
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
       ]),
       version: '0.1.0',
@@ -92,6 +101,7 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
   });
 
   after(() => {
+    delete process.env.FACTORY_SKILL_CHECKER;
     cp.close();
     rmSync(dataDir, { recursive: true, force: true });
   });
@@ -241,9 +251,14 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     assert.equal(skillRegistry(fresh).versions('discord-progress').length, 2);
   });
 
-  it('SK1 any authenticated user may register a skill (a viewer), and a folder path is normalised; it still needs approval', async () => {
+  it('A8 skills.register role gating: viewer without agent is refused (403); an agent owner may register', async () => {
     const m = { ...manifest('0.1.0'), id: 'viewer-skill' };
-    const reg = await call(port, '/api/v1/registry/skills', 'POST', VIEWER, { repo: 'https://github.com/example/skills', path: 'skills/viewer-skill/', commit: SHA1, manifest: m });
+    const refused = await call(port, '/api/v1/registry/skills', 'POST', VIEWER, { repo: 'https://github.com/example/skills', path: 'skills/viewer-skill/', commit: SHA1, manifest: m });
+    assert.equal(refused.status, 403);
+    assert.equal(refused.body.error, 'forbidden');
+    assert.equal(refused.body.required, 'admin');
+
+    const reg = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, { repo: 'https://github.com/example/skills', path: 'skills/viewer-skill/', commit: SHA1, manifest: m });
     assert.equal(reg.status, 201, JSON.stringify(reg.body));
     assert.equal(reg.body.path, 'skills/viewer-skill');
     assert.equal(reg.body.status, 'pending');
@@ -291,5 +306,405 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     assert.deepEqual(res.body.failures, ['imports boto3 (provider SDK)']);
     assert.equal(approvedSkill(state, 'discord-progress', '2.0.0'), undefined);
     assert.ok(actions().some((e) => e.action === 'SKILL_CHECKS_FAILED' && e.actor === 'factory:admission'));
+  });
+});
+
+function createTarHeader(opts: { name: string; size?: number; mode?: number; typeflag?: string }): Buffer {
+  const block = Buffer.alloc(512, 0);
+  const name = opts.name;
+  const size = opts.size ?? 0;
+  const mode = opts.mode ?? 0o644;
+  const typeflag = opts.typeflag ?? '0';
+
+  block.write(name, 0, 100, 'utf8');
+  block.write(mode.toString(8).padStart(7, '0') + '\0', 100, 8, 'ascii');
+  block.write('0000000\0', 108, 8, 'ascii');
+  block.write('0000000\0', 116, 8, 'ascii');
+  block.write(size.toString(8).padStart(11, '0') + '\0', 124, 12, 'ascii');
+  block.write('00000000000\0', 136, 12, 'ascii');
+  block.write(typeflag, 156, 1, 'ascii');
+  block.write('ustar\0', 257, 6, 'ascii');
+  block.write('00', 263, 2, 'ascii');
+
+  let sum = 0;
+  for (let i = 0; i < 512; i++) {
+    sum += i >= 148 && i < 156 ? 0x20 : block[i];
+  }
+  block.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+  return block;
+}
+
+function makeTarball(entries: Array<{ header: Buffer; content?: Buffer }>): Buffer {
+  const blocks: Buffer[] = [];
+  for (const entry of entries) {
+    blocks.push(entry.header);
+    if (entry.content && entry.content.length > 0) {
+      blocks.push(entry.content);
+      const rem = entry.content.length % 512;
+      if (rem > 0) blocks.push(Buffer.alloc(512 - rem, 0));
+    }
+  }
+  blocks.push(Buffer.alloc(1024, 0));
+  return Buffer.concat(blocks);
+}
+
+function makeValidPackage(id = 'test-packaged-skill', version = '1.0.0', opts: { description?: string } = {}): Buffer {
+  const desc = opts.description ?? 'Test packaged skill';
+  const yaml = `spec: 1\nid: ${id}\nname: Packaged Skill\nversion: ${version}\nlanguage: python\ndescription: ${desc}\nentry: entry.py\n`;
+  const entry = `def tools():\n    return []\n`;
+  const test = `def test_smoke():\n    assert True\n`;
+  const yBuf = Buffer.from(yaml, 'utf8');
+  const eBuf = Buffer.from(entry, 'utf8');
+  const tBuf = Buffer.from(test, 'utf8');
+  const tar = makeTarball([
+    { header: createTarHeader({ name: 'skill.yaml', size: yBuf.length }), content: yBuf },
+    { header: createTarHeader({ name: 'entry.py', size: eBuf.length }), content: eBuf },
+    { header: createTarHeader({ name: 'test_entry.py', size: tBuf.length }), content: tBuf },
+  ]);
+  return zlib.gzipSync(tar);
+}
+
+describe('A5 raw application/gzip package upload intake, A8 role gating, and package store wiring (TSK-276 Sub-slice 2c)', { concurrency: false }, () => {
+  let cp: http.Server;
+  let port = 0;
+  let dataDir: string;
+  let state: FactoryState;
+  let ledger: MemoryLedger;
+  const actions = () => ledger.query().filter((e) => e.agentId.startsWith('skill:'));
+
+  before(async () => {
+    process.env.FACTORY_SKILL_CHECKER = 'local';
+    dataDir = mkdtempSync(join(tmpdir(), 'cp-pkg-upload-'));
+    ledger = new MemoryLedger();
+    state = {
+      agents: new Map([
+        ['operator-agent', { id: 'operator-agent', name: 'Operator Agent', owners: ['operator', 'token:operator'] } as any],
+        ['other-agent', { id: 'other-agent', name: 'Other Agent', owners: ['other-owner', 'token:other-owner'] } as any],
+      ]),
+      registryDir: join(dataDir, 'registry'),
+      ledger,
+      auth: bearerAuth([
+        { name: 'admin', token: ADMIN, roles: ['admin'] },
+        { name: 'operator', token: OPERATOR, roles: ['operator'] },
+        { name: 'other-owner', token: OTHER_OWNER, roles: ['operator'] },
+        { name: 'viewer', token: VIEWER, roles: ['viewer'] },
+      ]),
+      version: '0.1.0',
+      providers: [envProvider({})],
+      runtime: noopRuntime(),
+      runs: new MemoryRunStore(),
+      approvals: new ApprovalStore(),
+      policies: new PolicyStore(),
+      spend: new SpendTracker(),
+      gatekeeperEgressHeldSecrets: new Set(['ANTHROPIC_API_KEY']),
+      idleMs: 0,
+      idleTimers: new Map(),
+      callbacks: { allowHosts: [] } as unknown as FactoryState['callbacks'],
+      runTokens: { issue: async () => '', verify: async () => undefined } as unknown as FactoryState['runTokens'],
+      secretValues: new Set(),
+    } as FactoryState;
+    loadSkills(state, join(dataDir, 'skills'));
+    cp = createFactoryServer(state);
+    port = await listen(cp);
+  });
+
+  after(() => {
+    delete process.env.FACTORY_SKILL_CHECKER;
+    cp.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('accepts raw application/gzip upload, returns 201, stores in SkillPackageStore and registry, and ledgers registration (A5)', async () => {
+    const pkg = makeValidPackage('math-tools', '1.0.0');
+    const hash = createHash('sha256').update(pkg).digest('hex');
+
+    const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(res.body.id, 'math-tools');
+    assert.equal(res.body.version, '1.0.0');
+    assert.equal(res.body.packageHash, hash);
+    assert.equal(res.body.status, 'pending');
+    assert.equal(res.body.tests, 'pending-build');
+    assert.equal(res.body.registeredBy, 'token:admin');
+
+    // Content-addressed immutable store has the package
+    const store = skillPackageStore(state);
+    assert.equal(await store.has(hash), true);
+    const rec = await store.getRecord(hash);
+    assert.ok(rec);
+    assert.equal(rec.sha256, hash);
+    assert.equal(rec.quarantinedAt, undefined);
+
+    // Persisted on data volume
+    assert.ok(existsSync(join(dataDir, 'skill-packages', 'packages', `${hash}.tar.gz`)), 'package file exists on disk');
+
+    // In registry
+    const skill = skillRegistry(state).get('math-tools', '1.0.0');
+    assert.ok(skill);
+    assert.equal(skill.packageHash, hash);
+
+    // Ledgered
+    const entry = actions().find((e) => e.action === 'SKILL_REGISTERED' && e.agentId === 'skill:math-tools@1.0.0');
+    assert.ok(entry);
+    assert.equal(entry.actor, 'token:admin');
+    assert.equal(entry.payloadSha256, hash);
+  });
+
+  it('refuses package upload from viewer without agent ownership (403 forbidden, A8)', async () => {
+    const pkg = makeValidPackage('viewer-denied', '1.0.0');
+    const res = await call(port, '/api/v1/registry/skills', 'POST', VIEWER, pkg);
+    assert.equal(res.status, 403);
+    assert.equal(res.body.error, 'forbidden');
+    assert.equal(res.body.required, 'admin');
+  });
+
+  it('refuses unauthenticated package upload (401 unauthorized)', async () => {
+    const pkg = makeValidPackage('unauth-denied', '1.0.0');
+    const res = await call(port, '/api/v1/registry/skills', 'POST', undefined, pkg);
+    assert.equal(res.status, 401);
+  });
+
+  it('allows package upload from agent owner holding operator token (A8)', async () => {
+    const pkg = makeValidPackage('owner-allowed', '1.0.0');
+    const hash = createHash('sha256').update(pkg).digest('hex');
+
+    const res = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, pkg);
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(res.body.id, 'owner-allowed');
+    assert.equal(res.body.packageHash, hash);
+    assert.equal(res.body.registeredBy, 'token:operator');
+  });
+
+  it('refuses upload exceeding 5 MiB route cap (413 payload too large, A5)', async () => {
+    const oversized = Buffer.alloc(5 * 1024 * 1024 + 1024, 0);
+    const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, oversized);
+    assert.equal(res.status, 413);
+    assert.equal(res.body.error, 'payload_too_large');
+  });
+
+  it('refuses corrupted or invalid package (422 unprocessable entity, ledgered, A5, A19)', async () => {
+    const corrupt = Buffer.from('this is definitely not a valid gzip tarball');
+    const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, corrupt);
+    assert.equal(res.status, 422);
+    assert.equal(res.body.error, 'package_invalid');
+    assert.ok(Array.isArray(res.body.reasons));
+
+    const entry = actions().find((e) => e.action === 'SKILL_REFUSED' && e.agentId === 'skill:(invalid)');
+    assert.ok(entry);
+    assert.equal(entry.actor, 'token:admin');
+  });
+
+  it('refuses duplicate version upload (422 unprocessable entity, ledgered, A5)', async () => {
+    const pkg = makeValidPackage('math-tools', '1.0.0');
+    const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+    assert.equal(res.status, 422);
+    assert.equal(res.body.error, 'skill_refused');
+    assert.ok(res.body.reasons.some((r: string) => /already registered/.test(r)));
+
+    const entry = actions().find((e) => e.action === 'SKILL_REFUSED' && e.agentId === 'skill:math-tools@1.0.0');
+    assert.ok(entry);
+    assert.equal(entry.actor, 'token:admin');
+  });
+
+  it('refuses non-gzip / non-json content type (415 unsupported media type, Nit 6)', async () => {
+    const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, Buffer.from('hello'), {
+      'content-type': 'text/plain',
+    });
+    assert.equal(res.status, 415);
+    assert.equal(res.body.error, 'unsupported_media_type');
+  });
+
+  it('refuses package upload if configured checker does not support packages (501 not implemented, Finding 1)', async () => {
+    // 1. Env-resolved codebuild checker (production AWS)
+    const prevProvider = process.env.FACTORY_DEPLOY_PROVIDER;
+    const prevChecker = process.env.FACTORY_SKILL_CHECKER;
+    process.env.FACTORY_DEPLOY_PROVIDER = 'aws';
+    delete process.env.FACTORY_SKILL_CHECKER;
+
+    const awsState = { ...state, agents: new Map(state.agents) } as FactoryState;
+    loadSkills(awsState, join(dataDir, 'skills-aws'));
+    const awsServer = createFactoryServer(awsState);
+    const awsPort = await listen(awsServer);
+    try {
+      const pkg = makeValidPackage('aws-checker-skill', '1.0.0');
+      const res = await call(awsPort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+      assert.equal(res.status, 501);
+      assert.equal(res.body.error, 'package_checks_unsupported');
+      assert.ok(res.body.message.includes('codebuild'));
+    } finally {
+      awsServer.close();
+      if (prevProvider !== undefined) process.env.FACTORY_DEPLOY_PROVIDER = prevProvider;
+      else delete process.env.FACTORY_DEPLOY_PROVIDER;
+      if (prevChecker !== undefined) process.env.FACTORY_SKILL_CHECKER = prevChecker;
+      else delete process.env.FACTORY_SKILL_CHECKER;
+    }
+
+    // 2. Env-resolved cloudbuild checker (production GCP)
+    process.env.FACTORY_DEPLOY_PROVIDER = 'gcp';
+    delete process.env.FACTORY_SKILL_CHECKER;
+
+    const gcpState = { ...state, agents: new Map(state.agents) } as FactoryState;
+    loadSkills(gcpState, join(dataDir, 'skills-gcp'));
+    const gcpServer = createFactoryServer(gcpState);
+    const gcpPort = await listen(gcpServer);
+    try {
+      const pkg = makeValidPackage('gcp-checker-skill', '1.0.0');
+      const res = await call(gcpPort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+      assert.equal(res.status, 501);
+      assert.equal(res.body.error, 'package_checks_unsupported');
+      assert.ok(res.body.message.includes('cloudbuild'));
+    } finally {
+      gcpServer.close();
+      if (prevProvider !== undefined) process.env.FACTORY_DEPLOY_PROVIDER = prevProvider;
+      else delete process.env.FACTORY_DEPLOY_PROVIDER;
+      if (prevChecker !== undefined) process.env.FACTORY_SKILL_CHECKER = prevChecker;
+      else delete process.env.FACTORY_SKILL_CHECKER;
+    }
+
+    // 3. No checker configured at all (FACTORY_SKILL_CHECKER=none or undefined)
+    process.env.FACTORY_SKILL_CHECKER = 'none';
+
+    const noneState = { ...state, agents: new Map(state.agents) } as FactoryState;
+    loadSkills(noneState, join(dataDir, 'skills-none'));
+    const noneServer = createFactoryServer(noneState);
+    const nonePort = await listen(noneServer);
+    try {
+      const pkg = makeValidPackage('none-checker-skill', '1.0.0');
+      const res = await call(nonePort, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+      assert.equal(res.status, 501);
+      assert.equal(res.body.error, 'package_checks_unsupported');
+      assert.ok(res.body.message.includes('no skill checker is configured'));
+    } finally {
+      noneServer.close();
+      if (prevChecker !== undefined) process.env.FACTORY_SKILL_CHECKER = prevChecker;
+      else delete process.env.FACTORY_SKILL_CHECKER;
+    }
+  });
+
+  it('atomic duplicate check under concurrent uploads with different packages (Promise.all, Finding 2, Nit 3)', async () => {
+    const pkg1 = makeValidPackage('concurrent-skill', '1.0.0', { description: 'package variant A' });
+    const pkg2 = makeValidPackage('concurrent-skill', '1.0.0', { description: 'package variant B' });
+    const hash1 = createHash('sha256').update(pkg1).digest('hex');
+    const hash2 = createHash('sha256').update(pkg2).digest('hex');
+    assert.notEqual(hash1, hash2, 'two package variants must have different hashes');
+
+    const [r1, r2] = await Promise.all([
+      call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg1),
+      call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg2),
+    ]);
+    const statuses = [r1.status, r2.status].sort();
+    assert.deepEqual(statuses, [201, 422]);
+
+    const winner = r1.status === 201 ? r1 : r2;
+    const loser = r1.status === 201 ? r2 : r1;
+    const expectedHash = r1.status === 201 ? hash1 : hash2;
+
+    assert.equal(winner.body.packageHash, expectedHash);
+    assert.equal(loser.body.error, 'skill_refused');
+    assert.ok(loser.body.reasons.some((r: string) => /already registered/.test(r)));
+
+    const stored = skillRegistry(state).get('concurrent-skill', '1.0.0');
+    assert.ok(stored);
+    assert.equal(stored.packageHash, expectedHash);
+  });
+
+  it('races two different users on a brand-new skill id (Finding 2)', async () => {
+    const pkgA = makeValidPackage('race-new-id', '1.0.0');
+    const pkgB = makeValidPackage('race-new-id', '1.0.1');
+
+    const [resA, resB] = await Promise.all([
+      call(port, '/api/v1/registry/skills', 'POST', OPERATOR, pkgA),
+      call(port, '/api/v1/registry/skills', 'POST', OTHER_OWNER, pkgB),
+    ]);
+
+    const statuses = [resA.status, resB.status].sort();
+    assert.deepEqual(statuses, [201, 422]);
+
+    const winner = resA.status === 201 ? resA : resB;
+    const loser = resA.status === 201 ? resB : resA;
+
+    assert.ok(loser.body.reasons.some((r: string) => r.includes('new versions must come from the owner or an admin (A15)')));
+    const versions = skillRegistry(state).versions('race-new-id');
+    assert.equal(versions.length, 1);
+    assert.equal(versions[0].registeredBy, winner.body.registeredBy);
+  });
+
+  it('refuses adoption of packaged skills (501 package_adoption_unsupported, Sub-slice 2d, A14)', async () => {
+    // Approve math-tools 1.0.0
+    const reg = skillRegistry(state);
+    const rec = reg.get('math-tools', '1.0.0');
+    assert.ok(rec);
+    rec.status = 'approved';
+    reg.save(rec);
+
+    const res = await call(port, '/api/v1/agents/operator-agent/skills', 'POST', ADMIN, {
+      skillId: 'math-tools',
+      version: '1.0.0',
+    });
+    assert.equal(res.status, 501);
+    assert.equal(res.body.error, 'package_adoption_unsupported');
+    assert.ok(res.body.message.includes('Sub-slice 2d'));
+  });
+
+  it('enforces A15 owner rule: new version of existing skill must come from owner or admin (Finding 1)', async () => {
+    // 1. operator registers version 1.0.0 -> owner is token:operator
+    const pkg1 = makeValidPackage('owner-rule-skill', '1.0.0');
+    const r1 = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, pkg1);
+    assert.equal(r1.status, 201);
+    assert.equal(r1.body.registeredBy, 'token:operator');
+
+    // 2. other-owner (not owner, not admin) tries to register 1.1.0 -> 422
+    const pkg2 = makeValidPackage('owner-rule-skill', '1.1.0');
+    const r2 = await call(port, '/api/v1/registry/skills', 'POST', OTHER_OWNER, pkg2);
+    assert.equal(r2.status, 422);
+    assert.equal(r2.body.error, 'skill_refused');
+    assert.ok(r2.body.reasons.some((r: string) => r.includes('new versions must come from the owner or an admin (A15)')));
+
+    // 3. admin registers 1.1.0 -> 201
+    const r3 = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg2);
+    assert.equal(r3.status, 201);
+
+    // 4. original owner (operator) registers 1.2.0 -> 201
+    const pkg3 = makeValidPackage('owner-rule-skill', '1.2.0');
+    const r4 = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, pkg3);
+    assert.equal(r4.status, 201);
+  });
+
+  it('forbids mixing repository and package registrations for the same id (Finding 1, A15)', async () => {
+    // 1. Register repo-first as repository skill
+    const repoRes = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, {
+      repo: REPO,
+      path: 'discord_progress',
+      commit: SHA1,
+      manifest: manifest('1.0.0', { routes: ['discord'], credentials: [{ name: 'DISCORD_BOT_TOKEN', source: 'discord' }] }),
+    });
+    // Manifest id in manifest() is discord-progress
+    assert.equal(repoRes.status, 201);
+
+    // 2. Try to register discord-progress 2.0.0 via package upload -> 422
+    const pkgDiscord = makeValidPackage('discord-progress', '2.0.0');
+    const pkgRes = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkgDiscord);
+    assert.equal(pkgRes.status, 422);
+    assert.equal(pkgRes.body.error, 'skill_refused');
+    assert.ok(pkgRes.body.reasons.some((r: string) => r.includes('cannot mix repository and package versions for this id (A15)')));
+
+    // 3. Try to register math-tools (previously package-registered) via repository JSON -> 422
+    const mixedRepoRes = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, {
+      repo: REPO,
+      path: 'math_tools',
+      commit: SHA1,
+      manifest: {
+        id: 'math-tools',
+        version: '2.0.0',
+        name: 'Math Tools',
+        description: 'desc',
+        language: 'python',
+        entry: 'entry.py',
+        requires: { routes: [], credentials: [] },
+      },
+    });
+    assert.equal(mixedRepoRes.status, 422);
+    assert.equal(mixedRepoRes.body.error, 'skill_refused');
+    assert.ok(mixedRepoRes.body.reasons.some((r: string) => r.includes('cannot mix repository and package versions for this id (A15)')));
   });
 });

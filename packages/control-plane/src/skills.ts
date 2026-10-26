@@ -35,10 +35,10 @@
 import http from 'node:http';
 import { dirname, join } from 'node:path';
 import { payloadHash } from '@beercanlabs/factory-ledger';
-import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, type SkillManifest } from '@beercanlabs/factory-contract';
+import { SEMVER, SKILL_ID, skillDesignIssues, validateSkillManifest, validateSkillPackage, type SkillManifest } from '@beercanlabs/factory-contract';
 import { authorize } from '@beercanlabs/factory-bouncer';
 import type { Principal } from '@beercanlabs/factory-auth';
-import { identify, json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import { identify, json, readJson, readBufferBody, requirePrivilege, type FactoryState } from './app.js';
 import { applyKillSwitch } from '@beercanlabs/factory-property-manager';
 import { registryOf } from '@beercanlabs/factory-registrar';
 import { triggerApply } from './apply.js';
@@ -46,7 +46,9 @@ import { configOf, ledgerVersion, ownersOf } from './config-store.js';
 import {
   AdoptionStore,
   FULL_SHA,
+  LocalSkillPackageStore,
   SkillRegistry,
+  type SkillPackageStore,
   adopters,
   availableTo,
   canAdopt,
@@ -76,7 +78,7 @@ import {
  * The checker this deployment uses (see the header). Called once per control plane; `undefined` means none is
  * configured. The CodeBuild checker is loaded only when selected, so the kernel does not load a cloud SDK otherwise.
  */
-export async function skillCheckerFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<SkillChecker | undefined> {
+export async function skillCheckerFromEnv(env: NodeJS.ProcessEnv = process.env, opts: { packageStore?: SkillPackageStore } = {}): Promise<SkillChecker | undefined> {
   const provider =
     env.FACTORY_DEPLOY_PROVIDER ||
     (env.FACTORY_RUNTIME === 'ecs' ? 'aws' : env.FACTORY_RUNTIME === 'cloudrun' ? 'gcp' : undefined);
@@ -91,7 +93,7 @@ export async function skillCheckerFromEnv(env: NodeJS.ProcessEnv = process.env):
     const { cloudBuildSkillChecker } = await import('./gcp/skill-checker.js');
     return cloudBuildSkillChecker();
   }
-  if (kind === 'local') return localSkillChecker();
+  if (kind === 'local') return localSkillChecker({ packageStore: opts.packageStore });
   if (kind !== 'none') console.warn(`[control-plane] FACTORY_SKILL_CHECKER=${kind} is not a checker (codebuild, cloudbuild, local, none); skill checks are off`);
   return undefined;
 }
@@ -108,12 +110,21 @@ function defaultSkillsDir(): string {
   return join(dirname(process.env.FACTORY_LEDGER_PATH || join(process.cwd(), 'data', 'ledger.jsonl')), 'skills');
 }
 
+function defaultSkillPackagesDir(): string {
+  if (process.env.FACTORY_SKILL_PACKAGES_DIR) return process.env.FACTORY_SKILL_PACKAGES_DIR;
+  return join(dirname(process.env.FACTORY_LEDGER_PATH || join(process.cwd(), 'data', 'ledger.jsonl')), 'skill-packages');
+}
+
 /** Opens the registry at `dir` (or the default data directory) and loads it into memory. Call once at start. */
 export function loadSkills(state: FactoryState, dir: string | undefined = defaultSkillsDir()): SkillRegistry {
   const registry = new SkillRegistry(dir, warnFromControlPlane);
   registries.set(state, registry);
   // Adoption requests and revocations sit beside the skills (R1: the control plane's backed-up volume).
   adoptionStores.set(state, new AdoptionStore(dir ? join(dirname(dir), 'skill-adoptions') : undefined, warnFromControlPlane));
+  if (!state.skillPackages && !packageStores.has(state)) {
+    const pkgDir = dir ? join(dirname(dir), 'skill-packages') : defaultSkillPackagesDir();
+    packageStores.set(state, new LocalSkillPackageStore(pkgDir));
+  }
   return registry;
 }
 
@@ -126,6 +137,18 @@ export function adoptionStore(state: FactoryState): AdoptionStore {
 /** The loaded registry; loaded from the default data directory on first use if `loadSkills` was not called. */
 export function skillRegistry(state: FactoryState): SkillRegistry {
   return registries.get(state) ?? loadSkills(state);
+}
+
+const packageStores = new WeakMap<FactoryState, SkillPackageStore>();
+/** Content-addressed immutable skill package store (A4, A21, S3). */
+export function skillPackageStore(state: FactoryState): SkillPackageStore {
+  if (state.skillPackages) return state.skillPackages;
+  let store = packageStores.get(state);
+  if (!store) {
+    store = new LocalSkillPackageStore(defaultSkillPackagesDir());
+    packageStores.set(state, store);
+  }
+  return store;
 }
 
 /** SK1, SK6: a version an agent may adopt. Only approved, unretired versions; anything else is undefined. */
@@ -145,8 +168,178 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
   // SK1: any authenticated user may register a skill; nothing is adoptable until an admin approves it.
   const principal = await requirePrivilege(req, res, state, 'skills.register');
   if (!principal) return;
-  const body = await readJson(req);
   const registry = skillRegistry(state);
+  const now = new Date().toISOString();
+  const contentType = (req.headers['content-type'] ?? '').toLowerCase();
+  const isJson = contentType.includes('application/json');
+  const isGzip = contentType.includes('application/gzip') || contentType.includes('application/x-gzip');
+
+  if (!isJson && !isGzip) {
+    json(res, 415, {
+      error: 'unsupported_media_type',
+      message: 'skill registration accepts application/json (repository) or application/gzip (package)',
+    });
+    return;
+  }
+
+  if (isGzip) {
+    const checker = await checkerFor(state);
+    if (!checker || !checker.supportsPackages) {
+      json(res, 501, {
+        error: 'package_checks_unsupported',
+        message: checker
+          ? `the configured skill checker (${checker.name}) does not support package checks (A14)`
+          : 'no skill checker is configured; package checks cannot run (A14)',
+      });
+      return;
+    }
+
+    let buffer: Buffer;
+    try {
+      buffer = await readBufferBody(req, 5 * 1024 * 1024);
+    } catch (err: any) {
+      if (err?.status === 413) {
+        res.writeHead(413, { 'Content-Type': 'application/json', Connection: 'close' });
+        res.end(JSON.stringify({ error: 'payload_too_large', message: err.message }));
+        return;
+      }
+      throw err;
+    }
+
+    if (!buffer.length) {
+      json(res, 400, { error: 'empty_package', message: 'package body cannot be empty' });
+      return;
+    }
+
+    const validated = await validateSkillPackage(buffer);
+    if (!validated.ok) {
+      state.ledger.append({
+        timestamp: now,
+        agentId: ledgerKey(undefined, undefined),
+        type: 'action',
+        action: 'SKILL_REFUSED',
+        actor: principal.actor,
+        payloadSha256: payloadHash(validated.issues),
+      });
+      json(res, 422, {
+        error: 'package_invalid',
+        message: 'the skill package is invalid (A1, A19)',
+        reasons: validated.issues,
+      });
+      return;
+    }
+
+    const manifest = validated.manifest;
+
+    // Content-addressed store is written first; content-addressed blobs are idempotent (A4, A21).
+    const store = skillPackageStore(state);
+    await store.put(validated.sha256, buffer);
+
+    // Synchronous section: check design issues, owner rule (A15), and save atomically without await.
+    const reasons: string[] = [];
+
+    for (const i of skillDesignIssues(manifest, { gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets })) {
+      reasons.push(`manifest.${i.path}: ${i.message}`);
+    }
+
+    if (reasons.length) {
+      state.ledger.append({
+        timestamp: now,
+        agentId: ledgerKey(manifest.id, manifest.version),
+        type: 'action',
+        action: 'SKILL_REFUSED',
+        actor: principal.actor,
+        payloadSha256: payloadHash(reasons),
+      });
+      json(res, 422, {
+        error: 'skill_refused',
+        id: manifest.id,
+        version: manifest.version,
+        message: `skill ${manifest.id}@${manifest.version} was not registered`,
+        reasons,
+      });
+      return;
+    }
+
+    const validateExisting = (existing: SkillVersionRecord[]): { ok: boolean; reason?: string } => {
+      if (existing.length) {
+        const first = existing[0];
+        if (first.repo) {
+          return { ok: false, reason: `id: ${manifest.id} is registered from a repository; cannot mix repository and package versions for this id (A15)` };
+        }
+        const isOwner = first.registeredBy.toLowerCase() === principal.actor.toLowerCase();
+        const isAdmin = authorize({ principal, privilege: 'skills.decide' }).allowed;
+        if (!isOwner && !isAdmin) {
+          return { ok: false, reason: `id: ${manifest.id} is owned by ${first.registeredBy}; new versions must come from the owner or an admin (A15)` };
+        }
+        const identity = registry.identityIssue(manifest);
+        if (identity) {
+          return { ok: false, reason: `manifest.visibility: ${identity}` };
+        }
+        if (existing.every((v) => v.retired)) {
+          return { ok: false, reason: `id: ${manifest.id} is retired; no new version can be registered (SK6), so give the skill a different id` };
+        }
+      }
+      return { ok: true };
+    };
+
+    const rec: SkillVersionRecord = {
+      id: manifest.id,
+      version: manifest.version,
+      packageHash: validated.sha256,
+      repo: '',
+      commit: validated.sha256,
+      path: '.',
+      manifest,
+      status: 'pending',
+      tests: 'pending-build',
+      registeredBy: principal.actor,
+      registeredAt: now,
+    };
+
+    try {
+      const saveResult = registry.saveIfAbsent(rec, validateExisting);
+      if (!saveResult.saved) {
+        const refusalReasons = [saveResult.reason!];
+        state.ledger.append({
+          timestamp: now,
+          agentId: ledgerKey(manifest.id, manifest.version),
+          type: 'action',
+          action: 'SKILL_REFUSED',
+          actor: principal.actor,
+          payloadSha256: payloadHash(refusalReasons),
+        });
+        json(res, 422, {
+          error: 'skill_refused',
+          id: manifest.id,
+          version: manifest.version,
+          message: `skill ${manifest.id}@${manifest.version} was not registered`,
+          reasons: refusalReasons,
+        });
+        return;
+      }
+    } catch (err) {
+      console.warn(`[control-plane] failed to persist skill ${rec.id}@${rec.version}:`, err);
+      json(res, 500, { error: 'persist_failed', message: 'the skill record could not be written; nothing was registered' });
+      return;
+    }
+
+    state.ledger.append({
+      timestamp: now,
+      agentId: ledgerKey(rec.id, rec.version),
+      type: 'action',
+      action: 'SKILL_REGISTERED',
+      actor: principal.actor,
+      commit: rec.commit,
+      payloadSha256: validated.sha256,
+    });
+
+    const started = await startSkillChecks(state, rec.id, rec.version, principal.actor);
+    json(res, 201, { ...(started.record ?? rec), packageHash: validated.sha256 });
+    return;
+  }
+
+  const body = await readJson(req);
   const reasons: string[] = [];
 
   const repo = checkRepoUrl(body.repo);
@@ -186,8 +379,12 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
       }
       // SK1: a skill is its source. A different repository or path is a different skill, never a new version of this one.
       const existing = registry.versions(manifest.id)[0];
-      if (existing && repo && path && (existing.repo !== repo || existing.path !== path)) {
-        reasons.push(`id: ${manifest.id} is registered from ${existing.repo} (${existing.path}); a different repository or path is a different skill, so give it a different id`);
+      if (existing) {
+        if (!existing.repo) {
+          reasons.push(`id: ${manifest.id} is registered from a package; cannot mix repository and package versions for this id (A15)`);
+        } else if (repo && path && (existing.repo !== repo || existing.path !== path)) {
+          reasons.push(`id: ${manifest.id} is registered from ${existing.repo} (${existing.path}); a different repository or path is a different skill, so give it a different id`);
+        }
       }
       for (const i of skillDesignIssues(manifest, { gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets })) {
         reasons.push(`manifest.${i.path}: ${i.message}`);
@@ -210,7 +407,6 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     }
   }
 
-  const now = new Date().toISOString();
   if (reasons.length || !manifest || !repo || !commit || !path) {
     state.ledger.append({
       timestamp: now,
@@ -238,7 +434,23 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     registeredAt: now,
   };
   try {
-    registry.save(rec);
+    const saved = registry.saveIfAbsent(rec);
+    if (!saved) {
+      state.ledger.append({
+        timestamp: now,
+        agentId: ledgerKey(rec.id, rec.version),
+        type: 'action',
+        action: 'SKILL_REFUSED',
+        actor: principal.actor,
+        ...(commit ? { commit } : {}),
+        payloadSha256: payloadHash([`version: ${rec.id}@${rec.version} is already registered; versions are immutable, register a new version`]),
+      });
+      json(res, 422, {
+        error: 'skill_refused',
+        reasons: [`version: ${rec.id}@${rec.version} is already registered; versions are immutable, register a new version`],
+      });
+      return;
+    }
   } catch (err) {
     console.warn(`[control-plane] failed to persist skill ${rec.id}@${rec.version}:`, err);
     json(res, 500, { error: 'persist_failed', message: 'the skill record could not be written; nothing was registered' });
@@ -430,7 +642,7 @@ async function checkerFor(state: FactoryState): Promise<SkillChecker | undefined
   if (state.skillChecker !== undefined) return state.skillChecker ?? undefined;
   let checker = envCheckers.get(state);
   if (!checker) {
-    checker = skillCheckerFromEnv().catch((err) => {
+    checker = skillCheckerFromEnv(process.env, { packageStore: skillPackageStore(state) }).catch((err) => {
       console.warn('[control-plane] skill checker unavailable; skill checks are off:', err);
       return undefined;
     });
@@ -470,7 +682,7 @@ export async function startSkillChecks(state: FactoryState, id: string, version:
   }
   let runId: string;
   try {
-    runId = await checker.start({ id, version, repo: rec.repo, path: rec.path, commit: rec.commit, manifest: rec.manifest });
+    runId = await checker.start({ id, version, repo: rec.repo, path: rec.path, commit: rec.commit, packageHash: rec.packageHash, manifest: rec.manifest });
   } catch (err) {
     const message = `the check run could not be started: ${err instanceof Error ? err.message : String(err)}`;
     console.warn(`[control-plane] skill checks for ${id}@${version}: ${message}`);
@@ -633,13 +845,28 @@ function accessAddedFor(state: FactoryState, agentId: string, rec: SkillVersionR
 const retiring = new WeakMap<FactoryState, Set<string>>();
 const isRetiring = (state: FactoryState, id: string): boolean => retiring.get(state)?.has(id) === true;
 
-/** `canAdopt`, and also refuses a skill that is being retired (SK6). */
+/** `canAdopt`, and also refuses a skill that is being retired (SK6) or packaged skill (Sub-slice 2d). */
 function adoptCheck(state: FactoryState, agentId: string, id: string, version: string): ReturnType<typeof canAdopt> {
   if (isRetiring(state, id)) return { ok: false, error: 'skill_retired', message: `skill ${id} is being retired (SK6)` };
-  return canAdopt(skillRegistry(state), agentId, id, version);
+  const check = canAdopt(skillRegistry(state), agentId, id, version);
+  if (!check.ok) return check;
+  if (check.record.packageHash) {
+    return {
+      ok: false,
+      error: 'package_adoption_unsupported',
+      message: `skill ${id}@${version} is a packaged skill; packaged skill image building and adoption will be delivered in Sub-slice 2d (A14)`,
+    };
+  }
+  return check;
 }
 
-const REFUSAL_STATUS = { not_found: 404, skill_private: 403, skill_retired: 409, skill_not_approved: 409 } as const;
+const REFUSAL_STATUS = {
+  not_found: 404,
+  skill_private: 403,
+  skill_retired: 409,
+  skill_not_approved: 409,
+  package_adoption_unsupported: 501,
+} as const;
 
 /**
  * SK6: pauses an agent because it runs a skill that is being revoked or retired, and remembers why, so that redeploying
@@ -679,6 +906,7 @@ async function autoAdoptPrivate(state: FactoryState, rec: SkillVersionRecord, pr
   const owner = ownerOf(rec);
   if (visibilityOf(rec) !== 'private' || !owner) return undefined;
   if (isRetiring(state, rec.id) || rec.retired) return { adopted: [] };
+  if (rec.packageHash) return { adopted: [], failed: 'package_adoption_unsupported' };
   const adoptions = adoptionStore(state);
   if (adoptions.blocksAutoAdopt(owner, rec.id)) return { adopted: [] };
   if (!state.agents.has(owner)) {

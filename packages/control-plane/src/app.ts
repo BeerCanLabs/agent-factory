@@ -29,6 +29,7 @@ import {
   type CommitResolver,
   type ConfigStore,
   type SkillChecker,
+  type SkillPackageStore,
   type SkillSource,
 } from '@beercanlabs/factory-registrar';
 import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
@@ -127,6 +128,8 @@ export type FactoryState = {
    * branch or tag to its commit. Unset: git with the factory's read-only source token (`gitSkillSource`).
    */
   skillSource?: SkillSource;
+  /** §6.14 SK1, A4, A21: content-addressed immutable storage for skill packages. */
+  skillPackages?: SkillPackageStore;
   spend: SpendTracker;
   /** The Treasurer's cloud and compute sources, and factory budget store (§6.15). */
   treasury?: Treasury;
@@ -217,6 +220,64 @@ export async function readJson(req: http.IncomingMessage): Promise<Record<string
 }
 
 /**
+ * Reads a raw binary body from a request, capped at limit bytes (default 5 MiB for packages, A1, A5).
+ */
+export function readBufferBody(req: http.IncomingMessage, limit = 5 * 1024 * 1024): Promise<Buffer> {
+  const clHeader = req.headers['content-length'];
+  if (clHeader !== undefined) {
+    const declaredLength = parseInt(clHeader, 10);
+    if (!Number.isNaN(declaredLength) && declaredLength > limit) {
+      req.pause();
+      req.resume();
+      return Promise.reject(Object.assign(new Error('payload too large (package capped at 5 MiB) (A1, A5)'), { status: 413 }));
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let totalLength = 0;
+    let rejected = false;
+    req.on('data', (chunk: Buffer) => {
+      if (rejected) return;
+      totalLength += chunk.length;
+      if (totalLength > limit) {
+        rejected = true;
+        req.pause();
+        req.destroy();
+        reject(Object.assign(new Error('payload too large (package capped at 5 MiB) (A1, A5)'), { status: 413 }));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (!rejected) resolve(Buffer.concat(chunks));
+    });
+    req.on('error', (err) => {
+      if (!rejected) reject(err);
+    });
+  });
+}
+
+function checkOwnsAnyAgent(state: FactoryState, actor: string): boolean {
+  const target = actor.toLowerCase();
+  for (const agent of state.agents.values()) {
+    const directOwners = (agent as unknown as { owners?: string[] }).owners;
+    if (directOwners && directOwners.some((o) => o.toLowerCase() === target)) {
+      return true;
+    }
+  }
+  if (!state.configs) return false;
+  const ids = new Set([...state.agents.keys(), ...(state.configs.agentIds ? state.configs.agentIds() : [])]);
+  for (const agentId of ids) {
+    const owners = ownersOf(state, agentId);
+    if (owners.some((o) => o.toLowerCase() === target)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * §6.12 A2: who is calling, from a credential the factory verifies itself. The `Authorization` header (factory tokens,
  * OIDC) first, then the identity-aware proxy's signed assertion (`cf-access-jwt-assertion` or the `CF_Authorization`
  * cookie) when Access identity is configured. Unsigned identity headers (the proxy's plain email header) are never
@@ -254,10 +315,15 @@ export async function requirePrivilege(
     json(res, 401, { error: 'unauthorized' });
     return null;
   }
+  const ownsAny = privilege === 'skills.register' ? checkOwnsAnyAgent(state, result.principal.actor) : false;
   const decision = authorize({
     principal: result.principal,
     privilege,
-    ...(resource ? { resource: { agentId: resource.agentId, owners: ownersOf(state, resource.agentId) } } : {}),
+    ...(resource
+      ? { resource: { agentId: resource.agentId, owners: ownersOf(state, resource.agentId), ownsAnyAgent: ownsAny } }
+      : ownsAny
+        ? { resource: { ownsAnyAgent: true } }
+        : {}),
   });
   if (!decision.allowed) {
     json(res, 403, { error: 'forbidden', required: decision.required });

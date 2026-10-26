@@ -8,10 +8,20 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
+import { createHash } from 'node:crypto';
 import YAML from 'yaml';
 import type { Build } from '@aws-sdk/client-codebuild';
 import type { SkillManifest } from '@beercanlabs/factory-contract';
-import { SKILL_CHECK_SCRIPT, localSkillChecker, manifestB64, parseSkillCheckResult, skillCheckEnv, type SkillCheckOutcome } from '@beercanlabs/factory-registrar';
+import {
+  SKILL_CHECK_SCRIPT,
+  localSkillChecker,
+  manifestB64,
+  parseSkillCheckResult,
+  skillCheckEnv,
+  LocalSkillPackageStore,
+  type SkillCheckOutcome,
+} from '@beercanlabs/factory-registrar';
 import { codeBuildSkillChecker, skillCheckOutcome } from './aws/skill-checker.js';
 import { skillCheckerFromEnv } from './skills.js';
 
@@ -278,6 +288,106 @@ describe('SK1 the local checker clones the pinned commit and runs the check', { 
     const out = await checker.result(await checker.start(req(missing)));
     assert.deepEqual(out, { passed: false, failures: [`source: could not fetch ${repo} at ${missing}`] });
     assert.equal((await checker.result('local-unknown')).passed, false);
+  });
+
+  it('localSkillChecker with SkillPackageStore: hit, miss, and extraction failure', async () => {
+    function makeSkillPackageGz(files: Record<string, string>): Buffer {
+      const entries: Buffer[] = [];
+      for (const [name, content] of Object.entries(files)) {
+        const buf = Buffer.from(content, 'utf8');
+        const header = Buffer.alloc(512, 0);
+        header.write(name, 0, 100, 'utf8');
+        header.write((0o644).toString(8).padStart(7, '0') + '\0', 100, 8, 'ascii');
+        header.write('0000000\0', 108, 8, 'ascii');
+        header.write('0000000\0', 116, 8, 'ascii');
+        header.write(buf.length.toString(8).padStart(11, '0') + '\0', 124, 12, 'ascii');
+        header.write('00000000000\0', 136, 12, 'ascii');
+        header.write('0', 156, 1, 'ascii');
+        header.write('ustar\0', 257, 6, 'ascii');
+        header.write('00', 263, 2, 'ascii');
+        let sum = 0;
+        for (let i = 0; i < 512; i++) {
+          sum += (i >= 148 && i < 156) ? 0x20 : header[i];
+        }
+        header.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+        entries.push(header);
+        entries.push(buf);
+        const rem = buf.length % 512;
+        if (rem > 0) entries.push(Buffer.alloc(512 - rem, 0));
+      }
+      entries.push(Buffer.alloc(1024, 0));
+      return zlib.gzipSync(Buffer.concat(entries));
+    }
+
+    const storeDir = mkdtempSync(join(tmpdir(), 'pkg-store-'));
+    try {
+      const store = new LocalSkillPackageStore(storeDir);
+      const checker = localSkillChecker({ packageStore: store });
+      assert.equal(checker.supportsPackages, true);
+
+      // 1. Hit: valid skill package
+      const validGz = makeSkillPackageGz({
+        'skill.yaml': `spec: 1\nid: pkg-skill\nname: Pkg Skill\nversion: 1.0.0\ndescription: A packaged skill\nlanguage: python\nentry: main.py\nrequires:\n  routes: []\n  credentials: []\n`,
+        'main.py': 'def tools(): return []\n',
+        'test_main.py': 'import unittest\nclass T(unittest.TestCase):\n  def test_ok(self): pass\n',
+      });
+      const sha = createHash('sha256').update(validGz).digest('hex');
+      const validRec = await store.put(sha, validGz);
+      const manifest: SkillManifest = {
+        id: 'pkg-skill',
+        version: '1.0.0',
+        name: 'Pkg Skill',
+        description: 'A packaged skill',
+        language: 'python',
+        entry: 'main.py',
+        requires: { routes: [], connections: [], credentials: [], models: [] },
+      } as SkillManifest;
+
+      const hitRun = await checker.start({
+        id: 'pkg-skill',
+        version: '1.0.0',
+        repo: '',
+        path: '.',
+        commit: '',
+        packageHash: validRec.sha256,
+        manifest,
+      });
+      const hitRes = await checker.result(hitRun);
+      assert.deepEqual(hitRes, { passed: true, failures: [] });
+
+      // 2. Miss: package not in store
+      const missingHash = 'e'.repeat(64);
+      const missRun = await checker.start({
+        id: 'pkg-skill',
+        version: '1.0.0',
+        repo: '',
+        path: '.',
+        commit: '',
+        packageHash: missingHash,
+        manifest,
+      });
+      const missRes = await checker.result(missRun);
+      assert.deepEqual(missRes, { passed: false, failures: [`source: package ${missingHash} not found in store`] });
+
+      // 3. Extraction failure: corrupted package in store
+      const badPkg = zlib.gzipSync(Buffer.from('not a valid tar'));
+      const badHash = createHash('sha256').update(badPkg).digest('hex');
+      await store.put(badHash, badPkg);
+      const badRun = await checker.start({
+        id: 'pkg-skill',
+        version: '1.0.0',
+        repo: '',
+        path: '.',
+        commit: '',
+        packageHash: badHash,
+        manifest,
+      });
+      const badRes = await checker.result(badRun);
+      assert.equal(badRes.passed, false);
+      assert.ok(badRes.failures.some((f) => f.startsWith('package: ')));
+    } finally {
+      rmSync(storeDir, { recursive: true, force: true });
+    }
   });
 });
 

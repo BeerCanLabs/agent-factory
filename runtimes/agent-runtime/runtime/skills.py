@@ -35,6 +35,7 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
     tools: list[Tool] = []
     problems: list[str] = []
     seen: set[str] = set(reserved or ())  # a skill cannot shadow the archetype's own tools
+    loaded_vendored: dict[str, str] = {}  # top-level vendored module -> skill id (A2)
     for item in adopted or []:
         sid = str(item.get("id", ""))
         if not SAFE_ID.match(sid):
@@ -60,6 +61,26 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
             # the modules it brought, so two skills never share a module and one cannot replace another's. Standard library
             # only otherwise: nothing is installed for a skill (docs/SKILLS.md).
             root_folder = folder.resolve()
+            vendor_folder = root_folder / "vendor"
+
+            # Check A2 collision for vendored top-level modules
+            current_vendored: list[str] = []
+            if vendor_folder.is_dir():
+                for v_item in sorted(vendor_folder.iterdir()):
+                    if v_item.name.startswith(".") or v_item.name == "__pycache__":
+                        continue
+                    mod_name = None
+                    if v_item.is_file() and v_item.suffix == ".py":
+                        mod_name = v_item.stem
+                    elif v_item.is_dir():
+                        mod_name = v_item.name
+                    if mod_name:
+                        if mod_name in loaded_vendored:
+                            raise ValueError(
+                                f"vendored module {mod_name!r} collides with module from skill {loaded_vendored[mod_name]!r}"
+                            )
+                        current_vendored.append(mod_name)
+
             name = f"skill_{sid.replace('-', '_')}"
             spec = importlib.util.spec_from_file_location(name, target, submodule_search_locations=[str(target.parent)] if target.name == "__init__.py" else None)
             if spec is None or spec.loader is None:
@@ -68,7 +89,11 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
             sys.modules[spec.name] = module
             known = set(sys.modules)
             path_list, path_before = sys.path, list(sys.path)
+
+            # A2 path precedence: skill root before vendor
             sys.path.append(str(root_folder))
+            if vendor_folder.is_dir():
+                sys.path.append(str(vendor_folder))
             try:
                 spec.loader.exec_module(module)
             except BaseException:
@@ -91,7 +116,7 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
                 sys.path = path_list
                 path_list[:] = path_before
                 importlib.invalidate_caches()
-                for place in [k for k in sys.path_importer_cache if k == str(root_folder) or k.startswith(str(root_folder) + os.sep)]:
+                for place in [k for k in sys.path_importer_cache if k == str(root_folder) or k.startswith(str(root_folder) + os.sep) or k == str(vendor_folder) or k.startswith(str(vendor_folder) + os.sep)]:
                     del sys.path_importer_cache[place]
             for t in module.tools():
                 name = str(t["name"])
@@ -100,6 +125,9 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
                     continue
                 seen.add(name)
                 tools.append(Tool(sid, name, str(t.get("description", "")), t.get("parameters") or {"type": "object", "properties": {}}, t["handler"]))
+
+            for mod_name in current_vendored:
+                loaded_vendored[mod_name] = sid
         except (Exception, SystemExit) as err:  # a broken skill (even one that exits at import) must not stop the agent answering
             problems.append(f"skill {sid}: {err}")
     return tools, problems

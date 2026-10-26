@@ -33,6 +33,12 @@ const BANNED_SEGMENTS = new Set([
   '__pycache__',
 ]);
 
+export interface ValidatedSkillPackageEntry {
+  path: string;
+  isDir: boolean;
+  content: Buffer;
+}
+
 export type ValidatedSkillPackage =
   | {
       ok: true;
@@ -40,6 +46,7 @@ export type ValidatedSkillPackage =
       sha256: string;
       files: string[];
       totalExpandedBytes: number;
+      entries: ValidatedSkillPackageEntry[];
     }
   | {
       ok: false;
@@ -342,6 +349,7 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
   }
 
   const files: string[] = [];
+  const entries: ValidatedSkillPackageEntry[] = [];
   const allFiles = new Set<string>();
   const allDirs = new Set<string>();
   const parentDirs = new Set<string>();
@@ -497,6 +505,9 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
     }
 
     if (isDir) {
+      if (!allDirs.has(normalized)) {
+        entries.push({ path: normalized, isDir: true, content: Buffer.alloc(0) });
+      }
       allDirs.add(normalized);
       // Register all parent directories of directory entry (N4)
       for (let p = 1; p < parts.length; p++) {
@@ -601,6 +612,8 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
           hasTests = true;
         }
       }
+
+      entries.push({ path: normalized, isDir: false, content });
     }
 
     // Only regular files advance the walk with content blocks; directories never have content blocks (B2, N1)
@@ -672,5 +685,47 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
     sha256,
     files,
     totalExpandedBytes,
+    entries,
+  };
+}
+
+/**
+ * Safely extracts a validated skill package to targetDir (A19).
+ * Single-pass extraction reusing parsed and validated entries from validateSkillPackage.
+ */
+export async function extractSkillPackage(
+  buffer: Buffer,
+  targetDir: string,
+): Promise<{ ok: true; files: string[]; manifest: SkillManifest; sha256: string } | { ok: false; issues: string[] }> {
+  const validated = await validateSkillPackage(buffer);
+  if (!validated.ok) {
+    return { ok: false, issues: validated.issues };
+  }
+
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const { resolve, dirname, sep } = await import('node:path');
+
+  const resolvedTarget = resolve(targetDir);
+  mkdirSync(resolvedTarget, { recursive: true, mode: 0o755 });
+
+  for (const entry of validated.entries) {
+    const dest = resolve(resolvedTarget, entry.path);
+    if (!dest.startsWith(resolvedTarget + sep) && dest !== resolvedTarget) {
+      return { ok: false, issues: [`path leaves target directory: ${entry.path}`] };
+    }
+
+    if (entry.isDir) {
+      mkdirSync(dest, { recursive: true, mode: 0o755 });
+    } else {
+      mkdirSync(dirname(dest), { recursive: true, mode: 0o755 });
+      writeFileSync(dest, entry.content, { mode: 0o644 });
+    }
+  }
+
+  return {
+    ok: true,
+    files: validated.files,
+    manifest: validated.manifest,
+    sha256: validated.sha256,
   };
 }

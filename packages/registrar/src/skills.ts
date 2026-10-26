@@ -50,6 +50,8 @@ export type SkillVersionRecord = {
   retiredBy?: string;
   retiredAt?: string;
   retiredReason?: string;
+  /** SHA256 hex digest of the skill package tarball (.tar.gz) when registered from a package (A5). */
+  packageHash?: string;
 };
 
 /**
@@ -91,7 +93,7 @@ export type SkillSummary = {
   versions: Array<
     Pick<
       SkillVersionRecord,
-      'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'checkRun' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt' | 'reason' | 'revoked' | 'retired' | 'retiredBy' | 'retiredAt' | 'retiredReason'
+      'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'checkRun' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt' | 'reason' | 'revoked' | 'retired' | 'retiredBy' | 'retiredAt' | 'retiredReason' | 'packageHash'
     >
   >;
 };
@@ -163,11 +165,43 @@ export class SkillRegistry {
       const folder = join(this.dir, rec.id);
       mkdirSync(folder, { recursive: true });
       const path = join(folder, `${rec.version}.json`);
-      const tmp = `${path}.${process.pid}.tmp`;
+      const tmp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
       writeFileSync(tmp, JSON.stringify(rec, null, 2), 'utf8');
       renameSync(tmp, path);
     }
     this.put(rec);
+  }
+
+  /**
+   * Saves `rec` only if no record exists for `rec.id@rec.version` AND, if provided,
+   * `validate` succeeds against existing versions of `rec.id`.
+   * Synchronous and atomic on the in-memory map.
+   */
+  saveIfAbsent(rec: SkillVersionRecord): boolean;
+  saveIfAbsent(rec: SkillVersionRecord, validate: (existing: SkillVersionRecord[]) => { ok: boolean; reason?: string }): { saved: boolean; reason?: string };
+  saveIfAbsent(
+    rec: SkillVersionRecord,
+    validate?: (existing: SkillVersionRecord[]) => { ok: boolean; reason?: string },
+  ): boolean | { saved: boolean; reason?: string } {
+    if (this.skills.get(rec.id)?.has(rec.version)) {
+      return validate ? { saved: false, reason: `version: ${rec.id}@${rec.version} is already registered; versions are immutable, register a new version` } : false;
+    }
+    if (this.dir) {
+      const folder = join(this.dir, rec.id);
+      const path = join(folder, `${rec.version}.json`);
+      if (existsSync(path)) {
+        return validate ? { saved: false, reason: `version: ${rec.id}@${rec.version} is already registered; versions are immutable, register a new version` } : false;
+      }
+    }
+    const existing = this.versions(rec.id);
+    if (validate) {
+      const check = validate(existing);
+      if (!check.ok) {
+        return { saved: false, reason: check.reason ?? 'registration_refused' };
+      }
+    }
+    this.save(rec);
+    return validate ? { saved: true } : true;
   }
 
   get(id: string, version: string): SkillVersionRecord | undefined {
@@ -245,12 +279,13 @@ export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummar
       ...(v.decidedBy ? { decidedBy: v.decidedBy, decidedAt: v.decidedAt } : {}),
       ...(v.reason ? { reason: v.reason } : {}),
       ...(v.revoked ? { revoked: true } : {}),
+      ...(v.packageHash ? { packageHash: v.packageHash } : {}),
       ...(v.retired ? { retired: true, ...(v.retiredBy ? { retiredBy: v.retiredBy } : {}), ...(v.retiredAt ? { retiredAt: v.retiredAt } : {}), ...(v.retiredReason ? { retiredReason: v.retiredReason } : {}) } : {}),
     })),
   };
 }
 
-export type AdoptRefusal = 'not_found' | 'skill_private' | 'skill_retired' | 'skill_not_approved';
+export type AdoptRefusal = 'not_found' | 'skill_private' | 'skill_retired' | 'skill_not_approved' | 'package_adoption_unsupported';
 export type AdoptCheck = { ok: true; record: SkillVersionRecord } | { ok: false; error: AdoptRefusal; message: string };
 
 /**
@@ -266,6 +301,9 @@ export function canAdopt(registry: SkillRegistry, agentId: string, id: string, v
   }
   if (rec.retired) return { ok: false, error: 'skill_retired', message: `skill ${id} is retired (SK6)` };
   if (rec.status !== 'approved') return { ok: false, error: 'skill_not_approved', message: `skill ${id}@${version} is ${rec.status}; only an approved version can be adopted (SK1)` };
+  if (rec.packageHash) {
+    return { ok: false, error: 'package_adoption_unsupported', message: `skill ${id}@${version} is a packaged skill; packaged skill image building and adoption will be delivered in Sub-slice 2d (A14)` };
+  }
   return { ok: true, record: rec };
 }
 

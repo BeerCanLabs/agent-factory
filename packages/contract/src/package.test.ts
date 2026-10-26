@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import {
   validateSkillPackage,
+  extractSkillPackage,
   MAX_PACKAGE_SIZE,
   MAX_EXPANDED_SIZE,
   MAX_FILE_SIZE,
@@ -798,6 +799,108 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
       assert.equal(result.ok, false);
       if (!result.ok) {
         assert.ok(result.issues.some((i) => i.includes(`exceeds limit of ${MAX_FILE_SIZE}`)));
+      }
+    });
+  });
+
+  describe('extractSkillPackage safe extraction (A19)', () => {
+    it('extracts valid skill package files to target directory', async () => {
+      const { mkdtempSync, rmSync, existsSync, readFileSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+
+      const tmp = mkdtempSync(join(tmpdir(), 'skill-extract-test-'));
+      try {
+        const manifestYaml = Buffer.from(VALID_SKILL_YAML, 'utf8');
+        const codePy = Buffer.from('def hello():\n    return "world"\n', 'utf8');
+        const testPy = Buffer.from('import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n', 'utf8');
+
+        const tar = makeTarball([
+          { header: createTarHeader({ name: 'skill.yaml', size: manifestYaml.length }), content: manifestYaml },
+          { header: createTarHeader({ name: 'src/', typeflag: '5' }) },
+          { header: createTarHeader({ name: 'src/main.py', size: codePy.length }), content: codePy },
+          { header: createTarHeader({ name: 'test_main.py', size: testPy.length }), content: testPy },
+        ]);
+        const gz = zlib.gzipSync(tar);
+
+        const outDir = join(tmp, 'extracted');
+        const res = await extractSkillPackage(gz, outDir);
+        assert.equal(res.ok, true);
+        if (res.ok) {
+          assert.equal(existsSync(join(outDir, 'skill.yaml')), true);
+          assert.equal(existsSync(join(outDir, 'src', 'main.py')), true);
+          assert.equal(existsSync(join(outDir, 'test_main.py')), true);
+          assert.equal(readFileSync(join(outDir, 'src', 'main.py'), 'utf8'), 'def hello():\n    return "world"\n');
+        }
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses extraction on invalid package without creating files', async () => {
+      const { mkdtempSync, rmSync, existsSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+
+      const tmp = mkdtempSync(join(tmpdir(), 'skill-extract-test-'));
+      try {
+        const outDir = join(tmp, 'extracted');
+        const invalidGz = Buffer.from('not-a-valid-gzip-buffer');
+        const res = await extractSkillPackage(invalidGz, outDir);
+        assert.equal(res.ok, false);
+        assert.equal(existsSync(join(outDir, 'skill.yaml')), false);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses extraction when package attempts directory traversal escape', async () => {
+      const { mkdtempSync, rmSync, existsSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+
+      const tmp = mkdtempSync(join(tmpdir(), 'skill-extract-test-'));
+      try {
+        const outDir = join(tmp, 'extracted');
+        const escapeTar = makeTarball([
+          { header: createTarHeader({ name: 'skill.yaml', size: Buffer.byteLength(VALID_SKILL_YAML) }), content: Buffer.from(VALID_SKILL_YAML) },
+          { header: createTarHeader({ name: 'test_a.py', size: Buffer.byteLength(VALID_TEST_PY) }), content: Buffer.from(VALID_TEST_PY) },
+          { header: createTarHeader({ name: '../escape.py', size: 10 }), content: Buffer.from('pwned=True') },
+        ]);
+        const gz = zlib.gzipSync(escapeTar);
+        const res = await extractSkillPackage(gz, outDir);
+        assert.equal(res.ok, false);
+        if (!res.ok) {
+          assert.ok(res.issues.some((i) => i.includes('directory traversal not allowed in path')));
+        }
+        assert.equal(existsSync(join(tmp, 'escape.py')), false);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses extraction when package contains symlink entry', async () => {
+      const { mkdtempSync, rmSync, existsSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+
+      const tmp = mkdtempSync(join(tmpdir(), 'skill-extract-test-'));
+      try {
+        const outDir = join(tmp, 'extracted');
+        const symlinkTar = makeTarball([
+          { header: createTarHeader({ name: 'skill.yaml', size: Buffer.byteLength(VALID_SKILL_YAML) }), content: Buffer.from(VALID_SKILL_YAML) },
+          { header: createTarHeader({ name: 'test_a.py', size: Buffer.byteLength(VALID_TEST_PY) }), content: Buffer.from(VALID_TEST_PY) },
+          { header: createTarHeader({ name: 'symlink_escape', typeflag: '2' }) },
+        ]);
+        const gz = zlib.gzipSync(symlinkTar);
+        const res = await extractSkillPackage(gz, outDir);
+        assert.equal(res.ok, false);
+        if (!res.ok) {
+          assert.ok(res.issues.some((i) => i.includes("entry type '2' not permitted")));
+        }
+        assert.equal(existsSync(join(outDir, 'symlink_escape')), false);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
       }
     });
   });

@@ -10,7 +10,7 @@ const ROLE_ORDER: readonly Role[] = ['viewer', 'operator', 'approver', 'ingest',
  * principal actor, absent when the requester is not linked to anyone. `memberRoles` are the roles the caller holds on
  * this agent, from their identity link (the Bouncer's own data), never `Owner`: only `authorizeIngress` sets it.
  */
-export type AuthorizeResource = { agentId: string; owners: readonly string[]; requester?: { actor?: string }; memberRoles?: readonly string[] };
+export type AuthorizeResource = { agentId?: string; owners?: readonly string[]; requester?: { actor?: string }; memberRoles?: readonly string[]; ownsAnyAgent?: boolean };
 
 export type AuthorizeRequest = { principal: Principal; privilege: Privilege; resource?: AuthorizeResource };
 export type AuthorizeResult = { allowed: true } | { allowed: false; required: Role };
@@ -30,7 +30,8 @@ const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCas
 export function authorize(req: AuthorizeRequest): AuthorizeResult {
   const { principal, privilege, resource } = req;
   if (principal.roles.some((r) => ROLE_PRIVILEGES[r]?.includes(privilege))) return { allowed: true };
-  if (resource && AGENT_SCOPED.has(privilege)) {
+  if (privilege === 'skills.register' && resource?.ownsAnyAgent) return { allowed: true };
+  if (resource && resource.owners && AGENT_SCOPED.has(privilege)) {
     const actor = principal.actor;
     const owner =
       resource.owners.some((o) => same(o, actor)) &&

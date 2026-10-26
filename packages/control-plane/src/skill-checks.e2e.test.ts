@@ -105,7 +105,9 @@ describe('SK1 skill checks: started at registration, recorded when they end, req
     dataDir = mkdtempSync(join(tmpdir(), 'cp-skill-checks-'));
     ledger = new MemoryLedger();
     state = {
-      agents: new Map(),
+      agents: new Map([
+        ['operator-agent', { id: 'operator-agent', name: 'Operator Agent', owners: ['token:operator'] } as any],
+      ]),
       registryDir: join(dataDir, 'registry'),
       ledger,
       auth: bearerAuth([

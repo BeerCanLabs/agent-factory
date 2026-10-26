@@ -100,7 +100,7 @@ describe('TSK-055 SK1 registration reads skill.yaml at the pin when no manifest 
       agents: new Map(),
       registryDir: join(dataDir, 'registry'),
       ledger,
-      auth: bearerAuth([{ name: 'user', token: USER, roles: ['viewer'] }]),
+      auth: bearerAuth([{ name: 'user', token: USER, roles: ['admin'] }]),
       version: '0.1.0',
       providers: [envProvider({})],
       runtime: noopRuntime(),
