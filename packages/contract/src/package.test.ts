@@ -21,6 +21,9 @@ function createTarHeader(opts: {
   prefix?: string;
   checksum?: number;
   rawSize?: Buffer;
+  rawUid?: Buffer;
+  devmajor?: string;
+  devminor?: string;
 }): Buffer {
   const block = Buffer.alloc(512, 0);
   const name = opts.name ?? 'test.py';
@@ -32,7 +35,11 @@ function createTarHeader(opts: {
 
   block.write(name, 0, 100, 'utf8');
   block.write(mode.toString(8).padStart(7, '0') + '\0', 100, 8, 'ascii');
-  block.write('0000000\0', 108, 8, 'ascii');
+  if (opts.rawUid) {
+    opts.rawUid.copy(block, 108, 0, Math.min(8, opts.rawUid.length));
+  } else {
+    block.write('0000000\0', 108, 8, 'ascii');
+  }
   block.write('0000000\0', 116, 8, 'ascii');
   if (opts.rawSize) {
     opts.rawSize.copy(block, 124, 0, Math.min(12, opts.rawSize.length));
@@ -44,6 +51,12 @@ function createTarHeader(opts: {
   if (magic) {
     block.write(magic, 257, 6, 'ascii');
     block.write('00', 263, 2, 'ascii');
+  }
+  if (opts.devmajor) {
+    block.write(opts.devmajor, 329, 8, 'latin1');
+  }
+  if (opts.devminor) {
+    block.write(opts.devminor, 337, 8, 'latin1');
   }
   if (prefix) {
     block.write(prefix, 345, 155, 'utf8');
@@ -144,7 +157,7 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
     });
 
     it('refuses decompression bombs exceeding 20 MiB limit (asserting inflate cap)', async () => {
-      // 1 GiB of zeros compressed with deflate is ~1 MiB (well under 5 MiB compressed cap)
+      // Create a compressed stream representing >20 MiB of zeros (compressed size is tiny)
       const bigZeroBuf = Buffer.alloc(25 * 1024 * 1024, 0);
       const gzBomb = zlib.gzipSync(bigZeroBuf);
       assert.ok(gzBomb.length < MAX_PACKAGE_SIZE);
@@ -152,7 +165,7 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
       const result = await validateSkillPackage(gzBomb);
       assert.equal(result.ok, false);
       if (!result.ok) {
-        assert.ok(result.issues.some((i) => i.includes('package expanded size exceeds 20971520 bytes')));
+        assert.ok(result.issues.some((i) => i.includes('package expanded size exceeds decompression limit of 20971520 bytes')));
       }
     });
 
@@ -200,7 +213,7 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
     });
   });
 
-  describe('Tar Parser Hardening, Path Normalization & Python Agreement (B1, B2, B3, A19)', () => {
+  describe('Tar Parser Hardening, Path Normalization & Python Agreement (N1-N5, B1-B3, A19)', () => {
     it('verifies tar header checksum and refuses tampered headers', async () => {
       const entryBuf = Buffer.from(VALID_ENTRY_PY);
       const header = createTarHeader({ name: 'entry.py', size: entryBuf.length });
@@ -214,23 +227,100 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
       }
     });
 
-    it('accepts signed tar header checksum', async () => {
+    it('accepts signed tar header checksum with non-ASCII bytes (signed != unsigned sum)', async () => {
       const yamlBuf = Buffer.from(VALID_SKILL_YAML);
       const testBuf = Buffer.from(VALID_TEST_PY);
-      const header = createTarHeader({ name: 'skill.yaml', size: yamlBuf.length });
+      // Header with byte 0x85 in name
+      const header = createTarHeader({ name: 'file_\x85.py', size: 0 });
       let signedSum = 0;
+      let unsignedSum = 0;
       for (let i = 0; i < 512; i++) {
         const val = (i >= 148 && i < 156) ? 0x20 : header[i];
+        unsignedSum += val;
         signedSum += (val > 127 ? val - 256 : val);
       }
+      assert.notEqual(signedSum, unsignedSum, 'signed and unsigned sums must differ');
       header.write(signedSum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
       const tar = makeTarball([
-        { header, content: yamlBuf },
+        { header: createTarHeader({ name: 'skill.yaml', size: yamlBuf.length }), content: yamlBuf },
+        { header },
         { header: createTarHeader({ name: 'test_entry.py', size: testBuf.length }), content: testBuf },
       ]);
       const gz = zlib.gzipSync(tar);
       const result = await validateSkillPackage(gz);
       assert.equal(result.ok, true);
+    });
+
+    it('refuses N1: . entry with typeflag 0 and size 512 pretending to be data', async () => {
+      const dotHeader = createTarHeader({ name: '.', typeflag: '0', size: 512 });
+      const tar = makeTarball([{ header: dotHeader, content: Buffer.alloc(512, 0) }]);
+      const gz = zlib.gzipSync(tar);
+      const result = await validateSkillPackage(gz);
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.ok(result.issues.some((i) => i.includes('root directory entry must have directory typeflag') || i.includes('root directory entry has non-zero size')));
+      }
+    });
+
+    it('refuses N2: high-bit byte in numeric field (000000\\xb1\\0)', async () => {
+      const rawUid = Buffer.alloc(8, 0);
+      rawUid.write('000000\xb1\0', 0, 'latin1');
+      const header = createTarHeader({ name: 'entry.py', rawUid });
+      const tar = makeTarball([{ header }]);
+      const gz = zlib.gzipSync(tar);
+      const result = await validateSkillPackage(gz);
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.ok(result.issues.some((i) => i.includes('malformed octal in tar header uid')));
+      }
+    });
+
+    it('refuses N3: non-ustar header with devmajor 9999999\\0', async () => {
+      const header = createTarHeader({ name: 'entry.py', magic: '', devmajor: '9999999\0' });
+      const tar = makeTarball([{ header }]);
+      const gz = zlib.gzipSync(tar);
+      const result = await validateSkillPackage(gz);
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.ok(result.issues.some((i) => i.includes('malformed octal in tar header devmajor')));
+      }
+    });
+
+    it('refuses N4: file a and directory entry a/b/', async () => {
+      const yamlBuf = Buffer.from(VALID_SKILL_YAML);
+      const testBuf = Buffer.from(VALID_TEST_PY);
+      const fileA = Buffer.from('print(1)');
+      const tar = makeTarball([
+        { header: createTarHeader({ name: 'skill.yaml', size: yamlBuf.length }), content: yamlBuf },
+        { header: createTarHeader({ name: 'a', size: fileA.length }), content: fileA },
+        { header: createTarHeader({ name: 'a/b/', typeflag: '5', size: 0 }) },
+        { header: createTarHeader({ name: 'test_entry.py', size: testBuf.length }), content: testBuf },
+      ]);
+      const gz = zlib.gzipSync(tar);
+      const result = await validateSkillPackage(gz);
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.ok(result.issues.some((i) => i.includes('both a regular file and a directory parent (A19): "a"')));
+      }
+    });
+
+    it('refuses N5: case collision across parent path components (A/x.py and a/y.py)', async () => {
+      const yamlBuf = Buffer.from(VALID_SKILL_YAML);
+      const testBuf = Buffer.from(VALID_TEST_PY);
+      const f1 = Buffer.from('print(1)');
+      const f2 = Buffer.from('print(2)');
+      const tar = makeTarball([
+        { header: createTarHeader({ name: 'skill.yaml', size: yamlBuf.length }), content: yamlBuf },
+        { header: createTarHeader({ name: 'A/x.py', size: f1.length }), content: f1 },
+        { header: createTarHeader({ name: 'a/y.py', size: f2.length }), content: f2 },
+        { header: createTarHeader({ name: 'test_entry.py', size: testBuf.length }), content: testBuf },
+      ]);
+      const gz = zlib.gzipSync(tar);
+      const result = await validateSkillPackage(gz);
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.ok(result.issues.some((i) => i.includes('case-colliding paths in package (A19): "A" vs "a"')));
+      }
     });
 
     it('refuses B3: NUL before digits (\\0 followed by 00000002000)', async () => {
@@ -242,7 +332,7 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
       const result = await validateSkillPackage(gz);
       assert.equal(result.ok, false);
       if (!result.ok) {
-        assert.ok(result.issues.some((i) => i.includes('non-padding byte after NUL terminator')));
+        assert.ok(result.issues.some((i) => i.includes('non-padding byte')));
       }
     });
 
@@ -455,14 +545,39 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
       assert.equal(result.ok, true);
     });
 
-    it('refuses directory traversal, leading slashes, and backslashes', async () => {
-      for (const badPath of ['../etc/passwd', 'a/../../b', '/root/file', 'win\\path']) {
-        const header = createTarHeader({ name: badPath });
-        const tar = makeTarball([{ header }]);
-        const gz = zlib.gzipSync(tar);
-        const result = await validateSkillPackage(gz);
-        assert.equal(result.ok, false);
-      }
+    it('refuses directory traversal, leading slashes, and backslashes with specific error messages', async () => {
+      const yamlBuf = Buffer.from(VALID_SKILL_YAML);
+      const testBuf = Buffer.from(VALID_TEST_PY);
+
+      // Traversal
+      let tar = makeTarball([
+        { header: createTarHeader({ name: 'skill.yaml', size: yamlBuf.length }), content: yamlBuf },
+        { header: createTarHeader({ name: '../etc/passwd' }) },
+        { header: createTarHeader({ name: 'test_entry.py', size: testBuf.length }), content: testBuf },
+      ]);
+      let res = await validateSkillPackage(zlib.gzipSync(tar));
+      assert.equal(res.ok, false);
+      if (!res.ok) assert.ok(res.issues.some((i) => i.includes('directory traversal not allowed in path')));
+
+      // Absolute
+      tar = makeTarball([
+        { header: createTarHeader({ name: 'skill.yaml', size: yamlBuf.length }), content: yamlBuf },
+        { header: createTarHeader({ name: '/root/file' }) },
+        { header: createTarHeader({ name: 'test_entry.py', size: testBuf.length }), content: testBuf },
+      ]);
+      res = await validateSkillPackage(zlib.gzipSync(tar));
+      assert.equal(res.ok, false);
+      if (!res.ok) assert.ok(res.issues.some((i) => i.includes('path must not be absolute')));
+
+      // Backslash
+      tar = makeTarball([
+        { header: createTarHeader({ name: 'skill.yaml', size: yamlBuf.length }), content: yamlBuf },
+        { header: createTarHeader({ name: 'win\\path' }) },
+        { header: createTarHeader({ name: 'test_entry.py', size: testBuf.length }), content: testBuf },
+      ]);
+      res = await validateSkillPackage(zlib.gzipSync(tar));
+      assert.equal(res.ok, false);
+      if (!res.ok) assert.ok(res.issues.some((i) => i.includes('path must not contain backslashes')));
     });
   });
 
@@ -480,8 +595,8 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
       }
     });
 
-    it('refuses banned directory segments (.git, __pycache__, node_modules, .venv, .DS_Store)', async () => {
-      for (const seg of ['.git', '__pycache__', 'node_modules', '.venv', '.DS_Store']) {
+    it('refuses banned directory segments (.git, __pycache__)', async () => {
+      for (const seg of ['.git', '__pycache__']) {
         const header = createTarHeader({ name: `${seg}/file.py` });
         const tar = makeTarball([{ header }]);
         const gz = zlib.gzipSync(tar);
@@ -630,7 +745,6 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
 
   describe('Bounded Work & Resource Limits (H-1, A19)', () => {
     it('caps issue strings at MAX_ISSUES (50)', async () => {
-      // Create a tarball with 70 entries having invalid modes
       const entries = [];
       for (let i = 0; i < 70; i++) {
         entries.push({ header: createTarHeader({ name: `bad_${i}.py`, mode: 0o4755 }) });

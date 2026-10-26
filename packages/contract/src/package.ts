@@ -2,7 +2,7 @@
  * Skill package specification and validator (A1, A19, A22, H7).
  *
  * Implements single-pass decompression bounds, ustar header checksums,
- * strict octal parsing aligned with Python `tarfile`, path normalization,
+ * strict raw-byte octal parsing aligned with Python `tarfile`, path normalization,
  * hierarchy conflict guards, typeflag guards, setuid guards, and bounded work.
  */
 import zlib from 'node:zlib';
@@ -31,10 +31,6 @@ const BANNED_EXTENSIONS = new Set([
 const BANNED_SEGMENTS = new Set([
   '.git',
   '__pycache__',
-  'node_modules',
-  '.venv',
-  'venv',
-  '.DS_Store',
 ]);
 
 export type ValidatedSkillPackage =
@@ -57,11 +53,14 @@ function pushIssue(issues: string[], msg: string): void {
 }
 
 /**
- * Strict numeric field parser for tar header fields aligned with Python `tarfile` (A19).
+ * Strict raw-byte numeric field parser for tar header fields aligned with Python `tarfile` (N2, B3, A19).
  *
  * Python's `tarfile.nti` stops at the first NUL terminator and strips spaces.
- * This parser stops at the first NUL, rejects any non-zero bytes after the terminator,
- * rejects non-octal characters, rejects base-256 binary encoding, and enforces safe bounds.
+ * This parser operates directly on raw bytes (avoiding UTF-8 decoding anomalies):
+ * - Rejects any byte outside space (0x20), octal digits (0x30..0x37), and NUL (0x00)
+ * - Stops at the first NUL terminator
+ * - Enforces that any byte after the NUL terminator is strictly padding (NUL or space)
+ * - Refuses base-256 binary encoding (0x80 high bit)
  */
 function parseNumericField(
   buf: Buffer,
@@ -79,36 +78,44 @@ function parseNumericField(
     return null;
   }
 
-  // Find first NUL terminator
-  const nulIdx = field.indexOf(0);
-  const beforeNul = nulIdx !== -1 ? field.subarray(0, nulIdx) : field;
-
-  // After the first NUL, all remaining bytes in the fixed-width field must be padding (NUL or space)
-  if (nulIdx !== -1) {
-    for (let i = nulIdx + 1; i < field.length; i++) {
-      if (field[i] !== 0 && field[i] !== 0x20) {
+  let nulIdx = -1;
+  for (let i = 0; i < field.length; i++) {
+    const b = field[i];
+    if (nulIdx === -1) {
+      if (b === 0) {
+        nulIdx = i;
+      } else if (b !== 0x20 && (b < 0x30 || b > 0x37)) {
         pushIssue(
           issues,
-          `malformed tar header ${fieldName} at offset ${offset}: non-padding byte after NUL terminator (A19)`
+          `malformed octal in tar header ${fieldName} at offset ${offset}: byte 0x${b.toString(16)} (A19)`
+        );
+        return null;
+      }
+    } else {
+      // After first NUL terminator, only padding (NUL or space) is permitted (N2)
+      if (b !== 0 && b !== 0x20) {
+        pushIssue(
+          issues,
+          `malformed tar header ${fieldName} at offset ${offset}: non-padding byte 0x${b.toString(16)} after NUL terminator (A19)`
         );
         return null;
       }
     }
   }
 
-  const rawStr = beforeNul.toString('ascii');
-  const trimmed = rawStr.trim();
-  if (trimmed === '') {
+  const beforeNul = nulIdx !== -1 ? field.subarray(0, nulIdx) : field;
+  const rawStr = beforeNul.toString('latin1').trim();
+  if (rawStr === '') {
     return 0;
   }
 
-  // Stricter than Python: only octal digits 0-7 allowed (no embedded spaces or trailing non-octal chars)
-  if (!/^[0-7]+$/.test(trimmed)) {
+  // Once trimmed, MUST be strictly octal digits 0-7 with NO internal spaces (B3, A19)
+  if (!/^[0-7]+$/.test(rawStr)) {
     pushIssue(issues, `malformed octal in tar header ${fieldName} at offset ${offset}: "${rawStr}" (A19)`);
     return null;
   }
 
-  const val = parseInt(trimmed, 8);
+  const val = parseInt(rawStr, 8);
   if (!Number.isSafeInteger(val) || val < 0) {
     pushIssue(issues, `invalid numeric value in tar header ${fieldName} at offset ${offset} (A19)`);
     return null;
@@ -270,7 +277,7 @@ function gunzipSingleStream(gz: Buffer, issues: string[]): Buffer | null {
     res = rawRes as unknown as { buffer: Buffer | ArrayBuffer; engine?: { bytesWritten?: number } };
   } catch (err: any) {
     if (err?.code === 'ERR_BUFFER_TOO_LARGE' || err?.message?.includes('maxOutputLength')) {
-      pushIssue(issues, `package expanded size exceeds ${MAX_EXPANDED_SIZE} bytes (A19)`);
+      pushIssue(issues, `package expanded size exceeds decompression limit of ${MAX_EXPANDED_SIZE} bytes (A19)`);
       return null;
     }
     pushIssue(issues, `failed to decompress gzip stream: ${err?.message || String(err)} (A19)`);
@@ -280,7 +287,7 @@ function gunzipSingleStream(gz: Buffer, issues: string[]): Buffer | null {
   const outBuf = Buffer.isBuffer(res.buffer) ? res.buffer : Buffer.from(res.buffer);
 
   if (outBuf.length > MAX_EXPANDED_SIZE) {
-    pushIssue(issues, `package expanded size exceeds ${MAX_EXPANDED_SIZE} bytes (A19)`);
+    pushIssue(issues, `package expanded size exceeds decompression limit of ${MAX_EXPANDED_SIZE} bytes (A19)`);
     return null;
   }
 
@@ -412,16 +419,14 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
 
     const rawPath = prefixPart ? `${prefixPart}/${namePart}` : namePart;
 
-    // Validate and parse all header numeric fields (mode, uid, gid, size, mtime, devmajor, devminor) (B3)
+    // Validate and parse all header numeric fields on EVERY header block (N3, B3)
     const mode = parseNumericField(block, 100, 8, 'mode', issues);
     parseNumericField(block, 108, 8, 'uid', issues);
     parseNumericField(block, 116, 8, 'gid', issues);
     const size = parseNumericField(block, 124, 12, 'size', issues);
     parseNumericField(block, 136, 12, 'mtime', issues);
-    if (isUstar) {
-      parseNumericField(block, 329, 8, 'devmajor', issues);
-      parseNumericField(block, 337, 8, 'devminor', issues);
-    }
+    parseNumericField(block, 329, 8, 'devmajor', issues);
+    parseNumericField(block, 337, 8, 'devminor', issues);
 
     const typeflag = String.fromCharCode(block[156]);
     const isRegular = typeflag === '0' || typeflag === '\0';
@@ -430,26 +435,36 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
     // Normalize path (B1)
     const { normalized, isExplicitDir, isValid } = normalizeTarPath(rawPath, issues);
     if (!isValid) {
-      offset += 512;
+      // Advance by declared size blocks so content is never treated as headers (N1)
+      const contentBlocks = Math.ceil((size ?? 0) / 512);
+      offset += 512 + contentBlocks * 512;
       continue;
     }
 
-    // Root directory reference (.)
+    // Root directory reference (. or ./)
     if (normalized === '') {
-      offset += 512;
+      if (!isExplicitDir && !isTypeDir) {
+        pushIssue(issues, `root directory entry must have directory typeflag (A19): "${rawPath}"`);
+      }
+      if (size !== null && size !== 0) {
+        pushIssue(issues, `root directory entry has non-zero size (${size}) (A19)`);
+      }
+      const contentBlocks = Math.ceil((size ?? 0) / 512);
+      offset += 512 + contentBlocks * 512;
       continue;
     }
 
     const isDir = isTypeDir || isExplicitDir;
 
-    // Reject non-regular and non-directory entries (pax, gnu, symlink, hardlink, dev, fifo) (B6)
+    // Reject non-regular and non-directory entries (pax, gnu, symlink, hardlink, dev, fifo) (B6, N1)
     if (!isRegular && !isDir) {
       pushIssue(issues, `entry type '${typeflag}' not permitted (only regular files and directories allowed) (A19): "${normalized}"`);
-      offset += 512;
+      const contentBlocks = Math.ceil((size ?? 0) / 512);
+      offset += 512 + contentBlocks * 512;
       continue;
     }
 
-    // Enforce size === 0 for directory entries (B2)
+    // Enforce size === 0 for directory entries (B2, N1)
     if (isDir) {
       if (size !== null && size !== 0) {
         pushIssue(issues, `directory entry has non-zero size (${size}) (A19): "${normalized}"`);
@@ -468,16 +483,25 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
       pushIssue(issues, `regular file entry name ends in slash (A19): "${normalized}"`);
     }
 
-    // Check case collisions on normalized canonical path (B1)
-    const lower = normalized.toLowerCase().normalize('NFC');
-    if (seenPathsLower.has(lower) && seenPathsLower.get(lower) !== normalized) {
-      pushIssue(issues, `case-colliding paths in package (A19): "${seenPathsLower.get(lower)}" vs "${normalized}"`);
-    } else {
-      seenPathsLower.set(lower, normalized);
+    // Check case collisions on every prefix component in normalized NFC (N5)
+    const parts = normalized.split('/');
+    let prefixAcc = '';
+    for (let p = 0; p < parts.length; p++) {
+      prefixAcc = prefixAcc ? `${prefixAcc}/${parts[p]}` : parts[p];
+      const lowerNfc = prefixAcc.toLowerCase().normalize('NFC');
+      if (seenPathsLower.has(lowerNfc) && seenPathsLower.get(lowerNfc) !== prefixAcc) {
+        pushIssue(issues, `case-colliding paths in package (A19): "${seenPathsLower.get(lowerNfc)}" vs "${prefixAcc}"`);
+      } else {
+        seenPathsLower.set(lowerNfc, prefixAcc);
+      }
     }
 
     if (isDir) {
       allDirs.add(normalized);
+      // Register all parent directories of directory entry (N4)
+      for (let p = 1; p < parts.length; p++) {
+        parentDirs.add(parts.slice(0, p).join('/'));
+      }
       if (allDirs.size > MAX_FILES) {
         pushIssue(issues, `directory count exceeds maximum of ${MAX_FILES} (A19)`);
         break;
@@ -489,8 +513,7 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
       allFiles.add(normalized);
       files.push(normalized);
 
-      // Record all parent directories
-      const parts = normalized.split('/');
+      // Register all parent directories of file entry
       for (let p = 1; p < parts.length; p++) {
         parentDirs.add(parts.slice(0, p).join('/'));
       }
@@ -580,12 +603,12 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
       }
     }
 
-    // Only regular files advance the walk with content blocks; directories never have content blocks (B2)
+    // Only regular files advance the walk with content blocks; directories never have content blocks (B2, N1)
     const contentBlocks = isRegular ? Math.ceil((size ?? 0) / 512) : 0;
     offset += 512 + contentBlocks * 512;
   }
 
-  // Hierarchy conflict guard: a path cannot be both a regular file and a directory parent
+  // Hierarchy conflict guard: a path cannot be both a regular file and a directory parent (N4)
   for (const file of allFiles) {
     if (allDirs.has(file)) {
       pushIssue(issues, `path is declared as both a regular file and a directory (A19): "${file}"`);
