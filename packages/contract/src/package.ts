@@ -674,3 +674,86 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
     totalExpandedBytes,
   };
 }
+
+/**
+ * Safely extracts a validated skill package to targetDir (A19).
+ * Verifies package first via validateSkillPackage; unpacks only regular files and directories.
+ */
+export async function extractSkillPackage(
+  buffer: Buffer,
+  targetDir: string,
+): Promise<{ ok: true; files: string[]; manifest: SkillManifest; sha256: string } | { ok: false; issues: string[] }> {
+  const validated = await validateSkillPackage(buffer);
+  if (!validated.ok) {
+    return { ok: false, issues: validated.issues };
+  }
+
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const { resolve, dirname, sep } = await import('node:path');
+
+  const resolvedTarget = resolve(targetDir);
+  mkdirSync(resolvedTarget, { recursive: true, mode: 0o755 });
+
+  const issues: string[] = [];
+  const tar = gunzipSingleStream(buffer, issues);
+  if (!tar) {
+    return { ok: false, issues };
+  }
+
+  let offset = 0;
+  while (offset + 512 <= tar.length) {
+    const block = tar.subarray(offset, offset + 512);
+    let isZeroBlock = true;
+    for (let i = 0; i < 512; i++) {
+      if (block[i] !== 0) {
+        isZeroBlock = false;
+        break;
+      }
+    }
+    if (isZeroBlock) break;
+
+    let nameEnd = block.indexOf(0, 0);
+    if (nameEnd === -1 || nameEnd > 100) nameEnd = 100;
+    const namePart = block.subarray(0, nameEnd).toString('utf8');
+
+    const magic = block.subarray(257, 263).toString('ascii');
+    const isUstar = magic.startsWith('ustar');
+
+    let prefixPart = '';
+    if (isUstar) {
+      let prefixEnd = block.indexOf(0, 345);
+      if (prefixEnd === -1 || prefixEnd > 500) prefixEnd = 500;
+      prefixPart = block.subarray(345, prefixEnd).toString('utf8');
+    }
+    const rawPath = prefixPart ? `${prefixPart}/${namePart}` : namePart;
+    const typeflag = block[156];
+    const size = parseNumericField(block, 124, 12, 'size', issues) ?? 0;
+
+    offset += 512;
+    const content = tar.subarray(offset, offset + size);
+    offset += Math.ceil(size / 512) * 512;
+
+    const { normalized, isValid } = normalizeTarPath(rawPath, issues);
+    if (!isValid || !normalized) continue;
+
+    const dest = resolve(resolvedTarget, normalized);
+    if (!dest.startsWith(resolvedTarget + sep) && dest !== resolvedTarget) {
+      issues.push(`path leaves target directory: ${normalized}`);
+      return { ok: false, issues };
+    }
+
+    if (typeflag === 0x35 || normalized.endsWith('/')) {
+      mkdirSync(dest, { recursive: true, mode: 0o755 });
+    } else {
+      mkdirSync(dirname(dest), { recursive: true, mode: 0o755 });
+      writeFileSync(dest, content, { mode: 0o644 });
+    }
+  }
+
+  return {
+    ok: true,
+    files: validated.files,
+    manifest: validated.manifest,
+    sha256: validated.sha256,
+  };
+}

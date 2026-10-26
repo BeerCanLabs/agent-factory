@@ -136,11 +136,13 @@ describe('adoption: request, approve, remove, retire, and private skills (TSK-15
       const unknown = await call('/api/v1/registry/skills', 'POST', ADMIN, { repo: REPO, path: '.', commit: SHA, manifest: privateManifest('print', '0.1.0', 'ghost') });
       assert.equal(unknown.status, 422);
       assert.ok(unknown.body.reasons.some((r: string) => /agent ghost is not registered/.test(r)), JSON.stringify(unknown.body));
-      for (const token of [STRANGER, DONNA_OWNER]) {
-        const refused = await call('/api/v1/registry/skills', 'POST', token, { repo: REPO, path: '.', commit: SHA, manifest: privateManifest('print', '0.1.0', 'higgins') });
-        assert.equal(refused.status, 422, token);
-        assert.ok(refused.body.reasons.some((r: string) => /only an admin or an owner of higgins/.test(r)), JSON.stringify(refused.body));
-      }
+      // A8: stranger holds viewer and owns no agents, so skills.register is forbidden (403)
+      const strangerRefused = await call('/api/v1/registry/skills', 'POST', STRANGER, { repo: REPO, path: '.', commit: SHA, manifest: privateManifest('print', '0.1.0', 'higgins') });
+      assert.equal(strangerRefused.status, 403);
+      // Donna's owner holds skills.register (owns donna), but is not an owner of higgins (422)
+      const donnaOwnerRefused = await call('/api/v1/registry/skills', 'POST', DONNA_OWNER, { repo: REPO, path: '.', commit: SHA, manifest: privateManifest('print', '0.1.0', 'higgins') });
+      assert.equal(donnaOwnerRefused.status, 422);
+      assert.ok(donnaOwnerRefused.body.reasons.some((r: string) => /only an admin or an owner of higgins/.test(r)), JSON.stringify(donnaOwnerRefused.body));
     });
 
     it('accepts the owner of the named agent', async () => {

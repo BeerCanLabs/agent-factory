@@ -3,6 +3,8 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { createHash } from 'node:crypto';
+import zlib from 'node:zlib';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,7 +16,7 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
-import { approvedSkill, loadSkills, recordSkillChecks, setSkillUsage, skillRegistry } from './skills.js';
+import { approvedSkill, loadSkills, recordSkillChecks, setSkillUsage, skillPackageStore, skillRegistry } from './skills.js';
 
 const ADMIN = 'admin-skills-token';
 const OPERATOR = 'operator-skills-token';
@@ -30,11 +32,13 @@ async function listen(server: http.Server): Promise<number> {
   return a.port;
 }
 
-async function call(port: number, path: string, method = 'GET', token?: string, body?: unknown) {
+async function call(port: number, path: string, method = 'GET', token?: string, body?: unknown, headers: Record<string, string> = {}) {
+  const isBuffer = Buffer.isBuffer(body);
+  const defaultContentType = isBuffer ? 'application/gzip' : 'application/json';
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
     method,
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { 'content-type': defaultContentType, ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers },
+    body: body === undefined ? undefined : isBuffer ? body : JSON.stringify(body),
   });
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
@@ -64,7 +68,9 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     dataDir = mkdtempSync(join(tmpdir(), 'cp-skills-'));
     ledger = new MemoryLedger();
     state = {
-      agents: new Map(),
+      agents: new Map([
+        ['operator-agent', { id: 'operator-agent', name: 'Operator Agent', owners: ['token:operator'] } as any],
+      ]),
       registryDir: join(dataDir, 'registry'),
       ledger,
       auth: bearerAuth([
@@ -241,9 +247,14 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     assert.equal(skillRegistry(fresh).versions('discord-progress').length, 2);
   });
 
-  it('SK1 any authenticated user may register a skill (a viewer), and a folder path is normalised; it still needs approval', async () => {
+  it('A8 skills.register role gating: viewer without agent is refused (403); an agent owner may register', async () => {
     const m = { ...manifest('0.1.0'), id: 'viewer-skill' };
-    const reg = await call(port, '/api/v1/registry/skills', 'POST', VIEWER, { repo: 'https://github.com/example/skills', path: 'skills/viewer-skill/', commit: SHA1, manifest: m });
+    const refused = await call(port, '/api/v1/registry/skills', 'POST', VIEWER, { repo: 'https://github.com/example/skills', path: 'skills/viewer-skill/', commit: SHA1, manifest: m });
+    assert.equal(refused.status, 403);
+    assert.equal(refused.body.error, 'forbidden');
+    assert.equal(refused.body.required, 'admin');
+
+    const reg = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, { repo: 'https://github.com/example/skills', path: 'skills/viewer-skill/', commit: SHA1, manifest: m });
     assert.equal(reg.status, 201, JSON.stringify(reg.body));
     assert.equal(reg.body.path, 'skills/viewer-skill');
     assert.equal(reg.body.status, 'pending');
@@ -291,5 +302,198 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
     assert.deepEqual(res.body.failures, ['imports boto3 (provider SDK)']);
     assert.equal(approvedSkill(state, 'discord-progress', '2.0.0'), undefined);
     assert.ok(actions().some((e) => e.action === 'SKILL_CHECKS_FAILED' && e.actor === 'factory:admission'));
+  });
+});
+
+function createTarHeader(opts: { name: string; size?: number; mode?: number; typeflag?: string }): Buffer {
+  const block = Buffer.alloc(512, 0);
+  const name = opts.name;
+  const size = opts.size ?? 0;
+  const mode = opts.mode ?? 0o644;
+  const typeflag = opts.typeflag ?? '0';
+
+  block.write(name, 0, 100, 'utf8');
+  block.write(mode.toString(8).padStart(7, '0') + '\0', 100, 8, 'ascii');
+  block.write('0000000\0', 108, 8, 'ascii');
+  block.write('0000000\0', 116, 8, 'ascii');
+  block.write(size.toString(8).padStart(11, '0') + '\0', 124, 12, 'ascii');
+  block.write('00000000000\0', 136, 12, 'ascii');
+  block.write(typeflag, 156, 1, 'ascii');
+  block.write('ustar\0', 257, 6, 'ascii');
+  block.write('00', 263, 2, 'ascii');
+
+  let sum = 0;
+  for (let i = 0; i < 512; i++) {
+    sum += i >= 148 && i < 156 ? 0x20 : block[i];
+  }
+  block.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+  return block;
+}
+
+function makeTarball(entries: Array<{ header: Buffer; content?: Buffer }>): Buffer {
+  const blocks: Buffer[] = [];
+  for (const entry of entries) {
+    blocks.push(entry.header);
+    if (entry.content && entry.content.length > 0) {
+      blocks.push(entry.content);
+      const rem = entry.content.length % 512;
+      if (rem > 0) blocks.push(Buffer.alloc(512 - rem, 0));
+    }
+  }
+  blocks.push(Buffer.alloc(1024, 0));
+  return Buffer.concat(blocks);
+}
+
+function makeValidPackage(id = 'test-packaged-skill', version = '1.0.0'): Buffer {
+  const yaml = `spec: 1\nid: ${id}\nname: Packaged Skill\nversion: ${version}\nlanguage: python\ndescription: Test packaged skill\nentry: entry.py\n`;
+  const entry = `def tools():\n    return []\n`;
+  const test = `def test_smoke():\n    assert True\n`;
+  const yBuf = Buffer.from(yaml, 'utf8');
+  const eBuf = Buffer.from(entry, 'utf8');
+  const tBuf = Buffer.from(test, 'utf8');
+  const tar = makeTarball([
+    { header: createTarHeader({ name: 'skill.yaml', size: yBuf.length }), content: yBuf },
+    { header: createTarHeader({ name: 'entry.py', size: eBuf.length }), content: eBuf },
+    { header: createTarHeader({ name: 'test_entry.py', size: tBuf.length }), content: tBuf },
+  ]);
+  return zlib.gzipSync(tar);
+}
+
+describe('A5 raw application/gzip package upload intake, A8 role gating, and package store wiring (TSK-276 Sub-slice 2c)', { concurrency: false }, () => {
+  let cp: http.Server;
+  let port = 0;
+  let dataDir: string;
+  let state: FactoryState;
+  let ledger: MemoryLedger;
+  const actions = () => ledger.query().filter((e) => e.agentId.startsWith('skill:'));
+
+  before(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cp-pkg-upload-'));
+    ledger = new MemoryLedger();
+    state = {
+      agents: new Map([
+        ['operator-agent', { id: 'operator-agent', name: 'Operator Agent', owners: ['token:operator'] } as any],
+      ]),
+      registryDir: join(dataDir, 'registry'),
+      ledger,
+      auth: bearerAuth([
+        { name: 'admin', token: ADMIN, roles: ['admin'] },
+        { name: 'operator', token: OPERATOR, roles: ['operator'] },
+        { name: 'viewer', token: VIEWER, roles: ['viewer'] },
+      ]),
+      version: '0.1.0',
+      providers: [envProvider({})],
+      runtime: noopRuntime(),
+      runs: new MemoryRunStore(),
+      approvals: new ApprovalStore(),
+      policies: new PolicyStore(),
+      spend: new SpendTracker(),
+      gatekeeperEgressHeldSecrets: new Set(['ANTHROPIC_API_KEY']),
+      idleMs: 0,
+      idleTimers: new Map(),
+      callbacks: { allowHosts: [] } as unknown as FactoryState['callbacks'],
+      runTokens: { issue: async () => '', verify: async () => undefined } as unknown as FactoryState['runTokens'],
+      secretValues: new Set(),
+    } as FactoryState;
+    loadSkills(state, join(dataDir, 'skills'));
+    cp = createFactoryServer(state);
+    port = await listen(cp);
+  });
+
+  after(() => {
+    cp.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('accepts raw application/gzip upload, returns 201, stores in SkillPackageStore and registry, and ledgers registration (A5)', async () => {
+    const pkg = makeValidPackage('math-tools', '1.0.0');
+    const hash = createHash('sha256').update(pkg).digest('hex');
+
+    const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(res.body.id, 'math-tools');
+    assert.equal(res.body.version, '1.0.0');
+    assert.equal(res.body.packageHash, hash);
+    assert.equal(res.body.status, 'pending');
+    assert.equal(res.body.tests, 'pending-build');
+    assert.equal(res.body.registeredBy, 'token:admin');
+
+    // Content-addressed immutable store has the package
+    const store = skillPackageStore(state);
+    assert.equal(await store.has(hash), true);
+    const rec = await store.getRecord(hash);
+    assert.ok(rec);
+    assert.equal(rec.sha256, hash);
+    assert.equal(rec.quarantinedAt, undefined);
+
+    // Persisted on data volume
+    assert.ok(existsSync(join(dataDir, 'skill-packages', 'packages', `${hash}.tar.gz`)), 'package file exists on disk');
+
+    // In registry
+    const skill = skillRegistry(state).get('math-tools', '1.0.0');
+    assert.ok(skill);
+    assert.equal(skill.packageHash, hash);
+
+    // Ledgered
+    const entry = actions().find((e) => e.action === 'SKILL_REGISTERED' && e.agentId === 'skill:math-tools@1.0.0');
+    assert.ok(entry);
+    assert.equal(entry.actor, 'token:admin');
+    assert.equal(entry.payloadSha256, hash);
+  });
+
+  it('refuses package upload from viewer without agent ownership (403 forbidden, A8)', async () => {
+    const pkg = makeValidPackage('viewer-denied', '1.0.0');
+    const res = await call(port, '/api/v1/registry/skills', 'POST', VIEWER, pkg);
+    assert.equal(res.status, 403);
+    assert.equal(res.body.error, 'forbidden');
+    assert.equal(res.body.required, 'admin');
+  });
+
+  it('refuses unauthenticated package upload (401 unauthorized)', async () => {
+    const pkg = makeValidPackage('unauth-denied', '1.0.0');
+    const res = await call(port, '/api/v1/registry/skills', 'POST', undefined, pkg);
+    assert.equal(res.status, 401);
+  });
+
+  it('allows package upload from agent owner holding operator token (A8)', async () => {
+    const pkg = makeValidPackage('owner-allowed', '1.0.0');
+    const hash = createHash('sha256').update(pkg).digest('hex');
+
+    const res = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, pkg);
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(res.body.id, 'owner-allowed');
+    assert.equal(res.body.packageHash, hash);
+    assert.equal(res.body.registeredBy, 'token:operator');
+  });
+
+  it('refuses upload exceeding 5 MiB route cap (413 payload too large, A5)', async () => {
+    const oversized = Buffer.alloc(5 * 1024 * 1024 + 1024, 0);
+    const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, oversized);
+    assert.equal(res.status, 413);
+    assert.equal(res.body.error, 'payload_too_large');
+  });
+
+  it('refuses corrupted or invalid package (422 unprocessable entity, ledgered, A5, A19)', async () => {
+    const corrupt = Buffer.from('this is definitely not a valid gzip tarball');
+    const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, corrupt);
+    assert.equal(res.status, 422);
+    assert.equal(res.body.error, 'package_invalid');
+    assert.ok(Array.isArray(res.body.reasons));
+
+    const entry = actions().find((e) => e.action === 'SKILL_REFUSED' && e.agentId === 'skill:(invalid)');
+    assert.ok(entry);
+    assert.equal(entry.actor, 'token:admin');
+  });
+
+  it('refuses duplicate version upload (422 unprocessable entity, ledgered, A5)', async () => {
+    const pkg = makeValidPackage('math-tools', '1.0.0');
+    const res = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkg);
+    assert.equal(res.status, 422);
+    assert.equal(res.body.error, 'skill_refused');
+    assert.ok(res.body.reasons.some((r: string) => /already registered/.test(r)));
+
+    const entry = actions().find((e) => e.action === 'SKILL_REFUSED' && e.agentId === 'skill:math-tools@1.0.0');
+    assert.ok(entry);
+    assert.equal(entry.actor, 'token:admin');
   });
 });

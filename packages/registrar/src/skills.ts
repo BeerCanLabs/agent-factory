@@ -50,6 +50,8 @@ export type SkillVersionRecord = {
   retiredBy?: string;
   retiredAt?: string;
   retiredReason?: string;
+  /** SHA256 hex digest of the skill package tarball (.tar.gz) when registered from a package (A5). */
+  packageHash?: string;
 };
 
 /**
@@ -91,7 +93,7 @@ export type SkillSummary = {
   versions: Array<
     Pick<
       SkillVersionRecord,
-      'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'checkRun' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt' | 'reason' | 'revoked' | 'retired' | 'retiredBy' | 'retiredAt' | 'retiredReason'
+      'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'checkRun' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt' | 'reason' | 'revoked' | 'retired' | 'retiredBy' | 'retiredAt' | 'retiredReason' | 'packageHash'
     >
   >;
 };
@@ -245,6 +247,7 @@ export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummar
       ...(v.decidedBy ? { decidedBy: v.decidedBy, decidedAt: v.decidedAt } : {}),
       ...(v.reason ? { reason: v.reason } : {}),
       ...(v.revoked ? { revoked: true } : {}),
+      ...(v.packageHash ? { packageHash: v.packageHash } : {}),
       ...(v.retired ? { retired: true, ...(v.retiredBy ? { retiredBy: v.retiredBy } : {}), ...(v.retiredAt ? { retiredAt: v.retiredAt } : {}), ...(v.retiredReason ? { retiredReason: v.retiredReason } : {}) } : {}),
     })),
   };

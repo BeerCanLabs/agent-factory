@@ -68,6 +68,9 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
             sys.modules[spec.name] = module
             known = set(sys.modules)
             path_list, path_before = sys.path, list(sys.path)
+            vendor_folder = root_folder / "vendor"
+            if vendor_folder.is_dir():
+                sys.path.append(str(vendor_folder))
             sys.path.append(str(root_folder))
             try:
                 spec.loader.exec_module(module)
@@ -91,7 +94,7 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
                 sys.path = path_list
                 path_list[:] = path_before
                 importlib.invalidate_caches()
-                for place in [k for k in sys.path_importer_cache if k == str(root_folder) or k.startswith(str(root_folder) + os.sep)]:
+                for place in [k for k in sys.path_importer_cache if k == str(root_folder) or k.startswith(str(root_folder) + os.sep) or k == str(vendor_folder) or k.startswith(str(vendor_folder) + os.sep)]:
                     del sys.path_importer_cache[place]
             for t in module.tools():
                 name = str(t["name"])

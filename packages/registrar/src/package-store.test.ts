@@ -268,11 +268,23 @@ describe('SkillPackageStore Provider Abstraction & Immutability (A4, A21, S3)', 
         await store.put(hash, buf);
         assert.equal(await store.has(hash), true);
 
-        // Check that no .tmp-* files remain in packages directory
-        const files = readFileSync; // Just verifying imports
         const pkgDir = join(tmp, 'packages');
         const readdirSync = (await import('node:fs')).readdirSync;
-        const remainingTemp = readdirSync(pkgDir).filter(f => f.startsWith('.tmp-'));
+        let remainingTemp = readdirSync(pkgDir).filter(f => f.startsWith('.tmp-'));
+        assert.equal(remainingTemp.length, 0);
+
+        // Inject failure: target path in a non-existent subdirectory causes renameSync to throw
+        const buf2 = Buffer.from('another package');
+        const hash2 = sha256Of(buf2);
+        (store as any).packagePath = () => join(tmp, 'packages', 'nonexistent-dir', `${hash2}.tar.gz`);
+
+        await assert.rejects(
+          async () => store.put(hash2, buf2),
+          /ENOENT/
+        );
+
+        // Verify that temporary file was unlinked and cleaned up
+        remainingTemp = readdirSync(pkgDir).filter(f => f.startsWith('.tmp-'));
         assert.equal(remainingTemp.length, 0);
       } finally {
         rmSync(tmp, { recursive: true, force: true });

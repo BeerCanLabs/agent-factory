@@ -31,12 +31,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { SkillManifest } from '@beercanlabs/factory-contract';
+import { extractSkillPackage, type SkillManifest } from '@beercanlabs/factory-contract';
+import type { SkillPackageStore } from './package-store.js';
 
 const execFileAsync = promisify(execFile);
 
 /** One skill version to check: the pin and the manifest it was registered with. */
-export type SkillCheckRequest = { id: string; version: string; repo: string; path: string; commit: string; manifest: SkillManifest };
+export type SkillCheckRequest = { id: string; version: string; repo: string; path: string; commit: string; packageHash?: string; manifest: SkillManifest };
 
 export type SkillCheckOutcome = { passed: boolean; failures: string[] };
 
@@ -119,7 +120,7 @@ export function fakeSkillChecker(outcome: (req: SkillCheckRequest) => SkillCheck
  * the skill's folder. For development, not production: it runs the skill's tests in the control plane's own
  * environment. Runs live in memory, so a restart loses them (re-run the checks).
  */
-export function localSkillChecker(opts: { python?: string; git?: string; timeoutMs?: number } = {}): SkillChecker {
+export function localSkillChecker(opts: { python?: string; git?: string; timeoutMs?: number; packageStore?: SkillPackageStore } = {}): SkillChecker {
   const runs = new Map<string, Promise<SkillCheckOutcome>>();
   const python = opts.python ?? 'python3';
   const git = opts.git ?? 'git';
@@ -131,13 +132,24 @@ export function localSkillChecker(opts: { python?: string; git?: string; timeout
     const env = { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', GIT_TERMINAL_PROMPT: '0' };
     try {
       const repoDir = join(work, 'repo');
-      try {
-        await execFileAsync(git, ['clone', '--no-checkout', '--quiet', '--', req.repo, repoDir], { env, timeout });
-        await execFileAsync(git, ['-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--detach', req.commit], { cwd: repoDir, env, timeout });
-        const { stdout } = await execFileAsync(git, ['rev-parse', 'HEAD'], { cwd: repoDir, env, encoding: 'utf8' });
-        if (stdout.trim() !== req.commit) throw new Error('checked out a different commit');
-      } catch {
-        return { passed: false, failures: [`source: could not fetch ${req.repo} at ${req.commit}`] };
+      if (req.packageHash && opts.packageStore) {
+        const pkgBuf = await opts.packageStore.get(req.packageHash);
+        if (!pkgBuf) {
+          return { passed: false, failures: [`source: package ${req.packageHash} not found in store`] };
+        }
+        const extracted = await extractSkillPackage(pkgBuf, repoDir);
+        if (!extracted.ok) {
+          return { passed: false, failures: extracted.issues.map((i) => `package: ${i}`) };
+        }
+      } else {
+        try {
+          await execFileAsync(git, ['clone', '--no-checkout', '--quiet', '--', req.repo, repoDir], { env, timeout });
+          await execFileAsync(git, ['-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--detach', req.commit], { cwd: repoDir, env, timeout });
+          const { stdout } = await execFileAsync(git, ['rev-parse', 'HEAD'], { cwd: repoDir, env, encoding: 'utf8' });
+          if (stdout.trim() !== req.commit) throw new Error('checked out a different commit');
+        } catch {
+          return { passed: false, failures: [`source: could not fetch ${req.repo} at ${req.commit}`] };
+        }
       }
       const script = join(work, 'skill_check.py');
       const out = join(work, 'result.json');
@@ -250,7 +262,14 @@ def read_text(root, rel):
     return data.decode('utf-8', errors='replace')
 
 
+def is_vendor(rel):
+    parts = rel.split('/')
+    return 'vendor' in parts[:-1] or rel.startswith('vendor/')
+
+
 def is_test(rel):
+    if is_vendor(rel):
+        return False
     parts = rel.split('/')
     name = parts[-1]
     return any(p in ('test', 'tests', 'testing') for p in parts[:-1]) or name.startswith('test_') or name.endswith('_test.py') or name == 'conftest.py'
@@ -342,7 +361,7 @@ def check_python(root, files, failures):
             failures.append('build: %s:%s does not parse as Python (%s)' % (rel, e.lineno, e.msg))
             continue
         docs = docstring_nodes(tree)
-        exempt = is_test(rel) or is_doc(rel)
+        exempt = is_test(rel) or is_doc(rel) or is_vendor(rel)
         for node in ast.walk(tree):
             for name in module_of(node):
                 sdk = sdk_of(name)
@@ -358,7 +377,7 @@ def check_python(root, files, failures):
 def check_other_hosts(root, files, failures):
     for rel in files:
         name = rel.split('/')[-1]
-        if rel.endswith('.py') or name in METADATA_FILES or is_test(rel) or is_doc(rel):
+        if rel.endswith('.py') or name in METADATA_FILES or is_test(rel) or is_doc(rel) or is_vendor(rel):
             continue
         if os.path.splitext(name)[1].lower() not in CONFIG_EXT:
             continue
@@ -573,6 +592,9 @@ def run_python_tests(root, files, venv, failures):
     pytest = has_pytest_config(root, files)
     python = sys.executable
     env = test_env()
+    vendor_dir = os.path.join(root, 'vendor')
+    if os.path.isdir(vendor_dir):
+        env['PYTHONPATH'] = vendor_dir + (os.pathsep + env['PYTHONPATH'] if 'PYTHONPATH' in env else '')
     if reqs or pytest:
         import venv as venvlib
         venvlib.create(venv, with_pip=True, clear=True)

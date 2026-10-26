@@ -446,7 +446,14 @@ phases:
             return data.decode('utf-8', errors='replace')
 
 
+        def is_vendor(rel):
+            parts = rel.split('/')
+            return 'vendor' in parts[:-1] or rel.startswith('vendor/')
+
+
         def is_test(rel):
+            if is_vendor(rel):
+                return False
             parts = rel.split('/')
             name = parts[-1]
             return any(p in ('test', 'tests', 'testing') for p in parts[:-1]) or name.startswith('test_') or name.endswith('_test.py') or name == 'conftest.py'
@@ -538,7 +545,7 @@ phases:
                     failures.append('build: %s:%s does not parse as Python (%s)' % (rel, e.lineno, e.msg))
                     continue
                 docs = docstring_nodes(tree)
-                exempt = is_test(rel) or is_doc(rel)
+                exempt = is_test(rel) or is_doc(rel) or is_vendor(rel)
                 for node in ast.walk(tree):
                     for name in module_of(node):
                         sdk = sdk_of(name)
@@ -554,7 +561,7 @@ phases:
         def check_other_hosts(root, files, failures):
             for rel in files:
                 name = rel.split('/')[-1]
-                if rel.endswith('.py') or name in METADATA_FILES or is_test(rel) or is_doc(rel):
+                if rel.endswith('.py') or name in METADATA_FILES or is_test(rel) or is_doc(rel) or is_vendor(rel):
                     continue
                 if os.path.splitext(name)[1].lower() not in CONFIG_EXT:
                     continue
@@ -769,6 +776,9 @@ phases:
             pytest = has_pytest_config(root, files)
             python = sys.executable
             env = test_env()
+            vendor_dir = os.path.join(root, 'vendor')
+            if os.path.isdir(vendor_dir):
+                env['PYTHONPATH'] = vendor_dir + (os.pathsep + env['PYTHONPATH'] if 'PYTHONPATH' in env else '')
             if reqs or pytest:
                 import venv as venvlib
                 venvlib.create(venv, with_pip=True, clear=True)

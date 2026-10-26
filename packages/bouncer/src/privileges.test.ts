@@ -18,7 +18,7 @@ const CENSUS: Record<string, Role> = {
   'spend.read': 'viewer',
   'approvals.read': 'viewer',
   'skills.read': 'viewer',
-  'skills.register': 'viewer',
+  'skills.register': 'admin',
   'systems.read': 'viewer',
   'systems.propose': 'viewer',
   'connections.read': 'viewer',
@@ -168,5 +168,16 @@ describe('authorize', () => {
     assert.ok(!authorize({ principal: principal(['operator']), privilege: 'approvals.decide' }).allowed);
     assert.ok(!authorize({ principal: principal(['ingest']), privilege: 'agents.read' }).allowed);
     assert.ok(!authorize({ principal: principal([]), privilege: 'agents.read' }).allowed);
+  });
+
+  it('skills.register is removed from viewer, operator and approver; held by admin and agent owners (A8)', () => {
+    assert.deepEqual(authorize({ principal: principal(['viewer']), privilege: 'skills.register' }), { allowed: false, required: 'admin' });
+    assert.deepEqual(authorize({ principal: principal(['operator']), privilege: 'skills.register' }), { allowed: false, required: 'admin' });
+    assert.deepEqual(authorize({ principal: principal(['approver']), privilege: 'skills.register' }), { allowed: false, required: 'admin' });
+    assert.ok(authorize({ principal: principal(['admin']), privilege: 'skills.register' }).allowed);
+
+    // Caller with no admin role who owns an agent is allowed
+    assert.ok(authorize({ principal: principal(['viewer']), privilege: 'skills.register', resource: { ownsAnyAgent: true } }).allowed);
+    assert.ok(authorize({ principal: principal([]), privilege: 'skills.register', resource: { ownsAnyAgent: true } }).allowed);
   });
 });
