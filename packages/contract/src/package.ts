@@ -729,3 +729,137 @@ export async function extractSkillPackage(
     sha256: validated.sha256,
   };
 }
+
+function createTarHeader(name: string, size: number, typeflag: '0' | '5', mode: number): Buffer {
+  const header = Buffer.alloc(512, 0);
+
+  let prefix = '';
+  let fileName = name;
+
+  if (Buffer.byteLength(name, 'utf8') > 100) {
+    const slashIdx = name.lastIndexOf('/', 155);
+    if (slashIdx === -1 || slashIdx > 155 || name.length - slashIdx - 1 > 100) {
+      throw new Error(`path too long for ustar format: ${name}`);
+    }
+    prefix = name.slice(0, slashIdx);
+    fileName = name.slice(slashIdx + 1);
+  }
+
+  header.write(fileName, 0, 100, 'utf8');
+  header.write(mode.toString(8).padStart(7, '0') + '\0', 100, 8, 'latin1');
+  header.write('0000000\0', 108, 8, 'latin1'); // uid
+  header.write('0000000\0', 116, 8, 'latin1'); // gid
+  header.write(size.toString(8).padStart(11, '0') + '\0', 124, 12, 'latin1');
+  header.write('00000000000\0', 136, 12, 'latin1'); // mtime
+  header.fill(0x20, 148, 156); // chksum spaces
+  header.write(typeflag, 156, 1, 'latin1');
+  header.write('ustar\0', 257, 6, 'latin1');
+  header.write('00', 263, 2, 'latin1');
+  if (prefix) {
+    header.write(prefix, 345, 155, 'utf8');
+  }
+
+  let sum = 0;
+  for (let i = 0; i < 512; i++) {
+    sum += header[i];
+  }
+  const chksumStr = sum.toString(8).padStart(6, '0') + '\0 ';
+  header.write(chksumStr, 148, 8, 'latin1');
+
+  return header;
+}
+
+/**
+ * Packs a skill directory into a conforming application/gzip package (A1, A6, A19).
+ * Verifies with validateSkillPackage before returning.
+ */
+export async function packSkillPackage(
+  sourceDir: string,
+): Promise<
+  | { ok: true; buffer: Buffer; sha256: string; manifest: SkillManifest; files: string[] }
+  | { ok: false; issues: string[] }
+> {
+  const { readdirSync, statSync, readFileSync } = await import('node:fs');
+  const { resolve, relative } = await import('node:path');
+
+  const root = resolve(sourceDir);
+  let st;
+  try {
+    st = statSync(root);
+  } catch (err: any) {
+    return { ok: false, issues: [`could not read source directory: ${err?.message || String(err)}`] };
+  }
+  if (!st.isDirectory()) {
+    return { ok: false, issues: [`${sourceDir} is not a directory`] };
+  }
+
+  const blocks: Buffer[] = [];
+
+  function collect(currentDir: string): { relativePath: string; fullPath: string; isDir: boolean }[] {
+    const entries = readdirSync(currentDir, { withFileTypes: true });
+    const result: { relativePath: string; fullPath: string; isDir: boolean }[] = [];
+    for (const ent of entries) {
+      if (ent.name === '.git' || ent.name === '__pycache__' || ent.name === '.DS_Store') continue;
+      const full = resolve(currentDir, ent.name);
+      const rel = relative(root, full).replace(/\\/g, '/');
+      if (ent.isDirectory()) {
+        result.push({ relativePath: rel + '/', fullPath: full, isDir: true });
+        result.push(...collect(full));
+      } else if (ent.isFile()) {
+        result.push({ relativePath: rel, fullPath: full, isDir: false });
+      }
+    }
+    return result;
+  }
+
+  let items: { relativePath: string; fullPath: string; isDir: boolean }[];
+  try {
+    items = collect(root);
+  } catch (err: any) {
+    return { ok: false, issues: [`could not read source directory: ${err?.message || String(err)}`] };
+  }
+
+  items.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+
+  for (const item of items) {
+    if (item.isDir) {
+      try {
+        const header = createTarHeader(item.relativePath, 0, '5', 0o755);
+        blocks.push(header);
+      } catch (err: any) {
+        return { ok: false, issues: [err?.message || String(err)] };
+      }
+    } else {
+      const content = readFileSync(item.fullPath);
+      try {
+        const header = createTarHeader(item.relativePath, content.length, '0', 0o644);
+        blocks.push(header);
+        blocks.push(content);
+        const remainder = content.length % 512;
+        if (remainder > 0) {
+          blocks.push(Buffer.alloc(512 - remainder, 0));
+        }
+      } catch (err: any) {
+        return { ok: false, issues: [err?.message || String(err)] };
+      }
+    }
+  }
+
+  blocks.push(Buffer.alloc(1024, 0));
+
+  const tarBuffer = Buffer.concat(blocks);
+  const gzBuffer = zlib.gzipSync(tarBuffer);
+
+  const validation = await validateSkillPackage(gzBuffer);
+  if (!validation.ok) {
+    return { ok: false, issues: validation.issues };
+  }
+
+  return {
+    ok: true,
+    buffer: gzBuffer,
+    sha256: validation.sha256,
+    manifest: validation.manifest,
+    files: validation.files,
+  };
+}

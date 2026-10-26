@@ -4,6 +4,7 @@ import zlib from 'node:zlib';
 import {
   validateSkillPackage,
   extractSkillPackage,
+  packSkillPackage,
   MAX_PACKAGE_SIZE,
   MAX_EXPANDED_SIZE,
   MAX_FILE_SIZE,
@@ -901,6 +902,30 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
         assert.equal(existsSync(join(outDir, 'symlink_escape')), false);
       } finally {
         rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('packSkillPackage (A1, A6, A19)', () => {
+    it('packs examples/skills/e2e-ping successfully and validates', async () => {
+      const { fileURLToPath } = await import('node:url');
+      const fixtureDir = fileURLToPath(new URL('../../../examples/skills/e2e-ping', import.meta.url));
+      const res = await packSkillPackage(fixtureDir);
+      assert.equal(res.ok, true);
+      if (res.ok) {
+        assert.equal(res.manifest.id, 'e2e-ping');
+        assert.equal(res.manifest.version, '1.0.0');
+        assert.ok(res.sha256.length === 64);
+        assert.ok(res.files.includes('skill.yaml'));
+        assert.ok(res.files.includes('e2e_ping.py'));
+      }
+    });
+
+    it('refuses when sourceDir does not exist or is not a directory', async () => {
+      const res = await packSkillPackage('/path/that/definitely/does/not/exist/999');
+      assert.equal(res.ok, false);
+      if (!res.ok) {
+        assert.ok(res.issues.some((i) => i.includes('could not read source directory')));
       }
     });
   });

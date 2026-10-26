@@ -13,7 +13,7 @@ const MAIN = fileURLToPath(new URL('./main.ts', import.meta.url));
 /** Runs the real entry point with its own HOME, as the installer does. */
 async function factory(home: string, args: string[], env: Record<string, string> = {}): Promise<{ code: number; out: string; err: string }> {
   return new Promise((resolve) => {
-    execFile(process.execPath, ['--import', 'tsx', MAIN, ...args], { env: { PATH: process.env.PATH ?? '', HOME: home, XDG_CONFIG_HOME: join(home, '.config'), ...env }, encoding: 'utf8' }, (error, out, err) => {
+    execFile(process.execPath, ['--import', 'tsx', MAIN, ...args], { env: { PATH: process.env.PATH ?? '', HOME: home, XDG_CONFIG_HOME: join(home, '.config'), FACTORY_CLI_STORE: 'file', ...env }, encoding: 'utf8' }, (error, out, err) => {
       resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0, out, err });
     });
   });
@@ -212,5 +212,20 @@ describe('§6.17 CL11 commands as subcommands, for scripts', () => {
     } finally {
       await srv.close();
     }
+  });
+
+  it('factory skill pack and register (A6)', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'cli-skill-'));
+    const fixtureDir = fileURLToPath(new URL('../../../examples/skills/e2e-ping', import.meta.url));
+    const outFile = join(home, 'e2e-ping-1.0.0.tar.gz');
+    const res = await factory(home, ['skill', 'pack', fixtureDir, '--out', outFile]);
+    assert.equal(res.code, 0, res.err);
+    assert.match(res.out, /Packed e2e-ping@1\.0\.0/);
+    const { existsSync } = await import('node:fs');
+    assert.ok(existsSync(outFile));
+
+    const bad = await factory(home, ['skill', 'pack']);
+    assert.equal(bad.code, 1);
+    assert.match(bad.err, /usage: factory skill pack <dir>/);
   });
 });

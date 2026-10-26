@@ -26,6 +26,8 @@ const USAGE = `factory ${version}
   factory whoami                  show who you are signed in as
   factory config get              show the settings
   factory config set <key> <value>  keys: address, auth (auto|cloudflare-access|oidc), theme, manager
+  factory skill pack <dir>        package a skill directory into a conforming .tar.gz
+  factory skill register <dir>    pack and register a skill package with the factory
   factory --manager <id>          use a manager agent with another id for this run
   factory --version
 
@@ -161,6 +163,66 @@ async function main(argv: string[]): Promise<number> {
     const me = await new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh) }).whoami();
     await writeAll(process.stdout, `${me.actor} (${me.roles.join(', ') || 'no role'}) at ${instance}\n`);
     return 0;
+  }
+
+  if (cmd === 'skill') {
+    const sub = arg;
+    if (sub === 'pack') {
+      const dir = argv[2];
+      if (!dir) throw new Error('usage: factory skill pack <dir> [--out <file>]');
+      const { packSkillPackage } = await import('@beercanlabs/factory-contract');
+      const res = await packSkillPackage(dir);
+      if (!res.ok) {
+        process.stderr.write(`package invalid:\n${res.issues.map((i) => `  - ${i}`).join('\n')}\n`);
+        return 1;
+      }
+      const outIdx = argv.indexOf('--out');
+      const outFile = outIdx >= 0 && argv[outIdx + 1] ? argv[outIdx + 1] : `${res.manifest.id}-${res.manifest.version}.tar.gz`;
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(outFile, res.buffer);
+      await writeAll(process.stdout, `Packed ${res.manifest.id}@${res.manifest.version} (${res.files.length} files, ${res.buffer.length} bytes, SHA-256: ${res.sha256}) -> ${outFile}\n`);
+      return 0;
+    }
+    if (sub === 'register') {
+      const dir = argv[2];
+      if (!dir) throw new Error('usage: factory skill register <dir>');
+      const { packSkillPackage } = await import('@beercanlabs/factory-contract');
+      const { statSync, readFileSync } = await import('node:fs');
+      let buffer: Buffer;
+      let manifest: { id: string; version: string } | undefined;
+      const st = statSync(dir);
+      if (st.isDirectory()) {
+        const packRes = await packSkillPackage(dir);
+        if (!packRes.ok) {
+          process.stderr.write(`package invalid:\n${packRes.issues.map((i) => `  - ${i}`).join('\n')}\n`);
+          return 1;
+        }
+        buffer = packRes.buffer;
+        manifest = packRes.manifest;
+      } else {
+        buffer = readFileSync(dir);
+      }
+      const instance = await instanceInUse();
+      const store = defaultStore();
+      const kind = await knownMethod(instance, (await loadConfig()).auth, store);
+      if (!kind) throw new Error(`not signed in to ${instance}. Run: factory login ${instance}`);
+      const session = makeSession(kind, instance, { store });
+      const client = new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh) });
+      const r = await client.uploadSkillPackage(buffer);
+      if (r.status === 201) {
+        const b = r.body as { skill?: { id: string; version: string } };
+        const id = b?.skill?.id ?? manifest?.id;
+        const version = b?.skill?.version ?? manifest?.version;
+        await writeAll(process.stdout, `Registered ${id}@${version} (HTTP 201 Created)\n`);
+        return 0;
+      } else {
+        const b = r.body as { error?: string; reasons?: string[] };
+        const reasons = b?.reasons?.length ? b.reasons.join('\n  - ') : (b?.error ?? JSON.stringify(b));
+        process.stderr.write(`Registration failed (HTTP ${r.status}):\n  - ${reasons}\n`);
+        return 1;
+      }
+    }
+    throw new Error('usage: factory skill pack <dir> | factory skill register <dir>');
   }
 
   if (cmd && isCommand(cmd)) return await runOneCommand(argv);

@@ -21,7 +21,7 @@ export class ApiError extends Error {
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
   headers.set('Accept', 'application/json');
-  if (options.body && !(options.body instanceof FormData)) {
+  if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
 
@@ -352,6 +352,15 @@ export const factoryApi = {
   /** No manifest: the control plane reads skill.yaml at the pin itself, and resolves a branch or tag to its SHA. */
   async registerSkill(payload: { repo: string; path: string; commit: string }): Promise<SkillVersion> {
     return request<SkillVersion>('/registry/skills', { method: 'POST', body: JSON.stringify(payload) });
+  },
+
+  /** Uploads a raw skill package (.tar.gz, up to 5 MiB) via POST /api/v1/registry/skills (A5, A6). */
+  async uploadSkillPackage(file: Blob | ArrayBuffer): Promise<SkillVersion> {
+    return request<SkillVersion>('/registry/skills', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/gzip' },
+      body: file,
+    });
   },
 
   async approveSkill(id: string, version: string, reason?: string): Promise<SkillVersion> {
