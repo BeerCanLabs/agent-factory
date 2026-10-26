@@ -602,6 +602,7 @@ phases:
         def normalize(value):
             if isinstance(value, dict):
                 out = dict((k, normalize(v)) for k, v in value.items() if k != 'spec')
+                if out.get('visibility') == 'public': del out['visibility']
                 return dict((k, v) for k, v in out.items() if v not in (None, [], {}, ''))
             if isinstance(value, list): return [normalize(v) for v in value]
             return value
@@ -717,8 +718,8 @@ phases:
             mkdir -p "skill-repo/$SKILL_PATH"
             PKG_FILE="/tmp/$PACKAGE_HASH.tar.gz"
             if [ -n "$PACKAGE_STORE_URI" ] && [[ "$PACKAGE_STORE_URI" =~ ^s3:// ]]; then
-              aws s3 cp "$${PACKAGE_STORE_URI%/}/packages/$PACKAGE_HASH.tar.gz" "$PKG_FILE" 2>/dev/null || \
-              aws s3 cp "$${PACKAGE_STORE_URI%/}/$PACKAGE_HASH.tar.gz" "$PKG_FILE" 2>/dev/null || true
+              aws s3 cp "$${PACKAGE_STORE_URI%/}/packages/$PACKAGE_HASH.tar.gz" "$PKG_FILE" || \
+              aws s3 cp "$${PACKAGE_STORE_URI%/}/$PACKAGE_HASH.tar.gz" "$PKG_FILE" || true
             fi
             if [ -f "$PKG_FILE" ] && [ "$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$PKG_FILE")" = "$PACKAGE_HASH" ]; then
               if ! tar -xzf "$PKG_FILE" -C "skill-repo/$SKILL_PATH"; then

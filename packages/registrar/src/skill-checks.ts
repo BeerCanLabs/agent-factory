@@ -407,6 +407,7 @@ def load_yaml(text):
 def normalize(value):
     if isinstance(value, dict):
         out = dict((k, normalize(v)) for k, v in value.items() if k != 'spec')
+        if out.get('visibility') == 'public': del out['visibility']
         return dict((k, v) for k, v in out.items() if v not in (None, [], {}, ''))
     if isinstance(value, list): return [normalize(v) for v in value]
     return value
