@@ -47,15 +47,22 @@ export type PackageFileContent = {
   content: string;
 };
 
+export const CANONICAL_RECIPIENT_RE =
+  /^(token:[a-z0-9._-]+|cloudflare:[^\s@]+@[^\s@]+\.[^\s@]+|oidc:[^\s@]+@[^\s@]+\.[^\s@]+)$/i;
+
 /**
- * Validates a transfer recipient identifier (e.g. email or actor).
- * Must be a non-empty string up to 255 chars.
+ * Validates a transfer recipient identifier in canonical form (A24, Archie round 2 Finding B).
+ * Must be in canonical form: token:<name>, cloudflare:<email>, or oidc:<email>.
  */
 export function validateTransferRecipient(recipient: unknown): string {
   if (typeof recipient !== 'string' || !recipient.trim() || recipient.length > 255) {
     throw new Error(`transfer recipient ${JSON.stringify(recipient)} is invalid: must be a non-empty string up to 255 characters`);
   }
-  return recipient.trim().toLowerCase();
+  const clean = recipient.trim().toLowerCase();
+  if (!CANONICAL_RECIPIENT_RE.test(clean)) {
+    throw new Error(`transfer recipient ${JSON.stringify(recipient)} is invalid: must be in canonical form token:<name>, cloudflare:<email>, or oidc:<email>`);
+  }
+  return clean;
 }
 
 /**

@@ -186,7 +186,7 @@ describe('skill-owner and groups', () => {
 
   it('human owner does not hold fleet-wide or agent-scoped privileges by skill ownership', () => {
     const res = onSkill('cloudflare:alice@example.com');
-    for (const p of ['policy.set', 'skills.decide', 'agents.wake', 'groups.manage'] as Privilege[]) {
+    for (const p of ['policy.set', 'skills.decide', 'agents.wake', 'groups.manage', 'skills.retire.force'] as Privilege[]) {
       assert.equal(allowed(alice, p, res), false, p);
     }
   });

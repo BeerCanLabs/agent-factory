@@ -303,30 +303,43 @@ export function actorIsAdmin(state: FactoryState, actor: string, knownRoles?: re
     }
   }
   const clean = actor.toLowerCase();
-  if (clean === 'token:admin' || clean === 'admin') return true;
+  // Archie Round 2 Finding B: match only canonical forms token:<name>, cloudflare:<email>, oidc:<email>.
+  // Drop bare admin and tokenName === 'admin'.
+  if (!clean.startsWith('token:') && !clean.startsWith('cloudflare:') && !clean.startsWith('oidc:')) {
+    return false;
+  }
+
+  if (clean.startsWith('token:')) {
+    const tokenName = clean.slice(6);
+    const rawTokens = process.env.FACTORY_TOKENS;
+    if (rawTokens) {
+      try {
+        const list = JSON.parse(rawTokens);
+        if (Array.isArray(list)) {
+          const match = list.find((t: any) => t && typeof t.name === 'string' && t.name.toLowerCase() === tokenName);
+          if (match && Array.isArray(match.roles)) {
+            for (const r of match.roles) {
+              if (r === 'admin') return true;
+            }
+          }
+        }
+      } catch {}
+    }
+    return false;
+  }
+
+  const email = clean.startsWith('cloudflare:') ? clean.slice(11) : clean.slice(5);
   const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
     .split(',')
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
-  for (const email of adminEmails) {
-    if (clean === email || clean === `cloudflare:${email}` || clean === `oidc:${email}`) return true;
+  if (adminEmails.includes(email)) return true;
+
+  if (state.identityLinks) {
+    const matching = state.identityLinks.list().filter((l) => l.actor.toLowerCase() === clean);
+    if (matching.some((l) => l.roles?.includes('admin'))) return true;
   }
-  const tokenName = clean.startsWith('token:') ? clean.slice(6) : clean;
-  if (tokenName === 'admin') return true;
-  const rawTokens = process.env.FACTORY_TOKENS;
-  if (rawTokens) {
-    try {
-      const list = JSON.parse(rawTokens);
-      if (Array.isArray(list)) {
-        const match = list.find((t: any) => t && t.name === tokenName);
-        if (match && Array.isArray(match.roles)) {
-          for (const r of match.roles) {
-            if (r === 'admin') return true;
-          }
-        }
-      }
-    } catch {}
-  }
+
   return false;
 }
 
@@ -407,8 +420,8 @@ export async function requirePrivilege(
 ): Promise<Principal | null> {
   let result = await identify(req, state);
   if (!result.ok) {
-    // A11: An agent presenting a run token may register a skill or add a version on behalf of its human requester
-    if ((privilege === 'skills.register' || privilege === 'skills.version.add') && state.runTokens && req.headers.authorization?.startsWith('Bearer ')) {
+    // A11: An agent presenting a run token may register a skill on behalf of its human requester
+    if (privilege === 'skills.register' && state.runTokens && req.headers.authorization?.startsWith('Bearer ')) {
       const token = bearerOf(req);
       const verdict = await verifyRun({
         tokens: state.runTokens,

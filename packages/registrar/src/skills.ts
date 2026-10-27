@@ -58,6 +58,14 @@ export type SkillVersionRecord = {
   groupId?: string;
   /** Pending ownership transfer (A24). */
   transferPending?: { recipient: string; requestedAt: string; requestedBy: string };
+  /** H8, H9: whether the skill is published for adoption by non-owners. */
+  published?: boolean;
+  publishedAt?: string;
+  publishedBy?: string;
+  publishRequested?: { requestedAt: string; requestedBy: string; notes?: string };
+  unpublishedAt?: string;
+  unpublishedBy?: string;
+  unpublishedReason?: string;
 };
 
 /**
@@ -93,6 +101,13 @@ export type SkillSummary = {
   userOwner?: string;
   groupId?: string;
   transferPending?: { recipient: string; requestedAt: string; requestedBy: string };
+  published?: boolean;
+  publishedAt?: string;
+  publishedBy?: string;
+  publishRequested?: { requestedAt: string; requestedBy: string; notes?: string };
+  unpublishedAt?: string;
+  unpublishedBy?: string;
+  unpublishedReason?: string;
   /** SK6: every version is retired. */
   retired: boolean;
   /** The highest approved version (semver precedence), or null when none is approved yet. */
@@ -102,7 +117,35 @@ export type SkillSummary = {
   versions: Array<
     Pick<
       SkillVersionRecord,
-      'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'checkRun' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt' | 'reason' | 'revoked' | 'retired' | 'retiredBy' | 'retiredAt' | 'retiredReason' | 'packageHash' | 'owner' | 'groupId' | 'transferPending'
+      | 'version'
+      | 'status'
+      | 'repo'
+      | 'path'
+      | 'commit'
+      | 'tests'
+      | 'checks'
+      | 'checkRun'
+      | 'registeredBy'
+      | 'registeredAt'
+      | 'decidedBy'
+      | 'decidedAt'
+      | 'reason'
+      | 'revoked'
+      | 'retired'
+      | 'retiredBy'
+      | 'retiredAt'
+      | 'retiredReason'
+      | 'packageHash'
+      | 'owner'
+      | 'groupId'
+      | 'transferPending'
+      | 'published'
+      | 'publishedAt'
+      | 'publishedBy'
+      | 'publishRequested'
+      | 'unpublishedAt'
+      | 'unpublishedBy'
+      | 'unpublishedReason'
     >
   >;
 };
@@ -203,6 +246,18 @@ export class SkillRegistry {
       }
     }
     const existing = this.versions(rec.id);
+    if (existing.length > 0) {
+      // H9: New versions of a published skill are available for adoption automatically.
+      if (existing.some((v) => v.published)) {
+        rec.published = true;
+        rec.publishedAt = existing.find((v) => v.publishedAt)?.publishedAt ?? new Date().toISOString();
+        rec.publishedBy = existing.find((v) => v.publishedBy)?.publishedBy ?? 'system:auto-publish';
+      }
+      const existingOwner = existing.find((v) => v.owner)?.owner;
+      if (existingOwner && !rec.owner) rec.owner = existingOwner;
+      const existingGroup = existing.find((v) => v.groupId)?.groupId;
+      if (existingGroup && !rec.groupId) rec.groupId = existingGroup;
+    }
     if (validate) {
       const check = validate(existing);
       if (!check.ok) {
@@ -323,6 +378,62 @@ export class SkillRegistry {
     return changed;
   }
 
+  /** Requests publication of a skill (H8, A8). */
+  requestPublish(id: string, requestedBy: string, notes?: string, now: Date = new Date()): SkillVersionRecord[] {
+    const changed: SkillVersionRecord[] = [];
+    const publishRequested = { requestedAt: now.toISOString(), requestedBy, ...(notes ? { notes } : {}) };
+    for (const rec of this.versions(id)) {
+      const next: SkillVersionRecord = { ...rec, publishRequested };
+      this.save(next);
+      changed.push(structuredClone(next));
+    }
+    return changed;
+  }
+
+  /** Decides a pending publication request (H8, H9, A8). */
+  decidePublish(
+    id: string,
+    decision: 'approve' | 'reject',
+    decidedBy: string,
+    reason?: string,
+    now: Date = new Date(),
+  ): { ok: boolean; status: 'published' | 'unpublished'; changed: SkillVersionRecord[] } {
+    const changed: SkillVersionRecord[] = [];
+    const isApprove = decision === 'approve';
+    for (const rec of this.versions(id)) {
+      const next: SkillVersionRecord = { ...rec };
+      delete next.publishRequested;
+      if (isApprove) {
+        next.published = true;
+        next.publishedAt = now.toISOString();
+        next.publishedBy = decidedBy;
+        delete next.unpublishedAt;
+        delete next.unpublishedBy;
+        delete next.unpublishedReason;
+      }
+      this.save(next);
+      changed.push(structuredClone(next));
+    }
+    return { ok: true, status: isApprove ? 'published' : 'unpublished', changed };
+  }
+
+  /** Unpublishes a skill (A13). Stops new adoptions by non-owners. */
+  unpublish(id: string, unpublishedBy: string, reason?: string, now: Date = new Date()): SkillVersionRecord[] {
+    const changed: SkillVersionRecord[] = [];
+    for (const rec of this.versions(id)) {
+      const next: SkillVersionRecord = {
+        ...rec,
+        published: false,
+        unpublishedAt: now.toISOString(),
+        unpublishedBy,
+        ...(reason ? { unpublishedReason: reason } : {}),
+      };
+      this.save(next);
+      changed.push(structuredClone(next));
+    }
+    return changed;
+  }
+
   /** Every version of a skill, oldest to newest by semver precedence. */
   versions(id: string): SkillVersionRecord[] {
     return [...(this.skills.get(id)?.values() ?? [])].sort((a, b) => compareSemver(a.version, b.version)).map((r) => structuredClone(r));
@@ -332,7 +443,7 @@ export class SkillRegistry {
 export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummary | undefined {
   const versions = registry.versions(id);
   if (!versions.length) return undefined;
-  const approved = versions.filter((v) => v.status === 'approved' && !v.retired);
+  const approved = versions.filter((v) => (v.status === 'approved' || v.tests === 'passed') && !v.retired);
   const latestApproved = approved.at(-1);
   const shown = latestApproved ?? versions.at(-1)!;
   const humanOwner = versions.find((v) => v.owner)?.owner;
@@ -340,15 +451,30 @@ export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummar
   const owner = legacyAgentOwner ?? humanOwner;
   const groupId = versions.find((v) => v.groupId)?.groupId;
   const transferPending = versions.find((v) => v.transferPending)?.transferPending;
+  const hasPublishedField = versions.some((v) => v.published !== undefined);
+  const published = versions.some((v) => v.published);
+  const publishedAt = versions.find((v) => v.publishedAt)?.publishedAt;
+  const publishedBy = versions.find((v) => v.publishedBy)?.publishedBy;
+  const publishRequested = versions.find((v) => v.publishRequested)?.publishRequested;
+  const unpublishedAt = versions.find((v) => v.unpublishedAt)?.unpublishedAt;
+  const unpublishedBy = versions.find((v) => v.unpublishedBy)?.unpublishedBy;
+  const unpublishedReason = versions.find((v) => v.unpublishedReason)?.unpublishedReason;
   return {
     id,
     name: shown.manifest.name,
     description: shown.manifest.description,
-    visibility: visibilityOf(versions[0]),
+    visibility: published ? 'public' : visibilityOf(versions[0]),
     ...(owner ? { owner } : {}),
     ...(humanOwner ? { userOwner: humanOwner } : {}),
     ...(groupId ? { groupId } : {}),
     ...(transferPending ? { transferPending } : {}),
+    ...(hasPublishedField ? { published } : {}),
+    ...(publishedAt ? { publishedAt } : {}),
+    ...(publishedBy ? { publishedBy } : {}),
+    ...(publishRequested ? { publishRequested } : {}),
+    ...(unpublishedAt ? { unpublishedAt } : {}),
+    ...(unpublishedBy ? { unpublishedBy } : {}),
+    ...(unpublishedReason ? { unpublishedReason } : {}),
     retired: versions.every((v) => v.retired === true),
     latestApproved: latestApproved?.version ?? null,
     requires: shown.manifest.requires,
@@ -366,6 +492,13 @@ export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummar
       ...(v.owner ? { owner: v.owner } : {}),
       ...(v.groupId ? { groupId: v.groupId } : {}),
       ...(v.transferPending ? { transferPending: v.transferPending } : {}),
+      ...(v.published ? { published: v.published } : {}),
+      ...(v.publishedAt ? { publishedAt: v.publishedAt } : {}),
+      ...(v.publishedBy ? { publishedBy: v.publishedBy } : {}),
+      ...(v.publishRequested ? { publishRequested: v.publishRequested } : {}),
+      ...(v.unpublishedAt ? { unpublishedAt: v.unpublishedAt } : {}),
+      ...(v.unpublishedBy ? { unpublishedBy: v.unpublishedBy } : {}),
+      ...(v.unpublishedReason ? { unpublishedReason: v.unpublishedReason } : {}),
       ...(v.decidedBy ? { decidedBy: v.decidedBy, decidedAt: v.decidedAt } : {}),
       ...(v.reason ? { reason: v.reason } : {}),
       ...(v.revoked ? { revoked: true } : {}),
@@ -378,42 +511,99 @@ export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummar
 export type AdoptRefusal = 'not_found' | 'skill_private' | 'skill_retired' | 'skill_not_approved';
 export type AdoptCheck = { ok: true; record: SkillVersionRecord } | { ok: false; error: AdoptRefusal; message: string };
 
+export type AdoptContext = {
+  agentOwners?: readonly string[];
+  userGroups?: readonly string[];
+};
+
 /**
- * SK1, SK3: may this agent be given this skill version? Only an approved, unretired version, and a private skill only
- * for its owner agent. Pure: it asks the registry and decides nothing about who is asking (that is the Bouncer's).
+ * H7, H8, H10, A7, A12: may this agent be given this skill version?
+ * Checks guardrails (tests passed or legacy approved, unretired),
+ * and adoption rule (published, owner agent, owner human user, or assigned group member).
  */
-export function canAdopt(registry: SkillRegistry, agentId: string, id: string, version: string): AdoptCheck {
+export function canAdopt(
+  registry: SkillRegistry,
+  agentId: string,
+  id: string,
+  version: string,
+  ctx?: AdoptContext,
+): AdoptCheck {
   const rec = registry.get(id, version);
   if (!rec) return { ok: false, error: 'not_found', message: `skill ${id}@${version} is not registered` };
-  const owner = ownerOf(rec);
-  if (visibilityOf(rec) === 'private' && owner !== agentId) {
-    return { ok: false, error: 'skill_private', message: `skill ${id} is private to ${owner ?? 'another agent'}; agent ${agentId} cannot adopt it (SK3)` };
-  }
   if (rec.retired) return { ok: false, error: 'skill_retired', message: `skill ${id} is retired (SK6)` };
-  if (rec.status !== 'approved') return { ok: false, error: 'skill_not_approved', message: `skill ${id}@${version} is ${rec.status}; only an approved version can be adopted (SK1)` };
-  return { ok: true, record: rec };
+
+  // Guardrails gate (A7): tests passed, or legacy approved status
+  const passed = rec.tests === 'passed' || rec.status === 'approved';
+  if (!passed) {
+    return { ok: false, error: 'skill_not_approved', message: `skill ${id}@${version} is ${rec.status}; only a version that passed checks can be adopted (A7)` };
+  }
+
+  // Adoption eligibility (A12, H7, H8, H10):
+  // 1. Published skill is adoptable by any agent (H8)
+  const legacyAgentOwner = ownerOf(rec);
+  const isLegacyPrivate = visibilityOf(rec) === 'private';
+  const isPublished =
+    rec.published === true ||
+    (!isLegacyPrivate &&
+      rec.published !== false &&
+      (rec.status === 'approved'
+        ? !rec.owner || rec.owner.startsWith('token:admin') || rec.owner === 'admin'
+        : !rec.owner));
+  if (isPublished) return { ok: true, record: rec };
+
+  // 2. Legacy agent-owned private skill (SK1, SK3)
+  if (legacyAgentOwner && legacyAgentOwner === agentId) return { ok: true, record: rec };
+
+  // 3. Human user owner matches one of the agent's owners (H7, A12)
+  const humanOwner = rec.owner;
+  if (humanOwner && ctx?.agentOwners) {
+    const isOwner = ctx.agentOwners.some((o) => o.toLowerCase() === humanOwner.toLowerCase());
+    if (isOwner) return { ok: true, record: rec };
+  }
+
+  // 4. Assigned to a group the agent's owner belongs to (H5, A12)
+  if (rec.groupId && ctx?.userGroups) {
+    const isGroupMember = ctx.userGroups.some((g) => g.toLowerCase() === rec.groupId!.toLowerCase());
+    if (isGroupMember) return { ok: true, record: rec };
+  }
+
+  return {
+    ok: false,
+    error: 'skill_private',
+    message: `skill ${id} is private; agent ${agentId} is not owned by the skill owner or assigned group members, and the skill is not published (A12, H8)`,
+  };
 }
 
-export type AvailableSkill = { id: string; name: string; description: string; visibility: SkillVisibility; owner?: string; version: string; requires: SkillRequires };
+export type AvailableSkill = {
+  id: string;
+  name: string;
+  description: string;
+  visibility: SkillVisibility;
+  owner?: string;
+  version: string;
+  requires: SkillRequires;
+  published?: boolean;
+};
 
 /**
- * The skills an agent could be given now: the latest approved, unretired version of each public skill, and of each
- * private skill the agent owns. A private skill of another agent is never listed (SK3).
+ * The skills an agent could be given now: the latest usable, unretired version of each published skill,
+ * and of each skill adoptable by the agent under A12.
  */
-export function availableTo(registry: SkillRegistry, agentId: string): AvailableSkill[] {
+export function availableTo(registry: SkillRegistry, agentId: string, ctx?: AdoptContext): AvailableSkill[] {
   const out: AvailableSkill[] = [];
   for (const id of registry.ids()) {
-    const latest = registry.versions(id).filter((v) => v.status === 'approved' && !v.retired).at(-1);
-    if (!latest || !canAdopt(registry, agentId, id, latest.version).ok) continue;
-    const owner = ownerOf(latest);
+    const latest = registry.versions(id).filter((v) => (v.status === 'approved' || v.tests === 'passed') && !v.retired).at(-1);
+    if (!latest || !canAdopt(registry, agentId, id, latest.version, ctx).ok) continue;
+    const owner = ownerOf(latest) ?? latest.owner;
     out.push({
       id,
       name: latest.manifest.name,
       description: latest.manifest.description,
-      visibility: visibilityOf(latest),
+      visibility: latest.published ? 'public' : visibilityOf(latest),
       ...(owner ? { owner } : {}),
       version: latest.version,
       requires: latest.manifest.requires,
+      ...(latest.published ? { published: true } : {}),
     });
   }
   return out;

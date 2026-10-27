@@ -4,9 +4,16 @@ import { validateTransferRecipient, validateAssignGroupInput } from './skill-own
 
 describe('skill ownership contract', () => {
   describe('validateTransferRecipient', () => {
-    it('accepts valid recipient identifier and normalizes case', () => {
-      assert.equal(validateTransferRecipient('Alice@Example.com'), 'alice@example.com');
-      assert.equal(validateTransferRecipient('user:bob'), 'user:bob');
+    it('accepts valid canonical recipient identifier and normalizes case', () => {
+      assert.equal(validateTransferRecipient('Cloudflare:Alice@Example.com'), 'cloudflare:alice@example.com');
+      assert.equal(validateTransferRecipient('TOKEN:admin-token'), 'token:admin-token');
+      assert.equal(validateTransferRecipient('oidc:user@company.com'), 'oidc:user@company.com');
+    });
+
+    it('rejects bare names and non-canonical recipients', () => {
+      assert.throws(() => validateTransferRecipient('admin'), /must be in canonical form/);
+      assert.throws(() => validateTransferRecipient('alice@example.com'), /must be in canonical form/);
+      assert.throws(() => validateTransferRecipient('user:bob'), /must be in canonical form/);
     });
 
     it('rejects invalid recipient', () => {
