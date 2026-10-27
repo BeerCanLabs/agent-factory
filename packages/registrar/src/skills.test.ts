@@ -443,5 +443,52 @@ describe('who may adopt what (SK1, SK3)', () => {
       assert.equal(summarizeSkill(r, 's3')?.groupId, undefined);
       assert.equal(r.get('s3', '1.0.0')?.groupId, undefined);
     });
+
+    it('manages publishing, auto-publishing of future versions, and unpublishing (H8, H9, A12, A13)', () => {
+      const r = new SkillRegistry();
+      r.save(record('1.0.0', { id: 's4', owner: 'alice', tests: 'passed', manifest: { ...record('1.0.0').manifest, visibility: 'private' } }));
+
+      // Initially private and unpublished
+      assert.equal(summarizeSkill(r, 's4')?.published, undefined);
+      const nonOwnerAdopt1 = canAdopt(r, 'agent-bob', 's4', '1.0.0', { agentOwners: ['bob'] });
+      assert.equal(nonOwnerAdopt1.ok, false);
+
+      // Owner adopt succeeds
+      const ownerAdopt = canAdopt(r, 'agent-alice', 's4', '1.0.0', { agentOwners: ['alice'] });
+      assert.equal(ownerAdopt.ok, true);
+
+      // Request publish
+      r.requestPublish('s4', 'alice', 'ready for team use');
+      assert.equal(summarizeSkill(r, 's4')?.publishRequested?.requestedBy, 'alice');
+      assert.equal(summarizeSkill(r, 's4')?.publishRequested?.notes, 'ready for team use');
+
+      // Decide publish: approve
+      const dec = r.decidePublish('s4', 'approve', 'admin', 'looks good');
+      assert.equal(dec.ok, true);
+      assert.equal(dec.status, 'published');
+      assert.equal(summarizeSkill(r, 's4')?.published, true);
+      assert.equal(summarizeSkill(r, 's4')?.publishRequested, undefined);
+
+      // Non-owner can now adopt
+      const nonOwnerAdopt2 = canAdopt(r, 'agent-bob', 's4', '1.0.0', { agentOwners: ['bob'] });
+      assert.equal(nonOwnerAdopt2.ok, true);
+
+      // H9: New versions of published skill automatically inherit published: true
+      r.saveIfAbsent(record('1.1.0', { id: 's4', tests: 'passed', manifest: { ...record('1.1.0').manifest, visibility: 'private' } }));
+      assert.equal(r.get('s4', '1.1.0')?.published, true);
+      assert.equal(canAdopt(r, 'agent-bob', 's4', '1.1.0', { agentOwners: ['bob'] }).ok, true);
+
+      // Unpublish
+      r.unpublish('s4', 'alice', 'deprecated');
+      assert.equal(summarizeSkill(r, 's4')?.published, false);
+      assert.equal(summarizeSkill(r, 's4')?.unpublishedReason, 'deprecated');
+      assert.equal(canAdopt(r, 'agent-bob', 's4', '1.1.0', { agentOwners: ['bob'] }).ok, false);
+      // Owner still adopts
+      assert.equal(canAdopt(r, 'agent-alice', 's4', '1.1.0', { agentOwners: ['alice'] }).ok, true);
+
+      // Group adoption: assigned group allows group members to adopt unpublished skill
+      r.assignGroup('s4', 'team-alpha');
+      assert.equal(canAdopt(r, 'agent-bob', 's4', '1.1.0', { agentOwners: ['bob'], userGroups: ['team-alpha'] }).ok, true);
+    });
   });
 });

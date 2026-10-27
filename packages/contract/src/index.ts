@@ -110,3 +110,4 @@ export type { AccessRole, EffectiveAccess, RouteAccess, SkillAccess } from './ac
 export * from './package.js';
 export * from './groups.js';
 export * from './skill-ownership.js';
+export * from './skill-publishing.js';

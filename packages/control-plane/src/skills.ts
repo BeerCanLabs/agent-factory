@@ -43,7 +43,13 @@ import {
   validateSkillPackage,
   validateTransferRecipient,
   validateAssignGroupInput,
+  validatePublishRequestInput,
+  validatePublishDecisionInput,
+  validateUnpublishInput,
   type SkillManifest,
+  type SkillPublishRequestInput,
+  type SkillPublishDecisionInput,
+  type SkillUnpublishInput,
 } from '@beercanlabs/factory-contract';
 import { authorize } from '@beercanlabs/factory-bouncer';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
@@ -947,7 +953,11 @@ const isRetiring = (state: FactoryState, id: string): boolean => retiring.get(st
 /** `canAdopt`, and also refuses a skill that is being retired (SK6). */
 function adoptCheck(state: FactoryState, agentId: string, id: string, version: string): ReturnType<typeof canAdopt> {
   if (isRetiring(state, id)) return { ok: false, error: 'skill_retired', message: `skill ${id} is being retired (SK6)` };
-  return canAdopt(skillRegistry(state), agentId, id, version);
+  const agentOwners = ownersOf(state, agentId);
+  const userGroups = state.groups
+    ? agentOwners.flatMap((o) => state.groups!.getUserRoles(o).length > 0 ? state.groups!.listUserGroups(o).map((g) => g.id) : [])
+    : [];
+  return canAdopt(skillRegistry(state), agentId, id, version, { agentOwners, userGroups });
 }
 
 const REFUSAL_STATUS = {
@@ -1058,12 +1068,17 @@ async function agentSkillsList(state: FactoryState, req: http.IncomingMessage, r
     return !summary || skillVisibleTo(summary, viewer);
   };
   const mine = skillsOf(state.configs, adoptionStore(state), agentId);
+  const agentOwners = ownersOf(state, agentId);
+  const userGroups = state.groups
+    ? agentOwners.flatMap((o) => state.groups!.getUserRoles(o).length > 0 ? state.groups!.listUserGroups(o).map((g) => g.id) : [])
+    : [];
+  const adoptCtx = { agentOwners, userGroups };
   json(res, 200, {
     agentId,
     adopted: mine.adopted.filter((a) => visible(a.id)),
     requests: mine.requests.filter((r) => visible(r.skillId)),
     revoked: mine.revoked.filter((r) => visible(r.skillId)),
-    available: availableTo(registry, agentId).filter((s) => visible(s.id)),
+    available: availableTo(registry, agentId, adoptCtx).filter((s) => visible(s.id)),
   });
 }
 
@@ -1191,13 +1206,29 @@ async function removeAdoption(state: FactoryState, req: http.IncomingMessage, re
  * before it looks for adopters again; it stops when a pass finds none.
  */
 async function retireSkill(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
-  const principal = await requirePrivilege(req, res, state, 'skills.retire');
-  if (!principal) return;
+  const registry = skillRegistry(state);
+  const versions = registry.versions(id);
+  const firstRec = versions[0];
+  const currentOwner = firstRec ? (firstRec.owner ?? firstRec.registeredBy) : undefined;
+  const currentGroupId = firstRec?.groupId;
+
   const body = await readJson(req);
   const reason = reasonOf(res, body);
   if (reason === null) return;
-  const registry = skillRegistry(state);
-  const versions = registry.versions(id);
+
+  // A8, A13: Retirement is of the whole skill, by the owner, a group member with skills.retire, or an admin.
+  // An admin's force (skills.retire.force) pauses adopters, strips the skill from their configurations and redeploys them.
+  let principal: Principal | null;
+  if (body.force === true) {
+    principal = await requirePrivilege(req, res, state, 'skills.retire.force');
+  } else {
+    principal = await requirePrivilege(req, res, state, 'skills.retire', {
+      skillId: id,
+      skillOwner: currentOwner,
+      groupId: currentGroupId,
+    });
+  }
+  if (!principal) return;
   if (!versions.length) return json(res, 404, { error: 'not_found', id });
   if (versions.every((v) => v.retired)) return json(res, 409, { error: 'already_retired', id });
   // Configured by an approved adoption (the configuration pins it), and, wider, running it (the deployed image has it).
@@ -1389,6 +1420,26 @@ async function cancelTransfer(state: FactoryState, req: http.IncomingMessage, re
   }
 }
 
+function isOwnerKnownInFactory(state: FactoryState, actor: string): boolean {
+  if (actorIsAdmin(state, actor)) return true;
+  if (checkOwnsAnyAgent(state, actor)) return true;
+  if (state.groups && state.groups.getUserRoles(actor).length > 0) return true;
+  if (state.identityLinks) {
+    const clean = actor.toLowerCase();
+    if (state.identityLinks.list().some((l) => l.actor.toLowerCase() === clean)) return true;
+  }
+  if (actor.toLowerCase().startsWith('token:')) {
+    const tokenName = actor.toLowerCase().slice(6);
+    try {
+      const list = JSON.parse(process.env.FACTORY_TOKENS ?? '[]');
+      if (Array.isArray(list) && list.some((t: any) => t && typeof t.name === 'string' && t.name.toLowerCase() === tokenName)) {
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
 /**
  * Admin transfer override without acceptance (A24): When owner rights have been revoked.
  */
@@ -1414,6 +1465,16 @@ async function adminTransfer(state: FactoryState, req: http.IncomingMessage, res
   }
 
   // A24: owner rights revoked means owner has lost skills.register right or account is disabled.
+  // Archie Round 2 Finding A: when a person's rights cannot be determined from what the factory stores,
+  // refuse the admin override (409, "cannot determine the owner's rights").
+  // Note: recipients and requesters who are admins only by external OIDC roles claim are not recognized by the factory store.
+  if (!isOwnerKnownInFactory(state, currentOwner)) {
+    return json(res, 409, {
+      error: 'owner_rights_indeterminate',
+      message: "cannot determine the owner's rights",
+    });
+  }
+
   const ownerHoldsRegister = userHoldsSkillsRegister(state, currentOwner);
   if (ownerHoldsRegister) {
     return json(res, 409, {
@@ -1632,12 +1693,147 @@ async function getPackageFile(state: FactoryState, req: http.IncomingMessage, re
   });
 }
 
+/**
+ * Requests publishing of a skill (H8, A8).
+ * Scoped to owner or group member with skill-owner role.
+ */
+async function requestPublish(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
+  const registry = skillRegistry(state);
+  const versions = registry.versions(id);
+  const first = versions[0];
+  const currentOwner = first ? (first.owner ?? first.registeredBy) : undefined;
+  const currentGroupId = first?.groupId;
+
+  const principal = await requirePrivilege(req, res, state, 'skills.publish.request', {
+    skillId: id,
+    skillOwner: currentOwner,
+    groupId: currentGroupId,
+  });
+  if (!principal) return;
+  if (!versions.length) return json(res, 404, { error: 'not_found', id });
+
+  const body = await readJson(req);
+  let input: SkillPublishRequestInput;
+  try {
+    input = validatePublishRequestInput(body);
+  } catch (err: any) {
+    return json(res, 400, { error: 'invalid_request', message: err.message });
+  }
+
+  if (versions.some((v) => v.published)) {
+    return json(res, 409, { error: 'already_published', id, message: `skill ${id} is already published (H8)` });
+  }
+
+  if (versions.some((v) => v.publishRequested)) {
+    return json(res, 409, { error: 'publish_already_requested', id, message: `publication of skill ${id} has already been requested` });
+  }
+
+  try {
+    const changed = registry.requestPublish(id, principal.actor, input.notes);
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: ledgerKey(id),
+      type: 'action',
+      action: 'SKILL_PUBLISH_REQUESTED',
+      actor: principal.actor,
+      payloadSha256: payloadHash({ id, requestedBy: principal.actor, notes: input.notes }),
+    });
+    json(res, 200, { id, publishRequested: true, ...(input.notes ? { notes: input.notes } : {}), updatedVersions: changed.map((v) => v.version) });
+  } catch (err: any) {
+    json(res, 500, { error: 'persist_failed', message: err.message });
+  }
+}
+
+/**
+ * Decides a pending publication request (H8, H9, A8).
+ * Admin-only (`skills.decide`).
+ */
+async function decidePublish(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
+  const principal = await requirePrivilege(req, res, state, 'skills.decide');
+  if (!principal) return;
+
+  const registry = skillRegistry(state);
+  const versions = registry.versions(id);
+  if (!versions.length) return json(res, 404, { error: 'not_found', id });
+
+  const body = await readJson(req);
+  let input: SkillPublishDecisionInput;
+  try {
+    input = validatePublishDecisionInput(body);
+  } catch (err: any) {
+    return json(res, 400, { error: 'invalid_decision', message: err.message });
+  }
+
+  try {
+    const outcome = registry.decidePublish(id, input.decision, principal.actor, input.reason);
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: ledgerKey(id),
+      type: 'action',
+      action: input.decision === 'approve' ? 'SKILL_PUBLISHED' : 'SKILL_PUBLISH_REJECTED',
+      actor: principal.actor,
+      payloadSha256: payloadHash({ id, decision: input.decision, reason: input.reason }),
+    });
+    json(res, 200, { id, status: outcome.status, ...(input.reason ? { reason: input.reason } : {}) });
+  } catch (err: any) {
+    json(res, 500, { error: 'persist_failed', message: err.message });
+  }
+}
+
+/**
+ * Unpublishes a skill (A13).
+ * Owner, group member with skill-owner, or admin (`skills.unpublish`).
+ */
+async function unpublishSkill(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
+  const registry = skillRegistry(state);
+  const versions = registry.versions(id);
+  const first = versions[0];
+  const currentOwner = first ? (first.owner ?? first.registeredBy) : undefined;
+  const currentGroupId = first?.groupId;
+
+  const principal = await requirePrivilege(req, res, state, 'skills.unpublish', {
+    skillId: id,
+    skillOwner: currentOwner,
+    groupId: currentGroupId,
+  });
+  if (!principal) return;
+  if (!versions.length) return json(res, 404, { error: 'not_found', id });
+
+  const body = await readJson(req);
+  let input: SkillUnpublishInput;
+  try {
+    input = validateUnpublishInput(body);
+  } catch (err: any) {
+    return json(res, 400, { error: 'invalid_request', message: err.message });
+  }
+
+  if (!versions.some((v) => v.published)) {
+    return json(res, 409, { error: 'skill_not_published', id, message: `skill ${id} is not published` });
+  }
+
+  try {
+    const changed = registry.unpublish(id, principal.actor, input.reason);
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: ledgerKey(id),
+      type: 'action',
+      action: 'SKILL_UNPUBLISHED',
+      actor: principal.actor,
+      payloadSha256: payloadHash({ id, reason: input.reason }),
+    });
+    json(res, 200, { id, published: false, ...(input.reason ? { reason: input.reason } : {}), updatedVersions: changed.map((v) => v.version) });
+  } catch (err: any) {
+    json(res, 500, { error: 'persist_failed', message: err.message });
+  }
+}
+
 const CHECKS = /^\/api\/v1\/registry\/skills\/([^/]+)\/versions\/([^/]+)\/checks$/;
 const DECISION = /^\/api\/v1\/registry\/skills\/([^/]+)\/versions\/([^/]+)\/(approve|reject)$/;
 const ONE_SKILL = /^\/api\/v1\/skills\/([^/]+)$/;
 const ONE_VERSION = /^\/api\/v1\/skills\/([^/]+)\/versions\/([^/]+)$/;
 const ADOPTERS = /^\/api\/v1\/skills\/([^/]+)\/adopters$/;
 const RETIRE = /^\/api\/v1\/registry\/skills\/([^/]+)\/retire$/;
+const SKILL_RETIRE_DIRECT = /^\/api\/v1\/skills\/([^/]+)\/retire$/;
 const AGENT_SKILLS = /^\/api\/v1\/agents\/([^/]+)\/skills$/;
 const AGENT_SKILL = /^\/api\/v1\/agents\/([^/]+)\/skills\/([^/]+)$/;
 const ADOPTION_DECISION = /^\/api\/v1\/agents\/([^/]+)\/skills\/([^/]+)\/adoption\/(approve|reject)$/;
@@ -1646,6 +1842,9 @@ const SKILL_TRANSFER_ACCEPT = /^\/api\/v1\/skills\/([^/]+)\/transfer\/accept$/;
 const SKILL_TRANSFER_CANCEL = /^\/api\/v1\/skills\/([^/]+)\/transfer\/cancel$/;
 const SKILL_TRANSFER_ADMIN = /^\/api\/v1\/skills\/([^/]+)\/transfer\/admin$/;
 const SKILL_GROUP = /^\/api\/v1\/skills\/([^/]+)\/group$/;
+const SKILL_PUBLISH = /^\/api\/v1\/skills\/([^/]+)\/publish$/;
+const SKILL_PUBLISH_DECIDE = /^\/api\/v1\/skills\/([^/]+)\/publish\/decide$/;
+const SKILL_UNPUBLISH = /^\/api\/v1\/skills\/([^/]+)\/unpublish$/;
 const PACKAGE_FILES = /^\/api\/v1\/skills\/([^/]+)\/versions\/([^/]+)\/package\/files$/;
 const PACKAGE_FILE = /^\/api\/v1\/skills\/([^/]+)\/versions\/([^/]+)\/package\/file$/;
 
@@ -1735,6 +1934,30 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
   }
   if (groupAssign && req.method === 'DELETE') {
     await unassignSkillGroup(state, req, res, decode(groupAssign[1]));
+    return true;
+  }
+
+  const publish = path.match(SKILL_PUBLISH);
+  if (publish && req.method === 'POST') {
+    await requestPublish(state, req, res, decode(publish[1]));
+    return true;
+  }
+
+  const publishDecide = path.match(SKILL_PUBLISH_DECIDE);
+  if (publishDecide && req.method === 'POST') {
+    await decidePublish(state, req, res, decode(publishDecide[1]));
+    return true;
+  }
+
+  const unpublish = path.match(SKILL_UNPUBLISH);
+  if (unpublish && req.method === 'POST') {
+    await unpublishSkill(state, req, res, decode(unpublish[1]));
+    return true;
+  }
+
+  const retireDirect = path.match(SKILL_RETIRE_DIRECT);
+  if (retireDirect && req.method === 'POST') {
+    await retireSkill(state, req, res, decode(retireDirect[1]));
     return true;
   }
 

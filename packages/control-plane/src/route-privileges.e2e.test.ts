@@ -203,6 +203,11 @@ const ROUTES: RouteRow[] = [
   { method: 'DELETE', path: `/api/v1/skills/${SKILL}/group`, privilege: 'skills.assign', role: 'admin' },
   { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1/package/files`, privilege: 'skills.package.read', role: 'admin' },
   { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1/package/file`, privilege: 'skills.package.read', role: 'admin' },
+  // TSK-278 (Slice 4): Publishing workflow and retirement (H8, H9, A8, A13)
+  { method: 'POST', path: `/api/v1/skills/${SKILL}/publish`, privilege: 'skills.publish.request', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/skills/${SKILL}/publish/decide`, privilege: 'skills.decide', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/skills/${SKILL}/unpublish`, privilege: 'skills.unpublish', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/skills/${SKILL}/retire`, privilege: 'skills.retire.force', role: 'admin', body: { force: true } },
 ];
 
 async function listen(server: http.Server): Promise<number> {

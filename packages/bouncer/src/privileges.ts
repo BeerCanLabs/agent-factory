@@ -97,6 +97,10 @@ export const PRIVILEGES = [
   'skills.assign',
   'skills.package.read',
   'skills.transfer',
+  // TSK-278 (Slice 4): Publishing workflow and retirement (H8, H9, A8, A9, A13)
+  'skills.publish.request',
+  'skills.unpublish',
+  'skills.retire.force',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -290,6 +294,9 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'skills.assign',
     'skills.package.read',
     'skills.transfer',
+    'skills.publish.request',
+    'skills.unpublish',
+    'skills.retire.force',
   ],
 };
 
@@ -336,6 +343,8 @@ export const SKILL_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
   'skills.assign',
   'skills.package.read',
   'skills.transfer',
+  'skills.publish.request',
+  'skills.unpublish',
 ]);
 
 /**
@@ -375,12 +384,14 @@ export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> 
   requester: ['approvals.decide'],
   /**
    * A9: Built-in `skill-owner` role. It carries `skills.version.add`, `skills.retire`, `skills.assign`,
-   * and `skills.package.read`, and not `skills.transfer`.
+   * `skills.publish.request`, `skills.unpublish`, and `skills.package.read`, and not `skills.transfer`.
    */
   'skill-owner': [
     'skills.version.add',
     'skills.retire',
     'skills.assign',
+    'skills.publish.request',
+    'skills.unpublish',
     'skills.package.read',
   ],
 };

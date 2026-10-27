@@ -111,6 +111,7 @@ describe('SK1 SK2 skill registry: register, admit, approve per version, catalog 
 
   after(() => {
     delete process.env.FACTORY_SKILL_CHECKER;
+    delete process.env.FACTORY_TOKENS;
     cp.close();
     rmSync(dataDir, { recursive: true, force: true });
   });
@@ -422,6 +423,7 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
 
   after(() => {
     delete process.env.FACTORY_SKILL_CHECKER;
+    delete process.env.FACTORY_TOKENS;
     cp.close();
     rmSync(dataDir, { recursive: true, force: true });
   });
@@ -807,6 +809,13 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
 
   before(async () => {
     process.env.FACTORY_SKILL_CHECKER = 'local';
+    process.env.FACTORY_TOKENS = JSON.stringify([
+      { name: 'admin', token: ADMIN, roles: ['admin'] },
+      { name: 'alice', token: ALICE, roles: ['viewer'] },
+      { name: 'bob', token: BOB, roles: ['viewer'] },
+      { name: 'charlie', token: CHARLIE, roles: ['viewer'] },
+      { name: 'agent:helper', token: HELPER_AGENT, roles: ['operator'] },
+    ]);
     dataDir = mkdtempSync(join(tmpdir(), 'cp-slice3b-'));
     ledger = new MemoryLedger();
     state = {
@@ -849,6 +858,7 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
 
   after(() => {
     delete process.env.FACTORY_SKILL_CHECKER;
+    delete process.env.FACTORY_TOKENS;
     cp.close();
     rmSync(dataDir, { recursive: true, force: true });
   });
@@ -1217,5 +1227,224 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
     });
     assert.equal(adminRes.status, 201);
     assert.equal(adminRes.body.owner, 'token:alice');
+  });
+});
+
+describe('TSK-278 Slice 4: Publishing workflow, adoption rules, retirement, and hardening', { concurrency: false }, () => {
+  let cp: http.Server;
+  let port = 0;
+  let dataDir: string;
+  let state: FactoryState;
+  let ledger: MemoryLedger;
+
+  const ADMIN = 'admin-token-s4';
+  const ALICE = 'alice-token-s4';
+  const BOB = 'bob-token-s4';
+  const CHARLIE = 'charlie-token-s4';
+
+  before(async () => {
+    process.env.FACTORY_SKILL_CHECKER = 'local';
+    process.env.FACTORY_TOKENS = JSON.stringify([
+      { name: 'admin', token: ADMIN, roles: ['admin'] },
+      { name: 'alice', token: ALICE, roles: ['viewer'] },
+      { name: 'bob', token: BOB, roles: ['viewer'] },
+      { name: 'charlie', token: CHARLIE, roles: ['viewer'] },
+    ]);
+    dataDir = mkdtempSync(join(tmpdir(), 'cp-slice4-'));
+    ledger = new MemoryLedger();
+    state = {
+      agents: new Map([
+        ['alice-agent', { id: 'alice-agent', name: 'Alice Agent', owners: ['token:alice'], deployedSkills: [] } as any],
+        ['bob-agent', { id: 'bob-agent', name: 'Bob Agent', owners: ['token:bob'], deployedSkills: [] } as any],
+      ]),
+      registryDir: join(dataDir, 'registry'),
+      ledger,
+      auth: bearerAuth([
+        { name: 'admin', token: ADMIN, roles: ['admin'] },
+        { name: 'alice', token: ALICE, roles: ['viewer'] },
+        { name: 'bob', token: BOB, roles: ['viewer'] },
+        { name: 'charlie', token: CHARLIE, roles: ['viewer'] },
+      ]),
+      version: '0.1.0',
+      providers: [envProvider({})],
+      runtime: noopRuntime(),
+      runs: new MemoryRunStore(),
+      approvals: new ApprovalStore(),
+      policies: new PolicyStore(),
+      spend: new SpendTracker(),
+      gatekeeperEgressHeldSecrets: new Set(['ANTHROPIC_API_KEY']),
+      idleMs: 0,
+      idleTimers: new Map(),
+      secretValues: new Set<string>(),
+      configs: new VersionedConfigStore(memoryBackend()),
+      groups: await GroupStore.open(join(dataDir, 'groups')),
+    } as unknown as FactoryState;
+
+    await state.configs.put({ agentId: 'alice-agent', source: {}, skills: [], policy: null, owners: ['token:alice'] }, { updatedBy: 'test', reason: 'init' });
+    await state.configs.put({ agentId: 'bob-agent', source: {}, skills: [], policy: null, owners: ['token:bob'] }, { updatedBy: 'test', reason: 'init' });
+    loadSkills(state, join(dataDir, 'skills'));
+    cp = createFactoryServer(state);
+    port = await listen(cp);
+  });
+
+  after(() => {
+    delete process.env.FACTORY_SKILL_CHECKER;
+    delete process.env.FACTORY_TOKENS;
+    cp.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('publishing request, rejection, and approval with future version auto-publishing (H8, H9, A8)', async () => {
+    // 1. Alice registers pub-skill 1.0.0
+    const pkg1 = makeValidPackage('pub-skill', '1.0.0');
+    const regRes = await call(port, '/api/v1/registry/skills', 'POST', ALICE, pkg1);
+    assert.equal(regRes.status, 201);
+    assert.equal(regRes.body.owner, 'token:alice');
+    assert.equal(regRes.body.published, undefined);
+
+    // 2. Bob (non-owner) requests publication -> 403
+    const bobPub = await call(port, '/api/v1/skills/pub-skill/publish', 'POST', BOB, { notes: 'Bob wants this' });
+    assert.equal(bobPub.status, 403);
+
+    // 3. Alice requests publication -> 200
+    const alicePub = await call(port, '/api/v1/skills/pub-skill/publish', 'POST', ALICE, { notes: 'Ready for all' });
+    assert.equal(alicePub.status, 200);
+    assert.equal(alicePub.body.publishRequested, true);
+
+    // 4. Duplicate publish request -> 409
+    const dupPub = await call(port, '/api/v1/skills/pub-skill/publish', 'POST', ALICE, { notes: 'Again' });
+    assert.equal(dupPub.status, 409);
+    assert.equal(dupPub.body.error, 'publish_already_requested');
+
+    // 5. Non-admin calls decide -> 403
+    const bobDecide = await call(port, '/api/v1/skills/pub-skill/publish/decide', 'POST', BOB, { decision: 'approve' });
+    assert.equal(bobDecide.status, 403);
+
+    // 6. Admin rejects first with reason
+    const adminReject = await call(port, '/api/v1/skills/pub-skill/publish/decide', 'POST', ADMIN, { decision: 'reject', reason: 'Needs better docs' });
+    assert.equal(adminReject.status, 200);
+    assert.equal(adminReject.body.status, 'unpublished');
+
+    // 7. Alice re-requests, and Admin approves
+    const alicePub2 = await call(port, '/api/v1/skills/pub-skill/publish', 'POST', ALICE, { notes: 'Updated docs' });
+    assert.equal(alicePub2.status, 200);
+
+    const adminApprove = await call(port, '/api/v1/skills/pub-skill/publish/decide', 'POST', ADMIN, { decision: 'approve' });
+    assert.equal(adminApprove.status, 200);
+    assert.equal(adminApprove.body.status, 'published');
+
+    const rows = ledger.query().filter((e) => e.action === 'SKILL_PUBLISHED');
+    assert.ok(rows.length >= 1);
+
+    // 8. Auto-publish future versions (H9): Alice registers 1.1.0 -> automatically published
+    const pkg2 = makeValidPackage('pub-skill', '1.1.0');
+    const regRes2 = await call(port, '/api/v1/registry/skills', 'POST', ALICE, pkg2);
+    assert.equal(regRes2.status, 201);
+    assert.equal(regRes2.body.published, true);
+  });
+
+  it('adoption rules: private skills restricted to owner/group; published skills adoptable by all (H7, A7, A12, H10)', async () => {
+    // 1. Alice registers private-skill 1.0.0
+    const pkg = makeValidPackage('private-skill', '1.0.0');
+    const regRes = await call(port, '/api/v1/registry/skills', 'POST', ALICE, pkg);
+    assert.equal(regRes.status, 201);
+
+    // Mark check passed so guardrails pass
+    recordSkillChecks(state, 'private-skill', '1.0.0', { passed: true });
+    recordSkillChecks(state, 'pub-skill', '1.0.0', { passed: true });
+
+    // 2. Bob attempts to adopt private-skill on bob-agent -> 403 skill_private
+    const bobAdoptPriv = await call(port, '/api/v1/agents/bob-agent/skills', 'POST', BOB, { skillId: 'private-skill', version: '1.0.0' });
+    assert.equal(bobAdoptPriv.status, 403);
+    assert.equal(bobAdoptPriv.body.error, 'skill_private');
+
+    // 3. Alice adopts private-skill on alice-agent -> 201 requested, then admin approves -> 200
+    const aliceAdopt = await call(port, '/api/v1/agents/alice-agent/skills', 'POST', ALICE, { skillId: 'private-skill', version: '1.0.0' });
+    assert.equal(aliceAdopt.status, 201);
+    const aliceApprove = await call(port, '/api/v1/agents/alice-agent/skills/private-skill/adoption/approve', 'POST', ADMIN, {});
+    assert.equal(aliceApprove.status, 200);
+
+    // 4. Bob adopts pub-skill (published) on bob-agent -> 201 requested, then admin approves -> 200
+    const bobAdoptPub = await call(port, '/api/v1/agents/bob-agent/skills', 'POST', BOB, { skillId: 'pub-skill', version: '1.0.0' });
+    assert.equal(bobAdoptPub.status, 201);
+    const bobApprove = await call(port, '/api/v1/agents/bob-agent/skills/pub-skill/adoption/approve', 'POST', ADMIN, {});
+    assert.equal(bobApprove.status, 200);
+  });
+
+  it('unpublishing stops future adoptions without disrupting running agents (A13)', async () => {
+    // 1. Alice unpublishes pub-skill
+    const unpubRes = await call(port, '/api/v1/skills/pub-skill/unpublish', 'POST', ALICE, { reason: 'Deprecating public access' });
+    assert.equal(unpubRes.status, 200);
+    assert.equal(unpubRes.body.published, false);
+
+    const rows = ledger.query().filter((e) => e.action === 'SKILL_UNPUBLISHED');
+    assert.ok(rows.length >= 1);
+
+    // 2. Bob\'s existing config still pins pub-skill (existing adopters undisturbed)
+    const bobConfig = state.configs!.current('bob-agent');
+    assert.ok(bobConfig?.skills.some((s) => s.id === 'pub-skill'));
+
+    // 3. Charlie attempts to adopt pub-skill now that it is unpublished -> 403 skill_private
+    await state.configs.put({ agentId: 'charlie-agent', source: {}, skills: [], policy: null, owners: ['token:charlie'] }, { updatedBy: 'test', reason: 'charlie' });
+    state.agents.set('charlie-agent', { id: 'charlie-agent', name: 'Charlie Agent', owners: ['token:charlie'], deployedSkills: [] } as any);
+
+    const charlieAdopt = await call(port, '/api/v1/agents/charlie-agent/skills', 'POST', CHARLIE, { skillId: 'pub-skill', version: '1.0.0' });
+    assert.equal(charlieAdopt.status, 403);
+    assert.equal(charlieAdopt.body.error, 'skill_private');
+  });
+
+  it('skill retirement: owner scope, in-use refusal without force, admin force retirement (A8, A13)', async () => {
+    // private-skill is adopted by alice-agent
+    // 1. Bob attempts to retire private-skill -> 403 (Bob not owner/admin)
+    const bobRetire = await call(port, '/api/v1/skills/private-skill/retire', 'POST', BOB, {});
+    assert.equal(bobRetire.status, 403);
+
+    // 2. Alice attempts to retire without force -> 409 skill_in_use
+    const aliceRetire = await call(port, '/api/v1/skills/private-skill/retire', 'POST', ALICE, {});
+    assert.equal(aliceRetire.status, 409);
+    assert.equal(aliceRetire.body.error, 'skill_in_use');
+
+    // 3. Alice calls with force: true -> 403 forbidden (skills.retire.force is admin only)
+    const aliceForce = await call(port, '/api/v1/skills/private-skill/retire', 'POST', ALICE, { force: true });
+    assert.equal(aliceForce.status, 403);
+
+    // 4. Admin calls with force: true -> 200, retired and stripped from alice-agent
+    const adminRetire = await call(port, '/api/v1/skills/private-skill/retire', 'POST', ADMIN, { force: true, reason: 'Security deprecation' });
+    assert.equal(adminRetire.status, 200);
+    assert.deepEqual(adminRetire.body.removedFrom, ['alice-agent']);
+
+    const vers = skillRegistry(state).versions('private-skill');
+    assert.ok(vers.every((v) => v.retired));
+  });
+
+  it('hardening: Archie Finding A (indeterminate owner rights) and Finding B (canonical recipient validation)', async () => {
+    // Finding B: recipient must be canonical actor format
+    const badRecipient = await call(port, '/api/v1/skills/pub-skill/transfer', 'POST', ALICE, { recipient: 'bob' });
+    assert.equal(badRecipient.status, 400);
+    assert.equal(badRecipient.body.error, 'invalid_recipient');
+
+    const bareAdmin = await call(port, '/api/v1/skills/pub-skill/transfer', 'POST', ALICE, { recipient: 'admin' });
+    assert.equal(bareAdmin.status, 400);
+
+    // Finding A: External unknown actor with indeterminate rights
+    const reg = skillRegistry(state);
+    reg.saveIfAbsent({
+      id: 'external-skill',
+      name: 'External Skill',
+      version: '1.0.0',
+      description: 'External',
+      language: 'python',
+      entry: 'entry.py',
+      tests: 'passed',
+      status: 'approved',
+      registeredBy: 'oidc:contractor@external-idp.example.com',
+      owner: 'oidc:contractor@external-idp.example.com',
+      registeredAt: new Date().toISOString(),
+    });
+
+    const adminOverride = await call(port, '/api/v1/skills/external-skill/transfer/admin', 'POST', ADMIN, { recipient: 'token:alice' });
+    assert.equal(adminOverride.status, 409);
+    assert.equal(adminOverride.body.error, 'owner_rights_indeterminate');
+    assert.equal(adminOverride.body.message, "cannot determine the owner's rights");
   });
 });
