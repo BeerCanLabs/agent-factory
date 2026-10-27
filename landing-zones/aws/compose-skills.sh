@@ -59,6 +59,7 @@ PY
 )" || exit 5
 
 # S1 invariant (packages/conformance/src/source-token.test.ts): token read gated on allowed host
+allowed=""
 if [ -n "${GIT_TOKEN_SECRET_ID:-}" ] && [ -n "$allowed" ]; then
   : # Packages read from package store; no git token needed
 fi
