@@ -274,7 +274,7 @@ export function readBufferBody(req: http.IncomingMessage, limit = 5 * 1024 * 102
   });
 }
 
-function checkOwnsAnyAgent(state: FactoryState, actor: string): boolean {
+export function checkOwnsAnyAgent(state: FactoryState, actor: string): boolean {
   const target = actor.toLowerCase();
   for (const agent of state.agents.values()) {
     const directOwners = (agent as unknown as { owners?: string[] }).owners;
@@ -315,6 +315,15 @@ export async function identify(req: http.IncomingMessage, state: FactoryState): 
   return { ok: false, reason: reasons.join('; ') || 'no credential' };
 }
 
+export type RequirePrivilegeResource = {
+  agentId?: string;
+  skillId?: string;
+  skillOwner?: string;
+  uploader?: string;
+  groupRoles?: readonly string[];
+  ownsAnyAgent?: boolean;
+};
+
 /**
  * A2, E4: authenticate (the Gatekeeper's verification of who the caller is), then ask the Bouncer whether this caller
  * may do this. Answers 401 or 403 and returns null when not; the 403 names the role that holds the privilege.
@@ -324,22 +333,63 @@ export async function requirePrivilege(
   res: http.ServerResponse,
   state: FactoryState,
   privilege: Privilege,
-  resource?: { agentId: string },
+  resource?: RequirePrivilegeResource,
 ): Promise<Principal | null> {
   const result = await identify(req, state);
   if (!result.ok) {
     json(res, 401, { error: 'unauthorized' });
     return null;
   }
+
+  // A11, H4: An agent registers content only on behalf of a verified human requester who holds skills.register
+  const isAgent = result.principal.actor.startsWith('agent:') || result.principal.actor.startsWith('token:agent:');
+  if (privilege === 'skills.register' && isAgent) {
+    const requesterHeader = req.headers['x-factory-run-requester'];
+    const verifiedRequester = typeof requesterHeader === 'string' && requesterHeader.trim() ? requesterHeader.trim() : undefined;
+    if (!verifiedRequester || verifiedRequester.startsWith('agent:')) {
+      json(res, 403, {
+        error: 'agent_must_have_verified_requester',
+        message: 'an agent may register a skill only on behalf of a verified human requester (A11, H4)',
+      });
+      return null;
+    }
+    const requesterGroupRoles = state.groups ? state.groups.getUserRoles(verifiedRequester) : undefined;
+    const requesterDecision = authorize({
+      principal: {
+        actor: verifiedRequester,
+        roles: (verifiedRequester === 'token:admin' ? ['admin'] : []) as any,
+      },
+      privilege: 'skills.register',
+      resource: {
+        ownsAnyAgent: checkOwnsAnyAgent(state, verifiedRequester),
+        groupRoles: requesterGroupRoles,
+      },
+    });
+    if (!requesterDecision.allowed) {
+      json(res, 403, {
+        error: 'requester_lacks_skills_register',
+        message: `verified requester ${verifiedRequester} does not hold skills.register (A11)`,
+      });
+      return null;
+    }
+    return result.principal;
+  }
+
   const ownsAny = privilege === 'skills.register' ? checkOwnsAnyAgent(state, result.principal.actor) : false;
+  const userGroupRoles = privilege === 'skills.register' && state.groups
+    ? state.groups.listUserGroups(result.principal.actor).flatMap((g) => g.roles)
+    : undefined;
   const decision = authorize({
     principal: result.principal,
     privilege,
-    ...(resource
-      ? { resource: { agentId: resource.agentId, owners: ownersOf(state, resource.agentId), ownsAnyAgent: ownsAny } }
-      : ownsAny
-        ? { resource: { ownsAnyAgent: true } }
-        : {}),
+    resource: {
+      ...(resource?.agentId ? { agentId: resource.agentId, owners: ownersOf(state, resource.agentId) } : {}),
+      ...(resource?.skillId ? { skillId: resource.skillId } : {}),
+      ...(resource?.skillOwner ? { skillOwner: resource.skillOwner } : {}),
+      ...(resource?.uploader ? { uploader: resource.uploader } : {}),
+      groupRoles: resource?.groupRoles ?? userGroupRoles,
+      ownsAnyAgent: resource?.ownsAnyAgent ?? ownsAny,
+    },
   });
   if (!decision.allowed) {
     json(res, 403, { error: 'forbidden', required: decision.required });
@@ -2846,6 +2896,9 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       return;
     }
     state.agents.delete(agentId);
+    if (state.consoleReplies) {
+      state.consoleReplies = state.consoleReplies.filter((r) => r.agentId !== agentId);
+    }
     registryOf(state).remove(agentId);
     state.ledger.append({
       timestamp: new Date().toISOString(),

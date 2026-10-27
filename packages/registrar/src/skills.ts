@@ -52,6 +52,12 @@ export type SkillVersionRecord = {
   retiredReason?: string;
   /** SHA256 hex digest of the skill package tarball (.tar.gz) when registered from a package (A5). */
   packageHash?: string;
+  /** Named human user who owns the skill (H4, A11). */
+  owner?: string;
+  /** Group the skill is assigned to (H5, A18). */
+  groupId?: string;
+  /** Pending ownership transfer (A24). */
+  transferPending?: { recipient: string; requestedAt: string; requestedBy: string };
 };
 
 /**
@@ -84,6 +90,9 @@ export type SkillSummary = {
   /** SK1: public, or private to `owner`. Fixed at registration and the same for every version. */
   visibility: SkillVisibility;
   owner?: string;
+  userOwner?: string;
+  groupId?: string;
+  transferPending?: { recipient: string; requestedAt: string; requestedBy: string };
   /** SK6: every version is retired. */
   retired: boolean;
   /** The highest approved version (semver precedence), or null when none is approved yet. */
@@ -93,7 +102,7 @@ export type SkillSummary = {
   versions: Array<
     Pick<
       SkillVersionRecord,
-      'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'checkRun' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt' | 'reason' | 'revoked' | 'retired' | 'retiredBy' | 'retiredAt' | 'retiredReason' | 'packageHash'
+      'version' | 'status' | 'repo' | 'path' | 'commit' | 'tests' | 'checks' | 'checkRun' | 'registeredBy' | 'registeredAt' | 'decidedBy' | 'decidedAt' | 'reason' | 'revoked' | 'retired' | 'retiredBy' | 'retiredAt' | 'retiredReason' | 'packageHash' | 'owner' | 'groupId' | 'transferPending'
     >
   >;
 };
@@ -243,6 +252,77 @@ export class SkillRegistry {
     return changed;
   }
 
+  /** Sets or updates the human owner on all versions of a skill and persists each (H4, A11). */
+  setOwner(id: string, newOwner: string): SkillVersionRecord[] {
+    const changed: SkillVersionRecord[] = [];
+    for (const rec of this.versions(id)) {
+      const next: SkillVersionRecord = { ...rec, owner: newOwner };
+      delete next.transferPending;
+      this.save(next);
+      changed.push(structuredClone(next));
+    }
+    return changed;
+  }
+
+  /** Requests a transfer of skill ownership to a recipient (A24). */
+  requestTransfer(id: string, recipient: string, requestedBy: string, now: Date = new Date()): SkillVersionRecord[] {
+    const changed: SkillVersionRecord[] = [];
+    const transferPending = { recipient, requestedAt: now.toISOString(), requestedBy };
+    for (const rec of this.versions(id)) {
+      const next: SkillVersionRecord = { ...rec, transferPending };
+      this.save(next);
+      changed.push(structuredClone(next));
+    }
+    return changed;
+  }
+
+  /** Accepts a pending transfer of skill ownership (A24). */
+  acceptTransfer(id: string, recipient: string): SkillVersionRecord[] {
+    const versions = this.versions(id);
+    const currentPending = versions.find((v) => v.transferPending)?.transferPending;
+    if (!currentPending || currentPending.recipient.toLowerCase() !== recipient.toLowerCase()) {
+      throw new Error(`no pending transfer for recipient ${recipient}`);
+    }
+    return this.setOwner(id, recipient);
+  }
+
+  /** Cancels a pending transfer of skill ownership. */
+  cancelTransfer(id: string): SkillVersionRecord[] {
+    const changed: SkillVersionRecord[] = [];
+    for (const rec of this.versions(id)) {
+      if (!rec.transferPending) continue;
+      const next: SkillVersionRecord = { ...rec };
+      delete next.transferPending;
+      this.save(next);
+      changed.push(structuredClone(next));
+    }
+    return changed;
+  }
+
+  /** Assigns a skill to a group (H5, A18). */
+  assignGroup(id: string, groupId: string): SkillVersionRecord[] {
+    const changed: SkillVersionRecord[] = [];
+    for (const rec of this.versions(id)) {
+      const next: SkillVersionRecord = { ...rec, groupId };
+      this.save(next);
+      changed.push(structuredClone(next));
+    }
+    return changed;
+  }
+
+  /** Unassigns a skill from a group. */
+  unassignGroup(id: string): SkillVersionRecord[] {
+    const changed: SkillVersionRecord[] = [];
+    for (const rec of this.versions(id)) {
+      if (!rec.groupId) continue;
+      const next: SkillVersionRecord = { ...rec };
+      delete next.groupId;
+      this.save(next);
+      changed.push(structuredClone(next));
+    }
+    return changed;
+  }
+
   /** Every version of a skill, oldest to newest by semver precedence. */
   versions(id: string): SkillVersionRecord[] {
     return [...(this.skills.get(id)?.values() ?? [])].sort((a, b) => compareSemver(a.version, b.version)).map((r) => structuredClone(r));
@@ -255,13 +335,20 @@ export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummar
   const approved = versions.filter((v) => v.status === 'approved' && !v.retired);
   const latestApproved = approved.at(-1);
   const shown = latestApproved ?? versions.at(-1)!;
-  const owner = ownerOf(versions[0]);
+  const humanOwner = versions.find((v) => v.owner)?.owner;
+  const legacyAgentOwner = ownerOf(versions[0]);
+  const owner = legacyAgentOwner ?? humanOwner;
+  const groupId = versions.find((v) => v.groupId)?.groupId;
+  const transferPending = versions.find((v) => v.transferPending)?.transferPending;
   return {
     id,
     name: shown.manifest.name,
     description: shown.manifest.description,
     visibility: visibilityOf(versions[0]),
     ...(owner ? { owner } : {}),
+    ...(humanOwner ? { userOwner: humanOwner } : {}),
+    ...(groupId ? { groupId } : {}),
+    ...(transferPending ? { transferPending } : {}),
     retired: versions.every((v) => v.retired === true),
     latestApproved: latestApproved?.version ?? null,
     requires: shown.manifest.requires,
@@ -276,6 +363,9 @@ export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummar
       ...(v.checkRun ? { checkRun: v.checkRun } : {}),
       registeredBy: v.registeredBy,
       registeredAt: v.registeredAt,
+      ...(v.owner ? { owner: v.owner } : {}),
+      ...(v.groupId ? { groupId: v.groupId } : {}),
+      ...(v.transferPending ? { transferPending: v.transferPending } : {}),
       ...(v.decidedBy ? { decidedBy: v.decidedBy, decidedAt: v.decidedAt } : {}),
       ...(v.reason ? { reason: v.reason } : {}),
       ...(v.revoked ? { revoked: true } : {}),
