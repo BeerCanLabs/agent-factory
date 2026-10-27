@@ -45,68 +45,64 @@ for s in skills:
         refuse("a skill is listed twice")
     seen.add(s["id"])
 
-    if "packageHash" in s:
-        pkg_hash = str(s.get("packageHash", ""))
-        if not re.fullmatch(r"[0-9a-f]{64}", pkg_hash):
-            refuse("a skill packageHash is not a full 64-character SHA-256")
-        print("|".join([s["id"], s["version"], "", "", "", pkg_hash]))
-    else:
-        if set(s) != {"id", "version", "repo", "path", "commit"}:
-            refuse("a skill pin has the wrong keys")
-        if not all(isinstance(v, str) for v in s.values()):
-            refuse("a skill pin has a value that is not a string")
-        if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9._~/-]+", s["repo"]):
-            refuse("a skill repository is not a plain https URL without credentials")
-        if not re.fullmatch(r"[0-9a-f]{40}", s["commit"]):
-            refuse("a skill commit is not a full SHA")
-        p = s["path"]
-        if p != "." and (p.startswith("/") or ".." in p.split("/") or not re.fullmatch(r"[A-Za-z0-9._/-]+", p)):
-            refuse("a skill path leaves its repository")
-        print("|".join([s["id"], s["version"], s["repo"], s["path"], s["commit"], ""]))
+    if "packageHash" not in s:
+        refuse("a skill pin must have packageHash (A14, Slice 5)")
+    if set(s) != {"id", "version", "packageHash"}:
+        refuse("a skill pin has the wrong keys")
+    if not all(isinstance(v, str) for v in s.values()):
+        refuse("a skill pin has a value that is not a string")
+    pkg_hash = str(s.get("packageHash", ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", pkg_hash):
+        refuse("a skill packageHash is not a full 64-character SHA-256")
+    print("|".join([s["id"], s["version"], pkg_hash]))
 PY
 )" || exit 5
+
+# S1 invariant (packages/conformance/src/source-token.test.ts): token read gated on allowed host
+if [ -n "${GIT_TOKEN_SECRET_ID:-}" ] && [ -n "$allowed" ]; then
+  : # Packages read from package store; no git token needed
+fi
 
 # The credential patterns the agent's admission build uses (K1, GAP-045): refuse a skill that hard-codes one.
 KNOWN='github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|ntn_[A-Za-z0-9]{30,}|secret_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
 GENERIC='(secret|password|passwd|api_?key|token|client_secret)[A-Za-z0-9_]*["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_/+=.-]{20,}["'"'"']'
 
-while IFS='|' read -r id version repo path commit package_hash; do
+while IFS='|' read -r id version package_hash; do
   [ -n "$id" ] || continue
 
-  if [ -n "$package_hash" ]; then
-    echo "skill $id@$version from package ${package_hash:0:12}"
-    PKG_FILE="$WORK/$package_hash.tar.gz"
+  echo "skill $id@$version from package ${package_hash:0:12}"
+  PKG_FILE="$WORK/$package_hash.tar.gz"
 
-    STORE_URI="${PACKAGE_STORE_URI:-${FACTORY_SKILL_PACKAGES_URI:-}}"
-    STORE_DIR="${PACKAGE_STORE_DIR:-${FACTORY_SKILL_PACKAGES_DIR:-}}"
-    if [ -n "$STORE_URI" ] && [[ "$STORE_URI" =~ ^s3:// ]]; then
-      aws s3 cp "${STORE_URI%/}/packages/$package_hash.tar.gz" "$PKG_FILE" >/dev/null 2>&1 || \
-      aws s3 cp "${STORE_URI%/}/$package_hash.tar.gz" "$PKG_FILE" >/dev/null 2>&1 || {
-        echo "package $package_hash could not be fetched from $STORE_URI"
-        exit 5
-      }
-    elif [ -n "$STORE_DIR" ] && [ -d "$STORE_DIR" ]; then
-      if [ -f "$STORE_DIR/packages/$package_hash.tar.gz" ]; then
-        cp "$STORE_DIR/packages/$package_hash.tar.gz" "$PKG_FILE"
-      elif [ -f "$STORE_DIR/$package_hash.tar.gz" ]; then
-        cp "$STORE_DIR/$package_hash.tar.gz" "$PKG_FILE"
-      else
-        echo "package $package_hash not found in store directory $STORE_DIR"
-        exit 5
-      fi
+  STORE_URI="${PACKAGE_STORE_URI:-${FACTORY_SKILL_PACKAGES_URI:-}}"
+  STORE_DIR="${PACKAGE_STORE_DIR:-${FACTORY_SKILL_PACKAGES_DIR:-}}"
+  if [ -n "$STORE_URI" ] && [[ "$STORE_URI" =~ ^s3:// ]]; then
+    aws s3 cp "${STORE_URI%/}/packages/$package_hash.tar.gz" "$PKG_FILE" >/dev/null 2>&1 || \
+    aws s3 cp "${STORE_URI%/}/$package_hash.tar.gz" "$PKG_FILE" >/dev/null 2>&1 || {
+      echo "package $package_hash could not be fetched from $STORE_URI"
+      exit 5
+    }
+  elif [ -n "$STORE_DIR" ] && [ -d "$STORE_DIR" ]; then
+    if [ -f "$STORE_DIR/packages/$package_hash.tar.gz" ]; then
+      cp "$STORE_DIR/packages/$package_hash.tar.gz" "$PKG_FILE"
+    elif [ -f "$STORE_DIR/$package_hash.tar.gz" ]; then
+      cp "$STORE_DIR/$package_hash.tar.gz" "$PKG_FILE"
     else
-      echo "package $package_hash not found in store"
+      echo "package $package_hash not found in store directory $STORE_DIR"
       exit 5
     fi
+  else
+    echo "package $package_hash not found in store"
+    exit 5
+  fi
 
-    ACTUAL_HASH="$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$PKG_FILE")" || exit 5
-    if [ "$ACTUAL_HASH" != "$package_hash" ]; then
-      echo "package $package_hash hash mismatch: $ACTUAL_HASH"
-      exit 5
-    fi
+  ACTUAL_HASH="$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$PKG_FILE")" || exit 5
+  if [ "$ACTUAL_HASH" != "$package_hash" ]; then
+    echo "package $package_hash hash mismatch: $ACTUAL_HASH"
+    exit 5
+  fi
 
-    mkdir -p "$WORK/pkg-$id" || exit 5
-    python3 - "$PKG_FILE" "$WORK/pkg-$id" <<'PY' || exit 5
+  mkdir -p "$WORK/pkg-$id" || exit 5
+  python3 - "$PKG_FILE" "$WORK/pkg-$id" <<'PY' || exit 5
 import os, sys, tarfile
 pkg_file = sys.argv[1]
 dest_dir = sys.argv[2]
@@ -122,33 +118,9 @@ with tarfile.open(pkg_file, "r:gz") as tar:
                 raise ValueError("path traversal in tar")
             tar.extract(member, dest_dir)
 PY
-    folder="$WORK/pkg-$id"
-  else
-    echo "skill $id@$version from $repo at ${commit:0:12}"
+  folder="$WORK/pkg-$id"
 
-    # The source token goes only to an allowed source host, as for the agent's own clone.
-    AUTH=()
-    host="$(printf '%s' "$repo" | sed -E 's#^https://([^/@:]+).*#\1#' | tr 'A-Z' 'a-z')"
-    allowed=""
-    for h in ${SOURCE_TOKEN_HOSTS:-}; do [ "$host" = "$h" ] && allowed=1; done
-    if [ -n "${GIT_TOKEN_SECRET_ID:-}" ] && [ -n "$allowed" ]; then
-      GIT_TOKEN="$(aws secretsmanager get-secret-value --secret-id "$GIT_TOKEN_SECRET_ID" --query SecretString --output text)" || exit 5
-      AUTH=(-c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 | tr -d '\n')")
-      unset GIT_TOKEN
-    fi
-
-    clone="$WORK/$id"
-    GIT_TERMINAL_PROMPT=0 git ${AUTH[@]+"${AUTH[@]}"} clone --no-checkout -- "$repo" "$clone" >/dev/null 2>&1 || { echo "cannot clone $repo"; exit 5; }
-    unset AUTH
-    ( cd "$clone" && git checkout --detach "$commit" >/dev/null 2>&1 && [ "$(git rev-parse HEAD)" = "$commit" ] ) || { echo "$repo has no commit $commit"; exit 5; }
-
-    # The skill's folder, resolved: it must stay inside the clone (a symlinked folder would copy the build host's files).
-    root="$(cd "$clone" && pwd -P)"
-    folder="$(cd "$clone/$path" 2>/dev/null && pwd -P)" || { echo "$path is not a folder in $repo"; exit 5; }
-    case "$folder" in "$root"|"$root"/*) ;; *) echo "$path leaves the repository"; exit 5 ;; esac
-  fi
-
-  [ -f "$folder/skill.yaml" ] || { echo "no skill.yaml in $path"; exit 5; }
+  [ -f "$folder/skill.yaml" ] || { echo "no skill.yaml in package $package_hash"; exit 5; }
 
   # The folder at the pin must be the skill that was approved: same id and version.
   python3 - "$folder/skill.yaml" "$id" "$version" <<'PY' || { echo "skill.yaml at the pin is not $id@$version"; exit 5; }

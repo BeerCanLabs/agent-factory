@@ -23,53 +23,55 @@ function skillYaml(id: string, version: string): string {
 
 describe('composing adopted skills into a build context (SK4)', () => {
   let root: string;
-  let repos: string;
-  let pins: Record<string, { repo: string; path: string; commit: string }>;
+  let pkgStoreDir: string;
+  let pkgs: Record<string, { hash: string; buf: Buffer }>;
 
-  /** A repository at `<repos>/<name>.git` reached as https://git.example.test/<name>. Returns its first commit. */
-  function makeRepo(name: string, files: Record<string, string>): string {
-    const dir = join(root, 'src', name);
-    mkdirSync(dir, { recursive: true });
-    git(dir, 'init', '-q', '-b', 'main');
-    for (const [file, body] of Object.entries(files)) {
-      mkdirSync(dirname(join(dir, file)), { recursive: true });
-      writeFileSync(join(dir, file), body);
+  function makePkg(id: string, version: string, files: Record<string, string> = {}): { hash: string; buf: Buffer } {
+    const srcDir = mkdtempSync(join(root, 'pkg-src-'));
+    writeFileSync(join(srcDir, 'skill.yaml'), `spec: 1\nid: ${id}\nversion: ${version}\nname: ${id}\nlanguage: python\nentry: ${id.replace(/-/g, '_')}\n`);
+    for (const [p, content] of Object.entries(files)) {
+      const full = join(srcDir, p);
+      mkdirSync(dirname(full), { recursive: true });
+      writeFileSync(full, content);
     }
-    git(dir, 'add', '-A');
-    git(dir, 'commit', '-q', '-m', 'init');
-    execFileSync('git', ['clone', '-q', '--bare', dir, join(repos, `${name}.git`)]);
-    return git(dir, 'rev-parse', 'HEAD');
+    const tarPath = join(root, `pkg-${randomUUID()}.tar.gz`);
+    execFileSync('tar', ['-czf', tarPath, '-C', srcDir, '.']);
+    const buf = readFileSync(tarPath);
+    rmSync(tarPath, { force: true });
+    rmSync(srcDir, { recursive: true, force: true });
+    const hash = createHash('sha256').update(buf).digest('hex');
+    mkdirSync(join(pkgStoreDir, 'packages'), { recursive: true });
+    writeFileSync(join(pkgStoreDir, 'packages', `${hash}.tar.gz`), buf);
+    return { hash, buf };
   }
 
   before(() => {
     root = mkdtempSync(join(tmpdir(), 'compose-skills-'));
-    repos = join(root, 'repos');
-    mkdirSync(repos, { recursive: true });
-    const tavily = makeRepo('skill-tavily-search', { 'skill.yaml': skillYaml('tavily-search', '0.1.0'), 'tavily_search/__init__.py': 'def search(q):\n    return q\n', 'README.md': '# t\n' });
-    const mono = makeRepo('skills-mono', { 'print/skill.yaml': skillYaml('print', '0.1.1'), 'print/print_api.py': 'X = 1\n', 'other/skill.yaml': skillYaml('other', '9.9.9') });
-    const leaky = makeRepo('skill-leaky', { 'skill.yaml': skillYaml('leaky', '1.0.0'), 'leaky/__init__.py': 'API_TOKEN = "Zk3mPq9xLw2RtYh7VbN5cJd8Fg4Ss1Aa"\n' });  // secret-scan:allow (a made-up value, the fixture the script must refuse)
-    const loadable = makeRepo('skill-loadable', {
-      'skill.yaml': skillYaml('loadable', '1.0.0'),
+    pkgStoreDir = join(root, 'pkg-store');
+    mkdirSync(join(pkgStoreDir, 'packages'), { recursive: true });
+
+    const tavily = makePkg('tavily-search', '0.1.0', {
+      'tavily_search/__init__.py': 'def search(q):\n    return q\n',
+      'README.md': '# t\n',
+    });
+    const print = makePkg('print', '0.1.1', {
+      'print_api.py': 'X = 1\n',
+    });
+    const leaky = makePkg('leaky', '1.0.0', {
+      'leaky/__init__.py': 'API_TOKEN = "Zk3mPq9xLw2RtYh7VbN5cJd8Fg4Ss1Aa"\n', // secret-scan:allow
+    });
+    const loadable = makePkg('loadable', '1.0.0', {
       'helper.py': "WORD = 'sibling'\n",
       'loadable/__init__.py': "import helper\nfrom . import inner\ndef tools():\n    return [{'name': 'loadable_tool', 'description': 'x', 'parameters': {}, 'handler': lambda a, c: helper.WORD + inner.WORD}]\n",
       'loadable/inner.py': "WORD = '+inner'\n",
     });
-    pins = {
-      loadable: { repo: `https://${HOST}/skill-loadable`, path: '.', commit: loadable },
-      tavily: { repo: `https://${HOST}/skill-tavily-search`, path: '.', commit: tavily },
-      print: { repo: `https://${HOST}/skills-mono`, path: 'print', commit: mono },
-      leaky: { repo: `https://${HOST}/skill-leaky`, path: '.', commit: leaky },
-    };
-    // A later commit on tavily's main that the pin must not pick up.
-    const work = join(root, 'src', 'skill-tavily-search');
-    writeFileSync(join(work, 'tavily_search', '__init__.py'), 'def search(q):\n    return "newer"\n');
-    git(work, 'commit', '-q', '-am', 'later');
-    git(work, 'push', '-q', join(repos, 'skill-tavily-search.git'), 'main');
+
+    pkgs = { loadable, tavily, print, leaky };
   });
 
   after(() => rmSync(root, { recursive: true, force: true }));
 
-  /** Runs the script in a fresh directory with git redirected to the local repositories. */
+  /** Runs the script in a fresh directory with package store configured. */
   function compose(skills: unknown, extraEnv: Record<string, string> = {}) {
     const cwd = mkdtempSync(join(root, 'run-'));
     const r = spawnSync('bash', [SCRIPT], {
@@ -78,17 +80,14 @@ describe('composing adopted skills into a build context (SK4)', () => {
       env: {
         PATH: process.env.PATH ?? '',
         HOME: cwd,
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_CONFIG_COUNT: '1',
-        GIT_CONFIG_KEY_0: `url.file://${repos}/.insteadOf`,
-        GIT_CONFIG_VALUE_0: `https://${HOST}/`,
+        PACKAGE_STORE_DIR: pkgStoreDir,
         SKILLS: typeof skills === 'string' ? skills : JSON.stringify(skills),
         ...extraEnv,
       },
     });
     return { cwd, status: r.status, out: `${r.stdout}${r.stderr}`, dir: join(cwd, '.factory-skills') };
   }
-  const pin = (key: keyof typeof pins, id: string, version: string) => ({ id, version, ...pins[key] });
+  const pin = (key: keyof typeof pkgs, id: string, version: string) => ({ id, version, packageHash: pkgs[key].hash });
 
   it('produces what the runtime loads: a package entry with a sibling import, through load_skills (SK4, TSK-272)', () => {
     const r = compose([pin('loadable', 'loadable', '1.0.0')]);
@@ -106,13 +105,12 @@ describe('composing adopted skills into a build context (SK4)', () => {
     assert.deepEqual(JSON.parse(py.stdout), { problems: [], tools: ['loadable_tool'], result: 'sibling+inner' });
   });
 
-  it('puts each skill at exactly its pinned commit in the context, without .git, and lists them in the manifest', () => {
+  it('puts each skill into the context, without .git, and lists them in the manifest', () => {
     const r = compose([pin('tavily', 'tavily-search', '0.1.0'), pin('print', 'print', '0.1.1')]);
     assert.equal(r.status, 0, r.out);
     assert.deepEqual(readdirSync(join(r.dir, 'skills')).sort(), ['print', 'tavily-search']);
-    assert.match(readFileSync(join(r.dir, 'skills', 'tavily-search', 'tavily_search', '__init__.py'), 'utf8'), /return q/, 'the pinned commit, not the later one');
-    assert.ok(existsSync(join(r.dir, 'skills', 'print', 'print_api.py')), 'only the skill’s folder of a monorepo');
-    assert.ok(!existsSync(join(r.dir, 'skills', 'print', 'other')) && !existsSync(join(r.dir, 'skills', 'other')));
+    assert.match(readFileSync(join(r.dir, 'skills', 'tavily-search', 'tavily_search', '__init__.py'), 'utf8'), /return q/);
+    assert.ok(existsSync(join(r.dir, 'skills', 'print', 'print_api.py')));
     assert.ok(!existsSync(join(r.dir, 'skills', 'tavily-search', '.git')));
     assert.deepEqual(JSON.parse(readFileSync(join(r.dir, 'skills.json'), 'utf8')), {
       skills: [
@@ -121,6 +119,12 @@ describe('composing adopted skills into a build context (SK4)', () => {
       ],
     });
     assert.equal(readFileSync(join(r.dir, 'Dockerfile'), 'utf8'), 'ARG BASE\nFROM ${BASE}\nCOPY skills /opt/factory/skills\nCOPY skills.json /opt/factory/skills.json\n');
+  });
+
+  it('refuses legacy git repository pins without packageHash (exit 5)', () => {
+    const r = compose([{ id: 'tavily-search', version: '0.1.0', repo: 'https://github.com/example/skills', commit: 'a'.repeat(40), path: '.' }]);
+    assert.equal(r.status, 5);
+    assert.match(r.out, /must have packageHash/);
   });
 
   it('refuses input that is not a list of well-formed pins (exit 5)', () => {
@@ -134,12 +138,9 @@ describe('composing adopted skills into a build context (SK4)', () => {
       [{ id: good.id }],
       [{ ...good, id: 'Bad Id' }],
       [{ ...good, version: 'latest' }],
-      [{ ...good, commit: 'main' }],
-      [{ ...good, repo: 'git@github.com:x/y.git' }],
-      [{ ...good, repo: 'https://user:pw@git.example.test/skill-tavily-search' }],
-      [{ ...good, repo: 'http://git.example.test/skill-tavily-search' }],
-      [{ ...good, path: '../x' }],
-      [{ ...good, path: '/etc' }],
+      [{ ...good, packageHash: 'not-a-hash' }],
+      [{ ...good, packageHash: 'A'.repeat(64) }],
+      [{ ...good, packageHash: 'a'.repeat(63) }],
       [good, good],
     ]) {
       const r = compose(bad);
@@ -148,16 +149,9 @@ describe('composing adopted skills into a build context (SK4)', () => {
     }
   });
 
-  it('refuses a commit the repository does not have, and a repository that cannot be cloned', () => {
-    assert.equal(compose([{ ...pin('tavily', 'tavily-search', '0.1.0'), commit: 'f'.repeat(40) }]).status, 5);
-    assert.equal(compose([{ ...pin('tavily', 'tavily-search', '0.1.0'), repo: `https://${HOST}/no-such-repo` }]).status, 5);
-  });
-
-  it('refuses a folder whose skill.yaml is not the skill that was approved', () => {
-    assert.equal(compose([pin('tavily', 'tavily-search', '0.2.0')]).status, 5, 'another version');
-    assert.equal(compose([pin('tavily', 'something-else', '0.1.0')]).status, 5, 'another skill');
-    assert.equal(compose([{ ...pin('print', 'print', '0.1.1'), path: 'other' }]).status, 5, 'another folder of the repository');
-    assert.equal(compose([{ ...pin('print', 'print', '0.1.1'), path: 'missing' }]).status, 5, 'no such folder');
+  it('refuses a package whose skill.yaml is not the skill that was approved (exit 5)', () => {
+    assert.equal(compose([{ ...pin('tavily', 'tavily-search', '0.2.0') }]).status, 5, 'another version');
+    assert.equal(compose([{ ...pin('tavily', 'something-else', '0.1.0') }]).status, 5, 'another skill');
   });
 
   it('refuses a skill that hard-codes a credential, naming the file and line but never the value (exit 6)', () => {
@@ -167,77 +161,6 @@ describe('composing adopted skills into a build context (SK4)', () => {
     assert.match(r.out, /leaky\/__init__\.py:1/);
     assert.ok(!r.out.includes('Zk3mPq9xLw2RtYh7VbN5cJd8Fg4Ss1Aa'), 'the value is never printed');
     assert.ok(!existsSync(join(r.dir, 'Dockerfile')));
-  });
-
-  it('never follows a folder that is a link out of the repository', () => {
-    const dir = join(root, 'src', 'skill-linked');
-    mkdirSync(dir, { recursive: true });
-    git(dir, 'init', '-q', '-b', 'main');
-    const outside = join(root, 'outside');
-    mkdirSync(outside, { recursive: true });
-    writeFileSync(join(outside, 'skill.yaml'), skillYaml('linked', '1.0.0'));
-    writeFileSync(join(outside, 'host-file.txt'), 'must not be copied');
-    symlinkSync(outside, join(dir, 'escape'));
-    git(dir, 'add', '-A');
-    git(dir, 'commit', '-q', '-m', 'init');
-    execFileSync('git', ['clone', '-q', '--bare', dir, join(repos, 'skill-linked.git')]);
-    const r = compose([{ id: 'linked', version: '1.0.0', repo: `https://${HOST}/skill-linked`, path: 'escape', commit: git(dir, 'rev-parse', 'HEAD') }]);
-    assert.equal(r.status, 5, r.out);
-    assert.match(r.out, /leaves the repository/);
-    assert.ok(!existsSync(join(r.dir, 'skills', 'linked', 'host-file.txt')));
-  });
-
-  it('sends the source token only to an allowed source host', () => {
-    const bin = join(root, 'bin');
-    mkdirSync(bin, { recursive: true });
-    const calls = join(root, 'aws-calls');
-    writeFileSync(join(bin, 'aws'), `#!/bin/sh\necho "$@" >> "${calls}"\necho test-token\n`);
-    chmodSync(join(bin, 'aws'), 0o755);
-    const env = { PATH: `${bin}:${process.env.PATH ?? ''}`, GIT_TOKEN_SECRET_ID: 'arn:aws:secretsmanager:us-east-1:111111111111:secret:source-token' };
-    const tavily = [pin('tavily', 'tavily-search', '0.1.0')];
-
-    assert.equal(compose(tavily, { ...env, SOURCE_TOKEN_HOSTS: 'github.com' }).status, 0);
-    assert.ok(!existsSync(calls), 'the token was not even read for a host that is not allowed');
-
-    assert.equal(compose(tavily, { ...env, SOURCE_TOKEN_HOSTS: `github.com ${HOST}` }).status, 0);
-    assert.match(readFileSync(calls, 'utf8'), /get-secret-value --secret-id arn:aws:secretsmanager/, 'read for an allowed host');
-  });
-
-  it('composes a packaged skill from package store by packageHash (A4, A14)', () => {
-    const pkgDir = mkdtempSync(join(root, 'pkg-store-'));
-    const makePkg = (id: string, version: string, files: Record<string, string> = {}) => {
-      const srcDir = mkdtempSync(join(root, 'pkg-src-'));
-      writeFileSync(join(srcDir, 'skill.yaml'), `spec: 1\nid: ${id}\nversion: ${version}\nname: ${id}\nlanguage: python\nentry: ${id.replace(/-/g, '_')}\n`);
-      for (const [p, content] of Object.entries(files)) {
-        const full = join(srcDir, p);
-        mkdirSync(dirname(full), { recursive: true });
-        writeFileSync(full, content);
-      }
-      const tarPath = join(root, `pkg-${randomUUID()}.tar.gz`);
-      execFileSync('tar', ['-czf', tarPath, '-C', srcDir, '.']);
-      const buf = readFileSync(tarPath);
-      rmSync(tarPath, { force: true });
-      rmSync(srcDir, { recursive: true, force: true });
-      const hash = createHash('sha256').update(buf).digest('hex');
-      mkdirSync(join(pkgDir, 'packages'), { recursive: true });
-      writeFileSync(join(pkgDir, 'packages', `${hash}.tar.gz`), buf);
-      return { hash, buf };
-    };
-
-    const pkg = makePkg('packaged-skill', '1.0.0', {
-      'packaged_skill/__init__.py': 'def tools(): return []\n',
-    });
-
-    const r = compose([{ id: 'packaged-skill', version: '1.0.0', packageHash: pkg.hash }], {
-      PACKAGE_STORE_DIR: pkgDir,
-    });
-    assert.equal(r.status, 0, r.out);
-    assert.ok(existsSync(join(r.dir, 'skills', 'packaged-skill', 'packaged_skill', '__init__.py')));
-    assert.deepEqual(JSON.parse(readFileSync(join(r.dir, 'skills.json'), 'utf8')), {
-      skills: [
-        { id: 'packaged-skill', version: '1.0.0', language: 'python', entry: 'packaged_skill', path: '/opt/factory/skills/packaged-skill' },
-      ],
-    });
   });
 
   it('refuses a packaged skill with mismatched hash or missing from store (exit 5)', () => {
