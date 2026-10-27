@@ -92,6 +92,10 @@ const CENSUS: Record<string, Role> = {
   'models.manage': 'admin',
   'conversations.read-others': 'admin',
   'groups.manage': 'admin',
+  'skills.version.add': 'admin',
+  'skills.assign': 'admin',
+  'skills.package.read': 'admin',
+  'skills.transfer': 'admin',
 };
 // Held by one service role alone; an admin does not hold them. `runs.attest-requester` moved from `operator` to
 // `gatekeeper-ingress` (TSK-111): the old rule no longer matches it, so the proof below reads it from here.
@@ -123,7 +127,7 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 85);
+    assert.equal(PRIVILEGES.length, 89);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 
@@ -180,5 +184,29 @@ describe('authorize', () => {
     // Caller with no admin role who owns an agent is allowed
     assert.ok(authorize({ principal: principal(['viewer']), privilege: 'skills.register', resource: { ownsAnyAgent: true } }).allowed);
     assert.ok(authorize({ principal: principal([]), privilege: 'skills.register', resource: { ownsAnyAgent: true } }).allowed);
+
+    // Caller with group role 'skills.register' is allowed (H3, A17)
+    assert.ok(authorize({ principal: principal([]), privilege: 'skills.register', resource: { groupRoles: ['skills.register'] } }).allowed);
+  });
+
+  it('skill ownership and group authorization (H4, H5, A8, A9, A17, A18, A24)', () => {
+    const ownerPrincipal: Principal = { actor: 'alice', roles: [] };
+    const otherPrincipal: Principal = { actor: 'bob', roles: [] };
+
+    // Skill owner has scoped privileges and skills.transfer
+    assert.ok(authorize({ principal: ownerPrincipal, privilege: 'skills.version.add', resource: { skillOwner: 'alice' } }).allowed);
+    assert.ok(authorize({ principal: ownerPrincipal, privilege: 'skills.transfer', resource: { skillOwner: 'alice' } }).allowed);
+    assert.ok(authorize({ principal: ownerPrincipal, privilege: 'skills.assign', resource: { skillOwner: 'alice' } }).allowed);
+    assert.ok(authorize({ principal: ownerPrincipal, privilege: 'skills.retire', resource: { skillOwner: 'alice' } }).allowed);
+    assert.ok(authorize({ principal: ownerPrincipal, privilege: 'skills.package.read', resource: { skillOwner: 'alice' } }).allowed);
+
+    // Non-owner without roles is denied
+    assert.equal(authorize({ principal: otherPrincipal, privilege: 'skills.version.add', resource: { skillOwner: 'alice' } }).allowed, false);
+    assert.equal(authorize({ principal: otherPrincipal, privilege: 'skills.transfer', resource: { skillOwner: 'alice' } }).allowed, false);
+
+    // Group member with skill-owner role on assigned group has scoped privileges but NOT skills.transfer (A9)
+    assert.ok(authorize({ principal: otherPrincipal, privilege: 'skills.version.add', resource: { skillOwner: 'alice', groupRoles: ['skill-owner'] } }).allowed);
+    assert.ok(authorize({ principal: otherPrincipal, privilege: 'skills.package.read', resource: { skillOwner: 'alice', groupRoles: ['skill-owner'] } }).allowed);
+    assert.equal(authorize({ principal: otherPrincipal, privilege: 'skills.transfer', resource: { skillOwner: 'alice', groupRoles: ['skill-owner'] } }).allowed, false);
   });
 });

@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
 import { PRIVILEGES, authorize, type AuthorizeResource, type Privilege } from './index.js';
-import { AGENT_SCOPED, DERIVED_ROLE_PRIVILEGES } from './privileges.js';
+import { AGENT_SCOPED, SKILL_SCOPED, DERIVED_ROLE_PRIVILEGES } from './privileges.js';
 
 const OWNER_RIGHTS: Privilege[] = [
   'config.read',
@@ -70,8 +70,14 @@ describe('agent-owner and requester', () => {
     }
   });
 
-  it('every derived row holds only agent-scoped privileges', () => {
-    for (const row of Object.values(DERIVED_ROLE_PRIVILEGES)) for (const p of row) assert.ok(AGENT_SCOPED.has(p), p);
+  it('every derived row holds only agent-scoped or skill-scoped privileges', () => {
+    for (const [role, row] of Object.entries(DERIVED_ROLE_PRIVILEGES)) {
+      if (role === 'skill-owner') {
+        for (const p of row) assert.ok(SKILL_SCOPED.has(p), p);
+      } else {
+        for (const p of row) assert.ok(AGENT_SCOPED.has(p), p);
+      }
+    }
     assert.deepEqual([...DERIVED_ROLE_PRIVILEGES['agent-owner']].sort(), [...OWNER_RIGHTS].sort());
   });
 
@@ -158,3 +164,54 @@ describe('agent-member', () => {
     assert.equal(allowed(owner, 'agents.wake', on('donna', ['cloudflare:dale@example.com'])), true);
   });
 });
+
+describe('skill-owner and groups', () => {
+  const alice = as('cloudflare:alice@example.com');
+  const bob = as('cloudflare:bob@example.com');
+  const charlie = as('cloudflare:charlie@example.com');
+
+  const onSkill = (skillOwner?: string, groupRoles?: readonly string[]): AuthorizeResource => ({
+    skillId: 'web-search',
+    ...(skillOwner ? { skillOwner } : {}),
+    ...(groupRoles ? { groupRoles } : {}),
+  });
+
+  it('human owner holds all skill-owner privileges and skills.transfer', () => {
+    const res = onSkill('cloudflare:alice@example.com');
+    for (const p of DERIVED_ROLE_PRIVILEGES['skill-owner']) {
+      assert.equal(allowed(alice, p, res), true, p);
+    }
+    assert.equal(allowed(alice, 'skills.transfer', res), true);
+  });
+
+  it('human owner does not hold fleet-wide or agent-scoped privileges by skill ownership', () => {
+    const res = onSkill('cloudflare:alice@example.com');
+    for (const p of ['policy.set', 'skills.decide', 'agents.wake', 'groups.manage'] as Privilege[]) {
+      assert.equal(allowed(alice, p, res), false, p);
+    }
+  });
+
+  it('another user holds nothing on the skill', () => {
+    const res = onSkill('cloudflare:alice@example.com');
+    for (const p of SKILL_SCOPED) {
+      assert.equal(allowed(bob, p, res), false, p);
+    }
+  });
+
+  it('group member with skill-owner holds skill-owner privileges but NOT skills.transfer (A9)', () => {
+    const res = onSkill('cloudflare:alice@example.com', ['skill-owner']);
+    for (const p of DERIVED_ROLE_PRIVILEGES['skill-owner']) {
+      assert.equal(allowed(bob, p, res), true, p);
+    }
+    assert.equal(allowed(bob, 'skills.transfer', res), false);
+  });
+
+  it('skills.register is held by admin, agent owner, or group role (H3, A8, A17)', () => {
+    assert.equal(allowed(as('token:admin', ['admin']), 'skills.register'), true);
+    assert.equal(allowed(alice, 'skills.register', { ownsAnyAgent: true }), true);
+    assert.equal(allowed(bob, 'skills.register', { groupRoles: ['skills.register'] }), true);
+    assert.equal(allowed(charlie, 'skills.register'), false);
+    assert.equal(allowed(charlie, 'skills.register', { ownsAnyAgent: false, groupRoles: [] }), false);
+  });
+});
+

@@ -92,6 +92,11 @@ export const PRIVILEGES = [
   'conversations.read-others',
   // TSK-277 (Slice 3): Groups management (A8, A10)
   'groups.manage',
+  // TSK-277 (Slice 3b): Scoped skill privileges and administration (A8, A9, A17)
+  'skills.version.add',
+  'skills.assign',
+  'skills.package.read',
+  'skills.transfer',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -281,6 +286,10 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'models.manage',
     'conversations.read-others',
     'groups.manage',
+    'skills.version.add',
+    'skills.assign',
+    'skills.package.read',
+    'skills.transfer',
   ],
 };
 
@@ -315,10 +324,22 @@ export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
 ]);
 
 /** The roles that are derived from data about one agent or run, never read from a credential or a claim. */
-export type DerivedRole = 'agent-owner' | 'agent-member' | 'requester';
+export type DerivedRole = 'agent-owner' | 'agent-member' | 'requester' | 'skill-owner';
 
 /**
- * What a derived role holds, on its own agent only (Dale, 2026-10-03). `approvals.decide` is held by an owner only
+ * Privileges that act on one skill, so a route can pass that skill as the resource.
+ * These can be held through skill ownership or group membership (A8, A9, H5).
+ */
+export const SKILL_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
+  'skills.version.add',
+  'skills.retire',
+  'skills.assign',
+  'skills.package.read',
+  'skills.transfer',
+]);
+
+/**
+ * What a derived role holds, on its own agent or skill only (Dale, 2026-10-03, A9). `approvals.decide` is held by an owner only
  * when the run has no requesting user (see `authorize`); the requester holds it for its own run.
  */
 export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> = {
@@ -352,4 +373,14 @@ export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> 
    */
   'agent-member': ['agents.wake', 'agents.converse'],
   requester: ['approvals.decide'],
+  /**
+   * A9: Built-in `skill-owner` role. It carries `skills.version.add`, `skills.retire`, `skills.assign`,
+   * and `skills.package.read`, and not `skills.transfer`.
+   */
+  'skill-owner': [
+    'skills.version.add',
+    'skills.retire',
+    'skills.assign',
+    'skills.package.read',
+  ],
 };

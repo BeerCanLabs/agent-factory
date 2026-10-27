@@ -274,7 +274,7 @@ export function readBufferBody(req: http.IncomingMessage, limit = 5 * 1024 * 102
   });
 }
 
-function checkOwnsAnyAgent(state: FactoryState, actor: string): boolean {
+export function checkOwnsAnyAgent(state: FactoryState, actor: string): boolean {
   const target = actor.toLowerCase();
   for (const agent of state.agents.values()) {
     const directOwners = (agent as unknown as { owners?: string[] }).owners;
@@ -291,6 +291,75 @@ function checkOwnsAnyAgent(state: FactoryState, actor: string): boolean {
     }
   }
   return false;
+}
+
+export const requestRun = new WeakMap<http.IncomingMessage, Run>();
+export const requestRunRequester = new WeakMap<http.IncomingMessage, string>();
+
+export function actorIsAdmin(state: FactoryState, actor: string, knownRoles?: readonly Role[]): boolean {
+  if (knownRoles) {
+    for (const r of knownRoles) {
+      if (r === 'admin') return true;
+    }
+  }
+  const clean = actor.toLowerCase();
+  if (clean === 'token:admin' || clean === 'admin') return true;
+  const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  for (const email of adminEmails) {
+    if (clean === email || clean === `cloudflare:${email}` || clean === `oidc:${email}`) return true;
+  }
+  const tokenName = clean.startsWith('token:') ? clean.slice(6) : clean;
+  if (tokenName === 'admin') return true;
+  const rawTokens = process.env.FACTORY_TOKENS;
+  if (rawTokens) {
+    try {
+      const list = JSON.parse(rawTokens);
+      if (Array.isArray(list)) {
+        const match = list.find((t: any) => t && t.name === tokenName);
+        if (match && Array.isArray(match.roles)) {
+          for (const r of match.roles) {
+            if (r === 'admin') return true;
+          }
+        }
+      }
+    } catch {}
+  }
+  return false;
+}
+
+export function userHoldsSkillsRegister(state: FactoryState, actor: string, knownRoles?: readonly Role[]): boolean {
+  const isAdmin = actorIsAdmin(state, actor, knownRoles);
+  const groupRoles = state.groups ? state.groups.getUserRoles(actor) : undefined;
+  return authorize({
+    principal: {
+      actor,
+      roles: isAdmin ? ['admin'] : [],
+    },
+    privilege: 'skills.register',
+    resource: {
+      ownsAnyAgent: checkOwnsAnyAgent(state, actor),
+      groupRoles,
+    },
+  }).allowed;
+}
+
+export function resolveRequesterActor(state: FactoryState, run: Run): string | undefined {
+  if (run.trigger === 'cron') return undefined;
+  const who = requesterOfRun(state, run);
+  if (!who) return undefined;
+  if (who.kind === 'identity') {
+    const resolved = state.identityLinks?.resolve(who.provider, who.id);
+    if (resolved) return resolved;
+    if (who.provider === 'cloudflare') return `cloudflare:${who.id}`;
+    return undefined;
+  }
+  if (who.kind === 'principal') {
+    return who.actor;
+  }
+  return undefined;
 }
 
 /**
@@ -315,6 +384,16 @@ export async function identify(req: http.IncomingMessage, state: FactoryState): 
   return { ok: false, reason: reasons.join('; ') || 'no credential' };
 }
 
+export type RequirePrivilegeResource = {
+  agentId?: string;
+  skillId?: string;
+  skillOwner?: string;
+  uploader?: string;
+  groupId?: string;
+  groupRoles?: readonly string[];
+  ownsAnyAgent?: boolean;
+};
+
 /**
  * A2, E4: authenticate (the Gatekeeper's verification of who the caller is), then ask the Bouncer whether this caller
  * may do this. Answers 401 or 403 and returns null when not; the 403 names the role that holds the privilege.
@@ -324,22 +403,79 @@ export async function requirePrivilege(
   res: http.ServerResponse,
   state: FactoryState,
   privilege: Privilege,
-  resource?: { agentId: string },
+  resource?: RequirePrivilegeResource,
 ): Promise<Principal | null> {
-  const result = await identify(req, state);
+  let result = await identify(req, state);
+  if (!result.ok) {
+    // A11: An agent presenting a run token may register a skill or add a version on behalf of its human requester
+    if ((privilege === 'skills.register' || privilege === 'skills.version.add') && state.runTokens && req.headers.authorization?.startsWith('Bearer ')) {
+      const token = bearerOf(req);
+      const verdict = await verifyRun({
+        tokens: state.runTokens,
+        token,
+        runOf: (id) => state.runs.get(id),
+        ended: (r) => isTerminal(r.state),
+      });
+      if (verdict.kind === 'ok') {
+        requestRun.set(req, verdict.run);
+        result = {
+          ok: true,
+          principal: {
+            actor: 'agent:' + verdict.claims.agentId,
+            roles: [],
+          },
+        };
+      }
+    }
+  }
   if (!result.ok) {
     json(res, 401, { error: 'unauthorized' });
     return null;
   }
+
+  // A11, H4: An agent registers content only on behalf of a verified human requester who holds skills.register
+  const isAgent = result.principal.actor.startsWith('agent:') || result.principal.actor.startsWith('token:agent:');
+  if (privilege === 'skills.register' && isAgent) {
+    const run = requestRun.get(req);
+    const verifiedRequester = run ? resolveRequesterActor(state, run) : undefined;
+    if (!verifiedRequester || verifiedRequester.startsWith('agent:') || verifiedRequester.startsWith('token:agent:')) {
+      json(res, 403, {
+        error: 'agent_must_have_verified_requester',
+        message: 'an agent may register a skill only on behalf of a verified human requester (A11, H4)',
+      });
+      return null;
+    }
+    if (!userHoldsSkillsRegister(state, verifiedRequester)) {
+      json(res, 403, {
+        error: 'requester_lacks_skills_register',
+        message: `verified requester ${verifiedRequester} does not hold skills.register (A11)`,
+      });
+      return null;
+    }
+    requestRunRequester.set(req, verifiedRequester);
+    return result.principal;
+  }
+
   const ownsAny = privilege === 'skills.register' ? checkOwnsAnyAgent(state, result.principal.actor) : false;
+  const computedGroupRoles = resource?.groupId && state.groups
+    ? (state.groups.getGroup(resource.groupId)?.members.some((m) => m.toLowerCase() === result.principal.actor.toLowerCase())
+        ? state.groups.getGroup(resource.groupId)?.roles
+        : [])
+    : undefined;
+  const userGroupRoles = privilege === 'skills.register' && state.groups
+    ? state.groups.listUserGroups(result.principal.actor).flatMap((g) => g.roles)
+    : undefined;
   const decision = authorize({
     principal: result.principal,
     privilege,
-    ...(resource
-      ? { resource: { agentId: resource.agentId, owners: ownersOf(state, resource.agentId), ownsAnyAgent: ownsAny } }
-      : ownsAny
-        ? { resource: { ownsAnyAgent: true } }
-        : {}),
+    resource: {
+      ...(resource?.agentId ? { agentId: resource.agentId, owners: ownersOf(state, resource.agentId) } : {}),
+      ...(resource?.skillId ? { skillId: resource.skillId } : {}),
+      ...(resource?.skillOwner ? { skillOwner: resource.skillOwner } : {}),
+      ...(resource?.uploader ? { uploader: resource.uploader } : {}),
+      groupRoles: resource?.groupRoles ?? computedGroupRoles ?? userGroupRoles,
+      ownsAnyAgent: resource?.ownsAnyAgent ?? ownsAny,
+    },
   });
   if (!decision.allowed) {
     json(res, 403, { error: 'forbidden', required: decision.required });
@@ -2846,6 +2982,9 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       return;
     }
     state.agents.delete(agentId);
+    if (state.consoleReplies) {
+      state.consoleReplies = state.consoleReplies.filter((r) => r.agentId !== agentId);
+    }
     registryOf(state).remove(agentId);
     state.ledger.append({
       timestamp: new Date().toISOString(),

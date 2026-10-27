@@ -88,6 +88,7 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: `/api/v1/skills/${SKILL}`, privilege: 'skills.read', role: 'viewer' },
   { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1`, privilege: 'skills.read', role: 'viewer' },
   { method: 'POST', path: '/api/v1/registry/skills', privilege: 'skills.register', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/registry/skills', privilege: 'skills.version.add', role: 'admin', body: {} },
   { method: 'GET', path: `/api/v1/skills/${SKILL}/adopters`, privilege: 'skills.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/agents/castle/skills', privilege: 'config.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/systems', privilege: 'systems.read', role: 'viewer' },
@@ -193,6 +194,15 @@ const ROUTES: RouteRow[] = [
   { method: 'DELETE', path: '/api/v1/groups/nope', privilege: 'groups.manage', role: 'admin' },
   { method: 'POST', path: '/api/v1/groups/nope/members', privilege: 'groups.manage', role: 'admin', body: {} },
   { method: 'DELETE', path: '/api/v1/groups/nope/members', privilege: 'groups.manage', role: 'admin', body: {} },
+  // TSK-277 (Slice 3b): Skill ownership, transfer, group assignment, package inspection (A8, A9, A18, A21, A24)
+  { method: 'POST', path: `/api/v1/skills/${SKILL}/transfer`, privilege: 'skills.transfer', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/skills/${SKILL}/transfer/accept`, privilege: 'skills.register', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/skills/${SKILL}/transfer/cancel`, privilege: 'skills.transfer', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/skills/${SKILL}/transfer/admin`, privilege: 'skills.decide', role: 'admin', body: {} },
+  { method: 'PUT', path: `/api/v1/skills/${SKILL}/group`, privilege: 'skills.assign', role: 'admin', body: {} },
+  { method: 'DELETE', path: `/api/v1/skills/${SKILL}/group`, privilege: 'skills.assign', role: 'admin' },
+  { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1/package/files`, privilege: 'skills.package.read', role: 'admin' },
+  { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1/package/file`, privilege: 'skills.package.read', role: 'admin' },
 ];
 
 async function listen(server: http.Server): Promise<number> {

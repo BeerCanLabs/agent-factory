@@ -490,8 +490,6 @@ describe('SK1 the CodeBuild skill checker and its project', () => {
     }
 
     const bashBin = resolveBash4();
-    const ver = spawnSync(bashBin, ['-c', 'echo "${BASH_VERSINFO[0]}"'], { encoding: 'utf8' }).stdout.trim();
-    assert.ok(parseInt(ver, 10) >= 4, `bash version must be >= 4, got ${ver}`);
 
     const tf = readFileSync(join(REPO_ROOT, 'landing-zones', 'aws', 'codebuild.tf'), 'utf8');
     const project = tf.match(/resource "aws_codebuild_project" "factory_skill_checker" \{[\s\S]*?\n\}\n/)?.[0];

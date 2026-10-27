@@ -388,4 +388,60 @@ describe('who may adopt what (SK1, SK3)', () => {
     assert.deepEqual(availableTo(r, 'higgins').map((s) => [s.id, s.version]), [['discord-progress', '1.0.0'], ['print', '0.1.1']]);
     assert.deepEqual(availableTo(r, 'donna').map((s) => s.id), ['discord-progress']);
   });
+
+  describe('skill human ownership, transfer, and group assignment (H4, H5, A18, A24)', () => {
+    it('manages human owner across versions', () => {
+      const r = new SkillRegistry();
+      r.save(record('1.0.0', { id: 's1', owner: 'alice' }));
+      r.save(record('1.1.0', { id: 's1', owner: 'alice' }));
+
+      const summary = summarizeSkill(r, 's1');
+      assert.equal(summary?.owner, 'alice');
+
+      r.setOwner('s1', 'bob');
+      assert.equal(summarizeSkill(r, 's1')?.owner, 'bob');
+      assert.equal(r.get('s1', '1.0.0')?.owner, 'bob');
+      assert.equal(r.get('s1', '1.1.0')?.owner, 'bob');
+    });
+
+    it('handles transfer request, accept, and cancel (A24)', () => {
+      const r = new SkillRegistry();
+      r.save(record('1.0.0', { id: 's2', owner: 'alice' }));
+
+      r.requestTransfer('s2', 'bob', 'alice');
+      const sPending = summarizeSkill(r, 's2');
+      assert.equal(sPending?.transferPending?.recipient, 'bob');
+      assert.equal(sPending?.transferPending?.requestedBy, 'alice');
+
+      // Invalid recipient cannot accept
+      assert.throws(() => r.acceptTransfer('s2', 'charlie'), /no pending transfer for recipient charlie/);
+
+      // Recipient accepts
+      r.acceptTransfer('s2', 'bob');
+      const sAccepted = summarizeSkill(r, 's2');
+      assert.equal(sAccepted?.owner, 'bob');
+      assert.equal(sAccepted?.transferPending, undefined);
+
+      // Cancellation
+      r.requestTransfer('s2', 'charlie', 'bob');
+      assert.ok(summarizeSkill(r, 's2')?.transferPending);
+      r.cancelTransfer('s2');
+      assert.equal(summarizeSkill(r, 's2')?.transferPending, undefined);
+    });
+
+    it('assigns and unassigns groups (H5, A18)', () => {
+      const r = new SkillRegistry();
+      r.save(record('1.0.0', { id: 's3', owner: 'alice' }));
+      r.save(record('2.0.0', { id: 's3', owner: 'alice' }));
+
+      r.assignGroup('s3', 'platform-devs');
+      assert.equal(summarizeSkill(r, 's3')?.groupId, 'platform-devs');
+      assert.equal(r.get('s3', '1.0.0')?.groupId, 'platform-devs');
+      assert.equal(r.get('s3', '2.0.0')?.groupId, 'platform-devs');
+
+      r.unassignGroup('s3');
+      assert.equal(summarizeSkill(r, 's3')?.groupId, undefined);
+      assert.equal(r.get('s3', '1.0.0')?.groupId, undefined);
+    });
+  });
 });
