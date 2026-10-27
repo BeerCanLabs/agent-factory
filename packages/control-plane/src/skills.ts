@@ -221,6 +221,10 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     return;
   }
 
+  if (isJson) {
+    res.setHeader('Deprecation', 'true');
+  }
+
   // A11, H4: An agent registers only on behalf of a verified human requester who holds skills.register
   const isAgent = principal.actor.startsWith('agent:') || principal.actor.startsWith('token:agent:');
   const verifiedRequester = requestRunRequester.get(req);

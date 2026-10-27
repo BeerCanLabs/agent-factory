@@ -128,6 +128,7 @@ export type FactoryState = {
   /**
    * §6.14 SK1, TSK-055: where registration reads a skill's `skill.yaml` when the caller sends none, and resolves a
    * branch or tag to its commit. Unset: git with the factory's read-only source token (`gitSkillSource`).
+   * @deprecated Repository skill registration is deprecated in favor of self-contained packages (H1, A5, TSK-279).
    */
   skillSource?: SkillSource;
   /** §6.14 SK1, A4, A21: content-addressed immutable storage for skill packages. */
