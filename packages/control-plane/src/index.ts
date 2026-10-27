@@ -7,6 +7,7 @@ import { accessAuthFromEnv, authFromEnv, cliDiscoveryFromEnv } from '@beercanlab
 import {
   BUILTIN_SYSTEM_AGENTS,
   configBackendFromEnv,
+  GroupStore,
   loadCatalog,
   loadDynamicRegistry,
   mergeAgents,
@@ -179,8 +180,12 @@ const modelStore = new ModelStore(
   process.env.FACTORY_DEFAULT_MODEL || undefined,
 );
 
+const GROUPS_DIR = process.env.FACTORY_GROUPS_DIR || join(DATA_DIR, 'groups');
+const groups = await GroupStore.open(GROUPS_DIR);
+
 const state: FactoryState = {
   agents: new Map(allAgents.map((a) => [a.id, a])),
+  groups,
   modelStore,
   // §6.9 M3: the dynamic catalog gatekeeper-egress serves, so the admin chooses from what is actually offered.
   modelCatalog: modelStore.toEgressCatalog(),
