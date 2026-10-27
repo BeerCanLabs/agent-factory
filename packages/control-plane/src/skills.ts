@@ -46,8 +46,19 @@ import {
   type SkillManifest,
 } from '@beercanlabs/factory-contract';
 import { authorize } from '@beercanlabs/factory-bouncer';
-import type { Principal } from '@beercanlabs/factory-auth';
-import { identify, json, readJson, readBufferBody, requirePrivilege, checkOwnsAnyAgent, type FactoryState } from './app.js';
+import type { Principal, Role } from '@beercanlabs/factory-auth';
+import {
+  identify,
+  json,
+  readJson,
+  readBufferBody,
+  requirePrivilege,
+  checkOwnsAnyAgent,
+  userHoldsSkillsRegister,
+  requestRunRequester,
+  actorIsAdmin,
+  type FactoryState,
+} from './app.js';
 import { applyKillSwitch } from '@beercanlabs/factory-property-manager';
 import { registryOf } from '@beercanlabs/factory-registrar';
 import { triggerApply } from './apply.js';
@@ -179,21 +190,6 @@ function callerGroupRoles(state: FactoryState, actor: string, groupId?: string):
   return [];
 }
 
-function userHoldsSkillsRegister(state: FactoryState, actor: string): boolean {
-  const groupRoles = state.groups ? state.groups.getUserRoles(actor) : undefined;
-  return authorize({
-    principal: {
-      actor,
-      roles: (actor === 'token:admin' ? ['admin'] : []) as any,
-    },
-    privilege: 'skills.register',
-    resource: {
-      ownsAnyAgent: checkOwnsAnyAgent(state, actor),
-      groupRoles,
-    },
-  }).allowed;
-}
-
 /** Ledger key for a skill version: the ledger is keyed by agent, so skills are `skill:<id>@<version>`. */
 function ledgerKey(id: unknown, version?: unknown): string {
   const safeId = typeof id === 'string' && SKILL_ID.test(id) && id.length <= 64 ? id : '(invalid)';
@@ -221,30 +217,8 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
 
   // A11, H4: An agent registers only on behalf of a verified human requester who holds skills.register
   const isAgent = principal.actor.startsWith('agent:') || principal.actor.startsWith('token:agent:');
-  let contentOwner: string;
-  let verifiedRequester: string | undefined;
-
-  if (isAgent) {
-    const requesterHeader = req.headers['x-factory-run-requester'];
-    verifiedRequester = typeof requesterHeader === 'string' && requesterHeader.trim() ? requesterHeader.trim() : undefined;
-    if (!verifiedRequester || verifiedRequester.startsWith('agent:') || verifiedRequester.startsWith('token:agent:')) {
-      json(res, 403, {
-        error: 'agent_must_have_verified_requester',
-        message: 'an agent may register a skill only on behalf of a verified human requester (A11, H4)',
-      });
-      return;
-    }
-    if (!userHoldsSkillsRegister(state, verifiedRequester)) {
-      json(res, 403, {
-        error: 'requester_lacks_skills_register',
-        message: `verified requester ${verifiedRequester} does not hold skills.register (A11)`,
-      });
-      return;
-    }
-    contentOwner = verifiedRequester;
-  } else {
-    contentOwner = principal.actor;
-  }
+  const verifiedRequester = requestRunRequester.get(req);
+  const contentOwner = isAgent && verifiedRequester ? verifiedRequester : principal.actor;
 
   if (isGzip) {
     const checker = await checkerFor(state);
@@ -328,9 +302,13 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
           return { ok: false, reason: `id: ${manifest.id} is registered from a repository; cannot mix repository and package versions for this id (A15)` };
         }
         const skillOwner = first.owner ?? first.registeredBy;
-        const groupRoles = callerGroupRoles(state, principal.actor, first.groupId);
+        const effectiveActor = (isAgent && verifiedRequester) ? verifiedRequester : principal.actor;
+        const effectivePrincipal: Principal = (isAgent && verifiedRequester)
+          ? { actor: verifiedRequester, roles: (actorIsAdmin(state, verifiedRequester) ? ['admin'] : []) as Role[] }
+          : principal;
+        const groupRoles = callerGroupRoles(state, effectiveActor, first.groupId);
         const canAddVersion = authorize({
-          principal,
+          principal: effectivePrincipal,
           privilege: 'skills.version.add',
           resource: { skillId: manifest.id, skillOwner, groupRoles },
         }).allowed;
@@ -483,6 +461,21 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
           reasons.push(`id: ${manifest.id} is registered from a package; cannot mix repository and package versions for this id (A15)`);
         } else if (repo && path && (existing.repo !== repo || existing.path !== path)) {
           reasons.push(`id: ${manifest.id} is registered from ${existing.repo} (${existing.path}); a different repository or path is a different skill, so give it a different id`);
+        } else {
+          const skillOwner = existing.owner ?? existing.registeredBy;
+          const effectiveActor = (isAgent && verifiedRequester) ? verifiedRequester : principal.actor;
+          const effectivePrincipal: Principal = (isAgent && verifiedRequester)
+            ? { actor: verifiedRequester, roles: (actorIsAdmin(state, verifiedRequester) ? ['admin'] : []) as Role[] }
+            : principal;
+          const groupRoles = callerGroupRoles(state, effectiveActor, existing.groupId);
+          const canAddVersion = authorize({
+            principal: effectivePrincipal,
+            privilege: 'skills.version.add',
+            resource: { skillId: manifest.id, skillOwner, groupRoles },
+          }).allowed;
+          if (!canAddVersion) {
+            reasons.push(`id: ${manifest.id} is owned by ${skillOwner}; new versions must come from the owner or an admin (A15)`);
+          }
         }
       }
       for (const i of skillDesignIssues(manifest, { gatekeeperEgressHeld: state.gatekeeperEgressHeldSecrets })) {
@@ -1300,7 +1293,7 @@ async function requestTransfer(state: FactoryState, req: http.IncomingMessage, r
     return json(res, 400, { error: 'invalid_recipient', message: err.message });
   }
 
-  if (recipient.startsWith('agent:')) {
+  if (recipient.startsWith('agent:') || recipient.startsWith('token:agent:')) {
     return json(res, 400, { error: 'invalid_recipient', message: 'an agent cannot own a skill (H4)' });
   }
 
@@ -1416,16 +1409,16 @@ async function adminTransfer(state: FactoryState, req: http.IncomingMessage, res
     return json(res, 400, { error: 'invalid_recipient', message: err.message });
   }
 
-  if (recipient.startsWith('agent:')) {
+  if (recipient.startsWith('agent:') || recipient.startsWith('token:agent:')) {
     return json(res, 400, { error: 'invalid_recipient', message: 'an agent cannot own a skill (H4)' });
   }
 
   // A24: owner rights revoked means owner has lost skills.register right or account is disabled.
   const ownerHoldsRegister = userHoldsSkillsRegister(state, currentOwner);
-  if (ownerHoldsRegister && body.force !== true) {
+  if (ownerHoldsRegister) {
     return json(res, 409, {
       error: 'owner_rights_not_revoked',
-      message: `owner ${currentOwner} still holds skills.register; admin transfer without acceptance requires revoked owner rights or "force": true (A24)`,
+      message: `owner ${currentOwner} still holds skills.register; admin transfer without acceptance requires revoked owner rights (A24)`,
     });
   }
 
@@ -1465,7 +1458,7 @@ async function assignSkillGroup(state: FactoryState, req: http.IncomingMessage, 
   const principal = await requirePrivilege(req, res, state, 'skills.assign', {
     skillId: id,
     skillOwner: currentOwner,
-    groupRoles: callerGroupRoles(state, '', currentGroupId),
+    groupId: currentGroupId,
   });
   if (!principal) return;
   if (!versions.length) return json(res, 404, { error: 'not_found', id });
@@ -1525,7 +1518,7 @@ async function unassignSkillGroup(state: FactoryState, req: http.IncomingMessage
   const principal = await requirePrivilege(req, res, state, 'skills.assign', {
     skillId: id,
     skillOwner: currentOwner,
-    groupRoles: callerGroupRoles(state, '', currentGroupId),
+    groupId: currentGroupId,
   });
   if (!principal) return;
   if (!versions.length) return json(res, 404, { error: 'not_found', id });
@@ -1557,7 +1550,7 @@ async function getPackageFiles(state: FactoryState, req: http.IncomingMessage, r
     skillId: id,
     skillOwner,
     uploader: rec?.registeredBy,
-    groupRoles: callerGroupRoles(state, '', rec?.groupId),
+    groupId: rec?.groupId,
   });
   if (!principal) return;
   if (!rec) return json(res, 404, { error: 'not_found', id, version });
@@ -1594,7 +1587,7 @@ async function getPackageFile(state: FactoryState, req: http.IncomingMessage, re
     skillId: id,
     skillOwner,
     uploader: rec?.registeredBy,
-    groupRoles: callerGroupRoles(state, '', rec?.groupId),
+    groupId: rec?.groupId,
   });
   if (!principal) return;
   if (!rec) return json(res, 404, { error: 'not_found', id, version });

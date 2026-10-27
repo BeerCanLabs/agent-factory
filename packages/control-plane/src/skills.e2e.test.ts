@@ -10,9 +10,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
-import { bearerAuth } from '@beercanlabs/factory-auth';
-import { createFactoryServer, type FactoryState } from './app.js';
-import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
+import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
+import { createFactoryServer, checkOwnsAnyAgent, type FactoryState } from './app.js';
+import { MemoryRunStore, noopRuntime, createRun } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
@@ -813,6 +813,7 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
       agents: new Map([
         ['alice-agent', { id: 'alice-agent', name: 'Alice Agent', owners: ['token:alice'] } as any],
         ['bob-agent', { id: 'bob-agent', name: 'Bob Agent', owners: ['token:bob'] } as any],
+        ['helper', { id: 'helper', name: 'Helper Agent', owners: ['token:bob'] } as any],
       ]),
       registryDir: join(dataDir, 'registry'),
       ledger,
@@ -834,7 +835,7 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
       idleMs: 0,
       idleTimers: new Map(),
       callbacks: { allowHosts: [] } as unknown as FactoryState['callbacks'],
-      runTokens: { issue: async () => '', verify: async () => undefined } as unknown as FactoryState['runTokens'],
+      runTokens: new RunTokens('slice3b-test-run-token-key-0123456789'),
       secretValues: new Set(),
     } as FactoryState;
     state.configs = await VersionedConfigStore.open(memoryBackend());
@@ -875,31 +876,74 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
   it('agent registers on behalf of verified human requester (A11, H4)', async () => {
     const pkg = makeValidPackage('agent-registered-skill', '1.0.0');
 
-    // 1. Agent calls without x-factory-run-requester -> 403
+    // 1. Agent calls with static token (no verified run) -> 403
     const noReq = await call(port, '/api/v1/registry/skills', 'POST', HELPER_AGENT, pkg);
     assert.equal(noReq.status, 403);
     assert.equal(noReq.body.error, 'agent_must_have_verified_requester');
 
-    // 2. Agent calls with requester who lacks skills.register -> 403
-    const unauthedReq = await call(port, '/api/v1/registry/skills', 'POST', HELPER_AGENT, pkg, {
-      'x-factory-run-requester': 'token:charlie',
+    // 2. Agent in cron run (trigger: 'cron', no human requester) -> 403
+    const cronRun = state.runs.create({
+      agentId: 'helper',
+      state: 'WORKING',
+      actor: 'system',
+      trigger: 'cron',
     });
+    const cronToken = await state.runTokens!.mint(cronRun);
+    const cronRes = await call(port, '/api/v1/registry/skills', 'POST', cronToken, pkg);
+    assert.equal(cronRes.status, 403);
+    assert.equal(cronRes.body.error, 'agent_must_have_verified_requester');
+
+    // 3. Agent in run whose requester lacks skills.register (Charlie) -> 403
+    const charlieRun = state.runs.create({
+      agentId: 'helper',
+      state: 'WORKING',
+      actor: 'token:charlie',
+      trigger: 'api',
+    });
+    const charlieToken = await state.runTokens!.mint(charlieRun);
+    const unauthedReq = await call(port, '/api/v1/registry/skills', 'POST', charlieToken, pkg);
     assert.equal(unauthedReq.status, 403);
     assert.equal(unauthedReq.body.error, 'requester_lacks_skills_register');
 
-    // 3. Agent calls with valid requester (Bob, who owns bob-agent) -> 201
-    const okReq = await call(port, '/api/v1/registry/skills', 'POST', HELPER_AGENT, pkg, {
+    // 4. Agent attempts to spoof requester via header x-factory-run-requester -> header ignored, still 403
+    const spoofReq = await call(port, '/api/v1/registry/skills', 'POST', charlieToken, pkg, {
       'x-factory-run-requester': 'token:bob',
     });
+    assert.equal(spoofReq.status, 403);
+    assert.equal(spoofReq.body.error, 'requester_lacks_skills_register');
+
+    // 5. Agent in run whose requester holds skills.register (Bob, who owns bob-agent) -> 201
+    const bobRun = state.runs.create({
+      agentId: 'helper',
+      state: 'WORKING',
+      actor: 'token:bob',
+      trigger: 'api',
+    });
+    const bobToken = await state.runTokens!.mint(bobRun);
+    const okReq = await call(port, '/api/v1/registry/skills', 'POST', bobToken, pkg);
     assert.equal(okReq.status, 201, JSON.stringify(okReq.body));
-    assert.equal(okReq.body.registeredBy, 'token:agent:helper');
+    assert.equal(okReq.body.registeredBy, 'agent:helper');
     assert.equal(okReq.body.owner, 'token:bob');
 
     // Ledger records agent as actor and verified requester as subject
     const rows = ledger.query().filter((e) => e.agentId === 'skill:agent-registered-skill@1.0.0' && e.action === 'SKILL_REGISTERED');
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].actor, 'token:agent:helper');
+    assert.equal(rows[0].actor, 'agent:helper');
     assert.equal(rows[0].subject, 'token:bob');
+
+    // 6. Finding 6: Agent in Bob's run adds a new version (1.1.0) to Bob's skill -> 201
+    const pkg11 = makeValidPackage('agent-registered-skill', '1.1.0');
+    const okVer = await call(port, '/api/v1/registry/skills', 'POST', bobToken, pkg11);
+    assert.equal(okVer.status, 201, JSON.stringify(okVer.body));
+    assert.equal(okVer.body.registeredBy, 'agent:helper');
+    assert.equal(okVer.body.owner, 'token:bob');
+
+    // 7. Finding 6: Agent in Bob's run tries to add a new version to Alice's skill -> 422
+    const alicePkg = makeValidPackage('text-analysis', '1.4.0');
+    const failVer = await call(port, '/api/v1/registry/skills', 'POST', bobToken, alicePkg);
+    assert.equal(failVer.status, 422);
+    assert.equal(failVer.body.error, 'skill_refused');
+    assert.ok(failVer.body.reasons.some((r: string) => r.includes('new versions must come from the owner or an admin (A15)')));
   });
 
   it('new version registration rules and inheritance (A15, A23)', async () => {
@@ -924,6 +968,27 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
   });
 
   it('two-step ownership transfer: request, recipient accept, cancel, and admin override (A24)', async () => {
+    // 0. Recipient must be human (non-blocking finding)
+    const agentReq1 = await call(port, '/api/v1/skills/text-analysis/transfer', 'POST', ALICE, { recipient: 'token:agent:helper' });
+    assert.equal(agentReq1.status, 400);
+    assert.equal(agentReq1.body.error, 'invalid_recipient');
+
+    const agentReq2 = await call(port, '/api/v1/skills/text-analysis/transfer', 'POST', ALICE, { recipient: 'agent:helper' });
+    assert.equal(agentReq2.status, 400);
+    assert.equal(agentReq2.body.error, 'invalid_recipient');
+
+    // Finding 3: Transfer to human admin (via FACTORY_ADMIN_EMAILS) succeeds
+    process.env.FACTORY_ADMIN_EMAILS = 'boss@example.com';
+    try {
+      const adminReq = await call(port, '/api/v1/skills/text-analysis/transfer', 'POST', ALICE, { recipient: 'cloudflare:boss@example.com' });
+      assert.equal(adminReq.status, 200, JSON.stringify(adminReq.body));
+      assert.equal(adminReq.body.transferPending.recipient, 'cloudflare:boss@example.com');
+      // Cancel so subsequent steps can continue with Bob
+      await call(port, '/api/v1/skills/text-analysis/transfer/cancel', 'POST', ALICE, {});
+    } finally {
+      delete process.env.FACTORY_ADMIN_EMAILS;
+    }
+
     // 1. Request transfer to recipient lacking skills.register -> 422
     const badReq = await call(port, '/api/v1/skills/text-analysis/transfer', 'POST', ALICE, { recipient: 'token:charlie' });
     assert.equal(badReq.status, 422);
@@ -965,17 +1030,27 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
     const cancelRows = ledger.query().filter((e) => e.action === 'SKILL_TRANSFER_CANCELLED');
     assert.ok(cancelRows.length >= 1);
 
-    // 6. Admin transfer override: Bob still holds skills.register, force: false -> 409
+    // 6. Admin transfer override (Finding 4): Bob still holds skills.register -> 409
     const refusedAdmin = await call(port, '/api/v1/skills/text-analysis/transfer/admin', 'POST', ADMIN, { recipient: 'token:alice' });
     assert.equal(refusedAdmin.status, 409);
     assert.equal(refusedAdmin.body.error, 'owner_rights_not_revoked');
 
-    // Admin transfers with force: true -> 200
-    const okAdmin = await call(port, '/api/v1/skills/text-analysis/transfer/admin', 'POST', ADMIN, { recipient: 'token:alice', force: true });
-    assert.equal(okAdmin.status, 200);
-    assert.equal(okAdmin.body.owner, 'token:alice');
-    const adminRows = ledger.query().filter((e) => e.action === 'SKILL_TRANSFERRED_BY_ADMIN');
-    assert.ok(adminRows.length >= 1);
+    // Finding 4: Revoke Bob's rights (remove agents owned by Bob) -> admin override succeeds unconditionally without acceptance
+    state.agents.delete('bob-agent');
+    state.agents.delete('helper');
+    await state.configs.remove('bob-agent');
+    try {
+      const okAdmin = await call(port, '/api/v1/skills/text-analysis/transfer/admin', 'POST', ADMIN, { recipient: 'token:alice' });
+      assert.equal(okAdmin.status, 200, JSON.stringify(okAdmin.body));
+      assert.equal(okAdmin.body.owner, 'token:alice');
+      const adminRows = ledger.query().filter((e) => e.action === 'SKILL_TRANSFERRED_BY_ADMIN');
+      assert.ok(adminRows.length >= 1);
+    } finally {
+      // Restore Bob's agents for subsequent tests
+      state.agents.set('bob-agent', { id: 'bob-agent', name: 'Bob Agent', owners: ['token:bob'] } as any);
+      state.agents.set('helper', { id: 'helper', name: 'Helper Agent', owners: ['token:bob'] } as any);
+      await state.configs.put({ agentId: 'bob-agent', source: {}, skills: [], policy: null, owners: ['token:bob'] }, { updatedBy: 'test', reason: 'restore' });
+    }
   });
 
   it('group assignment, group roles, and group member version addition (H5, A18, A23)', async () => {
@@ -1008,6 +1083,15 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
     const assignRows = ledger.query().filter((e) => e.action === 'SKILL_GROUP_ASSIGNED');
     assert.ok(assignRows.length >= 1);
 
+    // Finding 2: Group member with skill-owner role (Charlie) can inspect package files and file content
+    const charlieList = await call(port, '/api/v1/skills/text-analysis/versions/1.0.0/package/files', 'GET', CHARLIE);
+    assert.equal(charlieList.status, 200, JSON.stringify(charlieList.body));
+    assert.ok(charlieList.body.files.some((f: any) => f.path === 'skill.yaml'));
+
+    const charlieFile = await call(port, '/api/v1/skills/text-analysis/versions/1.0.0/package/file?path=entry.py', 'GET', CHARLIE);
+    assert.equal(charlieFile.status, 200);
+    assert.ok(charlieFile.body.content.includes('def tools():'));
+
     // 5. Bob (member of engineering which holds skill-owner) registers version 1.3.0 -> 201!
     const pkg13 = makeValidPackage('text-analysis', '1.3.0');
     const bobRes = await call(port, '/api/v1/registry/skills', 'POST', BOB, pkg13);
@@ -1021,8 +1105,8 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
     assert.equal(charlieRes.status, 201);
     assert.equal(charlieRes.body.owner, 'token:charlie');
 
-    // 7. Unassign group -> 200
-    const unassign = await call(port, '/api/v1/skills/text-analysis/group', 'DELETE', ALICE);
+    // 7. Finding 2: Group member (Charlie) unassigns group -> 200
+    const unassign = await call(port, '/api/v1/skills/text-analysis/group', 'DELETE', CHARLIE);
     assert.equal(unassign.status, 200);
     assert.equal(unassign.body.groupId, null);
     const unassignRows = ledger.query().filter((e) => e.action === 'SKILL_GROUP_UNASSIGNED');
@@ -1058,5 +1142,80 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
     // 6. Missing path query parameter -> 400
     const missingParam = await call(port, '/api/v1/skills/text-analysis/versions/1.0.0/package/file', 'GET', ALICE);
     assert.equal(missingParam.status, 400);
+  });
+
+  it('repository registration enforces owner or admin for new versions (Finding 5, A15, A23)', async () => {
+    // 1. Alice registers repo-skill@1.0.0
+    const regRes = await call(port, '/api/v1/registry/skills', 'POST', ALICE, {
+      repo: 'https://github.com/BeerCanLabs/test-repo-skill',
+      path: '.',
+      commit: '1111111111111111111111111111111111111111',
+      manifest: {
+        id: 'repo-skill',
+        name: 'Repo Skill',
+        version: '1.0.0',
+        description: 'Repo skill test',
+        language: 'python',
+        entry: 'entry.py',
+        visibility: 'public',
+      },
+    });
+    assert.equal(regRes.status, 201, JSON.stringify(regRes.body));
+    assert.equal(regRes.body.owner, 'token:alice');
+
+    // 2. Bob (holding skills.register, but not owner or admin) attempts to register version 1.1.0 -> 422
+    const bobRefused = await call(port, '/api/v1/registry/skills', 'POST', BOB, {
+      repo: 'https://github.com/BeerCanLabs/test-repo-skill',
+      path: '.',
+      commit: '2222222222222222222222222222222222222222',
+      manifest: {
+        id: 'repo-skill',
+        name: 'Repo Skill',
+        version: '1.1.0',
+        description: 'Repo skill test v1.1.0',
+        language: 'python',
+        entry: 'entry.py',
+        visibility: 'public',
+      },
+    });
+    assert.equal(bobRefused.status, 422);
+    assert.equal(bobRefused.body.error, 'skill_refused');
+    assert.ok(bobRefused.body.reasons.some((r: string) => r.includes('new versions must come from the owner or an admin (A15)')));
+
+    // 3. Alice (owner) registers version 1.1.0 -> 201
+    const aliceRes = await call(port, '/api/v1/registry/skills', 'POST', ALICE, {
+      repo: 'https://github.com/BeerCanLabs/test-repo-skill',
+      path: '.',
+      commit: '2222222222222222222222222222222222222222',
+      manifest: {
+        id: 'repo-skill',
+        name: 'Repo Skill',
+        version: '1.1.0',
+        description: 'Repo skill test v1.1.0',
+        language: 'python',
+        entry: 'entry.py',
+        visibility: 'public',
+      },
+    });
+    assert.equal(aliceRes.status, 201);
+    assert.equal(aliceRes.body.owner, 'token:alice');
+
+    // 4. Admin registers version 1.2.0 -> 201, inherits Alice as owner
+    const adminRes = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, {
+      repo: 'https://github.com/BeerCanLabs/test-repo-skill',
+      path: '.',
+      commit: '3333333333333333333333333333333333333333',
+      manifest: {
+        id: 'repo-skill',
+        name: 'Repo Skill',
+        version: '1.2.0',
+        description: 'Repo skill test v1.2.0',
+        language: 'python',
+        entry: 'entry.py',
+        visibility: 'public',
+      },
+    });
+    assert.equal(adminRes.status, 201);
+    assert.equal(adminRes.body.owner, 'token:alice');
   });
 });
