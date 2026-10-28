@@ -153,9 +153,15 @@ async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult
     const prevArtifact = agent.artifact;
     const prevDeployedCommit = agent.deployedCommit;
     const prevDeployedSkills = agent.deployedSkills;
+    const prevDeployedRuntime = agent.deployedRuntime ? { ...agent.deployedRuntime } : undefined;
+    const prevRepo = agent.repo;
+    const prevCommit = agent.commit;
     const prevLaunchEnv = agent.deployedSkills?.length ? { [SKILLS_MANIFEST_ENV]: SKILLS_MANIFEST_PATH } : undefined;
 
     agent.artifact = imageUri;
+    if (agent.createdFrom === 'configuration' && state.sharedRuntime) {
+      agent.deployedRuntime = { repo: state.sharedRuntime.repo, commit: state.sharedRuntime.commit, image: state.sharedRuntime.image };
+    }
 
     // Activation smoke gate (L4, TSK-281)
     const smokeRes = await runActivationSmoke(state, agent, skills, commit, actor);
@@ -170,10 +176,18 @@ async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult
         agent.artifact = prevArtifact;
         agent.deployedCommit = prevDeployedCommit;
         agent.deployedSkills = prevDeployedSkills;
+        if (agent.createdFrom === 'configuration') {
+          agent.deployedRuntime = prevDeployedRuntime;
+          if (prevDeployedRuntime) {
+            agent.repo = prevDeployedRuntime.repo;
+            agent.commit = prevDeployedRuntime.commit;
+          }
+        }
       } else {
         agent.artifact = '';
         delete agent.deployedCommit;
         delete agent.deployedSkills;
+        delete agent.deployedRuntime;
       }
       if (!stoppedDuring(agent)) {
         if (!job.isApply) agent.state = 'ERROR';
@@ -186,6 +200,15 @@ async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult
     agent.artifact = imageUri;
     agent.deployedCommit = commit;
     agent.deployedSkills = skills.map(({ id, version }) => ({ id, version }));
+    if (agent.createdFrom === 'configuration' && state.sharedRuntime) {
+      agent.repo = state.sharedRuntime.repo;
+      agent.commit = state.sharedRuntime.commit;
+      agent.deployedRuntime = {
+        repo: state.sharedRuntime.repo,
+        commit: state.sharedRuntime.commit,
+        image: state.sharedRuntime.image,
+      };
+    }
     agent.provider = 'cloud';
     // SK6: an agent paused because it ran a skill is resumed once the image no longer has it.
     const resumed = agent.pausedForSkill !== undefined && !agent.deployedSkills.some((s) => s.id === agent.pausedForSkill);
@@ -251,10 +274,25 @@ export function applyConfig(state: FactoryState, agentId: string, actor: string,
     console.error(`[control-plane] cannot apply ${agentId}: ${built.message}`);
     return { status: 'failed', reason: built.error };
   }
-  if (sameSkills(agent.deployedSkills ?? [], built.skills)) return { status: 'unchanged', reason: 'image_matches' };
   // CF6: an agent created from a configuration runs the pinned runtime image; one with adopted skills runs it with the
   // skills layered on (TSK-272), built only by a provider that can, never from a repository as if it were a cartridge.
   const configured = agent.createdFrom === 'configuration';
+  if (configured) {
+    const runtimeMatches =
+      Boolean(state.sharedRuntime) &&
+      agent.deployedCommit === state.sharedRuntime!.commit &&
+      (!agent.deployedRuntime ||
+        (agent.deployedRuntime.repo === state.sharedRuntime!.repo &&
+          agent.deployedRuntime.commit === state.sharedRuntime!.commit &&
+          agent.deployedRuntime.image === state.sharedRuntime!.image));
+    if (sameSkills(agent.deployedSkills ?? [], built.skills) && runtimeMatches) {
+      return { status: 'unchanged', reason: 'image_matches' };
+    }
+  } else {
+    if (sameSkills(agent.deployedSkills ?? [], built.skills)) {
+      return { status: 'unchanged', reason: 'image_matches' };
+    }
+  }
   if (configured && !state.sharedRuntime) {
     row(state, agentId, 'AGENT_CONFIG_APPLY_SKIPPED', actor, undefined, requestId);
     return { status: 'skipped', reason: 'shared_runtime_not_configured' };

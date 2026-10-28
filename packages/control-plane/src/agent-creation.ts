@@ -11,15 +11,14 @@
  */
 import http from 'node:http';
 import { payloadHash } from '@beercanlabs/factory-ledger';
-import { AGENT_ID, BUILTIN_AGENT_IDS, FULL_SHA, applySettingsChange, beginAdmission, changedParts, registryOf, type AgentRecord } from '@beercanlabs/factory-registrar';
+import { AGENT_ID, BUILTIN_AGENT_IDS, FULL_SHA, applySettingsChange, beginAdmission, changedParts, registryOf, loadSharedRuntime, saveSharedRuntime, type SharedRuntimePin, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
-import { buildSkillsFor, runDeploy } from './apply.js';
+import { applyConfig, buildSkillsFor, runDeploy } from './apply.js';
 import { changeReason, configOf, ledgerVersion, recordConfig, removeConfig } from './config-store.js';
 import { SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type Run } from '@beercanlabs/factory-property-manager';
 import { runActivationSmoke } from './smoke.js';
 
-/** The runtime version the factory pins new agents to (RT1): its repository and commit, and the image that runs it. */
-export type SharedRuntimePin = { repo: string; commit: string; image: string };
+export { loadSharedRuntime, saveSharedRuntime, type SharedRuntimePin };
 
 /** Why registering `agentId` from a repository is refused, or undefined when it is allowed (CF6). */
 export function registrationRefusal(state: FactoryState, agentId: string): { status: number; error: string; message: string } | undefined {
@@ -199,6 +198,9 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
   const prevArtifact = agent.artifact;
   const prevDeployedCommit = agent.deployedCommit;
   const prevDeployedSkills = agent.deployedSkills ? [...agent.deployedSkills] : undefined;
+  const prevDeployedRuntime = agent.deployedRuntime ? { ...agent.deployedRuntime } : undefined;
+  const prevRepo = agent.repo;
+  const prevCommit = agent.commit;
   const prevLaunchEnv = prevDeployedSkills?.length ? { [SKILLS_MANIFEST_ENV]: SKILLS_MANIFEST_PATH } : undefined;
   agent.state = 'DEPLOYING';
   registryOf(state).save(agent);
@@ -208,6 +210,7 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
     agent.artifact = pin.image;
     agent.deployedCommit = pin.commit;
     agent.deployedSkills = [];
+    agent.deployedRuntime = { repo: pin.repo, commit: pin.commit, image: pin.image };
 
     // Activation smoke gate (L4, TSK-281)
     const smokeRes = await runActivationSmoke(state, agent, [], pin.commit, actor);
@@ -222,11 +225,15 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
         agent.artifact = prevArtifact;
         agent.deployedCommit = prevDeployedCommit;
         agent.deployedSkills = prevDeployedSkills;
+        agent.deployedRuntime = prevDeployedRuntime;
+        agent.repo = prevRepo;
+        agent.commit = prevCommit;
         agent.state = previous;
       } else {
         agent.artifact = '';
         delete agent.deployedCommit;
         delete agent.deployedSkills;
+        delete agent.deployedRuntime;
         agent.state = 'ERROR';
       }
       registryOf(state).save(agent);
@@ -234,6 +241,10 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
     }
 
     agent.state = 'SLEEPING';
+    agent.repo = pin.repo;
+    agent.commit = pin.commit;
+    agent.deployedCommit = pin.commit;
+    agent.deployedRuntime = { repo: pin.repo, commit: pin.commit, image: pin.image };
     registryOf(state).save(agent);
     await recordConfig(state, agent.id, { actor, reason: changeReason(req, `deploy of runtime ${pin.commit}`) });
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'AGENT_DEPLOYED', actor, commit: pin.commit });
@@ -245,4 +256,135 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'AGENT_DEPLOY_FAILED', actor, commit: pin.commit });
     json(res, 502, { error: 'deploy_failed' });
   }
+}
+
+/**
+ * Admin-approved runtime rollout and runtime census (RT1, GAP-206, TSK-280):
+ *   GET /api/v1/runtime               current runtime pin and configuration agents status (agents.read)
+ *   PUT /api/v1/runtime               set pinned runtime and roll out to configuration agents (runtime.set)
+ */
+export async function handleRuntimeRoutes(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
+  if (path !== '/api/v1/runtime') return false;
+
+  if (req.method === 'GET') {
+    const principal = await requirePrivilege(req, res, state, 'agents.read');
+    if (!principal) return true;
+
+    const agents = [];
+    for (const a of state.agents.values()) {
+      if (a.createdFrom === 'configuration' && a.state !== 'RETIRED_PENDING_PURGE' && a.state !== 'PURGED') {
+        const deployedRuntime = a.deployedRuntime ?? (a.deployedCommit ? { repo: a.repo ?? '', commit: a.deployedCommit, image: a.artifact } : null);
+        const upToDate = Boolean(
+          state.sharedRuntime &&
+          deployedRuntime &&
+          deployedRuntime.repo === state.sharedRuntime.repo &&
+          deployedRuntime.commit === state.sharedRuntime.commit &&
+          deployedRuntime.image === state.sharedRuntime.image
+        );
+        agents.push({
+          id: a.id,
+          name: a.name,
+          state: a.state,
+          deployedRuntime,
+          upToDate,
+        });
+      }
+    }
+    agents.sort((a, b) => a.id.localeCompare(b.id));
+
+    json(res, 200, { ok: true, runtime: state.sharedRuntime ?? null, agents });
+    return true;
+  }
+
+  if (req.method === 'PUT') {
+    const principal = await requirePrivilege(req, res, state, 'runtime.set');
+    if (!principal) return true;
+
+    const body = (await readJson(req)) as Record<string, unknown>;
+    const repo = typeof body.repo === 'string' ? body.repo.trim() : '';
+    const commit = typeof body.commit === 'string' ? body.commit.trim() : '';
+    const image = typeof body.image === 'string' ? body.image.trim() : '';
+
+    if (!repo) {
+      json(res, 400, { error: 'invalid_runtime', message: 'repo is required' });
+      return true;
+    }
+    if (!FULL_SHA.test(commit)) {
+      json(res, 400, { error: 'invalid_runtime', message: 'commit must be a 40-character hex sha' });
+      return true;
+    }
+    if (!/^[^\s]+@sha256:[0-9a-f]{64}$/i.test(image)) {
+      json(res, 400, { error: 'invalid_runtime', message: 'image must be pinned by sha256 digest (image@sha256:...)' });
+      return true;
+    }
+
+    const nextPin: SharedRuntimePin = {
+      repo,
+      commit,
+      image,
+      updatedAt: new Date().toISOString(),
+      updatedBy: principal.actor,
+    };
+
+    state.sharedRuntime = nextPin;
+    saveSharedRuntime(state.registryDir, nextPin);
+
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: 'factory',
+      type: 'action',
+      action: 'RUNTIME_VERSION_SET',
+      actor: principal.actor,
+      commit: nextPin.commit,
+      payloadSha256: payloadHash({ repo: nextPin.repo, commit: nextPin.commit, image: nextPin.image }),
+    });
+
+    const dones: Promise<void>[] = [];
+    for (const a of state.agents.values()) {
+      if (a.createdFrom === 'configuration' && a.state !== 'RETIRED_PENDING_PURGE' && a.state !== 'PURGED') {
+        a.repo = nextPin.repo;
+        a.commit = nextPin.commit;
+        registryOf(state).save(a);
+        if (state.configs?.current(a.id)) {
+          await recordConfig(state, a.id, { actor: principal.actor, reason: 'runtime-upgrade' });
+        }
+        if (a.deployedCommit) {
+          const out = applyConfig(state, a.id, principal.actor, 'runtime-upgrade');
+          if (out.status === 'started') {
+            dones.push(out.done);
+          }
+        }
+      }
+    }
+
+    await Promise.allSettled(dones);
+
+    const agents = [];
+    for (const a of state.agents.values()) {
+      if (a.createdFrom === 'configuration' && a.state !== 'RETIRED_PENDING_PURGE' && a.state !== 'PURGED') {
+        const deployedRuntime = a.deployedRuntime ?? (a.deployedCommit ? { repo: a.repo ?? '', commit: a.deployedCommit, image: a.artifact } : null);
+        const upToDate = Boolean(
+          state.sharedRuntime &&
+          deployedRuntime &&
+          deployedRuntime.repo === state.sharedRuntime.repo &&
+          deployedRuntime.commit === state.sharedRuntime.commit &&
+          deployedRuntime.image === state.sharedRuntime.image
+        );
+        agents.push({
+          id: a.id,
+          name: a.name,
+          state: a.state,
+          deployedRuntime,
+          upToDate,
+        });
+      }
+    }
+    agents.sort((a, b) => a.id.localeCompare(b.id));
+
+    json(res, 200, { ok: true, runtime: state.sharedRuntime, agents });
+    return true;
+  }
+
+  json(res, 405, { error: 'method_not_allowed' });
+  return true;
 }
