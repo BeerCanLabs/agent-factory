@@ -4,7 +4,7 @@ export {
   AdmissionRefusedError, SKILLS_DIR, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, imageTagFor, memoryRuntime, noopRuntime, skillsHash,
 } from './runtime.js';
 export type { AdmissionRefusal, BuildSkill, DeployProvider, NoopStart, RunContext, Runtime, SourceRef, TaskStatus } from './runtime.js';
-export { dockerApi, dockerRuntime, parseImageMap } from './runtime-docker.js';
+export { dockerApi, dockerDeployProvider, dockerRuntime, parseImageMap } from './runtime-docker.js';
 export type { DockerApi, DockerRuntimeOptions } from './runtime-docker.js';
 export { defaultEcsCli, ecsRuntime, parseTaskMap } from './runtime-ecs.js';
 export type { EcsCli } from './runtime-ecs.js';

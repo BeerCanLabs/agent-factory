@@ -144,6 +144,35 @@ api "$CP/api/v1/ledger?agent=nova" | jq -e '[.[] | select(.type=="llm")] | lengt
 if api "$CP/api/v1/ledger" | grep -q 'SOUL-MARKER-7731'; then die "the soul is in the ledger"; fi
 ok "a repository registration of a new id is refused; a new agent is created from a configuration, answers on the shared runtime image, its model call is priced in the ledger, its soul is not"
 
+echo "== convert in place, runtime rollout, and activation smoke pass/fail (TSK-280, TSK-281, TSK-283, TSK-284)"
+nova_dep="$(api -X POST $CP/api/v1/registry/agents/nova/deploy)"
+jq -e '.smoke.ok == true and .deployedRuntime.image == "factory-agent-runtime:dev"' >/dev/null <<<"$nova_dep" || die "deploy nova: $nova_dep"
+
+conv="$(api -X POST -d '{"soul":"You are Summarizer on the shared runtime.","memory":{"archetype":"purpose-built"},"model":"test-small"}' $CP/api/v1/agents/llm-summarizer/convert)"
+jq -e '.createdFrom == "configuration" and .smoke.ok == true and .deployedRuntime.image == "factory-agent-runtime:dev"' >/dev/null <<<"$conv" || die "convert llm-summarizer: $conv"
+api "$CP/api/v1/ledger?agent=llm-summarizer" | jq -e 'map(select(.action=="AGENT_CONVERTED")) | length >= 1' >/dev/null || die "AGENT_CONVERTED not in ledger"
+api "$CP/api/v1/ledger?agent=llm-summarizer" | jq -e 'map(select(.action=="AGENT_DEPLOYED")) | length >= 1' >/dev/null || die "AGENT_DEPLOYED not in ledger"
+[ -z "$("${DC[@]}" exec -T control-plane sh -c 'ls -A /data/mind/llm-summarizer 2>/dev/null || true')" ] || die "llm-summarizer mind directory not empty on purpose-built archetype"
+
+rt_digest="$(docker image inspect factory-agent-runtime:dev --format '{{range .RepoDigests}}{{.}}{{end}}' 2>/dev/null || true)"
+if [ -z "$rt_digest" ]; then
+  rt_id="$(docker image inspect factory-agent-runtime:dev --format '{{.Id}}' | sed 's/sha256://')"
+  rt_digest="factory-agent-runtime@sha256:$rt_id"
+fi
+
+rollout="$(api -X PUT -d "{\"repo\":\"https://github.com/BeerCanLabs/agent-factory\",\"image\":\"$rt_digest\",\"commit\":\"fedcba9876543210fedcba9876543210fedcba98\"}" $CP/api/v1/runtime)"
+jq -e '.pin.commit == "fedcba9876543210fedcba9876543210fedcba98" and (.results | map(select(.status == "updated")) | length >= 2)' >/dev/null <<<"$rollout" || die "runtime rollout: $rollout"
+api "$CP/api/v1/ledger" | jq -e 'map(select(.action=="SHARED_RUNTIME_UPDATED")) | length >= 1' >/dev/null || die "SHARED_RUNTIME_UPDATED not in ledger"
+
+fail_digest="factory-agent-runtime@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+fail_rollout="$(api -X PUT -d "{\"repo\":\"https://github.com/BeerCanLabs/agent-factory\",\"image\":\"$fail_digest\",\"commit\":\"9999999999999999999999999999999999999999\"}" $CP/api/v1/runtime)"
+jq -e '.results | map(select(.status == "smoke_failed")) | length >= 2' >/dev/null <<<"$fail_rollout" || die "forced smoke failure rollout: $fail_rollout"
+agents_now="$(api "$CP/api/v1/agents")"
+jq -e --arg img "$rt_digest" 'map(select(.id == "nova" or .id == "llm-summarizer") | select(.artifact == $img and .deployedRuntime.commit == "fedcba9876543210fedcba9876543210fedcba98")) | length == 2' >/dev/null <<<"$agents_now" || die "rollback agents state: $agents_now"
+api "$CP/api/v1/ledger" | jq -e 'map(select(.action=="AGENT_SMOKE_FAILED")) | length >= 1' >/dev/null || die "AGENT_SMOKE_FAILED not in ledger"
+api -X PUT -d "{\"repo\":\"https://github.com/BeerCanLabs/agent-factory\",\"image\":\"$rt_digest\",\"commit\":\"fedcba9876543210fedcba9876543210fedcba98\"}" $CP/api/v1/runtime >/dev/null
+ok "convert in place, runtime rollout, and activation smoke pass/fail"
+
 echo "== ledger integrity"
 api "$CP/api/v1/ledger/verify" | jq -e '.ok == true' >/dev/null || die "ledger does not verify"
 api "$CP/api/v1/ledger?agent=llm-summarizer" | jq -e 'all(.[]; (.prompt == null) and (.messages == null) and (.content == null))' >/dev/null || die "payload text in ledger"

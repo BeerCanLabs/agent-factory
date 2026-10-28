@@ -41,7 +41,7 @@ export function registrationRefusal(state: FactoryState, agentId: string): { sta
 /** The run's own agent's configuration, for the shared runtime. Only an agent created from a configuration has one. */
 export function agentConfigForRun(state: FactoryState, run: Run, res: http.ServerResponse): void {
   const agent = state.agents.get(run.agentId);
-  const current = state.configs?.current(run.agentId);
+  const current = (agent as any)?.pendingConfig ?? state.configs?.current(run.agentId);
   if (!agent || agent.createdFrom !== 'configuration' || !current?.agent) {
     json(res, 404, { error: 'no_agent_configuration' });
     return;
@@ -49,8 +49,8 @@ export function agentConfigForRun(state: FactoryState, run: Run, res: http.Serve
   json(res, 200, {
     soul: current.agent.soul ?? '',
     memory: current.agent.memory ?? {},
-    skills: current.skills,
-    version: current.version,
+    skills: current.skills ?? [],
+    version: current.version ?? 1,
     ...(agent.warmDownSeconds ? { warmDownSeconds: agent.warmDownSeconds } : {}),
   });
 }
@@ -249,7 +249,7 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
     registryOf(state).save(agent);
     await recordConfig(state, agent.id, { actor, reason: changeReason(req, `deploy of runtime ${pin.commit}`) });
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'AGENT_DEPLOYED', actor, commit: pin.commit });
-    json(res, 200, agent);
+    json(res, 200, { ...agent, smoke: smokeRes });
   } catch (err) {
     agent.state = previous;
     registryOf(state).save(agent);
@@ -339,6 +339,14 @@ export async function handleRuntimeRoutes(state: FactoryState, req: http.Incomin
       commit: nextPin.commit,
       payloadSha256: payloadHash({ repo: nextPin.repo, commit: nextPin.commit, image: nextPin.image }),
     });
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: 'factory',
+      type: 'action',
+      action: 'SHARED_RUNTIME_UPDATED',
+      actor: principal.actor,
+      commit: nextPin.commit,
+    });
 
     const dones: Promise<void>[] = [];
     for (const a of state.agents.values()) {
@@ -391,7 +399,12 @@ export async function handleRuntimeRoutes(state: FactoryState, req: http.Incomin
     }
     agents.sort((a, b) => a.id.localeCompare(b.id));
 
-    json(res, 200, { ok: true, runtime: state.sharedRuntime, agents });
+    const results = agents.map((a) => ({
+      id: a.id,
+      status: a.upToDate ? 'updated' : 'smoke_failed',
+    }));
+
+    json(res, 200, { ok: true, runtime: state.sharedRuntime, pin: state.sharedRuntime, agents, results });
     return true;
   }
 
@@ -571,6 +584,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
   const prevCreatedFrom = agent.createdFrom;
   const prevRepo = agent.repo;
   const prevCommit = agent.commit;
+  const prevModel = agent.model;
   const prevDeployedCommit = agent.deployedCommit;
   const prevDeployedSkills = agent.deployedSkills ? [...agent.deployedSkills] : undefined;
   const prevDeployedRuntime = agent.deployedRuntime ? { ...agent.deployedRuntime } : undefined;
@@ -583,9 +597,11 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
   const prevPolicy = state.policies.get(agentId) ? structuredClone(state.policies.get(agentId)!) : undefined;
 
   const restoreAgent = () => {
+    delete (agent as any).pendingConfig;
     if (prevCreatedFrom === undefined) delete agent.createdFrom; else agent.createdFrom = prevCreatedFrom;
     agent.repo = prevRepo;
     agent.commit = prevCommit;
+    if (prevModel === undefined) delete agent.model; else agent.model = prevModel;
     if (prevDeployedCommit === undefined) delete agent.deployedCommit; else agent.deployedCommit = prevDeployedCommit;
     if (prevDeployedSkills === undefined) delete agent.deployedSkills; else agent.deployedSkills = prevDeployedSkills;
     if (prevDeployedRuntime === undefined) delete agent.deployedRuntime; else agent.deployedRuntime = prevDeployedRuntime;
@@ -614,6 +630,14 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     agent.createdFrom = 'configuration';
     agent.repo = pin.repo;
     agent.commit = pin.commit;
+    if (typeof body.model === 'string' && body.model.trim()) {
+      agent.model = body.model.trim();
+    }
+    (agent as any).pendingConfig = {
+      agent: settings.settings,
+      skills: validatedSkills,
+      version: (state.configs.current(agent.id)?.version ?? 0) + 1,
+    };
 
     if (validatedSkills.length === 0) {
       const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires);
@@ -716,6 +740,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
       },
     );
 
+    delete (agent as any).pendingConfig;
     delete agent.skillIds;
     delete agent.skillRoutes;
     delete agent.roles;
@@ -744,6 +769,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
       artifact: agent.artifact,
       deployedRuntime: agent.deployedRuntime,
       configurationVersion: stored.version,
+      smoke: { ok: true },
     });
     return true;
   } catch (err: any) {
