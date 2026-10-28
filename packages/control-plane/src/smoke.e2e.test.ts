@@ -659,8 +659,9 @@ describe('Activation smoke gate (TSK-281, §6.8 L4, §6.14 SK1)', { concurrency:
       const egressRes = await call(`/api/v1/gatekeeper-egress/runs/${run.runId}`, 'GET', ADMIN);
       assert.equal(egressRes.status, 200);
       assert.equal(egressRes.body.policySet, true);
-      assert.deepEqual(egressRes.body.policy.models, ['*']);
-      // Discord route is stripped out, tavily is included
+      assert.deepEqual(egressRes.body.policy.models, ['gemini-2.0-flash']);
+      // Models route is included, Discord route is stripped out, tavily is included
+      assert.ok(egressRes.body.policy.routes.includes('models'), 'models was included');
       assert.ok(!egressRes.body.policy.routes.includes('discord'), 'discord was stripped');
       assert.ok(egressRes.body.policy.routes.includes('tavily'), 'tavily was included');
       assert.equal(egressRes.body.policy.budgetUsd.perRun, 0.25);

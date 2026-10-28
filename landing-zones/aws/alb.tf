@@ -6,6 +6,7 @@ resource "aws_lb" "factory" {
   security_groups            = [aws_security_group.alb.id]
   subnets                    = aws_subnet.service[*].id
   drop_invalid_header_fields = true
+  idle_timeout               = 300
 }
 
 # §6.12 A1: only the identity-aware proxy reaches the load balancer (443, and 80 which only redirects).

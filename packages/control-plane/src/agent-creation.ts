@@ -423,6 +423,10 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     json(res, 400, { error: 'builtin_agent', message: 'built-in system agents cannot be converted' });
     return true;
   }
+  if (agent.state === 'RETIRED_PENDING_PURGE' || agent.state === 'PURGED') {
+    json(res, 409, { error: 'invalid_state', message: 'cannot convert a retired or purged agent' });
+    return true;
+  }
   if (agent.createdFrom === 'configuration') {
     json(res, 409, { error: 'already_configuration_agent', message: `${agentId} is already a configuration-mode agent` });
     return true;
@@ -546,8 +550,9 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
   const repoRoutes = new Set<string>([
     ...(agent.egress?.routes ?? []),
     ...Object.values(agent.skillRoutes ?? {}).flat(),
+    ...(state.policies.get(agentId)?.routes ?? []),
   ]);
-  const coveredRoutes = new Set<string>();
+  const coveredRoutes = new Set<string>(['models', 'discord']);
   for (const s of validatedSkills) {
     const rec = registry.get(s.id, s.version);
     for (const r of rec?.manifest?.requires?.routes ?? []) coveredRoutes.add(r);
@@ -571,9 +576,11 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
   const prevDeployedRuntime = agent.deployedRuntime ? { ...agent.deployedRuntime } : undefined;
   const prevArtifact = agent.artifact;
   const prevState = agent.state;
-  const prevRoles = agent.roles;
-  const prevSkillIds = agent.skillIds;
-  const prevSkillRoutes = agent.skillRoutes;
+  const prevRoles = agent.roles ? structuredClone(agent.roles) : undefined;
+  const prevSkillIds = agent.skillIds ? [...agent.skillIds] : undefined;
+  const prevSkillRoutes = agent.skillRoutes ? structuredClone(agent.skillRoutes) : undefined;
+  const prevAdmission = agent.admission ? structuredClone(agent.admission) : undefined;
+  const prevPolicy = state.policies.get(agentId) ? structuredClone(state.policies.get(agentId)!) : undefined;
 
   const restoreAgent = () => {
     if (prevCreatedFrom === undefined) delete agent.createdFrom; else agent.createdFrom = prevCreatedFrom;
@@ -587,141 +594,178 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     if (prevRoles === undefined) delete agent.roles; else agent.roles = prevRoles;
     if (prevSkillIds === undefined) delete agent.skillIds; else agent.skillIds = prevSkillIds;
     if (prevSkillRoutes === undefined) delete agent.skillRoutes; else agent.skillRoutes = prevSkillRoutes;
+    if (prevAdmission === undefined) delete agent.admission; else agent.admission = prevAdmission;
+    if (prevPolicy) state.policies.set(agentId, prevPolicy);
     registryOf(state).save(agent);
   };
 
-  agent.createdFrom = 'configuration';
-  agent.repo = pin.repo;
-  agent.commit = pin.commit;
+  if (body.dropUncoveredRoutes === true && uncovered.length > 0) {
+    const uncoveredSet = new Set(uncovered);
+    const existingPolicy = state.policies.get(agentId);
+    if (existingPolicy) {
+      state.policies.set(agentId, {
+        ...existingPolicy,
+        routes: existingPolicy.routes.filter((r) => !uncoveredSet.has(r)),
+      });
+    }
+  }
 
-  if (validatedSkills.length === 0) {
-    const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires);
-    await dp.registerCompute(agent.id, pin.image, agent.requires, identity, executionIdentity, agent.memoryPrefix ?? agent.id);
-    agent.artifact = pin.image;
-    agent.deployedCommit = pin.commit;
-    agent.deployedSkills = [];
-    agent.deployedRuntime = { repo: pin.repo, commit: pin.commit, image: pin.image };
+  try {
+    agent.createdFrom = 'configuration';
+    agent.repo = pin.repo;
+    agent.commit = pin.commit;
 
-    const smokeRes = await runActivationSmoke(state, agent, [], pin.commit, principal.actor);
-    if (!smokeRes.ok) {
-      if (prevArtifact) {
-        try {
-          await dp.registerCompute(
-            agent.id,
-            prevArtifact,
-            agent.requires,
-            identity,
-            executionIdentity,
-            agent.memoryPrefix ?? agent.id,
-            prevDeployedSkills?.length ? { [SKILLS_MANIFEST_ENV]: SKILLS_MANIFEST_PATH } : undefined,
-          );
-        } catch (rbErr) {
-          console.error(`[control-plane] Rollback registerCompute failed for ${agent.id}:`, rbErr);
+    if (validatedSkills.length === 0) {
+      const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires);
+      await dp.registerCompute(agent.id, pin.image, agent.requires, identity, executionIdentity, agent.memoryPrefix ?? agent.id);
+      agent.artifact = pin.image;
+      agent.deployedCommit = pin.commit;
+      agent.deployedSkills = [];
+      agent.deployedRuntime = { repo: pin.repo, commit: pin.commit, image: pin.image };
+
+      const smokeRes = await runActivationSmoke(state, agent, [], pin.commit, principal.actor);
+      if (!smokeRes.ok) {
+        if (prevArtifact) {
+          try {
+            await dp.registerCompute(
+              agent.id,
+              prevArtifact,
+              agent.requires,
+              identity,
+              executionIdentity,
+              agent.memoryPrefix ?? agent.id,
+              prevDeployedSkills?.length ? { [SKILLS_MANIFEST_ENV]: SKILLS_MANIFEST_PATH } : undefined,
+            );
+          } catch (rbErr) {
+            console.error(`[control-plane] Rollback registerCompute failed for ${agent.id}:`, rbErr);
+          }
+        }
+        restoreAgent();
+        json(res, 502, { error: 'smoke_failed', message: smokeRes.error });
+        return true;
+      }
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: agent.id,
+        type: 'action',
+        action: 'AGENT_DEPLOYED',
+        actor: principal.actor,
+        commit: pin.commit,
+      });
+    } else {
+      const buildSkills: BuildSkill[] = [];
+      for (const s of validatedSkills) {
+        const rec = registry.get(s.id, s.version)!;
+        if (rec.packageHash) {
+          buildSkills.push({
+            id: rec.id,
+            version: rec.version,
+            packageHash: rec.packageHash,
+            repo: rec.repo || '',
+            path: rec.path || '.',
+            commit: rec.commit || rec.packageHash,
+          });
+        } else {
+          buildSkills.push({ id: rec.id, version: rec.version, repo: rec.repo, path: rec.path, commit: rec.commit });
         }
       }
-      restoreAgent();
-      json(res, 502, { error: 'smoke_failed', message: smokeRes.error });
-      return true;
+
+      agent.state = 'DEPLOYING';
+      agent.admission = beginAdmission(pin.commit);
+      registryOf(state).save(agent);
+
+      const deployRes = await runDeploy(state, {
+        agent,
+        actor: principal.actor,
+        source: { repo: pin.repo, commit: pin.commit },
+        skills: buildSkills,
+        previousState: prevState,
+        isApply: true,
+      });
+
+      if (deployRes !== 'deployed') {
+        restoreAgent();
+        json(res, 502, { error: 'convert_deploy_failed', reason: deployRes });
+        return true;
+      }
     }
+
+    // Once deploy + activation smoke succeeds:
+    const nowIso = new Date().toISOString();
+    const adoptions = validatedSkills.map((s) => ({
+      id: s.id,
+      version: s.version,
+      requestedBy: principal.actor,
+      requestedAt: nowIso,
+      approvedBy: principal.actor,
+      approvedAt: nowIso,
+    }));
+
+    const { record: stored } = await state.configs.put(
+      {
+        ...configOf(state, agent.id),
+        source: { repo: pin.repo, commit: pin.commit },
+        skills: validatedSkills,
+        agent: settings.settings,
+      },
+      {
+        updatedBy: principal.actor,
+        reason: changeReason(req, 'converted from repository to configuration in place'),
+        skillAdoptions: adoptions.length ? adoptions : undefined,
+        replaces: ['agent', 'skills'],
+      },
+    );
+
+    delete agent.skillIds;
+    delete agent.skillRoutes;
+    delete agent.roles;
+    delete agent.admission;
+    agent.state = 'SLEEPING';
+    registryOf(state).save(agent);
+
+    ledgerVersion(state, stored, principal.actor);
+
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId: agent.id,
       type: 'action',
-      action: 'AGENT_DEPLOYED',
+      action: 'AGENT_CONVERTED',
       actor: principal.actor,
       commit: pin.commit,
+      requestId: `config:${agent.id}:v${stored.version}`,
+      payloadSha256: payloadHash({ fromCommit: prevCommit ?? '', toRuntimeCommit: pin.commit, skills: validatedSkills, hash: stored.hash }),
     });
-  } else {
-    const buildSkills: BuildSkill[] = [];
-    for (const s of validatedSkills) {
-      const rec = registry.get(s.id, s.version)!;
-      if (rec.packageHash) {
-        buildSkills.push({
-          id: rec.id,
-          version: rec.version,
-          packageHash: rec.packageHash,
-          repo: rec.repo || '',
-          path: rec.path || '.',
-          commit: rec.commit || rec.packageHash,
-        });
-      } else {
-        buildSkills.push({ id: rec.id, version: rec.version, repo: rec.repo, path: rec.path, commit: rec.commit });
+
+    json(res, 200, {
+      ok: true,
+      id: agent.id,
+      createdFrom: 'configuration',
+      state: agent.state,
+      artifact: agent.artifact,
+      deployedRuntime: agent.deployedRuntime,
+      configurationVersion: stored.version,
+    });
+    return true;
+  } catch (err: any) {
+    if (prevArtifact) {
+      try {
+        const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires);
+        await dp.registerCompute(
+          agent.id,
+          prevArtifact,
+          agent.requires,
+          identity,
+          executionIdentity,
+          agent.memoryPrefix ?? agent.id,
+          prevDeployedSkills?.length ? { [SKILLS_MANIFEST_ENV]: SKILLS_MANIFEST_PATH } : undefined,
+        );
+      } catch (rbErr) {
+        console.error(`[control-plane] Rollback registerCompute failed for ${agent.id}:`, rbErr);
       }
     }
-
-    agent.state = 'DEPLOYING';
-    agent.admission = beginAdmission(pin.commit);
-    registryOf(state).save(agent);
-
-    const deployRes = await runDeploy(state, {
-      agent,
-      actor: principal.actor,
-      source: { repo: pin.repo, commit: pin.commit },
-      skills: buildSkills,
-      previousState: prevState,
-      isApply: true,
-    });
-
-    if (deployRes !== 'deployed') {
-      restoreAgent();
-      json(res, 502, { error: 'convert_deploy_failed', reason: deployRes });
-      return true;
-    }
+    restoreAgent();
+    json(res, 502, { error: 'convert_failed', message: err?.message ?? String(err) });
+    return true;
   }
-
-  // Once deploy + activation smoke succeeds:
-  const nowIso = new Date().toISOString();
-  const adoptions = validatedSkills.map((s) => ({
-    id: s.id,
-    version: s.version,
-    requestedBy: principal.actor,
-    requestedAt: nowIso,
-    approvedBy: principal.actor,
-    approvedAt: nowIso,
-  }));
-
-  const { record: stored } = await state.configs.put(
-    {
-      ...configOf(state, agent.id),
-      source: { repo: pin.repo, commit: pin.commit },
-      skills: validatedSkills,
-      agent: settings.settings,
-    },
-    {
-      updatedBy: principal.actor,
-      reason: changeReason(req, 'converted from repository to configuration in place'),
-      skillAdoptions: adoptions.length ? adoptions : undefined,
-      replaces: ['agent', 'skills'],
-    },
-  );
-
-  delete agent.skillIds;
-  delete agent.skillRoutes;
-  delete agent.roles;
-  agent.state = 'SLEEPING';
-  registryOf(state).save(agent);
-
-  ledgerVersion(state, stored, principal.actor);
-
-  state.ledger.append({
-    timestamp: new Date().toISOString(),
-    agentId: agent.id,
-    type: 'action',
-    action: 'AGENT_CONVERTED',
-    actor: principal.actor,
-    commit: pin.commit,
-    requestId: `config:${agent.id}:v${stored.version}`,
-    payloadSha256: payloadHash({ fromCommit: prevCommit ?? '', toRuntimeCommit: pin.commit, skills: validatedSkills, hash: stored.hash }),
-  });
-
-  json(res, 200, {
-    ok: true,
-    id: agent.id,
-    createdFrom: 'configuration',
-    state: agent.state,
-    artifact: agent.artifact,
-    deployedRuntime: agent.deployedRuntime,
-    configurationVersion: stored.version,
-  });
   return true;
 }

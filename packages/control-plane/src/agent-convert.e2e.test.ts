@@ -210,6 +210,26 @@ describe('Convert repository agent in place (TSK-283, CF6, L4, AM1, GAP-209)', {
     assert.equal(afterCheck.createdFrom, undefined);
     assert.equal(afterCheck.commit, REPO_COMMIT);
     assert.equal(afterCheck.artifact, 'repo-image:skippy-like:v1');
+
+    // Verify an agent with models and discord in its routes plus custom-legacy-api only reports custom-legacy-api as uncovered
+    const customAgent: AgentRecord = {
+      ...skippyAgent,
+      id: 'custom-reach-agent',
+      egress: { routes: ['models', 'discord', 'custom-legacy-api'], hosts: [] },
+      skillRoutes: {},
+    };
+    state.agents.set('custom-reach-agent', customAgent);
+    registryOf(state).save(customAgent);
+    state.policies.set('custom-reach-agent', { routes: ['models', 'discord', 'custom-legacy-api'], models: ['gemini-2.0-flash'] });
+
+    const customRes = await call('/api/v1/agents/custom-reach-agent/convert', 'POST', ADMIN, {
+      soul: 'custom',
+      memory: { archetype: 'purpose-built' },
+      skills: [],
+    });
+    assert.equal(customRes.status, 422);
+    assert.equal(customRes.body?.error, 'uncovered_routes');
+    assert.deepEqual(customRes.body?.uncovered, ['custom-legacy-api']);
   });
 
   it('2. In-Place Conversion Preserves Identity, Policy, Owners, Schedules, and Role Assignments', async () => {
@@ -350,6 +370,7 @@ describe('Convert repository agent in place (TSK-283, CF6, L4, AM1, GAP-209)', {
         roles: {},
         memory: { archetype: 'purpose-built' },
         skills: [],
+        dropUncoveredRoutes: true,
       });
 
       assert.equal(res.status, 502);
@@ -446,6 +467,22 @@ describe('Convert repository agent in place (TSK-283, CF6, L4, AM1, GAP-209)', {
     });
     assert.equal(unregSkillRes.status, 409);
     assert.equal(unregSkillRes.body?.error, 'skill_unavailable');
+
+    // Retired or purged agent refusal
+    const baseStay = state.agents.get('repo-stay')!;
+    const retiredAgent: AgentRecord = {
+      ...baseStay,
+      id: 'repo-retired',
+      state: 'RETIRED_PENDING_PURGE',
+    };
+    state.agents.set('repo-retired', retiredAgent);
+    registryOf(state).save(retiredAgent);
+    const retiredRes = await call('/api/v1/agents/repo-retired/convert', 'POST', ADMIN, {
+      soul: 'soul',
+      memory: { archetype: 'purpose-built' },
+    });
+    assert.equal(retiredRes.status, 409);
+    assert.equal(retiredRes.body?.error, 'invalid_state');
   });
 
   it('5. In-Place Conversion with dropUncoveredRoutes=true and zero skills activates runtime image', async () => {
@@ -470,7 +507,7 @@ describe('Convert repository agent in place (TSK-283, CF6, L4, AM1, GAP-209)', {
     };
     state.agents.set('repo-drop', repoDrop);
     registryOf(state).save(repoDrop);
-    state.policies.set('repo-drop', { routes: ['knowledge'], models: ['gemini-2.0-flash'] });
+    state.policies.set('repo-drop', { routes: ['knowledge', 'legacy-route', 'models'], models: ['gemini-2.0-flash'] });
 
     computeRegistered.length = 0;
     const res = await call('/api/v1/agents/repo-drop/convert', 'POST', ADMIN, {
@@ -494,6 +531,12 @@ describe('Convert repository agent in place (TSK-283, CF6, L4, AM1, GAP-209)', {
     // Verify compute was registered with IMAGE_RUNTIME
     const lastCompute = computeRegistered.filter((c) => c.agentId === 'repo-drop').at(-1);
     assert.equal(lastCompute?.imageUri, IMAGE_RUNTIME);
+
+    // Verify uncovered routes were pruned from policy, while covered routes remain
+    const updatedPolicy = state.policies.get('repo-drop')!;
+    assert.ok(!updatedPolicy.routes.includes('legacy-route'), 'legacy-route should be pruned from policy');
+    assert.ok(!updatedPolicy.routes.includes('knowledge'), 'knowledge should be pruned from policy');
+    assert.ok(updatedPolicy.routes.includes('models'), 'models should remain in policy');
 
     // Verify AGENT_CONVERTED and AGENT_DEPLOYED in ledger
     const entries = ledger.query().filter((e) => e.agentId === 'repo-drop');
