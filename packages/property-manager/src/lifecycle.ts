@@ -76,6 +76,7 @@ export type PropertyManagerState = {
     smokeSpec?: { action: string; input: Record<string, unknown>; dryRun?: boolean };
     routes?: string[];
   }) => Promise<{ ok: boolean; error?: string; result?: unknown; egressRoutes?: string[]; omitEgress?: boolean; costUsd?: number }>;
+  configs?: { current(agentId: string): { agent?: { memory?: { archetype?: string } } } | undefined };
 };
 
 export type MailboxMessage = {
@@ -410,11 +411,13 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
       (state.policies.has(agent.id) && state.policies.get(agent.id).models
         ? state.policies.get(agent.id).models?.[0]
         : state.defaultModel);
+    const archetype = state.configs?.current(agent.id)?.agent?.memory?.archetype;
     runEnv = {
       FACTORY_RUN_ID: run.runId,
       FACTORY_RUN_TOKEN: runToken,
       ...(state.publicUrl ? { FACTORY_URL: state.publicUrl } : {}),
       ...(effectiveModel ? { FACTORY_MODEL: effectiveModel } : {}),
+      ...(archetype ? { FACTORY_MEMORY_ARCHETYPE: archetype } : {}),
       // AM3: the factory-wide notebook rotation policy and where closed volumes go.
       ...notebookEnv(),
       ...(state.gatekeeperEgressUrl ? { FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl } : {}),

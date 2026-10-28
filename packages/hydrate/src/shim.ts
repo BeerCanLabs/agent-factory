@@ -114,7 +114,9 @@ export async function main(argv: string[]): Promise<number> {
   const store: MindStore = { root: process.env.MEMORY_STORE_DIR ?? '', uri: process.env.MEMORY_STORE_URI };
   const prefix = process.env.MEMORY_PREFIX;
   const usesStore = Boolean(store.uri || store.root);
-  if (usesStore && prefix) pullMind(store, prefix, dir);
+  const isPurposeBuilt = process.env.FACTORY_MEMORY_ARCHETYPE === 'purpose-built';
+  const syncsMind = usesStore && !isPurposeBuilt;
+  if (syncsMind && prefix) pullMind(store, prefix, dir);
 
   // Prefetch run input to bridge it via FACTORY_INPUT and FACTORY_INPUT_FILE for decoupled workers
   const runId = process.env.FACTORY_RUN_ID;
@@ -162,7 +164,7 @@ export async function main(argv: string[]): Promise<number> {
   beat();
   const hb = setInterval(beat, beatEvery);
   const syncEvery = Number(process.env.FACTORY_MIND_SYNC_SECONDS || '60') * 1000;
-  const sync = usesStore ? setInterval(() => safePush(store, prefix, dir), syncEvery) : undefined;
+  const sync = syncsMind ? setInterval(() => safePush(store, prefix, dir), syncEvery) : undefined;
   const volumes = usesStore && prefix ? setInterval(() => serveVolumeRequests(store, prefix, dir), 1000) : undefined;
 
   const code: number = await new Promise((resolve) => {
@@ -175,7 +177,7 @@ export async function main(argv: string[]): Promise<number> {
   clearInterval(hb);
   if (sync) clearInterval(sync);
   if (volumes) clearInterval(volumes);
-  if (usesStore) safePush(store, prefix, dir);
+  if (syncsMind) safePush(store, prefix, dir);
 
   if (code === 0) {
     // If the decoupled worker wrote a result file, automatically report it to the factory
