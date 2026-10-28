@@ -273,7 +273,7 @@ phases:
         PREFIX="$AGENT_ID-$(echo $RUNTIME_COMMIT | cut -c1-12)"
         [ "$${IMAGE_TAG:0:$${#PREFIX}+1}" = "$PREFIX-" ] && [[ "$${IMAGE_TAG:$${#PREFIX}+1}" =~ ^[0-9a-f]{12}$ ]] || exit 5
       # The base is the factory's own runtime image, by registry path: no other image is layered on.
-      - '[[ "$BASE_IMAGE" =~ ^[A-Za-z0-9./:_-]+$ ]] && [ "$${BASE_IMAGE%%:*}" = "$RUNTIME_REPO_URI" ] || exit 5'
+      - '[[ "$BASE_IMAGE" =~ ^[A-Za-z0-9./:@_-]+$ ]] && [ "$${BASE_IMAGE%%[:@]*}" = "$RUNTIME_REPO_URI" ] || exit 5'
       - |
         cat > /tmp/compose-skills.sh <<'FACTORY_COMPOSE_SKILLS'
         ${indent(8, file("${path.module}/compose-skills.sh"))}

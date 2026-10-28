@@ -314,7 +314,9 @@ describe('the skills buildspec for an agent on the shared runtime (CF6, SK4, TSK
     assert.notEqual(guard({ ...good, BASE_IMAGE: `${RUNTIME_REPO}-evil:abc` }), 0, 'a repository that only starts with the same name');
     assert.notEqual(guard({ ...good, BASE_IMAGE: `${RUNTIME_REPO}:a b` }), 0, 'a space');
     assert.notEqual(guard({ ...good, BASE_IMAGE: `${RUNTIME_REPO}:a;rm -rf /` }), 0, 'a command');
-    assert.notEqual(guard({ ...good, BASE_IMAGE: `${RUNTIME_REPO}@sha256:abc` }), 0, 'a digest form is not the tag the factory pins');
+    assert.equal(guard({ ...good, BASE_IMAGE: `${RUNTIME_REPO}@sha256:abc` }), 0, 'a digest-pinned runtime image is accepted');
+    assert.notEqual(guard({ ...good, BASE_IMAGE: `${RUNTIME_REPO}@sha256:a b` }), 0, 'a space in digest');
+    assert.notEqual(guard({ ...good, BASE_IMAGE: `${RUNTIME_REPO}-evil@sha256:abc` }), 0, 'another repo with digest');
   });
 
   it('writes exactly compose-skills.sh to disk', () => {

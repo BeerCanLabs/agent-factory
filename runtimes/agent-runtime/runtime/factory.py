@@ -50,7 +50,11 @@ class Factory:
             url,
             data=data,
             method=method,
-            headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+                "User-Agent": "DiscordBot (https://github.com/BeerCanLabs/agent-factory, 1.0)",
+            },
         )
         try:
             with _DIRECT.open(req, timeout=timeout) as resp:
