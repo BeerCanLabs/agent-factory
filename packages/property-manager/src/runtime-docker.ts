@@ -82,7 +82,7 @@ export function dockerRuntime(opts: DockerRuntimeOptions): Runtime {
         MEMORY_PREFIX: prefix,
         ...(opts.mindVolume ? { MEMORY_STORE_DIR: '/store' } : {}),
       };
-      const create = await api('POST', `/containers/create?name=factory-run-${ctx.runId}`, {
+      const containerSpec = {
         Image: image,
         Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
         Labels: { 'factory.run': ctx.runId, 'factory.agent': agent.id },
@@ -100,7 +100,14 @@ export function dockerRuntime(opts: DockerRuntimeOptions): Runtime {
             ? [{ Type: 'volume', Source: opts.mindVolume, Target: `/store/${prefix}`, VolumeOptions: { Subpath: prefix } }]
             : [],
         },
-      });
+      };
+      let create = await api('POST', `/containers/create?name=factory-run-${ctx.runId}`, containerSpec);
+      if (create.status === 404 && /@sha256:[0-9a-f]{64}$/i.test(image)) {
+        create = await api('POST', `/containers/create?name=factory-run-${ctx.runId}`, {
+          ...containerSpec,
+          Image: `sha256:${image.split('@sha256:')[1]}`,
+        });
+      }
       if (create.status !== 201) throw new Error(`container create ${create.status}: ${JSON.stringify(create.body)}`);
       const id = String(create.body.Id);
       const start = await api('POST', `/containers/${id}/start`);
