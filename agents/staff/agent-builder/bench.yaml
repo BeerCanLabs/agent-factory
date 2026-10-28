@@ -1,0 +1,6 @@
+cases:
+  - id: asks-for-help
+    input:
+      message: help
+    expect:
+      contains: ["builder", "catalog"]

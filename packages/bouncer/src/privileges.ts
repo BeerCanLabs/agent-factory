@@ -163,6 +163,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'hooks.invoke',
     'schedules.write',
     'agents.update.read',
+    'agents.create',
   ],
   approver: [
     'agents.read',

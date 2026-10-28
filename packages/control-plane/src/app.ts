@@ -45,6 +45,7 @@ import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
+import { handleAgentBuilder } from './agent-builder.js';
 import { agentConfigForRun, deployConfigured, handleAgentCreation, handleConvertAgent, handleRuntimeRoutes, registrationRefusal, type SharedRuntimePin } from './agent-creation.js';
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
@@ -1589,10 +1590,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   // Agent-facing: authenticated by the run token minted at start.
-  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox|training|reply|agent-config|role-requests)$/);
+  const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox|training|reply|agent-config|role-requests|builder)$/);
   if (runSelf && (((runSelf[2] === 'input' || runSelf[2] === 'mailbox' || runSelf[2] === 'agent-config') && req.method === 'GET') || (runSelf[2] !== 'input' && runSelf[2] !== 'mailbox' && runSelf[2] !== 'agent-config' && req.method === 'POST'))) {
     const run = await authenticateRun(req, res, state, runSelf[1]);
     if (!run) return;
+    if (runSelf[2] === 'builder') {
+      await handleAgentBuilder(state, run, req, res);
+      return;
+    }
     if (runSelf[2] === 'agent-config') {
       agentConfigForRun(state, run, res);
       return;

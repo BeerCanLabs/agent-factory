@@ -1,0 +1,5 @@
+kind: oci
+ref: oci://ghcr.io/beercanlabs/agent-builder:latest
+localCommand:
+  - python3
+  - agent.py
