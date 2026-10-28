@@ -26,6 +26,7 @@ class FakeFactory:
     def __init__(self, config, payloads, model=None):
         self.config, self.payloads, self.model = config, list(payloads), model or (lambda messages, tools: {"role": "assistant", "content": "ok"})
         self.requests: list[tuple[str, str, dict | None, str]] = []
+        self.headers_received: list[dict[str, str]] = []
         self.mailbox: list[dict] = []
         outer = self
 
@@ -50,6 +51,7 @@ class FakeFactory:
                 path = urlparse(self.path).path
                 auth = self.headers.get("authorization", "")
                 outer.requests.append((method, path, body, auth))
+                outer.headers_received.append({k.lower(): v for k, v in self.headers.items()})
                 if auth != f"Bearer {TOKEN}":
                     return self._send(401, {"error": "invalid_run_token"})
                 if path == f"/api/v1/runs/{RUN}/agent-config":
@@ -285,6 +287,19 @@ class TestLoop(Base):
         with self.assertRaises(Exception):
             Factory(fake.env()).reply_discord("../../x", "hi")
         self.assertEqual(fake.requests, [])
+
+    def test_factory_calls_send_discord_bot_user_agent(self):
+        fake = FakeFactory(PA, [])
+        self.fakes.append(fake)
+        f = Factory(fake.env())
+        f.config()
+        f.reply_discord("123", "hi")
+        self.assertEqual(len(fake.headers_received), 2)
+        for h in fake.headers_received:
+            self.assertEqual(
+                h.get("user-agent"),
+                "DiscordBot (https://github.com/BeerCanLabs/agent-factory, 1.0)",
+            )
 
     def test_a_malformed_follow_up_does_not_end_the_run_and_the_result_holds_no_conversation(self):
         fake = FakeFactory({**PA, "warmDownSeconds": 1}, [turn("first")])
