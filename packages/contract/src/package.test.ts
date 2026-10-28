@@ -106,6 +106,10 @@ version: 1.0.0
 language: python
 description: A valid test skill package
 entry: entry.py
+smoke:
+  action: search
+  input:
+    q: test
 `;
 
 const VALID_TEST_PY = `def test_something():
@@ -722,6 +726,48 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
       if (!result.ok) {
         assert.ok(result.issues.some((i) => i.includes('skill.yaml must be an object')));
       }
+    });
+
+    it('refuses skill package with no smoke check (SK1, L4)', async () => {
+      const yaml = `spec: 1\nid: test-skill\nname: Test\ndescription: Test skill\nversion: 1.0.0\nentry: entry.py\nlanguage: python\n`;
+      const testBuf = Buffer.from(VALID_TEST_PY);
+      const tar = makeTarball([
+        { header: createTarHeader({ name: 'skill.yaml', size: Buffer.byteLength(yaml) }), content: Buffer.from(yaml) },
+        { header: createTarHeader({ name: 'test_entry.py', size: testBuf.length }), content: testBuf },
+      ]);
+      const gz = zlib.gzipSync(tar);
+      const result = await validateSkillPackage(gz);
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.ok(result.issues.some((i) => i.includes('smoke') && i.includes('declare a smoke check')));
+      }
+    });
+
+    it('refuses skill package whose smoke.action has hold: true without dryRun: true (SK1, E9)', async () => {
+      const yaml = `spec: 1\nid: test-skill\nname: Test\ndescription: Test skill\nversion: 1.0.0\nentry: entry.py\nlanguage: python\nrequires:\n  routes: [test-route]\nactions:\n  - id: write-data\n    route: test-route\n    method: POST\n    path: /write\n    hold: true\nsmoke:\n  action: write-data\n  input: {}\n`;
+      const testBuf = Buffer.from(VALID_TEST_PY);
+      const tar = makeTarball([
+        { header: createTarHeader({ name: 'skill.yaml', size: Buffer.byteLength(yaml) }), content: Buffer.from(yaml) },
+        { header: createTarHeader({ name: 'test_entry.py', size: testBuf.length }), content: testBuf },
+      ]);
+      const gz = zlib.gzipSync(tar);
+      const result = await validateSkillPackage(gz);
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.ok(result.issues.some((i) => i.includes('smoke.dryRun') && i.includes('requires dryRun: true')));
+      }
+    });
+
+    it('accepts skill package whose smoke.action has hold: true WITH dryRun: true (SK1, E9)', async () => {
+      const yaml = `spec: 1\nid: test-skill\nname: Test\ndescription: Test skill\nversion: 1.0.0\nentry: entry.py\nlanguage: python\nrequires:\n  routes: [test-route]\nactions:\n  - id: write-data\n    route: test-route\n    method: POST\n    path: /write\n    hold: true\nsmoke:\n  action: write-data\n  input: {}\n  dryRun: true\n`;
+      const testBuf = Buffer.from(VALID_TEST_PY);
+      const tar = makeTarball([
+        { header: createTarHeader({ name: 'skill.yaml', size: Buffer.byteLength(yaml) }), content: Buffer.from(yaml) },
+        { header: createTarHeader({ name: 'test_entry.py', size: testBuf.length }), content: testBuf },
+      ]);
+      const gz = zlib.gzipSync(tar);
+      const result = await validateSkillPackage(gz);
+      assert.equal(result.ok, true);
     });
 
     it('refuses package with no tests outside vendor/', async () => {

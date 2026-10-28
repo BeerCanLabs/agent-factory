@@ -8,3 +8,6 @@ name: E2E ping
 description: Returns a fixed check code, so an end-to-end test can tell the skill was installed and called.
 language: python
 entry: e2e_ping
+smoke:
+  action: e2e-ping-code
+  input: {}

@@ -547,6 +547,68 @@ class TestSkills(Base):
         self.wake(PA, [turn("do it")], model)
         self.assertEqual(seen["tool"], "error: no tool named rm_rf")
 
+    def test_smoke_turn_hello_world_makes_model_call_and_opens_no_notebook(self):
+        # With TeamMember archetype, no project notebook is created
+        cfg_tm = {"soul": "Pip", "memory": {"archetype": "team-member"}, "skills": [], "warmDownSeconds": 60}
+        payload = {"factoryKind": "smoke", "smoke": "hello-world", "message": "Smoke check: reply with ok."}
+        seen = {}
+
+        def model(messages, tools):
+            seen["messages"] = messages
+            return {"role": "assistant", "content": "ok"}
+
+        code, fake, result = self.wake(cfg_tm, [payload], model)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["output"]["reply"], "ok")
+        self.assertEqual(len(list(self.mind.glob("*.db"))), 0, "smoke runs must open no user notebook (AM2)")
+        replies = [r for r in fake.requests if r[1].endswith("/reply")]
+        self.assertEqual(len(replies), 0, "smoke turns have no delivery surface")
+
+    def test_smoke_turn_hello_world_empty_reply_fails(self):
+        payload = {"factoryKind": "smoke", "smoke": "hello-world", "message": "Smoke check"}
+        code, fake, result = self.wake(PA, [payload], lambda m, t: {"role": "assistant", "content": "   "})
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("empty smoke reply", result["output"]["error"])
+
+    def test_smoke_turn_skill_executes_action_and_receives_smoke_context(self):
+        body = (
+            "def tools():\n"
+            "    return [{'name': 'ping_check', 'description': 'ping', 'parameters': {'type': 'object', 'properties': {'val': {'type': 'integer'}}},\n"
+            "             'handler': lambda args, ctx: f\"pong {args.get('val')} smoke={ctx.get('smoke')} dryRun={ctx.get('dryRun')}\"}]\n"
+        )
+        self.write_skill(sid="ping-skill", body=body)
+        cfg = {**PA, "skills": [{"id": "ping-skill", "version": "1.0.0"}]}
+        payload = {"factoryKind": "smoke", "smoke": "skill", "action": "ping-check", "input": {"val": 42}, "dryRun": True}
+        code, fake, result = self.wake(cfg, [payload])
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["output"]["reply"], "pong 42 smoke=True dryRun=True")
+
+    def test_smoke_turn_skill_missing_tool_fails(self):
+        cfg = {**PA, "skills": []}
+        payload = {"factoryKind": "smoke", "smoke": "skill", "action": "missing-tool"}
+        code, fake, result = self.wake(cfg, [payload])
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("is not loaded", result["output"]["error"])
+
+    def test_smoke_turn_skill_failing_tool_fails_run(self):
+        body = (
+            "def tools():\n"
+            "    return [{'name': 'fail_tool', 'description': 'fail', 'parameters': {},\n"
+            "             'handler': lambda args, ctx: 'error: upstream database unavailable'}]\n"
+        )
+        self.write_skill(sid="fail-skill", body=body)
+        cfg = {**PA, "skills": [{"id": "fail-skill", "version": "1.0.0"}]}
+        payload = {"factoryKind": "smoke", "smoke": "skill", "action": "fail-tool"}
+        code, fake, result = self.wake(cfg, [payload])
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("upstream database unavailable", result["output"]["error"])
+
+
 
 class TestMemoryEngineIsNotForked(unittest.TestCase):
     def test_the_runtime_uses_the_same_memory_engine_as_the_reference_agent(self):

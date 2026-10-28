@@ -63,6 +63,18 @@ export type PropertyManagerState = {
    * (a deploy stops one before starting the next) is not lost: each run gets a full timeout from this moment.
    */
   healthSince?: number;
+  /** Activation smoke budget caps and tracking (§6.12, TSK-281). */
+  smokeBudgetUsd?: { perRun?: number };
+  smokeRunSpend?: Map<string, number>;
+  smokeHandler?: (opts: {
+    run: Run;
+    agent: AgentRecord;
+    smokeType: 'hello-world' | 'skill';
+    skillId?: string;
+    skillVersion?: string;
+    smokeSpec?: { action: string; input: Record<string, unknown>; dryRun?: boolean };
+    routes?: string[];
+  }) => Promise<{ ok: boolean; error?: string; result?: unknown; egressRoutes?: string[]; omitEgress?: boolean }>;
 };
 
 export type MailboxMessage = {
@@ -109,9 +121,11 @@ export const SYSTEM = {
   reconciler: 'factory:reconciler',
   health: 'factory:health',
   policy: 'factory:policy',
+  smoke: 'factory:smoke',
 } as const;
 
-async function notifyGatekeeperIngress(state: PropertyManagerState, agentId: string, presence: 'offline' | 'starting' | 'available') {
+async function notifyGatekeeperIngress(state: PropertyManagerState, agentId: string, presence: 'offline' | 'starting' | 'available', trigger?: string) {
+  if (trigger === 'smoke') return;
   if (!state.gatekeeperIngressUrl) return;
   try {
     const res = await fetch(`${state.gatekeeperIngressUrl.replace(/\/$/, '')}/api/v1/presence`, {
@@ -170,6 +184,8 @@ async function bindAgentSecrets(state: PropertyManagerState, names: string[]): P
 }
 
 export function scheduleTimeout(state: PropertyManagerState, run: Run) {
+  if (run.trigger === 'smoke') return;
+  if (!state.idleTimers) return;
   const prev = state.idleTimers.get(run.agentId);
   if (prev) clearTimeout(prev);
   const agent = state.agents.get(run.agentId);
@@ -234,8 +250,8 @@ export type CreateRunOptions = {
   model?: string;
   requestedBy?: { provider: string; id: string };
   caller?: AuthenticatedCaller;
-  /** What the factory itself says this input is (`conversation-request`, `approval`); the only way it gets onto an input. */
-  factoryKind?: 'conversation-request' | 'approval';
+  /** What the factory itself says this input is (`conversation-request`, `approval`, `smoke`); the only way it gets onto an input. */
+  factoryKind?: 'conversation-request' | 'approval' | 'smoke';
   /** The caller has already set `turnId` and `replyTo` itself (a conversation turn). Otherwise a sender's are removed: they are the factory's. */
   factoryTurn?: boolean;
 };
@@ -252,6 +268,8 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
     if (bad) return { status: 400, body: { error: bad } };
   }
 
+  const isSmoke = opts.trigger === 'smoke';
+
   // Sanitize input: never mutate caller's object, and never allow a forged caller
   let sanitizedInput: unknown = opts.input;
   if (opts.input && typeof opts.input === 'object' && !Array.isArray(opts.input)) {
@@ -264,13 +282,19 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
       delete copy.turnId;
       delete copy.replyTo;
     }
-    if (opts.factoryKind) copy.factoryKind = opts.factoryKind;
-    if (opts.caller) {
+    if (isSmoke) {
+      copy.factoryKind = 'smoke';
+    } else if (opts.factoryKind) {
+      copy.factoryKind = opts.factoryKind;
+    }
+    if (opts.caller && !isSmoke) {
       copy.caller = { ...opts.caller };
     }
     sanitizedInput = copy;
-  } else if (opts.caller && opts.input === undefined) {
+  } else if (opts.caller && opts.input === undefined && !isSmoke) {
     sanitizedInput = { caller: { ...opts.caller } };
+  } else if (isSmoke && (opts.input === undefined || typeof opts.input !== 'object')) {
+    sanitizedInput = { factoryKind: 'smoke' };
   }
 
   // Deduplicate incoming runs with identical messageId
@@ -287,9 +311,9 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
     }
   }
 
-  // No run exists yet, so perRun does not apply. Built-ins stay exempt, same predicate as ledger ingest.
+  // No run exists yet, so perRun does not apply. Built-ins and smoke runs stay exempt from agent budget.
   const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
-  if (!isBuiltin) {
+  if (!isBuiltin && !isSmoke) {
     const budget = state.policies.get(agentId).budgetUsd;
     const standing = checkStanding({
       limits: budget ? { perDay: budget.perDay, perMonth: budget.perMonth } : undefined,
@@ -320,8 +344,8 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
       actor: opts.actor,
       trigger: opts.trigger,
       callbackUrl: opts.callbackUrl,
-      ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
-      ...(opts.caller ? { caller: opts.caller } : {}),
+      ...(opts.requestedBy && !isSmoke ? { requestedBy: opts.requestedBy } : {}),
+      ...(opts.caller && !isSmoke ? { caller: opts.caller } : {}),
       missing: bound.missing,
     });
     record(state, run, 'PRE_FLIGHT_MISSING_SECRET', opts.actor);
@@ -337,8 +361,8 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
     trigger: opts.trigger,
     input: sanitizedInput,
     callbackUrl: opts.callbackUrl,
-    ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
-    ...(opts.caller ? { caller: opts.caller } : {}),
+    ...(opts.requestedBy && !isSmoke ? { requestedBy: opts.requestedBy } : {}),
+    ...(opts.caller && !isSmoke ? { caller: opts.caller } : {}),
     ...(opts.model ? { model: opts.model } : {}),
   });
   record(state, run, 'RUN_QUEUED', opts.actor);
@@ -374,8 +398,8 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
   let runToken: string;
   let runEnv: Record<string, string>;
   try {
-    await notifyGatekeeperIngress(state, agent.id, 'starting');
-    runToken = await state.runTokens.mint(run);
+    await notifyGatekeeperIngress(state, agent.id, 'starting', run.trigger);
+    runToken = state.runTokens?.mint ? await state.runTokens.mint(run) : '';
     // M2: a run is pinned only if a caller requested it (run.model). If unpinned, inject policy's primary model
     // (or factory default) as FACTORY_MODEL into the container environment without mutating run.model, so Gatekeeper
     // Egress leaves pinnedModel unset and honors multi-model policy allowlists.
@@ -436,9 +460,11 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
     // After the abandon handling too, so the reconciler cannot reap the run while its task is being stopped.
     startsInFlight.delete(run.runId);
   }
-  agent.state = 'WORKING';
+  if (run.trigger !== 'smoke') {
+    agent.state = 'WORKING';
+    scheduleTimeout(state, cur);
+  }
   record(state, cur, 'RUN_STARTED', run.actor);
-  scheduleTimeout(state, cur);
   return cur;
 }
 
@@ -454,7 +480,7 @@ export async function markRunReady(state: PropertyManagerState, runId: string) {
   if (!run || run.readyAt || run.state !== 'WORKING') return;
   const ready = state.runs.update(runId, { readyAt: new Date().toISOString() });
   record(state, ready, 'RUN_READY', `run:${run.agentId}`);
-  await notifyGatekeeperIngress(state, run.agentId, 'available');
+  await notifyGatekeeperIngress(state, run.agentId, 'available', run.trigger);
 }
 
 export async function finishRun(
@@ -500,9 +526,11 @@ export async function finishRun(
     state.metrics?.runSeconds.record((Date.parse(done.updatedAt) - Date.parse(done.startedAt)) / 1000, { agent: done.agentId, state: terminal });
   }
 
-  const timer = state.idleTimers.get(done.agentId);
-  if (timer) clearTimeout(timer);
-  state.idleTimers.delete(done.agentId);
+  if (state.idleTimers) {
+    const timer = state.idleTimers.get(done.agentId);
+    if (timer) clearTimeout(timer);
+    state.idleTimers.delete(done.agentId);
+  }
 
   const queue = state.mailboxes?.get(done.agentId);
   if (queue) {
@@ -521,31 +549,37 @@ export async function finishRun(
         console.error(`[control-plane] stop ${agent.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    if (agent.state === 'WORKING') {
-      agent.state = (terminal === 'DONE' || terminal === 'TIMED_OUT') ? 'SLEEPING' : 'ERROR';
-      registryOf(state).update(agent);
-    }
-    if (agent.pendingDrain && agent.stagedCommit) {
-      console.log(`[property-manager] Applying pending drained update for ${agent.id} at ${agent.stagedCommit}...`);
-      agent.commit = agent.stagedCommit;
-      agent.deployedCommit = agent.stagedCommit;
-      if (agent.stagedVersion) agent.installedVersion = agent.stagedVersion;
-      if (agent.stagedVersion && agent.offeredVersion === agent.stagedVersion) {
-        agent.updateAvailable = false;
+    if (cur.trigger !== 'smoke') {
+      if (agent.state === 'WORKING') {
+        agent.state = (terminal === 'DONE' || terminal === 'TIMED_OUT') ? 'SLEEPING' : 'ERROR';
+        registryOf(state).update(agent);
       }
-      delete agent.pendingDrain;
-      delete agent.stagedCommit;
-      delete agent.stagedVersion;
+      if (agent.pendingDrain && agent.stagedCommit) {
+        console.log(`[property-manager] Applying pending drained update for ${agent.id} at ${agent.stagedCommit}...`);
+        agent.commit = agent.stagedCommit;
+        agent.deployedCommit = agent.stagedCommit;
+        if (agent.stagedVersion) agent.installedVersion = agent.stagedVersion;
+        if (agent.stagedVersion && agent.offeredVersion === agent.stagedVersion) {
+          agent.updateAvailable = false;
+        }
+        delete agent.pendingDrain;
+        delete agent.stagedCommit;
+        delete agent.stagedVersion;
+      }
+      await notifyGatekeeperIngress(state, agent.id, 'offline', cur.trigger);
     }
-    await notifyGatekeeperIngress(state, agent.id, 'offline');
   }
-  if (terminal === 'FAILED' && done.agentId !== 'med-doc' && state.agents.has('med-doc')) {
-    state.ledger.append({ timestamp: new Date().toISOString(), agentId: done.agentId, runId, type: 'crash', actor: SYSTEM.runtime });
-    await createRun(state, 'med-doc', { actor: SYSTEM.router, trigger: 'event:crash', input: { agentId: done.agentId, runId } });
-  }
+  if (cur.trigger !== 'smoke') {
+    if (terminal === 'FAILED' && done.agentId !== 'med-doc' && state.agents.has('med-doc')) {
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: done.agentId, runId, type: 'crash', actor: SYSTEM.runtime });
+      await createRun(state, 'med-doc', { actor: SYSTEM.router, trigger: 'event:crash', input: { agentId: done.agentId, runId } });
+    }
 
-  void fireCallback(state, done);
-  if (terminal === 'FAILED') await breakCrashLoop(state, done.agentId);
+    void fireCallback(state, done);
+    if (terminal === 'FAILED') await breakCrashLoop(state, done.agentId);
+  } else {
+    void fireCallback(state, done);
+  }
 
   const next = state.runs.list({ agentId: done.agentId, active: true }).find((r) => r.state === 'QUEUED');
   if (next && agent && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED') await startRun(state, next);

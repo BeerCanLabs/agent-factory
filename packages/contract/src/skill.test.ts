@@ -87,4 +87,50 @@ describe('skill manifest: visibility, owner and actions (SK1, SK2)', () => {
     const dup = skillDesignIssues(parse({ requires: { routes: ['discord'] }, actions: [post, { ...post, method: 'PUT' }] }));
     assert.ok(dup.some((i) => i.path === 'actions' && /more than once/.test(i.message)));
   });
+
+  it('SK1 L4 skill manifest smoke check schema and design issues', () => {
+    // Optional on raw manifest: legacy/empty smoke still parses
+    const mWithoutSmoke = parse({});
+    assert.equal(mWithoutSmoke.smoke, undefined);
+
+    // Valid smoke check
+    const mWithSmoke = parse({
+      smoke: { action: 'ping-pong', input: { count: 1 }, dryRun: true },
+    });
+    assert.deepEqual(mWithSmoke.smoke, { action: 'ping-pong', input: { count: 1 }, dryRun: true });
+
+    // Invalid smoke check: non-kebab-case action
+    assert.equal(validateSkillManifest({ ...base, smoke: { action: 'PingPong' } }).ok, false);
+
+    // Actions declared, but smoke action not in actions
+    const undeclaredAction = skillDesignIssues(parse({
+      actions: [post],
+      requires: { routes: ['discord'] },
+      smoke: { action: 'unknown-action' },
+    }));
+    assert.ok(undeclaredAction.some((i) => i.path === 'smoke.action' && /not declared in actions/.test(i.message)));
+
+    // Smoke action has hold: true but dryRun is not true
+    const holdWithoutDryRun = skillDesignIssues(parse({
+      actions: [post],
+      requires: { routes: ['discord'] },
+      smoke: { action: 'post-message' },
+    }));
+    assert.ok(holdWithoutDryRun.some((i) => i.path === 'smoke.dryRun' && /requires dryRun: true/.test(i.message)));
+
+    // Smoke action has hold: true WITH dryRun: true
+    const holdWithDryRun = skillDesignIssues(parse({
+      actions: [post],
+      requires: { routes: ['discord'] },
+      smoke: { action: 'post-message', dryRun: true },
+    }));
+    assert.deepEqual(holdWithDryRun, []);
+
+    // Smoke action with 0 declared actions is allowed
+    const noActionsSmoke = skillDesignIssues(parse({
+      smoke: { action: 'ping-pong' },
+    }));
+    assert.deepEqual(noActionsSmoke, []);
+  });
 });
+
