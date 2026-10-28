@@ -19,6 +19,7 @@ import { IdentityLinkStore } from './identity-links.js';
 import { loadSkills, recordSkillChecks } from './skills.js';
 
 const ADMIN = 'admin-create';
+const OPERATOR = 'operator-create';
 const OWNER = 'owner-create';
 const VIEWER = 'viewer-create';
 const SHA = '6'.repeat(40);
@@ -56,6 +57,7 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
       ledger,
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
+        { name: 'operator', token: OPERATOR, roles: ['operator'] },
         { name: 'owner-svc', token: OWNER, roles: [] },
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
       ]),
@@ -114,12 +116,16 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
     state.agents.delete('hooked-cfg');
   });
 
-  it('only an admin creates an agent; a bare owner, a viewer and a run token cannot', async () => {
+  it('an admin or operator creates an agent; a bare owner, a viewer and a run token cannot (CF6, decision 7)', async () => {
     assert.equal((await call('POST', '/api/v1/agents', NEW, OWNER)).status, 403);
     assert.equal((await call('POST', '/api/v1/agents', NEW, VIEWER)).status, 403);
     const run = state.runs.create({ agentId: 'old', state: 'WORKING', actor: 'x', trigger: 'api' } as never);
     assert.equal((await call('POST', '/api/v1/agents', NEW, await tokens.mint({ runId: run.runId, agentId: 'old' }))).status, 401);
     assert.equal(state.agents.has('nova'), false);
+    const opCreated = await call('POST', '/api/v1/agents', { ...NEW, id: 'op-nova' }, OPERATOR);
+    assert.equal(opCreated.status, 201);
+    assert.equal(state.agents.has('op-nova'), true);
+    assert.deepEqual(state.configs!.current('op-nova')!.owners, ['token:operator']);
   });
 
   it('creates an agent with no repository: pinned to the runtime, owned by its creator, with nothing granted', async () => {

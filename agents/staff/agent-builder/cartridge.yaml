@@ -1,0 +1,30 @@
+schemaVersion: "1.0"
+id: agent-builder
+name: "Agent Builder"
+role: "House staff: interactive creation of configuration agents"
+prompt: "./soul.md"
+category: user
+
+triggers:
+  - type: http
+    path: /wake
+
+secrets:
+  requires: []
+
+persistence:
+  enabled: true
+  prefix: agent-builder
+
+memory:
+  archetype: personal-assistant
+  retentionDays: 30
+  maxMessages: 40
+  maxChars: 24000
+
+compute:
+  kind: oci
+  ref: "ghcr.io/beercanlabs/agent-builder:latest"
+  localCommand:
+    - python3
+    - agent.py

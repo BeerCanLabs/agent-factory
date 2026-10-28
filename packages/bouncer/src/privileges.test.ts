@@ -84,7 +84,7 @@ const CENSUS: Record<string, Role> = {
   'agents.roles.read': 'admin',
   'agents.settings.read': 'admin',
   'agents.settings.set': 'admin',
-  'agents.create': 'admin',
+  'agents.create': 'operator',
   'agents.roles.assign': 'admin',
   'spend.budget.set': 'admin',
   'agents.update.read': 'operator',
