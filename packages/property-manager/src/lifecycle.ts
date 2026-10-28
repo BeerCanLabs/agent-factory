@@ -64,8 +64,9 @@ export type PropertyManagerState = {
    */
   healthSince?: number;
   /** Activation smoke budget caps and tracking (§6.12, TSK-281). */
-  smokeBudgetUsd?: { perRun?: number };
+  smokeBudgetUsd?: { perRun?: number; perActivation?: number };
   smokeRunSpend?: Map<string, number>;
+  smokeActivationSpend?: Map<string, number>;
   smokeHandler?: (opts: {
     run: Run;
     agent: AgentRecord;
@@ -74,7 +75,7 @@ export type PropertyManagerState = {
     skillVersion?: string;
     smokeSpec?: { action: string; input: Record<string, unknown>; dryRun?: boolean };
     routes?: string[];
-  }) => Promise<{ ok: boolean; error?: string; result?: unknown; egressRoutes?: string[]; omitEgress?: boolean }>;
+  }) => Promise<{ ok: boolean; error?: string; result?: unknown; egressRoutes?: string[]; omitEgress?: boolean; costUsd?: number }>;
 };
 
 export type MailboxMessage = {

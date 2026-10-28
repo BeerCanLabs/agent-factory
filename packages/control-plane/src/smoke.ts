@@ -15,6 +15,22 @@ function isNoop(runtime: unknown): boolean {
   return Boolean(runtime && typeof runtime === 'object' && 'started' in runtime && Array.isArray((runtime as any).started));
 }
 
+function extractReplyText(result: unknown): string {
+  if (typeof result === 'string') return result;
+  if (!result || typeof result !== 'object') return '';
+  const r = result as Record<string, unknown>;
+  if (typeof r.reply === 'string') return r.reply;
+  if (typeof r.text === 'string') return r.text;
+  if (typeof r.output === 'string') return r.output;
+  if (r.output && typeof r.output === 'object') {
+    const out = r.output as Record<string, unknown>;
+    if (typeof out.reply === 'string') return out.reply;
+    if (typeof out.text === 'string') return out.text;
+    if (typeof out.summary === 'string') return out.summary;
+  }
+  return '';
+}
+
 async function waitForRun(state: FactoryState, runId: string, timeoutMs = 30000): Promise<Run> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -35,6 +51,27 @@ export async function runActivationSmoke(
   commit: string,
   actor: string,
 ): Promise<SmokeOutcome> {
+  const perActivationCap = state.smokeBudgetUsd?.perActivation ?? 1.00;
+  const activationId = `act-${agent.id}-${commit}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  state.smokeActivationSpend ??= new Map();
+  state.smokeActivationSpend.set(activationId, 0);
+
+  const getCumulativeSpend = () => state.smokeActivationSpend?.get(activationId) ?? 0;
+
+  if (perActivationCap - getCumulativeSpend() <= 0) {
+    const err = 'smoke activation budget exceeded';
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: agent.id,
+      type: 'action',
+      action: 'AGENT_SMOKE_FAILED',
+      actor,
+      commit,
+      error: err,
+    });
+    return { ok: false, error: err };
+  }
+
   // 1. Hello-World smoke turn
   const hwOutcome = await createRun(state, agent.id, {
     actor: SYSTEM.smoke,
@@ -42,6 +79,9 @@ export async function runActivationSmoke(
     input: {
       factoryKind: 'smoke',
       smoke: 'hello-world',
+      message: 'Activation smoke check',
+      text: 'Activation smoke check',
+      activationId,
     },
     factoryKind: 'smoke',
   });
@@ -72,13 +112,20 @@ export async function runActivationSmoke(
     const cur = state.runs.get(hwRun.runId);
     if (cur && !isTerminal(cur.state)) {
       if (handlerRes.ok) {
+        const costUsd = handlerRes.costUsd ?? 0.001;
+        state.smokeRunSpend ??= new Map();
+        state.smokeRunSpend.set(hwRun.runId, (state.smokeRunSpend.get(hwRun.runId) ?? 0) + costUsd);
+        if (activationId) {
+          state.smokeActivationSpend ??= new Map();
+          state.smokeActivationSpend.set(activationId, (state.smokeActivationSpend.get(activationId) ?? 0) + costUsd);
+        }
         state.ledger.append({
           timestamp: new Date().toISOString(),
           agentId: agent.id,
           runId: hwRun.runId,
           type: 'llm',
           model: agent.model ?? 'default-model',
-          costUsd: 0.001,
+          costUsd,
           inputTokens: 10,
           outputTokens: 5,
           actor: `run:${agent.id}`,
@@ -96,13 +143,20 @@ export async function runActivationSmoke(
     }
   } else if (isNoop(state.runtime)) {
     // Default mock execution under noopRuntime
+    const costUsd = 0.001;
+    state.smokeRunSpend ??= new Map();
+    state.smokeRunSpend.set(hwRun.runId, (state.smokeRunSpend.get(hwRun.runId) ?? 0) + costUsd);
+    if (activationId) {
+      state.smokeActivationSpend ??= new Map();
+      state.smokeActivationSpend.set(activationId, (state.smokeActivationSpend.get(activationId) ?? 0) + costUsd);
+    }
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId: agent.id,
       runId: hwRun.runId,
       type: 'llm',
       model: agent.model ?? 'default-model',
-      costUsd: 0.001,
+      costUsd,
       inputTokens: 10,
       outputTokens: 5,
       actor: `run:${agent.id}`,
@@ -132,7 +186,10 @@ export async function runActivationSmoke(
   }
 
   if (finishedHwRun.state !== 'DONE') {
-    const err = `hello-world smoke run finished with state ${finishedHwRun.state}: ${finishedHwRun.error ?? 'unspecified error'}`;
+    const isBudgetExceeded = finishedHwRun.state === 'BLOCKED_BUDGET_EXCEEDED' || String(finishedHwRun.error).includes('budget');
+    const err = isBudgetExceeded
+      ? 'smoke activation budget exceeded'
+      : `hello-world smoke run finished with state ${finishedHwRun.state}: ${finishedHwRun.error ?? 'unspecified error'}`;
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId: agent.id,
@@ -146,9 +203,24 @@ export async function runActivationSmoke(
     return { ok: false, error: err, runId: hwRun.runId };
   }
 
-  const hwResult = finishedHwRun.result;
-  const hasReply = hwResult && typeof hwResult === 'object' && ('reply' in hwResult || 'output' in hwResult);
-  if (!hasReply && typeof hwResult !== 'string') {
+  if (getCumulativeSpend() > perActivationCap) {
+    const err = 'smoke activation budget exceeded';
+    state.runs.update(hwRun.runId, { state: 'FAILED', error: err });
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: agent.id,
+      runId: hwRun.runId,
+      type: 'action',
+      action: 'AGENT_SMOKE_FAILED',
+      actor,
+      commit,
+      error: err,
+    });
+    return { ok: false, error: err, runId: hwRun.runId };
+  }
+
+  const replyText = extractReplyText(finishedHwRun.result);
+  if (!replyText.trim().length) {
     const err = 'hello-world smoke run produced empty or invalid result';
     state.runs.update(hwRun.runId, { state: 'FAILED', error: err });
     state.ledger.append({
@@ -159,6 +231,7 @@ export async function runActivationSmoke(
       action: 'AGENT_SMOKE_FAILED',
       actor,
       commit,
+      error: err,
     });
     return { ok: false, error: err, runId: hwRun.runId };
   }
@@ -175,6 +248,7 @@ export async function runActivationSmoke(
       action: 'AGENT_SMOKE_FAILED',
       actor,
       commit,
+      error: err,
     });
     return { ok: false, error: err, runId: hwRun.runId };
   }
@@ -182,6 +256,20 @@ export async function runActivationSmoke(
   // 2. Per-adopted-skill smoke turns
   const registry = skillRegistry(state);
   for (const s of skills) {
+    if (perActivationCap - getCumulativeSpend() <= 0) {
+      const err = 'smoke activation budget exceeded';
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: agent.id,
+        type: 'action',
+        action: 'AGENT_SMOKE_FAILED',
+        actor,
+        commit,
+        error: err,
+      });
+      return { ok: false, error: err };
+    }
+
     const rec = registry.get(s.id, s.version);
     const smokeSpec: SkillSmoke | undefined = rec?.manifest?.smoke;
     if (!smokeSpec) {
@@ -211,6 +299,7 @@ export async function runActivationSmoke(
         input: smokeSpec.input,
         dryRun: smokeSpec.dryRun,
         smokeRoutes: routes,
+        activationId,
       },
       factoryKind: 'smoke',
     });
@@ -244,6 +333,15 @@ export async function runActivationSmoke(
       const cur = state.runs.get(skillRun.runId);
       if (cur && !isTerminal(cur.state)) {
         if (handlerRes.ok) {
+          const costUsd = handlerRes.costUsd ?? 0;
+          if (costUsd > 0) {
+            state.smokeRunSpend ??= new Map();
+            state.smokeRunSpend.set(skillRun.runId, (state.smokeRunSpend.get(skillRun.runId) ?? 0) + costUsd);
+            if (activationId) {
+              state.smokeActivationSpend ??= new Map();
+              state.smokeActivationSpend.set(activationId, (state.smokeActivationSpend.get(activationId) ?? 0) + costUsd);
+            }
+          }
           const routesToEmit = (handlerRes as any).egressRoutes ?? ((handlerRes as any).omitEgress ? [] : routes);
           for (const route of routesToEmit) {
             state.ledger.append({
@@ -304,7 +402,26 @@ export async function runActivationSmoke(
     }
 
     if (finishedSkillRun.state !== 'DONE') {
-      const err = `skill smoke run for ${s.id} finished with state ${finishedSkillRun.state}: ${finishedSkillRun.error ?? 'unspecified error'}`;
+      const isBudgetExceeded = finishedSkillRun.state === 'BLOCKED_BUDGET_EXCEEDED' || String(finishedSkillRun.error).includes('budget');
+      const err = isBudgetExceeded
+        ? 'smoke activation budget exceeded'
+        : `skill smoke run for ${s.id} finished with state ${finishedSkillRun.state}: ${finishedSkillRun.error ?? 'unspecified error'}`;
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: agent.id,
+        runId: skillRun.runId,
+        type: 'action',
+        action: 'AGENT_SMOKE_FAILED',
+        actor,
+        commit,
+        error: err,
+      });
+      return { ok: false, error: err, runId: skillRun.runId };
+    }
+
+    if (getCumulativeSpend() > perActivationCap) {
+      const err = 'smoke activation budget exceeded';
+      state.runs.update(skillRun.runId, { state: 'FAILED', error: err });
       state.ledger.append({
         timestamp: new Date().toISOString(),
         agentId: agent.id,
@@ -333,6 +450,7 @@ export async function runActivationSmoke(
           action: 'AGENT_SMOKE_FAILED',
           actor,
           commit,
+          error: err,
         });
         return { ok: false, error: err, runId: skillRun.runId };
       }

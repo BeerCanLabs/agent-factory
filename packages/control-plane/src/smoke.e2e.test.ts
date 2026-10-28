@@ -383,6 +383,114 @@ describe('Activation smoke gate (TSK-281, §6.8 L4, §6.14 SK1)', { concurrency:
         delete state.smokeHandler;
       }
     });
+
+    it('configured agent redeploy smoke failure rolls back compute to prevArtifact and preserves prevDeployedCommit', async () => {
+      const made = await call('/api/v1/agents', 'POST', ADMIN, {
+        id: 'upgrade-cfg-agent',
+        name: 'Upgrade Cfg Agent',
+        soul: 'You are Upgrade Cfg Agent.',
+        memory: { archetype: 'personal-assistant' },
+        roles: [],
+      });
+      assert.equal(made.status, 201);
+      await call('/api/v1/agents/upgrade-cfg-agent/policy', 'PUT', ADMIN, { routes: ['models'] });
+
+      // First deploy succeeds
+      const firstDeploy = await call('/api/v1/registry/agents/upgrade-cfg-agent/deploy', 'POST', ADMIN, {});
+      assert.equal(firstDeploy.status, 200);
+
+      const agent = state.agents.get('upgrade-cfg-agent')!;
+      assert.equal(agent.state, 'SLEEPING');
+      const prevArtifact = agent.artifact;
+      const prevCommit = agent.deployedCommit;
+      assert.ok(prevArtifact);
+      assert.ok(prevCommit);
+
+      // Upgrade runtime version and make smoke fail
+      const origSharedRuntime = state.sharedRuntime;
+      state.sharedRuntime = {
+        repo: 'https://github.com/BeerCanLabs/agent-runtime',
+        commit: SHA2,
+        image: `${ECR}:agent-runtime-${SHA2.slice(0, 12)}`,
+      };
+
+      state.smokeHandler = async ({ agent: a }) => {
+        if (a.id === 'upgrade-cfg-agent') {
+          return { ok: false, error: 'runtime v2 activation check failed' };
+        }
+        return { ok: true };
+      };
+
+      try {
+        computeRegistered.length = 0;
+        const upgradeDeploy = await call('/api/v1/registry/agents/upgrade-cfg-agent/deploy', 'POST', ADMIN, {});
+        assert.equal(upgradeDeploy.status, 502);
+        assert.equal(upgradeDeploy.body.error, 'smoke_failed');
+
+        const reloaded = state.agents.get('upgrade-cfg-agent')!;
+        assert.equal(reloaded.state, 'SLEEPING', 'agent state is restored to SLEEPING');
+        assert.equal(reloaded.artifact, prevArtifact, 'artifact is restored to previous runtime image');
+        assert.equal(reloaded.deployedCommit, prevCommit, 'deployedCommit is restored to previous commit');
+
+        // Confirm compute registration rolled back
+        assert.ok(computeRegistered.length >= 2, 'candidate compute and rollback compute were registered');
+        assert.equal(computeRegistered[computeRegistered.length - 1].imageUri, prevArtifact);
+
+        const failed = ledger.query().find((e) => e.agentId === 'upgrade-cfg-agent' && e.action === 'AGENT_SMOKE_FAILED');
+        assert.ok(failed, 'AGENT_SMOKE_FAILED was recorded');
+        assert.equal(failed.commit, SHA2);
+        const smokeRun = state.runs.get(failed.runId!);
+        assert.match(String(smokeRun?.error), /runtime v2 activation check failed/);
+      } finally {
+        delete state.smokeHandler;
+        state.sharedRuntime = origSharedRuntime;
+      }
+    });
+
+    it('fails hello-world smoke and ledgers AGENT_SMOKE_FAILED when candidate produces empty or whitespace reply', async () => {
+      state.agents.set('blank-agent', {
+        id: 'blank-agent',
+        name: 'Blank Agent',
+        role: 'Worker',
+        state: 'PENDING_DEPLOY',
+        provider: 'cloud',
+        artifact: '',
+        repo: 'https://github.com/BeerCanLabs/agent-repo',
+        commit: SHA1,
+        requires: [],
+        ungated: [],
+        gated: [],
+        triggers: [],
+        dir: '/tmp/blank-agent',
+      });
+      await state.configs!.put({ agentId: 'blank-agent', source: { repo: 'https://github.com/BeerCanLabs/agent-repo', commit: SHA1 }, skills: [], policy: { routes: ['models'] }, owners: ['owner'] }, { updatedBy: 'test', reason: 'init' });
+      state.policies.set('blank-agent', { routes: ['models'], budgetUsd: { perRun: 1.0, perDay: 10.0, perMonth: 50.0 } });
+
+      const invalidReplies = [
+        '',
+        '   ',
+        { reply: '' },
+        { reply: '   ' },
+        { output: '' },
+        { status: 'succeeded', output: { reply: '' } },
+      ];
+
+      for (const invalid of invalidReplies) {
+        state.smokeHandler = async () => ({ ok: true, result: invalid });
+        try {
+          const outcome = await runActivationSmoke(state, state.agents.get('blank-agent')!, [], SHA1, 'test-actor');
+          assert.equal(outcome.ok, false);
+          assert.equal(outcome.error, 'hello-world smoke run produced empty or invalid result');
+
+          const failed = ledger.query().filter((e) => e.agentId === 'blank-agent' && e.action === 'AGENT_SMOKE_FAILED').pop();
+          assert.ok(failed, 'AGENT_SMOKE_FAILED was ledgered');
+          const smokeRun = state.runs.get(failed.runId!);
+          assert.equal(smokeRun?.error, 'hello-world smoke run produced empty or invalid result');
+        } finally {
+          delete state.smokeHandler;
+        }
+      }
+    });
   });
 
   describe('3. Per-adopted-skill smoke gate', () => {
@@ -594,6 +702,145 @@ describe('Activation smoke gate (TSK-281, §6.8 L4, §6.14 SK1)', { concurrency:
 
       // Regular agent spend tracker was NOT mutated
       assert.equal(state.spend.get('policy-test-agent').day, 0);
+    });
+
+    it('caps budgetUsd.perRun to Math.min(perRunCap, remainingActivationBudget) in egress run query', async () => {
+      const run = state.runs.create({
+        agentId: 'policy-test-agent',
+        state: 'WORKING',
+        actor: 'factory:smoke',
+        trigger: 'smoke',
+        input: {
+          factoryKind: 'smoke',
+          activationId: 'test-act-cap',
+        },
+      });
+
+      state.smokeBudgetUsd = { perRun: 0.25, perActivation: 1.00 };
+      state.smokeActivationSpend ??= new Map();
+
+      // Case A: activation spend is 0.85 -> remaining 0.15 < 0.25
+      state.smokeActivationSpend.set('test-act-cap', 0.85);
+      const resA = await call(`/api/v1/gatekeeper-egress/runs/${run.runId}`, 'GET', ADMIN);
+      assert.equal(resA.status, 200);
+      assert.equal(resA.body.policy.budgetUsd.perRun, 0.15);
+
+      // Case B: activation spend is 0.10 -> remaining 0.90 > 0.25 -> capped at 0.25
+      state.smokeActivationSpend.set('test-act-cap', 0.10);
+      const resB = await call(`/api/v1/gatekeeper-egress/runs/${run.runId}`, 'GET', ADMIN);
+      assert.equal(resB.status, 200);
+      assert.equal(resB.body.policy.budgetUsd.perRun, 0.25);
+
+      // Case C: activation spend is 1.05 -> remaining 0 -> capped at 0
+      state.smokeActivationSpend.set('test-act-cap', 1.05);
+      const resC = await call(`/api/v1/gatekeeper-egress/runs/${run.runId}`, 'GET', ADMIN);
+      assert.equal(resC.status, 200);
+      assert.equal(resC.body.policy.budgetUsd.perRun, 0);
+    });
+
+    it('tracks cumulative activation spend across turns and fails smoke if smokeBudgetUsd.perActivation is exceeded', async () => {
+      await publishSkill({
+        id: 'budget-smoke-skill',
+        version: '1.0.0',
+        name: 'Budget Smoke Skill',
+        description: 'Budget smoke skill',
+        language: 'python',
+        entry: 'entry.py',
+        requires: { routes: ['tavily'] },
+        actions: [{ id: 'search', route: 'tavily', method: 'POST', path: '/search', hold: false }],
+        smoke: { action: 'search', input: { query: 'test' } },
+      });
+
+      state.agents.set('budget-test-agent', {
+        id: 'budget-test-agent',
+        name: 'Budget Test Agent',
+        role: 'Worker',
+        state: 'PENDING_DEPLOY',
+        provider: 'cloud',
+        artifact: '',
+        repo: 'https://github.com/BeerCanLabs/agent-repo',
+        commit: SHA1,
+        requires: [],
+        ungated: [],
+        gated: [],
+        triggers: [],
+        dir: '/tmp/budget-test-agent',
+      });
+      await state.configs!.put({
+        agentId: 'budget-test-agent',
+        source: { repo: 'https://github.com/BeerCanLabs/agent-repo', commit: SHA1 },
+        skills: [{ id: 'budget-smoke-skill', version: '1.0.0' }],
+        policy: { routes: ['models', 'tavily'] },
+        owners: ['owner'],
+      }, { updatedBy: 'test', reason: 'adopt' });
+      state.policies.set('budget-test-agent', { routes: ['models', 'tavily'], budgetUsd: { perRun: 1.0, perDay: 10.0, perMonth: 50.0 } });
+
+      // Set perActivation cap to 0.10
+      state.smokeBudgetUsd = { perRun: 0.25, perActivation: 0.10 };
+
+      // Case 1: hello-world uses 0.10, so remaining budget before skill smoke is 0
+      state.smokeHandler = async ({ smokeType }) => {
+        if (smokeType === 'hello-world') {
+          return { ok: true, costUsd: 0.10, result: { reply: 'hello world' } };
+        }
+        return { ok: true };
+      };
+
+      try {
+        const outcome1 = await runActivationSmoke(
+          state,
+          state.agents.get('budget-test-agent')!,
+          [{ id: 'budget-smoke-skill', version: '1.0.0', manifest: { id: 'budget-smoke-skill', version: '1.0.0' } as any, source: {} as any }],
+          SHA1,
+          'test-actor',
+        );
+        assert.equal(outcome1.ok, false);
+        assert.equal(outcome1.error, 'smoke activation budget exceeded');
+
+        const failed1 = ledger.query().filter((e) => e.agentId === 'budget-test-agent' && e.action === 'AGENT_SMOKE_FAILED').pop();
+        assert.ok(failed1);
+        assert.equal(failed1.action, 'AGENT_SMOKE_FAILED');
+      } finally {
+        delete state.smokeHandler;
+      }
+
+      // Case 2: POST /api/v1/ledger pushes cumulative activation spend over perActivation during a smoke run
+      const smokeRun = state.runs.create({
+        agentId: 'budget-test-agent',
+        state: 'WORKING',
+        actor: 'factory:smoke',
+        trigger: 'smoke',
+        input: {
+          factoryKind: 'smoke',
+          activationId: 'act-mid-exceed',
+        },
+      });
+
+      // Post 1: $0.06 (under $0.10 cap)
+      const post1 = await call('/api/v1/ledger', 'POST', EGRESS_TOKEN, {
+        agentId: 'budget-test-agent',
+        runId: smokeRun.runId,
+        type: 'llm',
+        actor: 'run:budget-test-agent',
+        costUsd: 0.06,
+        model: 'test-model',
+      });
+      assert.equal(post1.status, 201);
+      assert.equal(state.smokeActivationSpend?.get('act-mid-exceed'), 0.06);
+      assert.equal(state.runs.get(smokeRun.runId)!.state, 'WORKING');
+
+      // Post 2: $0.05 (total $0.11 > $0.10 perActivation cap)
+      const post2 = await call('/api/v1/ledger', 'POST', EGRESS_TOKEN, {
+        agentId: 'budget-test-agent',
+        runId: smokeRun.runId,
+        type: 'llm',
+        actor: 'run:budget-test-agent',
+        costUsd: 0.05,
+        model: 'test-model',
+      });
+      assert.equal(post2.status, 201);
+      assert.equal(state.smokeActivationSpend?.get('act-mid-exceed'), 0.11);
+      assert.equal(state.runs.get(smokeRun.runId)!.state, 'BLOCKED_BUDGET_EXCEEDED');
     });
   });
 
