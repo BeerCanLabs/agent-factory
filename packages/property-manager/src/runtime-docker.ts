@@ -1,6 +1,6 @@
 import http from 'node:http';
 import type { AgentRecord } from '@beercanlabs/factory-registrar';
-import type { Runtime, TaskStatus } from './runtime.js';
+import type { DeployProvider, Runtime, TaskStatus } from './runtime.js';
 
 export type DockerApi = (method: string, path: string, body?: unknown) => Promise<{ status: number; body: any }>;
 
@@ -70,7 +70,7 @@ export function dockerRuntime(opts: DockerRuntimeOptions): Runtime {
   return {
     running: (id) => running.has(id),
     async start(agent, secrets, ctx) {
-      const image = opts.images[agent.id] ?? (agent.createdFrom === 'configuration' ? opts.sharedImage : undefined);
+      const image = opts.images[agent.id] ?? (agent.createdFrom === 'configuration' ? (agent.artifact || opts.sharedImage) : undefined);
       if (!image) throw new Error(`no image mapped for ${agent.id} (FACTORY_DOCKER_IMAGES)`);
       const prefix = agent.memoryPrefix ?? agent.id;
       if (opts.mindVolume) opts.ensureMindPath?.(prefix);
@@ -82,7 +82,7 @@ export function dockerRuntime(opts: DockerRuntimeOptions): Runtime {
         MEMORY_PREFIX: prefix,
         ...(opts.mindVolume ? { MEMORY_STORE_DIR: '/store' } : {}),
       };
-      const create = await api('POST', `/containers/create?name=factory-run-${ctx.runId}`, {
+      const containerSpec = {
         Image: image,
         Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
         Labels: { 'factory.run': ctx.runId, 'factory.agent': agent.id },
@@ -100,7 +100,14 @@ export function dockerRuntime(opts: DockerRuntimeOptions): Runtime {
             ? [{ Type: 'volume', Source: opts.mindVolume, Target: `/store/${prefix}`, VolumeOptions: { Subpath: prefix } }]
             : [],
         },
-      });
+      };
+      let create = await api('POST', `/containers/create?name=factory-run-${ctx.runId}`, containerSpec);
+      if (create.status === 404 && /@sha256:[0-9a-f]{64}$/i.test(image)) {
+        create = await api('POST', `/containers/create?name=factory-run-${ctx.runId}`, {
+          ...containerSpec,
+          Image: `sha256:${image.split('@sha256:')[1]}`,
+        });
+      }
       if (create.status !== 201) throw new Error(`container create ${create.status}: ${JSON.stringify(create.body)}`);
       const id = String(create.body.Id);
       const start = await api('POST', `/containers/${id}/start`);
@@ -141,5 +148,22 @@ export function parseImageMap(raw: string | undefined): Record<string, string> {
     if (i > 0) out[pair.slice(0, i).trim()] = pair.slice(i + 1).trim();
   }
   return out;
+}
+
+export function dockerDeployProvider(images: Record<string, string>): DeployProvider {
+  return {
+    async buildImage(agentId) {
+      return images[agentId] || `factory-agent-${agentId}:dev`;
+    },
+    async buildSkillsImage(_agentId, base) {
+      return base.image;
+    },
+    async provisionIdentity(agentId) {
+      return { identity: `docker:${agentId}` };
+    },
+    async registerCompute(agentId, imageUri) {
+      images[agentId] = imageUri;
+    },
+  };
 }
 

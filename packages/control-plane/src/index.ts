@@ -14,7 +14,7 @@ import {
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, FactoryState, relinkVendorModels } from './app.js';
-import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
+import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerDeployProvider, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
 import { scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
@@ -131,8 +131,9 @@ let opened = openSegment();
 const ledger = inspector.tapLedger(opened.store);
 const ledgerSink = opened.sink;
 
+const dockerImages = parseImageMap(process.env.FACTORY_DOCKER_IMAGES);
 let deployProvider: DeployProvider | undefined;
-const deployProviderType = process.env.FACTORY_DEPLOY_PROVIDER || (process.env.FACTORY_RUNTIME === 'ecs' ? 'aws' : process.env.FACTORY_RUNTIME === 'cloudrun' ? 'gcp' : undefined);
+const deployProviderType = process.env.FACTORY_DEPLOY_PROVIDER || (process.env.FACTORY_RUNTIME === 'ecs' ? 'aws' : process.env.FACTORY_RUNTIME === 'cloudrun' ? 'gcp' : process.env.FACTORY_RUNTIME === 'docker' ? 'docker' : undefined);
 if (deployProviderType === 'aws') {
   try {
     const { awsDeployProvider } = await import('@beercanlabs/factory-property-manager/aws/deploy');
@@ -147,6 +148,8 @@ if (deployProviderType === 'aws') {
   } catch (err) {
     console.warn('[control-plane] failed to initialize GCP deploy provider:', err);
   }
+} else if (deployProviderType === 'docker') {
+  deployProvider = dockerDeployProvider(dockerImages);
 }
 
 /** Model names, providers and prices from FACTORY_MODEL_CATALOG; unset or malformed means none offered. */
@@ -234,7 +237,7 @@ const state: FactoryState = {
     process.env.FACTORY_RUNTIME === 'docker'
       ? dockerRuntime({
           api: dockerApi(process.env.DOCKER_HOST || 'unix:///var/run/docker.sock'),
-          images: parseImageMap(process.env.FACTORY_DOCKER_IMAGES),
+          images: dockerImages,
           sharedImage: process.env.FACTORY_RUNTIME_IMAGE,
           network: process.env.FACTORY_DOCKER_NETWORK || 'factory-agents',
           mindVolume: process.env.FACTORY_DOCKER_MIND_VOLUME,
