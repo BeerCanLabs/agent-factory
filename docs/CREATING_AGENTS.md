@@ -111,7 +111,7 @@ Content-Type: application/json
    ```json
    {
      "op": "publish",
-     "agent": {
+     "spec": {
        "id": "market-analyst",
        "name": "Market Analyst",
        "soul": "...",
@@ -147,7 +147,7 @@ Authorization: Bearer <token>
 Before any candidate image is activated for an agent (whether configuration-only or repository-based), the factory runs a mandatory **Activation Smoke Gate**:
 
 1. **Isolated Smoke Container:** The factory boots a candidate container with `trigger: "smoke"` and `factoryKind: "smoke"`.
-2. **Temporary Factory Policy & Budget:** The factory temporarily grants minimal model access and a temporary budget cap ($0.05) so the smoke run never drains the agent's own budget.
+2. **Temporary Factory Policy & Budget:** The factory temporarily grants minimal model access and a temporary budget cap ($0.25 per run / $1.00 per activation) so the smoke run never drains the agent's own budget.
 3. **Turn 1 — Soul / Model Completion (`smoke: "hello-world"`):**
    - Injects a hello-world smoke turn.
    - Verifies that the container boots, loads the soul, makes at least one metered model call through Gatekeeper Egress (`E5`), and yields a non-empty `DONE` response.
@@ -184,21 +184,25 @@ Authorization: Bearer <token>
 Response:
 ```json
 {
+  "ok": true,
   "runtime": {
-    "repo": "BeerCanLabs/agent-factory",
+    "repo": "https://github.com/BeerCanLabs/agent-factory",
     "commit": "a28f963ede817225d6cab406e789138291d1d4fd",
     "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/factory-agent-runtime@sha256:7b92f7e4a1b2c3d4..."
   },
-  "agents": {
-    "market-analyst": {
-      "deployedRuntime": "a28f963ede817225d6cab406e789138291d1d4fd",
+  "agents": [
+    {
+      "id": "market-analyst",
+      "name": "Market Analyst",
+      "state": "SLEEPING",
+      "deployedRuntime": {
+        "repo": "https://github.com/BeerCanLabs/agent-factory",
+        "commit": "a28f963ede817225d6cab406e789138291d1d4fd",
+        "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/factory-agent-runtime@sha256:7b92f7e4a1b2c3d4..."
+      },
       "upToDate": true
-    },
-    "research-assistant": {
-      "deployedRuntime": "185406c669b26d7ebf7a292a187666f9797b9ee7",
-      "upToDate": false
     }
-  }
+  ]
 }
 ```
 
@@ -219,7 +223,7 @@ Content-Type: application/json
 ```
 
 #### Rollout Guarantees:
-- **Digest Pinning Required (`L4`):** The image must be pinned by `@sha256:` digest. Mutable tags (e.g. `:latest`) are rejected (`invalid_image`).
+- **Digest Pinning Required (`L4`):** The image must be pinned by `@sha256:` digest. Mutable tags (e.g. `:latest`) are rejected (`invalid_runtime`).
 - **Audit Ledger:** Records `RUNTIME_VERSION_SET` with the admin principal, commit, and digest.
 - **Automated Rebuild & Smoke:** The control plane triggers `triggerApply("runtime-upgrade")` for every configuration agent whose `deployedRuntime` differs:
   - Agents without skills adopt the new base image directly.
@@ -331,7 +335,7 @@ Content-Type: application/json
 ```
 
 #### What Happens Internally:
-1. Validates that the agent is currently a repository agent (`isConfigured === false`).
+1. Validates that the agent is currently a repository agent (`createdFrom !== 'configuration'`).
 2. Validates memory archetype and adopted skill version existence.
 3. Checks route coverage: refuses if legacy declared routes are missing unless `dropUncoveredRoutes: true`.
 4. Stages candidate configuration into `pendingConfig`.
@@ -339,7 +343,7 @@ Content-Type: application/json
 6. Executes the **Activation Smoke Gate** (`TSK-281`): runs hello-world model completion and per-skill smoke tests.
 7. **On Smoke Pass:**
    - Commits configuration to `config.json` and deletes legacy repository attributes (`repo`, `commit`, `buildspec`).
-   - Marks `isConfigured: true`.
+   - Marks `createdFrom: 'configuration'`.
    - Records `AGENT_CONVERTED` and `AGENT_DEPLOYED` in the ledger.
    - Activates new container compute.
 8. **On Smoke Failure:**
