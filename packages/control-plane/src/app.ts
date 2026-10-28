@@ -187,6 +187,19 @@ export type FactoryState = {
   consoleTurns?: Map<string, ConsoleTurn>;
   /** AM2: replies to console turns, kept briefly for the person who asked (never for anyone else). */
   consoleReplies?: ConsoleReply[];
+  /** Activation smoke budget caps and tracking (§6.12, TSK-281). */
+  smokeBudgetUsd?: { perRun?: number; perActivation?: number };
+  smokeRunSpend?: Map<string, number>;
+  smokeActivationSpend?: Map<string, number>;
+  smokeHandler?: (opts: {
+    run: Run;
+    agent: AgentRecord;
+    smokeType: 'hello-world' | 'skill';
+    skillId?: string;
+    skillVersion?: string;
+    smokeSpec?: { action: string; input: Record<string, unknown>; dryRun?: boolean };
+    routes?: string[];
+  }) => Promise<{ ok: boolean; error?: string; result?: unknown; egressRoutes?: string[]; omitEgress?: boolean; costUsd?: number }>;
 };
 
 
@@ -2239,31 +2252,57 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       timestamp: new Date().toISOString(),
     });
     if (isGatekeeperEgress && stored.type === 'llm' && typeof stored.costUsd === 'number') {
-      const agent = state.agents.get(stored.agentId);
-      const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(stored.agentId));
-      const policy = state.policies.get(stored.agentId);
-      // `before` must be read before the spend is added, or a crossing is never detected.
-      const beforeStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(stored.agentId, stored.runId) });
-      const before = beforeStanding.inGoodStanding ? undefined : beforeStanding.window;
-      state.spend.add(stored.agentId, stored.runId, stored.costUsd, stored.timestamp, spendDetail(stored));
-      if (!isBuiltin) {
-        const afterStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(stored.agentId, stored.runId) });
-        const after = afterStanding.inGoodStanding ? undefined : afterStanding.window;
-        // Alert once per crossing, even if the run already finished; block only a run that is still live.
-        if (after && after !== before) {
-          const alert = state.ledger.append({
-            timestamp: new Date().toISOString(),
-            agentId: stored.agentId,
-            runId: stored.runId,
-            type: 'budget.alert',
-            action: `BUDGET_${after.toUpperCase()}_EXCEEDED`,
-            actor: SYSTEM.policy,
-          });
-          await routeEvents(state, alert);
+      if (run && run.trigger === 'smoke') {
+        state.smokeRunSpend ??= new Map();
+        const current = state.smokeRunSpend.get(run.runId) ?? 0;
+        const updated = current + stored.costUsd;
+        state.smokeRunSpend.set(run.runId, updated);
+        const limit = state.smokeBudgetUsd?.perRun ?? 0.25;
+
+        const inputObj = (run.input && typeof run.input === 'object') ? (run.input as Record<string, unknown>) : {};
+        const activationId = typeof inputObj.activationId === 'string' ? inputObj.activationId : undefined;
+        let cumulativeActivationSpend = 0;
+        if (activationId) {
+          state.smokeActivationSpend ??= new Map();
+          const currentAct = state.smokeActivationSpend.get(activationId) ?? 0;
+          cumulativeActivationSpend = currentAct + stored.costUsd;
+          state.smokeActivationSpend.set(activationId, cumulativeActivationSpend);
         }
-        const live = run ? state.runs.get(run.runId) : undefined;
-        if (after && live && !isTerminal(live.state) && live.state !== 'BLOCKED_BUDGET_EXCEEDED') {
-          blockRun(state, live.runId, 'BLOCKED_BUDGET_EXCEEDED', SYSTEM.policy);
+        const perActivationLimit = state.smokeBudgetUsd?.perActivation ?? 1.00;
+
+        if (updated > limit || (activationId && cumulativeActivationSpend > perActivationLimit)) {
+          const live = state.runs.get(run.runId);
+          if (live && !isTerminal(live.state) && live.state !== 'BLOCKED_BUDGET_EXCEEDED') {
+            blockRun(state, live.runId, 'BLOCKED_BUDGET_EXCEEDED', SYSTEM.policy);
+          }
+        }
+      } else {
+        const agent = state.agents.get(stored.agentId);
+        const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(stored.agentId));
+        const policy = state.policies.get(stored.agentId);
+        // `before` must be read before the spend is added, or a crossing is never detected.
+        const beforeStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(stored.agentId, stored.runId) });
+        const before = beforeStanding.inGoodStanding ? undefined : beforeStanding.window;
+        state.spend.add(stored.agentId, stored.runId, stored.costUsd, stored.timestamp, spendDetail(stored));
+        if (!isBuiltin) {
+          const afterStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(stored.agentId, stored.runId) });
+          const after = afterStanding.inGoodStanding ? undefined : afterStanding.window;
+          // Alert once per crossing, even if the run already finished; block only a run that is still live.
+          if (after && after !== before) {
+            const alert = state.ledger.append({
+              timestamp: new Date().toISOString(),
+              agentId: stored.agentId,
+              runId: stored.runId,
+              type: 'budget.alert',
+              action: `BUDGET_${after.toUpperCase()}_EXCEEDED`,
+              actor: SYSTEM.policy,
+            });
+            await routeEvents(state, alert);
+          }
+          const live = run ? state.runs.get(run.runId) : undefined;
+          if (after && live && !isTerminal(live.state) && live.state !== 'BLOCKED_BUDGET_EXCEEDED') {
+            blockRun(state, live.runId, 'BLOCKED_BUDGET_EXCEEDED', SYSTEM.policy);
+          }
         }
       }
     }
@@ -2479,6 +2518,35 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
     const pol = state.policies.get(run.agentId);
+
+    if (run.trigger === 'smoke') {
+      const inputObj = (run.input && typeof run.input === 'object') ? (run.input as Record<string, unknown>) : {};
+      const smokeRoutes = Array.isArray(inputObj.smokeRoutes) ? (inputObj.smokeRoutes as string[]) : [];
+      const agentRoutes = pol?.routes ?? [];
+      const mergedRoutes = Array.from(new Set([...agentRoutes, ...smokeRoutes])).filter((r) => r !== 'discord');
+      const perRunCap = state.smokeBudgetUsd?.perRun ?? 0.25;
+      const perActivationCap = state.smokeBudgetUsd?.perActivation ?? 1.00;
+      const activationId = typeof inputObj.activationId === 'string' ? inputObj.activationId : undefined;
+      const actSpend = activationId ? (state.smokeActivationSpend?.get(activationId) ?? 0) : 0;
+      const remainingActivationBudget = Math.round(Math.max(0, perActivationCap - actSpend) * 10000) / 10000;
+      const effectivePerRun = Math.round(Math.min(perRunCap, remainingActivationBudget) * 10000) / 10000;
+      json(res, 200, {
+        run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state), ...(run.model ? { model: run.model } : {}) },
+        agentState: agent.state,
+        isBuiltin: false,
+        policySet: true,
+        policy: {
+          ...pol,
+          models: pol?.models?.length ? pol.models : ['*'],
+          routes: mergedRoutes,
+          budgetUsd: { perRun: effectivePerRun },
+        },
+        spend: { run: state.smokeRunSpend?.get(run.runId) ?? 0, day: 0, month: 0 },
+        access: { restricted: false },
+      });
+      return;
+    }
+
     json(res, 200, {
       run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state), ...(run.model ? { model: run.model } : {}) },
       agentState: agent.state,

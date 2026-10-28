@@ -16,6 +16,7 @@ import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type 
 import { type FactoryState } from './app.js';
 import { registryOf } from '@beercanlabs/factory-registrar';
 import { skillRegistry } from './skills.js';
+import { runActivationSmoke } from './smoke.js';
 
 /** SK4: the skills to build into the agent's image: its configuration's adopted skills, each approved, unretired and pinned. */
 export function buildSkillsFor(state: FactoryState, agentId: string): { ok: true; skills: BuildSkill[] } | { ok: false; error: 'skill_unavailable'; message: string } {
@@ -149,6 +150,39 @@ async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult
     const launchEnv = skills.length ? { [SKILLS_MANIFEST_ENV]: SKILLS_MANIFEST_PATH } : undefined;
     await dp.registerCompute(agentId, imageUri, agent.requires, identity, executionIdentity, agent.memoryPrefix ?? agentId, launchEnv);
 
+    const prevArtifact = agent.artifact;
+    const prevDeployedCommit = agent.deployedCommit;
+    const prevDeployedSkills = agent.deployedSkills;
+    const prevLaunchEnv = agent.deployedSkills?.length ? { [SKILLS_MANIFEST_ENV]: SKILLS_MANIFEST_PATH } : undefined;
+
+    agent.artifact = imageUri;
+
+    // Activation smoke gate (L4, TSK-281)
+    const smokeRes = await runActivationSmoke(state, agent, skills, commit, actor);
+    if (!smokeRes.ok) {
+      console.error(`[control-plane] Activation smoke failed for ${agentId}@${commit}: ${smokeRes.error}`);
+      if (prevArtifact) {
+        try {
+          await dp.registerCompute(agentId, prevArtifact, agent.requires, identity, executionIdentity, agent.memoryPrefix ?? agentId, prevLaunchEnv);
+        } catch (rbErr) {
+          console.error(`[control-plane] Rollback registerCompute failed for ${agentId}:`, rbErr);
+        }
+        agent.artifact = prevArtifact;
+        agent.deployedCommit = prevDeployedCommit;
+        agent.deployedSkills = prevDeployedSkills;
+      } else {
+        agent.artifact = '';
+        delete agent.deployedCommit;
+        delete agent.deployedSkills;
+      }
+      if (!stoppedDuring(agent)) {
+        if (!job.isApply) agent.state = 'ERROR';
+        else agent.state = previousState;
+      }
+      registryOf(state).save(agent);
+      return 'failed';
+    }
+
     agent.artifact = imageUri;
     agent.deployedCommit = commit;
     agent.deployedSkills = skills.map(({ id, version }) => ({ id, version }));
@@ -170,8 +204,10 @@ async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult
     console.error(`[control-plane] Deploy failed for ${agentId}:`, err);
     // An apply that fails after a good build leaves the agent as it was: its image and compute are still in place.
     // The deploy route keeps `ERROR`.
-    if (!job.isApply) agent.state = 'ERROR';
-    else if (!stoppedDuring(agent)) agent.state = previousState;
+    if (!stoppedDuring(agent)) {
+      if (!job.isApply) agent.state = 'ERROR';
+      else agent.state = previousState;
+    }
     registryOf(state).save(agent);
     row(state, agentId, 'AGENT_DEPLOY_FAILED', actor, commit);
     return 'failed';

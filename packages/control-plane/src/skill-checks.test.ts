@@ -328,7 +328,7 @@ describe('SK1 the local checker clones the pinned commit and runs the check', { 
 
       // 1. Hit: valid skill package
       const validGz = makeSkillPackageGz({
-        'skill.yaml': `spec: 1\nid: pkg-skill\nname: Pkg Skill\nversion: 1.0.0\ndescription: A packaged skill\nlanguage: python\nentry: main.py\nrequires:\n  routes: []\n  credentials: []\n`,
+        'skill.yaml': `spec: 1\nid: pkg-skill\nname: Pkg Skill\nversion: 1.0.0\ndescription: A packaged skill\nlanguage: python\nentry: main.py\nrequires:\n  routes: []\n  credentials: []\nsmoke:\n  action: ping\n  input: {}\n`,
         'main.py': 'def tools(): return []\n',
         'test_main.py': 'import unittest\nclass T(unittest.TestCase):\n  def test_ok(self): pass\n',
       });
@@ -342,6 +342,7 @@ describe('SK1 the local checker clones the pinned commit and runs the check', { 
         language: 'python',
         entry: 'main.py',
         requires: { routes: [], connections: [], credentials: [], models: [] },
+        smoke: { action: 'ping', input: {} },
       } as SkillManifest;
 
       const hitRun = await checker.start({

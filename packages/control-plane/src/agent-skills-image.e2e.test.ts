@@ -56,7 +56,7 @@ describe('an agent with adopted skills runs the shared runtime with them layered
   };
   /** A private skill owned by the agent, registered, checked and approved: the factory adopts it for the agent. */
   const adoptSkill = async (agent: string, skillId: string) => {
-    const manifest = { id: skillId, version: '1.0.0', name: skillId, description: 'A skill.', language: 'python', entry: skillId, visibility: 'private', owner: agent, requires: { routes: ['models'] } };
+    const manifest = { id: skillId, version: '1.0.0', name: skillId, description: 'A skill.', language: 'python', entry: skillId, visibility: 'private', owner: agent, requires: { routes: ['models'] }, smoke: { action: 'ping', input: {} } };
     assert.equal((await call('POST', '/api/v1/registry/skills', { repo: 'https://github.com/BeerCanLabs/skill-x', path: '.', commit: SHA, manifest })).status, 201);
     recordSkillChecks(state, skillId, '1.0.0', { passed: true });
     const approved = await call('POST', `/api/v1/registry/skills/${skillId}/versions/1.0.0/approve`, {});

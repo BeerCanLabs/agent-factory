@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
-import { bearerAuth } from '@beercanlabs/factory-auth';
+import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { VersionedConfigStore, type ConfigBackend, type ConfigRecord } from '@beercanlabs/factory-registrar';
@@ -47,6 +47,7 @@ const manifest = (id: string, version: string, extra: Record<string, unknown> = 
   language: 'python',
   entry: id.replace(/-/g, '_'),
   requires: { routes: ['tavily'] },
+  smoke: { action: 'ping', input: {} },
   ...extra,
 });
 
@@ -155,7 +156,7 @@ describe('applying an agent’s configuration: a skills change rebuilds and rede
       idleMs: 0,
       idleTimers: new Map(),
       callbacks: { allowHosts: [] } as unknown as FactoryState['callbacks'],
-      runTokens: { issue: async () => '', verify: async () => undefined } as unknown as FactoryState['runTokens'],
+      runTokens: new RunTokens('apply-e2e-run-token-key-0123456789'),
       secretValues: new Set(),
     } as FactoryState;
     state.configs = await VersionedConfigStore.open(memoryBackend());
@@ -213,7 +214,7 @@ describe('applying an agent’s configuration: a skills change rebuilds and rede
   });
 
   it('a private skill is built in as soon as its version is approved', async () => {
-    const approved = await publish(manifest('printer', '0.1.0', { visibility: 'private', owner: 'higgins', requires: { routes: ['print'] }, actions: [{ id: 'print-page', route: 'print', method: 'POST', path: '/jobs', hold: true }] }));
+    const approved = await publish(manifest('printer', '0.1.0', { visibility: 'private', owner: 'higgins', requires: { routes: ['print'] }, actions: [{ id: 'print-page', route: 'print', method: 'POST', path: '/jobs', hold: true }], smoke: { action: 'print-page', input: {}, dryRun: true } }));
     assert.deepEqual(approved.adopted, ['higgins']);
     await settled('higgins', () => deployed('higgins').includes('printer@0.1.0'));
     assert.deepEqual(configured('higgins'), ['printer@0.1.0']);

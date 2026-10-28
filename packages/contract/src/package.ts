@@ -8,7 +8,7 @@
 import zlib from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
-import { validateSkillManifest, type SkillManifest } from './skill.js';
+import { validateSkillManifest, skillDesignIssues, type SkillManifest } from './skill.js';
 
 export const MAX_PACKAGE_SIZE = 5 * 1024 * 1024; // 5 MiB compressed (A1, A19)
 export const MAX_EXPANDED_SIZE = 20 * 1024 * 1024; // 20 MiB uncompressed (A1, A19)
@@ -668,6 +668,16 @@ export async function validateSkillPackage(buffer: Buffer): Promise<ValidatedSki
   if (!manifestChecked.ok) {
     for (const issue of manifestChecked.issues) {
       pushIssue(issues, `manifest.${issue.path}: ${issue.message}`);
+    }
+  } else {
+    if (!manifestChecked.manifest.smoke) {
+      pushIssue(issues, 'smoke: skill package must declare a smoke check (SK1, L4)');
+    } else {
+      const designIssues = skillDesignIssues(manifestChecked.manifest);
+      const smokeIssues = designIssues.filter((i) => i.path.startsWith('smoke'));
+      for (const issue of smokeIssues) {
+        pushIssue(issues, `${issue.path}: ${issue.message}`);
+      }
     }
   }
 

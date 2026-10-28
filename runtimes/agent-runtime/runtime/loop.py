@@ -128,6 +128,23 @@ def handle(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], payl
     kind = payload.get("factoryKind")
     if kind == "approval":
         return None  # a decision for an action the agent asked for: the factory applies it, the loop has nothing to say
+    if kind == "smoke":
+        if payload.get("smoke") == "skill" or payload.get("action"):
+            action = str(payload.get("action") or "")
+            tool = tools.get(action) or tools.get(action.replace("-", "_"))
+            if tool is None:
+                raise RuntimeError(f"smoke action {action!r} is not loaded")
+            args = dict(payload.get("input") or {})
+            out = run_tool(tool, json.dumps(args), {"caller": {}, "turnId": payload.get("turnId"), "smoke": True, "dryRun": bool(payload.get("dryRun"))})
+            if out.startswith("error:"):
+                raise RuntimeError(out)
+            return out
+        else:
+            answer = factory.complete([{"role": "system", "content": system_prompt(soul, {})}, {"role": "user", "content": text_of(payload)}], None)
+            reply = str(answer.get("content") or "")
+            if not reply.strip():
+                raise RuntimeError("empty smoke reply")
+            return reply
     reply = answer_request(mind, payload) if kind == "conversation-request" else converse(factory, soul, mind, tools, payload)
     deliver(factory, payload, reply)
     return reply
@@ -155,12 +172,15 @@ def main(factory: Factory | None = None) -> int:
     for p in problems:
         print(f"[runtime] {p}", file=sys.stderr)
     turns = 0
+    last_reply = None
+    is_smoke = False
     try:
         payload = factory.input()
-        handle(factory, soul, mind, tools, payload)
+        is_smoke = payload.get("factoryKind") == "smoke"
+        last_reply = handle(factory, soul, mind, tools, payload)
         turns += 1
         # A conversational agent stays warm to answer follow-ups without a cold start; the idle window is the factory's.
-        warm = int(config.get("warmDownSeconds") or 0)
+        warm = 0 if is_smoke else int(config.get("warmDownSeconds") or 0)
         deadline = time.time() + warm
         while warm and time.time() < deadline:
             factory.heartbeat()
@@ -189,6 +209,13 @@ def main(factory: Factory | None = None) -> int:
         return 1
     finally:
         mind.close()
-    write_result({"status": "succeeded", "output": {"summary": f"handled {turns} turn(s)", "archetype": mind.archetype, "processed_at": datetime.now(timezone.utc).isoformat()}})
+    output: dict = {
+        "summary": f"handled {turns} turn(s)",
+        "archetype": mind.archetype,
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if is_smoke and last_reply is not None:
+        output["reply"] = last_reply
+    write_result({"status": "succeeded", "output": output})
     print("[runtime] done")
     return 0

@@ -65,13 +65,14 @@ export {
   SKILL_VISIBILITIES,
   SKILL_ACTION_METHODS,
   skillActionSchema,
+  skillSmokeSchema,
   skillManifestSchema,
   skillRequiresSchema,
   skillCredentialSchema,
   validateSkillManifest,
   skillDesignIssues,
 } from './skill.js';
-export type { SkillManifest, SkillRequires, SkillCredential, SkillAction, SkillVisibility, SkillIssue, SkillValidation, SkillDesignOptions } from './skill.js';
+export type { SkillManifest, SkillSmoke, SkillRequires, SkillCredential, SkillAction, SkillVisibility, SkillIssue, SkillValidation, SkillDesignOptions } from './skill.js';
 
 export {
   SYSTEM_ID,

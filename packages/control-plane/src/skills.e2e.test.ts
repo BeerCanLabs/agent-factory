@@ -360,7 +360,7 @@ function makeTarball(entries: Array<{ header: Buffer; content?: Buffer }>): Buff
 
 function makeValidPackage(id = 'test-packaged-skill', version = '1.0.0', opts: { description?: string } = {}): Buffer {
   const desc = opts.description ?? 'Test packaged skill';
-  const yaml = `spec: 1\nid: ${id}\nname: Packaged Skill\nversion: ${version}\nlanguage: python\ndescription: ${desc}\nentry: entry.py\n`;
+  const yaml = `spec: 1\nid: ${id}\nname: Packaged Skill\nversion: ${version}\nlanguage: python\ndescription: ${desc}\nentry: entry.py\nsmoke:\n  action: ping\n  input: {}\n`;
   const entry = `def tools():\n    return []\n`;
   const test = `def test_smoke():\n    assert True\n`;
   const yBuf = Buffer.from(yaml, 'utf8');

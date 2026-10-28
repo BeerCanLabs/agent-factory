@@ -15,7 +15,8 @@ import { AGENT_ID, BUILTIN_AGENT_IDS, FULL_SHA, applySettingsChange, beginAdmiss
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { buildSkillsFor, runDeploy } from './apply.js';
 import { changeReason, configOf, ledgerVersion, recordConfig, removeConfig } from './config-store.js';
-import type { Run } from '@beercanlabs/factory-property-manager';
+import { SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type Run } from '@beercanlabs/factory-property-manager';
+import { runActivationSmoke } from './smoke.js';
 
 /** The runtime version the factory pins new agents to (RT1): its repository and commit, and the image that runs it. */
 export type SharedRuntimePin = { repo: string; commit: string; image: string };
@@ -195,6 +196,10 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
     return;
   }
   const previous = agent.state;
+  const prevArtifact = agent.artifact;
+  const prevDeployedCommit = agent.deployedCommit;
+  const prevDeployedSkills = agent.deployedSkills ? [...agent.deployedSkills] : undefined;
+  const prevLaunchEnv = prevDeployedSkills?.length ? { [SKILLS_MANIFEST_ENV]: SKILLS_MANIFEST_PATH } : undefined;
   agent.state = 'DEPLOYING';
   registryOf(state).save(agent);
   try {
@@ -203,6 +208,31 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
     agent.artifact = pin.image;
     agent.deployedCommit = pin.commit;
     agent.deployedSkills = [];
+
+    // Activation smoke gate (L4, TSK-281)
+    const smokeRes = await runActivationSmoke(state, agent, [], pin.commit, actor);
+    if (!smokeRes.ok) {
+      console.error(`[control-plane] Activation smoke failed for configured ${agent.id}@${pin.commit}: ${smokeRes.error}`);
+      if (prevDeployedCommit && prevArtifact) {
+        try {
+          await dp.registerCompute(agent.id, prevArtifact, [], identity, executionIdentity, agent.memoryPrefix ?? agent.id, prevLaunchEnv);
+        } catch (rbErr) {
+          console.error(`[control-plane] Rollback registerCompute failed for ${agent.id}:`, rbErr);
+        }
+        agent.artifact = prevArtifact;
+        agent.deployedCommit = prevDeployedCommit;
+        agent.deployedSkills = prevDeployedSkills;
+        agent.state = previous;
+      } else {
+        agent.artifact = '';
+        delete agent.deployedCommit;
+        delete agent.deployedSkills;
+        agent.state = 'ERROR';
+      }
+      registryOf(state).save(agent);
+      return json(res, 502, { error: 'smoke_failed', message: smokeRes.error });
+    }
+
     agent.state = 'SLEEPING';
     registryOf(state).save(agent);
     await recordConfig(state, agent.id, { actor, reason: changeReason(req, `deploy of runtime ${pin.commit}`) });

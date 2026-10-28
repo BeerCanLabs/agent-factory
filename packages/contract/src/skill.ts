@@ -63,6 +63,15 @@ export const skillActionSchema = z
   })
   .strict();
 
+export const skillSmokeSchema = z
+  .object({
+    action: z.string().max(64).regex(SKILL_ID, 'smoke action must be a kebab-case action id'),
+    input: z.record(z.unknown()).default({}),
+    dryRun: z.boolean().optional(),
+  })
+  .strict();
+export type SkillSmoke = z.infer<typeof skillSmokeSchema>;
+
 export const skillManifestSchema = z
   .object({
     id: z.string().max(64).regex(SKILL_ID, 'skill id must be kebab-case (e.g. discord-progress)'),
@@ -78,6 +87,7 @@ export const skillManifestSchema = z
     owner: z.string().max(64).regex(SKILL_OWNER, 'owner must be an agent id (lowercase letters, digits, - and _)').optional(),
     requires: skillRequiresSchema.default({}),
     actions: z.array(skillActionSchema).default([]),
+    smoke: skillSmokeSchema.optional(),
   })
   .strict();
 
@@ -173,6 +183,16 @@ export function skillDesignIssues(manifest: SkillManifest, opts: SkillDesignOpti
     }
   });
   dupes(manifest.actions.map((a) => a.id), 'actions');
+
+  if (manifest.smoke) {
+    const act = manifest.actions.find((a) => a.id === manifest.smoke!.action);
+    if (manifest.actions.length > 0 && !act) {
+      issues.push({ path: 'smoke.action', message: `smoke action "${manifest.smoke.action}" is not declared in actions (SK1, SK2)` });
+    }
+    if (act?.hold === true && manifest.smoke.dryRun !== true) {
+      issues.push({ path: 'smoke.dryRun', message: `smoke action "${manifest.smoke.action}" has hold: true and requires dryRun: true (SK1, E9)` });
+    }
+  }
 
   return issues;
 }
