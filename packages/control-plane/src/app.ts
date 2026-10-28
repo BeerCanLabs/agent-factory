@@ -45,7 +45,7 @@ import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
-import { agentConfigForRun, deployConfigured, handleAgentCreation, handleRuntimeRoutes, registrationRefusal, type SharedRuntimePin } from './agent-creation.js';
+import { agentConfigForRun, deployConfigured, handleAgentCreation, handleConvertAgent, handleRuntimeRoutes, registrationRefusal, type SharedRuntimePin } from './agent-creation.js';
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
@@ -1363,6 +1363,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleAgentSettings(state, req, res, path)) return;
   if (await handleAgentCreation(state, req, res, path)) return;
+  if (await handleConvertAgent(state, req, res, path)) return;
   if (await handleRuntimeRoutes(state, req, res, path)) return;
   if (await handleAgentBundle(state, req, res, path)) return;
   if (path.startsWith('/api/v1/ingress/') && (await handleChannelApprovals(state, req, res, path))) return;
@@ -2524,13 +2525,20 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       const inputObj = (run.input && typeof run.input === 'object') ? (run.input as Record<string, unknown>) : {};
       const smokeRoutes = Array.isArray(inputObj.smokeRoutes) ? (inputObj.smokeRoutes as string[]) : [];
       const agentRoutes = pol?.routes ?? [];
-      const mergedRoutes = Array.from(new Set([...agentRoutes, ...smokeRoutes])).filter((r) => r !== 'discord');
+      const mergedRoutes = Array.from(new Set(['models', ...agentRoutes, ...smokeRoutes])).filter((r) => r !== 'discord');
       const perRunCap = state.smokeBudgetUsd?.perRun ?? 0.25;
       const perActivationCap = state.smokeBudgetUsd?.perActivation ?? 1.00;
       const activationId = typeof inputObj.activationId === 'string' ? inputObj.activationId : undefined;
       const actSpend = activationId ? (state.smokeActivationSpend?.get(activationId) ?? 0) : 0;
       const remainingActivationBudget = Math.round(Math.max(0, perActivationCap - actSpend) * 10000) / 10000;
       const effectivePerRun = Math.round(Math.min(perRunCap, remainingActivationBudget) * 10000) / 10000;
+      const effectiveModels = pol?.models?.length
+        ? pol.models
+        : agent.model
+        ? [agent.model]
+        : state.defaultModel
+        ? [state.defaultModel]
+        : undefined;
       json(res, 200, {
         run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state), ...(run.model ? { model: run.model } : {}) },
         agentState: agent.state,
@@ -2538,7 +2546,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         policySet: true,
         policy: {
           ...pol,
-          models: pol?.models?.length ? pol.models : ['*'],
+          models: effectiveModels,
           routes: mergedRoutes,
           budgetUsd: { perRun: effectivePerRun },
         },

@@ -31,7 +31,7 @@ function extractReplyText(result: unknown): string {
   return '';
 }
 
-async function waitForRun(state: FactoryState, runId: string, timeoutMs = 30000): Promise<Run> {
+async function waitForRun(state: FactoryState, runId: string, timeoutMs = Number(process.env.FACTORY_SMOKE_TIMEOUT_MS) || 120_000): Promise<Run> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const cur = state.runs.get(runId);

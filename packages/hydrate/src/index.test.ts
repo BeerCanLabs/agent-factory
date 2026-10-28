@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NOTEBOOK_ROTATION, notebookEnv, pullMind, pullVolume, pushMind, staleSidecars } from './index.js';
-import { serveVolumeRequests } from './shim.js';
+import { main, serveVolumeRequests } from './shim.js';
 import { existsSync } from 'node:fs';
 
 describe('hydrate', () => {
@@ -326,6 +326,88 @@ describe('AM3 notebooks rotate; closed volumes are cold storage', () => {
       mkdirSync(join(work, '.volume-requests/odd-dir'), { recursive: true });
       assert.doesNotThrow(() => serveVolumeRequests({ root: store }, 'agent', work));
     } finally {
+      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('AM1 main() with FACTORY_MEMORY_ARCHETYPE=purpose-built skips mind pull/push but serves volume requests', async () => {
+    const store = mkdtempSync(join(tmpdir(), 'shim-pb-store-'));
+    const work = mkdtempSync(join(tmpdir(), 'shim-pb-work-'));
+    const savedEnv = { ...process.env };
+    try {
+      file(store, 'agent/volumes/2026-07/notebook.db', 'volume data');
+      file(store, 'agent/store_only.txt', 'do not pull');
+
+      process.env.MEMORY_DIR = work;
+      process.env.MEMORY_STORE_DIR = store;
+      process.env.MEMORY_PREFIX = 'agent';
+      process.env.FACTORY_MEMORY_ARCHETYPE = 'purpose-built';
+      delete process.env.FACTORY_URL;
+
+      const workerCode = `
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const dir = process.env.MEMORY_DIR;
+        if (fs.existsSync(path.join(dir, 'store_only.txt'))) {
+          process.exit(10);
+        }
+        fs.writeFileSync(path.join(dir, 'local_scratch.txt'), 'do not push');
+        fs.mkdirSync(path.join(dir, '.volume-requests'), { recursive: true });
+        fs.writeFileSync(path.join(dir, '.volume-requests', '2026-07'), '');
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline) {
+          if (fs.existsSync(path.join(dir, '.volume-requests', '2026-07.done'))) break;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+        }
+        if (!fs.existsSync(path.join(dir, '.volume-requests', '2026-07.done'))) {
+          process.exit(11);
+        }
+      `;
+
+      const code = await main(['--', process.execPath, '-e', workerCode]);
+      assert.equal(code, 0, 'worker should succeed');
+
+      // Mind store should NOT have local_scratch.txt (safePush skipped)
+      assert.equal(existsSync(join(store, 'agent/local_scratch.txt')), false, 'local files not pushed to store');
+      // Mind dir should have received the requested volume
+      assert.equal(readFileSync(join(work, 'volumes/2026-07/notebook.db'), 'utf8'), 'volume data');
+    } finally {
+      for (const k of Object.keys(process.env)) if (!(k in savedEnv)) delete process.env[k];
+      Object.assign(process.env, savedEnv);
+      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('AM1 main() with FACTORY_MEMORY_ARCHETYPE=personal-assistant pulls and pushes mind', async () => {
+    const store = mkdtempSync(join(tmpdir(), 'shim-pa-store-'));
+    const work = mkdtempSync(join(tmpdir(), 'shim-pa-work-'));
+    const savedEnv = { ...process.env };
+    try {
+      file(store, 'agent/remembered.md', 'prior memory');
+
+      process.env.MEMORY_DIR = work;
+      process.env.MEMORY_STORE_DIR = store;
+      process.env.MEMORY_PREFIX = 'agent';
+      process.env.FACTORY_MEMORY_ARCHETYPE = 'personal-assistant';
+      delete process.env.FACTORY_URL;
+
+      const workerCode = `
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const dir = process.env.MEMORY_DIR;
+        const prior = fs.readFileSync(path.join(dir, 'remembered.md'), 'utf8');
+        fs.writeFileSync(path.join(dir, 'new.md'), prior + ' + updated');
+      `;
+
+      const code = await main(['--', process.execPath, '-e', workerCode]);
+      assert.equal(code, 0, 'worker should succeed');
+
+      assert.equal(readFileSync(join(store, 'agent/new.md'), 'utf8'), 'prior memory + updated');
+    } finally {
+      for (const k of Object.keys(process.env)) if (!(k in savedEnv)) delete process.env[k];
+      Object.assign(process.env, savedEnv);
       rmSync(store, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
     }
