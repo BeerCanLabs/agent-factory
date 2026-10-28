@@ -4,6 +4,12 @@ Welcome to the **BeerCanLabs Agent Factory** Cartridge Developer Guide.
 
 This guide teaches software engineers how to design, package, test, and deploy portable, enterprise-grade AI agent cartridges using the **Console vs. Cartridge** paradigm.
 
+> [!IMPORTANT]
+> ### Dual-Mode Agent Hosting: Configuration-Only Agents vs. Repository Cartridges (`CF6`, `RT1`)
+> **Most developers should build Configuration-Only Agents, NOT Repository Cartridges.**
+> - **Configuration-Only Agents (Recommended Default):** Created directly via the API (`POST /api/v1/agents`) or conversationally through the `agent-builder` staff agent. They require **no git repository**, **no custom Dockerfile**, and **no container build pipeline**. They run on the shared runtime (`runtimes/agent-runtime`) using a persona (`soul.md`), a standardized memory archetype (`AM1`), and modular skill packages (`SK1`–`SK5`). Upgrades to the runtime roll out fleet-wide with automatic smoke testing and zero maintenance burden. See the [Creating and Managing Agents Guide](./CREATING_AGENTS.md) and [Skills Guide](./SKILLS.md).
+> - **Repository Cartridges (Exception Only):** This guide documents how to build a repository cartridge from source. Repository cartridges are **strictly reserved** for Factory House Staff (`agents/staff/*`) or allowlisted platform cartridges (`FACTORY_REPOSITORY_AGENT_IDS`) that require custom compiled binaries, C-extensions, or access to privileged factory-internal endpoints. If your agent is an employee, conversational assistant, or workflow automaton, use **Configuration-Only Agents**.
+
 ---
 
 ## 1. Core Philosophy: The "New Hire" Mental Model

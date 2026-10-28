@@ -17,6 +17,7 @@ Every skill package is a gzip tar archive (`.tar.gz`) containing at its root a `
 - **Path limits**: At most 255 characters per path; paths must be relative and POSIX-compliant (no `..`, no leading `/`, no backslashes).
 - **Prohibited entries**: No compiled binaries (`.pyc`, `.so`, `.pyd`, `.dll`, `.dylib`, `.exe`), no `.git/` directories, and no `__pycache__/`.
 - **Pure-stream**: Single gzip stream with standard tar headers; pax and GNU long-name headers are refused.
+- **Mandatory Smoke Gate (`smoke`) (TSK-281)**: The manifest must declare a `smoke` block (`action`, `input`, and optional `dryRun`). Mutating actions (`POST`/`PUT`/`PATCH`/`DELETE` in `actions:`) and actions requiring approval (`hold: true`) require `dryRun: true`; otherwise admission is refused.
 
 ### The Manifest Specification (`spec: 1`)
 
@@ -42,6 +43,12 @@ actions:                            # Declarative description of external HTTP a
     method: POST
     path: /search
     hold: false                     # false = autonomous; true = human approval required
+
+smoke:                              # Mandatory smoke test specification (TSK-281, L4)
+  action: execute-search            # Action ID from actions: or declared tool name
+  input:                            # Argument dictionary passed to tool handler
+    query: ping
+  dryRun: true                      # Required true if action is mutating (POST/PUT/PATCH/DELETE) or has hold: true
 
 source:                             # Optional provenance metadata (untrusted informational record)
   repo: https://github.com/BeerCanLabs/skills
@@ -136,6 +143,7 @@ Once uploaded, the factory checks the package in an isolated build environment (
 4. **Network Perimeter (E1)**: Code may not hard-code external hostnames or IPs. All outbound traffic routes through designated `*_BASE_URL` Gatekeeper endpoints.
 5. **Syntax & Entry Verification**: Confirms that all Python files parse cleanly and the `entry` module exists.
 6. **Automated Test Execution**: Tests in `tests/` run offline using `unittest` or `pytest`. Both the skill root and `vendor/` are placed on `sys.path`.
+7. **Smoke Handler Execution (TSK-281)**: `SKILL_CHECK_SCRIPT` executes the handler for `smoke.action` in an isolated subprocess with `smoke.input` and `context={"smoke": True, "dryRun": smoke.dryRun}`. The check confirms that the handler runs without unhandled exceptions, honors `dryRun`, and returns a bounded, valid string result.
 
 ---
 
@@ -175,6 +183,13 @@ When an agent configuration with adopted skills is deployed:
 3. A consolidated manifest is generated at `/opt/factory/skills.json`.
 4. A container layer is built and pushed as `<agent>-<commit>-<skills-hash>`.
 5. At runtime, the agent runtime loads `/opt/factory/skills.json`, adds each skill's root and `vendor/` to `sys.path`, and registers tool handlers with the model turn loop.
+
+### The Activation Smoke Gate (TSK-281, L4)
+Before any candidate image layer containing adopted skills is activated for an agent, the factory executes the candidate container in smoke mode (`runActivationSmoke`):
+- **Turn 1**: Executes baseline hello-world agent turn verifying model completion through Gatekeeper Egress (`E5`).
+- **Turns 2..N**: Executes each adopted skill's declared `smoke:` action against the live container.
+- **Verification**: The candidate container must dispatch the tool, inject smoke context, complete without errors, and record egress audit rows on all required routes.
+- **Rollback on Failure**: If any adopted skill fails its smoke turn, the deployment aborts, the failure is ledgered (`AGENT_SMOKE_FAILED`), and the agent rolls back to its prior healthy image without downtime.
 
 ---
 

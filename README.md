@@ -73,7 +73,7 @@ Agent Factory is architected around **10 canonical services ("The Cast of Charac
     - **Role:** Watches the factory and says what it sees: emits live run progress and event streams (e.g., `discord-progress`, the WebSocket stream, the enterprise bus), registers the headless run metrics instruments, writes prompt traces, and derives the triage incident list (`/api/v1/triage`). It decides nothing, and the HTTP handlers stay in the control plane. Routing crash diagnostics to an alerting tool is not built (GAP-107).
     - **Contract:** `packages/inspector` exports `createInspector` (publish and subscribe to events, tap the ledger, attach an enterprise bus, report and read run progress), the progress emitter and prompt traces the egress uses, `factoryMetrics`, and `incidentsFromRuns`. `packages/telemetry` (`initTelemetry`) is a separate package it hosts.
 
-House staff are optional cartridges in `agents/staff`. They are not an eleventh platform service and they are not loaded into the baked catalog. The Personal Trainer (`agents/staff/personal-trainer`) guides a builder through a skill scorecard, scores pinned trials, and recommends a model. Training spend posts to the skill (`PUT /api/v1/skills/:id/training-account`). Using an adopted skill still posts to the agent's budget. The trainer does not rewrite the skill and does not deploy. The Factory Manager (`agents/staff/factory-manager`) is the front desk for the command-line client: it answers fleet questions and, through the CLI, acts with the signed-in person's own roles. See `docs/CLI.md`.
+House staff are optional cartridges in `agents/staff`. They are not an eleventh platform service and they are not loaded into the baked catalog. The Agent Builder (`agents/staff/agent-builder`) enables conversational configuration agent design, validation, and publishing directly from chat or CLI (`TSK-282`). The Personal Trainer (`agents/staff/personal-trainer`) guides a builder through a skill scorecard, scores pinned trials, and recommends a model. Training spend posts to the skill (`PUT /api/v1/skills/:id/training-account`). Using an adopted skill still posts to the agent's budget. The trainer does not rewrite the skill and does not deploy. The Factory Manager (`agents/staff/factory-manager`) is the front desk for the command-line client: it answers fleet questions and, through the CLI, acts with the signed-in person's own roles. See `docs/CLI.md`.
 
 ### Contracts as Designed: Architectural Invariants
 
@@ -97,6 +97,8 @@ The architecture is opinionated and accepts certain limits by design:
 
 ## Documentation & Layout
 
+- **[Creating and Managing Agents](docs/CREATING_AGENTS.md)** — Comprehensive guide to Dual-Mode Hosting (Configuration-Only vs. Repository-Based), conversational creation via `agent-builder`, the activation smoke gate, shared runtime upgrades, and in-place conversion runbook.
+- **[Skills Guide](docs/SKILLS.md)** — Guide to authoring, testing, packaging, and publishing stdlib Python skills, declaring smoke gates, and managing skill groups.
 - **[Agent Memory Models Guide](docs/architecture/agent-memory-models.md)** — Architectural specification for the 3 Agent Archetypes, the Storage Triad (Whiteboard vs. Notebook vs. Safe), FTS5 episodic state, and multi-user isolation.
 - **[Cartridge Developer Guide](docs/CARTRIDGE_DEVELOPER_GUIDE.md)** — Step-by-step guide to building, testing, and packaging an Agent Cartridge using the "New Hire" model.
 - **[DESIGN_AUTHORITY.md](DESIGN_AUTHORITY.md)** — The Single Source of Truth (SSOT) for architectural intent, component contracts, and AI governance.
@@ -104,6 +106,8 @@ The architecture is opinionated and accepts certain limits by design:
 - **[AGENTS.md](AGENTS.md)** — Instructions for implementing AIs deploying the Factory.
 
 ```
+docs/CREATING_AGENTS.md           # Dual-mode hosting, activation smoke gate & migration runbook
+docs/SKILLS.md                    # Skills authoring, manifest, packaging & publishing guide
 docs/architecture/agent-memory-models.md # Agent memory models & storage triad spec
 docs/CARTRIDGE_DEVELOPER_GUIDE.md # Developer tutorial for building cartridges
 DESIGN_AUTHORITY.md               # SSOT architecture & AI locking board
