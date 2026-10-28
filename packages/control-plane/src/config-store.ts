@@ -159,7 +159,7 @@ export type RegistryCheck = { ok: true; records: number } | { ok: false; reason:
 export function checkRegistry(dir: string): RegistryCheck {
   let names: string[];
   try {
-    names = readdirSync(dir).filter((n) => n.endsWith('.json'));
+    names = readdirSync(dir).filter((n) => n.endsWith('.json') && !n.startsWith('_'));
   } catch (err) {
     return { ok: false, reason: `registry ${dir} unreadable: ${err instanceof Error ? err.message : String(err)}` };
   }

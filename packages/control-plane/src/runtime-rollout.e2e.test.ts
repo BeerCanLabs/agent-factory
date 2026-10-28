@@ -20,6 +20,7 @@ import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { IdentityLinkStore } from './identity-links.js';
 import { loadSkills, recordSkillChecks } from './skills.js';
 import { loadSharedRuntime, saveSharedRuntime, type SharedRuntimePin } from './agent-creation.js';
+import { checkRegistry } from './config-store.js';
 
 const ADMIN = 'admin-token-runtime-rollout';
 const OPERATOR = 'operator-token-runtime-rollout';
@@ -386,6 +387,7 @@ describe('Admin-approved runtime rollout (TSK-280, RT1, L4, GAP-206)', { concurr
       assert.equal(one.deployedCommit, COMMIT_2, 'cfg-one kept v2 deployedCommit');
       assert.equal(one.artifact, v2ArtifactOne, 'cfg-one restored previous v2 layered artifact');
       assert.equal(one.deployedRuntime?.commit, COMMIT_2, 'cfg-one kept v2 deployedRuntime pin');
+      assert.equal(state.configs?.current('cfg-one')?.source?.commit, COMMIT_2, 'cfg-one source.commit in config store remains COMMIT_2 on failed smoke upgrade');
 
       // Verify AGENT_SMOKE_FAILED was ledgered for cfg-one on commit v3
       const failedEntry = ledger.query().find((e) => e.agentId === 'cfg-one' && e.action === 'AGENT_SMOKE_FAILED' && e.commit === COMMIT_3);
@@ -412,6 +414,10 @@ describe('Admin-approved runtime rollout (TSK-280, RT1, L4, GAP-206)', { concurr
   });
 
   it('4. Persistence across Restart', async () => {
+    // checkRegistry succeeds with _runtime.json present in registryDir
+    const regCheck = checkRegistry(state.registryDir!);
+    assert.equal(regCheck.ok, true, `checkRegistry should pass with _runtime.json present: ${JSON.stringify(regCheck)}`);
+
     // loadSharedRuntime from state.registryDir reads back the latest approved pin (v3)
     const pin = loadSharedRuntime(state.registryDir);
     assert.ok(pin);

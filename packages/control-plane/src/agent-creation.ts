@@ -342,13 +342,14 @@ export async function handleRuntimeRoutes(state: FactoryState, req: http.Incomin
     const dones: Promise<void>[] = [];
     for (const a of state.agents.values()) {
       if (a.createdFrom === 'configuration' && a.state !== 'RETIRED_PENDING_PURGE' && a.state !== 'PURGED') {
-        a.repo = nextPin.repo;
-        a.commit = nextPin.commit;
-        registryOf(state).save(a);
-        if (state.configs?.current(a.id)) {
-          await recordConfig(state, a.id, { actor: principal.actor, reason: 'runtime-upgrade' });
-        }
-        if (a.deployedCommit) {
+        if (!a.deployedCommit) {
+          a.repo = nextPin.repo;
+          a.commit = nextPin.commit;
+          registryOf(state).save(a);
+          if (state.configs?.current(a.id)) {
+            await recordConfig(state, a.id, { actor: principal.actor, reason: 'runtime-upgrade' });
+          }
+        } else {
           const out = applyConfig(state, a.id, principal.actor, 'runtime-upgrade');
           if (out.status === 'started') {
             dones.push(out.done);
@@ -358,6 +359,14 @@ export async function handleRuntimeRoutes(state: FactoryState, req: http.Incomin
     }
 
     await Promise.allSettled(dones);
+
+    for (const a of state.agents.values()) {
+      if (a.createdFrom === 'configuration' && a.deployedCommit && a.deployedRuntime?.commit === nextPin.commit) {
+        if (state.configs?.current(a.id)?.source?.commit !== nextPin.commit) {
+          await recordConfig(state, a.id, { actor: principal.actor, reason: 'runtime-upgrade' });
+        }
+      }
+    }
 
     const agents = [];
     for (const a of state.agents.values()) {
