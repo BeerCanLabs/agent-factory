@@ -225,13 +225,13 @@ Content-Type: application/json
 #### Rollout Guarantees:
 - **Digest Pinning Required (`L4`):** The image must be pinned by `@sha256:` digest. Mutable tags (e.g. `:latest`) are rejected (`invalid_runtime`).
 - **Audit Ledger:** Records `RUNTIME_VERSION_SET` with the admin principal, commit, and digest.
-- **Automated Rebuild & Smoke:** The control plane triggers `triggerApply("runtime-upgrade")` for every configuration agent whose `deployedRuntime` differs:
+- **Automated Fleet Rebuild & Smoke:** The control plane triggers `applyConfig` across all non-retired configuration-hosted agents (skipping any agent already in `DEPLOYING`):
   - Agents without skills adopt the new base image directly.
   - Agents with skills are rebuilt by `factory-skills-builder` layering adopted skills on top of the new base image.
-  - Each agent runs the **Activation Smoke Gate** (`TSK-281`).
+  - Candidate images are built and smoke-tested via the **Activation Smoke Gate** (`TSK-281`) before switching task definitions.
   - On smoke pass: updates `deployedRuntime` and activates new compute.
-  - On smoke failure: rolls back that specific agent to its previous working image, records `AGENT_DEPLOY_FAILED`, and continues upgrading other agents.
-- **Active Run Safety (`deferred_working`):** If an agent is actively running (`WORKING`), its upgrade is deferred until it finishes its current run, avoiding interrupted conversations.
+  - On smoke failure: rolls back that specific agent to its previous working image, records `AGENT_DEPLOY_FAILED`, and leaves the agent running its prior runtime.
+- **Synchronous Rollout Results:** `PUT /api/v1/runtime` waits for candidate builds and smoke runs to settle and returns `results: [{ id, status: "updated" | "smoke_failed" }]`, rolling back any individual agent whose smoke gate fails and providing immediate fleet rollout status.
 
 ---
 
@@ -349,7 +349,7 @@ Content-Type: application/json
 8. **On Smoke Failure:**
    - Discards `pendingConfig`.
    - Restores the previous repository image and commit.
-   - Records `AGENT_CONVERT_FAILED` or `AGENT_SMOKE_FAILED` in the ledger.
+   - Records `AGENT_SMOKE_FAILED` in the ledger.
    - The repository agent remains online and operational.
 
 #### Step 6: Post-Conversion Verification
