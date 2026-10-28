@@ -32,6 +32,7 @@ import { checkFactoryBudgets, createTreasury } from './spend.js';
 import { AwsComputeSource, AwsCostSource } from './aws/accountant.js';
 import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
 import { ModelStore } from './models.js';
+import { loadSharedRuntime } from './agent-creation.js';
 
 const PORT = parseInt(process.env.PORT || '8088', 10);
 const AGENTS_ROOT = process.env.AGENTS_ROOT || fileURLToPath(new URL('../../../agents', import.meta.url));
@@ -219,9 +220,7 @@ const state: FactoryState = {
   newAgentsFromConfigurationOnly: true,
   repositoryAgentIds: new Set((process.env.FACTORY_REPOSITORY_AGENT_IDS ?? '').split(',').map((v) => v.trim()).filter(Boolean)),
   // RT1: the pinned shared runtime new agents run on. Unset, no agent can be created from a configuration.
-  sharedRuntime: process.env.FACTORY_RUNTIME_IMAGE && process.env.FACTORY_RUNTIME_COMMIT
-    ? { repo: process.env.FACTORY_RUNTIME_REPO || 'https://github.com/BeerCanLabs/agent-factory', commit: process.env.FACTORY_RUNTIME_COMMIT, image: process.env.FACTORY_RUNTIME_IMAGE }
-    : undefined,
+  sharedRuntime: loadSharedRuntime(REGISTRY_DIR, process.env),
   callbacks: callbackPolicyFromEnv(),
   publicBaseUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
   publicUrl: process.env.FACTORY_PUBLIC_URL || process.env.FACTORY_URL || 'http://control-plane.factory.internal:8088',

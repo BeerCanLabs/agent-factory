@@ -56,6 +56,7 @@ const ATTESTATION = { privilege: 'ledger.attest-run-actor', role: 'gatekeeper-eg
 const SKILL = 'x';
 const ROUTES: RouteRow[] = [
   // viewer
+  { method: 'GET', path: '/api/v1/runtime', privilege: 'agents.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/agents', privilege: 'agents.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/registry/agents', privilege: 'agents.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/registry/agents/castle', privilege: 'agents.read', role: 'viewer' },
@@ -136,6 +137,7 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/models/internal/catalog', privilege: 'egress.models.read', role: 'gatekeeper-egress' },
   { method: 'POST', path: '/api/v1/gatekeeper-egress/connections/token', privilege: 'egress.connections.token', role: 'gatekeeper-egress', exclusive: true, body: {} },
   // admin
+  { method: 'PUT', path: '/api/v1/runtime', privilege: 'runtime.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/agents', privilege: 'registry.register', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/registry/agents/nope/budget', privilege: 'registry.budget.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/agents/nope/retire', privilege: 'registry.retire', role: 'admin', body: {} },

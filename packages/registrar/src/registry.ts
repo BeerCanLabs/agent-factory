@@ -1,9 +1,55 @@
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentRecord } from './catalog.js';
 
 /** Where a failed write is reported; a failed write never fails the request that caused it. */
 export type RegistryWarn = (message: string, err: unknown) => void;
+
+/** The runtime version the factory pins new agents to (RT1): its repository and commit, and the image that runs it. */
+export type SharedRuntimePin = {
+  repo: string;
+  commit: string;
+  image: string;
+  updatedAt?: string;
+  updatedBy?: string;
+};
+
+export function saveSharedRuntime(registryDir: string | undefined, pin: SharedRuntimePin): void {
+  if (!registryDir) return;
+  try {
+    mkdirSync(registryDir, { recursive: true });
+    const file = join(registryDir, '_runtime.json');
+    writeFileSync(file, JSON.stringify(pin, null, 2), 'utf8');
+  } catch (err) {
+    console.warn(`[registrar] failed to persist shared runtime:`, err);
+  }
+}
+
+export function loadSharedRuntime(registryDir: string | undefined, env: NodeJS.ProcessEnv = process.env): SharedRuntimePin | undefined {
+  if (registryDir) {
+    const file = join(registryDir, '_runtime.json');
+    if (existsSync(file)) {
+      try {
+        const parsed = JSON.parse(readFileSync(file, 'utf8')) as SharedRuntimePin;
+        if (parsed && typeof parsed === 'object' && typeof parsed.repo === 'string' && typeof parsed.commit === 'string' && typeof parsed.image === 'string') {
+          return parsed;
+        }
+      } catch (err) {
+        console.warn(`[registrar] failed to parse ${file}:`, err);
+      }
+    }
+  }
+  const image = env.FACTORY_RUNTIME_IMAGE || env.FACTORY_AGENT_RUNTIME_IMAGE;
+  const commit = env.FACTORY_RUNTIME_COMMIT;
+  if (image && commit) {
+    return {
+      repo: env.FACTORY_RUNTIME_REPO || 'https://github.com/BeerCanLabs/agent-factory',
+      commit,
+      image,
+    };
+  }
+  return undefined;
+}
 
 /**
  * The agent registry's records on disk: one `<dir>/<agentId>.json` per registered agent, written as

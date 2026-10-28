@@ -165,6 +165,8 @@ export type AgentRecord = {
   commit?: string;
   /** The commit whose SHA-tagged image is deployed now (L4). */
   deployedCommit?: string;
+  /** RT1 / TSK-280: The base runtime version deployed to this agent. */
+  deployedRuntime?: { repo: string; commit: string; image: string };
   /** The semantic version currently installed (e.g. 1.0.0; default 0.1.0 for unversioned). */
   installedVersion?: string;
   /** True when a newer release is detected. */
@@ -502,7 +504,7 @@ export function loadDynamicRegistry(registryDir: string): AgentRecord[] {
   const records: AgentRecord[] = [];
   try {
     for (const f of readdirSync(registryDir)) {
-      if (!f.endsWith('.json')) continue;
+      if (!f.endsWith('.json') || f.startsWith('_')) continue;
       try {
         const data = JSON.parse(readFileSync(join(registryDir, f), 'utf8')) as AgentRecord;
         if (data && data.id) {

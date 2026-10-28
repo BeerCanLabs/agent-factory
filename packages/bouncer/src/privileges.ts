@@ -101,6 +101,8 @@ export const PRIVILEGES = [
   'skills.publish.request',
   'skills.unpublish',
   'skills.retire.force',
+  // TSK-280: Admin-approved runtime rollout (RT1, GAP-206)
+  'runtime.set',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -297,6 +299,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'skills.publish.request',
     'skills.unpublish',
     'skills.retire.force',
+    'runtime.set',
   ],
 };
 
