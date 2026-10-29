@@ -5,11 +5,13 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { createHmac } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth, RunTokens, type Role } from '@beercanlabs/factory-auth';
+import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { GroupStore } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { createInspector } from '@beercanlabs/factory-inspector';
@@ -220,11 +222,11 @@ async function listen(server: http.Server): Promise<number> {
   return a.port;
 }
 
-async function call(port: number, method: string, path: string, cred: Credential, body?: unknown) {
+async function call(port: number, method: string, path: string, cred: Credential, body?: unknown, extraHeaders?: Record<string, string>) {
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
     method,
-    headers: { 'content-type': 'application/json', ...(cred === 'none' ? {} : { authorization: `Bearer ${TOKEN(cred)}` }) },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { 'content-type': 'application/json', ...(cred === 'none' ? {} : { authorization: `Bearer ${TOKEN(cred)}` }), ...extraHeaders },
+    body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
   });
   const text = await res.text();
   let parsed: unknown = null;
@@ -354,9 +356,229 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       const r = await call(port, 'GET', '/api/v1/whoami', cred);
       assert.equal(r.status, cred === 'none' ? 401 : 200, `whoami as ${cred}`);
     }
+    // GAP-211, TSK-285: without a valid signature every credential, including admin, gets 401.
     for (const cred of CREDENTIALS) {
       const r = await call(port, 'POST', '/api/v1/hooks/github', cred, {});
-      assert.equal(r.status, 200, `/api/v1/hooks/github as ${cred}`);
+      assert.equal(r.status, 401, `/api/v1/hooks/github without signature as ${cred}`);
+      assert.deepEqual(r.body, { error: 'bad_webhook_signature' });
+    }
+    // With a valid signature every credential, including none and admin, is accepted.
+    const secret = 'test-github-webhook-secret';
+    state.providers = [envProvider({ FACTORY_GITHUB_WEBHOOK_SECRET: secret })];
+    try {
+      const payload = JSON.stringify({});
+      const sig = 'sha256=' + createHmac('sha256', secret).update(payload).digest('hex');
+      for (const cred of CREDENTIALS) {
+        const r = await call(port, 'POST', '/api/v1/hooks/github', cred, payload, { 'x-hub-signature-256': sig });
+        assert.equal(r.status, 200, `/api/v1/hooks/github with valid signature as ${cred}`);
+        assert.deepEqual(r.body, { ok: true, ignored: true });
+      }
+    } finally {
+      state.providers = [];
+    }
+  });
+
+  it('GAP-211 / TSK-285: wrong signature, missing header, tampered body and unconfigured secret are refused and leave agent records unchanged', async () => {
+    const agentRecord = {
+      id: 'gh-release-agent',
+      name: 'GH Release Agent',
+      role: 'Agent',
+      state: 'SLEEPING',
+      provider: 'local',
+      artifact: '',
+      requires: [],
+      ungated: [],
+      gated: [],
+      triggers: [],
+      dir: '/agents/gh-release-agent',
+      repo: 'https://github.com/BeerCanLabs/test-repo',
+      installedVersion: '1.0.0',
+    } as never;
+    state.agents.set('gh-release-agent', agentRecord);
+
+    const secret = 'release-webhook-secret';
+    const payloadObj = {
+      action: 'published',
+      repository: { html_url: 'https://github.com/BeerCanLabs/test-repo' },
+      release: { tag_name: 'v2.0.0', target_commitish: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' },
+    };
+    const validBody = JSON.stringify(payloadObj);
+    const validSig = 'sha256=' + createHmac('sha256', secret).update(validBody).digest('hex');
+
+    const assertUnchanged = () => {
+      const curr = state.agents.get('gh-release-agent')!;
+      assert.equal(curr.offeredVersion, undefined);
+      assert.equal(curr.offeredCommit, undefined);
+      assert.equal(curr.updateAvailable, undefined);
+    };
+
+    // 1. Unconfigured secret: secret not in providers
+    state.providers = [];
+    const rUnconfigured = await call(port, 'POST', '/api/v1/hooks/github', 'none', validBody, {
+      'x-github-event': 'release',
+      'x-hub-signature-256': validSig,
+    });
+    assert.equal(rUnconfigured.status, 401);
+    assert.deepEqual(rUnconfigured.body, { error: 'bad_webhook_signature' });
+    assertUnchanged();
+
+    // Now configure secret
+    state.providers = [envProvider({ FACTORY_GITHUB_WEBHOOK_SECRET: secret })];
+    try {
+      // 2. Missing header
+      const rMissing = await call(port, 'POST', '/api/v1/hooks/github', 'none', validBody, {
+        'x-github-event': 'release',
+      });
+      assert.equal(rMissing.status, 401);
+      assert.deepEqual(rMissing.body, { error: 'bad_webhook_signature' });
+      assertUnchanged();
+
+      // 3. Malformed header (not sha256=...)
+      const rMalformed = await call(port, 'POST', '/api/v1/hooks/github', 'none', validBody, {
+        'x-github-event': 'release',
+        'x-hub-signature-256': 'md5=abcd',
+      });
+      assert.equal(rMalformed.status, 401);
+      assert.deepEqual(rMalformed.body, { error: 'bad_webhook_signature' });
+      assertUnchanged();
+
+      // 4. Wrong signature
+      const rWrong = await call(port, 'POST', '/api/v1/hooks/github', 'none', validBody, {
+        'x-github-event': 'release',
+        'x-hub-signature-256': 'sha256=' + '0'.repeat(64),
+      });
+      assert.equal(rWrong.status, 401);
+      assert.deepEqual(rWrong.body, { error: 'bad_webhook_signature' });
+      assertUnchanged();
+
+      // 5. Tampered body (signature valid for validBody, but sending modified payload)
+      const tamperedBody = JSON.stringify({ ...payloadObj, action: 'published', extra: 'tampered' });
+      const rTampered = await call(port, 'POST', '/api/v1/hooks/github', 'none', tamperedBody, {
+        'x-github-event': 'release',
+        'x-hub-signature-256': validSig,
+      });
+      assert.equal(rTampered.status, 401);
+      assert.deepEqual(rTampered.body, { error: 'bad_webhook_signature' });
+      assertUnchanged();
+
+      // 6. Valid signature succeeds and updates agent record
+      const rValid = await call(port, 'POST', '/api/v1/hooks/github', 'none', validBody, {
+        'x-github-event': 'release',
+        'x-hub-signature-256': validSig,
+      });
+      assert.equal(rValid.status, 200);
+      assert.deepEqual(rValid.body, {
+        ok: true,
+        agentId: 'gh-release-agent',
+        offeredVersion: '2.0.0',
+        updateAvailable: true,
+      });
+      const updated = state.agents.get('gh-release-agent')!;
+      assert.equal(updated.offeredVersion, '2.0.0');
+      assert.equal(updated.offeredCommit, 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef');
+      assert.equal(updated.updateAvailable, true);
+    } finally {
+      state.providers = [];
+      state.agents.delete('gh-release-agent');
+    }
+  });
+
+  it('GAP-211 / TSK-285: payload with multi-byte UTF-8 split across request chunks verifies and preserves releaseNotes', async () => {
+    const agentRecord = {
+      id: 'gh-utf8-agent',
+      name: 'GH UTF8 Agent',
+      role: 'Agent',
+      state: 'SLEEPING',
+      provider: 'local',
+      artifact: '',
+      requires: [],
+      ungated: [],
+      gated: [],
+      triggers: [],
+      dir: '/agents/gh-utf8-agent',
+      repo: 'https://github.com/BeerCanLabs/utf8-repo',
+      installedVersion: '1.0.0',
+    } as never;
+    state.agents.set('gh-utf8-agent', agentRecord);
+
+    const secret = 'utf8-webhook-secret';
+    state.providers = [envProvider({ FACTORY_GITHUB_WEBHOOK_SECRET: secret })];
+
+    try {
+      const releaseBody = 'Release 2.0.0 — ✨ Rocket launch! 🚀 Feature notes & updates.';
+      const payloadObj = {
+        action: 'published',
+        repository: { html_url: 'https://github.com/BeerCanLabs/utf8-repo' },
+        release: {
+          tag_name: 'v2.0.0',
+          target_commitish: 'e'.repeat(40),
+          body: releaseBody,
+        },
+      };
+      const jsonStr = JSON.stringify(payloadObj);
+      const rawBytes = Buffer.from(jsonStr, 'utf8');
+      const sig = 'sha256=' + createHmac('sha256', secret).update(rawBytes).digest('hex');
+
+      // Find the byte offset of the multi-byte em-dash character '—' (3 bytes: 0xE2 0x80 0x94)
+      const emDashBytes = Buffer.from('—', 'utf8');
+      const emDashIdx = rawBytes.indexOf(emDashBytes);
+      assert.ok(emDashIdx > 0, 'em-dash must be present in serialized JSON');
+
+      // Split right inside the em-dash:
+      // chunk1 has the first byte of the 3-byte em-dash
+      // chunk2 has the second byte
+      // chunk3 has the third byte and the rest
+      const chunk1 = rawBytes.subarray(0, emDashIdx + 1);
+      const chunk2 = rawBytes.subarray(emDashIdx + 1, emDashIdx + 2);
+      const chunk3 = rawBytes.subarray(emDashIdx + 2);
+
+      const res = await new Promise<{ status: number; body: Record<string, unknown> }>((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1',
+          port,
+          path: '/api/v1/hooks/github',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-github-event': 'release',
+            'x-hub-signature-256': sig,
+            'content-length': rawBytes.length,
+          },
+        }, (res) => {
+          let text = '';
+          res.on('data', (c) => (text += c));
+          res.on('end', () => {
+            let parsed = {};
+            try { parsed = JSON.parse(text); } catch {}
+            resolve({ status: res.statusCode ?? 0, body: parsed });
+          });
+        });
+        req.on('error', reject);
+        req.write(chunk1);
+        setTimeout(() => {
+          req.write(chunk2);
+          setTimeout(() => {
+            req.end(chunk3);
+          }, 10);
+        }, 10);
+      });
+
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body, {
+        ok: true,
+        agentId: 'gh-utf8-agent',
+        offeredVersion: '2.0.0',
+        updateAvailable: true,
+      });
+
+      const updated = state.agents.get('gh-utf8-agent')!;
+      assert.equal(updated.offeredVersion, '2.0.0');
+      assert.equal(updated.offeredCommit, 'e'.repeat(40));
+      assert.equal(updated.releaseNotes, releaseBody);
+      assert.equal(updated.updateAvailable, true);
+    } finally {
+      state.providers = [];
+      state.agents.delete('gh-utf8-agent');
     }
   });
 
