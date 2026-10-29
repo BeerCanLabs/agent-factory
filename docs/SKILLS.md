@@ -2,6 +2,8 @@
 
 A **skill** is a reusable, self-contained package of agent capabilities (such as tools, API integrations, and helper logic) that agents in the BeerCanLabs Agent Factory can adopt.
 
+In the factory's dual-mode hosting model ([`docs/CREATING_AGENTS.md`](./CREATING_AGENTS.md), `CF6`, `RT1`), skill packages are the primary way to equip **Configuration-Only Agents** on the shared runtime (`runtimes/agent-runtime`) with custom external tools, and they can also be adopted by **Repository-Based Cartridges** ([`docs/CARTRIDGE_DEVELOPER_GUIDE.md`](./CARTRIDGE_DEVELOPER_GUIDE.md), `SK4`).
+
 Skills are distributed and registered as immutable, content-addressed archives (`.tar.gz`) stored by SHA-256 hash. The factory operates completely offline during checks and builds: dependencies are vendored, no network access is permitted during admission or container composition, and packages never include committed secrets or cloud provider SDKs.
 
 ---
@@ -166,8 +168,8 @@ Once a skill version passes the factory's automated checks, it is **immediately 
 
 ### Publishing Workflow (H8, H9)
 To make a skill available to the entire fleet (all agent owners):
-1. The skill owner or a group member requests publication (`POST /api/v1/skills/:id/publish/request`).
-2. A factory admin reviews the code (using read-only inspection `GET /api/v1/skills/:id/versions/:version/package/files`) and approves (`POST /api/v1/skills/:id/publish/approve`).
+1. The skill owner or a group member requests publication (`POST /api/v1/skills/:id/publish`).
+2. A factory admin reviews the skill status (`GET /api/v1/skills/:id`) and code (using read-only inspection `GET /api/v1/skills/:id/versions/:version/package/files`) and approves publication (`POST /api/v1/skills/:id/publish/decide` with `{ "decision": "approve" }`).
 3. Once published, the skill is visible in the public catalog, and any agent owner can adopt it.
 4. New versions uploaded by the owner for a published skill flow automatically without requiring repeated admin approvals.
 

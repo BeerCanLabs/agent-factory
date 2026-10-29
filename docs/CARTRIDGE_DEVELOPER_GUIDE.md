@@ -6,9 +6,11 @@ This guide teaches software engineers how to design, package, test, and deploy p
 
 > [!IMPORTANT]
 > ### Dual-Mode Agent Hosting: Configuration-Only Agents vs. Repository Cartridges (`CF6`, `RT1`)
-> **Most developers should build Configuration-Only Agents, NOT Repository Cartridges.**
-> - **Configuration-Only Agents (Recommended Default):** Created directly via the API (`POST /api/v1/agents`) or conversationally through the `agent-builder` staff agent. They require **no git repository**, **no custom Dockerfile**, and **no container build pipeline**. They run on the shared runtime (`runtimes/agent-runtime`) using a persona (`soul.md`), a standardized memory archetype (`AM1`), and modular skill packages (`SK1`–`SK5`). Upgrades to the runtime roll out fleet-wide with automatic smoke testing and zero maintenance burden. See the [Creating and Managing Agents Guide](./CREATING_AGENTS.md) and [Skills Guide](./SKILLS.md).
-> - **Repository Cartridges (Exception Only):** This guide documents how to build a repository cartridge from source. Repository cartridges are **strictly reserved** for Factory House Staff (`agents/staff/*`) or allowlisted platform cartridges (`FACTORY_REPOSITORY_AGENT_IDS`) that require custom compiled binaries, C-extensions, or access to privileged factory-internal endpoints. If your agent is an employee, conversational assistant, or workflow automaton, use **Configuration-Only Agents**.
+> BeerCanLabs Agent Factory supports two first-class agent hosting models—both governed by the same ten perimeter services and verified by the same **Universal Activation Smoke Gate** (`L4`):
+> - **Configuration-Only Agents (Shared Runtime — Default for Most Agents):** Created directly via `POST /api/v1/agents` or conversationally through the `agent-builder` staff agent. They require **no git repository**, **no custom Dockerfile**, and **no custom turn loop**—running on the digest-pinned `runtimes/agent-runtime` (`RT1`) with a declarative persona (`soul.md`), memory archetype (`AM1`), roles (`E12`), and modular Python skill packages (`SK1`–`SK5`). Fleet-wide runtime upgrades roll out automatically via `PUT /api/v1/runtime`.
+> - **Repository-Based Cartridges (Custom Container — Specialized Workloads & House Staff):** This guide documents how to build a self-contained repository cartridge from source (`cartridge.yaml`, `soul.md`, `Dockerfile`, custom code, and unit tests). Choose a Repository Cartridge when your agent requires (1) custom turn or execution loops beyond the fixed `RT1`/`RT2` loop, (2) non-Python languages (TypeScript, Go, Rust) or compiled C-extensions and native binaries, (3) bespoke local SQLite domain schemas in `$MEMORY_DIR`, or (4) Factory House Staff (`agents/staff/*`) calling privileged run-scoped endpoints. When `FACTORY_NEW_AGENTS_FROM_CONFIGURATION_ONLY` is active (`CF6`), new repository agent IDs must be listed in `FACTORY_REPOSITORY_AGENT_IDS`.
+>
+> For the complete side-by-side decision rubric, Configuration-Only build guide, and in-place migration runbook, see **[Creating and Managing Agents](./CREATING_AGENTS.md)** and the **[Skills Guide](./SKILLS.md)**.
 
 ---
 
@@ -204,12 +206,14 @@ roles:
 - The holds on a skill's actions (`hold:`, E9) are separate: a role that allows a skill does not remove a hold.
 
 **What the factory does with them today.** It validates them (`cartridge validate`), refuses a registration that declares
-them badly, records them on the agent, and tells an admin and the agent's owner (`GET /api/v1/agents/:id/roles`, and with
-`?held=Family` what someone holding those roles may use). An admin assigns them in the console (Identities, Access to
-agents); the identity-links API refuses a role your cartridge does not declare (and `Owner`), so a typo or a role from
-another agent cannot be given. **It does not yet apply them to what your agent reaches** (the gatekeeper-egress will,
-TSK-174); until then your own check in the cartridge is the only limit. What the factory will never do: stop your agent
-repeating what it already remembers (that is your cartridge's, §6.6).
+them badly, records them on the agent (or in the versioned configuration record under `CF1`), and tells an admin and the
+agent's owner (`GET /api/v1/agents/:id/roles`, and with `?held=Family` what someone holding those roles may use). An admin
+or the agent's owner assigns people to roles (`CF2`, `PUT /api/v1/agents/:id/role-assignments/:provider/:identity`); the
+factory refuses a role your agent does not declare (and `Owner`), so a typo or a role from another agent cannot be given.
+**The `gatekeeper-egress` enforces role-based route access in real time (`E12`, `TSK-174`):** when a run has a verified human
+requester, the `gatekeeper-egress` allows a call through a skill's route only if the requester's roles on that agent allow at
+least one skill that uses the route and do not deny any skill that uses the route (deny wins). What the factory will never
+do: stop your agent repeating what it already remembers (that is your cartridge's responsibility under §6.6).
 
 **Scheduled runs.** When a schedule your agent (or its owner) set up fires, the run's input carries a `caller` badge, as a
 person's message does, and also `source: 'schedule'` and `scheduleName`. The badge is the authority of whoever
@@ -235,8 +239,7 @@ When the Factory Console wakes your cartridge:
 2. **Secrets:** Injected into `os.environ` using the exact names declared in `cartridge.yaml`.
 3. **Memory Directory:** The Console hydrates previous state into `os.environ["MEMORY_DIR"]`. The Factory sets it (`/tmp/mind` in the reference runtimes), so always read it from the environment and never hard-code a path. For architectural depth on Agent Archetypes, the Storage Triad (Whiteboard vs. Notebook vs. Safe), FTS5 episodic search, and avoiding the decoder ring anti-pattern, see the [Agent Memory Architecture Guide](architecture/agent-memory-models.md).
 4. **Egress Interception & Credential Injection:** The Console enforces a **Zero-Trust Network Perimeter** (no public IP, no default internet gateway route `0.0.0.0/0`). Outbound traffic to LLMs and third-party APIs (such as Discord) egresses exclusively through the **gatekeeper-egress** via standard Base URL variables:
-   - `ANTHROPIC_BASE_URL` (`${GATEKEEPER_EGRESS_URL}/anthropic`)
-   - `OPENAI_BASE_URL` (`${GATEKEEPER_EGRESS_URL}/v1`)
+   - `FACTORY_MODEL_BASE_URL` (`${GATEKEEPER_EGRESS_URL}/v1` — the unified OpenAI-compatible Factory Model API, `M1`)
    - `DISCORD_BASE_URL` (`${GATEKEEPER_EGRESS_URL}/discord`)
    Agents authenticate to the gatekeeper-egress using their ephemeral `FACTORY_RUN_TOKEN`. The gatekeeper-egress verifies run lifecycle and egress policy, meters the call, injects the real provider key or bot token (`Bot <token>`), and proxies to the upstream service.
 5. **Portability Fallback:** Cartridges remain 100% portable. If `DISCORD_BASE_URL` is unset, code defaults to `https://discord.com/api/v10` and uses local secrets (`DISCORD_BOT_TOKEN`).
@@ -248,12 +251,12 @@ When the Factory Console wakes your cartridge:
 import os
 import json
 import sqlite3
+import urllib.request
 from pathlib import Path
 from datetime import datetime, timezone
-from anthropic import Anthropic
 
-# 1. The Notebook: Persistent SQLite Memory ("The Notebook & Safe")
-# Cartridges write to local SQLite in $MEMORY_DIR; the Factory Console backs up to S3.
+# 1. The Notebook: Persistent SQLite Memory ("The Notebook & Safe", AM1-AM5)
+# Cartridges write to local SQLite in $MEMORY_DIR; the Factory Console backs up to object storage.
 # NEVER import boto3 or cloud storage SDKs for cartridge memory.
 def get_db(memory_dir: Path) -> sqlite3.Connection:
     memory_dir.mkdir(parents=True, exist_ok=True)
@@ -273,30 +276,42 @@ def get_db(memory_dir: Path) -> sqlite3.Connection:
     db.commit()
     return db
 
-def prune_old_records(conn: sqlite3.Connection, retention_days: int = 14):
-    """Keep the notebook small (<10MB) so S3 backup remains sub-second."""
-    from datetime import timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
-    conn.execute("DELETE FROM incidents WHERE timestamp < ?", (cutoff,))
-    conn.commit()
+def should_rotate_notebook(db_path: Path) -> bool:
+    """AM3: Rotate into $MEMORY_DIR/volumes/<name>/ at FACTORY_NOTEBOOK_MAX_BYTES (10 MB)
+    or FACTORY_NOTEBOOK_MAX_DAYS (90 days) rather than deleting historical records."""
+    max_bytes = int(os.environ.get("FACTORY_NOTEBOOK_MAX_BYTES", str(10 * 1024 * 1024)))
+    return db_path.exists() and db_path.stat().st_size >= max_bytes
 
 def close_db(conn: sqlite3.Connection):
-    """Clean checkpoint so S3 syncs a single, unfragmented .db file without dangling WAL locks."""
+    """Clean checkpoint so the shim syncs a single, unfragmented .db file without dangling WAL locks."""
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
     finally:
         conn.close()
 
-# 2. Toolbox: Tools available to the Agent
-def query_system_health(service_name: str) -> dict:
-    """Queries external infrastructure health for a specific service."""
-    # In real life, use requests with os.environ["PAGERDUTY_API_KEY"]
-    return {
-        "service": service_name,
-        "cpu_load": "94%",
-        "active_alerts": 2,
-        "status": "degraded"
+# 2. Factory Model API Call (M1, M2, E5)
+# Zero provider SDKs: call FACTORY_MODEL_BASE_URL with FACTORY_RUN_TOKEN.
+def call_model(system_prompt: str, user_prompt: str) -> str:
+    base_url = os.environ["FACTORY_MODEL_BASE_URL"].rstrip("/")
+    body = {
+        "model": os.environ.get("FACTORY_MODEL", "claude-sonnet-4-5"),
+        "max_tokens": 1024,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
     }
+    req = urllib.request.Request(
+        f"{base_url}/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {os.environ['FACTORY_RUN_TOKEN']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        return json.load(resp)["choices"][0]["message"]["content"]
 
 # 3. Reading Input Payload
 def read_input() -> dict:
@@ -315,35 +330,23 @@ def write_result(output: dict):
 
 def main():
     payload = read_input()
-    memory_dir = Path(os.environ.get("MEMORY_DIR", "/tmp/ops-memory"))
+    memory_dir = Path(os.environ.get("MEMORY_DIR", "/tmp/mind"))
     db = get_db(memory_dir)
+    try:
+        system_prompt = Path("soul.md").read_text("utf-8") if Path("soul.md").exists() else "You are an ops agent."
+        summary = call_model(
+            system_prompt=system_prompt,
+            user_prompt=f"Analyze incident alert for service '{payload.get('service')}': {json.dumps(payload)}",
+        )
 
-    # Standard, unmodified Anthropic SDK!
-    # gatekeeper-egress automatically meters tokens, enforces budget limits,
-    # and records execution to the immutable audit ledger.
-    client = Anthropic()
-
-    system_prompt = Path("soul.md").read_text("utf-8") if Path("soul.md").exists() else "You are an ops agent."
-
-    # Call LLM with persona and context
-    response = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
-        max_tokens=1024,
-        system=system_prompt,
-        messages=[{
-            "role": "user", 
-            "content": f"Analyze incident alert for service '{payload.get('service')}': {json.dumps(payload)}"
-        }]
-    )
-
-    summary = response.content[0].text
-
-    # Record in persistent memory
-    db.execute(
-        "INSERT INTO incidents (timestamp, service, summary) VALUES (?, ?, ?)",
-        (datetime.now(timezone.utc).isoformat(), payload.get("service", "unknown"), summary)
-    )
-    db.commit()
+        # Record in persistent memory
+        db.execute(
+            "INSERT INTO incidents (timestamp, service, summary) VALUES (?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), payload.get("service", "unknown"), summary),
+        )
+        db.commit()
+    finally:
+        close_db(db)
 
     # Deliver result
     write_result({"service": payload.get("service"), "analysis": summary})
@@ -615,5 +618,5 @@ The Cartridge model handles any autonomous agent workload. Here is how four prod
 1. **Think Like a Hiring Manager:** Fill out the Job Description (`soul.md`), Contract (`cartridge.yaml`), and Performance Rubric (`bench.yaml`).
 2. **Never Hardcode Secrets:** Declare variable names in `cartridge.yaml`; let the Factory Console inject them at runtime.
 3. **Bring Lightweight Memory:** Use local SQLite or JSON in `$MEMORY_DIR` for personal agent memory. The Factory takes care of cloud syncing. See the [Agent Memory Architecture Guide](architecture/agent-memory-models.md) for complete details.
-4. **Use Standard LLM SDKs:** Call `anthropic` or `openai` normally. The gatekeeper-egress intercepts, meters, and protects your cloud budget automatically.
+4. **Use the Factory Model API (`M1`, `M2`):** Call `${FACTORY_MODEL_BASE_URL}/chat/completions` using `FACTORY_RUN_TOKEN` and `FACTORY_MODEL` (via standard library HTTP or an OpenAI-compatible client pointed at `FACTORY_MODEL_BASE_URL`). Never import vendor-specific cloud or LLM SDKs (`boto3`, `anthropic`) or hardcode model selection in agent code.
 5. **Sleep at Zero:** Your agent only runs when a trigger fires, keeping cloud costs strictly at zero when idle.
