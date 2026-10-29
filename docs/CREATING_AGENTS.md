@@ -1,49 +1,108 @@
 # Creating and Managing Agents: Dual-Mode Hosting Guide
 
-BeerCanLabs Agent Factory supports **dual-mode agent hosting** (DESIGN_AUTHORITY.md §6.18, `CF6`, `RT1`):
-1. **Configuration-Only Agents:** The default pattern for all user, team, and business agents.
-2. **Repository-Based Agents:** The exceptional pattern reserved exclusively for Factory House Staff or specialized cartridges requiring custom binaries.
+BeerCanLabs Agent Factory supports **dual-mode agent hosting** ([`DESIGN_AUTHORITY.md` §6.18](../DESIGN_AUTHORITY.md), `CF6`, `RT1`):
+1. **Configuration-Only Agents (Shared Runtime):** Declarative agents defined by a persona (`soul.md`), memory archetype (`AM1`), roles (`E12`), and composed Python standard library skill packages (`SK1`–`SK5`) running on the shared `factory-agent-runtime` (`RT1`).
+2. **Repository-Based Cartridges (Custom Container):** Self-contained git repositories (`cartridge.yaml`, `soul.md`, `Dockerfile`, custom code, and unit tests) built at a pinned 40-character commit SHA into a dedicated OCI container image (`L3`, `L4`).
 
-This guide explains how to choose between the two models, how to create and deploy configuration agents, how the activation smoke gate guarantees agent health, how shared runtime upgrades are managed, and how to migrate existing repository agents to configuration agents in place.
+Both models are first-class citizens of the Agent Factory perimeter (`Gatekeeper`, `Keymaster`, `Executive`, `Property Manager`, `Auditor`, `Accountant`, `Bouncer`, `Timekeeper`, `Registrar`, `Inspector`), and both pass the **Universal Activation Smoke Gate** (`L4`) before taking live traffic.
 
----
-
-## 1. When to Build a Configuration-Only Agent vs. a Repository-Based Agent (`CF6`, `RT1`)
-
-### Configuration-Only Agents (Default for all user & business agents)
-For almost all agents, **Configuration-Only** is the correct architecture:
-- **No Git Repository Required:** The agent needs no dedicated source repository, no Dockerfile, and no container build pipeline for its business logic.
-- **Shared Agent Runtime:** Runs directly on the official, pre-tested factory runtime image (`runtimes/agent-runtime`, `RT1`).
-- **Core Components:**
-  - **Persona (`soul.md`):** A prompt describing the agent's identity, mission, communication style, and behavioral constraints (up to 64 KiB).
-  - **Memory Archetype (`memory.archetype`):** One of three standardized memory patterns (`purpose-built`, `personal-assistant`, or `team-member` under `AM1`).
-  - **Adopted Skills:** Pure Python standard library skills declared in `skills` and packaged conforming to `SK1`–`SK5`.
-- **Layered Skills Composition:** If the agent adopts skills, the factory layers only those approved skill packages and their manifest on top of the shared runtime base image (`factory-skills-builder`).
-- **Fleet-Wide Maintenance:** When the shared runtime is upgraded, an admin approves the new runtime version once (`PUT /api/v1/runtime`), and all configuration agents upgrade with automatic smoke validation and rollback protection.
-- **Creation:** Can be created directly via the API (`POST /api/v1/agents`) or conversationally through the `agent-builder` house staff agent.
-
-### Repository-Based Agents (`FACTORY_REPOSITORY_AGENT_IDS` — Exception Only)
-Repository-based agents are cartridges built from a dedicated git repository containing a `cartridge.yaml`, `Dockerfile`, and custom source code (`agent.py`/`agent.ts`).
-
-Repository agents are **strictly restricted** to:
-1. **Factory House Staff:** Platform agents located under `agents/staff/*` (`factory-manager`, `agent-builder`, `personal-trainer`).
-2. **Explicitly Allowlisted IDs:** Agent IDs enumerated in `FACTORY_REPOSITORY_AGENT_IDS` in the deployment configuration.
-
-**When a repository agent is warranted:**
-- The agent requires custom compiled binaries, C-extensions, or system dependencies outside the Python standard library.
-- The agent calls privileged factory-internal run-token endpoints (such as `agent-builder` calling `/api/v1/runs/:runId/builder` or `personal-trainer` calling `/api/v1/runs/:runId/training`).
-
-The factory **refuses** registration of any new agent ID from a repository unless the ID is in `FACTORY_REPOSITORY_AGENT_IDS` (`CF6`). Legacy repository agents already registered continue to function, but should be migrated in place using the migration runbook in [Section 5](#5-migration-runbook--converting-an-existing-repository-agent-in-place-post-apiv1agentsidconvert-tsk-283).
+This guide provides the architectural decision rubric for choosing between the two models, step-by-step build workflows for both tracks, shared runtime rollout operations, an in-place conversion runbook (`POST /api/v1/agents/:id/convert`), and an FAQ covering common operational pitfalls.
 
 ---
 
-## 2. Creating an Agent (`POST /api/v1/agents` & Conversational `agent-builder`)
+## 1. Architectural Decision Rubric: Configuration-Only Agents vs. Repository-Based Cartridges (`CF6`, `RT1`)
 
-Configuration agents can be created either programmatically via the REST API or conversationally through the `agent-builder` house staff agent.
+### Side-by-Side Comparison
 
-### Method A: Direct Creation via REST API (`POST /api/v1/agents`)
+| Dimension | Configuration-Only Agent (Shared Runtime) | Repository-Based Cartridge (Custom Container) |
+| :--- | :--- | :--- |
+| **Core Concept** | Declarative persona (`soul.md`), memory archetype (`AM1`), caller roles (`E12`), and composed Python stdlib skill packages running on the digest-pinned `factory-agent-runtime` (`RT1`). | Self-contained git repository (`cartridge.yaml`, `soul.md`, `Dockerfile`, custom code & unit test suite) built into a dedicated OCI container image (`L3`, `L4`). |
+| **Best Suited For** | Personal assistants, domain analysts, operations dispatchers, knowledge oracles, and workflow automatons whose tools are HTTP/API integrations. | Custom execution loops, non-Python languages (TypeScript/Go/Rust), compiled native libraries/C-extensions, custom local binaries, specialized SQLite schemas, and Factory House Staff (`agents/staff/*`). |
+| **Creation & Iteration Speed** | **Instant:** Create via `POST /api/v1/agents` or conversationally via `agent-builder`. Soul, role, and memory updates version in place (`PUT /api/v1/agents/:id/settings`) with zero git PR or image rebuild. | **Full SDLC:** Clone template, write code & unit tests, push a 40-char commit SHA, and run the isolated `L3`/`L4` container admission build. |
+| **Runtime Maintenance** | **Fleet-Managed:** One admin-approved `PUT /api/v1/runtime` upgrades and smoke-tests all configuration agents automatically with per-agent rollback protection. | **Owner-Managed:** Each repository owns its base image, OS packages, turn loop, and `AM3` notebook rotation updates. |
+| **Tooling & Dependencies** | Modular `spec: 1` Python skill packages (stdlib + vendored pure-Python under `vendor/`) reusable across any agent in the fleet. | Any language, runtime, or local binary tool (excluding prohibited cloud/LLM provider SDKs per `E5`/`S1`). |
+| **Portability & Export (`CF3`)** | **Full Bundle Portability:** Exports (`GET /api/v1/agents/:id/bundle`) as a self-contained configuration bundle importable (`POST /api/v1/agents/import`) into any factory instance. | **Git + OCI Portability:** Portable via git repository and container registry; configuration bundle export is read-only metadata (`origin: repository`). |
+| **Governance & Registration (`CF6`)** | Open to any `operator` or `admin` holding the `agents.create` privilege. | Governed by the `FACTORY_REPOSITORY_AGENT_IDS` allowlist when `FACTORY_NEW_AGENTS_FROM_CONFIGURATION_ONLY` is active (`CF6`). |
 
-Users holding the `agents.create` privilege (both `operator` and `admin` roles, decision 7) can create a configuration agent:
+### 1.1 When to Choose a Configuration-Only Agent (Default for User, Team & Business Agents)
+
+For most user, team, and business workloads, **Configuration-Only** is the recommended default:
+- **Zero Boilerplate:** You do not maintain a git repository, `Dockerfile`, turn loop, or container build pipeline for the agent.
+- **Shared Agent Runtime (`RT1`, `RT2`):** The agent executes on the official, digest-pinned `runtimes/agent-runtime` image—a verified Python program that opens memory by archetype (`AM1`–`AM5`), constructs prompts from the soul and conversation history, calls models through the Factory Model API (`M1`), dispatches tool calls to adopted skills, replies on the originating channel (`AM2`), and handles `/mailbox` warm-down polling.
+- **Reusable Skill Composition (`SK1`–`SK5`):** When the agent adopts skills, the deployment provider (`factory-skills-builder` on AWS or Docker on Compose) layers those verified skill packages onto the shared runtime base image.
+- **Zero-Touch Fleet Upgrades:** When the shared runtime is improved, a single admin rollout (`PUT /api/v1/runtime`) rebuilds and smoke-tests every configuration agent across the fleet.
+
+### 1.2 When to Choose a Repository-Based Cartridge (Custom Container & Specialized Workloads)
+
+A **Repository-Based Cartridge** is the right architectural choice when an agent's requirements intentionally exceed the fixed loop (`RT2`) or pure-Python skill model of the shared runtime:
+1. **Custom Turn or Execution Loops:** The agent implements specialized multi-stage state machines, custom context assembly, deterministic pre-/post-processing pipelines, or non-standard execution flows beyond the fixed `RT1` prompt-tool-reply loop.
+2. **Non-Python Runtimes or Compiled Native Dependencies:** The agent is written in TypeScript/Node.js, Go, or Rust, or relies on compiled C-extensions, native shared libraries, or system CLI binaries outside the Python standard library.
+3. **Bespoke Local Storage Schemas or Sidecar Tooling:** The agent manages custom SQLite domain tables, specialized FTS5 indexing pipelines, or local file processing in `$MEMORY_DIR` beyond the standard `AM1` archetype schemas.
+4. **Factory House Staff (`agents/staff/*`):** Platform staff cartridges (`factory-manager`, `agent-builder`, `personal-trainer`) that invoke privileged run-scoped factory endpoints (`/api/v1/runs/:runId/builder`, `/api/v1/runs/:runId/training`).
+
+#### Trade-offs & Governance (`CF6`):
+- **Owner-Managed Lifecycle:** Repository owners are responsible for keeping their base image, OS packages, turn loop, and `AM3` volume rotation logic current, and must register a new 40-character commit SHA for code or prompt updates.
+- **Allowlist Governance:** When `FACTORY_NEW_AGENTS_FROM_CONFIGURATION_ONLY` is enabled (the default in production), registering a **new** agent ID from a repository (`POST /api/v1/registry/agents`) requires the ID to be listed in `FACTORY_REPOSITORY_AGENT_IDS` (or be a built-in/staff agent); otherwise registration is refused with `HTTP 422 new_agents_use_configuration`. Existing registered repository agents continue to admit new commits and deploy normally, or can be converted in place to Configuration-Only agents at any time ([Section 5](#5-migration-runbook--converting-a-repository-agent-in-place-post-apiv1agentsidconvert-tsk-283)).
+
+---
+
+## 2. Step-by-Step Guide: Building a Configuration-Only Agent
+
+### Step 1: Design the Persona (`soul.md`) & Choose a Memory Archetype (`AM1`)
+
+1. **Draft the Persona (`soul`):** Define the agent's identity, mission, tone, and operational boundaries (up to 64 KiB). Ensure the text is clean of cloud account IDs, ARNs, VPC IDs, or internal infrastructure addresses (`S4`).
+2. **Select the Memory Archetype (`memory.archetype` under `AM1`):**
+   - `purpose-built`: Stateless, task-focused worker (e.g., webhook triage, one-shot classifier). The runtime shim (`packages/hydrate`) skips object-storage hydration on wake and replication on sleep for zero cold-start storage overhead.
+   - `personal-assistant`: Per-user isolated episodic memory (`notebook.db`) keyed by verified `caller.actor` (`AM2`).
+   - `team-member`: Shared project- and task-partitioned SQLite workspace memory.
+
+### Step 2: Package & Register Reusable Skills (Optional — When Custom Tools Are Needed)
+
+If your agent needs external API tools beyond baseline conversation, package each capability as a `spec: 1` Python skill (see [`docs/SKILLS.md`](./SKILLS.md)):
+
+1. **Author `skill.yaml` with a mandatory `smoke:` block (`TSK-281`, `L4`):**
+   ```yaml
+   spec: 1
+   id: tavily-search
+   version: 1.0.0
+   name: Tavily Search
+   description: Real-time web search tool.
+   language: python
+   entry: tavily_search
+   requires:
+     routes: [tavily]
+     credentials:
+       - name: TAVILY_API_KEY
+         description: API key for Tavily search
+   actions:
+     - id: execute-search
+       route: tavily
+       method: POST
+       path: /search
+       hold: false
+   smoke:
+     action: execute-search
+     input:
+       query: ping
+     dryRun: true # Required true when action method is POST/PUT/PATCH/DELETE or hold: true
+   ```
+2. **Pack and Register the Skill Archive:**
+   ```bash
+   # Validate and create my-skill-1.0.0.tar.gz locally
+   factory skill pack ./skills/tavily-search
+
+   # Upload to POST /api/v1/registry/skills (requires skills.register privilege)
+   factory skill register ./skills/tavily-search
+   ```
+3. **Own-Use vs. Fleet Publication (`H7`, `H8`, `A7`):**
+   - **Immediate Own-Use:** As soon as the isolated offline checker (`factory-skill-checker`) passes (`tests: "passed"` on `GET /api/v1/skills/:id`), the skill version is **immediately adoptable** by any agent owned by the skill uploader or members of assigned groups—no admin approval required.
+   - **Fleet-Wide Sharing:** To publish the skill in the public catalog for all agent owners, request publication (`POST /api/v1/skills/:id/publish`) and have a factory admin approve it (`POST /api/v1/skills/:id/publish/decide` with `{ "decision": "approve" }`).
+
+### Step 3: Create the Agent & Adopt Skills (`POST /api/v1/agents` or `agent-builder`)
+
+#### Method A: Direct Creation via REST API (`POST /api/v1/agents`)
+
+Any user holding the `agents.create` privilege (`operator` or `admin` roles, decision 7) can create a configuration agent:
 
 ```http
 POST /api/v1/agents
@@ -68,103 +127,213 @@ Content-Type: application/json
 }
 ```
 
-#### Fields:
-- `id` (required): Kebab-case identifier (lowercase letters, digits, dots, dashes, underscores; max 64 characters).
-- `name` (required): Human-readable display name.
-- `soul` (required): The agent's persona and system instructions (max 64 KiB).
-- `memory.archetype` (required): One of the three canonical memory archetypes:
-  - `purpose-built`: Task-focused worker; AM1 gate disables mind hydration/replication to eliminate cold-start overhead.
-  - `personal-assistant`: Per-user isolated episodic memory keyed by verified user identity.
-  - `team-member`: Project- and task-partitioned SQLite workspace memory.
-- `roles` (optional): Agent role mapping for channel access control (`E12`). Use `*` for skill access until skills are adopted.
+- **Creator Becomes Owner:** The authenticated caller is recorded as `owners: [principal.actor]`.
+- **Initial State (`PENDING_BUDGET`):** The agent starts with no egress access or budget until an admin sets its policy (`E7`).
+- **Role Skill Ceiling (`CF2`):** On initial creation via `POST /api/v1/agents`, the agent has not adopted any skills yet, so `roles` may only reference `"*"`. To restrict a role to specific skill IDs, adopt the skills first (`POST /api/v1/agents/:id/skills`) and then update `roles` via `PUT /api/v1/agents/:id/settings`:
+  ```http
+  POST /api/v1/agents/research-assistant/skills
+  Authorization: Bearer <owner-or-admin-token>
+  Content-Type: application/json
 
-#### Behavior:
-- The authenticated creator is automatically recorded as the agent's **owner** (`owners: [principal.actor]`).
-- The agent is created in `PENDING_BUDGET` status. It cannot be deployed or woken until an admin configures an egress policy and budget (`PUT /api/v1/agents/:id/policy`).
-- The agent has no git repository, no dedicated source build, and no initial egress access.
+  {
+    "skillId": "tavily-search",
+    "version": "1.0.0"
+  }
+  ```
 
-### Method B: Conversational Creation via `agent-builder`
+#### Method B: Conversational Creation via `agent-builder` (`POST /api/v1/runs/:runId/builder`)
 
-The factory provides a headless house staff agent: **`agent-builder`** (`agents/staff/agent-builder`, `TSK-282`). Operators and admins can chat with `agent-builder` (via Discord, Webhooks, or the Console) to design, validate, and publish configuration agents conversationally.
+Operators and admins can also converse with the headless **`agent-builder`** house staff agent (`agents/staff/agent-builder`, `TSK-282`) to design, validate, and publish configuration agents. `agent-builder` calls its run-scoped endpoint `POST /api/v1/runs/:runId/builder`:
 
-During execution, `agent-builder` uses its run-scoped route `POST /api/v1/runs/:runId/builder`:
-
-```http
-POST /api/v1/runs/<run-id>/builder
-Authorization: Bearer <run-token>
-Content-Type: application/json
-
-{
-  "op": "catalog"
-}
-```
-
-#### Supported Operations:
-1. **`op: "catalog"`**:
-   Returns the current catalog of available components:
-   - Approved public and accessible skill packages (`skills`).
-   - Approved model catalog offerings (`models`).
-   - Valid memory archetypes (`archetypes`: `purpose-built`, `personal-assistant`, `team-member`).
-2. **`op: "validate"`**:
-   Validates a proposed agent configuration (soul length, memory archetype validity, skill existence and version pins) against the factory contract without creating the agent.
-3. **`op: "publish"`**:
+1. **`op: "catalog"`:** Lists available approved/accessible skills, model catalog offerings, and valid memory archetypes (`purpose-built`, `personal-assistant`, `team-member`).
+2. **`op: "validate"`:** Validates a candidate specification (soul size, archetype, skill version existence, role ceilings) without creating the agent.
+3. **`op: "publish"`:**
    ```json
    {
      "op": "publish",
      "spec": {
        "id": "market-analyst",
        "name": "Market Analyst",
-       "soul": "...",
+       "soul": "You analyze market trends and summarize competitive intelligence...",
        "memory": { "archetype": "team-member" },
        "skills": [{ "id": "tavily-search", "version": "1.0.0" }]
      }
    }
    ```
-   - Checks that the run was requested by a verified human caller holding `agents.create` (refuses if the actor is `SYSTEM`).
-   - Invokes the identical code path as `POST /api/v1/agents`.
-   - Assigns the requesting human user as the created agent's owner.
-   - Sets status to `PENDING_BUDGET`.
+   - Verifies that the run was initiated by a human caller holding `agents.create` (refuses `SYSTEM` actors).
+   - Creates the agent in `PENDING_BUDGET` with the requesting human user as owner.
+
+### Step 4: Admin Policy & Budget Assignment (`PUT /api/v1/agents/:id/policy`)
+
+Before the agent can be deployed or woken, a factory admin grants its allowed models, egress routes, and spend ceilings (`E7`):
+
+```http
+PUT /api/v1/agents/research-assistant/policy
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{
+  "models": ["claude-sonnet-4-5", "claude-haiku-4-5"],
+  "routes": ["models", "tavily"],
+  "hosts": [],
+  "budget": {
+    "dailyUsd": 5.00,
+    "monthlyUsd": 50.00
+  }
+}
+```
+
+### Step 5: Deploy & The Activation Smoke Gate (`POST /api/v1/registry/agents/:id/deploy`, `L4`)
+
+Once policy and budget are configured, the agent owner or an admin triggers deployment:
+
+```http
+POST /api/v1/registry/agents/research-assistant/deploy
+Authorization: Bearer <owner-or-admin-token>
+```
+
+#### Synchronous vs. Asynchronous Deployment Behavior:
+- **Zero Adopted Skills (Synchronous `200 OK`):**
+  If the configuration agent has **no adopted skills**, no image layering is needed. The control plane binds the agent directly to the pinned shared runtime image (`FACTORY_RUNTIME_IMAGE`), provisions compute identity, and executes `runActivationSmoke` **synchronously** during the request:
+  - On smoke pass: transitions the agent to `SLEEPING`, records `AGENT_DEPLOYED`, and returns `HTTP 200 OK` (`{ ...agent, smoke }`).
+  - On smoke failure: rolls back to the previous working image (or marks `ERROR` on first deploy), records `AGENT_SMOKE_FAILED`, and returns `HTTP 502 { "error": "smoke_failed", "message": "..." }`.
+- **One or More Adopted Skills (Asynchronous `202 Accepted`):**
+  If the configuration agent **adopts one or more skills**, the control plane sets `state: "DEPLOYING"`, returns `HTTP 202 Accepted` immediately, and executes `runDeploy` asynchronously in the background:
+  - The deployment provider (`factory-skills-builder` on AWS or Docker on Compose) layers the approved skill packages from `SkillPackageStore` onto the shared runtime base image and pushes `<agentId>-<runtimeCommit12>-<skillsHash12>`.
+  - Once built, it runs `runActivationSmoke` before activating the new compute definition.
+
+#### What the Universal Activation Smoke Gate Verifies (`runActivationSmoke`, `TSK-281`):
+1. **Isolated Smoke Run:** Boots the candidate container with `trigger: "smoke"` and `factoryKind: "smoke"`.
+2. **Temporary Factory Policy & Budget:** Grants temporary model access and a factory-paid smoke budget cap ($0.25/run, $1.00/activation) so smoke verification never consumes the agent's own budget.
+3. **Turn 1 — Soul / Model Completion (`smoke: "hello-world"`):** Verifies that the container starts, loads its soul, makes at least one metered model call through `gatekeeper-egress` (`E5`), and finishes with a non-empty `DONE` response.
+4. **Turns 2..N — Adopted Skill Verification (`smoke: "skill"`):** Executes each adopted skill's declared `smoke:` block with `context: { smoke: true, dryRun: boolean }` and verifies tool dispatch and egress route audit rows.
+5. **Pass or Automatic Rollback:** Passing activates the image (`SLEEPING`, `AGENT_DEPLOYED`). Failing rejects the candidate image, restores the prior working image if one existed, and records `AGENT_SMOKE_FAILED` with container diagnostics.
 
 ---
 
-## 3. Deploying & The Activation Smoke Gate (`TSK-281`, `L4`)
+## 3. Step-by-Step Guide: Building a Repository-Based Cartridge
 
-Before an agent can answer messages or execute runs, it must be deployed.
+When your workload requires custom execution loops, non-Python languages, compiled binaries, custom SQLite schemas, or House Staff privileges, build a Repository-Based Cartridge. For deep implementation patterns and case studies, see the **[Cartridge Developer Guide](./CARTRIDGE_DEVELOPER_GUIDE.md)**.
 
-### Deploying the Agent (`POST /api/v1/registry/agents/:id/deploy`)
-Once an admin has granted an egress policy and model access (`PUT /api/v1/agents/:id/policy`), the agent owner or an admin triggers deployment:
+### Step 1: Verify Eligibility & Allowlisting (`CF6`)
 
-```http
-POST /api/v1/registry/agents/:id/deploy
-Authorization: Bearer <token>
+When `FACTORY_NEW_AGENTS_FROM_CONFIGURATION_ONLY=true` is active on the factory:
+- Ensure your new agent ID is added to the `FACTORY_REPOSITORY_AGENT_IDS` environment variable on the control plane (or is a built-in/staff cartridge under `agents/staff/*`).
+- If an un-allowlisted new ID is submitted to `POST /api/v1/registry/agents`, the factory refuses registration with `HTTP 422 new_agents_use_configuration`.
+
+### Step 2: Scaffold the Repository (`soul.md`, `cartridge.yaml`, Code, `Dockerfile`, Tests)
+
+Create a self-contained repository with the following layout (you can start from `agents/examples/starter-python`):
+
+```text
+my-cartridge/
+├── soul.md                  # Persona and operational constraints (<64 KiB, S4-clean)
+├── cartridge.yaml           # Machine-enforced contract (archetype, triggers, secrets, egress, roles)
+├── agent.py                 # Turn loop and custom domain logic
+├── requirements.txt         # Dependencies (no cloud or LLM vendor SDKs)
+├── Dockerfile               # Container build definition
+└── tests/
+    └── test_agent.py        # Unit test suite (mandatory for L3/L4 admission)
 ```
 
-- If the agent adopts **no skills**, it runs the pinned shared runtime image directly (`FACTORY_RUNTIME_IMAGE`).
-- If the agent adopts **skills**, the deployment provider (e.g., CodeBuild `factory-skills-builder` on AWS, or Docker on Compose) layers the approved skill packages from the `SkillPackageStore` onto the runtime base image and pushes `<agentId>-<runtimeCommit>-<skillsHash>`.
-- The deploy returns `202 Accepted` and executes asynchronously.
+Example `cartridge.yaml`:
+```yaml
+schemaVersion: "1.0"
+id: ops-triage
+name: "Operations Triage"
+role: "Incident Diagnostics"
+prompt: "./soul.md"
 
-### The Universal Activation Smoke Gate (`runActivationSmoke`, `TSK-281`)
-Before any candidate image is activated for an agent (whether configuration-only or repository-based), the factory runs a mandatory **Activation Smoke Gate**:
+memory:
+  archetype: team-member     # Required (AM1): purpose-built | personal-assistant | team-member
 
-1. **Isolated Smoke Container:** The factory boots a candidate container with `trigger: "smoke"` and `factoryKind: "smoke"`.
-2. **Temporary Factory Policy & Budget:** The factory temporarily grants minimal model access and a temporary budget cap ($0.25 per run / $1.00 per activation) so the smoke run never drains the agent's own budget.
-3. **Turn 1 — Soul / Model Completion (`smoke: "hello-world"`):**
-   - Injects a hello-world smoke turn.
-   - Verifies that the container boots, loads the soul, makes at least one metered model call through Gatekeeper Egress (`E5`), and yields a non-empty `DONE` response.
-4. **Turns 2..N — Adopted Skill Verification (`smoke: "skill"`):**
-   - For each adopted skill, executes the skill's declared `smoke:` block.
-   - Passes `context: { smoke: true, dryRun: boolean }` and sample input.
-   - Verifies tool dispatch, parameter validation, and egress route reachability.
-5. **Pass Outcome:**
-   - Image is activated in the agent registry.
-   - Agent transitions to `SLEEPING` (ready for incoming traffic).
-   - Ledger records `AGENT_DEPLOYED`.
-6. **Failure & Rollback:**
-   - If any smoke turn fails, produces an empty reply, or the container crashes:
-     - Candidate image is rejected.
-     - Agent rolls back to its previously deployed image (or remains undeployed if this was its first deploy).
-     - Failure details and container error logs are ledgered in `AGENT_SMOKE_FAILED`.
-     - The agent is never left in an un-routable broken state.
+triggers:
+  - type: webhook
+    path: /hooks/ops-triage
+    secretRef: OPS_WEBHOOK_SECRET
+  - type: discord
+    secretRef: DISCORD_BOT_TOKEN
+
+secrets:
+  requires:
+    - name: OPS_WEBHOOK_SECRET
+      description: "HMAC signing secret for inbound alert webhooks"
+
+persistence:
+  enabled: true
+  prefix: "ops-triage"
+
+compute:
+  kind: oci
+  ref: "ops-triage:latest"
+  localCommand: ["python3", "agent.py"]
+
+runtime:
+  warmDownSeconds: 300
+
+egress:
+  routes:
+    - models
+    - discord
+
+skills:
+  - id: pagerduty-ops
+    routes: [pagerduty]
+
+roles:
+  Owner:
+    skills:
+      "*": { allow: ["*"] }
+  OnCall:
+    skills:
+      pagerduty-ops: { allow: ["*"] }
+```
+
+### Step 3: Implement the Turn Loop (`M1`, `M2`, `AM1`–`AM5`, `E1`–`E6`)
+
+Your cartridge code must obey the factory perimeter invariants:
+- **Input:** Read the initial wake payload from `FACTORY_INPUT` or `/tmp/factory-input.json`.
+- **Model Calls (`M1`, `M2`, `E5`):** Call `POST ${FACTORY_MODEL_BASE_URL}/chat/completions` with `Authorization: Bearer ${FACTORY_RUN_TOKEN}` and `"model": os.environ.get("FACTORY_MODEL", "claude-sonnet-4-5")`. Never import `anthropic`, `boto3`, or `google.genai`, and never hardcode a model choice.
+- **Notebook & Safe (`AM1`–`AM5`, `E6`):** Store SQLite databases under `os.environ["MEMORY_DIR"]` using `PRAGMA journal_mode=WAL;`, `PRAGMA busy_timeout=5000;`, and `PRAGMA wal_checkpoint(TRUNCATE);` on exit. Rotate notebooks into `$MEMORY_DIR/volumes/<name>/` at `FACTORY_NOTEBOOK_MAX_BYTES` (10 MB) or `FACTORY_NOTEBOOK_MAX_DAYS` (90 days) rather than deleting history (`AM3`).
+- **Replies & Mailbox (`AM2`):** Deliver replies according to `replyTo` (`POST /api/v1/runs/${FACTORY_RUN_ID}/reply` for console turns or `${DISCORD_BASE_URL}` for Discord turns), poll `GET /api/v1/runs/${FACTORY_RUN_ID}/mailbox` while warm, and write the final status to `/tmp/factory-result.json`.
+
+### Step 4: Validate Locally
+
+Run contract validation and your unit test suite before pushing:
+
+```bash
+npx @beercanlabs/contract validate ./my-cartridge
+python3 -m pytest -q
+```
+
+### Step 5: Register & Admit a Pinned Commit (`POST /api/v1/registry/agents`, `L3`, `L4`)
+
+Push your commit to git and register the full **40-character commit SHA** (branches and tags are refused):
+
+```http
+POST /api/v1/registry/agents
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{
+  "id": "ops-triage",
+  "repo": "https://github.com/myorg/ops-triage",
+  "commit": "0123456789abcdef0123456789abcdef01234567"
+}
+```
+
+The Registrar and Property Manager run the isolated admission pipeline (`L3`, `L4`):
+1. **Commit Pin Verification:** Clones the exact 40-character SHA (`source_unavailable` if unreachable).
+2. **Secret Scan (`S1`):** Scans every tracked file for hardcoded tokens or private keys (`hardcoded_secret` on hit).
+3. **Automated Unit Tests:** Executes `python -m pytest -q` or `npm ci && npm test` (`no_tests` if zero tests are collected, `tests_failed` on failure).
+4. **OCI Image Build & Push:** Builds the `Dockerfile` and pushes `<agentId>-<commit12>` (`build_failed` / `push_failed` on error).
+
+### Step 6: Assign Policy & Deploy (`PUT /api/v1/agents/:id/policy` & `POST /api/v1/registry/agents/:id/deploy`)
+
+1. Set the agent's model, route, and budget policy via `PUT /api/v1/agents/ops-triage/policy`.
+2. Trigger deployment via `POST /api/v1/registry/agents/ops-triage/deploy` (returns `202 Accepted`).
+3. If the repository agent has also adopted skill packages, `compose-skills.sh` layers them onto the agent's admitted image (`<agentId>-<commit12>-<skillsHash12>`).
+4. The candidate image runs the **Universal Activation Smoke Gate** (`runActivationSmoke`, `L4`). On pass, the agent transitions to `SLEEPING` and records `AGENT_DEPLOYED`.
 
 ---
 
@@ -174,7 +343,7 @@ The shared runtime version is managed as **Factory Data** (`M3`-style, `R1`), pe
 
 ### Inspecting Runtime Status (`GET /api/v1/runtime`)
 
-Any authenticated viewer can inspect the active runtime version and fleet upgrade status:
+Any authenticated viewer (`agents.read`) can inspect the active runtime version and per-agent rollout status:
 
 ```http
 GET /api/v1/runtime
@@ -223,33 +392,33 @@ Content-Type: application/json
 ```
 
 #### Rollout Guarantees:
-- **Digest Pinning Required (`L4`):** The image must be pinned by `@sha256:` digest. Mutable tags (e.g. `:latest`) are rejected (`invalid_runtime`).
-- **Audit Ledger:** Records `RUNTIME_VERSION_SET` with the admin principal, commit, and digest.
-- **Automated Fleet Rebuild & Smoke:** The control plane triggers `applyConfig` across all non-retired configuration-hosted agents (skipping any agent already in `DEPLOYING`):
+- **Digest Pinning Required (`L4`):** The `image` must be pinned by `@sha256:<64-hex>` digest and `commit` must be a 40-character hex SHA. Mutable tags (e.g., `:latest`) are rejected with `HTTP 400 invalid_runtime`.
+- **Audit Ledger:** Appends `RUNTIME_VERSION_SET` and `SHARED_RUNTIME_UPDATED` with the admin actor, commit, and payload hash.
+- **Automated Fleet Rebuild & Smoke:** Triggers `applyConfig` across all non-retired configuration-hosted agents (skipping any agent currently in `DEPLOYING`):
   - Agents without skills adopt the new base image directly.
-  - Agents with skills are rebuilt by `factory-skills-builder` layering adopted skills on top of the new base image.
-  - Candidate images are built and smoke-tested via the **Activation Smoke Gate** (`TSK-281`) before switching task definitions.
-  - On smoke pass: updates `deployedRuntime` and activates new compute.
-  - On smoke failure: rolls back that specific agent to its previous working image, records `AGENT_DEPLOY_FAILED`, and leaves the agent running its prior runtime.
-- **Synchronous Rollout Results:** `PUT /api/v1/runtime` waits for candidate builds and smoke runs to settle and returns `results: [{ id, status: "updated" | "smoke_failed" }]`, rolling back any individual agent whose smoke gate fails and providing immediate fleet rollout status.
+  - Agents with skills are rebuilt by `factory-skills-builder` layering their adopted skills onto the new base image.
+  - Every candidate image must pass the **Activation Smoke Gate** (`TSK-281`) before compute is switched.
+  - On smoke pass: updates `deployedRuntime` and activates the new task definition (`status: "updated"`).
+  - On smoke failure: rolls back that specific agent to its previous working image, records `AGENT_SMOKE_FAILED` and `AGENT_DEPLOY_FAILED`, and leaves the agent running its prior runtime (`status: "smoke_failed"`).
+- **Synchronous Rollout Results:** `PUT /api/v1/runtime` awaits all candidate builds and smoke runs and returns `{ ok: true, runtime, pin, agents, results: [{ id, status: "updated" | "smoke_failed" }] }`.
 
 ---
 
-## 5. Migration Runbook — Converting an Existing Repository Agent in Place (`POST /api/v1/agents/:id/convert`, `TSK-283`)
+## 5. Migration Runbook — Converting a Repository Agent in Place (`POST /api/v1/agents/:id/convert`, `TSK-283`)
 
-Existing repository agents (`SM-*`) can be converted in place to configuration agents without losing identity, history, or configuration.
+Existing repository agents can be converted one-way in place to configuration agents without losing identity, ledger history, or mind state.
 
 ### What In-Place Conversion Preserves:
 - **Agent Identity:** Retains the exact same `id` and display name.
-- **Ledger Audit Trail:** Preserves all historical ledger rows and hashes.
-- **Ownership & Access:** Preserves `owners`, user links, and role bindings.
-- **Policy & Budgets:** Preserves model grants, route grants, budgets, and spend counters.
-- **Memory Prefix:** Retains `memoryPrefix` so episodic mind files remain accessible.
+- **Ledger Audit Trail:** Preserves all historical ledger rows and hash chains.
+- **Ownership & Access:** Preserves `owners`, identity links, and role assignments.
+- **Policy & Budgets:** Preserves model grants, route grants (unless uncovered routes are explicitly dropped), budgets, and spend counters.
+- **Memory Prefix:** Retains `memoryPrefix` so existing notebooks in object storage remain attached.
 - **Connected Channels & Schedules:** Preserves Discord channel bindings and Timekeeper cron schedules.
 
 ### Step-by-Step Migration Runbook
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                       IN-PLACE CONVERSION RUNBOOK                           │
 │                                                                             │
@@ -259,14 +428,14 @@ Existing repository agents (`SM-*`) can be converted in place to configuration a
 │  Step 2: Extract Tools to Python stdlib Skill Packages                      │
 │         Vendor pure Python dependencies, declare mandatory smoke: block     │
 │                                                                             │
-│  Step 3: Upload and Approve Skill Packages                                  │
-│         factory skill register -> offline checks -> publish/approve         │
+│  Step 3: Upload and Verify Skill Packages                                   │
+│         factory skill register -> offline checks (immediately own-use)      │
 │                                                                             │
 │  Step 4: Pre-flight Coverage & Policy Check                                 │
-│         Verify routes, models, and triggers are covered by skills/channels   │
+│         Verify routes, models, and triggers are covered by skills/channels  │
 │                                                                             │
 │  Step 5: Execute Conversion (POST /api/v1/agents/:id/convert)               │
-│         Builds layered image, runs activation smoke gate, commits or rolls   │
+│         Builds layered image, runs activation smoke gate, commits or rolls  │
 │                                                                             │
 │  Step 6: Post-Conversion Verification                                       │
 │         Send live turn, verify AM1 mind hydration/replication behavior      │
@@ -274,45 +443,20 @@ Existing repository agents (`SM-*`) can be converted in place to configuration a
 ```
 
 #### Step 1: S4 Scrub of `soul.md`
-Examine the repository's `soul.md`:
-- Remove any committed cloud account IDs, AWS account numbers, ARNs, internal DNS hostnames, or VPC IDs (`S4`).
-- Ensure instructions describe capabilities and tone rather than infrastructure addresses.
+Inspect the repository's `soul.md` and remove any cloud account numbers, ARNs, VPC IDs, or internal DNS hostnames (`S4`).
 
 #### Step 2: Extract Tools into Pure stdlib Python Skill Packages
-1. Locate tool definitions in `agent.py` or `tools/`.
-2. Package each capability as a conforming skill directory (see [`docs/SKILLS.md`](./SKILLS.md)):
-   - Standard library or pure-Python vendored dependencies only.
-   - Write `skill.yaml` with required `routes:`, `credentials:`, and `actions:`.
-   - **Declare the mandatory `smoke:` block:**
-     ```yaml
-     smoke:
-       action: search-query
-       input:
-         query: "test"
-       dryRun: true # Required true if action is a mutating POST/PUT/DELETE
-     ```
-3. Test locally using the offline check script:
-   ```bash
-   factory skill pack ./skills/my-skill
-   ```
+Package each custom tool from `agent.py` into a `spec: 1` skill directory (see [`docs/SKILLS.md`](./SKILLS.md)) with a mandatory `smoke:` block (`dryRun: true` for mutating `POST`/`PUT`/`PATCH`/`DELETE` or `hold: true` actions) and validate locally via `factory skill pack`.
 
-#### Step 3: Upload and Approve Skill Packages
-1. Upload the packaged skill archive:
-   ```bash
-   factory skill register ./skills/my-skill-1.0.0.tar.gz
-   ```
-2. Verify that the offline checks pass (`factory-skill-checker` reports `tests: "passed"`).
-3. If the skill is to be shared fleet-wide, request and approve publication (`POST /api/v1/skills/:id/publish/approve`). For own use by the same owner, the skill is immediately adoptable upon passing checks.
+#### Step 3: Upload and Verify Skill Packages
+Upload via `factory skill register ./skills/my-skill-1.0.0.tar.gz` (`POST /api/v1/registry/skills`) and confirm `factory-skill-checker` passes (`GET /api/v1/skills/:id` shows `status: "approved"`). For agents owned by the uploader or assigned group, the skill is immediately eligible for adoption (`H7`, `A7`); for fleet-wide use, request publication (`POST /api/v1/skills/:id/publish`) and have an admin approve it (`POST /api/v1/skills/:id/publish/decide` with `{ "decision": "approve" }`).
 
-#### Step 4: Pre-flight Coverage & Policy Check
-Inspect the repository agent's declared resources (`cartridge.yaml`):
-- **Egress Routes:** Ensure every route the agent needs is declared by an adopted skill.
-- **Credentials:** Ensure required credentials are provided by adopted skills or channel integrations.
-- **Triggers:** Ensure webhook or schedule triggers are represented.
-- **Uncovered Routes:** If the agent declared legacy routes in `cartridge.yaml` that are no longer needed, pass `"dropUncoveredRoutes": true` during conversion; otherwise conversion refuses with `uncovered_routes`.
+#### Step 4: Pre-flight Route Coverage Check
+Compare the repository agent's declared routes (`agent.egress.routes`, `agent.skillRoutes`, and `policy.routes`) against the `requires.routes` of the skills you are adopting (plus built-in `models` and `discord`):
+- Every route must be covered by an adopted skill, **or** you must pass `"dropUncoveredRoutes": true` in the conversion payload to remove obsolete routes from the agent's policy. Otherwise conversion refuses with `HTTP 422 uncovered_routes`.
 
 #### Step 5: Execute In-Place Conversion (`POST /api/v1/agents/:id/convert`)
-Execute the conversion endpoint. Requires the agent owner's token and admin approval (`CF4`):
+Invoke the conversion endpoint (`agents.settings.set` privilege — agent owner or admin, `CF4`):
 
 ```http
 POST /api/v1/agents/skippy/convert
@@ -330,30 +474,79 @@ Content-Type: application/json
       "version": "1.0.0"
     }
   ],
+  "roles": [
+    {
+      "name": "Team",
+      "skills": {
+        "knowledge-retrieval": { "allow": ["*"] }
+      }
+    }
+  ],
   "dropUncoveredRoutes": true
 }
 ```
 
 #### What Happens Internally:
-1. Validates that the agent is currently a repository agent (`createdFrom !== 'configuration'`).
-2. Validates memory archetype and adopted skill version existence.
-3. Checks route coverage: refuses if legacy declared routes are missing unless `dropUncoveredRoutes: true`.
-4. Stages candidate configuration into `pendingConfig`.
-5. Triggers container build (`factory-skills-builder`) layering adopted skills over the shared runtime.
-6. Executes the **Activation Smoke Gate** (`TSK-281`): runs hello-world model completion and per-skill smoke tests.
-7. **On Smoke Pass:**
-   - Commits configuration to `config.json` and deletes legacy repository attributes (`repo`, `commit`, `buildspec`).
-   - Marks `createdFrom: 'configuration'`.
-   - Records `AGENT_CONVERTED` and `AGENT_DEPLOYED` in the ledger.
-   - Activates new container compute.
-8. **On Smoke Failure:**
-   - Discards `pendingConfig`.
-   - Restores the previous repository image and commit.
-   - Records `AGENT_SMOKE_FAILED` in the ledger.
-   - The repository agent remains online and operational.
+1. Validates that the agent exists, is not a built-in agent, is not retired/purged, has an active policy with at least one route, and is not already a configuration agent (`createdFrom !== 'configuration'`).
+2. Validates `soul`, `memory.archetype` (`AM1`), `roles` skill references (`CF2`), and each adopted skill version's approval/visibility status.
+3. Verifies route coverage (`422 uncovered_routes` if uncovered routes exist and `dropUncoveredRoutes !== true`).
+4. Snapshots the pre-conversion agent record and policy, sets `createdFrom: 'configuration'`, pins `agent.repo = pin.repo` and `agent.commit = pin.commit` to the shared runtime, and stages `pendingConfig` so the smoke container reads the candidate configuration.
+5. **Zero Skills vs. Adopted Skills Build & Smoke:**
+   - With zero skills: registers compute on `pin.image` and runs `runActivationSmoke`.
+   - With adopted skills: invokes `runDeploy` (`factory-skills-builder` layered image build + `runActivationSmoke`).
+6. **On Smoke Pass:**
+   - Commits the new versioned configuration record to `config.json` with `source: { repo: pin.repo, commit: pin.commit }`, `skills`, and `agent` settings.
+   - Keeps `createdFrom: 'configuration'` and keeps `agent.repo` and `agent.commit` pinned to the shared runtime (`pin.repo`, `pin.commit`).
+   - Deletes legacy cartridge-specific fields from the agent record (`skillIds`, `skillRoutes`, `roles`, `admission`, and `pendingConfig`).
+   - Transitions `state` to `'SLEEPING'`, saves the agent record, and records `CONFIG_VERSIONED`, `AGENT_DEPLOYED`, and `AGENT_CONVERTED` in the ledger.
+   - Returns `HTTP 200 OK` with `{ ok: true, id, createdFrom: "configuration", state: "SLEEPING", artifact, deployedRuntime, configurationVersion, smoke: { ok: true } }`.
+7. **On Smoke or Build Failure:**
+   - Restores the pre-conversion snapshot (previous `createdFrom`, `repo`, `commit`, `artifact`, `state`, `roles`, `skillIds`, `skillRoutes`, `admission`, and `policy`) and re-registers the previous compute definition.
+   - Records `AGENT_SMOKE_FAILED` in the ledger and returns `HTTP 502` (`smoke_failed` or `convert_deploy_failed`). The repository agent remains online and operational on its previous image.
+
+#### Conversion Error Reference:
+| HTTP Status | `error` Code | Cause & Resolution |
+| :--- | :--- | :--- |
+| `400` | `builtin_agent` / `invalid_settings` / `invalid_skills` | Built-in agents cannot be converted, or `soul`/`roles`/`skills` schema is malformed. |
+| `403` | `skill_private` | A requested skill is private to another owner/group. |
+| `404` | `agent_not_found` | No agent with `:id` exists in the registry. |
+| `409` | `already_configuration_agent` | Agent already has `createdFrom: "configuration"`. Use `PUT /api/v1/agents/:id/settings` instead. |
+| `409` | `policy_required` | Agent has no policy or zero granted routes. Set policy via `PUT /api/v1/agents/:id/policy` first. |
+| `409` | `skill_unavailable` | A requested `id@version` is not registered, not `approved`, or is `retired`. |
+| `422` | `archetype_required` | `memory.archetype` is missing (`purpose-built`, `personal-assistant`, or `team-member`). |
+| `422` | `unknown_skill` | A role in `roles` names a skill ID not included in the conversion `skills` array (`CF2`). |
+| `422` | `uncovered_routes` | Existing repository/policy routes are not covered by adopted skills. Adopt the matching skill or pass `"dropUncoveredRoutes": true`. |
+| `502` | `smoke_failed` / `convert_deploy_failed` | Candidate image build or activation smoke gate failed; agent was automatically rolled back to its repository image. |
 
 #### Step 6: Post-Conversion Verification
-1. **Send Live Turn:** Send a test message via Discord or REST (`POST /api/v1/agents/:id/conversation`). Verify the agent responds normally and invokes adopted skills as needed.
+1. **Send a Live Turn:** Send a test turn via Discord or `POST /api/v1/agents/:id/conversation` and confirm normal responses and skill invocations.
 2. **Verify Memory Storage Gate (`AM1`):**
-   - If converted to `purpose-built`: inspect mind storage (S3 bucket or directory). Verify that no mind hydration pull or replication push occurred during the run.
-   - If converted to `personal-assistant` or `team-member`: verify episodic SQLite database is hydrated and updated.
+   - If `purpose-built`: verify that the runtime shim performs no object-storage mind pull on wake or push on sleep.
+   - If `personal-assistant` or `team-member`: verify that `notebook.db` hydrates and replicates cleanly.
+
+---
+
+## 6. FAQ & Common Pitfalls
+
+### 1. Why did registering my repository agent (`POST /api/v1/registry/agents`) fail with `422 new_agents_use_configuration`?
+When `FACTORY_NEW_AGENTS_FROM_CONFIGURATION_ONLY` is enabled (`CF6`), the factory only permits new agent IDs to be created as Configuration-Only agents (`POST /api/v1/agents` or via `agent-builder`) unless the ID is explicitly allowlisted.
+- **If the agent does not need a custom container:** Create it via `POST /api/v1/agents` (see [Section 2](#2-step-by-step-guide-building-a-configuration-only-agent)).
+- **If the agent genuinely requires a Repository-Based Cartridge:** Add the agent ID to `FACTORY_REPOSITORY_AGENT_IDS` in the control plane's environment configuration and retry `POST /api/v1/registry/agents`.
+
+### 2. Why did `POST /api/v1/agents` reject my `roles` definition with `422 unknown_skill`?
+Under `CF2`, an agent role may only name skills the agent has **already adopted** (or `"*"`). Because a brand-new agent created via `POST /api/v1/agents` has zero adopted skills at creation time, naming a specific skill ID in `roles` is rejected.
+- **Resolution:** Create the agent with `"*"` in `roles` (or omit `roles`), adopt the desired skills via `POST /api/v1/agents/:id/skills`, and then set per-skill role rules via `PUT /api/v1/agents/:id/settings`—or publish the agent via `agent-builder` (`op: "publish"`), which accepts `skills` alongside `roles`.
+
+### 3. Why did my skill package fail offline checks with a `smoke` or `dryRun` error?
+Under `TSK-281` (`L4`, `SK1`), every `spec: 1` skill manifest must declare a `smoke:` block (`action`, `input`, and optional `dryRun`), and `factory-skill-checker` executes that handler offline during admission.
+- If the smoke action's HTTP method in `actions:` is mutating (`POST`, `PUT`, `PATCH`, `DELETE`) or has `hold: true`, `smoke.dryRun: true` is **mandatory**; omitting it causes admission to refuse the package so activation smoke tests never mutate live external systems.
+
+### 4. Why did `POST /api/v1/agents/:id/convert` fail with `422 uncovered_routes`?
+To prevent silent loss of capability during in-place conversion (`CF6`, decision 5), the control plane checks that every route declared in the repository agent's `egress.routes`, `skillRoutes`, and active `policy.routes` is covered by the `requires.routes` of the adopted `skills` (plus `models` and `discord`).
+- **Resolution:** Inspect the `uncovered` array in the `422` response. Either include the skill package that declares those routes in `skills`, or pass `"dropUncoveredRoutes": true` to remove the unneeded routes from the agent's policy during conversion.
+
+### 5. Why does my `purpose-built` agent write no files to S3/GCS mind storage?
+This is an intentional optimization (`AM1` runtime shim gate, `TSK-283`). When `FACTORY_MEMORY_ARCHETYPE=purpose-built`, `packages/hydrate` skips pulling from and pushing to object storage so stateless task workers start and exit with zero storage latency. If your agent needs persistent episodic memory across wakes, set `memory.archetype` to `personal-assistant` or `team-member`.
+
+### 6. What happens if a shared runtime upgrade (`PUT /api/v1/runtime`) fails smoke for one agent in the fleet?
+`PUT /api/v1/runtime` isolates failures per agent (`TSK-280`, `TSK-281`). Every configuration agent whose candidate image passes `runActivationSmoke` upgrades to the new runtime (`status: "updated"`). Any agent whose smoke check fails is automatically rolled back to its previous working image and runtime commit (`status: "smoke_failed"`, ledgered as `AGENT_SMOKE_FAILED` and `AGENT_DEPLOY_FAILED`) and remains online without blocking the rest of the fleet.

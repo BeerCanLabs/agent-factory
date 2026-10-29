@@ -97,10 +97,10 @@ The architecture is opinionated and accepts certain limits by design:
 
 ## Documentation & Layout
 
-- **[Creating and Managing Agents](docs/CREATING_AGENTS.md)** — Comprehensive guide to Dual-Mode Hosting (Configuration-Only vs. Repository-Based), conversational creation via `agent-builder`, the activation smoke gate, shared runtime upgrades, and in-place conversion runbook.
-- **[Skills Guide](docs/SKILLS.md)** — Guide to authoring, testing, packaging, and publishing stdlib Python skills, declaring smoke gates, and managing skill groups.
+- **[Creating and Managing Agents](docs/CREATING_AGENTS.md)** — Architectural decision rubric and step-by-step build guides for Dual-Mode Hosting (Configuration-Only Agents on the shared runtime vs. Repository-Based Cartridges), conversational creation via `agent-builder`, the Universal Activation Smoke Gate, shared runtime rollouts, in-place conversion runbook, and FAQ.
+- **[Skills Guide](docs/SKILLS.md)** — Guide to authoring, testing, packaging, and publishing stdlib Python skills (`spec: 1`), declaring mandatory `smoke:` blocks, and managing own-use vs. fleet publication.
 - **[Agent Memory Models Guide](docs/architecture/agent-memory-models.md)** — Architectural specification for the 3 Agent Archetypes, the Storage Triad (Whiteboard vs. Notebook vs. Safe), FTS5 episodic state, and multi-user isolation.
-- **[Cartridge Developer Guide](docs/CARTRIDGE_DEVELOPER_GUIDE.md)** — Step-by-step guide to building, testing, and packaging an Agent Cartridge using the "New Hire" model.
+- **[Cartridge Developer Guide](docs/CARTRIDGE_DEVELOPER_GUIDE.md)** — Deep-dive implementation guide for Repository-Based Cartridges using the "New Hire" model, Factory Model API (`M1`), `AM3` notebook rotation, and E12 role-based route access.
 - **[DESIGN_AUTHORITY.md](DESIGN_AUTHORITY.md)** — The Single Source of Truth (SSOT) for architectural intent, component contracts, and AI governance.
 - **[POSITION_PAPER.md](POSITION_PAPER.md)** — The foundational manifesto: Console vs. Cartridge.
 - **[AGENTS.md](AGENTS.md)** — Instructions for implementing AIs deploying the Factory.

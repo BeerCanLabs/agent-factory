@@ -15,6 +15,7 @@ export function makeSite({ cast, contracts, blueprints, house = { intro: '', mem
   const root = base.endsWith('/') ? base : base + '/';
   const url = {
     home: () => root,
+    build: () => root + 'build/',
     staff: () => root + 'staff/',
     adopt: () => root + 'adopt/',
     member: (id, flow) => root + 'staff/' + id + '/' + (flow ? '#flow-' + flow : ''),
@@ -46,13 +47,13 @@ export function makeSite({ cast, contracts, blueprints, house = { intro: '', mem
       '<section class="hero"><div class="eyebrow">Agent Factory</div>' +
       '<h1>Just build the agent. <em>The factory is already built.</em></h1>' +
       '<p class="lead">Agent Factory is open-source, turnkey hosting for fleets of autonomous agents. You write the agent as a portable cartridge. The factory wakes it, keeps its keys, watches it, meters it and can switch it off, so you never build that part yourself.</p>' +
-      '<div class="rule"><a class="btn" href="' + url.staff() + '">Meet the staff</a><a class="btn alt" href="' + url.infra() + '">See the blueprints</a><a class="btn alt" href="' + REPO_URL + '" rel="noopener">View the source</a></div></section>' +
+      '<div class="rule"><a class="btn" href="' + url.build() + '">Build an agent</a><a class="btn alt" href="' + url.staff() + '">Meet the staff</a><a class="btn alt" href="' + url.infra() + '">See the blueprints</a><a class="btn alt" href="' + REPO_URL + '" rel="noopener">View the source</a></div></section>' +
       '<section class="sec-head"><div class="eyebrow">Why it exists</div><h2>Companies need three things to let AI do real work</h2></section>' +
-      '<div class="needs"><div><span class="n">1</span><h3>Ease of creation</h3><p>Developers build a cartridge: a prompt, a manifest and some code. Push a pinned commit and the factory admits, builds and runs it.</p></div>' +
+      '<div class="needs"><div><span class="n">1</span><h3>Ease of creation</h3><p>Build an employee in two ways: define a configuration-only agent with a persona, memory archetype and reusable skills on the shared runtime, or push a pinned commit from a cartridge repository when custom code or a custom container is needed. <a href="' + url.build() + '">See how agents are built →</a></p></div>' +
       '<div><span class="n">2</span><h3>Insight into value and cost</h3><p>Every model call is counted, priced and tied to an agent in real time, not on a bill that arrives a day late.</p></div>' +
       '<div><span class="n">3</span><h3>Protection from risk</h3><p>Agents hold no real secrets. Every outbound call passes the perimeter, and sensitive actions wait for a person.</p></div></div>' +
       '<section class="split"><div class="card"><div class="eyebrow">The factory</div><h2>The office building</h2><p>Compute, a locked-down front door, a safe for memory, a model service, a ledger. It looks the same whichever employee works in it, and whichever cloud it stands on.</p></div>' +
-      '<div class="card ink"><div class="eyebrow" style="color:var(--panel-2)">The cartridge</div><h2>The employee</h2><p>Persona, instructions, skills, and its own notebook. What an agent decides, remembers and says is the cartridge’s business, never the factory’s.</p></div></section>' +
+      '<div class="card ink"><div class="eyebrow" style="color:var(--panel-2)">The cartridge</div><h2>The employee</h2><p>Persona, instructions, skills, and its own notebook—hosted either as a pure configuration on the shared runtime or as a dedicated container repository. What an agent decides, remembers and says is the employee’s business, never the factory’s.</p></div></section>' +
       '<section class="sec-head"><div class="eyebrow">A day in the life</div><h2>What happens when someone messages a sleeping agent</h2></section>' +
       '<ol class="journey">' + journey.map((x) => '<li><b>' + x[1] + '</b><span class="muted">' + x[2] + '</span><a href="' + url.member(x[0]) + '">' + avatar(x[0]) + '<span>' + esc(byId[x[0]].name) + '</span></a></li>').join('') + '</ol>' +
       '<section class="split"><div class="card"><h3>' + Count + ' staff, one rule</h3><p>Each member owns one job behind a typed contract. A change is either inside one member or on one contract between two. Read each member’s page for its key product flows and the contracts it keeps with the others.</p><a class="btn alt" href="' + url.contracts() + '" style="justify-self:start">All contracts</a></div>' +
@@ -134,6 +135,60 @@ export function makeSite({ cast, contracts, blueprints, house = { intro: '', mem
   }
 
 
+  function build() {
+    const body =
+      '<section class="sec-head"><div class="eyebrow">Dual-Mode Hosting</div><h1>Two ways to build an employee</h1>' +
+      '<p class="lead">Every agent in the factory lives inside the same perimeter, draws from a metered budget, keeps its notebook in the safe, and passes an activation smoke check before going live. You choose how much you want to own: a declarative configuration on the shared runtime, or a dedicated repository in its own container.</p></section>' +
+      '<section class="split">' +
+      '<div class="card"><div class="eyebrow">Default Track · Shared Runtime</div><h2>Configuration-Only Agent</h2>' +
+      '<p>For most assistants, analysts, and workflow automatons, no git repository or container build is needed. You define the agent as pure configuration running on the factory’s shared agent runtime:</p>' +
+      '<ul>' +
+      '<li><b>Persona (Soul):</b> Write the instructions, tone, and boundaries that define who the employee is.</li>' +
+      '<li><b>Memory Archetype:</b> Choose <i>purpose-built</i> (stateless task worker), <i>personal assistant</i> (per-person notebook), or <i>team member</i> (shared project workspace).</li>' +
+      '<li><b>Composable Skills:</b> Attach reusable Python skill packages checked offline by the ' + personLink('registrar') + '.</li>' +
+      '<li><b>Fleet-Wide Upgrades:</b> Approve a new shared runtime digest once and the factory smoke-tests and upgrades every configuration agent automatically.</li>' +
+      '<li><b>Portable Bundle:</b> Export the entire agent configuration as a single bundle and import it into any factory.</li>' +
+      '</ul></div>' +
+      '<div class="card ink"><div class="eyebrow" style="color:var(--panel-2)">Full Control · Custom Container</div><h2>Repository Cartridge</h2>' +
+      '<p>When an employee needs custom execution logic or specialized runtime dependencies beyond the shared loop, build a self-contained repository cartridge:</p>' +
+      '<ul>' +
+      '<li><b>Custom Execution Loops:</b> Implement bespoke multi-step state machines, custom context assembly, or specialized reasoning pipelines.</li>' +
+      '<li><b>Any Language or Binary:</b> Write the cartridge in Python, TypeScript, Go, or Rust, or bundle compiled native libraries and command-line tools.</li>' +
+      '<li><b>Custom Domain Schemas:</b> Maintain specialized local SQLite tables and indexing pipelines inside the agent’s notebook directory.</li>' +
+      '<li><b>House Staff &amp; Platform Tools:</b> Power privileged factory house staff and custom engineering workflows admitted from a pinned commit.</li>' +
+      '</ul></div></section>' +
+      '<section class="sec-head"><div class="eyebrow">Decision Guide</div><h2>When to choose each model</h2>' +
+      '<p class="muted">Both models are governed by the same ' + countWord + ' cast members and pass the same activation smoke gate before taking traffic.</p></section>' +
+      '<div class="tablewrap"><table><thead><tr><th>Dimension</th><th>Configuration-Only Agent</th><th>Repository Cartridge</th></tr></thead><tbody>' +
+      '<tr><td><b>What you author</b></td><td>Persona, memory archetype, caller roles, and adopted skill packages.</td><td>Git repository with manifest, persona, source code, unit tests, and Dockerfile.</td></tr>' +
+      '<tr><td><b>Creation &amp; updates</b></td><td>Instant via API or conversationally with the Agent Builder; updates version in place.</td><td>Push a 40-character commit SHA; admitted through offline secret scan, test run, and image build.</td></tr>' +
+      '<tr><td><b>Tooling &amp; dependencies</b></td><td>Modular Python standard-library and vendored pure-Python skill packages shared across the fleet.</td><td>Any language, runtime, or compiled binary tool (never cloud or model provider SDKs).</td></tr>' +
+      '<tr><td><b>Runtime maintenance</b></td><td>One admin-approved runtime rollout upgrades and smoke-tests the fleet with automatic rollback.</td><td>Repository owner maintains the base image, dependencies, and turn loop.</td></tr>' +
+      '<tr><td><b>Portability</b></td><td>Self-contained configuration bundle export and import across factories.</td><td>Git repository and container image; can also be converted in place to a configuration agent.</td></tr>' +
+      '</tbody></table></div>' +
+      '<section class="sec-head"><div class="eyebrow">Lifecycle</div><h2>From idea to sleeping employee</h2></section>' +
+      '<section class="split">' +
+      '<div class="card"><div class="eyebrow">Track A</div><h3>Building a Configuration-Only Agent</h3>' +
+      '<ol>' +
+      '<li><b>Define persona &amp; memory:</b> Author the soul and select the memory archetype (purpose-built, personal assistant, or team member).</li>' +
+      '<li><b>Adopt skills:</b> Pick approved skills from the catalog, or package and register new Python skills verified offline by the ' + personLink('registrar') + '.</li>' +
+      '<li><b>Create &amp; set policy:</b> Create the agent via the API or Agent Builder, then have an administrator grant its models, routes, and budget with the ' + personLink('accountant') + ' and ' + personLink('gatekeeper') + '.</li>' +
+      '<li><b>Smoke test &amp; sleep:</b> Deploy the agent. The ' + personLink('property-manager') + ' runs an activation smoke check—verifying a model turn and every adopted skill—before putting the agent to sleep ready for work.</li>' +
+      '</ol></div>' +
+      '<div class="card"><div class="eyebrow">Track B</div><h3>Building a Repository Cartridge</h3>' +
+      '<ol>' +
+      '<li><b>Scaffold the cartridge:</b> Write the soul, manifest, turn loop, Dockerfile, and unit tests against the factory model API and local notebook directory.</li>' +
+      '<li><b>Admit a pinned commit:</b> Register the commit SHA. The ' + personLink('registrar') + ' and ' + personLink('property-manager') + ' scan for hardcoded secrets, run the test suite, and build the container image.</li>' +
+      '<li><b>Bind policy &amp; credentials:</b> Bind required secret names with the ' + personLink('keymaster') + ' and grant models, routes, and budget limits.</li>' +
+      '<li><b>Smoke test &amp; sleep:</b> Deploy the admitted image through the activation smoke gate. If a cartridge later simplifies to standard skills, convert it in place to a configuration agent without losing its identity, ledger history, or memory.</li>' +
+      '</ol></div></section>' +
+      '<section class="hero" style="margin-top:2rem"><div class="eyebrow">Developer Guides</div>' +
+      '<h2>Read the full specifications</h2>' +
+      '<p class="lead">Explore the step-by-step guides for creating configuration agents, packaging reusable skills, and authoring custom cartridges.</p>' +
+      '<div class="rule"><a class="btn" href="' + BLOB + 'docs/CREATING_AGENTS.md" rel="noopener">Creating Agents Guide ↗</a><a class="btn alt" href="' + BLOB + 'docs/SKILLS.md" rel="noopener">Skills Guide ↗</a><a class="btn alt" href="' + BLOB + 'docs/CARTRIDGE_DEVELOPER_GUIDE.md" rel="noopener">Cartridge Developer Guide ↗</a></div></section>';
+    return { title: 'Build an Agent | Beer Can Labs', description: 'Two ways to build an autonomous agent on Agent Factory: configuration-only agents on the shared runtime, or repository cartridges in their own container.', body, nav: 'build' };
+  }
+
   function adopt() {
     const body =
       '<section class="sec-head"><div class="eyebrow">For Non-Profits</div><h1>Autonomous Agent Factory for Social Impact</h1>' +
@@ -182,7 +237,7 @@ export function makeSite({ cast, contracts, blueprints, house = { intro: '', mem
   }
 
   /* ---------- shell ---------- */
-  const NAV = [['home', 'Home', url.home()], ['staff', 'Staff', url.staff()], ['adopt', 'For Non-Profits', url.adopt()], ['infra', 'Infrastructure', url.infra()]];
+  const NAV = [['home', 'Home', url.home()], ['build', 'Build an Agent', url.build()], ['staff', 'Staff', url.staff()], ['adopt', 'For Non-Profits', url.adopt()], ['infra', 'Infrastructure', url.infra()]];
 
   function shell(page, path) {
     const canonical = siteUrl + path;
@@ -200,7 +255,7 @@ export function makeSite({ cast, contracts, blueprints, house = { intro: '', mem
 
   /** Every page of the site: [path, page]. */
   function pages() {
-    const out = [['/', home()], ['/staff/', staff()], ['/adopt/', adopt()], ['/contracts/', contractIndex()], ['/infrastructure/', infra()]];
+    const out = [['/', home()], ['/build/', build()], ['/staff/', staff()], ['/adopt/', adopt()], ['/contracts/', contractIndex()], ['/infrastructure/', infra()]];
     for (const m of members) out.push(['/staff/' + m.id + '/', member(m)]);
     for (const m of house.members) out.push(['/staff/' + m.id + '/', houseMember(m)]);
     for (const c of contracts) out.push(['/contracts/' + c.id + '/', contract(c)]);
