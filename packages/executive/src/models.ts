@@ -49,11 +49,11 @@ function withThoughtSignature(sig: string | undefined): Pick<ToolCall, 'extra_co
 
 /**
  * Signature for call `i` of an assistant tool-call step sent to Gemini (GAP-213). Each call keeps its own signature;
- * in parallel calls subsequent calls stay unsigned, and an unsigned step gets `skip_thought_signature_validator` on
- * its first call only.
+ * in parallel calls (or coalesced `model` turns that already hold a `functionCall`) subsequent calls stay unsigned, and
+ * an unsigned step gets `skip_thought_signature_validator` on its first call only.
  */
-function geminiThoughtSignature(calls: ToolCall[], i: number): string | undefined {
-  return thoughtSignatureOf(calls[i]) ?? (i === 0 ? GEMINI_SKIP_THOUGHT_SIGNATURE : undefined);
+function geminiThoughtSignature(calls: ToolCall[], i: number, hasPriorCall = false): string | undefined {
+  return thoughtSignatureOf(calls[i]) ?? (!hasPriorCall && i === 0 ? GEMINI_SKIP_THOUGHT_SIGNATURE : undefined);
 }
 
 /**
@@ -602,14 +602,16 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
       for (const m of req.messages) {
         if (m.role === 'system') continue;
         const role = m.role === 'assistant' ? 'model' : 'user';
+        const last = contents.at(-1);
         const parts: GeminiPart[] = [];
         if (m.role === 'tool') {
           parts.push({ functionResponse: { name: callNames.get(m.toolCallId) ?? m.toolCallId, response: { content: m.content } } });
         } else if (m.role === 'assistant' && m.toolCalls?.length) {
+          const hasPriorCall = last?.role === 'model' && last.parts.some((p) => p.functionCall !== undefined);
           if (m.content) parts.push({ text: m.content });
           m.toolCalls.forEach((tc, i, calls) => {
             callNames.set(tc.id, tc.function.name);
-            const thoughtSignature = geminiThoughtSignature(calls, i);
+            const thoughtSignature = geminiThoughtSignature(calls, i, hasPriorCall);
             parts.push({
               functionCall: { name: tc.function.name, args: toolArgs(tc) },
               ...(thoughtSignature ? { thoughtSignature } : {}),
@@ -618,7 +620,6 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
         } else {
           parts.push({ text: m.content });
         }
-        const last = contents.at(-1);
         if (last && last.role === role) last.parts.push(...parts);
         else contents.push({ role, parts });
       }

@@ -1282,5 +1282,159 @@ describe('Gemini thought signatures across tool-call turns (GAP-213, M1, M2, M3)
       [{ google: { thought_signature: 'SIG_A' } }, undefined, { google: { thought_signature: 'SIG_C' } }],
     );
   });
+
+  it('vertexGemini coalesces contiguous assistant messages without synthesizing placeholder signatures onto non-initial functionCalls', async () => {
+    const { vertexGemini } = await import('./models.js');
+    const entry: CatalogEntry = { provider: 'vertex-gemini', id: 'gemini-4-argon' };
+
+    async function sendContents(messages: ChatRequest['messages']) {
+      const { sent, doFetch } = scripted({ candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }] });
+      await vertexGemini({ project: 'p', accessToken: async () => 't', fetch: doFetch }).complete(entry, { messages, tools: TOOLS });
+      return sent[0].contents;
+    }
+
+    // 1. [signed, unsigned] consecutive assistant tool-call messages merge into one model turn: only first carries SIG_1.
+    assert.deepEqual(
+      await sendContents([
+        { role: 'user', content: 'q' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' }, extra_content: { google: { thought_signature: 'SIG_1' } } }],
+        },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'c2', type: 'function', function: { name: 'g', arguments: '{}' } }],
+        },
+        { role: 'tool', content: 'R1', toolCallId: 'c1' },
+        { role: 'tool', content: 'R2', toolCallId: 'c2' },
+      ]),
+      [
+        { role: 'user', parts: [{ text: 'q' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'f', args: {} }, thoughtSignature: 'SIG_1' },
+            { functionCall: { name: 'g', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            { functionResponse: { name: 'f', response: { content: 'R1' } } },
+            { functionResponse: { name: 'g', response: { content: 'R2' } } },
+          ],
+        },
+      ],
+    );
+
+    // 2. [unsigned, unsigned] and [unsigned, system, unsigned]: only first functionCall in merged model turn gets SKIP.
+    assert.deepEqual(
+      await sendContents([
+        { role: 'user', content: 'q' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } }],
+        },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'c2', type: 'function', function: { name: 'g', arguments: '{}' } }],
+        },
+        { role: 'tool', content: 'R1', toolCallId: 'c1' },
+        { role: 'tool', content: 'R2', toolCallId: 'c2' },
+      ]),
+      [
+        { role: 'user', parts: [{ text: 'q' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'f', args: {} }, thoughtSignature: SKIP },
+            { functionCall: { name: 'g', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            { functionResponse: { name: 'f', response: { content: 'R1' } } },
+            { functionResponse: { name: 'g', response: { content: 'R2' } } },
+          ],
+        },
+      ],
+    );
+    assert.deepEqual(
+      await sendContents([
+        { role: 'user', content: 'q' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } }],
+        },
+        { role: 'system', content: 'mid-conversation system note' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'c2', type: 'function', function: { name: 'g', arguments: '{}' } }],
+        },
+        { role: 'tool', content: 'R1', toolCallId: 'c1' },
+        { role: 'tool', content: 'R2', toolCallId: 'c2' },
+      ]),
+      [
+        { role: 'user', parts: [{ text: 'q' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'f', args: {} }, thoughtSignature: SKIP },
+            { functionCall: { name: 'g', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            { functionResponse: { name: 'f', response: { content: 'R1' } } },
+            { functionResponse: { name: 'g', response: { content: 'R2' } } },
+          ],
+        },
+      ],
+    );
+
+    // 3. Text-only assistant followed by unsigned assistant tool-call message still places SKIP on the first functionCall only.
+    assert.deepEqual(
+      await sendContents([
+        { role: 'user', content: 'q' },
+        { role: 'assistant', content: 'Let me check.' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            { id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } },
+            { id: 'c2', type: 'function', function: { name: 'g', arguments: '{}' } },
+          ],
+        },
+        { role: 'tool', content: 'R1', toolCallId: 'c1' },
+        { role: 'tool', content: 'R2', toolCallId: 'c2' },
+      ]),
+      [
+        { role: 'user', parts: [{ text: 'q' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'Let me check.' },
+            { functionCall: { name: 'f', args: {} }, thoughtSignature: SKIP },
+            { functionCall: { name: 'g', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            { functionResponse: { name: 'f', response: { content: 'R1' } } },
+            { functionResponse: { name: 'g', response: { content: 'R2' } } },
+          ],
+        },
+      ],
+    );
+  });
 });
 
