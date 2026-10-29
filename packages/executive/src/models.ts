@@ -18,7 +18,43 @@ export type ToolCall = {
     name: string;
     arguments: string;
   };
+  /**
+   * Gemini's thought signature for this call (GAP-213), carried at `extra_content.google.thought_signature` where
+   * Google's OpenAI-compatible endpoint places it so agents echoing `tool_calls` return it on the next turn.
+   * Signatures are per call: in parallel calls only the first `functionCall` part carries one.
+   */
+  extra_content?: { google?: { thought_signature?: string } };
 };
+
+/**
+ * Google's documented placeholder for a `functionCall` that has no thought signature because Gemini did not produce it
+ * (for example a call made by a non-Gemini model before failover).
+ */
+const GEMINI_SKIP_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
+
+/** Extracts a non-empty `extra_content.google.thought_signature` string, ignoring everything else. */
+function thoughtSignatureOf(tc: unknown): string | undefined {
+  if (!tc || typeof tc !== 'object') return undefined;
+  const ec = (tc as { extra_content?: unknown }).extra_content;
+  if (!ec || typeof ec !== 'object') return undefined;
+  const google = (ec as { google?: unknown }).google;
+  if (!google || typeof google !== 'object') return undefined;
+  const sig = (google as { thought_signature?: unknown }).thought_signature;
+  return typeof sig === 'string' && sig.length > 0 ? sig : undefined;
+}
+
+function withThoughtSignature(sig: string | undefined): Pick<ToolCall, 'extra_content'> {
+  return sig ? { extra_content: { google: { thought_signature: sig } } } : {};
+}
+
+/**
+ * Signature for call `i` of an assistant tool-call step sent to Gemini (GAP-213). Each call keeps its own signature;
+ * in parallel calls (or coalesced `model` turns that already hold a `functionCall`) subsequent calls stay unsigned, and
+ * an unsigned step gets `skip_thought_signature_validator` on its first call only.
+ */
+function geminiThoughtSignature(calls: ToolCall[], i: number, hasPriorCall = false): string | undefined {
+  return thoughtSignatureOf(calls[i]) ?? (!hasPriorCall && i === 0 ? GEMINI_SKIP_THOUGHT_SIGNATURE : undefined);
+}
 
 /**
  * One message of the factory model API (OpenAI Chat Completions, §6.9 M1). An assistant turn may carry the tool calls
@@ -152,6 +188,7 @@ function parseToolCalls(v: unknown): ToolCall[] | null | undefined {
       id: tc.id,
       type: 'function',
       function: { name: fn.name, arguments: typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments ?? {}) },
+      ...withThoughtSignature(thoughtSignatureOf(tc)),
     });
   }
   return out;
@@ -167,11 +204,26 @@ function toolArgs(tc: ToolCall): Record<string, unknown> {
   }
 }
 
-/** The factory's messages in the OpenAI wire format, for OpenAI-compatible providers. */
-export function toOpenAiMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
+/**
+ * The factory's messages in the OpenAI wire format, for OpenAI-compatible providers. `extra_content` is omitted unless
+ * `googleThoughtSignatures` is enabled (Google's direct Gemini endpoint only, GAP-213).
+ */
+export function toOpenAiMessages(
+  messages: ChatMessage[],
+  opts: { googleThoughtSignatures?: boolean } = {},
+): Array<Record<string, unknown>> {
   return messages.map((m) => {
     if (m.role === 'tool') return { role: 'tool', tool_call_id: m.toolCallId, content: m.content };
-    if (m.role === 'assistant' && m.toolCalls?.length) return { role: 'assistant', content: m.content || null, tool_calls: m.toolCalls };
+    if (m.role === 'assistant' && m.toolCalls?.length) {
+      const calls = m.toolCalls;
+      const tool_calls = calls.map((tc, i) => ({
+        id: tc.id,
+        type: tc.type,
+        function: { name: tc.function.name, arguments: tc.function.arguments },
+        ...(opts.googleThoughtSignatures ? withThoughtSignature(geminiThoughtSignature(calls, i)) : {}),
+      }));
+      return { role: 'assistant', content: m.content || null, tool_calls };
+    }
     return { role: m.role, content: m.content };
   });
 }
@@ -538,26 +590,36 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
       }
 
       const systemParts = req.messages.filter((m) => m.role === 'system').map((m) => ({ text: m.content }));
-      type GeminiPart = { text?: string; functionCall?: { name: string; args: Record<string, unknown> }; functionResponse?: { name: string; response: { content: string } } };
+      type GeminiPart = {
+        text?: string;
+        functionCall?: { name: string; args: Record<string, unknown> };
+        thoughtSignature?: string;
+        functionResponse?: { name: string; response: { content: string } };
+      };
       const contents: Array<{ role: 'user' | 'model'; parts: GeminiPart[] }> = [];
       /** Gemini matches a function response to its call by name; OpenAI by id. */
       const callNames = new Map<string, string>();
       for (const m of req.messages) {
         if (m.role === 'system') continue;
         const role = m.role === 'assistant' ? 'model' : 'user';
+        const last = contents.at(-1);
         const parts: GeminiPart[] = [];
         if (m.role === 'tool') {
           parts.push({ functionResponse: { name: callNames.get(m.toolCallId) ?? m.toolCallId, response: { content: m.content } } });
         } else if (m.role === 'assistant' && m.toolCalls?.length) {
+          const hasPriorCall = last?.role === 'model' && last.parts.some((p) => p.functionCall !== undefined);
           if (m.content) parts.push({ text: m.content });
-          for (const tc of m.toolCalls) {
+          m.toolCalls.forEach((tc, i, calls) => {
             callNames.set(tc.id, tc.function.name);
-            parts.push({ functionCall: { name: tc.function.name, args: toolArgs(tc) } });
-          }
+            const thoughtSignature = geminiThoughtSignature(calls, i, hasPriorCall);
+            parts.push({
+              functionCall: { name: tc.function.name, args: toolArgs(tc) },
+              ...(thoughtSignature ? { thoughtSignature } : {}),
+            });
+          });
         } else {
           parts.push({ text: m.content });
         }
-        const last = contents.at(-1);
         if (last && last.role === role) last.parts.push(...parts);
         else contents.push({ role, parts });
       }
@@ -650,6 +712,7 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
           content?: {
             parts?: Array<{
               text?: unknown;
+              thoughtSignature?: unknown;
               functionCall?: { name?: string; args?: unknown };
             }>;
           };
@@ -663,6 +726,7 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
       for (const p of first?.content?.parts ?? []) {
         if (typeof p.text === 'string') textParts.push(p.text);
         if (p.functionCall && typeof p.functionCall === 'object' && typeof p.functionCall.name === 'string') {
+          const sig = typeof p.thoughtSignature === 'string' && p.thoughtSignature.length > 0 ? p.thoughtSignature : undefined;
           toolCalls.push({
             id: `call_${Math.random().toString(36).slice(2, 10)}`,
             type: 'function',
@@ -670,6 +734,7 @@ export function vertexGemini(opts: VertexOptions = {}): ModelAdapter {
               name: p.functionCall.name,
               arguments: typeof p.functionCall.args === 'string' ? p.functionCall.args : JSON.stringify(p.functionCall.args ?? {}),
             },
+            ...withThoughtSignature(sig),
           });
         }
       }
@@ -880,6 +945,8 @@ export type ApiKeyAdapterOptions = {
   timeoutMs?: number;
   /** Resolve a credential for a call to `target.host` (GAP-182: a key is only ever sent to a host bound to it). */
   resolveSecret?: (secretName: string, target: { host: string }) => Promise<string>;
+  /** Preserve and emit `extra_content.google.thought_signature` on `tool_calls` (direct Gemini only, GAP-213). */
+  googleThoughtSignatures?: boolean;
 };
 
 async function resolveApiKey(
@@ -964,7 +1031,7 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
       const key = await resolveApiKey(opts, entry, 'OPENAI_API_KEY', doFetch, chatUrl);
       const payload: Record<string, unknown> = {
         model: entry.id,
-        messages: toOpenAiMessages(req.messages),
+        messages: toOpenAiMessages(req.messages, { googleThoughtSignatures: opts.googleThoughtSignatures }),
         ...(req.maxTokens !== undefined ? { max_tokens: req.maxTokens } : {}),
         ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
         ...(req.topP !== undefined ? { top_p: req.topP } : {}),
@@ -1007,6 +1074,7 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
               id?: unknown;
               type?: unknown;
               function?: { name?: unknown; arguments?: unknown };
+              extra_content?: unknown;
             }>;
           };
           finish_reason?: string;
@@ -1027,6 +1095,7 @@ export function openAiCompatible(opts: ApiKeyAdapterOptions = {}): ModelAdapter 
                 name: fn.name,
                 arguments: typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments ?? {}),
               },
+              ...withThoughtSignature(thoughtSignatureOf(tc)),
             });
           }
         }
@@ -1090,6 +1159,7 @@ export function defaultModelAdapters(opts: DefaultModelAdaptersOptions = {}): Re
     chatPath: '/chat/completions',
     fetch: doFetch,
     resolveSecret: opts.resolveSecret,
+    googleThoughtSignatures: true,
   });
   return {
     'bedrock-converse': bedrockConverse(),
