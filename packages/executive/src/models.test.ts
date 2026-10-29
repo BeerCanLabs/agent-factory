@@ -828,7 +828,8 @@ describe('tool calls and tool results in the factory model API (GAP-173, M1, M3)
     await adapter.complete({ provider: 'vertex-gemini', id: 'gemini-2.5-flash' }, await parsed());
     assert.deepEqual(sent.contents, [
       { role: 'user', parts: [{ text: 'hey Rosie' }] },
-      { role: 'model', parts: [{ functionCall: { name: 'get_kitty_litter_status', args: {} } }] },
+      // Unsigned cross-model tool call gets Google's placeholder on the first functionCall part (GAP-213).
+      { role: 'model', parts: [{ functionCall: { name: 'get_kitty_litter_status', args: {} }, thoughtSignature: 'skip_thought_signature_validator' }] },
       { role: 'user', parts: [{ functionResponse: { name: 'get_kitty_litter_status', response: { content: '{"level":"clean"}' } } }] },
     ]);
   });
@@ -938,6 +939,348 @@ describe('a key is never sent through a redirect (GAP-182 review)', () => {
     await anthropicMessages({ apiKey: async () => 'k', fetch: doFetch }).complete({ provider: 'anthropic', id: 'claude-haiku-5-5' }, req);
     await openAiCompatible({ apiKey: async () => 'k', fetch: doFetch }).complete({ provider: 'openai', id: 'gpt-x' }, req);
     assert.deepEqual(seen, ['error', 'error']);
+  });
+});
+
+describe('Gemini thought signatures across tool-call turns (GAP-213, M1, M2, M3)', () => {
+  const SKIP = 'skip_thought_signature_validator';
+  const TOOLS = [{ type: 'function', function: { name: 'recall_conversation', parameters: { type: 'object', properties: {} } } }];
+
+  function scripted(...answers: unknown[]) {
+    const sent: Array<Record<string, any>> = [];
+    const doFetch = (async (_url: string, init: RequestInit) => {
+      sent.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify(answers[sent.length - 1]), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { sent, doFetch };
+  }
+
+  async function followUp(toolCalls: unknown[]) {
+    const { parseChatRequest } = await import('./models.js');
+    const out = parseChatRequest({
+      messages: [
+        { role: 'user', content: 'what did we decide yesterday?' },
+        { role: 'assistant', content: null, tool_calls: toolCalls },
+        ...toolCalls.map((tc, i) => ({
+          role: 'tool',
+          tool_call_id: (tc as { id: string }).id,
+          content: `{"hit":${i}}`,
+        })),
+      ],
+      tools: TOOLS,
+    });
+    assert.equal(out.ok, true, JSON.stringify(out));
+    return (out as { ok: true; req: ChatRequest }).req;
+  }
+
+  it('parseChatRequest preserves non-empty extra_content.google.thought_signature and strips malformed or extra fields', async () => {
+    const { parseChatRequest } = await import('./models.js');
+    const call = (extra_content: unknown, id = 'c1') => ({
+      id,
+      type: 'function',
+      function: { name: 'recall_conversation', arguments: '{}' },
+      ...(extra_content === undefined ? {} : { extra_content }),
+    });
+    const out = parseChatRequest({
+      messages: [
+        { role: 'user', content: 'hi' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            call({ google: { thought_signature: 'SIG_OK', extraGoogle: 'drop' }, extraTop: 'drop' }, 'c1'),
+            call({ google: { thought_signature: '' } }, 'c2'),
+            call({ google: { thought_signature: 123 } }, 'c3'),
+            call({ google: null }, 'c4'),
+            call('not-an-object', 'c5'),
+            call(['array'], 'c6'),
+            call({ other_vendor: { token: 'drop' } }, 'c7'),
+            call(undefined, 'c8'),
+          ],
+        },
+      ],
+    });
+    assert.equal(out.ok, true);
+    const assistant = (out as { ok: true; req: ChatRequest }).req.messages[1];
+    assert.equal(assistant.role, 'assistant');
+    assert.deepEqual(assistant.toolCalls, [
+      {
+        id: 'c1',
+        type: 'function',
+        function: { name: 'recall_conversation', arguments: '{}' },
+        extra_content: { google: { thought_signature: 'SIG_OK' } },
+      },
+      { id: 'c2', type: 'function', function: { name: 'recall_conversation', arguments: '{}' } },
+      { id: 'c3', type: 'function', function: { name: 'recall_conversation', arguments: '{}' } },
+      { id: 'c4', type: 'function', function: { name: 'recall_conversation', arguments: '{}' } },
+      { id: 'c5', type: 'function', function: { name: 'recall_conversation', arguments: '{}' } },
+      { id: 'c6', type: 'function', function: { name: 'recall_conversation', arguments: '{}' } },
+      { id: 'c7', type: 'function', function: { name: 'recall_conversation', arguments: '{}' } },
+      { id: 'c8', type: 'function', function: { name: 'recall_conversation', arguments: '{}' } },
+    ]);
+  });
+
+  it('vertexGemini round-trips thoughtSignature across parallel tool calls without copying onto unsigned siblings', async () => {
+    const { vertexGemini } = await import('./models.js');
+    const { sent, doFetch } = scripted(
+      {
+        candidates: [
+          {
+            content: {
+              parts: [
+                { functionCall: { name: 'recall_conversation', args: { q: 'a' } }, thoughtSignature: 'SIG_VERTEX_1' },
+                { functionCall: { name: 'recall_conversation', args: { q: 'b' } } },
+              ],
+            },
+            finishReason: 'STOP',
+          },
+        ],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 6 },
+      },
+      {
+        candidates: [{ content: { parts: [{ text: 'We decided X.' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 5 },
+      },
+    );
+
+    const adapter = vertexGemini({ project: 'gcp-proj', accessToken: async () => 'tok', fetch: doFetch });
+    const entry: CatalogEntry = { provider: 'vertex-gemini', id: 'gemini-4-argon', region: 'global' };
+
+    const turn1 = await adapter.complete(entry, { messages: [{ role: 'user', content: 'what did we decide yesterday?' }], tools: TOOLS });
+    assert.equal(turn1.finishReason, 'tool_calls');
+    assert.equal(turn1.toolCalls?.length, 2);
+    assert.deepEqual(turn1.toolCalls?.[0].extra_content, { google: { thought_signature: 'SIG_VERTEX_1' } });
+    assert.equal(turn1.toolCalls?.[1].extra_content, undefined);
+
+    // Agent echoes turn1.toolCalls back verbatim in the OpenAI request body on turn 2.
+    const turn2Req = await followUp(JSON.parse(JSON.stringify(turn1.toolCalls)));
+    const turn2 = await adapter.complete(entry, turn2Req);
+    assert.equal(turn2.content, 'We decided X.');
+
+    assert.deepEqual(sent[1].contents, [
+      { role: 'user', parts: [{ text: 'what did we decide yesterday?' }] },
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'recall_conversation', args: { q: 'a' } }, thoughtSignature: 'SIG_VERTEX_1' },
+          { functionCall: { name: 'recall_conversation', args: { q: 'b' } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          { functionResponse: { name: 'recall_conversation', response: { content: '{"hit":0}' } } },
+          { functionResponse: { name: 'recall_conversation', response: { content: '{"hit":1}' } } },
+        ],
+      },
+    ]);
+  });
+
+  it('directGemini (openAiCompatible with googleThoughtSignatures: true) round-trips signatures across parallel tool calls', async () => {
+    const { defaultModelAdapters, openAiCompatible } = await import('./models.js');
+    const { sent, doFetch } = scripted(
+      {
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_g1',
+                  type: 'function',
+                  function: { name: 'recall_conversation', arguments: '{"q":"a"}' },
+                  extra_content: { google: { thought_signature: 'SIG_DIRECT_1' } },
+                },
+                {
+                  id: 'call_g2',
+                  type: 'function',
+                  function: { name: 'recall_conversation', arguments: '{"q":"b"}' },
+                },
+              ],
+            },
+            finish_reason: 'tool_calls',
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 6 },
+      },
+      {
+        choices: [{ message: { content: 'Done.' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 18, completion_tokens: 2 },
+      },
+    );
+
+    const adapters = defaultModelAdapters({ resolveSecret: async () => 'gem-key', fetch: doFetch });
+    const entry: CatalogEntry = { provider: 'gemini', id: 'gemini-4-argon' };
+
+    const turn1 = await adapters.gemini.complete(entry, { messages: [{ role: 'user', content: 'what did we decide yesterday?' }], tools: TOOLS });
+    assert.deepEqual(turn1.toolCalls, [
+      {
+        id: 'call_g1',
+        type: 'function',
+        function: { name: 'recall_conversation', arguments: '{"q":"a"}' },
+        extra_content: { google: { thought_signature: 'SIG_DIRECT_1' } },
+      },
+      {
+        id: 'call_g2',
+        type: 'function',
+        function: { name: 'recall_conversation', arguments: '{"q":"b"}' },
+      },
+    ]);
+
+    const turn2Req = await followUp(JSON.parse(JSON.stringify(turn1.toolCalls)));
+    const turn2 = await adapters.google.complete({ provider: 'google', id: 'gemini-4-argon' }, turn2Req);
+    assert.equal(turn2.content, 'Done.');
+
+    assert.deepEqual(sent[1].messages[1], {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_g1',
+          type: 'function',
+          function: { name: 'recall_conversation', arguments: '{"q":"a"}' },
+          extra_content: { google: { thought_signature: 'SIG_DIRECT_1' } },
+        },
+        {
+          id: 'call_g2',
+          type: 'function',
+          function: { name: 'recall_conversation', arguments: '{"q":"b"}' },
+        },
+      ],
+    });
+
+    // Standalone openAiCompatible with googleThoughtSignatures: true behaves identically.
+    const standalone = scripted({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] });
+    await openAiCompatible({ apiKey: async () => 'k', googleThoughtSignatures: true, fetch: standalone.doFetch }).complete(entry, turn2Req);
+    assert.deepEqual(standalone.sent[0].messages[1], sent[1].messages[1]);
+  });
+
+  it('openai and xai adapters never include extra_content on outgoing tool_calls', async () => {
+    const { defaultModelAdapters, openAiCompatible } = await import('./models.js');
+    const req = await followUp([
+      {
+        id: 'call_1',
+        type: 'function',
+        function: { name: 'recall_conversation', arguments: '{}' },
+        extra_content: { google: { thought_signature: 'SIG_FROM_GEMINI' } },
+      },
+      {
+        id: 'call_2',
+        type: 'function',
+        function: { name: 'recall_conversation', arguments: '{}' },
+      },
+    ]);
+
+    for (const provider of ['openai', 'xai'] as const) {
+      const { sent, doFetch } = scripted({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] });
+      const adapters = defaultModelAdapters({ resolveSecret: async () => 'key', fetch: doFetch });
+      await adapters[provider].complete({ provider, id: 'model-1' }, req);
+      assert.deepEqual(
+        sent[0].messages[1].tool_calls,
+        [
+          { id: 'call_1', type: 'function', function: { name: 'recall_conversation', arguments: '{}' } },
+          { id: 'call_2', type: 'function', function: { name: 'recall_conversation', arguments: '{}' } },
+        ],
+        provider,
+      );
+      assert.equal(JSON.stringify(sent[0]).includes('extra_content'), false, provider);
+    }
+
+    const custom = scripted({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] });
+    await openAiCompatible({ apiKey: async () => 'key', fetch: custom.doFetch }).complete({ provider: 'openai', id: 'gpt-4o' }, req);
+    assert.equal(JSON.stringify(custom.sent[0]).includes('extra_content'), false);
+  });
+
+  it('injects skip_thought_signature_validator on the first tool call of an unsigned assistant turn on both Gemini paths', async () => {
+    const { parseChatRequest, vertexGemini, defaultModelAdapters } = await import('./models.js');
+    const parsed = parseChatRequest({
+      messages: [
+        { role: 'user', content: 'step 1' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            { id: 'toolu_1', type: 'function', function: { name: 'f', arguments: '{}' } },
+            { id: 'toolu_2', type: 'function', function: { name: 'g', arguments: '{}' } },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'toolu_1', content: 'R1' },
+        { role: 'tool', tool_call_id: 'toolu_2', content: 'R2' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            { id: 'fc_3', type: 'function', function: { name: 'f', arguments: '{}' }, extra_content: { google: { thought_signature: 'SIG_REAL' } } },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'fc_3', content: 'R3' },
+      ],
+    });
+    assert.equal(parsed.ok, true);
+    const req = (parsed as { ok: true; req: ChatRequest }).req;
+
+    const vertex = scripted({ candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }] });
+    await vertexGemini({ project: 'p', accessToken: async () => 't', fetch: vertex.doFetch }).complete(
+      { provider: 'vertex-gemini', id: 'gemini-4-argon' },
+      req,
+    );
+    const modelTurns = (vertex.sent[0].contents as Array<{ role: string; parts: unknown[] }>).filter((c) => c.role === 'model');
+    assert.deepEqual(modelTurns, [
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'f', args: {} }, thoughtSignature: SKIP },
+          { functionCall: { name: 'g', args: {} } },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'f', args: {} }, thoughtSignature: 'SIG_REAL' }],
+      },
+    ]);
+
+    const direct = scripted({ choices: [{ message: { content: 'done' }, finish_reason: 'stop' }] });
+    await defaultModelAdapters({ resolveSecret: async () => 'k', fetch: direct.doFetch }).gemini.complete(
+      { provider: 'gemini', id: 'gemini-4-argon' },
+      req,
+    );
+    const assistantTurns = (direct.sent[0].messages as Array<{ role: string; tool_calls?: unknown[] }>).filter((m) => m.role === 'assistant');
+    assert.deepEqual(
+      assistantTurns.map((m) => m.tool_calls),
+      [
+        [
+          { id: 'toolu_1', type: 'function', function: { name: 'f', arguments: '{}' }, extra_content: { google: { thought_signature: SKIP } } },
+          { id: 'toolu_2', type: 'function', function: { name: 'g', arguments: '{}' } },
+        ],
+        [
+          { id: 'fc_3', type: 'function', function: { name: 'f', arguments: '{}' }, extra_content: { google: { thought_signature: 'SIG_REAL' } } },
+        ],
+      ],
+    );
+  });
+
+  it('preserves per-part signatures when multiple parts in a turn carry their own signature without copying across unsigned parts', async () => {
+    const { vertexGemini, toOpenAiMessages } = await import('./models.js');
+    const req = await followUp([
+      { id: 'a', type: 'function', function: { name: 'f', arguments: '{}' }, extra_content: { google: { thought_signature: 'SIG_A' } } },
+      { id: 'b', type: 'function', function: { name: 'g', arguments: '{}' } },
+      { id: 'c', type: 'function', function: { name: 'h', arguments: '{}' }, extra_content: { google: { thought_signature: 'SIG_C' } } },
+    ]);
+    const { sent, doFetch } = scripted({ candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }] });
+    await vertexGemini({ project: 'p', accessToken: async () => 't', fetch: doFetch }).complete(
+      { provider: 'vertex-gemini', id: 'gemini-4-argon' },
+      req,
+    );
+    assert.deepEqual(sent[0].contents[1].parts, [
+      { functionCall: { name: 'f', args: {} }, thoughtSignature: 'SIG_A' },
+      { functionCall: { name: 'g', args: {} } },
+      { functionCall: { name: 'h', args: {} }, thoughtSignature: 'SIG_C' },
+    ]);
+    const wire = toOpenAiMessages(req.messages, { googleThoughtSignatures: true })[1] as { tool_calls: Array<{ extra_content?: unknown }> };
+    assert.deepEqual(
+      wire.tool_calls.map((tc) => tc.extra_content),
+      [{ google: { thought_signature: 'SIG_A' } }, undefined, { google: { thought_signature: 'SIG_C' } }],
+    );
   });
 });
 
