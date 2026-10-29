@@ -364,7 +364,7 @@ Agents call models through the gatekeeper-egress using the **factory model API**
 | Field | Required | Notes |
 |---|---|---|
 | `model` | no | Ignored for choosing: agents never choose a model (M2). The factory serves the model the owner assigned (the run's pin, the policy's first model, or the factory default) and records a differing name. Send `FACTORY_MODEL` if you send anything. |
-| `messages` | yes | `[{"role": "system" \| "user" \| "assistant" \| "tool", "content": "<string>"}]`; an assistant turn may carry `tool_calls`, and a `tool` message carries `tool_call_id` (GAP-173). |
+| `messages` | yes | `[{"role": "system" \| "user" \| "assistant" \| "tool", "content": "<string>"}]`; an assistant turn may carry `tool_calls`, and a `tool` message carries `tool_call_id` (GAP-173). When echoing an `assistant` turn's `tool_calls` on the follow-up call, pass the `tool_calls` entries unchanged so opaque fields such as `extra_content` (which carry provider state like Gemini thought signatures, GAP-213) are preserved; `gatekeeper-egress` strips them for non-Google providers and synthesizes the cross-model fallback when absent. |
 | `max_tokens` | no | Output token limit. |
 | `temperature` | no | |
 
