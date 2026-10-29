@@ -3,6 +3,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { createHmac } from 'node:crypto';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -62,7 +63,7 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
       ]),
       version: '0.1.0',
-      providers: [envProvider({})],
+      providers: [envProvider({ FACTORY_GITHUB_WEBHOOK_SECRET: 'test-creation-secret' })],
       runtime: noopRuntime(),
       runs: new MemoryRunStore(),
       runTokens: tokens,
@@ -104,12 +105,18 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
   it('a release of the runtime repository does not offer an update to a configuration agent', async () => {
     const rec = { id: 'hooked-cfg', name: 'h', role: 'Agent', state: 'SLEEPING', provider: 'cloud', artifact: IMAGE, requires: [], ungated: [], gated: [], triggers: [], dir: '/x', repo: 'https://github.com/BeerCanLabs/agent-factory', commit: RUNTIME_SHA, createdFrom: 'configuration' } as never;
     state.agents.set('hooked-cfg', rec);
+    const bodyStr = JSON.stringify({ action: 'published', repository: { html_url: 'https://github.com/BeerCanLabs/agent-factory' }, release: { tag_name: 'v9.9.9', target_commitish: 'f'.repeat(40) } });
+    const sig = 'sha256=' + createHmac('sha256', 'test-creation-secret').update(bodyStr).digest('hex');
     const res = await fetch(`http://127.0.0.1:${port}/api/v1/hooks/github`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-github-event': 'release' },
-      body: JSON.stringify({ action: 'published', repository: { html_url: 'https://github.com/BeerCanLabs/agent-factory' }, release: { tag_name: 'v9.9.9', target_commitish: 'f'.repeat(40) } }),
+      headers: {
+        'content-type': 'application/json',
+        'x-github-event': 'release',
+        'x-hub-signature-256': sig,
+      },
+      body: bodyStr,
     });
-    assert.ok(res.status < 500);
+    assert.equal(res.status, 200);
     const after = state.agents.get('hooked-cfg')!;
     assert.equal(after.offeredCommit, undefined);
     assert.equal(after.updateAvailable, undefined);

@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { timingSafeEqual, randomUUID, createHash } from 'node:crypto';
+import { timingSafeEqual, randomUUID, createHash, createHmac } from 'node:crypto';
 import { checkAgentUpdate, extractGitHubRepo, isNewerVersion, parseSemVer } from './updates.js';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
@@ -66,6 +66,12 @@ import { sanitizeOutputWithProvenance } from './provenance.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { resolveModelReference, type DiscoveredModel } from '@beercanlabs/factory-executive';
 import { ModelStore, type StoredModel, type StagedModel } from './models.js';
+
+/**
+ * §6.12 A1: Platform secret used to verify inbound GitHub release webhooks at `POST /api/v1/hooks/github`.
+ * Senders must sign raw payload bytes using HMAC-SHA256 and deliver the signature via `X-Hub-Signature-256`.
+ */
+export const FACTORY_GITHUB_WEBHOOK_SECRET = 'FACTORY_GITHUB_WEBHOOK_SECRET';
 
 /** AM2: a console turn the agent may answer through `POST /runs/:id/reply`. */
 export type ConsoleTurn = { agentId: string; actor: string; at: number };
@@ -215,19 +221,25 @@ export function json(res: http.ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-function readBody(req: http.IncomingMessage, limit = MAX_BODY): Promise<string> {
+function readBodyBytes(req: http.IncomingMessage, limit = MAX_BODY): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', (c) => {
-      body += c.toString();
-      if (body.length > limit) {
+    const chunks: Buffer[] = [];
+    let received = 0;
+    req.on('data', (c: Buffer) => {
+      chunks.push(c);
+      received += c.length;
+      if (received > limit) {
         reject(Object.assign(new Error('payload too large'), { status: 413 }));
         req.destroy();
       }
     });
-    req.on('end', () => resolve(body));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
+}
+
+function readBody(req: http.IncomingMessage, limit = MAX_BODY): Promise<string> {
+  return readBodyBytes(req, limit).then((b) => b.toString('utf8'));
 }
 
 export async function readJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
@@ -1505,7 +1517,29 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/api/v1/hooks/github' && req.method === 'POST') {
-    const raw = await readBody(req);
+    const rawBytes = await readBodyBytes(req);
+    const refuse = () => {
+      json(res, 401, { error: 'bad_webhook_signature' });
+    };
+    const sigHeader = req.headers['x-hub-signature-256'];
+    const signature = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader;
+    if (!signature || typeof signature !== 'string' || !signature.startsWith('sha256=')) {
+      refuse();
+      return;
+    }
+    const bound = await bindSecrets([FACTORY_GITHUB_WEBHOOK_SECRET], state.providers);
+    const secret = bound.ok ? bound.env[FACTORY_GITHUB_WEBHOOK_SECRET] : undefined;
+    if (!secret) {
+      refuse();
+      return;
+    }
+    const expected = 'sha256=' + createHmac('sha256', secret).update(rawBytes).digest('hex');
+    if (!safeEqual(signature, expected)) {
+      refuse();
+      return;
+    }
+
+    const raw = rawBytes.toString('utf8');
     let body: Record<string, any> = {};
     try {
       body = JSON.parse(raw);
