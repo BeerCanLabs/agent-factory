@@ -182,6 +182,8 @@ export type FactoryState = {
   /** The Inspector: events, run progress and the enterprise bus (§6.15). */
   inspector: Inspector;
   secretValues: Set<string>;
+  /** Runs that received a turn from a non-manager and are tainted against model management (§6.9 M2, GAP-210). */
+  nonManagerSharedRuns?: Set<string>;
   /** Short-lived cache of bound secret values, so pre-flight and redaction do not hit the vault on every wake. */
   secretCache?: Map<string, { value: string; at: number }>;
   /** Provider keys only the gatekeeper-egress holds (injected at egress, S1). Pre-flight treats them as satisfied and never reads them. */
@@ -400,6 +402,105 @@ export function resolveRequesterActor(state: FactoryState, run: Run): string | u
     return who.actor;
   }
   return undefined;
+}
+
+/** Whether the sender of a conversation turn is an Owner of the agent or a Factory Admin (§6.9 M2, GAP-210). */
+export function isSenderManager(
+  state: FactoryState,
+  agentId: string,
+  sender: { requestedBy?: { provider: string; id: string }; caller?: AuthenticatedCaller; actor?: string },
+): boolean {
+  const owners = ownersOf(state, agentId).map((o) => o.toLowerCase());
+  const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (sender.requestedBy) {
+    const link = state.identityLinks?.resolveLink(sender.requestedBy.provider, sender.requestedBy.id);
+    if (!link) return false;
+    const actorLower = link.actor.toLowerCase();
+    if (owners.includes(actorLower)) return true;
+    const roles = link.roles ?? [];
+    const isCloudflare = actorLower.startsWith('cloudflare:');
+    const email = isCloudflare ? actorLower.slice('cloudflare:'.length).trim() : (actorLower.startsWith('oidc:') ? actorLower.slice(5).trim() : '');
+    return roles.includes('admin') || (roles.length === 0 && email !== '' && adminEmails.includes(email));
+  }
+
+  const actor = sender.caller?.actor ?? sender.actor;
+  if (!actor) return false;
+  const actorLower = actor.toLowerCase();
+  if (owners.includes(actorLower)) return true;
+  if (sender.caller?.roles?.includes('admin')) return true;
+  if (actorIsAdmin(state, actor, sender.caller?.roles)) return true;
+  if (actorLower === 'token:admin') return true;
+  const isCloudflare = actorLower.startsWith('cloudflare:');
+  const email = isCloudflare ? actorLower.slice('cloudflare:'.length).trim() : (actorLower.startsWith('oidc:') ? actorLower.slice(5).trim() : '');
+  if (email !== '' && adminEmails.includes(email)) return true;
+
+  return false;
+}
+
+/** Verified Human Requester Authority for model selection & failback management (§6.9 M2, GAP-210, TSK-287). */
+export function canRunManageModels(
+  state: FactoryState,
+  run: Run,
+): { allowed: true; actor: string } | { allowed: false; actor?: undefined } {
+  if (state.nonManagerSharedRuns?.has(run.runId)) {
+    return { allowed: false };
+  }
+
+  const req = requesterOfRun(state, run);
+  if (!req) return { allowed: false };
+
+  const owners = ownersOf(state, run.agentId).map((o) => o.toLowerCase());
+  const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (req.kind === 'identity') {
+    const link = state.identityLinks?.resolveLink(req.provider, req.id);
+    if (!link) return { allowed: false };
+    const actor = link.actor;
+    const actorLower = actor.toLowerCase();
+    if (owners.includes(actorLower)) {
+      return { allowed: true, actor };
+    }
+    const roles = link.roles ?? [];
+    const isCloudflare = actorLower.startsWith('cloudflare:');
+    const email = isCloudflare ? actorLower.slice('cloudflare:'.length).trim() : (actorLower.startsWith('oidc:') ? actorLower.slice(5).trim() : '');
+    const isAdmin = roles.includes('admin') || (roles.length === 0 && email !== '' && adminEmails.includes(email));
+    if (isAdmin) {
+      return { allowed: true, actor };
+    }
+    return { allowed: false };
+  }
+
+  if (req.kind === 'principal') {
+    const actor = req.actor;
+    const actorLower = actor.toLowerCase();
+    if (owners.includes(actorLower)) {
+      return { allowed: true, actor };
+    }
+    if (run.caller?.roles?.includes('admin')) {
+      return { allowed: true, actor };
+    }
+    if (actorIsAdmin(state, actor, run.caller?.roles)) {
+      return { allowed: true, actor };
+    }
+    if (actorLower === 'token:admin') {
+      return { allowed: true, actor };
+    }
+    const isCloudflare = actorLower.startsWith('cloudflare:');
+    const email = isCloudflare ? actorLower.slice('cloudflare:'.length).trim() : (actorLower.startsWith('oidc:') ? actorLower.slice(5).trim() : '');
+    if (email !== '' && adminEmails.includes(email)) {
+      return { allowed: true, actor };
+    }
+    return { allowed: false };
+  }
+
+  return { allowed: false };
 }
 
 /**
@@ -798,6 +899,11 @@ async function handOff(
   if (currentRun) {
     if (currentRun.input === undefined) currentRun.input = payload;
     scheduleTimeout(state, currentRun);
+    // Warm-run taint protection (§6.9 M2, GAP-210): if a warm run receives a turn from a non-manager, taint it against model changes.
+    if (!isSenderManager(state, agent.id, { requestedBy: opts.requestedBy, caller: opts.caller, actor })) {
+      if (!state.nonManagerSharedRuns) state.nonManagerSharedRuns = new Set();
+      state.nonManagerSharedRuns.add(currentRun.runId);
+    }
   }
   state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, runId: currentRun?.runId, type: 'action', action: 'CONVERSATION_HANDOFF', actor, content: payload });
   return { status: 202, body: { ok: true } };
@@ -976,6 +1082,292 @@ async function setAgentModels(
       defaultModel: defaultModelOf(state) ?? null,
     },
   };
+}
+
+/**
+ * Switch model slots for an agent via run token (§6.9 M2, GAP-210, TSK-287).
+ * Strictly bounded by approved models (prompt-injection ceiling).
+ */
+async function applyRunModelSwitch(
+  state: FactoryState,
+  run: Run,
+  body: {
+    currentModel?: string | null;
+    primaryModel?: string | null;
+    secondaryModel?: string | null;
+  },
+  actor: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const pol = state.policies.get(run.agentId);
+  const eff = effectiveAgentModels(pol ?? {}, defaultModelOf(state));
+  const approved = eff.approvedModels;
+  if (approved.length === 0) {
+    return { status: 400, body: { error: 'invalid_model_selection', message: 'No approved models available for agent' } };
+  }
+
+  if (body.currentModel === undefined && body.primaryModel === undefined && body.secondaryModel === undefined) {
+    return { status: 400, body: { error: 'invalid_model_selection', message: 'At least one model slot must be specified' } };
+  }
+
+  if (body.currentModel !== undefined) {
+    if (typeof body.currentModel !== 'string' || !body.currentModel.length) {
+      return { status: 400, body: { error: 'invalid_model_selection', message: 'currentModel must be a non-empty string' } };
+    }
+    if (!approved.includes(body.currentModel)) {
+      return { status: 400, body: { error: 'invalid_model_selection', message: `currentModel '${body.currentModel}' is not in approved models: ${approved.join(', ')}` } };
+    }
+  }
+
+  if (body.primaryModel !== undefined) {
+    if (typeof body.primaryModel !== 'string' || !body.primaryModel.length) {
+      return { status: 400, body: { error: 'invalid_model_selection', message: 'primaryModel must be a non-empty string' } };
+    }
+    if (!approved.includes(body.primaryModel)) {
+      return { status: 400, body: { error: 'invalid_model_selection', message: `primaryModel '${body.primaryModel}' is not in approved models: ${approved.join(', ')}` } };
+    }
+  }
+
+  if (body.secondaryModel !== undefined && body.secondaryModel !== null) {
+    if (typeof body.secondaryModel !== 'string' || !body.secondaryModel.length) {
+      return { status: 400, body: { error: 'invalid_model_selection', message: 'secondaryModel must be a non-empty string or null' } };
+    }
+    if (!approved.includes(body.secondaryModel)) {
+      return { status: 400, body: { error: 'invalid_model_selection', message: `secondaryModel '${body.secondaryModel}' is not in approved models: ${approved.join(', ')}` } };
+    }
+  }
+
+  let next: AgentPolicy = structuredClone(pol ?? {});
+  if (!next.models || next.models.length === 0) {
+    next.models = [...approved];
+  }
+
+  if (body.currentModel !== undefined) {
+    next.currentModel = body.currentModel;
+  }
+  if (body.primaryModel !== undefined) {
+    next.primaryModel = body.primaryModel;
+  }
+  if (body.secondaryModel !== undefined) {
+    if (body.secondaryModel === null) {
+      delete next.secondaryModel;
+    } else {
+      next.secondaryModel = body.secondaryModel;
+    }
+  }
+
+  const checked = validatePolicy(next);
+  if (!checked.ok) {
+    return { status: 400, body: { error: 'invalid_model_selection', message: checked.error } };
+  }
+
+  state.policies.set(run.agentId, checked.policy);
+
+  state.ledger.append({
+    timestamp: new Date().toISOString(),
+    agentId: run.agentId,
+    runId: run.runId,
+    type: 'action',
+    action: 'MODEL_SWITCHED',
+    actor,
+    model: checked.policy.currentModel ?? checked.policy.primaryModel,
+    requestedModel: eff.currentModel ?? undefined,
+    models: checked.policy.models,
+  });
+
+  state.ledger.append({
+    timestamp: new Date().toISOString(),
+    agentId: run.agentId,
+    runId: run.runId,
+    type: 'action',
+    action: 'POLICY_UPDATED',
+    actor,
+  });
+
+  await recordConfig(state, run.agentId, { actor, reason: 'agent models switched via run token' });
+
+  const targetModel = checked.policy.currentModel ?? checked.policy.primaryModel ?? undefined;
+  if (targetModel) {
+    run.model = targetModel;
+    state.runs.update(run.runId, { model: targetModel });
+  }
+  (run as any).config = { model: targetModel };
+
+  const updatedEff = effectiveAgentModels(checked.policy, defaultModelOf(state));
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      agentId: run.agentId,
+      ...updatedEff,
+      defaultModel: defaultModelOf(state) ?? null,
+    },
+  };
+}
+
+/**
+ * Handle run-token model read/switch routes (§6.9 M2, GAP-210, TSK-287).
+ * GET/PUT /api/v1/runs/:id/models
+ */
+async function handleRunModels(state: FactoryState, run: Run, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const canManage = canRunManageModels(state, run);
+  const pol = state.policies.get(run.agentId);
+  const eff = effectiveAgentModels(pol ?? {}, defaultModelOf(state));
+
+  if (req.method === 'GET') {
+    json(res, 200, {
+      agentId: run.agentId,
+      ...eff,
+      defaultModel: defaultModelOf(state) ?? null,
+      canManageModels: canManage.allowed,
+    });
+    return;
+  }
+
+  if (req.method === 'PUT') {
+    if (!canManage.allowed) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: run.agentId,
+        runId: run.runId,
+        type: 'action',
+        action: 'MODEL_SWITCH_DENIED',
+        actor: run.actor,
+        reason: 'unauthorized_requester',
+      });
+      json(res, 403, { error: 'requester_unauthorized_for_model_switch' });
+      return;
+    }
+
+    const body = (await readJson(req)) as Record<string, unknown>;
+    if (body.approvedModels !== undefined) {
+      json(res, 403, { error: 'approved_models_ceiling', message: 'Run tokens cannot modify approved models' });
+      return;
+    }
+
+    const out = await applyRunModelSwitch(state, run, body, canManage.actor);
+    json(res, out.status, out.body);
+    return;
+  }
+}
+
+/**
+ * Handle MCP requests authenticated via run token (§6.9 M2, GAP-210, TSK-287).
+ * Exposes get_agent_models and (if canManageModels) set_agent_models scoped to run.agentId.
+ */
+export async function handleRunMcp(state: FactoryState, payload: Record<string, unknown>, run: Run): Promise<unknown> {
+  const id = payload.id ?? 1;
+  const method = payload.method;
+  if (method === 'initialize') {
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: {
+        protocolVersion: '2024-11-05',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'agent-factory', version: state.version },
+      },
+    };
+  }
+  if (method === 'ping') {
+    return { jsonrpc: '2.0', id, result: {} };
+  }
+  const canManage = canRunManageModels(state, run);
+  if (method === 'tools/list') {
+    const tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> = [
+      {
+        name: 'get_agent_models',
+        description: 'Get the effective and configured model slots and approved models for this agent',
+        inputSchema: { type: 'object', properties: { id: { type: 'string' } } },
+      },
+    ];
+    if (canManage.allowed) {
+      tools.push({
+        name: 'set_agent_models',
+        description: 'Configure current, primary, and secondary model slots for this agent within approved models',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            currentModel: { type: 'string' },
+            primaryModel: { type: 'string' },
+            secondaryModel: { type: 'string' },
+          },
+        },
+      });
+    }
+    return { jsonrpc: '2.0', id, result: { tools } };
+  }
+  if (method === 'tools/call') {
+    const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+    if (params.name === 'get_agent_models') {
+      const pol = state.policies.get(run.agentId);
+      const eff = effectiveAgentModels(pol ?? {}, defaultModelOf(state));
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                agentId: run.agentId,
+                ...eff,
+                defaultModel: defaultModelOf(state) ?? null,
+                canManageModels: canManage.allowed,
+              }),
+            },
+          ],
+        },
+      };
+    }
+    if (params.name === 'set_agent_models') {
+      if (!canManage.allowed) {
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId: run.agentId,
+          runId: run.runId,
+          type: 'action',
+          action: 'MODEL_SWITCH_DENIED',
+          actor: run.actor,
+          reason: 'unauthorized_requester',
+        });
+        return {
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32001, message: 'forbidden: run requester is unauthorized for model switch' },
+        };
+      }
+      const args = (params.arguments ?? {}) as Record<string, unknown>;
+      if (args.approvedModels !== undefined) {
+        return {
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32602, message: 'Run tokens cannot modify approved models' },
+        };
+      }
+      const out = await applyRunModelSwitch(state, run, args, canManage.actor);
+      if (out.status >= 400) {
+        return {
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32602, message: (out.body.message as string) || (out.body.error as string) },
+        };
+      }
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify(out.body) }],
+        },
+      };
+    }
+    return {
+      jsonrpc: '2.0',
+      id,
+      error: { code: -32001, message: `Tool "${String(params.name)}" not found or unsupported for run tokens` },
+    };
+  }
+  return { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method ${String(method)}` } };
 }
 
 /**
@@ -1811,6 +2203,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   // Agent-facing: authenticated by the run token minted at start.
+  const runModels = path.match(/^\/api\/v1\/runs\/([^/]+)\/models$/);
+  if (runModels && (req.method === 'GET' || req.method === 'PUT')) {
+    const run = await authenticateRun(req, res, state, runModels[1]);
+    if (!run) return;
+    await handleRunModels(state, run, req, res);
+    return;
+  }
+
   const runSelf = path.match(/^\/api\/v1\/runs\/([^/]+)\/(input|result|heartbeat|mailbox|training|reply|agent-config|role-requests|builder)$/);
   if (runSelf && (((runSelf[2] === 'input' || runSelf[2] === 'mailbox' || runSelf[2] === 'agent-config') && req.method === 'GET') || (runSelf[2] !== 'input' && runSelf[2] !== 'mailbox' && runSelf[2] !== 'agent-config' && req.method === 'POST'))) {
     const run = await authenticateRun(req, res, state, runSelf[1]);
@@ -2823,6 +3223,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         },
         spend: { run: state.smokeRunSpend?.get(run.runId) ?? 0, day: 0, month: 0 },
         access: { restricted: false },
+        canManageModels: false,
       });
       return;
     }
@@ -2838,6 +3239,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       // E12 item 4: what the run's requesting person may reach through skill routes; the egress applies it.
       // A built-in agent is the factory's own and has no person's roles.
       access: isBuiltin ? { restricted: false } : accessForRun(state, run, agent),
+      canManageModels: isBuiltin ? false : canRunManageModels(state, run).allowed,
     });
     return;
   }
@@ -3044,9 +3446,25 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if (path === '/mcp' && req.method === 'POST') {
-    const principal = await requirePrivilege(req, res, state, 'mcp.use');
-    if (!principal) return;
-    json(res, 200, await handleMcp(state, await readJson(req), principal));
+    const who = await identify(req, state);
+    if (who.ok) {
+      const principal = await requirePrivilege(req, res, state, 'mcp.use');
+      if (!principal) return;
+      json(res, 200, await handleMcp(state, await readJson(req), principal));
+      return;
+    }
+    const verdict = await verifyRun({
+      tokens: state.runTokens,
+      token: bearerOf(req),
+      runOf: (id) => state.runs.get(id),
+      ended: (r) => isTerminal(r.state),
+    });
+    if (verdict.kind === 'ok') {
+      const payload = (await readJson(req)) as Record<string, unknown>;
+      json(res, 200, await handleRunMcp(state, payload, verdict.run));
+      return;
+    }
+    await requirePrivilege(req, res, state, 'mcp.use');
     return;
   }
 

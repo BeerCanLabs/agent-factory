@@ -718,9 +718,14 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       adapter?: ModelAdapter;
       customCatalog?: ModelCatalog;
       failoverHandler?: (req: { runId: string; toModel: string; fromModel?: string; reason?: string }) => Promise<{ ok: boolean; currentModel?: string }>;
+      enableRunModels?: boolean;
+      getRunModelsHandler?: (req: { runId: string; runToken: string }) => Promise<any>;
+      setRunModelsHandler?: (req: { runId: string; runToken: string; currentModel?: string; primaryModel?: string; secondaryModel?: string }) => Promise<any>;
     } = {}) => {
       const rigLedger: Array<Record<string, any>> = [];
       const failoverCalls: Array<{ runId: string; toModel: string; fromModel?: string; reason?: string }> = [];
+      const getRunModelsCalls: Array<{ runId: string; runToken: string }> = [];
+      const setRunModelsCalls: Array<{ runId: string; runToken: string; currentModel?: string; primaryModel?: string; secondaryModel?: string }> = [];
 
       const testControl: ControlClient = {
         async runContext(runId) {
@@ -748,6 +753,37 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
           }
           return { ok: true, currentModel: req.toModel };
         },
+        ...(opts.enableRunModels
+          ? {
+              async getRunModels(req) {
+                getRunModelsCalls.push(req);
+                if (opts.getRunModelsHandler) return opts.getRunModelsHandler(req);
+                return {
+                  agentId: ctx.run.agentId,
+                  approvedModels: ctx.policy.models ?? [],
+                  currentModel: ctx.policy.currentModel ?? ctx.policy.models?.[0],
+                  primaryModel: ctx.policy.primaryModel ?? ctx.policy.models?.[0],
+                  secondaryModel: ctx.policy.secondaryModel,
+                  canManageModels: ctx.canManageModels,
+                };
+              },
+              async setRunModels(req) {
+                setRunModelsCalls.push(req);
+                if (opts.setRunModelsHandler) return opts.setRunModelsHandler(req);
+                if (req.currentModel) ctx.policy.currentModel = req.currentModel;
+                if (req.primaryModel) ctx.policy.primaryModel = req.primaryModel;
+                if (req.secondaryModel !== undefined) ctx.policy.secondaryModel = req.secondaryModel;
+                return {
+                  agentId: ctx.run.agentId,
+                  approvedModels: ctx.policy.models ?? [],
+                  currentModel: ctx.policy.currentModel,
+                  primaryModel: ctx.policy.primaryModel,
+                  secondaryModel: ctx.policy.secondaryModel,
+                  canManageModels: ctx.canManageModels,
+                };
+              },
+            }
+          : {}),
       };
 
       const defaultFailoverCatalog = parseModelCatalog(
@@ -778,7 +814,7 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
         },
       });
 
-      return { server, testControl, rigLedger, failoverCalls };
+      return { server, testControl, rigLedger, failoverCalls, getRunModelsCalls, setRunModelsCalls };
     };
 
     it('fails over from primary (m1) to secondary (m2) on upstream 500 and updates currentModel persistently', async () => {
@@ -1170,6 +1206,303 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
 
         assert.equal(rig.failoverCalls.length, 0);
         assert.equal(ctx.policy.currentModel, 'm1');
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+  });
+
+  describe('Conversational Model Query & Switching (GAP-210, TSK-287, M2)', () => {
+    const createTestRig = (opts: {
+      adapter?: ModelAdapter;
+      customCatalog?: ModelCatalog;
+      enableRunModels?: boolean;
+    } = {}) => {
+      const rigLedger: Array<Record<string, any>> = [];
+      const getRunModelsCalls: Array<{ runId: string; runToken: string }> = [];
+      const setRunModelsCalls: Array<{ runId: string; runToken: string; currentModel?: string; primaryModel?: string; secondaryModel?: string }> = [];
+
+      const testControl: ControlClient = {
+        async runContext(runId) {
+          return runId === ctx.run.runId ? structuredClone(ctx) : null;
+        },
+        async requestApproval() {
+          throw new Error('unused');
+        },
+        async consumeApproval() {
+          return false;
+        },
+        async ledger(event) {
+          rigLedger.push(event);
+        },
+        async getRunModels(req) {
+          getRunModelsCalls.push(req);
+          return {
+            agentId: ctx.run.agentId,
+            approvedModels: ctx.policy.models ?? [],
+            currentModel: ctx.policy.currentModel ?? ctx.policy.models?.[0],
+            primaryModel: ctx.policy.primaryModel ?? ctx.policy.models?.[0],
+            secondaryModel: ctx.policy.secondaryModel,
+            canManageModels: ctx.canManageModels,
+          };
+        },
+        async setRunModels(req) {
+          setRunModelsCalls.push(req);
+          if (req.currentModel) ctx.policy.currentModel = req.currentModel;
+          if (req.primaryModel) ctx.policy.primaryModel = req.primaryModel;
+          if (req.secondaryModel !== undefined) ctx.policy.secondaryModel = req.secondaryModel;
+          return {
+            agentId: ctx.run.agentId,
+            approvedModels: ctx.policy.models ?? [],
+            currentModel: ctx.policy.currentModel,
+            primaryModel: ctx.policy.primaryModel,
+            secondaryModel: ctx.policy.secondaryModel,
+            canManageModels: ctx.canManageModels,
+          };
+        },
+      };
+
+      const catalog = parseModelCatalog(
+        JSON.stringify({
+          m1: { provider: 'mock', id: 'm1', price: { inputPerMTok: 1, outputPerMTok: 2 } },
+          m2: { provider: 'mock', id: 'm2', price: { inputPerMTok: 1, outputPerMTok: 2 } },
+        }),
+      );
+
+      const server = createGatekeeperEgress({
+        routes: [{ id: 'models', kind: 'models' }],
+        prices: {},
+        runTokens: tokens,
+        control: testControl,
+        contextTtlMs: 0,
+        modelCatalog: opts.customCatalog ?? catalog,
+        modelAdapters: {
+          mock: opts.adapter ?? {
+            async complete(entry) {
+              return { content: `hello from ${entry.id}`, usage: { input: 10, output: 10 } };
+            },
+          },
+        },
+      });
+
+      return { server, testControl, rigLedger, getRunModelsCalls, setRunModelsCalls };
+    };
+
+    it('transparent injection and execution of factory_get_models in internal loop (GAP-210, TSK-287, M2)', async () => {
+      let round = 0;
+      const adapter: ModelAdapter = {
+        async complete(entry, payload) {
+          round++;
+          if (round === 1) {
+            const getTool = (payload.tools as any[])?.find((t) => t.function?.name === 'factory_get_models');
+            assert.ok(getTool, 'factory_get_models must be offered');
+            return {
+              content: null,
+              toolCalls: [
+                {
+                  id: 'call_get_1',
+                  type: 'function',
+                  function: { name: 'factory_get_models', arguments: '{}' },
+                },
+              ],
+              usage: { input: 15, output: 15 },
+            };
+          }
+          const toolResultMsg = (payload.messages as any[])?.find(
+            (m) => m.role === 'tool' && (m.toolCallId === 'call_get_1' || m.tool_call_id === 'call_get_1'),
+          );
+          assert.ok(toolResultMsg, 'tool result message must be passed in subsequent turn');
+          const parsedContent = JSON.parse(toolResultMsg.content);
+          assert.equal(parsedContent.agentId, ctx.run.agentId);
+          assert.deepEqual(parsedContent.approvedModels, ['m1', 'm2']);
+          assert.equal(parsedContent.currentModel, 'm1');
+
+          return {
+            content: `Current model is ${parsedContent.currentModel}`,
+            usage: { input: 25, output: 10 },
+          };
+        },
+      };
+
+      const rig = createTestRig({ adapter });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          secondaryModel: 'm2',
+          currentModel: 'm1',
+        };
+        ctx.canManageModels = true;
+
+        const res = await call(sPort, '/models/v1/chat/completions', {
+          token,
+          body: chat('m1'),
+        });
+
+        assert.equal(res.status, 200, res.text);
+        const reply = res.json();
+        assert.equal(reply.choices[0].message.content, 'Current model is m1');
+        assert.equal(round, 2, 'two completion rounds occurred');
+        assert.equal(rig.getRunModelsCalls.length, 1);
+        assert.equal(rig.getRunModelsCalls[0].runId, ctx.run.runId);
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+
+    it('transparent injection and execution of factory_set_models switches model and executes follow-up completion on new model', async () => {
+      let round = 0;
+      const completedEntries: string[] = [];
+      const adapter: ModelAdapter = {
+        async complete(entry, payload) {
+          round++;
+          completedEntries.push(entry.id);
+          if (round === 1) {
+            assert.equal(entry.id, 'm1');
+            const setTool = (payload.tools as any[])?.find((t) => t.function?.name === 'factory_set_models');
+            assert.ok(setTool, 'factory_set_models must be offered when canManageModels is true');
+            return {
+              content: null,
+              toolCalls: [
+                {
+                  id: 'call_set_1',
+                  type: 'function',
+                  function: { name: 'factory_set_models', arguments: JSON.stringify({ currentModel: 'm2' }) },
+                },
+              ],
+              usage: { input: 20, output: 20 },
+            };
+          }
+          assert.equal(entry.id, 'm2', 'second round should run on newly switched model');
+          return {
+            content: `Switched and completed on ${entry.id}`,
+            usage: { input: 30, output: 15 },
+          };
+        },
+      };
+
+      const rig = createTestRig({ adapter });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          secondaryModel: 'm2',
+          currentModel: 'm1',
+        };
+        ctx.canManageModels = true;
+
+        const res = await call(sPort, '/models/v1/chat/completions', {
+          token,
+          body: chat('m1'),
+        });
+
+        assert.equal(res.status, 200, res.text);
+        const reply = res.json();
+        assert.equal(reply.choices[0].message.content, 'Switched and completed on m2');
+        assert.equal(round, 2);
+        assert.deepEqual(completedEntries, ['m1', 'm2']);
+        assert.equal(rig.setRunModelsCalls.length, 1);
+        assert.equal(rig.setRunModelsCalls[0].currentModel, 'm2');
+        assert.equal(ctx.policy.currentModel, 'm2');
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+
+    it('omits factory_set_models when canManageModels is false', async () => {
+      let offeredToolNames: string[] = [];
+      const adapter: ModelAdapter = {
+        async complete(entry, payload) {
+          offeredToolNames = ((payload.tools as any[]) ?? []).map((t) => t.function?.name);
+          return {
+            content: 'Read-only turn complete',
+            usage: { input: 10, output: 10 },
+          };
+        },
+      };
+
+      const rig = createTestRig({ adapter });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          currentModel: 'm1',
+        };
+        ctx.canManageModels = false;
+
+        const res = await call(sPort, '/models/v1/chat/completions', {
+          token,
+          body: chat('m1'),
+        });
+
+        assert.equal(res.status, 200, res.text);
+        assert.ok(offeredToolNames.includes('factory_get_models'), 'factory_get_models is offered');
+        assert.ok(!offeredToolNames.includes('factory_set_models'), 'factory_set_models is omitted');
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+
+    it('AP3 footnote preservation: plain chat turn without caller tools does NOT receive [no tools called] footnote', async () => {
+      const adapter: ModelAdapter = {
+        async complete(_entry, payload) {
+          const toolNames = ((payload.tools as any[]) ?? []).map((t) => t.function?.name);
+          assert.ok(toolNames.includes('factory_get_models'));
+          return {
+            content: 'Just answering text.',
+            usage: { input: 10, output: 10 },
+          };
+        },
+      };
+
+      const rig = createTestRig({ adapter });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          currentModel: 'm1',
+        };
+        ctx.canManageModels = true;
+
+        // 1. Plain chat turn without caller tools: grounded, ledger action is MODEL_REPLY
+        const resPlain = await call(sPort, '/models/v1/chat/completions', {
+          token,
+          body: chat('m1'),
+        });
+
+        assert.equal(resPlain.status, 200);
+        const replyPlain = resPlain.json();
+        assert.equal(replyPlain.choices[0].message.content, 'Just answering text.');
+
+        const plainReplyEvent = rig.rigLedger.find((e) => e.type === 'action' && e.action === 'MODEL_REPLY');
+        assert.ok(plainReplyEvent, 'plain chat turn without caller tools yields MODEL_REPLY');
+        const ungroundedPlain = rig.rigLedger.find((e) => e.type === 'action' && e.action === 'UNGROUNDED_REPLY');
+        assert.equal(ungroundedPlain, undefined, 'must NOT be marked UNGROUNDED_REPLY');
+
+        // 2. Caller turn WITH caller tools where model calls no tools: ungrounded, ledger action is UNGROUNDED_REPLY
+        const resWithTools = await call(sPort, '/models/v1/chat/completions', {
+          token,
+          body: {
+            ...chat('m1'),
+            tools: [{ type: 'function', function: { name: 'caller_search', parameters: { type: 'object' } } }],
+          },
+        });
+
+        assert.equal(resWithTools.status, 200);
+        const ungroundedEvent = rig.rigLedger.find((e) => e.type === 'action' && e.action === 'UNGROUNDED_REPLY');
+        assert.ok(ungroundedEvent, 'caller turn with tools offered but uncalled yields UNGROUNDED_REPLY');
       } finally {
         await new Promise<void>((r) => rig.server.close(() => r()));
       }

@@ -418,6 +418,23 @@ def ask(prompt: str, system: str = "You are a helpful assistant.") -> str:
 
 Because the format is OpenAI's, the stock OpenAI SDK also works: `OpenAI(base_url=os.environ["FACTORY_MODEL_BASE_URL"], api_key=os.environ["FACTORY_RUN_TOKEN"])` (non-streaming calls only).
 
+### Conversational Model Query & Switching (GAP-210, TSK-287, M2)
+Agents and their verified human owners can inspect and adjust model slots dynamically at runtime:
+- **Run-Token Model Endpoints:**
+  - `GET /api/v1/runs/${FACTORY_RUN_ID}/models` (Header: `Authorization: Bearer ${FACTORY_RUN_TOKEN}`): Returns `{ agentId, approvedModels, currentModel, primaryModel, secondaryModel, defaultModel, canManageModels }`.
+  - `PUT /api/v1/runs/${FACTORY_RUN_ID}/models`: Updates `currentModel`, `primaryModel`, and/or `secondaryModel` within `approvedModels`.
+  - `POST /mcp` authenticated by `FACTORY_RUN_TOKEN`: exposes `get_agent_models` and (when `canManageModels === true`) `set_agent_models`.
+- **Prompt-Injection Ceiling:**
+  - The list of approved models (`approvedModels`) is governed strictly by the Agent Owner or Factory Admin. Agents receive a prompt-injection ceiling: attempts to mutate `approvedModels` via run token return `403 {"error": "approved_models_ceiling"}`.
+  - Selecting any model outside `approvedModels` returns `400 {"error": "invalid_model_selection"}`.
+- **Transparent Egress Execution:**
+  - On OpenAI tool-calling turns, `gatekeeper-egress` transparently injects `factory_get_models` and (when `canManageModels === true`) `factory_set_models`.
+  - When the model calls these tools, the egress executes them transparently in an internal loop and refreshes the execution context. When a model switch is requested, subsequent turn completions immediately execute on the newly chosen model.
+  - AP3 footnote preservation: turns without caller-offered tools do not receive a `[no tools called]` footnote.
+- **Warm-Run Taint Protection:**
+  - Model changes via run token are only allowed when the turn's requesting user is verified as an Agent Owner or Factory Admin.
+  - If a warm run receives a conversation turn from a non-manager guest or member, the run is tainted against model management (`canManageModels` becomes false) and subsequent modification requests are refused with `403 {"error": "requester_unauthorized_for_model_switch"}`.
+
 ### Notebook rotation and closed volumes (AM3)
 Nothing in the notebook is forgotten; the notebook rotates instead. This is factory-wide policy, and every run is told it:
 - **When to rotate:** `FACTORY_NOTEBOOK_MAX_BYTES` (10 MB) and `FACTORY_NOTEBOOK_MAX_DAYS` (90 days). Rotate at whichever comes first.
