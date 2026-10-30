@@ -57,7 +57,7 @@ export function configOf(state: FactoryState, agentId: string): ConfigContent {
 
 /** The agent's owners. No store or no record means no owners: it fails closed. */
 export function ownersOf(state: FactoryState, agentId: string): string[] {
-  return state.configs?.current(agentId)?.owners ?? [];
+  return state.configs?.current(agentId)?.owners ?? (state.agents.get(agentId) as unknown as { owners?: string[] })?.owners ?? [];
 }
 
 export const MAX_OWNERS = 10;

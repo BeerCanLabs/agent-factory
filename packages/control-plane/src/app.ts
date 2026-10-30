@@ -35,8 +35,8 @@ import {
 } from '@beercanlabs/factory-registrar';
 import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
 import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
-import { authorize, authorizeIngress, directCaller, heldCopyOf, heldToolName, parseHoldRequest, type Approval, type ApprovalStore, type AuthenticatedCaller, type Privilege } from '@beercanlabs/factory-bouncer';
-import { validatePolicy, type PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
+import { authorize, authorizeIngress, directCaller, heldCopyOf, heldToolName, parseHoldRequest, AGENT_SCOPED, type Approval, type ApprovalStore, type AuthenticatedCaller, type Privilege } from '@beercanlabs/factory-bouncer';
+import { validatePolicy, applyModelsRemoval, effectiveAgentModels, type AgentPolicy, type PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
@@ -572,6 +572,7 @@ export function enrichAgent(state: FactoryState, a: AgentRecord) {
     domain: (a as any).domain || (isBuiltin ? 'Platform Infrastructure' : 'Submind Autonomous Operations'),
     mindPrefix: a.memoryPrefix ? `s3://beercanlabs-minds/${a.memoryPrefix}/` : `s3://beercanlabs-minds/${a.id}/`,
     sqliteSizeKb: (a as any).sqliteSizeKb ?? 0,
+    model: pol?.currentModel !== undefined ? pol.currentModel : ((a as any).model ?? null),
   };
 }
 
@@ -590,7 +591,7 @@ function unblockAffordableRuns(state: FactoryState, agentId: string, limits: Bud
 }
 
 
-type ToolSpec = { name: string; description: string; privilege: Privilege; args: Record<string, { type: string }>; required?: string[] };
+type ToolSpec = { name: string; description: string; privilege: Privilege; args: Record<string, { type: string; items?: { type: string } }>; required?: string[] };
 
 const TOOLS: ToolSpec[] = [
   { name: 'list_agents', description: 'List factory cartridges', privilege: 'agents.read', args: {} },
@@ -679,6 +680,26 @@ const TOOLS: ToolSpec[] = [
     },
     required: ['model'],
   },
+  {
+    name: 'get_agent_models',
+    description: 'Get the effective and configured model slots and approved models for an agent',
+    privilege: 'agents.models.read',
+    args: { id: { type: 'string' } },
+    required: ['id'],
+  },
+  {
+    name: 'set_agent_models',
+    description: 'Configure approved models and current, primary, and secondary model slots for an agent',
+    privilege: 'agents.models.set',
+    args: {
+      id: { type: 'string' },
+      approvedModels: { type: 'array', items: { type: 'string' } },
+      currentModel: { type: 'string' },
+      primaryModel: { type: 'string' },
+      secondaryModel: { type: 'string' },
+    },
+    required: ['id'],
+  },
 ];
 
 export async function handleMcp(state: FactoryState, payload: Record<string, unknown>, principal: Principal): Promise<unknown> {
@@ -696,7 +717,12 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
     };
   }
   if (method === 'tools/list') {
-    const tools = TOOLS.filter((t) => authorize({ principal, privilege: t.privilege }).allowed).map((t) => ({
+    const ownsAny = checkOwnsAnyAgent(state, principal.actor);
+    const tools = TOOLS.filter((t) => {
+      if (authorize({ principal, privilege: t.privilege }).allowed) return true;
+      if (AGENT_SCOPED.has(t.privilege) && ownsAny) return true;
+      return false;
+    }).map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: { type: 'object', properties: t.args, ...(t.required ? { required: t.required } : {}) },
@@ -704,14 +730,17 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
     return { jsonrpc: '2.0', id, result: { tools } };
   }
   if (method === 'tools/call') {
-    const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, string> };
+    const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
     const spec = TOOLS.find((t) => t.name === params.name);
     if (!spec) return { jsonrpc: '2.0', id, error: { code: -32602, message: `unknown tool ${String(params.name)}` } };
-    const decision = authorize({ principal, privilege: spec.privilege });
+    const rawArgs = params.arguments ?? {};
+    const targetAgentId = typeof rawArgs.id === 'string' ? rawArgs.id : typeof rawArgs.agentId === 'string' ? rawArgs.agentId : undefined;
+    const resource = targetAgentId ? { agentId: targetAgentId, owners: ownersOf(state, targetAgentId) } : undefined;
+    const decision = authorize({ principal, privilege: spec.privilege, resource });
     if (!decision.allowed) {
       return { jsonrpc: '2.0', id, error: { code: -32001, message: `forbidden: requires ${decision.required}` } };
     }
-    const result = await dispatchTool(state, spec.name, params.arguments ?? {}, principal);
+    const result = await dispatchTool(state, spec.name, rawArgs, principal);
     return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }] } };
   }
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method ${String(method)}` } };
@@ -822,6 +851,134 @@ function defaultModelOf(state: FactoryState): string | undefined {
 }
 
 /**
+ * Core model selection configuration for an agent (§6.9 M2, TSK-165).
+ * Updates approvedModels, currentModel, primaryModel, and secondaryModel, applying deterministic removal transitions.
+ */
+async function setAgentModels(
+  state: FactoryState,
+  agentId: string,
+  body: {
+    approvedModels?: string[];
+    currentModel?: string | null;
+    primaryModel?: string | null;
+    secondaryModel?: string | null;
+  },
+  actor: string,
+  req?: http.IncomingMessage,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const agent = state.agents.get(agentId);
+  if (!agent) {
+    return { status: 404, body: { error: 'not_found' } };
+  }
+
+  const offeredNames = new Set(
+    state.modelStore
+      ? state.modelStore.listOffered().map((m) => m.name)
+      : Object.keys(state.modelCatalog ?? {})
+  );
+  if (offeredNames.size === 0 && state.defaultModel) {
+    offeredNames.add(state.defaultModel);
+  }
+
+  if (body.approvedModels !== undefined) {
+    if (!Array.isArray(body.approvedModels) || !body.approvedModels.every((m) => typeof m === 'string' && m.length > 0)) {
+      return { status: 400, body: { error: 'approvedModels must be an array of non-empty strings' } };
+    }
+    for (const m of body.approvedModels) {
+      if (!offeredNames.has(m)) {
+        return { status: 400, body: { error: 'model_not_offered', model: m } };
+      }
+    }
+  }
+
+  for (const slot of ['currentModel', 'primaryModel', 'secondaryModel'] as const) {
+    const val = body[slot];
+    if (typeof val === 'string') {
+      if (!offeredNames.has(val)) {
+        return { status: 400, body: { error: 'model_not_offered', model: val } };
+      }
+    }
+  }
+
+  const existing = state.policies.get(agentId);
+  let next: AgentPolicy = structuredClone(existing);
+
+  if (body.approvedModels !== undefined) {
+    const deduped = [...new Set(body.approvedModels)];
+    if (deduped.length === 0) {
+      next.models = [];
+      delete next.currentModel;
+      delete next.primaryModel;
+      delete next.secondaryModel;
+    } else if (!next.models || next.models.length === 0) {
+      next.models = deduped;
+      next.primaryModel = deduped[0];
+      next.currentModel = deduped[0];
+      delete next.secondaryModel;
+    } else {
+      const removed = next.models.filter((m) => !deduped.includes(m));
+      next = applyModelsRemoval({ ...next, models: next.models }, removed);
+      next.models = deduped;
+    }
+  }
+
+  if (body.primaryModel !== undefined) {
+    next.primaryModel = body.primaryModel;
+  }
+  if (body.secondaryModel !== undefined) {
+    if (body.secondaryModel === null) {
+      delete next.secondaryModel;
+    } else {
+      next.secondaryModel = body.secondaryModel;
+    }
+  }
+  if (body.currentModel !== undefined) {
+    next.currentModel = body.currentModel;
+  }
+  if (body.currentModel === null && next.primaryModel !== null && body.primaryModel === undefined) {
+    next.primaryModel = null;
+  }
+  if (body.primaryModel === null && next.currentModel !== null && body.currentModel === undefined) {
+    next.currentModel = null;
+  }
+
+  if (next.models?.length) {
+    if (next.primaryModel === null && typeof next.currentModel === 'string' && typeof body.primaryModel !== 'string') {
+      next.primaryModel = next.currentModel;
+    } else if (next.currentModel === null && typeof next.primaryModel === 'string' && typeof body.currentModel !== 'string') {
+      next.currentModel = next.primaryModel;
+    }
+  }
+
+  const checked = validatePolicy(next);
+  if (!checked.ok) {
+    return { status: 400, body: { error: checked.error } };
+  }
+
+  state.policies.set(agentId, checked.policy);
+  state.ledger.append({
+    timestamp: new Date().toISOString(),
+    agentId,
+    type: 'action',
+    action: 'POLICY_UPDATED',
+    actor,
+  });
+  await recordConfig(state, agentId, {
+    actor,
+    reason: req ? changeReason(req, 'agent models updated') : 'agent models updated',
+  });
+
+  return {
+    status: 200,
+    body: {
+      agentId,
+      ...effectiveAgentModels(checked.policy, defaultModelOf(state)),
+      defaultModel: defaultModelOf(state) ?? null,
+    },
+  };
+}
+
+/**
  * Retire a model and take it out of every policy that lists it (§6.9 M2, GAP-162). Each changed policy goes through
  * the same record as a policy change: `POLICY_UPDATED` and a configuration version (GAP-181).
  */
@@ -833,10 +990,8 @@ async function retireModel(state: FactoryState, modelName: string, actor: string
     const policy = state.policies.get(agentId);
     if (!policy.models?.includes(modelName)) continue;
     affectedAgents.push(agentId);
-    const remaining = policy.models.filter((m) => m !== modelName);
-    if (remaining.length === 0) delete policy.models;
-    else policy.models = remaining;
-    state.policies.set(agentId, policy);
+    const updated = applyModelsRemoval(policy, [modelName]);
+    state.policies.set(agentId, updated);
     state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'POLICY_UPDATED', actor });
     await recordConfig(state, agentId, { actor, reason: `model ${modelName} retired` });
   }
@@ -1022,13 +1177,13 @@ function stageDiscovered(state: FactoryState, vendorId: string, discovered: Disc
   return staged;
 }
 
-async function dispatchTool(state: FactoryState, name: string, args: Record<string, string>, principal: Principal): Promise<unknown> {
+async function dispatchTool(state: FactoryState, name: string, args: Record<string, unknown>, principal: Principal): Promise<unknown> {
   const actor = principal.actor;
   if (name === 'list_agents') return [...state.agents.values()];
-  if (name === 'query_ledger') return state.ledger.query({ agent: args.agent });
-  if (name === 'get_run') return state.runs.get(args.runId) ?? { error: 'not_found' };
+  if (name === 'query_ledger') return state.ledger.query({ agent: typeof args.agent === 'string' ? args.agent : undefined });
+  if (name === 'get_run') return (typeof args.runId === 'string' ? state.runs.get(args.runId) : undefined) ?? { error: 'not_found' };
   if (name === 'list_approvals') return visibleApprovals(state, principal, state.approvals.list({ state: 'pending' }));
-  if (name === 'decide_approval') return (await decideApproval(state, args.approvalId, args.decision, principal, args.notes)).body;
+  if (name === 'decide_approval') return (await decideApproval(state, String(args.approvalId), String(args.decision), principal, typeof args.notes === 'string' ? args.notes : undefined)).body;
   if (name === 'list_model_catalog') {
     return {
       offered: state.modelStore ? state.modelStore.listOffered() : Object.entries(state.modelCatalog ?? {}).map(([n, m]) => ({ name: n, ...m })),
@@ -1037,7 +1192,7 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
     };
   }
   if (name === 'scan_vendor_models') {
-    const vendorId = args.vendorId;
+    const vendorId = typeof args.vendorId === 'string' ? args.vendorId : undefined;
     if (!vendorId) return { error: 'vendorId is required' };
     const target = vendorTarget(state, vendorId);
     if ('error' in target) return target;
@@ -1052,25 +1207,32 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   }
   if (name === 'admit_model') {
     const price = (args.inputPerMTok && args.outputPerMTok) ? {
-      inputPerMTok: parseFloat(args.inputPerMTok),
-      outputPerMTok: parseFloat(args.outputPerMTok),
+      inputPerMTok: parseFloat(String(args.inputPerMTok)),
+      outputPerMTok: parseFloat(String(args.outputPerMTok)),
     } : undefined;
-    const out = admitModel(state, { name: args.name, id: args.id, vendorId: args.vendorId, provider: args.provider, region: args.region, price }, actor);
+    const out = admitModel(state, {
+      name: typeof args.name === 'string' ? args.name : undefined,
+      id: typeof args.id === 'string' ? args.id : undefined,
+      vendorId: typeof args.vendorId === 'string' ? args.vendorId : undefined,
+      provider: typeof args.provider === 'string' ? args.provider : undefined,
+      region: typeof args.region === 'string' ? args.region : undefined,
+      price,
+    }, actor);
     return out.ok ? { ok: true, model: out.model } : { error: out.error, ...(out.message ? { message: out.message } : {}) };
   }
   if (name === 'update_model_pricing') {
     if (!state.modelStore) return { error: 'model_store_not_configured' };
     const price = {
-      inputPerMTok: parseFloat(args.inputPerMTok),
-      outputPerMTok: parseFloat(args.outputPerMTok),
+      inputPerMTok: parseFloat(String(args.inputPerMTok)),
+      outputPerMTok: parseFloat(String(args.outputPerMTok)),
     };
     try {
-      const model = state.modelStore.updatePricing(args.name, price, actor);
+      const model = state.modelStore.updatePricing(String(args.name), price, actor);
       state.modelCatalog = state.modelStore.toEgressCatalog();
       state.ledger.append({
         action: 'MODEL_PRICING_UPDATED',
         actor,
-        model: args.name,
+        model: String(args.name),
         price,
         timestamp: new Date().toISOString(),
       });
@@ -1081,7 +1243,7 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
   }
   if (name === 'retire_vendor_or_model') {
     if (!state.modelStore) return { error: 'model_store_not_configured' };
-    const modelName = args.name;
+    const modelName = String(args.name);
     const out = await retireModel(state, modelName, actor);
     if (!out.retired) return { error: 'not_found' };
     return { ok: true, retired: modelName, affectedAgents: out.affectedAgents };
@@ -1105,8 +1267,33 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
     }
   }
 
-  const id = args.id;
+  const id = typeof args.id === 'string' ? args.id : undefined;
   if (!id) return { error: 'id required' };
+  if (name === 'get_agent_models') {
+    const agent = state.agents.get(id);
+    if (!agent) return { error: 'not_found' };
+    const pol = state.policies.get(id);
+    const eff = effectiveAgentModels(pol ?? {}, defaultModelOf(state));
+    return {
+      agentId: id,
+      ...eff,
+      defaultModel: defaultModelOf(state) ?? null,
+    };
+  }
+  if (name === 'set_agent_models') {
+    const out = await setAgentModels(
+      state,
+      id,
+      {
+        approvedModels: Array.isArray(args.approvedModels) ? (args.approvedModels as string[]) : undefined,
+        currentModel: (args.currentModel as string | null | undefined),
+        primaryModel: (args.primaryModel as string | null | undefined),
+        secondaryModel: (args.secondaryModel as string | null | undefined),
+      },
+      actor,
+    );
+    return out.body;
+  }
   if (name === 'wake_agent') return (await createRun(state, id, { actor, trigger: 'mcp' })).body;
   if (name === 'pause_agent') return (await applyKillSwitch(state, id, 'PAUSE', actor)).body;
   if (name === 'resume_agent') return (await applyKillSwitch(state, id, 'RESUME', actor)).body;
@@ -2507,6 +2694,32 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
+  const agentModelsMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/models$/);
+  if (agentModelsMatch && (req.method === 'GET' || req.method === 'PUT')) {
+    const agentId = agentModelsMatch[1];
+    const principal = await requirePrivilege(req, res, state, req.method === 'GET' ? 'agents.models.read' : 'agents.models.set', { agentId });
+    if (!principal) return;
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    if (req.method === 'GET') {
+      const pol = state.policies.get(agentId);
+      const eff = effectiveAgentModels(pol ?? {}, defaultModelOf(state));
+      json(res, 200, {
+        agentId,
+        ...eff,
+        defaultModel: defaultModelOf(state) ?? null,
+      });
+      return;
+    }
+    const body = (await readJson(req)) as Record<string, unknown>;
+    const result = await setAgentModels(state, agentId, body, principal.actor, req);
+    json(res, result.status, result.body);
+    return;
+  }
+
   const policyMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/policy$/);
   if (policyMatch && (req.method === 'GET' || req.method === 'PUT')) {
     const principal = await requirePrivilege(req, res, state, req.method === 'GET' ? 'policy.read' : 'policy.set');
@@ -2528,7 +2741,23 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 200, pol);
       return;
     }
-    const checked = validatePolicy(await readJson(req));
+    const body = (await readJson(req)) as Record<string, unknown>;
+    const existing = state.policies.get(agentId);
+    let toValidate: unknown = body;
+    if (body && typeof body === 'object' && Array.isArray(body.models)) {
+      if (existing?.models && body.currentModel === undefined && body.primaryModel === undefined && body.secondaryModel === undefined) {
+        const modelsArray = body.models as string[];
+        const removed = existing.models.filter((m: string) => !modelsArray.includes(m));
+        const reconciled = applyModelsRemoval(existing, removed);
+        toValidate = {
+          ...body,
+          ...(reconciled.currentModel !== undefined ? { currentModel: reconciled.currentModel } : {}),
+          ...(reconciled.primaryModel !== undefined ? { primaryModel: reconciled.primaryModel } : {}),
+          ...(reconciled.secondaryModel !== undefined ? { secondaryModel: reconciled.secondaryModel } : {}),
+        };
+      }
+    }
+    const checked = validatePolicy(toValidate);
     if (!checked.ok) {
       json(res, 400, { error: checked.error });
       return;
@@ -2586,6 +2815,9 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         policy: {
           ...pol,
           models: effectiveModels,
+          currentModel: pol?.currentModel ?? effectiveModels?.[0],
+          primaryModel: pol?.primaryModel ?? effectiveModels?.[0],
+          secondaryModel: pol?.secondaryModel,
           routes: mergedRoutes,
           budgetUsd: { perRun: effectivePerRun },
         },
@@ -2606,6 +2838,67 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       // E12 item 4: what the run's requesting person may reach through skill routes; the egress applies it.
       // A built-in agent is the factory's own and has no person's roles.
       access: isBuiltin ? { restricted: false } : accessForRun(state, run, agent),
+    });
+    return;
+  }
+
+  const gwFailover = path.match(/^\/api\/v1\/gatekeeper-egress\/runs\/([^/]+)\/failover$/);
+  if (gwFailover && req.method === 'POST') {
+    const principal = await requirePrivilege(req, res, state, 'egress.models.failover');
+    if (!principal) return;
+    const run = state.runs.get(gwFailover[1]);
+    const agent = run ? state.agents.get(run.agentId) : undefined;
+    if (!run || !agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    const body = (await readJson(req)) as { toModel?: string; fromModel?: string; reason?: string };
+    if (!body || typeof body.toModel !== 'string' || !body.toModel.length) {
+      json(res, 400, { error: 'toModel required' });
+      return;
+    }
+    const existing = state.policies.get(agent.id) ?? { routes: [] };
+    const fromModel = body.fromModel ?? existing.currentModel ?? existing.models?.[0];
+    const effectivePrimary = existing.primaryModel ?? (existing.models?.length ? existing.models[0] : undefined);
+    const updated: AgentPolicy = {
+      ...existing,
+      currentModel: body.toModel,
+      ...(effectivePrimary !== undefined ? { primaryModel: effectivePrimary } : {}),
+    };
+    const checked = validatePolicy(updated);
+    if (!checked.ok) {
+      json(res, 400, { error: checked.error });
+      return;
+    }
+    state.policies.set(agent.id, checked.policy);
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: agent.id,
+      runId: run.runId,
+      type: 'action',
+      action: 'MODEL_FAILOVER',
+      actor: principal.actor,
+      model: body.toModel,
+      requestedModel: fromModel,
+      models: [fromModel, body.toModel],
+    });
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: agent.id,
+      type: 'action',
+      action: 'POLICY_UPDATED',
+      actor: principal.actor,
+    });
+    await recordConfig(state, agent.id, {
+      actor: principal.actor,
+      reason: `failover to ${body.toModel}`,
+    });
+    json(res, 200, {
+      ok: true,
+      agentId: agent.id,
+      fromModel,
+      toModel: body.toModel,
+      currentModel: body.toModel,
     });
     return;
   }

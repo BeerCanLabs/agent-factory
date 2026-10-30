@@ -15,6 +15,9 @@ export type AgentPolicy = {
   tokensPerMinute?: number;
   /** AP3.3 (owner-set): give the model one more turn with the notice before returning an answer given without tools. */
   grounding?: 'warn-once';
+  currentModel?: string | null;
+  primaryModel?: string | null;
+  secondaryModel?: string;
 };
 
 const EMPTY: AgentPolicy = { routes: [] };
@@ -49,7 +52,7 @@ function positive(v: unknown): v is number {
 export function validatePolicy(raw: unknown): { ok: true; policy: AgentPolicy } | { ok: false; error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: 'policy must be an object' };
   const r = raw as Record<string, unknown>;
-  const allowed = new Set(['routes', 'models', 'hosts', 'tools', 'budgetUsd', 'tokensPerMinute', 'grounding']);
+  const allowed = new Set(['routes', 'models', 'hosts', 'tools', 'budgetUsd', 'tokensPerMinute', 'grounding', 'currentModel', 'primaryModel', 'secondaryModel']);
   for (const k of Object.keys(r)) if (!allowed.has(k)) return { ok: false, error: `unknown policy field ${k}` };
   if (!isStringArray(r.routes ?? [])) return { ok: false, error: 'routes must be an array of route ids' };
   if (r.models !== undefined && !isStringArray(r.models)) return { ok: false, error: 'models must be an array of model ids' };
@@ -70,7 +73,177 @@ export function validatePolicy(raw: unknown): { ok: true; policy: AgentPolicy } 
       }
     }
   }
-  return { ok: true, policy: { ...(r as AgentPolicy), routes: (r.routes as string[] | undefined) ?? [] } };
+
+  const dedupedModels = r.models !== undefined ? [...new Set(r.models as string[])] : undefined;
+
+  const effPrimary = r.primaryModel === undefined ? dedupedModels?.[0] : r.primaryModel;
+
+  if (r.secondaryModel !== undefined) {
+    if (typeof r.secondaryModel !== 'string' || r.secondaryModel.length === 0) {
+      return { ok: false, error: 'secondaryModel must be a non-empty string' };
+    }
+    if (!dedupedModels || !dedupedModels.includes(r.secondaryModel)) {
+      return { ok: false, error: 'secondaryModel must be in models' };
+    }
+    if (r.secondaryModel === effPrimary) {
+      return { ok: false, error: 'secondaryModel cannot equal primaryModel' };
+    }
+  }
+
+  if (r.currentModel === null || r.primaryModel === null) {
+    if (r.currentModel !== null || r.primaryModel !== null) {
+      return { ok: false, error: 'currentModel and primaryModel must both be null when either is null' };
+    }
+    if (r.secondaryModel !== undefined) {
+      return { ok: false, error: 'secondaryModel must be undefined when currentModel and primaryModel are null' };
+    }
+    if (!dedupedModels || dedupedModels.length === 0) {
+      return { ok: false, error: 'models must be a non-empty array when models are unset' };
+    }
+  }
+
+  if (r.currentModel !== undefined && r.currentModel !== null) {
+    if (typeof r.currentModel !== 'string' || r.currentModel.length === 0) {
+      return { ok: false, error: 'currentModel must be a non-empty string' };
+    }
+    if (!dedupedModels || dedupedModels.length === 0) {
+      return { ok: false, error: 'models must be non-empty when currentModel is set' };
+    }
+    if (!dedupedModels.includes(r.currentModel)) {
+      return { ok: false, error: 'currentModel must be in models' };
+    }
+  }
+
+  if (r.primaryModel !== undefined && r.primaryModel !== null) {
+    if (typeof r.primaryModel !== 'string' || r.primaryModel.length === 0) {
+      return { ok: false, error: 'primaryModel must be a non-empty string' };
+    }
+    if (!dedupedModels || dedupedModels.length === 0) {
+      return { ok: false, error: 'models must be non-empty when primaryModel is set' };
+    }
+    if (!dedupedModels.includes(r.primaryModel)) {
+      return { ok: false, error: 'primaryModel must be in models' };
+    }
+  }
+
+  const policy: AgentPolicy = {
+    ...(r as unknown as AgentPolicy),
+    routes: (r.routes as string[] | undefined) ?? [],
+    ...(dedupedModels !== undefined ? { models: dedupedModels } : {}),
+  };
+  return { ok: true, policy };
+}
+
+/**
+ * Deterministically removes models from an agent policy, updating currentModel, primaryModel, and secondaryModel
+ * according to §6.9 M2 retirement and unapproval transitions.
+ */
+export function applyModelsRemoval(policy: AgentPolicy, removed: Iterable<string>): AgentPolicy {
+  const next: AgentPolicy = structuredClone(policy);
+  if (!next.models) return next;
+  const remSet = new Set(removed);
+  const remaining = next.models.filter((m) => !remSet.has(m));
+  if (remaining.length === 0) {
+    delete next.models;
+    delete next.currentModel;
+    delete next.primaryModel;
+    delete next.secondaryModel;
+    return next;
+  }
+  next.models = remaining;
+
+  let current = policy.currentModel;
+  let primary = policy.primaryModel;
+  let secondary = policy.secondaryModel;
+
+  if (policy.models && primary === undefined && current === undefined && policy.models.length > 0) {
+    primary = policy.models[0];
+    current = policy.models[0];
+  }
+
+  if (secondary !== undefined && remSet.has(secondary)) {
+    secondary = undefined;
+  }
+
+  const currentInRem = current !== null && current !== undefined && remSet.has(current);
+  const primaryInRem = primary !== null && primary !== undefined && remSet.has(primary);
+
+  if (currentInRem && primaryInRem) {
+    // Case A (or both current and primary removed)
+    if (secondary !== undefined) {
+      current = secondary;
+      primary = secondary;
+      secondary = undefined;
+    } else {
+      current = null;
+      primary = null;
+      secondary = undefined;
+    }
+  } else if (currentInRem && !primaryInRem) {
+    // Case B
+    current = primary;
+  } else if (!currentInRem && primaryInRem) {
+    // Case C
+    primary = current;
+    if (secondary === current) {
+      secondary = undefined;
+    }
+  }
+
+  next.currentModel = current;
+  next.primaryModel = primary;
+  if (secondary === undefined) {
+    delete next.secondaryModel;
+  } else {
+    next.secondaryModel = secondary;
+  }
+
+  return next;
+}
+
+export type EffectiveAgentModels = {
+  approvedModels: string[];
+  usesDefault: boolean;
+  currentModel: string | null;
+  primaryModel: string | null;
+  secondaryModel?: string;
+};
+
+/**
+ * Resolves effective model slots for an agent policy (M2):
+ * - If policy.models is undefined: uses factory defaultModel.
+ * - If policy.models is empty: approvedModels is [], currentModel/primaryModel null.
+ * - If policy.models is non-empty: primary defaults to models[0], current defaults to primary, secondary optional.
+ */
+export function effectiveAgentModels(policy?: AgentPolicy, defaultModel?: string): EffectiveAgentModels {
+  if (!policy || policy.models === undefined) {
+    return {
+      approvedModels: defaultModel ? [defaultModel] : [],
+      usesDefault: true,
+      currentModel: defaultModel ?? null,
+      primaryModel: defaultModel ?? null,
+      secondaryModel: undefined,
+    };
+  }
+  if (policy.models.length === 0) {
+    return {
+      approvedModels: [],
+      usesDefault: false,
+      currentModel: null,
+      primaryModel: null,
+      secondaryModel: undefined,
+    };
+  }
+  const primary = policy.primaryModel === undefined ? policy.models[0] : policy.primaryModel;
+  const current = policy.currentModel === undefined ? primary : policy.currentModel;
+  const secondary = policy.secondaryModel;
+  return {
+    approvedModels: [...policy.models],
+    usesDefault: false,
+    currentModel: current,
+    primaryModel: primary,
+    secondaryModel: secondary,
+  };
 }
 
 export class PolicyStore {

@@ -5,6 +5,8 @@ import { PRIVILEGES, authorize, type AuthorizeResource, type Privilege } from '.
 import { AGENT_SCOPED, SKILL_SCOPED, DERIVED_ROLE_PRIVILEGES } from './privileges.js';
 
 const OWNER_RIGHTS: Privilege[] = [
+  'agents.models.read',
+  'agents.models.set',
   'config.read',
   'config.export.agent',
   'credentials.agent.read',

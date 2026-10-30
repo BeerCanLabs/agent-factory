@@ -12,6 +12,9 @@ export type ModelPolicy = {
   training: boolean;
   /** The run is pinned to this model (a caller named it for the run). */
   pinnedModel?: string;
+  currentModel?: string | null;
+  primaryModel?: string | null;
+  secondaryModel?: string;
 };
 
 export type ModelCheck =
@@ -36,8 +39,8 @@ export type ModelSelection =
 
 /**
  * The model the factory serves for a call (M2, GAP-181). Agents never choose: the run's pin wins, then (in training
- * only, where the owner is trying models) the requested model, then the policy's first model, then the factory
- * default. The requested name is returned only when it differs, so it can be recorded.
+ * only, where the owner is trying models) the requested model, then currentModel, then primaryModel, then the policy's
+ * first model, then the factory default. The requested name is returned only when it differs, so it can be recorded.
  */
 export function selectModel(policy: ModelPolicy, requested?: string): ModelSelection {
   // A policy that lists models grants exactly those; an explicit empty list grants none. Only a policy that names no
@@ -50,12 +53,42 @@ export function selectModel(policy: ModelPolicy, requested?: string): ModelSelec
     }
     return { ok: true, model: policy.pinnedModel, ...(requested && requested !== policy.pinnedModel ? { requested } : {}) };
   }
-  const model = (policy.training ? requested : undefined) ?? granted[0];
-  if (!model) {
+  if (!policy.training && policy.currentModel === null) {
+    return { ok: false, status: 403, code: 'model_not_allowed', detail: { model: requested ?? '' } };
+  }
+  const chosen = (policy.training ? requested : undefined) ?? (policy.currentModel ?? policy.primaryModel ?? granted[0]);
+  if (!chosen) {
     if (policy.allowedModels) return { ok: false, status: 403, code: 'model_not_allowed', detail: { model: requested ?? '' } };
     return { ok: false, status: 503, code: 'no_default_model' };
   }
-  return { ok: true, model, ...(requested && requested !== model ? { requested } : {}) };
+  if (!policy.training && !granted.includes(chosen)) {
+    return { ok: false, status: 403, code: 'model_not_allowed', detail: { model: chosen } };
+  }
+  return { ok: true, model: chosen, ...(requested && requested !== chosen ? { requested } : {}) };
+}
+
+/**
+ * Resolves the deterministic sequence of failback candidates for an execution turn (§6.9 M2):
+ * Returns unique([sel.model, effectivePrimary, secondaryModel]), bounded by approved models outside training.
+ */
+export function failbackCandidates(policy: ModelPolicy, requested?: string): readonly string[] {
+  const sel = selectModel(policy, requested);
+  if (!sel.ok) return [];
+  if (policy.pinnedModel || (policy.training && requested)) {
+    return [sel.model];
+  }
+  const granted = policy.allowedModels ?? (policy.defaultModel ? [policy.defaultModel] : []);
+  const effectivePrimary = policy.primaryModel === null ? undefined : (policy.primaryModel ?? granted[0]);
+  const rawList: (string | null | undefined)[] = [sel.model, effectivePrimary, policy.secondaryModel];
+  const result: string[] = [];
+  for (const m of rawList) {
+    if (typeof m === 'string' && m.length > 0 && (policy.training || granted.includes(m))) {
+      if (!result.includes(m)) {
+        result.push(m);
+      }
+    }
+  }
+  return result;
 }
 
 /** The models the agent may list: the offered ones it may use, in the catalog's order. */

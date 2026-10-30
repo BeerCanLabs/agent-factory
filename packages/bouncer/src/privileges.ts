@@ -103,6 +103,10 @@ export const PRIVILEGES = [
   'skills.retire.force',
   // TSK-280: Admin-approved runtime rollout (RT1, GAP-206)
   'runtime.set',
+  // TSK-165 (Slice 1): Model selection and failback
+  'agents.models.read',
+  'agents.models.set',
+  'egress.models.failover',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -116,6 +120,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
   // Reads. An operator and an approver also hold every viewer privilege.
   viewer: [
     'agents.read',
+    'agents.models.read',
     'policy.read',
     'config.read',
     'runs.read',
@@ -136,6 +141,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
   ],
   operator: [
     'agents.read',
+    'agents.models.read',
     'policy.read',
     'config.read',
     'runs.read',
@@ -167,6 +173,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
   ],
   approver: [
     'agents.read',
+    'agents.models.read',
     'policy.read',
     'config.read',
     'runs.read',
@@ -202,6 +209,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'egress.routes.read',
     'egress.models.read',
     'egress.connections.token',
+    'egress.models.failover',
   ],
   // The ingress is the one party that sees who sent a message, so it alone may say who asked (Dale, 2026-10-04: an
   // operator or admin must not be able to name the requester). Its token also carries `operator`, which it needs to
@@ -213,6 +221,8 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
   // Everything except the exclusive privileges.
   admin: [
     'agents.read',
+    'agents.models.read',
+    'agents.models.set',
     'policy.read',
     'config.read',
     'runs.read',
@@ -312,6 +322,8 @@ export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
   'agents.wake',
   'agents.pause',
   'agents.resume',
+  'agents.models.read',
+  'agents.models.set',
   'config.read',
   'config.export.agent',
   'credentials.agent.read',
@@ -357,6 +369,8 @@ export const SKILL_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
  */
 export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> = {
   'agent-owner': [
+    'agents.models.read',
+    'agents.models.set',
     'config.read',
     'config.export.agent',
     'credentials.agent.read',
