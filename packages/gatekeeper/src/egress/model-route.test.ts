@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import { createGatekeeperEgress, type ControlClient, type Policy, type RunContext } from './gatekeeper-egress.js';
-import { bedrockConverse, parseModelCatalog, signV4, type ModelCatalog } from '@beercanlabs/factory-executive';
+import { bedrockConverse, parseModelCatalog, signV4, ModelUpstreamError, type ModelCatalog, type ModelAdapter } from '@beercanlabs/factory-executive';
 
 const tokens = new RunTokens('models-test-run-token-key-0123456789');
 const AWS = { accessKeyId: 'AKIDGATEKEEPER', secretAccessKey: 'gatekeeper-egress-secret-key', sessionToken: 'gatekeeper-egress-session' };
@@ -684,4 +684,496 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
       await new Promise<void>((r) => server.close(() => r()));
     }
   });
+
+  describe('persistent failback and model failover (TSK-168)', () => {
+    let discordServer: http.Server;
+    let dPort = 0;
+    const discordPosted: Array<{ content: string }> = [];
+
+    before(async () => {
+      discordServer = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+          try {
+            const p = JSON.parse(body);
+            if (typeof p.content === 'string') discordPosted.push({ content: p.content });
+          } catch {}
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 'msg-1' }));
+        });
+      });
+      dPort = await listen(discordServer);
+    });
+
+    after(async () => {
+      await new Promise<void>((r) => discordServer.close(() => r()));
+    });
+
+    beforeEach(() => {
+      discordPosted.length = 0;
+    });
+
+    const createTestRig = (opts: {
+      adapter?: ModelAdapter;
+      customCatalog?: ModelCatalog;
+      failoverHandler?: (req: { runId: string; toModel: string; fromModel?: string; reason?: string }) => Promise<{ ok: boolean; currentModel?: string }>;
+    } = {}) => {
+      const rigLedger: Array<Record<string, any>> = [];
+      const failoverCalls: Array<{ runId: string; toModel: string; fromModel?: string; reason?: string }> = [];
+
+      const testControl: ControlClient = {
+        async runContext(runId) {
+          return runId === ctx.run.runId ? structuredClone(ctx) : null;
+        },
+        async requestApproval() {
+          throw new Error('unused');
+        },
+        async consumeApproval() {
+          return false;
+        },
+        async ledger(event) {
+          rigLedger.push(event);
+          if (event.type === 'llm' && typeof event.costUsd === 'number' && event.runId === ctx.run.runId) {
+            ctx.spend.run += event.costUsd;
+            ctx.spend.day += event.costUsd;
+            ctx.spend.month += event.costUsd;
+          }
+        },
+        async modelFailover(req) {
+          failoverCalls.push(req);
+          if (opts.failoverHandler) return opts.failoverHandler(req);
+          if (ctx.run.runId === req.runId) {
+            ctx.policy.currentModel = req.toModel;
+          }
+          return { ok: true, currentModel: req.toModel };
+        },
+      };
+
+      const defaultFailoverCatalog = parseModelCatalog(
+        JSON.stringify({
+          m1: { provider: 'mock', id: 'm1', price: { inputPerMTok: 1, outputPerMTok: 2 } },
+          m2: { provider: 'mock', id: 'm2', price: { inputPerMTok: 1, outputPerMTok: 2 } },
+          m3: { provider: 'mock', id: 'm3', price: { inputPerMTok: 1, outputPerMTok: 2 } },
+          unpriced: { provider: 'mock', id: 'unpriced' },
+        }),
+      );
+
+      const server = createGatekeeperEgress({
+        routes: [
+          { id: 'models', kind: 'models' },
+          { id: 'discord', kind: 'http', upstream: `http://127.0.0.1:${dPort}/discord` },
+        ],
+        prices: {},
+        runTokens: tokens,
+        control: testControl,
+        contextTtlMs: 0,
+        modelCatalog: opts.customCatalog ?? defaultFailoverCatalog,
+        modelAdapters: {
+          mock: opts.adapter ?? {
+            async complete(entry) {
+              return { content: `hello from ${entry.id}`, usage: { input: 100, output: 50 } };
+            },
+          },
+        },
+      });
+
+      return { server, testControl, rigLedger, failoverCalls };
+    };
+
+    it('fails over from primary (m1) to secondary (m2) on upstream 500 and updates currentModel persistently', async () => {
+      const callsMade: string[] = [];
+      const adapter: ModelAdapter = {
+        async complete(entry) {
+          callsMade.push(entry.id);
+          if (entry.id === 'm1') {
+            throw new ModelUpstreamError('internal_error', 'upstream 500 error', 500, 500);
+          }
+          return { content: 'Answer from M2', usage: { input: 100, output: 50 } };
+        },
+      };
+
+      const rig = createTestRig({ adapter });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models', 'discord'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          secondaryModel: 'm2',
+          currentModel: 'm1',
+        };
+
+        const res1 = await call(sPort, '/models/v1/chat/completions', { token, body: chat('m1') });
+        assert.equal(res1.status, 200, res1.text);
+        assert.equal(res1.json().choices[0].message.content, 'Answer from M2');
+        assert.deepEqual(callsMade, ['m1', 'm2']);
+
+        assert.equal(rig.failoverCalls.length, 1);
+        assert.equal(rig.failoverCalls[0].fromModel, 'm1');
+        assert.equal(rig.failoverCalls[0].toModel, 'm2');
+        assert.equal(ctx.policy.currentModel, 'm2');
+
+        const llmEvents = rig.rigLedger.filter((e) => e.type === 'llm');
+        assert.equal(llmEvents.length, 1);
+        assert.equal(llmEvents[0].model, 'm2');
+
+        const discRes = await call(sPort, '/discord/channels/123/messages', { token, body: { content: 'Answer from M2' } });
+        assert.equal(discRes.status, 200);
+        assert.equal(discordPosted.length, 1);
+        assert.equal(discordPosted[0].content, 'Answer from M2\n-# [model failed over: m1 -> m2]');
+
+        // Next model call uses m2 directly without failover footnote
+        callsMade.length = 0;
+        const res2 = await call(sPort, '/models/v1/chat/completions', { token, body: chat() });
+        assert.equal(res2.status, 200);
+        assert.deepEqual(callsMade, ['m2']);
+
+        const discRes2 = await call(sPort, '/discord/channels/123/messages', { token, body: { content: 'Answer from M2' } });
+        assert.equal(discRes2.status, 200);
+        assert.equal(discordPosted.length, 2);
+        assert.equal(discordPosted[1].content, 'Answer from M2');
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+
+    it('fails over on upstream 429 error', async () => {
+      const callsMade: string[] = [];
+      const adapter: ModelAdapter = {
+        async complete(entry) {
+          callsMade.push(entry.id);
+          if (entry.id === 'm1') {
+            throw new ModelUpstreamError('rate_limit', 'upstream rate limit', 429, 429);
+          }
+          return { content: 'Recovered from 429', usage: { input: 100, output: 50 } };
+        },
+      };
+
+      const rig = createTestRig({ adapter });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models', 'discord'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          secondaryModel: 'm2',
+          currentModel: 'm1',
+        };
+
+        const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('m1') });
+        assert.equal(res.status, 200, res.text);
+        assert.equal(res.json().choices[0].message.content, 'Recovered from 429');
+        assert.deepEqual(callsMade, ['m1', 'm2']);
+        assert.equal(ctx.policy.currentModel, 'm2');
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+
+    it('fails over on 503 model_not_offered (catalog missing candidate)', async () => {
+      const catalog = parseModelCatalog(
+        JSON.stringify({
+          m2: { provider: 'mock', id: 'm2', price: { inputPerMTok: 1, outputPerMTok: 2 } },
+        }),
+      );
+      const rig = createTestRig({ customCatalog: catalog });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models', 'discord'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          secondaryModel: 'm2',
+          currentModel: 'm1',
+        };
+
+        const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('m1') });
+        assert.equal(res.status, 200, res.text);
+        assert.equal(res.json().choices[0].message.content, 'hello from m2');
+        assert.equal(ctx.policy.currentModel, 'm2');
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+
+    it('fails over on 403 unpriced_model', async () => {
+      const catalog = parseModelCatalog(
+        JSON.stringify({
+          m1: { provider: 'mock', id: 'm1' },
+          m2: { provider: 'mock', id: 'm2', price: { inputPerMTok: 1, outputPerMTok: 2 } },
+        }),
+      );
+      const rig = createTestRig({ customCatalog: catalog });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models', 'discord'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          secondaryModel: 'm2',
+          currentModel: 'm1',
+        };
+
+        const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat('m1') });
+        assert.equal(res.status, 200, res.text);
+        assert.equal(res.json().choices[0].message.content, 'hello from m2');
+        assert.equal(ctx.policy.currentModel, 'm2');
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+
+    it('fails over on 422 malformed_tool_syntax, metering both completed attempts and logging MALFORMED_TOOL_SYNTAX', async () => {
+      const callsMade: string[] = [];
+      const adapter: ModelAdapter = {
+        async complete(entry) {
+          callsMade.push(entry.id);
+          if (entry.id === 'm1') {
+            return {
+              content: 'get_weather: {"city": "Seattle"}',
+              usage: { input: 120, output: 40 },
+            };
+          }
+          return {
+            content: 'The weather in Seattle is sunny.',
+            usage: { input: 150, output: 60 },
+          };
+        },
+      };
+
+      const rig = createTestRig({ adapter });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models', 'discord'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          secondaryModel: 'm2',
+          currentModel: 'm1',
+        };
+
+        const res = await call(sPort, '/models/v1/chat/completions', {
+          token,
+          body: {
+            ...chat('m1'),
+            tools: [{ type: 'function', function: { name: 'get_weather', parameters: { type: 'object' } } }],
+          },
+        });
+
+        assert.equal(res.status, 200, res.text);
+        assert.equal(res.json().choices[0].message.content, 'The weather in Seattle is sunny.');
+        assert.deepEqual(callsMade, ['m1', 'm2']);
+
+        const llmEvents = rig.rigLedger.filter((e) => e.type === 'llm');
+        assert.equal(llmEvents.length, 2);
+        assert.equal(llmEvents[0].model, 'm1');
+        assert.equal(llmEvents[0].inputTokens, 120);
+        assert.equal(llmEvents[0].outputTokens, 40);
+        assert.equal(llmEvents[1].model, 'm2');
+        assert.equal(llmEvents[1].inputTokens, 150);
+        assert.equal(llmEvents[1].outputTokens, 60);
+
+        const malformed = rig.rigLedger.find((e) => e.action === 'MALFORMED_TOOL_SYNTAX');
+        assert.ok(malformed);
+        assert.equal(malformed.tool, 'get_weather');
+        assert.equal(malformed.model, 'm1');
+
+        assert.equal(ctx.policy.currentModel, 'm2');
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+
+    it('starting at current == M3 walks [M3, M1, M2]', async () => {
+      const callsMade: string[] = [];
+      const adapter: ModelAdapter = {
+        async complete(entry) {
+          callsMade.push(entry.id);
+          if (entry.id === 'm3' || entry.id === 'm1') {
+            throw new ModelUpstreamError('internal_error', 'upstream failed', 500, 500);
+          }
+          return { content: 'Success on M2', usage: { input: 100, output: 50 } };
+        },
+      };
+
+      const rig = createTestRig({ adapter });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models', 'discord'],
+          models: ['m1', 'm2', 'm3'],
+          primaryModel: 'm1',
+          secondaryModel: 'm2',
+          currentModel: 'm3',
+        };
+
+        const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat() });
+        assert.equal(res.status, 200, res.text);
+        assert.equal(res.json().choices[0].message.content, 'Success on M2');
+        assert.deepEqual(callsMade, ['m3', 'm1', 'm2']);
+        assert.equal(ctx.policy.currentModel, 'm2');
+        assert.equal(rig.failoverCalls.length, 1);
+        assert.equal(rig.failoverCalls[0].fromModel, 'm3');
+        assert.equal(rig.failoverCalls[0].toModel, 'm2');
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+
+    it('starting at current == secondary (m2) walks [m2, m1], stops without looping, and ledgers MODEL_FAILOVER_EXHAUSTED on failure', async () => {
+      const callsMade: string[] = [];
+      const adapter: ModelAdapter = {
+        async complete(entry) {
+          callsMade.push(entry.id);
+          throw new ModelUpstreamError('internal_error', `upstream ${entry.id} down`, 500, 500);
+        },
+      };
+
+      const rig = createTestRig({ adapter });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models', 'discord'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          secondaryModel: 'm2',
+          currentModel: 'm2',
+        };
+
+        const res = await call(sPort, '/models/v1/chat/completions', { token, body: chat() });
+        assert.equal(res.status, 500);
+        assert.deepEqual(callsMade, ['m2', 'm1'], 'exact candidate order without looping');
+        assert.equal(ctx.policy.currentModel, 'm2', 'currentModel unchanged when exhausted');
+
+        const exhausted = rig.rigLedger.find((e) => e.action === 'MODEL_FAILOVER_EXHAUSTED');
+        assert.ok(exhausted);
+        assert.deepEqual(exhausted.models, ['m2', 'm1']);
+        assert.equal(rig.failoverCalls.length, 0);
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+
+    it('non-failover errors (400 bad json, 400 streaming, 402 budget, 429 throttle, 403 unapproved, pinned) never trigger failover', async () => {
+      let adapterCalls = 0;
+      const adapter: ModelAdapter = {
+        async complete() {
+          adapterCalls++;
+          throw new ModelUpstreamError('internal_error', 'boom', 500, 500);
+        },
+      };
+
+      const rig = createTestRig({ adapter });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models', 'discord'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          secondaryModel: 'm2',
+          currentModel: 'm1',
+        };
+
+        // 1. Streaming not supported: 400
+        adapterCalls = 0;
+        const resStream = await call(sPort, '/models/v1/chat/completions', { token, body: { ...chat('m1'), stream: true } });
+        assert.equal(resStream.status, 400);
+        assert.equal(resStream.json().error, 'streaming_not_supported');
+        assert.equal(adapterCalls, 0);
+
+        // 2. Model not allowed (empty models array grants none): 403
+        ctx.policy.models = [];
+        adapterCalls = 0;
+        const resUnapproved = await call(sPort, '/models/v1/chat/completions', { token, body: chat() });
+        assert.equal(resUnapproved.status, 403);
+        assert.equal(resUnapproved.json().error, 'model_not_allowed');
+        assert.equal(adapterCalls, 0);
+        ctx.policy.models = ['m1', 'm2'];
+
+        // 3. Budget exceeded at start: 402
+        ctx.policy.budgetUsd = { perRun: 0.0001 };
+        ctx.spend.run = 0.001;
+        adapterCalls = 0;
+        const resBudget = await call(sPort, '/models/v1/chat/completions', { token, body: chat() });
+        assert.equal(resBudget.status, 402);
+        assert.equal(resBudget.json().error, 'budget_exceeded');
+        assert.equal(adapterCalls, 0);
+        ctx.policy.budgetUsd = undefined;
+        ctx.spend.run = 0;
+
+        // 4. Pinned model: when pinned, does not walk failover candidates
+        ctx.run.model = 'm1';
+        adapterCalls = 0;
+        const resPinned = await call(sPort, '/models/v1/chat/completions', { token, body: chat() });
+        assert.equal(resPinned.status, 500);
+        assert.equal(adapterCalls, 1, 'only the pinned model is tried');
+        assert.equal(rig.failoverCalls.length, 0);
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+
+    it('mid-failover budget exhaustion refuses candidate 1 with 402 budget_exceeded after candidate 0 is metered', async () => {
+      const callsMade: string[] = [];
+      const adapter: ModelAdapter = {
+        async complete(entry) {
+          callsMade.push(entry.id);
+          if (entry.id === 'm1') {
+            return {
+              content: 'get_weather: {"city": "Seattle"}',
+              usage: { input: 1000, output: 50000 },
+            };
+          }
+          return { content: 'Should not reach m2', usage: { input: 10, output: 10 } };
+        },
+      };
+
+      const rig = createTestRig({ adapter });
+      const sPort = await listen(rig.server);
+
+      try {
+        ctx.policy = {
+          routes: ['models', 'discord'],
+          models: ['m1', 'm2'],
+          primaryModel: 'm1',
+          secondaryModel: 'm2',
+          currentModel: 'm1',
+          budgetUsd: { perRun: 0.05 },
+        };
+        ctx.spend.run = 0;
+
+        const res = await call(sPort, '/models/v1/chat/completions', {
+          token,
+          body: {
+            ...chat('m1'),
+            tools: [{ type: 'function', function: { name: 'get_weather', parameters: { type: 'object' } } }],
+          },
+        });
+
+        assert.equal(res.status, 402, res.text);
+        assert.equal(res.json().error, 'budget_exceeded');
+        assert.deepEqual(callsMade, ['m1'], 'm2 was never called');
+
+        const llmEvents = rig.rigLedger.filter((e) => e.type === 'llm');
+        assert.equal(llmEvents.length, 1);
+        assert.equal(llmEvents[0].model, 'm1');
+        assert.ok(ctx.spend.run > 0.05);
+
+        assert.equal(rig.failoverCalls.length, 0);
+        assert.equal(ctx.policy.currentModel, 'm1');
+      } finally {
+        await new Promise<void>((r) => rig.server.close(() => r()));
+      }
+    });
+  });
+
 });

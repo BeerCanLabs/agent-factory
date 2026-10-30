@@ -93,6 +93,19 @@ const control: ControlClient = {
     const body = (await res.json()) as { models?: ModelCatalog; catalog?: ModelCatalog; default?: string };
     return { catalog: body.catalog ?? body.models ?? {}, default: body.default };
   },
+  async modelFailover(req: { runId: string; toModel: string; fromModel?: string; reason?: string }) {
+    const res = await call('POST', `/api/v1/gatekeeper-egress/runs/${encodeURIComponent(req.runId)}/failover`, {
+      toModel: req.toModel,
+      fromModel: req.fromModel,
+      reason: req.reason,
+    });
+    if (!res.ok) {
+      console.error(`[gatekeeper-egress] modelFailover rejected: ${res.status}`);
+      return { ok: false };
+    }
+    const body = (await res.json()) as { ok: boolean; currentModel?: string };
+    return { ok: Boolean(body?.ok), currentModel: body?.currentModel };
+  },
   async ledger(event) {
     try {
       const res = await call('POST', '/api/v1/ledger', event);
