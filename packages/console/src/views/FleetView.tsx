@@ -17,9 +17,10 @@ import {
   KeyRound,
   ArrowUpCircle,
 } from 'lucide-react';
-import type { AgentRecord, AgentState } from '../api/types.js';
+import type { AgentPolicy, AgentRecord, AgentState } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
 import { factoryApi } from '../api/client.js';
+import { budgetFormFromPolicy, applyBudgetFormToPolicy, type BudgetFormData } from '../components/models-model.js';
 
 interface FleetViewProps {
   agents: AgentRecord[];
@@ -51,7 +52,13 @@ export const FleetView: React.FC<FleetViewProps> = ({
   const [isWaking, setIsWaking] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [budgetModalAgent, setBudgetModalAgent] = useState<AgentRecord | null>(null);
-  const [budgetLimit, setBudgetLimit] = useState<string>('');
+  const [budgetForm, setBudgetForm] = useState<BudgetFormData>({
+    monthlyUsd: '',
+    hasDailyLimit: false,
+    dailyUsd: '',
+  });
+  const [budgetPolicy, setBudgetPolicy] = useState<AgentPolicy | null>(null);
+  const [budgetError, setBudgetError] = useState<string | null>(null);
   const [isSettingBudget, setIsSettingBudget] = useState(false);
 
   const userAgents = agents.filter((a) => !a.isBuiltin && a.category !== 'builtin');
@@ -86,9 +93,23 @@ export const FleetView: React.FC<FleetViewProps> = ({
     .reduce((sum, a) => {
       const monthly = Number.isFinite(a.spendLimitMonthlyUsd) && (a.spendLimitMonthlyUsd ?? 0) > 0
         ? a.spendLimitMonthlyUsd!
-        : (Number.isFinite(a.spendLimitUsd) && (a.spendLimitUsd ?? 0) > 0 ? a.spendLimitUsd! * 30 : 0);
+        : 0;
       return sum + monthly;
     }, 0);
+
+  const openBudgetModal = async (agent: AgentRecord) => {
+    setBudgetModalAgent(agent);
+    setBudgetError(null);
+    const initialForm = budgetFormFromPolicy(null, agent);
+    setBudgetForm(initialForm);
+    try {
+      const pol = await factoryApi.getPolicy(agent.id);
+      setBudgetPolicy(pol);
+      setBudgetForm(budgetFormFromPolicy(pol, agent));
+    } catch {
+      setBudgetPolicy(null);
+    }
+  };
 
   const handleWake = async () => {
     if (!wakeModalAgent) return;
@@ -114,13 +135,28 @@ export const FleetView: React.FC<FleetViewProps> = ({
   const handleBudgetSubmit = async () => {
     if (!budgetModalAgent) return;
     setIsSettingBudget(true);
+    setBudgetError(null);
     try {
-      await factoryApi.setAgentBudget(budgetModalAgent.id, parseFloat(budgetLimit) || 0, 'perMonth');
+      let basePolicy = budgetPolicy;
+      if (!basePolicy) {
+        try {
+          basePolicy = await factoryApi.getPolicy(budgetModalAgent.id);
+        } catch {
+          basePolicy = { routes: [] };
+        }
+      }
+      const applied = applyBudgetFormToPolicy(basePolicy, budgetForm);
+      if (!applied.ok) {
+        setBudgetError(applied.error);
+        setIsSettingBudget(false);
+        return;
+      }
+      await factoryApi.saveAgentBudgetPolicy(budgetModalAgent.id, applied.policy, 'budget updated in console');
       setActionMessage(`Budget updated for ${budgetModalAgent.name}.`);
       setBudgetModalAgent(null);
       onRefresh();
     } catch (err: any) {
-      alert(`Failed to update budget: ${err.message}`);
+      setBudgetError(err.message || 'Failed to update budget');
     } finally {
       setIsSettingBudget(false);
     }
@@ -612,11 +648,8 @@ export const FleetView: React.FC<FleetViewProps> = ({
                       )}
 
                       <button
-                        onClick={() => {
-                          setBudgetModalAgent(agent);
-                          setBudgetLimit(agent.spendLimitMonthlyUsd ? String(agent.spendLimitMonthlyUsd) : '0');
-                        }}
-                        disabled={agent.isBuiltin || agent.category === 'builtin' || agent.budgetExempt}
+                        onClick={() => openBudgetModal(agent)}
+                        disabled={!permissions.canSetBudget || agent.isBuiltin || agent.category === 'builtin' || agent.budgetExempt}
                         className="p-1 text-slate-500 dark:text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 disabled:opacity-40 rounded hover:bg-slate-200 dark:hover:bg-slate-800 transition"
                         title="Configure Budget Limits"
                       >
@@ -654,20 +687,55 @@ export const FleetView: React.FC<FleetViewProps> = ({
             </div>
             
             <p className="text-xs text-slate-600 dark:text-slate-400">
-              Set the monthly LLM egress spend limit for this agent in USD.
+              Set the monthly LLM egress spend limit and optional daily limit for this agent in USD.
             </p>
             
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Monthly Limit ($)</label>
-              <input
-                type="number"
-                min="0"
-                step="5"
-                value={budgetLimit}
-                onChange={(e) => setBudgetLimit(e.target.value)}
-                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-3 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
-              />
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Monthly Limit ($)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={budgetForm.monthlyUsd}
+                  onChange={(e) => setBudgetForm({ ...budgetForm, monthlyUsd: e.target.value })}
+                  placeholder="no monthly limit"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2.5 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="flex items-center space-x-2 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer pt-1">
+                  <input
+                    type="checkbox"
+                    checked={budgetForm.hasDailyLimit}
+                    onChange={(e) => setBudgetForm({ ...budgetForm, hasDailyLimit: e.target.checked })}
+                    className="rounded text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <span>Set a daily limit</span>
+                </label>
+
+                {budgetForm.hasDailyLimit && (
+                  <div className="space-y-1">
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={budgetForm.dailyUsd}
+                      onChange={(e) => setBudgetForm({ ...budgetForm, dailyUsd: e.target.value })}
+                      placeholder="daily limit in USD"
+                      className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2.5 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                )}
+              </div>
             </div>
+
+            {budgetError && (
+              <div className="text-xs text-red-600 dark:text-red-400">
+                {budgetError}
+              </div>
+            )}
             
             <div className="flex items-center justify-end space-x-3 pt-2">
               <button

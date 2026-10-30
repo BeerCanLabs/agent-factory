@@ -64,7 +64,7 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
   const totalDailySpend = submindAgents.reduce((sum, a) => sum + (a.currentSpendUsd || 0), 0);
   const totalMonthlySpend = submindAgents.reduce((sum, a) => sum + (a.currentSpendMonthlyUsd || a.currentSpendUsd || 0), 0);
   const totalDailyBudget = submindAgents.reduce((sum, a) => sum + (a.spendLimitUsd || 0), 0);
-  const totalMonthlyBudget = submindAgents.reduce((sum, a) => sum + (a.spendLimitMonthlyUsd || (a.spendLimitUsd ? a.spendLimitUsd * 30 : 0)), 0);
+  const totalMonthlyBudget = submindAgents.reduce((sum, a) => sum + (a.spendLimitMonthlyUsd || 0), 0);
 
   const activeSpend = viewPeriod === 'monthly' ? totalMonthlySpend : totalDailySpend;
   const activeBudget = viewPeriod === 'monthly' ? totalMonthlyBudget : totalDailyBudget;
@@ -204,7 +204,7 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
                   : (agent.currentSpendUsd ?? 0);
 
                 const currentLimit = viewPeriod === 'monthly'
-                  ? (agent.spendLimitMonthlyUsd || (agent.spendLimitUsd ? agent.spendLimitUsd * 30 : 0))
+                  ? (agent.spendLimitMonthlyUsd || 0)
                   : (agent.spendLimitUsd || 0);
 
                 const headroom = Math.max(0, currentLimit - currentSpend);

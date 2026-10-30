@@ -1,88 +1,86 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle, Shield } from 'lucide-react';
-import type { AgentPolicy, AgentRecord, OfferedModel } from '../api/types.js';
+import { AlertTriangle, ArrowRight, CheckCircle, ExternalLink, Shield } from 'lucide-react';
+import type { AgentPolicy, AgentRecord, OfferedModel, AgentModelsState } from '../api/types.js';
 import { factoryApi } from '../api/client.js';
 
+interface PolicyEditorProps {
+  agent: AgentRecord;
+  canEdit: boolean;
+  onOpenModels?: () => void;
+}
+
 /**
- * TSK-048: the company's policy for one agent, set by an admin in the factory (E7, L4). The agent's repo only
- * declares the egress it needs and a preferred model (E8, M2); routes and hosts can be granted only from that
- * declaration, and models only from what this factory offers (M3). Budget is the company's alone.
+ * The company's policy for one agent (E7, L4).
+ * Routes and hosts can be granted only from the agent repository's declarations.
+ * Models and budget are managed in the Models tab (GAP-062, TSK-169).
+ * When saving Routes & Hosts, existing budgetUsd, models, currentModel, primaryModel, and secondaryModel
+ * are strictly preserved.
  */
-export const PolicyEditor: React.FC<{ agent: AgentRecord; canEdit: boolean }> = ({ agent, canEdit }) => {
+export const PolicyEditor: React.FC<PolicyEditorProps> = ({ agent, canEdit, onOpenModels }) => {
   const [policy, setPolicy] = useState<AgentPolicy | null>(null);
-  const [offered, setOffered] = useState<OfferedModel[]>([]);
+  const [modelsState, setModelsState] = useState<AgentModelsState | null>(null);
+  const [catalog, setCatalog] = useState<OfferedModel[]>([]);
   const [routes, setRoutes] = useState<string[]>([]);
   const [hosts, setHosts] = useState<string[]>([]);
-  const [models, setModels] = useState<string[]>([]);
-  const [perDay, setPerDay] = useState('');
-  const [perMonth, setPerMonth] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const budgetExempt = Boolean(agent.isBuiltin || agent.budgetExempt || agent.category === 'builtin');
   const declaredRoutes = agent.egress?.routes ?? [];
   const declaredHosts = agent.egress?.hosts ?? [];
-  const preferred = agent.requestedModels?.[0] ?? agent.model;
-
-  const load = (p: AgentPolicy) => {
-    setPolicy(p);
-    setRoutes(p.routes ?? []);
-    setHosts(p.hosts ?? []);
-    setModels(p.models ?? []);
-    setPerDay(p.budgetUsd?.perDay !== undefined ? String(p.budgetUsd.perDay) : '');
-    setPerMonth(p.budgetUsd?.perMonth !== undefined ? String(p.budgetUsd.perMonth) : '');
-  };
 
   useEffect(() => {
     setError(null);
     setSaved(null);
-    Promise.all([factoryApi.getPolicy(agent.id), factoryApi.listModels()])
-      .then(([p, m]) => {
-        load(p);
-        setOffered(m);
-      })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    Promise.allSettled([
+      factoryApi.getPolicy(agent.id),
+      factoryApi.getAgentModels(agent.id),
+      factoryApi.modelCatalog(),
+    ]).then(([pRes, mRes, cRes]) => {
+      if (pRes.status === 'fulfilled') {
+        const p = pRes.value;
+        setPolicy(p);
+        setRoutes(p.routes ?? []);
+        setHosts(p.hosts ?? []);
+      } else {
+        setError(`Failed to load policy: ${pRes.reason?.message ?? String(pRes.reason)}`);
+      }
+      if (mRes.status === 'fulfilled') {
+        setModelsState(mRes.value);
+      }
+      if (cRes.status === 'fulfilled') {
+        setCatalog(cRes.value.models ?? []);
+      }
+    });
   }, [agent.id]);
 
-  // Everything declared (or offered), plus anything the saved policy grants that is not, so it can be seen and
-  // removed. Rows come from the saved policy, not the edit in progress, so unticking one never makes it vanish.
-  // E7: the factory model API (`models`) comes with this policy; models are chosen below, not as a route.
-  const routeRows = useMemo(() => [...new Set([...declaredRoutes, ...(policy?.routes ?? [])])].filter((r) => r !== 'models'), [declaredRoutes, policy]);
-  const hostRows = useMemo(() => [...new Set([...declaredHosts, ...(policy?.hosts ?? [])])], [declaredHosts, policy]);
-  const modelRows = useMemo(() => [...new Set([...offered.map((m) => m.name), ...(policy?.models ?? [])])], [offered, policy]);
-  const offeredNames = new Set(offered.map((m) => m.name));
+  const routeRows = useMemo(
+    () => [...new Set([...declaredRoutes, ...(policy?.routes ?? [])])].filter((r) => r !== 'models'),
+    [declaredRoutes, policy],
+  );
+  const hostRows = useMemo(
+    () => [...new Set([...declaredHosts, ...(policy?.hosts ?? [])])],
+    [declaredHosts, policy],
+  );
 
   const toggle = (list: string[], set: (v: string[]) => void, item: string) =>
     set(list.includes(item) ? list.filter((x) => x !== item) : [...list, item]);
 
-  const money = (v: string): number | undefined | null => {
-    if (v.trim() === '') return undefined;
-    const n = Number(v);
-    return Number.isFinite(n) && n >= 0 ? n : null;
-  };
-
   const save = async () => {
     if (!policy) return;
-    const day = money(perDay);
-    const month = money(perMonth);
-    if (day === null || month === null) {
-      setError('Budgets must be numbers of dollars, 0 or more.');
-      return;
-    }
-    const budgetUsd = { ...(policy.budgetUsd?.perRun !== undefined ? { perRun: policy.budgetUsd.perRun } : {}), ...(day !== undefined ? { perDay: day } : {}), ...(month !== undefined ? { perMonth: month } : {}) };
+    // Strictly preserve policy.budgetUsd, models, currentModel, primaryModel, secondaryModel
     const next: AgentPolicy = {
       ...policy,
       routes,
       hosts,
-      models,
-      ...(budgetExempt ? {} : { budgetUsd }),
     };
-    if (budgetExempt || Object.keys(budgetUsd).length === 0) delete next.budgetUsd;
     setSaving(true);
     setError(null);
     try {
-      load(await factoryApi.setPolicy(agent.id, next));
+      const updated = await factoryApi.setPolicy(agent.id, next);
+      setPolicy(updated);
+      setRoutes(updated.routes ?? []);
+      setHosts(updated.hosts ?? []);
       setSaved(new Date().toLocaleTimeString());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -94,12 +92,13 @@ export const PolicyEditor: React.FC<{ agent: AgentRecord; canEdit: boolean }> = 
   const row = (label: string, checked: boolean, onChange: () => void, note?: React.ReactNode, disabled = false) => (
     <label key={label} className="flex items-center justify-between py-1.5 border-b border-slate-100 dark:border-slate-800/80 text-xs">
       <span className="flex items-center space-x-2">
-        <input type="checkbox" checked={checked} onChange={onChange} disabled={!canEdit || disabled} />
+        <input type="checkbox" checked={checked} onChange={onChange} disabled={!canEdit || disabled} className="rounded text-emerald-600 focus:ring-emerald-500" />
         <span className="font-mono text-slate-800 dark:text-slate-200">{label}</span>
       </span>
       {note}
     </label>
   );
+
   const tag = (text: string, tone: 'ok' | 'warn' | 'muted') => (
     <span
       className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
@@ -120,19 +119,23 @@ export const PolicyEditor: React.FC<{ agent: AgentRecord; canEdit: boolean }> = 
 
   if (!policy && !error) return <div className={hint}>Loading policy…</div>;
 
+  const catalogMap = new Map(catalog.map((m) => [m.name, m]));
+  const grantedModels = modelsState?.approvedModels ?? policy?.models ?? [];
+  const usesDefault = Boolean(modelsState?.usesDefault ?? (policy && !policy.models));
+
   return (
     <div className="space-y-4">
       <div className="flex items-start space-x-2 text-xs text-slate-600 dark:text-slate-300">
         <Shield className="w-4 h-4 text-emerald-500 shrink-0" />
         <p>
           This is what the company grants {agent.name}. The agent's repo only asks: it declares the egress it needs and the
-          model it was built for. Routes and hosts can be granted only from that declaration; models from what this factory
-          offers. A deploy never changes this policy.
+          model it was built for. Routes and hosts can be granted only from that declaration.
           {!canEdit && ' Only an admin can change it.'}
         </p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Routes & Hosts Column */}
         <div className={card}>
           <h4 className={heading}>Routes</h4>
           {routeRows.length === 0 && <p className={hint}>The agent declares no routes.</p>}
@@ -145,6 +148,7 @@ export const PolicyEditor: React.FC<{ agent: AgentRecord; canEdit: boolean }> = 
               !declaredRoutes.includes(r) && !routes.includes(r),
             ),
           )}
+
           {hostRows.length > 0 && <h4 className={`${heading} pt-3`}>Hosts</h4>}
           {hostRows.map((h) =>
             row(
@@ -157,53 +161,72 @@ export const PolicyEditor: React.FC<{ agent: AgentRecord; canEdit: boolean }> = 
           )}
         </div>
 
+        {/* Granted Models Column (Read-Only Summary) */}
         <div className={card}>
-          <h4 className={heading}>Models</h4>
-          <p className={hint}>Granting models gives the agent the factory model API; there is no separate route to check.</p>
-          {modelRows.length === 0 && <p className={hint}>This factory offers no models.</p>}
-          {modelRows.map((m) => {
-            const price = offered.find((o) => o.name === m)?.price;
-            return row(
-              m,
-              models.includes(m),
-              () => toggle(models, setModels, m),
-              <span className="flex items-center space-x-1">
-                {m === preferred && tag('preferred', 'ok')}
-                {price && tag(`$${price.inputPerMTok}/$${price.outputPerMTok} per M tok`, 'muted')}
-                {!offeredNames.has(m) && tag('not offered', 'warn')}
-              </span>,
-              !offeredNames.has(m) && !models.includes(m),
-            );
-          })}
+          <div className="flex items-center justify-between pb-1 border-b border-slate-100 dark:border-slate-800">
+            <h4 className={heading}>Granted Models</h4>
+            {onOpenModels && (
+              <button
+                type="button"
+                onClick={onOpenModels}
+                className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline flex items-center space-x-1"
+              >
+                <span>Manage in Models</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
 
-          {!budgetExempt && (
-            <>
-              <h4 className={`${heading} pt-3`}>Budget (USD)</h4>
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <label className="space-y-1">
-                  <span className={hint}>Per day</span>
-                  <input
-                    className="w-full rounded border border-slate-300 dark:border-slate-700 bg-transparent px-2 py-1"
-                    inputMode="decimal"
-                    value={perDay}
-                    onChange={(e) => setPerDay(e.target.value)}
-                    disabled={!canEdit}
-                    placeholder="no limit"
-                  />
-                </label>
-                <label className="space-y-1">
-                  <span className={hint}>Per month</span>
-                  <input
-                    className="w-full rounded border border-slate-300 dark:border-slate-700 bg-transparent px-2 py-1"
-                    inputMode="decimal"
-                    value={perMonth}
-                    onChange={(e) => setPerMonth(e.target.value)}
-                    disabled={!canEdit}
-                    placeholder="no limit"
-                  />
-                </label>
-              </div>
-            </>
+          <p className={hint}>
+            Model permissions and failback slots are configured in the Models tab.
+          </p>
+
+          {usesDefault ? (
+            <div className="p-3 bg-slate-50 dark:bg-slate-950 rounded-lg border border-slate-200 dark:border-slate-800 text-xs space-y-1">
+              <div className="font-semibold text-slate-800 dark:text-slate-200">Factory Default Model</div>
+              <p className="text-slate-500 dark:text-slate-400">
+                The policy grants no explicit model list, so this agent uses the factory default:{' '}
+                <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                  {modelsState?.defaultModel ?? 'none configured'}
+                </span>
+                .
+              </p>
+            </div>
+          ) : grantedModels.length === 0 ? (
+            <div className="p-3 bg-amber-50 dark:bg-amber-950/20 rounded-lg border border-amber-200 dark:border-amber-800/40 text-xs text-amber-700 dark:text-amber-400">
+              No models granted. Every model call will be refused.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {grantedModels.map((m) => {
+                const cat = catalogMap.get(m);
+                const isCurrent = m === modelsState?.currentModel;
+                const isPrimary = m === modelsState?.primaryModel;
+                const isSecondary = m === modelsState?.secondaryModel;
+
+                return (
+                  <div
+                    key={m}
+                    className="flex items-center justify-between py-1.5 px-2 rounded bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800/80 text-xs"
+                  >
+                    <span className="flex items-center space-x-2">
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                      <span className="font-mono text-slate-800 dark:text-slate-200">{m}</span>
+                    </span>
+                    <div className="flex items-center space-x-1.5">
+                      {isCurrent && tag('Current', 'ok')}
+                      {isPrimary && tag('Primary', 'muted')}
+                      {isSecondary && tag('Secondary', 'muted')}
+                      {cat?.price && (
+                        <span className="text-[10px] font-mono text-slate-400">
+                          ${cat.price.inputPerMTok}/${cat.price.outputPerMTok}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
       </div>
