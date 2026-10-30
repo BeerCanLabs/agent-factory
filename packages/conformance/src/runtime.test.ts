@@ -44,6 +44,7 @@ describe('RT2 the loop has no extension points', () => {
     const allowed = new Set([
       'FACTORY_URL', 'FACTORY_RUN_ID', 'FACTORY_RUN_TOKEN', 'FACTORY_MODEL_BASE_URL', 'FACTORY_MODEL', 'DISCORD_BASE_URL',
       'FACTORY_RESULT_FILE', 'MEMORY_DIR', 'SKILLS_DIR',
+      'FACTORY_NOTEBOOK_MAX_BYTES', 'FACTORY_NOTEBOOK_MAX_DAYS', 'FACTORY_NOTEBOOK_VOLUMES_DIR', 'FACTORY_VOLUME_REQUESTS_DIR',
     ]);
     const used = new Set<string>();
     for (const f of allSources()) {
@@ -63,3 +64,32 @@ describe('RT2 the loop has no extension points', () => {
     assert.match(doc, /current implementation/);
   });
 });
+
+describe('AM3 and AM4: shared runtime rotates notebooks and searches closed volumes without deleting turns', () => {
+  it('AM3 and AM4 neither runtime nor starter-python contains prune_conversations, prune_workspace, or DELETE turn statements', () => {
+    const memoryDirs = ['runtimes/agent-runtime/memory', 'agents/examples/starter-python/memory'];
+    for (const dir of memoryDirs) {
+      for (const f of files(dir, (p) => p.endsWith('.py'))) {
+        const content = read(f);
+        assert.ok(!content.includes('prune_conversations'), `${f} must not contain prune_conversations`);
+        assert.ok(!content.includes('prune_workspace'), `${f} must not contain prune_workspace`);
+        assert.ok(!/DELETE\s+FROM\s+conversation_turns/i.test(content), `${f} must not delete conversation turns`);
+        assert.ok(!/DELETE\s+FROM\s+workspace_turns/i.test(content), `${f} must not delete workspace turns`);
+      }
+    }
+    const agentPy = read('agents/examples/starter-python/agent.py');
+    assert.ok(!agentPy.includes('prune_conversations'), 'starter-python agent.py must not contain prune_conversations');
+    const mindPy = read('runtimes/agent-runtime/runtime/mind.py');
+    assert.ok(!mindPy.includes('prune_conversations'), 'runtime mind.py must not contain prune_conversations');
+  });
+
+  it('AM3 and AM4 notebook.py exists and is wired in runtime mind.py', () => {
+    assert.ok(files('runtimes/agent-runtime/memory', (p) => p.endsWith('notebook.py')).length > 0, 'notebook.py must exist');
+    const mind = read('runtimes/agent-runtime/runtime/mind.py');
+    assert.match(mind, /notebook\.init_notebook_tables/, 'mind.py must initialize notebook tables');
+    assert.match(mind, /notebook\.should_rotate/, 'mind.py must check should_rotate');
+    assert.match(mind, /notebook\.rotate/, 'mind.py must call notebook.rotate');
+    assert.match(mind, /notebook\.search_volumes/, 'mind.py must search closed volumes');
+  });
+});
+

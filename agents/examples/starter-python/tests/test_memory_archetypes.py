@@ -26,7 +26,7 @@ from memory import (
     get_memory_archetype,
     load_archetype_from_cartridge,
 )
-from memory import ephemeral, episodic, workspace
+from memory import ephemeral, episodic, workspace, notebook
 
 
 class TestMemoryArchetypes(unittest.TestCase):
@@ -106,7 +106,7 @@ id: test-agent
         self.assertTrue(callable(memory.load_whiteboard))
         self.assertTrue(callable(memory.remember_turn))
         self.assertTrue(callable(memory.recall_conversation))
-        self.assertTrue(callable(memory.prune_conversations))
+        self.assertTrue(hasattr(memory, "notebook"))
         self.assertIsInstance(memory.RECALL_TOOL_SPEC, dict)
 
         self.assertTrue(issubclass(memory.EphemeralWhiteboard, object))
@@ -236,20 +236,20 @@ id: test-agent
         self.assertIn("Conversation Export", res)
         conn.close()
 
-    def test_episodic_pruning_policy(self):
-        """Verify rolling pruning on wake for turns older than retention threshold."""
+    def test_episodic_retention_policy_zero_delete_pruning(self):
+        """Verify rolling retention does NOT delete turns older than 40 days (AM3 non-destructive)."""
         conn = sqlite3.connect(":memory:")
         episodic.init_episodic_tables(conn)
+        notebook.init_notebook_tables(conn)
         session_id, _ = episodic.get_or_create_active_session(conn, "alice")
 
         now = datetime.now(timezone.utc)
-        old_time = (now - timedelta(days=40)).isoformat()
+        old_time = (now - timedelta(days=45)).isoformat()
         recent_time = (now - timedelta(days=5)).isoformat()
 
-        # Insert historical turn directly
         conn.execute(
             "INSERT INTO conversation_turns (session_id, user_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
-            (session_id, "alice", "user", "Old forgotten message", old_time),
+            (session_id, "alice", "user", "Historical turn 45d old", old_time),
         )
         conn.execute(
             "INSERT INTO conversation_turns (session_id, user_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
@@ -257,13 +257,94 @@ id: test-agent
         )
         conn.commit()
 
-        pruned = episodic.prune_conversations(conn, retention_days=30)
-        self.assertEqual(pruned, 1)
-
-        remaining = conn.execute("SELECT content FROM conversation_turns WHERE session_id = ?", (session_id,)).fetchall()
-        self.assertEqual(len(remaining), 1)
-        self.assertEqual(remaining[0][0], "Recent message")
+        # Both turns remain in the database (no DELETE pruning)
+        remaining = conn.execute("SELECT content FROM conversation_turns WHERE session_id = ? ORDER BY id ASC", (session_id,)).fetchall()
+        self.assertEqual(len(remaining), 2)
+        self.assertEqual(remaining[0][0], "Historical turn 45d old")
+        self.assertEqual(remaining[1][0], "Recent message")
         conn.close()
+
+    def test_notebook_rotation_and_carry_forward(self):
+        """Verify notebook rotation archives closed volume and carries forward recent sessions/turns (AM3)."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            memory_dir = Path(tmp_dir)
+            db_path = memory_dir / "agent_state.db"
+            conn = sqlite3.connect(str(db_path))
+            episodic.init_episodic_tables(conn)
+            notebook.init_notebook_tables(conn)
+
+            session_id, _ = episodic.get_or_create_active_session(conn, "alice")
+            episodic.remember_turn(conn, session_id, "alice", "Turn 1", "Reply 1")
+            episodic.remember_turn(conn, session_id, "alice", "Turn 2", "Reply 2")
+
+            # Check should_rotate returns False initially
+            self.assertFalse(notebook.should_rotate(memory_dir, conn))
+
+            # Exceed byte limit via env
+            os.environ["FACTORY_NOTEBOOK_MAX_BYTES"] = "10"
+            try:
+                self.assertTrue(notebook.should_rotate(memory_dir, conn))
+                rotated_conn = notebook.rotate(memory_dir, conn, init_fn=episodic.init_episodic_tables)
+            finally:
+                os.environ.pop("FACTORY_NOTEBOOK_MAX_BYTES", None)
+
+            # Check that volumes directory contains the closed volume
+            vols = list((memory_dir / "volumes").iterdir())
+            self.assertEqual(len(vols), 1)
+            vol_name = vols[0].name
+            self.assertTrue((vols[0] / "agent_state.db").exists())
+
+            # Check that rotated_conn has the volume index in notebook_volumes
+            vols_idx = notebook.list_volumes(rotated_conn)
+            self.assertEqual(len(vols_idx), 1)
+            self.assertEqual(vols_idx[0]["name"], vol_name)
+
+            # Check that open conversation and turns were carried forward
+            carried_sessions = rotated_conn.execute("SELECT id, user_id FROM conversation_sessions WHERE id = ?", (session_id,)).fetchall()
+            self.assertEqual(len(carried_sessions), 1)
+            carried_turns = rotated_conn.execute("SELECT role, content FROM conversation_turns WHERE session_id = ? ORDER BY id ASC", (session_id,)).fetchall()
+            self.assertEqual(len(carried_turns), 4)  # 2 user + 2 assistant turns
+            rotated_conn.close()
+
+    def test_notebook_search_volumes_on_demand_recall(self):
+        """Verify search_volumes recalls past turns from closed volumes on demand (AM4)."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            memory_dir = Path(tmp_dir)
+            db_path = memory_dir / "agent_state.db"
+            conn = sqlite3.connect(str(db_path))
+            episodic.init_episodic_tables(conn)
+            notebook.init_notebook_tables(conn)
+
+            session_id, _ = episodic.get_or_create_active_session(conn, "alice")
+            episodic.remember_turn(conn, session_id, "alice", "Secret arch project code is 42", "Recorded.")
+
+            # Rotate so this turn ends up in the closed volume
+            rotated_conn = notebook.rotate(memory_dir, conn, init_fn=episodic.init_episodic_tables)
+            vol_name = notebook.list_volumes(rotated_conn)[0]["name"]
+
+            # Move closed volume away from local volumes/ dir to simulate cold archive
+            vol_file = memory_dir / "volumes" / vol_name / "agent_state.db"
+            archived_backup = memory_dir / "remote_storage" / vol_name / "agent_state.db"
+            archived_backup.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.move(str(vol_file), str(archived_backup))
+            shutil.rmtree(memory_dir / "volumes" / vol_name)
+
+            # Custom fetcher simulating shim: when .volume-requests/<name> appears, copies volume file and creates <name>.done
+            def mock_shim_fetch(md: Path, name: str) -> Path | None:
+                target_dir = md / "volumes" / name
+                target_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy(str(archived_backup), str(target_dir / "agent_state.db"))
+                done_marker = md / ".volume-requests" / f"{name}.done"
+                done_marker.parent.mkdir(parents=True, exist_ok=True)
+                done_marker.write_text("", encoding="utf-8")
+                return notebook.request_volume(md, name, timeout_s=2.0)
+
+            hits = notebook.search_volumes(memory_dir, rotated_conn, "alice", "arch project", fetch=mock_shim_fetch)
+            self.assertTrue(len(hits) >= 1)
+            self.assertIn("Secret arch project", hits[0]["content"])
+            self.assertEqual(hits[0]["volume"], vol_name)
+            rotated_conn.close()
 
     # ===========================================================================
     # 4. Type 3: Workspace Memory (Project & Task Scoped State)

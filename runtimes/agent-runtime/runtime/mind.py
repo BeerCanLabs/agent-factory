@@ -15,7 +15,7 @@ from memory import (
     DEFAULT_RETENTION_DAYS,
     canonical_archetype,
 )
-from memory import ephemeral, episodic, workspace
+from memory import ephemeral, episodic, workspace, notebook
 
 
 
@@ -75,10 +75,17 @@ class PersonalAssistant(Mind):
     archetype = ARCHETYPE_PERSONAL_ASSISTANT
 
     def __init__(self, memory_dir: Path, bounds: dict):
+        self.memory_dir = memory_dir
         self.bounds = bounds
         self.db = _connect(memory_dir / "agent_state.db")
         episodic.init_episodic_tables(self.db)
-        episodic.prune_conversations(self.db, retention_days=bounds["retention_days"])
+        notebook.init_notebook_tables(self.db)
+        if notebook.should_rotate(memory_dir, self.db):
+            try:
+                self.db = notebook.rotate(memory_dir, self.db, init_fn=episodic.init_episodic_tables)
+            except Exception as e:
+                print(f"[mind] Error rotating notebook: {e}", flush=True)
+                self.db = _connect(memory_dir / "agent_state.db")
 
     def fast_path(self, who, text):
         handled, reply = episodic.handle_turn_intent(self.db, user_id=who, text=text)
@@ -94,7 +101,11 @@ class PersonalAssistant(Mind):
 
     def tools(self):
         def recall(args: dict, who: str) -> str:
-            rows = episodic.recall_conversation(self.db, who, str(args.get("query", "")), args.get("session_name"))
+            query = str(args.get("query", ""))
+            session_name = args.get("session_name")
+            rows = episodic.recall_conversation(self.db, who, query, session_name)
+            if len(rows) < 5:
+                rows += notebook.search_volumes(self.memory_dir, self.db, who, query, session_name=session_name, limit=5 - len(rows))
             return json.dumps(rows)[:8000]
 
         return [(episodic.RECALL_TOOL_SPEC, recall)]

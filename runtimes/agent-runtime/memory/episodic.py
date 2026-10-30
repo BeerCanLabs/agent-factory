@@ -8,7 +8,7 @@ Provides:
 - Working memory (Whiteboard) sliding-window budgeting
 - Context awareness banners when older turns exist
 - On-demand episodic recall via SQLite FTS5 (Full-Text Search) with LIKE fallback
-- Rolling retention pruning on wake
+- Non-destructive notebook rotation per AM3 (zero turn deletion)
 """
 
 import json
@@ -481,19 +481,3 @@ def recall_conversation(
             })
 
     return results
-
-
-def prune_conversations(conn: sqlite3.Connection, retention_days: int = DEFAULT_RETENTION_DAYS) -> int:
-    """Drop conversation turns older than retention_days (rolling retention, run on wake)."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
-    old_turn_ids = [r[0] for r in conn.execute("SELECT id FROM conversation_turns WHERE timestamp < ?", (cutoff,)).fetchall()]
-    if not old_turn_ids:
-        return 0
-
-    cur = conn.execute("DELETE FROM conversation_turns WHERE timestamp < ?", (cutoff,))
-    # Remove from FTS table as well
-    for t_id in old_turn_ids:
-        conn.execute("DELETE FROM conversation_fts WHERE turn_id = ?", (str(t_id),))
-
-    conn.commit()
-    return cur.rowcount

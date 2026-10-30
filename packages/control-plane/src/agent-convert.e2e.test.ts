@@ -543,4 +543,91 @@ describe('Convert repository agent in place (TSK-283, CF6, L4, AM1, GAP-209)', {
     assert.ok(entries.some((e) => e.action === 'AGENT_CONVERTED'));
     assert.ok(entries.some((e) => e.action === 'AGENT_DEPLOYED'));
   });
+
+  it('allows owner/admin converting agent to adopt unapproved own-use spec: 1 package with tests: passed, refuses non-owner (H7, A7, A12)', async () => {
+    const reg = skillRegistry(state);
+    reg.save({
+      id: 'own-use-skill',
+      version: '1.0.0',
+      manifest: {
+        spec: 1,
+        id: 'own-use-skill',
+        version: '1.0.0',
+        name: 'Own Use Skill',
+        description: 'private skill with passing tests',
+        language: 'python',
+        entry: 'entry.py',
+        smoke: { entry: 'entry.py' },
+        requires: { routes: ['models'], credentials: [] },
+      } as any,
+      packageHash: 'c'.repeat(64),
+      status: 'pending',
+      tests: 'passed',
+      owner: 'token:operator',
+      published: false,
+    });
+
+    const repoAlienAgent: AgentRecord = {
+      id: 'repo-alien',
+      name: 'Alien Agent',
+      role: 'Assistant',
+      state: 'SLEEPING',
+      provider: 'cloud',
+      artifact: 'repo-image:repo-alien:v1',
+      repo: 'https://github.com/BeerCanLabs/SM-alien',
+      commit: REPO_COMMIT,
+      deployedCommit: REPO_COMMIT,
+      requires: [],
+      ungated: [],
+      gated: [],
+      triggers: [],
+      memoryPrefix: 'repo-alien',
+      dir: '/tmp/repo-alien',
+      egress: { routes: ['models'], hosts: [] },
+      owners: ['token:alice'],
+    };
+    state.agents.set('repo-alien', repoAlienAgent);
+    registryOf(state).save(repoAlienAgent);
+    state.policies.set('repo-alien', { routes: ['models'], models: ['gemini-2.0-flash'] });
+
+    const alienRes = await call('/api/v1/agents/repo-alien/convert', 'POST', ADMIN, {
+      soul: 'Alien soul',
+      memory: { archetype: 'personal-assistant' },
+      skills: [{ id: 'own-use-skill', version: '1.0.0' }],
+    });
+    assert.equal(alienRes.status, 403);
+    assert.equal(alienRes.body?.error, 'skill_private');
+
+    const repoOperatorAgent: AgentRecord = {
+      id: 'repo-operator',
+      name: 'Operator Agent',
+      role: 'Assistant',
+      state: 'SLEEPING',
+      provider: 'cloud',
+      artifact: 'repo-image:repo-operator:v1',
+      repo: 'https://github.com/BeerCanLabs/SM-operator',
+      commit: REPO_COMMIT,
+      deployedCommit: REPO_COMMIT,
+      requires: [],
+      ungated: [],
+      gated: [],
+      triggers: [],
+      memoryPrefix: 'repo-operator',
+      dir: '/tmp/repo-operator',
+      egress: { routes: ['models'], hosts: [] },
+      owners: ['token:operator'],
+    };
+    state.agents.set('repo-operator', repoOperatorAgent);
+    registryOf(state).save(repoOperatorAgent);
+    state.policies.set('repo-operator', { routes: ['models'], models: ['gemini-2.0-flash'] });
+
+    const operatorRes = await call('/api/v1/agents/repo-operator/convert', 'POST', OPERATOR, {
+      soul: 'Operator soul',
+      memory: { archetype: 'personal-assistant' },
+      skills: [{ id: 'own-use-skill', version: '1.0.0' }],
+    });
+    assert.equal(operatorRes.status, 200, JSON.stringify(operatorRes.body));
+    assert.equal(operatorRes.body?.ok, true);
+    assert.equal(operatorRes.body?.createdFrom, 'configuration');
+  });
 });

@@ -282,6 +282,7 @@ export class SkillRegistry {
    * skill. The refusal for a manifest that would change them, or undefined when it does not (or the skill is new).
    */
   identityIssue(manifest: Pick<SkillManifest, 'id' | 'visibility' | 'owner'>): string | undefined {
+    if ((manifest as any).spec === 1) return undefined;
     const first = this.versions(manifest.id)[0];
     if (!first) return undefined;
     const visibility = manifest.visibility === 'private' ? 'private' : 'public';
@@ -443,7 +444,7 @@ export class SkillRegistry {
 export function summarizeSkill(registry: SkillRegistry, id: string): SkillSummary | undefined {
   const versions = registry.versions(id);
   if (!versions.length) return undefined;
-  const approved = versions.filter((v) => (v.status === 'approved' || v.tests === 'passed') && !v.retired);
+  const approved = versions.filter((v) => v.status !== 'rejected' && (v.status === 'approved' || v.tests === 'passed') && !v.retired);
   const latestApproved = approved.at(-1);
   const shown = latestApproved ?? versions.at(-1)!;
   const humanOwner = versions.find((v) => v.owner)?.owner;
@@ -533,7 +534,7 @@ export function canAdopt(
   if (rec.retired) return { ok: false, error: 'skill_retired', message: `skill ${id} is retired (SK6)` };
 
   // Guardrails gate (A7): tests passed, or legacy approved status
-  const passed = rec.tests === 'passed' || rec.status === 'approved';
+  const passed = rec.status !== 'rejected' && (rec.status === 'approved' || rec.tests === 'passed');
   if (!passed) {
     return { ok: false, error: 'skill_not_approved', message: `skill ${id}@${version} is ${rec.status}; only a version that passed checks can be adopted (A7)` };
   }
@@ -592,7 +593,7 @@ export type AvailableSkill = {
 export function availableTo(registry: SkillRegistry, agentId: string, ctx?: AdoptContext): AvailableSkill[] {
   const out: AvailableSkill[] = [];
   for (const id of registry.ids()) {
-    const latest = registry.versions(id).filter((v) => (v.status === 'approved' || v.tests === 'passed') && !v.retired).at(-1);
+    const latest = registry.versions(id).filter((v) => v.status !== 'rejected' && (v.status === 'approved' || v.tests === 'passed') && !v.retired).at(-1);
     if (!latest || !canAdopt(registry, agentId, id, latest.version, ctx).ok) continue;
     const owner = ownerOf(latest) ?? latest.owner;
     out.push({

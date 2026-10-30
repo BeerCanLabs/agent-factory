@@ -757,8 +757,8 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
   });
 
   it('forbids mixing repository and package registrations for the same id (Finding 1, A15)', async () => {
-    // 1. Register repo-first as repository skill
-    const repoRes = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, {
+    // 1. Register repo-first as repository skill by OPERATOR
+    const repoRes = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, {
       repo: REPO,
       path: 'discord_progress',
       commit: SHA1,
@@ -767,14 +767,41 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
     // Manifest id in manifest() is discord-progress
     assert.equal(repoRes.status, 201);
 
-    // 2. Try to register discord-progress 2.0.0 via package upload -> 422
+    // 2. Upgrading discord-progress to a spec: 1 package 2.0.0 is REFUSED (422) for a non-owner (OTHER_OWNER)
     const pkgDiscord = makeValidPackage('discord-progress', '2.0.0');
-    const pkgRes = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, pkgDiscord);
-    assert.equal(pkgRes.status, 422);
-    assert.equal(pkgRes.body.error, 'skill_refused');
-    assert.ok(pkgRes.body.reasons.some((r: string) => r.includes('cannot mix repository and package versions for this id (A15)')));
+    const nonOwnerRes = await call(port, '/api/v1/registry/skills', 'POST', OTHER_OWNER, pkgDiscord);
+    assert.equal(nonOwnerRes.status, 422);
+    assert.equal(nonOwnerRes.body.error, 'skill_refused');
+    assert.ok(nonOwnerRes.body.reasons.some((r: string) => r.includes('new versions must come from the owner or an admin (A15)')));
 
-    // 3. Try to register math-tools (previously package-registered) via repository JSON -> 422
+    // 3. SUCCEEDS (201) for the owner (OPERATOR) or admin
+    const ownerRes = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, pkgDiscord);
+    assert.equal(ownerRes.status, 201);
+    assert.equal(ownerRes.body.id, 'discord-progress');
+    assert.equal(ownerRes.body.version, '2.0.0');
+    assert.equal(ownerRes.body.published, undefined);
+
+    // 4. Remains unpublished/private to non-owners until explicitly published
+    recordSkillChecks(state, 'discord-progress', '2.0.0', { passed: true });
+    const nonOwnerAdoptRes = await call(port, '/api/v1/agents/other-agent/skills', 'POST', OTHER_OWNER, {
+      skillId: 'discord-progress',
+      version: '2.0.0',
+    });
+    assert.equal(nonOwnerAdoptRes.status, 403);
+    assert.equal(nonOwnerAdoptRes.body.error, 'skill_private');
+
+    // 5. Registering a subsequent JSON repository version (3.0.0) after a package version (2.0.0) exists is REFUSED (422)
+    const postPackageRepoRes = await call(port, '/api/v1/registry/skills', 'POST', OPERATOR, {
+      repo: REPO,
+      path: 'discord_progress',
+      commit: SHA2,
+      manifest: manifest('3.0.0'),
+    });
+    assert.equal(postPackageRepoRes.status, 422);
+    assert.equal(postPackageRepoRes.body.error, 'skill_refused');
+    assert.ok(postPackageRepoRes.body.reasons.some((r: string) => r.includes('cannot mix repository and package versions for this id (A15)')));
+
+    // 6. Try to register math-tools (previously package-registered) via repository JSON -> 422
     const mixedRepoRes = await call(port, '/api/v1/registry/skills', 'POST', ADMIN, {
       repo: REPO,
       path: 'math_tools',

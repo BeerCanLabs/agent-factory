@@ -641,23 +641,3 @@ def recall_task_memory(
             })
 
     return results
-
-
-# ---------------------------------------------------------------------------
-# Rolling Retention Pruning
-# ---------------------------------------------------------------------------
-
-
-def prune_workspace(conn: sqlite3.Connection, retention_days: int = DEFAULT_RETENTION_DAYS) -> int:
-    """Drop workspace turns older than retention_days, preserving tasks and checkpoint state."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
-    old_turn_ids = [r[0] for r in conn.execute("SELECT id FROM workspace_turns WHERE timestamp < ?", (cutoff,)).fetchall()]
-    if not old_turn_ids:
-        return 0
-
-    cur = conn.execute("DELETE FROM workspace_turns WHERE timestamp < ?", (cutoff,))
-    for t_id in old_turn_ids:
-        conn.execute("DELETE FROM workspace_fts WHERE turn_id = ?", (str(t_id),))
-
-    conn.commit()
-    return cur.rowcount

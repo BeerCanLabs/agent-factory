@@ -11,7 +11,7 @@
  */
 import http from 'node:http';
 import { payloadHash } from '@beercanlabs/factory-ledger';
-import { AGENT_ID, BUILTIN_AGENT_IDS, FULL_SHA, applySettingsChange, beginAdmission, changedParts, registryOf, loadSharedRuntime, saveSharedRuntime, visibilityOf, ownerOf, type SharedRuntimePin, type AgentRecord } from '@beercanlabs/factory-registrar';
+import { AGENT_ID, BUILTIN_AGENT_IDS, FULL_SHA, applySettingsChange, beginAdmission, canAdopt, changedParts, registryOf, loadSharedRuntime, saveSharedRuntime, visibilityOf, ownerOf, type SharedRuntimePin, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { applyConfig, buildSkillsFor, runDeploy } from './apply.js';
 import { changeReason, configOf, ledgerVersion, ownersOf, recordConfig, removeConfig } from './config-store.js';
@@ -509,7 +509,8 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     }
     const skillItem = s as { id: string; version: string };
     const rec = registry.get(skillItem.id, skillItem.version);
-    if (!rec || rec.status !== 'approved' || rec.retired) {
+    const usable = Boolean(rec && !rec.retired && rec.status !== 'rejected' && (rec.status === 'approved' || Boolean(rec.packageHash && rec.tests === 'passed')));
+    if (!usable) {
       const why = !rec ? 'is not registered' : rec.retired ? 'is retired' : `is ${rec.status}`;
       json(res, 409, {
         error: 'skill_unavailable',
@@ -517,20 +518,19 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
       });
       return true;
     }
-    if (visibilityOf(rec) === 'private' && ownerOf(rec) !== agentId && (rec as any).ownerAgent !== agentId) {
-      let groupMatches = false;
-      if (rec.groupId && state.groups) {
-        const userGroups = [principal.actor, ...agentOwners].flatMap((u) => (state.groups!.getUserRoles(u).length > 0 ? state.groups!.listUserGroups(u).map((g) => g.id) : []));
-        if (userGroups.some((g) => g.toLowerCase() === rec.groupId!.toLowerCase())) groupMatches = true;
-      }
-      const ownerMatches = rec.owner && [principal.actor, ...agentOwners].some((u) => u.toLowerCase() === rec.owner!.toLowerCase());
-      if (!groupMatches && !ownerMatches) {
-        json(res, 403, {
-          error: 'skill_private',
-          message: `skill ${skillItem.id} is private to another agent or group`,
-        });
-        return true;
-      }
+    const userGroups = state.groups
+      ? [principal.actor, ...agentOwners].flatMap((u) => (state.groups!.getUserRoles(u).length > 0 ? state.groups!.listUserGroups(u).map((g) => g.id) : []))
+      : undefined;
+    const adopt = canAdopt(registry, agentId, skillItem.id, skillItem.version, {
+      agentOwners: [principal.actor, ...agentOwners],
+      userGroups,
+    });
+    if (!adopt.ok) {
+      json(res, 403, {
+        error: 'skill_private',
+        message: adopt.message,
+      });
+      return true;
     }
     validatedSkills.push({ id: skillItem.id, version: skillItem.version });
   }
