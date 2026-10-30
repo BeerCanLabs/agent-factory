@@ -29,6 +29,7 @@ from memory import (
 from memory import episodic
 from memory import ephemeral
 from memory import workspace
+from memory import notebook
 
 
 def get_input_payload() -> dict:
@@ -88,9 +89,9 @@ def main() -> int:
             db.execute("PRAGMA busy_timeout = 5000;")
 
             episodic.init_episodic_tables(db)
-            pruned = episodic.prune_conversations(db, retention_days=bounds["retention_days"])
-            if pruned:
-                print(f"[agent] Pruned {pruned} historical turns older than {bounds['retention_days']} days.")
+            notebook.init_notebook_tables(db)
+            if notebook.should_rotate(memory_dir, db, db_file="starter_python_state.db"):
+                db = notebook.rotate(memory_dir, db, init_fn=episodic.init_episodic_tables, db_file="starter_python_state.db")
 
             session_id, session_name = episodic.get_or_create_active_session(db, user_id=author_id)
 

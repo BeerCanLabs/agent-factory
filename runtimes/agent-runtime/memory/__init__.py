@@ -14,6 +14,7 @@ from typing import Any
 from . import ephemeral
 from . import episodic
 from . import workspace
+from . import notebook
 
 # Archetype Constants
 ARCHETYPE_EPHEMERAL = "ephemeral"
@@ -218,7 +219,6 @@ from .episodic import (
     load_whiteboard,
     remember_turn,
     recall_conversation,
-    prune_conversations,
     RECALL_TOOL_SPEC,
 )
 
@@ -246,6 +246,7 @@ __all__ = [
     "ephemeral",
     "episodic",
     "workspace",
+    "notebook",
     # Canonical Episodic API
     "init_episodic_tables",
     "get_or_create_active_session",
@@ -258,7 +259,6 @@ __all__ = [
     "load_whiteboard",
     "remember_turn",
     "recall_conversation",
-    "prune_conversations",
     "RECALL_TOOL_SPEC",
     # Canonical Ephemeral API
     "EphemeralWhiteboard",

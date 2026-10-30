@@ -24,8 +24,12 @@ export function buildSkillsFor(state: FactoryState, agentId: string): { ok: true
   const skills: BuildSkill[] = [];
   for (const adopted of state.configs?.current(agentId)?.skills ?? []) {
     const rec = registry.get(adopted.id, adopted.version);
-    if (!rec || rec.status !== 'approved' || rec.retired) {
-      const why = !rec ? 'is not registered' : rec.retired ? 'is retired' : `is ${rec.status}`;
+    if (!rec) {
+      return { ok: false, error: 'skill_unavailable', message: `${adopted.id}@${adopted.version} is not registered; an agent can be built only with approved, unretired skills (SK1, SK6)` };
+    }
+    const usable = !rec.retired && rec.status !== 'rejected' && (rec.status === 'approved' || Boolean(rec.packageHash && rec.tests === 'passed'));
+    if (!usable) {
+      const why = rec.retired ? 'is retired' : `is ${rec.status}`;
       return { ok: false, error: 'skill_unavailable', message: `${adopted.id}@${adopted.version} ${why}; an agent can be built only with approved, unretired skills (SK1, SK6)` };
     }
     if (rec.packageHash) {

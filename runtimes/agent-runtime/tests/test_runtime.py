@@ -623,13 +623,138 @@ class TestSkills(Base):
         self.assertEqual(result["status"], "failed")
         self.assertIn("upstream database unavailable", result["output"]["error"])
 
+    def test_personal_assistant_turns_older_than_40_days_survive_wake_unpruned(self):
+        # Seed memory with turn older than 40 days
+        self.mind.mkdir(parents=True, exist_ok=True)
+        import sqlite3
+        from datetime import datetime, timezone, timedelta
+        from memory import episodic, notebook
+        conn = sqlite3.connect(str(self.mind / "agent_state.db"))
+        episodic.init_episodic_tables(conn)
+        notebook.init_notebook_tables(conn)
+        session_id, _ = episodic.get_or_create_active_session(conn, user_id="cloudflare:dale@example.com")
+        old_time = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+        conn.execute(
+            "INSERT INTO conversation_turns (session_id, user_id, surface, channel_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, "cloudflare:dale@example.com", "console", None, "user", "Ancient context from 45 days ago", old_time),
+        )
+        conn.commit()
+        conn.close()
+
+        code, fake, result = self.wake(PA, [turn("Checking memory")])
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "succeeded")
+
+        # Verify old turn was NOT pruned by wake
+        conn = sqlite3.connect(str(self.mind / "agent_state.db"))
+        rows = conn.execute("SELECT content FROM conversation_turns WHERE content LIKE '%Ancient context%'").fetchall()
+        self.assertEqual(len(rows), 1)
+        conn.close()
+
+    def test_personal_assistant_wake_rotates_notebook_when_limits_exceeded(self):
+        # Pre-populate database with an active conversation
+        self.mind.mkdir(parents=True, exist_ok=True)
+        import sqlite3
+        from memory import episodic, notebook
+        conn = sqlite3.connect(str(self.mind / "agent_state.db"))
+        episodic.init_episodic_tables(conn)
+        notebook.init_notebook_tables(conn)
+        session_id, _ = episodic.get_or_create_active_session(conn, user_id="cloudflare:dale@example.com")
+        episodic.remember_turn(conn, session_id, "cloudflare:dale@example.com", "Carry me forward", "Will do.")
+        conn.commit()
+        conn.close()
+
+        # Set limit very low to trigger rotation on wake
+        os.environ["FACTORY_NOTEBOOK_MAX_BYTES"] = "100"
+        try:
+            code, fake, result = self.wake(PA, [turn("New turn after rotation")])
+        finally:
+            os.environ.pop("FACTORY_NOTEBOOK_MAX_BYTES", None)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "succeeded")
+
+        # Verify closed volume was archived under volumes/<name>/agent_state.db
+        vols_dir = self.mind / "volumes"
+        self.assertTrue(vols_dir.exists())
+        vols = list(vols_dir.iterdir())
+        self.assertEqual(len(vols), 1)
+        vol_file = vols[0] / "agent_state.db"
+        self.assertTrue(vol_file.exists())
+
+        # Verify new agent_state.db has the carried forward conversation + new turn and notebook_volumes index
+        conn = sqlite3.connect(str(self.mind / "agent_state.db"))
+        v_idx = conn.execute("SELECT name FROM notebook_volumes").fetchall()
+        self.assertEqual(len(v_idx), 1)
+        self.assertEqual(v_idx[0][0], vols[0].name)
+
+        carried = conn.execute("SELECT content FROM conversation_turns WHERE content = 'Carry me forward'").fetchall()
+        self.assertEqual(len(carried), 1)
+        new_turn = conn.execute("SELECT content FROM conversation_turns WHERE content = 'New turn after rotation'").fetchall()
+        self.assertEqual(len(new_turn), 1)
+        conn.close()
+
+    def test_personal_assistant_recall_tool_searches_closed_volumes(self):
+        # Setup closed volume with an archived turn that only exists in the volume
+        self.mind.mkdir(parents=True, exist_ok=True)
+        import sqlite3
+        from memory import episodic, notebook
+        conn = sqlite3.connect(str(self.mind / "agent_state.db"))
+        episodic.init_episodic_tables(conn)
+        notebook.init_notebook_tables(conn)
+        session_id, _ = episodic.get_or_create_active_session(conn, user_id="cloudflare:dale@example.com")
+        episodic.remember_turn(conn, session_id, "cloudflare:dale@example.com", "Top secret volume archival project 99", "Archived.")
+        conn.commit()
+
+        # Rotate so the turn is archived
+        rotated_conn = notebook.rotate(self.mind, conn, init_fn=episodic.init_episodic_tables)
+        # Delete turns in the active notebook so it's ONLY in the volume
+        rotated_conn.execute("DELETE FROM conversation_turns")
+        rotated_conn.execute("DELETE FROM conversation_fts")
+        rotated_conn.commit()
+        rotated_conn.close()
+
+        # Model requests tool call to recall_conversation
+        tool_call_seen = {}
+
+        def model(messages, tools):
+            # First call: trigger recall tool
+            if len(messages) <= 2:
+                tool_call_seen["tools"] = tools
+                return {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "recall_conversation", "arguments": json.dumps({"query": "archival project 99"})},
+                        }
+                    ],
+                }
+            # Second call: tool result returned
+            tool_msg = messages[-1]
+            tool_call_seen["tool_result"] = tool_msg.get("content", "")
+            return {"role": "assistant", "content": "Found the archival project."}
+
+        code, fake, result = self.wake(PA, [turn("find the archival project")], model)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertIn("Top secret volume archival project 99", tool_call_seen.get("tool_result", ""))
+
 
 
 class TestMemoryEngineIsNotForked(unittest.TestCase):
     def test_the_runtime_uses_the_same_memory_engine_as_the_reference_agent(self):
         ref = ROOT.parent.parent / "agents" / "examples" / "starter-python" / "memory"
+        mem = ROOT / "memory"
+        self.assertEqual(
+            set(p.name for p in ref.glob("*.py")),
+            set(p.name for p in mem.glob("*.py")),
+            "memory engine files differ between runtime and starter-python",
+        )
         for f in ref.glob("*.py"):
-            self.assertEqual((ROOT / "memory" / f.name).read_text(), f.read_text(), f"{f.name} drifted from the reference engine")
+            self.assertEqual((mem / f.name).read_text(), f.read_text(), f"{f.name} drifted from the reference engine")
 
 
 if __name__ == "__main__":

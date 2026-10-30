@@ -308,9 +308,6 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     const validateExisting = (existing: SkillVersionRecord[]): { ok: boolean; reason?: string } => {
       if (existing.length) {
         const first = existing[0];
-        if (first.repo) {
-          return { ok: false, reason: `id: ${manifest.id} is registered from a repository; cannot mix repository and package versions for this id (A15)` };
-        }
         const skillOwner = first.owner ?? first.registeredBy;
         const effectiveActor = (isAgent && verifiedRequester) ? verifiedRequester : principal.actor;
         const effectivePrincipal: Principal = (isAgent && verifiedRequester)
@@ -325,7 +322,7 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
         if (!canAddVersion) {
           return { ok: false, reason: `id: ${manifest.id} is owned by ${skillOwner}; new versions must come from the owner or an admin (A15)` };
         }
-        const identity = registry.identityIssue(manifest);
+        const identity = (manifest as any).spec === 1 ? undefined : registry.identityIssue(manifest);
         if (identity) {
           return { ok: false, reason: `manifest.visibility: ${identity}` };
         }
@@ -465,9 +462,10 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
         reasons.push(`version: ${manifest.id}@${manifest.version} is already registered; versions are immutable, register a new version`);
       }
       // SK1: a skill is its source. A different repository or path is a different skill, never a new version of this one.
-      const existing = registry.versions(manifest.id)[0];
+      const allExisting = registry.versions(manifest.id);
+      const existing = allExisting[0];
       if (existing) {
-        if (!existing.repo) {
+        if (allExisting.some((v) => !v.repo || Boolean(v.packageHash))) {
           reasons.push(`id: ${manifest.id} is registered from a package; cannot mix repository and package versions for this id (A15)`);
         } else if (repo && path && (existing.repo !== repo || existing.path !== path)) {
           reasons.push(`id: ${manifest.id} is registered from ${existing.repo} (${existing.path}); a different repository or path is a different skill, so give it a different id`);
