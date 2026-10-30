@@ -20,6 +20,8 @@ import { relinkVendorModels } from './app.js';
 const ADMIN = 'admin-model-token';
 const VIEWER = 'viewer-model-token';
 const EGRESS = 'egress-model-token';
+const OWNER = 'owner-model-token';
+const OTHER = 'other-model-token';
 
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -61,7 +63,7 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
 
     state = {
       agents: new Map([
-        ['donna', { id: 'donna', name: 'Donna', repo: 'https://github.com/beercanlabs/SM-donna', state: 'SLEEPING', category: 'agent' } as any],
+        ['donna', { id: 'donna', name: 'Donna', repo: 'https://github.com/beercanlabs/SM-donna', state: 'SLEEPING', category: 'agent', owners: ['token:alice'] } as any],
       ]),
       modelStore,
       modelCatalog: modelStore.toEgressCatalog(),
@@ -82,6 +84,8 @@ describe('Model Lifecycle & Dynamic Catalog E2E', { concurrency: false }, () => 
         { name: 'admin', token: ADMIN, roles: ['admin'] },
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
         { name: 'egress', token: EGRESS, roles: ['gatekeeper-egress'] },
+        { name: 'alice', token: OWNER, roles: ['viewer'] },
+        { name: 'bob', token: OTHER, roles: ['viewer'] },
       ]),
     };
 
@@ -465,5 +469,296 @@ describe('admitted models take provider, endpoint and credential from their vend
     const rows = state.ledger.query().filter((e: any) => e.action === 'MODEL_RELINKED');
     assert.equal(rows.length, before + 1);
     assert.ok((rows.at(-1) as any).models.includes('xai-old'));
+  });
+});
+
+describe('Model Selection & Persistent Failback E2E (TSK-165, TSK-166, GAP-126)', { concurrency: false }, () => {
+  let cp: http.Server;
+  let port = 0;
+  let tmp: string;
+  let state: FactoryState;
+
+  before(async () => {
+    tmp = mkdtempSync(join(tmpdir(), 'model-selection-e2e-'));
+    const catalogPath = join(tmp, 'catalog.json');
+    const policiesDir = join(tmp, 'policies');
+    const approvalsDir = join(tmp, 'approvals');
+    const identityDir = join(tmp, 'identity');
+
+    const modelStore = new ModelStore(catalogPath, {
+      'claude-haiku-4-5': {
+        provider: 'bedrockConverse',
+        id: 'us.anthropic.claude-haiku-4-5',
+        price: { inputPerMTok: 0.8, outputPerMTok: 4.0 },
+      },
+    });
+
+    for (const name of ['model-a', 'model-b', 'model-c', 'model-d', 'model-e', 'model-f', 'model-g']) {
+      modelStore.admit({ name, provider: 'openai', id: name, vendorId: 'openai' });
+    }
+
+    state = {
+      agents: new Map([
+        ['donna', { id: 'donna', name: 'Donna', repo: 'https://github.com/beercanlabs/SM-donna', state: 'SLEEPING', category: 'agent', owners: ['token:alice'] } as any],
+      ]),
+      modelStore,
+      modelCatalog: modelStore.toEgressCatalog(),
+      defaultModel: 'claude-haiku-4-5',
+      registryDir: tmp,
+      ledger: new MemoryLedger(),
+      policies: new PolicyStore(policiesDir),
+      approvals: new ApprovalStore(approvalsDir),
+      identityLinks: new IdentityLinkStore(identityDir),
+      runs: new MemoryRunStore(),
+      runtime: noopRuntime(),
+      runTokens: {} as any,
+      callbacks: {} as any,
+      providers: [],
+      spend: SpendTracker.fromLedger([], () => true),
+      version: '0.1.0',
+      auth: bearerAuth([
+        { name: 'admin', token: ADMIN, roles: ['admin'] },
+        { name: 'viewer', token: VIEWER, roles: ['viewer'] },
+        { name: 'egress', token: EGRESS, roles: ['gatekeeper-egress'] },
+        { name: 'alice', token: OWNER, roles: ['viewer'] },
+        { name: 'bob', token: OTHER, roles: ['viewer'] },
+      ]),
+    };
+
+    state.policies.set('donna', { routes: [], models: ['claude-haiku-4-5'] });
+
+    cp = createFactoryServer(state);
+    port = await listen(cp);
+  });
+
+  after(async () => {
+    await new Promise<void>((r) => cp.close(() => r()));
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('GET /api/v1/agents/:id/models allows viewer, owner, and admin; returns effective slots', async () => {
+    const viewerRes = await call(port, '/api/v1/agents/donna/models', 'GET', VIEWER);
+    assert.equal(viewerRes.status, 200);
+    assert.equal(viewerRes.body.agentId, 'donna');
+    assert.deepEqual(viewerRes.body.approvedModels, ['claude-haiku-4-5']);
+    assert.equal(viewerRes.body.currentModel, 'claude-haiku-4-5');
+    assert.equal(viewerRes.body.primaryModel, 'claude-haiku-4-5');
+
+    const ownerRes = await call(port, '/api/v1/agents/donna/models', 'GET', OWNER);
+    assert.equal(ownerRes.status, 200);
+
+    const adminRes = await call(port, '/api/v1/agents/donna/models', 'GET', ADMIN);
+    assert.equal(adminRes.status, 200);
+
+    const notFound = await call(port, '/api/v1/agents/unknown-agent/models', 'GET', VIEWER);
+    assert.equal(notFound.status, 404);
+  });
+
+  it('PUT /api/v1/agents/:id/models enforces authorization (admin and owner pass; viewer and non-owner fail)', async () => {
+    const viewerRes = await call(port, '/api/v1/agents/donna/models', 'PUT', VIEWER, {
+      approvedModels: ['claude-haiku-4-5'],
+    });
+    assert.equal(viewerRes.status, 403);
+
+    const otherRes = await call(port, '/api/v1/agents/donna/models', 'PUT', OTHER, {
+      approvedModels: ['claude-haiku-4-5'],
+    });
+    assert.equal(otherRes.status, 403);
+
+    const anonRes = await call(port, '/api/v1/agents/donna/models', 'PUT', undefined, {
+      approvedModels: ['claude-haiku-4-5'],
+    });
+    assert.equal(anonRes.status, 401);
+
+    // Owner passes
+    const ownerRes = await call(port, '/api/v1/agents/donna/models', 'PUT', OWNER, {
+      approvedModels: ['model-a', 'model-b', 'model-c'],
+      primaryModel: 'model-a',
+      secondaryModel: 'model-b',
+      currentModel: 'model-a',
+    });
+    assert.equal(ownerRes.status, 200, JSON.stringify(ownerRes.body));
+    assert.deepEqual(ownerRes.body.approvedModels, ['model-a', 'model-b', 'model-c']);
+    assert.equal(ownerRes.body.primaryModel, 'model-a');
+    assert.equal(ownerRes.body.secondaryModel, 'model-b');
+    assert.equal(ownerRes.body.currentModel, 'model-a');
+
+    // Admin also passes
+    const adminRes = await call(port, '/api/v1/agents/donna/models', 'PUT', ADMIN, {
+      currentModel: 'model-b',
+    });
+    assert.equal(adminRes.status, 200);
+    assert.equal(adminRes.body.currentModel, 'model-b');
+  });
+
+  it('MCP tools get_agent_models and set_agent_models enforce permissions and work end-to-end', async () => {
+    const getRes = await call(port, '/mcp', 'POST', VIEWER, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'get_agent_models', arguments: { id: 'donna' } },
+    });
+    assert.equal(getRes.status, 200);
+    const getParsed = JSON.parse(getRes.body.result.content[0].text);
+    assert.equal(getParsed.agentId, 'donna');
+    assert.equal(getParsed.currentModel, 'model-b');
+
+    // Viewer cannot call set_agent_models
+    const setViewer = await call(port, '/mcp', 'POST', VIEWER, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'set_agent_models', arguments: { id: 'donna', currentModel: 'model-a' } },
+    });
+    assert.ok(setViewer.body.error);
+    assert.equal(setViewer.body.error.code, -32001);
+
+    // Non-owner cannot call set_agent_models on donna
+    const setOther = await call(port, '/mcp', 'POST', OTHER, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'set_agent_models', arguments: { id: 'donna', currentModel: 'model-a' } },
+    });
+    assert.ok(setOther.body.error);
+
+    // Owner can call set_agent_models on donna
+    const setOwner = await call(port, '/mcp', 'POST', OWNER, {
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: { name: 'set_agent_models', arguments: { id: 'donna', currentModel: 'model-a' } },
+    });
+    assert.equal(setOwner.status, 200, JSON.stringify(setOwner.body));
+    const ownerParsed = JSON.parse(setOwner.body.result.content[0].text);
+    assert.equal(ownerParsed.currentModel, 'model-a');
+  });
+
+  it('Adding new approved models leaves slots untouched', async () => {
+    // Currently: approved ['model-a', 'model-b', 'model-c'], current: 'model-a', primary: 'model-a', secondary: 'model-b'
+    const res = await call(port, '/api/v1/agents/donna/models', 'PUT', OWNER, {
+      approvedModels: ['model-a', 'model-b', 'model-c', 'model-d'],
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.approvedModels, ['model-a', 'model-b', 'model-c', 'model-d']);
+    assert.equal(res.body.currentModel, 'model-a');
+    assert.equal(res.body.primaryModel, 'model-a');
+    assert.equal(res.body.secondaryModel, 'model-b');
+  });
+
+  it('DELETE /api/v1/models/:name performs deterministic model retirement transitions', async () => {
+    // Transition 1: current !== primary, retire current -> current becomes primary
+    await call(port, '/api/v1/agents/donna/models', 'PUT', OWNER, {
+      approvedModels: ['model-a', 'model-b', 'model-c'],
+      primaryModel: 'model-a',
+      currentModel: 'model-b',
+      secondaryModel: 'model-c',
+    });
+    let del = await call(port, '/api/v1/models/model-b', 'DELETE', ADMIN);
+    assert.equal(del.status, 200);
+    let pol = state.policies.get('donna');
+    assert.equal(pol.currentModel, 'model-a');
+    assert.equal(pol.primaryModel, 'model-a');
+    assert.equal(pol.secondaryModel, 'model-c');
+
+    // Transition 2: primary !== current, retire primary -> primary becomes current (clearing secondary if secondary === current)
+    await call(port, '/api/v1/agents/donna/models', 'PUT', OWNER, {
+      approvedModels: ['model-a', 'model-c', 'model-d'],
+      currentModel: 'model-a',
+      primaryModel: 'model-c',
+      secondaryModel: 'model-a',
+    });
+    del = await call(port, '/api/v1/models/model-c', 'DELETE', ADMIN);
+    assert.equal(del.status, 200);
+    pol = state.policies.get('donna');
+    assert.equal(pol.primaryModel, 'model-a');
+    assert.equal(pol.currentModel, 'model-a');
+    assert.equal(pol.secondaryModel, undefined);
+
+    // Transition 3: current === primary, retire it with secondary defined -> promotes secondary to current & primary, leaves secondary unset
+    await call(port, '/api/v1/agents/donna/models', 'PUT', OWNER, {
+      approvedModels: ['model-a', 'model-d', 'model-e'],
+      currentModel: 'model-a',
+      primaryModel: 'model-a',
+      secondaryModel: 'model-d',
+    });
+    del = await call(port, '/api/v1/models/model-a', 'DELETE', ADMIN);
+    assert.equal(del.status, 200);
+    pol = state.policies.get('donna');
+    assert.equal(pol.currentModel, 'model-d');
+    assert.equal(pol.primaryModel, 'model-d');
+    assert.equal(pol.secondaryModel, undefined);
+
+    // Transition 4: current === primary, retire it with secondary unset -> both become null (post-retirement unset state)
+    await call(port, '/api/v1/agents/donna/models', 'PUT', OWNER, {
+      approvedModels: ['model-d', 'model-e'],
+      currentModel: 'model-d',
+      primaryModel: 'model-d',
+      secondaryModel: null,
+    });
+    del = await call(port, '/api/v1/models/model-d', 'DELETE', ADMIN);
+    assert.equal(del.status, 200);
+    pol = state.policies.get('donna');
+    assert.equal(pol.currentModel, null);
+    assert.equal(pol.primaryModel, null);
+    assert.equal(pol.secondaryModel, undefined);
+
+    // Transition 5: retire secondary -> secondary becomes unset
+    await call(port, '/api/v1/agents/donna/models', 'PUT', OWNER, {
+      approvedModels: ['model-e', 'model-f'],
+      currentModel: 'model-e',
+      primaryModel: 'model-e',
+      secondaryModel: 'model-f',
+    });
+    del = await call(port, '/api/v1/models/model-f', 'DELETE', ADMIN);
+    assert.equal(del.status, 200);
+    pol = state.policies.get('donna');
+    assert.equal(pol.currentModel, 'model-e');
+    assert.equal(pol.primaryModel, 'model-e');
+    assert.equal(pol.secondaryModel, undefined);
+  });
+
+  it('POST /api/v1/gatekeeper-egress/runs/:id/failover persistently updates currentModel and ledgers MODEL_FAILOVER', async () => {
+    // Setup donna policy
+    await call(port, '/api/v1/agents/donna/models', 'PUT', OWNER, {
+      approvedModels: ['model-e', 'model-g'],
+      currentModel: 'model-e',
+      primaryModel: 'model-e',
+    });
+
+    const run = state.runs.create({ agentId: 'donna', state: 'WORKING', actor: 'test', trigger: 'conversation' });
+
+    // Non-egress caller fails
+    const viewerFail = await call(port, `/api/v1/gatekeeper-egress/runs/${run.runId}/failover`, 'POST', VIEWER, {
+      toModel: 'model-g',
+      fromModel: 'model-e',
+    });
+    assert.equal(viewerFail.status, 403);
+
+    // Gatekeeper-egress succeeds
+    const egressSuccess = await call(port, `/api/v1/gatekeeper-egress/runs/${run.runId}/failover`, 'POST', EGRESS, {
+      toModel: 'model-g',
+      fromModel: 'model-e',
+      reason: 'upstream 503 error',
+    });
+    assert.equal(egressSuccess.status, 200, JSON.stringify(egressSuccess.body));
+    assert.equal(egressSuccess.body.ok, true);
+    assert.equal(egressSuccess.body.agentId, 'donna');
+    assert.equal(egressSuccess.body.fromModel, 'model-e');
+    assert.equal(egressSuccess.body.toModel, 'model-g');
+    assert.equal(egressSuccess.body.currentModel, 'model-g');
+
+    // Verify persistent update in state.policies
+    const pol = state.policies.get('donna');
+    assert.equal(pol.currentModel, 'model-g');
+    assert.equal(pol.primaryModel, 'model-e');
+
+    // Verify ledger entries
+    const failoverEntries = state.ledger.query({ agent: 'donna' }).filter((e: any) => e.action === 'MODEL_FAILOVER');
+    assert.ok(failoverEntries.length >= 1);
+    const lastFailover = failoverEntries.at(-1) as any;
+    assert.equal(lastFailover.requestedModel, 'model-e');
+    assert.equal(lastFailover.model, 'model-g');
+    assert.deepEqual(lastFailover.models, ['model-e', 'model-g']);
   });
 });

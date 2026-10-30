@@ -7,7 +7,7 @@ export { describeHeldRequest, heldCopyOf, heldToolName, parseHoldRequest } from 
 export type { HoldCheck, HoldDecision, HoldRule, ToolApprovalCheck, ToolApprovalDecision } from './decisions.js';
 export { checkHold, checkToolApproval } from './decisions.js';
 export type { DerivedRole, Privilege } from './privileges.js';
-export { PRIVILEGES } from './privileges.js';
+export { PRIVILEGES, AGENT_SCOPED } from './privileges.js';
 export type { AuthorizeRequest, AuthorizeResource, AuthorizeResult } from './authorize.js';
 export { authorize } from './authorize.js';
 export type {

@@ -69,6 +69,9 @@ export type Policy = {
   tokensPerMinute?: number;
   /** AP3.3: give the model one more turn with the notice before returning an answer given without tools. */
   grounding?: 'warn-once';
+  currentModel?: string | null;
+  primaryModel?: string | null;
+  secondaryModel?: string;
 };
 
 export type RunContext = {
@@ -755,6 +758,9 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       defaultModel: activeDefaultModel,
       training: ctx.agentState === 'TRAINING',
       pinnedModel: ctx.run.model,
+      currentModel: ctx.policy.currentModel,
+      primaryModel: ctx.policy.primaryModel,
+      secondaryModel: ctx.policy.secondaryModel,
     };
   }
 

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkModel, offeredModels, selectModel, type ModelPolicy } from './model-policy.js';
+import { checkModel, offeredModels, selectModel, failbackCandidates, type ModelPolicy } from './model-policy.js';
 
 const DEFAULT = 'claude-haiku-4-5';
 const policy = (over: Partial<ModelPolicy> = {}): ModelPolicy => ({ defaultModel: DEFAULT, training: false, ...over });
@@ -126,5 +126,156 @@ describe('selectModel: the owner grant still bounds everything (E7, GAP-181 revi
   it('an explicit empty list grants nothing; only an absent list falls back to the default', () => {
     assert.deepEqual(selectModel({ allowedModels: [], defaultModel: 'claude-haiku-5-5', training: false }, 'x'), { ok: false, status: 403, code: 'model_not_allowed', detail: { model: 'x' } });
     assert.deepEqual(selectModel({ defaultModel: 'claude-haiku-5-5', training: false }), { ok: true, model: 'claude-haiku-5-5' });
+  });
+
+  it('honors currentModel and primaryModel slots (M2 two-tier authority)', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1', 'm2', 'm3'],
+      currentModel: 'm2',
+      primaryModel: 'm1',
+      secondaryModel: 'm3',
+      training: false,
+    };
+    assert.deepEqual(selectModel(p, 'm1'), { ok: true, model: 'm2', requested: 'm1' });
+    assert.deepEqual(selectModel(p), { ok: true, model: 'm2' });
+
+    // Fall back to primaryModel when currentModel is undefined
+    const p2: ModelPolicy = {
+      allowedModels: ['m1', 'm2', 'm3'],
+      primaryModel: 'm3',
+      training: false,
+    };
+    assert.deepEqual(selectModel(p2), { ok: true, model: 'm3' });
+  });
+
+  it('refuses when currentModel is null outside training, honors requested in training', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1', 'm2'],
+      currentModel: null,
+      primaryModel: null,
+      training: false,
+    };
+    assert.deepEqual(selectModel(p, 'm1'), { ok: false, status: 403, code: 'model_not_allowed', detail: { model: 'm1' } });
+    assert.deepEqual(selectModel(p), { ok: false, status: 403, code: 'model_not_allowed', detail: { model: '' } });
+
+    assert.deepEqual(selectModel({ ...p, training: true }, 'm2'), { ok: true, model: 'm2' });
+  });
+
+  it('refuses currentModel not on allowlist outside training', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1'],
+      currentModel: 'unlisted',
+      training: false,
+    };
+    assert.deepEqual(selectModel(p), { ok: false, status: 403, code: 'model_not_allowed', detail: { model: 'unlisted' } });
+  });
+});
+
+describe('failbackCandidates: persistent failback order (§6.9 M2)', () => {
+  it('current == primary == M1, secondary == M2 -> [M1, M2]', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1', 'm2', 'm3'],
+      currentModel: 'm1',
+      primaryModel: 'm1',
+      secondaryModel: 'm2',
+      training: false,
+    };
+    assert.deepEqual(failbackCandidates(p), ['m1', 'm2']);
+  });
+
+  it('current == M3, primary == M1, secondary == M2 -> [M3, M1, M2]', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1', 'm2', 'm3'],
+      currentModel: 'm3',
+      primaryModel: 'm1',
+      secondaryModel: 'm2',
+      training: false,
+    };
+    assert.deepEqual(failbackCandidates(p), ['m3', 'm1', 'm2']);
+  });
+
+  it('current == secondary == M2, primary == M1 -> anti-loop [M2, M1]', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1', 'm2', 'm3'],
+      currentModel: 'm2',
+      primaryModel: 'm1',
+      secondaryModel: 'm2',
+      training: false,
+    };
+    assert.deepEqual(failbackCandidates(p), ['m2', 'm1']);
+  });
+
+  it('single model policy -> [M1]', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1'],
+      currentModel: 'm1',
+      primaryModel: 'm1',
+      training: false,
+    };
+    assert.deepEqual(failbackCandidates(p), ['m1']);
+  });
+
+  it('currentModel === null -> []', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1', 'm2'],
+      currentModel: null,
+      primaryModel: null,
+      training: false,
+    };
+    assert.deepEqual(failbackCandidates(p), []);
+    assert.deepEqual(failbackCandidates(p, 'm1'), []);
+  });
+
+  it('pinnedModel -> [sel.model]', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1', 'm2', 'm3'],
+      currentModel: 'm3',
+      primaryModel: 'm1',
+      secondaryModel: 'm2',
+      pinnedModel: 'm1',
+      training: false,
+    };
+    assert.deepEqual(failbackCandidates(p), ['m1']);
+  });
+
+  it('training with requested model -> [sel.model]', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1', 'm2'],
+      currentModel: 'm1',
+      primaryModel: 'm1',
+      secondaryModel: 'm2',
+      training: true,
+    };
+    assert.deepEqual(failbackCandidates(p, 'm-experimental'), ['m-experimental']);
+  });
+
+  it('legacy allowedModels-only policy -> [granted[0]]', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1', 'm2', 'm3'],
+      training: false,
+    };
+    assert.deepEqual(failbackCandidates(p), ['m1']);
+  });
+
+  it('filters out secondaryModel not present in granted outside training', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1'],
+      currentModel: 'm1',
+      primaryModel: 'm1',
+      secondaryModel: 'unlisted',
+      training: false,
+    };
+    assert.deepEqual(failbackCandidates(p), ['m1']);
+  });
+
+  it('includes secondaryModel not present in allowedModels during training without requested pin', () => {
+    const p: ModelPolicy = {
+      allowedModels: ['m1'],
+      currentModel: 'm1',
+      primaryModel: 'm1',
+      secondaryModel: 'unlisted',
+      training: true,
+    };
+    assert.deepEqual(failbackCandidates(p), ['m1', 'unlisted']);
   });
 });

@@ -1,6 +1,6 @@
 export { signV4, awsCredentialsFromEnv } from './sigv4.js';
 export type { AwsCredentials } from './sigv4.js';
-export { checkModel, offeredModels, selectModel } from './model-policy.js';
+export { checkModel, offeredModels, selectModel, failbackCandidates } from './model-policy.js';
 export type { ModelCheck, ModelPolicy, ModelSelection } from './model-policy.js';
 export { complete, findModel } from './complete.js';
 export type { Completion } from './complete.js';
