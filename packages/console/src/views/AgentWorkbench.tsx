@@ -296,11 +296,13 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
             <div className="font-bold text-slate-700 dark:text-slate-300">
               {agent.isBuiltin || agent.category === 'builtin' || agent.budgetExempt
                 ? 'Exempt (System Core)'
+                : agent.spendLimitMonthlyUsd && agent.spendLimitUsd
+                ? `$${agent.spendLimitMonthlyUsd}/mo ($${agent.spendLimitUsd}/day)`
                 : agent.spendLimitMonthlyUsd
                 ? `$${agent.spendLimitMonthlyUsd}/mo`
                 : agent.spendLimitUsd
                 ? `$${agent.spendLimitUsd}/day`
-                : 'No budget set'}
+                : 'Not set'}
             </div>
           </div>
         </div>
@@ -505,14 +507,20 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
         </div>
       )}
 
-      {/* Tab 4: Models (read-only; models are granted in the Policy tab, GAP-062) */}
-      {activeTab === 'models' && <ModelsView agent={agent} onOpenPolicy={() => setActiveTab('policy')} />}
+      {/* Tab 4: Models */}
+      {activeTab === 'models' && <ModelsView agent={agent} onRefresh={onRefresh} />}
 
       {/* Skills (SK3 to SK6, TSK-161): what the agent runs and may be given; changes are configuration, never a pull request */}
       {activeTab === 'skills' && <AgentSkillsTab key={agent.id} agent={agent} onRefresh={onRefresh} />}
 
       {/* Tab 5: Policy */}
-      {activeTab === 'policy' && <PolicyEditor agent={agent} canEdit={permissions.canSetPolicy} />}
+      {activeTab === 'policy' && (
+        <PolicyEditor
+          agent={agent}
+          canEdit={permissions.canSetPolicy}
+          onOpenModels={() => setActiveTab('models')}
+        />
+      )}
 
       {/* Tab 6: Owners */}
       {activeTab === 'owners' && <OwnersEditor agent={agent} canEdit={permissions.canSetOwners} />}

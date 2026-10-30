@@ -1,4 +1,4 @@
-import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, AgentRolesInfo, AgentSkills, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident, StoredModel, StagedModel, ModelsCatalogResponse, ScanModelsResponse, AdmitModelRequest } from './types.js';
+import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, AgentRolesInfo, AgentSkills, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident, StoredModel, StagedModel, ModelsCatalogResponse, ScanModelsResponse, AdmitModelRequest, AgentModelsState, SetAgentModelsInput } from './types.js';
 
 
 const API_BASE = '/api/v1';
@@ -214,8 +214,31 @@ export const factoryApi = {
     });
   },
 
-  async setAgentBudget(id: string, spendLimitUsd: number, period: string = 'daily'): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/registry/agents/${id}/budget`, {
+  /** Effective model configuration and slots for an agent (M2). */
+  async getAgentModels(id: string): Promise<AgentModelsState> {
+    return request<AgentModelsState>(`/agents/${encodeURIComponent(id)}/models`);
+  },
+
+  /** Set approved models and execution slots for an agent (M2). */
+  async setAgentModels(id: string, body: SetAgentModelsInput, reason?: string): Promise<AgentModelsState> {
+    return request<AgentModelsState>(`/agents/${encodeURIComponent(id)}/models`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+      headers: reason ? { 'x-change-reason': reason } : undefined,
+    });
+  },
+
+  /** Save full agent policy including budget limits (GAP-214). */
+  async saveAgentBudgetPolicy(id: string, policy: AgentPolicy, reason?: string): Promise<AgentRecord> {
+    return request<AgentRecord>(`/registry/agents/${encodeURIComponent(id)}/budget`, {
+      method: 'PUT',
+      body: JSON.stringify(policy),
+      headers: reason ? { 'x-change-reason': reason } : undefined,
+    });
+  },
+
+  async setAgentBudget(id: string, spendLimitUsd: number, period: 'daily' | 'monthly' = 'monthly'): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/registry/agents/${encodeURIComponent(id)}/budget`, {
       method: 'PUT',
       body: JSON.stringify({ spendLimitUsd, period }),
     });

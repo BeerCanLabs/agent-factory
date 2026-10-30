@@ -209,13 +209,37 @@ export interface AgentPolicy {
   tokensPerMinute?: number;
   /** AP3.3: one more model turn with the notice before an answer given without tools is returned. */
   grounding?: 'warn-once';
+  currentModel?: string | null;
+  primaryModel?: string | null;
+  secondaryModel?: string;
 }
 
 /** A model this factory offers (M3). */
 export interface OfferedModel {
   name: string;
   provider: string;
+  id?: string;
+  vendorId?: string;
   price?: { inputPerMTok: number; outputPerMTok: number };
+}
+
+/** Effective and configured model selection state for an agent (M2). */
+export interface AgentModelsState {
+  agentId: string;
+  approvedModels: string[];
+  usesDefault: boolean;
+  currentModel: string | null;
+  primaryModel: string | null;
+  secondaryModel?: string;
+  defaultModel: string | null;
+}
+
+/** Payload to update an agent's model selection (M2). */
+export interface SetAgentModelsInput {
+  approvedModels?: string[];
+  currentModel?: string | null;
+  primaryModel?: string | null;
+  secondaryModel?: string | null;
 }
 
 /** What a skill declares it needs (SK2): a request, never a grant. */
