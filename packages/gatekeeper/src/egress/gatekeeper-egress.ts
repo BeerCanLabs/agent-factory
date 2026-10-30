@@ -91,6 +91,18 @@ export type RunContext = {
    * route a skill declares that is not `allowed` is refused; a route no skill declares is not restricted by roles.
    */
   access?: { restricted: false } | { restricted: true; routes: Record<string, 'allowed' | 'denied'> };
+  /** Whether the run requester is authorized to manage models (§6.9 M2, GAP-210, TSK-287). */
+  canManageModels?: boolean;
+};
+
+export type RunModelsInfo = {
+  agentId: string;
+  approvedModels: string[];
+  currentModel?: string | null;
+  primaryModel?: string | null;
+  secondaryModel?: string | null;
+  defaultModel?: string | null;
+  canManageModels?: boolean;
 };
 
 /** How the gatekeeper-egress talks to the control plane. HTTP in production, in-memory in tests. */
@@ -118,6 +130,10 @@ export type ControlClient = {
   modelCatalog?(): Promise<ModelCatalog | { catalog?: ModelCatalog; models?: ModelCatalog; default?: string }>;
   /** Model failover (§6.9 M2): persistently records failover and updates agent currentModel in control plane. */
   modelFailover?(req: { runId: string; toModel: string; fromModel?: string; reason?: string }): Promise<{ ok: boolean; currentModel?: string }>;
+  /** Run models read (§6.9 M2, GAP-210, TSK-287). */
+  getRunModels?(req: { runId: string; runToken: string }): Promise<RunModelsInfo | undefined>;
+  /** Run models switch (§6.9 M2, GAP-210, TSK-287). */
+  setRunModels?(req: { runId: string; runToken: string; currentModel?: string; primaryModel?: string; secondaryModel?: string }): Promise<RunModelsInfo | undefined>;
 };
 
 
@@ -937,10 +953,54 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const selection = selectModel(modelPolicyOf(ctx), requestedName);
     if (!selection.ok) return deny(res, ctx, route, selection.status, selection.code, 'detail' in selection ? selection.detail : undefined);
 
-    const candidates = failbackCandidates(modelPolicyOf(ctx), requestedName);
     const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
-    const declaredToolNames = toolNamesOf(parsed.tools);
-    const upstreamBody = declaredToolNames.length > 0 ? withGroundingNote(parsed) : parsed;
+    const isTraining = ctx.agentState === 'TRAINING';
+    // AP3 Footnote Preservation (§6.9 M2, GAP-210): compute caller tools before injecting factory tools
+    const callerToolNames = toolNamesOf(parsed.tools);
+    const toolsOffered = callerToolNames.length > 0;
+
+    const canInjectTools = !isBuiltin && !isTraining && Boolean(opts.control.getRunModels) && parsed.tool_choice !== 'none' && (parsed.tool_choice === undefined || parsed.tool_choice === 'auto');
+    const injectedTools: unknown[] = [];
+    const injectedToolNames: string[] = [];
+
+    if (canInjectTools) {
+      injectedTools.push({
+        type: 'function',
+        function: {
+          name: 'factory_get_models',
+          description: 'Get the effective and configured model slots and approved models for this agent',
+          parameters: { type: 'object', properties: {} },
+        },
+      });
+      injectedToolNames.push('factory_get_models');
+      if (ctx.canManageModels === true && Boolean(opts.control.setRunModels)) {
+        injectedTools.push({
+          type: 'function',
+          function: {
+            name: 'factory_set_models',
+            description: 'Switch currentModel or configure primaryModel/secondaryModel for this agent within approved models',
+            parameters: {
+              type: 'object',
+              properties: {
+                currentModel: { type: 'string', description: 'Model to switch active execution to' },
+                primaryModel: { type: 'string', description: 'First failback target model' },
+                secondaryModel: { type: 'string', description: 'Designated second failback target model' },
+              },
+            },
+          },
+        });
+        injectedToolNames.push('factory_set_models');
+      }
+    }
+
+    const allToolNames = [...callerToolNames, ...injectedToolNames];
+
+    let currentBody: Record<string, unknown> = { ...parsed };
+    if (injectedTools.length > 0) {
+      const existingTools = Array.isArray(parsed.tools) ? (parsed.tools as unknown[]) : [];
+      currentBody.tools = [...existingTools, ...injectedTools];
+    }
+    let upstreamBody = callerToolNames.length > 0 ? withGroundingNote(currentBody) : currentBody;
 
     type Failure = {
       status: number;
@@ -950,222 +1010,310 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       detail?: Record<string, unknown>;
       outcome?: 'error' | 'timeout';
     };
-    const failures: Failure[] = [];
-    let succeeded: {
-      candidate: string;
-      index: number;
-      done: { ok: true; request: ChatRequest; result: any };
-      usage: Usage;
-      price: Price;
-      entry: CatalogEntry;
-      requestId: string;
-    } | undefined;
 
-    for (let i = 0; i < candidates.length; i++) {
-      const candidate = candidates[i];
-      if (i > 0) {
-        if (!isBuiltin) {
-          const standing = checkStanding({
-            limits: ctx.policy.budgetUsd,
-            spend: ctx.spend,
-            pendingUsd: unacked.get(ctx.run.runId) ?? 0,
-          });
-          if (!standing.inGoodStanding) {
-            return deny(res, ctx, route, 402, 'budget_exceeded', { window: standing.window });
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let finalReply: any;
+    let finalModel = '';
+    let finalEntry: CatalogEntry | undefined;
+    let finalPrice: Price | undefined;
+    let finalRequestId = '';
+
+    const MAX_ROUNDS = injectedToolNames.length > 0 ? 3 : 1;
+    let round = 0;
+
+    while (round < MAX_ROUNDS) {
+      const candidates = failbackCandidates(modelPolicyOf(ctx), round === 0 ? requestedName : undefined);
+      const failures: Failure[] = [];
+      let succeeded: {
+        candidate: string;
+        index: number;
+        done: { ok: true; request: ChatRequest; result: any };
+        usage: Usage;
+        price: Price;
+        entry: CatalogEntry;
+        requestId: string;
+      } | undefined;
+
+      for (let i = 0; i < candidates.length; i++) {
+        const candidate = candidates[i];
+        if (i > 0) {
+          if (!isBuiltin) {
+            const standing = checkStanding({
+              limits: ctx.policy.budgetUsd,
+              spend: ctx.spend,
+              pendingUsd: unacked.get(ctx.run.runId) ?? 0,
+            });
+            if (!standing.inGoodStanding) {
+              return deny(res, ctx, route, 402, 'budget_exceeded', { window: standing.window });
+            }
+          }
+          if (throttled(ctx)) {
+            return deny(res, ctx, route, 429, 'throttled');
           }
         }
-        if (throttled(ctx)) {
-          return deny(res, ctx, route, 429, 'throttled');
-        }
-      }
 
-      const entry = findModel(catalog, candidate);
-      if (!entry) {
-        failures.push({
-          status: 503,
-          body: { error: 'model_not_offered', model: candidate },
-          reason: 'model_not_offered',
-          isDeny: true,
-          detail: { model: candidate },
-        });
-        continue;
-      }
-
-      const price = entry.price ?? priceFor(opts.prices, candidate);
-      if (!price) {
-        failures.push({
-          status: 403,
-          body: { error: 'unpriced_model', model: candidate },
-          reason: 'unpriced_model',
-          isDeny: true,
-          detail: { model: candidate },
-        });
-        continue;
-      }
-
-      if (i === 0 && throttled(ctx)) {
-        return deny(res, ctx, route, 429, 'throttled');
-      }
-
-      calls.get(res)?.start(candidate);
-      const requestId = randomUUID();
-      const t0 = performance.now();
-      const done = await complete({ entry, adapters: modelAdapters, body: upstreamBody });
-
-      if (!done.ok && done.kind === 'refused') {
-        failures.push({
-          status: done.status,
-          body: { error: done.code, ...(done.detail ? { detail: done.detail } : {}) },
-          reason: done.code,
-          isDeny: true,
-          detail: done.detail,
-        });
-        continue;
-      }
-
-      if (!done.ok) {
-        const e = done.error;
-        const outcome = /timeout|timed out/i.test(`${e.code} ${e.message}`) ? 'timeout' : 'error';
-        markOutcome(res, outcome);
-        m?.requests.add(1, { route: route.id, outcome: e.code, agent: ctx.run.agentId });
-        console.error(`[gatekeeper-egress] models ${candidate} via ${entry.provider}: ${e.code} ${e.upstreamStatus ?? ''} ${e.message}`);
-        ledger(ctx, route, { type: 'action', action: 'MODEL_UPSTREAM_ERROR', model: candidate, provider: entry.provider, upstreamStatus: e.upstreamStatus, requestId });
-        failures.push({
-          status: e.status,
-          body: { error: e.code, message: redactSecrets(e.message, secretValues), ...(e.upstreamStatus ? { upstreamStatus: e.upstreamStatus } : {}) },
-          reason: e.code,
-          outcome,
-        });
-        continue;
-      }
-
-      const { request: chat, result } = done;
-      m?.requests.add(1, { route: route.id, outcome: '200' });
-      m?.latency.record((performance.now() - t0) / 1000, { route: route.id });
-
-      let usage: Usage;
-      let action: string | undefined;
-      if (result.usage) usage = { model: candidate, input: result.usage.input, output: result.usage.output, cacheRead: 0, cacheWrite: 0 };
-      else {
-        // No usage reported: charge the worst case the request allowed rather than nothing.
-        usage = { model: candidate, input: 0, output: chat.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
-        action = 'METERING_GAP';
-      }
-      recordUsage(ctx, route, {
-        usage,
-        model: candidate,
-        price,
-        request: parsed,
-        requestId,
-        action,
-        extra: {
-          provider: entry.provider,
-          upstreamModel: entry.id,
-          ...(selection.requested ? { requestedModel: selection.requested } : {}),
-        },
-      }, res);
-
-      if (declaredToolNames.length > 0 && (!result.toolCalls || result.toolCalls.length === 0)) {
-        const leakedTool = detectToolSyntaxLeak(result.content, declaredToolNames);
-        if (leakedTool) {
-          ledger(ctx, route, {
-            type: 'action',
-            action: 'MALFORMED_TOOL_SYNTAX',
-            model: candidate,
-            tool: leakedTool,
-            requestId,
-          });
+        const entry = findModel(catalog, candidate);
+        if (!entry) {
           failures.push({
-            status: 422,
-            body: {
-              error: 'malformed_tool_syntax',
-              message: `Model generated pseudo-tool syntax for '${leakedTool}' in content instead of structured tool_calls. Retry; call the tool through tool_calls (AP1).`,
-              tool: leakedTool,
-            },
-            reason: 'malformed_tool_syntax',
+            status: 503,
+            body: { error: 'model_not_offered', model: candidate },
+            reason: 'model_not_offered',
+            isDeny: true,
+            detail: { model: candidate },
           });
           continue;
         }
-      }
 
-      succeeded = {
-        candidate,
-        index: i,
-        done,
-        usage,
-        price,
-        entry,
-        requestId,
-      };
-      break;
-    }
-
-    if (!succeeded) {
-      const lastFailure = failures[failures.length - 1];
-      if (candidates.length > 1) {
-        ledger(ctx, route, {
-          type: 'action',
-          action: 'MODEL_FAILOVER_EXHAUSTED',
-          models: candidates,
-          reason: lastFailure?.reason ?? 'exhausted',
-        });
-      }
-      if (lastFailure?.isDeny) {
-        return deny(res, ctx, route, lastFailure.status, lastFailure.reason, lastFailure.detail);
-      }
-      if (lastFailure?.outcome) {
-        markOutcome(res, lastFailure.outcome);
-      }
-      return send(res, lastFailure?.status ?? 500, lastFailure?.body ?? { error: 'model_call_failed' });
-    }
-
-    if (succeeded.index > 0) {
-      const fromModel = candidates[0];
-      const toModel = succeeded.candidate;
-      const firstFailureReason = failures[0]?.reason;
-
-      if (opts.control.modelFailover) {
-        try {
-          await opts.control.modelFailover({
-            runId: ctx.run.runId,
-            fromModel,
-            toModel,
-            reason: firstFailureReason,
+        const price = entry.price ?? priceFor(opts.prices, candidate);
+        if (!price) {
+          failures.push({
+            status: 403,
+            body: { error: 'unpriced_model', model: candidate },
+            reason: 'unpriced_model',
+            isDeny: true,
+            detail: { model: candidate },
           });
-        } catch (err) {
-          console.error(`[gatekeeper-egress] modelFailover rejected: ${err instanceof Error ? err.message : String(err)}`);
+          continue;
         }
-      } else {
-        ledger(ctx, route, {
-          type: 'action',
-          action: 'MODEL_FAILOVER',
-          model: toModel,
-          requestedModel: fromModel,
-          models: [fromModel, toModel],
-        });
+
+        if (i === 0 && throttled(ctx)) {
+          return deny(res, ctx, route, 429, 'throttled');
+        }
+
+        calls.get(res)?.start(candidate);
+        const requestId = randomUUID();
+        const t0 = performance.now();
+        const done = await complete({ entry, adapters: modelAdapters, body: upstreamBody });
+
+        if (!done.ok && done.kind === 'refused') {
+          failures.push({
+            status: done.status,
+            body: { error: done.code, ...(done.detail ? { detail: done.detail } : {}) },
+            reason: done.code,
+            isDeny: true,
+            detail: done.detail,
+          });
+          continue;
+        }
+
+        if (!done.ok) {
+          const e = done.error;
+          const outcome = /timeout|timed out/i.test(`${e.code} ${e.message}`) ? 'timeout' : 'error';
+          markOutcome(res, outcome);
+          m?.requests.add(1, { route: route.id, outcome: e.code, agent: ctx.run.agentId });
+          console.error(`[gatekeeper-egress] models ${candidate} via ${entry.provider}: ${e.code} ${e.upstreamStatus ?? ''} ${e.message}`);
+          ledger(ctx, route, { type: 'action', action: 'MODEL_UPSTREAM_ERROR', model: candidate, provider: entry.provider, upstreamStatus: e.upstreamStatus, requestId });
+          failures.push({
+            status: e.status,
+            body: { error: e.code, message: redactSecrets(e.message, secretValues), ...(e.upstreamStatus ? { upstreamStatus: e.upstreamStatus } : {}) },
+            reason: e.code,
+            outcome,
+          });
+          continue;
+        }
+
+        const { request: chat, result } = done;
+        m?.requests.add(1, { route: route.id, outcome: '200' });
+        m?.latency.record((performance.now() - t0) / 1000, { route: route.id });
+
+        let usage: Usage;
+        let action: string | undefined;
+        if (result.usage) usage = { model: candidate, input: result.usage.input, output: result.usage.output, cacheRead: 0, cacheWrite: 0 };
+        else {
+          // No usage reported: charge the worst case the request allowed rather than nothing.
+          usage = { model: candidate, input: 0, output: chat.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
+          action = 'METERING_GAP';
+        }
+        recordUsage(ctx, route, {
+          usage,
+          model: candidate,
+          price,
+          request: parsed,
+          requestId,
+          action,
+          extra: {
+            provider: entry.provider,
+            upstreamModel: entry.id,
+            ...(selection.requested ? { requestedModel: selection.requested } : {}),
+          },
+        }, res);
+
+        if (allToolNames.length > 0 && (!result.toolCalls || result.toolCalls.length === 0)) {
+          const leakedTool = detectToolSyntaxLeak(result.content, allToolNames);
+          if (leakedTool) {
+            ledger(ctx, route, {
+              type: 'action',
+              action: 'MALFORMED_TOOL_SYNTAX',
+              model: candidate,
+              tool: leakedTool,
+              requestId,
+            });
+            failures.push({
+              status: 422,
+              body: {
+                error: 'malformed_tool_syntax',
+                message: `Model generated pseudo-tool syntax for '${leakedTool}' in content instead of structured tool_calls. Retry; call the tool through tool_calls (AP1).`,
+                tool: leakedTool,
+              },
+              reason: 'malformed_tool_syntax',
+            });
+            continue;
+          }
+        }
+
+        succeeded = {
+          candidate,
+          index: i,
+          done,
+          usage,
+          price,
+          entry,
+          requestId,
+        };
+        break;
       }
 
-      ctx.policy.currentModel = toModel;
-      for (const entry of ctxCache.values()) {
-        if (entry.ctx.run.agentId === ctx.run.agentId) {
-          entry.ctx.policy.currentModel = toModel;
+      if (!succeeded) {
+        const lastFailure = failures[failures.length - 1];
+        if (candidates.length > 1) {
+          ledger(ctx, route, {
+            type: 'action',
+            action: 'MODEL_FAILOVER_EXHAUSTED',
+            models: candidates,
+            reason: lastFailure?.reason ?? 'exhausted',
+          });
+        }
+        if (lastFailure?.isDeny) {
+          return deny(res, ctx, route, lastFailure.status, lastFailure.reason, lastFailure.detail);
+        }
+        if (lastFailure?.outcome) {
+          markOutcome(res, lastFailure.outcome);
+        }
+        return send(res, lastFailure?.status ?? 500, lastFailure?.body ?? { error: 'model_call_failed' });
+      }
+
+      if (succeeded.index > 0) {
+        const fromModel = candidates[0];
+        const toModel = succeeded.candidate;
+        const firstFailureReason = failures[0]?.reason;
+
+        if (opts.control.modelFailover) {
+          try {
+            await opts.control.modelFailover({
+              runId: ctx.run.runId,
+              fromModel,
+              toModel,
+              reason: firstFailureReason,
+            });
+          } catch (err) {
+            console.error(`[gatekeeper-egress] modelFailover rejected: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        } else {
+          ledger(ctx, route, {
+            type: 'action',
+            action: 'MODEL_FAILOVER',
+            model: toModel,
+            requestedModel: fromModel,
+            models: [fromModel, toModel],
+          });
+        }
+
+        ctx.policy.currentModel = toModel;
+        for (const entry of ctxCache.values()) {
+          if (entry.ctx.run.agentId === ctx.run.agentId) {
+            entry.ctx.policy.currentModel = toModel;
+          }
+        }
+
+        replies.recordFailover(ctx.run.runId, fromModel, toModel);
+      }
+
+      totalInputTokens += succeeded.usage.input;
+      totalOutputTokens += succeeded.usage.output;
+      finalReply = succeeded.done.result;
+      finalModel = succeeded.candidate;
+      finalEntry = succeeded.entry;
+      finalPrice = succeeded.price;
+      finalRequestId = succeeded.requestId;
+
+      const factoryCalls = (finalReply.toolCalls ?? []).filter((tc: any) => injectedToolNames.includes(tc.function?.name));
+      if (factoryCalls.length === 0) {
+        break;
+      }
+
+      round++;
+      if (round >= MAX_ROUNDS) {
+        break;
+      }
+
+      // Execute factory tool calls transparently (§6.9 M2, GAP-210)
+      const toolMessages: unknown[] = [];
+      for (const tc of factoryCalls) {
+        if (tc.function?.name === 'factory_get_models') {
+          const info = opts.control.getRunModels
+            ? await opts.control.getRunModels({ runId: ctx.run.runId, runToken: presentedToken(req) ?? '' })
+            : undefined;
+          toolMessages.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            name: tc.function.name,
+            content: JSON.stringify(info ?? { error: 'unavailable' }),
+          });
+        } else if (tc.function?.name === 'factory_set_models') {
+          const args = (tryJson(tc.function.arguments) ?? {}) as Record<string, unknown>;
+          const info = opts.control.setRunModels
+            ? await opts.control.setRunModels({
+                runId: ctx.run.runId,
+                runToken: presentedToken(req) ?? '',
+                currentModel: typeof args.currentModel === 'string' ? args.currentModel : undefined,
+                primaryModel: typeof args.primaryModel === 'string' ? args.primaryModel : undefined,
+                secondaryModel: typeof args.secondaryModel === 'string' ? args.secondaryModel : undefined,
+              })
+            : undefined;
+          if (info) {
+            ctxCache.delete(ctx.run.runId);
+            const fresh = await opts.control.runContext(ctx.run.runId);
+            if (fresh) ctx = fresh;
+            else if (info.currentModel) ctx.policy.currentModel = info.currentModel;
+          }
+          toolMessages.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            name: tc.function.name,
+            content: JSON.stringify(info ?? { error: 'failed_to_set_models' }),
+          });
         }
       }
 
-      replies.recordFailover(ctx.run.runId, fromModel, toModel);
+      if (!isBuiltin) {
+        const standing = checkStanding({ limits: ctx.policy.budgetUsd, spend: ctx.spend, pendingUsd: unacked.get(ctx.run.runId) ?? 0 });
+        if (!standing.inGoodStanding) return deny(res, ctx, route, 402, 'budget_exceeded', { window: standing.window });
+      }
+      if (throttled(ctx)) return deny(res, ctx, route, 429, 'throttled');
+
+      const assistantMsg = {
+        role: 'assistant',
+        content: finalReply.content || null,
+        tool_calls: finalReply.toolCalls,
+      };
+      const existingMessages = Array.isArray(upstreamBody.messages) ? (upstreamBody.messages as unknown[]) : [];
+      upstreamBody = {
+        ...upstreamBody,
+        messages: [...existingMessages, assistantMsg, ...toolMessages],
+      };
     }
 
-    const model = succeeded.candidate;
-    const entry = succeeded.entry;
-    const price = succeeded.price;
-    const requestId = succeeded.requestId;
+    const model = finalModel;
+    const entry = finalEntry!;
+    const price = finalPrice!;
+    const requestId = finalRequestId;
 
     // AP3: a final answer (no tool calls) given with tools offered and no tool result in this turn is ungrounded.
-    let reply = succeeded.done.result;
-    let replyUsage = { input: succeeded.usage.input, output: succeeded.usage.output };
-    const toolsOffered = declaredToolNames.length > 0;
+    let reply = finalReply;
+    let replyUsage = { input: totalInputTokens, output: totalOutputTokens };
     // AP3.2: grounded by tool results the model was given, or by data this run fetched through a route since its last answer.
-    const grounded = !toolsOffered || toolResultsInTurn(succeeded.done.request.messages) || readsGround;
+    const grounded = !toolsOffered || toolResultsInTurn(upstreamBody.messages as any) || readsGround;
     const retryAffordable = isBuiltin || checkStanding({ limits: ctx.policy.budgetUsd, spend: ctx.spend, pendingUsd: unacked.get(ctx.run.runId) ?? 0 }).inGoodStanding;
     if (!grounded && !reply.toolCalls?.length && ctx.policy.grounding === 'warn-once' && reply.content.trim() && retryAffordable && !throttled(ctx)) {
       // AP3.3: one more turn with the notice; metered, inside the budget and throttle, and held to AP1 like any answer.
@@ -1178,7 +1326,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         const r2 = again.result;
         const u2: Usage = r2.usage ? { model, input: r2.usage.input, output: r2.usage.output, cacheRead: 0, cacheWrite: 0 } : { model, input: 0, output: again.request.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
         recordUsage(ctx, route, { usage: u2, model, price, request: retryBody, requestId: retryId, action: r2.usage ? undefined : 'METERING_GAP', extra: { provider: entry.provider, upstreamModel: entry.id } }, res);
-        const leaked = !r2.toolCalls?.length && detectToolSyntaxLeak(r2.content, declaredToolNames);
+        const leaked = !r2.toolCalls?.length && detectToolSyntaxLeak(r2.content, allToolNames);
         ledger(ctx, route, { type: 'action', action: 'GROUNDING_RETRY', model, requestId, retryRequestId: retryId, toolCalled: Boolean(r2.toolCalls?.length) });
         replyUsage = { input: replyUsage.input + u2.input, output: replyUsage.output + u2.output };
         // A retry that imitates a tool call, or says nothing, leaves the first answer in place.

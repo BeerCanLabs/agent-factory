@@ -42,8 +42,8 @@ Agent Factory is architected around **10 canonical services ("The Cast of Charac
    - **Contract:** Zero-knowledge credential evaluation, ephemeral leases, token rotation events, and write-only platform secrets onboarding without exposing plaintext credentials to agents.
 
 3. **Executive (Model Service / Inference Provider):**
-   - **Role:** Provides a uniform OpenAI-compatible Chat Completions API (M1), translates calls to model providers (Bedrock today), decides whether an agent may use a model (M2), and counts tokens (E5).
-   - **Contract:** `checkModel` and `offeredModels` (may this agent use this model?), `complete` (serve one call and return the result, a refusal, or the provider's failure), the model catalog and provider adapters; normalizes token usage (`input`, `output`, `cacheRead`, `cacheWrite`) and reports it to the Accountant for pricing. Lives in `packages/executive`.
+   - **Role:** Provides a uniform OpenAI-compatible Chat Completions API (M1), translates calls to model providers (Bedrock today), decides whether an agent may use a model (M2), manages two-tier model authority with persistent failback across slots (`currentModel`, `primaryModel`, `secondaryModel`), transparently supports conversational model switching via run tokens and injected egress tools (GAP-210), and counts tokens (E5).
+   - **Contract:** `checkModel`, `offeredModels`, and `failbackCandidates` (may this agent use this model, and what is its failover chain?), `complete` (serve one call and return the result, a refusal, or the provider's failure), the model catalog and provider adapters; normalizes token usage (`input`, `output`, `cacheRead`, `cacheWrite`) and reports it to the Accountant for pricing. Lives in `packages/executive`.
 
 4. **Property Manager (Compute & State Lifecycle, Turn Broker):**
    - **Role:** Property Manager, Compute & State. Manages serverless min=0 compute, wake-from-zero, warm-down windows, operational pause/kill-switches, turn coordination via `/mailbox` long-polling, container runtime state hydration ("The Safe", §6.6), and two-stage retirement (§6.4).

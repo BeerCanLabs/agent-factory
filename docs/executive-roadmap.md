@@ -61,15 +61,13 @@ test guards against a second copy. What stays in the egress is GAP-130.
 
 **Then the model configuration work stream** (each task is scoped when its turn comes):
 
-1. **TSK-165, the policy holds the selection:** `model`, `fallbackModel`, `skillModels`; validation; a policy with none
-   of them behaves exactly as today.
-2. **TSK-166, the Executive serves it:** `resolveModel` in `packages/executive`; the egress serves the resolved model;
-   the ledger records the requested and the served model.
-3. **TSK-167, a skill's calls use the skill's model:** each call from a skill carries the skill's id.
-4. **TSK-168, the backup model:** failover rules, decided with Dale first.
-5. **TSK-169, the console:** the owner picks the model, the backup and each skill's model from the offered models.
-6. **TSK-170, remove model names from code and metadata,** and migrate SM-donna and SM-template. Last, and accept-and-ignore
-   before removing, so no existing cartridge or skill breaks.
+1. **TSK-165, the policy holds the selection (Completed, Slice 1 / PR #280):** `policy.models: string[]` (approved models), `currentModel` (execution slot), `primaryModel` (1st failback target), `secondaryModel` (optional 2nd failback target). Two-tier authority (`M2`, `M3`), retirement & unapproval cascading transitions, and effective slots resolution. Headless REST API (`GET`/`PUT /api/v1/agents/:id/models`) and MCP tools (`get_agent_models`, `set_agent_models`).
+2. **TSK-166, the Executive serves it (Completed, Slice 1 / PR #280):** `resolveModel` and `failbackCandidates` in `packages/executive`; egress serves `selection.model` and records both `model` (served) and `requestedModel` (differing request).
+3. **TSK-168, persistent failback & model failover (Completed, Slice 2 / PR #281):** Egress candidate chain `failbackCandidates(policy, requested)` (`[current, primary, secondary]`). Automatic failover on transient upstream errors (5xx, 429, 503, unpriced 403, 422 malformed tool syntax). Non-failover fatal errors fail immediately (403 unapproved, 403 pinned, 400 bad json, 400 streaming, 402 budget, 429 throttle). Mid-failover budget metering and standing checks. Egress failover handler calls `POST /api/v1/gatekeeper-egress/runs/:id/failover` which ledgers `MODEL_FAILOVER` and persists `currentModel` across agent turns.
+4. **TSK-287 / GAP-210, run-token model selection & conversational parity (Completed, Slice 3 / PR #282):** Run-token parity on REST (`GET`/`PUT /api/v1/runs/:id/models`) and MCP (`POST /mcp` `get_agent_models`/`set_agent_models`). Verified human requester authority check (agent owner or factory admin) with warm-run taint protection (non-manager turns taint the run, returning 403 `requester_unauthorized_for_model_switch`). Prompt-injection ceiling: `approvedModels` is strictly read-only for agents (mutation rejected with 403 `approved_models_ceiling`), model slots selectable strictly within approved models. Transparent egress injection and execution of `factory_get_models` and `factory_set_models` with AP3 footnote preservation (`[no tools called]` omitted on text turns without caller tools).
+5. **TSK-167, a skill's calls use the skill's model (Queued):** each call from a skill carries the skill's id.
+6. **TSK-169, the console (Queued):** the owner picks the model, the backup and each skill's model from the offered models in Console UI.
+7. **TSK-170, remove model names from code and metadata (Queued):** migrate SM-donna and SM-template. Accept-and-ignore before removing, so no existing cartridge or skill breaks.
 
 ## Open decisions for Dale
 

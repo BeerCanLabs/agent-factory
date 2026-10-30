@@ -106,6 +106,45 @@ const control: ControlClient = {
     const body = (await res.json()) as { ok: boolean; currentModel?: string };
     return { ok: Boolean(body?.ok), currentModel: body?.currentModel };
   },
+  async getRunModels(req: { runId: string; runToken: string }) {
+    try {
+      const res = await fetch(`${FACTORY_URL}/api/v1/runs/${encodeURIComponent(req.runId)}/models`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${req.runToken}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        console.error(`[gatekeeper-egress] getRunModels rejected: ${res.status}`);
+        return undefined;
+      }
+      return (await res.json()) as any;
+    } catch (err) {
+      console.error(`[gatekeeper-egress] getRunModels failed: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
+  },
+  async setRunModels(req: { runId: string; runToken: string; currentModel?: string; primaryModel?: string; secondaryModel?: string }) {
+    try {
+      const res = await fetch(`${FACTORY_URL}/api/v1/runs/${encodeURIComponent(req.runId)}/models`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${req.runToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(req.currentModel !== undefined ? { currentModel: req.currentModel } : {}),
+          ...(req.primaryModel !== undefined ? { primaryModel: req.primaryModel } : {}),
+          ...(req.secondaryModel !== undefined ? { secondaryModel: req.secondaryModel } : {}),
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        console.error(`[gatekeeper-egress] setRunModels rejected: ${res.status}`);
+        return undefined;
+      }
+      return (await res.json()) as any;
+    } catch (err) {
+      console.error(`[gatekeeper-egress] setRunModels failed: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
+  },
   async ledger(event) {
     try {
       const res = await call('POST', '/api/v1/ledger', event);
