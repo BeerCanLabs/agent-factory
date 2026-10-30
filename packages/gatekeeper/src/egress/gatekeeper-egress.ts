@@ -9,7 +9,7 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { BUILTIN_PROVIDER_HOSTS, BUILTIN_PROVIDER_SECRETS, SseMeter, checkModel, selectModel, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
+import { BUILTIN_PROVIDER_HOSTS, BUILTIN_PROVIDER_SECRETS, SseMeter, checkModel, selectModel, failbackCandidates, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ChatRequest, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
 import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';
@@ -116,6 +116,8 @@ export type ControlClient = {
   platformCredentialNames?(): Promise<string[]>;
   /** GAP-162: resolve dynamic model catalog from control plane. Cached, refreshed on interval, no redeploy. */
   modelCatalog?(): Promise<ModelCatalog | { catalog?: ModelCatalog; models?: ModelCatalog; default?: string }>;
+  /** Model failover (§6.9 M2): persistently records failover and updates agent currentModel in control plane. */
+  modelFailover?(req: { runId: string; toModel: string; fromModel?: string; reason?: string }): Promise<{ ok: boolean; currentModel?: string }>;
 };
 
 
@@ -934,67 +936,236 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const requestedName = typeof parsed.model === 'string' && parsed.model ? parsed.model : undefined;
     const selection = selectModel(modelPolicyOf(ctx), requestedName);
     if (!selection.ok) return deny(res, ctx, route, selection.status, selection.code, 'detail' in selection ? selection.detail : undefined);
-    const model = selection.model;
-    calls.get(res)?.start(model);
-    const entry = findModel(catalog, model);
-    if (!entry) return deny(res, ctx, route, 503, 'model_not_offered', { model });
-    const price = entry.price ?? priceFor(opts.prices, model);
-    if (!price) return deny(res, ctx, route, 403, 'unpriced_model', { model });
-    if (throttled(ctx)) return deny(res, ctx, route, 429, 'throttled');
-    const requestId = randomUUID();
-    const t0 = performance.now();
-    // AP3.1: a request that offers tools carries the standing note.
+
+    const candidates = failbackCandidates(modelPolicyOf(ctx), requestedName);
+    const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
     const declaredToolNames = toolNamesOf(parsed.tools);
     const upstreamBody = declaredToolNames.length > 0 ? withGroundingNote(parsed) : parsed;
-    const done = await complete({ entry, adapters: modelAdapters, body: upstreamBody });
-    if (!done.ok && done.kind === 'refused') return deny(res, ctx, route, done.status, done.code, done.detail);
-    if (!done.ok) {
-      const e = done.error;
-      markOutcome(res, /timeout|timed out/i.test(`${e.code} ${e.message}`) ? 'timeout' : 'error');
-      m?.requests.add(1, { route: route.id, outcome: e.code, agent: ctx.run.agentId });
-      console.error(`[gatekeeper-egress] models ${model} via ${entry.provider}: ${e.code} ${e.upstreamStatus ?? ''} ${e.message}`);
-      ledger(ctx, route, { type: 'action', action: 'MODEL_UPSTREAM_ERROR', model, provider: entry.provider, upstreamStatus: e.upstreamStatus, requestId });
-      return send(res, e.status, { error: e.code, message: redactSecrets(e.message, secretValues), ...(e.upstreamStatus ? { upstreamStatus: e.upstreamStatus } : {}) });
-    }
-    const { request: chat, result } = done;
-    m?.requests.add(1, { route: route.id, outcome: '200' });
-    m?.latency.record((performance.now() - t0) / 1000, { route: route.id });
 
-    let usage: Usage;
-    let action: string | undefined;
-    if (result.usage) usage = { model, input: result.usage.input, output: result.usage.output, cacheRead: 0, cacheWrite: 0 };
-    else {
-      // No usage reported: charge the worst case the request allowed rather than nothing.
-      usage = { model, input: 0, output: chat.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
-      action = 'METERING_GAP';
-    }
-    recordUsage(ctx, route, { usage, model, price, request: parsed, requestId, action, extra: { provider: entry.provider, upstreamModel: entry.id, ...(selection.requested ? { requestedModel: selection.requested } : {}) } }, res);
+    type Failure = {
+      status: number;
+      body: Record<string, unknown>;
+      reason: string;
+      isDeny?: boolean;
+      detail?: Record<string, unknown>;
+      outcome?: 'error' | 'timeout';
+    };
+    const failures: Failure[] = [];
+    let succeeded: {
+      candidate: string;
+      index: number;
+      done: { ok: true; request: ChatRequest; result: any };
+      usage: Usage;
+      price: Price;
+      entry: CatalogEntry;
+      requestId: string;
+    } | undefined;
 
-    if (declaredToolNames.length > 0 && (!result.toolCalls || result.toolCalls.length === 0)) {
-      const leakedTool = detectToolSyntaxLeak(result.content, declaredToolNames);
-      if (leakedTool) {
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i];
+      if (i > 0) {
+        if (!isBuiltin) {
+          const standing = checkStanding({
+            limits: ctx.policy.budgetUsd,
+            spend: ctx.spend,
+            pendingUsd: unacked.get(ctx.run.runId) ?? 0,
+          });
+          if (!standing.inGoodStanding) {
+            return deny(res, ctx, route, 402, 'budget_exceeded', { window: standing.window });
+          }
+        }
+        if (throttled(ctx)) {
+          return deny(res, ctx, route, 429, 'throttled');
+        }
+      }
+
+      const entry = findModel(catalog, candidate);
+      if (!entry) {
+        failures.push({
+          status: 503,
+          body: { error: 'model_not_offered', model: candidate },
+          reason: 'model_not_offered',
+          isDeny: true,
+          detail: { model: candidate },
+        });
+        continue;
+      }
+
+      const price = entry.price ?? priceFor(opts.prices, candidate);
+      if (!price) {
+        failures.push({
+          status: 403,
+          body: { error: 'unpriced_model', model: candidate },
+          reason: 'unpriced_model',
+          isDeny: true,
+          detail: { model: candidate },
+        });
+        continue;
+      }
+
+      if (i === 0 && throttled(ctx)) {
+        return deny(res, ctx, route, 429, 'throttled');
+      }
+
+      calls.get(res)?.start(candidate);
+      const requestId = randomUUID();
+      const t0 = performance.now();
+      const done = await complete({ entry, adapters: modelAdapters, body: upstreamBody });
+
+      if (!done.ok && done.kind === 'refused') {
+        failures.push({
+          status: done.status,
+          body: { error: done.code, ...(done.detail ? { detail: done.detail } : {}) },
+          reason: done.code,
+          isDeny: true,
+          detail: done.detail,
+        });
+        continue;
+      }
+
+      if (!done.ok) {
+        const e = done.error;
+        const outcome = /timeout|timed out/i.test(`${e.code} ${e.message}`) ? 'timeout' : 'error';
+        markOutcome(res, outcome);
+        m?.requests.add(1, { route: route.id, outcome: e.code, agent: ctx.run.agentId });
+        console.error(`[gatekeeper-egress] models ${candidate} via ${entry.provider}: ${e.code} ${e.upstreamStatus ?? ''} ${e.message}`);
+        ledger(ctx, route, { type: 'action', action: 'MODEL_UPSTREAM_ERROR', model: candidate, provider: entry.provider, upstreamStatus: e.upstreamStatus, requestId });
+        failures.push({
+          status: e.status,
+          body: { error: e.code, message: redactSecrets(e.message, secretValues), ...(e.upstreamStatus ? { upstreamStatus: e.upstreamStatus } : {}) },
+          reason: e.code,
+          outcome,
+        });
+        continue;
+      }
+
+      const { request: chat, result } = done;
+      m?.requests.add(1, { route: route.id, outcome: '200' });
+      m?.latency.record((performance.now() - t0) / 1000, { route: route.id });
+
+      let usage: Usage;
+      let action: string | undefined;
+      if (result.usage) usage = { model: candidate, input: result.usage.input, output: result.usage.output, cacheRead: 0, cacheWrite: 0 };
+      else {
+        // No usage reported: charge the worst case the request allowed rather than nothing.
+        usage = { model: candidate, input: 0, output: chat.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
+        action = 'METERING_GAP';
+      }
+      recordUsage(ctx, route, {
+        usage,
+        model: candidate,
+        price,
+        request: parsed,
+        requestId,
+        action,
+        extra: {
+          provider: entry.provider,
+          upstreamModel: entry.id,
+          ...(selection.requested ? { requestedModel: selection.requested } : {}),
+        },
+      }, res);
+
+      if (declaredToolNames.length > 0 && (!result.toolCalls || result.toolCalls.length === 0)) {
+        const leakedTool = detectToolSyntaxLeak(result.content, declaredToolNames);
+        if (leakedTool) {
+          ledger(ctx, route, {
+            type: 'action',
+            action: 'MALFORMED_TOOL_SYNTAX',
+            model: candidate,
+            tool: leakedTool,
+            requestId,
+          });
+          failures.push({
+            status: 422,
+            body: {
+              error: 'malformed_tool_syntax',
+              message: `Model generated pseudo-tool syntax for '${leakedTool}' in content instead of structured tool_calls. Retry; call the tool through tool_calls (AP1).`,
+              tool: leakedTool,
+            },
+            reason: 'malformed_tool_syntax',
+          });
+          continue;
+        }
+      }
+
+      succeeded = {
+        candidate,
+        index: i,
+        done,
+        usage,
+        price,
+        entry,
+        requestId,
+      };
+      break;
+    }
+
+    if (!succeeded) {
+      const lastFailure = failures[failures.length - 1];
+      if (candidates.length > 1) {
         ledger(ctx, route, {
           type: 'action',
-          action: 'MALFORMED_TOOL_SYNTAX',
-          model,
-          tool: leakedTool,
-          requestId,
-        });
-        return send(res, 422, {
-          error: 'malformed_tool_syntax',
-          message: `Model generated pseudo-tool syntax for '${leakedTool}' in content instead of structured tool_calls. Retry; call the tool through tool_calls (AP1).`,
-          tool: leakedTool,
+          action: 'MODEL_FAILOVER_EXHAUSTED',
+          models: candidates,
+          reason: lastFailure?.reason ?? 'exhausted',
         });
       }
+      if (lastFailure?.isDeny) {
+        return deny(res, ctx, route, lastFailure.status, lastFailure.reason, lastFailure.detail);
+      }
+      if (lastFailure?.outcome) {
+        markOutcome(res, lastFailure.outcome);
+      }
+      return send(res, lastFailure?.status ?? 500, lastFailure?.body ?? { error: 'model_call_failed' });
     }
 
+    if (succeeded.index > 0) {
+      const fromModel = candidates[0];
+      const toModel = succeeded.candidate;
+      const firstFailureReason = failures[0]?.reason;
+
+      if (opts.control.modelFailover) {
+        try {
+          await opts.control.modelFailover({
+            runId: ctx.run.runId,
+            fromModel,
+            toModel,
+            reason: firstFailureReason,
+          });
+        } catch (err) {
+          console.error(`[gatekeeper-egress] modelFailover rejected: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else {
+        ledger(ctx, route, {
+          type: 'action',
+          action: 'MODEL_FAILOVER',
+          model: toModel,
+          requestedModel: fromModel,
+          models: [fromModel, toModel],
+        });
+      }
+
+      ctx.policy.currentModel = toModel;
+      for (const entry of ctxCache.values()) {
+        if (entry.ctx.run.agentId === ctx.run.agentId) {
+          entry.ctx.policy.currentModel = toModel;
+        }
+      }
+
+      replies.recordFailover(ctx.run.runId, fromModel, toModel);
+    }
+
+    const model = succeeded.candidate;
+    const entry = succeeded.entry;
+    const price = succeeded.price;
+    const requestId = succeeded.requestId;
+
     // AP3: a final answer (no tool calls) given with tools offered and no tool result in this turn is ungrounded.
-    let reply = result;
-    let replyUsage = { input: usage.input, output: usage.output };
+    let reply = succeeded.done.result;
+    let replyUsage = { input: succeeded.usage.input, output: succeeded.usage.output };
     const toolsOffered = declaredToolNames.length > 0;
     // AP3.2: grounded by tool results the model was given, or by data this run fetched through a route since its last answer.
-    const grounded = !toolsOffered || toolResultsInTurn(chat.messages) || readsGround;
-    const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
+    const grounded = !toolsOffered || toolResultsInTurn(succeeded.done.request.messages) || readsGround;
     const retryAffordable = isBuiltin || checkStanding({ limits: ctx.policy.budgetUsd, spend: ctx.spend, pendingUsd: unacked.get(ctx.run.runId) ?? 0 }).inGoodStanding;
     if (!grounded && !reply.toolCalls?.length && ctx.policy.grounding === 'warn-once' && reply.content.trim() && retryAffordable && !throttled(ctx)) {
       // AP3.3: one more turn with the notice; metered, inside the budget and throttle, and held to AP1 like any answer.

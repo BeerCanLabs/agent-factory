@@ -10,7 +10,9 @@ import {
   NO_MODEL_FOOTNOTE,
   NO_TOOLS_FOOTNOTE,
   ReplyBook,
+  failoverFootnote,
   footnoteDiscordBody,
+  stripFootnote,
   READ_WINDOW_MS,
   isDiscordReply,
   isDiscordRoute,
@@ -78,6 +80,54 @@ describe('AP3 grounding pieces', () => {
     assert.equal(long.skipped, true, 'content is never cut to fit a footnote');
     assert.equal(long.body, raw);
     assert.equal(footnoteDiscordBody(Buffer.from(JSON.stringify({ embeds: [] })), () => NO_MODEL_FOOTNOTE), undefined, 'no content, nothing to mark');
+  });
+
+  it('failover footnote formatting, stripFootnote stripping, and ReplyBook one-time consumption', () => {
+    assert.equal(failoverFootnote('m1', 'm2'), '[model failed over: m1 -> m2]');
+
+    // stripFootnote covers standard, failover, and combined footnotes
+    assert.equal(stripFootnote('hello\n-# [no tools called]'), 'hello');
+    assert.equal(stripFootnote('hello\n-# [no model or tools used]'), 'hello');
+    assert.equal(stripFootnote('hello\n-# [model failed over: m1 -> m2]'), 'hello');
+    assert.equal(stripFootnote('hello\n-# [model failed over: m1 -> m2] [no tools called]'), 'hello');
+    assert.equal(stripFootnote('hello\n-# [model failed over: m1 -> m2] [no model or tools used]'), 'hello');
+
+    // Case 1: single-turn answer with failover footnote
+    const b1 = new ReplyBook();
+    b1.sawModelApiCall('r1');
+    b1.recordFailover('r1', 'm1', 'm2');
+    b1.remember('r1', 'Clean single-turn grounded answer.');
+    assert.equal(b1.footnoteFor('r1', 'Clean single-turn grounded answer.'), '[model failed over: m1 -> m2]');
+    // Next answer in same run does not carry failover footnote
+    b1.remember('r1', 'Subsequent turn answer without failover.');
+    assert.equal(b1.footnoteFor('r1', 'Subsequent turn answer without failover.'), undefined);
+
+    // Case 2: multi-step turn where failover happens during tool-calling turn
+    const b2 = new ReplyBook();
+    b2.sawModelApiCall('r2');
+    b2.recordFailover('r2', 'm1', 'm2');
+    // Tool calls occur: no remember called yet!
+    // Follow-up turn succeeds on m2 (no new failover): final text answer remembered
+    b2.remember('r2', 'Final answer after tool execution.');
+    assert.equal(b2.footnoteFor('r2', 'Final answer after tool execution.'), '[model failed over: m1 -> m2]');
+    // Following turn has no failover footnote
+    b2.remember('r2', 'Another turn later in run.');
+    assert.equal(b2.footnoteFor('r2', 'Another turn later in run.'), undefined);
+
+    // Case 3: ungrounded reply combined footnote
+    const b3 = new ReplyBook();
+    b3.sawModelApiCall('r3');
+    b3.recordFailover('r3', 'primary-model', 'secondary-model');
+    b3.remember('r3', 'Ungrounded reply.', NO_TOOLS_FOOTNOTE);
+    assert.equal(b3.footnoteFor('r3', 'Ungrounded reply.'), '[model failed over: primary-model -> secondary-model] [no tools called]');
+
+    // Case 4: chained failovers (m1 -> m2 -> m3) before final answer
+    const b4 = new ReplyBook();
+    b4.sawModelApiCall('r4');
+    b4.recordFailover('r4', 'm1', 'm2');
+    b4.recordFailover('r4', 'm2', 'm3');
+    b4.remember('r4', 'Answer after chain.');
+    assert.equal(b4.footnoteFor('r4', 'Answer after chain.'), '[model failed over: m1 -> m3]');
   });
 });
 

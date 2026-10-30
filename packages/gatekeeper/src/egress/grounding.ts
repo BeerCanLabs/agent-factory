@@ -9,6 +9,10 @@ import { createHash } from 'node:crypto';
 export const NO_TOOLS_FOOTNOTE = '[no tools called]';
 export const NO_MODEL_FOOTNOTE = '[no model or tools used]';
 
+export function failoverFootnote(fromModel: string, toModel: string): string {
+  return `[model failed over: ${fromModel} -> ${toModel}]`;
+}
+
 /** The standing note added to every model request that offers tools (AP3.1). */
 export const GROUNDING_NOTE =
   `Factory notice: a reply you give without calling a tool is delivered to the user with the footnote "${NO_TOOLS_FOOTNOTE}". ` +
@@ -70,6 +74,9 @@ type RunBook = {
   /** Reads before this absolute index were used up by an answer given with tools offered. */
   readsUsed: number;
   at: number;
+  pendingFailover?: string;
+  pendingFromModel?: string;
+  pendingToModel?: string;
 };
 
 /** A read older than this grounds nothing: a warm run's lookup from an hour ago is not what the model just said. */
@@ -179,11 +186,29 @@ export class ReplyBook {
     if (b) b.readsUsed = Math.max(b.readsUsed, mark);
   }
 
+  /** Record a model failover event for this run, attached once to the next final answer. */
+  recordFailover(runId: string, fromModel: string, toModel: string, now = Date.now()): void {
+    const b = this.book(runId, now);
+    const origin = b.pendingFromModel ?? fromModel;
+    b.pendingFromModel = origin;
+    b.pendingToModel = toModel;
+    b.pendingFailover = failoverFootnote(origin, toModel);
+  }
+
   remember(runId: string, text: string, footnote?: string, now = Date.now()): void {
     const t = normaliseReply(text);
     if (!t) return;
     const b = this.book(runId, now);
-    b.answers.push({ text: t, ...(footnote ? { footnote } : {}) });
+    let effectiveFootnote = footnote;
+    if (b.pendingFailover) {
+      effectiveFootnote = effectiveFootnote
+        ? `${b.pendingFailover} ${effectiveFootnote}`
+        : b.pendingFailover;
+      b.pendingFailover = undefined;
+      b.pendingFromModel = undefined;
+      b.pendingToModel = undefined;
+    }
+    b.answers.push({ text: t, ...(effectiveFootnote ? { footnote: effectiveFootnote } : {}) });
     b.answers = b.answers.slice(-this.keep);
   }
 
@@ -206,7 +231,7 @@ export class ReplyBook {
   }
 }
 
-const FOOTNOTE_LINE = /\n-# \[(no tools called|no model or tools used)\]\s*$/;
+const FOOTNOTE_LINE = /\n-# (?:\[model failed over: [^\]]+\](?:\s+\[(?:no tools called|no model or tools used)\])?|\[(?:no tools called|no model or tools used)\])\s*$/;
 
 /** A message without a footnote this factory already added (an edit of a footnoted message gets one, not two). */
 export function stripFootnote(content: string): string {
