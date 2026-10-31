@@ -46,7 +46,7 @@ import { handleCredentials } from './credentials.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
-import { allowedSubagents, handleSubagents, spawnSubagent, type SubagentRecord } from './subagents.js';
+import { allowedSubagents, budgetHolder, handleSubagents, spawnSubagent, type SubagentRecord } from './subagents.js';
 import { agentConfigForRun, deployConfigured, handleAgentCreation, handleConvertAgent, handleRuntimeRoutes, registrationRefusal, type SharedRuntimePin } from './agent-creation.js';
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
@@ -3004,22 +3004,24 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
           }
         }
       } else {
-        const agent = state.agents.get(stored.agentId);
-        const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(stored.agentId));
-        const policy = state.policies.get(stored.agentId);
+        // E2.1 (#297): a helper run's spend is its parent's: charged to the parent agent, in the parent run, no line item.
+        const payer = run ? budgetHolder(run) : { agentId: stored.agentId, runId: stored.runId as string, parent: false };
+        const agent = state.agents.get(payer.agentId);
+        const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(payer.agentId));
+        const policy = state.policies.get(payer.agentId);
         // `before` must be read before the spend is added, or a crossing is never detected.
-        const beforeStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(stored.agentId, stored.runId) });
+        const beforeStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(payer.agentId, payer.runId) });
         const before = beforeStanding.inGoodStanding ? undefined : beforeStanding.window;
-        state.spend.add(stored.agentId, stored.runId, stored.costUsd, stored.timestamp, spendDetail(stored));
+        state.spend.add(payer.agentId, payer.runId, stored.costUsd, stored.timestamp, spendDetail(stored));
         if (!isBuiltin) {
-          const afterStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(stored.agentId, stored.runId) });
+          const afterStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(payer.agentId, payer.runId) });
           const after = afterStanding.inGoodStanding ? undefined : afterStanding.window;
           // Alert once per crossing, even if the run already finished; block only a run that is still live.
           if (after && after !== before) {
             const alert = state.ledger.append({
               timestamp: new Date().toISOString(),
-              agentId: stored.agentId,
-              runId: stored.runId,
+              agentId: payer.agentId,
+              runId: payer.runId,
               type: 'budget.alert',
               action: `BUDGET_${after.toUpperCase()}_EXCEEDED`,
               actor: SYSTEM.policy,
@@ -3327,14 +3329,25 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
 
+    // E2.1 (#297): a helper run is judged on its parent's budget and spend; the egress names the parent in a refusal.
+    const payer = budgetHolder(run);
+    const payerAgent = state.agents.get(payer.agentId);
+    if (payer.parent && !payerAgent) {
+      // Fail closed: a helper whose parent agent is gone has no budget to spend.
+      json(res, 404, { error: 'parent_agent_not_found' });
+      return;
+    }
+    const payerBuiltin = Boolean(payerAgent?.isBuiltin || payerAgent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(payer.agentId));
+    const budgetUsd = payer.parent ? (payerBuiltin ? undefined : state.policies.get(payer.agentId).budgetUsd) : pol.budgetUsd;
     json(res, 200, {
       run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state), ...(run.model ? { model: run.model } : {}) },
       agentState: agent.state,
-      isBuiltin,
+      isBuiltin: payer.parent ? payerBuiltin : isBuiltin,
       // E7: a policy set for this agent implies the factory model API; the global fallback never does.
       policySet: state.policies.has(run.agentId),
-      policy: isBuiltin ? { ...pol, budgetUsd: undefined } : pol,
-      spend: state.spend.get(run.agentId, run.runId),
+      policy: (payer.parent ? payerBuiltin : isBuiltin) ? { ...pol, budgetUsd: undefined } : { ...pol, budgetUsd },
+      spend: state.spend.get(payer.agentId, payer.runId),
+      ...(payer.parent ? { budgetOf: 'parent' } : {}),
       // E12 item 4: what the run's requesting person may reach through skill routes; the egress applies it.
       // A built-in agent is the factory's own and has no person's roles.
       access: isBuiltin ? { restricted: false } : accessForRun(state, run, agent),

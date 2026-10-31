@@ -319,6 +319,23 @@ describe('factory model API (/models/v1/chat/completions)', { concurrency: false
     assert.equal(seen.length, 2);
   });
 
+  it('a helper run out of its parent budget is refused as supervising_agent_out_of_budget (E2.1)', async () => {
+    ctx.policy = policy({ budgetUsd: { perRun: 0.01 } });
+    const saved = ctx.spend;
+    (ctx as any).budgetOf = 'parent';
+    (ctx as any).spend = { run: 1, day: 1, month: 1 };
+    const before = seen.length;
+    try {
+      const res = await call(port, '/models/v1/chat/completions', { token, body: chat() });
+      assert.equal(res.status, 402);
+      assert.equal(res.json().error, 'supervising_agent_out_of_budget');
+      assert.equal(seen.length, before);
+    } finally {
+      delete (ctx as any).budgetOf;
+      ctx.spend = saved;
+    }
+  });
+
   it('honours isolate and pause', async () => {
     ctx.agentState = 'ISOLATED';
     assert.equal((await call(port, '/models/v1/chat/completions', { token, body: chat() })).status, 403);

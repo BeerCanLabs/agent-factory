@@ -8,7 +8,8 @@ import { validateSubagent } from '@beercanlabs/factory-contract';
 import { SubagentStore, type SubagentRecord } from '@beercanlabs/factory-registrar';
 import { randomBytes } from 'node:crypto';
 import { createRun, type Run } from '@beercanlabs/factory-property-manager';
-import type { AgentRecord } from '@beercanlabs/factory-registrar';
+import { BUILTIN_AGENT_IDS, type AgentRecord } from '@beercanlabs/factory-registrar';
+import { checkStanding } from '@beercanlabs/factory-budget';
 import { approvedModels, json, readJson, requirePrivilege, type FactoryState } from './app.js';
 
 export type { SubagentRecord };
@@ -76,6 +77,14 @@ export async function handleSubagents(state: FactoryState, req: http.IncomingMes
   return false;
 }
 
+/**
+ * E2.1 (#297): whose budget a run spends. A helper run (it has a parent) spends its parent agent's budget, counted in the
+ * parent run, so there is no helper line item; every other run spends its own.
+ */
+export function budgetHolder(run: Pick<Run, 'agentId' | 'runId' | 'parentAgentId' | 'parentRunId'>): { agentId: string; runId: string; parent: boolean } {
+  return run.parentAgentId && run.parentRunId ? { agentId: run.parentAgentId, runId: run.parentRunId, parent: true } : { agentId: run.agentId, runId: run.runId, parent: false };
+}
+
 export type SpawnOutcome = { status: number; body: Record<string, unknown> };
 
 /** Longest task prompt a parent may pass to one helper run. */
@@ -103,6 +112,11 @@ export async function spawnSubagent(state: FactoryState, parent: Run, args: Reco
   const prompt = args.prompt;
   if (typeof prompt !== 'string' || !prompt.trim()) return { status: 400, body: { error: 'prompt_required' } };
   if (prompt.length > MAX_HELPER_PROMPT_CHARS) return { status: 413, body: { error: 'prompt_too_long', max: MAX_HELPER_PROMPT_CHARS } };
+  // E2.1 (#297): the helper spends the parent's budget, so a parent out of budget starts none.
+  const parentBuiltin = Boolean(parentAgent.isBuiltin || parentAgent.category === 'builtin' || BUILTIN_AGENT_IDS.has(parentAgent.id));
+  if (!parentBuiltin && !checkStanding({ limits: state.policies.get(parent.agentId).budgetUsd, spend: state.spend.get(parent.agentId, parent.runId) }).inGoodStanding) {
+    return { status: 402, body: { error: 'supervising_agent_out_of_budget' } };
+  }
   const pin = state.sharedRuntime;
   if (!pin?.image) return { status: 503, body: { error: 'shared_runtime_not_configured' } };
 
