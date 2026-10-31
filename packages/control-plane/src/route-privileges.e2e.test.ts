@@ -601,6 +601,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       { method: 'GET', path: '/api/v1/runs/nope/events' },
       { method: 'GET', path: '/api/v1/runs/nope/models' },
       { method: 'PUT', path: '/api/v1/runs/nope/models', body: {} },
+      { method: 'GET', path: '/api/v1/runs/nope/approved-models' },
       { method: 'POST', path: '/api/v1/keymaster/checkout', body: {} },
     ];
     for (const row of rows) {
