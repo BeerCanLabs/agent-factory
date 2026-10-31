@@ -20,6 +20,14 @@ export function subagentsOf(state: FactoryState): Map<string, SubagentRecord> {
   return state.subagents;
 }
 
+/** E1.3 (#294): the registered helpers an agent's admin-set policy allows it, by id; none without an allow-list entry. */
+export function allowedSubagents(state: FactoryState, agentId: string): Array<{ id: string; name?: string; description?: string }> {
+  const allow = new Set(state.policies.get(agentId)?.subagents ?? []);
+  return [...subagentsOf(state).values()]
+    .filter((h) => allow.has(h.id))
+    .map((h) => ({ id: h.id, ...(h.name ? { name: h.name } : {}), ...(h.description ? { description: h.description } : {}) }));
+}
+
 /** Handles /api/v1/registry/subagents[/:id]; returns false when the path is not one of these. */
 export async function handleSubagents(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
   if (path === '/api/v1/registry/subagents' && req.method === 'POST') {
