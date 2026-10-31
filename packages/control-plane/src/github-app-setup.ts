@@ -37,7 +37,8 @@ function stateKey(s: FactoryState): Buffer | undefined {
 /** The manifest GitHub prefills. Permissions are what a coding agent needs; the admin can narrow them on GitHub. */
 export function buildManifest(publicBase: string, agentId: string, agentName: string) {
   return {
-    name: `${agentName}`.slice(0, 34),
+    // GitHub App names are global: qualify the agent's name with this factory's host so the default is rarely taken.
+    name: `${agentName} (${new URL(publicBase).hostname.split('.')[0]})`.slice(0, 34),
     url: publicBase,
     redirect_url: `${publicBase}/api/v1/keymaster/github-app/callback`,
     public: false,
