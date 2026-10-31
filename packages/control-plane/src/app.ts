@@ -46,6 +46,7 @@ import { handleCredentials } from './credentials.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
+import { handleSubagents, type SubagentRecord } from './subagents.js';
 import { agentConfigForRun, deployConfigured, handleAgentCreation, handleConvertAgent, handleRuntimeRoutes, registrationRefusal, type SharedRuntimePin } from './agent-creation.js';
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
@@ -92,6 +93,8 @@ const nextReplySeq = (): number => (consoleReplySeq = Math.max(Date.now() * 1000
 export type FactoryState = {
 
   agents: Map<string, AgentRecord>;
+  /** E1.1 (#292): helper (subagent) definitions, kept apart from `agents` so chat agent lists never show them. */
+  subagents?: Map<string, SubagentRecord>;
   /** Dynamic model store (§6.9 M3, GAP-162). */
   modelStore?: ModelStore;
   /** Models the factory offers (§6.9 M3, FACTORY_MODEL_CATALOG), by neutral name. */
@@ -1994,6 +1997,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleAgentSettings(state, req, res, path)) return;
   if (await handleAgentCreation(state, req, res, path)) return;
+  if (await handleSubagents(state, req, res, path)) return;
   if (await handleConvertAgent(state, req, res, path)) return;
   if (await handleRuntimeRoutes(state, req, res, path)) return;
   if (await handleAgentBundle(state, req, res, path)) return;
