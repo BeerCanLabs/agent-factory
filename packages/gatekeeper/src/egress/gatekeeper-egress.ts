@@ -92,6 +92,11 @@ export type RunContext = {
   policy: Policy;
   spend: { run: number; day: number; month: number };
   /**
+   * E2.1 (#297): a helper run spends its parent's budget; `policy.budgetUsd` and `spend` are the parent's, and a refusal
+   * says so (`supervising_agent_out_of_budget`).
+   */
+  budgetOf?: 'parent';
+  /**
    * E12 item 4: what the run's requesting person may reach through skill routes, decided by the factory from their roles
    * (never by the agent). Absent is read as unrestricted so an older control plane keeps working. When restricted, a
    * route a skill declares that is not `allowed` is refused; a route no skill declares is not restricted by roles.
@@ -247,6 +252,11 @@ function presentedToken(req: http.IncomingMessage): string | undefined {
   }
   const a = h.authorization;
   return a?.startsWith('Bearer ') ? a.slice(7).trim() : undefined;
+}
+
+/** E2.1 (#297): the 402 error code: a helper's budget is its parent's. */
+function budgetError(ctx: { budgetOf?: 'parent' }): string {
+  return ctx.budgetOf === 'parent' ? 'supervising_agent_out_of_budget' : 'budget_exceeded';
 }
 
 function isHostAllowed(policy: Policy, routes: Map<string, Route>, destHost: string): boolean {
@@ -1053,7 +1063,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
               pendingUsd: unacked.get(ctx.run.runId) ?? 0,
             });
             if (!standing.inGoodStanding) {
-              return deny(res, ctx, route, 402, 'budget_exceeded', { window: standing.window });
+              return deny(res, ctx, route, 402, budgetError(ctx), { window: standing.window });
             }
           }
           if (throttled(ctx)) {
@@ -1296,7 +1306,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
 
       if (!isBuiltin) {
         const standing = checkStanding({ limits: ctx.policy.budgetUsd, spend: ctx.spend, pendingUsd: unacked.get(ctx.run.runId) ?? 0 });
-        if (!standing.inGoodStanding) return deny(res, ctx, route, 402, 'budget_exceeded', { window: standing.window });
+        if (!standing.inGoodStanding) return deny(res, ctx, route, 402, budgetError(ctx), { window: standing.window });
       }
       if (throttled(ctx)) return deny(res, ctx, route, 429, 'throttled');
 
@@ -1656,13 +1666,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
       const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
       if ((route.kind === 'llm' || route.kind === 'models') && !isBuiltin) {
-        if (ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED') return deny(res, ctx, route, 402, 'budget_exceeded', { window: 'blocked' });
+        if (ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED') return deny(res, ctx, route, 402, budgetError(ctx), { window: 'blocked' });
         const standing = checkStanding({
           limits: ctx.policy.budgetUsd,
           spend: ctx.spend,
           pendingUsd: unacked.get(ctx.run.runId) ?? 0,
         });
-        if (!standing.inGoodStanding) return deny(res, ctx, route, 402, 'budget_exceeded', { window: standing.window });
+        if (!standing.inGoodStanding) return deny(res, ctx, route, 402, budgetError(ctx), { window: standing.window });
       }
 
       let raw = await readBody(req, limit);
