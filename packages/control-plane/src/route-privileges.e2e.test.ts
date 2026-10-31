@@ -62,6 +62,8 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/agents', privilege: 'agents.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/registry/agents', privilege: 'agents.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/registry/agents/castle', privilege: 'agents.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/registry/subagents', privilege: 'agents.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/registry/subagents/nope', privilege: 'agents.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/agents/castle/policy', privilege: 'policy.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/agents/castle/models', privilege: 'agents.models.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/agents/castle/roles', privilege: 'agents.roles.read', role: 'admin' },
@@ -146,6 +148,7 @@ const ROUTES: RouteRow[] = [
   // admin
   { method: 'PUT', path: '/api/v1/runtime', privilege: 'runtime.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/agents', privilege: 'registry.register', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/registry/subagents', privilege: 'registry.register', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/registry/agents/nope/budget', privilege: 'registry.budget.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/agents/nope/retire', privilege: 'registry.retire', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/agents/nope/reinstate', privilege: 'registry.reinstate', role: 'admin', body: {} },
