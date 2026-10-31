@@ -684,6 +684,15 @@ function badRunModel(model: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * E1.2: the models this factory offers right now (the catalog gatekeeper egress routes by), read fresh on every call so
+ * a model removed from the catalog is gone at once. Names only: no endpoints, keys or vendor ids.
+ */
+export function approvedModels(state: FactoryState): { models: string[]; default: string | null } {
+  const names = state.modelStore ? state.modelStore.listOffered().map((m) => m.name) : Object.keys(state.modelCatalog ?? {});
+  return { models: [...names].sort(), default: defaultModelOf(state) ?? null };
+}
+
 /** Kill-switch only. Waking is createRun. */
 /**
  * Lets a run that was flagged BLOCKED_BUDGET_EXCEEDED go again once the agent is back inside its limits. Every route
@@ -1291,6 +1300,11 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
         description: 'Get the effective and configured model slots and approved models for this agent',
         inputSchema: { type: 'object', properties: { id: { type: 'string' } } },
       },
+      {
+        name: 'list_models',
+        description: 'List the models this factory approves (names only) and the default',
+        inputSchema: { type: 'object', properties: {} },
+      },
     ];
     if (canManage.allowed) {
       tools.push({
@@ -1311,6 +1325,9 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
   }
   if (method === 'tools/call') {
     const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+    if (params.name === 'list_models') {
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(approvedModels(state)) }] } };
+    }
     if (params.name === 'get_agent_models') {
       const pol = state.policies.get(run.agentId);
       const eff = effectiveAgentModels(pol ?? {}, defaultModelOf(state));
@@ -2225,6 +2242,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   // Agent-facing: authenticated by the run token minted at start.
+  // E1.2: a run reads the factory's approved model list with its own run token.
+  const runApproved = path.match(/^\/api\/v1\/runs\/([^/]+)\/approved-models$/);
+  if (runApproved && req.method === 'GET') {
+    if (!(await authenticateRun(req, res, state, runApproved[1]))) return;
+    json(res, 200, approvedModels(state));
+    return;
+  }
+
   const runModels = path.match(/^\/api\/v1\/runs\/([^/]+)\/models$/);
   if (runModels && (req.method === 'GET' || req.method === 'PUT')) {
     const run = await authenticateRun(req, res, state, runModels[1]);
