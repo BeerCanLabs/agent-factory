@@ -2306,6 +2306,19 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
+  // #318: a parent run reads the helper runs it started (E1.5 parent link), with its own run token, and nothing else.
+  const runHelper = path.match(/^\/api\/v1\/runs\/([^/]+)\/subagents\/runs\/([^/]+)$/);
+  if (runHelper && req.method === 'GET') {
+    const run = await authenticateRun(req, res, state, runHelper[1]);
+    if (!run) return;
+    const helper = state.runs.get(decodeURIComponent(runHelper[2]));
+    // An unknown id and another run's helper look the same: no existence oracle.
+    if (!helper || helper.parentRunId !== run.runId) return json(res, 403, { error: 'not_your_helper_run' });
+    const { runId, agentId, state: runState, result, error, startedAt, updatedAt } = helper;
+    json(res, 200, { runId, agentId, state: runState, ...(result !== undefined ? { result } : {}), ...(error ? { error } : {}), ...(startedAt ? { startedAt } : {}), updatedAt });
+    return;
+  }
+
   const runModels = path.match(/^\/api\/v1\/runs\/([^/]+)\/models$/);
   if (runModels && (req.method === 'GET' || req.method === 'PUT')) {
     const run = await authenticateRun(req, res, state, runModels[1]);
