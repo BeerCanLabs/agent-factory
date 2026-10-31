@@ -63,7 +63,7 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     const m = buildManifest('https://f.example', 'archie', 'Archie');
     assert.equal(m.redirect_url, 'https://f.example/api/v1/keymaster/github-app/callback');
     assert.equal(m.public, false);
-    assert.equal(m.name, 'Archie');
+    assert.equal(m.name, 'Archie (f)');
   });
 
   it('names secrets per agent', () => {
@@ -83,7 +83,7 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     assert.equal(r.status, 200);
     const b = await r.json() as any;
     assert.ok(b.action.startsWith('https://github.example/organizations/sandbox-org/settings/apps/new?state='));
-    assert.equal(b.manifest.name, 'Archie');
+    assert.equal(b.manifest.name, 'Archie (factory)');
     assert.ok(b.state);
   });
 
