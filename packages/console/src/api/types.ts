@@ -338,10 +338,23 @@ export interface SkillSummary {
   /** Every version is retired (SK6). */
   retired?: boolean;
   latestApproved: string | null;
+  /** Admin-configured default version for newly created agents (GAP-216, SK3, CF6). */
+  defaultVersion?: string;
   requires: SkillRequires;
   versions: SkillVersion[];
   /** Who uses this skill (SK7). */
   adopters?: SkillAdopter[];
+}
+
+export interface DefaultSkillEntry {
+  id: string;
+  version: string;
+}
+
+export interface DefaultSkillsResponse {
+  skills: DefaultSkillEntry[];
+  updatedAt?: string;
+  updatedBy?: string;
 }
 
 export type SystemStatus = 'proposed' | 'approved' | 'rejected';

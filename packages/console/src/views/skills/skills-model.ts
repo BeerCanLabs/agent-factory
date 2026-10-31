@@ -151,3 +151,23 @@ export function retireEffect(impact: { agents: string[]; requestsDropped: number
   if (impact.requestsDropped) parts.push(`drop ${impact.requestsDropped} pending adoption request${impact.requestsDropped === 1 ? '' : 's'}`);
   return parts.length ? `This will ${parts.join(' and ')}.` : 'No agent runs this skill.';
 }
+
+// ---- Default skills (GAP-216, SK3, CF6) --------------------------------------------------------------------------
+
+/** Approved, unretired versions of a skill that could be chosen as default. */
+export function approvedVersions(summary: Pick<SkillSummary, 'versions'>): string[] {
+  return (summary.versions ?? [])
+    .filter((v) => v.status === 'approved' && !v.retired && !v.revoked)
+    .map((v) => v.version);
+}
+
+/** Whether the viewer may configure this skill as a fleet default (public, not retired, has approved version). */
+export function canSetDefaultSkill(
+  summary: Pick<SkillSummary, 'visibility' | 'retired' | 'versions'>,
+  opts: { canDecideSkills?: boolean },
+): boolean {
+  if (!opts.canDecideSkills) return false;
+  if (summary.retired) return false;
+  if (visibilityOf(summary) !== 'public') return false;
+  return approvedVersions(summary).length > 0;
+}

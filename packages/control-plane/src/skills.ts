@@ -94,6 +94,9 @@ import {
   gitSkillSource,
   localSkillChecker,
   summarizeSkill,
+  DefaultSkillsStore,
+  type DefaultSkillEntry,
+  type DefaultSkillsState,
   type SkillCheckOutcome,
   type SkillChecker,
   type SkillSource,
@@ -130,6 +133,7 @@ const warnFromControlPlane = (message: string, err: unknown): void => console.wa
 
 const registries = new WeakMap<FactoryState, SkillRegistry>();
 const adoptionStores = new WeakMap<FactoryState, AdoptionStore>();
+const defaultSkillsStores = new WeakMap<FactoryState, DefaultSkillsStore>();
 
 /** The control plane's data directory, as `index.ts` derives it (the ledger's directory), plus `skills`. */
 function defaultSkillsDir(): string {
@@ -148,6 +152,7 @@ export function loadSkills(state: FactoryState, dir: string | undefined = defaul
   registries.set(state, registry);
   // Adoption requests and revocations sit beside the skills (R1: the control plane's backed-up volume).
   adoptionStores.set(state, new AdoptionStore(dir ? join(dirname(dir), 'skill-adoptions') : undefined, warnFromControlPlane));
+  defaultSkillsStores.set(state, new DefaultSkillsStore(dir ? join(dirname(dir), 'skill-defaults.json') : undefined, warnFromControlPlane));
   if (!state.skillPackages && !packageStores.has(state)) {
     const pkgDir = dir ? join(dirname(dir), 'skill-packages') : defaultSkillPackagesDir();
     packageStores.set(state, new LocalSkillPackageStore(pkgDir));
@@ -159,6 +164,22 @@ export function loadSkills(state: FactoryState, dir: string | undefined = defaul
 export function adoptionStore(state: FactoryState): AdoptionStore {
   skillRegistry(state);
   return adoptionStores.get(state)!;
+}
+
+/** The default skills catalog (SK3, CF6, GAP-216); loaded with the registry. */
+export function defaultSkillsStore(state: FactoryState): DefaultSkillsStore {
+  skillRegistry(state);
+  return defaultSkillsStores.get(state)!;
+}
+
+/** Returns the active default skills that are approved, unretired, and publicly adoptable. */
+export function activeDefaultSkills(state: FactoryState): DefaultSkillEntry[] {
+  const store = defaultSkillsStore(state);
+  const registry = skillRegistry(state);
+  return store.get().skills.filter((s) => {
+    const rec = registry.get(s.id, s.version);
+    return !!rec && !rec.retired && rec.status === 'approved' && canAdopt(registry, '__default__', s.id, s.version).ok;
+  });
 }
 
 /** The loaded registry; loaded from the default data directory on first use if `loadSkills` was not called. */
@@ -278,6 +299,10 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     }
 
     const manifest = validated.manifest;
+    if (manifest.id === 'defaults') {
+      json(res, 400, { error: 'invalid_skill_id', message: "skill id 'defaults' is reserved" });
+      return;
+    }
 
     // Synchronous section: check design issues, owner rule (A15, A23), and save atomically without await.
     const reasons: string[] = [];
@@ -458,6 +483,10 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
       for (const i of checked.issues) reasons.push(`manifest.${i.path}: ${i.message}`);
     } else {
       manifest = checked.manifest;
+      if (manifest.id === 'defaults') {
+        json(res, 400, { error: 'invalid_skill_id', message: "skill id 'defaults' is reserved" });
+        return;
+      }
       if (registry.get(manifest.id, manifest.version)) {
         reasons.push(`version: ${manifest.id}@${manifest.version} is already registered; versions are immutable, register a new version`);
       }
@@ -685,6 +714,19 @@ async function decide(
     console.warn(`[control-plane] failed to persist skill decision ${id}@${version}:`, err);
     json(res, 500, { error: 'persist_failed', message: 'the decision could not be written; nothing changed' });
     return;
+  }
+  if (decision === 'reject') {
+    const defStore = defaultSkillsStore(state);
+    if (defStore.removeSkill(id, principal.actor, version)) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: 'factory',
+        type: 'action',
+        action: 'DEFAULT_SKILLS_SET',
+        actor: principal.actor,
+        payloadSha256: payloadHash({ skills: defStore.get().skills, reason: `skill ${id}@${version} ${revoking ? 'revoked' : 'rejected'}` }),
+      });
+    }
   }
   state.ledger.append({
     timestamp: now,
@@ -1286,6 +1328,17 @@ async function retireSkill(state: FactoryState, req: http.IncomingMessage, res: 
       console.warn(`[control-plane] failed to persist retirement of ${id}:`, err);
       return json(res, 500, { error: 'persist_failed', message: 'the retirement could not be written' });
     }
+    const defStore = defaultSkillsStore(state);
+    if (defStore.removeSkill(id, principal.actor)) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: 'factory',
+        type: 'action',
+        action: 'DEFAULT_SKILLS_SET',
+        actor: principal.actor,
+        payloadSha256: payloadHash({ skills: defStore.get().skills, reason: `skill ${id} retired` }),
+      });
+    }
     const forced = touched.size > 0 || first.length > 0;
     state.ledger.append({
       timestamp: new Date().toISOString(),
@@ -1823,6 +1876,17 @@ async function unpublishSkill(state: FactoryState, req: http.IncomingMessage, re
       actor: principal.actor,
       payloadSha256: payloadHash({ id, reason: input.reason }),
     });
+    const defStore = defaultSkillsStore(state);
+    if (defStore.removeSkill(id, principal.actor)) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: 'factory',
+        type: 'action',
+        action: 'DEFAULT_SKILLS_SET',
+        actor: principal.actor,
+        payloadSha256: payloadHash({ skills: defStore.get().skills, reason: `skill ${id} unpublished` }),
+      });
+    }
     json(res, 200, { id, published: false, ...(input.reason ? { reason: input.reason } : {}), updatedVersions: changed.map((v) => v.version) });
   } catch (err: any) {
     json(res, 500, { error: 'persist_failed', message: err.message });
@@ -1856,6 +1920,82 @@ function decode(s: string): string {
   } catch {
     return '';
   }
+}
+
+async function getDefaultSkills(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const principal = await requirePrivilege(req, res, state, 'skills.read');
+  if (!principal) return;
+  const meta = defaultSkillsStore(state).get();
+  json(res, 200, {
+    skills: activeDefaultSkills(state),
+    ...(meta.updatedAt ? { updatedAt: meta.updatedAt } : {}),
+    ...(meta.updatedBy ? { updatedBy: meta.updatedBy } : {}),
+  });
+}
+
+async function setDefaultSkills(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const principal = await requirePrivilege(req, res, state, 'skills.defaults.set');
+  if (!principal) return;
+
+  const body = await readJson(req);
+  const skillsInput = Array.isArray(body) ? body : body?.skills;
+  if (!Array.isArray(skillsInput)) {
+    json(res, 400, { error: 'invalid_defaults', message: 'body must contain a skills array' });
+    return;
+  }
+
+  const reason = typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : undefined;
+  const registry = skillRegistry(state);
+  const seen = new Set<string>();
+  const validated: DefaultSkillEntry[] = [];
+
+  for (const item of skillsInput) {
+    if (!item || typeof item !== 'object') {
+      json(res, 400, { error: 'invalid_defaults', message: 'each default skill entry must be an object' });
+      return;
+    }
+    const s = item as { id?: unknown; version?: unknown };
+    if (typeof s.id !== 'string' || !SKILL_ID.test(s.id) || typeof s.version !== 'string' || !SEMVER.test(s.version)) {
+      json(res, 400, { error: 'invalid_defaults', message: 'each default skill entry must have a valid id and semver version' });
+      return;
+    }
+    if (seen.has(s.id)) {
+      json(res, 400, { error: 'duplicate_skill', message: `duplicate skill id ${s.id}` });
+      return;
+    }
+    seen.add(s.id);
+
+    const rec = registry.get(s.id, s.version);
+    if (!rec) {
+      json(res, 404, { error: 'not_found', message: `skill ${s.id}@${s.version} is not registered` });
+      return;
+    }
+    if (rec.retired) {
+      json(res, 409, { error: 'skill_retired', message: `skill ${s.id} is retired` });
+      return;
+    }
+    if (rec.status !== 'approved') {
+      json(res, 409, { error: 'skill_not_approved', message: `skill ${s.id}@${s.version} is not approved` });
+      return;
+    }
+    if (!canAdopt(registry, '__default__', s.id, s.version).ok) {
+      json(res, 409, { error: 'skill_not_public', message: `skill ${s.id}@${s.version} is not publicly adoptable` });
+      return;
+    }
+    validated.push({ id: s.id, version: s.version });
+  }
+
+  const saved = defaultSkillsStore(state).set(validated, principal.actor);
+  state.ledger.append({
+    timestamp: new Date().toISOString(),
+    agentId: 'factory',
+    type: 'action',
+    action: 'DEFAULT_SKILLS_SET',
+    actor: principal.actor,
+    payloadSha256: payloadHash({ skills: validated, ...(reason ? { reason } : {}) }),
+  });
+
+  json(res, 200, { ok: true, ...saved });
 }
 
 /** Handles the skill registry and catalog routes. Returns false for any other path or method. */
@@ -1963,6 +2103,18 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
     return true;
   }
 
+  if (path === '/api/v1/skills/defaults') {
+    if (req.method === 'GET') {
+      await getDefaultSkills(state, req, res);
+      return true;
+    }
+    if (req.method === 'PUT') {
+      await setDefaultSkills(state, req, res);
+      return true;
+    }
+    return false;
+  }
+
   if (req.method !== 'GET') return false;
 
   const pkgFiles = path.match(PACKAGE_FILES);
@@ -1982,6 +2134,7 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
     if (!principal) return true;
     const registry = skillRegistry(state);
     const viewer = viewerOf(state, principal);
+    const defMap = new Map(activeDefaultSkills(state).map((d) => [d.id, d.version]));
     json(
       res,
       200,
@@ -1989,7 +2142,14 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
         .ids()
         .map((id) => summarizeSkill(registry, id))
         .filter((s): s is NonNullable<typeof s> => !!s && skillVisibleTo(s, viewer))
-        .map((s) => ({ ...s, adopters: adoptersOf(state, s.id) })),
+        .map((s) => {
+          const defaultVersion = defMap.get(s.id);
+          return {
+            ...s,
+            ...(defaultVersion ? { defaultVersion } : {}),
+            adopters: adoptersOf(state, s.id),
+          };
+        }),
     );
     return true;
   }
@@ -2017,7 +2177,13 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
     const summary = summarizeSkill(registry, id);
     // SK7: a private skill the viewer may not see does not exist for them.
     if (!summary || !skillVisibleTo(summary, viewerOf(state, principal))) return json(res, 404, { error: 'not_found', id }), true;
-    json(res, 200, { ...summary, versions: registry.versions(id), adopters: adoptersOf(state, id) });
+    const def = activeDefaultSkills(state).find((d) => d.id === id);
+    json(res, 200, {
+      ...summary,
+      ...(def ? { defaultVersion: def.version } : {}),
+      versions: registry.versions(id),
+      adopters: adoptersOf(state, id),
+    });
     return true;
   }
 
