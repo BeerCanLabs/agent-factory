@@ -4,13 +4,19 @@
  * and the chat agent lists never show them.
  */
 import type http from 'node:http';
-import { validateSubagent, type SubagentDefinition } from '@beercanlabs/factory-contract';
+import { validateSubagent } from '@beercanlabs/factory-contract';
+import { SubagentStore, type SubagentRecord } from '@beercanlabs/factory-registrar';
 import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
 
-export type SubagentRecord = SubagentDefinition & { kind: 'subagent'; registeredBy: string; registeredAt: string };
+export type { SubagentRecord };
 
-function subagentsOf(state: FactoryState): Map<string, SubagentRecord> {
-  state.subagents ??= new Map();
+function storeOf(state: FactoryState): SubagentStore {
+  return new SubagentStore(state.registryDir, (m, e) => console.warn(`[control-plane] ${m}`, e ?? ''));
+}
+
+/** The helper map, read back from the registry directory on first use. */
+export function subagentsOf(state: FactoryState): Map<string, SubagentRecord> {
+  state.subagents ??= storeOf(state).load();
   return state.subagents;
 }
 
@@ -31,6 +37,13 @@ export async function handleSubagents(state: FactoryState, req: http.IncomingMes
     }
     const replaced = map.has(v.value.id);
     const record: SubagentRecord = { ...v.value, kind: 'subagent', registeredBy: principal.actor, registeredAt: new Date().toISOString() };
+    try {
+      storeOf(state).save(record);
+    } catch (err) {
+      console.warn(`[control-plane] failed to persist helper ${record.id}:`, err);
+      json(res, 500, { error: 'subagent_not_stored' });
+      return true;
+    }
     map.set(record.id, record);
     state.ledger.append({ timestamp: record.registeredAt, agentId: record.id, type: 'action', action: replaced ? 'SUBAGENT_UPDATED' : 'SUBAGENT_REGISTERED', actor: principal.actor });
     json(res, replaced ? 200 : 201, record);

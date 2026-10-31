@@ -1,6 +1,9 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
@@ -27,9 +30,11 @@ describe('helper (subagent) registry (E1.1)', { concurrency: false }, () => {
   let cp: http.Server;
   let port = 0;
   let state: FactoryState;
+  const registryDir = mkdtempSync(join(tmpdir(), 'subagents-e2e-'));
 
   before(async () => {
     state = {
+      registryDir,
       agents: new Map(),
       ledger: new MemoryLedger(),
       auth: bearerAuth([{ name: 'admin', token: ADMIN, roles: ['admin'] }, { name: 'viewer', token: VIEWER, roles: ['viewer'] }]),
@@ -49,7 +54,7 @@ describe('helper (subagent) registry (E1.1)', { concurrency: false }, () => {
     await new Promise<void>((r) => cp.listen(0, '127.0.0.1', r));
     port = (cp.address() as { port: number }).port;
   });
-  after(async () => { await new Promise<void>((r) => cp.close(() => r())); });
+  after(async () => { await new Promise<void>((r) => cp.close(() => r())); rmSync(registryDir, { recursive: true, force: true }); });
 
   it('an admin registers a prompt-only helper and an audit row is written', async () => {
     const r = await call(port, '/api/v1/registry/subagents', 'POST', ADMIN, { id: 'juror', name: 'Juror', prompt: 'Vote on each finding.' });
@@ -95,5 +100,20 @@ describe('helper (subagent) registry (E1.1)', { concurrency: false }, () => {
     assert.deepEqual(ids, ['alpha']);
     const reg = await call(port, '/api/v1/registry/agents', 'GET', ADMIN);
     assert.deepEqual(reg.body.map((a: any) => a.id), ['alpha']);
+  });
+
+  it('a registered helper survives a control-plane restart', async () => {
+    const restarted = { ...state, subagents: undefined } as FactoryState;
+    const cp2 = createFactoryServer(restarted);
+    await new Promise<void>((r) => cp2.listen(0, '127.0.0.1', r));
+    const p2 = (cp2.address() as { port: number }).port;
+    try {
+      const r = await call(p2, '/api/v1/registry/subagents/juror', 'GET', VIEWER);
+      assert.equal(r.status, 200);
+      assert.equal(r.body.prompt, 'Vote on each finding.');
+      assert.deepEqual(r.body.egress, { github: { readOnly: true } });
+    } finally {
+      await new Promise<void>((r) => cp2.close(() => r()));
+    }
   });
 });
