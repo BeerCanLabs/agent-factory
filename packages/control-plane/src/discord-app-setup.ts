@@ -17,6 +17,7 @@ import { invalidateCredentials } from './credentials.js';
 /** View channels (1024) + send messages (2048) + read message history (65536). */
 export const DEFAULT_DISCORD_PERMISSIONS = '68608';
 const PERMS = /^\d{1,20}$/;
+const SHARED_TOKEN = 'DISCORD_BOT_TOKEN';
 const TOKEN = /^[A-Za-z0-9._-]{50,100}$/;
 
 const apiBase = (s: FactoryState) => (s.discordApiBase ?? 'https://discord.com/api/v10').replace(/\/$/, '');
@@ -24,10 +25,12 @@ const apiBase = (s: FactoryState) => (s.discordApiBase ?? 'https://discord.com/a
 /** Where this agent's bot token and app id live: the declared Discord trigger's secretRef, else a per-agent default. */
 export function discordSecretNames(state: FactoryState, agentId: string) {
   const agent = state.agents.get(agentId) as { triggers?: Array<{ type?: string; secretRef?: string }> } | undefined;
-  const declared = agent?.triggers?.find((t) => t.type === 'discord')?.secretRef;
+  const trigger = agent?.triggers?.find((t) => t.type === 'discord');
+  const declared = trigger ? trigger.secretRef ?? SHARED_TOKEN : undefined;
   const prefix = agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_');
-  const token = declared && declared !== 'DISCORD_BOT_TOKEN' ? declared : `${prefix}_DISCORD_BOT_TOKEN`;
-  return { token, appId: `${prefix}_DISCORD_APP_ID` };
+  // An agent on the shared default would never read a per-agent token, and writing the shared one would replace every
+  // other agent's bot: `shared` tells the caller to refuse and ask for a per-agent secretRef.
+  return { token: declared ?? `${prefix}_DISCORD_BOT_TOKEN`, appId: `${prefix}_DISCORD_APP_ID`, shared: declared === SHARED_TOKEN };
 }
 
 function declaredPermissions(state: FactoryState, agentId: string): string {
@@ -79,6 +82,8 @@ export async function handleDiscordAppSetup(state: FactoryState, req: http.Incom
     const principal = await requirePrivilege(req, res, state, 'credentials.agent.set', { agentId });
     if (!principal) return true;
     if (!state.agents.has(agentId)) return json(res, 404, { error: 'not_found' }), true;
+    const names = discordSecretNames(state, agentId);
+    if (names.shared) return json(res, 409, { error: 'shared_secret_ref', message: `${agentId}'s Discord trigger uses the shared ${SHARED_TOKEN}; declare its own secretRef (e.g. ${agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_DISCORD_BOT_TOKEN) first` }), true;
     const writer = writableProvider(state.providers);
     if (!writer) return json(res, 503, { error: 'no_writable_secrets_backend' }), true;
     const b = await readJson(req);
@@ -95,7 +100,6 @@ export async function handleDiscordAppSetup(state: FactoryState, req: http.Incom
       return json(res, 502, { error: 'discord_unavailable' }), true;
     }
     if (typeof app.id !== 'string' || !/^\d{1,32}$/.test(app.id)) return json(res, 502, { error: 'discord_unavailable' }), true;
-    const names = discordSecretNames(state, agentId);
     try {
       await writer.put(names.token, token);
       await writer.put(names.appId, app.id);

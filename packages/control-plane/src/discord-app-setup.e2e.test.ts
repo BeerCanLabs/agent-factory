@@ -34,6 +34,7 @@ describe('Discord bot setup (E5.2)', { concurrency: false }, () => {
       agents: new Map([
         ['archie', { id: 'archie', name: 'Archie', state: 'IDLE', roles: [], requires: [], triggers: [{ type: 'discord', secretRef: 'ARCHIE_BOT' }], discord: { permissions: '3072' } } as any],
         ['plain', { id: 'plain', name: 'Plain', state: 'IDLE', roles: [], requires: [] } as any],
+        ['shared', { id: 'shared', name: 'Shared', state: 'IDLE', roles: [], requires: [], triggers: [{ type: 'discord', secretRef: 'DISCORD_BOT_TOKEN' }] } as any],
       ]),
       ledger: new MemoryLedger(),
       auth: bearerAuth([{ name: 'admin', token: ADMIN, roles: ['admin'] }, { name: 'viewer', token: VIEWER, roles: ['viewer'] }]),
@@ -94,5 +95,14 @@ describe('Discord bot setup (E5.2)', { concurrency: false }, () => {
     const r = await call('POST', '/api/v1/keymaster/agents/plain/discord-app/token', ADMIN, { value: GOOD });
     assert.equal(r.body.name, 'PLAIN_DISCORD_BOT_TOKEN');
     assert.equal(new URL(r.body.inviteUrl).searchParams.get('permissions'), DEFAULT_DISCORD_PERMISSIONS);
+  });
+
+  it('refuses an agent on the shared default secretRef instead of storing a token it would never read', async () => {
+    const before = stored.size;
+    const r = await call('POST', '/api/v1/keymaster/agents/shared/discord-app/token', ADMIN, { value: GOOD });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error, 'shared_secret_ref');
+    assert.equal(stored.size, before);
+    assert.equal(stored.get('DISCORD_BOT_TOKEN'), undefined);
   });
 });
