@@ -46,6 +46,7 @@ import { handleCredentials } from './credentials.js';
 import { handleGitHubAppSetup } from './github-app-setup.js';
 import { handleGitHubAppInstall } from './github-app-install.js';
 import { handleDiscordAppSetup } from './discord-app-setup.js';
+import { handleAppSetup } from './app-setup-providers.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
@@ -2023,6 +2024,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleGitHubAppSetup(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleDiscordAppSetup(state, req, res, path))) return;
+  if (path.startsWith('/api/v1/keymaster/') && (await handleAppSetup(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/keymaster/') || path === '/api/v1/gatekeeper-egress/github-app/token') && (await handleGitHubAppInstall(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleAgentSettings(state, req, res, path)) return;

@@ -13,6 +13,7 @@ import http from 'node:http';
 import { writableProvider } from '@beercanlabs/factory-secrets-bind';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { invalidateCredentials } from './credentials.js';
+import { agentPath, readSecret, registerAppSetupProvider } from './app-setup-providers.js';
 
 /** View channels (1024) + send messages (2048) + read message history (65536). */
 export const DEFAULT_DISCORD_PERMISSIONS = '68608';
@@ -55,14 +56,6 @@ export function discordSteps(state: FactoryState, agentId: string) {
     { id: 'paste-token', manual: false, text: `Paste the token here. The factory checks it with Discord and stores it as ${names.token}; it is never shown again.` },
     { id: 'invite', manual: false, text: 'Open the invite link the factory builds and pick the server. The bot joins with the declared permissions.' },
   ];
-}
-
-async function readSecret(state: FactoryState, name: string): Promise<string | undefined> {
-  for (const p of state.providers) {
-    const v = await p.get(name).catch(() => undefined);
-    if (v) return v;
-  }
-  return undefined;
 }
 
 /** Handles the Discord setup routes. Returns false when the path is not one of them. */
@@ -117,3 +110,14 @@ export async function handleDiscordAppSetup(state: FactoryState, req: http.Incom
   }
   return false;
 }
+
+// E5.3: Discord through the shared setup pattern; its routes above are unchanged.
+registerAppSetupProvider({
+  id: 'discord',
+  title: 'Discord bot',
+  steps: (state, agentId) => discordSteps(state, agentId).map((s) => (s.id === 'paste-token' ? { ...s, action: { kind: 'secret' as const, path: agentPath(agentId, 'discord-app/token') } } : s)),
+  async status(state, agentId) {
+    const appId = await readSecret(state, discordSecretNames(state, agentId).appId);
+    return appId ? { configured: true, links: [{ label: 'Invite the bot to a server', url: inviteUrl(appId, declaredPermissions(state, agentId)) }] } : { configured: false };
+  },
+});

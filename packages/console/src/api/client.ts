@@ -46,6 +46,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
+export type AppSetupAction = { kind: 'secret'; path: string } | { kind: 'browser-post'; path: string; input?: string; postField: string } | { kind: 'list'; path: string; input: string };
+export type AppSetupProvider = { id: string; title: string; configured: boolean; links?: Array<{ label: string; url: string }>; steps: Array<{ id: string; manual: boolean; text: string; action?: AppSetupAction }> };
+
 export const factoryApi = {
   // Agent Registry & Lifecycle
   async listAgents(): Promise<AgentRecord[]> {
@@ -342,19 +345,14 @@ export const factoryApi = {
     return this.submitCredential(`/keymaster/platform/credentials/${encodeURIComponent(name)}`, value);
   },
 
-  /** E5.1: start an agent's GitHub App manifest flow; the console posts `manifest` to `action`. */
-  async startGitHubApp(agentId: string, org?: string): Promise<{ action: string; manifest: Record<string, unknown>; state: string }> {
-    return request(`/keymaster/agents/${encodeURIComponent(agentId)}/github-app/start`, { method: 'POST', body: JSON.stringify(org ? { org } : {}) });
+  /** E5.3: every app setup provider's steps, status and links for an agent (never a value). */
+  async getAppSetup(agentId: string): Promise<{ providers: AppSetupProvider[] }> {
+    return request(`/keymaster/agents/${encodeURIComponent(agentId)}/app-setup`);
   },
 
-  /** E5.2: Discord bot setup steps, status and invite link (never the token). */
-  async getDiscordApp(agentId: string): Promise<{ steps: Array<{ id: string; manual: boolean; text: string }>; configured: boolean; inviteUrl?: string }> {
-    return request(`/keymaster/agents/${encodeURIComponent(agentId)}/discord-app`);
-  },
-
-  /** E5.2: write-only; the factory checks the token with Discord and stores it. */
-  async submitDiscordToken(agentId: string, value: string): Promise<{ name: string; inviteUrl: string }> {
-    return request(`/keymaster/agents/${encodeURIComponent(agentId)}/discord-app/token`, { method: 'POST', body: JSON.stringify({ value }) });
+  /** E5.3: run a setup step's action at the path the provider gave. */
+  async appSetupAction(path: string, body: Record<string, unknown>): Promise<Record<string, any>> {
+    return request(path, { method: 'POST', body: JSON.stringify(body) });
   },
 
   async getOutstandingCredentials(): Promise<OutstandingCredentials> {

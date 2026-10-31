@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { KeyRound, Link2, RefreshCw, ShieldCheck, AlertTriangle, CheckCircle2, Save, Server } from 'lucide-react';
 import type { AgentCredentials, AgentRecord, CredentialItem, CredentialStatus } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
-import { factoryApi, PLATFORM_CREDENTIALS } from '../api/client.js';
+import { factoryApi, PLATFORM_CREDENTIALS, type AppSetupAction, type AppSetupProvider } from '../api/client.js';
 
 // DESIGN_AUTHORITY.md §6.11 K5: a client of the Keymaster API only. It adds no logic of its own, and a credential
 // value typed here is sent once, write-only, and never shown again.
@@ -189,71 +189,69 @@ const CredentialCard: React.FC<{ agentId: string; item: CredentialItem; canWrite
   );
 };
 
-/** E5.1: create this agent's own GitHub App. GitHub needs a form POST of the manifest; nothing secret passes through here. */
-const GitHubAppSetup: React.FC<{ agentId: string }> = ({ agentId }) => {
-  const [org, setOrg] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const begin = async () => {
-    setError(null);
-    try {
-      const { action, manifest } = await factoryApi.startGitHubApp(agentId, org.trim() || undefined);
-      const form = document.createElement('form');
-      form.method = 'post';
-      form.action = action;
-      const field = document.createElement('input');
-      field.type = 'hidden';
-      field.name = 'manifest';
-      field.value = JSON.stringify(manifest);
-      form.appendChild(field);
-      document.body.appendChild(form);
-      form.submit();
-    } catch (err: any) {
-      setError(err.message);
-    }
-  };
-  return (
-    <div className="flex items-center gap-2 text-xs">
-      <input value={org} onChange={(e) => setOrg(e.target.value)} placeholder="GitHub org (optional)" aria-label="GitHub org"
-        className="bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-3 py-1.5 text-slate-900 dark:text-white" />
-      <button onClick={begin} className="px-3 py-1.5 rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-900 font-semibold">Create GitHub App</button>
-      {error && <span className="text-rose-600">{error}</span>}
-    </div>
-  );
-};
-
-/** E5.2: Discord bot setup. Manual steps are Discord's; the token is sent once and never shown again. */
-const DiscordSetup: React.FC<{ agentId: string }> = ({ agentId }) => {
-  const [info, setInfo] = useState<Awaited<ReturnType<typeof factoryApi.getDiscordApp>> | null>(null);
+/** E5.3: one panel for every app setup provider. It knows the three step kinds and nothing about any provider. */
+const StepAction: React.FC<{ action: AppSetupAction; onDone: () => void; onError: (m: string) => void }> = ({ action, onDone, onError }) => {
+  // A secret is held only until it is sent, and never rendered back.
   const [draft, setDraft] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const load = () => factoryApi.getDiscordApp(agentId).then(setInfo).catch((e: any) => setError(e.message));
-  useEffect(() => { setInfo(null); load(); }, [agentId]);
-  const save = async () => {
-    setError(null);
+  const run = async () => {
     try {
-      await factoryApi.submitDiscordToken(agentId, draft.trim());
-      await load();
+      const v = draft.trim();
+      if (action.kind === 'secret') await factoryApi.appSetupAction(action.path, { value: v });
+      if (action.kind === 'list') await factoryApi.appSetupAction(action.path, { [action.input]: v.split(/[\s,]+/).filter(Boolean) });
+      if (action.kind === 'browser-post') {
+        const out = await factoryApi.appSetupAction(action.path, action.input && v ? { [action.input]: v } : {});
+        const form = document.createElement('form');
+        form.method = 'post';
+        form.action = out.action;
+        const field = document.createElement('input');
+        field.type = 'hidden';
+        field.name = action.postField;
+        field.value = JSON.stringify(out[action.postField]);
+        form.appendChild(field);
+        document.body.appendChild(form);
+        form.submit();
+        return;
+      }
+      onDone();
     } catch (err: any) {
-      setError(err.message);
+      onError(err.message);
     } finally {
       setDraft('');
     }
   };
-  if (!info) return null;
+  const needsInput = action.kind !== 'browser-post' || Boolean(action.input);
   return (
-    <section className="text-xs space-y-2 border border-slate-200 dark:border-slate-800 rounded-xl p-3">
-      <h2 className="font-bold uppercase tracking-wider text-slate-500">Discord bot</h2>
-      <ol className="list-decimal ml-4 space-y-1">
-        {info.steps.map((s) => <li key={s.id}>{s.manual && <strong>[In Discord] </strong>}{s.text}</li>)}
-      </ol>
-      <div className="flex items-center gap-2">
-        <input type="password" autoComplete="off" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Bot token (write-only)" aria-label="Discord bot token"
-          className="flex-1 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-3 py-1.5 font-mono" />
-        <button onClick={save} disabled={!draft.trim()} className="px-3 py-1.5 rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-900 font-semibold disabled:opacity-50">Save</button>
-      </div>
-      {info.inviteUrl && <a href={info.inviteUrl} target="_blank" rel="noopener noreferrer" className="text-emerald-700 dark:text-emerald-400 underline">Invite the bot to a server</a>}
-      {error && <p className="text-rose-600">{error}</p>}
-    </section>
+    <div className="flex items-center gap-2 mt-1">
+      {needsInput && <input type={action.kind === 'secret' ? 'password' : 'text'} autoComplete="off" value={draft} onChange={(e) => setDraft(e.target.value)}
+        placeholder={action.kind === 'secret' ? 'Paste value (write-only)' : action.kind === 'list' ? 'Comma-separated' : 'Optional'} aria-label={action.kind === 'browser-post' ? action.input : action.kind}
+        className="flex-1 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-3 py-1.5 font-mono" />}
+      <button onClick={run} disabled={(action.kind === 'secret' || action.kind === 'list') && !draft.trim()} className="px-3 py-1.5 rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-900 font-semibold disabled:opacity-50">
+        {action.kind === 'browser-post' ? 'Start' : 'Save'}
+      </button>
+    </div>
+  );
+};
+
+const AppSetupPanel: React.FC<{ agentId: string }> = ({ agentId }) => {
+  const [providers, setProviders] = useState<AppSetupProvider[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => factoryApi.getAppSetup(agentId).then((r) => setProviders(r.providers)).catch((e: any) => setError(e.message));
+  useEffect(() => { setProviders([]); setError(null); load(); }, [agentId]);
+  return (
+    <>
+      {error && <p className="text-xs text-rose-600">{error}</p>}
+      {providers.map((p) => (
+        <section key={p.id} className="text-xs space-y-2 border border-slate-200 dark:border-slate-800 rounded-xl p-3">
+          <h2 className="font-bold uppercase tracking-wider text-slate-500">{p.title}{p.configured ? ' · set up' : ''}</h2>
+          <ol className="list-decimal ml-4 space-y-2">
+            {p.steps.map((s) => (
+              <li key={s.id}>{s.manual && <strong>[Manual] </strong>}{s.text}{s.action && <StepAction action={s.action} onDone={load} onError={setError} />}</li>
+            ))}
+          </ol>
+          {p.links?.map((l) => <a key={l.url} href={l.url} target="_blank" rel="noopener noreferrer" className="block text-emerald-700 dark:text-emerald-400 underline">{l.label}</a>)}
+        </section>
+      ))}
+    </>
   );
 };
 
@@ -342,8 +340,7 @@ export const CredentialsView: React.FC<CredentialsViewProps> = ({ agents, agentI
       {!permissions.canManageCredentials && (
         <p className="text-xs text-slate-500 dark:text-slate-400">Only admins can supply credentials or connect accounts.</p>
       )}
-      {!isPlatform && permissions.canManageCredentials && <GitHubAppSetup agentId={agentId} />}
-      {!isPlatform && permissions.canManageCredentials && <DiscordSetup agentId={agentId} />}
+      {!isPlatform && permissions.canManageCredentials && <AppSetupPanel agentId={agentId} />}
       {notice && <div className="text-xs font-semibold text-emerald-800 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 rounded-lg px-3 py-2">{notice}</div>}
       {error && <div className="text-xs text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 rounded-lg px-3 py-2">Could not load credentials: {error}</div>}
       {data && data.credentials.length === 0 && <p className="text-sm text-slate-500 dark:text-slate-400">{isPlatform ? 'The gatekeeper-egress holds no platform keys.' : 'This agent declares no credentials.'}</p>}
