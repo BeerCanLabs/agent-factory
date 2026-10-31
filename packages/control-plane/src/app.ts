@@ -46,7 +46,7 @@ import { handleCredentials } from './credentials.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
-import { allowedSubagents, handleSubagents, type SubagentRecord } from './subagents.js';
+import { allowedSubagents, handleSubagents, spawnSubagent, type SubagentRecord } from './subagents.js';
 import { agentConfigForRun, deployConfigured, handleAgentCreation, handleConvertAgent, handleRuntimeRoutes, registrationRefusal, type SharedRuntimePin } from './agent-creation.js';
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
@@ -1313,6 +1313,11 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
         description: 'List the helper agents (subagents) this agent may start: id, name and description',
         inputSchema: { type: 'object', properties: {} },
       },
+      {
+        name: 'spawn_subagent',
+        description: 'Start a helper run: an allowed helper id, an approved model (list_models) and the task prompt. Returns the run.',
+        inputSchema: { type: 'object', properties: { subagent: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' } }, required: ['subagent', 'model', 'prompt'] },
+      },
     ];
     if (canManage.allowed) {
       tools.push({
@@ -1338,6 +1343,10 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
     }
     if (params.name === 'list_subagents') {
       return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify({ subagents: allowedSubagents(state, run.agentId) }) }] } };
+    }
+    if (params.name === 'spawn_subagent') {
+      const out = await spawnSubagent(state, run, (params.arguments ?? {}) as Record<string, unknown>);
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify({ status: out.status, ...out.body }) }], ...(out.status >= 300 ? { isError: true } : {}) } };
     }
     if (params.name === 'get_agent_models') {
       const pol = state.policies.get(run.agentId);
@@ -1611,7 +1620,7 @@ function stageDiscovered(state: FactoryState, vendorId: string, discovered: Disc
 
 async function dispatchTool(state: FactoryState, name: string, args: Record<string, unknown>, principal: Principal): Promise<unknown> {
   const actor = principal.actor;
-  if (name === 'list_agents') return [...state.agents.values()];
+  if (name === 'list_agents') return [...state.agents.values()].filter((a) => !a.ephemeral);
   if (name === 'query_ledger') return state.ledger.query({ agent: typeof args.agent === 'string' ? args.agent : undefined });
   if (name === 'get_run') return (typeof args.runId === 'string' ? state.runs.get(args.runId) : undefined) ?? { error: 'not_found' };
   if (name === 'list_approvals') return visibleApprovals(state, principal, state.approvals.list({ state: 'pending' }));
@@ -2268,6 +2277,17 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const run = await authenticateRun(req, res, state, runSubagents[1]);
     if (!run) return;
     json(res, 200, { subagents: allowedSubagents(state, run.agentId) });
+    return;
+  }
+
+  // E1.4 (#295): a run starts a helper it is allowed, with its own run token.
+  const runSpawn = path.match(/^\/api\/v1\/runs\/([^/]+)\/subagents\/spawn$/);
+  if (runSpawn && req.method === 'POST') {
+    const run = await authenticateRun(req, res, state, runSpawn[1]);
+    if (!run) return;
+    const body = await readJson(req);
+    const out = await spawnSubagent(state, run, body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {});
+    json(res, out.status, out.body);
     return;
   }
 
@@ -3717,7 +3737,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   
   if (path === '/api/v1/registry/agents' && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'agents.read'))) return;
-    json(res, 200, Array.from(state.agents.values()).map((a) => enrichAgent(state, a)));
+    json(res, 200, Array.from(state.agents.values()).filter((a) => !a.ephemeral).map((a) => enrichAgent(state, a)));
     return;
   }
 

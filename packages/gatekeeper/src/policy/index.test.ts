@@ -1,8 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   applyModelsRemoval,
   effectiveAgentModels,
+  PolicyStore,
   validatePolicy,
   type AgentPolicy,
 } from './index.js';
@@ -351,5 +355,24 @@ describe('applyModelsRemoval (§6.9 M2 transitions)', () => {
     assert.equal(res.currentModel, 'm1');
     assert.equal(res.primaryModel, 'm1');
     assert.equal(res.secondaryModel, undefined);
+  });
+});
+
+describe('PolicyStore ephemeral policies (E1.4)', () => {
+  it('an ephemeral policy is served but never written, and forgetEphemeral never drops a stored one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'policy-ephemeral-'));
+    try {
+      const store = new PolicyStore(dir);
+      store.setEphemeral('juror.helper.1', { routes: ['models'], models: ['m'] });
+      assert.deepEqual(store.get('juror.helper.1'), { routes: ['models'], models: ['m'] });
+      assert.deepEqual(readdirSync(dir), []);
+      store.forgetEphemeral('juror.helper.1');
+      assert.equal(store.has('juror.helper.1'), false);
+      store.set('kept', { routes: [] });
+      store.forgetEphemeral('kept');
+      assert.equal(store.has('kept'), true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

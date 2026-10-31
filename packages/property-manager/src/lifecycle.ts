@@ -25,6 +25,8 @@ export type Outcome<T> = { status: number; body: T | { error: string; [k: string
 export type PropertyManagerPolicies = {
   get(agentId: string): { budgetUsd?: BudgetLimits; routes?: string[]; models?: string[] };
   has(agentId: string): boolean;
+  /** E1.4 (#295): drops a helper run's in-memory policy when the run ends. */
+  forgetEphemeral?(agentId: string): void;
 };
 
 /** The part of the control plane's `FactoryState` the run lifecycle uses. `FactoryState` is assignable to it. */
@@ -594,6 +596,11 @@ export async function finishRun(
       }
       await notifyGatekeeperIngress(state, agent.id, 'offline', cur.trigger);
     }
+  }
+  // E1.4 (#295): a helper run is torn down when it ends: its in-memory agent record and policy go with it.
+  if (agent?.ephemeral) {
+    state.agents.delete(agent.id);
+    state.policies.forgetEphemeral?.(agent.id);
   }
   if (cur.trigger !== 'smoke') {
     if (terminal === 'FAILED' && done.agentId !== 'med-doc' && state.agents.has('med-doc')) {

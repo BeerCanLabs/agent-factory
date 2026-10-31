@@ -160,6 +160,11 @@ export type AgentRecord = {
   currentSpendMonthlyUsd?: number;
   /** CF6: set for an agent created from a configuration: it runs on the shared runtime (RT1) and has no repository of its own. */
   createdFrom?: 'configuration';
+  /**
+   * E1.4 (#295): an in-memory record for one helper (subagent) run, never saved to the registry. It is removed, with its
+   * in-memory policy, when that run ends.
+   */
+  ephemeral?: { subagent: string; parentRunId: string };
   /** Registered source (§6.8 L3): git repository and the exact commit pinned for admission. */
   repo?: string;
   commit?: string;

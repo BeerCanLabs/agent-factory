@@ -251,6 +251,7 @@ export function effectiveAgentModels(policy?: AgentPolicy, defaultModel?: string
 
 export class PolicyStore {
   private readonly policies = new Map<string, AgentPolicy>();
+  private readonly ephemeralIds = new Set<string>();
 
   constructor(
     private readonly dir?: string,
@@ -307,8 +308,21 @@ export class PolicyStore {
     return { archived, ...(to && archived.length ? { to } : {}) };
   }
 
+  /** E1.4 (#295): a policy held in memory only (a helper run's), never written to the policy directory. */
+  setEphemeral(agentId: string, policy: AgentPolicy): void {
+    this.policies.set(agentId, policy);
+    this.ephemeralIds.add(agentId);
+  }
+
+  /** E1.4 (#295): drops an in-memory-only policy; a stored policy is left alone. */
+  forgetEphemeral(agentId: string): void {
+    if (!this.ephemeralIds.delete(agentId)) return;
+    this.policies.delete(agentId);
+  }
+
   set(agentId: string, policy: AgentPolicy): void {
     this.policies.set(agentId, policy);
+    this.ephemeralIds.delete(agentId);
     if (!this.dir) return;
     const path = join(this.dir, `${agentId}.json`);
     const tmp = `${path}.${process.pid}.tmp`;
