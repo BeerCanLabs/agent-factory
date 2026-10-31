@@ -418,3 +418,14 @@ describe('model and grounding fields are kept, well-formed only (GAP-181, GAP-18
     assert.equal(row.toolCalled, undefined);
   });
 });
+
+describe('parent fields (E1.5)', () => {
+  it('keeps well-formed parentRunId and parentAgentId and drops anything else', () => {
+    const ok = toLedgerEvent({ agentId: 'juror', type: 'llm', parentRunId: 'a75a3ac9-b9c6-427b-9b47-969ffe2c6c25', parentAgentId: 'sdlc-pr-reviewer' });
+    assert.equal(ok.parentRunId, 'a75a3ac9-b9c6-427b-9b47-969ffe2c6c25');
+    assert.equal(ok.parentAgentId, 'sdlc-pr-reviewer');
+    const bad = toLedgerEvent({ agentId: 'juror', type: 'llm', parentRunId: 'free text here', parentAgentId: 42 });
+    assert.equal(bad.parentRunId, undefined);
+    assert.equal(bad.parentAgentId, undefined);
+  });
+});

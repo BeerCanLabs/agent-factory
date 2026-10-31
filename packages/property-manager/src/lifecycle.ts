@@ -256,6 +256,11 @@ export type CreateRunOptions = {
   factoryKind?: 'conversation-request' | 'approval' | 'smoke';
   /** The caller has already set `turnId` and `replyTo` itself (a conversation turn). Otherwise a sender's are removed: they are the factory's. */
   factoryTurn?: boolean;
+  /**
+   * E1.5 (#296): the live run that is starting this one as a helper. Server code only (E1.4); never copied from a request
+   * body. The parent agent is read from that run's record, so a caller cannot name it.
+   */
+  parentRunId?: string;
 };
 
 /** The single entry point for waking an agent: manual, webhook, cron, event route, gatekeeper-ingress. */
@@ -271,6 +276,12 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
   }
 
   const isSmoke = opts.trigger === 'smoke';
+  let parent: { parentRunId: string; parentAgentId: string } | undefined;
+  if (opts.parentRunId !== undefined) {
+    const p = state.runs.get(opts.parentRunId);
+    if (!p) return { status: 400, body: { error: 'parent_run_not_found' } };
+    parent = { parentRunId: p.runId, parentAgentId: p.agentId };
+  }
 
   // Sanitize input: never mutate caller's object, and never allow a forged caller
   let sanitizedInput: unknown = opts.input;
@@ -349,6 +360,7 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
       ...(opts.requestedBy && !isSmoke ? { requestedBy: opts.requestedBy } : {}),
       ...(opts.caller && !isSmoke ? { caller: opts.caller } : {}),
       missing: bound.missing,
+      ...parent,
     });
     record(state, run, 'PRE_FLIGHT_MISSING_SECRET', opts.actor);
     void fireCallback(state, run);
@@ -366,6 +378,7 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
     ...(opts.requestedBy && !isSmoke ? { requestedBy: opts.requestedBy } : {}),
     ...(opts.caller && !isSmoke ? { caller: opts.caller } : {}),
     ...(opts.model ? { model: opts.model } : {}),
+    ...parent,
   });
   record(state, run, 'RUN_QUEUED', opts.actor);
   if (busy) {

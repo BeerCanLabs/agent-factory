@@ -22,6 +22,9 @@ export type LedgerEvent = {
   leaseId?: string;
   gatedSecret?: string;
   turnId?: string;
+  /** E1.5 (#296): a helper run's parent run and agent, stamped by the control plane from the run record. */
+  parentRunId?: string;
+  parentAgentId?: string;
   /** Egress destination of a tunnelled or proxied connection (hostname only) — E3. */
   host?: string;
   port?: number;
@@ -54,6 +57,8 @@ export type LedgerEvent = {
 
 const ALLOWED = new Set<keyof LedgerEvent>([
   'requestedModel',
+  'parentRunId',
+  'parentAgentId',
   'upstreamModel',
   'models',
   'replySha256',
@@ -181,6 +186,9 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (raw.leaseId !== undefined) event.leaseId = String(raw.leaseId);
   if (raw.gatedSecret !== undefined) event.gatedSecret = String(raw.gatedSecret);
   if (raw.turnId !== undefined) event.turnId = String(raw.turnId);
+  const ident = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(v);
+  if (ident(raw.parentRunId)) event.parentRunId = raw.parentRunId;
+  if (ident(raw.parentAgentId)) event.parentAgentId = raw.parentAgentId;
   // Only well-formed values: these fields must never become a channel for arbitrary text.
   if (typeof raw.host === 'string' && /^[a-z0-9.-]{1,253}$/i.test(raw.host)) event.host = raw.host.toLowerCase();
   if (typeof raw.port === 'number' && Number.isInteger(raw.port) && raw.port > 0 && raw.port < 65536) event.port = raw.port;
