@@ -678,6 +678,12 @@ export function enrichAgent(state: FactoryState, a: AgentRecord) {
 }
 
 
+/** A requested run model must be a model id (REST and MCP wake share this check, E4.1). */
+function badRunModel(model: unknown): string | undefined {
+  if (model !== undefined && (typeof model !== 'string' || !/^[\w.:@/-]{1,128}$/.test(model))) return 'model must be a model id';
+  return undefined;
+}
+
 /** Kill-switch only. Waking is createRun. */
 /**
  * Lets a run that was flagged BLOCKED_BUDGET_EXCEEDED go again once the agent is back inside its limits. Every route
@@ -698,7 +704,13 @@ const TOOLS: ToolSpec[] = [
   { name: 'list_agents', description: 'List factory cartridges', privilege: 'agents.read', args: {} },
   { name: 'query_ledger', description: 'Read the execution ledger', privilege: 'ledger.read', args: { agent: { type: 'string' } } },
   { name: 'get_run', description: 'Get a run by id', privilege: 'runs.read', args: { runId: { type: 'string' } }, required: ['runId'] },
-  { name: 'wake_agent', description: 'Start a run (202 semantics: returns the queued/started run)', privilege: 'agents.wake', args: { id: { type: 'string' } }, required: ['id'] },
+  {
+    name: 'wake_agent',
+    description: 'Start a run (202 semantics: returns the queued/started run). Optional model pins the run; optional input is passed to it, the same as POST /api/v1/agents/:id/runs.',
+    privilege: 'agents.wake',
+    args: { id: { type: 'string' }, model: { type: 'string' }, input: { type: 'object' } },
+    required: ['id'],
+  },
   { name: 'pause_agent', description: 'Pause agent egress', privilege: 'agents.pause', args: { id: { type: 'string' } }, required: ['id'] },
   { name: 'resume_agent', description: 'Resume agent egress', privilege: 'agents.resume', args: { id: { type: 'string' } }, required: ['id'] },
   { name: 'isolate_agent', description: 'Isolate agent egress', privilege: 'agents.isolate', args: { id: { type: 'string' } }, required: ['id'] },
@@ -1686,7 +1698,17 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
     );
     return out.body;
   }
-  if (name === 'wake_agent') return (await createRun(state, id, { actor, trigger: 'mcp' })).body;
+  if (name === 'wake_agent') {
+    // E4.1: the same checks and start path as REST run creation; createRun strips caller/turn fields from input.
+    const bad = badRunModel(args.model);
+    if (bad) return { error: bad };
+    return (await createRun(state, id, {
+      actor,
+      trigger: 'mcp',
+      ...(args.input !== undefined ? { input: args.input } : {}),
+      ...(typeof args.model === 'string' ? { model: args.model } : {}),
+    })).body;
+  }
   if (name === 'pause_agent') return (await applyKillSwitch(state, id, 'PAUSE', actor)).body;
   if (name === 'resume_agent') return (await applyKillSwitch(state, id, 'RESUME', actor)).body;
   if (name === 'isolate_agent') return (await applyKillSwitch(state, id, 'ISOLATE', actor)).body;
@@ -2413,8 +2435,9 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 400, { error: 'callbackUrl must be a string' });
       return;
     }
-    if (body.model !== undefined && (typeof body.model !== 'string' || !/^[\w.:@/-]{1,128}$/.test(body.model))) {
-      json(res, 400, { error: 'model must be a model id' });
+    const badModel = badRunModel(body.model);
+    if (badModel) {
+      json(res, 400, { error: badModel });
       return;
     }
     // Only a caller allowed to say who asked (the ingress) may name the requester. `input.authorId` is whatever the
