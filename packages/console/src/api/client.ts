@@ -342,6 +342,11 @@ export const factoryApi = {
     return this.submitCredential(`/keymaster/platform/credentials/${encodeURIComponent(name)}`, value);
   },
 
+  /** E5.1: start an agent's GitHub App manifest flow; the console posts `manifest` to `action`. */
+  async startGitHubApp(agentId: string, org?: string): Promise<{ action: string; manifest: Record<string, unknown>; state: string }> {
+    return request(`/keymaster/agents/${encodeURIComponent(agentId)}/github-app/start`, { method: 'POST', body: JSON.stringify(org ? { org } : {}) });
+  },
+
   async getOutstandingCredentials(): Promise<OutstandingCredentials> {
     return request<OutstandingCredentials>('/keymaster/outstanding');
   },

@@ -178,6 +178,7 @@ const ROUTES: RouteRow[] = [
   { method: 'PUT', path: '/api/v1/keymaster/platform/credentials/n', privilege: 'credentials.platform.set', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/keymaster/agents/castle/credentials', privilege: 'credentials.agent.read', role: 'admin' },
   { method: 'POST', path: '/api/v1/keymaster/agents/castle/credentials/n', privilege: 'credentials.agent.set', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/keymaster/agents/castle/github-app/start', privilege: 'credentials.agent.set', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/keymaster/agents/castle/credentials/n', privilege: 'credentials.agent.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/keymaster/providers/p/client', privilege: 'credentials.provider.set', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/connections/castle/p/start', privilege: 'connections.start', role: 'admin' },
@@ -354,7 +355,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
   });
 
   it('public routes and the OAuth callback answer every credential alike, and whoami needs only a verified principal', async () => {
-    for (const path of ['/ui', '/healthz', '/', '/api/v1/health', '/.well-known/factory-cli', '/api/v1/connections/p/callback']) {
+    for (const path of ['/ui', '/healthz', '/', '/api/v1/health', '/.well-known/factory-cli', '/api/v1/connections/p/callback', '/api/v1/keymaster/github-app/callback']) {
       for (const cred of CREDENTIALS) {
         const r = await call(port, 'GET', path, cred);
         assert.ok(r.status !== 401 && r.status !== 403, `${path} as ${cred}: ${r.status}`);

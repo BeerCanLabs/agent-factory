@@ -43,6 +43,7 @@ import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleCredentials } from './credentials.js';
+import { handleGitHubAppSetup } from './github-app-setup.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
@@ -156,6 +157,9 @@ export type FactoryState = {
   publicBaseUrl?: string;
   /** Signs OAuth consent state. Defaults to the callback signing key. */
   connectionStateKey?: string;
+  /** GitHub API and web origins for app setup (E5.1). Default to github.com; tests point them at fakes. */
+  githubApiBase?: string;
+  githubWebBase?: string;
   schedules?: ScheduleStore;
   /** GAP-088: which person a Discord user is, set by an admin. Absent: nobody is linked. */
   identityLinks?: IdentityLinkStore;
@@ -2013,6 +2017,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   }
 
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
+  if (path.startsWith('/api/v1/keymaster/') && (await handleGitHubAppSetup(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleAgentSettings(state, req, res, path)) return;
   if (await handleAgentCreation(state, req, res, path)) return;
