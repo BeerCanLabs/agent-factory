@@ -164,6 +164,9 @@ export function dockerDeployProvider(images: Record<string, string>): DeployProv
     async registerCompute(agentId, imageUri) {
       images[agentId] = imageUri;
     },
+    async provisionHelperCompute(computeId, imageUri) {
+      images[computeId] = imageUri;
+    },
   };
 }
 

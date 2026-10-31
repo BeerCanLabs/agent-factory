@@ -9,7 +9,9 @@ import { agentContainerSecrets } from "./gatekeeper-held.js";
 
 export async function provisionAgentRoles(
   agentId: string,
-  secrets: string[]
+  secrets: string[],
+  /** E1.4 (#295): `memory: false` (a helper's role) gets no mind-bucket access, and loses any it had. */
+  opts: { memory?: boolean } = {},
 ): Promise<{ taskRoleArn: string; executionRoleArn: string }> {
   const client = new IAMClient({});
 
@@ -69,16 +71,24 @@ export async function provisionAgentRoles(
     ],
   });
 
-  try {
-    await client.send(
-      new PutRolePolicyCommand({
-        RoleName: taskRoleName,
-        PolicyName: "MindPersistenceAccess",
-        PolicyDocument: persistencePolicyDocument,
-      })
-    );
-  } catch (err: any) {
-    console.warn(`[iam] Failed to attach MindPersistenceAccess to ${taskRoleName}:`, err);
+  if (opts.memory === false) {
+    try {
+      await client.send(new DeleteRolePolicyCommand({ RoleName: taskRoleName, PolicyName: "MindPersistenceAccess" }));
+    } catch (err: any) {
+      if (err.name !== "NoSuchEntityException" && err.name !== "NoSuchEntity") throw err;
+    }
+  } else {
+    try {
+      await client.send(
+        new PutRolePolicyCommand({
+          RoleName: taskRoleName,
+          PolicyName: "MindPersistenceAccess",
+          PolicyDocument: persistencePolicyDocument,
+        })
+      );
+    } catch (err: any) {
+      console.warn(`[iam] Failed to attach MindPersistenceAccess to ${taskRoleName}:`, err);
+    }
   }
 
   // 1c. Attach Bedrock Converse Policy to Task Role
