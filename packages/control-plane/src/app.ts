@@ -4049,6 +4049,11 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       json(res, 400, { error: checked.error });
       return;
     }
+    // #312: a helper allow-list is per agent only; a global/default policy may not carry one.
+    if (checked.policy.subagents !== undefined) {
+      json(res, 400, { error: 'subagents are set per agent, never in the global policy' });
+      return;
+    }
     state.policies.set('__global__', checked.policy);
     json(res, 200, checked.policy);
     return;
