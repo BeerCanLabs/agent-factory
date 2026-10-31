@@ -97,6 +97,11 @@ export type RunContext = {
    */
   budgetOf?: 'parent';
   /**
+   * E3.2 (#299): set for a helper run: its parent agent. A credential route's per-agent secret is the parent's (the helper
+   * never holds a key), every route is read-only for it, it gets no raw tunnel and no connection route.
+   */
+  helperOf?: string;
+  /**
    * E12 item 4: what the run's requesting person may reach through skill routes, decided by the factory from their roles
    * (never by the agent). Absent is read as unrestricted so an older control plane keeps working. When restricted, a
    * route a skill declares that is not `allowed` is refused; a route no skill declares is not restricted by roles.
@@ -585,7 +590,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (!route.credential) return '';
     let name = route.credential.secret;
     if (ctx && (name.includes('{agent}') || name.includes('${agent}'))) {
-      const agentVar = ctx.run.agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      const agentVar = (ctx.helperOf ?? ctx.run.agentId).toUpperCase().replace(/[^A-Z0-9]/g, '_');
       name = name.replace(/\$\{agent\}|\{agent\}/gi, agentVar);
     }
     return name;
@@ -1608,7 +1613,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           return send(res, 403, { error: 'role_not_allowed', host: parsed.hostname });
         }
 
-        if (!isHostAllowed(ctx.policy, routes, parsed.hostname)) {
+        if (ctx.helperOf || !isHostAllowed(ctx.policy, routes, parsed.hostname)) {
           markOutcome(res, 'denied');
           void opts.control.ledger({
             agentId: ctx.run.agentId,
@@ -1676,7 +1681,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
 
       let raw = await readBody(req, limit);
-      if (route.readOnly) {
+      // E3.2 (#299): a helper is read-only on every route but the factory model API, whatever its parent may do, and
+      // reaches no connection route.
+      if (ctx.helperOf && route.connection) return deny(res, ctx, route, 403, 'route_not_allowed', { route: route.id });
+      if (route.readOnly || (ctx.helperOf && route.kind !== 'models')) {
         const verdict = readOnlyVerdict(req.method, rest, req.headers, raw);
         if (!verdict.ok) return deny(res, ctx, route, 403, 'read_only_route', { reason: verdict.why });
       }
@@ -1776,7 +1784,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         return refuse('403 Forbidden', 403);
       }
 
-      if (!isHostAllowed(ctx.policy, routes, destHost)) {
+      if (ctx.helperOf || !isHostAllowed(ctx.policy, routes, destHost)) {
 
         void opts.control.ledger({
           agentId: ctx.run.agentId,
