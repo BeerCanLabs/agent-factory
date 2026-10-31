@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { isTerminal } from '@beercanlabs/factory-property-manager';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { githubAppSecretNames } from './github-app-setup.js';
+import { agentPath, readSecret, registerAppSetupProvider } from './app-setup-providers.js';
 
 const ORG = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const MAX_ORGS = 50;
@@ -34,14 +35,6 @@ export function chosenOrgs(state: FactoryState, agentId: string): string[] {
   } catch {
     return [];
   }
-}
-
-async function readSecret(state: FactoryState, name: string): Promise<string | undefined> {
-  for (const p of state.providers) {
-    const v = await p.get(name).catch(() => undefined);
-    if (v) return v;
-  }
-  return undefined;
 }
 
 /** A GitHub App JWT (RS256), valid ten minutes and backdated one for clock skew. */
@@ -127,3 +120,18 @@ export async function handleGitHubAppInstall(state: FactoryState, req: http.Inco
   }
   return false;
 }
+
+// E5.3: GitHub through the shared setup pattern; its routes above and in github-app-setup.ts are unchanged.
+registerAppSetupProvider({
+  id: 'github',
+  title: 'GitHub App',
+  steps: (_s, agentId) => [
+    { id: 'create', manual: false, text: 'Create this agent\'s own GitHub App from a prefilled manifest (optionally under an org), then approve it on GitHub. The factory stores its key.', action: { kind: 'browser-post', path: agentPath(agentId, 'github-app/start'), input: 'org', postField: 'manifest' } },
+    { id: 'orgs', manual: false, text: 'Choose the orgs the app is for (comma-separated). Keys are minted only for these.', action: { kind: 'list', path: agentPath(agentId, 'github-app/installations'), input: 'orgs' } },
+    { id: 'install', manual: true, text: 'Open the install link and install the app on each chosen org.' },
+  ],
+  async status(state, agentId) {
+    const slug = await readSecret(state, githubAppSecretNames(agentId).slug);
+    return slug ? { configured: true, links: [{ label: 'Install the app on an org', url: `${webBase(state)}/apps/${encodeURIComponent(slug)}/installations/new` }] } : { configured: false };
+  },
+});

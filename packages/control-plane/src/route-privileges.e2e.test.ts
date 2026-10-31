@@ -180,6 +180,8 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/keymaster/agents/castle/credentials/n', privilege: 'credentials.agent.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/keymaster/agents/castle/github-app/start', privilege: 'credentials.agent.set', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/keymaster/agents/castle/discord-app', privilege: 'credentials.agent.read', role: 'admin' },
+  { method: 'GET', path: '/api/v1/keymaster/agents/castle/app-setup', privilege: 'credentials.agent.read', role: 'admin' },
+  { method: 'POST', path: '/api/v1/keymaster/agents/castle/app-setup/p/s', privilege: 'credentials.agent.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/keymaster/agents/castle/discord-app/token', privilege: 'credentials.agent.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/keymaster/agents/castle/github-app/installations', privilege: 'credentials.agent.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/gatekeeper-egress/github-app/token', privilege: 'egress.connections.token', role: 'gatekeeper-egress', exclusive: true, body: {} },

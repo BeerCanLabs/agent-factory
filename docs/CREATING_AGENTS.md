@@ -542,6 +542,8 @@ Each named agent gets its own apps, and a company's apps and keys stay in its ow
 
 **Discord bot (as automated as Discord allows).** Discord has no API to create an application, so two steps stay manual in the [Developer Portal](https://discord.com/developers/applications): create the application, then reset and copy the bot token. Paste the token on the agent's credentials page (`POST /api/v1/keymaster/agents/:id/discord-app/token`). The factory checks it with Discord, stores it under the agent's declared Discord `secretRef` (else `<AGENT>_DISCORD_BOT_TOKEN`; an agent on the shared `DISCORD_BOT_TOKEN` must declare its own first), and returns an invite link with the declared permissions (`discord.permissions`, default view channels, send messages, read history). `GET /api/v1/keymaster/agents/:id/discord-app` lists the steps and the invite link; it never returns the token.
 
+**Adding another service (`E5.3`).** Each service is an `AppSetupProvider` (`packages/control-plane/src/app-setup-providers.ts`): its steps, whether each is manual, its status and links. A step's action is one of three kinds the console already renders: `secret` (paste once, write-only), `browser-post` (start, then post to the service, as GitHub's manifest does) and `list` (names, such as orgs). Register the provider with `registerAppSetupProvider`; it appears on every agent's credentials page with no console changes. Store values only through the secret store; a provider never returns one. `GET /api/v1/keymaster/agents/:id/app-setup` lists them all.
+
 ## 7. FAQ & Common Pitfalls
 
 ### 1. Why did registering my repository agent (`POST /api/v1/registry/agents`) fail with `422 new_agents_use_configuration`?
