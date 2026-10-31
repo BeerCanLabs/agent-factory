@@ -189,6 +189,38 @@ const CredentialCard: React.FC<{ agentId: string; item: CredentialItem; canWrite
   );
 };
 
+/** E5.1: create this agent's own GitHub App. GitHub needs a form POST of the manifest; nothing secret passes through here. */
+const GitHubAppSetup: React.FC<{ agentId: string }> = ({ agentId }) => {
+  const [org, setOrg] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const begin = async () => {
+    setError(null);
+    try {
+      const { action, manifest } = await factoryApi.startGitHubApp(agentId, org.trim() || undefined);
+      const form = document.createElement('form');
+      form.method = 'post';
+      form.action = action;
+      const field = document.createElement('input');
+      field.type = 'hidden';
+      field.name = 'manifest';
+      field.value = JSON.stringify(manifest);
+      form.appendChild(field);
+      document.body.appendChild(form);
+      form.submit();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <input value={org} onChange={(e) => setOrg(e.target.value)} placeholder="GitHub org (optional)" aria-label="GitHub org"
+        className="bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-3 py-1.5 text-slate-900 dark:text-white" />
+      <button onClick={begin} className="px-3 py-1.5 rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-900 font-semibold">Create GitHub App</button>
+      {error && <span className="text-rose-600">{error}</span>}
+    </div>
+  );
+};
+
 export const CredentialsView: React.FC<CredentialsViewProps> = ({ agents, agentId, onSelectAgent, onChanged }) => {
   const permissions = usePermissions();
   const [data, setData] = useState<AgentCredentials | null>(null);
@@ -274,6 +306,7 @@ export const CredentialsView: React.FC<CredentialsViewProps> = ({ agents, agentI
       {!permissions.canManageCredentials && (
         <p className="text-xs text-slate-500 dark:text-slate-400">Only admins can supply credentials or connect accounts.</p>
       )}
+      {!isPlatform && permissions.canManageCredentials && <GitHubAppSetup agentId={agentId} />}
       {notice && <div className="text-xs font-semibold text-emerald-800 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 rounded-lg px-3 py-2">{notice}</div>}
       {error && <div className="text-xs text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 rounded-lg px-3 py-2">Could not load credentials: {error}</div>}
       {data && data.credentials.length === 0 && <p className="text-sm text-slate-500 dark:text-slate-400">{isPlatform ? 'The gatekeeper-egress holds no platform keys.' : 'This agent declares no credentials.'}</p>}
