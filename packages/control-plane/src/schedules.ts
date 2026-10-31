@@ -14,7 +14,7 @@ import { authorize, authorizeIngress, type AuthenticatedCaller } from '@beercanl
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { DEFAULT_TIMEZONE, cronIssue, isTimeZone, type ScheduledAction, type ScheduleRequester } from '@beercanlabs/factory-timekeeper';
 import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
-import { isTerminal, SYSTEM, type Run } from '@beercanlabs/factory-property-manager';
+import { createRun, isTerminal, SYSTEM, type Run } from '@beercanlabs/factory-property-manager';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { ownersOf } from './config-store.js';
 
@@ -310,6 +310,34 @@ export function scheduleRunOptions(
   }
 
   return skip('its requester no longer holds a role on this agent');
+}
+
+/**
+ * Fires a dynamic scheduled action by resolving the requester's authority and creating a run.
+ * When a valid Discord snowflake channelId is present, passes turnId and replyTo along with factoryTurn: true
+ * so the shared runtime can deliver the reply to Discord and record the turn under the Discord surface.
+ */
+export async function fireScheduledAction(state: FactoryState, sched: ScheduledAction) {
+  const who = scheduleRunOptions(state, sched);
+  if (!who) return undefined;
+  const hasDiscordChannel = typeof sched.channelId === 'string' && /^\d{1,32}$/.test(sched.channelId);
+  const input: Record<string, unknown> = {
+    content: sched.prompt,
+    message: sched.prompt,
+    ...(sched.channelId ? { channelId: sched.channelId } : {}),
+    scheduleId: sched.id,
+    scheduleName: sched.name,
+    source: 'schedule',
+    ...(hasDiscordChannel ? { turnId: randomUUID(), replyTo: { channel: 'discord', channelId: sched.channelId } } : {}),
+  };
+  console.log(`[scheduler] Firing dynamic schedule "${sched.name}" (${sched.id}) for agent ${sched.agentId}`);
+  return await createRun(state, sched.agentId, {
+    actor: SYSTEM.scheduler,
+    trigger: 'schedule',
+    ...who,
+    ...(hasDiscordChannel ? { factoryTurn: true } : {}),
+    input,
+  });
 }
 
 const optionalString = (v: unknown): v is string | undefined | null => v === undefined || v === null || typeof v === 'string';

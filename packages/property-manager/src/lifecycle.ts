@@ -368,7 +368,16 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
     ...(opts.model ? { model: opts.model } : {}),
   });
   record(state, run, 'RUN_QUEUED', opts.actor);
-  if (busy) return { status: 202, body: run };
+  if (busy) {
+    const queue = state.mailboxes?.get(agentId);
+    if (queue && queue.waiters.length > 0 && queue.messages.length === 0) {
+      while (queue.waiters.length > 0) {
+        const w = queue.waiters.shift();
+        w?.({ id: 'done', timestamp: new Date().toISOString(), payload: null });
+      }
+    }
+    return { status: 202, body: run };
+  }
   return { status: 202, body: await startRun(state, run, bound.env) };
 }
 

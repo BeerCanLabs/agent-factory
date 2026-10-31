@@ -18,7 +18,7 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { createRun, MemoryRunStore, noopRuntime, SYSTEM } from '@beercanlabs/factory-property-manager';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { IdentityLinkStore } from './identity-links.js';
-import { requesterOfRun, scheduleRunOptions } from './schedules.js';
+import { fireScheduledAction, requesterOfRun, scheduleRunOptions } from './schedules.js';
 
 const ADMIN = 'admin-sched-requester'; // secret-scan:allow (test fixture)
 const OPERATOR = 'operator-sched-requester'; // secret-scan:allow (test fixture)
@@ -268,6 +268,96 @@ describe('a scheduled run carries its requester’s authority, never more (E12, 
       const who = scheduleRunOptions(state, s)!;
       assert.equal(who.caller.isOwner, true);
       assert.equal(who.requestedBy, undefined, 'bare principal owner wins over link');
+    });
+
+    it('fireScheduledAction with discord channelId passes factoryTurn, turnId, and replyTo', async () => {
+      const s = sched({ channelId: '1490373419240521769', requestedBy: { kind: 'identity', provider: 'discord', id: '201' } });
+      const out = await fireScheduledAction(state, s);
+      assert.ok(out);
+      assert.equal(out.status, 202);
+      const run = state.runs.get((out.body as { runId: string }).runId)!;
+      const inp = run.input as Record<string, unknown>;
+      assert.equal(inp.source, 'schedule');
+      assert.equal(inp.scheduleId, s.id);
+      assert.equal(inp.scheduleName, s.name);
+      assert.equal(inp.channelId, '1490373419240521769');
+      assert.equal(typeof inp.turnId, 'string');
+      assert.ok((inp.turnId as string).length > 0);
+      assert.deepEqual(inp.replyTo, { channel: 'discord', channelId: '1490373419240521769' });
+      assert.ok(inp.caller);
+      const caller = inp.caller as Record<string, unknown>;
+      assert.equal(caller.actor, 'cloudflare:aiden@example.com');
+      assert.equal(caller.source, 'schedule');
+      state.runs.update((out.body as { runId: string }).runId, { state: 'DONE' });
+    });
+
+    it('fireScheduledAction without valid discord channelId omits replyTo and turnId', async () => {
+      const sNoChannel = sched({ requestedBy: { kind: 'identity', provider: 'discord', id: '201' } });
+      const outNoChannel = await fireScheduledAction(state, sNoChannel);
+      assert.ok(outNoChannel);
+      const run1 = state.runs.get((outNoChannel.body as { runId: string }).runId)!;
+      const inp1 = run1.input as Record<string, unknown>;
+      assert.equal(inp1.replyTo, undefined);
+      assert.equal(inp1.turnId, undefined);
+      assert.equal(inp1.source, 'schedule');
+      state.runs.update(run1.runId, { state: 'DONE' });
+
+      const sBadChannel = sched({ channelId: 'general-chat', requestedBy: { kind: 'identity', provider: 'discord', id: '201' } });
+      const outBadChannel = await fireScheduledAction(state, sBadChannel);
+      assert.ok(outBadChannel);
+      const run2 = state.runs.get((outBadChannel.body as { runId: string }).runId)!;
+      const inp2 = run2.input as Record<string, unknown>;
+      assert.equal(inp2.replyTo, undefined);
+      assert.equal(inp2.turnId, undefined);
+      state.runs.update(run2.runId, { state: 'DONE' });
+    });
+
+    it('warm container idle in mailbox yields immediately to queued run', async () => {
+      // Ensure donna has no stale active runs
+      for (const r of state.runs.list({ agentId: 'donna', active: true })) {
+        state.runs.update(r.runId, { state: 'DONE' });
+      }
+      if (state.mailboxes) state.mailboxes.delete('donna');
+
+      // Start an active run for donna
+      const { run, token } = await liveRun('donna', { state: 'WORKING' });
+
+      // Start long-poll in background
+      const startMs = Date.now();
+      const pollPromise = api(`/api/v1/runs/${run.runId}/mailbox?timeout=5000`, 'GET', token);
+
+      // Wait a moment so the waiter is registered in state.mailboxes
+      await new Promise((r) => setTimeout(r, 50));
+      const queue = state.mailboxes?.get('donna');
+      assert.ok(queue && queue.waiters.length > 0, 'mailbox waiter registered');
+
+      // Fire dynamic schedule which queues a second run for donna (busy)
+      const s = sched({ requestedBy: { kind: 'identity', provider: 'discord', id: '201' } });
+      const out = await fireScheduledAction(state, s);
+      assert.ok(out);
+      assert.equal(out.status, 202);
+      const queuedRun = out.body as { state: string };
+      assert.equal(queuedRun.state, 'QUEUED');
+
+      // The long-poll should resolve almost immediately (well under 5000ms) with id: 'done'
+      const pollRes = await pollPromise;
+      const elapsedMs = Date.now() - startMs;
+      assert.ok(elapsedMs < 2000, `poll took ${elapsedMs}ms, should resolve immediately`);
+      assert.equal(pollRes.status, 200);
+      assert.equal(pollRes.body?.ok, true);
+      assert.equal(pollRes.body?.message?.id, 'done');
+      assert.equal(pollRes.body?.message?.payload, null);
+
+      // Calling GET /mailbox while a QUEUED run is active immediately returns id: 'done'
+      const immediatePoll = await api(`/api/v1/runs/${run.runId}/mailbox?timeout=5000`, 'GET', token);
+      assert.equal(immediatePoll.status, 200);
+      assert.equal(immediatePoll.body?.ok, true);
+      assert.equal(immediatePoll.body?.message?.id, 'done');
+      assert.equal(immediatePoll.body?.message?.payload, null);
+
+      // Cleanup: mark runs finished so state is clean
+      state.runs.update(run.runId, { state: 'DONE' });
+      state.runs.update((out.body as { runId: string }).runId, { state: 'DONE' });
     });
   });
 });
