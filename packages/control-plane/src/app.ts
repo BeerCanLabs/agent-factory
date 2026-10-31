@@ -3347,7 +3347,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       policySet: state.policies.has(run.agentId),
       policy: (payer.parent ? payerBuiltin : isBuiltin) ? { ...pol, budgetUsd: undefined } : { ...pol, budgetUsd },
       spend: state.spend.get(payer.agentId, payer.runId),
-      ...(payer.parent ? { budgetOf: 'parent' } : {}),
+      ...(payer.parent ? { budgetOf: 'parent', helperOf: payer.agentId } : {}),
       // E12 item 4: what the run's requesting person may reach through skill routes; the egress applies it.
       // A built-in agent is the factory's own and has no person's roles.
       access: isBuiltin ? { restricted: false } : accessForRun(state, run, agent),

@@ -163,7 +163,9 @@ export async function spawnSubagent(state: FactoryState, parent: Run, args: Reco
     computeId,
   };
   state.agents.set(id, record);
-  state.policies.setEphemeral(id, { routes: ['models'], models: [model] });
+  // E3.2 (#299): GitHub only when the parent has it; the gatekeeper adds the parent's key and forces read-only.
+  const routes = state.policies.get(parent.agentId).routes?.includes('github') ? ['models', 'github'] : ['models'];
+  state.policies.setEphemeral(id, { routes, models: [model] });
   let out: { status: number; body: unknown };
   try {
     out = await createRun(state, id, {
