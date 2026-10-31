@@ -66,6 +66,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/credentials.ts',
       'packages/control-plane/src/github-app-setup.ts',
       'packages/control-plane/src/github-app-install.ts',
+      'packages/control-plane/src/discord-app-setup.ts',
     ],
   },
   executive: {

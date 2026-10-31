@@ -347,6 +347,16 @@ export const factoryApi = {
     return request(`/keymaster/agents/${encodeURIComponent(agentId)}/github-app/start`, { method: 'POST', body: JSON.stringify(org ? { org } : {}) });
   },
 
+  /** E5.2: Discord bot setup steps, status and invite link (never the token). */
+  async getDiscordApp(agentId: string): Promise<{ steps: Array<{ id: string; manual: boolean; text: string }>; configured: boolean; inviteUrl?: string }> {
+    return request(`/keymaster/agents/${encodeURIComponent(agentId)}/discord-app`);
+  },
+
+  /** E5.2: write-only; the factory checks the token with Discord and stores it. */
+  async submitDiscordToken(agentId: string, value: string): Promise<{ name: string; inviteUrl: string }> {
+    return request(`/keymaster/agents/${encodeURIComponent(agentId)}/discord-app/token`, { method: 'POST', body: JSON.stringify({ value }) });
+  },
+
   async getOutstandingCredentials(): Promise<OutstandingCredentials> {
     return request<OutstandingCredentials>('/keymaster/outstanding');
   },
