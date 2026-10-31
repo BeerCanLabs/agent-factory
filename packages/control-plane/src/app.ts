@@ -2322,6 +2322,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         json(res, 200, { ok: true, message: nextMsg });
         return;
       }
+      const hasQueuedRun = state.runs.list({ agentId: run.agentId, active: true }).some((r) => r.state === 'QUEUED');
+      if (hasQueuedRun) {
+        json(res, 200, { ok: true, message: { id: 'done', timestamp: new Date().toISOString(), payload: null } });
+        return;
+      }
       const url = new URL(req.url ?? '/', 'http://factory.local');
       const timeout = Math.min(Math.max(parseInt(url.searchParams.get('timeout') || '15000', 10), 0), 30000);
       if (timeout === 0) {

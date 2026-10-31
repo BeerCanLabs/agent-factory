@@ -62,10 +62,15 @@ class FakeFactory:
                     return self._send(200, {"choices": [{"message": outer.model(body["messages"], body.get("tools"))}]})
                 if path == f"/api/v1/runs/{RUN}/reply":
                     return self._send(200, {"ok": True})
-                if path == "/discord/channels/123/messages":
+                if path.startswith("/discord/channels/") and path.endswith("/messages"):
                     return self._send(200, {"id": "m1"})
                 if path == f"/api/v1/runs/{RUN}/mailbox":
-                    return self._send(200, {"ok": True, "message": outer.mailbox.pop(0) if outer.mailbox else None})
+                    if outer.mailbox:
+                        item = outer.mailbox.pop(0)
+                        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], int):
+                            return self._send(item[0], item[1])
+                        return self._send(200, {"ok": True, "message": item})
+                    return self._send(200, {"ok": True, "message": None})
                 if path == f"/api/v1/runs/{RUN}/heartbeat":
                     return self._send(200, {"ok": True})
                 return self._send(404, {"error": "nope"})
@@ -352,6 +357,56 @@ class TestLoop(Base):
         self.assertEqual(loop.main(Factory(fake.env())), 0)
         self.assertEqual(len([r for r in fake.requests if r[1].endswith("/reply")]), 2)
         self.assertTrue([r for r in fake.requests if r[1].endswith("/heartbeat")], "a warm agent keeps telling the factory it is alive")
+
+    def test_scheduled_wake_delivers_to_discord_and_exits_without_warmdown(self):
+        code, fake, result = self.wake(
+            {**PA, "warmDownSeconds": 3600},
+            [turn("daily church board rundown", source="schedule", reply={"channel": "discord", "channelId": "1490373419240521769"})],
+            lambda m, t: {"role": "assistant", "content": "Here is the rundown."},
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["output"]["summary"], "handled 1 turn(s)")
+
+        # Verify reply posted to discord route
+        discord_msgs = [r for r in fake.requests if r[1] == "/discord/channels/1490373419240521769/messages"]
+        self.assertEqual(len(discord_msgs), 1)
+        self.assertEqual(discord_msgs[0][2], {"content": "Here is the rundown."})
+
+        # Verify turn remembered in SQLite with surface="discord" and channel_id="1490373419240521769"
+        import sqlite3
+        conn = sqlite3.connect(str(self.mind / "agent_state.db"))
+        rows = conn.execute("SELECT surface, channel_id, role, content FROM conversation_turns WHERE role = 'assistant'").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "discord")
+        self.assertEqual(rows[0][1], "1490373419240521769")
+        conn.close()
+
+        # Verify it did not poll /mailbox because warm = 0 for scheduled wake
+        mailbox_reqs = [r for r in fake.requests if "/mailbox" in r[1]]
+        self.assertEqual(len(mailbox_reqs), 0)
+
+    def test_warm_agent_exits_cleanly_on_mailbox_done_signal(self):
+        fake = FakeFactory({**PA, "warmDownSeconds": 10}, [turn("first turn")])
+        fake.mailbox = [{"id": "done", "timestamp": "2026-10-31T14:00:50Z", "payload": None}]
+        self.fakes.append(fake)
+        code = loop.main(Factory(fake.env()))
+        self.assertEqual(code, 0)
+        result = json.loads(self.result.read_text())
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["output"]["summary"], "handled 1 turn(s)")
+        mailbox_reqs = [r for r in fake.requests if "/mailbox" in r[1]]
+        self.assertEqual(len(mailbox_reqs), 1, "broke out on done signal without re-polling")
+
+    def test_warm_agent_exits_cleanly_on_mailbox_401_invalid_run_token(self):
+        fake = FakeFactory({**PA, "warmDownSeconds": 10}, [turn("first turn")])
+        fake.mailbox = [(401, {"error": "invalid_run_token"})]
+        self.fakes.append(fake)
+        code = loop.main(Factory(fake.env()))
+        self.assertEqual(code, 0)
+        result = json.loads(self.result.read_text())
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["output"]["summary"], "handled 1 turn(s)")
 
 
 class TestSkills(Base):

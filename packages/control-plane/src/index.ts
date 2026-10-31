@@ -15,7 +15,7 @@ import {
 } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, FactoryState, relinkVendorModels } from './app.js';
 import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerDeployProvider, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
-import { scheduleRunOptions } from './schedules.js';
+import { fireScheduledAction, scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
@@ -413,24 +413,7 @@ if (process.env.FACTORY_CRON !== '0') {
         if (!activeRun(state, request.agentId)) void createRun(state, request.agentId, { actor: SYSTEM.scheduler, trigger: 'cron' });
         return;
       }
-      const sched = request.schedule;
-      // E12, GAP-131: the run carries its requester's current authority, or does not start.
-      const who = scheduleRunOptions(state, sched);
-      if (!who) return;
-      console.log(`[scheduler] Firing dynamic schedule "${sched.name}" (${sched.id}) for agent ${sched.agentId}`);
-      void createRun(state, sched.agentId, {
-        actor: SYSTEM.scheduler,
-        trigger: 'schedule',
-        ...who,
-        input: {
-          content: sched.prompt,
-          message: sched.prompt,
-          channelId: sched.channelId,
-          scheduleId: sched.id,
-          scheduleName: sched.name,
-          source: 'schedule',
-        },
-      });
+      void fireScheduledAction(state, request.schedule);
     },
   }).start();
 }

@@ -180,16 +180,24 @@ def main(factory: Factory | None = None) -> int:
         last_reply = handle(factory, soul, mind, tools, payload)
         turns += 1
         # A conversational agent stays warm to answer follow-ups without a cold start; the idle window is the factory's.
-        warm = 0 if is_smoke else int(config.get("warmDownSeconds") or 0)
+        is_background = payload.get("source") in ("schedule", "cron")
+        warm = 0 if (is_smoke or is_background) else int(config.get("warmDownSeconds") or 0)
         deadline = time.time() + warm
         while warm and time.time() < deadline:
             factory.heartbeat()
             asked = time.time()
-            message = factory.next_message(min(20000, max(1, int((deadline - time.time()) * 1000))))
+            try:
+                message = factory.next_message(min(20000, max(1, int((deadline - time.time()) * 1000))))
+            except FactoryError as err:
+                if err.status in (401, 409, 410):
+                    break
+                raise
             if not message:
                 if time.time() - asked < 0.05:
                     time.sleep(0.25)  # an answer that comes back at once is not a reason to spin
                 continue
+            if isinstance(message, dict) and (message.get("id") == "done" or (isinstance(message.get("payload"), dict) and message["payload"].get("done"))):
+                break
             nxt = message.get("payload")
             if isinstance(nxt, dict):
                 try:
