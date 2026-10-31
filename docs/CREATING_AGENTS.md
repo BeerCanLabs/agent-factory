@@ -534,7 +534,15 @@ Content-Type: application/json
 
 ---
 
-## 6. FAQ & Common Pitfalls
+## 6. Giving an Agent Its Own GitHub App and Discord Bot (`E5`, #291)
+
+Each named agent gets its own apps, and a company's apps and keys stay in its own factory's secret store. Keys never go in the repository.
+
+**GitHub App (one click on GitHub).** On the agent's credentials page, choose **Create GitHub App** (optionally name the org). The factory sends GitHub a prefilled manifest; approve it on GitHub. GitHub redirects back and the factory stores the app id, private key and webhook secret itself (`GITHUB_APP_<AGENT>_*`). Then `POST /api/v1/keymaster/agents/:id/github-app/installations {"orgs": [...]}` records the orgs and returns an install link per org. The gatekeeper-egress mints one-hour installation keys for chosen orgs only.
+
+**Discord bot (as automated as Discord allows).** Discord has no API to create an application, so two steps stay manual in the [Developer Portal](https://discord.com/developers/applications): create the application, then reset and copy the bot token. Paste the token on the agent's credentials page (`POST /api/v1/keymaster/agents/:id/discord-app/token`). The factory checks it with Discord, stores it under the agent's declared Discord `secretRef` (else `<AGENT>_DISCORD_BOT_TOKEN`; an agent on the shared `DISCORD_BOT_TOKEN` must declare its own first), and returns an invite link with the declared permissions (`discord.permissions`, default view channels, send messages, read history). `GET /api/v1/keymaster/agents/:id/discord-app` lists the steps and the invite link; it never returns the token.
+
+## 7. FAQ & Common Pitfalls
 
 ### 1. Why did registering my repository agent (`POST /api/v1/registry/agents`) fail with `422 new_agents_use_configuration`?
 When `FACTORY_NEW_AGENTS_FROM_CONFIGURATION_ONLY` is enabled (`CF6`), the factory only permits new agent IDs to be created as Configuration-Only agents (`POST /api/v1/agents` or via `agent-builder`) unless the ID is explicitly allowlisted.

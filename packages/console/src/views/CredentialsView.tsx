@@ -221,6 +221,42 @@ const GitHubAppSetup: React.FC<{ agentId: string }> = ({ agentId }) => {
   );
 };
 
+/** E5.2: Discord bot setup. Manual steps are Discord's; the token is sent once and never shown again. */
+const DiscordSetup: React.FC<{ agentId: string }> = ({ agentId }) => {
+  const [info, setInfo] = useState<Awaited<ReturnType<typeof factoryApi.getDiscordApp>> | null>(null);
+  const [draft, setDraft] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const load = () => factoryApi.getDiscordApp(agentId).then(setInfo).catch((e: any) => setError(e.message));
+  useEffect(() => { setInfo(null); load(); }, [agentId]);
+  const save = async () => {
+    setError(null);
+    try {
+      await factoryApi.submitDiscordToken(agentId, draft.trim());
+      await load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setDraft('');
+    }
+  };
+  if (!info) return null;
+  return (
+    <section className="text-xs space-y-2 border border-slate-200 dark:border-slate-800 rounded-xl p-3">
+      <h2 className="font-bold uppercase tracking-wider text-slate-500">Discord bot</h2>
+      <ol className="list-decimal ml-4 space-y-1">
+        {info.steps.map((s) => <li key={s.id}>{s.manual && <strong>[In Discord] </strong>}{s.text}</li>)}
+      </ol>
+      <div className="flex items-center gap-2">
+        <input type="password" autoComplete="off" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Bot token (write-only)" aria-label="Discord bot token"
+          className="flex-1 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-3 py-1.5 font-mono" />
+        <button onClick={save} disabled={!draft.trim()} className="px-3 py-1.5 rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-900 font-semibold disabled:opacity-50">Save</button>
+      </div>
+      {info.inviteUrl && <a href={info.inviteUrl} target="_blank" rel="noopener noreferrer" className="text-emerald-700 dark:text-emerald-400 underline">Invite the bot to a server</a>}
+      {error && <p className="text-rose-600">{error}</p>}
+    </section>
+  );
+};
+
 export const CredentialsView: React.FC<CredentialsViewProps> = ({ agents, agentId, onSelectAgent, onChanged }) => {
   const permissions = usePermissions();
   const [data, setData] = useState<AgentCredentials | null>(null);
@@ -307,6 +343,7 @@ export const CredentialsView: React.FC<CredentialsViewProps> = ({ agents, agentI
         <p className="text-xs text-slate-500 dark:text-slate-400">Only admins can supply credentials or connect accounts.</p>
       )}
       {!isPlatform && permissions.canManageCredentials && <GitHubAppSetup agentId={agentId} />}
+      {!isPlatform && permissions.canManageCredentials && <DiscordSetup agentId={agentId} />}
       {notice && <div className="text-xs font-semibold text-emerald-800 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 rounded-lg px-3 py-2">{notice}</div>}
       {error && <div className="text-xs text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 rounded-lg px-3 py-2">Could not load credentials: {error}</div>}
       {data && data.credentials.length === 0 && <p className="text-sm text-slate-500 dark:text-slate-400">{isPlatform ? 'The gatekeeper-egress holds no platform keys.' : 'This agent declares no credentials.'}</p>}
