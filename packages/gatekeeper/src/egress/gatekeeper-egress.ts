@@ -14,6 +14,7 @@ import type { Meter } from '@opentelemetry/api';
 
 import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';
 import { GROUNDING_RETRY_NOTICE, NO_TOOLS_FOOTNOTE, ReplyBook, footnoteDiscordBody, isDiscordReply, isDiscordRoute, isReadMethod, mcpResultOk, replySha256, toolNamesOf, toolResultsInTurn, withGroundingNote } from './grounding.js';
+import { readOnlyVerdict } from './read-only.js';
 import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from '@beercanlabs/factory-inspector';
 
 export type Route = {
@@ -53,6 +54,11 @@ export type Route = {
    * landing-zone route; a route defined as a Systems-store system does not carry it.
    */
   maxContentChars?: number;
+  /**
+   * E3.1: a read-only route (helpers on `github`). Reads are forwarded; any write method, GraphQL mutation or git push
+   * is refused with 403 `read_only_route` before any credential is injected (see read-only.ts).
+   */
+  readOnly?: boolean;
 };
 
 export type ConnectionTokenResult =
@@ -248,7 +254,8 @@ function isHostAllowed(policy: Policy, routes: Map<string, Route>, destHost: str
   for (const rId of policy.routes) {
     const r = routes.get(rId);
     // Connection routes are reachable only through the gatekeeper-egress's token injection, never as a raw tunnel host.
-    if (r?.upstream && !r.connection) {
+    // E3.1: neither are read-only routes; a raw tunnel would skip the read-only check.
+    if (r?.upstream && !r.connection && !r.readOnly) {
       try {
         allowed.add(new URL(r.upstream).hostname);
       } catch {}
@@ -320,6 +327,7 @@ export function routeProblem(r: Route, system = false, allowHttp = false): strin
   if (r.connection && r.credential) return 'a connection route must not also carry a static credential';
   if (r.connection && r.kind !== 'http') return 'connections are supported on http routes only';
   if (r.maxContentChars !== undefined && !(Number.isInteger(r.maxContentChars) && r.maxContentChars > 0)) return 'maxContentChars must be a positive integer';
+  if (r.readOnly !== undefined && typeof r.readOnly !== 'boolean') return 'readOnly must be a boolean';
   if (!system) return undefined;
   if (r.kind !== 'http' && r.kind !== 'mcp') return `kind ${String(r.kind)} is not a system kind (model routes belong to the landing zone, E5)`;
   if (typeof r.upstream !== 'string' || !(allowHttp ? /^https?:\/\/[^/]/ : /^https:\/\/[^/]/).test(r.upstream)) return 'upstream must be an https URL';
@@ -1658,6 +1666,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
 
       let raw = await readBody(req, limit);
+      if (route.readOnly) {
+        const verdict = readOnlyVerdict(req.method, rest, req.headers, raw);
+        if (!verdict.ok) return deny(res, ctx, route, 403, 'read_only_route', { reason: verdict.why });
+      }
       // AP3: a reply is matched to the model's answer as the agent sent it, before any rewrite (review #198).
       const sentContent = isDiscordReply(route, req.method, rest) ? (tryJson(raw) as { content?: unknown } | undefined)?.content : undefined;
       if (route.stripSignInLinks && raw.length && /json/i.test(String(req.headers['content-type'] ?? ''))) {
