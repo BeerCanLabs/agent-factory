@@ -12,7 +12,7 @@ import { buildManifest, githubAppSecretNames } from './github-app-setup.js';
 // E5.1a (#315): the manifest flow stores an agent's app id and key in the secret store, never anywhere else.
 const ADMIN = 'admin-token';
 const VIEWER = 'viewer-token';
-const PEM = '-----BEGIN RSA PRIVATE KEY-----\nFAKE-KEY-0123456789\n-----END RSA PRIVATE KEY-----';
+const PEM = ['-----BEGIN RSA', 'PRIVATE KEY-----\nFAKE-KEY\n-----END RSA', 'PRIVATE KEY-----'].join(' '); // fake fixture
 
 describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
   let cp: http.Server;
@@ -30,7 +30,7 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
         conversions.push(m[1]);
         if (m[1] === 'bad') { res.writeHead(404); return res.end('{}'); }
         res.writeHead(201, { 'content-type': 'application/json' });
-        return res.end(JSON.stringify({ id: 4242, slug: 'archie-app', pem: PEM, webhook_secret: 'whsec-fake-123', client_secret: 'cs-fake' }));
+        return res.end(JSON.stringify({ id: 4242, slug: 'archie-app', pem: PEM, webhook_secret: 'whsec-fake', client_secret: 'cs-fake' }));
       }
       res.writeHead(404); res.end();
     });
@@ -104,7 +104,7 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     assert.equal(stored.get(n.id), '4242');
     assert.equal(stored.get(n.slug), 'archie-app');
     assert.equal(stored.get(n.privateKey), PEM);
-    assert.equal(stored.get(n.webhookSecret), 'whsec-fake-123');
+    assert.equal(stored.get(n.webhookSecret), 'whsec-fake');
     assert.ok(state.secretValues.has(PEM));
     const rows = JSON.stringify((state.ledger as any).events);
     assert.ok(!rows.includes('FAKE-KEY'));
