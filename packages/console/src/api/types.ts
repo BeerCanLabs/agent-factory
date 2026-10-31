@@ -110,6 +110,9 @@ export interface LedgerEvent {
   type: string;
   agentId?: string;
   runId?: string;
+  /** E1.5 (#296): set on a helper run's rows; the run and agent that started it. */
+  parentRunId?: string;
+  parentAgentId?: string;
   actor: string;
   spendUsd?: number;
   payload: Record<string, any>;

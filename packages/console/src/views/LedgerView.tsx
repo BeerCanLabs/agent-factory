@@ -47,6 +47,8 @@ export const LedgerView: React.FC = () => {
       e.type.toLowerCase().includes(q) ||
       (e.agentId && e.agentId.toLowerCase().includes(q)) ||
       e.actor.toLowerCase().includes(q) ||
+      (e.runId && e.runId.toLowerCase().includes(q)) ||
+      (e.parentRunId && e.parentRunId.toLowerCase().includes(q)) ||
       e.hash.toLowerCase().includes(q)
     );
   });
@@ -126,6 +128,7 @@ export const LedgerView: React.FC = () => {
                   <th className="py-3 px-4">Event Type</th>
                   <th className="py-3 px-4">Agent</th>
                   <th className="py-3 px-4">Actor</th>
+                  <th className="py-3 px-4">Parent</th>
                   <th className="py-3 px-4">Spend</th>
                 </tr>
               </thead>
@@ -148,6 +151,23 @@ export const LedgerView: React.FC = () => {
                       <td className="py-2.5 px-4 font-sans font-bold text-slate-900 dark:text-white text-xs">{evt.type}</td>
                       <td className="py-2.5 px-4 text-emerald-600 dark:text-emerald-400 font-semibold">{evt.agentId || '—'}</td>
                       <td className="py-2.5 px-4 text-[11px] text-slate-600 dark:text-slate-300 truncate max-w-[140px]">{evt.actor}</td>
+                      <td className="py-2.5 px-4 text-[11px]">
+                        {evt.parentRunId ? (
+                          <button
+                            type="button"
+                            title={`Show run ${evt.parentRunId}`}
+                            className="text-blue-600 dark:text-blue-400 underline"
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              setFilterQuery(evt.parentRunId ?? '');
+                            }}
+                          >
+                            {evt.parentAgentId ?? 'parent'} · {evt.parentRunId.slice(0, 8)}
+                          </button>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
                       <td className="py-2.5 px-4 text-slate-800 dark:text-slate-200 font-sans">
                         {evt.spendUsd ? `$${evt.spendUsd.toFixed(3)}` : '—'}
                       </td>

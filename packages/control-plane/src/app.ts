@@ -2924,8 +2924,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     const actor = isGatekeeperEgress && run && event.actor === `run:${run.agentId}` ? event.actor : principal.actor;
+    // E1.5 (#296): a helper run's rows carry its parent, taken from the run record; a writer's own parent fields are dropped.
+    const { parentRunId: _callerParentRun, parentAgentId: _callerParentAgent, ...fields } = event;
     const stored = state.ledger.append({
-      ...event,
+      ...fields,
+      ...(run?.parentRunId ? { parentRunId: run.parentRunId, parentAgentId: run.parentAgentId } : {}),
       ...(isGatekeeperEgress ? {} : { costUsd: undefined }),
       agentId: event.agentId,
       type: event.type,

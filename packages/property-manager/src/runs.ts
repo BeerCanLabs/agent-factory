@@ -46,6 +46,9 @@ export type Run = {
   /** When the run first showed it can take a turn (first heartbeat or mailbox poll); presence goes available then. */
   readyAt?: string;
   rssMb?: number;
+  /** E1.5 (#296): the run that started this helper run, and its agent. Set by the server from the parent run record, never by caller input. */
+  parentRunId?: string;
+  parentAgentId?: string;
 };
 
 export function isTerminal(state: RunState): boolean {
