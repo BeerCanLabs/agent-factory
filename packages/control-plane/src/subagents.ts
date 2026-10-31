@@ -26,6 +26,8 @@ export function subagentsOf(state: FactoryState): Map<string, SubagentRecord> {
 
 /** E1.3 (#294): the registered helpers an agent's admin-set policy allows it, by id; none without an allow-list entry. */
 export function allowedSubagents(state: FactoryState, agentId: string): Array<{ id: string; name?: string; description?: string }> {
+  // #312: only a policy an admin set for this agent counts; the store's fallback (or `__global__`) never grants helpers.
+  if (agentId === '__global__' || !state.policies.has(agentId)) return [];
   const allow = new Set(state.policies.get(agentId)?.subagents ?? []);
   return [...subagentsOf(state).values()]
     .filter((h) => allow.has(h.id))
