@@ -195,7 +195,31 @@ Before any candidate image layer containing adopted skills is activated for an a
 
 ---
 
-## 7. Language Support (RT2)
+## 7. Admin-Managed Default Skills (`GAP-216`, `SK3`, `CF6`)
+
+Administrators can configure a baseline catalog of **Default Skills** (`GET /api/v1/skills/defaults`, `PUT /api/v1/skills/defaults`) that newly created or converted configuration agents automatically inherit:
+
+### Configuration & Eligibility
+- **Privileges**: Reading default skills requires `skills.read` (all roles); configuring defaults requires `skills.defaults.set` (`admin` only).
+- **Public & Approved Only**: Every configured default skill version `{ id, version }` must be public, approved, and unretired (`canAdopt(registry, '__default__', id, version).ok`). Unapproved, private, retired, or missing skills are rejected with `HTTP 409` or `HTTP 404`.
+- **Atomic Persistence (`R1`, `GAP-056`)**: Persisted atomically to `skill-defaults.json` in the registry directory and served from memory.
+- **Audit Ledger**: Setting default skills appends a cryptographic action `'DEFAULT_SKILLS_SET'` to the factory ledger.
+
+### Automatic Seeding Workflow
+1. **Agent Creation (`POST /api/v1/agents` and `agent-builder` `publish`)**: Configured default skills are automatically seeded into initial agent configuration with provenance recorded as `approvedBy: "factory:defaults"`.
+2. **Repository Conversion (`POST /api/v1/agents/:id/convert`)**: Converted repository agents automatically adopt default skills unless overridden or opted out.
+3. **Custom Version Wins**: If the creation or conversion payload explicitly specifies a version for a default skill, the explicitly requested version is used instead.
+4. **Opting Out**: Callers can opt out of individual default skills via `"excludeDefaultSkills": ["id"]` or opt out entirely via `"includeDefaultSkills": false`. (Bundle imports `POST /api/v1/agents/import` automatically pass `includeDefaultSkills: false` to ensure exact reproduction).
+5. **Post-Creation Lifecycle**: Once seeded, default skills become regular agent adoptions. Skill upgrades (`SK5`) and removals (`SK6`) remain strictly owner-controlled: default skills are never forced back onto existing agents if upgraded or removed from fleet defaults.
+6. **Automatic Catalog Pruning**: If a skill version is retired (`POST /api/v1/registry/skills/:id/retire`), revoked/rejected, or unpublished, any matching default skill entries are automatically pruned from defaults.
+
+### Console UI
+- In the Console **Skills** catalog view, default skills display a `Default · <version>` badge.
+- Administrators can toggle default status or select the default version for any public, approved skill directly from the expanded skill card.
+
+---
+
+## 8. Language Support (RT2)
 
 **Skills are Python only. That is the current implementation, not a design limit:** the factory's skill checks and runtime run Python 3.11+. Other languages may be supported in future updates to the checks and runtime.
 

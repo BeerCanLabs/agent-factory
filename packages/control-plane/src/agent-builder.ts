@@ -21,7 +21,7 @@ import type { Role, Principal } from '@beercanlabs/factory-auth';
 import type { Run } from '@beercanlabs/factory-property-manager';
 import { json, readJson, type FactoryState } from './app.js';
 import { createFromConfiguration, discardCreated } from './agent-creation.js';
-import { skillRegistry, adoptionStore, requestAdoptionFor } from './skills.js';
+import { skillRegistry, adoptionStore, requestAdoptionFor, activeDefaultSkills } from './skills.js';
 
 export const ARCHETYPES = ['purpose-built', 'personal-assistant', 'team-member'] as const;
 
@@ -200,6 +200,19 @@ export function validateBuilderSpec(state: FactoryState, spec: unknown): Builder
     skillsToAdopt.push({ id: skillId, version });
   }
 
+  const excludeDefaults = new Set<string>(
+    Array.isArray(s.excludeDefaultSkills)
+      ? s.excludeDefaultSkills.filter((x): x is string => typeof x === 'string')
+      : [],
+  );
+  if (s.includeDefaultSkills !== false) {
+    for (const def of activeDefaultSkills(state)) {
+      if (!excludeDefaults.has(def.id)) {
+        adoptableSkillIds.add(def.id);
+      }
+    }
+  }
+
   for (const r of settings.settings.roles ?? []) {
     for (const skill of Object.keys(r.skills)) {
       if (skill !== '*' && !adoptableSkillIds.has(skill)) {
@@ -272,6 +285,7 @@ export async function handleAgentBuilder(
       ok: true,
       archetypes: [...ARCHETYPES],
       skills,
+      defaultSkills: activeDefaultSkills(state),
       models: models.length ? models : [defaultModel],
       defaultModel,
     });
@@ -313,6 +327,11 @@ export async function handleAgentBuilder(
     const role = typeof s.role === 'string' && s.role.trim() ? s.role.trim() : 'Agent';
     const model = typeof s.model === 'string' && s.model.trim() ? s.model.trim() : undefined;
 
+    const userExclude = Array.isArray(s.excludeDefaultSkills)
+      ? (s.excludeDefaultSkills as unknown[]).filter((x): x is string => typeof x === 'string')
+      : [];
+    const excludeDefaultSkills = Array.from(new Set([...userExclude, ...validation.skillsToAdopt.map((sk) => sk.id)]));
+
     const created = await createFromConfiguration(state, humanCaller, {
       id,
       name,
@@ -322,6 +341,8 @@ export async function handleAgentBuilder(
       roles: s.roles,
       memory: s.memory,
       rolesMayNameSkills: validation.adoptableSkillIds,
+      includeDefaultSkills: s.includeDefaultSkills as boolean | undefined,
+      excludeDefaultSkills,
       reason: 'created by agent-builder',
     });
 

@@ -129,7 +129,14 @@ Content-Type: application/json
 
 - **Creator Becomes Owner:** The authenticated caller is recorded as `owners: [principal.actor]`.
 - **Initial State (`PENDING_BUDGET`):** The agent starts with no egress access or budget until an admin sets its policy (`E7`).
-- **Role Skill Ceiling (`CF2`):** On initial creation via `POST /api/v1/agents`, the agent has not adopted any skills yet, so `roles` may only reference `"*"`. To restrict a role to specific skill IDs, adopt the skills first (`POST /api/v1/agents/:id/skills`) and then update `roles` via `PUT /api/v1/agents/:id/settings`:
+- **Admin-Managed Default Skills & Automatic Seeding (`GAP-216`, `SK3`, `CF6`):** Any default skills configured by administrators (`GET/PUT /api/v1/skills/defaults`) are automatically seeded into the agent's initial skills configuration upon creation (with provenance recorded as `approvedBy: "factory:defaults"`).
+  - **Explicit Initial Skills (`skills`):** Callers can pass initial skills directly in the creation payload:
+    ```json
+    "skills": [{ "id": "tavily-search", "version": "1.0.0" }]
+    ```
+    If an explicit version is specified for a skill that is also a default skill, the explicit version takes precedence ("custom version wins").
+  - **Opting Out:** Callers can exclude specific default skills via `"excludeDefaultSkills": ["skill-id"]` or opt out of all defaults via `"includeDefaultSkills": false`. (Bundle imports `POST /api/v1/agents/import` automatically pass `includeDefaultSkills: false` to ensure exact reproduction).
+- **Role Skill Ceiling (`CF2`):** On initial creation via `POST /api/v1/agents`, `roles` may reference any adopted skills (both explicitly supplied skills and automatically seeded default skills). Any role referencing an unadopted skill is rejected with `HTTP 422 unknown_skill`. Additional skills can be adopted post-creation via `POST /api/v1/agents/:id/skills`, and role mappings updated via `PUT /api/v1/agents/:id/settings`:
   ```http
   POST /api/v1/agents/research-assistant/skills
   Authorization: Bearer <owner-or-admin-token>
@@ -489,18 +496,19 @@ Content-Type: application/json
 #### What Happens Internally:
 1. Validates that the agent exists, is not a built-in agent, is not retired/purged, has an active policy with at least one route, and is not already a configuration agent (`createdFrom !== 'configuration'`).
 2. Validates `soul`, `memory.archetype` (`AM1`), `roles` skill references (`CF2`), and each adopted skill version's approval/visibility status.
-3. Verifies route coverage (`422 uncovered_routes` if uncovered routes exist and `dropUncoveredRoutes !== true`).
-4. Snapshots the pre-conversion agent record and policy, sets `createdFrom: 'configuration'`, pins `agent.repo = pin.repo` and `agent.commit = pin.commit` to the shared runtime, and stages `pendingConfig` so the smoke container reads the candidate configuration.
-5. **Zero Skills vs. Adopted Skills Build & Smoke:**
+3. Automatically seeds admin-managed default skills (`GAP-216`, `SK3`, `CF6`) into the candidate skills list unless an explicit version for that skill ID is present in `skills` or opted out via `"includeDefaultSkills": false` or `"excludeDefaultSkills": ["..."]`.
+4. Verifies route coverage against the unified set of candidate skills (`422 uncovered_routes` if uncovered routes exist and `dropUncoveredRoutes !== true`).
+5. Snapshots the pre-conversion agent record and policy, sets `createdFrom: 'configuration'`, pins `agent.repo = pin.repo` and `agent.commit = pin.commit` to the shared runtime, and stages `pendingConfig` so the smoke container reads the candidate configuration.
+6. **Zero Skills vs. Adopted Skills Build & Smoke:**
    - With zero skills: registers compute on `pin.image` and runs `runActivationSmoke`.
    - With adopted skills: invokes `runDeploy` (`factory-skills-builder` layered image build + `runActivationSmoke`).
-6. **On Smoke Pass:**
+7. **On Smoke Pass:**
    - Commits the new versioned configuration record to `config.json` with `source: { repo: pin.repo, commit: pin.commit }`, `skills`, and `agent` settings.
    - Keeps `createdFrom: 'configuration'` and keeps `agent.repo` and `agent.commit` pinned to the shared runtime (`pin.repo`, `pin.commit`).
    - Deletes legacy cartridge-specific fields from the agent record (`skillIds`, `skillRoutes`, `roles`, `admission`, and `pendingConfig`).
    - Transitions `state` to `'SLEEPING'`, saves the agent record, and records `CONFIG_VERSIONED`, `AGENT_DEPLOYED`, and `AGENT_CONVERTED` in the ledger.
    - Returns `HTTP 200 OK` with `{ ok: true, id, createdFrom: "configuration", state: "SLEEPING", artifact, deployedRuntime, configurationVersion, smoke: { ok: true } }`.
-7. **On Smoke or Build Failure:**
+8. **On Smoke or Build Failure:**
    - Restores the pre-conversion snapshot (previous `createdFrom`, `repo`, `commit`, `artifact`, `state`, `roles`, `skillIds`, `skillRoutes`, `admission`, and `policy`) and re-registers the previous compute definition.
    - Records `AGENT_SMOKE_FAILED` in the ledger and returns `HTTP 502` (`smoke_failed` or `convert_deploy_failed`). The repository agent remains online and operational on its previous image.
 

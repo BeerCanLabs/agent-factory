@@ -1,4 +1,4 @@
-import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, AgentRolesInfo, AgentSkills, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident, StoredModel, StagedModel, ModelsCatalogResponse, ScanModelsResponse, AdmitModelRequest, AgentModelsState, SetAgentModelsInput } from './types.js';
+import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, AgentRolesInfo, AgentSkills, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident, StoredModel, StagedModel, ModelsCatalogResponse, ScanModelsResponse, AdmitModelRequest, AgentModelsState, SetAgentModelsInput, DefaultSkillEntry, DefaultSkillsResponse } from './types.js';
 
 
 const API_BASE = '/api/v1';
@@ -437,6 +437,18 @@ export const factoryApi = {
 
   async rerunSkillChecks(id: string, version: string): Promise<SkillVersion> {
     return request<SkillVersion>(`/registry/skills/${encodeURIComponent(id)}/versions/${encodeURIComponent(version)}/checks`, { method: 'POST' });
+  },
+
+  // Default skills (GAP-216, TSK-292, SK3, CF6)
+  async getDefaultSkills(): Promise<DefaultSkillsResponse> {
+    return request<DefaultSkillsResponse>('/skills/defaults');
+  },
+
+  async setDefaultSkills(skills: DefaultSkillEntry[], reason?: string): Promise<DefaultSkillsResponse & { ok: boolean }> {
+    return request<DefaultSkillsResponse & { ok: boolean }>('/skills/defaults', {
+      method: 'PUT',
+      body: JSON.stringify({ skills, ...(reason ? { reason } : {}) }),
+    });
   },
 
   // Register New Cartridge

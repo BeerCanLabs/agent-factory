@@ -107,6 +107,8 @@ export const PRIVILEGES = [
   'agents.models.read',
   'agents.models.set',
   'egress.models.failover',
+  // TSK-292: Admin-managed default skills (GAP-216)
+  'skills.defaults.set',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -311,6 +313,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'skills.unpublish',
     'skills.retire.force',
     'runtime.set',
+    'skills.defaults.set',
   ],
 };
 

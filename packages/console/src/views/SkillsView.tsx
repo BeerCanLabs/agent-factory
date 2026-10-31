@@ -162,6 +162,35 @@ export const SkillsView: React.FC = () => {
     }
   };
 
+  const handleSetDefault = async (id: string, version: string | null) => {
+    setError(null);
+    setNotice(null);
+    try {
+      const current = await factoryApi.getDefaultSkills();
+      const currentSkills = current.skills ?? [];
+      let nextSkills: Array<{ id: string; version: string }>;
+      if (version) {
+        nextSkills = [
+          ...currentSkills.filter((s) => s.id !== id),
+          { id, version },
+        ];
+      } else {
+        nextSkills = currentSkills.filter((s) => s.id !== id);
+      }
+      await factoryApi.setDefaultSkills(nextSkills);
+      setNotice(
+        version
+          ? `Set ${id}@${version} as default skill for new agents.`
+          : `Removed ${id} from default skills.`,
+      );
+      await load();
+      await loadDetail(id);
+    } catch (err) {
+      const body = err instanceof ApiError ? err.body : null;
+      setError(`Could not update default skill ${id}: ${body?.message ?? errorText(err)}`);
+    }
+  };
+
   const onRegistered = (v: SkillVersion) => {
     setRegistering(false);
     setNotice(
@@ -276,6 +305,7 @@ export const SkillsView: React.FC = () => {
               setNotice(null);
               setRetiring(sk);
             }}
+            onSetDefault={handleSetDefault}
           />
         ))}
       </div>

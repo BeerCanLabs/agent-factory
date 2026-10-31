@@ -8,7 +8,9 @@ import {
   adopterCounts,
   adopterRows,
   adoptionRequestCount,
+  approvedVersions,
   canRetire,
+  canSetDefaultSkill,
   decisionLabel,
   filterSkills,
   holdKind,
@@ -218,5 +220,32 @@ describe('formatting', () => {
     assert.equal(sourceLinks({ ...pin, path: '.' }).pin, `https://github.com/BeerCanLabs/skills/tree/${'b'.repeat(40)}`);
     assert.deepEqual(sourceLinks({ ...pin, repo: 'https://git.example.test/x/y' }), { repo: 'https://git.example.test/x/y', pin: 'https://git.example.test/x/y' });
     assert.deepEqual(sourceLinks({ ...pin, repo: 'not a url' }), { repo: 'not a url', pin: 'not a url' });
+  });
+});
+
+describe('default skills (GAP-216, SK3, CF6)', () => {
+  const v1 = version({ version: '1.0.0', status: 'approved' });
+  const v2 = version({ version: '2.0.0', status: 'approved' });
+  const vPending = version({ version: '3.0.0', status: 'pending' });
+  const vRevoked = version({ version: '0.9.0', status: 'rejected', revoked: true });
+  const vRetired = version({ version: '1.5.0', status: 'approved', retired: true });
+
+  it('extracts approved, unretired, unrevoked versions', () => {
+    const s = skill({ versions: [vRevoked, v1, vRetired, v2, vPending] });
+    assert.deepEqual(approvedVersions(s), ['1.0.0', '2.0.0']);
+    assert.deepEqual(approvedVersions({ versions: [] }), []);
+  });
+
+  it('determines whether an admin may configure a default skill', () => {
+    const pubSkill = skill({ visibility: 'public', versions: [v1] });
+    const privSkill = skill({ visibility: 'private', owner: 'higgins', versions: [v1] });
+    const retiredSkill = skill({ visibility: 'public', retired: true, versions: [v1] });
+    const noApprovedSkill = skill({ visibility: 'public', versions: [vPending] });
+
+    assert.equal(canSetDefaultSkill(pubSkill, { canDecideSkills: true }), true);
+    assert.equal(canSetDefaultSkill(pubSkill, { canDecideSkills: false }), false, 'needs canDecideSkills');
+    assert.equal(canSetDefaultSkill(privSkill, { canDecideSkills: true }), false, 'private skill cannot be default');
+    assert.equal(canSetDefaultSkill(retiredSkill, { canDecideSkills: true }), false, 'retired skill cannot be default');
+    assert.equal(canSetDefaultSkill(noApprovedSkill, { canDecideSkills: true }), false, 'needs at least one approved version');
   });
 });

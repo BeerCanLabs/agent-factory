@@ -90,6 +90,8 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/spend/budgets', privilege: 'spend.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/approvals', privilege: 'approvals.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/skills', privilege: 'skills.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/skills/defaults', privilege: 'skills.read', role: 'viewer' },
+  { method: 'PUT', path: '/api/v1/skills/defaults', privilege: 'skills.defaults.set', role: 'admin', body: { skills: [] } },
   { method: 'GET', path: `/api/v1/skills/${SKILL}`, privilege: 'skills.read', role: 'viewer' },
   { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1`, privilege: 'skills.read', role: 'viewer' },
   { method: 'POST', path: '/api/v1/registry/skills', privilege: 'skills.register', role: 'admin', body: {} },

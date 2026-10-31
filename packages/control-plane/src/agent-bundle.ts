@@ -56,6 +56,7 @@ export async function handleAgentBundle(state: FactoryState, req: http.IncomingM
     // A role may name only a skill this very agent can be given (approved, not retired, public or its own): anything else would be a ceiling that is not there (CF2).
     rolesMayNameSkills: new Set(bundle.skills.filter((s) => canAdopt(skillRegistry(state), bundle.agent.id, s.id, s.version).ok).map((s) => s.id)),
     reason: 'imported from a bundle',
+    includeDefaultSkills: false,
   });
   if (created.status !== 201) return json(res, created.status, created.body), true;
   const id = bundle.agent.id;

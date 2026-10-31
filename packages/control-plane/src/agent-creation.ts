@@ -11,13 +11,14 @@
  */
 import http from 'node:http';
 import { payloadHash } from '@beercanlabs/factory-ledger';
-import { AGENT_ID, BUILTIN_AGENT_IDS, FULL_SHA, applySettingsChange, beginAdmission, canAdopt, changedParts, registryOf, loadSharedRuntime, saveSharedRuntime, visibilityOf, ownerOf, type SharedRuntimePin, type AgentRecord } from '@beercanlabs/factory-registrar';
+import { SEMVER, SKILL_ID } from '@beercanlabs/factory-contract';
+import { AGENT_ID, BUILTIN_AGENT_IDS, FULL_SHA, applySettingsChange, beginAdmission, canAdopt, changedParts, registryOf, loadSharedRuntime, saveSharedRuntime, visibilityOf, ownerOf, type SharedRuntimePin, type AgentRecord, type SkillAdoptionProvenance } from '@beercanlabs/factory-registrar';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { applyConfig, buildSkillsFor, runDeploy } from './apply.js';
 import { changeReason, configOf, ledgerVersion, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type Run } from '@beercanlabs/factory-property-manager';
 import { runActivationSmoke } from './smoke.js';
-import { skillRegistry } from './skills.js';
+import { skillRegistry, activeDefaultSkills } from './skills.js';
 
 export { loadSharedRuntime, saveSharedRuntime, type SharedRuntimePin };
 
@@ -74,6 +75,9 @@ export type NewConfiguredAgent = {
   soul?: unknown;
   roles?: unknown;
   memory?: unknown;
+  skills?: unknown;
+  includeDefaultSkills?: unknown;
+  excludeDefaultSkills?: unknown;
   /** Skill ids a role may name although the agent has not adopted them yet: an import's skills are adopted afterwards, by an admin (CF3, CF5). */
   rolesMayNameSkills?: ReadonlySet<string>;
   reason?: string;
@@ -97,10 +101,68 @@ export async function createFromConfiguration(state: FactoryState, principal: { 
   const settings = applySettingsChange(undefined, Object.fromEntries(Object.entries(given).filter(([, v]) => v !== undefined)));
   if (!settings.ok) return { status: 400, body: { error: 'invalid_settings', message: settings.error } };
   if (!settings.settings.memory?.archetype) return { status: 422, body: { error: 'archetype_required', message: 'memory.archetype is required: purpose-built, personal-assistant or team-member (AM1)' } };
-  // No skills are adopted yet, so a role can name none (CF2): they are adopted afterwards, then named.
+
+  const initialSkills: Array<{ id: string; version: string }> = [];
+  const seenSkillIds = new Set<string>();
+
+  if (spec.skills !== undefined) {
+    if (!Array.isArray(spec.skills)) {
+      return { status: 400, body: { error: 'invalid_skills', message: 'skills must be an array' } };
+    }
+    const registry = skillRegistry(state);
+    for (const item of spec.skills) {
+      if (!item || typeof item !== 'object') {
+        return { status: 400, body: { error: 'invalid_skills', message: 'skill entry must be an object' } };
+      }
+      const s = item as { id?: unknown; version?: unknown };
+      if (typeof s.id !== 'string' || !SKILL_ID.test(s.id) || typeof s.version !== 'string' || !SEMVER.test(s.version)) {
+        return { status: 400, body: { error: 'invalid_skills', message: 'each skill needs a valid id and semantic version' } };
+      }
+      if (seenSkillIds.has(s.id)) {
+        return { status: 400, body: { error: 'duplicate_skill', message: `duplicate skill id ${s.id}` } };
+      }
+      const check = canAdopt(registry, id, s.id, s.version, { agentOwners: [principal.actor] });
+      if (!check.ok) {
+        const status = check.error === 'not_found' ? 404 : check.error === 'skill_private' ? 403 : 409;
+        return { status, body: { error: check.error, message: check.message } };
+      }
+      seenSkillIds.add(s.id);
+      initialSkills.push({ id: s.id, version: s.version });
+    }
+  }
+
+  const excludeSet = new Set<string>(
+    Array.isArray(spec.excludeDefaultSkills)
+      ? spec.excludeDefaultSkills.filter((x): x is string => typeof x === 'string')
+      : [],
+  );
+  if (spec.includeDefaultSkills !== false) {
+    for (const def of activeDefaultSkills(state)) {
+      if (!seenSkillIds.has(def.id) && !excludeSet.has(def.id)) {
+        seenSkillIds.add(def.id);
+        initialSkills.push({ id: def.id, version: def.version });
+      }
+    }
+  }
+
+  // CF2: Roles may name adopted skills or rolesMayNameSkills
+  const allowedRoleSkills = new Set<string>([
+    ...(spec.rolesMayNameSkills ?? []),
+    ...initialSkills.map((s) => s.id),
+  ]);
   for (const r of settings.settings.roles ?? []) {
     for (const skill of Object.keys(r.skills)) {
-      if (skill !== '*' && !spec.rolesMayNameSkills?.has(skill)) return { status: 422, body: { error: 'unknown_skill', role: r.name, skill, message: `role "${r.name}" names skill "${skill}", which a new agent has not adopted` } };
+      if (skill !== '*' && !allowedRoleSkills.has(skill)) {
+        return {
+          status: 422,
+          body: {
+            error: 'unknown_skill',
+            role: r.name,
+            skill,
+            message: `role "${r.name}" names skill "${skill}", which a new agent has not adopted`,
+          },
+        };
+      }
     }
   }
   const model = typeof spec.model === 'string' && spec.model ? spec.model : (state.defaultModel ?? 'gemini-2.0-flash');
@@ -129,9 +191,28 @@ export async function createFromConfiguration(state: FactoryState, principal: { 
   state.agents.set(id, record);
   try {
     const parts = changedParts(undefined, settings.settings);
+    const nowIso = new Date().toISOString();
+    const explicitSet = new Set(
+      Array.isArray(spec.skills)
+        ? spec.skills.map((s: any) => s?.id).filter(Boolean)
+        : [],
+    );
+    const adoptions: SkillAdoptionProvenance[] = initialSkills.map((s) => ({
+      id: s.id,
+      version: s.version,
+      requestedBy: principal.actor,
+      requestedAt: nowIso,
+      approvedBy: explicitSet.has(s.id) ? principal.actor : 'factory:defaults',
+      approvedAt: nowIso,
+    }));
+
     const { record: stored } = await state.configs.put(
-      { ...configOf(state, id), skills: [], owners: [principal.actor.toLowerCase()], agent: settings.settings },
-      { updatedBy: principal.actor, reason: spec.reason ?? 'created from a configuration' },
+      { ...configOf(state, id), skills: initialSkills, owners: [principal.actor.toLowerCase()], agent: settings.settings },
+      {
+        updatedBy: principal.actor,
+        reason: spec.reason ?? 'created from a configuration',
+        skillAdoptions: adoptions.length ? adoptions : undefined,
+      },
     );
     registryOf(state).save(record);
     ledgerVersion(state, stored, principal.actor);
@@ -145,7 +226,16 @@ export async function createFromConfiguration(state: FactoryState, principal: { 
       requestId: `config:${id}:v${stored.version}`,
       payloadSha256: payloadHash({ parts, hash: stored.hash }),
     });
-    return { status: 201, body: { ...record, owners: stored.owners ?? [], configurationVersion: stored.version }, record };
+    return {
+      status: 201,
+      body: {
+        ...record,
+        owners: stored.owners ?? [],
+        configurationVersion: stored.version,
+        skills: stored.skills ?? [],
+      },
+      record,
+    };
   } catch (err) {
     await discardCreated(state, id, principal.actor, 'creation failed');
     console.error(`[control-plane] agent ${id} not created: ${err instanceof Error ? err.message : String(err)}`);
@@ -158,7 +248,18 @@ export async function handleAgentCreation(state: FactoryState, req: http.Incomin
   const principal = await requirePrivilege(req, res, state, 'agents.create');
   if (!principal) return true;
   const body = (await readJson(req)) as Record<string, unknown>;
-  const out = await createFromConfiguration(state, principal, { id: body.id, name: body.name, role: body.role, model: body.model, soul: body.soul, roles: body.roles, memory: body.memory });
+  const out = await createFromConfiguration(state, principal, {
+    id: body.id,
+    name: body.name,
+    role: body.role,
+    model: body.model,
+    soul: body.soul,
+    roles: body.roles,
+    memory: body.memory,
+    skills: body.skills,
+    includeDefaultSkills: body.includeDefaultSkills,
+    excludeDefaultSkills: body.excludeDefaultSkills,
+  });
   json(res, out.status, out.body);
   return true;
 }
@@ -535,6 +636,21 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     validatedSkills.push({ id: skillItem.id, version: skillItem.version });
   }
 
+  const excludeDefaultSkills = new Set<string>(
+    Array.isArray(body.excludeDefaultSkills)
+      ? body.excludeDefaultSkills.filter((x): x is string => typeof x === 'string')
+      : [],
+  );
+  if (body.includeDefaultSkills !== false) {
+    const existingIds = new Set(validatedSkills.map((s) => s.id));
+    for (const def of activeDefaultSkills(state)) {
+      if (!existingIds.has(def.id) && !excludeDefaultSkills.has(def.id)) {
+        existingIds.add(def.id);
+        validatedSkills.push({ id: def.id, version: def.version });
+      }
+    }
+  }
+
   if (validatedSkills.length > 0 && !dp.buildSkillsImage) {
     json(res, 409, {
       error: 'skills_image_not_supported',
@@ -716,12 +832,13 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
 
     // Once deploy + activation smoke succeeds:
     const nowIso = new Date().toISOString();
+    const explicitSkills = new Set(rawSkills.map((s: any) => s?.id).filter(Boolean));
     const adoptions = validatedSkills.map((s) => ({
       id: s.id,
       version: s.version,
       requestedBy: principal.actor,
       requestedAt: nowIso,
-      approvedBy: principal.actor,
+      approvedBy: explicitSkills.has(s.id) ? principal.actor : 'factory:defaults',
       approvedAt: nowIso,
     }));
 
