@@ -46,7 +46,7 @@ import { handleCredentials } from './credentials.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
-import { handleSubagents, type SubagentRecord } from './subagents.js';
+import { allowedSubagents, handleSubagents, type SubagentRecord } from './subagents.js';
 import { agentConfigForRun, deployConfigured, handleAgentCreation, handleConvertAgent, handleRuntimeRoutes, registrationRefusal, type SharedRuntimePin } from './agent-creation.js';
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
@@ -1308,6 +1308,11 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
         description: 'List the models this factory approves (names only) and the default',
         inputSchema: { type: 'object', properties: {} },
       },
+      {
+        name: 'list_subagents',
+        description: 'List the helper agents (subagents) this agent may start: id, name and description',
+        inputSchema: { type: 'object', properties: {} },
+      },
     ];
     if (canManage.allowed) {
       tools.push({
@@ -1330,6 +1335,9 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
     const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
     if (params.name === 'list_models') {
       return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(approvedModels(state)) }] } };
+    }
+    if (params.name === 'list_subagents') {
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify({ subagents: allowedSubagents(state, run.agentId) }) }] } };
     }
     if (params.name === 'get_agent_models') {
       const pol = state.policies.get(run.agentId);
@@ -2251,6 +2259,15 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (runApproved && req.method === 'GET') {
     if (!(await authenticateRun(req, res, state, runApproved[1]))) return;
     json(res, 200, approvedModels(state));
+    return;
+  }
+
+  // E1.3: a run lists the helpers its agent may start (admin-set policy allow-list), with its own run token.
+  const runSubagents = path.match(/^\/api\/v1\/runs\/([^/]+)\/subagents$/);
+  if (runSubagents && req.method === 'GET') {
+    const run = await authenticateRun(req, res, state, runSubagents[1]);
+    if (!run) return;
+    json(res, 200, { subagents: allowedSubagents(state, run.agentId) });
     return;
   }
 
