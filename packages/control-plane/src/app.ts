@@ -2319,6 +2319,28 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
+  // #319: a running agent wakes a named agent on its own admin-set `wakeAgents` allow-list, with its run token. The
+  // fallback/global policy never counts (see #312), and a helper run never wakes anyone.
+  const runWake = path.match(/^\/api\/v1\/runs\/([^/]+)\/wake\/([^/]+)$/);
+  if (runWake && req.method === 'POST') {
+    const run = await authenticateRun(req, res, state, runWake[1]);
+    if (!run) return;
+    const target = decodeURIComponent(runWake[2]);
+    const caller = state.agents.get(run.agentId);
+    const allowed = Boolean(caller && !caller.ephemeral && !run.parentRunId && state.policies.has(run.agentId) && (state.policies.get(run.agentId).wakeAgents ?? []).includes(target));
+    const actor = `run:${run.agentId}:${run.runId}`;
+    if (!allowed || target === run.agentId) {
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: target, type: 'action', action: 'RUN_WAKE_REFUSED', actor });
+      return json(res, 403, { error: 'wake_not_allowed', message: `${run.agentId} may not wake ${target}` });
+    }
+    const body = await readJson(req);
+    const badModel = badRunModel(body.model);
+    if (badModel) return json(res, 400, { error: badModel });
+    const out = await createRun(state, target, { actor, trigger: 'agent', input: body.input, model: body.model as string | undefined });
+    json(res, out.status, out.body);
+    return;
+  }
+
   const runModels = path.match(/^\/api\/v1\/runs\/([^/]+)\/models$/);
   if (runModels && (req.method === 'GET' || req.method === 'PUT')) {
     const run = await authenticateRun(req, res, state, runModels[1]);
@@ -4065,6 +4087,11 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
     // #312: a helper allow-list is per agent only; a global/default policy may not carry one.
     if (checked.policy.subagents !== undefined) {
       json(res, 400, { error: 'subagents are set per agent, never in the global policy' });
+      return;
+    }
+    // #319: a wake allow-list is per agent only; a global/default policy may not carry one.
+    if (checked.policy.wakeAgents !== undefined) {
+      json(res, 400, { error: 'wakeAgents are set per agent, never in the global policy' });
       return;
     }
     state.policies.set('__global__', checked.policy);
