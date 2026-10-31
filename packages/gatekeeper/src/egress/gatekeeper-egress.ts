@@ -254,7 +254,8 @@ function isHostAllowed(policy: Policy, routes: Map<string, Route>, destHost: str
   for (const rId of policy.routes) {
     const r = routes.get(rId);
     // Connection routes are reachable only through the gatekeeper-egress's token injection, never as a raw tunnel host.
-    if (r?.upstream && !r.connection) {
+    // E3.1: neither are read-only routes; a raw tunnel would skip the read-only check.
+    if (r?.upstream && !r.connection && !r.readOnly) {
       try {
         allowed.add(new URL(r.upstream).hostname);
       } catch {}

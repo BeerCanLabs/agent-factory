@@ -127,6 +127,47 @@ describe('a read-only github route (E3.1)', { concurrency: false }, () => {
   });
 });
 
+describe('a read-only route is never a raw tunnel host (E3.1 review)', { concurrency: false }, () => {
+  let gk: http.Server;
+  let port = 0;
+  const ctx: RunContext = { run: { runId: 'ro-tunnel', agentId: 'juror', state: 'WORKING', live: true }, agentState: 'WORKING', policy: { routes: ['github', 'other'] }, spend: { run: 0, day: 0, month: 0 } };
+  before(async () => {
+    gk = createGatekeeperEgress({
+      routes: [
+        { id: 'github', kind: 'http', upstream: 'https://ro-github.invalid', readOnly: true },
+        { id: 'other', kind: 'http', upstream: 'https://rw-host.invalid' },
+      ],
+      prices: {},
+      runTokens: tokens,
+      control: {
+        async runContext(runId) { return runId === ctx.run.runId ? structuredClone(ctx) : null; },
+        async requestApproval() { return { approvalId: 'unused', state: 'pending' }; },
+        async consumeApproval() { return false; },
+        async ledger() {},
+      },
+      providers: [],
+      contextTtlMs: 0,
+    });
+    await new Promise<void>((r) => gk.listen(0, '127.0.0.1', r));
+    port = (gk.address() as { port: number }).port;
+  });
+  after(async () => { await new Promise<void>((r) => gk.close(() => r())); });
+  const connect = async (host: string) => {
+    const token = await tokens.mint({ runId: 'ro-tunnel', agentId: 'juror' });
+    return new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, method: 'CONNECT', path: `${host}:443`, headers: { 'proxy-authorization': `Bearer ${token}`, authorization: `Bearer ${token}` } });
+      req.on('connect', (res, socket) => { socket.destroy(); resolve(res.statusCode ?? 0); });
+      req.on('response', (res) => resolve(res.statusCode ?? 0));
+      req.on('error', reject);
+      req.end();
+    });
+  };
+  it('refuses a CONNECT tunnel to a read-only route host, while a normal route host is still allowed past the host check', async () => {
+    assert.equal(await connect('ro-github.invalid'), 403);
+    assert.notEqual(await connect('rw-host.invalid'), 403);
+  });
+});
+
 describe('read-only route validation and the GraphQL lexer', () => {
   it('readOnly must be a boolean', () => {
     const route = (readOnly: unknown) => ({ id: 'github', kind: 'http' as const, upstream: 'https://api.github.com', readOnly: readOnly as boolean });
