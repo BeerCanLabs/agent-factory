@@ -202,4 +202,9 @@ export type DeployProvider = {
   /** `memoryPrefix`: the agent's mind prefix; the runtime must hand it to the shim (MEMORY_STORE_URI + MEMORY_PREFIX). */
   /** `launchEnv`: non-secret environment the Landlord names at launch (SK4: where the skills manifest is). */
   registerCompute(agentId: string, imageUri: string, secrets: string[], identity: string, executionIdentity?: string, memoryPrefix?: string, launchEnv?: Record<string, string>): Promise<void>;
+  /**
+   * E1.4 (#295): the shared compute for one helper definition: no secrets and no mind-bucket access. Helper runs start on
+   * it (AgentRecord.computeId). A provider without it cannot run helpers, and spawning is refused.
+   */
+  provisionHelperCompute?(computeId: string, imageUri: string): Promise<void>;
 };

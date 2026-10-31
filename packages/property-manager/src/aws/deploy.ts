@@ -18,6 +18,11 @@ export function awsDeployProvider(): DeployProvider {
       return { identity: taskRoleArn, executionIdentity: executionRoleArn };
     },
 
+    async provisionHelperCompute(computeId: string, imageUri: string): Promise<void> {
+      const { taskRoleArn, executionRoleArn } = await provisionAgentRoles(computeId, [], { memory: false });
+      await registerAgentTaskDefinition(computeId, imageUri, [], taskRoleArn, executionRoleArn, computeId);
+    },
+
     async registerCompute(
       agentId: string,
       imageUri: string,

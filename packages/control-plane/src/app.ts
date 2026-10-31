@@ -116,6 +116,8 @@ export type FactoryState = {
   runtime: Runtime;
   /** Provider-specific deploy lifecycle (build → identity → compute). Absent = deploy endpoint returns 501. */
   deployProvider?: DeployProvider;
+  /** E1.4 (#295): helper computes provisioned in this process, by compute id, with the image each was made for. */
+  helperCompute?: Map<string, string>;
   /** RT1: the shared runtime version new agents are pinned to (FACTORY_RUNTIME_*). Absent: new agents cannot be created. */
   sharedRuntime?: SharedRuntimePin;
   /** CF6: refuse to register a new agent id from a repository; new agents are created from a configuration. Set in production. */

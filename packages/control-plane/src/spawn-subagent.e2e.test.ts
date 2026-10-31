@@ -130,6 +130,25 @@ describe('spawn_subagent (E1.4)', { concurrency: false }, () => {
     assert.deepEqual(helperIds(), []);
   });
 
+  it('a deploy provider gets one shared helper compute per helper and image; one without it refuses (501)', async () => {
+    const made: string[] = [];
+    state.deployProvider = { provisionHelperCompute: async (id: string, image: string) => void made.push(`${id}@${image}`) } as any;
+    try {
+      for (let i = 0; i < 2; i++) {
+        const r = await spawn('reviewer', { subagent: 'juror', model: 'grok-4', prompt: 'x' });
+        assert.equal(state.agents.get(state.runs.get(r.body.runId)!.agentId)!.computeId, '__helper_juror');
+        await finishRun(state, r.body.runId, 'DONE', { actor: 'test' });
+      }
+      assert.deepEqual(made, ['__helper_juror@runtime:test']);
+      state.deployProvider = {} as any;
+      const no = await spawn('reviewer', { subagent: 'juror', model: 'grok-4', prompt: 'x' });
+      assert.equal(no.status, 501);
+      assert.deepEqual(helperIds(), []);
+    } finally {
+      delete (state as any).deployProvider;
+    }
+  });
+
   it('a missing or wrong run token is refused', async () => {
     assert.equal((await call(port, `/api/v1/runs/${runs.reviewer.runId}/subagents/spawn`, 'POST', undefined, {})).status, 401);
     assert.equal((await call(port, `/api/v1/runs/${runs.reviewer.runId}/subagents/spawn`, 'POST', runs.other.token, {})).status, 401);

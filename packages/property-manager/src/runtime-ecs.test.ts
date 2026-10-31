@@ -57,6 +57,14 @@ describe('ecsRuntime', () => {
     assert.equal(args.includes('ECHO_WEBHOOK_SECRET'), false);
   });
 
+  it('a helper run starts on its shared helper compute, not a family of its own (E1.4)', async () => {
+    const { rt, calls } = fake();
+    const helper = { ...echo, id: 'juror.helper.abc', provider: 'cloud', computeId: '__helper_juror' } as AgentRecord;
+    await rt.start(helper, {}, { runId: 'run-h', runEnv: {} });
+    const args = calls[0];
+    assert.equal(args[args.indexOf('--task-definition') + 1], 'agent-__helper_juror');
+  });
+
   it('a landing-zone mapped task overrides its worker container, even for an oci (cloud) cartridge', async () => {
     const { rt, calls } = fake();
     await rt.start({ ...echo, provider: 'cloud' }, {}, { runId: 'run-9', runEnv: { FACTORY_RUN_ID: 'run-9' } });

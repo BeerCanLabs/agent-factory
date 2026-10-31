@@ -106,6 +106,23 @@ export async function spawnSubagent(state: FactoryState, parent: Run, args: Reco
   const pin = state.sharedRuntime;
   if (!pin?.image) return { status: 503, body: { error: 'shared_runtime_not_configured' } };
 
+  // One compute per helper definition and runtime image, with no secrets and no mind-bucket access, made on first use.
+  const computeId = `__helper_${helperId}`; // `__` never starts an agent id, so no agent shares this compute
+  const dp = state.deployProvider;
+  if (dp) {
+    if (!dp.provisionHelperCompute) return { status: 501, body: { error: 'helper_runtime_not_supported' } };
+    state.helperCompute ??= new Map();
+    if (state.helperCompute.get(computeId) !== pin.image) {
+      try {
+        await dp.provisionHelperCompute(computeId, pin.image);
+      } catch (err) {
+        console.warn(`[control-plane] helper compute ${computeId} not provisioned:`, err);
+        return { status: 503, body: { error: 'helper_compute_unavailable' } };
+      }
+      state.helperCompute.set(computeId, pin.image);
+    }
+  }
+
   let id = '';
   do id = `${helperId}.helper.${randomBytes(6).toString('hex')}`;
   while (state.agents.has(id));
@@ -129,6 +146,7 @@ export async function spawnSubagent(state: FactoryState, parent: Run, args: Reco
     commit: pin.commit,
     createdFrom: 'configuration',
     ephemeral: { subagent: helperId, parentRunId: parent.runId },
+    computeId,
   };
   state.agents.set(id, record);
   state.policies.setEphemeral(id, { routes: ['models'], models: [model] });

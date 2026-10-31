@@ -66,7 +66,7 @@ export function ecsRuntime(opts: {
       // admitted commit, never a statically mapped one.
       const deployed = Boolean(agent.deployedCommit);
       const mapped = deployed ? undefined : opts.taskMap[agent.id];
-      const family = mapped ?? (deployed || agent.provider === 'cloud' ? `agent-${agent.id}` : undefined);
+      const family = mapped ?? (agent.computeId ? `agent-${agent.computeId}` : deployed || agent.provider === 'cloud' ? `agent-${agent.id}` : undefined);
       if (!family) throw new Error(`no ECS task definition mapped for ${agent.id}`);
       // The container name follows where the task definition came from: landing-zone mapped tasks use the
       // configured worker container; task definitions the factory registers (aws/ecs.ts) use 'agent-container'.

@@ -165,6 +165,8 @@ export type AgentRecord = {
    * in-memory policy, when that run ends.
    */
   ephemeral?: { subagent: string; parentRunId: string };
+  /** E1.4 (#295): the compute (task definition family `agent-<computeId>`) a helper run starts on, shared per helper. */
+  computeId?: string;
   /** Registered source (§6.8 L3): git repository and the exact commit pinned for admission. */
   repo?: string;
   commit?: string;
