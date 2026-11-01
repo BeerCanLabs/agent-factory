@@ -124,6 +124,8 @@ export type FactoryState = {
   helperCompute?: Map<string, string>;
   /** RT1: the shared runtime version new agents are pinned to (FACTORY_RUNTIME_*). Absent: new agents cannot be created. */
   sharedRuntime?: SharedRuntimePin;
+  /** #336: the runtime rollout running in the background (PUT /api/v1/runtime), if any. */
+  runtimeRollout?: { commit: string; startedAt: string; remaining: string[]; done: boolean };
   /** CF6: refuse to register a new agent id from a repository; new agents are created from a configuration. Set in production. */
   newAgentsFromConfigurationOnly?: boolean;
   /** L2: ids an operator admits from source (house staff); the refusal above does not apply to them. From FACTORY_REPOSITORY_AGENT_IDS. */

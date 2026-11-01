@@ -157,7 +157,7 @@ describe('Admin-approved runtime rollout (TSK-280, RT1, L4, GAP-206)', { concurr
     assert.equal(operatorPut.body?.error, 'forbidden');
 
     // Tag-only image without @sha256:<64-hex> is rejected with 400 invalid_runtime
-    const tagOnlyPut = await call('/api/v1/runtime', 'PUT', ADMIN, {
+    const tagOnlyPut = await call('/api/v1/runtime', 'PUT', ADMIN, { wait: true,
       repo: 'https://github.com/BeerCanLabs/agent-factory',
       commit: COMMIT_2,
       image: 'ghcr.io/beercanlabs/agent-runtime:latest',
@@ -167,7 +167,7 @@ describe('Admin-approved runtime rollout (TSK-280, RT1, L4, GAP-206)', { concurr
     assert.match(tagOnlyPut.body?.message, /sha256/i);
 
     // Non-40-hex commit is rejected with 400 invalid_runtime
-    const badCommitPut = await call('/api/v1/runtime', 'PUT', ADMIN, {
+    const badCommitPut = await call('/api/v1/runtime', 'PUT', ADMIN, { wait: true,
       repo: 'https://github.com/BeerCanLabs/agent-factory',
       commit: 'main',
       image: IMAGE_2,
@@ -177,7 +177,7 @@ describe('Admin-approved runtime rollout (TSK-280, RT1, L4, GAP-206)', { concurr
     assert.match(badCommitPut.body?.message, /40-character hex sha/i);
 
     // Empty repo is rejected with 400 invalid_runtime
-    const emptyRepoPut = await call('/api/v1/runtime', 'PUT', ADMIN, {
+    const emptyRepoPut = await call('/api/v1/runtime', 'PUT', ADMIN, { wait: true,
       repo: '',
       commit: COMMIT_2,
       image: IMAGE_2,
@@ -309,7 +309,7 @@ describe('Admin-approved runtime rollout (TSK-280, RT1, L4, GAP-206)', { concurr
 
     // 2f. PUT /api/v1/runtime with runtime v2 -> rolls out to both cfg-zero and cfg-one
     computeRegistered.length = 0;
-    const rolloutV2 = await call('/api/v1/runtime', 'PUT', ADMIN, {
+    const rolloutV2 = await call('/api/v1/runtime', 'PUT', ADMIN, { wait: true,
       repo: 'https://github.com/BeerCanLabs/agent-factory',
       commit: COMMIT_2,
       image: IMAGE_2,
@@ -369,7 +369,7 @@ describe('Admin-approved runtime rollout (TSK-280, RT1, L4, GAP-206)', { concurr
 
     try {
       computeRegistered.length = 0;
-      const rolloutV3 = await call('/api/v1/runtime', 'PUT', ADMIN, {
+      const rolloutV3 = await call('/api/v1/runtime', 'PUT', ADMIN, { wait: true,
         repo: 'https://github.com/BeerCanLabs/agent-factory',
         commit: COMMIT_3,
         image: IMAGE_3,
@@ -426,5 +426,27 @@ describe('Admin-approved runtime rollout (TSK-280, RT1, L4, GAP-206)', { concurr
     assert.equal(pin.image, IMAGE_3);
     assert.ok(pin.updatedAt);
     assert.equal(pin.updatedBy, 'token:admin');
+  });
+
+  it('5. #336: rollout returns 202 at once and runs in the background; an agents list limits it (canary)', async () => {
+    const before = state.agents.get('cfg-one')!.deployedCommit;
+    const put = await call('/api/v1/runtime', 'PUT', ADMIN, {
+      repo: 'https://github.com/BeerCanLabs/agent-factory',
+      commit: COMMIT_2,
+      image: IMAGE_2,
+      agents: ['cfg-zero'],
+    });
+    assert.equal(put.status, 202);
+    assert.deepEqual(put.body.rollout.agents, ['cfg-zero']);
+    let rollout: { done: boolean; remaining: string[] } | null = null;
+    for (let i = 0; i < 200; i++) {
+      rollout = (await call('/api/v1/runtime', 'GET', VIEWER)).body.rollout;
+      if (rollout?.done) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(rollout?.done, true);
+    assert.deepEqual(rollout?.remaining, []);
+    assert.equal(state.agents.get('cfg-zero')!.deployedCommit, COMMIT_2);
+    assert.equal(state.agents.get('cfg-one')!.deployedCommit, before, 'an agent outside the canary list is untouched');
   });
 });

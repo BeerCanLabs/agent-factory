@@ -989,6 +989,20 @@ describe('restart reconciliation', () => {
     assert.match(state.runs.get(run.runId)?.error ?? '', /task not found in runtime/);
     assert.equal(state.agents.get('echo-agent')?.state, 'SLEEPING');
   });
+
+  it('#336: a failed status call (AWS throttling) does not mark the run lost', async () => {
+    const remote: Runtime = {
+      ...noopRuntime(),
+      running: () => false,
+      status: async () => { throw new Error('Throttling: Rate exceeded'); },
+    };
+    const state = makeState({ runtime: remote as ReturnType<typeof noopRuntime> });
+    const run = state.runs.create({ agentId: 'echo-agent', state: 'WORKING', actor: 'x', trigger: 'api', taskHandle: 'arn:busy' });
+    const past = new Date(Date.now() - 120_000).toISOString();
+    state.runs.update(run.runId, { startedAt: past, createdAt: past });
+    await reconcileRuns(state);
+    assert.equal(state.runs.get(run.runId)?.state, 'WORKING');
+  });
 });
 
 describe('hydrate through runtime store', () => {
