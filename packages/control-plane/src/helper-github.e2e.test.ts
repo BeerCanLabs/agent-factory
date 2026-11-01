@@ -13,6 +13,7 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 
 // E3.2 (#299): a helper gets GitHub only through its parent: the route when the parent has it, never a key of its own.
+const MODELS_332 = ['grok-4', 'claude-sonnet'];
 const ADMIN = 'admin-token';
 const EGRESS = 'egress-token';
 
@@ -64,7 +65,9 @@ describe('helper GitHub through the parent (E3.2)', { concurrency: false }, () =
     await new Promise<void>((r) => cp.listen(0, '127.0.0.1', r));
     port = (cp.address() as { port: number }).port;
     assert.equal((await call(port, '/api/v1/registry/subagents', 'POST', ADMIN, { id: 'juror', prompt: 'You are a juror.' })).status, 201);
+    assert.equal((await call(port, '/api/v1/registry/subagents/juror/models', 'PUT', ADMIN, { approvedModels: MODELS_332 })).status, 200);
     assert.equal((await call(port, '/api/v1/registry/subagents', 'POST', ADMIN, { id: 'scout', prompt: 'You scout.' })).status, 201);
+    assert.equal((await call(port, '/api/v1/registry/subagents/scout/models', 'PUT', ADMIN, { approvedModels: MODELS_332 })).status, 200);
     state.policies.set('reviewer', { routes: ['github'], subagents: ['juror'] } as any);
     state.policies.set('other', { routes: [], subagents: ['juror'] } as any);
   });

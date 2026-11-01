@@ -149,6 +149,7 @@ const ROUTES: RouteRow[] = [
   { method: 'PUT', path: '/api/v1/runtime', privilege: 'runtime.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/agents', privilege: 'registry.register', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/subagents', privilege: 'registry.register', role: 'admin', body: {} },
+  { method: 'PUT', path: '/api/v1/registry/subagents/x/models', privilege: 'registry.register', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/registry/agents/nope/budget', privilege: 'registry.budget.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/agents/nope/retire', privilege: 'registry.retire', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/agents/nope/reinstate', privilege: 'registry.reinstate', role: 'admin', body: {} },

@@ -14,6 +14,7 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 
 // E1.4 (#295): an allowed agent starts a stripped-down, ephemeral helper run pinned to an approved model.
+const MODELS_332 = ['grok-4', 'claude-sonnet'];
 const ADMIN = 'admin-token';
 
 async function call(port: number, path: string, method: string, token?: string, body?: unknown) {
@@ -63,7 +64,9 @@ describe('spawn_subagent (E1.4)', { concurrency: false }, () => {
     await new Promise<void>((r) => cp.listen(0, '127.0.0.1', r));
     port = (cp.address() as { port: number }).port;
     assert.equal((await call(port, '/api/v1/registry/subagents', 'POST', ADMIN, { id: 'juror', prompt: 'You are a juror.' })).status, 201);
+    assert.equal((await call(port, '/api/v1/registry/subagents/juror/models', 'PUT', ADMIN, { approvedModels: MODELS_332 })).status, 200);
     assert.equal((await call(port, '/api/v1/registry/subagents', 'POST', ADMIN, { id: 'scout', prompt: 'You scout.' })).status, 201);
+    assert.equal((await call(port, '/api/v1/registry/subagents/scout/models', 'PUT', ADMIN, { approvedModels: MODELS_332 })).status, 200);
     assert.equal((await call(port, '/api/v1/agents/reviewer/policy', 'PUT', ADMIN, { routes: [], subagents: ['juror'] })).status, 200);
   });
   after(async () => {

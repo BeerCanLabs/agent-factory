@@ -7,7 +7,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join } from 'node:path';
 import { validateSubagent, type SubagentDefinition } from '@beercanlabs/factory-contract';
 
-export type SubagentRecord = SubagentDefinition & { kind: 'subagent'; registeredBy: string; registeredAt: string };
+/** #332: `approvedModels` is the helper's model grant, set by an admin apart from the definition; missing means none. */
+export type SubagentRecord = SubagentDefinition & { kind: 'subagent'; registeredBy: string; registeredAt: string; approvedModels?: string[] };
 
 export class SubagentStore {
   private readonly dir: string | undefined;
@@ -20,9 +21,12 @@ export class SubagentStore {
     if (!this.dir || !existsSync(this.dir)) return map;
     for (const f of readdirSync(this.dir).filter((n) => n.endsWith('.json'))) {
       try {
-        const { kind: _kind, registeredBy, registeredAt, ...definition } = JSON.parse(readFileSync(join(this.dir, f), 'utf8')) as Record<string, unknown>;
+        const { kind: _kind, registeredBy, registeredAt, approvedModels, ...definition } = JSON.parse(readFileSync(join(this.dir, f), 'utf8')) as Record<string, unknown>;
         const v = validateSubagent(definition);
-        if (v.ok && typeof registeredBy === 'string' && typeof registeredAt === 'string') map.set(v.value.id, { ...v.value, kind: 'subagent', registeredBy, registeredAt });
+        if (v.ok && typeof registeredBy === 'string' && typeof registeredAt === 'string') {
+          const granted = Array.isArray(approvedModels) ? approvedModels.filter((m): m is string => typeof m === 'string' && m.length > 0) : [];
+          map.set(v.value.id, { ...v.value, kind: 'subagent', registeredBy, registeredAt, approvedModels: granted });
+        }
         else this.warn(`skipped invalid helper record ${f}`);
       } catch (err) {
         this.warn(`failed to read helper record ${f}`, err);

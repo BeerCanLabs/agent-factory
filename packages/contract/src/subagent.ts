@@ -1,6 +1,6 @@
 /**
  * E1.1 (#292): a helper (subagent) definition. A helper is prompt-only and ephemeral: it has no memory, no persistence,
- * no tools of its own and no model list (its parent picks the model when it starts one, E1.4). Its only egress is
+ * no tools of its own. Its approved model list (#332) is an admin grant kept on its record, not in the definition. Its only egress is
  * `github`, and that route is read-only; a definition cannot turn the read-only flag off.
  */
 import { z } from 'zod';
@@ -14,10 +14,10 @@ const FORBIDDEN: Readonly<Record<string, string>> = {
   tools: 'a helper is prompt-only; tools are not allowed',
   skills: 'a helper is prompt-only; skills are not allowed',
   routes: 'a helper reaches only the read-only github route; routes are not allowed',
-  model: 'a helper has no model of its own; the parent picks one per run',
-  models: 'a helper has no model list; the parent picks one per run',
-  approvedModels: 'a helper has no model list; the parent picks one per run',
-  requestedModels: 'a helper has no model list; the parent picks one per run',
+  model: 'a helper has no model of its own; the parent picks one per run from the helper\'s approved list',
+  models: 'set a helper\'s approved models with PUT /api/v1/registry/subagents/<id>/models, not in its definition',
+  approvedModels: 'set a helper\'s approved models with PUT /api/v1/registry/subagents/<id>/models, not in its definition',
+  requestedModels: 'set a helper\'s approved models with PUT /api/v1/registry/subagents/<id>/models, not in its definition',
   secrets: 'a helper holds no secrets; it borrows the parent\'s access through the gatekeeper',
   triggers: 'a helper is started only by its parent agent',
 };
