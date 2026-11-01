@@ -365,6 +365,26 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
  *   GET /api/v1/runtime               current runtime pin and configuration agents status (agents.read)
  *   PUT /api/v1/runtime               set pinned runtime and roll out to configuration agents (runtime.set)
  */
+/** Configuration agents with the runtime each runs and whether it is the pinned one (GET and PUT /api/v1/runtime). */
+function runtimeAgents(state: FactoryState) {
+  const agents = [];
+  for (const a of state.agents.values()) {
+    if (a.createdFrom === 'configuration' && a.state !== 'RETIRED_PENDING_PURGE' && a.state !== 'PURGED') {
+      const deployedRuntime = a.deployedRuntime ?? (a.deployedCommit ? { repo: a.repo ?? '', commit: a.deployedCommit, image: a.artifact } : null);
+      const upToDate = Boolean(
+        state.sharedRuntime &&
+        deployedRuntime &&
+        deployedRuntime.repo === state.sharedRuntime.repo &&
+        deployedRuntime.commit === state.sharedRuntime.commit &&
+        deployedRuntime.image === state.sharedRuntime.image
+      );
+      agents.push({ id: a.id, name: a.name, state: a.state, deployedRuntime, upToDate });
+    }
+  }
+  agents.sort((a, b) => a.id.localeCompare(b.id));
+  return agents;
+}
+
 export async function handleRuntimeRoutes(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
   if (path !== '/api/v1/runtime') return false;
 
@@ -372,29 +392,8 @@ export async function handleRuntimeRoutes(state: FactoryState, req: http.Incomin
     const principal = await requirePrivilege(req, res, state, 'agents.read');
     if (!principal) return true;
 
-    const agents = [];
-    for (const a of state.agents.values()) {
-      if (a.createdFrom === 'configuration' && a.state !== 'RETIRED_PENDING_PURGE' && a.state !== 'PURGED') {
-        const deployedRuntime = a.deployedRuntime ?? (a.deployedCommit ? { repo: a.repo ?? '', commit: a.deployedCommit, image: a.artifact } : null);
-        const upToDate = Boolean(
-          state.sharedRuntime &&
-          deployedRuntime &&
-          deployedRuntime.repo === state.sharedRuntime.repo &&
-          deployedRuntime.commit === state.sharedRuntime.commit &&
-          deployedRuntime.image === state.sharedRuntime.image
-        );
-        agents.push({
-          id: a.id,
-          name: a.name,
-          state: a.state,
-          deployedRuntime,
-          upToDate,
-        });
-      }
-    }
-    agents.sort((a, b) => a.id.localeCompare(b.id));
-
-    json(res, 200, { ok: true, runtime: state.sharedRuntime ?? null, agents });
+    const agents = runtimeAgents(state);
+    json(res, 200, { ok: true, runtime: state.sharedRuntime ?? null, agents, rollout: state.runtimeRollout ?? null });
     return true;
   }
 
@@ -420,6 +419,10 @@ export async function handleRuntimeRoutes(state: FactoryState, req: http.Incomin
       return true;
     }
 
+    if (state.runtimeRollout && !state.runtimeRollout.done) {
+      json(res, 409, { error: 'rollout_in_progress', message: 'a runtime rollout is still running (GET /api/v1/runtime)', rollout: state.runtimeRollout });
+      return true;
+    }
     const nextPin: SharedRuntimePin = {
       repo,
       commit,
@@ -449,62 +452,49 @@ export async function handleRuntimeRoutes(state: FactoryState, req: http.Incomin
       commit: nextPin.commit,
     });
 
-    const dones: Promise<void>[] = [];
-    for (const a of state.agents.values()) {
-      if (a.createdFrom === 'configuration' && a.state !== 'RETIRED_PENDING_PURGE' && a.state !== 'PURGED') {
-        if (!a.deployedCommit) {
-          a.repo = nextPin.repo;
-          a.commit = nextPin.commit;
-          registryOf(state).save(a);
-          if (state.configs?.current(a.id)) {
+    // #336: an optional `agents` list limits the rollout (a canary); without it every configuration agent is rolled.
+    const only = Array.isArray(body.agents) ? new Set(body.agents.filter((x): x is string => typeof x === 'string')) : undefined;
+    const targets = [...state.agents.values()].filter((a) =>
+      a.createdFrom === 'configuration' && a.state !== 'RETIRED_PENDING_PURGE' && a.state !== 'PURGED' && (!only || only.has(a.id)));
+
+    // #336: roll agents out one at a time. All at once (Promise.allSettled) throttled the AWS APIs ("Rate exceeded")
+    // and every activation smoke failed.
+    const rollout = async (): Promise<void> => {
+      for (const a of targets) {
+        try {
+          if (!a.deployedCommit) {
+            a.repo = nextPin.repo;
+            a.commit = nextPin.commit;
+            registryOf(state).save(a);
+            if (state.configs?.current(a.id)) {
+              await recordConfig(state, a.id, { actor: principal.actor, reason: 'runtime-upgrade' });
+            }
+          } else {
+            const out = applyConfig(state, a.id, principal.actor, 'runtime-upgrade');
+            if (out.status === 'started') await out.done.catch(() => undefined);
+          }
+          if (a.deployedCommit && a.deployedRuntime?.commit === nextPin.commit && state.configs?.current(a.id)?.source?.commit !== nextPin.commit) {
             await recordConfig(state, a.id, { actor: principal.actor, reason: 'runtime-upgrade' });
           }
-        } else {
-          const out = applyConfig(state, a.id, principal.actor, 'runtime-upgrade');
-          if (out.status === 'started') {
-            dones.push(out.done);
-          }
+        } catch (err) {
+          console.warn(`[control-plane] runtime rollout for ${a.id} failed:`, err);
         }
+        if (state.runtimeRollout) state.runtimeRollout.remaining = state.runtimeRollout.remaining.filter((id) => id !== a.id);
       }
+    };
+
+    // #336: by default the rollout runs in the background and the call returns at once (202), so it never outlasts the
+    // edge proxy's timeout (Cloudflare 524 at 100 s). `wait: true` keeps the old synchronous answer.
+    if (body.wait !== true) {
+      const started = { commit: nextPin.commit, startedAt: new Date().toISOString(), remaining: targets.map((a) => a.id), done: false };
+      state.runtimeRollout = started;
+      void rollout().finally(() => { started.done = true; });
+      json(res, 202, { ok: true, runtime: state.sharedRuntime, pin: state.sharedRuntime, rollout: { status: 'running', agents: targets.map((a) => a.id) } });
+      return true;
     }
-
-    await Promise.allSettled(dones);
-
-    for (const a of state.agents.values()) {
-      if (a.createdFrom === 'configuration' && a.deployedCommit && a.deployedRuntime?.commit === nextPin.commit) {
-        if (state.configs?.current(a.id)?.source?.commit !== nextPin.commit) {
-          await recordConfig(state, a.id, { actor: principal.actor, reason: 'runtime-upgrade' });
-        }
-      }
-    }
-
-    const agents = [];
-    for (const a of state.agents.values()) {
-      if (a.createdFrom === 'configuration' && a.state !== 'RETIRED_PENDING_PURGE' && a.state !== 'PURGED') {
-        const deployedRuntime = a.deployedRuntime ?? (a.deployedCommit ? { repo: a.repo ?? '', commit: a.deployedCommit, image: a.artifact } : null);
-        const upToDate = Boolean(
-          state.sharedRuntime &&
-          deployedRuntime &&
-          deployedRuntime.repo === state.sharedRuntime.repo &&
-          deployedRuntime.commit === state.sharedRuntime.commit &&
-          deployedRuntime.image === state.sharedRuntime.image
-        );
-        agents.push({
-          id: a.id,
-          name: a.name,
-          state: a.state,
-          deployedRuntime,
-          upToDate,
-        });
-      }
-    }
-    agents.sort((a, b) => a.id.localeCompare(b.id));
-
-    const results = agents.map((a) => ({
-      id: a.id,
-      status: a.upToDate ? 'updated' : 'smoke_failed',
-    }));
-
+    await rollout();
+    const agents = runtimeAgents(state);
+    const results = agents.filter((a) => !only || only.has(a.id)).map((a) => ({ id: a.id, status: a.upToDate ? 'updated' : 'smoke_failed' }));
     json(res, 200, { ok: true, runtime: state.sharedRuntime, pin: state.sharedRuntime, agents, results });
     return true;
   }

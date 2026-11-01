@@ -765,7 +765,15 @@ export async function reconcileRuns(state: PropertyManagerState): Promise<void> 
       }
       continue;
     }
-    const s = await state.runtime.status(run.taskHandle).catch(() => ({ state: 'unknown' as const }));
+    // #336: a status call that fails (AWS throttling, "Rate exceeded") says nothing about the task: try again next
+    // pass. Only a describe that answers without the task counts toward "task lost".
+    let s: Awaited<ReturnType<NonNullable<typeof state.runtime.status>>>;
+    try {
+      s = await state.runtime.status(run.taskHandle);
+    } catch (err) {
+      console.warn(`[reconciler] status for run ${run.runId} failed; retrying next pass:`, err instanceof Error ? err.message.slice(0, 200) : err);
+      continue;
+    }
     if (s.state === 'stopped') {
       await finishRun(state, run.runId, s.exitCode === 0 ? 'DONE' : 'FAILED', {
         actor: SYSTEM.reconciler,
