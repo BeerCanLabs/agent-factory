@@ -74,6 +74,13 @@ const control: ControlClient = {
       connectUrl: typeof body.connectUrl === 'string' ? body.connectUrl : undefined,
     };
   },
+  // #334: the agent's GitHub App installation key; any failure means the route's own credential is used.
+  async githubAppToken(req) {
+    const res = await call('POST', '/api/v1/gatekeeper-egress/github-app/token', req);
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (res.ok && typeof body.accessToken === 'string' && typeof body.expiresAt === 'string') return { ok: true, accessToken: body.accessToken, expiresAt: body.expiresAt };
+    return { ok: false, status: res.status, error: typeof body.error === 'string' ? body.error : `control_plane_${res.status}` };
+  },
   // Run progress (§6.5): best effort, batched by the emitter, one request in flight. Never touches the ledger
   // circuit breaker: a lost progress batch is not a lost audit row.
   async progress(events) {
