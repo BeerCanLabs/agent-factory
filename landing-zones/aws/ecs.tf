@@ -72,6 +72,8 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_ACCESS_TEAM_DOMAIN", value = var.access_team_domain },
         { name = "FACTORY_ACCESS_AUD", value = var.access_aud },
         { name = "FACTORY_ADMIN_EMAILS", value = var.admin_emails },
+        # CF6: repository agents this deployment allowlists (comma-separated ids); empty admits none.
+        { name = "FACTORY_REPOSITORY_AGENT_IDS", value = var.repository_agent_ids },
         { name = "FACTORY_RUNTIME", value = "ecs" },
         { name = "FACTORY_ECS_CLUSTER", value = aws_ecs_cluster.factory.name },
         { name = "FACTORY_ECS_SUBNETS", value = join(",", aws_subnet.agents[*].id) },
