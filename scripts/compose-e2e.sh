@@ -160,17 +160,17 @@ if [ -z "$rt_digest" ]; then
   rt_digest="factory-agent-runtime@sha256:$rt_id"
 fi
 
-rollout="$(api -X PUT -d "{\"repo\":\"https://github.com/BeerCanLabs/agent-factory\",\"image\":\"$rt_digest\",\"commit\":\"fedcba9876543210fedcba9876543210fedcba98\"}" $CP/api/v1/runtime)"
+rollout="$(api -X PUT -d "{\"wait\":true,\"repo\":\"https://github.com/BeerCanLabs/agent-factory\",\"image\":\"$rt_digest\",\"commit\":\"fedcba9876543210fedcba9876543210fedcba98\"}" $CP/api/v1/runtime)"
 jq -e '.pin.commit == "fedcba9876543210fedcba9876543210fedcba98" and (.results | map(select(.status == "updated")) | length >= 2)' >/dev/null <<<"$rollout" || die "runtime rollout: $rollout"
 api "$CP/api/v1/ledger" | jq -e 'map(select(.action=="SHARED_RUNTIME_UPDATED")) | length >= 1' >/dev/null || die "SHARED_RUNTIME_UPDATED not in ledger"
 
 fail_digest="factory-agent-runtime@sha256:9999999999999999999999999999999999999999999999999999999999999999"
-fail_rollout="$(api -X PUT -d "{\"repo\":\"https://github.com/BeerCanLabs/agent-factory\",\"image\":\"$fail_digest\",\"commit\":\"9999999999999999999999999999999999999999\"}" $CP/api/v1/runtime)"
+fail_rollout="$(api -X PUT -d "{\"wait\":true,\"repo\":\"https://github.com/BeerCanLabs/agent-factory\",\"image\":\"$fail_digest\",\"commit\":\"9999999999999999999999999999999999999999\"}" $CP/api/v1/runtime)"
 jq -e '.results | map(select(.status == "smoke_failed")) | length >= 2' >/dev/null <<<"$fail_rollout" || die "forced smoke failure rollout: $fail_rollout"
 agents_now="$(api "$CP/api/v1/agents")"
 jq -e --arg img "$rt_digest" 'map(select(.id == "nova" or .id == "llm-summarizer") | select(.artifact == $img and .deployedRuntime.commit == "fedcba9876543210fedcba9876543210fedcba98")) | length == 2' >/dev/null <<<"$agents_now" || die "rollback agents state: $agents_now"
 api "$CP/api/v1/ledger" | jq -e 'map(select(.action=="AGENT_SMOKE_FAILED")) | length >= 1' >/dev/null || die "AGENT_SMOKE_FAILED not in ledger"
-api -X PUT -d "{\"repo\":\"https://github.com/BeerCanLabs/agent-factory\",\"image\":\"$rt_digest\",\"commit\":\"fedcba9876543210fedcba9876543210fedcba98\"}" $CP/api/v1/runtime >/dev/null
+api -X PUT -d "{\"wait\":true,\"repo\":\"https://github.com/BeerCanLabs/agent-factory\",\"image\":\"$rt_digest\",\"commit\":\"fedcba9876543210fedcba9876543210fedcba98\"}" $CP/api/v1/runtime >/dev/null
 ok "convert in place, runtime rollout, and activation smoke pass/fail"
 
 echo "== ledger integrity"
