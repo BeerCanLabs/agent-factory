@@ -130,12 +130,13 @@ describe('a read-only github route (E3.1)', { concurrency: false }, () => {
 describe('a read-only route is never a raw tunnel host (E3.1 review)', { concurrency: false }, () => {
   let gk: http.Server;
   let port = 0;
-  const ctx: RunContext = { run: { runId: 'ro-tunnel', agentId: 'juror', state: 'WORKING', live: true }, agentState: 'WORKING', policy: { routes: ['github', 'other'] }, spend: { run: 0, day: 0, month: 0 } };
+  const ctx: RunContext = { run: { runId: 'ro-tunnel', agentId: 'juror', state: 'WORKING', live: true }, agentState: 'WORKING', policy: { routes: ['github', 'other', 'dead'] }, spend: { run: 0, day: 0, month: 0 } };
   before(async () => {
     gk = createGatekeeperEgress({
       routes: [
         { id: 'github', kind: 'http', upstream: 'https://ro-github.invalid', readOnly: true },
         { id: 'other', kind: 'http', upstream: 'https://rw-host.invalid' },
+        { id: 'dead', kind: 'http', upstream: 'https://127.0.0.1' },
       ],
       prices: {},
       runTokens: tokens,
@@ -152,10 +153,10 @@ describe('a read-only route is never a raw tunnel host (E3.1 review)', { concurr
     port = (gk.address() as { port: number }).port;
   });
   after(async () => { await new Promise<void>((r) => gk.close(() => r())); });
-  const connect = async (host: string) => {
+  const connect = async (host: string, port_ = 443) => {
     const token = await tokens.mint({ runId: 'ro-tunnel', agentId: 'juror' });
     return new Promise<number>((resolve, reject) => {
-      const req = http.request({ host: '127.0.0.1', port, method: 'CONNECT', path: `${host}:443`, headers: { 'proxy-authorization': `Bearer ${token}`, authorization: `Bearer ${token}` } });
+      const req = http.request({ host: '127.0.0.1', port, method: 'CONNECT', path: `${host}:${port_}`, headers: { 'proxy-authorization': `Bearer ${token}`, authorization: `Bearer ${token}` } });
       req.on('connect', (res, socket) => { socket.destroy(); resolve(res.statusCode ?? 0); });
       req.on('response', (res) => resolve(res.statusCode ?? 0));
       req.on('error', reject);
@@ -164,7 +165,12 @@ describe('a read-only route is never a raw tunnel host (E3.1 review)', { concurr
   };
   it('refuses a CONNECT tunnel to a read-only route host, while a normal route host is still allowed past the host check', async () => {
     assert.equal(await connect('ro-github.invalid'), 403);
+    // Whether rw-host.invalid resolves depends on the resolver (CI: NXDOMAIN; some sandboxes: a fake IP),
+    // so only the host check is asserted here: anything but 403.
     assert.notEqual(await connect('rw-host.invalid'), 403);
+  });
+  it('answers 502, not a bare hang-up, when an allowed tunnel host cannot be dialled', async () => {
+    assert.equal(await connect('127.0.0.1', 1), 502);
   });
 });
 
