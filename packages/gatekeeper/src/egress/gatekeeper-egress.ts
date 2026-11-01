@@ -1818,7 +1818,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       upstreamSocket.on('error', (err) => {
         if (tunnel && !tunnel.outcome) tunnel.outcome = (err as NodeJS.ErrnoException).code === 'ETIMEDOUT' ? 'timeout' : 'error';
         console.warn(`[gatekeeper-egress] connect error to ${destHost}:${destPort}: ${err.message}`);
-        clientSocket.destroy();
+        // A dial that never connected gets an explicit status instead of a bare hang-up,
+        // so the agent can tell an unreachable host from a refused one.
+        if (tunnelStatus !== 200 && clientSocket.writable) clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+        else clientSocket.destroy();
       });
       clientSocket.on('error', () => {
         upstreamSocket.destroy();
