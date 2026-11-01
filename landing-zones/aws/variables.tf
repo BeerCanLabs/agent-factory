@@ -189,6 +189,12 @@ variable "admin_emails" {
   description = "Comma-separated emails that get the admin roles when they arrive with a verified Access assertion. Empty: no admins through Access."
 }
 
+variable "repository_agent_ids" {
+  type        = string
+  default     = ""
+  description = "CF6: comma-separated agent ids admitted from repositories (FACTORY_REPOSITORY_AGENT_IDS on the control plane). Empty admits none."
+}
+
 variable "ledger_retention_days" {
   type        = number
   default     = 365
