@@ -62,7 +62,12 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
   it('builds a prefilled manifest that redirects back to the factory', () => {
     const m = buildManifest('https://f.example', 'archie', 'Archie');
     assert.equal(m.redirect_url, 'https://f.example/api/v1/keymaster/github-app/callback');
-    assert.equal(m.public, false);
+    // GitHub answered "Public cannot be private" to public:false with an inactive hook: send neither.
+    assert.equal('public' in m, false);
+    assert.equal('hook_attributes' in m, false);
+    const allowed = ['name', 'url', 'hook_attributes', 'redirect_url', 'callback_urls', 'setup_url', 'description', 'public', 'default_events', 'default_permissions', 'request_oauth_on_install', 'setup_on_update'];
+    for (const k of Object.keys(m)) assert.ok(allowed.includes(k), `undocumented manifest key ${k}`);
+    assert.deepEqual(JSON.parse(JSON.stringify(m)), m);
     assert.equal(m.name, 'Archie (f)');
   });
 

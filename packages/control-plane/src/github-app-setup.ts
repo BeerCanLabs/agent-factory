@@ -34,15 +34,18 @@ function stateKey(s: FactoryState): Buffer | undefined {
   return key ? createHmac('sha256', key).update('factory:keymaster:github-app-state:v1').digest() : undefined;
 }
 
-/** The manifest GitHub prefills. Permissions are what a coding agent needs; the admin can narrow them on GitHub. */
-export function buildManifest(publicBase: string, agentId: string, agentName: string) {
+/**
+ * The manifest GitHub prefills. Permissions are what a coding agent needs; the admin can narrow them on GitHub.
+ * GitHub rejected `public: false` plus an inactive webhook with "Public cannot be private", so the manifest
+ * carries neither: GitHub's form then defaults to "Only on this account" (a private app), and the factory has no
+ * webhook route for app events. Only documented manifest keys are sent.
+ */
+export function buildManifest(publicBase: string, _agentId: string, agentName: string) {
   return {
     // GitHub App names are global: qualify the agent's name with this factory's host so the default is rarely taken.
     name: `${agentName} (${new URL(publicBase).hostname.split('.')[0]})`.slice(0, 34),
     url: publicBase,
     redirect_url: `${publicBase}/api/v1/keymaster/github-app/callback`,
-    public: false,
-    hook_attributes: { url: `${publicBase}/api/v1/github-app/${encodeURIComponent(agentId)}/webhook`, active: false },
     default_permissions: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' },
     default_events: [] as string[],
   };
