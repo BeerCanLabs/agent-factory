@@ -15,6 +15,7 @@ import {
 import { factoryApi } from '../api/client.js';
 import type { StoredModel, StagedModel, AiProviderTemplate, ModelsCatalogResponse } from '../api/types.js';
 import { OnboardVendorModal } from '../components/OnboardVendorModal.js';
+import { HelperModelsPanel } from '../components/HelperModelsPanel.js';
 
 export const ExecutiveOfficeView: React.FC = () => {
   const [catalog, setCatalog] = useState<ModelsCatalogResponse | null>(null);
@@ -312,6 +313,8 @@ export const ExecutiveOfficeView: React.FC = () => {
           </div>
         </div>
       )}
+
+      <HelperModelsPanel />
 
       {/* Onboard Vendor Modal */}
       <OnboardVendorModal

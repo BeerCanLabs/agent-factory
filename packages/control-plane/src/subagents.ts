@@ -25,13 +25,19 @@ export function subagentsOf(state: FactoryState): Map<string, SubagentRecord> {
 }
 
 /** E1.3 (#294): the registered helpers an agent's admin-set policy allows it, by id; none without an allow-list entry. */
-export function allowedSubagents(state: FactoryState, agentId: string): Array<{ id: string; name?: string; description?: string }> {
+/** #332: the models a helper may run on: its admin grant, limited to what the factory offers now. Empty means none. */
+export function helperModels(state: FactoryState, helper: SubagentRecord): string[] {
+  const offered = new Set(approvedModels(state).models);
+  return [...new Set(helper.approvedModels ?? [])].filter((m) => offered.has(m)).sort();
+}
+
+export function allowedSubagents(state: FactoryState, agentId: string): Array<{ id: string; name?: string; description?: string; approvedModels: string[] }> {
   // #312: only a policy an admin set for this agent counts; the store's fallback (or `__global__`) never grants helpers.
   if (agentId === '__global__' || !state.policies.has(agentId)) return [];
   const allow = new Set(state.policies.get(agentId)?.subagents ?? []);
   return [...subagentsOf(state).values()]
     .filter((h) => allow.has(h.id))
-    .map((h) => ({ id: h.id, ...(h.name ? { name: h.name } : {}), ...(h.description ? { description: h.description } : {}) }));
+    .map((h) => ({ id: h.id, ...(h.name ? { name: h.name } : {}), ...(h.description ? { description: h.description } : {}), approvedModels: helperModels(state, h) }));
 }
 
 /** Handles /api/v1/registry/subagents[/:id]; returns false when the path is not one of these. */
@@ -50,7 +56,8 @@ export async function handleSubagents(state: FactoryState, req: http.IncomingMes
       return true;
     }
     const replaced = map.has(v.value.id);
-    const record: SubagentRecord = { ...v.value, kind: 'subagent', registeredBy: principal.actor, registeredAt: new Date().toISOString() };
+    // #332: re-registering a definition keeps the helper's model grant; a new helper starts with none.
+    const record: SubagentRecord = { ...v.value, kind: 'subagent', registeredBy: principal.actor, registeredAt: new Date().toISOString(), approvedModels: map.get(v.value.id)?.approvedModels ?? [] };
     try {
       storeOf(state).save(record);
     } catch (err) {
@@ -66,6 +73,42 @@ export async function handleSubagents(state: FactoryState, req: http.IncomingMes
   if (path === '/api/v1/registry/subagents' && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'agents.read'))) return true;
     json(res, 200, [...subagentsOf(state).values()]);
+    return true;
+  }
+  // #332: an admin sets a helper's approved models, the same grant an agent's Models tab sets.
+  const mm = path.match(/^\/api\/v1\/registry\/subagents\/([^/]+)\/models$/);
+  if (mm && req.method === 'PUT') {
+    const principal = await requirePrivilege(req, res, state, 'registry.register');
+    if (!principal) return true;
+    const map = subagentsOf(state);
+    const current = map.get(decodeURIComponent(mm[1]));
+    if (!current) {
+      json(res, 404, { error: 'not_found' });
+      return true;
+    }
+    const body = (await readJson(req)) as { approvedModels?: unknown };
+    const list = body?.approvedModels;
+    if (!Array.isArray(list) || !list.every((x) => typeof x === 'string' && x.length > 0)) {
+      json(res, 400, { error: 'approvedModels must be an array of non-empty strings' });
+      return true;
+    }
+    const offered = new Set(approvedModels(state).models);
+    const missing = (list as string[]).find((x) => !offered.has(x));
+    if (missing) {
+      json(res, 400, { error: 'model_not_offered', model: missing });
+      return true;
+    }
+    const record: SubagentRecord = { ...current, approvedModels: [...new Set(list as string[])].sort() };
+    try {
+      storeOf(state).save(record);
+    } catch (err) {
+      console.warn(`[control-plane] failed to persist helper ${record.id} models:`, err);
+      json(res, 500, { error: 'subagent_not_stored' });
+      return true;
+    }
+    map.set(record.id, record);
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: record.id, type: 'action', action: 'SUBAGENT_MODELS_SET', actor: principal.actor });
+    json(res, 200, { id: record.id, approvedModels: record.approvedModels });
     return true;
   }
   const m = path.match(/^\/api\/v1\/registry\/subagents\/([^/]+)$/);
@@ -109,8 +152,10 @@ export async function spawnSubagent(state: FactoryState, parent: Run, args: Reco
   const helper = subagentsOf(state).get(helperId);
   if (!helper) return { status: 403, body: { error: 'subagent_not_allowed' } };
   const model = args.model;
-  if (typeof model !== 'string' || !model) return { status: 400, body: { error: 'model_required', message: 'name an approved model (list_models)' } };
-  if (!approvedModels(state).models.includes(model)) return { status: 400, body: { error: 'model_not_approved', model } };
+  const granted = helperModels(state, helper);
+  if (typeof model !== 'string' || !model) return { status: 400, body: { error: 'model_required', message: `name one of ${helperId}'s approved models (list_models with subagent)`, approvedModels: granted } };
+  // #332: the helper's own grant decides, not the whole factory catalog.
+  if (!granted.includes(model)) return { status: 400, body: { error: 'model_not_approved', model, approvedModels: granted } };
   const prompt = args.prompt;
   if (typeof prompt !== 'string' || !prompt.trim()) return { status: 400, body: { error: 'prompt_required' } };
   if (prompt.length > MAX_HELPER_PROMPT_CHARS) return { status: 413, body: { error: 'prompt_too_long', max: MAX_HELPER_PROMPT_CHARS } };

@@ -75,7 +75,7 @@ describe('list_subagents (E1.3)', { concurrency: false }, () => {
   it('an allowed agent gets exactly its allowed, registered helpers (no prompts) over REST and MCP', async () => {
     const r = await call(port, `/api/v1/runs/${runs.reviewer.runId}/subagents`, 'GET', runs.reviewer.token);
     assert.equal(r.status, 200);
-    assert.deepEqual(r.body, { subagents: [{ id: 'juror', name: 'JUROR' }] });
+    assert.deepEqual(r.body, { subagents: [{ id: 'juror', name: 'JUROR', approvedModels: [] }] });
     assert.deepEqual(await mcp('reviewer'), r.body);
     assert.doesNotMatch(JSON.stringify(r.body), /secret prompt/);
   });

@@ -66,11 +66,12 @@ describe('helper (subagent) registry (E1.1)', { concurrency: false }, () => {
     assert.equal(rows[0].actor, 'token:admin');
   });
 
-  it('reading the definition shows github read-only and no model list', async () => {
+  it('reading the definition shows github read-only and an empty model grant (#332)', async () => {
     const r = await call(port, '/api/v1/registry/subagents/juror', 'GET', VIEWER);
     assert.equal(r.status, 200);
     assert.deepEqual(r.body.egress, { github: { readOnly: true } });
-    for (const k of ['model', 'models', 'approvedModels', 'requestedModels', 'memory']) assert.equal(k in r.body, false, k);
+    assert.deepEqual(r.body.approvedModels, []);
+    for (const k of ['model', 'models', 'requestedModels', 'memory']) assert.equal(k in r.body, false, k);
     assert.equal((await call(port, '/api/v1/registry/subagents/nope', 'GET', VIEWER)).status, 404);
   });
 

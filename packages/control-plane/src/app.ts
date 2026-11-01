@@ -1316,17 +1316,17 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
       },
       {
         name: 'list_models',
-        description: 'List the models this factory approves (names only) and the default',
-        inputSchema: { type: 'object', properties: {} },
+        description: 'List the models this factory approves (names only) and the default. With subagent: that helper\'s approved models, the only ones it may be started on',
+        inputSchema: { type: 'object', properties: { subagent: { type: 'string' } } },
       },
       {
         name: 'list_subagents',
-        description: 'List the helper agents (subagents) this agent may start: id, name and description',
+        description: 'List the helper agents (subagents) this agent may start: id, name, description and each helper\'s approvedModels',
         inputSchema: { type: 'object', properties: {} },
       },
       {
         name: 'spawn_subagent',
-        description: 'Start a helper run: an allowed helper id, an approved model (list_models) and the task prompt. Returns the run.',
+        description: 'Start a helper run: an allowed helper id, one of that helper\'s approvedModels (list_subagents) and the task prompt. Returns the run.',
         inputSchema: { type: 'object', properties: { subagent: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' } }, required: ['subagent', 'model', 'prompt'] },
       },
     ];
@@ -1350,6 +1350,13 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
   if (method === 'tools/call') {
     const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
     if (params.name === 'list_models') {
+      // #332: for a helper, the parent reads that helper's grant, never the whole catalog.
+      const sub = (params.arguments ?? {}).subagent;
+      if (typeof sub === 'string' && sub) {
+        const h = allowedSubagents(state, run.agentId).find((x) => x.id === sub);
+        const body = h ? { subagent: sub, models: h.approvedModels } : { error: 'subagent_not_allowed', subagent: sub };
+        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(body) }], ...(h ? {} : { isError: true }) } };
+      }
       return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(approvedModels(state)) }] } };
     }
     if (params.name === 'list_subagents') {

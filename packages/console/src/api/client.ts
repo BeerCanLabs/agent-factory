@@ -49,6 +49,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 export type AppSetupAction = { kind: 'secret'; path: string } | { kind: 'browser-post'; path: string; input?: string; postField: string } | { kind: 'list'; path: string; input: string };
 export type AppSetupProvider = { id: string; title: string; configured: boolean; links?: Array<{ label: string; url: string }>; steps: Array<{ id: string; manual: boolean; text: string; action?: AppSetupAction }> };
 
+/** #332: a helper definition as the registry returns it. */
+export interface HelperDefinition {
+  id: string;
+  name?: string;
+  description?: string;
+  approvedModels?: string[];
+}
+
 export const factoryApi = {
   // Agent Registry & Lifecycle
   async listAgents(): Promise<AgentRecord[]> {
@@ -164,6 +172,18 @@ export const factoryApi = {
       body: JSON.stringify({ owners }),
     });
     return cfg.owners ?? [];
+  },
+
+  // #332: helper (subagent) definitions and each helper's approved model list.
+  async listSubagents(): Promise<HelperDefinition[]> {
+    return request<HelperDefinition[]>('/registry/subagents');
+  },
+
+  async setSubagentModels(id: string, approvedModels: string[]): Promise<{ id: string; approvedModels: string[] }> {
+    return request<{ id: string; approvedModels: string[] }>(`/registry/subagents/${encodeURIComponent(id)}/models`, {
+      method: 'PUT',
+      body: JSON.stringify({ approvedModels }),
+    });
   },
 
   // The models this factory offers (M3).

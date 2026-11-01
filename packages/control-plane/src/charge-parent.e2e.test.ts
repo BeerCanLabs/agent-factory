@@ -13,6 +13,7 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 
 // E2.1 (#297): a helper's model spend is its parent's: debited to the parent, refused when the parent is out of budget.
+const MODELS_332 = ['grok-4', 'claude-sonnet'];
 const ADMIN = 'admin-token';
 const EGRESS = 'egress-token';
 
@@ -63,7 +64,9 @@ describe('helper spend charges the parent (E2.1)', { concurrency: false }, () =>
     await new Promise<void>((r) => cp.listen(0, '127.0.0.1', r));
     port = (cp.address() as { port: number }).port;
     assert.equal((await call(port, '/api/v1/registry/subagents', 'POST', ADMIN, { id: 'juror', prompt: 'You are a juror.' })).status, 201);
+    assert.equal((await call(port, '/api/v1/registry/subagents/juror/models', 'PUT', ADMIN, { approvedModels: MODELS_332 })).status, 200);
     assert.equal((await call(port, '/api/v1/registry/subagents', 'POST', ADMIN, { id: 'scout', prompt: 'You scout.' })).status, 201);
+    assert.equal((await call(port, '/api/v1/registry/subagents/scout/models', 'PUT', ADMIN, { approvedModels: MODELS_332 })).status, 200);
     state.policies.set('reviewer', { routes: [], subagents: ['juror'], budgetUsd: { perDay: 1 } } as any);
   });
   after(async () => {
