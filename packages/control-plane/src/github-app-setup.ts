@@ -15,6 +15,7 @@ import { writableProvider } from '@beercanlabs/factory-secrets-bind';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { signConsentState, verifyConsentState } from './connections.js';
 import { invalidateCredentials } from './credentials.js';
+import { readSecret } from './app-setup-providers.js';
 
 const STATE_TTL_MS = 10 * 60_000;
 const ORG = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -42,8 +43,10 @@ function stateKey(s: FactoryState): Buffer | undefined {
  */
 export function buildManifest(publicBase: string, _agentId: string, agentName: string) {
   return {
-    // GitHub App names are global: qualify the agent's name with this factory's host so the default is rarely taken.
-    name: `${agentName} (${new URL(publicBase).hostname.split('.')[0]})`.slice(0, 34),
+    // GitHub App names are global and a created app keeps its name: qualify the agent's name with this factory's
+    // host, plus a short random tag so a second Start (after a lost callback, or for a replacement) is never refused
+    // with "name already taken".
+    name: `${`${agentName} (${new URL(publicBase).hostname.split('.')[0]})`.slice(0, 29)} ${randomUUID().slice(0, 4)}`,
     url: publicBase,
     redirect_url: `${publicBase}/api/v1/keymaster/github-app/callback`,
     default_permissions: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' },
@@ -79,6 +82,11 @@ export async function handleGitHubAppSetup(state: FactoryState, req: http.Incomi
     const key = stateKey(state);
     if (!pub || !key) return json(res, 503, { error: 'github_app_setup_unconfigured', message: 'FACTORY_PUBLIC_BASE_URL and a factory signing key are required' }), true;
     const body = await readJson(req);
+    // An app already stored for this agent: say so instead of sending the admin to create a second one.
+    const existing = await readSecret(state, githubAppSecretNames(agentId).slug);
+    if (existing && body.replace !== true) {
+      return json(res, 409, { error: 'github_app_exists', slug: existing, installUrl: `${webBase(state)}/apps/${encodeURIComponent(existing)}/installations/new`, message: `This agent already has the GitHub App "${existing}". Install it on your org from the install link; send replace:true to create a new one.` }), true;
+    }
     const org = typeof body.org === 'string' && body.org ? body.org : undefined;
     if (org !== undefined && !ORG.test(org)) return json(res, 400, { error: 'invalid_org' }), true;
     const signed = signConsentState(key, { agentId, provider: 'github-app', scopes: [], actor: principal.actor, nonce: randomUUID(), exp: Date.now() + STATE_TTL_MS });

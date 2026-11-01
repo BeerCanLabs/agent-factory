@@ -68,7 +68,9 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     const allowed = ['name', 'url', 'hook_attributes', 'redirect_url', 'callback_urls', 'setup_url', 'description', 'public', 'default_events', 'default_permissions', 'request_oauth_on_install', 'setup_on_update'];
     for (const k of Object.keys(m)) assert.ok(allowed.includes(k), `undocumented manifest key ${k}`);
     assert.deepEqual(JSON.parse(JSON.stringify(m)), m);
-    assert.equal(m.name, 'Archie (f)');
+    assert.match(m.name, /^Archie \(f\) [0-9a-f]{4}$/);
+    assert.notEqual(buildManifest('https://f.example', 'archie', 'Archie').name, m.name);
+    assert.ok(buildManifest('https://f.example', 'a', 'A'.repeat(60)).name.length <= 34);
   });
 
   it('names secrets per agent', () => {
@@ -88,7 +90,7 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     assert.equal(r.status, 200);
     const b = await r.json() as any;
     assert.ok(b.action.startsWith('https://github.example/organizations/sandbox-org/settings/apps/new?state='));
-    assert.equal(b.manifest.name, 'Archie (factory)');
+    assert.match(b.manifest.name, /^Archie \(factory\) [0-9a-f]{4}$/);
     assert.ok(b.state);
   });
 
@@ -118,6 +120,14 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     const again = await cb(`code=good&state=${encodeURIComponent(s)}`);
     assert.equal(again.status, 400);
     assert.equal(conversions.filter((c) => c === 'good').length, 1);
+
+    // A second Start once the app is stored points at the install link instead of creating a duplicate.
+    const dup = await start(ADMIN);
+    assert.equal(dup.status, 409);
+    const d = await dup.json() as any;
+    assert.equal(d.error, 'github_app_exists');
+    assert.equal(d.installUrl, 'https://github.example/apps/archie-app/installations/new');
+    assert.equal((await start(ADMIN, { replace: true })).status, 200);
   });
 
   it('reports a failed conversion without storing', async () => {
