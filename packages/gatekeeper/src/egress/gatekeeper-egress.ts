@@ -130,6 +130,11 @@ export type ControlClient = {
   holdRequest?(req: HoldRequest): Promise<HoldOutcome>;
   /** Keymaster access token for a live run's agent connection (§6.11). */
   connectionToken?(req: { runId: string; agentId: string; connection: string; scopes?: string[] }): Promise<ConnectionTokenResult>;
+  /**
+   * #334: a short-lived GitHub App installation key for the agent's own app on one org. Absent, or any failure: the
+   * route's existing credential is used instead.
+   */
+  githubAppToken?(req: { runId: string; agentId: string; org: string }): Promise<{ ok: true; accessToken: string; expiresAt: string } | { ok: false; status: number; error: string }>;
   ledger(event: Record<string, unknown>): Promise<void>;
   /** Circuit breaker: returns false when the ledger endpoint is known-unreachable. */
   ledgerAvailable?(): boolean;
@@ -161,6 +166,8 @@ export type GatekeeperEgressOptions = {
   providers: SecretProvider[];
   traces?: TraceConfig;
   contextTtlMs?: number;
+  /** #334: hosts whose routes may carry an agent's GitHub App key: `api` (REST, org from /repos|/orgs) or `git` (org first). Tests point these at local servers. */
+  githubAppHosts?: Record<string, 'api' | 'git'>;
   maxBodyBytes?: number;
   meter?: Meter;
   /** Offered models for the `models` route (operations config, M3). */
@@ -633,6 +640,55 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     return route.credential.encoding === 'basic' ? `Basic ${Buffer.from(formatted).toString('base64')}` : formatted;
   }
 
+  /** #334: the GitHub org (owner) a call on a github.com route is for, or undefined (e.g. `/user`). */
+  function githubOrgOf(route: Route, rest: string): string | undefined {
+    if (!route.upstream || route.connection) return undefined;
+    let host = '';
+    try {
+      host = new URL(route.upstream).hostname.toLowerCase();
+    } catch {
+      return undefined;
+    }
+    const seg = rest.split('?')[0].split('/').filter(Boolean).map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
+    let org: string | undefined;
+    const kind = githubAppHosts[host];
+    if (kind === 'api') org = seg[0] === 'repos' || seg[0] === 'orgs' ? seg[1] : undefined;
+    else if (kind === 'git') org = seg[0];
+    return org && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(org) ? org : undefined;
+  }
+
+  const githubAppHosts: Record<string, 'api' | 'git'> = opts.githubAppHosts ?? { 'api.github.com': 'api', 'github.com': 'git' };
+  const appCache = new Map<string, { token: string; expiresAtMs: number }>();
+  /**
+   * #334: the agent's GitHub App key for this call, formatted like the route's credential, or undefined to fall back.
+   * A helper gets its parent's app key; read-only was already enforced before this, so it can still only read.
+   */
+  async function githubAppCredential(route: Route, ctx: RunContext, rest: string): Promise<string | undefined> {
+    if (!opts.control.githubAppToken) return undefined;
+    const org = githubOrgOf(route, rest);
+    if (!org) return undefined;
+    const agentId = ctx.helperOf ?? ctx.run.agentId;
+    const key = `${agentId}\u0000${org.toLowerCase()}`;
+    let hit = appCache.get(key);
+    if (!hit || hit.expiresAtMs - 60_000 <= Date.now()) {
+      hit = undefined;
+      try {
+        const r = await opts.control.githubAppToken({ runId: ctx.run.runId, agentId, org });
+        if (r.ok) {
+          if (r.accessToken.length >= 4) secretValues.add(r.accessToken);
+          hit = { token: r.accessToken, expiresAtMs: Date.parse(r.expiresAt) || Date.now() + 5 * 60_000 };
+          appCache.set(key, hit);
+        }
+      } catch (err) {
+        console.error(`[gatekeeper-egress] github app token ${route.id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (!hit) return undefined;
+    const host = new URL(route.upstream!).hostname.toLowerCase();
+    // git over HTTPS takes Basic x-access-token:<key>; the REST API takes `token <key>`.
+    return githubAppHosts[host] === 'git' ? `Basic ${Buffer.from(`x-access-token:${hit.token}`).toString('base64')}` : `token ${hit.token}`;
+  }
+
   async function connectionToken(route: Route, ctx: RunContext): Promise<ConnectionTokenResult> {
     if (!opts.control.connectionToken) return { ok: false, status: 503, error: 'connections_unavailable' };
     const key = `${ctx.run.agentId}\u0000${route.connection}\u0000${(route.scopes ?? []).join(' ')}`;
@@ -713,6 +769,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     authHeader: string | undefined,
     onResponse?: (status: number, isSse: boolean) => { chunk: (b: Buffer) => void },
     beforeEnd?: () => void,
+    authHeaderName?: string,
   ): Promise<number> {
     const t0 = performance.now();
     const done = (status: number) => {
@@ -740,7 +797,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       for (const [k, v] of Object.entries(req.headers)) if (v !== undefined && !STRIP.has(k.toLowerCase())) headers[k] = v;
       headers['accept-encoding'] = 'identity';
       if (body.length) headers['content-length'] = String(body.length);
-      if (route.connection) {
+      if (authHeaderName && authHeader) {
+        // #334: a GitHub App key always goes in Authorization, whatever header the route's static credential uses.
+        headers[authHeaderName] = authHeader;
+      } else if (route.connection) {
         // §6.11: only the Keymaster's token goes upstream; the caller's credentials never do.
         if (authHeader) headers['authorization'] = authHeader;
       } else if (route.credential && authHeader) {
@@ -1726,9 +1786,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
       if (checkHold({ hold: route.hold, method: req.method ?? 'GET' }).held && (await holdOrRelease(req, res, ctx, route, rest, raw))) return;
       if (route.connection) return await handleConnection(req, res, ctx, route, rest, raw);
-      const cred = await credential(route, ctx);
+      // #334: the agent's own GitHub App key when it has one installed on the target org; else the route's credential.
+      const appCred = await githubAppCredential(route, ctx, rest);
+      const cred = appCred ?? (await credential(route, ctx));
       if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
-      const status = await forward(req, res, route, rest, raw, cred);
+      const status = await forward(req, res, route, rest, raw, cred, undefined, undefined, appCred ? 'authorization' : undefined);
+      if (appCred) ledger(ctx, route, { type: 'action', action: 'GITHUB_APP_KEY_USED', org: githubOrgOf(route, rest) });
+      if (status === 401 && appCred) for (const k of appCache.keys()) if (k.startsWith(`${ctx.helperOf ?? ctx.run.agentId}\u0000`)) appCache.delete(k);
       // AP3.2: a successful read consults the system; a write, or anything on the Discord route, does not.
       if (status >= 200 && status < 300 && isReadMethod(req.method) && !isDiscordRoute(route)) replies.sawDataRead(ctx.run.runId);
       ledger(ctx, route, { type: 'action', action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS' });

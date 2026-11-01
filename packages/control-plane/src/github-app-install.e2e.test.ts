@@ -119,4 +119,13 @@ describe('GitHub App install and installation keys (E5.1b)', { concurrency: fals
     assert.equal((await token({ runId, agentId: 'archie', org: 'sandbox-org' }, ADMIN)).status, 403);
     assert.equal((await token({ runId, agentId: 'other', org: 'sandbox-org' })).body.error, 'run_not_live');
   });
+
+  it("#334: a live helper run borrows its parent's key; a helper of another agent, or after the parent ends, does not", async () => {
+    const helper = state.runs.create({ agentId: 'juror.helper.1', state: 'WORKING', actor: 'test', trigger: 'subagent', parentRunId: runId, parentAgentId: 'archie' } as any).runId;
+    assert.equal((await token({ runId: helper, agentId: 'archie', org: 'sandbox-org' })).status, 200);
+    assert.equal((await token({ runId: helper, agentId: 'other', org: 'sandbox-org' })).body.error, 'run_not_live');
+    const ended = state.runs.create({ agentId: 'archie', state: 'DONE', actor: 'test', trigger: 'api' } as any).runId;
+    const orphan = state.runs.create({ agentId: 'juror.helper.2', state: 'WORKING', actor: 'test', trigger: 'subagent', parentRunId: ended, parentAgentId: 'archie' } as any).runId;
+    assert.equal((await token({ runId: orphan, agentId: 'archie', org: 'sandbox-org' })).body.error, 'run_not_live');
+  });
 });

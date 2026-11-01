@@ -111,7 +111,11 @@ export async function handleGitHubAppInstall(state: FactoryState, req: http.Inco
     const org = typeof b.org === 'string' && ORG.test(b.org) ? b.org : undefined;
     if (!runId || !agentId || !org) return json(res, 400, { error: 'runId, agentId, org required' }), true;
     const run = state.runs.get(runId);
-    if (!run || run.agentId !== agentId || isTerminal(run.state)) return json(res, 403, { error: 'run_not_live' }), true;
+    // #334: a helper run borrows its parent's app key (the gatekeeper keeps it read-only), only while both runs are live.
+    const parentRun = run?.parentAgentId === agentId && run.parentRunId ? state.runs.get(run.parentRunId) : undefined;
+    const own = run?.agentId === agentId;
+    const borrowed = Boolean(parentRun && !isTerminal(parentRun.state));
+    if (!run || (!own && !borrowed) || isTerminal(run.state)) return json(res, 403, { error: 'run_not_live' }), true;
     const out = await mintInstallationToken(state, agentId, org);
     if (!out.ok) return json(res, out.status, { error: out.error }), true;
     res.setHeader('Cache-Control', 'no-store');
