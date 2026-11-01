@@ -419,6 +419,10 @@ export async function handleRuntimeRoutes(state: FactoryState, req: http.Incomin
       return true;
     }
 
+    if (state.runtimeRollout && !state.runtimeRollout.done) {
+      json(res, 409, { error: 'rollout_in_progress', message: 'a runtime rollout is still running (GET /api/v1/runtime)', rollout: state.runtimeRollout });
+      return true;
+    }
     const nextPin: SharedRuntimePin = {
       repo,
       commit,
