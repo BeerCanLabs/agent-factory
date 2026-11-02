@@ -415,20 +415,24 @@ export async function runActivationSmoke(
 
     if (finishedSkillRun.state !== 'DONE') {
       const isBudgetExceeded = finishedSkillRun.state === 'BLOCKED_BUDGET_EXCEEDED' || String(finishedSkillRun.error).includes('budget');
+      // Only reached for per-skill smokes: the hello-world check returned above on any failure, 5xx included.
       if (!isBudgetExceeded && finishedSkillRun.state === 'FAILED' && isDependencyDown(finishedSkillRun.error)) {
         // The runtime loaded and ran the skill; the service behind its route is down. Report it, do not roll back.
-        state.ledger.append({
-          timestamp: new Date().toISOString(),
-          agentId: agent.id,
-          runId: skillRun.runId,
-          type: 'action',
-          action: 'AGENT_SMOKE_DEPENDENCY_DOWN',
-          actor,
-          commit,
-          // The ledger keeps structured fields only: the route and the upstream status; the run holds the error text.
-          ...(routes[0] ? { route: routes[0] } : {}),
-          ...(upstreamStatus(finishedSkillRun.error) ? { status: upstreamStatus(finishedSkillRun.error) } : {}),
-        });
+        // The ledger keeps structured fields only (route, upstream status); the run record holds the error text.
+        const status = upstreamStatus(finishedSkillRun.error);
+        for (const route of routes.length ? routes : [undefined]) {
+          state.ledger.append({
+            timestamp: new Date().toISOString(),
+            agentId: agent.id,
+            runId: skillRun.runId,
+            type: 'action',
+            action: 'AGENT_SMOKE_DEPENDENCY_DOWN',
+            actor,
+            commit,
+            ...(route ? { route } : {}),
+            ...(status ? { status } : {}),
+          });
+        }
         continue;
       }
       const err = isBudgetExceeded
