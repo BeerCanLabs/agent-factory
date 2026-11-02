@@ -1,7 +1,7 @@
 {
   "id": "factory-auth",
   "title": "Agent Factory: factory-owned authorization and login",
-  "status": "plan-gate",
+  "status": "awaiting-approval",
   "outcome": "The IdP handles identity only; every role, grant and check lives in factory storage behind the factory's one API, so access changes need no redeploy and no Cloudflare edit, and no route answers without a verified credential except the login page.",
   "target_repo": "BeerCanLabs/agent-factory",
   "companion": "plans/factory-auth.md",
@@ -35,8 +35,9 @@
     {
       "id": "skill-egress",
       "title": "Follow-on: Skill-driven egress policy",
-      "deploy_point": true,
+      "deploy_point": false,
       "acceptance_criteria": [
+        "Out of this plan's delivery (D17): recorded for linkage only; the story-breaker creates no stories for it until its own plan is merged.",
         "Adopting a skill writes its declared requires.routes into the agent's AgentPolicy automatically, one direction only.",
         "Policy is not a second manual edit surface; no agent route exists that no skill justifies.",
         "Adoption brings the skill's default hold policy into the agent's hold settings (S23)."
@@ -45,8 +46,9 @@
     {
       "id": "cloud-spend",
       "title": "Follow-on: Cloud spend enforcement",
-      "deploy_point": true,
+      "deploy_point": false,
       "acceptance_criteria": [
+        "Out of this plan's delivery (D17): recorded for linkage only; the story-breaker creates no stories for it until its own plan is merged.",
         "Provisioning checks estimated cost against the budget-owner's allocation (D25) before creating anything.",
         "Provisioning is refused when no allocation exists."
       ]
