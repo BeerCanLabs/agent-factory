@@ -147,11 +147,10 @@ function walkFiles(dir, base = dir) {
 /** A mind or volume sync that has not finished in this long is abandoned (it blocks the shim while it runs). */
 const SYNC_TIMEOUT_MS = 10 * 60 * 1000;
 
-function defaultSync(cmd: string, args: string[]): void {
-  const env = platformEnv(process.env);
+/** The process a sync step runs: the platform CLI, or this package's GCS helper script. */
+export function syncCommand(cmd: string, args: string[]): { file: string; args: string[] } {
   if (cmd === 'gcloud' && args[0] === 'storage' && args[1] === 'rm') {
-    execFileSync(process.execPath, ['-e', GCS_SYNC_SCRIPT, 'rm', ...args.slice(2).filter((a) => a.startsWith('gs://'))], { stdio: 'inherit', env, timeout: SYNC_TIMEOUT_MS });
-    return;
+    return { file: process.execPath, args: ['-e', GCS_SYNC_SCRIPT, 'rm', ...args.slice(2).filter((a) => a.startsWith('gs://'))] };
   }
   if (cmd === 'gcloud' && args[0] === 'storage' && args[1] === 'rsync') {
     const src = args[args.length - 2];
@@ -159,10 +158,18 @@ function defaultSync(cmd: string, args: string[]): void {
     // `-x ^<dir>/` excludes one top-level directory (AM3: closed volumes on pull).
     const x = args.indexOf('-x');
     const exclude = x >= 0 ? args[x + 1].replace(/^\^\(?/, '').replace(/\)?\/$/, '').split('|').join(',') : '';
-    execFileSync(process.execPath, ['-e', GCS_SYNC_SCRIPT, src, dst, ...(exclude ? [exclude] : [])], { stdio: 'inherit', env, timeout: SYNC_TIMEOUT_MS });
-    return;
+    return { file: process.execPath, args: ['-e', GCS_SYNC_SCRIPT, src, dst, ...(exclude ? [exclude] : [])] };
   }
-  execFileSync(cmd, args, { stdio: 'inherit', env, timeout: SYNC_TIMEOUT_MS });
+  return { file: cmd, args };
+}
+
+export function syncEnv(): NodeJS.ProcessEnv {
+  return platformEnv(process.env);
+}
+
+function defaultSync(cmd: string, args: string[]): void {
+  const c = syncCommand(cmd, args);
+  execFileSync(c.file, c.args, { stdio: 'inherit', env: syncEnv(), timeout: SYNC_TIMEOUT_MS });
 }
 
 function s3Prefix(store: MindStore, prefix: string): string {

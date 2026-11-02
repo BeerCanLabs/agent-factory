@@ -7,7 +7,7 @@
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { VOLUME_REQUESTS_DIR, isVolumeName, pullMind, pullVolume, pushMind, type MindStore } from './index.js';
+import { VOLUME_REQUESTS_DIR, isVolumeName, pullMind, pullVolume, pushMind, syncCommand, syncEnv, type MindStore } from './index.js';
 import { gatekeeperEgressEnv } from './gatekeeper-egress-env.js';
 
 export { gatekeeperEgressEnv };
@@ -56,6 +56,47 @@ async function post(path: string, body: unknown): Promise<number | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * #339: the final mind push runs off the event loop and is bounded, so heartbeats keep flowing while it runs and a stalled
+ * upload can never hold back the run's result (the factory stops the task once the result lands, so the push goes first).
+ * The steps are recorded from `pushMind` and replayed in order; a failed step aborts the rest, as the sync push does.
+ */
+export async function pushMindBounded(store: MindStore, prefix: string, dir: string, timeoutMs: number): Promise<'ok' | 'failed' | 'timed_out'> {
+  const steps: Array<{ cmd: string; args: string[] }> = [];
+  try {
+    pushMind(store, prefix, dir, (cmd, args) => void steps.push({ cmd, args }));
+  } catch (err) {
+    console.error(`[shim] mind push failed: ${err instanceof Error ? err.message : String(err)}`);
+    return 'failed';
+  }
+  const deadline = Date.now() + timeoutMs;
+  for (const step of steps) {
+    const c = syncCommand(step.cmd, step.args);
+    const left = deadline - Date.now();
+    if (left <= 0) return 'timed_out';
+    const outcome: 'ok' | 'failed' | 'timed_out' = await new Promise((resolve) => {
+      const p = spawn(c.file, c.args, { stdio: 'inherit', env: syncEnv() });
+      const t = setTimeout(() => {
+        p.kill('SIGKILL');
+        resolve('timed_out');
+      }, left);
+      p.on('error', () => {
+        clearTimeout(t);
+        resolve('failed');
+      });
+      p.on('exit', (code) => {
+        clearTimeout(t);
+        resolve(code === 0 ? 'ok' : 'failed');
+      });
+    });
+    if (outcome !== 'ok') {
+      console.error(`[shim] mind push ${outcome === 'timed_out' ? `timed out after ${timeoutMs}ms` : 'failed'} (${step.cmd} ${step.args.slice(0, 2).join(' ')})`);
+      return outcome;
+    }
+  }
+  return 'ok';
 }
 
 function safePush(store: MindStore, prefix: string | undefined, dir: string) {
@@ -174,25 +215,33 @@ export async function main(argv: string[]): Promise<number> {
       resolve(127);
     });
   });
-  clearInterval(hb);
   if (sync) clearInterval(sync);
   if (volumes) clearInterval(volumes);
-  if (syncsMind) safePush(store, prefix, dir);
+  // #339: heartbeats keep running through the final push; the push is bounded so the result is never held back by it.
+  if (syncsMind && prefix) {
+    const started = Date.now();
+    const outcome = await pushMindBounded(store, prefix, dir, Number(process.env.FACTORY_FINAL_SYNC_SECONDS || '45') * 1000);
+    console.error(`[shim] final mind push ${outcome} in ${Date.now() - started}ms`);
+  }
+  clearInterval(hb);
 
+  let report: unknown;
   if (code === 0) {
     // If the decoupled worker wrote a result file, automatically report it to the factory
     if (resultFile && existsSync(resultFile)) {
       try {
-        const raw = readFileSync(resultFile, 'utf8');
-        const parsed = JSON.parse(raw);
-        await post('result', parsed);
+        report = JSON.parse(readFileSync(resultFile, 'utf8'));
       } catch (err) {
         console.error(`[shim] could not report result from ${resultFile}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   } else {
     // If the worker died without reporting, say so now instead of waiting for task reconciliation.
-    await post('result', { status: 'failed', error: `worker exited ${code}` });
+    report = { status: 'failed', error: `worker exited ${code}` };
+  }
+  if (report !== undefined) {
+    const status = await post('result', report);
+    if (status === undefined || status >= 300) console.error(`[shim] result was not accepted: ${status ?? 'no response'}`);
   }
   return code;
 }
