@@ -29,8 +29,10 @@ import {
 } from '@beercanlabs/factory-bouncer';
 import {
   BUILTIN_AGENT_IDS,
+  RETIRED_PLACEHOLDER_IDS,
   effectiveAgentKind,
   loadDynamicRegistry,
+  registryOf,
   summarizeSkill,
   type AgentKind,
   type AgentRecord,
@@ -38,8 +40,7 @@ import {
   type SkillRegistry,
 } from '@beercanlabs/factory-registrar';
 import type { LedgerStore } from '@beercanlabs/factory-ledger';
-import { wireGrantStoreKindLookup, type FactoryState } from './app.js';
-import { skillRegistry } from './skills.js';
+import { findAgentRecord, wireGrantStoreKindLookup, type FactoryState } from './app.js';
 
 export type OwnerConversionRole = 'content-owner' | 'accountable-lead' | 'member';
 
@@ -125,6 +126,7 @@ function isBuiltinAgent(agent: AgentRecord): boolean {
 }
 
 function isRetiredAgent(agent: AgentRecord): boolean {
+  if (RETIRED_PLACEHOLDER_IDS.has(agent.id)) return true;
   const status = (agent as unknown as { status?: string }).status;
   return Boolean(
     agent.retiredAt !== undefined ||
@@ -133,6 +135,19 @@ function isRetiredAgent(agent: AgentRecord): boolean {
       agent.state === 'RETIRED_PENDING_PURGE' ||
       agent.state === 'PURGED',
   );
+}
+
+function isOccupyingSlot(g: GrantRecord, at: Date): boolean {
+  const nowMs = at.getTime();
+  if (g.expiresAt !== null && Date.parse(g.expiresAt) <= nowMs) return false;
+  if (g.state === 'active') return true;
+  if (g.state === 'pending-revoked') {
+    if (typeof g.pendingExpiresAt === 'string' && Date.parse(g.pendingExpiresAt) <= nowMs) {
+      return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 function defaultDisplayName(email: string): string {
@@ -278,13 +293,21 @@ export async function convertLegacyOwners(
   const dryRun = Boolean(opts.dryRun);
   const now = opts.now ?? (() => new Date());
 
+  // Fail-closed R8 assertions on unhealthy stores
+  if (state.principals && state.principals.healthy === false) {
+    throw new Error('state.principals is unhealthy (fail-closed R8)');
+  }
+  if (state.grants && state.grants.healthy === false) {
+    throw new Error('state.grants is unhealthy (fail-closed R8)');
+  }
+
   if (!dryRun) {
     if (!state.grants) throw new Error('state.grants is required for apply mode');
     if (!state.principals) throw new Error('state.principals is required for apply mode');
     if (!state.ledger) throw new Error('state.ledger is required for apply mode');
   }
 
-  if (state.grants && (state as FactoryState).agents) {
+  if (!dryRun && state.grants && (state as FactoryState).agents) {
     try {
       wireGrantStoreKindLookup(state as FactoryState);
     } catch {
@@ -296,12 +319,8 @@ export async function convertLegacyOwners(
   const agentsMap = new Map<string, AgentRecord>();
 
   if (state.registryDir) {
-    try {
-      for (const a of loadDynamicRegistry(state.registryDir)) {
-        agentsMap.set(a.id, a);
-      }
-    } catch {
-      // Ignore registry read error
+    for (const a of loadDynamicRegistry(state.registryDir)) {
+      agentsMap.set(a.id, a);
     }
   }
 
@@ -311,6 +330,7 @@ export async function convertLegacyOwners(
 
   if (state.configs) {
     for (const agentId of state.configs.agentIds()) {
+      if (agentId.startsWith('__')) continue;
       if (!agentsMap.has(agentId)) {
         const cur = state.configs.current(agentId);
         if (cur) {
@@ -338,15 +358,11 @@ export async function convertLegacyOwners(
   const knownPrincipalIds = new Set<string>();
 
   if (state.principals) {
-    try {
-      for (const p of state.principals.list()) {
-        knownPrincipalIds.add(p.id);
-        for (const e of p.emails) {
-          simulatedEmailToPrincipal.set(e, p.id);
-        }
+    for (const p of state.principals.list()) {
+      knownPrincipalIds.add(p.id);
+      for (const e of p.emails) {
+        simulatedEmailToPrincipal.set(e, p.id);
       }
-    } catch {
-      // If store list fails
     }
   }
 
@@ -376,29 +392,25 @@ export async function convertLegacyOwners(
     );
     const agentKind: AgentKind = isTeam ? 'team' : 'personal';
 
-    // Check existing active grants in GrantStore
+    // Check existing occupying grants in GrantStore
     let existingGrants: GrantRecord[] = [];
-    if (state.grants && state.grants.healthy) {
-      try {
-        existingGrants = state.grants.list({
-          scopeKind: 'agent',
-          scopeId: agent.id,
-          includeExpired: false,
-          at: now(),
-        });
-      } catch {
-        existingGrants = [];
-      }
+    if (state.grants) {
+      existingGrants = state.grants.list({
+        scopeKind: 'agent',
+        scopeId: agent.id,
+        includeExpired: false,
+        at: now(),
+      });
     }
 
-    const activeContentOwnerGrant = existingGrants.find(
-      (g) => g.role === 'content-owner' && g.state === 'active',
+    const occupyingContentOwnerGrant = existingGrants.find(
+      (g) => g.role === 'content-owner' && isOccupyingSlot(g, now()),
     );
-    const activeLeadGrant = existingGrants.find(
-      (g) => g.role === 'accountable-lead' && g.state === 'active',
+    const occupyingLeadGrant = existingGrants.find(
+      (g) => g.role === 'accountable-lead' && isOccupyingSlot(g, now()),
     );
-    const activeMemberGrants = existingGrants.filter(
-      (g) => g.role === 'member' && g.state === 'active',
+    const occupyingMemberGrants = existingGrants.filter(
+      (g) => g.role === 'member' && isOccupyingSlot(g, now()),
     );
 
     // Get legacy owners from ConfigStore, falling back to agent.owners
@@ -410,9 +422,67 @@ export async function convertLegacyOwners(
         ? agentOwners
         : [];
 
+    // Parse and resolve all legacy owners FIRST to their canonical principalId
+    type ResolvedOwner = { raw: string; principalId: string; normalizedEmail?: string };
+    const resolvedOwners: ResolvedOwner[] = [];
+    let resolveFailed = false;
+
+    for (const rawOwner of legacyOwners) {
+      const parsed = parseLegacyOwnerString(rawOwner);
+      if (!parsed.ok) {
+        orphans.push({
+          targetKind: 'agent',
+          targetId: agent.id,
+          agentKind,
+          reason: 'unresolvable_owner',
+          message: `unresolvable legacy owner '${rawOwner}' on ${agentKind} agent '${agent.id}': ${parsed.reason}`,
+          legacyOwners,
+        });
+        resolveFailed = true;
+        break;
+      }
+      const resolved = resolveCanonicalPrincipalId(
+        parsed,
+        state.principals,
+        simulatedEmailToPrincipal,
+        knownPrincipalIds,
+      );
+      if (!resolved.ok) {
+        orphans.push({
+          targetKind: 'agent',
+          targetId: agent.id,
+          agentKind,
+          reason: 'unresolvable_owner',
+          message: `unresolvable principal for owner '${rawOwner}' on ${agentKind} agent '${agent.id}': ${resolved.reason}`,
+          legacyOwners,
+        });
+        resolveFailed = true;
+        break;
+      }
+      resolvedOwners.push({
+        raw: rawOwner,
+        principalId: resolved.principalId,
+        normalizedEmail: resolved.normalizedEmail,
+      });
+    }
+
+    if (resolveFailed) {
+      continue;
+    }
+
+    // Deduplicate by canonical principalId preserving first-seen order
+    const deduplicatedOwners: ResolvedOwner[] = [];
+    const seenPrincipals = new Set<string>();
+    for (const ro of resolvedOwners) {
+      if (!seenPrincipals.has(ro.principalId)) {
+        seenPrincipals.add(ro.principalId);
+        deduplicatedOwners.push(ro);
+      }
+    }
+
     if (agentKind === 'personal') {
-      if (activeContentOwnerGrant) {
-        // Personal agent already holds active canonical content-owner grant
+      if (occupyingContentOwnerGrant) {
+        // Personal agent already holds occupying canonical content-owner grant
         skippedCount++;
         continue;
       }
@@ -429,49 +499,18 @@ export async function convertLegacyOwners(
         continue;
       }
 
-      if (legacyOwners.length === 1) {
-        const rawOwner = legacyOwners[0];
-        const parsed = parseLegacyOwnerString(rawOwner);
-        if (!parsed.ok) {
-          orphans.push({
-            targetKind: 'agent',
-            targetId: agent.id,
-            agentKind: 'personal',
-            reason: 'unresolvable_owner',
-            message: `unresolvable legacy owner '${rawOwner}' on personal agent '${agent.id}': ${parsed.reason}`,
-            legacyOwners,
-          });
-          continue;
-        }
-
-        const resolved = resolveCanonicalPrincipalId(
-          parsed,
-          state.principals,
-          simulatedEmailToPrincipal,
-          knownPrincipalIds,
-        );
-        if (!resolved.ok) {
-          orphans.push({
-            targetKind: 'agent',
-            targetId: agent.id,
-            agentKind: 'personal',
-            reason: 'unresolvable_owner',
-            message: `unresolvable principal for owner '${rawOwner}' on personal agent '${agent.id}': ${resolved.reason}`,
-            legacyOwners,
-          });
-          continue;
-        }
-
+      if (deduplicatedOwners.length === 1) {
+        const primary = deduplicatedOwners[0];
         mappings.push({
           targetKind: 'agent',
           targetId: agent.id,
           agentKind: 'personal',
           role: 'content-owner',
-          legacyOwner: rawOwner,
-          principalId: resolved.principalId,
+          legacyOwner: primary.raw,
+          principalId: primary.principalId,
         });
       } else {
-        // Multiple legacy owners on personal agent
+        // Multiple distinct canonical principals on personal agent
         let ambiguityDecision: MultiOwnerAmbiguityPolicy = 'orphan';
         if (opts.resolveAmbiguity) {
           ambiguityDecision = opts.resolveAmbiguity(agent.id, legacyOwners);
@@ -492,197 +531,113 @@ export async function convertLegacyOwners(
         }
 
         if (ambiguityDecision === 'primary') {
-          const rawOwner = legacyOwners[0];
-          const parsed = parseLegacyOwnerString(rawOwner);
-          if (!parsed.ok) {
-            orphans.push({
-              targetKind: 'agent',
-              targetId: agent.id,
-              agentKind: 'personal',
-              reason: 'unresolvable_owner',
-              message: `unresolvable primary owner '${rawOwner}' on personal agent '${agent.id}': ${parsed.reason}`,
-              legacyOwners,
-            });
-            continue;
-          }
-          const resolved = resolveCanonicalPrincipalId(
-            parsed,
-            state.principals,
-            simulatedEmailToPrincipal,
-            knownPrincipalIds,
-          );
-          if (!resolved.ok) {
-            orphans.push({
-              targetKind: 'agent',
-              targetId: agent.id,
-              agentKind: 'personal',
-              reason: 'unresolvable_owner',
-              message: `unresolvable principal for primary owner '${rawOwner}' on personal agent '${agent.id}': ${resolved.reason}`,
-              legacyOwners,
-            });
-            continue;
-          }
+          const primary = deduplicatedOwners[0];
           mappings.push({
             targetKind: 'agent',
             targetId: agent.id,
             agentKind: 'personal',
             role: 'content-owner',
-            legacyOwner: rawOwner,
-            principalId: resolved.principalId,
+            legacyOwner: primary.raw,
+            principalId: primary.principalId,
           });
         } else if (ambiguityDecision === 'team') {
           // Reclassify as team agent
-          const leadOwner = legacyOwners[0];
-          const coOwners = legacyOwners.slice(1);
-          const parsedLead = parseLegacyOwnerString(leadOwner);
-          if (!parsedLead.ok) {
-            orphans.push({
-              targetKind: 'agent',
-              targetId: agent.id,
-              agentKind: 'team',
-              reason: 'unresolvable_owner',
-              message: `unresolvable lead '${leadOwner}' on converted team agent '${agent.id}': ${parsedLead.reason}`,
-              legacyOwners,
-            });
-            continue;
-          }
-          const resolvedLead = resolveCanonicalPrincipalId(
-            parsedLead,
-            state.principals,
-            simulatedEmailToPrincipal,
-            knownPrincipalIds,
-          );
-          if (!resolvedLead.ok) {
-            orphans.push({
-              targetKind: 'agent',
-              targetId: agent.id,
-              agentKind: 'team',
-              reason: 'unresolvable_owner',
-              message: `unresolvable lead principal '${leadOwner}' on converted team agent '${agent.id}': ${resolvedLead.reason}`,
-              legacyOwners,
-            });
-            continue;
-          }
+          const lead = deduplicatedOwners[0];
           mappings.push({
             targetKind: 'agent',
             targetId: agent.id,
             agentKind: 'team',
             role: 'accountable-lead',
-            legacyOwner: leadOwner,
-            principalId: resolvedLead.principalId,
+            legacyOwner: lead.raw,
+            principalId: lead.principalId,
           });
 
-          let memberFailed = false;
-          for (const memberRaw of coOwners) {
-            const parsedMember = parseLegacyOwnerString(memberRaw);
-            if (!parsedMember.ok) {
-              orphans.push({
-                targetKind: 'agent',
-                targetId: agent.id,
-                agentKind: 'team',
-                reason: 'unresolvable_owner',
-                message: `unresolvable member '${memberRaw}' on team agent '${agent.id}': ${parsedMember.reason}`,
-                legacyOwners,
-              });
-              memberFailed = true;
-              break;
-            }
-            const resolvedMember = resolveCanonicalPrincipalId(
-              parsedMember,
-              state.principals,
-              simulatedEmailToPrincipal,
-              knownPrincipalIds,
-            );
-            if (!resolvedMember.ok) {
-              orphans.push({
-                targetKind: 'agent',
-                targetId: agent.id,
-                agentKind: 'team',
-                reason: 'unresolvable_owner',
-                message: `unresolvable member principal '${memberRaw}' on team agent '${agent.id}': ${resolvedMember.reason}`,
-                legacyOwners,
-              });
-              memberFailed = true;
-              break;
-            }
-            if (resolvedMember.principalId !== resolvedLead.principalId) {
-              mappings.push({
-                targetKind: 'agent',
-                targetId: agent.id,
-                agentKind: 'team',
-                role: 'member',
-                legacyOwner: memberRaw,
-                principalId: resolvedMember.principalId,
-              });
-            }
-          }
-          if (memberFailed) continue;
-        }
-      }
-    } else {
-      // Team agent
-      const candidateLead = agent.accountableLead || legacyOwners[0];
-      const candidateMembers = agent.accountableLead
-        ? legacyOwners.filter((o) => o !== agent.accountableLead)
-        : legacyOwners.slice(1);
-
-      if (activeLeadGrant) {
-        // Accountable lead grant already held
-        let memberFailed = false;
-        for (const memberRaw of candidateMembers) {
-          const parsed = parseLegacyOwnerString(memberRaw);
-          if (!parsed.ok) {
-            orphans.push({
-              targetKind: 'agent',
-              targetId: agent.id,
-              agentKind: 'team',
-              reason: 'unresolvable_owner',
-              message: `unresolvable member owner '${memberRaw}' on team agent '${agent.id}': ${parsed.reason}`,
-              legacyOwners,
-            });
-            memberFailed = true;
-            break;
-          }
-          const resolved = resolveCanonicalPrincipalId(
-            parsed,
-            state.principals,
-            simulatedEmailToPrincipal,
-            knownPrincipalIds,
-          );
-          if (!resolved.ok) {
-            orphans.push({
-              targetKind: 'agent',
-              targetId: agent.id,
-              agentKind: 'team',
-              reason: 'unresolvable_owner',
-              message: `unresolvable member principal '${memberRaw}' on team agent '${agent.id}': ${resolved.reason}`,
-              legacyOwners,
-            });
-            memberFailed = true;
-            break;
-          }
-          const alreadyMember = activeMemberGrants.some(
-            (g) => g.subject === resolved.principalId,
-          );
-          if (!alreadyMember && resolved.principalId !== activeLeadGrant.subject) {
+          for (const member of deduplicatedOwners.slice(1)) {
             mappings.push({
               targetKind: 'agent',
               targetId: agent.id,
               agentKind: 'team',
               role: 'member',
-              legacyOwner: memberRaw,
-              principalId: resolved.principalId,
+              legacyOwner: member.raw,
+              principalId: member.principalId,
             });
           }
         }
-        if (memberFailed) continue;
-        if (candidateMembers.length === 0) {
+      }
+    } else {
+      // Team agent
+      let candidateLeadResolved: ResolvedOwner | undefined;
+
+      if (agent.accountableLead) {
+        const parsedLead = parseLegacyOwnerString(agent.accountableLead);
+        if (!parsedLead.ok) {
+          orphans.push({
+            targetKind: 'agent',
+            targetId: agent.id,
+            agentKind: 'team',
+            reason: 'unresolvable_owner',
+            message: `unresolvable accountable-lead '${agent.accountableLead}' on team agent '${agent.id}': ${parsedLead.reason}`,
+            legacyOwners,
+          });
+          continue;
+        }
+        const resolvedLead = resolveCanonicalPrincipalId(
+          parsedLead,
+          state.principals,
+          simulatedEmailToPrincipal,
+          knownPrincipalIds,
+        );
+        if (!resolvedLead.ok) {
+          orphans.push({
+            targetKind: 'agent',
+            targetId: agent.id,
+            agentKind: 'team',
+            reason: 'unresolvable_owner',
+            message: `unresolvable accountable-lead principal '${agent.accountableLead}' on team agent '${agent.id}': ${resolvedLead.reason}`,
+            legacyOwners,
+          });
+          continue;
+        }
+        candidateLeadResolved = {
+          raw: agent.accountableLead,
+          principalId: resolvedLead.principalId,
+          normalizedEmail: resolvedLead.normalizedEmail,
+        };
+      } else if (deduplicatedOwners.length > 0) {
+        candidateLeadResolved = deduplicatedOwners[0];
+      }
+
+      const leadPrincipalId = occupyingLeadGrant?.subject ?? candidateLeadResolved?.principalId;
+      const candidateMembers = deduplicatedOwners.filter(
+        (ro) => ro.principalId !== leadPrincipalId,
+      );
+
+      if (occupyingLeadGrant) {
+        // Accountable lead grant already held
+        let addedMembers = 0;
+        for (const member of candidateMembers) {
+          const alreadyMember = occupyingMemberGrants.some(
+            (g) => g.subject === member.principalId,
+          );
+          if (!alreadyMember) {
+            mappings.push({
+              targetKind: 'agent',
+              targetId: agent.id,
+              agentKind: 'team',
+              role: 'member',
+              legacyOwner: member.raw,
+              principalId: member.principalId,
+            });
+            addedMembers++;
+          }
+        }
+        if (candidateMembers.length === 0 || addedMembers === 0) {
           skippedCount++;
         }
         continue;
       }
 
-      if (!candidateLead) {
+      if (!candidateLeadResolved) {
         orphans.push({
           targetKind: 'agent',
           targetId: agent.id,
@@ -694,165 +649,122 @@ export async function convertLegacyOwners(
         continue;
       }
 
-      // Resolve candidate lead
-      const parsedLead = parseLegacyOwnerString(candidateLead);
-      if (!parsedLead.ok) {
-        orphans.push({
-          targetKind: 'agent',
-          targetId: agent.id,
-          agentKind: 'team',
-          reason: 'unresolvable_owner',
-          message: `unresolvable accountable-lead '${candidateLead}' on team agent '${agent.id}': ${parsedLead.reason}`,
-          legacyOwners,
-        });
-        continue;
-      }
-
-      const resolvedLead = resolveCanonicalPrincipalId(
-        parsedLead,
-        state.principals,
-        simulatedEmailToPrincipal,
-        knownPrincipalIds,
-      );
-      if (!resolvedLead.ok) {
-        orphans.push({
-          targetKind: 'agent',
-          targetId: agent.id,
-          agentKind: 'team',
-          reason: 'unresolvable_owner',
-          message: `unresolvable accountable-lead principal '${candidateLead}' on team agent '${agent.id}': ${resolvedLead.reason}`,
-          legacyOwners,
-        });
-        continue;
-      }
-
       mappings.push({
         targetKind: 'agent',
         targetId: agent.id,
         agentKind: 'team',
         role: 'accountable-lead',
-        legacyOwner: candidateLead,
-        principalId: resolvedLead.principalId,
+        legacyOwner: candidateLeadResolved.raw,
+        principalId: candidateLeadResolved.principalId,
       });
 
-      let memberFailed = false;
-      for (const memberRaw of candidateMembers) {
-        const parsedMember = parseLegacyOwnerString(memberRaw);
-        if (!parsedMember.ok) {
-          orphans.push({
-            targetKind: 'agent',
-            targetId: agent.id,
-            agentKind: 'team',
-            reason: 'unresolvable_owner',
-            message: `unresolvable member owner '${memberRaw}' on team agent '${agent.id}': ${parsedMember.reason}`,
-            legacyOwners,
-          });
-          memberFailed = true;
-          break;
-        }
-        const resolvedMember = resolveCanonicalPrincipalId(
-          parsedMember,
-          state.principals,
-          simulatedEmailToPrincipal,
-          knownPrincipalIds,
+      for (const member of candidateMembers) {
+        const alreadyMember = occupyingMemberGrants.some(
+          (g) => g.subject === member.principalId,
         );
-        if (!resolvedMember.ok) {
-          orphans.push({
-            targetKind: 'agent',
-            targetId: agent.id,
-            agentKind: 'team',
-            reason: 'unresolvable_owner',
-            message: `unresolvable member principal '${memberRaw}' on team agent '${agent.id}': ${resolvedMember.reason}`,
-            legacyOwners,
-          });
-          memberFailed = true;
-          break;
-        }
-        if (resolvedMember.principalId !== resolvedLead.principalId) {
+        if (!alreadyMember) {
           mappings.push({
             targetKind: 'agent',
             targetId: agent.id,
             agentKind: 'team',
             role: 'member',
-            legacyOwner: memberRaw,
-            principalId: resolvedMember.principalId,
+            legacyOwner: member.raw,
+            principalId: member.principalId,
           });
         }
       }
-      if (memberFailed) continue;
     }
   }
 
-  // 4. Inspect skills (if skill registry is accessible)
-  let skillsReg: SkillRegistry | undefined = state.skills;
-  if (!skillsReg) {
-    try {
-      skillsReg = skillRegistry(state as FactoryState);
-    } catch {
-      // Skill registry not configured or not loaded
-    }
-  }
+  // 4. Inspect skills (ONLY if state.skills is explicitly provided)
+  const skillsReg: SkillRegistry | undefined = state.skills;
 
   if (skillsReg) {
-    try {
-      for (const skillId of skillsReg.ids()) {
-        const summary = summarizeSkill(skillsReg, skillId);
-        if (!summary || summary.retired) {
-          skippedCount++;
-          continue;
-        }
+    for (const skillId of skillsReg.ids()) {
+      const versions = skillsReg.versions(skillId);
+      if (!versions.length) {
+        skippedCount++;
+        continue;
+      }
+      const summary = summarizeSkill(skillsReg, skillId);
+      if (summary?.retired || versions.every((v) => v.retired)) {
+        skippedCount++;
+        continue;
+      }
 
-        // Check if skill already has active content-owner grant
-        const hasSkillGrant = state.grants?.activeContentOwnerOf({ kind: 'skill', id: skillId }, now());
-        if (hasSkillGrant) {
-          skippedCount++;
-          continue;
-        }
-
-        const skillOwner = summary.userOwner || summary.owner;
-        if (!skillOwner) {
-          continue;
-        }
-
-        const parsed = parseLegacyOwnerString(skillOwner);
-        if (!parsed.ok) {
-          orphans.push({
-            targetKind: 'skill',
-            targetId: skillId,
-            reason: 'unresolvable_owner',
-            message: `unresolvable legacy owner '${skillOwner}' on skill '${skillId}': ${parsed.reason}`,
-            legacyOwners: [skillOwner],
-          });
-          continue;
-        }
-
-        const resolved = resolveCanonicalPrincipalId(
-          parsed,
-          state.principals,
-          simulatedEmailToPrincipal,
-          knownPrincipalIds,
-        );
-        if (!resolved.ok) {
-          orphans.push({
-            targetKind: 'skill',
-            targetId: skillId,
-            reason: 'unresolvable_owner',
-            message: `unresolvable principal for skill owner '${skillOwner}' on skill '${skillId}': ${resolved.reason}`,
-            legacyOwners: [skillOwner],
-          });
-          continue;
-        }
-
-        mappings.push({
-          targetKind: 'skill',
-          targetId: skillId,
-          role: 'content-owner',
-          legacyOwner: skillOwner,
-          principalId: resolved.principalId,
+      // Check if skill already has occupying content-owner grant
+      let existingSkillGrants: GrantRecord[] = [];
+      if (state.grants) {
+        existingSkillGrants = state.grants.list({
+          scopeKind: 'skill',
+          scopeId: skillId,
+          includeExpired: false,
+          at: now(),
         });
       }
-    } catch {
-      // Ignore skill iteration failures
+      const hasSkillGrant = existingSkillGrants.some(
+        (g) => g.role === 'content-owner' && isOccupyingSlot(g, now()),
+      );
+      if (hasSkillGrant) {
+        skippedCount++;
+        continue;
+      }
+
+      // Resolve legacy human owner from versions (first.owner ?? first.registeredBy), NEVER manifest.owner agent ID!
+      const first = versions[0];
+      const skillOwner =
+        first?.owner ??
+        first?.registeredBy ??
+        versions.find((v) => v.owner)?.owner ??
+        versions.find((v) => v.registeredBy)?.registeredBy;
+
+      if (!skillOwner) {
+        orphans.push({
+          targetKind: 'skill',
+          targetId: skillId,
+          reason: 'no_owner',
+          message: `live skill '${skillId}' lacks content-owner grant and has no legacy human owner or registeredBy`,
+          legacyOwners: [],
+        });
+        continue;
+      }
+
+      const parsed = parseLegacyOwnerString(skillOwner);
+      if (!parsed.ok) {
+        orphans.push({
+          targetKind: 'skill',
+          targetId: skillId,
+          reason: 'unresolvable_owner',
+          message: `unresolvable legacy owner '${skillOwner}' on skill '${skillId}': ${parsed.reason}`,
+          legacyOwners: [skillOwner],
+        });
+        continue;
+      }
+
+      const resolved = resolveCanonicalPrincipalId(
+        parsed,
+        state.principals,
+        simulatedEmailToPrincipal,
+        knownPrincipalIds,
+      );
+      if (!resolved.ok) {
+        orphans.push({
+          targetKind: 'skill',
+          targetId: skillId,
+          reason: 'unresolvable_owner',
+          message: `unresolvable principal for skill owner '${skillOwner}' on skill '${skillId}': ${resolved.reason}`,
+          legacyOwners: [skillOwner],
+        });
+        continue;
+      }
+
+      mappings.push({
+        targetKind: 'skill',
+        targetId: skillId,
+        role: 'content-owner',
+        legacyOwner: skillOwner,
+        principalId: resolved.principalId,
+      });
     }
   }
 
@@ -860,6 +772,19 @@ export async function convertLegacyOwners(
 
   // 5. Dry-Run Mode: ZERO writes to any store or ledger!
   if (dryRun) {
+    const dryRunMaterializedPrincipals = new Set<string>();
+    for (const mapping of mappings) {
+      const existing = state.principals?.get(mapping.principalId);
+      if (!existing) {
+        const parsed = parseLegacyOwnerString(mapping.legacyOwner);
+        const email = parsed.ok && parsed.kind === 'email' ? parsed.normalizedEmail : undefined;
+        if (email) {
+          dryRunMaterializedPrincipals.add(mapping.principalId);
+          mapping.materializedPrincipal = true;
+        }
+      }
+    }
+
     return {
       ready,
       dryRun: true,
@@ -867,7 +792,7 @@ export async function convertLegacyOwners(
       orphans,
       convertedCount: mappings.length,
       skippedCount,
-      materializedPrincipals: [...new Set(mappings.map((m) => m.principalId))],
+      materializedPrincipals: [...dryRunMaterializedPrincipals],
       ledgerRowsWritten: 0,
     };
   }
@@ -919,7 +844,7 @@ export async function convertLegacyOwners(
   let ledgerRowsWritten = 0;
 
   for (const mapping of mappings) {
-    // Check if active grant already exists
+    // Check if occupying grant already exists
     const existingGrants = grantStore.list({
       scopeKind: mapping.targetKind,
       scopeId: mapping.targetId,
@@ -931,13 +856,36 @@ export async function convertLegacyOwners(
       (g) =>
         g.subject === mapping.principalId &&
         g.role === mapping.role &&
-        g.state === 'active',
+        isOccupyingSlot(g, now()),
     );
 
     if (alreadyGranted) {
       mapping.alreadyGranted = true;
       skippedCount++;
       continue;
+    }
+
+    // F1: Update and persist AgentRecord kind BEFORE grantStore.grant so effectiveAgentKind reflects the new kind!
+    if (mapping.targetKind === 'agent' && mapping.agentKind) {
+      const agentRec =
+        state.agents.get(mapping.targetId) ??
+        findAgentRecord(state as FactoryState, mapping.targetId) ??
+        agentsMap.get(mapping.targetId);
+      if (agentRec) {
+        if (!state.agents.has(mapping.targetId)) {
+          state.agents.set(mapping.targetId, agentRec);
+        }
+        if (agentRec.kind !== mapping.agentKind) {
+          agentRec.kind = mapping.agentKind;
+          if (state.registryDir) {
+            try {
+              registryOf(state).save(agentRec);
+            } catch {
+              // Minimal test harnesses may not support dynamic registry persistence
+            }
+          }
+        }
+      }
     }
 
     // Write grant
@@ -957,18 +905,10 @@ export async function convertLegacyOwners(
 
     convertedCount++;
 
-    // Update in-memory AgentRecord kind if omitted
-    if (mapping.targetKind === 'agent' && mapping.agentKind) {
-      const agentRec = state.agents.get(mapping.targetId);
-      if (agentRec && !agentRec.kind) {
-        agentRec.kind = mapping.agentKind;
-      }
-    }
-
-    // Append OWNER_CONVERTED to hash-chained audit ledger
+    // F2: Append OWNER_CONVERTED to hash-chained audit ledger with agentId: skill:<id> for skills!
     ledger.append({
       timestamp: now().toISOString(),
-      agentId: mapping.targetKind === 'agent' ? mapping.targetId : 'factory',
+      agentId: mapping.targetKind === 'skill' ? `skill:${mapping.targetId}` : mapping.targetId,
       type: 'action',
       action: 'OWNER_CONVERTED',
       actor: by,

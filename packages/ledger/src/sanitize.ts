@@ -328,6 +328,29 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   }
   if (typeof raw.legacyOwner === 'string' && /^[A-Za-z0-9:._@+-]{1,256}$/.test(raw.legacyOwner)) event.legacyOwner = raw.legacyOwner;
   if (typeof raw.principalId === 'string' && /^[A-Za-z0-9:._@+-]{1,256}$/.test(raw.principalId)) event.principalId = raw.principalId;
+  if (
+    typeof raw.subject === 'string' &&
+    raw.subject.length <= 320 &&
+    !raw.subject.startsWith('fk_') &&
+    /^(?:user|domain|group|service|cloudflare|oidc):[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.-]{1,315}$/.test(raw.subject)
+  ) {
+    event.subject = raw.subject;
+  }
+  if (
+    typeof raw.legacyOwner === 'string' &&
+    raw.legacyOwner.length <= 320 &&
+    !raw.legacyOwner.startsWith('fk_') &&
+    /^(?:(?:user|cloudflare|oidc):[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.-]{1,315}|[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9.-]+)$/.test(raw.legacyOwner)
+  ) {
+    event.legacyOwner = raw.legacyOwner;
+  }
+  if (
+    typeof raw.principalId === 'string' &&
+    raw.principalId.length <= 320 &&
+    /^user:[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.-]{1,315}$/.test(raw.principalId)
+  ) {
+    event.principalId = raw.principalId;
+  }
   if (typeof raw.role === 'string' && /^[a-z0-9_-]{1,64}$/.test(raw.role)) event.role = raw.role;
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {

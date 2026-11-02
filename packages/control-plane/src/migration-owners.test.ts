@@ -1,21 +1,26 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   GrantStore,
   PrincipalStore,
-} from '@beercanlabs/factory-bouncer';
-import {
   MemoryDocBackend,
 } from '@beercanlabs/factory-bouncer';
 import {
   VersionedConfigStore,
+  SkillRegistry,
+  loadDynamicRegistry,
+  effectiveAgentKind,
+  registryOf,
+  RETIRED_PLACEHOLDER_IDS,
   type AgentRecord,
   type ConfigRecord,
-  type ConfigContent,
   type ConfigBackend,
-  type ConfigMeta,
-  type ConfigExport,
+  type SkillVersionRecord,
 } from '@beercanlabs/factory-registrar';
+import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import {
   convertLegacyOwners,
   ZeroOrphanCutoverError,
@@ -42,40 +47,6 @@ class MemoryConfigBackend implements ConfigBackend {
 
   async remove(agentId: string): Promise<void> {
     this.records.delete(agentId);
-  }
-}
-
-class MemoryLedgerStore {
-  readonly rows: Array<Record<string, unknown>> = [];
-  private seq = 0;
-  private prevHash = '0'.repeat(64);
-
-  append(event: Record<string, unknown>) {
-    this.seq++;
-    const row = {
-      ...event,
-      seq: this.seq,
-      prevHash: this.prevHash,
-      hash: `hash_${this.seq}_${this.prevHash.slice(0, 8)}`,
-    };
-    this.prevHash = row.hash;
-    this.rows.push(row);
-    return row as any;
-  }
-
-  query(filter?: { agent?: string | null }) {
-    if (filter?.agent) {
-      return this.rows.filter((r) => r.agentId === filter.agent);
-    }
-    return [...this.rows];
-  }
-
-  head() {
-    return { seq: this.seq, hash: this.prevHash };
-  }
-
-  verify() {
-    return { ok: true, rows: this.rows.length, head: this.prevHash, checkpointsChecked: 0 };
   }
 }
 
@@ -108,7 +79,7 @@ describe('Owner migration converter (S18)', () => {
     const principals = await PrincipalStore.open(principalsBackend);
     const grants = await GrantStore.open(grantsBackend, { principals });
     const configs = await VersionedConfigStore.open(configBackend);
-    const ledger = new MemoryLedgerStore();
+    const ledger = new MemoryLedger();
 
     // Create an initial admin in PrincipalStore
     await principals.create({
@@ -138,12 +109,12 @@ describe('Owner migration converter (S18)', () => {
       configs,
       principals,
       grants,
-      ledger: ledger as any,
+      ledger,
     };
 
     const initialPrincipals = principals.list();
     const initialGrants = grants.list();
-    const initialLedgerRows = ledger.rows.length;
+    const initialLedgerRows = ledger.query().length;
 
     // Run dry-run
     const res = await convertLegacyOwners(state, {
@@ -164,7 +135,7 @@ describe('Owner migration converter (S18)', () => {
     // Verify ZERO mutations occurred!
     assert.deepEqual(principals.list(), initialPrincipals);
     assert.deepEqual(grants.list(), initialGrants);
-    assert.equal(ledger.rows.length, initialLedgerRows);
+    assert.equal(ledger.query().length, initialLedgerRows);
   });
 
   it('zero-orphan refusal gate blocks apply with zero writes when any live agent lacks an owner/lead', async () => {
@@ -175,7 +146,7 @@ describe('Owner migration converter (S18)', () => {
     const principals = await PrincipalStore.open(principalsBackend);
     const grants = await GrantStore.open(grantsBackend, { principals });
     const configs = await VersionedConfigStore.open(configBackend);
-    const ledger = new MemoryLedgerStore();
+    const ledger = new MemoryLedger();
 
     await principals.create({
       id: 'user:admin',
@@ -228,7 +199,7 @@ describe('Owner migration converter (S18)', () => {
       configs,
       principals,
       grants,
-      ledger: ledger as any,
+      ledger,
     };
 
     // 1. Dry run identifies orphan and reports ready: false
@@ -254,7 +225,7 @@ describe('Owner migration converter (S18)', () => {
 
     // Check zero grants written and zero ledger rows
     assert.equal(grants.list().length, 0);
-    assert.equal(ledger.rows.length, 0);
+    assert.equal(ledger.query().length, 0);
 
     // 3. throwOnOrphan throws ZeroOrphanCutoverError
     await assert.rejects(
@@ -280,7 +251,7 @@ describe('Owner migration converter (S18)', () => {
     const principals = await PrincipalStore.open(principalsBackend);
     const grants = await GrantStore.open(grantsBackend, { principals });
     const configs = await VersionedConfigStore.open(configBackend);
-    const ledger = new MemoryLedgerStore();
+    const ledger = new MemoryLedger();
 
     // Seed Stephanie's canonical principal with both hotmail and gmail emails
     await principals.create({
@@ -323,7 +294,7 @@ describe('Owner migration converter (S18)', () => {
       configs,
       principals,
       grants,
-      ledger: ledger as any,
+      ledger,
     };
 
     const dryRes = await convertLegacyOwners(state, {
@@ -356,8 +327,8 @@ describe('Owner migration converter (S18)', () => {
     assert.equal(finleyOwner, 'user:stephanie');
 
     // Verify OWNER_CONVERTED ledger rows
-    const higginsRow = ledger.rows.find((r) => r.agentId === 'higgins');
-    const finleyRow = ledger.rows.find((r) => r.agentId === 'finley');
+    const higginsRow = ledger.query().find((r) => r.agentId === 'higgins');
+    const finleyRow = ledger.query().find((r) => r.agentId === 'finley');
     assert.ok(higginsRow);
     assert.ok(finleyRow);
     assert.equal(higginsRow.action, 'OWNER_CONVERTED');
@@ -379,7 +350,7 @@ describe('Owner migration converter (S18)', () => {
     const principals = await PrincipalStore.open(principalsBackend);
     const grants = await GrantStore.open(grantsBackend, { principals });
     const configs = await VersionedConfigStore.open(configBackend);
-    const ledger = new MemoryLedgerStore();
+    const ledger = new MemoryLedger();
 
     // Personal agent: Dale is owner
     await configs.put(
@@ -414,7 +385,7 @@ describe('Owner migration converter (S18)', () => {
       configs,
       principals,
       grants,
-      ledger: ledger as any,
+      ledger,
     };
 
     const res = await convertLegacyOwners(state, {
@@ -440,7 +411,7 @@ describe('Owner migration converter (S18)', () => {
     assert.equal(memberGrant.subject, 'user:alice');
 
     // Verify ledger entries
-    assert.equal(ledger.rows.length, 3);
+    assert.equal(ledger.query().length, 3);
     assert.equal(ledger.verify().ok, true);
   });
 
@@ -452,7 +423,7 @@ describe('Owner migration converter (S18)', () => {
     const principals = await PrincipalStore.open(principalsBackend);
     const grants = await GrantStore.open(grantsBackend, { principals });
     const configs = await VersionedConfigStore.open(configBackend);
-    const ledger = new MemoryLedgerStore();
+    const ledger = new MemoryLedger();
 
     await configs.put(
       {
@@ -473,7 +444,7 @@ describe('Owner migration converter (S18)', () => {
       configs,
       principals,
       grants,
-      ledger: ledger as any,
+      ledger,
     };
 
     // First apply
@@ -486,7 +457,7 @@ describe('Owner migration converter (S18)', () => {
     assert.equal(firstRes.ledgerRowsWritten, 1);
 
     const grantsCountAfterFirst = grants.list().length;
-    const ledgerCountAfterFirst = ledger.rows.length;
+    const ledgerCountAfterFirst = ledger.query().length;
 
     // Second apply
     const secondRes = await convertLegacyOwners(state, {
@@ -500,7 +471,7 @@ describe('Owner migration converter (S18)', () => {
 
     // Grant store count and ledger row count remain identical
     assert.equal(grants.list().length, grantsCountAfterFirst);
-    assert.equal(ledger.rows.length, ledgerCountAfterFirst);
+    assert.equal(ledger.query().length, ledgerCountAfterFirst);
     assert.equal(ledger.verify().ok, true);
   });
 
@@ -512,7 +483,7 @@ describe('Owner migration converter (S18)', () => {
     const principals = await PrincipalStore.open(principalsBackend);
     const grants = await GrantStore.open(grantsBackend, { principals });
     const configs = await VersionedConfigStore.open(configBackend);
-    const ledger = new MemoryLedgerStore();
+    const ledger = new MemoryLedger();
 
     await configs.put(
       {
@@ -533,7 +504,7 @@ describe('Owner migration converter (S18)', () => {
       configs,
       principals,
       grants,
-      ledger: ledger as any,
+      ledger,
     };
 
     // 1. Default policy is 'orphan'
@@ -577,7 +548,7 @@ describe('Owner migration converter (S18)', () => {
     const principals = await PrincipalStore.open(principalsBackend);
     const grants = await GrantStore.open(grantsBackend, { principals });
     const configs = await VersionedConfigStore.open(configBackend);
-    const ledger = new MemoryLedgerStore();
+    const ledger = new MemoryLedger();
 
     await configs.put(
       {
@@ -598,7 +569,7 @@ describe('Owner migration converter (S18)', () => {
       configs,
       principals,
       grants,
-      ledger: ledger as any,
+      ledger,
     };
 
     const res = await convertLegacyOwners(state, {
@@ -609,5 +580,620 @@ describe('Owner migration converter (S18)', () => {
     assert.equal(res.ready, false);
     assert.equal(res.orphans.length, 1);
     assert.equal(res.orphans[0].reason, 'unresolvable_owner');
+  });
+
+  describe('F1: team-kind conversion crash & persistence and zero dryRun mutation', () => {
+    it('apply mode converts legacy (kind: undefined) agent to team via defaultTeamAgents without 409 conflict and updates kind', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const configs = await VersionedConfigStore.open(new MemoryConfigBackend());
+      const ledger = new MemoryLedger();
+
+      await configs.put(
+        {
+          agentId: 'legacy-agent',
+          source: { repo: 'BeerCanLabs/legacy' },
+          skills: [],
+          policy: null,
+          owners: ['cloudflare:lead@example.com'],
+        },
+        { by: 'bootstrap', reason: 'initial' },
+      );
+
+      // Pre-S2b agent record with kind: undefined
+      const agent = makeAgent('legacy-agent', { kind: undefined });
+      const agents = new Map<string, AgentRecord>();
+      agents.set('legacy-agent', agent);
+
+      const state: OwnerMigrationState = { agents, configs, principals, grants, ledger };
+
+      // Apply mode with defaultTeamAgents specifying legacy-agent
+      const res = await convertLegacyOwners(state, {
+        dryRun: false,
+        by: 'user:admin',
+        defaultTeamAgents: new Set(['legacy-agent']),
+      });
+
+      assert.equal(res.ready, true);
+      assert.equal(res.convertedCount, 1);
+      assert.equal(agent.kind, 'team');
+      assert.equal(effectiveAgentKind(agent), 'team');
+
+      const lead = grants.list({ scopeKind: 'agent', scopeId: 'legacy-agent' }).find((g) => g.role === 'accountable-lead');
+      assert.equal(lead?.subject, 'user:lead');
+    });
+
+    it('apply mode persists kind: "team" to registryDir via registryOf(state) so it survives restart', async () => {
+      const registryDir = mkdtempSync(join(tmpdir(), 'reg-test-'));
+      try {
+        const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+        const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+        const configs = await VersionedConfigStore.open(new MemoryConfigBackend());
+        const ledger = new MemoryLedger();
+
+        await configs.put(
+          {
+            agentId: 'persisted-agent',
+            source: { repo: 'BeerCanLabs/persisted' },
+            skills: [],
+            policy: null,
+            owners: ['cloudflare:lead@example.com'],
+          },
+          { by: 'bootstrap', reason: 'initial' },
+        );
+
+        const agent = makeAgent('persisted-agent', { kind: undefined });
+        registryOf({ registryDir }).save(agent);
+
+        const agents = new Map<string, AgentRecord>();
+        agents.set('persisted-agent', agent);
+
+        const state: OwnerMigrationState = { agents, configs, principals, grants, ledger, registryDir };
+
+        const res = await convertLegacyOwners(state, {
+          dryRun: false,
+          by: 'user:admin',
+          defaultTeamAgents: new Set(['persisted-agent']),
+        });
+
+        assert.equal(res.ready, true);
+        assert.equal(agent.kind, 'team');
+
+        // Reload from dynamic registry to prove persistence survives restart
+        const loaded = loadDynamicRegistry(registryDir);
+        const reloadedAgent = loaded.find((a) => a.id === 'persisted-agent');
+        assert.ok(reloadedAgent);
+        assert.equal(reloadedAgent.kind, 'team');
+        assert.equal(effectiveAgentKind(reloadedAgent), 'team');
+      } finally {
+        rmSync(registryDir, { recursive: true, force: true });
+      }
+    });
+
+    it('apply mode converts kind: "personal" agent to "team" via resolveAmbiguity', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const configs = await VersionedConfigStore.open(new MemoryConfigBackend());
+      const ledger = new MemoryLedger();
+
+      await configs.put(
+        {
+          agentId: 'reclass-agent',
+          source: { repo: 'BeerCanLabs/reclass' },
+          skills: [],
+          policy: null,
+          owners: ['cloudflare:lead@example.com', 'cloudflare:member@example.com'],
+        },
+        { by: 'bootstrap', reason: 'initial' },
+      );
+
+      const agent = makeAgent('reclass-agent', { kind: 'personal' });
+      const agents = new Map<string, AgentRecord>();
+      agents.set('reclass-agent', agent);
+
+      const state: OwnerMigrationState = { agents, configs, principals, grants, ledger };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: false,
+        by: 'user:admin',
+        resolveAmbiguity: () => 'team',
+      });
+
+      assert.equal(res.ready, true);
+      assert.equal(res.convertedCount, 2);
+      assert.equal(agent.kind, 'team');
+      assert.equal(effectiveAgentKind(agent), 'team');
+
+      const lead = grants.list({ scopeKind: 'agent', scopeId: 'reclass-agent' }).find((g) => g.role === 'accountable-lead');
+      assert.equal(lead?.subject, 'user:lead');
+    });
+
+    it('dryRun: true does not call wireGrantStoreKindLookup or mutate grants', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+
+      const agent = makeAgent('test-agent', { kind: undefined });
+      const agents = new Map<string, AgentRecord>();
+      agents.set('test-agent', agent);
+
+      const state: OwnerMigrationState = { agents, principals, grants, ledger };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: true,
+        by: 'user:admin',
+      });
+
+      // wireGrantStoreKindLookup was NOT called (agent.kind is untouched)
+      assert.equal(agent.kind, undefined);
+    });
+  });
+
+  describe('F2: skills human owner resolution, no ambient mkdirSync, skill:<id> ledger agentId', () => {
+    const makeSkillVersion = (id: string, over: Partial<SkillVersionRecord> = {}): SkillVersionRecord => ({
+      id,
+      version: '1.0.0',
+      repo: 'https://github.com/BeerCanLabs/skills',
+      path: id,
+      commit: '0'.repeat(40),
+      manifest: { id, name: id, description: `${id} skill`, version: '1.0.0', tools: [] },
+      status: 'approved',
+      tests: 'passed',
+      registeredBy: 'cloudflare:dale@example.com',
+      registeredAt: '2026-10-08T00:00:00.000Z',
+      ...over,
+    });
+
+    it('converts public skill with human owner and emits agentId: "skill:<id>" on ledger row', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+      const skills = new SkillRegistry();
+
+      skills.save(makeSkillVersion('web-search', {
+        owner: 'cloudflare:dale@example.com',
+        registeredBy: 'cloudflare:dale@example.com',
+        published: true,
+      }));
+
+      const state: OwnerMigrationState = {
+        agents: new Map(),
+        principals,
+        grants,
+        ledger,
+        skills,
+      };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: false,
+        by: 'user:admin',
+      });
+
+      assert.equal(res.ready, true);
+      assert.equal(res.convertedCount, 1);
+      assert.equal(res.mappings[0].targetKind, 'skill');
+      assert.equal(res.mappings[0].targetId, 'web-search');
+      assert.equal(res.mappings[0].role, 'content-owner');
+      assert.equal(res.mappings[0].principalId, 'user:dale');
+
+      const owner = grants.activeContentOwnerOf({ kind: 'skill', id: 'web-search' });
+      assert.equal(owner, 'user:dale');
+
+      // Verify agentId: "skill:web-search" on ledger row
+      const skillRow = ledger.query().find((r) => r.agentId === 'skill:web-search');
+      assert.ok(skillRow, 'expected ledger row with agentId: skill:web-search');
+      assert.equal(skillRow.action, 'OWNER_CONVERTED');
+      assert.equal(skillRow.principalId, 'user:dale');
+      assert.equal(ledger.verify().ok, true);
+    });
+
+    it('resolves agent-private skill to human owner, NOT manifest.owner agent ID (SK1)', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+      const skills = new SkillRegistry();
+
+      skills.save(makeSkillVersion('donna-notes', {
+        manifest: { id: 'donna-notes', name: 'donna-notes', description: 'private', version: '1.0.0', tools: [], owner: 'donna' },
+        owner: 'cloudflare:sarah@example.com',
+        registeredBy: 'cloudflare:sarah@example.com',
+      }));
+
+      const state: OwnerMigrationState = {
+        agents: new Map(),
+        principals,
+        grants,
+        ledger,
+        skills,
+      };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: true,
+        by: 'user:admin',
+      });
+
+      assert.equal(res.ready, true);
+      assert.equal(res.mappings.length, 1);
+      assert.equal(res.mappings[0].principalId, 'user:sarah'); // NOT donna!
+      assert.equal(res.mappings[0].legacyOwner, 'cloudflare:sarah@example.com');
+    });
+
+    it('resolves registeredBy-only skill to human registrant', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+      const skills = new SkillRegistry();
+
+      skills.save(makeSkillVersion('legacy-skill', {
+        owner: undefined,
+        registeredBy: 'cloudflare:bob@example.com',
+      }));
+
+      const state: OwnerMigrationState = {
+        agents: new Map(),
+        principals,
+        grants,
+        ledger,
+        skills,
+      };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: true,
+        by: 'user:admin',
+      });
+
+      assert.equal(res.ready, true);
+      assert.equal(res.mappings.length, 1);
+      assert.equal(res.mappings[0].principalId, 'user:bob');
+    });
+
+    it('records no_owner orphan when live skill has neither grant nor legacy human owner', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+      const skills = new SkillRegistry();
+
+      skills.save(makeSkillVersion('unowned-skill', {
+        owner: undefined,
+        registeredBy: undefined as any,
+      }));
+
+      const state: OwnerMigrationState = {
+        agents: new Map(),
+        principals,
+        grants,
+        ledger,
+        skills,
+      };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: true,
+        by: 'user:admin',
+      });
+
+      assert.equal(res.ready, false);
+      assert.equal(res.orphans.length, 1);
+      assert.equal(res.orphans[0].targetKind, 'skill');
+      assert.equal(res.orphans[0].targetId, 'unowned-skill');
+      assert.equal(res.orphans[0].reason, 'no_owner');
+    });
+
+    it('skips skill inspection when state.skills is omitted (no ambient disk read)', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+
+      const state: OwnerMigrationState = {
+        agents: new Map(),
+        principals,
+        grants,
+        ledger,
+      };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: true,
+        by: 'user:admin',
+      });
+
+      assert.equal(res.ready, true);
+      assert.equal(res.mappings.length, 0);
+    });
+  });
+
+  describe('F3: canonical multi-email alias deduplication', () => {
+    it('personal agent with multiple email aliases resolving to 1 canonical principal is unambiguous', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+
+      await principals.create({
+        id: 'user:steph',
+        displayName: 'Steph S',
+        emails: ['steph@hotmail.com', 'steph@gmail.com'],
+        by: 'bootstrap',
+      });
+
+      const agent = makeAgent('steph-agent', {
+        kind: 'personal',
+        owners: ['cloudflare:steph@hotmail.com', 'oidc:steph@gmail.com'],
+      });
+      const agents = new Map<string, AgentRecord>([['steph-agent', agent]]);
+
+      const state: OwnerMigrationState = { agents, principals, grants, ledger };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: true,
+        by: 'user:admin',
+      });
+
+      assert.equal(res.ready, true);
+      assert.equal(res.orphans.length, 0);
+      assert.equal(res.mappings.length, 1);
+      assert.equal(res.mappings[0].principalId, 'user:steph');
+      assert.equal(res.mappings[0].role, 'content-owner');
+    });
+
+    it('team agent deduplicates co-owner member mappings and grants', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+
+      await principals.create({
+        id: 'user:coowner',
+        displayName: 'Co Owner',
+        emails: ['co@hotmail.com', 'co@gmail.com'],
+        by: 'bootstrap',
+      });
+
+      const agent = makeAgent('team-agent', {
+        kind: 'team',
+        owners: ['cloudflare:lead@example.com', 'cloudflare:co@hotmail.com', 'oidc:co@gmail.com'],
+      });
+      const agents = new Map<string, AgentRecord>([['team-agent', agent]]);
+
+      const state: OwnerMigrationState = { agents, principals, grants, ledger };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: false,
+        by: 'user:admin',
+      });
+
+      assert.equal(res.ready, true);
+      assert.equal(res.convertedCount, 2); // 1 lead + 1 member (NOT 2 members)
+      assert.equal(res.mappings.length, 2);
+      assert.equal(res.mappings[0].role, 'accountable-lead');
+      assert.equal(res.mappings[0].principalId, 'user:lead');
+      assert.equal(res.mappings[1].role, 'member');
+      assert.equal(res.mappings[1].principalId, 'user:coowner');
+
+      // Idempotent second run skips
+      const rerun = await convertLegacyOwners(state, {
+        dryRun: false,
+        by: 'user:admin',
+      });
+      assert.equal(rerun.convertedCount, 0);
+      assert.equal(rerun.skippedCount, 1);
+    });
+  });
+
+  describe('F4: fail-closed store reads & D15 pending-revoked slot occupancy', () => {
+    it('fails closed when state.principals is unhealthy', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      Object.defineProperty(principals, 'healthy', { value: false });
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+
+      const state: OwnerMigrationState = {
+        agents: new Map(),
+        principals,
+        grants,
+        ledger,
+      };
+
+      await assert.rejects(
+        convertLegacyOwners(state, { dryRun: true, by: 'user:admin' }),
+        /state\.principals is unhealthy/i,
+      );
+    });
+
+    it('fails closed when state.grants is unhealthy', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      Object.defineProperty(grants, 'healthy', { value: false });
+      const ledger = new MemoryLedger();
+
+      const state: OwnerMigrationState = {
+        agents: new Map(),
+        principals,
+        grants,
+        ledger,
+      };
+
+      await assert.rejects(
+        convertLegacyOwners(state, { dryRun: true, by: 'user:admin' }),
+        /state\.grants is unhealthy/i,
+      );
+    });
+
+    it('treats non-expired pending-revoked content-owner grant as occupying slot (skips without 409 conflict)', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+
+      await principals.create({
+        id: 'user:existing',
+        displayName: 'Existing User',
+        emails: ['existing@example.com'],
+        by: 'bootstrap',
+      });
+      await principals.create({
+        id: 'user:next',
+        displayName: 'Next User',
+        emails: ['next@example.com'],
+        by: 'bootstrap',
+      });
+
+      // Create an active grant then start transfer so it enters pending-revoked
+      await grants.grant({
+        subject: 'user:existing',
+        scope: { kind: 'agent', id: 'transferring-agent' },
+        role: 'content-owner',
+        by: 'user:admin',
+        granterRole: 'admin',
+        granterIsAdmin: true,
+      });
+
+      await grants.startOwnershipTransfer({
+        scope: { kind: 'agent', id: 'transferring-agent' },
+        fromSubject: 'user:existing',
+        toSubject: 'user:next',
+        by: 'user:existing',
+        ttlMs: 60_000,
+      });
+
+      const agent = makeAgent('transferring-agent', {
+        kind: 'personal',
+        owners: ['cloudflare:existing@example.com'],
+      });
+      const agents = new Map<string, AgentRecord>([['transferring-agent', agent]]);
+
+      const state: OwnerMigrationState = { agents, principals, grants, ledger };
+
+      // Dry run skips because slot is occupied
+      const dryRes = await convertLegacyOwners(state, {
+        dryRun: true,
+        by: 'user:admin',
+      });
+      assert.equal(dryRes.ready, true);
+      assert.equal(dryRes.skippedCount, 1);
+      assert.equal(dryRes.mappings.length, 0);
+
+      // Apply mode also skips cleanly without throwing 409 owner_exists
+      const applyRes = await convertLegacyOwners(state, {
+        dryRun: false,
+        by: 'user:admin',
+      });
+      assert.equal(applyRes.ready, true);
+      assert.equal(applyRes.skippedCount, 1);
+      assert.equal(applyRes.convertedCount, 0);
+    });
+  });
+
+  describe('F5: RFC 5322 apostrophe emails and real MemoryLedger hash-chain verification', () => {
+    it('converts email with apostrophe, preserves principalId in real MemoryLedger, and passes verify()', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+
+      await principals.create({
+        id: "user:o'connor@example.com",
+        displayName: "Liam O'Connor",
+        emails: ["o'connor@example.com"],
+        by: 'bootstrap',
+      });
+
+      const agent = makeAgent('oconnor-agent', {
+        kind: 'personal',
+        owners: ["cloudflare:o'connor@example.com"],
+      });
+      const agents = new Map<string, AgentRecord>([['oconnor-agent', agent]]);
+
+      const state: OwnerMigrationState = { agents, principals, grants, ledger };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: false,
+        by: 'user:admin',
+      });
+
+      assert.equal(res.ready, true);
+      assert.equal(res.convertedCount, 1);
+      assert.equal(res.mappings[0].principalId, "user:o'connor@example.com");
+
+      // Verify real MemoryLedger
+      assert.equal(ledger.query().length, 1);
+      const row = ledger.query()[0];
+      assert.equal(row.agentId, 'oconnor-agent');
+      assert.equal(row.action, 'OWNER_CONVERTED');
+      assert.equal(row.legacyOwner, "cloudflare:o'connor@example.com");
+      assert.equal(row.principalId, "user:o'connor@example.com");
+      assert.equal(row.role, 'content-owner');
+      assert.equal(row.subject, "user:o'connor@example.com");
+      assert.equal(ledger.verify().ok, true);
+    });
+  });
+
+  describe('F6: dryRun materializedPrincipals & RETIRED_PLACEHOLDER_IDS / __* keys', () => {
+    it('dryRun only returns missing principals in materializedPrincipals and sets mapping.materializedPrincipal', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+
+      // Seed user:existing
+      await principals.create({
+        id: 'user:existing',
+        displayName: 'Existing User',
+        emails: ['existing@example.com'],
+        by: 'bootstrap',
+      });
+
+      const agents = new Map<string, AgentRecord>([
+        ['agent-1', makeAgent('agent-1', { owners: ['cloudflare:existing@example.com'] })],
+        ['agent-2', makeAgent('agent-2', { owners: ['cloudflare:brandnew@example.com'] })],
+      ]);
+
+      const state: OwnerMigrationState = { agents, principals, grants, ledger };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: true,
+        by: 'user:admin',
+      });
+
+      assert.equal(res.ready, true);
+      assert.equal(res.mappings.length, 2);
+      // Only brandnew is in materializedPrincipals
+      assert.deepEqual(res.materializedPrincipals, ['user:brandnew']);
+
+      const m1 = res.mappings.find((m) => m.targetId === 'agent-1');
+      const m2 = res.mappings.find((m) => m.targetId === 'agent-2');
+      assert.equal(m1?.materializedPrincipal, undefined);
+      assert.equal(m2?.materializedPrincipal, true);
+    });
+
+    it('ignores RETIRED_PLACEHOLDER_IDS and __* keys in ConfigStore without tripping orphans', async () => {
+      const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+      const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+      const ledger = new MemoryLedger();
+
+      // Mock ConfigStore with reserved __ keys in agentIds()
+      const configs = {
+        agentIds: () => ['__runtime_meta', '__global__', 'normal-agent'],
+        current: (id: string) =>
+          id === 'normal-agent'
+            ? { agentId: 'normal-agent', owners: ['cloudflare:normal@example.com'] }
+            : id.startsWith('__')
+              ? { agentId: id, owners: [] }
+              : undefined,
+      } as any;
+
+      // RETIRED_PLACEHOLDER_IDS agents
+      const agents = new Map<string, AgentRecord>();
+      for (const retiredId of RETIRED_PLACEHOLDER_IDS) {
+        agents.set(retiredId, makeAgent(retiredId, { owners: [] }));
+      }
+      agents.set('normal-agent', makeAgent('normal-agent'));
+
+      const state: OwnerMigrationState = { agents, configs, principals, grants, ledger };
+
+      const res = await convertLegacyOwners(state, {
+        dryRun: true,
+        by: 'user:admin',
+      });
+
+      assert.equal(res.ready, true);
+      assert.equal(res.orphans.length, 0);
+      assert.equal(res.mappings.length, 1);
+      assert.equal(res.mappings[0].targetId, 'normal-agent');
+      assert.equal(res.skippedCount, RETIRED_PLACEHOLDER_IDS.size);
+    });
   });
 });
