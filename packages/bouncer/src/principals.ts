@@ -21,11 +21,14 @@ const execFileAsync = promisify(execFile);
 export const SLUG_BODY = '(?!.*\\.\\.)[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?';
 const EMAIL_LOCAL_ATOM = "[a-z0-9!#$%&'*+/=?^_`{|}~-]";
 const EMAIL_LOCAL_DOT = "[a-z0-9.!#$%&'*+/=?^_`{|}~-]";
-export const EMAIL_BODY = `(?=.{3,254}$)(?!.*\\.\\.)${EMAIL_LOCAL_ATOM}(?:${EMAIL_LOCAL_DOT}{0,62}${EMAIL_LOCAL_ATOM})?@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+`;
+export const EMAIL_DOMAIN_BODY =
+  '(?=.{3,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+';
+export const EMAIL_BODY = `(?=.{3,254}$)(?!.*\\.\\.)${EMAIL_LOCAL_ATOM}(?:${EMAIL_LOCAL_DOT}{0,62}${EMAIL_LOCAL_ATOM})?@${EMAIL_DOMAIN_BODY}`;
 export const SERVICE_BODY = '(?!.*\\.\\.)[a-z0-9](?:[a-z0-9._-]{0,246}[a-z0-9])?';
 export const TOKEN_BODY = '(?!.*::)[a-z0-9](?:[a-z0-9._:-]{0,247}[a-z0-9])?';
 
 const EMAIL_REGEX = new RegExp(`^${EMAIL_BODY}$`);
+const EMAIL_DOMAIN_REGEX = new RegExp(`^${EMAIL_DOMAIN_BODY}$`);
 
 /** Canonical user principal actor (`user:<slug>` up to 128-char slug, or `user:<lowercased-email>` up to 254-char RFC 5322 email). */
 export const PRINCIPAL_ID = new RegExp(`^user:(?:${SLUG_BODY}|${EMAIL_BODY})$`);
@@ -606,6 +609,15 @@ export function normalizeEmail(raw: unknown): string {
   const clean = raw.trim().toLowerCase();
   if (!EMAIL_REGEX.test(clean)) {
     throw new Error(`invalid email: ${JSON.stringify(raw)}`);
+  }
+  return clean;
+}
+
+export function normalizeDomain(raw: unknown): string {
+  if (typeof raw !== 'string') throw new Error('domain must be a string');
+  const clean = raw.trim().toLowerCase();
+  if (!EMAIL_DOMAIN_REGEX.test(clean)) {
+    throw new Error(`invalid domain: ${JSON.stringify(raw)}`);
   }
   return clean;
 }
