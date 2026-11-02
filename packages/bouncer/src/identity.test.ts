@@ -1,6 +1,17 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { authorizeIngress, directCaller, IdentityLinkStore } from './identity.js';
+import {
+  authorizeIngress,
+  directCaller,
+  IdentityLinkStore,
+  normalizeActorToPrincipal,
+  normalizeGroupMembersToPrincipals,
+  normalizeIdentityLink,
+  normalizeLegacyActor,
+  normalizeOwnersToPrincipals,
+  parseActor,
+} from './identity.js';
+import { PrincipalStore } from './principals.js';
 
 describe('Bouncer authorizeIngress', () => {
   it('allows internal actions with no requestedBy when not ingress caller', () => {
@@ -474,5 +485,152 @@ describe('AM2 a person conversing directly speaks as themselves', () => {
     const operator = directCaller({ actor: 'token:op', roles: ['viewer', 'operator'] }, [], 'agents.converse');
     assert.equal(operator.role, 'operator', 'the role that holds the privilege, not the first listed');
     assert.equal(operator.provider, 'api', 'a service token is an API client, not a person at the console');
+    const svc = directCaller({ actor: 'service:deploy', roles: ['operator'] }, [], 'agents.converse');
+    assert.equal(svc.provider, 'api', 'a canonical service principal is an API client');
+    const user = directCaller({ actor: 'user:dale', roles: ['admin'] }, [], 'agents.converse');
+    assert.equal(user.provider, 'console');
+  });
+});
+
+describe('S1 canonical & legacy actor normalization (AC3)', () => {
+  it('parseActor accepts canonical user:/service: alongside legacy cloudflare:/oidc:/token: (including 254-char & RFC 5322 emails)', () => {
+    const email254 = `${'a'.repeat(64)}@${'b'.repeat(61)}.${'c'.repeat(61)}.${'d'.repeat(61)}.com`;
+    const email255 = `${'a'.repeat(64)}@${'b'.repeat(62)}.${'c'.repeat(61)}.${'d'.repeat(61)}.com`;
+    assert.equal(email254.length, 254);
+
+    assert.equal(parseActor('USER:Stephanie'), 'user:stephanie');
+    assert.equal(parseActor('USER:Alice+Tag@Sub.Example.com'), 'user:alice+tag@sub.example.com');
+    assert.equal(parseActor("USER:O'Connor@Example.com"), "user:o'connor@example.com");
+    assert.equal(parseActor('user:_svc@example.com'), 'user:_svc@example.com');
+    assert.equal(parseActor(`USER:${email254}`), `user:${email254}`);
+    assert.equal(parseActor('Service:Gatekeeper-Egress'), 'service:gatekeeper-egress');
+    assert.equal(parseActor('cloudflare-service:Deploy-Check.Access'), 'cloudflare-service:deploy-check.access');
+    assert.equal(parseActor('Cloudflare:Alice@Example.com'), 'cloudflare:alice@example.com');
+    assert.equal(parseActor("Cloudflare:O'Connor@Example.com"), "cloudflare:o'connor@example.com");
+    assert.equal(parseActor(`Cloudflare:${email254}`), `cloudflare:${email254}`);
+    assert.equal(parseActor('OIDC:Bob@Example.com'), 'oidc:bob@example.com');
+    assert.equal(parseActor(`OIDC:${email254}`), `oidc:${email254}`);
+    assert.equal(parseActor('OIDC:Carol'), 'oidc:carol');
+    assert.equal(parseActor('token:Admin'), 'token:admin');
+    assert.equal(parseActor('token:agent:helper'), 'token:agent:helper');
+    for (const bad of [
+      '',
+      'alice',
+      'email:alice@example.com',
+      'user:',
+      'user:///',
+      'user:@',
+      'user:foo@bar',
+      'user:a..b@example.com',
+      `user:${email255}`,
+      'service:',
+      'service:///',
+      'service:a b',
+      'token:',
+      'token:///',
+      'token:agent:',
+      'cloudflare:',
+      'cloudflare:notanemail',
+      'cloudflare:foo@bar',
+      `cloudflare:${email255}`,
+      'cloudflare:///',
+      'oidc:foo@bar',
+      'oidc:///',
+      'user:a b',
+      42,
+      null,
+    ]) {
+      assert.equal(parseActor(bad), undefined, JSON.stringify(bad));
+    }
+  });
+
+  it('normalizes legacy cloudflare:/oidc:, identity links, owners, and group members deterministically', async () => {
+    const store = await PrincipalStore.open();
+    await store.create({
+      id: 'user:stephanie',
+      displayName: 'Stephanie Sackrider',
+      emails: ['stephaniesackrider@hotmail.com', 'stephanie.sackrider@gmail.com'],
+      by: 'user:dale',
+    });
+
+    // Without store: deterministic user:<lowercased-email>
+    assert.equal(normalizeActorToPrincipal('Cloudflare:Alice@Example.COM'), 'user:alice@example.com');
+    assert.equal(normalizeLegacyActor('OIDC:Bob@Example.COM'), 'user:bob@example.com');
+    assert.equal(normalizeActorToPrincipal('USER:Dale'), 'user:dale');
+    assert.equal(normalizeActorToPrincipal('Service:Ingress'), 'service:ingress');
+    assert.equal(normalizeActorToPrincipal('cloudflare-service:Deploy.Access'), 'service:deploy.access');
+    const email254 = `${'a'.repeat(64)}@${'b'.repeat(61)}.${'c'.repeat(61)}.${'d'.repeat(61)}.com`;
+    assert.equal(normalizeActorToPrincipal(email254), `user:${email254}`);
+    assert.equal(normalizeActorToPrincipal(`user:${email254}`), `user:${email254}`);
+    assert.equal(normalizeActorToPrincipal(`cloudflare:${email254}`), `user:${email254}`);
+    assert.equal(normalizeActorToPrincipal(`oidc:${email254}`), `user:${email254}`);
+    assert.equal(normalizeActorToPrincipal("Cloudflare:O'Connor@Example.com"), "user:o'connor@example.com");
+    assert.equal(normalizeActorToPrincipal('oidc:_svc@example.com'), 'user:_svc@example.com');
+    assert.equal(normalizeActorToPrincipal('Token:Admin'), 'token:admin');
+    assert.equal(normalizeActorToPrincipal('token:agent:helper'), 'token:agent:helper');
+    assert.equal(normalizeActorToPrincipal('OIDC:Carol'), 'user:carol');
+    assert.equal(normalizeActorToPrincipal('user:Alice+Tag@Sub.Example.com'), 'user:alice+tag@sub.example.com');
+
+    // With store: multi-email aliases across IdPs collapse to the one canonical PrincipalRecord.id
+    assert.equal(normalizeActorToPrincipal('cloudflare:StephanieSackrider@Hotmail.com', store), 'user:stephanie');
+    assert.equal(normalizeActorToPrincipal('oidc:STEPHANIE.SACKRIDER@GMAIL.COM', store), 'user:stephanie');
+    assert.equal(normalizeActorToPrincipal('user:Stephanie.Sackrider@Gmail.com', store), 'user:stephanie');
+    assert.equal(normalizeActorToPrincipal('cloudflare:Unseen@Example.org', store), 'user:unseen@example.org');
+
+    // Owners array collapses duplicate aliases for the same person into one canonical principal
+    assert.deepEqual(
+      normalizeOwnersToPrincipals(
+        ['Cloudflare:StephanieSackrider@Hotmail.com', 'oidc:stephanie.sackrider@gmail.com', 'cloudflare:Dale@Example.com'],
+        store,
+      ),
+      ['user:dale@example.com', 'user:stephanie'],
+    );
+
+    // Group members handle bare emails, legacy prefixes, and canonical user:<id>
+    assert.deepEqual(
+      normalizeGroupMembersToPrincipals(
+        ['Stephanie.Sackrider@Gmail.com', 'cloudflare:stephaniesackrider@hotmail.com', 'Dave@Example.com', 'USER:Dale'],
+        store,
+      ),
+      ['user:dale', 'user:dave@example.com', 'user:stephanie'],
+    );
+
+    // IdentityLink normalization updates actor & linkedBy and preserves sanitized agentRoles
+    const normalizedLink = normalizeIdentityLink(
+      {
+        provider: 'discord',
+        id: '12345',
+        actor: 'Cloudflare:StephanieSackrider@Hotmail.com',
+        name: 'Stephanie',
+        agentRoles: { higgins: ['Realtor', 'Owner'] },
+        linkedBy: 'cloudflare:Dale@Example.com',
+        linkedAt: '2026-11-01T00:00:00.000Z',
+      },
+      store,
+    );
+    assert.equal(normalizedLink.actor, 'user:stephanie');
+    assert.equal(normalizedLink.linkedBy, 'user:dale@example.com');
+    assert.deepEqual({ ...normalizedLink.agentRoles }, { higgins: ['Realtor'] });
+
+    for (const bad of [
+      '',
+      'not-an-actor-or-email',
+      'unknown:alice',
+      'user:///',
+      'user:@',
+      'user:foo@bar',
+      'user:a..b@example.com',
+      'service:a b',
+      'service:///',
+      'cloudflare:',
+      'cloudflare:notanemail',
+      'cloudflare:///',
+      'oidc:///',
+      'oidc:foo@bar',
+      'token:///',
+      'token:agent:',
+    ]) {
+      assert.throws(() => normalizeActorToPrincipal(bad, store), /invalid/, `expected throw for ${JSON.stringify(bad)}`);
+    }
   });
 });

@@ -4,6 +4,7 @@ import { SignJWT, createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerify
 export {
   accessAssertionOf,
   accessAuthFromEnv,
+  accessIdentityPrincipal,
   accessPrincipal,
   cloudflareAccessAuth,
   normalizeTeamDomain,
@@ -22,7 +23,13 @@ export type Role = (typeof ROLES)[number];
 
 export type Principal = { actor: string; roles: Role[] };
 
-export type AuthResult = { ok: true; principal: Principal } | { ok: false; reason: string };
+export type OidcIdentityClaims = { email: string; emailVerified: true; sub: string };
+
+export type OidcIdentityResult =
+  | { ok: true; principal: Principal; claims: OidcIdentityClaims }
+  | { ok: false; reason: string };
+
+export type AuthResult = { ok: true; principal: Principal; claims?: OidcIdentityClaims } | { ok: false; reason: string };
 
 export type AuthProvider = {
   name: string;
@@ -82,22 +89,28 @@ export type OidcOptions = {
   roleMap?: Record<string, Role>;
   clockToleranceSec?: number;
   adminEmails?: string[];
+  /** R1/R13/D1/D2: require `email_verified: true` and emit identity-only `user:<email>` with zero roles. */
+  identityOnly?: boolean;
+  /** R13: require `email_verified: true` on verified OIDC tokens. */
+  requireEmailVerified?: boolean;
 };
 
 async function discoverJwks(issuer: string): Promise<string> {
   const url = `${issuer.replace(/\/$/, '')}/.well-known/openid-configuration`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
   if (!res.ok) throw new Error(`OIDC discovery ${res.status} at ${url}`);
   const doc = (await res.json()) as { jwks_uri?: string; issuer?: string };
   if (!doc.jwks_uri) throw new Error('OIDC discovery document has no jwks_uri');
   return doc.jwks_uri;
 }
 
-/** OIDC/JWT (Entra, Cloudflare Access, Google, Cognito): signature via JWKS, iss, aud, exp/nbf. */
-export function oidcAuth(opts: OidcOptions): AuthProvider {
+const MAX_OIDC_RESOLVERS = 64;
+const oidcResolverCache = new Map<string, () => Promise<JWTVerifyGetKey>>();
+
+function createOidcKeyResolver(opts: OidcOptions): () => Promise<JWTVerifyGetKey> {
   let keys: JWTVerifyGetKey | undefined = opts.keys;
   let pending: Promise<JWTVerifyGetKey> | undefined;
-  const resolveKeys = async (): Promise<JWTVerifyGetKey> => {
+  return async (): Promise<JWTVerifyGetKey> => {
     if (keys) return keys;
     pending ??= (async () => {
       const jwks = opts.jwksUrl ?? (await discoverJwks(opts.issuer));
@@ -111,25 +124,79 @@ export function oidcAuth(opts: OidcOptions): AuthProvider {
       throw err;
     }
   };
+}
+
+function getOidcKeyResolver(opts: OidcOptions): () => Promise<JWTVerifyGetKey> {
+  if (opts.keys) return createOidcKeyResolver(opts);
+  const cacheKey = `${opts.issuer}\0${opts.jwksUrl ?? ''}`;
+  const cached = oidcResolverCache.get(cacheKey);
+  if (cached) return cached;
+  if (oidcResolverCache.size >= MAX_OIDC_RESOLVERS) {
+    const oldest = oidcResolverCache.keys().next().value;
+    if (oldest !== undefined) oidcResolverCache.delete(oldest);
+  }
+  const resolver = createOidcKeyResolver(opts);
+  oidcResolverCache.set(cacheKey, resolver);
+  return resolver;
+}
+
+async function verifyOidcPayload(
+  jwt: string | undefined,
+  opts: OidcOptions,
+  resolveKeys: () => Promise<JWTVerifyGetKey>,
+): Promise<{ ok: true; payload: JWTPayload & { sub: string } } | { ok: false; reason: string }> {
+  if (!jwt || jwt.split('.').length !== 3) return { ok: false, reason: 'missing bearer jwt' };
+  let payload: JWTPayload;
+  try {
+    ({ payload } = await jwtVerify(jwt, await resolveKeys(), {
+      issuer: opts.issuer,
+      audience: opts.audience,
+      clockTolerance: opts.clockToleranceSec ?? 30,
+      algorithms: ['RS256', 'PS256', 'ES256', 'EdDSA'],
+    }));
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : 'jwt rejected' };
+  }
+  if (typeof payload.sub !== 'string' || !payload.sub) return { ok: false, reason: 'jwt has no sub' };
+  return { ok: true, payload: payload as JWTPayload & { sub: string } };
+}
+
+function toIdentityResult(payload: JWTPayload & { sub: string }): OidcIdentityResult {
+  if (payload.email_verified !== true) return { ok: false, reason: 'email not verified' };
+  const email = typeof payload.email === 'string' ? payload.email.trim().toLowerCase() : '';
+  if (!email) return { ok: false, reason: 'jwt has no email' };
+  return {
+    ok: true,
+    principal: { actor: `user:${email}`, roles: [] },
+    claims: { email, emailVerified: true, sub: payload.sub },
+  };
+}
+
+/** Verifies an OIDC token (raw JWT or `Bearer <jwt>`) as an identity-only assertion requiring `email_verified: true` (R1, R13, D1, D2). */
+export async function verifyOidcIdentity(tokenOrAuth: string | undefined, opts: OidcOptions): Promise<OidcIdentityResult> {
+  const trimmed = tokenOrAuth?.trim();
+  const jwt = bearerOf(tokenOrAuth) ?? (trimmed && !/\s/.test(trimmed) ? trimmed : undefined);
+  const verified = await verifyOidcPayload(jwt, opts, getOidcKeyResolver(opts));
+  if (!verified.ok) return verified;
+  return toIdentityResult(verified.payload);
+}
+
+/** OIDC/JWT (Entra, Cloudflare Access, Google, Cognito): signature via JWKS, iss, aud, exp/nbf. */
+export function oidcAuth(opts: OidcOptions): AuthProvider {
+  const resolveKeys = getOidcKeyResolver(opts);
   const claim = opts.rolesClaim ?? 'roles';
+  const identityMode = Boolean(opts.identityOnly);
 
   return {
     name: 'oidc',
     async verify(authorization) {
-      const jwt = bearerOf(authorization);
-      if (!jwt || jwt.split('.').length !== 3) return { ok: false, reason: 'missing bearer jwt' };
-      let payload: JWTPayload;
-      try {
-        ({ payload } = await jwtVerify(jwt, await resolveKeys(), {
-          issuer: opts.issuer,
-          audience: opts.audience,
-          clockTolerance: opts.clockToleranceSec ?? 30,
-          algorithms: ['RS256', 'PS256', 'ES256', 'EdDSA'],
-        }));
-      } catch (err) {
-        return { ok: false, reason: err instanceof Error ? err.message : 'jwt rejected' };
+      const verified = await verifyOidcPayload(bearerOf(authorization), opts, resolveKeys);
+      if (!verified.ok) return verified;
+      const { payload } = verified;
+      if (identityMode) return toIdentityResult(payload);
+      if (opts.requireEmailVerified && payload.email_verified !== true) {
+        return { ok: false, reason: 'email not verified' };
       }
-      if (typeof payload.sub !== 'string' || !payload.sub) return { ok: false, reason: 'jwt has no sub' };
       const email = typeof payload.email === 'string' ? payload.email : undefined;
       const roles = asRoles(payload[claim], opts.roleMap);
       // No built-in admins: only the deployment names them (FACTORY_ADMIN_EMAILS).
