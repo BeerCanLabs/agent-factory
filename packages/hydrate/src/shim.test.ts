@@ -127,6 +127,28 @@ describe('shim process', () => {
     assert.deepEqual(result.body, { status: 'succeeded', output: { echo: 'hello-from-test' } });
   });
 
+  it('a stalled final mind push is bounded, heartbeats continue, and the result still lands (#339)', async () => {
+    calls.length = 0;
+    const bin = mkdtempSync(join(tmpdir(), 'fake-aws-'));
+    // pull (s3 -> local) answers at once; push (local -> s3) hangs, as the stalled upload did in production.
+    writeFileSync(join(bin, 'aws'), '#!/bin/sh\ncase "$3" in s3://*) exit 0;; esac\nexec sleep 30\n', { mode: 0o755 });
+    const started = Date.now();
+    const { out } = await run(
+      `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(process.env.FACTORY_RESULT_FILE, JSON.stringify({ status: 'succeeded', output: { reply: 'pong' } }));
+      `,
+      { PATH: `${bin}:${process.env.PATH}`, MEMORY_STORE_URI: 's3://bucket/minds', MEMORY_STORE_DIR: '', FACTORY_FINAL_SYNC_SECONDS: '1' }
+    );
+    assert.equal(out.status, 0, out.stderr);
+    assert.ok(Date.now() - started < 15_000, 'the push must not hold the shim for its full duration');
+    assert.match(out.stderr, /final mind push timed_out/);
+    const resultAt = calls.findIndex((c) => c.path === '/api/v1/runs/run-9/result');
+    assert.ok(resultAt >= 0, 'result posted');
+    assert.deepEqual(calls[resultAt].body, { status: 'succeeded', output: { reply: 'pong' } });
+    assert.ok(calls.slice(0, resultAt).filter((c) => c.path.endsWith('/heartbeat')).length >= 5, 'heartbeats kept flowing during the push');
+  });
+
   it('refuses to start without MEMORY_DIR', () => {
     const out = spawnSync(process.execPath, ['--import', 'tsx', shim, '--', 'true'], { env: { PATH: process.env.PATH }, encoding: 'utf8' });
     assert.equal(out.status, 2);
