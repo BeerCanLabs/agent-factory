@@ -3,24 +3,37 @@
 #
 # Edge enforcement model when var.cloudflare_zone_id is set:
 #   1. Root Access Application (`/*`) gates all paths by default (`decision = "allow"` for verified identities;
-#      optional `decision = "service_auth"` for transitional service tokens per D9; never `everyone` or `bypass`).
+#      optional `decision = "non_identity"` for transitional service tokens per D9; never `everyone` or `bypass`).
+#      Non-`fk_` traffic on `/api/v1*` and `/mcp` (keyless browsers, OAuth callbacks, `/ui` MCP sessions, future
+#      factory session cookies, and transitional `CF-Access-Client-Id` service tokens) remains on `/*` so Cloudflare
+#      Access verifies session cookies cryptographically and issues native `<team>.cloudflareaccess.com` redirects
+#      preserving path and query string.
 #   2. Webhook Access Application (`var.cloudflare_webhook_paths`, default `/api/v1/hooks/*`) bypasses interactive
 #      Access for signature-verified webhook deliveries only (A1, D22, TSK-285, TSK-286).
-#   3. API-key Access Application (`/api/v1`, `/api/v1/*`, `/mcp`) is paired with pre-Access edge rulesets:
-#      - Keyless unauthenticated requests on `/api/v1*` and `/mcp*` (outside webhook paths) redirect (302) to
-#        `https://<host>/cdn-cgi/access/login` (`http_request_dynamic_redirect`, S5b).
-#      - WAF Custom Rule (`http_request_firewall_custom`) blocks (403) any request on `/api/v1*` and `/mcp*`
-#        (outside webhook paths) unless it presents a single `Authorization: Bearer fk_<token>` header on canonical
-#        `/api/v1`, `/api/v1/*`, or `/mcp` (or an interactive `CF_Authorization` session cookie with no
-#        `Authorization` header on `/api/v1` / `/api/v1/*` excluding `/api/v1/health`).
+#   3. Headless `fk_` API key bypass via internal edge prefix `/.cf-fk-bypass/*` (D9, D23, S5b):
+#      - URL Rewrite (`http_request_transform`, after `http_request_sanitize` normalization and before Access) rewrites
+#        `http.request.uri.path` to `concat("/.cf-fk-bypass", http.request.uri.path)` strictly when the request targets
+#        canonical `/api/v1`, `/api/v1/*`, or `/mcp` (outside webhook paths, with no traversal) and carries a single
+#        `Authorization: Bearer fk_<token>` header.
+#      - WAF Custom Rule (`http_request_firewall_custom`, before Access) blocks (403) any direct or malformed request
+#        under `/.cf-fk-bypass*` that is not a valid rewritten `/api/v1`, `/api/v1/*`, or `/mcp` `Bearer fk_<token>` call.
+#      - Bypass Access Application (`/.cf-fk-bypass/*`) applies `decision = "bypass"` strictly to rewritten `fk_` calls.
 #      - Request Header Transform (`http_request_late_transform`) strips client-supplied `cf-access-jwt-assertion`
-#        and `cf-access-authenticated-user-email` headers on bypassed paths before origin delivery (A2).
+#        and `cf-access-authenticated-user-email` headers on bypassed paths (A2).
+#      - Post-Access Edge Worker (`${local.cloudflare_host}/.cf-fk-bypass/*`) strips the `/.cf-fk-bypass` prefix and
+#        forwards the original `/api/v1`, `/api/v1/*`, or `/mcp` URI (with `cf-access-*` headers removed) to origin.
 
 # Credentials come from CLOUDFLARE_API_TOKEN in the deploy environment; never stored in variables or state (K1, K5).
 provider "cloudflare" {}
 
+data "cloudflare_zone" "factory" {
+  count   = local.cloudflare_enabled && var.cloudflare_account_id == "" ? 1 : 0
+  zone_id = var.cloudflare_zone_id
+}
+
 locals {
   cloudflare_enabled      = var.cloudflare_zone_id != ""
+  cloudflare_account_id   = var.cloudflare_account_id != "" ? var.cloudflare_account_id : (local.cloudflare_enabled ? data.cloudflare_zone.factory[0].account.id : "")
   cloudflare_derived_host = lower(try(regex("^https://([A-Za-z0-9.-]+)(?::[0-9]+)?(?:/.*)?$", var.factory_public_base_url)[0], ""))
   cloudflare_host         = var.cloudflare_hostname != "" ? lower(var.cloudflare_hostname) : local.cloudflare_derived_host
 
@@ -35,12 +48,14 @@ locals {
     [for e in local.cloudflare_allowed_emails : { email = { email = e } }],
   )
 
-  # Exact paths where `Authorization: Bearer fk_...` may bypass interactive Access (D9, D23, S5b).
+  # External paths eligible to bypass interactive Access when carrying `Authorization: Bearer fk_<token>` (D9, D23, S5b).
   cloudflare_api_key_bypass_paths = [
     "/api/v1",
     "/api/v1/*",
     "/mcp",
   ]
+
+  cloudflare_fk_bypass_prefix = "/.cf-fk-bypass"
 
   cloudflare_webhook_path_clauses = [
     for p in var.cloudflare_webhook_paths : (
@@ -51,19 +66,63 @@ locals {
   ]
   cloudflare_webhook_path_expr = length(local.cloudflare_webhook_path_clauses) > 0 ? "(${join(" or ", local.cloudflare_webhook_path_clauses)})" : "false"
 
-  # Broad case-insensitive scope guarded by pre-Access rulesets so case or subpath variations never slip through.
-  cloudflare_fk_guard_scope_expr = "lower(http.host) eq \"${local.cloudflare_host}\" and (lower(http.request.uri.path) eq \"/api/v1\" or starts_with(lower(http.request.uri.path), \"/api/v1/\") or lower(http.request.uri.path) eq \"/mcp\" or starts_with(lower(http.request.uri.path), \"/mcp/\")) and not ${local.cloudflare_webhook_path_expr}"
+  cloudflare_rewritten_webhook_path_clauses = [
+    for p in var.cloudflare_webhook_paths : (
+      endswith(p, "/*")
+      ? "starts_with(lower(http.request.uri.path), \"${local.cloudflare_fk_bypass_prefix}${lower(trimsuffix(p, "*"))}\")"
+      : "lower(http.request.uri.path) eq \"${local.cloudflare_fk_bypass_prefix}${lower(p)}\""
+    )
+  ]
+  cloudflare_rewritten_webhook_path_expr = length(local.cloudflare_rewritten_webhook_path_clauses) > 0 ? "(${join(" or ", local.cloudflare_rewritten_webhook_path_clauses)})" : "false"
+
+  # Reject literal or percent-encoded dot-segments and encoded path separators even if URL normalization is relaxed.
+  cloudflare_no_traversal_expr = "(not (http.request.uri.path contains \"..\") and not (lower(http.request.uri.path) contains \"%2e\") and not (lower(http.request.uri.path) contains \"%2f\") and not (lower(http.request.uri.path) contains \"%5c\"))"
 
   # Strict canonical path and `Bearer fk_<non-empty>` check (single Authorization header, non-empty secret suffix, no internal spaces).
-  cloudflare_fk_canonical_path_expr = "(http.request.uri.path eq \"/api/v1\" or starts_with(http.request.uri.path, \"/api/v1/\") or http.request.uri.path eq \"/mcp\")"
+  cloudflare_fk_canonical_path_expr = "((http.request.uri.path eq \"/api/v1\" or starts_with(http.request.uri.path, \"/api/v1/\") or http.request.uri.path eq \"/mcp\") and ${local.cloudflare_no_traversal_expr})"
   cloudflare_fk_bearer_expr         = "(len(http.request.headers[\"authorization\"]) eq 1 and starts_with(http.request.headers[\"authorization\"][0], \"Bearer fk_\") and len(trim(substring(http.request.headers[\"authorization\"][0], 7))) gt 3 and not (trim(substring(http.request.headers[\"authorization\"][0], 7)) contains \" \"))"
-  cloudflare_fk_valid_request_expr  = "(${local.cloudflare_fk_canonical_path_expr} and ${local.cloudflare_fk_bearer_expr})"
+  cloudflare_fk_rewrite_expr        = "lower(http.host) eq \"${local.cloudflare_host}\" and ${local.cloudflare_fk_canonical_path_expr} and not ${local.cloudflare_webhook_path_expr} and ${local.cloudflare_fk_bearer_expr}"
 
-  # Interactive Access browser session cookie on `/api/v1` and `/api/v1/*` (excluding `/api/v1/health`, R17/D22).
-  cloudflare_access_cookie_expr = "(len(http.request.headers[\"authorization\"]) eq 0 and (http.request.uri.path eq \"/api/v1\" or starts_with(http.request.uri.path, \"/api/v1/\")) and http.request.uri.path ne \"/api/v1/health\" and any(http.request.headers[\"cookie\"][*] contains \"CF_Authorization=eyJ\"))"
+  # Guard scope and invariant for the internal `/.cf-fk-bypass` namespace before Cloudflare Access evaluates destinations.
+  cloudflare_fk_bypass_prefix_scope_expr = "lower(http.host) eq \"${local.cloudflare_host}\" and starts_with(lower(http.request.uri.path), \"/.cf-fk-bypass\")"
+  cloudflare_fk_rewritten_valid_expr     = "((http.request.uri.path eq \"/.cf-fk-bypass/api/v1\" or starts_with(http.request.uri.path, \"/.cf-fk-bypass/api/v1/\") or http.request.uri.path eq \"/.cf-fk-bypass/mcp\") and ${local.cloudflare_no_traversal_expr} and not ${local.cloudflare_rewritten_webhook_path_expr} and ${local.cloudflare_fk_bearer_expr})"
+  cloudflare_header_sanitize_scope_expr  = "lower(http.host) eq \"${local.cloudflare_host}\" and (starts_with(lower(http.request.uri.path), \"/.cf-fk-bypass\") or ${local.cloudflare_webhook_path_expr})"
+
+  cloudflare_fk_strip_worker_js = <<-EOT
+    const PREFIX = "/.cf-fk-bypass";
+    export default {
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (!url.pathname.startsWith(PREFIX + "/")) {
+          return new Response("Forbidden", { status: 403 });
+        }
+        const stripped = url.pathname.slice(PREFIX.length);
+        const lower = stripped.toLowerCase();
+        if (
+          (stripped !== "/api/v1" && !stripped.startsWith("/api/v1/") && stripped !== "/mcp") ||
+          stripped.includes("..") ||
+          lower.includes("%2e") ||
+          lower.includes("%2f") ||
+          lower.includes("%5c")
+        ) {
+          return new Response("Forbidden", { status: 403 });
+        }
+        const auth = request.headers.get("authorization") ?? "";
+        if (!auth.startsWith("Bearer fk_") || auth.slice(10).trim().length === 0 || auth.slice(7).trim().includes(" ")) {
+          return new Response("Forbidden", { status: 403 });
+        }
+        url.pathname = stripped;
+        const rewritten = new Request(url.toString(), request);
+        rewritten.headers.delete("cf-access-jwt-assertion");
+        rewritten.headers.delete("cf-access-authenticated-user-email");
+        return fetch(rewritten);
+      },
+    };
+  EOT
 }
 
-# 1. Root Access Application: gates `/*` (including `/`, `/ui`, `/healthz`, `/metrics`, `/.well-known/*`).
+# 1. Root Access Application: gates `/*` (including `/`, `/ui`, `/healthz`, `/metrics`, `/.well-known/*`,
+#    and all non-`fk_` requests on `/api/v1*` and `/mcp`).
 resource "cloudflare_zero_trust_access_application" "factory" {
   count            = local.cloudflare_enabled ? 1 : 0
   zone_id          = var.cloudflare_zone_id
@@ -91,7 +150,7 @@ resource "cloudflare_zero_trust_access_application" "factory" {
     length(var.cloudflare_access_service_token_ids) > 0 ? [
       {
         name       = "transitional-service-tokens"
-        decision   = "service_auth"
+        decision   = "non_identity"
         precedence = 2
         include = [
           for id in var.cloudflare_access_service_token_ids : {
@@ -146,26 +205,25 @@ resource "cloudflare_zero_trust_access_application" "webhooks_bypass" {
   ]
 }
 
-# 3. Headless `fk_` API key bypass on `/api/v1`, `/api/v1/*`, and `/mcp` (D9, D23, S5b),
-#    enforced at the edge by the pre-Access redirect and WAF custom rulesets below.
+# 3. Headless `fk_` API key bypass scoped strictly to the internal edge prefix `/.cf-fk-bypass/*` (D9, D23, S5b).
 resource "cloudflare_zero_trust_access_application" "api_keys_bypass" {
   count            = local.cloudflare_enabled ? 1 : 0
   zone_id          = var.cloudflare_zone_id
   name             = "${local.name}-api-keys-bypass"
   type             = "self_hosted"
-  domain           = "${local.cloudflare_host}/api/v1"
+  domain           = "${local.cloudflare_host}/.cf-fk-bypass/*"
   session_duration = "24h"
 
   destinations = [
-    for p in local.cloudflare_api_key_bypass_paths : {
+    {
       type = "public"
-      uri  = "${local.cloudflare_host}${p}"
-    }
+      uri  = "${local.cloudflare_host}/.cf-fk-bypass/*"
+    },
   ]
 
   policies = [
     {
-      name       = "bypass-fk-api-keys-guarded-by-waf"
+      name       = "bypass-fk-api-keys-via-internal-rewrite"
       decision   = "bypass"
       precedence = 1
       include = [
@@ -177,28 +235,26 @@ resource "cloudflare_zero_trust_access_application" "api_keys_bypass" {
   ]
 }
 
-# 4. Pre-Access redirect ruleset (`http_request_dynamic_redirect`): keyless requests on `/api/v1*` and `/mcp*`
-#    (outside webhook paths) hit the Cloudflare Access login gate (S5b).
-resource "cloudflare_ruleset" "api_keys_unauthenticated_redirect" {
+# 4. Pre-Access URL rewrite (`http_request_transform`): rewrites canonical `/api/v1`, `/api/v1/*`, and `/mcp`
+#    requests carrying `Authorization: Bearer fk_<token>` (outside webhook paths) onto `/.cf-fk-bypass/*`.
+resource "cloudflare_ruleset" "api_keys_bypass_rewrite" {
   count       = local.cloudflare_enabled ? 1 : 0
   zone_id     = var.cloudflare_zone_id
-  name        = "${local.name}-api-keys-login-redirect"
-  description = "Redirect keyless unauthenticated /api/v1 and /mcp requests to Cloudflare Access login (S5b)."
+  name        = "${local.name}-api-keys-bypass-rewrite"
+  description = "Rewrite canonical /api/v1 and /mcp Bearer fk_ requests onto /.cf-fk-bypass/* before Access (S5b)."
   kind        = "zone"
-  phase       = "http_request_dynamic_redirect"
+  phase       = "http_request_transform"
 
   rules = [
     {
       enabled     = true
-      action      = "redirect"
-      description = "Keyless requests on /api/v1 and /mcp redirect to the Access login gate"
-      expression  = "(${local.cloudflare_fk_guard_scope_expr}) and len(http.request.headers[\"authorization\"]) eq 0 and not (${local.cloudflare_access_cookie_expr})"
+      action      = "rewrite"
+      description = "Route valid Bearer fk_ API and MCP requests through internal /.cf-fk-bypass prefix"
+      expression  = local.cloudflare_fk_rewrite_expr
       action_parameters = {
-        from_value = {
-          status_code           = 302
-          preserve_query_string = false
-          target_url = {
-            value = "https://${local.cloudflare_host}/cdn-cgi/access/login"
+        uri = {
+          path = {
+            expression = "concat(\"/.cf-fk-bypass\", http.request.uri.path)"
           }
         }
       }
@@ -206,14 +262,13 @@ resource "cloudflare_ruleset" "api_keys_unauthenticated_redirect" {
   ]
 }
 
-# 5. Pre-Access WAF guard (`http_request_firewall_custom`): blocks any request on `/api/v1*` and `/mcp*`
-#    (outside webhook paths) that does not carry a valid `Authorization: Bearer fk_<token>` (or an interactive
-#    Access browser cookie with no Authorization header on `/api/v1*` excluding `/api/v1/health`).
+# 5. Pre-Access WAF guard (`http_request_firewall_custom`): blocks any direct or malformed request under
+#    `/.cf-fk-bypass*` before Cloudflare Access evaluates `api_keys_bypass`.
 resource "cloudflare_ruleset" "api_keys_bypass_guard" {
   count       = local.cloudflare_enabled ? 1 : 0
   zone_id     = var.cloudflare_zone_id
   name        = "${local.name}-api-keys-bypass-guard"
-  description = "Allow Access bypass on /api/v1 and /mcp only for Bearer fk_ API keys (D9, D23, S5b)."
+  description = "Block any /.cf-fk-bypass* request that is not a valid rewritten /api/v1 or /mcp Bearer fk_ call (D9, D23, S5b)."
   kind        = "zone"
   phase       = "http_request_firewall_custom"
 
@@ -221,8 +276,8 @@ resource "cloudflare_ruleset" "api_keys_bypass_guard" {
     {
       enabled     = true
       action      = "block"
-      description = "Refuse non-fk_ credentials and unauthenticated requests on bypassed API and MCP paths"
-      expression  = "(${local.cloudflare_fk_guard_scope_expr}) and not (${local.cloudflare_fk_valid_request_expr}) and not (${local.cloudflare_access_cookie_expr})"
+      description = "Refuse direct probes and non-fk_ credentials on /.cf-fk-bypass*"
+      expression  = "(${local.cloudflare_fk_bypass_prefix_scope_expr}) and not (${local.cloudflare_fk_rewritten_valid_expr})"
     },
   ]
 }
@@ -233,7 +288,7 @@ resource "cloudflare_ruleset" "api_keys_header_sanitize" {
   count       = local.cloudflare_enabled ? 1 : 0
   zone_id     = var.cloudflare_zone_id
   name        = "${local.name}-api-keys-header-sanitize"
-  description = "Strip client-supplied Cloudflare Access headers on bypassed /api/v1 and /mcp paths (A2)."
+  description = "Strip client-supplied Cloudflare Access headers on bypassed paths (A2)."
   kind        = "zone"
   phase       = "http_request_late_transform"
 
@@ -241,8 +296,8 @@ resource "cloudflare_ruleset" "api_keys_header_sanitize" {
     {
       enabled     = true
       action      = "rewrite"
-      description = "Remove client-supplied cf-access headers on bypassed API and MCP paths"
-      expression  = local.cloudflare_fk_guard_scope_expr
+      description = "Remove client-supplied cf-access headers on bypassed API, MCP, and webhook paths"
+      expression  = local.cloudflare_header_sanitize_scope_expr
       action_parameters = {
         headers = {
           "cf-access-jwt-assertion" = {
@@ -255,4 +310,22 @@ resource "cloudflare_ruleset" "api_keys_header_sanitize" {
       }
     },
   ]
+}
+
+# 7. Post-Access Edge Worker: strips the internal `/.cf-fk-bypass` prefix after Cloudflare Access bypasses
+#    interactive login so the origin receives the canonical `/api/v1`, `/api/v1/*`, or `/mcp` request URI.
+resource "cloudflare_workers_script" "api_keys_bypass_strip" {
+  count              = local.cloudflare_enabled ? 1 : 0
+  account_id         = local.cloudflare_account_id
+  script_name        = "${local.name}-fk-bypass-strip"
+  main_module        = "worker.js"
+  compatibility_date = "2026-01-01"
+  content            = local.cloudflare_fk_strip_worker_js
+}
+
+resource "cloudflare_workers_route" "api_keys_bypass_strip" {
+  count   = local.cloudflare_enabled ? 1 : 0
+  zone_id = var.cloudflare_zone_id
+  pattern = "${local.cloudflare_host}/.cf-fk-bypass/*"
+  script  = cloudflare_workers_script.api_keys_bypass_strip[0].script_name
 }

@@ -199,6 +199,16 @@ variable "cloudflare_zone_id" {
   }
 }
 
+variable "cloudflare_account_id" {
+  type        = string
+  default     = ""
+  description = "Optional Cloudflare Account ID owning the zone's edge Worker. When empty, looked up automatically from cloudflare_zone_id."
+  validation {
+    condition     = var.cloudflare_account_id == "" || can(regex("^[0-9a-f]{32}$", var.cloudflare_account_id))
+    error_message = "cloudflare_account_id must be empty or a 32-character lowercase hex Cloudflare Account ID."
+  }
+}
+
 variable "cloudflare_hostname" {
   type        = string
   default     = ""

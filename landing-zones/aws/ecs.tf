@@ -70,7 +70,7 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_OIDC_ROLES_CLAIM", value = var.oidc_roles_claim },
         # §6.12 A2: identity only from the proxy's verified assertion; empty disables it.
         { name = "FACTORY_ACCESS_TEAM_DOMAIN", value = var.access_team_domain },
-        { name = "FACTORY_ACCESS_AUD", value = var.access_aud },
+        { name = "FACTORY_ACCESS_AUD", value = var.access_aud != "" ? var.access_aud : (local.cloudflare_enabled ? cloudflare_zero_trust_access_application.factory[0].aud : "") },
         { name = "FACTORY_ADMIN_EMAILS", value = var.admin_emails },
         # CF6: repository agents this deployment allowlists (comma-separated ids); empty admits none.
         { name = "FACTORY_REPOSITORY_AGENT_IDS", value = var.repository_agent_ids },
