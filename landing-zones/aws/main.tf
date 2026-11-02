@@ -9,6 +9,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 5.0"
+    }
   }
   # Partial config: scripts/aws-deploy.sh passes bucket/key/region from the bootstrap stack.
   backend "s3" {}

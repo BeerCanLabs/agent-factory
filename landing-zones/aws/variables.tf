@@ -189,6 +189,66 @@ variable "admin_emails" {
   description = "Comma-separated emails that get the admin roles when they arrive with a verified Access assertion. Empty: no admins through Access."
 }
 
+variable "cloudflare_zone_id" {
+  type        = string
+  default     = ""
+  description = "Cloudflare Zone ID fronting the factory public endpoint (§6.12 A1, S5b). Empty (default) skips Cloudflare edge resource management in this module."
+  validation {
+    condition     = var.cloudflare_zone_id == "" || can(regex("^[0-9a-f]{32}$", var.cloudflare_zone_id))
+    error_message = "cloudflare_zone_id must be empty or a 32-character lowercase hex Cloudflare Zone ID."
+  }
+}
+
+variable "cloudflare_hostname" {
+  type        = string
+  default     = ""
+  description = "Public DNS hostname fronted by Cloudflare Access (e.g. factory.example.com). When empty, derived from factory_public_base_url."
+  validation {
+    condition     = var.cloudflare_hostname == "" || can(regex("^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$", var.cloudflare_hostname))
+    error_message = "cloudflare_hostname must be a bare lowercase DNS hostname without scheme, port, path, or wildcards."
+  }
+}
+
+variable "cloudflare_access_allowed_email_domains" {
+  type        = list(string)
+  default     = []
+  description = "Email domains admitted by the root Cloudflare Access application policy (§6.12 A1, D1). Never wildcard."
+  validation {
+    condition     = alltrue([for d in var.cloudflare_access_allowed_email_domains : can(regex("^[a-z0-9]([a-z0-9.-]*[a-z0-9])?\\.[a-z]{2,}$", lower(trimspace(d))))])
+    error_message = "Each entry in cloudflare_access_allowed_email_domains must be a valid DNS domain without @ or wildcards."
+  }
+}
+
+variable "cloudflare_access_allowed_emails" {
+  type        = list(string)
+  default     = []
+  description = "Individual email addresses admitted by the root Cloudflare Access application policy in addition to admin_emails."
+  validation {
+    condition     = alltrue([for e in var.cloudflare_access_allowed_emails : can(regex("^[^@\\s*]+@[^@\\s*]+\\.[^@\\s*]+$", trimspace(e)))])
+    error_message = "Each entry in cloudflare_access_allowed_emails must be a valid email address without wildcards."
+  }
+}
+
+variable "cloudflare_access_service_token_ids" {
+  type        = list(string)
+  default     = []
+  description = "Optional Cloudflare Access service token IDs permitted on the root Access application during S10 transition (D9: passes the door only, zero factory authority)."
+  validation {
+    condition     = alltrue([for id in var.cloudflare_access_service_token_ids : trimspace(id) != "" && !can(regex("\\*", id))])
+    error_message = "cloudflare_access_service_token_ids entries must be non-empty Access service token IDs."
+  }
+}
+
+variable "cloudflare_webhook_paths" {
+  type        = list(string)
+  default     = ["/api/v1/hooks/*"]
+  description = "Signature-verified inbound webhook paths that bypass interactive Cloudflare Access (§6.12 A1, D22, TSK-285, TSK-286). Restricted strictly to /api/v1/hooks/* or /hooks/*."
+  validation {
+    condition     = alltrue([for p in var.cloudflare_webhook_paths : can(regex("^/(?:api/v1/)?hooks/(?:\\*|[A-Za-z0-9_./*-]+)$", p)) && !can(regex("\\.\\.", p))])
+    error_message = "cloudflare_webhook_paths may only contain signature-verified webhook paths under /api/v1/hooks/ or /hooks/ (never /*, /api/v1/*, or /ui)."
+  }
+}
+
 variable "repository_agent_ids" {
   type        = string
   default     = ""
