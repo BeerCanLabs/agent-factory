@@ -1083,7 +1083,16 @@ async function autoAdoptPrivate(state: FactoryState, rec: SkillVersionRecord, pr
     return { adopted: result.created ? [owner] : [] };
   }
   ledgerAdoption(state, owner, 'SKILL_ADOPTION_FAILED', principal.actor, rec.id, rec.version, result.error, rec.commit);
-  adoptions.request({ agentId: owner, skillId: rec.id, version: rec.version, requestedBy: rec.registeredBy, reason: 'automatic adoption failed; approve to retry', accessAdded: accessAddedFor(state, owner, rec) });
+  const fallbackHolds = effectiveSkillHolds(rec.manifest, currentSkills(state, owner).find((k) => k.id === rec.id)?.holds);
+  adoptions.request({
+    agentId: owner,
+    skillId: rec.id,
+    version: rec.version,
+    requestedBy: rec.registeredBy,
+    reason: 'automatic adoption failed; approve to retry',
+    accessAdded: accessAddedFor(state, owner, rec),
+    ...(Object.keys(fallbackHolds).length ? { holds: fallbackHolds } : {}),
+  });
   return { adopted: [], failed: result.error };
 }
 
@@ -1395,15 +1404,10 @@ async function updateSkillHolds(
           },
         };
       }
-      const updatedReq = adoptions.request({
-        agentId,
-        skillId,
-        version: pending.version,
-        requestedBy: principal.actor,
-        ...(reason ?? pending.reason ? { reason: (reason ?? pending.reason)! } : {}),
-        ...(pending.accessAdded ? { accessAdded: pending.accessAdded } : {}),
-        ...(Object.keys(validated.holds).length ? { holds: validated.holds } : {}),
-      });
+      const updatedReq = adoptions.updateHolds(agentId, skillId, validated.holds, reason);
+      if (!updatedReq) {
+        return { status: 404, body: { error: 'not_adopted', agentId, skillId } };
+      }
       state.ledger.append({
         timestamp: new Date().toISOString(),
         agentId,

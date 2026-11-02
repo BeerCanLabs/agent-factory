@@ -220,5 +220,42 @@ describe('which agents use a skill, and which skills an agent uses (SK7)', () =>
       send_email: true,
       search_mail: true,
     });
+
+    // F3: AdoptionStore.updateHolds updates holds on a pending request while preserving requestedBy and requestedAt
+    const dir = tmp();
+    try {
+      const store = new AdoptionStore(dir);
+      const t0 = new Date('2026-11-02T01:02:03.000Z');
+      store.request(
+        {
+          agentId: 'castle',
+          skillId: 'tavily-search',
+          version: '1.0.0',
+          requestedBy: 'cloudflare:owner@bcl.test',
+          reason: 'initial request',
+          holds: { send_email: true, search_mail: false },
+        },
+        t0,
+      );
+      const updated = store.updateHolds('castle', 'tavily-search', { send_email: true, search_mail: true }, 'tightened by admin');
+      assert.ok(updated);
+      assert.equal(updated.requestedBy, 'cloudflare:owner@bcl.test');
+      assert.equal(updated.requestedAt, t0.toISOString());
+      assert.equal(updated.reason, 'tightened by admin');
+      assert.deepEqual(updated.holds, { send_email: true, search_mail: true });
+
+      // Reload from disk and verify provenance and holds persisted
+      const reloaded = new AdoptionStore(dir).get('castle', 'tavily-search');
+      assert.equal(reloaded?.requestedBy, 'cloudflare:owner@bcl.test');
+      assert.equal(reloaded?.requestedAt, t0.toISOString());
+      assert.deepEqual(reloaded?.holds, { send_email: true, search_mail: true });
+
+      // Rejected/missing records return undefined
+      store.reject('castle', 'tavily-search', 'token:admin');
+      assert.equal(store.updateHolds('castle', 'tavily-search', { send_email: true, search_mail: false }), undefined);
+      assert.equal(store.updateHolds('castle', 'print', { send_email: true }), undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

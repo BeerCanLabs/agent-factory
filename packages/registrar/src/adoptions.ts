@@ -265,6 +265,32 @@ export class AdoptionStore {
     });
   }
 
+  /**
+   * S23 (D31): updates per-action `holds` on a pending (`requested`) adoption record while preserving
+   * the original `requestedBy` and `requestedAt` provenance. Returns `undefined` when no pending request exists.
+   */
+  updateHolds(
+    agentId: string,
+    skillId: string,
+    holds: Record<string, boolean>,
+    reason?: string,
+  ): AdoptionRecord | undefined {
+    check(agentId, skillId);
+    const rec = this.records.get(`${agentId}/${skillId}`);
+    if (!rec || rec.state !== 'requested') return undefined;
+    return this.save({
+      agentId: rec.agentId,
+      skillId: rec.skillId,
+      version: rec.version,
+      state: 'requested',
+      requestedBy: rec.requestedBy,
+      requestedAt: rec.requestedAt,
+      ...(reason ?? rec.reason ? { reason: (reason ?? rec.reason)! } : {}),
+      ...(rec.accessAdded ? { accessAdded: structuredClone(rec.accessAdded) } : {}),
+      ...(Object.keys(holds).length ? { holds: structuredClone(holds) } : {}),
+    });
+  }
+
   /** Rejects a pending request. Undefined when there is none. */
   reject(agentId: string, skillId: string, by: string, reason?: string, now: Date = new Date()): AdoptionRecord | undefined {
     const rec = this.records.get(`${agentId}/${skillId}`);

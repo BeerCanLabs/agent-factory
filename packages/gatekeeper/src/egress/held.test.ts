@@ -112,6 +112,12 @@ describe('E9 held requests: the gatekeeper-egress holds what an agent sends in a
           upstream: `http://127.0.0.1:${upPort}`,
           connection: 'google',
         },
+        {
+          id: 'gmail-prefixed',
+          kind: 'http',
+          upstream: `http://127.0.0.1:${upPort}/gmail/v1`,
+          connection: 'google',
+        },
       ],
       prices: {},
       runTokens: tokens,
@@ -254,5 +260,52 @@ describe('E9 held requests: the gatekeeper-egress holds what an agent sends in a
     const searchHeld = await call(port, '/google-gmail/gmail/v1/users/me/messages?q=secret', { token, method: 'GET' });
     assert.equal(searchHeld.status, 202);
     assert.equal(holds.length, 2);
+  });
+
+  it('S23 F1 (#369) blocks path-normalization bypasses and upstream prefix climbs before forwarding', async () => {
+    ctx.policy.routes = ['google-gmail', 'gmail-prefixed'];
+    ctx.skillHolds = [
+      { skillId: 'mail', actionId: 'send_email', route: 'google-gmail', method: 'POST', path: '/gmail/v1/users/{userId}/messages/send', hold: true },
+      { skillId: 'mail', actionId: 'prefixed_send', route: 'gmail-prefixed', method: 'POST', path: '/users/{userId}/messages/send', hold: true },
+      { skillId: 'mail', actionId: 'prefixed_get', route: 'gmail-prefixed', method: 'GET', path: '/users/{userId}/messages/{id}', hold: false },
+    ];
+    const emailBody = JSON.stringify({ raw: 'dGVzdA==' });
+
+    const evasionPaths = [
+      '/google-gmail/gmail/v1/users/me/messages/./send',
+      '/google-gmail/gmail/v1/users/me/drafts/../messages/send',
+      '/google-gmail/gmail/v1/users/me/%2e/messages/send',
+      '/google-gmail/gmail/v1/users/me/messages\\send',
+      '/google-gmail//gmail///v1/users/me/messages//send',
+      '/google-gmail/gmail/v1/users/me/messages/%73end',
+      '/google-gmail/gmail/v1/users/me/messages;v=1/send',
+      '/google-gmail/gmail/v1/users/me/drafts/..;/messages/send',
+      '/google-gmail/gmail/v1/users/me/messages%2fsend',
+      '/google-gmail/gmail/v1/users/me/messages/%E0%A4%A',
+    ];
+    for (const p of evasionPaths) {
+      const r = await call(port, p, { token, method: 'POST', body: emailBody });
+      assert.equal(r.status, 202, `expected 202 held for ${p}, got ${r.status}`);
+    }
+    assert.equal(seen.length, 0, 'none of the evasion requests may reach upstream');
+
+    // Climbing out of route.upstream's path prefix returns 400 bad_path before checkHold
+    const holdsBeforeClimb = holds.length;
+    const climbOut = await call(port, '/gmail-prefixed/../other/v1/users/me/messages/send', { token, method: 'POST', body: emailBody });
+    assert.equal(climbOut.status, 400);
+    assert.equal(climbOut.json().error, 'bad_path');
+    assert.equal(holds.length, holdsBeforeClimb, 'bad_path is rejected before creating a hold');
+
+    // Climbing up and back into route.upstream's path prefix resolves to `/users/me/messages/send` and is held
+    const climbBackIn1 = await call(port, '/gmail-prefixed/../v1/users/me/messages/send', { token, method: 'POST', body: emailBody });
+    assert.equal(climbBackIn1.status, 202);
+    const climbBackIn2 = await call(port, '/gmail-prefixed/../../gmail/v1/users/me/messages/send', { token, method: 'POST', body: emailBody });
+    assert.equal(climbBackIn2.status, 202);
+    assert.equal(seen.length, 0);
+
+    // Legitimate `%2f` inside `{param}` on an unheld GET path passes upstream unblocked
+    const encodedParamGet = await call(port, '/gmail-prefixed/users/me/messages/label%2fmsg-42', { token, method: 'GET' });
+    assert.equal(encodedParamGet.status, 201);
+    assert.equal(seen.length, 1);
   });
 });

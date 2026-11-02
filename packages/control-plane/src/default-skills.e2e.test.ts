@@ -283,14 +283,14 @@ describe('Admin-managed default skills and automatic creation/conversion seeding
     });
     assert.equal(created.status, 201, JSON.stringify(created.body));
     assert.deepEqual(created.body.skills, [
-      { id: 'sched', version: '1.0.0' },
-      { id: 'knowledge-retrieval', version: '2.0.0' },
+      { id: 'sched', version: '1.0.0', holds: { ping: false } },
+      { id: 'knowledge-retrieval', version: '2.0.0', holds: { ping: false } },
     ]);
 
     const storedCfg = state.configs!.current('fleet-agent-1')!;
     assert.deepEqual(storedCfg.skills, [
-      { id: 'sched', version: '1.0.0' },
-      { id: 'knowledge-retrieval', version: '2.0.0' },
+      { id: 'sched', version: '1.0.0', holds: { ping: false } },
+      { id: 'knowledge-retrieval', version: '2.0.0', holds: { ping: false } },
     ]);
     assert.ok(storedCfg.skillAdoptions);
     assert.equal(storedCfg.skillAdoptions[0].approvedBy, 'factory:defaults');
@@ -310,8 +310,8 @@ describe('Admin-managed default skills and automatic creation/conversion seeding
     });
     assert.equal(created.status, 201);
     assert.deepEqual(created.body.skills, [
-      { id: 'sched', version: '1.1.0' },
-      { id: 'knowledge-retrieval', version: '2.0.0' },
+      { id: 'sched', version: '1.1.0', holds: { ping: false } },
+      { id: 'knowledge-retrieval', version: '2.0.0', holds: { ping: false } },
     ]);
     const storedCfg = state.configs!.current('fleet-agent-custom')!;
     assert.equal(storedCfg.skillAdoptions![0].approvedBy, 'token:admin');
@@ -339,7 +339,7 @@ describe('Admin-managed default skills and automatic creation/conversion seeding
       excludeDefaultSkills: ['sched'],
     });
     assert.equal(optOutOne.status, 201);
-    assert.deepEqual(optOutOne.body.skills, [{ id: 'knowledge-retrieval', version: '2.0.0' }]);
+    assert.deepEqual(optOutOne.body.skills, [{ id: 'knowledge-retrieval', version: '2.0.0', holds: { ping: false } }]);
   });
 
   it('allows owner to remove a seeded default skill post-creation and it stays removed (SK6)', async () => {
@@ -347,7 +347,7 @@ describe('Admin-managed default skills and automatic creation/conversion seeding
     assert.equal(delRes.status, 200);
 
     const cfg = state.configs!.current('fleet-agent-1')!;
-    assert.deepEqual(cfg.skills, [{ id: 'knowledge-retrieval', version: '2.0.0' }]);
+    assert.deepEqual(cfg.skills, [{ id: 'knowledge-retrieval', version: '2.0.0', holds: { ping: false } }]);
   });
 
   it('automatically seeds default skills on repository agent convert-in-place unless opted out or overridden', async () => {
@@ -384,8 +384,8 @@ describe('Admin-managed default skills and automatic creation/conversion seeding
     assert.equal(conv.status, 200, JSON.stringify(conv.body));
     const stored = state.configs!.current('convert-demo')!;
     assert.deepEqual(stored.skills, [
-      { id: 'sched', version: '1.0.0' },
-      { id: 'knowledge-retrieval', version: '2.0.0' },
+      { id: 'sched', version: '1.0.0', holds: { ping: false } },
+      { id: 'knowledge-retrieval', version: '2.0.0', holds: { ping: false } },
     ]);
   });
 

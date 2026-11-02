@@ -1786,13 +1786,27 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           ledger(ctx, route, { type: 'action', action: 'REPLY_FOOTNOTED', footnote: marked.footnote });
         }
       }
+      let holdPath = rest;
+      if (route.upstream) {
+        try {
+          const base = new URL(route.upstream);
+          const prefix = base.pathname.replace(/\/$/, '');
+          const dest = new URL(base.origin + prefix + rest);
+          if (dest.origin !== base.origin || (prefix && dest.pathname !== prefix && !dest.pathname.startsWith(prefix + '/'))) {
+            return deny(res, ctx, route, 400, 'bad_path');
+          }
+          holdPath = dest.pathname.slice(prefix.length) || '/';
+        } catch {
+          return deny(res, ctx, route, 400, 'bad_path');
+        }
+      }
       if (
         checkHold({
           hold: route.hold,
           skillActions: ctx.skillHolds,
           route: route.id,
           method: req.method ?? 'GET',
-          path: rest,
+          path: holdPath,
         }).held &&
         (await holdOrRelease(req, res, ctx, route, rest, raw))
       ) return;

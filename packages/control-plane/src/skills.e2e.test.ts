@@ -517,14 +517,20 @@ describe('A5 raw application/gzip package upload intake, A8 role gating, and pac
         },
         (res) => {
           let data = '';
-          res.on('data', (c) => { data += c; });
-          res.on('end', () => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            try { req.destroy(); } catch {}
             resolve({
               status: res.statusCode ?? 0,
               headers: res.headers,
               body: data ? JSON.parse(data) : null,
             });
-          });
+          };
+          res.on('data', (c) => { data += c; });
+          res.on('end', finish);
+          res.on('close', finish);
         },
       );
       req.on('error', () => {
@@ -1655,5 +1661,193 @@ describe('TSK-278 Slice 4: Publishing workflow, adoption rules, retirement, and 
     const upApp = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant/adoption/approve', 'POST', ADMIN, {});
     assert.equal(upApp.status, 200, JSON.stringify(upApp.body));
     assert.deepEqual(upApp.body.holds, { send_email: true, search_mail: true, delete_thread: true });
+
+    // 9. F3: Tightening holds on a pending adoption request preserves original requestedBy and requestedAt through approval
+    // Publish mail-assistant so Bob can request adoption on bob-agent
+    const pubRes = await call(port, '/api/v1/skills/mail-assistant/publish', 'POST', ALICE, {});
+    assert.equal(pubRes.status, 200, JSON.stringify(pubRes.body));
+    const pubDecide = await call(port, '/api/v1/skills/mail-assistant/publish/decide', 'POST', ADMIN, { decision: 'approve' });
+    assert.equal(pubDecide.status, 200, JSON.stringify(pubDecide.body));
+
+    const bobReq = await call(port, '/api/v1/agents/bob-agent/skills', 'POST', BOB, {
+      skillId: 'mail-assistant',
+      version: '1.0.0',
+      reason: 'Bob wants mail',
+    });
+    assert.equal(bobReq.status, 201, JSON.stringify(bobReq.body));
+    const origRequestedAt = bobReq.body.requestedAt;
+    assert.equal(bobReq.body.requestedBy, 'token:bob');
+
+    // Admin tightens search_mail on Bob's pending request before approving
+    const adminTightenPending = await call(port, '/api/v1/agents/bob-agent/skills/mail-assistant/holds', 'PATCH', ADMIN, {
+      holds: { search_mail: true },
+    });
+    assert.equal(adminTightenPending.status, 200, JSON.stringify(adminTightenPending.body));
+    assert.deepEqual(adminTightenPending.body.holds, { send_email: true, search_mail: true });
+
+    const bobListPending = await call(port, '/api/v1/agents/bob-agent/skills', 'GET', BOB);
+    assert.equal(bobListPending.status, 200);
+    const pendingMail = bobListPending.body.requests.find((r: any) => r.skillId === 'mail-assistant');
+    assert.equal(pendingMail?.requestedBy, 'token:bob');
+    assert.equal(pendingMail?.requestedAt, origRequestedAt);
+
+    const bobApprove = await call(port, '/api/v1/agents/bob-agent/skills/mail-assistant/adoption/approve', 'POST', ADMIN, {});
+    assert.equal(bobApprove.status, 200, JSON.stringify(bobApprove.body));
+    const bobListAdopted = await call(port, '/api/v1/agents/bob-agent/skills', 'GET', BOB);
+    const bobAdoptedMail = bobListAdopted.body.adopted.find((s: any) => s.id === 'mail-assistant');
+    assert.equal(bobAdoptedMail?.requestedBy, 'token:bob');
+    assert.equal(bobAdoptedMail?.approvedBy, 'token:admin');
+    assert.deepEqual(bobAdoptedMail?.holds, { send_email: true, search_mail: true });
+
+    // 10. F2: POST /api/v1/agents (createFromConfiguration) & POST /api/v1/agents/:id/convert (handleConvertAgent)
+    // enforce monotonic hold overrides and propagate default holds (including activeDefaultSkills)
+    state.sharedRuntime = {
+      repo: 'https://github.com/BeerCanLabs/agent-factory',
+      commit: '5555555555555555555555555555555555555555',
+      image: 'shared-runtime:test',
+    };
+    state.deployProvider = {
+      async buildImage(agentId: string, source: { commit: string }) {
+        return `repo-image:${agentId}:${source.commit}`;
+      },
+      async buildSkillsImage(agentId: string, runtime: { commit: string }, skills: Array<{ id: string }>) {
+        return `layered-image:${agentId}:${runtime.commit}:${skills.map((s) => s.id).join('-')}`;
+      },
+      async provisionIdentity(id: string) {
+        return { identity: `role:${id}`, executionIdentity: `exec:${id}` };
+      },
+      async registerCompute() {},
+    } as any;
+    state.smokeHandler = async () => ({ ok: true });
+
+    // 10a. Creating a configured agent with loosened hold: false on send_email is rejected with 422 hold_loosening_forbidden
+    const badCreate = await call(port, '/api/v1/agents', 'POST', ADMIN, {
+      id: 'cfg-loosen-mail',
+      name: 'Cfg Loosen',
+      soul: 'Test soul',
+      memory: { archetype: 'purpose-built' },
+      skills: [{ id: 'mail-assistant', version: '1.0.0', holds: { send_email: false } }],
+    });
+    assert.equal(badCreate.status, 422, JSON.stringify(badCreate.body));
+    assert.equal(badCreate.body.error, 'hold_loosening_forbidden');
+    assert.equal(state.agents.has('cfg-loosen-mail'), false);
+
+    // 10b. Creating a configured agent with tightened holds persists them; default skills also receive default holds
+    const setDefRes = await call(port, '/api/v1/skills/defaults', 'PUT', ADMIN, {
+      skills: [{ id: 'mail-assistant', version: '1.0.0' }],
+    });
+    assert.equal(setDefRes.status, 200, JSON.stringify(setDefRes.body));
+
+    const okCreateDefault = await call(port, '/api/v1/agents', 'POST', ADMIN, {
+      id: 'cfg-default-mail',
+      name: 'Cfg Default Mail',
+      soul: 'Test soul',
+      memory: { archetype: 'purpose-built' },
+    });
+    assert.equal(okCreateDefault.status, 201, JSON.stringify(okCreateDefault.body));
+    assert.deepEqual(state.configs!.current('cfg-default-mail')?.skills, [
+      { id: 'mail-assistant', version: '1.0.0', holds: { send_email: true, search_mail: false } },
+    ]);
+
+    const okCreateTightened = await call(port, '/api/v1/agents', 'POST', ADMIN, {
+      id: 'cfg-tight-mail',
+      name: 'Cfg Tight Mail',
+      soul: 'Test soul',
+      memory: { archetype: 'purpose-built' },
+      skills: [{ id: 'mail-assistant', version: '1.0.0', holds: { search_mail: true } }],
+    });
+    assert.equal(okCreateTightened.status, 201, JSON.stringify(okCreateTightened.body));
+    assert.deepEqual(state.configs!.current('cfg-tight-mail')?.skills, [
+      { id: 'mail-assistant', version: '1.0.0', holds: { send_email: true, search_mail: true } },
+    ]);
+
+    // Clear default skills so subsequent state is clean
+    await call(port, '/api/v1/skills/defaults', 'PUT', ADMIN, { skills: [] });
+
+    // 10c. Converting a repository agent in place rejects loosened holds (422) and persists tightened holds (200)
+    const repoAgent = {
+      id: 'repo-mail-agent',
+      name: 'Repo Mail Agent',
+      role: 'Assistant',
+      state: 'SLEEPING' as const,
+      provider: 'cloud' as const,
+      artifact: 'repo-mail:v1',
+      repo: 'https://github.com/BeerCanLabs/repo-mail-agent',
+      commit: '6666666666666666666666666666666666666666',
+      deployedCommit: '6666666666666666666666666666666666666666',
+      requires: [],
+      ungated: [],
+      gated: [],
+      triggers: [],
+      memoryPrefix: 'repo-mail-agent',
+      dir: '/tmp/repo-mail-agent',
+    };
+    state.agents.set('repo-mail-agent', repoAgent as any);
+    state.policies.set('repo-mail-agent', { routes: ['google-gmail'], models: ['gemini-2.0-flash'] } as any);
+    await state.configs!.put(
+      { agentId: 'repo-mail-agent', source: { repo: repoAgent.repo, commit: repoAgent.commit }, skills: [], policy: null, owners: ['token:alice'] },
+      { updatedBy: 'test', reason: 'init repo agent' },
+    );
+
+    const badConvert = await call(port, '/api/v1/agents/repo-mail-agent/convert', 'POST', ADMIN, {
+      soul: 'Converted soul',
+      memory: { archetype: 'purpose-built' },
+      skills: [{ id: 'mail-assistant', version: '1.0.0', holds: { send_email: false } }],
+      dropUncoveredRoutes: true,
+    });
+    assert.equal(badConvert.status, 422, JSON.stringify(badConvert.body));
+    assert.equal(badConvert.body.error, 'hold_loosening_forbidden');
+    assert.equal(state.agents.get('repo-mail-agent')?.createdFrom, undefined);
+
+    const okConvert = await call(port, '/api/v1/agents/repo-mail-agent/convert', 'POST', ADMIN, {
+      soul: 'Converted soul',
+      memory: { archetype: 'purpose-built' },
+      skills: [{ id: 'mail-assistant', version: '1.0.0', holds: { search_mail: true } }],
+      dropUncoveredRoutes: true,
+    });
+    assert.equal(okConvert.status, 200, JSON.stringify(okConvert.body));
+    assert.deepEqual(state.configs!.current('repo-mail-agent')?.skills, [
+      { id: 'mail-assistant', version: '1.0.0', holds: { send_email: true, search_mail: true } },
+    ]);
+
+    // 10d. autoAdoptPrivate fallback preserves holds on pending adoption record if config store write fails
+    reg.save({
+      id: 'priv-fallback-mail',
+      version: '1.0.0',
+      repo: 'https://github.com/BeerCanLabs/priv-fallback-mail',
+      path: '.',
+      commit: '7777777777777777777777777777777777777777',
+      manifest: {
+        id: 'priv-fallback-mail',
+        name: 'Private Fallback Mail',
+        version: '1.0.0',
+        description: 'Private mail skill',
+        language: 'python',
+        entry: 'entry.py',
+        visibility: 'private',
+        owner: 'alice-agent',
+        requires: { routes: ['google-gmail'], connections: [], credentials: [], models: [] },
+        actions: [
+          { id: 'send_email', route: 'google-gmail', method: 'POST', path: '/gmail/v1/users/{userId}/messages/send', hold: true },
+          { id: 'search_mail', route: 'google-gmail', method: 'GET', path: '/gmail/v1/users/{userId}/messages', hold: false },
+        ],
+      },
+      tests: 'passed',
+      status: 'pending',
+      registeredBy: 'token:alice',
+      registeredAt: new Date().toISOString(),
+    });
+    const savedConfigs = state.configs;
+    state.configs = undefined;
+    try {
+      const approvePriv = await call(port, '/api/v1/registry/skills/priv-fallback-mail/versions/1.0.0/approve', 'POST', ADMIN, {});
+      assert.equal(approvePriv.status, 200, JSON.stringify(approvePriv.body));
+    } finally {
+      state.configs = savedConfigs;
+    }
+    const aliceSkillsAfterFallback = await call(port, '/api/v1/agents/alice-agent/skills', 'GET', ALICE);
+    const fallbackReq = aliceSkillsAfterFallback.body.requests.find((r: any) => r.skillId === 'priv-fallback-mail');
+    assert.ok(fallbackReq);
+    assert.deepEqual(fallbackReq.holds, { send_email: true, search_mail: false });
   });
 });

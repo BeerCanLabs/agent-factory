@@ -45,6 +45,63 @@ describe('checkHold', () => {
       { held: true },
     );
   });
+
+  it('canonicalizes unnormalized paths so dot-segments, backslashes, matrix params, percent-encoding, and encoded separators cannot bypass holds (F1, #369)', () => {
+    const actions: SkillActionHoldRule[] = [
+      { skillId: 'mail', actionId: 'send_email', route: 'google-gmail', method: 'POST', path: '/gmail/v1/users/{userId}/messages/send', hold: true },
+      { skillId: 'mail', actionId: 'modify_msg', route: 'google-gmail', method: 'POST', path: '/gmail/v1/users/{userId}/messages/{id}:modify', hold: true },
+      { skillId: 'mail', actionId: 'get_msg', route: 'google-gmail', method: 'GET', path: '/gmail/v1/users/{userId}/messages/{id}', hold: false },
+    ];
+
+    const bypassAttempts = [
+      '/gmail/v1/users/me/messages/./send',
+      '/gmail/v1/users/me/drafts/../messages/send',
+      '/gmail/v1/users/me/%2e/messages/send',
+      '/gmail/v1/users/me/drafts/%2e%2e/messages/send',
+      '/gmail/v1/users/me/messages\\send',
+      '//gmail///v1//users/me//messages//send/',
+      '/gmail/v1/users/me/messages/%73end',
+      '/gmail/v1/users/me/messages;v=1/send;foo=bar',
+      '/gmail/v1/users/me/drafts/..;/messages/send',
+      '/gmail/v1/users/me/messages%2fsend',
+      '/gmail/v1/users/me/messages%5csend',
+      '/gmail/v1/users/me/drafts%2f..%2fmessages%2fsend',
+    ];
+    for (const attempt of bypassAttempts) {
+      assert.equal(matchSkillActionPath('/gmail/v1/users/{userId}/messages/send', attempt), true, `expected match for ${attempt}`);
+      assert.deepEqual(
+        checkHold({ skillActions: actions, route: 'google-gmail', method: 'POST', path: attempt }),
+        { held: true },
+        `expected hold for ${attempt}`,
+      );
+    }
+
+    // Percent-encoded `:modify` suffix (`%3Amodify`) matches `{id}:modify`
+    assert.deepEqual(
+      checkHold({ skillActions: actions, route: 'google-gmail', method: 'POST', path: '/gmail/v1/users/me/messages/18f%3Amodify' }),
+      { held: true },
+    );
+
+    // Legitimate `%2f` inside `{param}` on an unheld path remains unheld
+    assert.deepEqual(
+      checkHold({ skillActions: actions, route: 'google-gmail', method: 'GET', path: '/gmail/v1/users/me/messages/folder%2fmsg-1' }),
+      { held: false },
+    );
+    assert.deepEqual(
+      checkHold({ skillActions: actions, route: 'google-calendar', method: 'GET', path: '/a%2fb' }),
+      { held: false },
+    );
+
+    // Malformed `%` encoding fails closed on a route with held skill actions, but does not hold routes without held skill actions
+    assert.deepEqual(
+      checkHold({ skillActions: actions, route: 'google-gmail', method: 'POST', path: '/gmail/v1/users/me/messages/%E0%A4%A' }),
+      { held: true },
+    );
+    assert.deepEqual(
+      checkHold({ skillActions: actions, route: 'google-calendar', method: 'GET', path: '/calendars/%E0%A4%A' }),
+      { held: false },
+    );
+  });
 });
 
 describe('checkToolApproval', () => {

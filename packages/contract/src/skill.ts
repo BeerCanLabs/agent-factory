@@ -10,8 +10,8 @@ import { connectionSchema, credentialSource, secretName } from './schema.js';
  *
  * A skill is public (any agent may be given it) or private (it names one owner agent and only that agent may adopt it,
  * SK1, SK3). It declares its actions (SK2): each names the route, method and path it takes and says `hold: true`
- * (human-in-the-loop, E9) or `hold: false` (autonomous). A declared `hold` is recorded and shown to the approver but is
- * enforced only once grants carry actions (GAP-070).
+ * (human-in-the-loop, E9) or `hold: false` (autonomous). Declared action holds propagate as defaults on adoption, may
+ * only be tightened (`hold: false` -> `true`, never loosened, D31/S23), and are enforced at `gatekeeper-egress`.
  */
 
 /** Semantic Versioning 2.0.0 (https://semver.org), without a leading `v`. */
