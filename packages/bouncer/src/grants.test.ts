@@ -21,6 +21,7 @@ import {
   normalizeGrantScope,
   parseGrantSubject,
   parseIsoTimestamp,
+  snapshotSha256,
   type AwsCliRunner,
   type GrantsDoc,
   type PrincipalsDoc,
@@ -1045,6 +1046,803 @@ describe('GrantStore & domain grants (S2 #351)', () => {
       const gcsReopened = await GrantStore.open(gcsBackend);
       assert.equal(gcsReopened.version, 1);
       assert.equal(gcsReopened.hasActiveDomainGrant('sackrider.org'), true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('F1: prevents duplicate slot-occupying unique-role records for the same subject across grant(), update(), expired transfers, and reload()', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'grants-f1-'));
+    try {
+      let clock = Date.parse('2026-11-02T20:00:00.000Z');
+      const now = () => new Date((clock += 1000));
+      const backend = new FileDocBackend<GrantsDoc>(dir);
+      const store = await GrantStore.open(backend, { now });
+
+      // 1. Explicit distinct grant IDs for the same subject on unique slots reject with 409 (never inserting a 2nd record).
+      const ownerAgent = await store.grant({
+        id: 'g_owner_agent_1',
+        subject: 'user:alice',
+        scope: { kind: 'agent', id: 'solo-agent' },
+        role: 'content-owner',
+        by: 'user:dale',
+      });
+      await assert.rejects(
+        () =>
+          store.grant({
+            id: 'g_owner_agent_2',
+            subject: 'user:alice',
+            scope: { kind: 'agent', id: 'solo-agent' },
+            role: 'content-owner',
+            by: 'user:dale',
+          }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'owner_exists',
+      );
+      // Calling grant() with undefined id or matching id updates/returns the single record in place.
+      const ownerAgentSame = await store.grant({
+        subject: 'user:alice',
+        scope: { kind: 'agent', id: 'solo-agent' },
+        role: 'content-owner',
+        expiresAt: '2026-12-01T00:00:00.000Z',
+        by: 'user:dale',
+      });
+      assert.equal(ownerAgentSame.id, ownerAgent.id);
+      assert.equal(
+        store.list({ scopeKind: 'agent', scopeId: 'solo-agent' }).filter((g) => g.role === 'content-owner').length,
+        1,
+      );
+
+      await store.grant({
+        id: 'g_owner_skill_1',
+        subject: 'user:alice',
+        scope: { kind: 'skill', id: 'solo-skill' },
+        role: 'content-owner',
+        by: 'user:dale',
+      });
+      await assert.rejects(
+        () =>
+          store.grant({
+            id: 'g_owner_skill_2',
+            subject: 'user:alice',
+            scope: { kind: 'skill', id: 'solo-skill' },
+            role: 'content-owner',
+            by: 'user:dale',
+          }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'owner_exists',
+      );
+
+      await store.grant({
+        id: 'g_lead_1',
+        subject: 'user:alice',
+        scope: { kind: 'agent', id: 'team-agent' },
+        role: 'accountable-lead',
+        by: 'user:dale',
+      });
+      await assert.rejects(
+        () =>
+          store.grant({
+            id: 'g_lead_2',
+            subject: 'user:alice',
+            scope: { kind: 'agent', id: 'team-agent' },
+            role: 'accountable-lead',
+            by: 'user:dale',
+          }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'lead_exists',
+      );
+
+      await store.grant({
+        id: 'g_budget_1',
+        subject: 'user:alice',
+        scope: { kind: 'fleet' },
+        role: 'budget-owner',
+        by: 'user:dale',
+      });
+      await assert.rejects(
+        () =>
+          store.grant({
+            id: 'g_budget_2',
+            subject: 'user:alice',
+            scope: { kind: 'fleet' },
+            role: 'budget-owner',
+            by: 'user:dale',
+          }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'budget_owner_exists',
+      );
+
+      // 2. Promoting another grant of user:alice via update() onto a unique slot already occupied by user:alice rejects with 409.
+      const aliceMember = await store.grant({
+        subject: 'user:alice',
+        scope: { kind: 'agent', id: 'solo-agent' },
+        role: 'member',
+        by: 'user:dale',
+      });
+      await assert.rejects(
+        () => store.update(aliceMember.id, { role: 'content-owner', by: 'user:dale' }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'owner_exists',
+      );
+      const aliceTeamMember = await store.grant({
+        subject: 'user:alice',
+        scope: { kind: 'agent', id: 'team-agent' },
+        role: 'member',
+        by: 'user:dale',
+      });
+      await assert.rejects(
+        () => store.update(aliceTeamMember.id, { role: 'accountable-lead', by: 'user:dale' }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'lead_exists',
+      );
+      const aliceFleetViewer = await store.grant({
+        subject: 'user:alice',
+        scope: { kind: 'fleet' },
+        role: 'viewer',
+        by: 'user:dale',
+      });
+      await assert.rejects(
+        () => store.update(aliceFleetViewer.id, { role: 'budget-owner', by: 'user:dale' }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'budget_owner_exists',
+      );
+
+      // 3. During an UNEXPIRED pending-revoked transfer, grant() and update() for user:alice reject with 409 owner_exists (preserving D15 read-only).
+      await store.startOwnershipTransfer({
+        scope: { kind: 'agent', id: 'solo-agent' },
+        fromSubject: 'user:alice',
+        toSubject: 'user:bob',
+        by: 'user:alice',
+        ttlMs: 60_000,
+      });
+      await assert.rejects(
+        () =>
+          store.grant({
+            subject: 'user:alice',
+            scope: { kind: 'agent', id: 'solo-agent' },
+            role: 'content-owner',
+            by: 'user:dale',
+          }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'owner_exists',
+      );
+      await assert.rejects(
+        () => store.update(aliceMember.id, { role: 'content-owner', by: 'user:dale' }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'owner_exists',
+      );
+
+      // 4. After transfer TTL expires (before sweepExpiredTransfers), grant() for user:alice restores existing grant in place & cleans up pending-accepted.
+      clock += 120_000;
+      await assert.rejects(
+        () => store.update(aliceMember.id, { role: 'content-owner', by: 'user:dale' }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'owner_exists',
+      );
+      const restoredInPlace = await store.grant({
+        subject: 'user:alice',
+        scope: { kind: 'agent', id: 'solo-agent' },
+        role: 'content-owner',
+        by: 'user:dale',
+      });
+      assert.equal(restoredInPlace.id, ownerAgent.id);
+      assert.equal(restoredInPlace.state, 'active');
+      assert.equal(restoredInPlace.transferId, undefined);
+      assert.equal(restoredInPlace.pendingExpiresAt, undefined);
+      const soloAgentGrants = store.list({ scopeKind: 'agent', scopeId: 'solo-agent' });
+      assert.equal(soloAgentGrants.filter((g) => g.role === 'content-owner').length, 1);
+      assert.equal(soloAgentGrants.some((g) => g.state !== 'active'), false);
+
+      // Reload succeeds cleanly with zero duplicate unique-slot records.
+      await store.reload();
+      assert.equal(store.healthy, true);
+
+      // 5. Tampering disk snapshot to contain two content-owner records for the SAME subject fails closed (503) on reload().
+      const vPath = join(dir, `${store.version}.json`);
+      const snap = JSON.parse(readFileSync(vPath, 'utf8')) as VersionedSnapshot<GrantsDoc>;
+      const dup = structuredClone(snap.data.grants.find((g) => g.id === ownerAgent.id)!);
+      dup.id = 'g_tampered_dup_owner';
+      snap.data.grants.push(dup);
+      snap.sha256 = snapshotSha256(snap.data);
+      writeFileSync(vPath, JSON.stringify(snap, null, 2));
+      writeFileSync(join(dir, 'current.json'), JSON.stringify({ version: snap.version, sha256: snap.sha256 }, null, 2));
+
+      await assert.rejects(
+        () => store.reload(),
+        (err: unknown) => err instanceof GrantStoreUnavailableError && err.status === 503,
+      );
+      assert.equal(store.healthy, false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('F2: serializes reload() and loadEffectiveGrantsFor(..., { refresh: true }) on enqueue so concurrent writes never race, regress version, or resurrect revoked grants', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'grants-f2-'));
+    try {
+      const fileBackend = new FileDocBackend<GrantsDoc>(dir);
+      let loadGate: (() => void) | undefined;
+      let notifyLoadEntered: (() => void) | undefined;
+      let failNextWrite = false;
+
+      const gatedBackend: VersionedDocBackend<GrantsDoc> = {
+        description: fileBackend.description,
+        loadLatest: () => fileBackend.loadLatest(),
+        loadState: async () => {
+          const state = await fileBackend.loadState!();
+          if (loadGate) {
+            const release = loadGate;
+            loadGate = undefined;
+            notifyLoadEntered?.();
+            await new Promise<void>((resolve) => {
+              const orig = release;
+              void orig;
+              gateResolver = resolve;
+            });
+          }
+          return state;
+        },
+        write: async (snap) => {
+          if (failNextWrite) {
+            failNextWrite = false;
+            throw new Error('simulated transient S3 write error');
+          }
+          await fileBackend.write(snap);
+        },
+      };
+
+      let gateResolver: (() => void) | undefined;
+      const store = await GrantStore.open(gatedBackend);
+      await store.grant({
+        id: 'g_admin_dale',
+        subject: 'user:dale',
+        scope: { kind: 'fleet' },
+        role: 'admin',
+        by: 'user:dale',
+      });
+      const bobGrant = await store.grant({
+        id: 'g_viewer_bob',
+        subject: 'user:bob',
+        scope: { kind: 'fleet' },
+        role: 'viewer',
+        by: 'user:dale',
+      });
+      assert.equal(store.version, 2);
+
+      // 1. Start an in-flight loadEffectiveGrantsFor(..., { refresh: true }) paused mid-load on snapshot v2, then queue revoke(bob) + grant(carol).
+      const entered = new Promise<void>((resolve) => {
+        notifyLoadEntered = resolve;
+      });
+      loadGate = () => {};
+      const refreshPromise = store.loadEffectiveGrantsFor({ subject: 'user:bob' }, { refresh: true });
+      await entered;
+
+      const revokePromise = store.revoke(bobGrant.id, { by: 'user:dale' });
+      const carolPromise = store.grant({
+        id: 'g_viewer_carol',
+        subject: 'user:carol',
+        scope: { kind: 'fleet' },
+        role: 'viewer',
+        by: 'user:dale',
+      });
+
+      // Release the paused reload -> refresh finishes v2, then revoke commits v3, then grant(carol) commits v4 cleanly!
+      gateResolver!();
+      const [refreshedBeforeRevoke] = await Promise.all([refreshPromise, revokePromise, carolPromise]);
+      assert.equal(refreshedBeforeRevoke.length, 1);
+      assert.equal(store.version, 4);
+      assert.deepEqual(store.effectiveGrantsFor({ subject: 'user:bob' }), [], 'revoked grant must never be resurrected');
+      assert.equal(store.effectiveGrantsFor({ subject: 'user:carol' }).length, 1);
+
+      // 2. Queue a revoke(carol) FIRST and call reload() + loadEffectiveGrantsFor(..., { refresh: true }) concurrently -> refresh sees post-revoke state ([]).
+      const [, , refreshedAfterRevoke] = await Promise.all([
+        store.revoke('g_viewer_carol', { by: 'user:dale' }),
+        store.reload(),
+        store.loadEffectiveGrantsFor({ subject: 'user:carol' }, { refresh: true }),
+      ]);
+      assert.deepEqual(refreshedAfterRevoke, []);
+      assert.equal(store.version, 5);
+
+      // 3. Transient write failure marks store unhealthy (503); explicit reload() runs sequentially and safely re-syncs durable state + version.
+      failNextWrite = true;
+      await assert.rejects(
+        () =>
+          store.grant({
+            subject: 'user:dave',
+            scope: { kind: 'fleet' },
+            role: 'viewer',
+            by: 'user:dale',
+          }),
+        (err: unknown) => err instanceof GrantStoreUnavailableError && err.status === 503,
+      );
+      assert.equal(store.healthy, false);
+
+      await store.reload();
+      assert.equal(store.healthy, true);
+      assert.equal(store.version, 5);
+      const daveAfterRecovery = await store.grant({
+        subject: 'user:dave',
+        scope: { kind: 'fleet' },
+        role: 'viewer',
+        by: 'user:dale',
+      });
+      assert.equal(daveAfterRecovery.subject, 'user:dave');
+      assert.equal(store.version, 6);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('F3: canonicalizes user:<email> subjects via PrincipalStore across effectiveGrantsFor and all subject-accepting methods while preserving unmaterialized domain evaluation', async () => {
+    let clock = Date.parse('2026-11-02T21:00:00.000Z');
+    const now = () => new Date((clock += 1000));
+    const principals = await PrincipalStore.open(undefined, { now });
+    const grants = await GrantStore.open(undefined, { now, principals });
+
+    const dale = await principals.create({
+      id: 'user:dale',
+      displayName: 'Dale Sackrider',
+      emails: ['dale@sackrider.org', 'dale.alias@gmail.com'],
+      by: 'bootstrap',
+    });
+    assert.equal(dale.id, 'user:dale');
+
+    const bob = await principals.create({
+      id: 'user:bob',
+      displayName: 'Bob Sackrider',
+      emails: ['bob@sackrider.org'],
+      by: 'user:dale',
+    });
+    assert.equal(bob.id, 'user:bob');
+
+    // Grant via email -> stored under canonical slug user:dale
+    await grants.grant({
+      subject: 'user:dale@sackrider.org',
+      scope: { kind: 'fleet' },
+      role: 'admin',
+      by: 'user:dale',
+    });
+    await grants.grant({
+      subject: 'dale@sackrider.org',
+      scope: { kind: 'agent', id: 'switch-bot' },
+      role: 'content-owner',
+      by: 'user:dale',
+    });
+    await grants.grant({
+      subject: 'domain:sackrider.org',
+      scope: { kind: 'fleet' },
+      role: 'viewer',
+      by: 'user:dale',
+    });
+
+    // S1 identity verifier shape: Principal.actor === 'user:dale@sackrider.org' or 'user:dale.alias@gmail.com'
+    assert.deepEqual(
+      grants.effectiveFleetRolesFor({ subject: 'user:dale@sackrider.org' }).sort(),
+      ['admin', 'viewer'],
+    );
+    assert.deepEqual(
+      grants.effectiveFleetRolesFor({ subject: 'user:dale.alias@gmail.com', emails: ['dale.alias@gmail.com'] }).sort(),
+      ['admin', 'viewer'],
+      'secondary non-domain email still inherits both direct user:dale grants and linked @sackrider.org domain grant',
+    );
+    assert.equal(grants.isActiveContentOwner('user:dale@sackrider.org', { kind: 'agent', id: 'switch-bot' }), true);
+    assert.equal(grants.list({ subject: 'user:dale@sackrider.org' }).length, 2);
+    assert.equal(grants.list({ subject: 'dale@sackrider.org' }).length, 2);
+
+    // assertCanRemovePrincipal canonicalizes user:<email> -> protects sole human admin
+    assert.throws(
+      () => grants.assertCanRemovePrincipal('user:dale@sackrider.org'),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'last_admin',
+    );
+
+    // Unmaterialized S1 verifier caller 'user:newcomer@sackrider.org' with emails omitted still resolves domain:sackrider.org with zero PrincipalStore writes (D6 / AC1).
+    const principalsBeforeEval = principals.list().length;
+    assert.deepEqual(grants.effectiveFleetRolesFor({ subject: 'user:newcomer@sackrider.org' }), ['viewer']);
+    assert.deepEqual(grants.effectiveFleetRolesFor({ subject: 'user:stranger@other.org' }), []);
+    assert.equal(principals.list().length, principalsBeforeEval);
+
+    // startOwnershipTransfer canonicalizes both fromSubject and toSubject when passed as user:<email>
+    const tx = await grants.startOwnershipTransfer({
+      scope: { kind: 'agent', id: 'switch-bot' },
+      fromSubject: 'user:dale@sackrider.org',
+      toSubject: 'user:bob@sackrider.org',
+      by: 'user:dale',
+    });
+    assert.equal(tx.outgoing.subject, 'user:dale');
+    assert.equal(tx.incoming.subject, 'user:bob');
+    await grants.resolveOwnershipTransfer({ transferId: tx.transferId, action: 'accept', by: 'user:bob' });
+    assert.equal(grants.isActiveContentOwner('user:bob@sackrider.org', { kind: 'agent', id: 'switch-bot' }), true);
+
+    // Add second human admin so we can exercise downgrade, revokeMatching, and revokeAllForSubject via user:<email>
+    await grants.grant({
+      subject: 'user:bob@sackrider.org',
+      scope: { kind: 'fleet' },
+      role: 'admin',
+      by: 'user:dale',
+    });
+    const downgraded = await grants.downgrade('user:dale@sackrider.org', 'operator', { by: 'user:bob' });
+    assert.equal(downgraded.subject, 'user:dale');
+    assert.equal(downgraded.role, 'operator');
+
+    await grants.grant({
+      subject: 'user:dale@sackrider.org',
+      scope: { kind: 'agent', id: 'switch-bot' },
+      role: 'member',
+      by: 'user:bob',
+    });
+    const revokedMatch = await grants.revokeMatching(
+      { subject: 'user:dale@sackrider.org', scope: { kind: 'agent', id: 'switch-bot' }, role: 'member' },
+      { by: 'user:bob' },
+    );
+    assert.equal(revokedMatch.subject, 'user:dale');
+
+    const revokedAll = await grants.revokeAllForSubject('user:dale.alias@gmail.com', { by: 'user:bob' });
+    assert.equal(revokedAll.length, 1);
+    assert.equal(revokedAll[0].subject, 'user:dale');
+    assert.equal(grants.list({ subject: 'user:dale' }).length, 0);
+  });
+
+  it('F4: preserves two-phase transfer invariants across single-grant revocations, update(), raw state inputs, and reload()', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'grants-f4-'));
+    try {
+      let clock = Date.parse('2026-11-02T22:00:00.000Z');
+      const now = () => new Date((clock += 1000));
+      const backend = new FileDocBackend<GrantsDoc>(dir);
+      const store = await GrantStore.open(backend, { now });
+
+      await store.grant({
+        subject: 'user:alice',
+        scope: { kind: 'agent', id: 'alpha' },
+        role: 'content-owner',
+        by: 'user:alice',
+      });
+
+      // 1. Revoking pending-accepted via revoke(), revokeMatching(), and revokeAllForSubject() restores paired pending-revoked to active!
+      const tx1 = await store.startOwnershipTransfer({
+        scope: { kind: 'agent', id: 'alpha' },
+        fromSubject: 'user:alice',
+        toSubject: 'user:bob',
+        by: 'user:dale',
+        onBehalfOf: 'user:alice',
+      });
+      await store.revoke(tx1.incoming.id, { by: 'user:dale' });
+      const restored1 = store.get(tx1.outgoing.id)!;
+      assert.equal(restored1.state, 'active');
+      assert.equal(restored1.transferId, undefined);
+      assert.equal(restored1.pendingExpiresAt, undefined);
+      assert.equal(restored1.onBehalfOf, undefined);
+      assert.equal(store.isActiveContentOwner('user:alice', { kind: 'agent', id: 'alpha' }), true);
+
+      const tx2 = await store.startOwnershipTransfer({
+        scope: { kind: 'agent', id: 'alpha' },
+        fromSubject: 'user:alice',
+        toSubject: 'user:bob',
+        by: 'user:alice',
+      });
+      await store.revokeMatching(
+        { subject: 'user:bob', scope: { kind: 'agent', id: 'alpha' }, role: 'content-owner' },
+        { by: 'user:dale' },
+      );
+      assert.equal(store.get(tx2.outgoing.id)?.state, 'active');
+      assert.equal(store.isActiveContentOwner('user:alice', { kind: 'agent', id: 'alpha' }), true);
+
+      const tx3 = await store.startOwnershipTransfer({
+        scope: { kind: 'agent', id: 'alpha' },
+        fromSubject: 'user:alice',
+        toSubject: 'user:bob',
+        by: 'user:alice',
+      });
+      await store.revokeAllForSubject('user:bob', { by: 'user:dale' });
+      assert.equal(store.get(tx3.outgoing.id)?.state, 'active');
+      assert.equal(store.isActiveContentOwner('user:alice', { kind: 'agent', id: 'alpha' }), true);
+
+      // 2. Revoking pending-revoked also deletes paired pending-accepted so zero orphan pending-accepted remains!
+      const tx4 = await store.startOwnershipTransfer({
+        scope: { kind: 'agent', id: 'alpha' },
+        fromSubject: 'user:alice',
+        toSubject: 'user:bob',
+        by: 'user:alice',
+      });
+      await store.revoke(tx4.outgoing.id, { by: 'user:dale' });
+      assert.equal(store.get(tx4.outgoing.id), undefined);
+      assert.equal(store.get(tx4.incoming.id), undefined);
+      assert.deepEqual(store.list({ scopeKind: 'agent', scopeId: 'alpha' }), []);
+
+      // 3. update(outgoing.id, { state: 'active' }) clears transferId/pendingExpiresAt and removes paired pending-accepted.
+      const freshOwner = await store.grant({
+        subject: 'user:alice',
+        scope: { kind: 'skill', id: 'skill-one' },
+        role: 'content-owner',
+        by: 'user:alice',
+      });
+      const tx5 = await store.startOwnershipTransfer({
+        scope: { kind: 'skill', id: 'skill-one' },
+        fromSubject: 'user:alice',
+        toSubject: 'user:bob',
+        by: 'user:alice',
+      });
+      const updatedActive = await store.update(freshOwner.id, { state: 'active', by: 'user:dale' });
+      assert.equal(updatedActive.state, 'active');
+      assert.equal(updatedActive.transferId, undefined);
+      assert.equal(updatedActive.pendingExpiresAt, undefined);
+      assert.equal(store.get(tx5.incoming.id), undefined);
+
+      // Cannot transition an active grant into pending-revoked/pending-accepted via update().
+      await assert.rejects(
+        () => store.update(freshOwner.id, { state: 'pending-revoked', by: 'user:dale' }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_grant',
+      );
+
+      // 4. grant() rejects non-active states on fleet scope, non-user subjects, non-content-owner roles, missing transferId/pendingExpiresAt, and rejects active grants with transferId/pendingExpiresAt.
+      const futureIso = '2026-11-10T00:00:00.000Z';
+      for (const badInput of [
+        {
+          subject: 'user:carol',
+          scope: { kind: 'fleet' as const },
+          role: 'viewer',
+          state: 'pending-revoked' as const,
+          transferId: 'tx_bad_1',
+          pendingExpiresAt: futureIso,
+          by: 'user:dale',
+        },
+        {
+          subject: 'group:eng',
+          scope: { kind: 'agent' as const, id: 'beta' },
+          role: 'member',
+          state: 'pending-accepted' as const,
+          transferId: 'tx_bad_2',
+          pendingExpiresAt: futureIso,
+          by: 'user:dale',
+        },
+        {
+          subject: 'user:carol',
+          scope: { kind: 'agent' as const, id: 'beta' },
+          role: 'member',
+          state: 'pending-revoked' as const,
+          transferId: 'tx_bad_3',
+          pendingExpiresAt: futureIso,
+          by: 'user:dale',
+        },
+        {
+          subject: 'user:carol',
+          scope: { kind: 'agent' as const, id: 'beta' },
+          role: 'content-owner',
+          state: 'pending-revoked' as const,
+          pendingExpiresAt: futureIso,
+          by: 'user:dale',
+        },
+        {
+          subject: 'user:carol',
+          scope: { kind: 'agent' as const, id: 'beta' },
+          role: 'content-owner',
+          state: 'pending-revoked' as const,
+          transferId: 'tx_bad_5',
+          by: 'user:dale',
+        },
+        {
+          subject: 'user:carol',
+          scope: { kind: 'agent' as const, id: 'beta' },
+          role: 'content-owner',
+          state: 'active' as const,
+          transferId: 'tx_bad_6',
+          by: 'user:dale',
+        },
+        {
+          subject: 'user:carol',
+          scope: { kind: 'agent' as const, id: 'beta' },
+          role: 'content-owner',
+          state: 'active' as const,
+          pendingExpiresAt: futureIso,
+          by: 'user:dale',
+        },
+      ]) {
+        await assert.rejects(
+          () => store.grant(badInput),
+          (err: unknown) => err instanceof GrantStoreError && err.status === 400,
+        );
+      }
+
+      // 5. Tampering disk snapshot with invalid transfer state fields fails closed (503) on reload().
+      await store.reload();
+      const vPath = join(dir, `${store.version}.json`);
+      const snap = JSON.parse(readFileSync(vPath, 'utf8')) as VersionedSnapshot<GrantsDoc>;
+      snap.data.grants[0].state = 'pending-revoked';
+      // Missing transferId and pendingExpiresAt
+      snap.sha256 = snapshotSha256(snap.data);
+      writeFileSync(vPath, JSON.stringify(snap, null, 2));
+      writeFileSync(join(dir, 'current.json'), JSON.stringify({ version: snap.version, sha256: snap.sha256 }, null, 2));
+
+      await assert.rejects(
+        () => store.reload(),
+        (err: unknown) => err instanceof GrantStoreUnavailableError && err.status === 503,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('F5: validates onBehalfOf as a human user principal across all mutations/reload and clears stale onBehalfOf on subsequent non-impersonated mutations', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'grants-f5-'));
+    try {
+      let clock = Date.parse('2026-11-02T23:00:00.000Z');
+      const now = () => new Date((clock += 1000));
+      const principals = await PrincipalStore.open(undefined, { now });
+      await principals.create({
+        id: 'user:alice',
+        displayName: 'Alice',
+        emails: ['alice@sackrider.org'],
+        by: 'bootstrap',
+      });
+      await principals.create({
+        id: 'user:bob',
+        displayName: 'Bob',
+        emails: ['bob@sackrider.org'],
+        by: 'bootstrap',
+      });
+      await principals.create({
+        id: 'user:dale',
+        displayName: 'Dale',
+        emails: ['dale@sackrider.org'],
+        by: 'bootstrap',
+      });
+
+      const backend = new FileDocBackend<GrantsDoc>(dir);
+      const store = await GrantStore.open(backend, { now, principals });
+
+      // 1. Valid onBehalfOf (including user:<email> canonicalized to user:<slug>) is recorded; subsequent non-impersonated grant() in-place update clears it.
+      const g1 = await store.grant({
+        subject: 'user:alice',
+        scope: { kind: 'agent', id: 'gamma' },
+        role: 'content-owner',
+        by: 'user:dale',
+        onBehalfOf: 'user:alice@sackrider.org',
+      });
+      assert.equal(g1.onBehalfOf, 'user:alice');
+
+      const g1Cleared = await store.grant({
+        subject: 'user:alice',
+        scope: { kind: 'agent', id: 'gamma' },
+        role: 'content-owner',
+        by: 'user:dale',
+      });
+      assert.equal(g1Cleared.id, g1.id);
+      assert.equal(g1Cleared.onBehalfOf, undefined);
+      assert.equal('onBehalfOf' in g1Cleared, false);
+
+      // 2. update() records valid onBehalfOf and clears it on next non-impersonated update().
+      const g1WithObo = await store.update(g1.id, {
+        expiresAt: '2026-12-15T00:00:00.000Z',
+        by: 'user:dale',
+        onBehalfOf: 'user:alice',
+      });
+      assert.equal(g1WithObo.onBehalfOf, 'user:alice');
+
+      const g1UpdateCleared = await store.update(g1.id, {
+        expiresAt: null,
+        by: 'user:dale',
+      });
+      assert.equal(g1UpdateCleared.onBehalfOf, undefined);
+      assert.equal('onBehalfOf' in g1UpdateCleared, false);
+
+      // 3. startOwnershipTransfer, resolveOwnershipTransfer, and sweepExpiredTransfers never leak stale onBehalfOf!
+      const tx1 = await store.startOwnershipTransfer({
+        scope: { kind: 'agent', id: 'gamma' },
+        fromSubject: 'user:alice',
+        toSubject: 'user:bob',
+        by: 'user:dale',
+        onBehalfOf: 'user:alice',
+        ttlMs: 60_000,
+      });
+      assert.equal(tx1.outgoing.onBehalfOf, 'user:alice');
+      assert.equal(tx1.incoming.onBehalfOf, 'user:alice');
+
+      // Cancel without onBehalfOf -> clears stale onBehalfOf on restored outgoing grant
+      const cancelled = await store.resolveOwnershipTransfer({
+        transferId: tx1.transferId,
+        action: 'cancel',
+        by: 'user:alice',
+      });
+      assert.equal(cancelled.activeOwner.onBehalfOf, undefined);
+      assert.equal('onBehalfOf' in cancelled.activeOwner, false);
+
+      // Start transfer with onBehalfOf, let expire, and sweep -> clears stale onBehalfOf
+      await store.startOwnershipTransfer({
+        scope: { kind: 'agent', id: 'gamma' },
+        fromSubject: 'user:alice',
+        toSubject: 'user:bob',
+        by: 'user:dale',
+        onBehalfOf: 'user:alice',
+        ttlMs: 10_000,
+      });
+      clock += 20_000;
+      const swept = await store.sweepExpiredTransfers('system');
+      assert.equal(swept.length, 1);
+      assert.equal(swept[0].onBehalfOf, undefined);
+      assert.equal('onBehalfOf' in swept[0], false);
+
+      // Start transfer without onBehalfOf after setting onBehalfOf on owner -> clears stale onBehalfOf on outgoing
+      await store.update(g1.id, { expiresAt: null, by: 'user:dale', onBehalfOf: 'user:alice' });
+      const tx3 = await store.startOwnershipTransfer({
+        scope: { kind: 'agent', id: 'gamma' },
+        fromSubject: 'user:alice',
+        toSubject: 'user:bob',
+        by: 'user:alice',
+      });
+      assert.equal(tx3.outgoing.onBehalfOf, undefined);
+      const accepted = await store.resolveOwnershipTransfer({
+        transferId: tx3.transferId,
+        action: 'accept',
+        by: 'user:bob',
+      });
+      assert.equal(accepted.activeOwner.onBehalfOf, undefined);
+
+      // 4. Invalid onBehalfOf values reject with 400 invalid_grant across all mutation methods.
+      for (const badObo of ['service:bot', 'group:eng', 'domain:sackrider.org', 'not-a-user']) {
+        await assert.rejects(
+          () =>
+            store.grant({
+              subject: 'user:alice',
+              scope: { kind: 'fleet' },
+              role: 'viewer',
+              by: 'user:dale',
+              onBehalfOf: badObo,
+            }),
+          (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_grant',
+        );
+        await assert.rejects(
+          () => store.update(accepted.activeOwner.id, { expiresAt: null, by: 'user:dale', onBehalfOf: badObo }),
+          (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_grant',
+        );
+        await assert.rejects(
+          () => store.revoke(accepted.activeOwner.id, { by: 'user:dale', onBehalfOf: badObo }),
+          (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_grant',
+        );
+        await assert.rejects(
+          () =>
+            store.revokeMatching(
+              { subject: 'user:bob', scope: { kind: 'agent', id: 'gamma' }, role: 'content-owner' },
+              { by: 'user:dale', onBehalfOf: badObo },
+            ),
+          (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_grant',
+        );
+        await assert.rejects(
+          () => store.revokeAllForSubject('user:bob', { by: 'user:dale', onBehalfOf: badObo }),
+          (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_grant',
+        );
+        await assert.rejects(
+          () =>
+            store.startOwnershipTransfer({
+              scope: { kind: 'agent', id: 'gamma' },
+              fromSubject: 'user:bob',
+              toSubject: 'user:alice',
+              by: 'user:dale',
+              onBehalfOf: badObo,
+            }),
+          (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_grant',
+        );
+      }
+
+      const tx4 = await store.startOwnershipTransfer({
+        scope: { kind: 'agent', id: 'gamma' },
+        fromSubject: 'user:bob',
+        toSubject: 'user:alice',
+        by: 'user:bob',
+      });
+      await assert.rejects(
+        () =>
+          store.resolveOwnershipTransfer({
+            transferId: tx4.transferId,
+            action: 'accept',
+            by: 'user:dale',
+            onBehalfOf: 'service:bot',
+          }),
+        (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_grant',
+      );
+      await store.resolveOwnershipTransfer({ transferId: tx4.transferId, action: 'cancel', by: 'user:bob' });
+
+      // 5. Tampering disk snapshot with non-user onBehalfOf fails closed (503) on reload().
+      const vPath = join(dir, `${store.version}.json`);
+      const snap = JSON.parse(readFileSync(vPath, 'utf8')) as VersionedSnapshot<GrantsDoc>;
+      snap.data.grants[0].onBehalfOf = 'service:rogue-impersonator';
+      snap.sha256 = snapshotSha256(snap.data);
+      writeFileSync(vPath, JSON.stringify(snap, null, 2));
+      writeFileSync(join(dir, 'current.json'), JSON.stringify({ version: snap.version, sha256: snap.sha256 }, null, 2));
+
+      await assert.rejects(
+        () => store.reload(),
+        (err: unknown) => err instanceof GrantStoreUnavailableError && err.status === 503,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

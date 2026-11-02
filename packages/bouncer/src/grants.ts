@@ -471,6 +471,289 @@ function defaultDisplayNameFromEmail(email: string): string {
   return (local.trim() || 'user').slice(0, 256);
 }
 
+type ResolvedSubject = {
+  subject: string;
+  kind: GrantSubjectKind;
+  principalRecord?: PrincipalRecord;
+  extractedEmail?: string;
+};
+
+function resolveCanonicalSubject(raw: unknown, principals?: PrincipalStore): ResolvedSubject {
+  if (principals && !principals.healthy) {
+    throw new PrincipalStoreUnavailableError('principal store unhealthy');
+  }
+  const parsed = parseGrantSubject(raw);
+  if (parsed.kind !== 'user') {
+    return parsed;
+  }
+  const rest = parsed.subject.slice('user:'.length);
+  const extractedEmail = rest.includes('@') ? normalizeEmail(rest) : undefined;
+  if (!principals) {
+    return { ...parsed, extractedEmail };
+  }
+  const found = principals.get(parsed.subject) ?? (extractedEmail ? principals.findByEmail(extractedEmail) : undefined);
+  if (found) {
+    return {
+      subject: found.id,
+      kind: 'user',
+      principalRecord: found,
+      extractedEmail,
+    };
+  }
+  return { ...parsed, extractedEmail };
+}
+
+function resolveOnBehalfOf(raw: unknown, principals?: PrincipalStore): string | undefined {
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  if (typeof raw !== 'string') {
+    throw new GrantStoreError(400, 'invalid_grant', `invalid onBehalfOf principal: ${JSON.stringify(raw)}`);
+  }
+  const trimmed = raw.trim().toLowerCase();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (!isValidUserPrincipalId(trimmed)) {
+    throw new GrantStoreError(400, 'invalid_grant', `invalid onBehalfOf principal: ${JSON.stringify(raw)}`);
+  }
+  if (principals) {
+    if (!principals.healthy) {
+      throw new PrincipalStoreUnavailableError('principal store unhealthy');
+    }
+    const rest = trimmed.slice('user:'.length);
+    const found = principals.get(trimmed) ?? (rest.includes('@') ? principals.findByEmail(rest) : undefined);
+    if (found) {
+      return found.id;
+    }
+  }
+  return trimmed;
+}
+
+function assertValidTransferStateFields(params: {
+  state: GrantState;
+  subjectKind: GrantSubjectKind;
+  scope: GrantScope;
+  role: string;
+  transferId: string | undefined;
+  pendingExpiresAt: string | null | undefined;
+}): void {
+  const { state, subjectKind, scope, role, transferId, pendingExpiresAt } = params;
+  if (state === 'active') {
+    if (transferId !== undefined) {
+      throw new GrantStoreError(400, 'invalid_grant', 'active grant must not specify transferId');
+    }
+    if (pendingExpiresAt !== undefined && pendingExpiresAt !== null) {
+      throw new GrantStoreError(400, 'invalid_grant', 'active grant must not specify pendingExpiresAt');
+    }
+    return;
+  }
+  if (subjectKind !== 'user') {
+    throw new GrantStoreError(
+      400,
+      'invalid_grant',
+      `grant state '${state}' requires a human user:<id> subject`,
+    );
+  }
+  if (scope.kind !== 'agent' && scope.kind !== 'skill') {
+    throw new GrantStoreError(
+      400,
+      'invalid_grant',
+      `grant state '${state}' is only valid on agent or skill scope`,
+    );
+  }
+  if (role !== 'content-owner') {
+    throw new GrantStoreError(
+      400,
+      'invalid_grant',
+      `grant state '${state}' is only valid for role 'content-owner'`,
+    );
+  }
+  if (!transferId) {
+    throw new GrantStoreError(
+      400,
+      'invalid_grant',
+      `grant state '${state}' requires a non-empty transferId`,
+    );
+  }
+  if (typeof pendingExpiresAt !== 'string' || !pendingExpiresAt) {
+    throw new GrantStoreError(
+      400,
+      'invalid_expiry',
+      `grant state '${state}' requires an ISO-8601 pendingExpiresAt timestamp`,
+    );
+  }
+}
+
+function assertTransferGraphInvariants(grants: Iterable<GrantRecord>, nowMs: number): void {
+  const all = [...grants];
+  const activeTeamLeads = new Set<string>();
+  const slotOwnersByScope = new Map<string, GrantRecord>();
+  let activeBudgetOwner: string | undefined;
+
+  for (const g of all) {
+    if (!isGrantOccupyingSlot(g, nowMs)) continue;
+    if (g.scope.kind === 'agent' && g.role === 'accountable-lead') {
+      if (activeTeamLeads.has(g.scope.id)) {
+        throw new GrantStoreError(
+          409,
+          'lead_exists',
+          `team agent '${g.scope.id}' already has an active accountable-lead`,
+        );
+      }
+      if (slotOwnersByScope.has(`agent:${g.scope.id}`)) {
+        throw new GrantStoreError(
+          409,
+          'agent_kind_conflict',
+          `personal agent '${g.scope.id}' already has a content-owner`,
+        );
+      }
+      activeTeamLeads.add(g.scope.id);
+    }
+    if ((g.scope.kind === 'agent' || g.scope.kind === 'skill') && g.role === 'content-owner') {
+      const key = `${g.scope.kind}:${g.scope.id}`;
+      if (slotOwnersByScope.has(key)) {
+        throw new GrantStoreError(
+          409,
+          'owner_exists',
+          `${g.scope.kind} '${g.scope.id}' already has an active content-owner`,
+        );
+      }
+      if (g.scope.kind === 'agent' && activeTeamLeads.has(g.scope.id)) {
+        throw new GrantStoreError(
+          409,
+          'agent_kind_conflict',
+          `agent '${g.scope.id}' already has an accountable-lead`,
+        );
+      }
+      slotOwnersByScope.set(key, g);
+    }
+    if (g.scope.kind === 'fleet' && g.role === 'budget-owner') {
+      if (activeBudgetOwner !== undefined) {
+        throw new GrantStoreError(409, 'budget_owner_exists', 'factory already has an active budget-owner');
+      }
+      activeBudgetOwner = g.subject;
+    }
+  }
+
+  const byTransferId = new Map<string, { outgoing?: GrantRecord; incoming?: GrantRecord }>();
+  const pendingRevokedByScope = new Map<string, GrantRecord>();
+  const pendingAcceptedByScope = new Map<string, GrantRecord>();
+
+  for (const g of all) {
+    if (g.state === 'active') continue;
+    if (g.scope.kind !== 'agent' && g.scope.kind !== 'skill') {
+      throw new GrantStoreError(400, 'invalid_grant', `grant state '${g.state}' requires agent or skill scope`);
+    }
+    if (g.scope.kind === 'agent' && activeTeamLeads.has(g.scope.id)) {
+      throw new GrantStoreError(
+        409,
+        'agent_kind_conflict',
+        `team agent '${g.scope.id}' does not support content-owner transfer state '${g.state}'`,
+      );
+    }
+    const scopeKey = `${g.scope.kind}:${g.scope.id}`;
+    const txId = g.transferId!;
+    const tx = byTransferId.get(txId) ?? {};
+
+    if (g.state === 'pending-revoked') {
+      if (tx.outgoing) {
+        throw new GrantStoreError(409, 'transfer_conflict', `duplicate pending-revoked grant on transfer '${txId}'`);
+      }
+      if (pendingRevokedByScope.has(scopeKey)) {
+        throw new GrantStoreError(409, 'transfer_conflict', `multiple pending-revoked grants on ${scopeKey}`);
+      }
+      tx.outgoing = g;
+      pendingRevokedByScope.set(scopeKey, g);
+    } else if (g.state === 'pending-accepted') {
+      if (tx.incoming) {
+        throw new GrantStoreError(409, 'transfer_conflict', `duplicate pending-accepted grant on transfer '${txId}'`);
+      }
+      if (pendingAcceptedByScope.has(scopeKey)) {
+        throw new GrantStoreError(409, 'transfer_conflict', `multiple pending-accepted grants on ${scopeKey}`);
+      }
+      const currentOwner = slotOwnersByScope.get(scopeKey);
+      if (currentOwner && currentOwner.subject === g.subject) {
+        throw new GrantStoreError(
+          409,
+          'transfer_conflict',
+          `subject '${g.subject}' already holds content-owner on ${scopeKey}`,
+        );
+      }
+      tx.incoming = g;
+      pendingAcceptedByScope.set(scopeKey, g);
+    }
+
+    if (tx.outgoing && tx.incoming) {
+      if (!sameScope(tx.outgoing.scope, tx.incoming.scope)) {
+        throw new GrantStoreError(409, 'transfer_conflict', `transfer '${txId}' spans mismatched scopes`);
+      }
+      if (tx.outgoing.subject === tx.incoming.subject) {
+        throw new GrantStoreError(
+          409,
+          'transfer_conflict',
+          `transfer '${txId}' cannot have identical outgoing and incoming subject`,
+        );
+      }
+    }
+
+    byTransferId.set(txId, tx);
+  }
+}
+
+function applyRevocationsToMap(
+  currentMap: ReadonlyMap<string, GrantRecord>,
+  idsToDelete: ReadonlySet<string>,
+  by: string,
+  nowIso: string,
+  onBehalfOf: string | undefined,
+): Map<string, GrantRecord> {
+  const nextMap = new Map(currentMap);
+  const revokedOutgoingTransfers = new Set<string>();
+  const revokedIncomingTransfers = new Set<string>();
+
+  for (const id of idsToDelete) {
+    const rec = currentMap.get(id);
+    if (!rec) continue;
+    nextMap.delete(id);
+    if (rec.transferId) {
+      if (rec.state === 'pending-revoked') {
+        revokedOutgoingTransfers.add(rec.transferId);
+      } else if (rec.state === 'pending-accepted') {
+        revokedIncomingTransfers.add(rec.transferId);
+      }
+    }
+  }
+
+  for (const [id, other] of [...nextMap.entries()]) {
+    if (!other.transferId) continue;
+    if (other.state === 'pending-accepted' && revokedOutgoingTransfers.has(other.transferId)) {
+      nextMap.delete(id);
+    } else if (
+      other.state === 'pending-revoked' &&
+      revokedIncomingTransfers.has(other.transferId) &&
+      !revokedOutgoingTransfers.has(other.transferId)
+    ) {
+      const restored: GrantRecord = {
+        ...structuredClone(other),
+        state: 'active',
+        version: other.version + 1,
+        updatedAt: nowIso,
+        updatedBy: by,
+      };
+      delete restored.transferId;
+      delete restored.pendingExpiresAt;
+      delete restored.onBehalfOf;
+      if (onBehalfOf !== undefined) {
+        restored.onBehalfOf = onBehalfOf;
+      }
+      nextMap.set(id, restored);
+    }
+  }
+
+  return nextMap;
+}
+
 /**
  * Versioned, fail-closed factory grant store (R2, R3, R8, D5, D6, D7, D10, D11, D13, D15, D25, D26, D32, S2).
  */
@@ -524,7 +807,11 @@ export class GrantStore {
     }
   }
 
-  async reload(): Promise<void> {
+  reload(): Promise<void> {
+    return this.enqueue(() => this.reloadUnlocked());
+  }
+
+  private async reloadUnlocked(): Promise<void> {
     try {
       const state = this.backend.loadState
         ? await this.backend.loadState()
@@ -555,16 +842,42 @@ export class GrantStore {
         if (typeof raw.state !== 'string' || !(GRANT_STATES as readonly string[]).includes(raw.state)) {
           throw new Error(`invalid grant state on ${raw.id}: ${JSON.stringify(raw.state)}`);
         }
+        const grantState = raw.state as GrantState;
         const trimmedTransferId =
-          typeof raw.transferId === 'string' && raw.transferId.trim() ? raw.transferId.trim() : undefined;
-        if (raw.state !== 'active' && !trimmedTransferId) {
-          throw new Error(`corrupt grant ${raw.id}: state '${raw.state}' requires transferId`);
-        }
+          raw.transferId === undefined || raw.transferId === null
+            ? undefined
+            : typeof raw.transferId === 'string' && raw.transferId.trim()
+              ? raw.transferId.trim()
+              : (() => {
+                  throw new Error(`invalid transferId on ${raw.id}: ${JSON.stringify(raw.transferId)}`);
+                })();
         const expiresAt = raw.expiresAt === null || raw.expiresAt === undefined ? null : parseIsoTimestamp(raw.expiresAt, 'expiresAt').iso;
         const pendingExpiresAt =
           raw.pendingExpiresAt === undefined || raw.pendingExpiresAt === null
             ? raw.pendingExpiresAt
             : parseIsoTimestamp(raw.pendingExpiresAt, 'pendingExpiresAt').iso;
+
+        assertValidTransferStateFields({
+          state: grantState,
+          subjectKind,
+          scope,
+          role,
+          transferId: trimmedTransferId,
+          pendingExpiresAt,
+        });
+
+        let onBehalfOf: string | undefined;
+        if (raw.onBehalfOf !== undefined && raw.onBehalfOf !== null) {
+          if (typeof raw.onBehalfOf !== 'string' || !raw.onBehalfOf.trim()) {
+            throw new Error(`invalid onBehalfOf on ${raw.id}: ${JSON.stringify(raw.onBehalfOf)}`);
+          }
+          const normObo = raw.onBehalfOf.trim().toLowerCase();
+          if (!isValidUserPrincipalId(normObo)) {
+            throw new Error(`invalid onBehalfOf principal on ${raw.id}: ${JSON.stringify(raw.onBehalfOf)}`);
+          }
+          onBehalfOf = normObo;
+        }
+
         if (typeof raw.version !== 'number' || !Number.isInteger(raw.version) || raw.version < 1) {
           throw new Error(`invalid grant version on ${raw.id}`);
         }
@@ -579,11 +892,11 @@ export class GrantStore {
           subject,
           scope,
           role,
-          state: raw.state as GrantState,
+          state: grantState,
           expiresAt,
           ...(trimmedTransferId !== undefined ? { transferId: trimmedTransferId } : {}),
-          ...(pendingExpiresAt !== undefined ? { pendingExpiresAt } : {}),
-          ...(typeof raw.onBehalfOf === 'string' && raw.onBehalfOf.trim() ? { onBehalfOf: raw.onBehalfOf.trim().toLowerCase() } : {}),
+          ...(typeof pendingExpiresAt === 'string' ? { pendingExpiresAt } : {}),
+          ...(onBehalfOf !== undefined ? { onBehalfOf } : {}),
           version: raw.version,
           createdAt,
           createdBy: raw.createdBy.trim(),
@@ -594,8 +907,8 @@ export class GrantStore {
         if (isGrantOccupyingSlot(record, nowMs)) {
           if ((scope.kind === 'agent' || scope.kind === 'skill') && role === 'content-owner') {
             const key = `${scope.kind}:${scope.id}`;
-            if (activeContentOwners.has(key) && activeContentOwners.get(key) !== subject) {
-              throw new Error(`corrupt grants store: duplicate active content-owner on ${key}`);
+            if (activeContentOwners.has(key)) {
+              throw new Error(`corrupt grants store: duplicate slot-occupying content-owner on ${key}`);
             }
             if (scope.kind === 'agent' && activeTeamLeads.has(scope.id)) {
               throw new Error(`corrupt grants store: agent:${scope.id} has both content-owner and accountable-lead`);
@@ -603,8 +916,8 @@ export class GrantStore {
             activeContentOwners.set(key, subject);
           }
           if (scope.kind === 'agent' && role === 'accountable-lead') {
-            if (activeTeamLeads.has(scope.id) && activeTeamLeads.get(scope.id) !== subject) {
-              throw new Error(`corrupt grants store: duplicate active accountable-lead on agent:${scope.id}`);
+            if (activeTeamLeads.has(scope.id)) {
+              throw new Error(`corrupt grants store: duplicate slot-occupying accountable-lead on agent:${scope.id}`);
             }
             if (activeContentOwners.has(`agent:${scope.id}`)) {
               throw new Error(`corrupt grants store: agent:${scope.id} has both content-owner and accountable-lead`);
@@ -612,8 +925,8 @@ export class GrantStore {
             activeTeamLeads.set(scope.id, subject);
           }
           if (scope.kind === 'fleet' && role === 'budget-owner') {
-            if (activeBudgetOwner !== undefined && activeBudgetOwner !== subject) {
-              throw new Error('corrupt grants store: multiple active budget-owner grants');
+            if (activeBudgetOwner !== undefined) {
+              throw new Error('corrupt grants store: multiple slot-occupying budget-owner grants');
             }
             activeBudgetOwner = subject;
           }
@@ -621,6 +934,8 @@ export class GrantStore {
 
         nextById.set(record.id, record);
       }
+
+      assertTransferGraphInvariants(nextById.values(), nowMs);
 
       this.byId = nextById;
       this.docVersion = Math.max(snap?.version ?? 0, state.maxSeenVersion);
@@ -647,8 +962,16 @@ export class GrantStore {
     at?: Date;
   }): GrantRecord[] {
     this.assertHealthy();
+    if (this.principals && !this.principals.healthy) {
+      throw new PrincipalStoreUnavailableError('principal store unhealthy');
+    }
     const nowMs = (filter?.at ?? this.now()).getTime();
-    const subjectFilter = filter?.subject ? filter.subject.trim().toLowerCase() : undefined;
+    let subjectFilter: string | undefined;
+    if (filter?.subject !== undefined) {
+      const rawSubj = filter.subject.trim();
+      const normalizedInput = !rawSubj.includes(':') && rawSubj.includes('@') ? `user:${rawSubj}` : rawSubj;
+      subjectFilter = resolveCanonicalSubject(normalizedInput, this.principals).subject;
+    }
     const scopeIdFilter = filter?.scopeId ? filter.scopeId.trim().toLowerCase() : undefined;
     return [...this.byId.values()]
       .filter((g) => {
@@ -703,17 +1026,21 @@ export class GrantStore {
     const nowMs = (query.at ?? this.now()).getTime();
     let directSubject: string | undefined;
     let subjectKind: GrantSubjectKind | undefined;
+    let resolvedPrincipal: PrincipalRecord | undefined;
+    let subjectExtractedEmail: string | undefined;
     if (query.subject !== undefined) {
-      const parsed = parseGrantSubject(query.subject);
-      if (parsed.kind !== 'user' && parsed.kind !== 'service') {
+      const resolved = resolveCanonicalSubject(query.subject, this.principals);
+      if (resolved.kind !== 'user' && resolved.kind !== 'service') {
         throw new GrantStoreError(
           400,
           'invalid_subject',
           `effectiveGrantsFor subject must be user:<id> or service:<name>, got '${query.subject}'`,
         );
       }
-      directSubject = parsed.subject;
-      subjectKind = parsed.kind;
+      directSubject = resolved.subject;
+      subjectKind = resolved.kind;
+      resolvedPrincipal = resolved.principalRecord;
+      subjectExtractedEmail = resolved.extractedEmail;
     }
 
     if (subjectKind === 'service') {
@@ -732,9 +1059,11 @@ export class GrantStore {
       for (const e of query.emails) {
         emailsToCheck.add(normalizeEmail(e));
       }
-    } else if (directSubject && this.principals) {
-      const rec = this.principals.get(directSubject);
-      for (const e of rec?.emails ?? []) {
+    } else if (subjectExtractedEmail !== undefined && !resolvedPrincipal) {
+      emailsToCheck.add(subjectExtractedEmail);
+    }
+    if (resolvedPrincipal) {
+      for (const e of resolvedPrincipal.emails) {
         emailsToCheck.add(normalizeEmail(e));
       }
     }
@@ -773,7 +1102,10 @@ export class GrantStore {
     opts?: { refresh?: boolean },
   ): Promise<EffectiveGrant[]> {
     if (opts?.refresh) {
-      await this.reload();
+      return this.enqueue(async () => {
+        await this.reloadUnlocked();
+        return this.effectiveGrantsFor(query);
+      });
     }
     return this.effectiveGrantsFor(query);
   }
@@ -856,7 +1188,7 @@ export class GrantStore {
 
   assertCanRemovePrincipal(principalId: string, at?: Date): void {
     this.assertHealthy();
-    const { subject, kind } = parseGrantSubject(principalId);
+    const { subject, kind } = resolveCanonicalSubject(principalId, this.principals);
     if (kind !== 'user') return;
     const nowMs = (at ?? this.now()).getTime();
     const beforeAdmins = countActiveHumanAdmins(this.byId.values(), nowMs);
@@ -1019,13 +1351,7 @@ export class GrantStore {
       if (!by) {
         throw new GrantStoreError(400, 'invalid_grant', 'by actor is required');
       }
-      const onBehalfOf =
-        typeof input.onBehalfOf === 'string' && input.onBehalfOf.trim()
-          ? input.onBehalfOf.trim().toLowerCase()
-          : undefined;
-      if (onBehalfOf !== undefined && !isValidUserPrincipalId(onBehalfOf)) {
-        throw new GrantStoreError(400, 'invalid_grant', `invalid onBehalfOf principal: ${JSON.stringify(input.onBehalfOf)}`);
-      }
+      const onBehalfOf = resolveOnBehalfOf(input.onBehalfOf, principals);
 
       const isAdmin =
         input.granterRole !== undefined
@@ -1156,10 +1482,14 @@ export class GrantStore {
         throw new GrantStoreError(400, 'invalid_grant', `invalid grant state: ${JSON.stringify(input.state)}`);
       }
       const trimmedTransferId =
-        typeof input.transferId === 'string' && input.transferId.trim() ? input.transferId.trim() : undefined;
-      if (state !== 'active' && !trimmedTransferId) {
-        throw new GrantStoreError(400, 'invalid_grant', `grant state '${state}' requires a transferId`);
-      }
+        input.transferId === undefined || input.transferId === null
+          ? undefined
+          : typeof input.transferId === 'string' && input.transferId.trim()
+            ? input.transferId.trim()
+            : (() => {
+                throw new GrantStoreError(400, 'invalid_grant', `invalid transferId: ${JSON.stringify(input.transferId)}`);
+              })();
+
       let pendingExpiresAt: string | null | undefined = input.pendingExpiresAt;
       if (pendingExpiresAt !== undefined && pendingExpiresAt !== null) {
         const parsedPending = parseIsoTimestamp(pendingExpiresAt, 'pendingExpiresAt');
@@ -1169,57 +1499,74 @@ export class GrantStore {
         pendingExpiresAt = parsedPending.iso;
       }
 
-      if (input.id !== undefined) {
-        const cleanId = input.id.trim();
-        if (!GRANT_ID_REGEX.test(cleanId)) {
-          throw new GrantStoreError(400, 'invalid_grant', `invalid grant id: ${JSON.stringify(input.id)}`);
-        }
-        if (this.byId.has(cleanId)) {
-          throw new GrantStoreError(409, 'invalid_grant', `grant '${cleanId}' already exists`);
-        }
+      assertValidTransferStateFields({
+        state,
+        subjectKind,
+        scope,
+        role,
+        transferId: trimmedTransferId,
+        pendingExpiresAt,
+      });
+
+      const cleanRequestedId = input.id !== undefined ? input.id.trim() : undefined;
+      if (cleanRequestedId !== undefined && !GRANT_ID_REGEX.test(cleanRequestedId)) {
+        throw new GrantStoreError(400, 'invalid_grant', `invalid grant id: ${JSON.stringify(input.id)}`);
       }
 
-      // Check uniqueness & conflict constraints BEFORE auto-provisioning any unseen principal in PrincipalStore.
-      const toRemoveIds = new Set<string>();
-      for (const existing of this.byId.values()) {
-        if (isGrantExpired(existing, nowMs)) continue;
+      const checkUniqueSlotConflicts = (subj: string, unseenEmail: boolean): Set<string> => {
+        const removals = new Set<string>();
+        for (const existing of this.byId.values()) {
+          if (isGrantExpired(existing, nowMs)) continue;
 
-        if ((scope.kind === 'agent' || scope.kind === 'skill') && role === 'content-owner') {
-          if (sameScope(existing.scope, scope)) {
-            if (existing.role === 'accountable-lead' && isGrantOccupyingSlot(existing, nowMs)) {
-              throw new GrantStoreError(
-                409,
-                'agent_kind_conflict',
-                `agent '${scope.id}' already has an accountable-lead and cannot also have a content-owner`,
-              );
-            }
-            if (existing.role === 'content-owner' && isGrantOccupyingSlot(existing, nowMs)) {
-              const pendingLocked =
-                existing.state === 'pending-revoked' && !isPendingTransferExpired(existing, nowMs);
-              if (pendingLocked || emailToAutoProvision !== undefined || existing.subject !== resolvedSubject) {
+          if ((scope.kind === 'agent' || scope.kind === 'skill') && role === 'content-owner') {
+            if (sameScope(existing.scope, scope)) {
+              if (existing.role === 'accountable-lead' && isGrantOccupyingSlot(existing, nowMs)) {
                 throw new GrantStoreError(
                   409,
-                  'owner_exists',
-                  `${scope.kind} '${scope.id}' already has an active content-owner ('${existing.subject}')`,
+                  'agent_kind_conflict',
+                  `agent '${scope.id}' already has an accountable-lead and cannot also have a content-owner`,
                 );
+              }
+              if (existing.role === 'content-owner' && isGrantOccupyingSlot(existing, nowMs)) {
+                const pendingLocked =
+                  existing.state === 'pending-revoked' && !isPendingTransferExpired(existing, nowMs);
+                const canUpdateInPlace =
+                  !unseenEmail &&
+                  existing.subject === subj &&
+                  state === 'active' &&
+                  !pendingLocked &&
+                  (cleanRequestedId === undefined || cleanRequestedId === existing.id);
+                if (!canUpdateInPlace) {
+                  throw new GrantStoreError(
+                    409,
+                    'owner_exists',
+                    `${scope.kind} '${scope.id}' already has an active content-owner ('${existing.subject}')`,
+                  );
+                }
               }
             }
           }
-        }
 
-        if (scope.kind === 'agent' && role === 'accountable-lead' && sameScope(existing.scope, scope)) {
-          if (existing.role === 'content-owner' && isGrantOccupyingSlot(existing, nowMs)) {
-            throw new GrantStoreError(
-              409,
-              'agent_kind_conflict',
-              `personal agent '${scope.id}' already has a content-owner and cannot have an accountable-lead`,
-            );
-          }
-          if (existing.role === 'accountable-lead' && isGrantOccupyingSlot(existing, nowMs)) {
-            if (emailToAutoProvision !== undefined || existing.subject !== resolvedSubject) {
-              if (input.replaceExisting && isAdmin) {
-                toRemoveIds.add(existing.id);
-              } else {
+          if (scope.kind === 'agent' && role === 'accountable-lead' && sameScope(existing.scope, scope)) {
+            if (existing.role === 'content-owner' && isGrantOccupyingSlot(existing, nowMs)) {
+              throw new GrantStoreError(
+                409,
+                'agent_kind_conflict',
+                `personal agent '${scope.id}' already has a content-owner and cannot have an accountable-lead`,
+              );
+            }
+            if (existing.role === 'accountable-lead' && isGrantOccupyingSlot(existing, nowMs)) {
+              if (unseenEmail || existing.subject !== subj) {
+                if (input.replaceExisting && isAdmin) {
+                  removals.add(existing.id);
+                } else {
+                  throw new GrantStoreError(
+                    409,
+                    'lead_exists',
+                    `team agent '${scope.id}' already has an active accountable-lead ('${existing.subject}')`,
+                  );
+                }
+              } else if (cleanRequestedId !== undefined && cleanRequestedId !== existing.id) {
                 throw new GrantStoreError(
                   409,
                   'lead_exists',
@@ -1228,14 +1575,20 @@ export class GrantStore {
               }
             }
           }
-        }
 
-        if (scope.kind === 'fleet' && role === 'budget-owner' && existing.scope.kind === 'fleet') {
-          if (existing.role === 'budget-owner' && isGrantOccupyingSlot(existing, nowMs)) {
-            if (emailToAutoProvision !== undefined || existing.subject !== resolvedSubject) {
-              if (input.replaceExisting && isAdmin) {
-                toRemoveIds.add(existing.id);
-              } else {
+          if (scope.kind === 'fleet' && role === 'budget-owner' && existing.scope.kind === 'fleet') {
+            if (existing.role === 'budget-owner' && isGrantOccupyingSlot(existing, nowMs)) {
+              if (unseenEmail || existing.subject !== subj) {
+                if (input.replaceExisting && isAdmin) {
+                  removals.add(existing.id);
+                } else {
+                  throw new GrantStoreError(
+                    409,
+                    'budget_owner_exists',
+                    `factory already has an active budget-owner ('${existing.subject}')`,
+                  );
+                }
+              } else if (cleanRequestedId !== undefined && cleanRequestedId !== existing.id) {
                 throw new GrantStoreError(
                   409,
                   'budget_owner_exists',
@@ -1245,6 +1598,51 @@ export class GrantStore {
             }
           }
         }
+        return removals;
+      };
+
+      // Check uniqueness, ID collision & transfer invariants BEFORE auto-provisioning any unseen principal in PrincipalStore.
+      let toRemoveIds = checkUniqueSlotConflicts(resolvedSubject, emailToAutoProvision !== undefined);
+
+      if (cleanRequestedId !== undefined) {
+        const existingById = this.byId.get(cleanRequestedId);
+        if (existingById) {
+          const canReuseId =
+            emailToAutoProvision === undefined &&
+            !toRemoveIds.has(existingById.id) &&
+            state === 'active' &&
+            !isGrantExpired(existingById, nowMs) &&
+            (existingById.state === 'active' ||
+              (existingById.state === 'pending-revoked' && isPendingTransferExpired(existingById, nowMs))) &&
+            existingById.subject === resolvedSubject &&
+            sameScope(existingById.scope, scope) &&
+            sameRole(scope, existingById.role, role);
+          if (!canReuseId) {
+            throw new GrantStoreError(409, 'invalid_grant', `grant '${cleanRequestedId}' already exists`);
+          }
+        }
+      }
+
+      if (state !== 'active') {
+        const preCheckId = cleanRequestedId ?? `g_precheck_${randomUUID().replace(/-/g, '')}`;
+        const preCheckRecord: GrantRecord = {
+          id: preCheckId,
+          subject: resolvedSubject,
+          scope,
+          role,
+          state,
+          expiresAt,
+          transferId: trimmedTransferId!,
+          pendingExpiresAt: pendingExpiresAt as string,
+          version: 1,
+          createdAt: nowIso,
+          createdBy: by,
+          updatedAt: nowIso,
+          updatedBy: by,
+        };
+        const preCheckMap = new Map(this.byId);
+        preCheckMap.set(preCheckId, preCheckRecord);
+        assertTransferGraphInvariants(preCheckMap.values(), nowMs);
       }
 
       // Now safe to auto-provision unseen email in PrincipalStore for admin pre-grant (D32).
@@ -1270,41 +1668,69 @@ export class GrantStore {
           }
         }
         this.assertHealthy();
+        toRemoveIds = checkUniqueSlotConflicts(resolvedSubject, false);
       }
 
-      // Check for idempotent existing active grant on exact (subject, scope, role) when state === 'active' and no custom id.
-      if (input.id === undefined && state === 'active') {
+      // Check for idempotent or expired-transfer-restoring existing grant on exact (subject, scope, role) when state === 'active'.
+      if (state === 'active') {
         const existingMatch = [...this.byId.values()].find(
           (g) =>
             !toRemoveIds.has(g.id) &&
             !isGrantExpired(g, nowMs) &&
-            g.state === 'active' &&
+            (g.state === 'active' || (g.state === 'pending-revoked' && isPendingTransferExpired(g, nowMs))) &&
             g.subject === resolvedSubject &&
             sameScope(g.scope, scope) &&
-            sameRole(scope, g.role, role),
+            sameRole(scope, g.role, role) &&
+            (cleanRequestedId === undefined || g.id === cleanRequestedId),
         );
         if (existingMatch) {
-          if (existingMatch.expiresAt === expiresAt && existingMatch.role === role && toRemoveIds.size === 0) {
+          if (
+            existingMatch.state === 'active' &&
+            existingMatch.expiresAt === expiresAt &&
+            existingMatch.role === role &&
+            existingMatch.onBehalfOf === onBehalfOf &&
+            toRemoveIds.size === 0
+          ) {
             return structuredClone(existingMatch);
           }
           const updated: GrantRecord = {
             ...structuredClone(existingMatch),
+            state: 'active',
             role,
             expiresAt,
-            ...(onBehalfOf !== undefined ? { onBehalfOf } : {}),
             version: existingMatch.version + 1,
             updatedAt: nowIso,
             updatedBy: by,
           };
-          const nextMap = new Map(this.byId);
-          for (const remId of toRemoveIds) nextMap.delete(remId);
+          delete updated.transferId;
+          delete updated.pendingExpiresAt;
+          delete updated.onBehalfOf;
+          if (onBehalfOf !== undefined) {
+            updated.onBehalfOf = onBehalfOf;
+          }
+          const nextMap = applyRevocationsToMap(this.byId, toRemoveIds, by, nowIso, onBehalfOf);
+          if (existingMatch.state === 'pending-revoked') {
+            for (const [gid, g] of [...nextMap.entries()]) {
+              if (
+                g.state === 'pending-accepted' &&
+                ((existingMatch.transferId && g.transferId === existingMatch.transferId) ||
+                  (sameScope(g.scope, scope) && isPendingTransferExpired(g, nowMs)))
+              ) {
+                nextMap.delete(gid);
+              }
+            }
+          }
           nextMap.set(updated.id, updated);
+          assertTransferGraphInvariants(nextMap.values(), nowMs);
           await this.commitMap(nextMap, by, nowIso);
           return structuredClone(updated);
         }
       }
 
-      const id = input.id !== undefined ? input.id.trim() : `g_${randomUUID().replace(/-/g, '')}`;
+      const id = cleanRequestedId ?? `g_${randomUUID().replace(/-/g, '')}`;
+      if (this.byId.has(id)) {
+        throw new GrantStoreError(409, 'invalid_grant', `grant '${id}' already exists`);
+      }
       const record: GrantRecord = {
         id,
         subject: resolvedSubject,
@@ -1313,7 +1739,7 @@ export class GrantStore {
         state,
         expiresAt,
         ...(trimmedTransferId !== undefined ? { transferId: trimmedTransferId } : {}),
-        ...(pendingExpiresAt !== undefined ? { pendingExpiresAt } : {}),
+        ...(typeof pendingExpiresAt === 'string' ? { pendingExpiresAt } : {}),
         ...(onBehalfOf !== undefined ? { onBehalfOf } : {}),
         version: 1,
         createdAt: nowIso,
@@ -1322,20 +1748,38 @@ export class GrantStore {
         updatedBy: by,
       };
 
-      const nextMap = new Map(this.byId);
-      for (const remId of toRemoveIds) nextMap.delete(remId);
-      // Prune any already-expired identical (subject, scope, role) grant on fresh re-grant.
-      for (const [oldId, oldGrant] of nextMap) {
-        if (
-          isGrantExpired(oldGrant, nowMs) &&
-          oldGrant.subject === resolvedSubject &&
-          sameScope(oldGrant.scope, scope) &&
-          sameRole(scope, oldGrant.role, role)
-        ) {
-          nextMap.delete(oldId);
+      const nextMap = applyRevocationsToMap(this.byId, toRemoveIds, by, nowIso, onBehalfOf);
+      // Prune any already-expired identical (subject, scope, role) active grant and stale transfer records on fresh re-grant.
+      if (state === 'active') {
+        const staleTransferIds = new Set<string>();
+        for (const [oldId, oldGrant] of [...nextMap.entries()]) {
+          if (
+            isGrantExpired(oldGrant, nowMs) &&
+            oldGrant.state === 'active' &&
+            oldGrant.subject === resolvedSubject &&
+            sameScope(oldGrant.scope, scope) &&
+            sameRole(scope, oldGrant.role, role)
+          ) {
+            nextMap.delete(oldId);
+          } else if (
+            (role === 'content-owner' || role === 'accountable-lead') &&
+            sameScope(oldGrant.scope, scope) &&
+            oldGrant.state !== 'active'
+          ) {
+            nextMap.delete(oldId);
+            if (oldGrant.transferId) staleTransferIds.add(oldGrant.transferId);
+          }
+        }
+        if (staleTransferIds.size > 0) {
+          for (const [oldId, oldGrant] of [...nextMap.entries()]) {
+            if (oldGrant.transferId && staleTransferIds.has(oldGrant.transferId) && oldGrant.state !== 'active') {
+              nextMap.delete(oldId);
+            }
+          }
         }
       }
       nextMap.set(record.id, record);
+      assertTransferGraphInvariants(nextMap.values(), nowMs);
       await this.commitMap(nextMap, by, nowIso);
       return structuredClone(record);
     });
@@ -1351,6 +1795,8 @@ export class GrantStore {
     if (!by) {
       throw new GrantStoreError(400, 'invalid_grant', 'by actor is required');
     }
+    const onBehalfOf = resolveOnBehalfOf(patch.onBehalfOf, this.principals);
+
     const cleanId = typeof id === 'string' ? id.trim() : '';
     const current = this.byId.get(cleanId);
     if (!current) {
@@ -1368,9 +1814,25 @@ export class GrantStore {
     if (!(GRANT_STATES as readonly string[]).includes(nextState)) {
       throw new GrantStoreError(400, 'invalid_grant', `invalid grant state: ${JSON.stringify(patch.state)}`);
     }
-    if (nextState !== 'active' && !current.transferId) {
-      throw new GrantStoreError(400, 'invalid_grant', `grant state '${nextState}' requires an active transferId`);
+    if (nextState !== 'active' && patch.state !== undefined && patch.state !== current.state) {
+      throw new GrantStoreError(
+        400,
+        'invalid_grant',
+        `cannot transition grant into '${nextState}' via update; use startOwnershipTransfer`,
+      );
     }
+
+    const nextTransferId = nextState === 'active' ? undefined : current.transferId;
+    const nextPendingExpiresAt = nextState === 'active' ? undefined : current.pendingExpiresAt;
+
+    assertValidTransferStateFields({
+      state: nextState,
+      subjectKind,
+      scope: current.scope,
+      role: nextRole,
+      transferId: nextTransferId,
+      pendingExpiresAt: nextPendingExpiresAt,
+    });
 
     let nextExpiresAt = current.expiresAt;
     let parsedExpiresMs: number | undefined;
@@ -1384,26 +1846,45 @@ export class GrantStore {
       }
     }
 
-    const onBehalfOf =
-      typeof patch.onBehalfOf === 'string' && patch.onBehalfOf.trim()
-        ? patch.onBehalfOf.trim().toLowerCase()
-        : current.onBehalfOf;
-    if (onBehalfOf !== undefined && !isValidUserPrincipalId(onBehalfOf)) {
-      throw new GrantStoreError(400, 'invalid_grant', `invalid onBehalfOf principal: ${JSON.stringify(patch.onBehalfOf)}`);
-    }
-
     const candidate: GrantRecord = {
       ...structuredClone(current),
       role: nextRole,
       state: nextState,
       expiresAt: nextExpiresAt,
-      ...(onBehalfOf !== undefined ? { onBehalfOf } : {}),
       version: current.version + 1,
       updatedAt: nowIso,
       updatedBy: by,
     };
+    delete candidate.onBehalfOf;
+    if (onBehalfOf !== undefined) {
+      candidate.onBehalfOf = onBehalfOf;
+    }
+    if (nextState === 'active') {
+      delete candidate.transferId;
+      delete candidate.pendingExpiresAt;
+    }
 
     const nextMap = new Map(this.byId);
+    if (nextState === 'active' && current.transferId) {
+      if (current.state === 'pending-revoked') {
+        for (const [otherId, other] of [...nextMap.entries()]) {
+          if (otherId !== candidate.id && other.transferId === current.transferId && other.state === 'pending-accepted') {
+            nextMap.delete(otherId);
+          }
+        }
+      } else if (current.state === 'pending-accepted') {
+        for (const [otherId, other] of [...nextMap.entries()]) {
+          if (
+            otherId !== candidate.id &&
+            other.transferId === current.transferId &&
+            other.state === 'pending-revoked' &&
+            isGrantExpired(other, nowMs)
+          ) {
+            nextMap.delete(otherId);
+          }
+        }
+      }
+    }
     nextMap.set(candidate.id, candidate);
 
     // AC2 / D5: Check last active human admin BEFORE expired_timestamp so attempting to expire/downgrade the sole human admin always returns 409 last_admin.
@@ -1417,7 +1898,7 @@ export class GrantStore {
       throw new GrantStoreError(400, 'expired_timestamp', 'expiresAt must be in the future');
     }
 
-    // Check uniqueness constraints if role changed onto a unique role.
+    // Check uniqueness constraints: at most one slot-occupying GrantRecord per unique slot regardless of subject (F1).
     if (isGrantOccupyingSlot(candidate, nowMs)) {
       for (const other of nextMap.values()) {
         if (other.id === candidate.id || !isGrantOccupyingSlot(other, nowMs)) continue;
@@ -1426,7 +1907,7 @@ export class GrantStore {
           candidate.role === 'content-owner' &&
           sameScope(other.scope, candidate.scope)
         ) {
-          if (other.role === 'content-owner' && other.subject !== candidate.subject) {
+          if (other.role === 'content-owner') {
             throw new GrantStoreError(
               409,
               'owner_exists',
@@ -1446,7 +1927,7 @@ export class GrantStore {
           candidate.role === 'accountable-lead' &&
           sameScope(other.scope, candidate.scope)
         ) {
-          if (other.role === 'accountable-lead' && other.subject !== candidate.subject) {
+          if (other.role === 'accountable-lead') {
             throw new GrantStoreError(
               409,
               'lead_exists',
@@ -1465,8 +1946,7 @@ export class GrantStore {
           candidate.scope.kind === 'fleet' &&
           candidate.role === 'budget-owner' &&
           other.scope.kind === 'fleet' &&
-          other.role === 'budget-owner' &&
-          other.subject !== candidate.subject
+          other.role === 'budget-owner'
         ) {
           throw new GrantStoreError(
             409,
@@ -1477,8 +1957,8 @@ export class GrantStore {
       }
     }
 
-    // Collapse duplicate active grant if downgrading onto a role the subject already holds on the same scope.
-    for (const [otherId, other] of nextMap) {
+    // Collapse duplicate active grant if downgrading onto a non-unique role the subject already holds on the same scope.
+    for (const [otherId, other] of [...nextMap.entries()]) {
       if (
         otherId !== candidate.id &&
         !isGrantExpired(other, nowMs) &&
@@ -1492,6 +1972,7 @@ export class GrantStore {
       }
     }
 
+    assertTransferGraphInvariants(nextMap.values(), nowMs);
     await this.commitMap(nextMap, by, nowIso);
     return structuredClone(candidate);
   }
@@ -1504,7 +1985,7 @@ export class GrantStore {
       this.assertHealthy();
       const trimmed = typeof grantIdOrSubject === 'string' ? grantIdOrSubject.trim() : '';
       if (trimmed.includes(':')) {
-        const { subject } = parseGrantSubject(trimmed);
+        const { subject } = resolveCanonicalSubject(trimmed, this.principals);
         const nowMs = this.now().getTime();
         const matches = [...this.byId.values()].filter((g) => g.subject === subject && g.scope.kind === 'fleet');
         const target =
@@ -1527,7 +2008,9 @@ export class GrantStore {
       if (!by) {
         throw new GrantStoreError(400, 'invalid_grant', 'by actor is required');
       }
-      const existing = this.byId.get(id.trim());
+      const onBehalfOf = resolveOnBehalfOf(opts.onBehalfOf, this.principals);
+      const cleanId = typeof id === 'string' ? id.trim() : '';
+      const existing = this.byId.get(cleanId);
       if (!existing) {
         throw new GrantStoreError(404, 'grant_not_found', `grant '${id}' not found`);
       }
@@ -1536,8 +2019,7 @@ export class GrantStore {
       const nowMs = now.getTime();
       const nowIso = now.toISOString();
 
-      const nextMap = new Map(this.byId);
-      nextMap.delete(existing.id);
+      const nextMap = applyRevocationsToMap(this.byId, new Set([existing.id]), by, nowIso, onBehalfOf);
 
       const beforeAdmins = countActiveHumanAdmins(this.byId.values(), nowMs);
       const afterAdmins = countActiveHumanAdmins(nextMap.values(), nowMs);
@@ -1545,6 +2027,7 @@ export class GrantStore {
         throw new GrantStoreError(409, 'last_admin', 'cannot revoke or downgrade the last active human admin');
       }
 
+      assertTransferGraphInvariants(nextMap.values(), nowMs);
       await this.commitMap(nextMap, by, nowIso);
       return structuredClone(existing);
     });
@@ -1560,23 +2043,24 @@ export class GrantStore {
       if (!by) {
         throw new GrantStoreError(400, 'invalid_grant', 'by actor is required');
       }
-      const { subject, kind: subjectKind } = parseGrantSubject(criteria.subject);
+      const onBehalfOf = resolveOnBehalfOf(opts.onBehalfOf, this.principals);
+      const { subject, kind: subjectKind } = resolveCanonicalSubject(criteria.subject, this.principals);
       const scope = normalizeGrantScope(criteria.scope);
       const role = validateAndNormalizeRole(scope, criteria.role, subjectKind);
-
-      const target = [...this.byId.values()].find(
-        (g) => g.subject === subject && sameScope(g.scope, scope) && sameRole(scope, g.role, role),
-      );
-      if (!target) {
-        throw new GrantStoreError(404, 'grant_not_found', `matching grant not found for '${subject}'`);
-      }
 
       const now = this.now();
       const nowMs = now.getTime();
       const nowIso = now.toISOString();
 
-      const nextMap = new Map(this.byId);
-      nextMap.delete(target.id);
+      const matches = [...this.byId.values()].filter(
+        (g) => g.subject === subject && sameScope(g.scope, scope) && sameRole(scope, g.role, role),
+      );
+      const target = matches.find((g) => !isGrantExpired(g, nowMs)) ?? matches[0];
+      if (!target) {
+        throw new GrantStoreError(404, 'grant_not_found', `matching grant not found for '${subject}'`);
+      }
+
+      const nextMap = applyRevocationsToMap(this.byId, new Set([target.id]), by, nowIso, onBehalfOf);
 
       const beforeAdmins = countActiveHumanAdmins(this.byId.values(), nowMs);
       const afterAdmins = countActiveHumanAdmins(nextMap.values(), nowMs);
@@ -1584,6 +2068,7 @@ export class GrantStore {
         throw new GrantStoreError(409, 'last_admin', 'cannot revoke or downgrade the last active human admin');
       }
 
+      assertTransferGraphInvariants(nextMap.values(), nowMs);
       await this.commitMap(nextMap, by, nowIso);
       return structuredClone(target);
     });
@@ -1599,7 +2084,8 @@ export class GrantStore {
       if (!by) {
         throw new GrantStoreError(400, 'invalid_grant', 'by actor is required');
       }
-      const { subject } = parseGrantSubject(subjectRaw);
+      const onBehalfOf = resolveOnBehalfOf(opts.onBehalfOf, this.principals);
+      const { subject } = resolveCanonicalSubject(subjectRaw, this.principals);
       const removed = [...this.byId.values()].filter((g) => g.subject === subject);
       if (removed.length === 0) {
         return [];
@@ -1609,10 +2095,13 @@ export class GrantStore {
       const nowMs = now.getTime();
       const nowIso = now.toISOString();
 
-      const nextMap = new Map(this.byId);
-      for (const g of removed) {
-        nextMap.delete(g.id);
-      }
+      const nextMap = applyRevocationsToMap(
+        this.byId,
+        new Set(removed.map((g) => g.id)),
+        by,
+        nowIso,
+        onBehalfOf,
+      );
 
       const beforeAdmins = countActiveHumanAdmins(this.byId.values(), nowMs);
       const afterAdmins = countActiveHumanAdmins(nextMap.values(), nowMs);
@@ -1620,6 +2109,7 @@ export class GrantStore {
         throw new GrantStoreError(409, 'last_admin', 'cannot revoke or downgrade the last active human admin');
       }
 
+      assertTransferGraphInvariants(nextMap.values(), nowMs);
       await this.commitMap(nextMap, by, nowIso);
       return removed.map((g) => structuredClone(g));
     });
@@ -1643,34 +2133,31 @@ export class GrantStore {
       if (!by) {
         throw new GrantStoreError(400, 'invalid_grant', 'by actor is required');
       }
+      const onBehalfOf = resolveOnBehalfOf(input.onBehalfOf, principals);
       const scope = normalizeGrantScope(input.scope);
       if (scope.kind !== 'agent' && scope.kind !== 'skill') {
         throw new GrantStoreError(400, 'invalid_scope', 'ownership transfer applies only to agent or skill scope');
       }
 
-      const fromParsed = parseGrantSubject(input.fromSubject);
-      const toParsed = parseGrantSubject(input.toSubject);
-      if (fromParsed.kind !== 'user' || toParsed.kind !== 'user') {
+      const fromResolved = resolveCanonicalSubject(input.fromSubject, principals);
+      const toResolved = resolveCanonicalSubject(input.toSubject, principals);
+      if (fromResolved.kind !== 'user' || toResolved.kind !== 'user') {
         throw new GrantStoreError(400, 'invalid_subject', 'ownership transfer subjects must be human user:<id> principals');
       }
 
+      const fromSubject = fromResolved.subject;
       const isAdmin = input.granterIsAdmin ?? false;
-      let toSubject = toParsed.subject;
+      let toSubject = toResolved.subject;
       let toEmailToAutoProvision: string | undefined;
-      if (principals) {
-        const rest = toSubject.slice('user:'.length);
-        const isEmailUser = rest.includes('@');
-        const found = principals.get(toSubject) ?? (isEmailUser ? principals.findByEmail(rest) : undefined);
-        if (found) {
-          toSubject = found.id;
-        } else if (!isAdmin) {
+      if (principals && !toResolved.principalRecord) {
+        if (!isAdmin) {
           throw new GrantStoreError(
             403,
             'unknown_subject',
             `transfer recipient '${toSubject}' is not a known principal`,
           );
-        } else if (isEmailUser) {
-          toEmailToAutoProvision = rest;
+        } else if (toResolved.extractedEmail) {
+          toEmailToAutoProvision = toResolved.extractedEmail;
         } else {
           throw new GrantStoreError(
             404,
@@ -1679,7 +2166,7 @@ export class GrantStore {
           );
         }
       }
-      if (fromParsed.subject === toSubject) {
+      if (fromSubject === toSubject) {
         throw new GrantStoreError(400, 'invalid_grant', 'cannot transfer ownership to the current owner');
       }
 
@@ -1706,7 +2193,7 @@ export class GrantStore {
 
       const ownerGrant = [...this.byId.values()].find(
         (g) =>
-          g.subject === fromParsed.subject &&
+          g.subject === fromSubject &&
           sameScope(g.scope, scope) &&
           g.role === 'content-owner' &&
           !isGrantExpired(g, nowMs) &&
@@ -1716,8 +2203,13 @@ export class GrantStore {
         throw new GrantStoreError(
           409,
           'transfer_conflict',
-          `'${fromParsed.subject}' does not hold active content-owner on ${scope.kind}:${scope.id}`,
+          `'${fromSubject}' does not hold active content-owner on ${scope.kind}:${scope.id}`,
         );
+      }
+
+      const transferId = input.transferId?.trim() || `tx_${randomUUID().replace(/-/g, '')}`;
+      if ([...this.byId.values()].some((g) => g.transferId === transferId && !sameScope(g.scope, scope))) {
+        throw new GrantStoreError(409, 'transfer_conflict', `transferId '${transferId}' is already in use`);
       }
 
       if (toEmailToAutoProvision !== undefined && principals) {
@@ -1737,28 +2229,25 @@ export class GrantStore {
             throw err;
           }
         }
-        if (fromParsed.subject === toSubject) {
+        if (fromSubject === toSubject) {
           throw new GrantStoreError(400, 'invalid_grant', 'cannot transfer ownership to the current owner');
         }
         this.assertHealthy();
       }
-
-      const transferId = input.transferId?.trim() || `tx_${randomUUID().replace(/-/g, '')}`;
-      const onBehalfOf =
-        typeof input.onBehalfOf === 'string' && input.onBehalfOf.trim()
-          ? input.onBehalfOf.trim().toLowerCase()
-          : undefined;
 
       const outgoing: GrantRecord = {
         ...structuredClone(ownerGrant),
         state: 'pending-revoked',
         transferId,
         pendingExpiresAt,
-        ...(onBehalfOf !== undefined ? { onBehalfOf } : {}),
         version: ownerGrant.version + 1,
         updatedAt: nowIso,
         updatedBy: by,
       };
+      delete outgoing.onBehalfOf;
+      if (onBehalfOf !== undefined) {
+        outgoing.onBehalfOf = onBehalfOf;
+      }
 
       const incoming: GrantRecord = {
         id: `g_${randomUUID().replace(/-/g, '')}`,
@@ -1778,14 +2267,15 @@ export class GrantStore {
       };
 
       const nextMap = new Map(this.byId);
-      // Clean up any stale expired pending-accepted grants on the same scope.
-      for (const [gid, g] of nextMap) {
+      // Clean up any stale pending-accepted grants on the same scope.
+      for (const [gid, g] of [...nextMap.entries()]) {
         if (sameScope(g.scope, scope) && g.state === 'pending-accepted') {
           nextMap.delete(gid);
         }
       }
       nextMap.set(outgoing.id, outgoing);
       nextMap.set(incoming.id, incoming);
+      assertTransferGraphInvariants(nextMap.values(), nowMs);
       await this.commitMap(nextMap, by, nowIso);
 
       return {
@@ -1813,6 +2303,7 @@ export class GrantStore {
       if (!txId) {
         throw new GrantStoreError(400, 'invalid_grant', 'transferId is required');
       }
+      const onBehalfOf = resolveOnBehalfOf(input.onBehalfOf, this.principals);
 
       const outgoing = [...this.byId.values()].find((g) => g.transferId === txId && g.state === 'pending-revoked');
       const incoming = [...this.byId.values()].find((g) => g.transferId === txId && g.state === 'pending-accepted');
@@ -1823,29 +2314,34 @@ export class GrantStore {
       const now = this.now();
       const nowMs = now.getTime();
       const nowIso = now.toISOString();
-      const onBehalfOf =
-        typeof input.onBehalfOf === 'string' && input.onBehalfOf.trim()
-          ? input.onBehalfOf.trim().toLowerCase()
-          : undefined;
 
       if (input.action === 'accept') {
-        if (isPendingTransferExpired(outgoing, nowMs) || isPendingTransferExpired(incoming, nowMs)) {
+        if (
+          isGrantExpired(outgoing, nowMs) ||
+          isGrantExpired(incoming, nowMs) ||
+          isPendingTransferExpired(outgoing, nowMs) ||
+          isPendingTransferExpired(incoming, nowMs)
+        ) {
           throw new GrantStoreError(409, 'transfer_expired', `pending transfer '${txId}' has expired`);
         }
         const promoted: GrantRecord = {
           ...structuredClone(incoming),
           state: 'active',
-          ...(onBehalfOf !== undefined ? { onBehalfOf } : {}),
           version: incoming.version + 1,
           updatedAt: nowIso,
           updatedBy: by,
         };
         delete promoted.transferId;
         delete promoted.pendingExpiresAt;
+        delete promoted.onBehalfOf;
+        if (onBehalfOf !== undefined) {
+          promoted.onBehalfOf = onBehalfOf;
+        }
 
         const nextMap = new Map(this.byId);
         nextMap.delete(outgoing.id);
         nextMap.set(promoted.id, promoted);
+        assertTransferGraphInvariants(nextMap.values(), nowMs);
         await this.commitMap(nextMap, by, nowIso);
         return { action: 'accept', activeOwner: structuredClone(promoted) };
       }
@@ -1854,17 +2350,21 @@ export class GrantStore {
         const restored: GrantRecord = {
           ...structuredClone(outgoing),
           state: 'active',
-          ...(onBehalfOf !== undefined ? { onBehalfOf } : {}),
           version: outgoing.version + 1,
           updatedAt: nowIso,
           updatedBy: by,
         };
         delete restored.transferId;
         delete restored.pendingExpiresAt;
+        delete restored.onBehalfOf;
+        if (onBehalfOf !== undefined) {
+          restored.onBehalfOf = onBehalfOf;
+        }
 
         const nextMap = new Map(this.byId);
         nextMap.delete(incoming.id);
         nextMap.set(restored.id, restored);
+        assertTransferGraphInvariants(nextMap.values(), nowMs);
         await this.commitMap(nextMap, by, nowIso);
         return { action: input.action, activeOwner: structuredClone(restored) };
       }
@@ -1902,6 +2402,7 @@ export class GrantStore {
           };
           delete next.transferId;
           delete next.pendingExpiresAt;
+          delete next.onBehalfOf;
           nextMap.set(id, next);
           restored.push(structuredClone(next));
           changed = true;
@@ -1909,6 +2410,7 @@ export class GrantStore {
       }
 
       if (changed) {
+        assertTransferGraphInvariants(nextMap.values(), nowMs);
         await this.commitMap(nextMap, actor, nowIso);
       }
       return restored;
@@ -1955,8 +2457,9 @@ export class GrantStore {
       });
     } catch (err) {
       this.byId = new Map();
-      this.unhealthy = err;
-      throw err;
+      const unavailable = err instanceof GrantStoreUnavailableError ? err : new GrantStoreUnavailableError(err);
+      this.unhealthy = unavailable;
+      throw unavailable;
     }
     this.byId = nextMap;
     this.docVersion = nextVersion;
