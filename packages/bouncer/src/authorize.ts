@@ -1,5 +1,13 @@
 import type { Principal, Role } from '@beercanlabs/factory-auth';
-import { AGENT_SCOPED, SKILL_SCOPED, DERIVED_ROLE_PRIVILEGES, ROLE_PRIVILEGES, type Privilege } from './privileges.js';
+import type { EffectiveGrant } from './grants.js';
+import {
+  AGENT_SCOPED,
+  DERIVED_ROLE_PRIVILEGES,
+  ROLE_PRIVILEGES,
+  SKILL_CONTENT_OWNER_READONLY_PRIVILEGES,
+  SKILL_SCOPED,
+  type Privilege,
+} from './privileges.js';
 
 /** The order `required` is found in: the least powerful role that holds the privilege comes first. */
 const ROLE_ORDER: readonly Role[] = ['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'];
@@ -10,11 +18,16 @@ const ROLE_ORDER: readonly Role[] = ['viewer', 'operator', 'approver', 'ingest',
  * principal actor, absent when the requester is not linked to anyone. `memberRoles` are the roles the caller holds on
  * this agent, from their identity link (the Bouncer's own data), never `Owner`: only `authorizeIngress` sets it.
  *
+ * `agentKind` (`'personal' | 'team'`) and `grants` (`EffectiveGrant[]` from `GrantStore`) drive S2b / D7 / D11 / D15 / D29
+ * authorization for personal `content-owner` (active vs `pending-revoked` read-only), team `accountable-lead`, team `member`,
+ * personal `agent-member`, and skill `content-owner`.
+ *
  * For skills: `skillOwner` is the named human user who owns the skill (H4), and `groupRoles` are the roles the caller
  * holds via group membership for the group the skill is assigned to (H5, A9, A17, A18).
  */
 export type AuthorizeResource = {
   agentId?: string;
+  agentKind?: 'personal' | 'team';
   owners?: readonly string[];
   requester?: { actor?: string };
   memberRoles?: readonly string[];
@@ -23,6 +36,7 @@ export type AuthorizeResource = {
   skillOwner?: string;
   uploader?: string;
   groupRoles?: readonly string[];
+  grants?: readonly EffectiveGrant[];
 };
 
 export type AuthorizeRequest = { principal: Principal; privilege: Privilege; resource?: AuthorizeResource };
@@ -31,39 +45,146 @@ export type AuthorizeResult = { allowed: true } | { allowed: false; required: Ro
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
 /**
- * A2, E4, E9: may this caller do this? The principal's identity is already verified by the Gatekeeper's
- * authentication; this maps its roles to privileges. On a denial `required` is the first role (in the order above)
- * that holds it.
- *
- * With a `resource`, derived roles can apply:
- * - Agent-scoped: `agent-owner`, `requester`, `agent-member`.
- * - Skill-scoped: `skill-owner` (human owner, or group member whose group holds `skill-owner`).
- *   An owner also holds `skills.transfer`; group members never hold `skills.transfer` (A9).
- * - `skills.register` is fleet-wide, held by admin, by anyone who owns any agent (`ownsAnyAgent`), or by members of a group with `skills.register` (H3, A8, A17).
+ * A2, E4, E9, D7, D11, D15, D29, S2b: may this caller do this? The principal's identity is already verified by the
+ * Gatekeeper's authentication; this maps its roles and effective grants to privileges. On a denial `required` is the
+ * first role (in the order above) that holds it.
  */
 export function authorize(req: AuthorizeRequest): AuthorizeResult {
   const { principal, privilege, resource } = req;
   if (principal.roles.some((r) => ROLE_PRIVILEGES[r]?.includes(privilege))) return { allowed: true };
-  if (privilege === 'skills.register' && (resource?.ownsAnyAgent || resource?.groupRoles?.includes('skills.register'))) {
-    return { allowed: true };
+
+  if (resource?.grants) {
+    for (const eg of resource.grants) {
+      if (!eg.readOnly && eg.grant.scope.kind === 'fleet') {
+        const fleetPrivs = ROLE_PRIVILEGES[eg.grant.role as Role];
+        if (fleetPrivs?.includes(privilege)) return { allowed: true };
+      }
+    }
   }
-  if (resource && resource.owners && AGENT_SCOPED.has(privilege)) {
-    const actor = principal.actor;
-    const owner =
-      resource.owners.some((o) => same(o, actor)) &&
-      DERIVED_ROLE_PRIVILEGES['agent-owner'].includes(privilege) &&
-      !(privilege === 'approvals.decide' && resource.requester);
-    const requester =
-      resource.requester?.actor !== undefined && same(resource.requester.actor, actor) && DERIVED_ROLE_PRIVILEGES.requester.includes(privilege);
-    const member =
-      (resource.memberRoles ?? []).some((r) => typeof r === 'string' && r.trim() !== '' && r.trim().toLowerCase() !== 'owner') &&
-      DERIVED_ROLE_PRIVILEGES['agent-member'].includes(privilege);
-    if (owner || requester || member) return { allowed: true };
+
+  if (privilege === 'skills.register') {
+    if (resource?.ownsAnyAgent || resource?.groupRoles?.includes('skills.register')) {
+      return { allowed: true };
+    }
+    if (
+      resource?.grants?.some(
+        (eg) =>
+          !eg.readOnly &&
+          eg.grant.scope.kind === 'agent' &&
+          (eg.grant.role === 'content-owner' || eg.grant.role === 'accountable-lead'),
+      )
+    ) {
+      return { allowed: true };
+    }
   }
+
+  if (resource && AGENT_SCOPED.has(privilege)) {
+    let suppressLegacyOwner = resource.agentKind === 'team';
+    // D29: When grant-backed authorization is active (`resource.grants` provided), holds go strictly to the content side
+    // (`content-owner` on personal agents; `accountable-lead` or `member` on team agents), never to a personal `agent-member` requester.
+    const suppressLegacyRequester = resource.grants !== undefined;
+
+    if (resource.grants && resource.agentId) {
+      const agentGrants = resource.grants.filter(
+        (eg) => eg.grant.scope.kind === 'agent' && same(eg.grant.scope.id, resource.agentId!),
+      );
+      const effectiveKind =
+        resource.agentKind ?? (agentGrants.some((eg) => eg.grant.role === 'accountable-lead') ? 'team' : 'personal');
+
+      if (effectiveKind === 'team') {
+        suppressLegacyOwner = true;
+        for (const eg of agentGrants) {
+          if (eg.readOnly) continue;
+          if (
+            eg.grant.role === 'accountable-lead' &&
+            eg.source === 'direct' &&
+            DERIVED_ROLE_PRIVILEGES['accountable-lead'].includes(privilege)
+          ) {
+            return { allowed: true };
+          }
+          if (eg.grant.role === 'member' && DERIVED_ROLE_PRIVILEGES['team-member'].includes(privilege)) {
+            return { allowed: true };
+          }
+          if (
+            eg.grant.role !== 'content-owner' &&
+            eg.grant.role !== 'accountable-lead' &&
+            eg.grant.role !== 'member' &&
+            eg.grant.role.trim().toLowerCase() !== 'owner' &&
+            DERIVED_ROLE_PRIVILEGES['agent-member'].includes(privilege)
+          ) {
+            return { allowed: true };
+          }
+        }
+      } else {
+        for (const eg of agentGrants) {
+          if (eg.grant.role === 'content-owner' && eg.source === 'direct') {
+            suppressLegacyOwner = true;
+            if (eg.readOnly) {
+              if (DERIVED_ROLE_PRIVILEGES['content-owner-readonly'].includes(privilege)) {
+                return { allowed: true };
+              }
+            } else if (DERIVED_ROLE_PRIVILEGES['content-owner'].includes(privilege)) {
+              return { allowed: true };
+            }
+          } else if (
+            !eg.readOnly &&
+            eg.grant.role !== 'accountable-lead' &&
+            eg.grant.role.trim().toLowerCase() !== 'owner' &&
+            DERIVED_ROLE_PRIVILEGES['agent-member'].includes(privilege)
+          ) {
+            return { allowed: true };
+          }
+        }
+      }
+    }
+
+    if (resource.owners || resource.requester || resource.memberRoles) {
+      const actor = principal.actor;
+      const owner =
+        !suppressLegacyOwner &&
+        (resource.owners ?? []).some((o) => same(o, actor)) &&
+        DERIVED_ROLE_PRIVILEGES['agent-owner'].includes(privilege) &&
+        !(privilege === 'approvals.decide' && resource.requester);
+      const requester =
+        !suppressLegacyRequester &&
+        resource.requester?.actor !== undefined &&
+        same(resource.requester.actor, actor) &&
+        DERIVED_ROLE_PRIVILEGES.requester.includes(privilege);
+      const member =
+        (resource.memberRoles ?? []).some((r) => typeof r === 'string' && r.trim() !== '' && r.trim().toLowerCase() !== 'owner') &&
+        DERIVED_ROLE_PRIVILEGES['agent-member'].includes(privilege);
+      if (owner || requester || member) return { allowed: true };
+    }
+  }
+
   if (resource && SKILL_SCOPED.has(privilege)) {
+    let suppressLegacySkillOwner = false;
+    if (resource.grants && resource.skillId) {
+      const skillGrants = resource.grants.filter(
+        (eg) => eg.grant.scope.kind === 'skill' && same(eg.grant.scope.id, resource.skillId!),
+      );
+      for (const eg of skillGrants) {
+        if (eg.grant.role === 'content-owner' && eg.source === 'direct') {
+          suppressLegacySkillOwner = true;
+          if (eg.readOnly) {
+            if (SKILL_CONTENT_OWNER_READONLY_PRIVILEGES.includes(privilege)) return { allowed: true };
+          } else {
+            if (privilege === 'skills.transfer') return { allowed: true };
+            if (DERIVED_ROLE_PRIVILEGES['skill-owner'].includes(privilege)) return { allowed: true };
+          }
+        } else if (
+          !eg.readOnly &&
+          eg.grant.role === 'member' &&
+          DERIVED_ROLE_PRIVILEGES['skill-owner'].includes(privilege)
+        ) {
+          return { allowed: true };
+        }
+      }
+    }
+
     const actor = principal.actor;
     // Human owner holds scoped privileges and skills.transfer (H4, A8, A9)
-    if (resource.skillOwner && same(resource.skillOwner, actor)) {
+    if (!suppressLegacySkillOwner && resource.skillOwner && same(resource.skillOwner, actor)) {
       if (privilege === 'skills.transfer') return { allowed: true };
       if (DERIVED_ROLE_PRIVILEGES['skill-owner'].includes(privilege)) return { allowed: true };
     }

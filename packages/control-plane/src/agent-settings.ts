@@ -20,7 +20,7 @@ import { authorize } from '@beercanlabs/factory-bouncer';
 import type { Principal } from '@beercanlabs/factory-auth';
 import { applySettingsChange, changedParts, type AgentRecord, type AgentSettings, type DeclaredRole } from '@beercanlabs/factory-registrar';
 import { BUILTIN_AGENT_IDS, registryOf } from '@beercanlabs/factory-registrar';
-import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
+import { agentKindOf, effectiveGrantsForActor, requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { changeReason, configOf, ledgerVersion, ownersOf } from './config-store.js';
 import { skillRegistry } from './skills.js';
 
@@ -62,7 +62,18 @@ export function agentInForce(state: FactoryState, agent: AgentRecord): AgentReco
 
 /** Whether the principal may read the agent's settings (the soul is not for every viewer). */
 export function canReadSettings(state: FactoryState, principal: Principal, agentId: string): boolean {
-  return authorize({ principal, privilege: 'agents.settings.read', resource: { agentId, owners: ownersOf(state, agentId) } }).allowed;
+  const grantRes = effectiveGrantsForActor(state, principal.actor);
+  if (!grantRes.ok) return false;
+  return authorize({
+    principal,
+    privilege: 'agents.settings.read',
+    resource: {
+      agentId,
+      agentKind: agentKindOf(state, agentId),
+      owners: ownersOf(state, agentId),
+      ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+    },
+  }).allowed;
 }
 
 /** One change at a time per agent: the read, merge and write of a settings change are not interleaved. */

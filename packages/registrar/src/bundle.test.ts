@@ -83,8 +83,21 @@ describe('CF3 agent bundle', () => {
     b.owners = ['token:evil'];
     b.token = 'secret';
     b.agent.owners = ['token:evil'];
+    b.agent.accountableLead = 'user:sarah';
     const parsed = parseBundle(b);
     assert.equal(parsed.ok, true);
-    if (parsed.ok) assert.ok(!JSON.stringify(parsed.bundle).includes('evil') && !JSON.stringify(parsed.bundle).includes('secret'));
+    if (parsed.ok) assert.ok(!JSON.stringify(parsed.bundle).includes('evil') && !JSON.stringify(parsed.bundle).includes('secret') && !JSON.stringify(parsed.bundle).includes('sarah'));
+  });
+
+  it('round-trips optional agent.kind (personal or team) and rejects invalid agent.kind', () => {
+    const teamBundle = buildBundle({ ...agent, kind: 'team' }, content as never);
+    assert.equal(teamBundle.agent.kind, 'team');
+    const parsed = parseBundle(JSON.parse(JSON.stringify(teamBundle)));
+    assert.equal(parsed.ok, true);
+    if (parsed.ok) assert.equal(parsed.bundle.agent.kind, 'team');
+
+    const badKind = JSON.parse(JSON.stringify(teamBundle));
+    badKind.agent.kind = 'enterprise';
+    assert.equal(parseBundle(badKind).ok, false);
   });
 });

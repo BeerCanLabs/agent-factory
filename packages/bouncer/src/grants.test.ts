@@ -1847,4 +1847,104 @@ describe('GrantStore & domain grants (S2 #351)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('enforces live agentKindLookup on grant(), update(), and startOwnershipTransfer(), plus initialSubmission unknown-principal boundary (S2b, D11, D13, D30)', async () => {
+    const principals = PrincipalStore.inMemory();
+    await principals.create({ id: 'user:ops', displayName: 'Ops', emails: ['ops@sackrider.org'], by: 'system' });
+    await principals.create({ id: 'user:sarah', displayName: 'Sarah', emails: ['sarah@sackrider.org'], by: 'system' });
+    await principals.create({ id: 'user:dale', displayName: 'Dale', emails: ['dale@sackrider.org'], by: 'system' });
+
+    const kinds = new Map<string, 'personal' | 'team'>([
+      ['donna', 'personal'],
+      ['archie', 'team'],
+    ]);
+    const store = GrantStore.inMemory({
+      principals,
+      agentKindLookup: (id) => kinds.get(id),
+    });
+
+    // Non-admin initialSubmission succeeds for known accountable-lead on team agent, but rejects unknown principal with 403 (D13)
+    await assert.rejects(
+      () =>
+        store.grant({
+          subject: 'user:unknown@sackrider.org',
+          scope: { kind: 'agent', id: 'archie' },
+          role: 'accountable-lead',
+          by: 'user:ops',
+          granterIsAdmin: false,
+          initialSubmission: true,
+        }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 403 && err.code === 'unknown_subject',
+    );
+    assert.equal(store.list().length, 0);
+
+    await store.grant({
+      subject: 'user:sarah',
+      scope: { kind: 'agent', id: 'archie' },
+      role: 'accountable-lead',
+      by: 'user:ops',
+      granterIsAdmin: false,
+      initialSubmission: true,
+    });
+
+    // Live agentKindLookup rejects content-owner on team agent even without explicit input.agentKind
+    await assert.rejects(
+      () =>
+        store.grant({
+          subject: 'user:dale',
+          scope: { kind: 'agent', id: 'archie' },
+          role: 'content-owner',
+          by: 'user:dale',
+        }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'agent_kind_conflict',
+    );
+
+    // Live agentKindLookup rejects accountable-lead on personal agent even before any content-owner grant exists
+    await assert.rejects(
+      () =>
+        store.grant({
+          subject: 'user:sarah',
+          scope: { kind: 'agent', id: 'donna' },
+          role: 'accountable-lead',
+          by: 'user:dale',
+        }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'agent_kind_conflict',
+    );
+
+    // update() also enforces live agentKindLookup
+    const teamMember = await store.grant({
+      subject: 'user:dale',
+      scope: { kind: 'agent', id: 'archie' },
+      role: 'member',
+      by: 'user:dale',
+    });
+    await assert.rejects(
+      () => store.update(teamMember.id, { role: 'content-owner', by: 'user:dale' }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'agent_kind_conflict',
+    );
+
+    const personalMember = await store.grant({
+      subject: 'user:sarah',
+      scope: { kind: 'agent', id: 'donna' },
+      role: 'member',
+      by: 'user:dale',
+    });
+    await assert.rejects(
+      () => store.update(personalMember.id, { role: 'accountable-lead', by: 'user:dale' }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'agent_kind_conflict',
+    );
+
+    // startOwnershipTransfer() rejects team agent via live agentKindLookup even if another team agent has no lead grant yet
+    kinds.set('triage-team', 'team');
+    await assert.rejects(
+      () =>
+        store.startOwnershipTransfer({
+          scope: { kind: 'agent', id: 'triage-team' },
+          fromSubject: 'user:dale',
+          toSubject: 'user:sarah',
+          by: 'user:dale',
+        }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'agent_kind_conflict',
+    );
+  });
 });

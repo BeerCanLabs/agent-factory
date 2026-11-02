@@ -518,3 +518,21 @@ describe('AM1 every cartridge declares its archetype', () => {
     assert.equal(canonicalArchetype('chatbot'), undefined);
   });
 });
+
+describe('D11 / D30 / S2b agent kind (personal vs team)', () => {
+  it('accepts personal and team kinds, optional accountableLead on team, and rejects invalid kind or accountableLead on personal', async () => {
+    const { parseAgentKind } = await import('./schema.js');
+    assert.equal(parseAgentKind('personal'), 'personal');
+    assert.equal(parseAgentKind('team'), 'team');
+    assert.equal(parseAgentKind('shared'), undefined);
+    assert.equal(parseAgentKind(undefined), undefined);
+
+    assert.equal(cartridgeSchema.safeParse({ kind: 'personal' }).success, true);
+    assert.equal(cartridgeSchema.safeParse({ kind: 'team', accountableLead: 'user:sarah' }).success, true);
+    assert.equal(cartridgeSchema.safeParse({ kind: 'team' }).success, true);
+    assert.equal(cartridgeSchema.safeParse({ kind: 'shared' }).success, false);
+    assert.equal(cartridgeSchema.safeParse({ kind: 'personal', accountableLead: 'user:sarah' }).success, false);
+    assert.equal(cartridgeSchema.safeParse({ accountableLead: 'user:sarah' }).success, false);
+  });
+});
+

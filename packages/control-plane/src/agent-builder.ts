@@ -11,16 +11,17 @@ import http from 'node:http';
 import {
   AGENT_ID,
   BUILTIN_AGENT_IDS,
-  canAdopt,
-  summarizeSkill,
   applySettingsChange,
+  canAdopt,
+  parseAgentKind,
+  summarizeSkill,
 } from '@beercanlabs/factory-registrar';
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { authorize } from '@beercanlabs/factory-bouncer';
 import type { Role, Principal } from '@beercanlabs/factory-auth';
 import type { Run } from '@beercanlabs/factory-property-manager';
-import { json, readJson, type FactoryState } from './app.js';
-import { createFromConfiguration, discardCreated } from './agent-creation.js';
+import { effectiveGrantsForActor, json, readJson, type FactoryState } from './app.js';
+import { createFromConfiguration, discardCreated, resolveAgentOwnershipOnSubmit } from './agent-creation.js';
 import { skillRegistry, adoptionStore, requestAdoptionFor, activeDefaultSkills } from './skills.js';
 
 export const ARCHETYPES = ['purpose-built', 'personal-assistant', 'team-member'] as const;
@@ -72,6 +73,19 @@ function enrichRoles(state: FactoryState, actor: string, roles: Set<Role>): void
       roles.add('admin');
     }
   }
+  if (state.grants && state.grants.healthy) {
+    const grantRes = effectiveGrantsForActor(state, actor);
+    if (grantRes.ok && grantRes.grants) {
+      for (const eg of grantRes.grants) {
+        if (!eg.readOnly && eg.grant.scope.kind === 'fleet') {
+          const r = eg.grant.role;
+          if (r === 'viewer' || r === 'operator' || r === 'approver' || r === 'admin' || r === 'ingest' || r === 'gatekeeper-egress' || r === 'gatekeeper-ingress') {
+            roles.add(r);
+          }
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -120,7 +134,7 @@ export type BuilderValidationResult =
   | { ok: true; valid: true; adoptableSkillIds: Set<string>; skillsToAdopt: Array<{ id: string; version: string }> }
   | { ok: false; status: number; error: string; message: string; role?: string; skill?: string };
 
-export function validateBuilderSpec(state: FactoryState, spec: unknown): BuilderValidationResult {
+export function validateBuilderSpec(state: FactoryState, spec: unknown, caller?: Principal): BuilderValidationResult {
   if (!spec || typeof spec !== 'object') {
     return { ok: false, status: 400, error: 'invalid_spec', message: 'spec must be an object' };
   }
@@ -139,6 +153,27 @@ export function validateBuilderSpec(state: FactoryState, spec: unknown): Builder
   }
   if (state.configs?.current(id)) {
     return { ok: false, status: 409, error: 'configuration_exists', message: `a configuration for ${id} is still stored` };
+  }
+
+  if (caller) {
+    const ownership = resolveAgentOwnershipOnSubmit(state, caller, {
+      kind: s.kind,
+      accountableLead: s.accountableLead,
+      owners: s.owners,
+      actAs: s.actAs,
+      onBehalfOf: s.onBehalfOf,
+      defaultKindWhenOmitted: 'personal',
+    });
+    if (!ownership.ok) {
+      return {
+        ok: false,
+        status: ownership.status,
+        error: String(ownership.body.error ?? 'invalid_ownership'),
+        message: String(ownership.body.message ?? 'invalid agent ownership specification'),
+      };
+    }
+  } else if (s.kind !== undefined && !parseAgentKind(s.kind)) {
+    return { ok: false, status: 400, error: 'invalid_kind', message: 'kind must be "personal" or "team"' };
   }
 
   if (!s.memory || typeof s.memory !== 'object' || !(s.memory as Record<string, unknown>).archetype) {
@@ -293,7 +328,7 @@ export async function handleAgentBuilder(
   }
 
   if (op === 'validate') {
-    const validation = validateBuilderSpec(state, body?.spec);
+    const validation = validateBuilderSpec(state, body?.spec, humanCaller);
     if (!validation.ok) {
       json(res, validation.status, {
         ok: false,
@@ -309,7 +344,7 @@ export async function handleAgentBuilder(
   }
 
   if (op === 'publish') {
-    const validation = validateBuilderSpec(state, body?.spec);
+    const validation = validateBuilderSpec(state, body?.spec, humanCaller);
     if (!validation.ok) {
       json(res, validation.status, {
         ok: false,
@@ -336,6 +371,11 @@ export async function handleAgentBuilder(
       id,
       name,
       role,
+      kind: s.kind,
+      accountableLead: s.accountableLead,
+      owners: s.owners,
+      actAs: s.actAs,
+      onBehalfOf: s.onBehalfOf,
       model,
       soul: s.soul,
       roles: s.roles,

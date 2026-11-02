@@ -11,11 +11,35 @@
  */
 import http from 'node:http';
 import { payloadHash } from '@beercanlabs/factory-ledger';
-import { SEMVER, SKILL_ID } from '@beercanlabs/factory-contract';
-import { AGENT_ID, BUILTIN_AGENT_IDS, FULL_SHA, applySettingsChange, beginAdmission, canAdopt, changedParts, registryOf, loadSharedRuntime, saveSharedRuntime, visibilityOf, ownerOf, type SharedRuntimePin, type AgentRecord, type SkillAdoptionProvenance } from '@beercanlabs/factory-registrar';
-import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
+import { SEMVER, SKILL_ID, type AgentKind } from '@beercanlabs/factory-contract';
+import {
+  GrantStoreError,
+  GrantStoreUnavailableError,
+  PrincipalStoreUnavailableError,
+  isValidUserPrincipalId,
+  normalizeActorToPrincipal,
+  type GrantRecord,
+} from '@beercanlabs/factory-bouncer';
+import type { Role } from '@beercanlabs/factory-auth';
+import {
+  AGENT_ID,
+  BUILTIN_AGENT_IDS,
+  FULL_SHA,
+  applySettingsChange,
+  beginAdmission,
+  canAdopt,
+  changedParts,
+  loadSharedRuntime,
+  parseAgentKind,
+  registryOf,
+  saveSharedRuntime,
+  type AgentRecord,
+  type SharedRuntimePin,
+  type SkillAdoptionProvenance,
+} from '@beercanlabs/factory-registrar';
+import { actorIsAdmin, json, readJson, requirePrivilege, wireGrantStoreKindLookup, type FactoryState } from './app.js';
 import { applyConfig, buildSkillsFor, runDeploy } from './apply.js';
-import { changeReason, configOf, ledgerVersion, ownersOf, recordConfig, removeConfig } from './config-store.js';
+import { changeReason, configOf, ledgerVersion, ownersOf, parseOwners, recordConfig, removeConfig } from './config-store.js';
 import { SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type Run } from '@beercanlabs/factory-property-manager';
 import { runActivationSmoke } from './smoke.js';
 import { skillRegistry, activeDefaultSkills } from './skills.js';
@@ -56,7 +80,7 @@ export function agentConfigForRun(state: FactoryState, run: Run, res: http.Serve
   });
 }
 
-/** Nothing of a failed creation is left behind: neither the agent, its registry file nor its configuration, so the id can be tried again. */
+/** Nothing of a failed creation is left behind: neither the agent, its registry file, its grants, nor its configuration, so the id can be tried again. */
 export async function discardCreated(state: FactoryState, id: string, actor: string, reason: string): Promise<void> {
   state.agents.delete(id);
   try {
@@ -64,13 +88,436 @@ export async function discardCreated(state: FactoryState, id: string, actor: str
   } catch {
     // the record may not have been written
   }
+  if (state.grants && state.grants.healthy) {
+    try {
+      const existingGrants = state.grants.list({ scopeKind: 'agent', scopeId: id, includeExpired: true });
+      for (const g of existingGrants) {
+        await state.grants.revoke(g.id, { by: actor }).catch(() => undefined);
+      }
+    } catch {
+      // grant store may not hold any grant for id
+    }
+  }
   await removeConfig(state, id, { actor, reason }).catch(() => undefined);
+}
+
+export type ResolvedAgentOwnership =
+  | {
+      ok: true;
+      effectiveKind: AgentKind;
+      recordKind?: AgentKind;
+      accountableLead?: string;
+      configOwners?: string[];
+      grantRole?: 'content-owner' | 'accountable-lead';
+      grantSubject?: string;
+      onBehalfOf?: string;
+      isAdmin: boolean;
+    }
+  | {
+      ok: false;
+      status: number;
+      body: Record<string, unknown>;
+    };
+
+function resolveHumanUserSubject(
+  state: FactoryState,
+  rawInput: string,
+  opts: { isAdmin: boolean; errorCode: string; label: string },
+): { ok: true; subject: string } | { ok: false; status: number; body: Record<string, unknown> } {
+  const trimmed = rawInput.trim();
+  if (!trimmed) {
+    return { ok: false, status: 400, body: { error: opts.errorCode, message: `${opts.label} must not be empty` } };
+  }
+  let normalized: string;
+  try {
+    normalized = normalizeActorToPrincipal(trimmed, state.principals);
+  } catch {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: opts.errorCode, message: `${opts.label} must be a valid human principal (user:<id>) or email` },
+    };
+  }
+  if (!normalized.startsWith('user:') || !isValidUserPrincipalId(normalized)) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: opts.errorCode, message: `${opts.label} must be a human user principal (not '${normalized}')` },
+    };
+  }
+  if (state.principals) {
+    const rest = normalized.slice('user:'.length);
+    const isEmail = rest.includes('@');
+    const found = state.principals.get(normalized) ?? (isEmail ? state.principals.findByEmail(rest) : undefined);
+    if (found) {
+      return { ok: true, subject: found.id };
+    }
+    if (!opts.isAdmin) {
+      return {
+        ok: false,
+        status: 403,
+        body: {
+          error: 'unknown_subject',
+          message: `non-admin callers may only reference already-known principals ('${normalized}' not found)`,
+        },
+      };
+    }
+    if (!isEmail) {
+      return {
+        ok: false,
+        status: 404,
+        body: {
+          error: 'unknown_subject',
+          message: `principal '${normalized}' not found in principal store`,
+        },
+      };
+    }
+  }
+  return { ok: true, subject: normalized };
+}
+
+/**
+ * Validates `kind` (`'personal' | 'team'`), `accountableLead`, `owners`, and `actAs` / `onBehalfOf` on agent submission
+ * BEFORE any state or ledger write (`D7`, `D10`, `D11`, `D12`, `D13`, `D30`, `S2b`).
+ */
+export function resolveAgentOwnershipOnSubmit(
+  state: FactoryState,
+  principal: { actor: string; roles?: readonly Role[] },
+  input: {
+    kind?: unknown;
+    accountableLead?: unknown;
+    owners?: unknown;
+    actAs?: unknown;
+    onBehalfOf?: unknown;
+    defaultKindWhenOmitted: 'personal' | 'omit';
+  },
+): ResolvedAgentOwnership {
+  if (state.grants && !state.grants.healthy) {
+    return { ok: false, status: 503, body: { error: 'grant_store_unavailable', message: 'grant store is unhealthy' } };
+  }
+  if (state.principals && !state.principals.healthy) {
+    return { ok: false, status: 503, body: { error: 'principal_store_unavailable', message: 'principal store is unhealthy' } };
+  }
+
+  let explicitKind: AgentKind | undefined;
+  if (input.kind !== undefined && input.kind !== null) {
+    explicitKind = parseAgentKind(input.kind);
+    if (!explicitKind) {
+      return { ok: false, status: 400, body: { error: 'invalid_kind', message: 'kind must be "personal" or "team"' } };
+    }
+  }
+  const effectiveKind: AgentKind = explicitKind ?? 'personal';
+  const isAdmin = actorIsAdmin(state, principal.actor, principal.roles);
+
+  const rawActAs = input.actAs !== undefined ? input.actAs : input.onBehalfOf;
+  let onBehalfOf: string | undefined;
+  if (rawActAs !== undefined && rawActAs !== null) {
+    if (!isAdmin) {
+      return {
+        ok: false,
+        status: 403,
+        body: { error: 'forbidden', message: 'only an admin may act on behalf of another principal', required: 'admin' },
+      };
+    }
+    if (typeof rawActAs !== 'string') {
+      return { ok: false, status: 400, body: { error: 'invalid_act_as', message: 'actAs / onBehalfOf must be a string' } };
+    }
+    const resolvedActAs = resolveHumanUserSubject(state, rawActAs, {
+      isAdmin: true,
+      errorCode: 'invalid_act_as',
+      label: 'actAs / onBehalfOf',
+    });
+    if (!resolvedActAs.ok) return resolvedActAs;
+    onBehalfOf = resolvedActAs.subject;
+  }
+
+  if (effectiveKind === 'team') {
+    if (input.owners !== undefined && input.owners !== null) {
+      if (!Array.isArray(input.owners)) {
+        return { ok: false, status: 400, body: { error: 'invalid_owners', message: 'owners must be an array' } };
+      }
+      if (input.owners.length > 0) {
+        return {
+          ok: false,
+          status: 409,
+          body: { error: 'agent_kind_conflict', message: 'team agents cannot have owners / content-owner; specify accountableLead instead' },
+        };
+      }
+    }
+    if (
+      input.accountableLead === undefined ||
+      input.accountableLead === null ||
+      (typeof input.accountableLead === 'string' && !input.accountableLead.trim())
+    ) {
+      return {
+        ok: false,
+        status: 422,
+        body: { error: 'accountable_lead_required', message: 'team agents require accountableLead at submission (D30, S2b)' },
+      };
+    }
+    if (typeof input.accountableLead !== 'string') {
+      return {
+        ok: false,
+        status: 400,
+        body: { error: 'invalid_accountable_lead', message: 'accountableLead must be a human principal (user:<id>) or email' },
+      };
+    }
+    const resolvedLead = resolveHumanUserSubject(state, input.accountableLead, {
+      isAdmin,
+      errorCode: 'invalid_accountable_lead',
+      label: 'accountableLead',
+    });
+    if (!resolvedLead.ok) return resolvedLead;
+    return {
+      ok: true,
+      effectiveKind: 'team',
+      recordKind: 'team',
+      accountableLead: resolvedLead.subject,
+      configOwners: undefined,
+      grantRole: 'accountable-lead',
+      grantSubject: resolvedLead.subject,
+      onBehalfOf,
+      isAdmin,
+    };
+  }
+
+  // Personal agent (`effectiveKind === 'personal'`)
+  if (input.accountableLead !== undefined && input.accountableLead !== null) {
+    return {
+      ok: false,
+      status: 409,
+      body: { error: 'agent_kind_conflict', message: 'personal agents cannot have an accountableLead' },
+    };
+  }
+
+  let explicitOwners: string[] | undefined;
+  if (input.owners !== undefined && input.owners !== null) {
+    const checked = parseOwners(input.owners);
+    if (!checked.ok) {
+      return { ok: false, status: 400, body: { error: 'invalid_owners', message: checked.error } };
+    }
+    if (checked.owners.length > 1) {
+      return {
+        ok: false,
+        status: 409,
+        body: { error: 'single_owner_only', message: 'personal agents have exactly one content-owner (D11, S2b)' },
+      };
+    }
+    if (checked.owners.length === 0) {
+      return {
+        ok: false,
+        status: 409,
+        body: { error: 'owner_required', message: 'personal agents require a single content-owner' },
+      };
+    }
+    explicitOwners = checked.owners;
+  }
+
+  // Legacy bare repository registration (`kind`, `actAs`, `owners` all omitted): keep `recordKind` & `configOwners` undefined
+  // so legacy config hash vectors and `PUT .../owners` behavior stay intact until S18 migration, while seeding `GrantStore` if human caller.
+  if (input.defaultKindWhenOmitted === 'omit' && explicitKind === undefined && onBehalfOf === undefined && explicitOwners === undefined) {
+    let grantSubject: string | undefined;
+    if (state.grants) {
+      const actorLower = principal.actor.trim().toLowerCase();
+      if (actorLower.startsWith('user:') || actorLower.startsWith('cloudflare:') || actorLower.startsWith('oidc:')) {
+        const humanCheck = resolveHumanUserSubject(state, principal.actor, {
+          isAdmin,
+          errorCode: 'invalid_owner',
+          label: 'submitter',
+        });
+        if (!humanCheck.ok) return humanCheck;
+        grantSubject = humanCheck.subject;
+      }
+    }
+    return {
+      ok: true,
+      effectiveKind: 'personal',
+      recordKind: undefined,
+      configOwners: undefined,
+      ...(grantSubject ? { grantRole: 'content-owner', grantSubject } : {}),
+      isAdmin,
+    };
+  }
+
+  const recordKind: AgentKind | undefined =
+    explicitKind ?? (state.grants !== undefined || onBehalfOf !== undefined || explicitOwners !== undefined ? 'personal' : undefined);
+  if (onBehalfOf !== undefined) {
+    if (explicitOwners) {
+      const resolvedExplicit = resolveHumanUserSubject(state, explicitOwners[0], {
+        isAdmin: true,
+        errorCode: 'invalid_owners',
+        label: 'owner',
+      });
+      if (!resolvedExplicit.ok) return resolvedExplicit;
+      if (resolvedExplicit.subject !== onBehalfOf) {
+        return {
+          ok: false,
+          status: 409,
+          body: { error: 'owner_mismatch', message: 'owners[0] conflicts with actAs / onBehalfOf target' },
+        };
+      }
+    }
+    return {
+      ok: true,
+      effectiveKind: 'personal',
+      recordKind,
+      configOwners: [onBehalfOf],
+      grantRole: 'content-owner',
+      grantSubject: onBehalfOf,
+      onBehalfOf,
+      isAdmin,
+    };
+  }
+
+  if (explicitOwners) {
+    if (!isAdmin) {
+      let callerNorm = principal.actor.toLowerCase();
+      let targetNorm = explicitOwners[0].toLowerCase();
+      try {
+        callerNorm = normalizeActorToPrincipal(principal.actor, state.principals);
+        targetNorm = normalizeActorToPrincipal(explicitOwners[0], state.principals);
+      } catch {
+        // compare raw lowercased actors below
+      }
+      if (callerNorm !== targetNorm) {
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            error: 'forbidden',
+            message: 'only an admin may assign personal agent ownership to another principal at creation',
+            required: 'admin',
+          },
+        };
+      }
+    }
+    if (state.grants || state.principals) {
+      const resolvedOwner = resolveHumanUserSubject(state, explicitOwners[0], {
+        isAdmin,
+        errorCode: 'invalid_owners',
+        label: 'owner',
+      });
+      if (!resolvedOwner.ok) return resolvedOwner;
+      return {
+        ok: true,
+        effectiveKind: 'personal',
+        recordKind,
+        configOwners: [resolvedOwner.subject],
+        grantRole: 'content-owner',
+        grantSubject: resolvedOwner.subject,
+        isAdmin,
+      };
+    }
+    return {
+      ok: true,
+      effectiveKind: 'personal',
+      recordKind,
+      configOwners: explicitOwners,
+      isAdmin,
+    };
+  }
+
+  if (state.grants) {
+    const actorLower = principal.actor.trim().toLowerCase();
+    if (!actorLower.startsWith('user:') && !actorLower.startsWith('cloudflare:') && !actorLower.startsWith('oidc:')) {
+      return {
+        ok: false,
+        status: 422,
+        body: {
+          error: 'content_owner_required',
+          message:
+            'machine or service callers creating a personal agent must specify actAs / onBehalfOf for a human user, or create a kind: "team" agent with accountableLead',
+        },
+      };
+    }
+    const resolvedCaller = resolveHumanUserSubject(state, principal.actor, {
+      isAdmin,
+      errorCode: 'invalid_owner',
+      label: 'submitter',
+    });
+    if (!resolvedCaller.ok) return resolvedCaller;
+    return {
+      ok: true,
+      effectiveKind: 'personal',
+      recordKind,
+      configOwners: [resolvedCaller.subject],
+      grantRole: 'content-owner',
+      grantSubject: resolvedCaller.subject,
+      isAdmin,
+    };
+  }
+
+  const fallbackOwner = state.principals
+    ? (() => {
+        try {
+          return normalizeActorToPrincipal(principal.actor, state.principals);
+        } catch {
+          return principal.actor.toLowerCase();
+        }
+      })()
+    : principal.actor.toLowerCase();
+  return {
+    ok: true,
+    effectiveKind: 'personal',
+    recordKind,
+    configOwners: [fallbackOwner],
+    isAdmin,
+  };
+}
+
+/**
+ * Seeds or updates the initial `content-owner` or `accountable-lead` grant in `state.grants` when configured.
+ */
+export async function applyAgentOwnershipGrant(
+  state: FactoryState,
+  agentId: string,
+  principal: { actor: string },
+  ownership: Extract<ResolvedAgentOwnership, { ok: true }>,
+): Promise<{ ok: true; grant?: GrantRecord } | { ok: false; status: number; body: Record<string, unknown> }> {
+  if (!state.grants || !ownership.grantRole || !ownership.grantSubject) {
+    return { ok: true };
+  }
+  wireGrantStoreKindLookup(state);
+  let byActor = principal.actor;
+  try {
+    byActor = normalizeActorToPrincipal(principal.actor, state.principals);
+  } catch {
+    byActor = principal.actor;
+  }
+  try {
+    const grant = await state.grants.grant({
+      subject: ownership.grantSubject,
+      scope: { kind: 'agent', id: agentId },
+      role: ownership.grantRole,
+      agentKind: ownership.effectiveKind,
+      by: byActor,
+      ...(ownership.onBehalfOf ? { onBehalfOf: ownership.onBehalfOf } : {}),
+      granterIsAdmin: ownership.isAdmin,
+      initialSubmission: true,
+      replaceExisting: ownership.isAdmin && ownership.grantRole === 'accountable-lead',
+      principals: state.principals,
+    });
+    return { ok: true, grant };
+  } catch (err) {
+    if (err instanceof GrantStoreError) {
+      return { ok: false, status: err.status, body: { error: err.code, message: err.message } };
+    }
+    if (err instanceof GrantStoreUnavailableError || err instanceof PrincipalStoreUnavailableError) {
+      return { ok: false, status: 503, body: { error: 'grant_store_unavailable', message: err.message } };
+    }
+    throw err;
+  }
 }
 
 export type NewConfiguredAgent = {
   id: unknown;
   name?: unknown;
   role?: unknown;
+  kind?: unknown;
+  accountableLead?: unknown;
+  owners?: unknown;
+  actAs?: unknown;
+  onBehalfOf?: unknown;
   model?: unknown;
   soul?: unknown;
   roles?: unknown;
@@ -85,7 +532,11 @@ export type NewConfiguredAgent = {
 export type Created = { status: number; body: Record<string, unknown>; record?: AgentRecord };
 
 /** Creates an agent from a configuration (CF6): the one place that does it, for `POST /agents` and for an import (CF3). */
-export async function createFromConfiguration(state: FactoryState, principal: { actor: string }, spec: NewConfiguredAgent): Promise<Created> {
+export async function createFromConfiguration(
+  state: FactoryState,
+  principal: { actor: string; roles?: readonly Role[] },
+  spec: NewConfiguredAgent,
+): Promise<Created> {
   const pin = state.sharedRuntime;
   if (!state.configs || !pin || !FULL_SHA.test(pin.commit) || !pin.image) return { status: 503, body: { error: 'shared_runtime_not_configured', message: 'this factory has no pinned shared runtime (FACTORY_RUNTIME_IMAGE, FACTORY_RUNTIME_COMMIT)' } };
 
@@ -94,6 +545,19 @@ export async function createFromConfiguration(state: FactoryState, principal: { 
   // The id is taken before anything is awaited, so two creations of one id cannot both succeed.
   if (state.agents.has(id) || BUILTIN_AGENT_IDS.has(id) || state.repositoryAgentIds?.has(id)) return { status: 409, body: { error: 'agent_exists', message: `${id} already exists (or is reserved)` } };
   if (state.configs.current(id)) return { status: 409, body: { error: 'configuration_exists', message: `a configuration for ${id} is still stored` } };
+
+  const ownership = resolveAgentOwnershipOnSubmit(state, principal, {
+    kind: spec.kind,
+    accountableLead: spec.accountableLead,
+    owners: spec.owners,
+    actAs: spec.actAs,
+    onBehalfOf: spec.onBehalfOf,
+    defaultKindWhenOmitted: 'personal',
+  });
+  if (!ownership.ok) {
+    return { status: ownership.status, body: ownership.body };
+  }
+
   const name = typeof spec.name === 'string' && spec.name.trim() ? spec.name.trim().slice(0, 120) : id;
   const role = typeof spec.role === 'string' && spec.role.trim() ? spec.role.trim().slice(0, 120) : 'Agent';
 
@@ -101,6 +565,11 @@ export async function createFromConfiguration(state: FactoryState, principal: { 
   const settings = applySettingsChange(undefined, Object.fromEntries(Object.entries(given).filter(([, v]) => v !== undefined)));
   if (!settings.ok) return { status: 400, body: { error: 'invalid_settings', message: settings.error } };
   if (!settings.settings.memory?.archetype) return { status: 422, body: { error: 'archetype_required', message: 'memory.archetype is required: purpose-built, personal-assistant or team-member (AM1)' } };
+
+  const authorityActors =
+    ownership.effectiveKind === 'team'
+      ? (ownership.accountableLead ? [ownership.accountableLead] : [])
+      : (ownership.configOwners ?? [principal.actor]);
 
   const initialSkills: Array<{ id: string; version: string }> = [];
   const seenSkillIds = new Set<string>();
@@ -121,7 +590,7 @@ export async function createFromConfiguration(state: FactoryState, principal: { 
       if (seenSkillIds.has(s.id)) {
         return { status: 400, body: { error: 'duplicate_skill', message: `duplicate skill id ${s.id}` } };
       }
-      const check = canAdopt(registry, id, s.id, s.version, { agentOwners: [principal.actor] });
+      const check = canAdopt(registry, id, s.id, s.version, { agentOwners: authorityActors });
       if (!check.ok) {
         const status = check.error === 'not_found' ? 404 : check.error === 'skill_private' ? 403 : 409;
         return { status, body: { error: check.error, message: check.message } };
@@ -171,6 +640,8 @@ export async function createFromConfiguration(state: FactoryState, principal: { 
     id,
     name,
     role,
+    ...(ownership.recordKind ? { kind: ownership.recordKind } : {}),
+    ...(ownership.effectiveKind === 'team' && ownership.accountableLead ? { accountableLead: ownership.accountableLead } : {}),
     // E7: no budget and no policy until an admin sets them; the global default is not copied to an agent that asked for nothing.
     state: 'PENDING_BUDGET',
     provider: 'cloud',
@@ -190,6 +661,22 @@ export async function createFromConfiguration(state: FactoryState, principal: { 
   };
   state.agents.set(id, record);
   try {
+    const grantApplied = await applyAgentOwnershipGrant(state, id, principal, ownership);
+    if (!grantApplied.ok) {
+      await discardCreated(state, id, principal.actor, 'ownership grant rejected');
+      return { status: grantApplied.status, body: grantApplied.body };
+    }
+    const canonicalGrantSubject = grantApplied.grant?.subject;
+    if (ownership.effectiveKind === 'team' && canonicalGrantSubject) {
+      record.accountableLead = canonicalGrantSubject;
+    }
+    const storedOwners =
+      ownership.effectiveKind === 'team'
+        ? undefined
+        : canonicalGrantSubject
+          ? [canonicalGrantSubject]
+          : ownership.configOwners;
+
     const parts = changedParts(undefined, settings.settings);
     const nowIso = new Date().toISOString();
     const explicitSet = new Set(
@@ -206,8 +693,14 @@ export async function createFromConfiguration(state: FactoryState, principal: { 
       approvedAt: nowIso,
     }));
 
+    const { owners: _prevOwners, ...baseConfig } = configOf(state, id);
     const { record: stored } = await state.configs.put(
-      { ...configOf(state, id), skills: initialSkills, owners: [principal.actor.toLowerCase()], agent: settings.settings },
+      {
+        ...baseConfig,
+        skills: initialSkills,
+        ...(storedOwners && storedOwners.length ? { owners: storedOwners } : {}),
+        agent: settings.settings,
+      },
       {
         updatedBy: principal.actor,
         reason: spec.reason ?? 'created from a configuration',
@@ -222,9 +715,10 @@ export async function createFromConfiguration(state: FactoryState, principal: { 
       type: 'action',
       action: 'AGENT_CREATED_FROM_CONFIGURATION',
       actor: principal.actor,
+      ...(ownership.onBehalfOf ? { onBehalfOf: ownership.onBehalfOf } : {}),
       commit: pin.commit,
       requestId: `config:${id}:v${stored.version}`,
-      payloadSha256: payloadHash({ parts, hash: stored.hash }),
+      payloadSha256: payloadHash({ parts, kind: record.kind, ...(record.accountableLead ? { accountableLead: record.accountableLead } : {}), hash: stored.hash }),
     });
     return {
       status: 201,
@@ -252,6 +746,11 @@ export async function handleAgentCreation(state: FactoryState, req: http.Incomin
     id: body.id,
     name: body.name,
     role: body.role,
+    kind: body.kind,
+    accountableLead: body.accountableLead,
+    owners: body.owners,
+    actAs: body.actAs,
+    onBehalfOf: body.onBehalfOf,
     model: body.model,
     soul: body.soul,
     roles: body.roles,

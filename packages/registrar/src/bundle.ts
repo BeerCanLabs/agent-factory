@@ -7,6 +7,7 @@
  * `parseBundle` is strict (a bundle is input from outside) and never grants: a policy in a bundle is a request an admin
  * sets by hand, and a skill in a bundle is a request to adopt that an admin decides (SK3).
  */
+import { parseAgentKind, type AgentKind } from '@beercanlabs/factory-contract';
 import { applySettingsChange, type AgentSettings } from './agent-settings.js';
 import type { ConfigContent, ConfigSkill } from './config-store.js';
 
@@ -20,7 +21,7 @@ const SEMVER = /^\d+\.\d+\.\d+$/;
 export type AgentBundle = {
   format: typeof BUNDLE_FORMAT;
   exportedAt: string;
-  agent: { id: string; name: string; role: string; model?: string };
+  agent: { id: string; name: string; role: string; kind?: AgentKind; model?: string };
   /** Where the agent's soul and roles live: `configuration` (importable) or `repository` (a read-only record, CF6). */
   origin: 'configuration' | 'repository';
   /** For an agent from a repository, its pinned source, so the record says what it ran. Not importable. */
@@ -32,15 +33,22 @@ export type AgentBundle = {
 };
 
 export function buildBundle(
-  agent: { id: string; name: string; role: string; model?: string; createdFrom?: 'configuration' },
+  agent: { id: string; name: string; role: string; kind?: AgentKind; model?: string; createdFrom?: 'configuration' },
   content: Pick<ConfigContent, 'source' | 'skills' | 'policy' | 'agent'>,
   now: Date = new Date(),
 ): AgentBundle {
   const configured = agent.createdFrom === 'configuration' && content.agent !== undefined;
+  const kind = parseAgentKind(agent.kind);
   return {
     format: BUNDLE_FORMAT,
     exportedAt: now.toISOString(),
-    agent: { id: agent.id, name: agent.name, role: agent.role, ...(agent.model ? { model: agent.model } : {}) },
+    agent: {
+      id: agent.id,
+      name: agent.name,
+      role: agent.role,
+      ...(kind ? { kind } : {}),
+      ...(agent.model ? { model: agent.model } : {}),
+    },
     origin: configured ? 'configuration' : 'repository',
     ...(configured ? {} : { source: { ...(content.source.repo ? { repo: content.source.repo } : {}), ...(content.source.commit ? { commit: content.source.commit } : {}) } }),
     ...(content.agent ? { settings: structuredClone(content.agent) } : {}),
@@ -63,6 +71,8 @@ export function parseBundle(input: unknown): BundleResult {
   const name = text(a.name, 120);
   const role = text(a.role, 120);
   if (!name || !role) return bad('invalid_bundle', 'agent.name and agent.role are required text of at most 120 characters');
+  const kind = a.kind === undefined ? undefined : parseAgentKind(a.kind);
+  if (a.kind !== undefined && !kind) return bad('invalid_bundle', 'agent.kind must be "personal" or "team"');
   if (a.model !== undefined && !text(a.model, 200)) return bad('invalid_bundle', 'agent.model must be text of at most 200 characters');
   if (input.origin !== 'configuration' && input.origin !== 'repository') return bad('invalid_bundle', 'origin must be "configuration" or "repository"');
   if (!Array.isArray(input.skills) || input.skills.length > MAX_BUNDLE_SKILLS) return bad('invalid_bundle', `skills must be a list of at most ${MAX_BUNDLE_SKILLS}`);
@@ -91,7 +101,7 @@ export function parseBundle(input: unknown): BundleResult {
     bundle: {
       format: BUNDLE_FORMAT,
       exportedAt,
-      agent: { id: a.id, name, role, ...(a.model ? { model: String(a.model).trim() } : {}) },
+      agent: { id: a.id, name, role, ...(kind ? { kind } : {}), ...(a.model ? { model: String(a.model).trim() } : {}) },
       origin: input.origin,
       ...(source ? { source } : {}),
       ...(settings ? { settings } : {}),

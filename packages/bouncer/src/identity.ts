@@ -2,6 +2,7 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
 import { authorize } from './authorize.js';
+import type { EffectiveGrant } from './grants.js';
 import {
   EMAIL_BODY,
   SERVICE_BODY,
@@ -290,8 +291,10 @@ export type IngressPrivilege = 'agents.wake' | 'agents.converse';
 export type IngressAuthorizeRequest = {
   requestedBy?: ExternalIdentity;
   agentId: string;
+  agentKind?: 'personal' | 'team';
   privilege?: IngressPrivilege;
   owners?: readonly string[];
+  grants?: readonly EffectiveGrant[];
   link?: {
     actor: string;
     name?: string;
@@ -374,7 +377,13 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
   const auth = authorize({
     principal,
     privilege,
-    resource: { agentId, owners, memberRoles: linkAgentRoles },
+    resource: {
+      agentId,
+      agentKind: req.agentKind,
+      owners,
+      memberRoles: linkAgentRoles,
+      grants: req.grants,
+    },
   });
 
   if (!auth.allowed) {
@@ -386,23 +395,47 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
     };
   }
 
-  const isOwner = owners.some((o) => o.toLowerCase() === actor.toLowerCase());
-  const effectiveAgentRoles = isOwner
-    ? ['Owner', ...linkAgentRoles]
-    : linkAgentRoles;
+  const agentGrants = (req.grants ?? []).filter(
+    (eg) => eg.grant.scope.kind === 'agent' && eg.grant.scope.id.toLowerCase() === agentId.toLowerCase(),
+  );
+  const effectiveKind =
+    req.agentKind ?? (agentGrants.some((eg) => eg.grant.role === 'accountable-lead') ? 'team' : 'personal');
+  const hasActiveGrantOwner =
+    effectiveKind === 'personal' &&
+    agentGrants.some((eg) => !eg.readOnly && eg.source === 'direct' && eg.grant.role === 'content-owner');
+  const hasReadOnlyGrantOwner =
+    effectiveKind === 'personal' &&
+    agentGrants.some((eg) => eg.readOnly && eg.source === 'direct' && eg.grant.role === 'content-owner');
 
+  const isOwner =
+    effectiveKind === 'team'
+      ? false
+      : hasActiveGrantOwner || (!hasReadOnlyGrantOwner && owners.some((o) => o.toLowerCase() === actor.toLowerCase()));
+  const grantRoleLabels = agentGrants
+    .filter((eg) => !eg.readOnly && eg.grant.role !== 'content-owner')
+    .map((eg) => eg.grant.role);
+  const mergedMemberRoles = [...new Set([...linkAgentRoles, ...grantRoleLabels])];
+  const effectiveAgentRoles = isOwner
+    ? ['Owner', ...mergedMemberRoles]
+    : mergedMemberRoles;
+
+  const grantFleetRoles = (req.grants ?? [])
+    .filter((eg) => !eg.readOnly && eg.grant.scope.kind === 'fleet' && eg.grant.role in ROLE_PRIVILEGES)
+    .map((eg) => eg.grant.role as Role);
+  const allFleetRoles = [...new Set([...resolvedRoles, ...grantFleetRoles])];
 
   // Determine the primary role that actually satisfied the privilege
   let satisfyingRole: Role | 'agent-owner' | 'agent-member';
-  if (resolvedRoles.includes('admin')) {
+  if (allFleetRoles.includes('admin')) {
     satisfyingRole = 'admin';
   } else if (isOwner) {
     satisfyingRole = 'agent-owner';
   } else {
     // Find the granted role that holds the required privilege (e.g. ['viewer', 'operator'] -> 'operator')
-    // A person admitted only by an agent role satisfied the privilege as an agent-member.
+    // A person admitted only by an agent role or agent grant satisfied the privilege as an agent-member.
     satisfyingRole =
-      resolvedRoles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ?? (linkAgentRoles.length > 0 ? 'agent-member' : (resolvedRoles[0] ?? 'operator'));
+      allFleetRoles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ??
+      (mergedMemberRoles.length > 0 ? 'agent-member' : (allFleetRoles[0] ?? 'operator'));
   }
 
   // Report faithfully: link's explicitly granted roles, or admin if derived from email, or empty array if un-roled
@@ -431,13 +464,41 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
  * AM2: the caller a signed-in person is when they converse directly (the console, the API), not through an ingress:
  * their own principal, with the role that let them in. The control plane asks for it rather than reading roles itself.
  */
-export function directCaller(principal: Principal, owners: readonly string[], privilege: Privilege): AuthenticatedCaller {
-  const isOwner = owners.some((o) => o.toLowerCase() === principal.actor.toLowerCase());
-  const role: AuthenticatedCaller['role'] = principal.roles.includes('admin')
+export function directCaller(
+  principal: Principal,
+  owners: readonly string[],
+  privilege: Privilege,
+  opts?: { agentId?: string; agentKind?: 'personal' | 'team'; grants?: readonly EffectiveGrant[] },
+): AuthenticatedCaller {
+  const agentGrants =
+    opts?.grants && opts.agentId
+      ? opts.grants.filter(
+          (eg) => eg.grant.scope.kind === 'agent' && eg.grant.scope.id.toLowerCase() === opts.agentId!.toLowerCase(),
+        )
+      : [];
+  const effectiveKind =
+    opts?.agentKind ?? (agentGrants.some((eg) => eg.grant.role === 'accountable-lead') ? 'team' : 'personal');
+  const hasActiveGrantOwner =
+    effectiveKind === 'personal' &&
+    agentGrants.some((eg) => !eg.readOnly && eg.source === 'direct' && eg.grant.role === 'content-owner');
+  const hasReadOnlyGrantOwner =
+    effectiveKind === 'personal' &&
+    agentGrants.some((eg) => eg.readOnly && eg.source === 'direct' && eg.grant.role === 'content-owner');
+  const isOwner =
+    effectiveKind === 'team'
+      ? false
+      : hasActiveGrantOwner || (!hasReadOnlyGrantOwner && owners.some((o) => o.toLowerCase() === principal.actor.toLowerCase()));
+  const grantFleetRoles = (opts?.grants ?? [])
+    .filter((eg) => !eg.readOnly && eg.grant.scope.kind === 'fleet' && eg.grant.role in ROLE_PRIVILEGES)
+    .map((eg) => eg.grant.role as Role);
+  const allRoles = [...new Set([...principal.roles, ...grantFleetRoles])];
+  const hasAgentMemberGrant = agentGrants.some((eg) => !eg.readOnly && eg.grant.role !== 'content-owner');
+  const role: AuthenticatedCaller['role'] = allRoles.includes('admin')
     ? 'admin'
     : isOwner
       ? 'agent-owner'
-      : (principal.roles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ?? principal.roles[0] ?? 'operator');
+      : (allRoles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ??
+        (hasAgentMemberGrant ? 'agent-member' : (allRoles[0] ?? 'operator')));
   // A service token (token:<name> or service:<name>) is an API client, not a person at the console.
   const provider = principal.actor.startsWith('token:') || principal.actor.startsWith('service:') ? 'api' : 'console';
   return { actor: principal.actor, role, roles: [...principal.roles], isOwner, provider, id: principal.actor };

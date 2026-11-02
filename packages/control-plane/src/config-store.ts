@@ -55,9 +55,11 @@ export function configOf(state: FactoryState, agentId: string): ConfigContent {
   };
 }
 
-/** The agent's owners. No store or no record means no owners: it fails closed. */
+/** The agent's owners. Team agents have no content-owner (D11, S2b). No store or no record means no owners: it fails closed. */
 export function ownersOf(state: FactoryState, agentId: string): string[] {
-  return state.configs?.current(agentId)?.owners ?? (state.agents.get(agentId) as unknown as { owners?: string[] })?.owners ?? [];
+  const agent = state.agents.get(agentId);
+  if (agent?.kind === 'team') return [];
+  return state.configs?.current(agentId)?.owners ?? (agent as unknown as { owners?: string[] })?.owners ?? [];
 }
 
 export const MAX_OWNERS = 10;
@@ -257,13 +259,22 @@ async function handleOwners(state: FactoryState, req: http.IncomingMessage, res:
     json(res, 400, { error: 'reserved_agent_id' });
     return true;
   }
-  if (!state.agents.has(agentId)) {
+  const agent = state.agents.get(agentId);
+  if (!agent) {
     json(res, 404, { error: 'not_found' });
     return true;
   }
   const checked = parseOwners((await readJson(req)).owners);
   if (!checked.ok) {
     json(res, 400, { error: checked.error });
+    return true;
+  }
+  if (agent.kind === 'team' && checked.owners.length > 0) {
+    json(res, 409, { error: 'agent_kind_conflict', message: 'team agents cannot have owners / content-owner' });
+    return true;
+  }
+  if ((agent.kind === 'personal' || state.grants !== undefined) && checked.owners.length > 1) {
+    json(res, 409, { error: 'single_owner_only', message: 'personal agents have at most one content-owner (D11, S2b)' });
     return true;
   }
   const { owners: _previous, ...content } = configOf(state, agentId);
