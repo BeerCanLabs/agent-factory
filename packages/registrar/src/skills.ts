@@ -82,13 +82,25 @@ export function ownerOf(rec: Pick<SkillVersionRecord, 'manifest'>): string | und
   return visibilityOf(rec) === 'private' ? rec.manifest.owner : undefined;
 }
 
-/** Who is looking: an admin sees every skill; anyone else sees public skills and the private skills of agents they own. */
-export type SkillViewer = { admin: boolean; ownedAgents: readonly string[] };
+/** Who is looking: an admin sees every skill; anyone else sees public skills and the private skills of agents or skills they control. */
+export type SkillViewer = { admin: boolean; ownedAgents: readonly string[]; actor?: string };
 
-/** SK7: a private skill is visible only to admins and to the owners of its owner agent. */
-export function skillVisibleTo(skill: { visibility: SkillVisibility; owner?: string }, viewer: SkillViewer): boolean {
+/** SK7, D26: a private skill is visible only to admins, its human content-owner, and authority holders of its owner agent. */
+export function skillVisibleTo(
+  skill: { visibility: SkillVisibility; owner?: string; userOwner?: string },
+  viewer: SkillViewer,
+): boolean {
   if (skill.visibility === 'public' || viewer.admin) return true;
-  return skill.owner !== undefined && viewer.ownedAgents.includes(skill.owner);
+  if (skill.owner !== undefined && viewer.ownedAgents.includes(skill.owner)) return true;
+  if (
+    viewer.actor &&
+    skill.userOwner !== undefined &&
+    (skill.owner === undefined || skill.owner === skill.userOwner) &&
+    skill.userOwner.toLowerCase() === viewer.actor.toLowerCase()
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export type SkillSummary = {
@@ -515,12 +527,17 @@ export type AdoptCheck = { ok: true; record: SkillVersionRecord } | { ok: false;
 export type AdoptContext = {
   agentOwners?: readonly string[];
   userGroups?: readonly string[];
+  /**
+   * D26: Optional resolver for grant-backed skill `content-owner` (`null` when grant-managed with no active owner,
+   * such as `pending-revoked`; `undefined` when falling back to `rec.owner`).
+   */
+  resolveSkillOwner?: (skillId: string, rec: SkillVersionRecord) => string | null | undefined;
 };
 
 /**
- * H7, H8, H10, A7, A12: may this agent be given this skill version?
+ * H7, H8, H10, A7, A12, D26: may this agent be given this skill version?
  * Checks guardrails (tests passed or legacy approved, unretired),
- * and adoption rule (published, owner agent, owner human user, or assigned group member).
+ * and adoption rule (published, owner agent, owner human user controlling personal/team agent, or assigned group member).
  */
 export function canAdopt(
   registry: SkillRegistry,
@@ -539,30 +556,32 @@ export function canAdopt(
     return { ok: false, error: 'skill_not_approved', message: `skill ${id}@${version} is ${rec.status}; only a version that passed checks can be adopted (A7)` };
   }
 
-  // Adoption eligibility (A12, H7, H8, H10):
-  // 1. Published skill is adoptable by any agent (H8)
+  // Adoption eligibility (A12, H7, H8, H10, D26):
+  // 1. Published skill is adoptable by any agent (H8, D26)
   const legacyAgentOwner = ownerOf(rec);
   const isLegacyPrivate = visibilityOf(rec) === 'private';
+  const resolvedOwner = ctx?.resolveSkillOwner ? ctx.resolveSkillOwner(id, rec) : undefined;
+  const effectivePublishCheckOwner = resolvedOwner !== undefined ? (resolvedOwner ?? rec.owner) : rec.owner;
   const isPublished =
     rec.published === true ||
     (!isLegacyPrivate &&
       rec.published !== false &&
       (rec.status === 'approved'
-        ? !rec.owner || rec.owner.startsWith('token:admin') || rec.owner === 'admin'
-        : !rec.owner));
+        ? !effectivePublishCheckOwner || effectivePublishCheckOwner.startsWith('token:admin') || effectivePublishCheckOwner === 'admin'
+        : !effectivePublishCheckOwner));
   if (isPublished) return { ok: true, record: rec };
 
   // 2. Legacy agent-owned private skill (SK1, SK3)
   if (legacyAgentOwner && legacyAgentOwner === agentId) return { ok: true, record: rec };
 
-  // 3. Human user owner matches one of the agent's owners (H7, A12)
-  const humanOwner = rec.owner;
+  // 3. Human user owner matches one of the agent's authority holders: personal content-owner or team accountable-lead (H7, A12, D26)
+  const humanOwner = resolvedOwner !== undefined ? resolvedOwner : rec.owner;
   if (humanOwner && ctx?.agentOwners) {
     const isOwner = ctx.agentOwners.some((o) => o.toLowerCase() === humanOwner.toLowerCase());
     if (isOwner) return { ok: true, record: rec };
   }
 
-  // 4. Assigned to a group the agent's owner belongs to (H5, A12)
+  // 4. Assigned to a group the agent's authority holder belongs to (H5, A12)
   if (rec.groupId && ctx?.userGroups) {
     const isGroupMember = ctx.userGroups.some((g) => g.toLowerCase() === rec.groupId!.toLowerCase());
     if (isGroupMember) return { ok: true, record: rec };
@@ -571,7 +590,7 @@ export function canAdopt(
   return {
     ok: false,
     error: 'skill_private',
-    message: `skill ${id} is private; agent ${agentId} is not owned by the skill owner or assigned group members, and the skill is not published (A12, H8)`,
+    message: `skill ${id} is private; agent ${agentId} is not controlled by the skill content-owner or assigned group members, and the skill is not published (D26, A12, H8)`,
   };
 }
 

@@ -108,6 +108,8 @@ export const PRIVILEGES = [
   'egress.models.failover',
   // TSK-292: Admin-managed default skills (GAP-216)
   'skills.defaults.set',
+  // TSK-300 (S3): Principals & grants management (R4, GAP-226)
+  'grants.manage',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -311,6 +313,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'skills.retire.force',
     'runtime.set',
     'skills.defaults.set',
+    'grants.manage',
   ],
 };
 

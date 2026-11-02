@@ -40,6 +40,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/gatekeeper', 'packages/auth', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/mcp.ts',
       'packages/control-plane/src/provenance.ts',
       'packages/gatekeeper/src/policy/index.ts',
       'packages/gatekeeper/src/run-token/index.ts',
@@ -119,6 +120,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     hostedIn: ['packages/bouncer', 'packages/control-plane'],
     owns: [
       'packages/control-plane/src/app.ts',
+      'packages/control-plane/src/grants-routes.ts',
       'packages/control-plane/src/access-enforcement.ts',
       'packages/control-plane/src/identity-links.ts',
       'packages/control-plane/src/role-assignments.ts',

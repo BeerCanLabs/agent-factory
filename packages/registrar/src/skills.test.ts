@@ -490,5 +490,50 @@ describe('who may adopt what (SK1, SK3)', () => {
       r.assignGroup('s4', 'team-alpha');
       assert.equal(canAdopt(r, 'agent-bob', 's4', '1.1.0', { agentOwners: ['bob'], userGroups: ['team-alpha'] }).ok, true);
     });
+
+    it('enforces grant-backed content-owner authority across personal and team agents (D26)', () => {
+      const r = new SkillRegistry();
+      r.save(record('1.0.0', { id: 'priv-skill', owner: 'user:legacy', tests: 'passed' }));
+
+      // Grant-backed active content-owner (`user:stephanie`) overrides legacy `rec.owner`
+      const resolveActive = () => 'user:stephanie';
+      assert.equal(
+        canAdopt(r, 'steph-personal', 'priv-skill', '1.0.0', {
+          agentOwners: ['user:stephanie'],
+          resolveSkillOwner: resolveActive,
+        }).ok,
+        true,
+      );
+      assert.equal(
+        canAdopt(r, 'steph-team', 'priv-skill', '1.0.0', {
+          agentOwners: ['user:stephanie'], // team accountable-lead
+          resolveSkillOwner: resolveActive,
+        }).ok,
+        true,
+      );
+      assert.equal(
+        canAdopt(r, 'other-team', 'priv-skill', '1.0.0', {
+          agentOwners: ['user:other-lead'],
+          resolveSkillOwner: resolveActive,
+        }).ok,
+        false,
+      );
+      // Outgoing owner is superseded by GrantStore active owner
+      assert.equal(
+        canAdopt(r, 'legacy-personal', 'priv-skill', '1.0.0', {
+          agentOwners: ['user:legacy'],
+          resolveSkillOwner: resolveActive,
+        }).ok,
+        false,
+      );
+      // During pending-revoked transfer (`resolveSkillOwner` returns `null`), private adoption is refused
+      assert.equal(
+        canAdopt(r, 'steph-personal', 'priv-skill', '1.0.0', {
+          agentOwners: ['user:stephanie'],
+          resolveSkillOwner: () => null,
+        }).ok,
+        false,
+      );
+    });
   });
 });

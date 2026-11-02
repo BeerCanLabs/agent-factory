@@ -1,10 +1,11 @@
 import http from 'node:http';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { timingSafeEqual, randomUUID, createHash, createHmac } from 'node:crypto';
 import { checkAgentUpdate, extractGitHubRepo, isNewerVersion, parseSemVer } from './updates.js';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, payloadHash, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
-import { accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role, type CliDiscovery } from '@beercanlabs/factory-auth';
+import { ROLES, accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role, type CliDiscovery } from '@beercanlabs/factory-auth';
 import { cartridgeRoleProblems, classifySecrets, effectiveAccess, type Surface } from '@beercanlabs/factory-contract';
 import {
   AgentRecord,
@@ -47,11 +48,15 @@ import {
   directCaller,
   heldCopyOf,
   heldToolName,
+  isValidUserPrincipalId,
   normalizeActorToPrincipal,
+  normalizeEmail,
   parseHoldRequest,
+  requiredRoleForPrivilege,
   type Approval,
   type ApprovalStore,
   type AuthenticatedCaller,
+  type AuthorizeResource,
   type EffectiveGrant,
   type GrantStore,
   type PrincipalStore,
@@ -84,6 +89,9 @@ import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercan
 import { handleSchedules, requesterOfRun, requestersEqual } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleGroupRoutes } from './group-routes.js';
+import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
+import { handleMcp } from './mcp.js';
+export { handleMcp } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
@@ -370,6 +378,24 @@ export function agentKindOf(state: FactoryState, agentId: string): AgentKind | u
   return a ? effectiveAgentKind(a) : undefined;
 }
 
+export const actAsStorage = new AsyncLocalStorage<{ actor: string; onBehalfOf: string }>();
+export const requestActAs = new WeakMap<http.IncomingMessage, { actor: string; onBehalfOf: string }>();
+const requestBasePrincipal = new WeakMap<http.IncomingMessage, Principal>();
+const tappedLedgers = new WeakSet<LedgerStore>();
+
+export function tapActAsLedger(state: FactoryState): void {
+  if (!state.ledger || tappedLedgers.has(state.ledger)) return;
+  const origAppend = state.ledger.append.bind(state.ledger);
+  state.ledger.append = ((event: Parameters<LedgerStore['append']>[0]) => {
+    const ctx = actAsStorage.getStore();
+    if (ctx && event.onBehalfOf === undefined) {
+      return origAppend({ ...event, onBehalfOf: ctx.onBehalfOf });
+    }
+    return origAppend(event);
+  }) as LedgerStore['append'];
+  tappedLedgers.add(state.ledger);
+}
+
 export function effectiveGrantsForActor(
   state: FactoryState,
   actor: string,
@@ -400,9 +426,11 @@ export function effectiveGrantsForActor(
       for (const g of state.groups.listUserGroups(canonicalSubject)) groupSet.add(g.id);
     }
   }
+  const extracted = extractVerifiedEmailFromActor(actor);
   try {
     const grants = state.grants.effectiveGrantsFor({
       subject: canonicalSubject,
+      ...(extracted ? { emails: [extracted.email] } : {}),
       groupIds: groupSet.size > 0 ? [...groupSet] : undefined,
     });
     return { ok: true, grants, canonicalSubject };
@@ -420,12 +448,19 @@ export function resolvePrincipalCaller(
   agentId: string,
   privilege: Privilege,
 ): { ok: true; caller: AuthenticatedCaller } | { ok: false; status: 503; error: string } {
-  const callerGrantRes = effectiveGrantsForActor(state, principal.actor);
+  const subjectActor = principal.onBehalfOf ?? principal.actor;
+  const callerGrantRes = effectiveGrantsForActor(state, subjectActor);
   if (!callerGrantRes.ok) {
     return { ok: false, status: 503, error: callerGrantRes.error };
   }
+  const targetPrincipal: Principal = principal.onBehalfOf
+    ? {
+        actor: subjectActor,
+        roles: rolesForSubjectActor(state, subjectActor, callerGrantRes.grants),
+      }
+    : principal;
   const targetAgent = findAgentRecord(state, agentId);
-  const caller = directCaller(principal, ownersOf(state, agentId), privilege, {
+  const caller = directCaller(targetPrincipal, ownersOf(state, agentId), privilege, {
     agentId,
     agentKind: targetAgent ? effectiveAgentKind(targetAgent) : agentKindOf(state, agentId),
     ...(callerGrantRes.grants !== undefined ? { grants: callerGrantRes.grants } : {}),
@@ -433,7 +468,7 @@ export function resolvePrincipalCaller(
   return { ok: true, caller };
 }
 
-function attachCallerToRunResult(
+export function attachCallerToRunResult(
   state: FactoryState,
   out: { status: number; body: unknown },
   caller: AuthenticatedCaller,
@@ -498,6 +533,16 @@ export function actorIsAdmin(state: FactoryState, actor: string, knownRoles?: re
     }
   }
   const clean = actor.toLowerCase();
+  const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (clean.startsWith('user:') && state.principals && state.principals.healthy) {
+    const rec = state.principals.get(clean);
+    if (rec && rec.emails.some((e) => adminEmails.includes(e))) return true;
+  }
+
   if (!clean.startsWith('token:') && !clean.startsWith('cloudflare:') && !clean.startsWith('oidc:')) {
     return false;
   }
@@ -522,10 +567,6 @@ export function actorIsAdmin(state: FactoryState, actor: string, knownRoles?: re
   }
 
   const email = clean.startsWith('cloudflare:') ? clean.slice(11) : clean.slice(5);
-  const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
-    .split(',')
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
   if (adminEmails.includes(email)) return true;
 
   if (state.identityLinks) {
@@ -768,26 +809,245 @@ export function canRunManageModels(
   return { allowed: false };
 }
 
+const AUTH_ROLE_SET_APP: ReadonlySet<string> = new Set<string>(ROLES);
+
+async function resolveVerifiedPrincipal(
+  state: FactoryState,
+  verified: Principal,
+  allowMaterialize: boolean,
+): Promise<Principal> {
+  let actor = verified.actor;
+  const roleSet = new Set<Role>(verified.roles);
+
+  if (state.principals && state.principals.healthy) {
+    const extracted = extractVerifiedEmailFromActor(actor);
+    if (extracted) {
+      const existing = state.principals.findByEmail(extracted.email);
+      if (existing) {
+        actor = existing.id;
+      } else if (allowMaterialize && state.grants && state.grants.healthy) {
+        const emailDomain = extracted.email.slice(extracted.email.indexOf('@') + 1);
+        if (state.grants.hasActiveDomainGrant(emailDomain)) {
+          try {
+            const mat = await state.grants.materializeOnVerifiedSignIn({
+              principals: state.principals,
+              idp: extracted.idp,
+              email: extracted.email,
+              emailVerified: true,
+            });
+            if (mat.ok && mat.record) {
+              actor = mat.record.id;
+              if (mat.materialized) {
+                const domainActor = 'domain:' + emailDomain;
+                state.ledger.append({
+                  timestamp: new Date().toISOString(),
+                  agentId: 'control-plane',
+                  type: 'action',
+                  action: 'PRINCIPAL_CREATED',
+                  actor: domainActor,
+                  subject: mat.record.id,
+                  before: null,
+                  after: mat.record,
+                });
+              }
+            }
+          } catch {
+            // Store failure surfaces fail-closed via effectiveGrantsForActor on downstream checks.
+          }
+        }
+      }
+    } else if (actor.toLowerCase().startsWith('user:')) {
+      const found = state.principals.get(actor.trim().toLowerCase());
+      if (found) actor = found.id;
+    }
+  }
+
+  if (state.grants && state.grants.healthy && (!state.principals || state.principals.healthy)) {
+    const grantRes = effectiveGrantsForActor(state, actor);
+    if (grantRes.ok && grantRes.grants) {
+      for (const eg of grantRes.grants) {
+        if (!eg.readOnly && eg.grant.scope.kind === 'fleet' && AUTH_ROLE_SET_APP.has(eg.grant.role)) {
+          roleSet.add(eg.grant.role as Role);
+        }
+      }
+    }
+  }
+
+  return { actor, roles: [...roleSet] };
+}
+
+export function resolveActAsForPrincipal(
+  state: FactoryState,
+  principal: Principal,
+  rawTarget: unknown,
+): { ok: true; onBehalfOf: string } | { ok: false; status: number; body: Record<string, unknown> } {
+  if (state.principals && !state.principals.healthy) {
+    return { ok: false, status: 503, body: { error: 'principal_store_unavailable', message: 'principal store is unhealthy' } };
+  }
+  if (state.grants && !state.grants.healthy) {
+    return { ok: false, status: 503, body: { error: 'grant_store_unavailable', message: 'grant store is unhealthy' } };
+  }
+  const grantRes = effectiveGrantsForActor(state, principal.actor);
+  if (!grantRes.ok) {
+    return { ok: false, status: 503, body: { error: grantRes.error } };
+  }
+
+  const adminDecision = authorize({
+    principal,
+    privilege: 'grants.manage',
+    ...(grantRes.grants !== undefined ? { resource: { grants: grantRes.grants } } : {}),
+  });
+  if (!adminDecision.allowed) {
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: 'control-plane',
+      type: 'action',
+      action: 'AUTHZ_DENIED:act_as_requires_admin',
+      actor: principal.actor,
+      scope: { kind: 'fleet' },
+    });
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        error: 'forbidden',
+        required: 'admin',
+        requiredRole: 'admin',
+        message: 'only an admin may act on behalf of another principal',
+      },
+    };
+  }
+
+  if (typeof rawTarget !== 'string' || !rawTarget.trim() || rawTarget.includes(',')) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: 'invalid_act_as', message: 'actAs target must name a single human user:<id> principal or email' },
+    };
+  }
+  const trimmed = rawTarget.trim();
+  if (trimmed.includes(':')) {
+    const lower = trimmed.toLowerCase();
+    if (!lower.startsWith('user:') || !isValidUserPrincipalId(lower)) {
+      return {
+        ok: false,
+        status: 400,
+        body: { error: 'invalid_act_as', message: `actAs target must be a human user:<id> principal (got '${trimmed}')` },
+      };
+    }
+    if (state.principals) {
+      const rest = lower.slice('user:'.length);
+      const found = state.principals.get(lower) ?? (rest.includes('@') ? state.principals.findByEmail(rest) : undefined);
+      if (!found) {
+        return {
+          ok: false,
+          status: 404,
+          body: { error: 'unknown_principal', message: `principal '${lower}' not found` },
+        };
+      }
+      return { ok: true, onBehalfOf: found.id };
+    }
+    return { ok: true, onBehalfOf: lower };
+  }
+
+  let normEmail: string;
+  try {
+    normEmail = normalizeEmail(trimmed);
+  } catch {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: 'invalid_act_as', message: `actAs target '${trimmed}' is not a valid user:<id> or email` },
+    };
+  }
+  if (state.principals) {
+    const found = state.principals.findByEmail(normEmail);
+    if (!found) {
+      return {
+        ok: false,
+        status: 404,
+        body: { error: 'unknown_principal', message: `principal for email '${normEmail}' not found` },
+      };
+    }
+    return { ok: true, onBehalfOf: found.id };
+  }
+  return { ok: true, onBehalfOf: 'user:' + normEmail };
+}
+
+async function enforceActAsHeader(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<{ ok: true; ctx?: { actor: string; onBehalfOf: string } } | { ok: false }> {
+  const raw = req.headers['x-factory-act-as'];
+  if (raw === undefined) return { ok: true };
+  if (Array.isArray(raw) || raw.includes(',') || !raw.trim()) {
+    json(res, 400, {
+      error: 'invalid_act_as',
+      message: 'X-Factory-Act-As must contain a single non-empty human user:<id> principal or email',
+    });
+    return { ok: false };
+  }
+  const who = await identify(req, state, { allowMaterialize: true, skipActAs: true });
+  if (!who.ok) {
+    json(res, 401, { error: 'unauthorized' });
+    return { ok: false };
+  }
+  const resolved = resolveActAsForPrincipal(state, who.principal, raw);
+  if (!resolved.ok) {
+    json(res, resolved.status, resolved.body);
+    return { ok: false };
+  }
+  const ctx = { actor: who.principal.actor, onBehalfOf: resolved.onBehalfOf };
+  requestActAs.set(req, ctx);
+  return { ok: true, ctx };
+}
+
 /**
- * §6.12 A2: who is calling, from a credential the factory verifies itself. The `Authorization` header (factory tokens,
- * OIDC) first, then the identity-aware proxy's signed assertion (`cf-access-jwt-assertion` or the `CF_Authorization`
- * cookie) when Access identity is configured. Unsigned identity headers (the proxy's plain email header) are never
- * read.
+ * §6.12 A2, D2, D6, D10, D32: who is calling, from a credential the factory verifies itself, resolved to the canonical
+ * `PrincipalStore` principal (materializing on first verified login under a granted `domain:<domain>` when
+ * `opts?.allowMaterialize !== false`, with zero writes for unknown callers outside granted domains).
  */
-export async function identify(req: http.IncomingMessage, state: FactoryState): Promise<AuthResult> {
-  const reasons: string[] = [];
-  if (req.headers.authorization) {
-    const r = await state.auth.verify(req.headers.authorization);
-    if (r.ok) return r;
-    reasons.push(r.reason);
+export async function identify(
+  req: http.IncomingMessage,
+  state: FactoryState,
+  opts?: { allowMaterialize?: boolean; skipActAs?: boolean },
+): Promise<AuthResult> {
+  const allowMaterialize = opts?.allowMaterialize !== false;
+  let base = allowMaterialize ? requestBasePrincipal.get(req) : undefined;
+  if (!base) {
+    const reasons: string[] = [];
+    let verified: AuthResult | undefined;
+    if (req.headers.authorization) {
+      const r = await state.auth.verify(req.headers.authorization);
+      if (r.ok) verified = r;
+      else reasons.push(r.reason);
+    }
+    if (!verified) {
+      const assertion = accessAssertionOf(req.headers);
+      if (assertion && state.access) {
+        const r = await state.access.verify(assertion);
+        if (r.ok) verified = r;
+        else reasons.push(`access: ${r.reason}`);
+      }
+    }
+    if (!verified || !verified.ok) {
+      return { ok: false, reason: reasons.join('; ') || 'no credential' };
+    }
+    base = await resolveVerifiedPrincipal(state, verified.principal, allowMaterialize);
+    if (allowMaterialize) {
+      requestBasePrincipal.set(req, base);
+    }
   }
-  const assertion = accessAssertionOf(req.headers);
-  if (assertion && state.access) {
-    const r = await state.access.verify(assertion);
-    if (r.ok) return r;
-    reasons.push(`access: ${r.reason}`);
+
+  if (opts?.skipActAs) {
+    return { ok: true, principal: { ...base, roles: [...base.roles] } };
   }
-  return { ok: false, reason: reasons.join('; ') || 'no credential' };
+  const actAs = requestActAs.get(req) ?? actAsStorage.getStore();
+  if (actAs && actAs.actor === base.actor) {
+    return { ok: true, principal: { ...base, roles: [...base.roles], onBehalfOf: actAs.onBehalfOf } };
+  }
+  return { ok: true, principal: { ...base, roles: [...base.roles] } };
 }
 
 export type RequirePrivilegeResource = {
@@ -868,36 +1128,71 @@ export async function requirePrivilege(
     return null;
   }
 
-  const ownsAny = privilege === 'skills.register' ? checkOwnsAnyAgent(state, result.principal.actor) : false;
+  const ownsAny =
+    privilege === 'skills.register' || privilege === 'mcp.use'
+      ? checkOwnsAnyAgent(state, result.principal.actor)
+      : false;
   const computedGroupRoles = resource?.groupId && state.groups
-    ? (state.groups.getGroup(resource.groupId)?.members.some((m) => m.toLowerCase() === result.principal.actor.toLowerCase())
+    ? (state.groups.getGroup(resource.groupId)?.members.some((m) => {
+        try {
+          return normalizeActorToPrincipal(m, state.principals) === normalizeActorToPrincipal(result.principal.actor, state.principals);
+        } catch {
+          return m.toLowerCase() === result.principal.actor.toLowerCase();
+        }
+      })
         ? state.groups.getGroup(resource.groupId)?.roles
         : [])
     : undefined;
   const userGroupRoles = privilege === 'skills.register' && state.groups
     ? state.groups.listUserGroups(result.principal.actor).flatMap((g) => g.roles)
     : undefined;
+  const normalizedOwners = resource?.agentId
+    ? ownersOf(state, resource.agentId).map((o) => {
+        try {
+          return normalizeActorToPrincipal(o, state.principals);
+        } catch {
+          return o;
+        }
+      })
+    : undefined;
+  const authResource: AuthorizeResource = {
+    ...(resource?.agentId
+      ? {
+          agentId: resource.agentId,
+          agentKind: agentKindOf(state, resource.agentId),
+          owners: normalizedOwners,
+        }
+      : {}),
+    ...(resource?.skillId ? { skillId: resource.skillId } : {}),
+    ...(resource?.skillOwner ? { skillOwner: resource.skillOwner } : {}),
+    ...(resource?.uploader ? { uploader: resource.uploader } : {}),
+    groupRoles: resource?.groupRoles ?? computedGroupRoles ?? userGroupRoles,
+    ownsAnyAgent: resource?.ownsAnyAgent ?? ownsAny,
+    ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+  };
   const decision = authorize({
     principal: result.principal,
     privilege,
-    resource: {
-      ...(resource?.agentId
-        ? {
-            agentId: resource.agentId,
-            agentKind: agentKindOf(state, resource.agentId),
-            owners: ownersOf(state, resource.agentId),
-          }
-        : {}),
-      ...(resource?.skillId ? { skillId: resource.skillId } : {}),
-      ...(resource?.skillOwner ? { skillOwner: resource.skillOwner } : {}),
-      ...(resource?.uploader ? { uploader: resource.uploader } : {}),
-      groupRoles: resource?.groupRoles ?? computedGroupRoles ?? userGroupRoles,
-      ownsAnyAgent: resource?.ownsAnyAgent ?? ownsAny,
-      ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
-    },
+    resource: authResource,
   });
   if (!decision.allowed) {
-    json(res, 403, { error: 'forbidden', required: decision.required });
+    const requiredRole = requiredRoleForPrivilege(privilege, authResource, decision.required);
+    if (state.grants || state.principals) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: resource?.agentId ?? 'control-plane',
+        type: 'action',
+        action: 'AUTHZ_DENIED',
+        actor: result.principal.actor,
+        ...(result.principal.onBehalfOf ? { onBehalfOf: result.principal.onBehalfOf } : {}),
+        scope: resource?.agentId
+          ? { kind: 'agent', id: resource.agentId }
+          : resource?.skillId
+            ? { kind: 'skill', id: resource.skillId }
+            : { kind: 'fleet' },
+      });
+    }
+    json(res, 403, { error: 'forbidden', required: decision.required, requiredRole });
     return null;
   }
   return result.principal;
@@ -1004,7 +1299,7 @@ export function enrichAgent(state: FactoryState, a: AgentRecord) {
 
 
 /** A requested run model must be a model id (REST and MCP wake share this check, E4.1). */
-function badRunModel(model: unknown): string | undefined {
+export function badRunModel(model: unknown): string | undefined {
   if (model !== undefined && (typeof model !== 'string' || !/^[\w.:@/-]{1,128}$/.test(model))) return 'model must be a model id';
   return undefined;
 }
@@ -1032,199 +1327,7 @@ function unblockAffordableRuns(state: FactoryState, agentId: string, limits: Bud
 }
 
 
-type ToolSpec = { name: string; description: string; privilege: Privilege; args: Record<string, { type: string; items?: { type: string } }>; required?: string[] };
-
-const TOOLS: ToolSpec[] = [
-  { name: 'list_agents', description: 'List factory cartridges', privilege: 'agents.read', args: {} },
-  { name: 'query_ledger', description: 'Read the execution ledger', privilege: 'ledger.read', args: { agent: { type: 'string' } } },
-  { name: 'get_run', description: 'Get a run by id', privilege: 'runs.read', args: { runId: { type: 'string' } }, required: ['runId'] },
-  {
-    name: 'wake_agent',
-    description: 'Start a run (202 semantics: returns the queued/started run). Optional model pins the run; optional input is passed to it, the same as POST /api/v1/agents/:id/runs.',
-    privilege: 'agents.wake',
-    args: { id: { type: 'string' }, model: { type: 'string' }, input: { type: 'object' } },
-    required: ['id'],
-  },
-  { name: 'pause_agent', description: 'Pause agent egress', privilege: 'agents.pause', args: { id: { type: 'string' } }, required: ['id'] },
-  { name: 'resume_agent', description: 'Resume agent egress', privilege: 'agents.resume', args: { id: { type: 'string' } }, required: ['id'] },
-  { name: 'isolate_agent', description: 'Isolate agent egress', privilege: 'agents.isolate', args: { id: { type: 'string' } }, required: ['id'] },
-  { name: 'list_approvals', description: 'List pending tool-call approvals', privilege: 'approvals.read', args: {} },
-  {
-    name: 'decide_approval',
-    description: 'Approve or reject a held tool call',
-    privilege: 'approvals.decide',
-    args: { approvalId: { type: 'string' }, decision: { type: 'string' }, notes: { type: 'string' } },
-    required: ['approvalId', 'decision'],
-  },
-  {
-    name: 'check_agent_update',
-    description: 'Check for available cartridge updates from git repository',
-    privilege: 'agents.update.read',
-    args: { id: { type: 'string' } },
-    required: ['id'],
-  },
-  {
-    name: 'install_agent_update',
-    description: 'Install an available cartridge update (mode: drain or restart_now)',
-    privilege: 'agents.update.install',
-    args: { id: { type: 'string' }, mode: { type: 'string' } },
-    required: ['id'],
-  },
-  {
-    name: 'list_model_catalog',
-    description: 'List offered and staged models in the factory',
-    privilege: 'models.read',
-    args: {},
-  },
-  {
-    name: 'scan_vendor_models',
-    description: 'Scan an AI vendor endpoint to discover available models',
-    privilege: 'models.manage',
-    args: { vendorId: { type: 'string' } },
-    required: ['vendorId'],
-  },
-  {
-    name: 'admit_model',
-    description: 'Admit a model to the factory offering with token pricing. Name its vendor (vendorId): provider, endpoint and credential come from the vendor. provider/region only for cloud model services (bedrock-converse, vertex-*).',
-    privilege: 'models.manage',
-    args: {
-      name: { type: 'string' },
-      id: { type: 'string' },
-      vendorId: { type: 'string' },
-      provider: { type: 'string' },
-      region: { type: 'string' },
-      inputPerMTok: { type: 'string' },
-      outputPerMTok: { type: 'string' },
-    },
-    required: ['name', 'id'],
-  },
-  {
-    name: 'update_model_pricing',
-    description: 'Update token pricing per million tokens for an admitted model',
-    privilege: 'models.manage',
-    args: {
-      name: { type: 'string' },
-      inputPerMTok: { type: 'string' },
-      outputPerMTok: { type: 'string' },
-    },
-    required: ['name', 'inputPerMTok', 'outputPerMTok'],
-  },
-  {
-    name: 'retire_vendor_or_model',
-    description: 'Retire an admitted model from the factory offering',
-    privilege: 'models.manage',
-    args: {
-      name: { type: 'string' },
-    },
-    required: ['name'],
-  },
-  {
-    name: 'set_default_model',
-    description: 'Set the factory default model granted to agents whose policy specifies no models (requires models.manage)',
-    privilege: 'models.manage',
-    args: {
-      model: { type: 'string' },
-    },
-    required: ['model'],
-  },
-  {
-    name: 'get_agent_models',
-    description: 'Get the effective and configured model slots and approved models for an agent',
-    privilege: 'agents.models.read',
-    args: { id: { type: 'string' } },
-    required: ['id'],
-  },
-  {
-    name: 'set_agent_models',
-    description: 'Configure approved models and current, primary, and secondary model slots for an agent',
-    privilege: 'agents.models.set',
-    args: {
-      id: { type: 'string' },
-      approvedModels: { type: 'array', items: { type: 'string' } },
-      currentModel: { type: 'string' },
-      primaryModel: { type: 'string' },
-      secondaryModel: { type: 'string' },
-    },
-    required: ['id'],
-  },
-];
-
-export async function handleMcp(state: FactoryState, payload: Record<string, unknown>, principal: Principal): Promise<unknown> {
-  const id = payload.id ?? 1;
-  const method = payload.method;
-  if (method === 'initialize') {
-    return {
-      jsonrpc: '2.0',
-      id,
-      result: {
-        protocolVersion: '2024-11-05',
-        capabilities: { tools: {} },
-        serverInfo: { name: 'agent-factory', version: state.version },
-      },
-    };
-  }
-  if (method === 'tools/list') {
-    const grantRes = effectiveGrantsForActor(state, principal.actor);
-    if (!grantRes.ok) {
-      return { jsonrpc: '2.0', id, error: { code: -32003, message: grantRes.error } };
-    }
-    const ownsAny = checkOwnsAnyAgent(state, principal.actor);
-    const hasAgentScopeGrant = Boolean(
-      grantRes.grants?.some((eg) => eg.grant.scope.kind === 'agent'),
-    );
-    const tools = TOOLS.filter((t) => {
-      if (
-        authorize({
-          principal,
-          privilege: t.privilege,
-          ...(grantRes.grants !== undefined ? { resource: { grants: grantRes.grants } } : {}),
-        }).allowed
-      ) {
-        return true;
-      }
-      if (AGENT_SCOPED.has(t.privilege) && (ownsAny || hasAgentScopeGrant)) return true;
-      return false;
-    }).map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: { type: 'object', properties: t.args, ...(t.required ? { required: t.required } : {}) },
-    }));
-    return { jsonrpc: '2.0', id, result: { tools } };
-  }
-  if (method === 'tools/call') {
-    const grantRes = effectiveGrantsForActor(state, principal.actor);
-    if (!grantRes.ok) {
-      return { jsonrpc: '2.0', id, error: { code: -32003, message: grantRes.error } };
-    }
-    const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
-    const spec = TOOLS.find((t) => t.name === params.name);
-    if (!spec) return { jsonrpc: '2.0', id, error: { code: -32602, message: `unknown tool ${String(params.name)}` } };
-    const rawArgs = params.arguments ?? {};
-    const targetAgentId = typeof rawArgs.id === 'string' ? rawArgs.id : typeof rawArgs.agentId === 'string' ? rawArgs.agentId : undefined;
-    const resource =
-      targetAgentId || grantRes.grants !== undefined
-        ? {
-            ...(targetAgentId
-              ? {
-                  agentId: targetAgentId,
-                  agentKind: agentKindOf(state, targetAgentId),
-                  owners: ownersOf(state, targetAgentId),
-                }
-              : {}),
-            ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
-          }
-        : undefined;
-    const decision = authorize({ principal, privilege: spec.privilege, resource });
-    if (!decision.allowed) {
-      return { jsonrpc: '2.0', id, error: { code: -32001, message: `forbidden: requires ${decision.required}` } };
-    }
-    const result = await dispatchTool(state, spec.name, rawArgs, principal);
-    return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }] } };
-  }
-  return { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method ${String(method)}` } };
-}
-
-type VendorTarget = { upstream: string; adapter: string; discoveryPath?: string; secretName: string };
+export type VendorTarget = { upstream: string; adapter: string; discoveryPath?: string; secretName: string };
 
 /**
  * Hands a turn to the agent (GAP-176, §6.15): to its live run's mailbox, or, with no run to hand it to (live or queued),
@@ -1261,7 +1364,7 @@ async function handOff(
   if (handoffTargets.length > 0) {
     const senderRequester = opts.requestedBy
       ? ({ kind: 'identity' as const, provider: opts.requestedBy.provider, id: opts.requestedBy.id })
-      : ({ kind: 'principal' as const, actor });
+      : ({ kind: 'principal' as const, actor: opts.caller?.actor ?? actor });
     const sender = accessForRequester(state, agent, senderRequester, false, opts.caller?.roles);
     const sameAsRun = handoffTargets.every((r) => requestersEqual(requesterOfRun(state, r), senderRequester));
     if (hasDeniedRoute(sender) && !sameAsRun) {
@@ -1371,7 +1474,7 @@ function resultFootnote(output: string, runRows: ReadonlyArray<Record<string, un
 }
 
 /** The factory default model: configuration (M2, GAP-181), never a value in code. Undefined when none is set. */
-function defaultModelOf(state: FactoryState): string | undefined {
+export function defaultModelOf(state: FactoryState): string | undefined {
   return state.modelStore?.getDefault() ?? state.defaultModel;
 }
 
@@ -1379,7 +1482,7 @@ function defaultModelOf(state: FactoryState): string | undefined {
  * Core model selection configuration for an agent (§6.9 M2, TSK-165).
  * Updates approvedModels, currentModel, primaryModel, and secondaryModel, applying deterministic removal transitions.
  */
-async function setAgentModels(
+export async function setAgentModels(
   state: FactoryState,
   agentId: string,
   body: {
@@ -1825,7 +1928,7 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
  * Retire a model and take it out of every policy that lists it (§6.9 M2, GAP-162). Each changed policy goes through
  * the same record as a policy change: `POLICY_UPDATED` and a configuration version (GAP-181).
  */
-async function retireModel(state: FactoryState, modelName: string, actor: string): Promise<{ retired: false } | { retired: true; affectedAgents: string[] }> {
+export async function retireModel(state: FactoryState, modelName: string, actor: string): Promise<{ retired: false } | { retired: true; affectedAgents: string[] }> {
   if (!state.modelStore?.retire(modelName)) return { retired: false };
   if (state.defaultModel === modelName) state.defaultModel = undefined;
   const affectedAgents: string[] = [];
@@ -1844,7 +1947,7 @@ async function retireModel(state: FactoryState, modelName: string, actor: string
 }
 
 /** Registered ai-provider, else a built-in template. HTTPS only. The secret name is held by the gatekeeper-egress. */
-function vendorTarget(state: FactoryState, vendorId: string): VendorTarget | { error: string; message?: string } {
+export function vendorTarget(state: FactoryState, vendorId: string): VendorTarget | { error: string; message?: string } {
   let upstream: string | undefined;
   let adapter = 'openAiCompatible';
   let discoveryPath: string | undefined;
@@ -1907,10 +2010,10 @@ function vendorCatalogFields(state: FactoryState, vendorId: string): { provider:
   };
 }
 
-type AdmitInput = { name?: string; id?: string; vendorId?: string; provider?: string; endpoint?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } };
+export type AdmitInput = { name?: string; id?: string; vendorId?: string; provider?: string; endpoint?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } };
 
 /** One admission path for REST, MCP and the console (GAP-182). */
-function admitModel(state: FactoryState, input: AdmitInput, actor: string): { ok: true; model: StoredModel } | { ok: false; status: number; error: string; message?: string } {
+export function admitModel(state: FactoryState, input: AdmitInput, actor: string): { ok: true; model: StoredModel } | { ok: false; status: number; error: string; message?: string } {
   if (!state.modelStore) return { ok: false, status: 500, error: 'model_store_not_configured' };
   if (!input.name || !input.id) return { ok: false, status: 400, error: 'invalid_request', message: 'name and id are required' };
   const cloud = Boolean(input.provider && CLOUD_PROVIDERS.has(input.provider));
@@ -1966,7 +2069,7 @@ export function relinkVendorModels(state: FactoryState): string[] {
  * S1: the control plane never reads a provider key. The gatekeeper-egress holds it and calls the vendor.
  * Returns model ids only.
  */
-async function discoverViaEgress(state: FactoryState, target: VendorTarget): Promise<DiscoveredModel[]> {
+export async function discoverViaEgress(state: FactoryState, target: VendorTarget): Promise<DiscoveredModel[]> {
   const base = state.gatekeeperEgressUrl?.replace(/\/$/, '');
   const token = state.gatekeeperEgressToken;
   if (!base || !token) {
@@ -1994,7 +2097,7 @@ async function discoverViaEgress(state: FactoryState, target: VendorTarget): Pro
   return body.models;
 }
 
-function stageDiscovered(state: FactoryState, vendorId: string, discovered: DiscoveredModel[], actor: string): StagedModel[] {
+export function stageDiscovered(state: FactoryState, vendorId: string, discovered: DiscoveredModel[], actor: string): StagedModel[] {
   const staged: StagedModel[] = discovered.map((d) => {
     const ref = resolveModelReference(d.id);
     return {
@@ -2020,178 +2123,6 @@ function stageDiscovered(state: FactoryState, vendorId: string, discovered: Disc
   return staged;
 }
 
-async function dispatchTool(state: FactoryState, name: string, args: Record<string, unknown>, principal: Principal): Promise<unknown> {
-  const actor = principal.actor;
-  if (name === 'list_agents') return [...state.agents.values()].filter((a) => !a.ephemeral).map((a) => enrichAgent(state, a));
-  if (name === 'query_ledger') return state.ledger.query({ agent: typeof args.agent === 'string' ? args.agent : undefined });
-  if (name === 'get_run') return (typeof args.runId === 'string' ? state.runs.get(args.runId) : undefined) ?? { error: 'not_found' };
-  if (name === 'list_approvals') return visibleApprovals(state, principal, state.approvals.list({ state: 'pending' }));
-  if (name === 'decide_approval') return (await decideApproval(state, String(args.approvalId), String(args.decision), principal, typeof args.notes === 'string' ? args.notes : undefined)).body;
-  if (name === 'list_model_catalog') {
-    return {
-      offered: state.modelStore ? state.modelStore.listOffered() : Object.entries(state.modelCatalog ?? {}).map(([n, m]) => ({ name: n, ...m })),
-      staged: state.modelStore?.listStaged() ?? [],
-      default: defaultModelOf(state) ?? null,
-    };
-  }
-  if (name === 'scan_vendor_models') {
-    const vendorId = typeof args.vendorId === 'string' ? args.vendorId : undefined;
-    if (!vendorId) return { error: 'vendorId is required' };
-    const target = vendorTarget(state, vendorId);
-    if ('error' in target) return target;
-    try {
-      const discovered = await discoverViaEgress(state, target);
-      const staged = stageDiscovered(state, vendorId, discovered, actor);
-      return { ok: true, count: staged.length, staged };
-    } catch (err: any) {
-      const code = err?.message === 'credential_unbound' ? 'credential_unbound' : err?.status === 503 ? 'discovery_unavailable' : 'discovery_failed';
-      return { error: code, message: `Model discovery failed for vendor ${vendorId}` };
-    }
-  }
-  if (name === 'admit_model') {
-    const price = (args.inputPerMTok && args.outputPerMTok) ? {
-      inputPerMTok: parseFloat(String(args.inputPerMTok)),
-      outputPerMTok: parseFloat(String(args.outputPerMTok)),
-    } : undefined;
-    const out = admitModel(state, {
-      name: typeof args.name === 'string' ? args.name : undefined,
-      id: typeof args.id === 'string' ? args.id : undefined,
-      vendorId: typeof args.vendorId === 'string' ? args.vendorId : undefined,
-      provider: typeof args.provider === 'string' ? args.provider : undefined,
-      region: typeof args.region === 'string' ? args.region : undefined,
-      price,
-    }, actor);
-    return out.ok ? { ok: true, model: out.model } : { error: out.error, ...(out.message ? { message: out.message } : {}) };
-  }
-  if (name === 'update_model_pricing') {
-    if (!state.modelStore) return { error: 'model_store_not_configured' };
-    const price = {
-      inputPerMTok: parseFloat(String(args.inputPerMTok)),
-      outputPerMTok: parseFloat(String(args.outputPerMTok)),
-    };
-    try {
-      const model = state.modelStore.updatePricing(String(args.name), price, actor);
-      state.modelCatalog = state.modelStore.toEgressCatalog();
-      state.ledger.append({
-        action: 'MODEL_PRICING_UPDATED',
-        actor,
-        model: String(args.name),
-        price,
-        timestamp: new Date().toISOString(),
-      });
-      return { ok: true, model };
-    } catch (err: any) {
-      return { error: 'not_found', message: err.message };
-    }
-  }
-  if (name === 'retire_vendor_or_model') {
-    if (!state.modelStore) return { error: 'model_store_not_configured' };
-    const modelName = String(args.name);
-    const out = await retireModel(state, modelName, actor);
-    if (!out.retired) return { error: 'not_found' };
-    return { ok: true, retired: modelName, affectedAgents: out.affectedAgents };
-  }
-  if (name === 'set_default_model') {
-    if (!state.modelStore) return { error: 'model_store_not_configured' };
-    const model = args.model;
-    if (!model || typeof model !== 'string') return { error: 'model is required' };
-    try {
-      state.modelStore.setDefault(model, actor);
-      state.defaultModel = model;
-      state.ledger.append({
-        action: 'MODEL_DEFAULT_UPDATED',
-        actor,
-        model,
-        timestamp: new Date().toISOString(),
-      });
-      return { ok: true, default: model };
-    } catch (err: any) {
-      return { error: 'invalid_request', message: err.message };
-    }
-  }
-
-  const id = typeof args.id === 'string' ? args.id : undefined;
-  if (!id) return { error: 'id required' };
-  if (name === 'get_agent_models') {
-    const agent = state.agents.get(id);
-    if (!agent) return { error: 'not_found' };
-    const pol = state.policies.get(id);
-    const eff = effectiveAgentModels(pol ?? {}, defaultModelOf(state));
-    return {
-      agentId: id,
-      ...eff,
-      defaultModel: defaultModelOf(state) ?? null,
-    };
-  }
-  if (name === 'set_agent_models') {
-    const out = await setAgentModels(
-      state,
-      id,
-      {
-        approvedModels: Array.isArray(args.approvedModels) ? (args.approvedModels as string[]) : undefined,
-        currentModel: (args.currentModel as string | null | undefined),
-        primaryModel: (args.primaryModel as string | null | undefined),
-        secondaryModel: (args.secondaryModel as string | null | undefined),
-      },
-      actor,
-    );
-    return out.body;
-  }
-  if (name === 'wake_agent') {
-    // E4.1: the same checks and start path as REST run creation; createRun strips caller/turn fields from input.
-    const bad = badRunModel(args.model);
-    if (bad) return { error: bad };
-    const resolved = resolvePrincipalCaller(state, principal, id, 'agents.wake');
-    if (!resolved.ok) return { error: resolved.error };
-    const out = await createRun(state, id, {
-      actor,
-      trigger: 'mcp',
-      ...(args.input !== undefined ? { input: args.input } : {}),
-      ...(typeof args.model === 'string' ? { model: args.model } : {}),
-    });
-    attachCallerToRunResult(state, out, resolved.caller);
-    return out.body;
-  }
-  if (name === 'pause_agent') return (await applyKillSwitch(state, id, 'PAUSE', actor)).body;
-  if (name === 'resume_agent') return (await applyKillSwitch(state, id, 'RESUME', actor)).body;
-  if (name === 'isolate_agent') return (await applyKillSwitch(state, id, 'ISOLATE', actor)).body;
-  if (name === 'check_agent_update') {
-    const agent = state.agents.get(id);
-    if (!agent) return { error: 'not_found' };
-    if (agent.createdFrom === 'configuration') return { error: 'configuration_agent' };
-    const res = await checkAgentUpdate(agent, process.env.FACTORY_AGENT_SOURCE_TOKEN);
-    Object.assign(agent, res);
-    registryOf(state).save(agent);
-    return res;
-  }
-  if (name === 'install_agent_update') {
-    const agent = state.agents.get(id);
-    if (!agent) return { error: 'not_found' };
-    if (agent.createdFrom === 'configuration') return { error: 'configuration_agent' };
-    const mode = (args.mode === 'restart_now' ? 'restart_now' : 'drain') as 'drain' | 'restart_now';
-    const targetCommit = agent.offeredCommit ?? agent.commit;
-    const targetVersion = agent.offeredVersion;
-    if (!targetCommit) return { error: 'no_commit_available' };
-    if (agent.state === 'WORKING' && mode === 'drain') {
-      agent.stagedCommit = targetCommit;
-      agent.stagedVersion = targetVersion;
-      agent.pendingDrain = true;
-      registryOf(state).save(agent);
-      return { ok: true, status: 'staged_drain', agentId: id, commit: targetCommit, version: targetVersion };
-    }
-    agent.commit = targetCommit;
-    agent.deployedCommit = targetCommit;
-    if (targetVersion) agent.installedVersion = targetVersion;
-    agent.updateAvailable = false;
-    delete agent.pendingDrain;
-    delete agent.stagedCommit;
-    delete agent.stagedVersion;
-    registryOf(state).save(agent);
-    return { ok: true, status: 'applied', agentId: id, commit: targetCommit, version: targetVersion };
-  }
-  return { error: `unknown tool ${name}` };
-}
-
 /**
  * E9, E4: who may decide what an agent did. The global `admin` and `approver` roles decide any agent's; otherwise the
  * requesting user of the run decides, or, when the run has no requesting user, any owner of the agent. A requester whose
@@ -2199,7 +2130,7 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
  * not decide is refused whether or not the approval exists.
  */
 /** A configuration change names a person's external identity: only those who may decide it read what it says (CF4). Used by every list. */
-function visibleApprovals(state: FactoryState, reader: Principal, all: Approval[]): Approval[] {
+export function visibleApprovals(state: FactoryState, reader: Principal, all: Approval[]): Approval[] {
   return all.map((raw) => {
     // CF4: the code ties a channel reply to an approval; it is the ingress's, never listed.
     const a: Approval = raw.ask ? { ...raw, ask: { ...raw.ask, code: '' } } : raw;
@@ -2255,14 +2186,15 @@ export async function decideApproval(state: FactoryState, id: string, decision: 
   const grantCheck = effectiveGrantsForActor(state, actor);
   if (!grantCheck.ok) return { status: 503, body: { error: grantCheck.error } };
   const may = mayDecide(state, principal, id);
-  if (!may.ok) return { status: 403, body: { error: 'forbidden', required: may.required } };
+  if (!may.ok) return { status: 403, body: { error: 'forbidden', required: may.required, requiredRole: may.required } };
   if (decision !== 'approve' && decision !== 'reject') return { status: 400, body: { error: 'decision must be approve or reject' } };
   if (notes !== undefined && notes !== null && (typeof notes !== 'string' || notes.length > 4000)) return { status: 400, body: { error: 'notes must be text, at most 4000 characters' } };
   const note = typeof notes === 'string' && notes.trim() ? notes.trim() : undefined;
   // CF4: a configuration change is decided only by an admin or an owner of that agent, and applied by the factory.
   const pending = state.approvals.get(id);
   if (pending?.kind === 'change' && !mayApproveChange(state, principal, pending.agentId)) {
-    return { status: 403, body: { error: 'forbidden', required: 'agent-owner' } };
+    const reqRole = agentKindOf(state, pending.agentId) === 'team' ? 'accountable-lead' : 'content-owner';
+    return { status: 403, body: { error: 'forbidden', required: 'agent-owner', requiredRole: reqRole } };
   }
   const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor, note);
   if (!decided) return { status: 409, body: { error: 'approval not pending' } };
@@ -2416,6 +2348,7 @@ import { UI_HTML } from './ui.js';
 
 export function createFactoryServer(state: FactoryState): http.Server {
   wireGrantStoreKindLookup(state);
+  tapActAsLedger(state);
   // SK1: follow skill checks a previous control plane started and did not see end.
   void resumeSkillChecks(state).catch((err) => console.warn('[control-plane] could not resume skill checks:', err));
   return http.createServer(async (req, res) => {
@@ -2430,12 +2363,34 @@ export function createFactoryServer(state: FactoryState): http.Server {
 
 async function route(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
   wireGrantStoreKindLookup(state);
+  tapActAsLedger(state);
+  const actAsCheck = await enforceActAsHeader(state, req, res);
+  if (!actAsCheck.ok) return;
+  if (actAsCheck.ctx) {
+    return actAsStorage.run(actAsCheck.ctx, () => routeInner(state, req, res));
+  }
+  return routeInner(state, req, res);
+}
+
+async function routeInner(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
   const path = (req.url ?? '/').split('?')[0];
   const started = Number(process.env.FACTORY_STARTED_AT ?? Date.now());
 
   if (path === '/ui' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(UI_HTML);
+    return;
+  }
+
+  if (
+    (path === '/api/v1/whoami' ||
+      path === '/api/v1/authz/check' ||
+      path === '/api/v1/principals' ||
+      path.startsWith('/api/v1/principals/') ||
+      path === '/api/v1/grants' ||
+      path.startsWith('/api/v1/grants/')) &&
+    (await handleGrantsRoutes(state, req, res, path))
+  ) {
     return;
   }
 
@@ -2478,14 +2433,6 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       uptime: Math.round((Date.now() - started) / 1000),
       timestamp: new Date().toISOString(),
     });
-    return;
-  }
-
-  // The caller's verified identity and roles (the dashboard shows what the factory will actually allow).
-  if (path === '/api/v1/whoami' && req.method === 'GET') {
-    const who = await identify(req, state);
-    if (!who.ok) return json(res, 401, { error: 'unauthorized' });
-    json(res, 200, { actor: who.principal.actor, roles: who.principal.roles });
     return;
   }
 
@@ -3427,10 +3374,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       refuse(403, 'CONVERSATION_REQUEST_REFUSED', { error: 'forbidden', reason: 'a conversation request is made by a person, not the ingress' });
       return;
     }
+    const effectivePerson = principal.onBehalfOf ?? principal.actor;
     const subject = typeof body.subject === 'string' ? body.subject : undefined;
-    const othersRead = subject !== undefined && subject !== principal.actor;
+    const othersRead = subject !== undefined && subject !== effectivePerson && subject !== principal.actor;
     if (othersRead && !authorize({ principal, privilege: 'conversations.read-others' }).allowed) {
-      refuse(403, 'CONVERSATION_REQUEST_REFUSED', { error: 'forbidden', required: 'admin' });
+      refuse(403, 'CONVERSATION_REQUEST_REFUSED', { error: 'forbidden', required: 'admin', requiredRole: 'admin' });
       return;
     }
     const agent = state.agents.get(convReq[1]);
@@ -3452,7 +3400,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     const caller = resolvedConvCaller.caller;
     const request = { op: body.op, ...(body.conversation ? { conversation: body.conversation } : {}), ...(body.limit ? { limit: body.limit } : {}), ...(othersRead ? { subject } : {}) };
     const payload = { kind: 'conversation-request', request, caller, turnId, replyTo: { channel: 'console' } };
-    rememberConsoleTurn(state, turnId, agent.id, principal.actor);
+    rememberConsoleTurn(state, turnId, agent.id, effectivePerson);
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId: agent.id,
@@ -3476,10 +3424,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   if (repliesMatch && req.method === 'GET') {
     const principal = await requirePrivilege(req, res, state, 'agents.converse', { agentId: repliesMatch[1] });
     if (!principal) return;
+    const effectivePerson = principal.onBehalfOf ?? principal.actor;
     const url = new URL(req.url ?? '/', 'http://factory.local');
     const after = Number(url.searchParams.get('after') ?? 0) || 0;
     const replies = (state.consoleReplies ?? [])
-      .filter((r) => r.agentId === repliesMatch[1] && r.actor === principal.actor && r.seq > after)
+      .filter((r) => r.agentId === repliesMatch[1] && r.actor === effectivePerson && r.seq > after)
       .map(({ seq, turnId, runId, content, footnote, at }) => ({ seq, turnId, runId, content, ...(footnote ? { footnote } : {}), at }));
     json(res, 200, { replies });
     return;

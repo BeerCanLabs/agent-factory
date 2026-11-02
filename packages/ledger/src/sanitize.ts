@@ -55,6 +55,14 @@ export type LedgerEvent = {
   toolCalled?: boolean;
   /** AM5: whose conversation an admin read (an actor, never content). */
   subject?: string;
+  /** S3 / D10: canonical human principal (`user:<id>`) on whose behalf an admin executed the action. */
+  onBehalfOf?: string;
+  /** S3 / S7: structured grant scope (`fleet` or `agent`/`skill` with id) for grant/authz audit rows. */
+  scope?: { kind: 'fleet' } | { kind: 'agent' | 'skill'; id: string };
+  /** S3 / S7: structured pre-mutation principal/grant snapshot (`null` when newly created). */
+  before?: Record<string, unknown> | null;
+  /** S3 / S7: structured post-mutation principal/grant snapshot (`null` when deleted/revoked). */
+  after?: Record<string, unknown> | null;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
@@ -68,6 +76,10 @@ const ALLOWED = new Set<keyof LedgerEvent>([
   'retryRequestId',
   'toolCalled',
   'subject',
+  'onBehalfOf',
+  'scope',
+  'before',
+  'after',
   'timestamp',
   'agentId',
   'type',
@@ -168,6 +180,82 @@ function asType(raw: unknown): string {
   return 'action';
 }
 
+const AUDIT_ID_FIELD = /^[A-Za-z0-9:._@+-]{1,256}$/;
+const AUDIT_SAFE_SCALAR_KEYS = new Set([
+  'id',
+  'kind',
+  'subject',
+  'subjectKind',
+  'role',
+  'state',
+  'expiresAt',
+  'grantedBy',
+  'grantedAt',
+  'onBehalfOf',
+  'transferId',
+  'transferExpiresAt',
+  'pendingExpiresAt',
+  'createdAt',
+  'updatedAt',
+  'createdBy',
+  'updatedBy',
+]);
+
+function sanitizeGrantScope(raw: unknown): LedgerEvent['scope'] | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const s = raw as Record<string, unknown>;
+  if (s.kind === 'fleet') return { kind: 'fleet' };
+  if ((s.kind === 'agent' || s.kind === 'skill') && typeof s.id === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(s.id)) {
+    return { kind: s.kind, id: s.id };
+  }
+  return undefined;
+}
+
+function sanitizeAuditSnapshot(raw: unknown): Record<string, unknown> | null | undefined {
+  if (raw === null) return null;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const src = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(src)) {
+    if (val === undefined) continue;
+    if (key === 'displayName') {
+      if (typeof val === 'string') {
+        const clean = val.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 256);
+        if (clean) out.displayName = clean;
+      }
+      continue;
+    }
+    if (key === 'emails') {
+      if (Array.isArray(val)) {
+        const emails = val
+          .filter((e): e is string => typeof e === 'string' && AUDIT_ID_FIELD.test(e) && e.includes('@'))
+          .slice(0, 32);
+        out.emails = emails;
+      }
+      continue;
+    }
+    if (key === 'scope') {
+      const sc = sanitizeGrantScope(val);
+      if (sc) out.scope = sc;
+      continue;
+    }
+    if (key === 'version') {
+      if (typeof val === 'number' && Number.isInteger(val) && val >= 0) {
+        out.version = val;
+      }
+      continue;
+    }
+    if (AUDIT_SAFE_SCALAR_KEYS.has(key)) {
+      if (val === null) {
+        out[key] = null;
+      } else if (typeof val === 'string' && AUDIT_ID_FIELD.test(val)) {
+        out[key] = val;
+      }
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<string> = []): LedgerEvent {
   const event: LedgerEvent = {
     timestamp: raw.timestamp ? String(raw.timestamp) : new Date().toISOString(),
@@ -220,6 +308,17 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (typeof raw.retryRequestId === 'string' && /^[0-9a-f-]{36}$/.test(raw.retryRequestId)) event.retryRequestId = raw.retryRequestId;
   if (typeof raw.toolCalled === 'boolean') event.toolCalled = raw.toolCalled;
   if (typeof raw.subject === 'string' && /^[A-Za-z0-9:._@+-]{1,256}$/.test(raw.subject)) event.subject = raw.subject;
+  if (typeof raw.onBehalfOf === 'string' && AUDIT_ID_FIELD.test(raw.onBehalfOf)) event.onBehalfOf = raw.onBehalfOf;
+  const cleanScope = sanitizeGrantScope(raw.scope);
+  if (cleanScope) event.scope = cleanScope;
+  if (raw.before !== undefined) {
+    const cleanBefore = sanitizeAuditSnapshot(raw.before);
+    if (cleanBefore !== undefined) event.before = cleanBefore;
+  }
+  if (raw.after !== undefined) {
+    const cleanAfter = sanitizeAuditSnapshot(raw.after);
+    if (cleanAfter !== undefined) event.after = cleanAfter;
+  }
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);
