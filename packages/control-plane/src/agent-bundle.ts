@@ -45,10 +45,15 @@ export async function handleAgentBundle(state: FactoryState, req: http.IncomingM
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: bundle.agent.id, type: 'action', action: 'AGENT_IMPORT_REFUSED:bundle_not_importable', actor: principal.actor });
     return json(res, 422, { error: 'bundle_not_importable', message: 'this bundle records an agent that runs from a repository; its soul and roles are in that repository, and importing it would register a new agent from a repository (CF6)' }), true;
   }
+  const hasWrapper = body.bundle !== undefined && body.bundle !== null;
   const created = await createFromConfiguration(state, principal, {
     id: bundle.agent.id,
     name: bundle.agent.name,
     role: bundle.agent.role,
+    kind: hasWrapper && body.kind !== undefined ? body.kind : bundle.agent.kind,
+    accountableLead: body.accountableLead,
+    actAs: body.actAs,
+    onBehalfOf: body.onBehalfOf,
     model: bundle.agent.model,
     soul: bundle.settings.soul,
     roles: bundle.settings.roles,
@@ -84,7 +89,7 @@ export async function handleAgentBundle(state: FactoryState, req: http.IncomingM
         // the store may not hold one
       }
     }
-    await discardCreated(state, id, principal.actor, 'import failed');
+    await discardCreated(state, id, principal.actor, 'import failed', created.mintedGrantId);
     try {
       state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_IMPORT_FAILED', actor: principal.actor, payloadSha256: payloadHash(bundle) });
     } catch {

@@ -1,7 +1,14 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
-import { PRIVILEGES, authorize, type AuthorizeResource, type Privilege } from './index.js';
+import {
+  GrantStore,
+  PRIVILEGES,
+  authorize,
+  authorizeIngress,
+  type AuthorizeResource,
+  type Privilege,
+} from './index.js';
 import { AGENT_SCOPED, SKILL_SCOPED, DERIVED_ROLE_PRIVILEGES } from './privileges.js';
 
 const OWNER_RIGHTS: Privilege[] = [
@@ -214,6 +221,176 @@ describe('skill-owner and groups', () => {
     assert.equal(allowed(bob, 'skills.register', { groupRoles: ['skills.register'] }), true);
     assert.equal(allowed(charlie, 'skills.register'), false);
     assert.equal(allowed(charlie, 'skills.register', { ownsAnyAgent: false, groupRoles: [] }), false);
+  });
+});
+
+describe('S2b: personal vs team agent grant authorization (D7, D11, D15, D24, D29)', () => {
+  it('personal content-owner holds owner rights + converse + hold clearance, and drops to strictly read-only while pending-revoked', async () => {
+    const store = GrantStore.inMemory({
+      now: () => new Date('2026-11-02T12:00:00.000Z'),
+      agentKindLookup: (id) => (id === 'donna' ? 'personal' : undefined),
+    });
+    await store.grant({
+      subject: 'user:dale',
+      scope: { kind: 'agent', id: 'donna' },
+      role: 'content-owner',
+      by: 'user:dale',
+    });
+    await store.grant({
+      subject: 'user:stephanie',
+      scope: { kind: 'agent', id: 'donna' },
+      role: 'Family',
+      by: 'user:dale',
+    });
+
+    const dale = as('user:dale');
+    const stephanie = as('user:stephanie');
+    const daleActive = store.effectiveGrantsFor({ subject: 'user:dale' });
+    const stephActive = store.effectiveGrantsFor({ subject: 'user:stephanie' });
+
+    // Active personal content-owner manages agent, wakes, converses, and clears holds even when a sub-role member triggered the run (D29)
+    const donnaRes: AuthorizeResource = {
+      agentId: 'donna',
+      agentKind: 'personal',
+      owners: ['user:dale'],
+      requester: { actor: 'user:stephanie' },
+      grants: daleActive,
+    };
+    assert.equal(allowed(dale, 'agents.settings.set', donnaRes), true);
+    assert.equal(allowed(dale, 'agents.models.set', donnaRes), true);
+    assert.equal(allowed(dale, 'config.export.agent', donnaRes), true);
+    assert.equal(allowed(dale, 'agents.converse', donnaRes), true);
+    assert.equal(allowed(dale, 'approvals.decide', donnaRes), true);
+    assert.equal(allowed(dale, 'skills.register', { grants: daleActive }), true);
+
+    // Personal agent-member (sub-role) can wake & converse, NEVER clear holds even if they triggered the run (D29)
+    const stephRes: AuthorizeResource = {
+      agentId: 'donna',
+      agentKind: 'personal',
+      owners: ['user:dale'],
+      requester: { actor: 'user:stephanie' },
+      grants: stephActive,
+    };
+    assert.deepEqual(
+      PRIVILEGES.filter((p) => allowed(stephanie, p, stephRes)).sort(),
+      ['agents.converse', 'agents.wake'],
+    );
+    assert.equal(allowed(stephanie, 'approvals.decide', stephRes), false);
+
+    // Start ownership transfer: outgoing owner becomes pending-revoked (readOnly: true)
+    await store.startOwnershipTransfer({
+      scope: { kind: 'agent', id: 'donna' },
+      fromSubject: 'user:dale',
+      toSubject: 'user:alice',
+      by: 'user:dale',
+    });
+    const dalePending = store.effectiveGrantsFor({ subject: 'user:dale' });
+    const alicePending = store.effectiveGrantsFor({ subject: 'user:alice' });
+    assert.equal(dalePending[0]?.readOnly, true);
+    assert.equal(alicePending.length, 0);
+
+    // Even if stale legacy owners=['user:dale'] is still present, pending-revoked suppresses write fallback!
+    const pendingRes: AuthorizeResource = {
+      agentId: 'donna',
+      agentKind: 'personal',
+      owners: ['user:dale'],
+      grants: dalePending,
+    };
+    assert.deepEqual(
+      PRIVILEGES.filter((p) => allowed(dale, p, pendingRes)).sort(),
+      [...DERIVED_ROLE_PRIVILEGES['content-owner-readonly']].sort(),
+    );
+    for (const deniedWrite of [
+      'agents.settings.set',
+      'agents.models.set',
+      'credentials.agent.set',
+      'config.export.agent',
+      'agents.wake',
+      'agents.converse',
+      'agents.pause',
+      'approvals.decide',
+    ] as Privilege[]) {
+      assert.equal(allowed(dale, deniedWrite, pendingRes), false, deniedWrite);
+    }
+  });
+
+  it('team accountable-lead and team member hold team privileges and both clear holds, while team agents ignore content-owner/owners', async () => {
+    const store = GrantStore.inMemory({
+      now: () => new Date('2026-11-02T12:00:00.000Z'),
+      agentKindLookup: (id) => (id === 'archie' ? 'team' : undefined),
+    });
+    await store.grant({
+      subject: 'user:sarah',
+      scope: { kind: 'agent', id: 'archie' },
+      role: 'accountable-lead',
+      by: 'user:dale',
+    });
+    await store.grant({
+      subject: 'group:reviewers',
+      scope: { kind: 'agent', id: 'archie' },
+      role: 'member',
+      by: 'user:sarah',
+      granterIsAdmin: false,
+      granterRole: 'accountable-lead',
+      knownGroups: new Set(['reviewers']),
+    });
+
+    const sarah = as('user:sarah');
+    const geordi = as('user:geordi');
+    const sarahGrants = store.effectiveGrantsFor({ subject: 'user:sarah' });
+    const geordiGrants = store.effectiveGrantsFor({ subject: 'user:geordi', groupIds: ['reviewers'] });
+
+    const leadRes: AuthorizeResource = {
+      agentId: 'archie',
+      agentKind: 'team',
+      grants: sarahGrants,
+    };
+    assert.deepEqual(
+      [...AGENT_SCOPED].filter((p) => allowed(sarah, p, leadRes)).sort(),
+      [...DERIVED_ROLE_PRIVILEGES['accountable-lead']].sort(),
+    );
+    assert.equal(allowed(sarah, 'skills.register', { grants: sarahGrants }), true);
+    assert.equal(allowed(sarah, 'approvals.decide', leadRes), true);
+    assert.equal(allowed(sarah, 'agents.roles.assign', leadRes), true);
+    assert.equal(allowed(sarah, 'config.export.agent', leadRes), false);
+
+    // Team member (direct or via group) wakes, converses, and clears holds on the team agent (D11, D29)
+    const memberRes: AuthorizeResource = {
+      agentId: 'archie',
+      agentKind: 'team',
+      grants: geordiGrants,
+    };
+    assert.deepEqual(
+      PRIVILEGES.filter((p) => allowed(geordi, p, memberRes)).sort(),
+      ['agents.converse', 'agents.wake', 'approvals.decide'].sort(),
+    );
+
+    // Stale legacy owners on a team agent grant nothing
+    const staleOwner = as('user:stale');
+    assert.equal(
+      allowed(staleOwner, 'agents.settings.set', {
+        agentId: 'archie',
+        agentKind: 'team',
+        owners: ['user:stale'],
+      }),
+      false,
+    );
+
+    // Ingress authorization admits team member via grants without legacy link roles
+    const ingress = authorizeIngress({
+      requestedBy: { provider: 'discord', id: '999' },
+      agentId: 'archie',
+      agentKind: 'team',
+      privilege: 'agents.converse',
+      grants: geordiGrants,
+      link: { actor: 'user:geordi', name: 'Geordi' },
+      isIngressCaller: true,
+    });
+    assert.equal(ingress.allowed, true);
+    if (ingress.allowed) {
+      assert.equal(ingress.caller?.role, 'agent-member');
+      assert.equal(ingress.caller?.isOwner, false);
+    }
   });
 });
 

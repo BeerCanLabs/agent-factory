@@ -122,6 +122,7 @@ export type GrantStoreOptions = {
   now?: () => Date;
   principals?: PrincipalStore;
   knownGroups?: KnownGroupsCheck;
+  agentKindLookup?: (agentId: string) => 'personal' | 'team' | undefined;
 };
 
 export type CreateGrantInput = {
@@ -139,6 +140,8 @@ export type CreateGrantInput = {
   granterIsAdmin?: boolean;
   granterRole?: 'admin' | 'content-owner' | 'accountable-lead';
   agentKind?: 'personal' | 'team';
+  /** True when the factory itself seeds the initial `content-owner` or `accountable-lead` grant during agent/skill submission (D30, S2b). Still enforces D13 unknown-subject refusal for non-admins. */
+  initialSubmission?: boolean;
   replaceExisting?: boolean;
   principals?: PrincipalStore;
   knownGroups?: KnownGroupsCheck;
@@ -765,11 +768,17 @@ export class GrantStore {
   private readonly now: () => Date;
   private readonly principals?: PrincipalStore;
   private readonly knownGroups?: KnownGroupsCheck;
+  private agentKindLookup?: (agentId: string) => 'personal' | 'team' | undefined;
 
   private constructor(private readonly backend: VersionedDocBackend<GrantsDoc>, opts?: GrantStoreOptions) {
     this.now = opts?.now ?? (() => new Date());
     this.principals = opts?.principals;
     this.knownGroups = opts?.knownGroups;
+    this.agentKindLookup = opts?.agentKindLookup;
+  }
+
+  setAgentKindLookup(fn: ((agentId: string) => 'personal' | 'team' | undefined) | undefined): void {
+    this.agentKindLookup = fn;
   }
 
   static async open(
@@ -1186,6 +1195,23 @@ export class GrantStore {
     );
   }
 
+  /**
+   * Returns the canonical subject (`user:<id>`) holding active `content-owner` on `scope` (including an expired
+   * `pending-revoked` transfer that reverted to active per D15), or `undefined` when `pending-revoked` is still in flight
+   * or no `content-owner` grant exists.
+   */
+  activeContentOwnerOf(scope: { kind: 'agent' | 'skill'; id: string }, at?: Date): string | undefined {
+    this.assertHealthy();
+    const normScope = normalizeGrantScope(scope);
+    const nowMs = (at ?? this.now()).getTime();
+    for (const g of this.byId.values()) {
+      if (!sameScope(g.scope, normScope) || g.role !== 'content-owner' || isGrantExpired(g, nowMs)) continue;
+      if (g.state === 'active') return g.subject;
+      if (g.state === 'pending-revoked' && isPendingTransferExpired(g, nowMs)) return g.subject;
+    }
+    return undefined;
+  }
+
   assertCanRemovePrincipal(principalId: string, at?: Date): void {
     this.assertHealthy();
     const { subject, kind } = resolveCanonicalSubject(principalId, this.principals);
@@ -1448,18 +1474,36 @@ export class GrantStore {
       }
 
       const role = validateAndNormalizeRole(scope, input.role, subjectKind);
-      if (!isAdmin && (role === 'content-owner' || role === 'accountable-lead')) {
+      const allowInitialSubmission =
+        Boolean(input.initialSubmission) &&
+        (scope.kind === 'agent' || scope.kind === 'skill') &&
+        (input.state === undefined || input.state === 'active');
+      if (!isAdmin && !allowInitialSubmission && (role === 'content-owner' || role === 'accountable-lead')) {
         throw new GrantStoreError(403, 'forbidden', `granting '${role}' requires admin authority or dedicated transfer`);
       }
       if (input.granterRole === 'accountable-lead' && role !== 'member') {
         throw new GrantStoreError(403, 'forbidden', `accountable-lead may only grant 'member' on their team agent`);
       }
 
-      if (scope.kind === 'agent' && input.agentKind !== undefined) {
-        if (input.agentKind === 'team' && role === 'content-owner') {
+      const registeredKind = scope.kind === 'agent' ? this.agentKindLookup?.(scope.id) : undefined;
+      if (
+        scope.kind === 'agent' &&
+        registeredKind !== undefined &&
+        input.agentKind !== undefined &&
+        registeredKind !== input.agentKind
+      ) {
+        throw new GrantStoreError(
+          409,
+          'agent_kind_conflict',
+          `agent '${scope.id}' is registered as '${registeredKind}', not '${input.agentKind}'`,
+        );
+      }
+      const effectiveAgentKind = scope.kind === 'agent' ? (registeredKind ?? input.agentKind) : undefined;
+      if (scope.kind === 'agent' && effectiveAgentKind !== undefined) {
+        if (effectiveAgentKind === 'team' && role === 'content-owner') {
           throw new GrantStoreError(409, 'agent_kind_conflict', 'team agents cannot have a content-owner');
         }
-        if (input.agentKind === 'personal' && role === 'accountable-lead') {
+        if (effectiveAgentKind === 'personal' && role === 'accountable-lead') {
           throw new GrantStoreError(409, 'agent_kind_conflict', 'personal agents cannot have an accountable-lead');
         }
       }
@@ -1527,21 +1571,29 @@ export class GrantStore {
                   `agent '${scope.id}' already has an accountable-lead and cannot also have a content-owner`,
                 );
               }
-              if (existing.role === 'content-owner' && isGrantOccupyingSlot(existing, nowMs)) {
-                const pendingLocked =
-                  existing.state === 'pending-revoked' && !isPendingTransferExpired(existing, nowMs);
-                const canUpdateInPlace =
-                  !unseenEmail &&
-                  existing.subject === subj &&
-                  state === 'active' &&
-                  !pendingLocked &&
-                  (cleanRequestedId === undefined || cleanRequestedId === existing.id);
-                if (!canUpdateInPlace) {
-                  throw new GrantStoreError(
-                    409,
-                    'owner_exists',
-                    `${scope.kind} '${scope.id}' already has an active content-owner ('${existing.subject}')`,
-                  );
+              if (existing.role === 'content-owner') {
+                if (input.replaceExisting && isAdmin && state === 'active') {
+                  if (unseenEmail || existing.subject !== subj || existing.state !== 'active') {
+                    removals.add(existing.id);
+                    continue;
+                  }
+                }
+                if (isGrantOccupyingSlot(existing, nowMs)) {
+                  const pendingLocked =
+                    existing.state === 'pending-revoked' && !isPendingTransferExpired(existing, nowMs);
+                  const canUpdateInPlace =
+                    !unseenEmail &&
+                    existing.subject === subj &&
+                    state === 'active' &&
+                    !pendingLocked &&
+                    (cleanRequestedId === undefined || cleanRequestedId === existing.id);
+                  if (!canUpdateInPlace) {
+                    throw new GrantStoreError(
+                      409,
+                      'owner_exists',
+                      `${scope.kind} '${scope.id}' already has an active content-owner ('${existing.subject}')`,
+                    );
+                  }
                 }
               }
             }
@@ -1833,6 +1885,16 @@ export class GrantStore {
       transferId: nextTransferId,
       pendingExpiresAt: nextPendingExpiresAt,
     });
+
+    if (current.scope.kind === 'agent') {
+      const effectiveAgentKind = this.agentKindLookup?.(current.scope.id);
+      if (effectiveAgentKind === 'team' && nextRole === 'content-owner') {
+        throw new GrantStoreError(409, 'agent_kind_conflict', 'team agents cannot have a content-owner');
+      }
+      if (effectiveAgentKind === 'personal' && nextRole === 'accountable-lead') {
+        throw new GrantStoreError(409, 'agent_kind_conflict', 'personal agents cannot have an accountable-lead');
+      }
+    }
 
     let nextExpiresAt = current.expiresAt;
     let parsedExpiresMs: number | undefined;
@@ -2179,7 +2241,10 @@ export class GrantStore {
       }
       const pendingExpiresAt = new Date(nowMs + ttlMs).toISOString();
 
-      // Team agents (holding accountable-lead) reject ownership transfer with 409 (D11, S3b).
+      // Team agents (registered kind === 'team' or holding accountable-lead) reject ownership transfer with 409 (D11, S2b, S3b).
+      if (scope.kind === 'agent' && this.agentKindLookup?.(scope.id) === 'team') {
+        throw new GrantStoreError(409, 'agent_kind_conflict', `team agent '${scope.id}' does not support ownership transfer`);
+      }
       for (const g of this.byId.values()) {
         if (
           scope.kind === 'agent' &&

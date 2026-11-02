@@ -16,7 +16,9 @@ import {
   checkRepoUrl,
   connectionsOf,
   credentialsOf,
+  effectiveAgentKind,
   egressOf,
+  parseAgentKind,
   rolesOf,
   skillIdsOf,
   skillRoutesOf,
@@ -26,6 +28,7 @@ import {
   pinSource,
   stateAfterRefusal,
   type AgentCategory,
+  type AgentKind,
   type CommitResolver,
   type ConfigStore,
   type SkillChecker,
@@ -35,7 +38,25 @@ import {
 } from '@beercanlabs/factory-registrar';
 import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
 import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
-import { authorize, authorizeIngress, directCaller, heldCopyOf, heldToolName, parseHoldRequest, AGENT_SCOPED, type Approval, type ApprovalStore, type AuthenticatedCaller, type Privilege } from '@beercanlabs/factory-bouncer';
+import {
+  AGENT_SCOPED,
+  GrantStoreUnavailableError,
+  PrincipalStoreUnavailableError,
+  authorize,
+  authorizeIngress,
+  directCaller,
+  heldCopyOf,
+  heldToolName,
+  normalizeActorToPrincipal,
+  parseHoldRequest,
+  type Approval,
+  type ApprovalStore,
+  type AuthenticatedCaller,
+  type EffectiveGrant,
+  type GrantStore,
+  type PrincipalStore,
+  type Privilege,
+} from '@beercanlabs/factory-bouncer';
 import { validatePolicy, applyModelsRemoval, effectiveAgentModels, type AgentPolicy, type PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 
@@ -51,16 +72,16 @@ import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
 import { allowedSubagents, budgetHolder, handleSubagents, spawnSubagent, type SubagentRecord } from './subagents.js';
-import { agentConfigForRun, deployConfigured, handleAgentCreation, handleConvertAgent, handleRuntimeRoutes, registrationRefusal, type SharedRuntimePin } from './agent-creation.js';
+import { agentConfigForRun, applyAgentOwnershipGrant, deployConfigured, handleAgentCreation, handleConvertAgent, handleRuntimeRoutes, registrationRefusal, resolveAgentOwnershipOnSubmit, type SharedRuntimePin } from './agent-creation.js';
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
-import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
+import { accountableLeadOf, changeReason, configOf, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { handleSkills, resumeSkillChecks } from './skills.js';
 import { applyTrainingForCaller, handleSkillTraining } from './skill-training.js';
 import { buildSkillsFor, isDeploying, runDeploy } from './apply.js';
 import { handleRunProgress } from './progress-routes.js';
 import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercanlabs/factory-inspector';
-import { handleSchedules, requesterOfRun } from './schedules.js';
+import { handleSchedules, requesterOfRun, requestersEqual } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleGroupRoutes } from './group-routes.js';
 import { handleChannelApprovals } from './channel-approvals.js';
@@ -172,6 +193,10 @@ export type FactoryState = {
   identityLinks?: IdentityLinkStore;
   /** User groups and group membership store (H6, A10, A17, GAP-203). */
   groups?: GroupStore;
+  /** Canonical multi-email principal directory (`plans/factory-auth.md` S1, S2b). */
+  principals?: PrincipalStore;
+  /** Versioned factory grant store (`plans/factory-auth.md` S2, S2b). */
+  grants?: GrantStore;
   /** Systems as factory data (§6.3.1 E10): approved external system definitions. */
   systems?: SystemsStore;
   /** URL agents use to reach the control plane (result reporting, input fetch). */
@@ -319,9 +344,124 @@ export function readBufferBody(req: http.IncomingMessage, limit = 5 * 1024 * 102
   });
 }
 
+const wiredGrantStores = new WeakMap<GrantStore, FactoryState>();
+
+export function findAgentRecord(state: FactoryState, agentId: string): AgentRecord | undefined {
+  const exact = state.agents.get(agentId);
+  if (exact) return exact;
+  const lower = agentId.toLowerCase();
+  for (const [k, v] of state.agents.entries()) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return undefined;
+}
+
+export function wireGrantStoreKindLookup(state: FactoryState): void {
+  if (!state.grants || wiredGrantStores.get(state.grants) === state) return;
+  state.grants.setAgentKindLookup((agentId) => {
+    const a = findAgentRecord(state, agentId);
+    return a ? effectiveAgentKind(a) : undefined;
+  });
+  wiredGrantStores.set(state.grants, state);
+}
+
+export function agentKindOf(state: FactoryState, agentId: string): AgentKind | undefined {
+  const a = findAgentRecord(state, agentId);
+  return a ? effectiveAgentKind(a) : undefined;
+}
+
+export function effectiveGrantsForActor(
+  state: FactoryState,
+  actor: string,
+): { ok: true; grants?: EffectiveGrant[]; canonicalSubject?: string } | { ok: false; status: 503; error: string } {
+  if (!state.grants) {
+    return { ok: true, grants: undefined };
+  }
+  wireGrantStoreKindLookup(state);
+  if (!state.grants.healthy) {
+    return { ok: false, status: 503, error: 'grant_store_unavailable' };
+  }
+  if (state.principals && !state.principals.healthy) {
+    return { ok: false, status: 503, error: 'principal_store_unavailable' };
+  }
+  let canonicalSubject: string;
+  try {
+    canonicalSubject = normalizeActorToPrincipal(actor, state.principals);
+  } catch {
+    return { ok: true, grants: [] };
+  }
+  if (!canonicalSubject.startsWith('user:') && !canonicalSubject.startsWith('service:')) {
+    return { ok: true, grants: [] };
+  }
+  const groupSet = new Set<string>();
+  if (state.groups) {
+    for (const g of state.groups.listUserGroups(actor)) groupSet.add(g.id);
+    if (canonicalSubject !== actor) {
+      for (const g of state.groups.listUserGroups(canonicalSubject)) groupSet.add(g.id);
+    }
+  }
+  try {
+    const grants = state.grants.effectiveGrantsFor({
+      subject: canonicalSubject,
+      groupIds: groupSet.size > 0 ? [...groupSet] : undefined,
+    });
+    return { ok: true, grants, canonicalSubject };
+  } catch (err) {
+    if (err instanceof GrantStoreUnavailableError || err instanceof PrincipalStoreUnavailableError) {
+      return { ok: false, status: 503, error: err.code };
+    }
+    return { ok: true, grants: [] };
+  }
+}
+
+export function resolvePrincipalCaller(
+  state: FactoryState,
+  principal: Principal,
+  agentId: string,
+  privilege: Privilege,
+): { ok: true; caller: AuthenticatedCaller } | { ok: false; status: 503; error: string } {
+  const callerGrantRes = effectiveGrantsForActor(state, principal.actor);
+  if (!callerGrantRes.ok) {
+    return { ok: false, status: 503, error: callerGrantRes.error };
+  }
+  const targetAgent = findAgentRecord(state, agentId);
+  const caller = directCaller(principal, ownersOf(state, agentId), privilege, {
+    agentId,
+    agentKind: targetAgent ? effectiveAgentKind(targetAgent) : agentKindOf(state, agentId),
+    ...(callerGrantRes.grants !== undefined ? { grants: callerGrantRes.grants } : {}),
+  });
+  return { ok: true, caller };
+}
+
+function attachCallerToRunResult(
+  state: FactoryState,
+  out: { status: number; body: unknown },
+  caller: AuthenticatedCaller,
+): void {
+  if (out.status < 300 && out.body && typeof out.body === 'object') {
+    const runId = (out.body as { runId?: unknown }).runId;
+    if (typeof runId === 'string' && state.runs.get(runId)) {
+      state.runs.update(runId, { caller });
+    }
+    (out.body as Record<string, unknown>).caller = caller;
+  }
+}
+
 export function checkOwnsAnyAgent(state: FactoryState, actor: string): boolean {
+  if (state.grants) {
+    if (!state.grants.healthy) return false;
+    const grantRes = effectiveGrantsForActor(state, actor);
+    if (!grantRes.ok || !grantRes.grants) return false;
+    return grantRes.grants.some(
+      (eg) =>
+        !eg.readOnly &&
+        eg.grant.scope.kind === 'agent' &&
+        (eg.grant.role === 'content-owner' || eg.grant.role === 'accountable-lead'),
+    );
+  }
   const target = actor.toLowerCase();
   for (const agent of state.agents.values()) {
+    if (agent.kind === 'team') continue;
     const directOwners = (agent as unknown as { owners?: string[] }).owners;
     if (directOwners && directOwners.some((o) => o.toLowerCase() === target)) {
       return true;
@@ -347,9 +487,17 @@ export function actorIsAdmin(state: FactoryState, actor: string, knownRoles?: re
       if (r === 'admin') return true;
     }
   }
+  if (state.grants && state.grants.healthy) {
+    const grantRes = effectiveGrantsForActor(state, actor);
+    if (grantRes.ok && grantRes.grants) {
+      for (const eg of grantRes.grants) {
+        if (!eg.readOnly && eg.grant.scope.kind === 'fleet' && eg.grant.role === 'admin') {
+          return true;
+        }
+      }
+    }
+  }
   const clean = actor.toLowerCase();
-  // Archie Round 2 Finding B: match only canonical forms token:<name>, cloudflare:<email>, oidc:<email>.
-  // Drop bare admin and tokenName === 'admin'.
   if (!clean.startsWith('token:') && !clean.startsWith('cloudflare:') && !clean.startsWith('oidc:')) {
     return false;
   }
@@ -382,13 +530,19 @@ export function actorIsAdmin(state: FactoryState, actor: string, knownRoles?: re
 
   if (state.identityLinks) {
     const matching = state.identityLinks.list().filter((l) => l.actor.toLowerCase() === clean);
-    if (matching.some((l) => l.roles?.includes('admin'))) return true;
+    for (const link of matching) {
+      for (const r of link.roles ?? []) {
+        if (r === 'admin') return true;
+      }
+    }
   }
 
   return false;
 }
 
 export function userHoldsSkillsRegister(state: FactoryState, actor: string, knownRoles?: readonly Role[]): boolean {
+  const grantRes = effectiveGrantsForActor(state, actor);
+  if (!grantRes.ok) return false;
   const isAdmin = actorIsAdmin(state, actor, knownRoles);
   const groupRoles = state.groups ? state.groups.getUserRoles(actor) : undefined;
   return authorize({
@@ -400,6 +554,7 @@ export function userHoldsSkillsRegister(state: FactoryState, actor: string, know
     resource: {
       ownsAnyAgent: checkOwnsAnyAgent(state, actor),
       groupRoles,
+      ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
     },
   }).allowed;
 }
@@ -435,19 +590,64 @@ export function isSenderManager(
   if (sender.requestedBy) {
     const link = state.identityLinks?.resolveLink(sender.requestedBy.provider, sender.requestedBy.id);
     if (!link) return false;
+    if (state.grants) {
+      const grantRes = effectiveGrantsForActor(state, link.actor);
+      if (!grantRes.ok) return false;
+      if (
+        authorize({
+          principal: { actor: link.actor, roles: [...(link.roles ?? [])] },
+          privilege: 'agents.models.set',
+          resource: {
+            agentId,
+            agentKind: agentKindOf(state, agentId),
+            owners: ownersOf(state, agentId),
+            grants: grantRes.grants,
+          },
+        }).allowed
+      ) {
+        return true;
+      }
+    }
     const actorLower = link.actor.toLowerCase();
     if (owners.includes(actorLower)) return true;
     const roles = link.roles ?? [];
     const isCloudflare = actorLower.startsWith('cloudflare:');
     const email = isCloudflare ? actorLower.slice('cloudflare:'.length).trim() : (actorLower.startsWith('oidc:') ? actorLower.slice(5).trim() : '');
-    return roles.includes('admin') || (roles.length === 0 && email !== '' && adminEmails.includes(email));
+    let linkHasAdmin = false;
+    for (const r of roles) if (r === 'admin') linkHasAdmin = true;
+    return linkHasAdmin || (roles.length === 0 && email !== '' && adminEmails.includes(email));
   }
 
   const actor = sender.caller?.actor ?? sender.actor;
   if (!actor) return false;
+  if (state.grants) {
+    const grantRes = effectiveGrantsForActor(state, actor);
+    if (!grantRes.ok) return false;
+    if (
+      authorize({
+        principal: { actor, roles: [...(sender.caller?.roles ?? [])] },
+        privilege: 'agents.models.set',
+        resource: {
+          agentId,
+          agentKind: agentKindOf(state, agentId),
+          owners: ownersOf(state, agentId),
+          grants: grantRes.grants,
+        },
+      }).allowed
+    ) {
+      return true;
+    }
+    // If grant-backed pending-revoked owner, do not fall through to stale legacy owners!
+    if (
+      grantRes.grants?.some(
+        (eg) => eg.readOnly && eg.grant.scope.kind === 'agent' && eg.grant.scope.id.toLowerCase() === agentId.toLowerCase(),
+      )
+    ) {
+      return false;
+    }
+  }
   const actorLower = actor.toLowerCase();
   if (owners.includes(actorLower)) return true;
-  if (sender.caller?.roles?.includes('admin')) return true;
   if (actorIsAdmin(state, actor, sender.caller?.roles)) return true;
   if (actorLower === 'token:admin') return true;
   const isCloudflare = actorLower.startsWith('cloudflare:');
@@ -479,6 +679,31 @@ export function canRunManageModels(
     const link = state.identityLinks?.resolveLink(req.provider, req.id);
     if (!link) return { allowed: false };
     const actor = link.actor;
+    if (state.grants) {
+      const grantRes = effectiveGrantsForActor(state, actor);
+      if (!grantRes.ok) return { allowed: false };
+      if (
+        authorize({
+          principal: { actor, roles: [...(link.roles ?? [])] },
+          privilege: 'agents.models.set',
+          resource: {
+            agentId: run.agentId,
+            agentKind: agentKindOf(state, run.agentId),
+            owners: ownersOf(state, run.agentId),
+            grants: grantRes.grants,
+          },
+        }).allowed
+      ) {
+        return { allowed: true, actor };
+      }
+      if (
+        grantRes.grants?.some(
+          (eg) => eg.readOnly && eg.grant.scope.kind === 'agent' && eg.grant.scope.id.toLowerCase() === run.agentId.toLowerCase(),
+        )
+      ) {
+        return { allowed: false };
+      }
+    }
     const actorLower = actor.toLowerCase();
     if (owners.includes(actorLower)) {
       return { allowed: true, actor };
@@ -486,7 +711,9 @@ export function canRunManageModels(
     const roles = link.roles ?? [];
     const isCloudflare = actorLower.startsWith('cloudflare:');
     const email = isCloudflare ? actorLower.slice('cloudflare:'.length).trim() : (actorLower.startsWith('oidc:') ? actorLower.slice(5).trim() : '');
-    const isAdmin = roles.includes('admin') || (roles.length === 0 && email !== '' && adminEmails.includes(email));
+    let linkHasAdmin = false;
+    for (const r of roles) if (r === 'admin') linkHasAdmin = true;
+    const isAdmin = linkHasAdmin || (roles.length === 0 && email !== '' && adminEmails.includes(email));
     if (isAdmin) {
       return { allowed: true, actor };
     }
@@ -495,11 +722,33 @@ export function canRunManageModels(
 
   if (req.kind === 'principal') {
     const actor = req.actor;
+    if (state.grants) {
+      const grantRes = effectiveGrantsForActor(state, actor);
+      if (!grantRes.ok) return { allowed: false };
+      if (
+        authorize({
+          principal: { actor, roles: [...(run.caller?.roles ?? [])] },
+          privilege: 'agents.models.set',
+          resource: {
+            agentId: run.agentId,
+            agentKind: agentKindOf(state, run.agentId),
+            owners: ownersOf(state, run.agentId),
+            grants: grantRes.grants,
+          },
+        }).allowed
+      ) {
+        return { allowed: true, actor };
+      }
+      if (
+        grantRes.grants?.some(
+          (eg) => eg.readOnly && eg.grant.scope.kind === 'agent' && eg.grant.scope.id.toLowerCase() === run.agentId.toLowerCase(),
+        )
+      ) {
+        return { allowed: false };
+      }
+    }
     const actorLower = actor.toLowerCase();
     if (owners.includes(actorLower)) {
-      return { allowed: true, actor };
-    }
-    if (run.caller?.roles?.includes('admin')) {
       return { allowed: true, actor };
     }
     if (actorIsAdmin(state, actor, run.caller?.roles)) {
@@ -613,6 +862,12 @@ export async function requirePrivilege(
     return result.principal;
   }
 
+  const grantRes = effectiveGrantsForActor(state, result.principal.actor);
+  if (!grantRes.ok) {
+    json(res, 503, { error: grantRes.error });
+    return null;
+  }
+
   const ownsAny = privilege === 'skills.register' ? checkOwnsAnyAgent(state, result.principal.actor) : false;
   const computedGroupRoles = resource?.groupId && state.groups
     ? (state.groups.getGroup(resource.groupId)?.members.some((m) => m.toLowerCase() === result.principal.actor.toLowerCase())
@@ -626,12 +881,19 @@ export async function requirePrivilege(
     principal: result.principal,
     privilege,
     resource: {
-      ...(resource?.agentId ? { agentId: resource.agentId, owners: ownersOf(state, resource.agentId) } : {}),
+      ...(resource?.agentId
+        ? {
+            agentId: resource.agentId,
+            agentKind: agentKindOf(state, resource.agentId),
+            owners: ownersOf(state, resource.agentId),
+          }
+        : {}),
       ...(resource?.skillId ? { skillId: resource.skillId } : {}),
       ...(resource?.skillOwner ? { skillOwner: resource.skillOwner } : {}),
       ...(resource?.uploader ? { uploader: resource.uploader } : {}),
       groupRoles: resource?.groupRoles ?? computedGroupRoles ?? userGroupRoles,
       ownsAnyAgent: resource?.ownsAnyAgent ?? ownsAny,
+      ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
     },
   });
   if (!decision.allowed) {
@@ -708,13 +970,18 @@ export function handoffRefusal(state: FactoryState, agent: AgentRecord): string 
 }
 
 export function enrichAgent(state: FactoryState, a: AgentRecord) {
+  const { accountableLead: _storedLead, ...baseAgent } = a;
+  const kind = effectiveAgentKind(a);
+  const resolvedLead = kind === 'team' ? accountableLeadOf(state, a.id, a) : undefined;
   const s = state.spend.get(a.id, undefined);
   const pol = state.policies.get(a.id);
   const activeR = activeRun(state, a.id);
   const isBuiltin = Boolean(a.isBuiltin || a.category === 'builtin' || BUILTIN_AGENT_IDS.has(a.id));
   const category: AgentCategory = isBuiltin ? 'builtin' : (a.category ?? 'user');
   return {
-    ...a,
+    ...baseAgent,
+    kind,
+    ...(resolvedLead ? { accountableLead: resolvedLead } : {}),
     category,
     isBuiltin,
     budgetExempt: isBuiltin,
@@ -897,10 +1164,25 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
     };
   }
   if (method === 'tools/list') {
+    const grantRes = effectiveGrantsForActor(state, principal.actor);
+    if (!grantRes.ok) {
+      return { jsonrpc: '2.0', id, error: { code: -32003, message: grantRes.error } };
+    }
     const ownsAny = checkOwnsAnyAgent(state, principal.actor);
+    const hasAgentScopeGrant = Boolean(
+      grantRes.grants?.some((eg) => eg.grant.scope.kind === 'agent'),
+    );
     const tools = TOOLS.filter((t) => {
-      if (authorize({ principal, privilege: t.privilege }).allowed) return true;
-      if (AGENT_SCOPED.has(t.privilege) && ownsAny) return true;
+      if (
+        authorize({
+          principal,
+          privilege: t.privilege,
+          ...(grantRes.grants !== undefined ? { resource: { grants: grantRes.grants } } : {}),
+        }).allowed
+      ) {
+        return true;
+      }
+      if (AGENT_SCOPED.has(t.privilege) && (ownsAny || hasAgentScopeGrant)) return true;
       return false;
     }).map((t) => ({
       name: t.name,
@@ -910,12 +1192,28 @@ export async function handleMcp(state: FactoryState, payload: Record<string, unk
     return { jsonrpc: '2.0', id, result: { tools } };
   }
   if (method === 'tools/call') {
+    const grantRes = effectiveGrantsForActor(state, principal.actor);
+    if (!grantRes.ok) {
+      return { jsonrpc: '2.0', id, error: { code: -32003, message: grantRes.error } };
+    }
     const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
     const spec = TOOLS.find((t) => t.name === params.name);
     if (!spec) return { jsonrpc: '2.0', id, error: { code: -32602, message: `unknown tool ${String(params.name)}` } };
     const rawArgs = params.arguments ?? {};
     const targetAgentId = typeof rawArgs.id === 'string' ? rawArgs.id : typeof rawArgs.agentId === 'string' ? rawArgs.agentId : undefined;
-    const resource = targetAgentId ? { agentId: targetAgentId, owners: ownersOf(state, targetAgentId) } : undefined;
+    const resource =
+      targetAgentId || grantRes.grants !== undefined
+        ? {
+            ...(targetAgentId
+              ? {
+                  agentId: targetAgentId,
+                  agentKind: agentKindOf(state, targetAgentId),
+                  owners: ownersOf(state, targetAgentId),
+                }
+              : {}),
+            ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+          }
+        : undefined;
     const decision = authorize({ principal, privilege: spec.privilege, resource });
     if (!decision.allowed) {
       return { jsonrpc: '2.0', id, error: { code: -32001, message: `forbidden: requires ${decision.required}` } };
@@ -960,9 +1258,12 @@ async function handOff(
   const handoffTargets = hasWarmDown ? conversationalActive : conversationalActive.filter((r) => r.state !== 'QUEUED');
   // E12 item 4: a run's roles are those of the person it was started for. A message from a person whose roles deny a
   // skill route must not be handled inside someone else's run, where it would have that person's reach. It waits.
-  if (handoffTargets.length > 0 && opts.requestedBy) {
-    const sender = accessForRequester(state, agent, { kind: 'identity', provider: opts.requestedBy.provider, id: opts.requestedBy.id });
-    const sameAsRun = handoffTargets.every((r) => r.requestedBy && r.requestedBy.provider === opts.requestedBy!.provider && r.requestedBy.id === opts.requestedBy!.id);
+  if (handoffTargets.length > 0) {
+    const senderRequester = opts.requestedBy
+      ? ({ kind: 'identity' as const, provider: opts.requestedBy.provider, id: opts.requestedBy.id })
+      : ({ kind: 'principal' as const, actor });
+    const sender = accessForRequester(state, agent, senderRequester, false, opts.caller?.roles);
+    const sameAsRun = handoffTargets.every((r) => requestersEqual(requesterOfRun(state, r), senderRequester));
     if (hasDeniedRoute(sender) && !sameAsRun) {
       state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'HANDOFF_REFUSED_BUSY_FOR_ANOTHER_PERSON', actor });
       return { status: 409, body: { error: 'busy_with_another_person', message: 'the agent is working for someone else; try again in a moment' } };
@@ -1721,7 +2022,7 @@ function stageDiscovered(state: FactoryState, vendorId: string, discovered: Disc
 
 async function dispatchTool(state: FactoryState, name: string, args: Record<string, unknown>, principal: Principal): Promise<unknown> {
   const actor = principal.actor;
-  if (name === 'list_agents') return [...state.agents.values()].filter((a) => !a.ephemeral);
+  if (name === 'list_agents') return [...state.agents.values()].filter((a) => !a.ephemeral).map((a) => enrichAgent(state, a));
   if (name === 'query_ledger') return state.ledger.query({ agent: typeof args.agent === 'string' ? args.agent : undefined });
   if (name === 'get_run') return (typeof args.runId === 'string' ? state.runs.get(args.runId) : undefined) ?? { error: 'not_found' };
   if (name === 'list_approvals') return visibleApprovals(state, principal, state.approvals.list({ state: 'pending' }));
@@ -1840,12 +2141,16 @@ async function dispatchTool(state: FactoryState, name: string, args: Record<stri
     // E4.1: the same checks and start path as REST run creation; createRun strips caller/turn fields from input.
     const bad = badRunModel(args.model);
     if (bad) return { error: bad };
-    return (await createRun(state, id, {
+    const resolved = resolvePrincipalCaller(state, principal, id, 'agents.wake');
+    if (!resolved.ok) return { error: resolved.error };
+    const out = await createRun(state, id, {
       actor,
       trigger: 'mcp',
       ...(args.input !== undefined ? { input: args.input } : {}),
       ...(typeof args.model === 'string' ? { model: args.model } : {}),
-    })).body;
+    });
+    attachCallerToRunResult(state, out, resolved.caller);
+    return out.body;
   }
   if (name === 'pause_agent') return (await applyKillSwitch(state, id, 'PAUSE', actor)).body;
   if (name === 'resume_agent') return (await applyKillSwitch(state, id, 'RESUME', actor)).body;
@@ -1905,7 +2210,13 @@ function visibleApprovals(state: FactoryState, reader: Principal, all: Approval[
 }
 
 export function mayDecide(state: FactoryState, principal: { actor: string; roles: Role[] }, approvalId: string): { ok: true } | { ok: false; required: Role } {
-  const global = authorize({ principal, privilege: 'approvals.decide' });
+  const grantRes = effectiveGrantsForActor(state, principal.actor);
+  if (!grantRes.ok) return { ok: false, required: 'approver' };
+  const global = authorize({
+    principal,
+    privilege: 'approvals.decide',
+    ...(grantRes.grants !== undefined ? { resource: { grants: grantRes.grants } } : {}),
+  });
   const approval = state.approvals.get(approvalId);
   // CF4: a configuration change is the agent's owners' to decide, or an admin's; the run's requester rule (E9) does not apply,
   // so any owner of the agent may, and a run that is gone changes nothing. The global approver role does not decide it.
@@ -1928,13 +2239,21 @@ export function mayDecide(state: FactoryState, principal: { actor: string; roles
   const scoped = authorize({
     principal,
     privilege: 'approvals.decide',
-    resource: { agentId: approval.agentId, owners: ownersOf(state, approval.agentId), ...(requester ? { requester } : {}) },
+    resource: {
+      agentId: approval.agentId,
+      agentKind: agentKindOf(state, approval.agentId),
+      owners: ownersOf(state, approval.agentId),
+      ...(requester ? { requester } : {}),
+      ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+    },
   });
   return scoped.allowed ? { ok: true } : { ok: false, required: scoped.required };
 }
 
 export async function decideApproval(state: FactoryState, id: string, decision: unknown, principal: Principal, notes?: unknown, via?: { provider: string; channelId: string }): Promise<Outcome<unknown>> {
   const actor = principal.actor;
+  const grantCheck = effectiveGrantsForActor(state, actor);
+  if (!grantCheck.ok) return { status: 503, body: { error: grantCheck.error } };
   const may = mayDecide(state, principal, id);
   if (!may.ok) return { status: 403, body: { error: 'forbidden', required: may.required } };
   if (decision !== 'approve' && decision !== 'reject') return { status: 400, body: { error: 'decision must be approve or reject' } };
@@ -1999,13 +2318,14 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
     if (!r) return 'unknown';
     return requesterOfRun(state, r) ?? (r.trigger === 'schedule' ? 'unknown' : 'none');
   };
-  const who = whoOf(state.runs.get(a.runId));
+  const originRun = state.runs.get(a.runId);
+  const who = whoOf(originRun);
   const sameRequester = (r: Run | undefined): boolean => {
     const there = whoOf(r);
     if (who === 'unknown' || there === 'unknown') return false;
     if (who === 'none' || there === 'none') return who === there;
     if (who.kind === 'identity') return there.kind === 'identity' && there.provider === who.provider && there.id === who.id;
-    if (who.kind === 'principal') return there.kind === 'principal' && there.actor === who.actor;
+    if (who.kind === 'principal') return there.kind === 'principal' && there.actor.toLowerCase() === who.actor.toLowerCase();
     return there.kind === who.kind;
   };
   const plain = {
@@ -2029,13 +2349,19 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
   }
   // A person's request stays that person's. An origin that cannot be placed starts a run that holds nothing: a
   // requester no identity link resolves to is restricted to nothing.
+  const runActor = typeof who === 'object' && who.kind === 'principal' ? who.actor : actor;
   const forPerson =
     who === 'unknown'
       ? { requestedBy: { provider: 'factory', id: 'unplaceable-origin' } }
       : typeof who === 'object' && who.kind === 'identity'
-        ? { requestedBy: { provider: who.provider, id: who.id } }
-        : {};
-  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input: who === 'unknown' ? plain : full, factoryKind: 'approval', ...forPerson });
+        ? {
+            requestedBy: { provider: who.provider, id: who.id },
+            ...(originRun?.caller ? { caller: originRun.caller } : {}),
+          }
+        : typeof who === 'object' && who.kind === 'principal'
+          ? { ...(originRun?.caller ? { caller: originRun.caller } : {}) }
+          : {};
+  const out = await createRun(state, a.agentId, { actor: runActor, trigger: 'approval', input: who === 'unknown' ? plain : full, factoryKind: 'approval', ...forPerson });
   if (out.status < 300) return 'run';
   state.ledger.append({
     timestamp: new Date().toISOString(),
@@ -2089,6 +2415,7 @@ export function getKeymaster(state: FactoryState): Keymaster {
 import { UI_HTML } from './ui.js';
 
 export function createFactoryServer(state: FactoryState): http.Server {
+  wireGrantStoreKindLookup(state);
   // SK1: follow skill checks a previous control plane started and did not see end.
   void resumeSkillChecks(state).catch((err) => console.warn('[control-plane] could not resume skill checks:', err));
   return http.createServer(async (req, res) => {
@@ -2102,6 +2429,7 @@ export function createFactoryServer(state: FactoryState): http.Server {
 }
 
 async function route(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
+  wireGrantStoreKindLookup(state);
   const path = (req.url ?? '/').split('?')[0];
   const started = Number(process.env.FACTORY_STARTED_AT ?? Date.now());
 
@@ -2388,7 +2716,6 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
-
     const rawBytes = await readBodyBytes(req);
     if (hmacSignature) {
       if (!verifyWebhookHmac(rawBytes, secret, hmacSignature)) {
@@ -2747,11 +3074,18 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         .map((e) => e.trim().toLowerCase())
         .filter(Boolean);
       const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
+      const linkGrants = link ? effectiveGrantsForActor(state, link.actor) : undefined;
+      if (linkGrants && !linkGrants.ok) {
+        json(res, 503, { error: linkGrants.error });
+        return;
+      }
       const ingressAuth = authorizeIngress({
         requestedBy,
         agentId: runCreate[1],
+        agentKind: agentKindOf(state, runCreate[1]),
         privilege: 'agents.wake',
         owners: ownersOf(state, runCreate[1]),
+        grants: linkGrants?.grants,
         link,
         adminEmails,
         isIngressCaller: isIngress,
@@ -2774,6 +3108,13 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         return;
       }
       caller = ingressAuth.caller;
+    } else if (!isIngress) {
+      const resolved = resolvePrincipalCaller(state, principal, runCreate[1], 'agents.wake');
+      if (!resolved.ok) {
+        json(res, resolved.status, { error: resolved.error });
+        return;
+      }
+      caller = resolved.caller;
     }
     // AM2: the turn id and reply address are the factory's. A message from an ingress that wakes the agent is a turn like
     // any other (the first of a Discord session arrives here); an operator's run is a job and gets neither.
@@ -2786,6 +3127,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       if (replyTo) Object.assign(copy, { turnId: randomUUID(), replyTo });
       input = copy;
     }
+    const injectCallerIntoInput = Boolean(caller && (requestedBy || runCreate[2] === 'wake'));
     const out = await createRun(state, runCreate[1], {
       actor: principal.actor,
       trigger: runCreate[2] === 'wake' ? 'manual' : 'api',
@@ -2793,9 +3135,12 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       callbackUrl: body.callbackUrl as string | undefined,
       model: body.model as string | undefined,
       ...(requestedBy ? { requestedBy } : {}),
-      ...(caller ? { caller } : {}),
+      ...(injectCallerIntoInput ? { caller } : {}),
       factoryTurn: true,
     });
+    if (caller && !injectCallerIntoInput) {
+      attachCallerToRunResult(state, out, caller);
+    }
     json(res, out.status, out.body);
     return;
   }
@@ -2909,7 +3254,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   const convoMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/conversation$/);
   if (convoMatch && req.method === 'POST') {
-    const principal = await requirePrivilege(req, res, state, 'agents.converse');
+    const principal = await requirePrivilege(req, res, state, 'agents.converse', { agentId: convoMatch[1] });
     if (!principal) return;
     const agent = state.agents.get(convoMatch[1]);
     if (!agent) {
@@ -2973,11 +3318,18 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         .map((e) => e.trim().toLowerCase())
         .filter(Boolean);
       const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
+      const linkGrants = link ? effectiveGrantsForActor(state, link.actor) : undefined;
+      if (linkGrants && !linkGrants.ok) {
+        json(res, 503, { error: linkGrants.error });
+        return;
+      }
       const ingressAuth = authorizeIngress({
         requestedBy,
         agentId: agent.id,
+        agentKind: effectiveAgentKind(agent),
         privilege: 'agents.converse',
         owners: ownersOf(state, agent.id),
+        grants: linkGrants?.grants,
         link,
         adminEmails,
         isIngressCaller: isIngress,
@@ -3002,7 +3354,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       caller = ingressAuth.caller;
     }
     // AM2: every delivered turn says who is speaking. A person conversing directly (the console) speaks as themselves.
-    if (!caller && !isIngress) caller = directCaller(principal, ownersOf(state, agent.id), 'agents.converse');
+    if (!caller && !isIngress) {
+      const resolved = resolvePrincipalCaller(state, principal, agent.id, 'agents.converse');
+      if (!resolved.ok) {
+        json(res, resolved.status, { error: resolved.error });
+        return;
+      }
+      caller = resolved.caller;
+    }
     const turnId = randomUUID();
 
     // Input hygiene: unwrap body.input if sent as { input, requestedBy }, strip unverified caller
@@ -3085,7 +3444,12 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     const turnId = randomUUID();
-    const caller = directCaller(principal, ownersOf(state, agent.id), 'agents.converse');
+    const resolvedConvCaller = resolvePrincipalCaller(state, principal, agent.id, 'agents.converse');
+    if (!resolvedConvCaller.ok) {
+      json(res, resolvedConvCaller.status, { error: resolvedConvCaller.error });
+      return;
+    }
+    const caller = resolvedConvCaller.caller;
     const request = { op: body.op, ...(body.conversation ? { conversation: body.conversation } : {}), ...(body.limit ? { limit: body.limit } : {}), ...(othersRead ? { subject } : {}) };
     const payload = { kind: 'conversation-request', request, caller, turnId, replyTo: { channel: 'console' } };
     rememberConsoleTurn(state, turnId, agent.id, principal.actor);
@@ -3110,7 +3474,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
   // who asked can read them; an admin reading someone else's conversation goes through the agent (AM5), not here.
   const repliesMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/replies$/);
   if (repliesMatch && req.method === 'GET') {
-    const principal = await requirePrivilege(req, res, state, 'agents.converse');
+    const principal = await requirePrivilege(req, res, state, 'agents.converse', { agentId: repliesMatch[1] });
     if (!principal) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
     const after = Number(url.searchParams.get('after') ?? 0) || 0;
@@ -3856,12 +4220,115 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       source = { repo, commit: commit as string };
     }
 
+    const recordId = typeof cartridge.id === 'string' ? cartridge.id : agentId;
+    const previousAgent = state.agents.get(recordId);
+    const hasCartridgeWrapper = Boolean(body.cartridge && typeof body.cartridge === 'object');
+    const rawKind = body.kind !== undefined ? body.kind : cartridge.kind;
+    // On re-registration (`previousAgent !== undefined`), `cartridge.accountableLead` inside `body.cartridge` is the
+    // checked-in manifest default (for first-time registration) and NEVER an explicit ownership override — only
+    // top-level `body.accountableLead`, `body.owners`, `body.actAs`, or `body.onBehalfOf` mutates live GrantStore state.
+    const rawLead =
+      body.accountableLead !== undefined
+        ? body.accountableLead
+        : !previousAgent || !hasCartridgeWrapper
+          ? cartridge.accountableLead
+          : undefined;
+    const hasExplicitOwnershipMutation =
+      rawLead !== undefined ||
+      body.owners !== undefined ||
+      body.actAs !== undefined ||
+      body.onBehalfOf !== undefined;
+
+    let ownershipOnBehalfOf: string | undefined;
+    let resolvedRecordKind: AgentKind | undefined;
+    let resolvedAccountableLead: string | undefined;
+    let nextConfigOwners: string[] | undefined;
+    let replaceConfigOwners = false;
+
+    if (previousAgent && !hasExplicitOwnershipMutation) {
+      if (state.grants && !state.grants.healthy) {
+        json(res, 503, { error: 'grant_store_unavailable', message: 'grant store is unhealthy' });
+        return;
+      }
+      if (state.principals && !state.principals.healthy) {
+        json(res, 503, { error: 'principal_store_unavailable', message: 'principal store is unhealthy' });
+        return;
+      }
+      const prevEffectiveKind = effectiveAgentKind(previousAgent);
+      let explicitKind: AgentKind | undefined;
+      if (rawKind !== undefined && rawKind !== null) {
+        explicitKind = parseAgentKind(rawKind);
+        if (!explicitKind) {
+          json(res, 400, { error: 'invalid_kind', message: 'kind must be "personal" or "team"' });
+          return;
+        }
+        if (explicitKind !== prevEffectiveKind) {
+          json(res, 409, {
+            error: 'agent_kind_conflict',
+            message: `cannot change agent kind from '${prevEffectiveKind}' to '${explicitKind}' on re-registration`,
+          });
+          return;
+        }
+      }
+      resolvedRecordKind = explicitKind ?? previousAgent.kind;
+      resolvedAccountableLead = prevEffectiveKind === 'team' ? accountableLeadOf(state, recordId, previousAgent) : undefined;
+    } else {
+      if (previousAgent && rawKind !== undefined && rawKind !== null) {
+        const parsedReRegKind = parseAgentKind(rawKind);
+        if (!parsedReRegKind) {
+          json(res, 400, { error: 'invalid_kind', message: 'kind must be "personal" or "team"' });
+          return;
+        }
+        if (parsedReRegKind !== effectiveAgentKind(previousAgent)) {
+          json(res, 409, {
+            error: 'agent_kind_conflict',
+            message: `cannot change agent kind from '${effectiveAgentKind(previousAgent)}' to '${parsedReRegKind}' on re-registration`,
+          });
+          return;
+        }
+      }
+      const ownership = resolveAgentOwnershipOnSubmit(state, principal, {
+        kind: rawKind !== undefined ? rawKind : previousAgent?.kind,
+        accountableLead: rawLead,
+        owners: body.owners,
+        actAs: body.actAs,
+        onBehalfOf: body.onBehalfOf,
+        defaultKindWhenOmitted: 'omit',
+      });
+      if (!ownership.ok) {
+        json(res, ownership.status, ownership.body);
+        return;
+      }
+      const grantResult = await applyAgentOwnershipGrant(state, recordId, principal, ownership, {
+        replaceExisting: Boolean(previousAgent && ownership.isAdmin),
+      });
+      if (!grantResult.ok) {
+        json(res, grantResult.status, grantResult.body);
+        return;
+      }
+      const canonicalGrantSubject = grantResult.grant?.subject;
+      ownershipOnBehalfOf = ownership.onBehalfOf;
+      resolvedRecordKind = ownership.recordKind ?? previousAgent?.kind;
+      resolvedAccountableLead =
+        resolvedRecordKind === 'team'
+          ? (canonicalGrantSubject ?? ownership.accountableLead ?? previousAgent?.accountableLead)
+          : undefined;
+      if (ownership.configOwners !== undefined || resolvedRecordKind === 'team') {
+        replaceConfigOwners = true;
+        nextConfigOwners =
+          resolvedRecordKind === 'team'
+            ? undefined
+            : (canonicalGrantSubject ? [canonicalGrantSubject] : ownership.configOwners);
+      }
+    }
+
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId,
       type: 'action',
       action: 'AGENT_REGISTERED',
       actor: principal.actor,
+      ...(ownershipOnBehalfOf ? { onBehalfOf: ownershipOnBehalfOf } : {}),
       ...(source ? { commit: source.commit } : {}),
     });
     
@@ -3919,6 +4386,8 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         ? { name: state.agents.get(typeof cartridge.id === 'string' ? cartridge.id : agentId)!.name, nameSetInFactory: true }
         : { name: typeof cartridge.name === 'string' ? cartridge.name : (typeof body.name === 'string' ? body.name : agentId) }),
       role: typeof cartridge.role === 'string' ? cartridge.role : (typeof body.role === 'string' ? body.role : 'Agent'),
+      ...(resolvedRecordKind ? { kind: resolvedRecordKind } : {}),
+      ...(resolvedAccountableLead ? { accountableLead: resolvedAccountableLead } : {}),
       state: stateResult,
       provider: 'cloud',
       artifact,
@@ -3946,7 +4415,34 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     // reviews; routes, hosts, and budgets come only from the policy API.
 
     registryOf(state).save(record);
-    await recordConfig(state, record.id, { actor: principal.actor, reason: changeReason(req, state.configs?.current(record.id) ? 're-registered' : 'registered') });
+    const hadConfig = Boolean(state.configs?.current(record.id));
+    if (state.configs && replaceConfigOwners) {
+      const { owners: _prevOwners, ...baseCfg } = configOf(state, record.id);
+      const { record: cfgRec, created: cfgCreated } = await state.configs.put(
+        {
+          ...baseCfg,
+          ...(nextConfigOwners && nextConfigOwners.length ? { owners: nextConfigOwners } : {}),
+        },
+        {
+          updatedBy: principal.actor,
+          reason: changeReason(req, hadConfig ? 're-registered' : 'registered'),
+          replaces: ['owners'],
+        },
+      );
+      if (cfgCreated) {
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId: cfgRec.agentId,
+          type: 'action',
+          action: 'CONFIG_VERSIONED',
+          actor: principal.actor,
+          requestId: `config:${cfgRec.agentId}:v${cfgRec.version}`,
+          payloadSha256: cfgRec.hash,
+        });
+      }
+    } else {
+      await recordConfig(state, record.id, { actor: principal.actor, reason: changeReason(req, hadConfig ? 're-registered' : 'registered') });
+    }
     json(res, 201, archetypeWarning ? { ...record, warnings: [archetypeWarning] } : record);
     return;
   }
@@ -4156,6 +4652,11 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       await removeConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, 'agent purged') });
     } catch (err) {
       console.error(`[control-plane] configuration for ${agentId} not removed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (state.grants && state.grants.healthy) {
+      for (const g of state.grants.list({ scopeKind: 'agent', scopeId: agentId, includeExpired: true })) {
+        await state.grants.revoke(g.id, { by: principal.actor }).catch(() => undefined);
+      }
     }
     json(res, 200, { ok: true, id: agentId, action: 'purged' });
     return;

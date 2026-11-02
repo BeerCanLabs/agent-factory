@@ -346,8 +346,16 @@ export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
   'agents.update.install',
 ]);
 
-/** The roles that are derived from data about one agent or run, never read from a credential or a claim. */
-export type DerivedRole = 'agent-owner' | 'agent-member' | 'requester' | 'skill-owner';
+/** The roles that are derived from data about one agent, skill, or run, never read from a credential or a claim. */
+export type DerivedRole =
+  | 'agent-owner'
+  | 'agent-member'
+  | 'requester'
+  | 'skill-owner'
+  | 'content-owner'
+  | 'content-owner-readonly'
+  | 'accountable-lead'
+  | 'team-member';
 
 /**
  * Privileges that act on one skill, so a route can pass that skill as the resource.
@@ -363,9 +371,14 @@ export const SKILL_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
   'skills.unpublish',
 ]);
 
+/** Read-only skill privileges retained by an outgoing skill `content-owner` while a transfer is `pending-revoked` (D15). */
+export const SKILL_CONTENT_OWNER_READONLY_PRIVILEGES: readonly Privilege[] = ['skills.package.read'];
+
 /**
- * What a derived role holds, on its own agent or skill only (Dale, 2026-10-03, A9). `approvals.decide` is held by an owner only
- * when the run has no requesting user (see `authorize`); the requester holds it for its own run.
+ * What a derived role holds, on its own agent or skill only (Dale, 2026-10-03, A9, D7, D11, D15, D24, D29, S2b).
+ * `approvals.decide` is held by a legacy `agent-owner` only when the run has no requesting user (see `authorize`),
+ * whereas grant-backed personal `content-owner` and team `accountable-lead` / `team-member` hold `approvals.decide`
+ * per D29 (personal `agent-member` sub-roles never hold `approvals.decide`).
  */
 export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> = {
   'agent-owner': [
@@ -394,9 +407,82 @@ export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> 
     'agents.update.install',
   ],
   /**
-   * E12 (Dale, 2026-10-10): a person who holds an agent role on an agent (Stephanie: `Family` on Donna) may reach that
-   * agent, and nothing else: start a run and converse. It holds no factory role, so it holds nothing on any other agent,
-   * and nothing here that changes, reads or decides anything.
+   * D7, D11, D24, D29: Grant-backed sole `content-owner` on a `personal` agent. Holds full personal-agent management,
+   * wake + converse, and run-time hold clearance (`approvals.decide`).
+   */
+  'content-owner': [
+    'agents.models.read',
+    'agents.models.set',
+    'config.read',
+    'config.export.agent',
+    'credentials.agent.read',
+    'credentials.agent.set',
+    'connections.start',
+    'connections.import',
+    'agents.wake',
+    'agents.converse',
+    'agents.pause',
+    'agents.resume',
+    'skills.adopt.request',
+    'skills.adopt.remove',
+    'skills.decide.private',
+    'skills.training.fund',
+    'skills.training.run',
+    'agents.roles.read',
+    'agents.settings.read',
+    'agents.settings.set',
+    'agents.roles.assign',
+    'approvals.decide',
+    'agents.update.read',
+    'agents.update.install',
+  ],
+  /**
+   * D15: Outgoing personal-agent `content-owner` while an ownership transfer is in `pending-revoked`.
+   * Strictly non-secret read-only inspection; zero mutations, zero bundle export, zero wake/converse/hold clearance.
+   */
+  'content-owner-readonly': [
+    'agents.models.read',
+    'config.read',
+    'credentials.agent.read',
+    'agents.roles.read',
+    'agents.settings.read',
+    'agents.update.read',
+  ],
+  /**
+   * D11, D24, D26, D29: `accountable-lead` on a `team` agent. Manages team configuration, models, credentials,
+   * skills, settings, updates, and `member` grants (`agents.roles.assign`), wakes/converses, and clears holds,
+   * without personal-owner bundle export or personal user-OAuth binding.
+   */
+  'accountable-lead': [
+    'agents.models.read',
+    'agents.models.set',
+    'config.read',
+    'credentials.agent.read',
+    'credentials.agent.set',
+    'agents.wake',
+    'agents.converse',
+    'agents.pause',
+    'agents.resume',
+    'skills.adopt.request',
+    'skills.adopt.remove',
+    'skills.decide.private',
+    'skills.training.fund',
+    'skills.training.run',
+    'agents.roles.read',
+    'agents.settings.read',
+    'agents.settings.set',
+    'agents.roles.assign',
+    'approvals.decide',
+    'agents.update.read',
+    'agents.update.install',
+  ],
+  /**
+   * D11, D29, S2b: `member` grant on a `team` agent — wakes, converses, and clears run-time holds on that team agent.
+   */
+  'team-member': ['agents.wake', 'agents.converse', 'approvals.decide'],
+  /**
+   * E12 (Dale, 2026-10-10), D29: a person who holds an agent sub-role on a personal agent (Stephanie: `Family` on Donna)
+   * may reach that agent, and nothing else: start a run and converse. Never clears holds (`approvals.decide`).
    */
   'agent-member': ['agents.wake', 'agents.converse'],
   requester: ['approvals.decide'],
