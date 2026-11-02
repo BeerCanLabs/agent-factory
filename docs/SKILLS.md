@@ -190,9 +190,9 @@ When an agent configuration with adopted skills is deployed:
 ### The Activation Smoke Gate (TSK-281, L4)
 Before any candidate image layer containing adopted skills is activated for an agent, the factory executes the candidate container in smoke mode (`runActivationSmoke`):
 - **Turn 1**: Executes baseline hello-world agent turn verifying model completion through Gatekeeper Egress (`E5`).
-- **Turns 2..N**: Executes each adopted skill's declared `smoke:` action against the live container.
-- **Verification**: The candidate container must dispatch the tool, inject smoke context, complete without errors, and record egress audit rows on all required routes.
-- **Rollback on Failure**: If any adopted skill fails its smoke turn, the deployment aborts, the failure is ledgered (`AGENT_SMOKE_FAILED`), and the agent rolls back to its prior healthy image without downtime.
+- **Turns 2..N**: Executes each adopted skill's declared `smoke:` action against the live container, always with `dryRun: true` (#342).
+- **Verification**: The candidate container must dispatch the tool, inject smoke context, and complete without errors. A required route the dry run did not call is ledgered as `AGENT_SMOKE_ROUTE_NOT_EXERCISED`; an outside dependency that is down (5xx/unreachable) is ledgered as `AGENT_SMOKE_DEPENDENCY_DOWN` and does not fail the activation.
+- **Rollback on Failure**: If the hello-world turn fails, or an adopted skill fails its smoke turn for a runtime reason, the deployment aborts, the failure is ledgered (`AGENT_SMOKE_FAILED`), and the agent rolls back to its prior healthy image without downtime.
 
 ---
 
