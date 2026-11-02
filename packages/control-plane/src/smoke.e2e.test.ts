@@ -563,70 +563,94 @@ describe('Activation smoke gate (TSK-281, §6.8 L4, §6.14 SK1)', { concurrency:
       assert.ok(egressRow, 'egress row recorded for tavily route');
     });
 
-    it('fails activation and rolls back if skill smoke omits route egress entry', async () => {
+    async function deployWithSkill(agentId: string, skillId: string, handler: NonNullable<typeof state.smokeHandler>, until: string[]) {
       await publishSkill({
-        id: 'no-egress-skill',
+        id: skillId,
         version: '1.0.0',
-        name: 'No Egress Skill',
-        description: 'No egress test',
+        name: skillId,
+        description: 'smoke dry-run test',
         language: 'python',
         entry: 'entry.py',
         requires: { routes: ['weather'] },
         actions: [{ id: 'get-weather', route: 'weather', method: 'GET', path: '/now', hold: false }],
         smoke: { action: 'get-weather', input: {} },
       });
-
-      state.agents.set('strict-agent', {
-        id: 'strict-agent',
-        name: 'Strict Agent',
-        role: 'Worker',
-        state: 'PENDING_DEPLOY',
-        provider: 'cloud',
-        artifact: '',
-        repo: 'https://github.com/BeerCanLabs/agent-repo',
-        commit: SHA1,
-        requires: [],
-        ungated: [],
-        gated: [],
-        triggers: [],
-        dir: '/tmp/strict-agent',
+      state.agents.set(agentId, {
+        id: agentId, name: agentId, role: 'Worker', state: 'PENDING_DEPLOY', provider: 'cloud', artifact: '',
+        repo: 'https://github.com/BeerCanLabs/agent-repo', commit: SHA1, requires: [], ungated: [], gated: [], triggers: [],
+        dir: `/tmp/${agentId}`,
       });
       await state.configs!.put({
-        agentId: 'strict-agent',
+        agentId,
         source: { repo: 'https://github.com/BeerCanLabs/agent-repo', commit: SHA1 },
-        skills: [{ id: 'no-egress-skill', version: '1.0.0' }],
+        skills: [{ id: skillId, version: '1.0.0' }],
         policy: { routes: ['models', 'weather'] },
         owners: ['owner'],
       }, { updatedBy: 'test', reason: 'adopt' });
-      state.policies.set('strict-agent', { routes: ['models', 'weather'], budgetUsd: { perRun: 1.0, perDay: 10.0, perMonth: 50.0 } });
-
-      // Custom handler that finishes DONE but appends NO egress row for weather
-      state.smokeHandler = async ({ smokeType }) => {
-        if (smokeType === 'skill') {
-          return { ok: true, omitEgress: true, result: { done: true } } as any; // Omits writing egress row
-        }
-        return { ok: true };
-      };
-
+      state.policies.set(agentId, { routes: ['models', 'weather'], budgetUsd: { perRun: 1.0, perDay: 10.0, perMonth: 50.0 } });
+      state.smokeHandler = handler;
       try {
-        const res = await call('/api/v1/registry/agents/strict-agent/deploy', 'POST', ADMIN, { commit: SHA1 });
+        const res = await call(`/api/v1/registry/agents/${agentId}/deploy`, 'POST', ADMIN, { commit: SHA1 });
         assert.equal(res.status, 202);
-
         for (let i = 0; i < 50; i++) {
           await sleep(20);
-          if (state.agents.get('strict-agent')?.state === 'ERROR') break;
+          if (until.includes(String(state.agents.get(agentId)?.state))) break;
         }
-
-        const agent = state.agents.get('strict-agent')!;
-        assert.equal(agent.state, 'ERROR');
-
-        const failed = ledger.query().find((e) => e.agentId === 'strict-agent' && e.action === 'AGENT_SMOKE_FAILED');
-        assert.ok(failed, 'AGENT_SMOKE_FAILED recorded');
-        const smokeRun = state.runs.get(failed.runId!);
-        assert.match(String(smokeRun?.error), /did not record egress on required route 'weather'/);
       } finally {
         delete state.smokeHandler;
       }
+      return state.agents.get(agentId)!;
+    }
+
+    it('skill smoke without egress (dry run) passes activation and notes the route was not exercised (#342)', async () => {
+      const agent = await deployWithSkill('strict-agent', 'no-egress-skill', async ({ smokeType }) => (
+        smokeType === 'skill' ? ({ ok: true, omitEgress: true, result: { done: true } } as any) : { ok: true }
+      ), ['SLEEPING', 'ERROR']);
+      assert.equal(agent.state, 'SLEEPING');
+      assert.ok(ledger.query().find((e) => e.agentId === 'strict-agent' && e.action === 'AGENT_SMOKE_ROUTE_NOT_EXERCISED'));
+      assert.ok(!ledger.query().find((e) => e.agentId === 'strict-agent' && e.action === 'AGENT_SMOKE_FAILED'));
+    });
+
+    it('forces dryRun on every skill smoke even when the manifest omits it (#342)', async () => {
+      let seen: unknown;
+      const agent = await deployWithSkill('dry-agent', 'dry-skill', async (o: any) => {
+        if (o.smokeType === 'skill') seen = o.smokeSpec?.dryRun;
+        return { ok: true };
+      }, ['SLEEPING', 'ERROR']);
+      assert.equal(agent.state, 'SLEEPING');
+      assert.equal(seen, true);
+      const run = state.runs.list({ agentId: 'dry-agent' }).find((r) => (r.input as any).smoke === 'skill');
+      assert.equal((run?.input as any).dryRun, true);
+    });
+
+    it('a 5xx from the skill route is ledgered as dependency down and does not fail or roll back (#342)', async () => {
+      const agent = await deployWithSkill('dep-down-agent', 'dep-down-skill', async ({ smokeType }) => (
+        smokeType === 'skill'
+          ? { ok: false, error: 'error: HttpError: Print request failed with HTTP 522: <none>' }
+          : { ok: true }
+      ), ['SLEEPING', 'ERROR']);
+      assert.equal(agent.state, 'SLEEPING');
+      const down = ledger.query().find((e) => e.agentId === 'dep-down-agent' && e.action === 'AGENT_SMOKE_DEPENDENCY_DOWN');
+      assert.ok(down, 'AGENT_SMOKE_DEPENDENCY_DOWN recorded');
+      assert.equal((down as any).status, 522);
+      assert.equal((down as any).route, 'weather');
+      assert.match(String(state.runs.get(down!.runId!)?.error), /HTTP 522/);
+      assert.ok(!ledger.query().find((e) => e.agentId === 'dep-down-agent' && e.action === 'AGENT_SMOKE_FAILED'));
+    });
+
+    it('a real runtime failure in a skill smoke still blocks activation (#342)', async () => {
+      const agent = await deployWithSkill('broken-agent', 'broken-skill', async ({ smokeType }) => (
+        smokeType === 'skill' ? { ok: false, error: "smoke action 'get-weather' is not loaded" } : { ok: true }
+      ), ['SLEEPING', 'ERROR']);
+      assert.equal(agent.state, 'ERROR');
+      assert.ok(ledger.query().find((e) => e.agentId === 'broken-agent' && e.action === 'AGENT_SMOKE_FAILED'));
+    });
+
+    it('a dependency-down hello-world failure still blocks activation (#342)', async () => {
+      const agent = await deployWithSkill('hw-agent', 'hw-skill', async ({ smokeType }) => (
+        smokeType === 'hello-world' ? { ok: false, error: 'model route HTTP 503' } : { ok: true }
+      ), ['SLEEPING', 'ERROR']);
+      assert.equal(agent.state, 'ERROR');
     });
   });
 
