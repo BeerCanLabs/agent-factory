@@ -31,8 +31,14 @@
 import http from 'node:http';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  GrantStoreError,
+  GrantStoreUnavailableError,
+  PrincipalStoreUnavailableError,
+  normalizeActorToPrincipal,
+} from '@beercanlabs/factory-bouncer';
 import { AGENT_ID, type AgentSettings, type ConfigContent, type ConfigRecord } from '@beercanlabs/factory-registrar';
-import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
+import { findAgentRecord, json, readJson, requirePrivilege, wireGrantStoreKindLookup, type FactoryState } from './app.js';
 import { parseActor } from './identity-links.js';
 import { isReservedPolicyId } from '@beercanlabs/factory-gatekeeper/policy';
 import { canReadSettings } from './agent-settings.js';
@@ -55,10 +61,23 @@ export function configOf(state: FactoryState, agentId: string): ConfigContent {
   };
 }
 
-/** The agent's owners. Team agents have no content-owner (D11, S2b). No store or no record means no owners: it fails closed. */
+/**
+ * The agent's owners. Team agents have no content-owner (D11, S2b). When `state.grants` is configured, `GrantStore` is
+ * authoritative for personal agent `content-owner` (`[]` when `pending-revoked`, revoked, or unhealthy — failing closed).
+ */
 export function ownersOf(state: FactoryState, agentId: string): string[] {
-  const agent = state.agents.get(agentId);
+  const agent = findAgentRecord(state, agentId);
   if (agent?.kind === 'team') return [];
+  if (state.grants) {
+    wireGrantStoreKindLookup(state);
+    if (!state.grants.healthy) return [];
+    try {
+      const activeOwner = state.grants.activeContentOwnerOf({ kind: 'agent', id: agentId });
+      return activeOwner ? [activeOwner] : [];
+    } catch {
+      return [];
+    }
+  }
   return state.configs?.current(agentId)?.owners ?? (agent as unknown as { owners?: string[] })?.owners ?? [];
 }
 
@@ -277,10 +296,72 @@ async function handleOwners(state: FactoryState, req: http.IncomingMessage, res:
     json(res, 409, { error: 'single_owner_only', message: 'personal agents have at most one content-owner (D11, S2b)' });
     return true;
   }
+  if (state.grants && !state.grants.healthy) {
+    json(res, 503, { error: 'grant_store_unavailable' });
+    return true;
+  }
+  if (state.principals && !state.principals.healthy) {
+    json(res, 503, { error: 'principal_store_unavailable' });
+    return true;
+  }
+
+  let storedOwners = checked.owners;
+  if (state.grants) {
+    wireGrantStoreKindLookup(state);
+    let byActor = principal.actor;
+    try {
+      byActor = normalizeActorToPrincipal(principal.actor, state.principals);
+    } catch {
+      byActor = principal.actor;
+    }
+    try {
+      if (checked.owners.length === 0) {
+        const existingOwnerGrants = state.grants
+          .list({ scopeKind: 'agent', scopeId: agent.id.toLowerCase(), includeExpired: true })
+          .filter((g) => g.role === 'content-owner');
+        const primary =
+          existingOwnerGrants.find((g) => g.state === 'pending-revoked') ??
+          existingOwnerGrants.find((g) => g.state === 'active') ??
+          existingOwnerGrants[0];
+        if (primary) {
+          await state.grants.revoke(primary.id, { by: byActor });
+        }
+        storedOwners = [];
+      } else {
+        const normalizedSubject = normalizeActorToPrincipal(checked.owners[0], state.principals);
+        const granted = await state.grants.grant({
+          subject: normalizedSubject,
+          scope: { kind: 'agent', id: agent.id },
+          role: 'content-owner',
+          agentKind: 'personal',
+          by: byActor,
+          granterIsAdmin: true,
+          replaceExisting: true,
+          principals: state.principals,
+        });
+        if (!agent.kind) {
+          agent.kind = 'personal';
+        }
+        storedOwners = [granted.subject];
+      }
+    } catch (err) {
+      if (err instanceof GrantStoreError) {
+        json(res, err.status, { error: err.code, message: err.message });
+        return true;
+      }
+      if (err instanceof GrantStoreUnavailableError || err instanceof PrincipalStoreUnavailableError) {
+        json(res, 503, { error: err.code, message: err.message });
+        return true;
+      }
+      json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      return true;
+    }
+  }
+
   const { owners: _previous, ...content } = configOf(state, agentId);
   try {
     const { record, created } = await state.configs.put(
-      { ...content, ...(checked.owners.length ? { owners: checked.owners } : {}) },
+      { ...content, ...(storedOwners.length ? { owners: storedOwners } : {}) },
       { updatedBy: principal.actor, reason: changeReason(req, 'owners changed'), replaces: ['owners'] },
     );
     if (created) ledgerVersion(state, record, principal.actor);

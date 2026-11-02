@@ -73,15 +73,21 @@ function enrichRoles(state: FactoryState, actor: string, roles: Set<Role>): void
       roles.add('admin');
     }
   }
-  if (state.grants && state.grants.healthy) {
+  if (state.grants) {
+    if (!state.grants.healthy) {
+      roles.clear();
+      return;
+    }
     const grantRes = effectiveGrantsForActor(state, actor);
-    if (grantRes.ok && grantRes.grants) {
-      for (const eg of grantRes.grants) {
-        if (!eg.readOnly && eg.grant.scope.kind === 'fleet') {
-          const r = eg.grant.role;
-          if (r === 'viewer' || r === 'operator' || r === 'approver' || r === 'admin' || r === 'ingest' || r === 'gatekeeper-egress' || r === 'gatekeeper-ingress') {
-            roles.add(r);
-          }
+    if (!grantRes.ok || !grantRes.grants) {
+      roles.clear();
+      return;
+    }
+    for (const eg of grantRes.grants) {
+      if (!eg.readOnly && eg.grant.scope.kind === 'fleet') {
+        const r = eg.grant.role;
+        if (r === 'viewer' || r === 'operator' || r === 'approver' || r === 'admin' || r === 'ingest' || r === 'gatekeeper-egress' || r === 'gatekeeper-ingress') {
+          roles.add(r);
         }
       }
     }
@@ -277,6 +283,15 @@ export async function handleAgentBuilder(
     return;
   }
 
+  if (state.grants && !state.grants.healthy) {
+    json(res, 503, { error: 'grant_store_unhealthy', message: 'grant store is unhealthy' });
+    return;
+  }
+  if (state.principals && !state.principals.healthy) {
+    json(res, 503, { error: 'principal_store_unavailable', message: 'principal store is unhealthy' });
+    return;
+  }
+
   const humanCaller = resolveHumanCaller(state, run);
   if (!humanCaller) {
     json(res, 403, { error: 'builder_caller_required', message: 'agent-builder requires a verified human caller holding agents.create' });
@@ -425,7 +440,7 @@ export async function handleAgentBuilder(
       });
       return;
     } catch (err: any) {
-      await discardCreated(state, id, humanCaller.actor, 'builder adoption request failed');
+      await discardCreated(state, id, humanCaller.actor, 'builder adoption request failed', created.mintedGrantId);
       for (const skill of validation.skillsToAdopt) {
         try {
           adoptionStore(state).clear(id, skill.id);

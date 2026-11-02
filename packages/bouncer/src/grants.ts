@@ -1195,6 +1195,23 @@ export class GrantStore {
     );
   }
 
+  /**
+   * Returns the canonical subject (`user:<id>`) holding active `content-owner` on `scope` (including an expired
+   * `pending-revoked` transfer that reverted to active per D15), or `undefined` when `pending-revoked` is still in flight
+   * or no `content-owner` grant exists.
+   */
+  activeContentOwnerOf(scope: { kind: 'agent' | 'skill'; id: string }, at?: Date): string | undefined {
+    this.assertHealthy();
+    const normScope = normalizeGrantScope(scope);
+    const nowMs = (at ?? this.now()).getTime();
+    for (const g of this.byId.values()) {
+      if (!sameScope(g.scope, normScope) || g.role !== 'content-owner' || isGrantExpired(g, nowMs)) continue;
+      if (g.state === 'active') return g.subject;
+      if (g.state === 'pending-revoked' && isPendingTransferExpired(g, nowMs)) return g.subject;
+    }
+    return undefined;
+  }
+
   assertCanRemovePrincipal(principalId: string, at?: Date): void {
     this.assertHealthy();
     const { subject, kind } = resolveCanonicalSubject(principalId, this.principals);
@@ -1468,7 +1485,20 @@ export class GrantStore {
         throw new GrantStoreError(403, 'forbidden', `accountable-lead may only grant 'member' on their team agent`);
       }
 
-      const effectiveAgentKind = scope.kind === 'agent' ? (input.agentKind ?? this.agentKindLookup?.(scope.id)) : undefined;
+      const registeredKind = scope.kind === 'agent' ? this.agentKindLookup?.(scope.id) : undefined;
+      if (
+        scope.kind === 'agent' &&
+        registeredKind !== undefined &&
+        input.agentKind !== undefined &&
+        registeredKind !== input.agentKind
+      ) {
+        throw new GrantStoreError(
+          409,
+          'agent_kind_conflict',
+          `agent '${scope.id}' is registered as '${registeredKind}', not '${input.agentKind}'`,
+        );
+      }
+      const effectiveAgentKind = scope.kind === 'agent' ? (registeredKind ?? input.agentKind) : undefined;
       if (scope.kind === 'agent' && effectiveAgentKind !== undefined) {
         if (effectiveAgentKind === 'team' && role === 'content-owner') {
           throw new GrantStoreError(409, 'agent_kind_conflict', 'team agents cannot have a content-owner');
@@ -1541,21 +1571,29 @@ export class GrantStore {
                   `agent '${scope.id}' already has an accountable-lead and cannot also have a content-owner`,
                 );
               }
-              if (existing.role === 'content-owner' && isGrantOccupyingSlot(existing, nowMs)) {
-                const pendingLocked =
-                  existing.state === 'pending-revoked' && !isPendingTransferExpired(existing, nowMs);
-                const canUpdateInPlace =
-                  !unseenEmail &&
-                  existing.subject === subj &&
-                  state === 'active' &&
-                  !pendingLocked &&
-                  (cleanRequestedId === undefined || cleanRequestedId === existing.id);
-                if (!canUpdateInPlace) {
-                  throw new GrantStoreError(
-                    409,
-                    'owner_exists',
-                    `${scope.kind} '${scope.id}' already has an active content-owner ('${existing.subject}')`,
-                  );
+              if (existing.role === 'content-owner') {
+                if (input.replaceExisting && isAdmin && state === 'active') {
+                  if (unseenEmail || existing.subject !== subj || existing.state !== 'active') {
+                    removals.add(existing.id);
+                    continue;
+                  }
+                }
+                if (isGrantOccupyingSlot(existing, nowMs)) {
+                  const pendingLocked =
+                    existing.state === 'pending-revoked' && !isPendingTransferExpired(existing, nowMs);
+                  const canUpdateInPlace =
+                    !unseenEmail &&
+                    existing.subject === subj &&
+                    state === 'active' &&
+                    !pendingLocked &&
+                    (cleanRequestedId === undefined || cleanRequestedId === existing.id);
+                  if (!canUpdateInPlace) {
+                    throw new GrantStoreError(
+                      409,
+                      'owner_exists',
+                      `${scope.kind} '${scope.id}' already has an active content-owner ('${existing.subject}')`,
+                    );
+                  }
                 }
               }
             }

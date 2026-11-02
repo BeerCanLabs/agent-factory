@@ -403,17 +403,16 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
   const hasActiveGrantOwner =
     effectiveKind === 'personal' &&
     agentGrants.some((eg) => !eg.readOnly && eg.source === 'direct' && eg.grant.role === 'content-owner');
-  const hasReadOnlyGrantOwner =
-    effectiveKind === 'personal' &&
-    agentGrants.some((eg) => eg.readOnly && eg.source === 'direct' && eg.grant.role === 'content-owner');
+  const suppressLegacyOwner = effectiveKind === 'team' || req.grants !== undefined;
 
   const isOwner =
-    effectiveKind === 'team'
-      ? false
-      : hasActiveGrantOwner || (!hasReadOnlyGrantOwner && owners.some((o) => o.toLowerCase() === actor.toLowerCase()));
+    hasActiveGrantOwner || (!suppressLegacyOwner && owners.some((o) => o.toLowerCase() === actor.toLowerCase()));
+  const stripSubrolePrefix = (r: string): string =>
+    r.toLowerCase().startsWith('subrole:') ? r.slice('subrole:'.length) : r;
   const grantRoleLabels = agentGrants
     .filter((eg) => !eg.readOnly && eg.grant.role !== 'content-owner')
-    .map((eg) => eg.grant.role);
+    .map((eg) => stripSubrolePrefix(eg.grant.role))
+    .filter((r) => r.trim() !== '' && r.trim().toLowerCase() !== 'owner');
   const mergedMemberRoles = [...new Set([...linkAgentRoles, ...grantRoleLabels])];
   const effectiveAgentRoles = isOwner
     ? ['Owner', ...mergedMemberRoles]
@@ -481,13 +480,9 @@ export function directCaller(
   const hasActiveGrantOwner =
     effectiveKind === 'personal' &&
     agentGrants.some((eg) => !eg.readOnly && eg.source === 'direct' && eg.grant.role === 'content-owner');
-  const hasReadOnlyGrantOwner =
-    effectiveKind === 'personal' &&
-    agentGrants.some((eg) => eg.readOnly && eg.source === 'direct' && eg.grant.role === 'content-owner');
+  const suppressLegacyOwner = effectiveKind === 'team' || opts?.grants !== undefined;
   const isOwner =
-    effectiveKind === 'team'
-      ? false
-      : hasActiveGrantOwner || (!hasReadOnlyGrantOwner && owners.some((o) => o.toLowerCase() === principal.actor.toLowerCase()));
+    hasActiveGrantOwner || (!suppressLegacyOwner && owners.some((o) => o.toLowerCase() === principal.actor.toLowerCase()));
   const grantFleetRoles = (opts?.grants ?? [])
     .filter((eg) => !eg.readOnly && eg.grant.scope.kind === 'fleet' && eg.grant.role in ROLE_PRIVILEGES)
     .map((eg) => eg.grant.role as Role);

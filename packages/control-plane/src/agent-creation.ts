@@ -80,23 +80,25 @@ export function agentConfigForRun(state: FactoryState, run: Run, res: http.Serve
   });
 }
 
-/** Nothing of a failed creation is left behind: neither the agent, its registry file, its grants, nor its configuration, so the id can be tried again. */
-export async function discardCreated(state: FactoryState, id: string, actor: string, reason: string): Promise<void> {
+/**
+ * Nothing of a failed creation is left behind: neither the agent, its registry file, any grant newly minted during this
+ * creation attempt, nor its configuration, so the id can be tried again without clobbering pre-existing admin grants.
+ */
+export async function discardCreated(
+  state: FactoryState,
+  id: string,
+  actor: string,
+  reason: string,
+  mintedGrantId?: string,
+): Promise<void> {
   state.agents.delete(id);
   try {
     registryOf(state).remove(id);
   } catch {
     // the record may not have been written
   }
-  if (state.grants && state.grants.healthy) {
-    try {
-      const existingGrants = state.grants.list({ scopeKind: 'agent', scopeId: id, includeExpired: true });
-      for (const g of existingGrants) {
-        await state.grants.revoke(g.id, { by: actor }).catch(() => undefined);
-      }
-    } catch {
-      // grant store may not hold any grant for id
-    }
+  if (mintedGrantId && state.grants && state.grants.healthy) {
+    await state.grants.revoke(mintedGrantId, { by: actor }).catch(() => undefined);
   }
   await removeConfig(state, id, { actor, reason }).catch(() => undefined);
 }
@@ -473,7 +475,11 @@ export async function applyAgentOwnershipGrant(
   agentId: string,
   principal: { actor: string },
   ownership: Extract<ResolvedAgentOwnership, { ok: true }>,
-): Promise<{ ok: true; grant?: GrantRecord } | { ok: false; status: number; body: Record<string, unknown> }> {
+  opts?: { replaceExisting?: boolean },
+): Promise<
+  | { ok: true; grant?: GrantRecord; mintedGrantId?: string }
+  | { ok: false; status: number; body: Record<string, unknown> }
+> {
   if (!state.grants || !ownership.grantRole || !ownership.grantSubject) {
     return { ok: true };
   }
@@ -485,6 +491,11 @@ export async function applyAgentOwnershipGrant(
     byActor = principal.actor;
   }
   try {
+    const existingIds = new Set(
+      state.grants
+        .list({ scopeKind: 'agent', scopeId: agentId.toLowerCase(), includeExpired: true })
+        .map((g) => g.id),
+    );
     const grant = await state.grants.grant({
       subject: ownership.grantSubject,
       scope: { kind: 'agent', id: agentId },
@@ -494,10 +505,11 @@ export async function applyAgentOwnershipGrant(
       ...(ownership.onBehalfOf ? { onBehalfOf: ownership.onBehalfOf } : {}),
       granterIsAdmin: ownership.isAdmin,
       initialSubmission: true,
-      replaceExisting: ownership.isAdmin && ownership.grantRole === 'accountable-lead',
+      replaceExisting: opts?.replaceExisting ?? (ownership.isAdmin && ownership.grantRole === 'accountable-lead'),
       principals: state.principals,
     });
-    return { ok: true, grant };
+    const mintedGrantId = existingIds.has(grant.id) ? undefined : grant.id;
+    return { ok: true, grant, ...(mintedGrantId ? { mintedGrantId } : {}) };
   } catch (err) {
     if (err instanceof GrantStoreError) {
       return { ok: false, status: err.status, body: { error: err.code, message: err.message } };
@@ -529,7 +541,7 @@ export type NewConfiguredAgent = {
   rolesMayNameSkills?: ReadonlySet<string>;
   reason?: string;
 };
-export type Created = { status: number; body: Record<string, unknown>; record?: AgentRecord };
+export type Created = { status: number; body: Record<string, unknown>; record?: AgentRecord; mintedGrantId?: string };
 
 /** Creates an agent from a configuration (CF6): the one place that does it, for `POST /agents` and for an import (CF3). */
 export async function createFromConfiguration(
@@ -660,12 +672,14 @@ export async function createFromConfiguration(
     createdFrom: 'configuration',
   };
   state.agents.set(id, record);
+  let mintedGrantId: string | undefined;
   try {
     const grantApplied = await applyAgentOwnershipGrant(state, id, principal, ownership);
     if (!grantApplied.ok) {
       await discardCreated(state, id, principal.actor, 'ownership grant rejected');
       return { status: grantApplied.status, body: grantApplied.body };
     }
+    mintedGrantId = grantApplied.mintedGrantId;
     const canonicalGrantSubject = grantApplied.grant?.subject;
     if (ownership.effectiveKind === 'team' && canonicalGrantSubject) {
       record.accountableLead = canonicalGrantSubject;
@@ -729,9 +743,10 @@ export async function createFromConfiguration(
         skills: stored.skills ?? [],
       },
       record,
+      ...(mintedGrantId ? { mintedGrantId } : {}),
     };
   } catch (err) {
-    await discardCreated(state, id, principal.actor, 'creation failed');
+    await discardCreated(state, id, principal.actor, 'creation failed', mintedGrantId);
     console.error(`[control-plane] agent ${id} not created: ${err instanceof Error ? err.message : String(err)}`);
     return { status: 500, body: { error: 'agent_not_created' } };
   }

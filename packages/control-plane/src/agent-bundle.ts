@@ -89,7 +89,7 @@ export async function handleAgentBundle(state: FactoryState, req: http.IncomingM
         // the store may not hold one
       }
     }
-    await discardCreated(state, id, principal.actor, 'import failed');
+    await discardCreated(state, id, principal.actor, 'import failed', created.mintedGrantId);
     try {
       state.ledger.append({ timestamp: new Date().toISOString(), agentId: id, type: 'action', action: 'AGENT_IMPORT_FAILED', actor: principal.actor, payloadSha256: payloadHash(bundle) });
     } catch {

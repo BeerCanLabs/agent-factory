@@ -3,8 +3,8 @@
 // call the person's roles do not allow, before any credential is injected. The agent is never asked and cannot change it.
 import { effectiveAccess, type RouteAccess } from '@beercanlabs/factory-contract';
 import type { Run } from '@beercanlabs/factory-property-manager';
-import type { AgentRecord } from '@beercanlabs/factory-registrar';
-import type { FactoryState } from './app.js';
+import { effectiveAgentKind, type AgentRecord } from '@beercanlabs/factory-registrar';
+import { agentKindOf, effectiveGrantsForActor, type FactoryState } from './app.js';
 import { ownersOf } from './config-store.js';
 import { requesterOfRun } from './schedules.js';
 import { agentInForce } from './agent-settings.js';
@@ -55,12 +55,61 @@ export function accessForRequester(state: FactoryState, agent: AgentRecord, requ
   if (!link) return restrictedTo(agent, []);
 
   const actor = link.actor.toLowerCase();
-  const owners = ownersOf(state, agentId).map((o) => o.toLowerCase());
-  if (owners.includes(actor)) return NOT_RESTRICTED;
   const roles = link.roles ?? [];
   const email = actor.startsWith('cloudflare:') ? actor.slice('cloudflare:'.length).trim() : '';
   // As the Bouncer reads a link (`authorizeIngress`): explicit roles replace the email-admin default.
   const isAdmin = roles.includes('admin') || (roles.length === 0 && email !== '' && adminEmails().includes(email));
+
+  if (state.grants) {
+    const grantRes = effectiveGrantsForActor(state, link.actor);
+    if (!grantRes.ok || !grantRes.grants) return restrictedTo(agent, []);
+
+    if (isAdmin || roles.includes('operator')) return NOT_RESTRICTED;
+    for (const eg of grantRes.grants) {
+      if (!eg.readOnly && eg.grant.scope.kind === 'fleet' && (eg.grant.role === 'admin' || eg.grant.role === 'operator')) {
+        return NOT_RESTRICTED;
+      }
+    }
+
+    const lowerAgentId = agentId.toLowerCase();
+    const agentGrants = grantRes.grants.filter(
+      (eg) => !eg.readOnly && eg.grant.scope.kind === 'agent' && eg.grant.scope.id.toLowerCase() === lowerAgentId,
+    );
+    const kind = agentKindOf(state, agentId) ?? effectiveAgentKind(agent);
+    const declaredRoles = agent.roles ?? [];
+    const definesMemberRole = declaredRoles.some((r) => r.name === 'member');
+
+    if (kind === 'personal') {
+      if (agentGrants.some((eg) => eg.source === 'direct' && eg.grant.role === 'content-owner')) {
+        return NOT_RESTRICTED;
+      }
+    } else if (kind === 'team') {
+      if (agentGrants.some((eg) => eg.source === 'direct' && eg.grant.role === 'accountable-lead')) {
+        return NOT_RESTRICTED;
+      }
+      if (!definesMemberRole && agentGrants.some((eg) => eg.grant.role === 'member')) {
+        return NOT_RESTRICTED;
+      }
+    }
+
+    const heldSet = new Set<string>(
+      Object.prototype.hasOwnProperty.call(link.agentRoles ?? {}, agentId) ? (link.agentRoles![agentId] ?? []) : [],
+    );
+    for (const eg of agentGrants) {
+      const r = eg.grant.role;
+      if (r === 'content-owner' || r === 'accountable-lead' || r === 'agent-member' || r === 'owner') continue;
+      if (kind === 'team' && r === 'member' && !definesMemberRole) continue;
+      const normalized = r.toLowerCase().startsWith('subrole:') ? r.slice('subrole:'.length) : r;
+      if (normalized) heldSet.add(normalized);
+    }
+    return restrictedTo(agent, [...heldSet]);
+  }
+
+  const kind = agentKindOf(state, agentId) ?? effectiveAgentKind(agent);
+  if (kind !== 'team') {
+    const owners = ownersOf(state, agentId).map((o) => o.toLowerCase());
+    if (owners.includes(actor)) return NOT_RESTRICTED;
+  }
   // Admins are not restricted (E12 item 4). A factory operator is admitted to every agent (E12 item 3) and is likewise
   // not narrowed to a role: to limit a person to an agent role, they hold no operator role.
   if (isAdmin || roles.includes('operator')) return NOT_RESTRICTED;

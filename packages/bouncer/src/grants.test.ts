@@ -1946,5 +1946,62 @@ describe('GrantStore & domain grants (S2 #351)', () => {
         }),
       (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'agent_kind_conflict',
     );
+
+    // F4: explicit input.agentKind contradicting registered agentKindLookup rejects 409 agent_kind_conflict
+    await assert.rejects(
+      () =>
+        store.grant({
+          subject: 'user:dale',
+          scope: { kind: 'agent', id: 'archie' },
+          role: 'member',
+          agentKind: 'personal',
+          by: 'user:dale',
+        }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'agent_kind_conflict',
+    );
+    await assert.rejects(
+      () =>
+        store.grant({
+          subject: 'user:sarah',
+          scope: { kind: 'agent', id: 'donna' },
+          role: 'member',
+          agentKind: 'team',
+          by: 'user:dale',
+        }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'agent_kind_conflict',
+    );
+
+    // F1: activeContentOwnerOf tracks active owner, returns undefined during pending-revoked, updates on accept & replaceExisting
+    assert.equal(store.activeContentOwnerOf({ kind: 'agent', id: 'donna' }), undefined);
+    await store.grant({
+      subject: 'user:dale',
+      scope: { kind: 'agent', id: 'donna' },
+      role: 'content-owner',
+      by: 'user:dale',
+      initialSubmission: true,
+    });
+    assert.equal(store.activeContentOwnerOf({ kind: 'agent', id: 'donna' }), 'user:dale');
+
+    const tx = await store.startOwnershipTransfer({
+      scope: { kind: 'agent', id: 'donna' },
+      fromSubject: 'user:dale',
+      toSubject: 'user:sarah',
+      by: 'user:dale',
+    });
+    assert.equal(store.activeContentOwnerOf({ kind: 'agent', id: 'donna' }), undefined);
+    await store.resolveOwnershipTransfer({ transferId: tx.transferId, action: 'accept', by: 'user:sarah' });
+    assert.equal(store.activeContentOwnerOf({ kind: 'agent', id: 'donna' }), 'user:sarah');
+
+    const replaced = await store.grant({
+      subject: 'user:dale',
+      scope: { kind: 'agent', id: 'donna' },
+      role: 'content-owner',
+      by: 'user:dale',
+      granterIsAdmin: true,
+      replaceExisting: true,
+    });
+    assert.equal(store.activeContentOwnerOf({ kind: 'agent', id: 'donna' }), 'user:dale');
+    await store.revoke(replaced.id, { by: 'user:dale' });
+    assert.equal(store.activeContentOwnerOf({ kind: 'agent', id: 'donna' }), undefined);
   });
 });

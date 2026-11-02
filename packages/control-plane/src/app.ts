@@ -18,6 +18,7 @@ import {
   credentialsOf,
   effectiveAgentKind,
   egressOf,
+  parseAgentKind,
   rolesOf,
   skillIdsOf,
   skillRoutesOf,
@@ -343,19 +344,29 @@ export function readBufferBody(req: http.IncomingMessage, limit = 5 * 1024 * 102
   });
 }
 
-const wiredGrantStores = new WeakSet<GrantStore>();
+const wiredGrantStores = new WeakMap<GrantStore, FactoryState>();
+
+export function findAgentRecord(state: FactoryState, agentId: string): AgentRecord | undefined {
+  const exact = state.agents.get(agentId);
+  if (exact) return exact;
+  const lower = agentId.toLowerCase();
+  for (const [k, v] of state.agents.entries()) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return undefined;
+}
 
 export function wireGrantStoreKindLookup(state: FactoryState): void {
-  if (!state.grants || wiredGrantStores.has(state.grants)) return;
+  if (!state.grants || wiredGrantStores.get(state.grants) === state) return;
   state.grants.setAgentKindLookup((agentId) => {
-    const a = state.agents.get(agentId);
+    const a = findAgentRecord(state, agentId);
     return a ? effectiveAgentKind(a) : undefined;
   });
-  wiredGrantStores.add(state.grants);
+  wiredGrantStores.set(state.grants, state);
 }
 
 export function agentKindOf(state: FactoryState, agentId: string): AgentKind | undefined {
-  const a = state.agents.get(agentId);
+  const a = findAgentRecord(state, agentId);
   return a ? effectiveAgentKind(a) : undefined;
 }
 
@@ -2330,6 +2341,7 @@ export function createFactoryServer(state: FactoryState): http.Server {
 }
 
 async function route(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
+  wireGrantStoreKindLookup(state);
   const path = (req.url ?? '/').split('?')[0];
   const started = Number(process.env.FACTORY_STARTED_AT ?? Date.now());
 
@@ -4061,26 +4073,97 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
 
     const recordId = typeof cartridge.id === 'string' ? cartridge.id : agentId;
-    const ownership = resolveAgentOwnershipOnSubmit(state, principal, {
-      kind: body.kind !== undefined ? body.kind : cartridge.kind,
-      accountableLead: body.accountableLead !== undefined ? body.accountableLead : cartridge.accountableLead,
-      owners: body.owners,
-      actAs: body.actAs,
-      onBehalfOf: body.onBehalfOf,
-      defaultKindWhenOmitted: 'omit',
-    });
-    if (!ownership.ok) {
-      json(res, ownership.status, ownership.body);
-      return;
-    }
-
     const previousAgent = state.agents.get(recordId);
-    const grantResult = await applyAgentOwnershipGrant(state, recordId, principal, ownership);
-    if (!grantResult.ok) {
-      json(res, grantResult.status, grantResult.body);
-      return;
+    const rawKind = body.kind !== undefined ? body.kind : cartridge.kind;
+    const rawLead = body.accountableLead !== undefined ? body.accountableLead : cartridge.accountableLead;
+    const hasExplicitOwnershipMutation =
+      rawLead !== undefined ||
+      body.owners !== undefined ||
+      body.actAs !== undefined ||
+      body.onBehalfOf !== undefined;
+
+    let ownershipOnBehalfOf: string | undefined;
+    let resolvedRecordKind: AgentKind | undefined;
+    let resolvedAccountableLead: string | undefined;
+    let nextConfigOwners: string[] | undefined;
+    let replaceConfigOwners = false;
+
+    if (previousAgent && !hasExplicitOwnershipMutation) {
+      if (state.grants && !state.grants.healthy) {
+        json(res, 503, { error: 'grant_store_unavailable', message: 'grant store is unhealthy' });
+        return;
+      }
+      if (state.principals && !state.principals.healthy) {
+        json(res, 503, { error: 'principal_store_unavailable', message: 'principal store is unhealthy' });
+        return;
+      }
+      const prevEffectiveKind = effectiveAgentKind(previousAgent);
+      let explicitKind: AgentKind | undefined;
+      if (rawKind !== undefined && rawKind !== null) {
+        explicitKind = parseAgentKind(rawKind);
+        if (!explicitKind) {
+          json(res, 400, { error: 'invalid_kind', message: 'kind must be "personal" or "team"' });
+          return;
+        }
+        if (explicitKind !== prevEffectiveKind) {
+          json(res, 409, {
+            error: 'agent_kind_conflict',
+            message: `cannot change agent kind from '${prevEffectiveKind}' to '${explicitKind}' on re-registration`,
+          });
+          return;
+        }
+      }
+      resolvedRecordKind = explicitKind ?? previousAgent.kind;
+      resolvedAccountableLead = prevEffectiveKind === 'team' ? previousAgent.accountableLead : undefined;
+    } else {
+      if (previousAgent && rawKind !== undefined && rawKind !== null) {
+        const parsedReRegKind = parseAgentKind(rawKind);
+        if (!parsedReRegKind) {
+          json(res, 400, { error: 'invalid_kind', message: 'kind must be "personal" or "team"' });
+          return;
+        }
+        if (parsedReRegKind !== effectiveAgentKind(previousAgent)) {
+          json(res, 409, {
+            error: 'agent_kind_conflict',
+            message: `cannot change agent kind from '${effectiveAgentKind(previousAgent)}' to '${parsedReRegKind}' on re-registration`,
+          });
+          return;
+        }
+      }
+      const ownership = resolveAgentOwnershipOnSubmit(state, principal, {
+        kind: rawKind !== undefined ? rawKind : previousAgent?.kind,
+        accountableLead: rawLead,
+        owners: body.owners,
+        actAs: body.actAs,
+        onBehalfOf: body.onBehalfOf,
+        defaultKindWhenOmitted: 'omit',
+      });
+      if (!ownership.ok) {
+        json(res, ownership.status, ownership.body);
+        return;
+      }
+      const grantResult = await applyAgentOwnershipGrant(state, recordId, principal, ownership, {
+        replaceExisting: Boolean(previousAgent && ownership.isAdmin),
+      });
+      if (!grantResult.ok) {
+        json(res, grantResult.status, grantResult.body);
+        return;
+      }
+      const canonicalGrantSubject = grantResult.grant?.subject;
+      ownershipOnBehalfOf = ownership.onBehalfOf;
+      resolvedRecordKind = ownership.recordKind ?? previousAgent?.kind;
+      resolvedAccountableLead =
+        resolvedRecordKind === 'team'
+          ? (canonicalGrantSubject ?? ownership.accountableLead ?? previousAgent?.accountableLead)
+          : undefined;
+      if (ownership.configOwners !== undefined || resolvedRecordKind === 'team') {
+        replaceConfigOwners = true;
+        nextConfigOwners =
+          resolvedRecordKind === 'team'
+            ? undefined
+            : (canonicalGrantSubject ? [canonicalGrantSubject] : ownership.configOwners);
+      }
     }
-    const canonicalGrantSubject = grantResult.grant?.subject;
 
     state.ledger.append({
       timestamp: new Date().toISOString(),
@@ -4088,7 +4171,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       type: 'action',
       action: 'AGENT_REGISTERED',
       actor: principal.actor,
-      ...(ownership.onBehalfOf ? { onBehalfOf: ownership.onBehalfOf } : {}),
+      ...(ownershipOnBehalfOf ? { onBehalfOf: ownershipOnBehalfOf } : {}),
       ...(source ? { commit: source.commit } : {}),
     });
     
@@ -4139,12 +4222,6 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       ? cartridge.approvedModels
       : (Array.isArray(body.approvedModels) && body.approvedModels.length > 0 ? body.approvedModels : [model]);
 
-    const resolvedRecordKind = ownership.recordKind ?? previousAgent?.kind;
-    const resolvedAccountableLead =
-      resolvedRecordKind === 'team'
-        ? (canonicalGrantSubject ?? ownership.accountableLead ?? previousAgent?.accountableLead)
-        : undefined;
-
     const record: AgentRecord = {
       id: typeof cartridge.id === 'string' ? cartridge.id : agentId,
       // #65: a display name set in the factory survives re-registration; otherwise the cartridge names the agent.
@@ -4182,16 +4259,12 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
     registryOf(state).save(record);
     const hadConfig = Boolean(state.configs?.current(record.id));
-    if (state.configs && (ownership.configOwners !== undefined || resolvedRecordKind === 'team')) {
+    if (state.configs && replaceConfigOwners) {
       const { owners: _prevOwners, ...baseCfg } = configOf(state, record.id);
-      const nextOwners =
-        resolvedRecordKind === 'team'
-          ? undefined
-          : (canonicalGrantSubject ? [canonicalGrantSubject] : ownership.configOwners);
       const { record: cfgRec, created: cfgCreated } = await state.configs.put(
         {
           ...baseCfg,
-          ...(nextOwners && nextOwners.length ? { owners: nextOwners } : {}),
+          ...(nextConfigOwners && nextConfigOwners.length ? { owners: nextConfigOwners } : {}),
         },
         {
           updatedBy: principal.actor,

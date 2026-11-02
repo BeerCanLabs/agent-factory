@@ -79,7 +79,9 @@ export function authorize(req: AuthorizeRequest): AuthorizeResult {
   }
 
   if (resource && AGENT_SCOPED.has(privilege)) {
-    let suppressLegacyOwner = resource.agentKind === 'team';
+    // F1/D11/D15: When grant-backed authorization is active (`resource.grants` provided) or the agent is `team`,
+    // `GrantStore` is authoritative for agent ownership; legacy `resource.owners` never resurrects transferred/revoked owners.
+    let suppressLegacyOwner = resource.agentKind === 'team' || resource.grants !== undefined;
     // D29: When grant-backed authorization is active (`resource.grants` provided), holds go strictly to the content side
     // (`content-owner` on personal agents; `accountable-lead` or `member` on team agents), never to a personal `agent-member` requester.
     const suppressLegacyRequester = resource.grants !== undefined;

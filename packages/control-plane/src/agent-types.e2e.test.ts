@@ -22,6 +22,7 @@ import { FileConfigBackend, GroupStore, VersionedConfigStore } from '@beercanlab
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { createFactoryServer, type FactoryState } from './app.js';
+import { accessForRun } from './access-enforcement.js';
 import { IdentityLinkStore } from './identity-links.js';
 import { ownersOf } from './config-store.js';
 import { loadSkills } from './skills.js';
@@ -36,9 +37,10 @@ const TOKENS = {
   stephanie: 'tok-user-stephanie',
   bob: 'tok-user-bob',
   ingress: 'tok-svc-ingress',
+  ci: 'tok-svc-ci',
 } as const;
 
-const ACTORS: Record<string, { actor: string; roles: Array<'operator' | 'gatekeeper-ingress'> }> = {
+const ACTORS: Record<string, { actor: string; roles: Array<'admin' | 'operator' | 'gatekeeper-ingress'> }> = {
   [TOKENS.admin]: { actor: 'user:admin', roles: [] },
   [TOKENS.op]: { actor: 'user:op', roles: [] },
   [TOKENS.dale]: { actor: 'user:dale', roles: [] },
@@ -48,6 +50,7 @@ const ACTORS: Record<string, { actor: string; roles: Array<'operator' | 'gatekee
   [TOKENS.stephanie]: { actor: 'user:stephanie', roles: [] },
   [TOKENS.bob]: { actor: 'user:bob', roles: [] },
   [TOKENS.ingress]: { actor: 'service:gatekeeper-ingress', roles: ['operator', 'gatekeeper-ingress'] },
+  [TOKENS.ci]: { actor: 'service:ci', roles: ['admin'] },
 };
 
 function identityOnlyAuth(): AuthProvider {
@@ -150,6 +153,7 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
 
     const identityLinks = new IdentityLinkStore(join(dir, 'links'));
     identityLinks.link('discord', 'dale-discord-1', 'user:dale', 'user:admin');
+    identityLinks.link('discord', 'alice-discord-1', 'user:alice', 'user:admin');
     identityLinks.link('discord', 'sarah-discord-1', 'user:sarah', 'user:admin');
     identityLinks.link('discord', 'geordi-discord-1', 'user:geordi', 'user:admin');
     identityLinks.link('discord', 'steph-discord-1', 'user:stephanie', 'user:admin');
@@ -595,7 +599,7 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     );
   });
 
-  it('AC5/D15/D26: pending-revoked content-owner on personal agent retains read-only access and is refused writes, bundle export, wake, conversation, and hold decisions despite legacy ConfigStore.owners', async () => {
+  it('AC5/D15/D26/F1: GrantStore is authoritative over stale ConfigStore.owners across pending-revoked, transfer accept, grant revoke, and PUT /owners sync', async () => {
     // Give user:alice a personal agent where she holds only fleet viewer + content-owner (no fleet operator)
     // Start ownership transfer on alice-bot from user:alice to user:bob
     const transfer = await grants.startOwnershipTransfer({
@@ -607,8 +611,9 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     });
     assert.equal(transfer.outgoing.state, 'pending-revoked');
     assert.equal(transfer.incoming.state, 'pending-accepted');
-    // Note: ConfigStore.owners STILL lists ['user:alice'], proving GrantStore readOnly suppresses legacy owner fallback!
-    assert.deepEqual(ownersOf(state, 'alice-bot'), ['user:alice']);
+    // ConfigStore.owners still holds stale ['user:alice'], while authoritative ownersOf(state, 'alice-bot') is [] during pending-revoked!
+    assert.deepEqual(state.configs!.current('alice-bot')?.owners, ['user:alice']);
+    assert.deepEqual(ownersOf(state, 'alice-bot'), []);
 
     assert.equal((await call('POST', '/api/v1/registry/agents/alice-bot/deploy', {}, TOKENS.admin)).status, 200);
 
@@ -640,6 +645,7 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
 
     // Cancel transfer -> Alice returns to active content-owner and regains full authority immediately
     await grants.resolveOwnershipTransfer({ transferId: transfer.transferId, action: 'cancel', by: 'user:alice' });
+    assert.deepEqual(ownersOf(state, 'alice-bot'), ['user:alice']);
     assert.equal(
       (await call('PUT', '/api/v1/agents/alice-bot/settings', { soul: 'Restored active owner.' }, TOKENS.alice)).status,
       200,
@@ -647,6 +653,50 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     assert.equal((await call('GET', '/api/v1/agents/alice-bot/bundle', undefined, TOKENS.alice)).status, 200);
     assert.equal(
       (await call('POST', `/api/v1/approvals/${heldId}`, { decision: 'reject' }, TOKENS.alice)).status,
+      200,
+    );
+
+    // F1: Accept ownership transfer (Alice -> Bob) WITHOUT touching ConfigStore.owners directly:
+    // Alice (still in ConfigStore.owners!) must get 403 on reads & writes; Bob must get 200 and become ownersOf!
+    const transfer2 = await grants.startOwnershipTransfer({
+      scope: { kind: 'agent', id: 'alice-bot' },
+      fromSubject: 'user:alice',
+      toSubject: 'user:bob',
+      by: 'user:alice',
+      principals,
+    });
+    await grants.resolveOwnershipTransfer({ transferId: transfer2.transferId, action: 'accept', by: 'user:bob' });
+    assert.deepEqual(state.configs!.current('alice-bot')?.owners, ['user:alice'], 'ConfigStore still holds stale Alice');
+    assert.deepEqual(ownersOf(state, 'alice-bot'), ['user:bob'], 'GrantStore is authoritative for ownersOf');
+    assert.equal(
+      (await call('PUT', '/api/v1/agents/alice-bot/settings', { soul: 'Stale Alice write' }, TOKENS.alice)).status,
+      403,
+    );
+    assert.equal((await call('GET', '/api/v1/agents/alice-bot/settings', undefined, TOKENS.alice)).status, 403);
+    assert.equal((await call('POST', '/api/v1/agents/alice-bot/wake', {}, TOKENS.alice)).status, 403);
+    assert.equal(
+      (await call('PUT', '/api/v1/agents/alice-bot/settings', { soul: 'New owner Bob write.' }, TOKENS.bob)).status,
+      200,
+    );
+
+    // F1: Revoking Bob's content-owner grant immediately removes Bob's write/read authority (403) and ownersOf -> []
+    const bobOwnerGrant = grants
+      .list({ scopeKind: 'agent', scopeId: 'alice-bot' })
+      .find((g) => g.role === 'content-owner' && g.subject === 'user:bob')!;
+    await grants.revoke(bobOwnerGrant.id, { by: 'user:admin' });
+    assert.deepEqual(ownersOf(state, 'alice-bot'), []);
+    assert.equal(
+      (await call('PUT', '/api/v1/agents/alice-bot/settings', { soul: 'Revoked Bob write' }, TOKENS.bob)).status,
+      403,
+    );
+
+    // F1: Admin PUT /api/v1/agents/alice-bot/owners syncs BOTH GrantStore and ConfigStore.owners
+    const putOwnerRes = await call('PUT', '/api/v1/agents/alice-bot/owners', { owners: ['user:alice'] }, TOKENS.admin);
+    assert.equal(putOwnerRes.status, 200, JSON.stringify(putOwnerRes.body));
+    assert.deepEqual(ownersOf(state, 'alice-bot'), ['user:alice']);
+    assert.deepEqual(state.configs!.current('alice-bot')?.owners, ['user:alice']);
+    assert.equal(
+      (await call('PUT', '/api/v1/agents/alice-bot/settings', { soul: 'Alice restored via PUT /owners.' }, TOKENS.alice)).status,
       200,
     );
   });
@@ -697,12 +747,24 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
       403,
     );
 
-    // 2. Grant `agent-member` (subRole: 'Family') on personal agent `donna` to `user:stephanie`
+    // 2. Configure skill routes + Family role ceiling on personal agent `donna`, and grant `subrole:Family` to `user:stephanie` (F5)
+    const donnaRecord = state.agents.get('donna')!;
+    donnaRecord.skillIds = ['calendar', 'bank'];
+    donnaRecord.skillRoutes = { calendar: ['gcal'], bank: ['plaid'] };
+    const roleSetting = await call(
+      'PUT',
+      '/api/v1/agents/donna/settings',
+      {
+        roles: [{ name: 'Family', skills: { calendar: { allow: ['*'], deny: [] } } }],
+      },
+      TOKENS.dale,
+    );
+    assert.equal(roleSetting.status, 200, JSON.stringify(roleSetting.body));
+
     await grants.grant({
       subject: 'user:stephanie',
       scope: { kind: 'agent', id: 'donna' },
-      role: 'agent-member',
-      subRoles: ['Family'],
+      role: 'subrole:Family',
       by: 'user:dale',
     });
 
@@ -725,6 +787,40 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
       TOKENS.ingress,
     );
     assert.equal(stephIngressWake.status, 202, JSON.stringify(stephIngressWake.body));
+    const stephRun = state.runs.get(stephIngressWake.body.runId)!;
+    assert.deepEqual(stephRun.caller?.agentRoles, ['Family'], 'authorizeIngress strips subrole: prefix');
+
+    // F5: accessForRun enforces GrantStore subrole:Family ceiling on donna (gcal allowed, plaid denied),
+    // while active personal content-owner (Alice on alice-bot), team accountable-lead (Sarah), and team member (Geordi) are NOT_RESTRICTED
+    assert.deepEqual(accessForRun(state, stephRun, donnaRecord), {
+      restricted: true,
+      routes: { gcal: 'allowed', plaid: 'denied' },
+    });
+    const aliceBotRecord = state.agents.get('alice-bot')!;
+    aliceBotRecord.skillIds = ['calendar'];
+    aliceBotRecord.skillRoutes = { calendar: ['gcal'] };
+    const aliceRun = state.runs.create({
+      agentId: 'alice-bot',
+      state: 'WORKING',
+      actor: 'service:gatekeeper-ingress',
+      trigger: 'manual',
+      requestedBy: { provider: 'discord', id: 'alice-discord-1' },
+    });
+    assert.deepEqual(accessForRun(state, aliceRun, aliceBotRecord), { restricted: false });
+
+    const triageRecord = state.agents.get('incident-triage')!;
+    triageRecord.skillIds = ['pagerduty'];
+    triageRecord.skillRoutes = { pagerduty: ['pd-api'] };
+    const geordiIngressRun = state.runs.get(geordiIngressWake.body.runId)!;
+    assert.deepEqual(accessForRun(state, geordiIngressRun, triageRecord), { restricted: false });
+    const sarahRun = state.runs.create({
+      agentId: 'incident-triage',
+      state: 'WORKING',
+      actor: 'service:gatekeeper-ingress',
+      trigger: 'manual',
+      requestedBy: { provider: 'discord', id: 'sarah-discord-1' },
+    });
+    assert.deepEqual(accessForRun(state, sarahRun, triageRecord), { restricted: false });
 
     // CRITICAL D29 INVARIANT: A held request on a run of personal agent `donna` initiated by Stephanie (agent-member)
     // CANNOT be decided by Stephanie (403), and CAN be decided by Dale (personal content-owner, 200)!
@@ -779,10 +875,232 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     assert.equal(grants.list({ scopeKind: 'agent', scopeId: 'builder-team' })[0]?.role, 'accountable-lead');
   });
 
-  it('fails closed with 503 when GrantStore is unhealthy', async () => {
+  it('F2: failed agent creation rollback never revokes pre-existing admin grants on that scopeId', async () => {
+    // Admin pre-grants content-owner (user:alice) and agent-member (user:stephanie) before `pregranted-bot` is created
+    const preOwner = await grants.grant({
+      subject: 'user:alice',
+      scope: { kind: 'agent', id: 'pregranted-bot' },
+      role: 'content-owner',
+      agentKind: 'personal',
+      by: 'user:admin',
+      granterIsAdmin: true,
+    });
+    const preMember = await grants.grant({
+      subject: 'user:stephanie',
+      scope: { kind: 'agent', id: 'pregranted-bot' },
+      role: 'agent-member',
+      agentKind: 'personal',
+      by: 'user:admin',
+      granterIsAdmin: true,
+    });
+
+    // Unrelated operator user:op attempts to squat `pregranted-bot` -> 409 owner_exists
+    const squatAttempt1 = await call(
+      'POST',
+      '/api/v1/agents',
+      { id: 'pregranted-bot', name: 'Squat', memory: { archetype: 'personal-assistant' } },
+      TOKENS.op,
+    );
+    assert.equal(squatAttempt1.status, 409);
+    assert.equal(squatAttempt1.body.error, 'owner_exists');
+    assert.equal(state.agents.has('pregranted-bot'), false);
+
+    // Pre-existing admin grants MUST still be intact; a second squat attempt MUST also get 409!
+    const remaining = grants.list({ scopeKind: 'agent', scopeId: 'pregranted-bot' });
+    assert.equal(remaining.length, 2);
+    assert.equal(remaining.some((g) => g.id === preOwner.id && g.state === 'active'), true);
+    assert.equal(remaining.some((g) => g.id === preMember.id && g.state === 'active'), true);
+
+    const squatAttempt2 = await call(
+      'POST',
+      '/api/v1/agents',
+      { id: 'pregranted-bot', name: 'Squat Again', memory: { archetype: 'personal-assistant' } },
+      TOKENS.op,
+    );
+    assert.equal(squatAttempt2.status, 409);
+    assert.equal(squatAttempt2.body.error, 'owner_exists');
+
+    // Admin creating `pregranted-bot` on behalf of `user:alice` succeeds idempotently (201) keeping both pre-grants
+    const legitimateCreate = await call(
+      'POST',
+      '/api/v1/agents',
+      { id: 'pregranted-bot', name: 'Pregranted Bot', actAs: 'user:alice', memory: { archetype: 'personal-assistant' } },
+      TOKENS.admin,
+    );
+    assert.equal(legitimateCreate.status, 201, JSON.stringify(legitimateCreate.body));
+    assert.deepEqual(ownersOf(state, 'pregranted-bot'), ['user:alice']);
+    assert.equal(grants.list({ scopeKind: 'agent', scopeId: 'pregranted-bot' }).length, 2);
+  });
+
+  it('F3/F4: repository re-registration preserves kind & owner/lead across admin and CI callers, rejects kind flips with 409, and enforces mixed-case agentKindLookup', async () => {
+    const NEXT_SHA = '8'.repeat(40);
+
+    // 1. Register a personal repo agent owned by user:dale (submitted by admin via actAs)
+    const repoPersonal1 = await call(
+      'POST',
+      '/api/v1/registry/agents',
+      {
+        repo: 'https://github.com/BeerCanLabs/SM-dale-repo-pa',
+        commit: SHA,
+        actAs: 'user:dale',
+        cartridge: { id: 'dale-repo-pa', name: 'Dale Repo PA', kind: 'personal', memory: { archetype: 'personal-assistant' } },
+      },
+      TOKENS.admin,
+    );
+    assert.equal(repoPersonal1.status, 201, JSON.stringify(repoPersonal1.body));
+    assert.equal(repoPersonal1.body.kind, 'personal');
+    assert.deepEqual(ownersOf(state, 'dale-repo-pa'), ['user:dale']);
+
+    // Re-registering new commit by admin AND by CI service key (`service:ci`) succeeds 201 and keeps user:dale as sole content-owner!
+    const repoPersonalAdminReReg = await call(
+      'POST',
+      '/api/v1/registry/agents',
+      {
+        repo: 'https://github.com/BeerCanLabs/SM-dale-repo-pa',
+        commit: NEXT_SHA,
+        cartridge: { id: 'dale-repo-pa', name: 'Dale Repo PA v2', kind: 'personal', memory: { archetype: 'personal-assistant' } },
+      },
+      TOKENS.admin,
+    );
+    assert.equal(repoPersonalAdminReReg.status, 201, JSON.stringify(repoPersonalAdminReReg.body));
+    assert.deepEqual(ownersOf(state, 'dale-repo-pa'), ['user:dale']);
+
+    const repoPersonalCiReReg = await call(
+      'POST',
+      '/api/v1/registry/agents',
+      {
+        repo: 'https://github.com/BeerCanLabs/SM-dale-repo-pa',
+        commit: SHA,
+        cartridge: { id: 'dale-repo-pa', name: 'Dale Repo PA v3', kind: 'personal', memory: { archetype: 'personal-assistant' } },
+      },
+      TOKENS.ci,
+    );
+    assert.equal(repoPersonalCiReReg.status, 201, JSON.stringify(repoPersonalCiReReg.body));
+    assert.deepEqual(ownersOf(state, 'dale-repo-pa'), ['user:dale']);
+
+    // 2. Re-registering existing team repo agent `ops-watch` with `cartridge.kind: 'team'` (and NO accountableLead in payload)
+    // or with omitted `kind` succeeds 201 for both admin and CI service key, preserving `kind: 'team'` and `user:sarah`!
+    const repoTeamCiReReg1 = await call(
+      'POST',
+      '/api/v1/registry/agents',
+      {
+        repo: 'https://github.com/BeerCanLabs/SM-ops-watch',
+        commit: NEXT_SHA,
+        cartridge: { id: 'ops-watch', name: 'Ops Watch v2', kind: 'team', memory: { archetype: 'team-member' } },
+      },
+      TOKENS.ci,
+    );
+    assert.equal(repoTeamCiReReg1.status, 201, JSON.stringify(repoTeamCiReReg1.body));
+    assert.equal(repoTeamCiReReg1.body.kind, 'team');
+    assert.equal(repoTeamCiReReg1.body.accountableLead, 'user:sarah');
+
+    const repoTeamCiReReg2 = await call(
+      'POST',
+      '/api/v1/registry/agents',
+      {
+        repo: 'https://github.com/BeerCanLabs/SM-ops-watch',
+        commit: SHA,
+        cartridge: { id: 'ops-watch', name: 'Ops Watch v3', memory: { archetype: 'team-member' } },
+      },
+      TOKENS.ci,
+    );
+    assert.equal(repoTeamCiReReg2.status, 201, JSON.stringify(repoTeamCiReReg2.body));
+    assert.equal(repoTeamCiReReg2.body.kind, 'team');
+    assert.equal(repoTeamCiReReg2.body.accountableLead, 'user:sarah');
+    assert.equal(
+      grants.list({ scopeKind: 'agent', scopeId: 'ops-watch' }).filter((g) => g.role === 'content-owner').length,
+      0,
+    );
+
+    // Attempting to flip kind on re-registration (`team` -> `personal` or `personal` -> `team`) returns 409 agent_kind_conflict
+    const flipTeamToPersonal = await call(
+      'POST',
+      '/api/v1/registry/agents',
+      {
+        repo: 'https://github.com/BeerCanLabs/SM-ops-watch',
+        commit: NEXT_SHA,
+        kind: 'personal',
+        cartridge: { id: 'ops-watch', name: 'Ops Watch Bad', memory: { archetype: 'personal-assistant' } },
+      },
+      TOKENS.admin,
+    );
+    assert.equal(flipTeamToPersonal.status, 409);
+    assert.equal(flipTeamToPersonal.body.error, 'agent_kind_conflict');
+
+    // 3. F4: Mixed-case agent ID registered as `kind: 'team'` rejects lowercase grant with `agentKind: 'personal'` (409)
+    const mixedCaseTeam = await call(
+      'POST',
+      '/api/v1/agents',
+      {
+        id: 'MixedCaseTeam',
+        name: 'Mixed Case Team',
+        kind: 'team',
+        accountableLead: 'user:sarah',
+        memory: { archetype: 'team-member' },
+      },
+      TOKENS.admin,
+    );
+    assert.equal(mixedCaseTeam.status, 201, JSON.stringify(mixedCaseTeam.body));
+    await assert.rejects(
+      () =>
+        grants.grant({
+          subject: 'user:bob',
+          scope: { kind: 'agent', id: 'mixedcaseteam' },
+          role: 'content-owner',
+          agentKind: 'personal',
+          by: 'user:admin',
+          granterIsAdmin: true,
+        }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 409 && err.code === 'agent_kind_conflict',
+    );
+  });
+
+  it('fails closed with 503 (and denied skill routes) when GrantStore is unhealthy (including F6 agent-builder)', async () => {
     const heldId = holdOnRun('donna');
+    const builderRun = state.runs.create({
+      agentId: 'agent-builder',
+      state: 'WORKING',
+      actor: 'user:op',
+      caller: { actor: 'user:op', role: 'operator', roles: ['operator'] },
+      trigger: 'api',
+    });
+    const builderToken = await state.runTokens!.mint({ runId: builderRun.runId, agentId: 'agent-builder' });
+    const stephRun = state.runs.create({
+      agentId: 'donna',
+      state: 'WORKING',
+      actor: 'service:gatekeeper-ingress',
+      trigger: 'manual',
+      requestedBy: { provider: 'discord', id: 'steph-discord-1' },
+    });
+
     grants.markUnhealthy('simulated S3 backend failure');
     assert.equal(grants.healthy, false);
+    assert.deepEqual(ownersOf(state, 'donna'), []);
+
+    // F5: accessForRun fails closed (all routes denied) when GrantStore is unhealthy
+    assert.deepEqual(accessForRun(state, stephRun, state.agents.get('donna')!), {
+      restricted: true,
+      routes: { gcal: 'denied', plaid: 'denied' },
+    });
+
+    // F6: agent-builder fails closed with 503 grant_store_unhealthy even when run.caller cached legacy roles
+    const unhealthyBuilderCatalog = await call(
+      'POST',
+      `/api/v1/runs/${builderRun.runId}/builder`,
+      { op: 'catalog' },
+      builderToken,
+    );
+    assert.equal(unhealthyBuilderCatalog.status, 503);
+    assert.equal(unhealthyBuilderCatalog.body.error, 'grant_store_unhealthy');
+
+    const unhealthyBuilderValidate = await call(
+      'POST',
+      `/api/v1/runs/${builderRun.runId}/builder`,
+      { op: 'validate', spec: { id: 'no-publish', memory: { archetype: 'personal-assistant' } } },
+      builderToken,
+    );
+    assert.equal(unhealthyBuilderValidate.status, 503);
+    assert.equal(unhealthyBuilderValidate.body.error, 'grant_store_unhealthy');
 
     assert.equal(
       (
