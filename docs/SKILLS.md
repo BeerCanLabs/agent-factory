@@ -20,6 +20,7 @@ Every skill package is a gzip tar archive (`.tar.gz`) containing at its root a `
 - **Prohibited entries**: No compiled binaries (`.pyc`, `.so`, `.pyd`, `.dll`, `.dylib`, `.exe`), no `.git/` directories, and no `__pycache__/`.
 - **Pure-stream**: Single gzip stream with standard tar headers; pax and GNU long-name headers are refused.
 - **Mandatory Smoke Gate (`smoke`) (TSK-281)**: The manifest must declare a `smoke` block (`action`, `input`, and optional `dryRun`). Mutating actions (`POST`/`PUT`/`PATCH`/`DELETE` in `actions:`) and actions requiring approval (`hold: true`) require `dryRun: true`; otherwise admission is refused.
+- **Activation smoke is always a dry run (#342)**: when an agent is activated or moved to a new runtime, the factory runs every skill smoke with `dryRun: true` whatever the manifest says. A skill's dry run must confirm it loaded and its route is configured without calling the outside service, so an update never prints, sends, or books anything. If the call does reach a dependency that is down (5xx or unreachable), the factory ledgers `AGENT_SMOKE_DEPENDENCY_DOWN` (route + upstream status) and the activation continues; a route a dry run did not call is ledgered as `AGENT_SMOKE_ROUTE_NOT_EXERCISED`. The hello-world check and runtime failures (action not loaded, crash, timeout, budget) still block and roll back.
 
 ### The Manifest Specification (`spec: 1`)
 

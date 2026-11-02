@@ -42,6 +42,17 @@ async function waitForRun(state: FactoryState, runId: string, timeoutMs = Number
   throw new Error(`smoke run ${runId} timed out after ${timeoutMs}ms`);
 }
 
+/** A skill smoke failure caused by the outside service behind a route (5xx, unreachable), not by the runtime. */
+export function isDependencyDown(error: unknown): boolean {
+  const e = String(error ?? '');
+  return /\bHTTP 5\d\d\b|\bstatus[\s:=]*5\d\d\b|\b5\d\d (Bad Gateway|Service Unavailable|Gateway Timeout|Origin)|\bNetworkError\b|Unable to reach|\bdependency[_ ]down\b/i.test(e);
+}
+
+function upstreamStatus(error: unknown): number | undefined {
+  const m = /\b(5\d\d)\b/.exec(String(error ?? ''));
+  return m ? Number(m[1]) : undefined;
+}
+
 export type SmokeOutcome = { ok: true } | { ok: false; error: string; runId?: string };
 
 export async function runActivationSmoke(
@@ -297,7 +308,8 @@ export async function runActivationSmoke(
         skillId: s.id,
         action: smokeSpec.action,
         input: smokeSpec.input,
-        dryRun: smokeSpec.dryRun,
+        // An activation check never acts on the outside world (agent-factory#342): dry run is forced on.
+        dryRun: true,
         smokeRoutes: routes,
         activationId,
       },
@@ -327,7 +339,7 @@ export async function runActivationSmoke(
         smokeType: 'skill',
         skillId: s.id,
         skillVersion: s.version,
-        smokeSpec,
+        smokeSpec: { ...smokeSpec, dryRun: true },
         routes,
       });
       const cur = state.runs.get(skillRun.runId);
@@ -403,6 +415,22 @@ export async function runActivationSmoke(
 
     if (finishedSkillRun.state !== 'DONE') {
       const isBudgetExceeded = finishedSkillRun.state === 'BLOCKED_BUDGET_EXCEEDED' || String(finishedSkillRun.error).includes('budget');
+      if (!isBudgetExceeded && finishedSkillRun.state === 'FAILED' && isDependencyDown(finishedSkillRun.error)) {
+        // The runtime loaded and ran the skill; the service behind its route is down. Report it, do not roll back.
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId: agent.id,
+          runId: skillRun.runId,
+          type: 'action',
+          action: 'AGENT_SMOKE_DEPENDENCY_DOWN',
+          actor,
+          commit,
+          // The ledger keeps structured fields only: the route and the upstream status; the run holds the error text.
+          ...(routes[0] ? { route: routes[0] } : {}),
+          ...(upstreamStatus(finishedSkillRun.error) ? { status: upstreamStatus(finishedSkillRun.error) } : {}),
+        });
+        continue;
+      }
       const err = isBudgetExceeded
         ? 'smoke activation budget exceeded'
         : `skill smoke run for ${s.id} finished with state ${finishedSkillRun.state}: ${finishedSkillRun.error ?? 'unspecified error'}`;
@@ -440,19 +468,17 @@ export async function runActivationSmoke(
     for (const r of routes) {
       const hasRoute = actions.some((e) => (e as any).route === r);
       if (!hasRoute) {
-        const err = `skill smoke run for ${s.id} did not record egress on required route '${r}'`;
-        state.runs.update(skillRun.runId, { state: 'FAILED', error: err });
+        // Skill smokes are dry runs, so a route that was configured but not called is expected; note it only.
         state.ledger.append({
           timestamp: new Date().toISOString(),
           agentId: agent.id,
           runId: skillRun.runId,
           type: 'action',
-          action: 'AGENT_SMOKE_FAILED',
+          action: 'AGENT_SMOKE_ROUTE_NOT_EXERCISED',
           actor,
           commit,
-          error: err,
+          route: r,
         });
-        return { ok: false, error: err, runId: skillRun.runId };
       }
     }
   }
