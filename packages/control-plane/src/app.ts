@@ -666,7 +666,7 @@ export function verifyWebhookHmac(
   headerValue: string | undefined | null,
   options?: { requiredPrefix?: string }
 ): boolean {
-  if (!secret || typeof secret !== 'string' || secret.length === 0) return false;
+  if (!secret || typeof secret !== 'string' || secret.trim().length === 0) return false;
   if (!headerValue || typeof headerValue !== 'string' || headerValue.trim().length === 0) return false;
 
   let hex = headerValue.trim();
@@ -2260,22 +2260,30 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return;
   }
 
-  const GITHUB_HOOK_PATHS = new Set(['/api/v1/hooks/github', '/hooks/github', '/api/v1/webhooks/github', '/webhooks/github']);
-  if ((path === '/api/v1/hooks/github' || GITHUB_HOOK_PATHS.has(path)) && req.method === 'POST') {
-    const rawBytes = await readBodyBytes(req);
-    const refuse = () => {
+  if (
+    req.method === 'POST' &&
+    (path === '/api/v1/hooks/github' ||
+      path === '/hooks/github' ||
+      path === '/api/v1/webhooks/github' ||
+      path === '/webhooks/github')
+  ) {
+    const sigHeader = req.headers['x-hub-signature-256'];
+    const signature = typeof sigHeader === 'string' ? sigHeader : undefined;
+    if (!signature || !/^sha256=[0-9a-fA-F]{64}$/.test(signature)) {
+      capDrain(req);
       json(res, 401, { error: 'bad_webhook_signature' });
-    };
+      return;
+    }
     const bound = await bindSecrets([FACTORY_GITHUB_WEBHOOK_SECRET], state.providers);
     const secret = bound.ok ? bound.env[FACTORY_GITHUB_WEBHOOK_SECRET] : undefined;
     if (!secret || typeof secret !== 'string' || !secret.trim()) {
-      refuse();
+      capDrain(req);
+      json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
-    const sigHeader = req.headers['x-hub-signature-256'];
-    const signature = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader;
+    const rawBytes = await readBodyBytes(req);
     if (!verifyWebhookHmac(rawBytes, secret, signature, { requiredPrefix: 'sha256=' })) {
-      refuse();
+      json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
 
@@ -2327,45 +2335,69 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
   // Webhooks authenticate with the cartridge's own shared secret, not a factory bearer.
   // Fail closed when no secret is configured or signature is invalid (D18, D22, S15; #360).
-  const hookMatch = path.match(/^(?:\/api\/v1)?\/(?:hooks|webhooks)\/([^/]+)$/);
+  const hookMatch = path.match(/^\/api\/v1\/hooks\/([^/]+)$/) ?? path.match(/^\/hooks\/([^/]+)$/);
   if (hookMatch && req.method === 'POST') {
     const hookId = hookMatch[1];
+
+    // Pre-check headers up front BEFORE state.agents lookup, bindSecrets, or readBodyBytes (F1, F2, F4)
+    const HMAC_HEADERS = ['x-hub-signature-256', 'x-factory-signature', 'x-signature-256'] as const;
+    const presentHmacKeys = HMAC_HEADERS.filter((h) => h in req.headers);
+
+    let hmacSignature: string | undefined;
+    let legacySecret: string | undefined;
+
+    if (presentHmacKeys.length > 0) {
+      for (const k of presentHmacKeys) {
+        const val = req.headers[k];
+        if (typeof val !== 'string' || val.trim() === '' || !/^(?:sha256=)?[0-9a-fA-F]{64}$/.test(val)) {
+          capDrain(req);
+          json(res, 401, { error: 'bad_webhook_signature' });
+          return;
+        }
+      }
+      hmacSignature = req.headers[presentHmacKeys[0]] as string;
+    } else {
+      const leg = req.headers['x-factory-secret'];
+      if (typeof leg !== 'string' || leg.trim() === '') {
+        capDrain(req);
+        json(res, 401, { error: 'bad_webhook_signature' });
+        return;
+      }
+      legacySecret = leg;
+    }
+
+    // Validate agent ID format and ensure webhook trigger with secretRef exists BEFORE bindSecrets
     const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
     if (!AGENT_ID.test(hookId)) {
-      json(res, 404, { error: 'not_found' });
+      capDrain(req);
+      json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
     const agent = state.agents.get(hookId);
     const trigger = agent?.triggers.find((t) => t.type === 'webhook');
-    if (!agent || !trigger || trigger.type !== 'webhook') {
-      json(res, 404, { error: 'not_found' });
+    if (!agent || !trigger || trigger.type !== 'webhook' || !trigger.secretRef) {
+      capDrain(req);
+      json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
-    const rawBytes = await readBodyBytes(req);
-    if (!trigger.secretRef) {
-      json(res, 401, { error: 'webhook_secret_unconfigured' });
-      return;
-    }
+
     const bound = await bindSecrets([trigger.secretRef], state.providers);
     const secret = bound.ok ? bound.env[trigger.secretRef] : undefined;
     if (!secret || typeof secret !== 'string' || !secret.trim()) {
-      json(res, 401, { error: 'webhook_secret_unconfigured' });
+      capDrain(req);
+      json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
 
-    const sigHeader = req.headers['x-hub-signature-256'] ?? req.headers['x-factory-signature'] ?? req.headers['x-signature-256'];
-    const signature = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader;
-    const legacySecret = req.headers['x-factory-secret'];
-    const providedSecret = Array.isArray(legacySecret) ? legacySecret[0] : legacySecret;
-
-    if (signature) {
-      if (!verifyWebhookHmac(rawBytes, secret, signature)) {
+    const rawBytes = await readBodyBytes(req);
+    if (hmacSignature) {
+      if (!verifyWebhookHmac(rawBytes, secret, hmacSignature)) {
         json(res, 401, { error: 'bad_webhook_signature' });
         return;
       }
-    } else if (providedSecret) {
-      if (!safeEqual(providedSecret, secret)) {
-        json(res, 401, { error: 'bad_webhook_secret' });
+    } else if (legacySecret) {
+      if (!safeEqual(legacySecret, secret)) {
+        json(res, 401, { error: 'bad_webhook_signature' });
         return;
       }
     } else {

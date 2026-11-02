@@ -12,7 +12,7 @@ import {
 } from './app.js';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
-import { envProvider } from '@beercanlabs/factory-secrets-bind';
+import { envProvider, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
@@ -71,6 +71,16 @@ describe('verifyWebhookHmac unit tests for edge cases (S15, AC2)', () => {
     assert.equal(verifyWebhookHmac(body, '', validWithPrefix), false);
     assert.equal(verifyWebhookHmac(body, undefined as never, validWithPrefix), false);
     assert.equal(verifyWebhookHmac(body, null as never, validWithPrefix), false);
+  });
+
+  it('whitespace-only secret fails closed (F4) while untrimmed non-blank secret computes with untrimmed value', () => {
+    assert.equal(verifyWebhookHmac(body, '   ', validWithPrefix), false);
+    assert.equal(verifyWebhookHmac(body, ' \t\n ', validWithPrefix), false);
+
+    // Non-blank secret with leading/trailing spaces computes HMAC with untrimmed secret
+    const untrimmedSecret = ' example-secret-with-spaces '; // secret-scan:allow
+    const untrimmedHex = createHmac('sha256', untrimmedSecret).update(body).digest('hex');
+    assert.equal(verifyWebhookHmac(body, untrimmedSecret, `sha256=${untrimmedHex}`), true);
   });
 
   it('missing or empty header fails closed (returns false)', () => {
@@ -255,6 +265,7 @@ describe('Fail-closed webhook signature verification e2e (S15, AC1 & AC2)', () =
         'x-github-event': 'release',
       });
       assert.equal(rNoHeader.status, 401);
+      assert.deepEqual(rNoHeader.body, { error: 'bad_webhook_signature' });
 
       // Verify agent state was untouched
       const ghAgent = state.agents.get('gh-agent')!;
@@ -284,6 +295,7 @@ describe('Fail-closed webhook signature verification e2e (S15, AC1 & AC2)', () =
         'x-hub-signature-256': 'sha256=' + 'z'.repeat(64),
       });
       assert.equal(rNonHex.status, 401);
+      assert.deepEqual(rNonHex.body, { error: 'bad_webhook_signature' });
 
       // 4. Wrong signature
       const rWrong = await postWebhook(port, '/api/v1/hooks/github', validBody, {
@@ -291,6 +303,7 @@ describe('Fail-closed webhook signature verification e2e (S15, AC1 & AC2)', () =
         'x-hub-signature-256': 'sha256=' + '0'.repeat(64),
       });
       assert.equal(rWrong.status, 401);
+      assert.deepEqual(rWrong.body, { error: 'bad_webhook_signature' });
 
       // 5. Tampered body
       const tamperedBody = JSON.stringify({ ...validReleasePayload, action: 'edited' });
@@ -299,6 +312,7 @@ describe('Fail-closed webhook signature verification e2e (S15, AC1 & AC2)', () =
         'x-hub-signature-256': validSig,
       });
       assert.equal(rTampered.status, 401);
+      assert.deepEqual(rTampered.body, { error: 'bad_webhook_signature' });
 
       // 6. Malformed JSON with bad/missing signature fails with 401, NOT 400
       const rBadJsonBadSig = await postWebhook(port, '/api/v1/hooks/github', '{not-valid-json', {
@@ -351,49 +365,73 @@ describe('Fail-closed webhook signature verification e2e (S15, AC1 & AC2)', () =
   });
 
   describe('Generic webhook endpoint (/api/v1/hooks/:id and /hooks/:id)', () => {
-    it('returns 404 for non-existent agent or invalid agent ID format', async () => {
-      const rInvalid = await postWebhook(port, '/api/v1/hooks/../bad_id', {});
-      assert.equal(rInvalid.status, 404);
-      const rNonExistent = await postWebhook(port, '/api/v1/hooks/does-not-exist', {});
-      assert.equal(rNonExistent.status, 404);
+    it('F1: non-existent agent or invalid agent ID format refuses uniformly with 401 bad_webhook_signature (not 404)', async () => {
+      const validSig = 'sha256=' + '0'.repeat(64);
+      const rInvalid = await postWebhook(port, '/api/v1/hooks/_invalid_id', {}, {
+        'x-hub-signature-256': validSig,
+      });
+      assert.equal(rInvalid.status, 401);
+      assert.deepEqual(rInvalid.body, { error: 'bad_webhook_signature' });
+
+      const rNonExistent = await postWebhook(port, '/api/v1/hooks/does-not-exist', {}, {
+        'x-hub-signature-256': validSig,
+      });
+      assert.equal(rNonExistent.status, 401);
+      assert.deepEqual(rNonExistent.body, { error: 'bad_webhook_signature' });
     });
 
-    it('AC1: agent with NO configured secretRef refuses every delivery (401 webhook_secret_unconfigured) before JSON parse or wake', async () => {
+    it('AC1 & F1: agent with NO configured secretRef refuses every delivery uniformly (401 bad_webhook_signature)', async () => {
       // 1. Without credentials
       const r1 = await postWebhook(port, '/api/v1/hooks/unconfigured-hook-agent', { test: true });
       assert.equal(r1.status, 401);
-      assert.deepEqual(r1.body, { error: 'webhook_secret_unconfigured' });
+      assert.deepEqual(r1.body, { error: 'bad_webhook_signature' });
 
       // 2. Even with an operator bearer token, unconfigured hook fails closed (no fallback)
       const rAuth = await postWebhook(port, '/api/v1/hooks/unconfigured-hook-agent', { test: true }, {
         authorization: 'Bearer operator-token',
       });
       assert.equal(rAuth.status, 401);
-      assert.deepEqual(rAuth.body, { error: 'webhook_secret_unconfigured' });
+      assert.deepEqual(rAuth.body, { error: 'bad_webhook_signature' });
 
-      // 3. AC2: Malformed JSON with unconfigured secret fails with 401, NOT 400
+      // 3. With syntactically valid HMAC header, unconfigured hook refuses uniformly with 401 bad_webhook_signature
+      const rWithSig = await postWebhook(port, '/api/v1/hooks/unconfigured-hook-agent', { test: true }, {
+        'x-hub-signature-256': 'sha256=' + '0'.repeat(64),
+      });
+      assert.equal(rWithSig.status, 401);
+      assert.deepEqual(rWithSig.body, { error: 'bad_webhook_signature' });
+
+      // 4. AC2: Malformed JSON with unconfigured secret fails with 401, NOT 400
       const rMalformed = await postWebhook(port, '/api/v1/hooks/unconfigured-hook-agent', '{malformed-json');
       assert.equal(rMalformed.status, 401, 'unconfigured hook must refuse malformed JSON with 401 before parse');
+      assert.deepEqual(rMalformed.body, { error: 'bad_webhook_signature' });
     });
 
-    it('AC1: agent with secretRef but secret missing from providers refuses delivery (401 webhook_secret_unconfigured)', async () => {
+    it('AC1 & F1: agent with secretRef but secret missing from providers refuses delivery uniformly (401 bad_webhook_signature)', async () => {
       state.providers = []; // SECURED_HOOK_SECRET is not in providers
-      const rUnset = await postWebhook(port, '/api/v1/hooks/secured-agent', { ping: true });
+      const validSig = 'sha256=' + '0'.repeat(64);
+      const rUnset = await postWebhook(port, '/api/v1/hooks/secured-agent', { ping: true }, {
+        'x-hub-signature-256': validSig,
+      });
       assert.equal(rUnset.status, 401);
-      assert.deepEqual(rUnset.body, { error: 'webhook_secret_unconfigured' });
+      assert.deepEqual(rUnset.body, { error: 'bad_webhook_signature' });
 
-      // Secret is empty string
-      state.providers = [envProvider({ SECURED_HOOK_SECRET: '' })];
-      const rEmpty = await postWebhook(port, '/api/v1/hooks/secured-agent', { ping: true });
+      // Secret is empty string or whitespace
+      state.providers = [envProvider({ SECURED_HOOK_SECRET: '   ' })];
+      const rEmpty = await postWebhook(port, '/api/v1/hooks/secured-agent', { ping: true }, {
+        'x-hub-signature-256': validSig,
+      });
       assert.equal(rEmpty.status, 401);
-      assert.deepEqual(rEmpty.body, { error: 'webhook_secret_unconfigured' });
+      assert.deepEqual(rEmpty.body, { error: 'bad_webhook_signature' });
 
       // Malformed JSON with missing secret fails with 401, NOT 400
-      const rMalformed = await postWebhook(port, '/api/v1/hooks/secured-agent', '{not-json');
+      const rMalformed = await postWebhook(port, '/api/v1/hooks/secured-agent', '{not-json', {
+        'x-hub-signature-256': validSig,
+      });
       assert.equal(rMalformed.status, 401);
+      assert.deepEqual(rMalformed.body, { error: 'bad_webhook_signature' });
     });
 
-    it('AC2: with configured secret, missing/invalid signatures and secrets are refused (401) before JSON parse', async () => {
+    it('AC2 & F1 & F4: with configured secret, missing/invalid signatures and secrets are refused (401 bad_webhook_signature) before JSON parse', async () => {
       state.providers = [envProvider({ SECURED_HOOK_SECRET: GENERIC_SECRET })];
       const validPayload = JSON.stringify({ event: 'build_complete', status: 'success' });
       const validSig = 'sha256=' + createHmac('sha256', GENERIC_SECRET).update(validPayload).digest('hex');
@@ -422,24 +460,27 @@ describe('Fail-closed webhook signature verification e2e (S15, AC1 & AC2)', () =
         'x-factory-secret': 'wrong-secret',
       });
       assert.equal(rBadSecret.status, 401);
-      assert.deepEqual(rBadSecret.body, { error: 'bad_webhook_secret' });
+      assert.deepEqual(rBadSecret.body, { error: 'bad_webhook_signature' });
 
       // 5. Tampered body with HMAC signature
       const rTampered = await postWebhook(port, '/api/v1/hooks/secured-agent', JSON.stringify({ tampered: true }), {
         'x-hub-signature-256': validSig,
       });
       assert.equal(rTampered.status, 401);
+      assert.deepEqual(rTampered.body, { error: 'bad_webhook_signature' });
 
       // 6. Malformed JSON with bad signature or secret returns 401, NOT 400
       const rMalformedBadSig = await postWebhook(port, '/api/v1/hooks/secured-agent', '{not-json', {
         'x-hub-signature-256': 'sha256=' + '0'.repeat(64),
       });
       assert.equal(rMalformedBadSig.status, 401, 'must fail with 401 before JSON parse');
+      assert.deepEqual(rMalformedBadSig.body, { error: 'bad_webhook_signature' });
 
       const rMalformedBadSecret = await postWebhook(port, '/api/v1/hooks/secured-agent', '{not-json', {
         'x-factory-secret': 'wrong',
       });
       assert.equal(rMalformedBadSecret.status, 401, 'must fail with 401 before JSON parse');
+      assert.deepEqual(rMalformedBadSecret.body, { error: 'bad_webhook_signature' });
 
       // 7. Malformed JSON with VALID signature returns 400 invalid_json
       const malformedBody = '{invalid-json-content';
@@ -449,6 +490,27 @@ describe('Fail-closed webhook signature verification e2e (S15, AC1 & AC2)', () =
       });
       assert.equal(rMalformedValidSig.status, 400);
       assert.deepEqual(rMalformedValidSig.body, { error: 'invalid_json' });
+    });
+
+    it('F4: empty HMAC header in req.headers fails closed and never falls through to x-factory-secret', async () => {
+      state.providers = [envProvider({ SECURED_HOOK_SECRET: GENERIC_SECRET })];
+      const payload = JSON.stringify({ ping: true });
+
+      // Empty string X-Hub-Signature-256 with valid legacy secret
+      const rEmptySig = await postWebhook(port, '/api/v1/hooks/secured-agent', payload, {
+        'x-hub-signature-256': '',
+        'x-factory-secret': GENERIC_SECRET,
+      });
+      assert.equal(rEmptySig.status, 401);
+      assert.deepEqual(rEmptySig.body, { error: 'bad_webhook_signature' });
+
+      // Whitespace-only X-Hub-Signature-256 with valid legacy secret
+      const rWhitespaceSig = await postWebhook(port, '/api/v1/hooks/secured-agent', payload, {
+        'x-hub-signature-256': '   ',
+        'x-factory-secret': GENERIC_SECRET,
+      });
+      assert.equal(rWhitespaceSig.status, 401);
+      assert.deepEqual(rWhitespaceSig.body, { error: 'bad_webhook_signature' });
     });
 
     it('valid deliveries succeed across HMAC headers, legacy secret, and path aliases', async () => {
@@ -487,6 +549,55 @@ describe('Fail-closed webhook signature verification e2e (S15, AC1 & AC2)', () =
         'x-hub-signature-256': `sha256=${hmacHex}`,
       });
       assert.equal(rShortPath.status, 202);
+    });
+
+    it('F2: bindSecrets is NEVER invoked on unsigned or malformed-header requests', async () => {
+      let getCalls = 0;
+      const spyProvider: SecretProvider = {
+        name: 'spy-provider',
+        get: async () => {
+          getCalls++;
+          return 'spy-secret';
+        },
+      };
+      state.providers = [spyProvider];
+
+      // 1. Unsigned GitHub webhook
+      const rGhUnsigned = await postWebhook(port, '/api/v1/hooks/github', '{}');
+      assert.equal(rGhUnsigned.status, 401);
+      assert.deepEqual(rGhUnsigned.body, { error: 'bad_webhook_signature' });
+      assert.equal(getCalls, 0, 'bindSecrets must not be called on unsigned GitHub webhook');
+
+      // 2. Malformed-header GitHub webhook
+      const rGhMalformed = await postWebhook(port, '/api/v1/hooks/github', '{}', {
+        'x-hub-signature-256': 'not-sha256-hex',
+      });
+      assert.equal(rGhMalformed.status, 401);
+      assert.deepEqual(rGhMalformed.body, { error: 'bad_webhook_signature' });
+      assert.equal(getCalls, 0, 'bindSecrets must not be called on malformed GitHub webhook header');
+
+      // 3. Unsigned generic webhook
+      const rGenericUnsigned = await postWebhook(port, '/api/v1/hooks/secured-agent', '{}');
+      assert.equal(rGenericUnsigned.status, 401);
+      assert.deepEqual(rGenericUnsigned.body, { error: 'bad_webhook_signature' });
+      assert.equal(getCalls, 0, 'bindSecrets must not be called on unsigned generic webhook');
+
+      // 4. Malformed-header generic webhook
+      const rGenericMalformed = await postWebhook(port, '/api/v1/hooks/secured-agent', '{}', {
+        'x-hub-signature-256': 'not-sha256-hex',
+      });
+      assert.equal(rGenericMalformed.status, 401);
+      assert.deepEqual(rGenericMalformed.body, { error: 'bad_webhook_signature' });
+      assert.equal(getCalls, 0, 'bindSecrets must not be called on malformed generic webhook header');
+
+      // 5. Non-existent agent ID even with syntactically valid HMAC header
+      const validSyntaxSig = 'sha256=' + '0'.repeat(64);
+      const rNonExistent = await postWebhook(port, '/api/v1/hooks/non-existent-agent', '{}', {
+        'x-hub-signature-256': validSyntaxSig,
+      });
+      assert.equal(rNonExistent.status, 401);
+      assert.deepEqual(rNonExistent.body, { error: 'bad_webhook_signature' });
+      assert.equal(getCalls, 0, 'bindSecrets must not be called on non-existent agent');
     });
   });
 });
