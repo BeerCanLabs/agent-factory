@@ -16,7 +16,7 @@ describe('recovering deploys interrupted by a restart (#346)', () => {
       ['donna', agent('donna', { state: 'SLEEPING', deployedCommit: 'old' })],
     ]);
     const state = { agents, ledger } as unknown as FactoryState;
-    const ids = recoverInterruptedDeploys(state, { reapply: false, now: new Date('2026-11-02T00:00:00Z') });
+    const ids = recoverInterruptedDeploys(state, { reapply: false });
     assert.deepEqual(ids.sort(), ['fresh', 'rosie']);
     assert.equal(agents.get('rosie').state, 'SLEEPING');
     assert.equal(agents.get('rosie').deployedCommit, 'old');
