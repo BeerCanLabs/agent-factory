@@ -345,3 +345,30 @@ export function triggerApply(state: FactoryState, agentId: string, actor: string
   }
 }
 
+
+/**
+ * #346: a deploy runs in this process's memory, so a control-plane restart mid-deploy kills it and leaves the persisted
+ * agent `DEPLOYING` with its admission `building`, which `applyConfig` treats as "a deploy is running" forever. At
+ * startup, every such agent is recovered: its last good image is still recorded (`deployedCommit` changes only when a
+ * deploy succeeds), so it goes back to `SLEEPING` (a never-deployed agent to `ERROR`), the interrupted admission is
+ * recorded as refused, a ledger row says so, and its configuration is applied again so it converges on the current
+ * shared runtime. Returns the ids recovered.
+ */
+export function recoverInterruptedDeploys(state: FactoryState, opts: { reapply?: boolean; now?: Date } = {}): string[] {
+  const recovered: string[] = [];
+  const at = (opts.now ?? new Date()).toISOString();
+  for (const agent of state.agents.values()) {
+    if (agent.state !== 'DEPLOYING' || isDeploying(state, agent.id)) continue;
+    const commit = agent.admission?.commit;
+    agent.state = agent.deployedCommit ? 'SLEEPING' : 'ERROR';
+    agent.admission = { commit: commit ?? agent.deployedCommit ?? 'unknown', status: 'refused', reason: 'interrupted', message: 'the control plane restarted while this deploy ran', at };
+    registryOf(state).save(agent);
+    row(state, agent.id, 'AGENT_DEPLOY_INTERRUPTED', 'system:control-plane', commit);
+    console.warn(`[control-plane] deploy of ${agent.id} was interrupted by a restart; now ${agent.state}`);
+    recovered.push(agent.id);
+  }
+  if (opts.reapply !== false) {
+    for (const id of recovered) if (state.agents.get(id)?.deployedCommit) triggerApply(state, id, 'system:control-plane', 'resume interrupted deploy');
+  }
+  return recovered;
+}

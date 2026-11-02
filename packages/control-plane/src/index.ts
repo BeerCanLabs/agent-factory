@@ -1,3 +1,4 @@
+import { recoverInterruptedDeploys } from './apply.js';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -334,6 +335,7 @@ try {
   console.error(`[control-plane] systems store initialization failed: ${err instanceof Error ? err.message : String(err)}`);
 }
 
+recoverInterruptedDeploys(state);
 await reconcileRuns(state);
 
 setInterval(() => void checkHealth(state), 15_000).unref();
