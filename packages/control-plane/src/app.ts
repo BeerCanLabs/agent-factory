@@ -3773,7 +3773,10 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
     const record: AgentRecord = {
       id: typeof cartridge.id === 'string' ? cartridge.id : agentId,
-      name: typeof cartridge.name === 'string' ? cartridge.name : (typeof body.name === 'string' ? body.name : agentId),
+      // #65: a display name set in the factory survives re-registration; otherwise the cartridge names the agent.
+      ...(state.agents.get(typeof cartridge.id === 'string' ? cartridge.id : agentId)?.nameSetInFactory
+        ? { name: state.agents.get(typeof cartridge.id === 'string' ? cartridge.id : agentId)!.name, nameSetInFactory: true }
+        : { name: typeof cartridge.name === 'string' ? cartridge.name : (typeof body.name === 'string' ? body.name : agentId) }),
       role: typeof cartridge.role === 'string' ? cartridge.role : (typeof body.role === 'string' ? body.role : 'Agent'),
       state: stateResult,
       provider: 'cloud',

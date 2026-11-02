@@ -160,6 +160,8 @@ export type AgentRecord = {
   currentSpendMonthlyUsd?: number;
   /** CF6: set for an agent created from a configuration: it runs on the shared runtime (RT1) and has no repository of its own. */
   createdFrom?: 'configuration';
+  /** #65: the display name was set in the factory (PUT /api/v1/agents/:id/name), so a re-registration keeps it over the cartridge's. */
+  nameSetInFactory?: boolean;
   /**
    * E1.4 (#295): an in-memory record for one helper (subagent) run, never saved to the registry. It is removed, with its
    * in-memory policy, when that run ends.
