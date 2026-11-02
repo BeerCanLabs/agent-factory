@@ -166,6 +166,20 @@ export const identitySchema = z
   .strict();
 
 /**
+ * D11, D30, S2b: Agent ownership classification (`personal` vs `team`).
+ * Legacy cartridges/records omitting `kind` default to `'personal'` at runtime prior to S18 migration.
+ */
+export const AGENT_KINDS = ['personal', 'team'] as const;
+export type AgentKind = (typeof AGENT_KINDS)[number];
+export const agentKindSchema = z.enum(AGENT_KINDS);
+
+export function parseAgentKind(value: unknown): AgentKind | undefined {
+  return typeof value === 'string' && (AGENT_KINDS as readonly string[]).includes(value)
+    ? (value as AgentKind)
+    : undefined;
+}
+
+/**
  * AM1 (DESIGN_AUTHORITY §6.6): every agent declares one of three archetypes. The pre-AM1 names are accepted for one
  * release as aliases (`ephemeral` -> `purpose-built`, `episodic` -> `personal-assistant`, `workspace` -> `team-member`).
  */
@@ -317,6 +331,9 @@ export const cartridgeSchema = z
     id: z.string().regex(/^[a-z0-9][a-z0-9-_]*$/i, 'cartridge id must be a slug').optional(),
     name: z.string().min(1).optional(),
     role: z.string().optional(),
+    /** D11, D30, S2b: personal (single content-owner) vs team (explicit accountable-lead, no content-owner). */
+    kind: agentKindSchema.optional(),
+    accountableLead: z.string().trim().min(1).max(320).optional(),
     /** `builtin` lists the agent with platform/system agents (and applies their budget and kill-switch exemptions). */
     category: z.enum(['user', 'builtin']).optional(),
     prompt: z.string().optional(),
@@ -360,6 +377,13 @@ export const cartridgeSchema = z
   .strict()
   .superRefine((c, ctx) => {
     for (const issue of cartridgeRoleIssues(c)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: issue.path, message: issue.message });
+    if (c.kind !== 'team' && c.accountableLead !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['accountableLead'],
+        message: 'accountableLead may only be declared when kind is "team"',
+      });
+    }
   });
 
 export const egressSchema = z

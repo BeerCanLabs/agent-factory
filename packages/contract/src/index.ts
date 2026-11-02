@@ -15,6 +15,9 @@ export {
   identitySchema,
   memorySchema,
   memoryArchetype,
+  AGENT_KINDS,
+  agentKindSchema,
+  parseAgentKind,
   ARCHETYPES,
   LEGACY_ARCHETYPES,
   canonicalArchetype,
@@ -34,6 +37,7 @@ export {
   secretDeclarations,
 } from './schema.js';
 export type {
+  AgentKind,
   Archetype,
   CartridgeRole,
   RoleIssue,

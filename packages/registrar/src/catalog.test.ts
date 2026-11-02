@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { loadCatalog, loadDynamicRegistry, mergeAgents, BUILTIN_SYSTEM_AGENTS } from './catalog.js';
+import { loadCatalog, loadDynamicRegistry, mergeAgents, effectiveAgentKind, BUILTIN_SYSTEM_AGENTS } from './catalog.js';
 
 const agentsRoot = fileURLToPath(new URL('../../../agents', import.meta.url));
 
@@ -79,6 +79,39 @@ describe('loadCatalog', () => {
       assert.equal(loaded.length, 1);
       assert.equal(loaded[0].id, 'test-agent');
       assert.equal(loaded[0].name, 'Test Agent');
+      assert.equal(effectiveAgentKind(loaded[0]), 'personal');
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('preserves valid personal and team kinds in dynamic registry and strips invalid kind or stray accountableLead', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'reg-kind-'));
+    try {
+      const base = {
+        name: 'Team Bot',
+        role: 'Ops',
+        state: 'SLEEPING' as const,
+        provider: 'cloud',
+        artifact: 'image:latest',
+        requires: [],
+        triggers: [],
+        dir: '/tmp/team',
+      };
+      writeFileSync(join(dir, 'team-bot.json'), JSON.stringify({ ...base, id: 'team-bot', kind: 'team', accountableLead: 'user:sarah' }));
+      writeFileSync(join(dir, 'personal-bot.json'), JSON.stringify({ ...base, id: 'personal-bot', kind: 'personal', accountableLead: 'user:sarah' }));
+      writeFileSync(join(dir, 'bad-kind.json'), JSON.stringify({ ...base, id: 'bad-kind', kind: 'rogue' }));
+      const byId = new Map(loadDynamicRegistry(dir).map((a) => [a.id, a]));
+      assert.equal(byId.get('team-bot')?.kind, 'team');
+      assert.equal(byId.get('team-bot')?.accountableLead, 'user:sarah');
+      assert.equal(effectiveAgentKind(byId.get('team-bot')), 'team');
+
+      assert.equal(byId.get('personal-bot')?.kind, 'personal');
+      assert.equal(byId.get('personal-bot')?.accountableLead, undefined);
+      assert.equal(effectiveAgentKind(byId.get('personal-bot')), 'personal');
+
+      assert.equal(byId.get('bad-kind')?.kind, undefined);
+      assert.equal(effectiveAgentKind(byId.get('bad-kind')), 'personal');
     } finally {
       rmSync(dir, { recursive: true });
     }

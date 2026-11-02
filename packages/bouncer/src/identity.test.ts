@@ -11,6 +11,7 @@ import {
   normalizeOwnersToPrincipals,
   parseActor,
 } from './identity.js';
+import type { EffectiveGrant } from './grants.js';
 import { PrincipalStore } from './principals.js';
 
 describe('Bouncer authorizeIngress', () => {
@@ -298,6 +299,169 @@ describe('Bouncer authorizeIngress', () => {
     assert.equal(res.allowed, true);
     if (res.allowed) {
       assert.equal(res.caller?.role, 'operator');
+    }
+  });
+
+  it('F2: authorizeIngress with req.grants merges fleet roles into caller.roles without legacy link.roles', () => {
+    const resAdmin = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'fleet_admin_1' },
+      agentId: 'donna',
+      link: {
+        actor: 'user:charlie',
+      },
+      grants: [
+        {
+          grant: {
+            id: 'g-admin',
+            subject: 'user:charlie',
+            subjectKind: 'user',
+            scope: { kind: 'fleet' },
+            role: 'admin',
+            state: 'active',
+            version: 1,
+            createdAt: '2026-11-02T00:00:00.000Z',
+            createdBy: 'user:admin',
+            updatedAt: '2026-11-02T00:00:00.000Z',
+            updatedBy: 'user:admin',
+            expiresAt: null,
+          },
+          source: 'direct',
+          sourceSubject: 'user:charlie',
+          readOnly: false,
+        },
+      ],
+    });
+    assert.equal(resAdmin.allowed, true);
+    if (resAdmin.allowed && resAdmin.caller) {
+      assert.equal(resAdmin.caller.role, 'admin');
+      assert.deepEqual(resAdmin.caller.roles, ['admin']);
+    }
+
+    const resOp = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'fleet_op_1' },
+      agentId: 'donna',
+      link: {
+        actor: 'user:dana',
+      },
+      grants: [
+        {
+          grant: {
+            id: 'g-op',
+            subject: 'user:dana',
+            subjectKind: 'user',
+            scope: { kind: 'fleet' },
+            role: 'operator',
+            state: 'active',
+            version: 1,
+            createdAt: '2026-11-02T00:00:00.000Z',
+            createdBy: 'user:admin',
+            updatedAt: '2026-11-02T00:00:00.000Z',
+            updatedBy: 'user:admin',
+            expiresAt: null,
+          },
+          source: 'direct',
+          sourceSubject: 'user:dana',
+          readOnly: false,
+        },
+      ],
+    });
+    assert.equal(resOp.allowed, true);
+    if (resOp.allowed && resOp.caller) {
+      assert.equal(resOp.caller.role, 'operator');
+      assert.deepEqual(resOp.caller.roles, ['operator']);
+    }
+  });
+
+  it('F2: authorizeIngress with req.grants excludes accountable-lead and agent-member from caller.agentRoles while preserving custom subroles', () => {
+    const resTeamLead = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'lead_1' },
+      agentId: 'incident-triage',
+      agentKind: 'team',
+      link: {
+        actor: 'user:lead',
+      },
+      grants: [
+        {
+          grant: {
+            id: 'g-lead',
+            subject: 'user:lead',
+            subjectKind: 'user',
+            scope: { kind: 'agent', id: 'incident-triage' },
+            role: 'accountable-lead',
+            state: 'active',
+            version: 1,
+            createdAt: '2026-11-02T00:00:00.000Z',
+            createdBy: 'user:admin',
+            updatedAt: '2026-11-02T00:00:00.000Z',
+            updatedBy: 'user:admin',
+            expiresAt: null,
+          },
+          source: 'direct',
+          sourceSubject: 'user:lead',
+          readOnly: false,
+        },
+        {
+          grant: {
+            id: 'g-finance',
+            subject: 'user:lead',
+            subjectKind: 'user',
+            scope: { kind: 'agent', id: 'incident-triage' },
+            role: 'subrole:Finance',
+            state: 'active',
+            version: 1,
+            createdAt: '2026-11-02T00:00:00.000Z',
+            createdBy: 'user:admin',
+            updatedAt: '2026-11-02T00:00:00.000Z',
+            updatedBy: 'user:admin',
+            expiresAt: null,
+          },
+          source: 'direct',
+          sourceSubject: 'user:lead',
+          readOnly: false,
+        },
+      ],
+    });
+    assert.equal(resTeamLead.allowed, true);
+    if (resTeamLead.allowed && resTeamLead.caller) {
+      assert.equal(resTeamLead.caller.role, 'agent-member');
+      assert.deepEqual(resTeamLead.caller.agentRoles, ['Finance']);
+      assert.ok(!resTeamLead.caller.agentRoles.includes('accountable-lead'));
+    }
+
+    const resAgentMember = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'member_1' },
+      agentId: 'incident-triage',
+      agentKind: 'team',
+      link: {
+        actor: 'user:member',
+      },
+      grants: [
+        {
+          grant: {
+            id: 'g-member',
+            subject: 'user:member',
+            subjectKind: 'user',
+            scope: { kind: 'agent', id: 'incident-triage' },
+            role: 'agent-member',
+            state: 'active',
+            version: 1,
+            createdAt: '2026-11-02T00:00:00.000Z',
+            createdBy: 'user:admin',
+            updatedAt: '2026-11-02T00:00:00.000Z',
+            updatedBy: 'user:admin',
+            expiresAt: null,
+          },
+          source: 'direct',
+          sourceSubject: 'user:member',
+          readOnly: false,
+        },
+      ],
+    });
+    assert.equal(resAgentMember.allowed, true);
+    if (resAgentMember.allowed && resAgentMember.caller) {
+      assert.equal(resAgentMember.caller.role, 'agent-member');
+      assert.deepEqual(resAgentMember.caller.agentRoles, []);
+      assert.ok(!resAgentMember.caller.agentRoles.includes('agent-member'));
     }
   });
 });

@@ -14,10 +14,11 @@
  */
 import http from 'node:http';
 import { payloadHash } from '@beercanlabs/factory-ledger';
-import type { Approval, ChangeRequest } from '@beercanlabs/factory-bouncer';
+import { authorize, type Approval, type ChangeRequest } from '@beercanlabs/factory-bouncer';
+import type { Role } from '@beercanlabs/factory-auth';
 import { isProvider, type IdentityProvider } from './identity-links.js';
 import { effectiveRoles } from './agent-settings.js';
-import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
+import { agentKindOf, effectiveGrantsForActor, requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { ownersOf } from './config-store.js';
 import { requesterOfRun } from './schedules.js';
 import type { Run } from '@beercanlabs/factory-property-manager';
@@ -88,23 +89,34 @@ export function applyApprovedChange(state: FactoryState, a: Approval, approvedBy
   return assignRoles(state, a.agentId, c.provider, c.identity, c.roles, approvedBy, `approval:${a.approvalId}`);
 }
 
-/** Whether this principal may approve a change to this agent: an admin, or one of its owners (CF4). */
+/** Whether this principal may approve a change to this agent: an admin, personal content-owner, or team accountable-lead (CF4, D11). */
 export function mayApproveChange(state: FactoryState, principal: { actor: string; roles?: readonly string[] }, agentId: string): boolean {
-  if (principal.roles?.includes('admin')) return true;
-  const actor = principal.actor.toLowerCase();
-  return ownersOf(state, agentId).some((o) => o.toLowerCase() === actor);
+  const grantRes = effectiveGrantsForActor(state, principal.actor);
+  if (!grantRes.ok) return false;
+  return authorize({
+    principal: { actor: principal.actor, roles: (principal.roles ?? []) as Role[] },
+    privilege: 'agents.roles.assign',
+    resource: {
+      agentId,
+      agentKind: agentKindOf(state, agentId),
+      owners: ownersOf(state, agentId),
+      ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+    },
+  }).allowed;
 }
 
-/** The run's verified requester, when it is one of the agent's owners; undefined otherwise. */
+/** The run's verified requester, when they hold role-assignment authority on the agent; undefined otherwise. */
 function ownerRequester(state: FactoryState, run: Run): string | undefined {
   const who = requesterOfRun(state, run);
-  const isOwner = (a: string) => ownersOf(state, run.agentId).some((o) => o.toLowerCase() === a.toLowerCase());
+  const canManage = (a: string) =>
+    ownersOf(state, run.agentId).some((o) => o.toLowerCase() === a.toLowerCase()) ||
+    mayApproveChange(state, { actor: a, roles: [] }, run.agentId);
   // An owner acting alone in a signed-in console or API session is the requester too (until in-channel approvals, TSK-267).
-  if (who?.kind === 'principal') return isOwner(who.actor) ? who.actor : undefined;
+  if (who?.kind === 'principal') return canManage(who.actor) ? who.actor : undefined;
   if (who?.kind !== 'identity') return undefined;
   const actor = state.identityLinks?.resolve(who.provider, who.id);
   if (!actor) return undefined;
-  return isOwner(actor) ? actor : undefined;
+  return canManage(actor) ? actor : undefined;
 }
 
 /** The agent asks. Accepted only when the run's verified requester is an owner; held for that owner's approval. */

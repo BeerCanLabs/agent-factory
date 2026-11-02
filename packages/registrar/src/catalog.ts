@@ -1,7 +1,15 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { validateCartridge, classifySecrets, connectionSchema, secretDeclarations, ROLE_NAME, ROUTE_ID, type Surface, type Cartridge, type SecretsManifest, type Connection, type SecretDeclaration } from '@beercanlabs/factory-contract';
+import { validateCartridge, classifySecrets, connectionSchema, secretDeclarations, AGENT_KINDS, parseAgentKind, ROLE_NAME, ROUTE_ID, type AgentKind, type Surface, type Cartridge, type SecretsManifest, type Connection, type SecretDeclaration } from '@beercanlabs/factory-contract';
+
+export { AGENT_KINDS, parseAgentKind };
+export type { AgentKind };
+
+/** D11, D30, S2b: Omitted legacy `kind` defaults to `'personal'` until S18 migration. */
+export function effectiveAgentKind(agent?: { kind?: AgentKind | null } | null): AgentKind {
+  return agent?.kind === 'team' ? 'team' : 'personal';
+}
 
 export type AgentCategory = 'user' | 'builtin';
 
@@ -138,6 +146,10 @@ export type AgentRecord = {
     | 'OUT_OF_BUDGET';
   category?: AgentCategory;
   isBuiltin?: boolean;
+  /** D11, D30, S2b: personal (single content-owner) vs team (accountable-lead, no content-owner). Omitted defaults to 'personal'. */
+  kind?: AgentKind;
+  /** D11, D30, S2b: canonical human principal (`user:<id>`) holding `accountable-lead` on a team agent. */
+  accountableLead?: string;
   provider: string;
   artifact: string;
   localCommand?: string[];
@@ -451,6 +463,8 @@ export function loadCatalog(agentsRoot: string, options: { includeRetired?: bool
       state: 'SLEEPING',
       category,
       isBuiltin,
+      ...(rawCartridge?.kind ? { kind: rawCartridge.kind } : {}),
+      ...(rawCartridge?.kind === 'team' && rawCartridge?.accountableLead ? { accountableLead: rawCartridge.accountableLead } : {}),
       provider: isCloud ? 'cloud' : 'local',
       artifact,
       localCommand,
@@ -518,8 +532,12 @@ export function loadDynamicRegistry(registryDir: string): AgentRecord[] {
         const data = JSON.parse(readFileSync(join(registryDir, f), 'utf8')) as AgentRecord;
         if (data && data.id) {
           const isBuiltin = data.isBuiltin ?? (data.category ? data.category === 'builtin' : isBuiltinCartridge(data.id, data.dir));
+          const parsedKind = parseAgentKind(data.kind);
+          const { kind: _rawKind, accountableLead: rawLead, ...rest } = data;
           records.push({
-            ...data,
+            ...rest,
+            ...(parsedKind ? { kind: parsedKind } : {}),
+            ...(parsedKind === 'team' && typeof rawLead === 'string' && rawLead.trim() ? { accountableLead: rawLead.trim() } : {}),
             isBuiltin,
             category: isBuiltin ? 'builtin' : 'user',
           });
