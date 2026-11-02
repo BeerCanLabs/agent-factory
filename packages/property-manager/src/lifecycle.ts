@@ -431,15 +431,28 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
     let bound: Awaited<ReturnType<typeof bindAgentSecrets>>;
     try {
       bound = await bindAgentSecrets(state, agent.ungated ?? agent.requires);
-    } catch (e) {
+    } catch (err) {
       startsInFlight.delete(run.runId);
-      throw e;
+      const message = err instanceof Error ? err.message : String(err);
+      return finishRun(state, run.runId, 'FAILED', { actor: SYSTEM.runtime, error: `start failed: ${message}` });
     }
     if (!bound.ok) {
       startsInFlight.delete(run.runId);
       const failed = state.runs.update(run.runId, { state: 'PRE_FLIGHT_MISSING_SECRET', missing: bound.missing });
       record(state, failed, 'PRE_FLIGHT_MISSING_SECRET', SYSTEM.runtime);
       void fireCallback(state, failed);
+      const nextQueued = state.runs.list({ agentId: agent.id, active: true }).find((r) => r.state === 'QUEUED');
+      if (nextQueued && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED' && !activeRun(state, agent.id)) {
+        await startRun(state, nextQueued).catch((err) => {
+          console.error(`[property-manager] failed to start queued run ${nextQueued.runId}: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      } else if (run.trigger !== 'smoke') {
+        if (agent.state === 'WORKING') {
+          agent.state = 'SLEEPING';
+          registryOf(state).update(agent);
+        }
+        await notifyGatekeeperIngress(state, agent.id, 'offline', run.trigger);
+      }
       return failed;
     }
     env = bound.env;
@@ -449,7 +462,7 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
   // E7 deny-by-default: starting a run never changes the agent's policy; only admin actions do.
   // P1: a started task is not a ready agent. Presence shows starting now and available only on markRunReady.
   // In flight from here: the notification and the token mint can take seconds, and the reconciler must not reap the run.
-  let runToken: string;
+  let runToken = '';
   let runEnv: Record<string, string>;
   try {
     await notifyGatekeeperIngress(state, agent.id, 'starting', run.trigger);
@@ -479,10 +492,12 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
         FACTORY_EGRESS_ROUTES: (state.policies.has(agent.id) ? state.policies.get(agent.id).routes ?? [] : []).join(','),
       }),
     };
-  } catch (e) {
-    // Nothing is starting yet (the env build can throw too), so the reconciler may judge the run again.
+  } catch (err) {
+    // Nothing is starting yet (the env build can throw too), so clear startsInFlight and fail the run cleanly (#345).
     startsInFlight.delete(run.runId);
-    throw e;
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const message = runToken ? rawMessage.split(runToken).join('[redacted]') : rawMessage;
+    return finishRun(state, run.runId, 'FAILED', { actor: SYSTEM.runtime, error: `start failed: ${message}` });
   }
   try {
     // A start can wait (a new agent's task role propagating), so a reset, cancel, pause or isolate that lands meanwhile
@@ -596,43 +611,50 @@ export async function finishRun(
         const w = queue.waiters.shift();
         w?.({ id: 'done', timestamp: new Date().toISOString(), payload: null });
       }
-      queue.messages.length = 0;
+      const hasQueuedConversational = Boolean(
+        agent &&
+        !agent.ephemeral &&
+        agent.state !== 'PAUSED' &&
+        agent.state !== 'ISOLATED' &&
+        (agent.warmDownSeconds ?? 0) > 0 &&
+        state.runs
+          .list({ agentId: done.agentId, active: true })
+          .some((r) => r.state === 'QUEUED' && r.trigger !== 'schedule' && r.trigger !== 'cron' && r.trigger !== 'smoke'),
+      );
+      if (!hasQueuedConversational) {
+        queue.messages.length = 0;
+      }
     }
 
-    if (agent) {
-      if (state.runtime.running(agent.id) || done.taskHandle) {
-        try {
-          await state.runtime.stop(agent, done.taskHandle);
-        } catch (err) {
-          console.error(`[control-plane] stop ${agent.id}: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-      if (cur.trigger !== 'smoke') {
-        if (agent.state === 'WORKING') {
-          agent.state = (terminal === 'DONE' || terminal === 'TIMED_OUT') ? 'SLEEPING' : 'ERROR';
-          registryOf(state).update(agent);
-        }
-        if (agent.pendingDrain && agent.stagedCommit) {
-          console.log(`[property-manager] Applying pending drained update for ${agent.id} at ${agent.stagedCommit}...`);
-          agent.commit = agent.stagedCommit;
-          agent.deployedCommit = agent.stagedCommit;
-          if (agent.stagedVersion) agent.installedVersion = agent.stagedVersion;
-          if (agent.stagedVersion && agent.offeredVersion === agent.stagedVersion) {
-            agent.updateAvailable = false;
-          }
-          delete agent.pendingDrain;
-          delete agent.stagedCommit;
-          delete agent.stagedVersion;
-        }
-        await notifyGatekeeperIngress(state, agent.id, 'offline', cur.trigger);
+    if (agent && (state.runtime.running(agent.id) || done.taskHandle)) {
+      try {
+        await state.runtime.stop(agent, done.taskHandle);
+      } catch (err) {
+        console.error(`[control-plane] stop ${agent.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+
     // E1.4 (#295): a helper run is torn down when it ends: its in-memory agent record and policy go with it.
     if (agent?.ephemeral) {
       state.agents.delete(agent.id);
       state.policies.forgetEphemeral?.(agent.id);
     }
+
     if (cur.trigger !== 'smoke') {
+      if (agent && agent.pendingDrain && agent.stagedCommit) {
+        console.log(`[property-manager] Applying pending drained update for ${agent.id} at ${agent.stagedCommit}...`);
+        agent.commit = agent.stagedCommit;
+        agent.deployedCommit = agent.stagedCommit;
+        if (agent.stagedVersion) agent.installedVersion = agent.stagedVersion;
+        if (agent.stagedVersion && agent.offeredVersion === agent.stagedVersion) {
+          agent.updateAvailable = false;
+        }
+        delete agent.pendingDrain;
+        delete agent.stagedCommit;
+        delete agent.stagedVersion;
+        if (!agent.ephemeral) registryOf(state).update(agent);
+      }
+
       if (terminal === 'FAILED' && done.agentId !== 'med-doc' && state.agents.has('med-doc')) {
         state.ledger.append({
           timestamp: new Date().toISOString(),
@@ -645,9 +667,30 @@ export async function finishRun(
         await createRun(state, 'med-doc', { actor: SYSTEM.router, trigger: 'event:crash', input: { agentId: done.agentId, runId } });
       }
 
-      void fireCallback(state, done);
       if (terminal === 'FAILED') await breakCrashLoop(state, done.agentId);
+
+      // #345: skip SLEEPING/offline transitions when a queued non-smoke run is immediately taking over, so Discord
+      // activeTurns for a queued interactive wake are never wiped mid-handoff.
+      const willStartNext = Boolean(
+        agent &&
+        !agent.ephemeral &&
+        agent.state !== 'PAUSED' &&
+        agent.state !== 'ISOLATED' &&
+        state.runs.list({ agentId: done.agentId, active: true }).some((r) => r.state === 'QUEUED' && r.trigger !== 'smoke'),
+      );
+      if (agent && !agent.ephemeral && !willStartNext) {
+        if (agent.state === 'WORKING') {
+          agent.state = (terminal === 'DONE' || terminal === 'TIMED_OUT') ? 'SLEEPING' : 'ERROR';
+          registryOf(state).update(agent);
+        }
+        await notifyGatekeeperIngress(state, agent.id, 'offline', cur.trigger);
+      }
+
+      void fireCallback(state, done);
     } else {
+      if (agent && !agent.ephemeral) {
+        await notifyGatekeeperIngress(state, agent.id, 'offline', cur.trigger);
+      }
       void fireCallback(state, done);
     }
   } finally {
@@ -655,8 +698,10 @@ export async function finishRun(
   }
 
   const next = state.runs.list({ agentId: done.agentId, active: true }).find((r) => r.state === 'QUEUED');
-  if (next && agent && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED' && !activeRun(state, done.agentId)) {
-    await startRun(state, next);
+  if (next && agent && !agent.ephemeral && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED' && !activeRun(state, done.agentId)) {
+    await startRun(state, next).catch((err) => {
+      console.error(`[property-manager] failed to start queued run ${next.runId}: ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
   return done;
 }

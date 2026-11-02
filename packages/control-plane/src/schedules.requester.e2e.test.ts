@@ -408,5 +408,68 @@ describe('a scheduled run carries its requester’s authority, never more (E12, 
       state.runs.update(schedRunId, { state: 'DONE' });
       state.runs.update(convRes.body.runId, { state: 'DONE' });
     });
+
+    it('F2: preserves follow-up mailbox messages for a QUEUED conversational run when a background schedule run finishes (#345)', async () => {
+      for (const r of state.runs.list({ agentId: 'donna', active: true })) {
+        state.runs.update(r.runId, { state: 'DONE' });
+      }
+      if (state.mailboxes) state.mailboxes.delete('donna');
+      const donna = state.agents.get('donna')!;
+      const prevWarmDown = donna.warmDownSeconds;
+      donna.warmDownSeconds = 300;
+
+      try {
+        // 1) Start an active background schedule run
+        const s = sched({ requestedBy: { kind: 'identity', provider: 'discord', id: '201' } });
+        const schedOut = await fireScheduledAction(state, s);
+        assert.ok(schedOut);
+        const schedRunId = (schedOut.body as { runId: string }).runId;
+        state.runs.update(schedRunId, { state: 'WORKING' });
+
+        // 2) First interactive message queues convRun1
+        const conv1 = await api('/api/v1/agents/donna/conversation', 'POST', OPERATOR, {
+          channelId: '1490373419240521769',
+          messageId: 'msg-f2-1',
+          authorId: '100',
+          content: 'first interactive message',
+        });
+        assert.equal(conv1.status, 202);
+        assert.equal(conv1.body.woke, true);
+        const convRunId = conv1.body.runId as string;
+        assert.equal(state.runs.get(convRunId)?.state, 'QUEUED');
+
+        // 3) Second interactive message while schedRun is still WORKING and convRun1 is QUEUED
+        const conv2 = await api('/api/v1/agents/donna/conversation', 'POST', OPERATOR, {
+          channelId: '1490373419240521769',
+          messageId: 'msg-f2-2',
+          authorId: '100',
+          content: 'second follow-up message',
+        });
+        assert.equal(conv2.status, 202);
+        assert.equal(conv2.body.woke, true, 'must return woke: true when currentRun is QUEUED so Discord grants queuedWake lease');
+        assert.equal(conv2.body.runId, convRunId);
+        assert.equal(state.mailboxes?.get('donna')?.messages.length, 1);
+
+        // 4) Background schedule run finishes via POST /runs/:id/result -> convRun1 starts and mailbox retains msg-f2-2!
+        const schedToken = await tokens.mint({ runId: schedRunId, agentId: 'donna' });
+        const resDone = await api(`/api/v1/runs/${schedRunId}/result`, 'POST', schedToken, {
+          status: 'succeeded',
+          output: { silent: true },
+        });
+        assert.equal(resDone.status, 200);
+        assert.equal(state.runs.get(convRunId)?.state, 'WORKING');
+
+        // 5) convRun1 polls its mailbox and receives the preserved follow-up message!
+        const convToken = await tokens.mint({ runId: convRunId, agentId: 'donna' });
+        const mb = await api(`/api/v1/runs/${convRunId}/mailbox?timeout=0`, 'GET', convToken);
+        assert.equal(mb.status, 200);
+        assert.equal(mb.body?.ok, true);
+        assert.equal(mb.body?.message?.payload?.content, 'second follow-up message');
+
+        state.runs.update(convRunId, { state: 'DONE' });
+      } finally {
+        donna.warmDownSeconds = prevWarmDown;
+      }
+    });
   });
 });

@@ -542,6 +542,11 @@ describe('gatekeeper-ingress discord client', () => {
       // Wake/handoff binds ch1's turn to 'run-interactive' (queued behind run-sched)
       discord.bindTurnRun?.('ch1', 'run-interactive', true);
 
+      // F1 defense-in-depth: a transient 'offline' presence notification while 'run-interactive' is queuedWake must NOT wipe activeTurns
+      await discord.setPresence('offline');
+      await discord.setPresence('starting');
+      await discord.setPresence('available');
+
       // Straggler event from 'run-other' after binding is also ignored
       await discord.recordActivity?.({ runId: 'run-other', route: 'github', kind: 'call.end', durationMs: 300 });
 

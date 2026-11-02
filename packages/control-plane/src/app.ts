@@ -912,17 +912,21 @@ async function handOff(
     payload && typeof payload === 'object' && !Array.isArray(payload) && typeof (payload as Record<string, unknown>).turnId === 'string'
       ? ((payload as Record<string, unknown>).turnId as string)
       : undefined;
+  // #345: only deliver follow-ups to a QUEUED conversational run's mailbox when the agent has warm-down enabled (so it will poll /mailbox);
+  // single-shot conversational agents (warmDownSeconds <= 0) only accept mailbox deliveries while live, and otherwise queue a dedicated run.
+  const hasWarmDown = Boolean(agent.warmDownSeconds && agent.warmDownSeconds > 0);
+  const handoffTargets = hasWarmDown ? conversationalActive : conversationalActive.filter((r) => r.state !== 'QUEUED');
   // E12 item 4: a run's roles are those of the person it was started for. A message from a person whose roles deny a
   // skill route must not be handled inside someone else's run, where it would have that person's reach. It waits.
-  if (conversationalActive.length > 0 && opts.requestedBy) {
+  if (handoffTargets.length > 0 && opts.requestedBy) {
     const sender = accessForRequester(state, agent, { kind: 'identity', provider: opts.requestedBy.provider, id: opts.requestedBy.id });
-    const sameAsRun = conversationalActive.every((r) => r.requestedBy && r.requestedBy.provider === opts.requestedBy!.provider && r.requestedBy.id === opts.requestedBy!.id);
+    const sameAsRun = handoffTargets.every((r) => r.requestedBy && r.requestedBy.provider === opts.requestedBy!.provider && r.requestedBy.id === opts.requestedBy!.id);
     if (hasDeniedRoute(sender) && !sameAsRun) {
       state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'HANDOFF_REFUSED_BUSY_FOR_ANOTHER_PERSON', actor });
       return { status: 409, body: { error: 'busy_with_another_person', message: 'the agent is working for someone else; try again in a moment' } };
     }
   }
-  if (conversationalActive.length === 0) {
+  if (handoffTargets.length === 0) {
     const out = await createRun(state, agent.id, {
       actor,
       trigger: 'conversation',
@@ -950,7 +954,7 @@ async function handOff(
   await state.runtime.deliver(agent, payload);
   deliverToMailbox(state, agent.id, payload);
   const liveCandidate = activeRun(state, agent.id);
-  const currentRun = liveCandidate && !isBackgroundRun(liveCandidate.trigger) ? liveCandidate : conversationalActive[0];
+  const currentRun = liveCandidate && !isBackgroundRun(liveCandidate.trigger) ? liveCandidate : handoffTargets[0];
   if (currentRun) {
     if (currentRun.input === undefined) currentRun.input = payload;
     if (currentRun.state !== 'QUEUED') scheduleTimeout(state, currentRun);
@@ -971,7 +975,14 @@ async function handOff(
     actor,
     content: payload,
   });
-  return { status: 202, body: { ok: true, ...(currentRun ? { runId: currentRun.runId } : {}) } };
+  return {
+    status: 202,
+    body: {
+      ok: true,
+      ...(currentRun?.state === 'QUEUED' ? { woke: true } : {}),
+      ...(currentRun ? { runId: currentRun.runId } : {}),
+    },
+  };
 }
 
 /** AM2: a console turn the agent may answer, kept for an hour; the oldest are dropped past the cap. */

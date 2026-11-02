@@ -637,10 +637,14 @@ export function createDiscordClient(
       if (!client.isReady()) return;
       client.user?.setStatus(discordStatus(status));
       if (status === 'offline') {
-        for (const channelId of activeTurns.keys()) {
+        for (const [channelId, turn] of activeTurns.entries()) {
+          // #345: preserve queued interactive wakes across transient offline presence notifications while a prior run tears down.
+          if (turn.queuedWake) continue;
           clearActiveTurn(channelId);
         }
-        client.user?.setPresence({ activities: [] });
+        if (activeTurns.size === 0) {
+          client.user?.setPresence({ activities: [] });
+        }
       }
     },
     onMessage(handler) {
