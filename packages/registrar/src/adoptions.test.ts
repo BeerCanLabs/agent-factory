@@ -165,4 +165,103 @@ describe('which agents use a skill, and which skills an agent uses (SK7)', () =>
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('S23 (#369) propagates default holds and enforces monotonic stricter-only overrides', async () => {
+    const { defaultSkillActionHolds, effectiveSkillHolds, validateSkillHoldOverrides } = await import('./index.js');
+    const manifest = {
+      actions: [
+        { id: 'send_email', route: 'google-gmail', method: 'POST' as const, path: '/messages/send', hold: true },
+        { id: 'search_mail', route: 'google-gmail', method: 'GET' as const, path: '/messages', hold: false },
+      ],
+    };
+
+    assert.deepEqual(defaultSkillActionHolds(manifest), { send_email: true, search_mail: false });
+    assert.deepEqual(effectiveSkillHolds(manifest), { send_email: true, search_mail: false });
+
+    // AC1: loosening send_email (hold: true -> false) is rejected with 422
+    const loosened = validateSkillHoldOverrides(manifest, { send_email: false });
+    assert.equal(loosened.ok, false);
+    if (!loosened.ok) {
+      assert.equal(loosened.status, 422);
+      assert.equal(loosened.error, 'hold_loosening_forbidden');
+      assert.equal(loosened.action, 'send_email');
+    }
+
+    // AC1: tightening search_mail (hold: false -> true) succeeds
+    const tightened = validateSkillHoldOverrides(manifest, { search_mail: true });
+    assert.equal(tightened.ok, true);
+    if (tightened.ok) {
+      assert.deepEqual(tightened.holds, { send_email: true, search_mail: true });
+      assert.deepEqual(tightened.overrides, { search_mail: true });
+    }
+
+    // Unknown action is 422; malformed payload is 400
+    const unknownAct = validateSkillHoldOverrides(manifest, { delete_all: true });
+    assert.equal(unknownAct.ok, false);
+    if (!unknownAct.ok) assert.equal(unknownAct.status, 422);
+
+    const nonBool = validateSkillHoldOverrides(manifest, { search_mail: 'yes' });
+    assert.equal(nonBool.ok, false);
+    if (!nonBool.ok) assert.equal(nonBool.status, 400);
+
+    // Prototype keys cannot pollute or bypass unknown action validation
+    const protoAttempt = validateSkillHoldOverrides(manifest, JSON.parse('{"__proto__": false}'));
+    assert.equal(protoAttempt.ok, false);
+    if (!protoAttempt.ok) assert.equal(protoAttempt.status, 422);
+
+    // Version upgrade: if a newer version sets hold: true on search_mail, effectiveSkillHolds enforces true even if stored had false
+    const upgradedManifest = {
+      actions: [
+        { id: 'send_email', route: 'google-gmail', method: 'POST' as const, path: '/messages/send', hold: true },
+        { id: 'search_mail', route: 'google-gmail', method: 'GET' as const, path: '/messages', hold: true },
+      ],
+    };
+    assert.deepEqual(effectiveSkillHolds(upgradedManifest, { send_email: false, search_mail: false }), {
+      send_email: true,
+      search_mail: true,
+    });
+
+    // F3: AdoptionStore.updateHolds updates holds on a pending request while preserving requestedBy and requestedAt
+    const dir = tmp();
+    try {
+      const store = new AdoptionStore(dir);
+      const t0 = new Date('2026-11-02T01:02:03.000Z');
+      store.request(
+        {
+          agentId: 'castle',
+          skillId: 'tavily-search',
+          version: '1.0.0',
+          requestedBy: 'cloudflare:owner@bcl.test',
+          reason: 'initial request',
+          holds: { send_email: true, search_mail: false },
+        },
+        t0,
+      );
+      const updated = store.updateHolds('castle', 'tavily-search', { send_email: true, search_mail: true }, 'tightened by admin');
+      assert.ok(updated);
+      assert.equal(updated.requestedBy, 'cloudflare:owner@bcl.test');
+      assert.equal(updated.requestedAt, t0.toISOString());
+      assert.equal(updated.reason, 'tightened by admin');
+      assert.deepEqual(updated.holds, { send_email: true, search_mail: true });
+
+      // Reload from disk and verify provenance and holds persisted
+      const reloaded = new AdoptionStore(dir).get('castle', 'tavily-search');
+      assert.equal(reloaded?.requestedBy, 'cloudflare:owner@bcl.test');
+      assert.equal(reloaded?.requestedAt, t0.toISOString());
+      assert.deepEqual(reloaded?.holds, { send_email: true, search_mail: true });
+
+      // Rejected/missing records return undefined, and reject strips holds (F2)
+      const rejected = store.reject('castle', 'tavily-search', 'token:admin');
+      assert.ok(rejected);
+      assert.equal(rejected.state, 'rejected');
+      assert.equal(rejected.holds, undefined);
+      const reloadedRejected = new AdoptionStore(dir).get('castle', 'tavily-search');
+      assert.equal(reloadedRejected?.state, 'rejected');
+      assert.equal(reloadedRejected?.holds, undefined);
+      assert.equal(store.updateHolds('castle', 'tavily-search', { send_email: true, search_mail: false }), undefined);
+      assert.equal(store.updateHolds('castle', 'print', { send_email: true }), undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

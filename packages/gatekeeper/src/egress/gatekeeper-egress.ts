@@ -4,7 +4,7 @@ import net from 'node:net';
 import stream from 'node:stream';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { RunTokens } from '@beercanlabs/factory-auth';
-import { checkHold, checkToolApproval, describeHeldRequest, type HoldRule, type ApprovalOutcome, type ApprovalRequest, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
+import { canonicalizeRouteRequest, checkHold, checkToolApproval, describeHeldRequest, type HoldRule, type SkillActionHoldRule, type ApprovalOutcome, type ApprovalRequest, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
@@ -109,6 +109,8 @@ export type RunContext = {
   access?: { restricted: false } | { restricted: true; routes: Record<string, 'allowed' | 'denied'> };
   /** Whether the run requester is authorized to manage models (§6.9 M2, GAP-210, TSK-287). */
   canManageModels?: boolean;
+  /** S23 (D31): effective per-action hold rules from the agent's adopted skills (`manifestHold || overrideHold`). */
+  skillHolds?: SkillActionHoldRule[];
 };
 
 export type RunModelsInfo = {
@@ -760,6 +762,28 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     send(res, status, { error: reason, ...extra });
   }
 
+  function resolveUpstreamTarget(
+    upstream: string,
+    rest: string,
+  ): { ok: true; dest: URL; canonical: { malformed: boolean; suffixCandidates: string[][] } } | { ok: false } {
+    try {
+      const base = new URL(upstream);
+      const prefix = base.pathname.replace(/\/+$/, '');
+      // Build by string so `//host` in the path can never switch origin (and carry the credential elsewhere).
+      const dest = new URL(base.origin + prefix + rest);
+      // A dot segment (`..`, percent-encoded separators `%2f`/`%5c`, or `;` matrix parameters) must never climb out of
+      // the route's own path prefix under any normalization variant (E12 item 4, E9, S23 F1).
+      if (dest.origin !== base.origin || (prefix && dest.pathname !== prefix && !dest.pathname.startsWith(prefix + '/'))) {
+        return { ok: false };
+      }
+      const canonical = canonicalizeRouteRequest(prefix, rest);
+      if (!canonical.ok) return { ok: false };
+      return { ok: true, dest, canonical };
+    } catch {
+      return { ok: false };
+    }
+  }
+
   function forward(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -782,17 +806,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         resolve(500);
         return;
       }
-      const base = new URL(route.upstream);
-      // Build by string so `//host` in the path can never switch origin (and carry the credential elsewhere).
-      const dest = new URL(base.origin + base.pathname.replace(/\/$/, '') + rest);
-      // A dot segment (`..`, also percent-encoded) is resolved by URL parsing: the call must stay inside the route's own
-      // path, or an allowed route would be a way to another route's path on the same origin (E12 item 4).
-      const prefix = base.pathname.replace(/\/$/, '');
-      if (dest.origin !== base.origin || (prefix && dest.pathname !== prefix && !dest.pathname.startsWith(prefix + '/'))) {
+      const target = resolveUpstreamTarget(route.upstream, rest);
+      if (!target.ok) {
         send(res, 400, { error: 'bad_path' });
         resolve(400);
         return;
       }
+      const dest = target.dest;
       const headers: Record<string, string | string[]> = {};
       for (const [k, v] of Object.entries(req.headers)) if (v !== undefined && !STRIP.has(k.toLowerCase())) headers[k] = v;
       headers['accept-encoding'] = 'identity';
@@ -1784,7 +1804,26 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           ledger(ctx, route, { type: 'action', action: 'REPLY_FOOTNOTED', footnote: marked.footnote });
         }
       }
-      if (checkHold({ hold: route.hold, method: req.method ?? 'GET' }).held && (await holdOrRelease(req, res, ctx, route, rest, raw))) return;
+      let holdSuffixCandidates: string[][] | undefined;
+      let holdMalformedPath: boolean | undefined;
+      if (route.upstream) {
+        const target = resolveUpstreamTarget(route.upstream, rest);
+        if (!target.ok) return deny(res, ctx, route, 400, 'bad_path');
+        holdSuffixCandidates = target.canonical.suffixCandidates;
+        holdMalformedPath = target.canonical.malformed;
+      }
+      if (
+        checkHold({
+          hold: route.hold,
+          skillActions: ctx.skillHolds,
+          route: route.id,
+          method: req.method ?? 'GET',
+          path: rest,
+          ...(holdSuffixCandidates !== undefined ? { suffixCandidates: holdSuffixCandidates } : {}),
+          ...(holdMalformedPath !== undefined ? { malformedPath: holdMalformedPath } : {}),
+        }).held &&
+        (await holdOrRelease(req, res, ctx, route, rest, raw))
+      ) return;
       if (route.connection) return await handleConnection(req, res, ctx, route, rest, raw);
       // #334: the agent's own GitHub App key when it has one installed on the target org; else the route's credential.
       const appCred = await githubAppCredential(route, ctx, rest);

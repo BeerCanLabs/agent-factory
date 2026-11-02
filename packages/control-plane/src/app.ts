@@ -76,7 +76,7 @@ import { agentConfigForRun, applyAgentOwnershipGrant, deployConfigured, handleAg
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
 import { accountableLeadOf, changeReason, configOf, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
-import { handleSkills, resumeSkillChecks } from './skills.js';
+import { effectiveAgentSkillActionHolds, handleSkills, resumeSkillChecks } from './skills.js';
 import { applyTrainingForCaller, handleSkillTraining } from './skill-training.js';
 import { buildSkillsFor, isDeploying, runDeploy } from './apply.js';
 import { handleRunProgress } from './progress-routes.js';
@@ -3851,6 +3851,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
     const pol = state.policies.get(run.agentId);
+    const skillHolds = isBuiltin ? [] : effectiveAgentSkillActionHolds(state, run.agentId);
 
     if (run.trigger === 'smoke') {
       const inputObj = (run.input && typeof run.input === 'object') ? (run.input as Record<string, unknown>) : {};
@@ -3887,6 +3888,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         spend: { run: state.smokeRunSpend?.get(run.runId) ?? 0, day: 0, month: 0 },
         access: { restricted: false },
         canManageModels: false,
+        ...(skillHolds.length ? { skillHolds } : {}),
       });
       return;
     }
@@ -3914,6 +3916,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       // A built-in agent is the factory's own and has no person's roles.
       access: isBuiltin ? { restricted: false } : accessForRun(state, run, agent),
       canManageModels: isBuiltin ? false : canRunManageModels(state, run).allowed,
+      ...(skillHolds.length ? { skillHolds } : {}),
     });
     return;
   }
