@@ -10,7 +10,7 @@
  * records the outcome on the agent and in the ledger. The control plane is one process, so the "apply again" flags below
  * are in memory.
  */
-import { BUILTIN_AGENT_IDS, admissionOf, admit, beginAdmission, pinSource, stateAfterRefusal, type AgentRecord } from '@beercanlabs/factory-registrar';
+import { BUILTIN_AGENT_IDS, admissionOf, admit, beginAdmission, pinSource, stateAfterRefusal, interruptedAdmission, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { redactSecrets } from '@beercanlabs/factory-ledger';
 import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type SourceRef } from '@beercanlabs/factory-property-manager';
 import { type FactoryState } from './app.js';
@@ -345,3 +345,29 @@ export function triggerApply(state: FactoryState, agentId: string, actor: string
   }
 }
 
+
+/**
+ * #346: a deploy runs in this process's memory, so a control-plane restart mid-deploy kills it and leaves the persisted
+ * agent `DEPLOYING` with its admission `building`, which `applyConfig` treats as "a deploy is running" forever. At
+ * startup, every such agent is recovered: its last good image is still recorded (`deployedCommit` changes only when a
+ * deploy succeeds), so it goes back to `SLEEPING` (a never-deployed agent to `ERROR`), the interrupted admission is
+ * recorded as refused, a ledger row says so, and its configuration is applied again so it converges on the current
+ * shared runtime. Returns the ids recovered.
+ */
+export function recoverInterruptedDeploys(state: FactoryState, opts: { reapply?: boolean } = {}): string[] {
+  const recovered: string[] = [];
+  for (const agent of state.agents.values()) {
+    if (agent.state !== 'DEPLOYING' || isDeploying(state, agent.id)) continue;
+    const commit = agent.admission?.commit;
+    agent.state = agent.deployedCommit ? 'SLEEPING' : 'ERROR';
+    agent.admission = interruptedAdmission(commit ?? agent.deployedCommit ?? 'unknown');
+    registryOf(state).save(agent);
+    row(state, agent.id, 'AGENT_DEPLOY_INTERRUPTED', 'system:control-plane', commit);
+    console.warn(`[control-plane] deploy of ${agent.id} was interrupted by a restart; now ${agent.state}`);
+    recovered.push(agent.id);
+  }
+  if (opts.reapply !== false) {
+    for (const id of recovered) if (state.agents.get(id)?.deployedCommit) triggerApply(state, id, 'system:control-plane', 'resume interrupted deploy');
+  }
+  return recovered;
+}
