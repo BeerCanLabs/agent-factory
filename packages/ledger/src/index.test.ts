@@ -506,3 +506,33 @@ describe('trigger attribution field (#345)', () => {
     }
   });
 });
+
+describe('owner conversion fields (S18)', () => {
+  it('keeps well-formed legacyOwner, principalId, and role', () => {
+    const ok = toLedgerEvent({
+      agentId: 'donna',
+      type: 'action',
+      action: 'OWNER_CONVERTED',
+      actor: 'admin@example.com',
+      legacyOwner: 'cloudflare:dale@example.com',
+      principalId: 'user:dale',
+      role: 'content-owner',
+    });
+    assert.equal(ok.legacyOwner, 'cloudflare:dale@example.com');
+    assert.equal(ok.principalId, 'user:dale');
+    assert.equal(ok.role, 'content-owner');
+
+    const bad = toLedgerEvent({
+      agentId: 'donna',
+      type: 'action',
+      action: 'OWNER_CONVERTED',
+      legacyOwner: 'free text with spaces',
+      principalId: 'bad principal <script>',
+      role: 'Invalid Role With Spaces',
+    });
+    assert.equal(bad.legacyOwner, undefined);
+    assert.equal(bad.principalId, undefined);
+    assert.equal(bad.role, undefined);
+  });
+});
+

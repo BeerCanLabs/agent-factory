@@ -63,9 +63,16 @@ export type LedgerEvent = {
   before?: Record<string, unknown> | null;
   /** S3 / S7: structured post-mutation principal/grant snapshot (`null` when deleted/revoked). */
   after?: Record<string, unknown> | null;
+  /** S18: legacy owner string converted to canonical principal and grant. */
+  legacyOwner?: string;
+  principalId?: string;
+  role?: string;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
+  'legacyOwner',
+  'principalId',
+  'role',
   'requestedModel',
   'parentRunId',
   'parentAgentId',
@@ -319,6 +326,9 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
     const cleanAfter = sanitizeAuditSnapshot(raw.after);
     if (cleanAfter !== undefined) event.after = cleanAfter;
   }
+  if (typeof raw.legacyOwner === 'string' && /^[A-Za-z0-9:._@+-]{1,256}$/.test(raw.legacyOwner)) event.legacyOwner = raw.legacyOwner;
+  if (typeof raw.principalId === 'string' && /^[A-Za-z0-9:._@+-]{1,256}$/.test(raw.principalId)) event.principalId = raw.principalId;
+  if (typeof raw.role === 'string' && /^[a-z0-9_-]{1,64}$/.test(raw.role)) event.role = raw.role;
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);
