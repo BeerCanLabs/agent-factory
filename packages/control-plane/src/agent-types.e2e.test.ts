@@ -4,7 +4,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
@@ -18,7 +18,7 @@ import {
   GrantStoreError,
   PrincipalStore,
 } from '@beercanlabs/factory-bouncer';
-import { FileConfigBackend, GroupStore, VersionedConfigStore } from '@beercanlabs/factory-registrar';
+import { FileConfigBackend, GroupStore, VersionedConfigStore, registryOf, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { ScheduleStore } from '@beercanlabs/factory-timekeeper';
@@ -163,6 +163,7 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     await groups.createGroup({ id: 'sre', name: 'SRE Team', roles: [], members: ['user:geordi'] });
 
     const identityLinks = new IdentityLinkStore(join(dir, 'links'));
+    identityLinks.link('discord', 'admin-discord-1', 'user:admin', 'user:admin');
     identityLinks.link('discord', 'dale-discord-1', 'user:dale', 'user:admin');
     identityLinks.link('discord', 'alice-discord-1', 'user:alice', 'user:admin');
     identityLinks.link('discord', 'sarah-discord-1', 'user:sarah', 'user:admin');
@@ -713,6 +714,95 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     );
   });
 
+  it('F1: clearing PUT /api/v1/agents/:id/owners with { owners: [] } revokes live owner grant even when an expired content-owner grant exists, and persists agent.kind backfill', async () => {
+    // 1. Create a legacy personal agent with kind: undefined in memory and in registry store
+    const legacyAgentId = 'legacy-pa-bot';
+    const legacyRecord: AgentRecord = {
+      id: legacyAgentId,
+      name: 'Legacy Personal Agent',
+      role: 'Assistant',
+      state: 'SLEEPING',
+      provider: 'local',
+      artifact: '',
+      requires: [],
+      ungated: [],
+      gated: [],
+      triggers: [],
+      dir: '/tmp',
+    };
+    delete (legacyRecord as unknown as { kind?: unknown }).kind;
+    state.agents.set(legacyAgentId, legacyRecord);
+    registryOf(state).save(legacyRecord);
+
+    const onDiskBefore = JSON.parse(
+      readFileSync(join(dir, 'registry', `${legacyAgentId}.json`), 'utf8'),
+    );
+    assert.equal(onDiskBefore.kind, undefined);
+
+    // 2. Insert a historical EXPIRED content-owner grant for prior owner (user:sarah) sorting ahead of subsequent grants
+    const expiredGrant = await grants.grant({
+      id: 'g-000-historical-expired',
+      subject: 'user:sarah',
+      scope: { kind: 'agent', id: legacyAgentId },
+      role: 'content-owner',
+      agentKind: 'personal',
+      by: 'user:admin',
+      granterIsAdmin: true,
+      initialSubmission: true,
+    });
+    ((grants as unknown as { byId: Map<string, unknown> }).byId.get(expiredGrant.id) as { expiresAt?: string }).expiresAt = '2020-01-01T00:00:00.000Z';
+
+    // 3. Admin calls PUT /api/v1/agents/:id/owners with { owners: ['user:alice'] } to set current live owner
+    // This also triggers the if (!agent.kind) { agent.kind = 'personal'; await registryOf(state).save(agent); } backfill!
+    const putAliceRes = await call(
+      'PUT',
+      `/api/v1/agents/${legacyAgentId}/owners`,
+      { owners: ['user:alice'] },
+      TOKENS.admin,
+    );
+    assert.equal(putAliceRes.status, 200, JSON.stringify(putAliceRes.body));
+    assert.deepEqual(ownersOf(state, legacyAgentId), ['user:alice']);
+
+    // Verify agent.kind = 'personal' backfill is persisted both in state and in registry store on disk
+    assert.equal(state.agents.get(legacyAgentId)!.kind, 'personal');
+    const onDiskAfter = JSON.parse(
+      readFileSync(join(dir, 'registry', `${legacyAgentId}.json`), 'utf8'),
+    );
+    assert.equal(onDiskAfter.kind, 'personal');
+
+    // Alice has content-owner write authority on settings
+    assert.equal(
+      (await call('PUT', `/api/v1/agents/${legacyAgentId}/settings`, { soul: 'Alice active owner write' }, TOKENS.alice)).status,
+      200,
+    );
+
+    // Verify the expired grant and alice's active grant both exist in grants.list({ includeExpired: true })
+    const allGrants = grants.list({ scopeKind: 'agent', scopeId: legacyAgentId, includeExpired: true });
+    assert.equal(allGrants.length, 2);
+    assert.ok(allGrants.some((g) => g.id === expiredGrant.id && g.subject === 'user:sarah'));
+    assert.ok(allGrants.some((g) => g.subject === 'user:alice' && g.state === 'active'));
+
+    // 4. Admin clears owners via PUT /api/v1/agents/:id/owners with { owners: [] }
+    const clearRes = await call(
+      'PUT',
+      `/api/v1/agents/${legacyAgentId}/owners`,
+      { owners: [] },
+      TOKENS.admin,
+    );
+    assert.equal(clearRes.status, 200, JSON.stringify(clearRes.body));
+
+    // 5. Verify ownersOf is [], activeContentOwnerOf is undefined, and ConfigStore has no owners
+    assert.deepEqual(ownersOf(state, legacyAgentId), []);
+    assert.equal(grants.activeContentOwnerOf({ kind: 'agent', id: legacyAgentId }), undefined);
+    assert.deepEqual(state.configs!.current(legacyAgentId)?.owners, undefined);
+
+    // Former live owner Alice has lost content-owner privileges (403 on settings write)
+    assert.equal(
+      (await call('PUT', `/api/v1/agents/${legacyAgentId}/settings`, { soul: 'Former owner write' }, TOKENS.alice)).status,
+      403,
+    );
+  });
+
   it('AC5/D29: team member (via group grant) wakes, converses, and clears holds on team agent; personal agent-member wakes & converses ONLY and NEVER clears holds even on a run she initiated', async () => {
     // 1. Grant `member` on team agent `incident-triage` to `group:sre` (containing user:geordi)
     await grants.grant({
@@ -742,6 +832,47 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
       TOKENS.ingress,
     );
     assert.equal(geordiIngressWake.status, 202, JSON.stringify(geordiIngressWake.body));
+    const geordiRun = state.runs.get(geordiIngressWake.body.runId)!;
+    assert.deepEqual(geordiRun.caller?.roles, ['viewer'], 'F2: GrantStore fleet viewer role merged into caller.roles');
+
+    // F2: GrantStore fleet admin & operator without legacy link.roles carry caller.roles on ingress wake
+    const daleIngressWake = await call(
+      'POST',
+      '/api/v1/agents/incident-triage/wake',
+      { requestedBy: { provider: 'discord', id: 'dale-discord-1' }, input: { text: 'ping from op' } },
+      TOKENS.ingress,
+    );
+    assert.equal(daleIngressWake.status, 202, JSON.stringify(daleIngressWake.body));
+    const daleRun = state.runs.get(daleIngressWake.body.runId)!;
+    assert.deepEqual(daleRun.caller?.roles, ['operator'], 'F2: GrantStore fleet operator role merged into caller.roles');
+
+    const adminIngressWake = await call(
+      'POST',
+      '/api/v1/agents/incident-triage/wake',
+      { requestedBy: { provider: 'discord', id: 'admin-discord-1' }, input: { text: 'ping from admin' } },
+      TOKENS.ingress,
+    );
+    assert.equal(adminIngressWake.status, 202, JSON.stringify(adminIngressWake.body));
+    const adminRun = state.runs.get(adminIngressWake.body.runId)!;
+    assert.deepEqual(adminRun.caller?.roles, ['admin'], 'F2: GrantStore fleet admin role merged into caller.roles');
+
+    // F2: Team agent accountable-lead + agent subrole:Finance on ingress wake
+    await grants.grant({
+      subject: 'user:sarah',
+      scope: { kind: 'agent', id: 'incident-triage' },
+      role: 'subrole:Finance',
+      by: 'user:admin',
+      granterIsAdmin: true,
+    });
+    const sarahIngressWake = await call(
+      'POST',
+      '/api/v1/agents/incident-triage/wake',
+      { requestedBy: { provider: 'discord', id: 'sarah-discord-1' }, input: { text: 'ping from lead' } },
+      TOKENS.ingress,
+    );
+    assert.equal(sarahIngressWake.status, 202, JSON.stringify(sarahIngressWake.body));
+    const sarahIngressRun = state.runs.get(sarahIngressWake.body.runId)!;
+    assert.deepEqual(sarahIngressRun.caller?.agentRoles, ['Finance'], 'F2: structural accountable-lead role does NOT leak, while subrole:Finance is preserved');
 
     // Team member Geordi clears a held request on incident-triage (D29)
     const teamHold1 = holdOnRun('incident-triage', { provider: 'discord', id: 'sarah-discord-1' });

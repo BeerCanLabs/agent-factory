@@ -410,7 +410,14 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
   const stripSubrolePrefix = (r: string): string =>
     r.toLowerCase().startsWith('subrole:') ? r.slice('subrole:'.length) : r;
   const grantRoleLabels = agentGrants
-    .filter((eg) => !eg.readOnly && eg.grant.role !== 'content-owner')
+    .filter(
+      (eg) =>
+        !eg.readOnly &&
+        eg.grant.role !== 'content-owner' &&
+        eg.grant.role !== 'accountable-lead' &&
+        eg.grant.role !== 'agent-member' &&
+        eg.grant.role !== 'owner',
+    )
     .map((eg) => stripSubrolePrefix(eg.grant.role))
     .filter((r) => r.trim() !== '' && r.trim().toLowerCase() !== 'owner');
   const mergedMemberRoles = [...new Set([...linkAgentRoles, ...grantRoleLabels])];
@@ -423,6 +430,9 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
     .map((eg) => eg.grant.role as Role);
   const allFleetRoles = [...new Set([...resolvedRoles, ...grantFleetRoles])];
 
+  const hasAgentMemberGrant =
+    mergedMemberRoles.length > 0 || agentGrants.some((eg) => !eg.readOnly && eg.grant.role !== 'content-owner');
+
   // Determine the primary role that actually satisfied the privilege
   let satisfyingRole: Role | 'agent-owner' | 'agent-member';
   if (allFleetRoles.includes('admin')) {
@@ -434,15 +444,19 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
     // A person admitted only by an agent role or agent grant satisfied the privilege as an agent-member.
     satisfyingRole =
       allFleetRoles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ??
-      (mergedMemberRoles.length > 0 ? 'agent-member' : (allFleetRoles[0] ?? 'operator'));
+      (hasAgentMemberGrant ? 'agent-member' : (allFleetRoles[0] ?? 'operator'));
   }
 
   // Report faithfully: link's explicitly granted roles, or admin if derived from email, or empty array if un-roled
-  const faithfulRoles: readonly Role[] = link.roles
+  const baseFaithfulRoles: readonly Role[] = link.roles
     ? [...link.roles]
     : isEmailAdmin
       ? (['admin'] as const)
       : [];
+  const faithfulRoles: Role[] =
+    req.grants !== undefined
+      ? [...new Set([...baseFaithfulRoles, ...grantFleetRoles])]
+      : [...baseFaithfulRoles];
 
   return {
     allowed: true,

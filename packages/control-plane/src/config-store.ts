@@ -40,6 +40,7 @@ import {
 import {
   AGENT_ID,
   effectiveAgentKind,
+  registryOf,
   type AgentRecord,
   type AgentSettings,
   type ConfigContent,
@@ -347,15 +348,32 @@ async function handleOwners(state: FactoryState, req: http.IncomingMessage, res:
     }
     try {
       if (checked.owners.length === 0) {
-        const existingOwnerGrants = state.grants
-          .list({ scopeKind: 'agent', scopeId: agent.id.toLowerCase(), includeExpired: true })
-          .filter((g) => g.role === 'content-owner');
-        const primary =
-          existingOwnerGrants.find((g) => g.state === 'pending-revoked') ??
-          existingOwnerGrants.find((g) => g.state === 'active') ??
-          existingOwnerGrants[0];
-        if (primary) {
-          await state.grants.revoke(primary.id, { by: byActor });
+        const queryLiveOwnerGrants = () =>
+          state.grants!
+            .list({ scopeKind: 'agent', scopeId: agent.id.toLowerCase(), includeExpired: false })
+            .filter((g) => g.role === 'content-owner');
+
+        const initialLive = queryLiveOwnerGrants();
+        const nonAccepted = [
+          ...initialLive.filter((g) => g.state === 'pending-revoked'),
+          ...initialLive.filter((g) => g.state === 'active'),
+        ];
+        for (const g of nonAccepted) {
+          try {
+            await state.grants.revoke(g.id, { by: byActor });
+          } catch (err) {
+            if (err instanceof GrantStoreError && err.code === 'grant_not_found') continue;
+            throw err;
+          }
+        }
+        const remainingLive = queryLiveOwnerGrants();
+        for (const g of remainingLive) {
+          try {
+            await state.grants.revoke(g.id, { by: byActor });
+          } catch (err) {
+            if (err instanceof GrantStoreError && err.code === 'grant_not_found') continue;
+            throw err;
+          }
         }
         storedOwners = [];
       } else {
@@ -372,6 +390,7 @@ async function handleOwners(state: FactoryState, req: http.IncomingMessage, res:
         });
         if (!agent.kind) {
           agent.kind = 'personal';
+          await registryOf(state).save(agent);
         }
         storedOwners = [granted.subject];
       }
