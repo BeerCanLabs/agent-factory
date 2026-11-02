@@ -15,6 +15,7 @@ import { createFactoryServer, checkOwnsAnyAgent, type FactoryState } from './app
 import { MemoryRunStore, noopRuntime, createRun } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { createGatekeeperEgress, type ControlClient } from '@beercanlabs/factory-gatekeeper';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { GroupStore, VersionedConfigStore, type ConfigBackend, type ConfigRecord } from '@beercanlabs/factory-registrar';
 import { approvedSkill, loadSkills, recordSkillChecks, setSkillUsage, skillPackageStore, skillRegistry } from './skills.js';
@@ -1274,6 +1275,7 @@ describe('TSK-278 Slice 4: Publishing workflow, adoption rules, retirement, and 
   const ALICE = 'alice-token-s4';
   const BOB = 'bob-token-s4';
   const CHARLIE = 'charlie-token-s4';
+  const GATEKEEPER_EGRESS = 'gk-egress-token-s4';
 
   before(async () => {
     process.env.FACTORY_SKILL_CHECKER = 'local';
@@ -1282,6 +1284,7 @@ describe('TSK-278 Slice 4: Publishing workflow, adoption rules, retirement, and 
       { name: 'alice', token: ALICE, roles: ['viewer'] },
       { name: 'bob', token: BOB, roles: ['viewer'] },
       { name: 'charlie', token: CHARLIE, roles: ['viewer'] },
+      { name: 'gatekeeper-egress', token: GATEKEEPER_EGRESS, roles: ['gatekeeper-egress'] },
     ]);
     dataDir = mkdtempSync(join(tmpdir(), 'cp-slice4-'));
     ledger = new MemoryLedger();
@@ -1297,6 +1300,7 @@ describe('TSK-278 Slice 4: Publishing workflow, adoption rules, retirement, and 
         { name: 'alice', token: ALICE, roles: ['viewer'] },
         { name: 'bob', token: BOB, roles: ['viewer'] },
         { name: 'charlie', token: CHARLIE, roles: ['viewer'] },
+        { name: 'gatekeeper-egress', token: GATEKEEPER_EGRESS, roles: ['gatekeeper-egress'] },
       ]),
       version: '0.1.0',
       providers: [envProvider({})],
@@ -1849,5 +1853,161 @@ describe('TSK-278 Slice 4: Publishing workflow, adoption rules, retirement, and 
     const fallbackReq = aliceSkillsAfterFallback.body.requests.find((r: any) => r.skillId === 'priv-fallback-mail');
     assert.ok(fallbackReq);
     assert.deepEqual(fallbackReq.holds, { send_email: true, search_mail: false });
+
+    // 11. Round 2 F2: Activation `smoke` runs include `skillHolds` on `GET /api/v1/gatekeeper-egress/runs/:id`
+    // and `gatekeeper-egress` enforces `hold: true` on smoke runs instead of forwarding live with credentials!
+    const smokeUpstreamSeen: Array<{ method?: string; url?: string; auth?: string }> = [];
+    const mockGmail = http.createServer((uReq, uRes) => {
+      smokeUpstreamSeen.push({
+        method: uReq.method,
+        url: uReq.url,
+        auth: String(uReq.headers['authorization'] ?? ''),
+      });
+      uRes.writeHead(200, { 'content-type': 'application/json' });
+      uRes.end(JSON.stringify({ id: 'sent-live' }));
+    });
+    const gmailPort = await listen(mockGmail);
+    const gwClient: ControlClient = {
+      async runContext(runId) {
+        const r = await call(port, `/api/v1/gatekeeper-egress/runs/${encodeURIComponent(runId)}`, 'GET', GATEKEEPER_EGRESS);
+        return r.status === 200 ? r.body : null;
+      },
+      async requestApproval() {
+        throw new Error('unused');
+      },
+      async consumeApproval() {
+        return false;
+      },
+      async holdRequest(hReq) {
+        const r = await call(port, '/api/v1/gatekeeper-egress/holds', 'POST', GATEKEEPER_EGRESS, hReq);
+        if (r.status === 200 || r.status === 201) return r.body;
+        throw new Error(`unexpected hold status ${r.status}: ${JSON.stringify(r.body)}`);
+      },
+      async ledger() {},
+    };
+    const smokeRunTokens = new RunTokens('smoke-hold-key-0123456789abcdefghij');
+    const smokeEgress = createGatekeeperEgress({
+      routes: [
+        {
+          id: 'google-gmail',
+          kind: 'http',
+          upstream: `http://127.0.0.1:${gmailPort}`,
+          credential: { secret: 'SMOKE_GMAIL_TOKEN', header: 'Authorization', format: 'Bearer {value}' },
+        },
+      ],
+      prices: {},
+      runTokens: smokeRunTokens,
+      control: gwClient,
+      providers: [envProvider({ SMOKE_GMAIL_TOKEN: 'secret-gmail-oauth-token' })],
+      contextTtlMs: 0,
+    });
+    const egressPort = await listen(smokeEgress);
+    try {
+      state.agents.get('alice-agent')!.state = 'SLEEPING';
+      const smokeRun = state.runs.create({
+        agentId: 'alice-agent',
+        state: 'WORKING',
+        actor: 'factory:smoke',
+        trigger: 'smoke',
+        input: {
+          factoryKind: 'smoke',
+          smoke: 'skill',
+          skillId: 'mail-assistant',
+          action: 'search_mail',
+          dryRun: true,
+          smokeRoutes: ['google-gmail'],
+        },
+      });
+      const smokeCtxRes = await call(port, `/api/v1/gatekeeper-egress/runs/${smokeRun.runId}`, 'GET', ADMIN);
+      assert.equal(smokeCtxRes.status, 200, JSON.stringify(smokeCtxRes.body));
+      assert.ok(Array.isArray(smokeCtxRes.body.skillHolds) && smokeCtxRes.body.skillHolds.length >= 2, 'smoke run context must carry skillHolds');
+      assert.equal(
+        smokeCtxRes.body.skillHolds.find((r: any) => r.actionId === 'send_email')?.hold,
+        true,
+      );
+
+      const smokeToken = await smokeRunTokens.mint({ runId: smokeRun.runId, agentId: 'alice-agent' });
+      const smokeEgressRes = await fetch(`http://127.0.0.1:${egressPort}/google-gmail/gmail/v1/users/me/messages/send`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${smokeToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ raw: 'c21va2UtdGVzdA==' }),
+      });
+      const smokeEgressBody = await smokeEgressRes.text();
+      assert.equal(smokeEgressRes.status, 202, `held skill action called during smoke run must be held (202), got ${smokeEgressRes.status}: ${smokeEgressBody}`);
+      assert.equal(smokeUpstreamSeen.length, 0, 'smoke run must not forward held action or leak credentials to upstream');
+    } finally {
+      smokeEgress.closeAllConnections?.();
+      mockGmail.closeAllConnections?.();
+      await new Promise<void>((r) => smokeEgress.close(() => r()));
+      await new Promise<void>((r) => mockGmail.close(() => r()));
+    }
+
+    // 12. Round 2 F3: Tightening holds on an adopted skill while an upgrade request is pending MUST NOT be reverted on upgrade approval!
+    // Reset alice-agent's mail-assistant@1.1.0 `search_mail` override back to `false` first so we start with `search_mail: false`.
+    const resetSearch = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant/holds', 'PUT', ALICE, {
+      holds: { search_mail: false },
+    });
+    assert.equal(resetSearch.status, 200, JSON.stringify(resetSearch.body));
+    assert.deepEqual(resetSearch.body.holds, { send_email: true, search_mail: false, delete_thread: true });
+
+    // 12a. Register mail-assistant@1.2.0, request upgrade WITHOUT explicit `holds`, then tighten `search_mail: true` on 1.1.0 before approving 1.2.0
+    const reg12 = await call(port, '/api/v1/registry/skills', 'POST', ALICE, buildActionSkillPackage('mail-assistant', '1.2.0', extraDelete));
+    assert.equal(reg12.status, 201, JSON.stringify(reg12.body));
+    const rec12 = reg.get('mail-assistant', '1.2.0')!;
+    rec12.tests = 'passed';
+    rec12.status = 'approved';
+    reg.save(rec12);
+
+    const upReq12 = await call(port, '/api/v1/agents/alice-agent/skills', 'POST', ALICE, {
+      skillId: 'mail-assistant',
+      version: '1.2.0',
+    });
+    assert.equal(upReq12.status, 201, JSON.stringify(upReq12.body));
+    assert.deepEqual(upReq12.body.holds, { send_email: true, search_mail: false, delete_thread: true });
+
+    // Owner tightens `search_mail: true` while 1.2.0 upgrade is pending
+    const tightenDuringUpgrade = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant/holds', 'PUT', ALICE, {
+      holds: { search_mail: true },
+    });
+    assert.equal(tightenDuringUpgrade.status, 200, JSON.stringify(tightenDuringUpgrade.body));
+    assert.deepEqual(tightenDuringUpgrade.body.holds, { send_email: true, search_mail: true, delete_thread: true });
+
+    // Admin approves 1.2.0 -> `search_mail: true` MUST remain `true`!
+    const upApp12 = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant/adoption/approve', 'POST', ADMIN, {});
+    assert.equal(upApp12.status, 200, JSON.stringify(upApp12.body));
+    assert.deepEqual(upApp12.body.holds, { send_email: true, search_mail: true, delete_thread: true });
+    assert.deepEqual(
+      state.configs!.current('alice-agent')!.skills.find((s) => s.id === 'mail-assistant')?.holds,
+      { send_email: true, search_mail: true, delete_thread: true },
+    );
+
+    // 12b. Request upgrade to 1.3.0 WITH explicit `{ search_mail: false }`, then tighten `{ search_mail: true }` via PATCH before approval -> stays `true`!
+    const reg13 = await call(port, '/api/v1/registry/skills', 'POST', ALICE, buildActionSkillPackage('mail-assistant', '1.3.0', extraDelete));
+    assert.equal(reg13.status, 201, JSON.stringify(reg13.body));
+    const rec13 = reg.get('mail-assistant', '1.3.0')!;
+    rec13.tests = 'passed';
+    rec13.status = 'approved';
+    reg.save(rec13);
+
+    const upReq13 = await call(port, '/api/v1/agents/alice-agent/skills', 'POST', ALICE, {
+      skillId: 'mail-assistant',
+      version: '1.3.0',
+      holds: { search_mail: false },
+    });
+    assert.equal(upReq13.status, 201, JSON.stringify(upReq13.body));
+    assert.deepEqual(upReq13.body.holds, { send_email: true, search_mail: false, delete_thread: true });
+
+    const patchDuringUpgrade = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant/holds', 'PATCH', ALICE, {
+      holds: { search_mail: true },
+    });
+    assert.equal(patchDuringUpgrade.status, 200, JSON.stringify(patchDuringUpgrade.body));
+    assert.deepEqual(patchDuringUpgrade.body.holds, { send_email: true, search_mail: true, delete_thread: true });
+
+    const upApp13 = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant/adoption/approve', 'POST', ADMIN, {});
+    assert.equal(upApp13.status, 200, JSON.stringify(upApp13.body));
+    assert.deepEqual(upApp13.body.holds, { send_email: true, search_mail: true, delete_thread: true });
   });
 });

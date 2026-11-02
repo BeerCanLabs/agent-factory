@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { checkHold, checkToolApproval, findHeldSkillAction, matchSkillActionPath, type SkillActionHoldRule } from './index.js';
+import { canonicalizeRouteRequest, checkHold, checkToolApproval, findHeldSkillAction, matchSkillActionPath, type SkillActionHoldRule } from './index.js';
 
 describe('checkHold', () => {
   it('matches methods ignoring case', () => {
@@ -101,6 +101,47 @@ describe('checkHold', () => {
       checkHold({ skillActions: actions, route: 'google-calendar', method: 'GET', path: '/calendars/%E0%A4%A' }),
       { held: false },
     );
+
+    // Round 2 F1: canonicalizeRouteRequest normalizes `;` matrix params and `%2f`/`%5c` BEFORE upstream prefix containment & slicing
+    const matrixClimb = canonicalizeRouteRequest('/gmail/v1', '/..;/v1/users/me/messages/send');
+    assert.equal(matrixClimb.ok, true);
+    if (matrixClimb.ok) {
+      assert.deepEqual(
+        checkHold({
+          skillActions: [{ skillId: 'mail', actionId: 'prefixed_send', route: 'gmail-prefixed', method: 'POST', path: '/users/{userId}/messages/send', hold: true }],
+          route: 'gmail-prefixed',
+          method: 'POST',
+          suffixCandidates: matrixClimb.suffixCandidates,
+          malformedPath: matrixClimb.malformed,
+        }),
+        { held: true },
+      );
+    }
+
+    const encodedClimb = canonicalizeRouteRequest('/gmail/v1', '/%2e%2e%2fv1/users/me/messages/send');
+    assert.equal(encodedClimb.ok, true);
+    if (encodedClimb.ok) {
+      assert.deepEqual(
+        checkHold({
+          skillActions: [{ skillId: 'mail', actionId: 'prefixed_send', route: 'gmail-prefixed', method: 'POST', path: '/users/{userId}/messages/send', hold: true }],
+          route: 'gmail-prefixed',
+          method: 'POST',
+          suffixCandidates: encodedClimb.suffixCandidates,
+          malformedPath: encodedClimb.malformed,
+        }),
+        { held: true },
+      );
+    }
+
+    // Escaping prefix via `..;` or `%2e%2e%2f` is rejected (`ok: false`)
+    assert.deepEqual(canonicalizeRouteRequest('/gmail/v1', '/..;/..;/other/admin'), { ok: false });
+    assert.deepEqual(canonicalizeRouteRequest('/gmail/v1', '/..;/other/admin'), { ok: false });
+    assert.deepEqual(canonicalizeRouteRequest('/gmail/v1', '/%2e%2e%2fother/admin'), { ok: false });
+    assert.deepEqual(canonicalizeRouteRequest('/gmail/v1', '/..%5cother/admin'), { ok: false });
+
+    // Legitimate `%2f` inside `{param}` on a prefixed route stays inside `/cal`
+    const calParam = canonicalizeRouteRequest('/cal', '/a%2fb');
+    assert.equal(calParam.ok, true);
   });
 });
 

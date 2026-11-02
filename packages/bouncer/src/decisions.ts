@@ -21,8 +21,16 @@ export type HoldCheck = {
   route?: string;
   method: string;
   path?: string;
+  /** Optional pre-canonicalized route-relative segment candidates (for routes with an upstream path prefix). */
+  suffixCandidates?: readonly string[][];
+  /** True when the request path contained malformed percent-encoding (fails closed when the route has held skill actions). */
+  malformedPath?: boolean;
 };
 export type HoldDecision = { held: boolean };
+
+export type CanonicalRouteRequest =
+  | { ok: true; malformed: boolean; suffixCandidates: string[][] }
+  | { ok: false };
 
 function safeDecodeSegment(seg: string): string {
   try {
@@ -43,6 +51,19 @@ function resolveDotSegments(segs: readonly string[]): string[] {
     stack.push(s);
   }
   return stack;
+}
+
+function resolveDotSegmentsRfc3986(segs: readonly string[]): string[] {
+  const stack: string[] = [];
+  for (const s of segs) {
+    if (s === '.') continue;
+    if (s === '..') {
+      stack.pop();
+      continue;
+    }
+    stack.push(s);
+  }
+  return stack.filter((s) => s.length > 0);
 }
 
 function splitPatternSegments(pattern: string): string[] {
@@ -73,13 +94,16 @@ function buildRequestSegmentCandidates(rawPath: string): { malformed: boolean; c
 
   const seen = new Set<string>();
   const candidates: string[][] = [];
-  const pushCandidate = (segs: string[]) => {
-    const resolved = resolveDotSegments(segs);
+  const pushResolved = (resolved: string[]) => {
     const key = `${resolved.length}:${resolved.join('\u0000')}`;
     if (!seen.has(key)) {
       seen.add(key);
       candidates.push(resolved);
     }
+  };
+  const pushCandidate = (segs: readonly string[]) => {
+    pushResolved(resolveDotSegments(segs));
+    pushResolved(resolveDotSegmentsRfc3986(segs));
   };
 
   const urlNormalize = (inputPath: string): string => {
@@ -91,31 +115,81 @@ function buildRequestSegmentCandidates(rawPath: string): { malformed: boolean; c
   };
 
   const collapsed = cut.replace(/\/+/g, '/');
-  const matrixStrippedPath = collapsed
+  const cutMatrixStripped = cut
+    .split('/')
+    .map((s) => s.replace(/;.*$/, ''))
+    .join('/');
+  const collapsedMatrixStripped = collapsed
     .split('/')
     .map((s) => s.replace(/;.*$/, ''))
     .join('/');
 
-  for (const variant of [urlNormalize(cut), urlNormalize(collapsed), urlNormalize(matrixStrippedPath)]) {
-    const rawSegs = variant.split('/').filter((s) => s.length > 0);
-    let decodedSegs: string[];
+  for (const variant of [
+    urlNormalize(cut),
+    urlNormalize(collapsed),
+    urlNormalize(cutMatrixStripped),
+    urlNormalize(collapsedMatrixStripped),
+  ]) {
+    const rawSegsWithEmpty = variant.replace(/^\//, '').split('/');
+    let decodedWithEmpty: string[];
     try {
-      decodedSegs = rawSegs.map((s) => decodeURIComponent(s));
+      decodedWithEmpty = rawSegsWithEmpty.map((s) => decodeURIComponent(s));
     } catch {
       return { malformed: true, candidates: [] };
     }
 
-    pushCandidate(decodedSegs);
-    pushCandidate(decodedSegs.map((s) => s.replace(/;.*$/, '')).filter((s) => s.length > 0));
+    pushCandidate(decodedWithEmpty);
+    pushCandidate(decodedWithEmpty.map((s) => s.replace(/;.*$/, '')));
 
-    if (decodedSegs.some((s) => s.includes('/') || s.includes('\\'))) {
-      const expanded = decodedSegs.flatMap((s) => s.replace(/\\/g, '/').split('/')).filter((s) => s.length > 0);
+    if (decodedWithEmpty.some((s) => s.includes('/') || s.includes('\\'))) {
+      const expanded = decodedWithEmpty.flatMap((s) => s.replace(/\\/g, '/').split('/'));
       pushCandidate(expanded);
-      pushCandidate(expanded.map((s) => s.replace(/;.*$/, '')).filter((s) => s.length > 0));
+      pushCandidate(expanded.map((s) => s.replace(/;.*$/, '')));
     }
   }
 
   return { malformed: false, candidates };
+}
+
+/**
+ * Canonicalizes `(prefix + requestPath)` across all segment-normalization variants (`.` / `..` / `%2e`, `\` -> `/`,
+ * duplicate `/` collapse, `;` matrix parameter stripping, and `%2f` / `%5c` separator expansion) BEFORE checking
+ * upstream prefix containment and slicing `prefix` (`S23 F1`).
+ *
+ * When `prefix` is non-empty, if `requestPath` has malformed percent-encoding or ANY normalized candidate fails to
+ * retain `prefix`'s segments as its prefix, returns `{ ok: false }` (`400 bad_path`).
+ */
+export function canonicalizeRouteRequest(prefix: string, requestPath: string): CanonicalRouteRequest {
+  const cleanPrefix = prefix.replace(/\\/g, '/').replace(/\/+$/, '');
+  const prefixSegs = cleanPrefix
+    .split('/')
+    .filter((s) => s.length > 0)
+    .map(safeDecodeSegment);
+  const rawPathname = requestPath.split(/[?#]/, 1)[0] ?? '';
+  const combinedRaw = cleanPrefix + (rawPathname.startsWith('/') ? rawPathname : '/' + rawPathname);
+  const parsed = buildRequestSegmentCandidates(combinedRaw);
+
+  if (prefixSegs.length === 0) {
+    return { ok: true, malformed: parsed.malformed, suffixCandidates: parsed.candidates };
+  }
+  if (parsed.malformed || parsed.candidates.length === 0) {
+    return { ok: false };
+  }
+  const seen = new Set<string>();
+  const suffixCandidates: string[][] = [];
+  for (const cand of parsed.candidates) {
+    if (cand.length < prefixSegs.length) return { ok: false };
+    for (let i = 0; i < prefixSegs.length; i++) {
+      if (cand[i] !== prefixSegs[i]) return { ok: false };
+    }
+    const suffix = cand.slice(prefixSegs.length);
+    const key = `${suffix.length}:${suffix.join('\u0000')}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      suffixCandidates.push(suffix);
+    }
+  }
+  return { ok: true, malformed: false, suffixCandidates };
 }
 
 function matchSegment(patternSeg: string, reqSeg: string): boolean {
@@ -169,11 +243,15 @@ export function matchSkillActionPath(pattern: string, requestPath: string): bool
 
 /** Returns the first matching skill action rule with `hold: true` for this request, if any. */
 export function findHeldSkillAction(req: HoldCheck): SkillActionHoldRule | undefined {
-  if (!req.skillActions?.length || !req.route || req.path === undefined) return undefined;
+  if (!req.skillActions?.length || !req.route) return undefined;
+  if (req.path === undefined && req.suffixCandidates === undefined && !req.malformedPath) return undefined;
   const heldForRoute = req.skillActions.filter((a) => a.hold && a.route === req.route);
   if (heldForRoute.length === 0) return undefined;
   const method = req.method.toUpperCase();
-  const parsed = buildRequestSegmentCandidates(req.path);
+  const parsed =
+    req.suffixCandidates !== undefined || req.malformedPath !== undefined
+      ? { malformed: Boolean(req.malformedPath), candidates: (req.suffixCandidates ?? []) as string[][] }
+      : buildRequestSegmentCandidates(req.path!);
   if (parsed.malformed) {
     return heldForRoute.find((a) => a.method.toUpperCase() === method) ?? heldForRoute[0];
   }

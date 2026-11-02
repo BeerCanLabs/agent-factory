@@ -776,6 +776,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     if (prevRoles === undefined) delete agent.roles; else agent.roles = prevRoles;
     if (prevSkillIds === undefined) delete agent.skillIds; else agent.skillIds = prevSkillIds;
     if (prevSkillRoutes === undefined) delete agent.skillRoutes; else agent.skillRoutes = prevSkillRoutes;
+    delete (agent as any).pendingConfig;
     if (prevAdmission === undefined) delete agent.admission; else agent.admission = prevAdmission;
     if (prevPolicy) state.policies.set(agentId, prevPolicy);
     registryOf(state).save(agent);

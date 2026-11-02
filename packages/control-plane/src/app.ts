@@ -3387,6 +3387,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
     const pol = state.policies.get(run.agentId);
+    const skillHolds = isBuiltin ? [] : effectiveAgentSkillActionHolds(state, run.agentId);
 
     if (run.trigger === 'smoke') {
       const inputObj = (run.input && typeof run.input === 'object') ? (run.input as Record<string, unknown>) : {};
@@ -3423,6 +3424,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         spend: { run: state.smokeRunSpend?.get(run.runId) ?? 0, day: 0, month: 0 },
         access: { restricted: false },
         canManageModels: false,
+        ...(skillHolds.length ? { skillHolds } : {}),
       });
       return;
     }
@@ -3437,7 +3439,6 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     const payerBuiltin = Boolean(payerAgent?.isBuiltin || payerAgent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(payer.agentId));
     const budgetUsd = payer.parent ? (payerBuiltin ? undefined : state.policies.get(payer.agentId).budgetUsd) : pol.budgetUsd;
-    const skillHolds = isBuiltin ? [] : effectiveAgentSkillActionHolds(state, run.agentId);
     json(res, 200, {
       run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state), ...(run.model ? { model: run.model } : {}) },
       agentState: agent.state,

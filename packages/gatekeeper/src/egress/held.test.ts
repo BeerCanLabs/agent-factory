@@ -303,6 +303,38 @@ describe('E9 held requests: the gatekeeper-egress holds what an agent sends in a
     assert.equal(climbBackIn2.status, 202);
     assert.equal(seen.length, 0);
 
+    // Round 2 F1: `;` matrix-param dot-segments and `%2f`/`%5c` encoded-separator climbs on prefixed upstreams
+    // are normalized BEFORE prefix containment & slicing — climbing back into `/gmail/v1/users/me/messages/send` is HELD (202),
+    // and escaping `/gmail/v1` via `..;` or `%2e%2e%2f` is denied with `400 bad_path` in both handler & forward()!
+    for (const p of [
+      '/gmail-prefixed/..;/v1/users/me/messages/send',
+      '/gmail-prefixed/%2e%2e%2fv1/users/me/messages/send',
+      '/gmail-prefixed/..%2fv1/users/me/messages/send',
+      '/gmail-prefixed/..%5cv1/users/me/messages/send',
+      '/gmail-prefixed/%2e%2e%3b/v1/users/me/messages/send',
+    ]) {
+      const r = await call(port, p, { token, method: 'POST', body: emailBody });
+      assert.equal(r.status, 202, `expected 202 held for prefixed evasion ${p}, got ${r.status}`);
+    }
+    assert.equal(seen.length, 0, 'none of the prefixed evasion requests may reach upstream');
+
+    const holdsBeforeMatrixEscape = holds.length;
+    for (const p of [
+      '/gmail-prefixed/..;/..;/other/admin',
+      '/gmail-prefixed/..;/other/admin',
+      '/gmail-prefixed/%2e%2e%2fother/admin',
+      '/gmail-prefixed/..%5cother/admin',
+    ]) {
+      const postEsc = await call(port, p, { token, method: 'POST', body: emailBody });
+      assert.equal(postEsc.status, 400, `expected 400 bad_path on POST ${p}, got ${postEsc.status}`);
+      assert.equal(postEsc.json().error, 'bad_path');
+      const getEsc = await call(port, p, { token, method: 'GET' });
+      assert.equal(getEsc.status, 400, `expected 400 bad_path on GET ${p}, got ${getEsc.status}`);
+      assert.equal(getEsc.json().error, 'bad_path');
+    }
+    assert.equal(holds.length, holdsBeforeMatrixEscape, 'prefix-escaping bad_path is rejected before creating a hold');
+    assert.equal(seen.length, 0, 'prefix-escaping requests never reach upstream or inject credentials');
+
     // Legitimate `%2f` inside `{param}` on an unheld GET path passes upstream unblocked
     const encodedParamGet = await call(port, '/gmail-prefixed/users/me/messages/label%2fmsg-42', { token, method: 'GET' });
     assert.equal(encodedParamGet.status, 201);
