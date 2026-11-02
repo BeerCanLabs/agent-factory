@@ -24,9 +24,11 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
     const accepted = state.inspector.reportProgress(batch, (e) => {
       const run = state.runs.get(e.runId);
       const isLive = Boolean(run) && run!.agentId === e.agentId && !isTerminal(run!.state);
-      if (isLive) {
+      if (isLive && run!.trigger !== 'smoke') {
         liveEvents.push({
           agentId: e.agentId,
+          runId: e.runId,
+          ...(run!.trigger ? { trigger: run!.trigger } : {}),
           route: e.route,
           model: e.model,
           kind: e.kind,
@@ -71,6 +73,8 @@ export async function handleRunProgress(state: FactoryState, req: http.IncomingM
 
 type ActivityEvent = {
   agentId: string;
+  runId?: string;
+  trigger?: string;
   route?: string;
   model?: string;
   kind?: string;

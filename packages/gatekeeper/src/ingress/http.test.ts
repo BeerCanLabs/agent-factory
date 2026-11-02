@@ -74,11 +74,15 @@ describe('gatekeeper-ingress http', () => {
       // Single event
       const res1 = await call(p, '/api/v1/activity', 'POST', 'presence-token', {
         agentId: 'echo-agent',
+        runId: 'run-1',
+        trigger: 'conversation',
         route: 'github',
         kind: 'call.start',
       });
       assert.equal(res1, 200);
       assert.equal(discord.activities.length, 1);
+      assert.equal(discord.activities[0].runId, 'run-1');
+      assert.equal(discord.activities[0].trigger, 'conversation');
       assert.equal(discord.activities[0].route, 'github');
       assert.equal(discord.activities[0].kind, 'call.start');
 

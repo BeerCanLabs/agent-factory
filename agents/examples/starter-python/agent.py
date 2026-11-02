@@ -93,10 +93,23 @@ def main() -> int:
             if notebook.should_rotate(memory_dir, db, db_file="starter_python_state.db"):
                 db = notebook.rotate(memory_dir, db, init_fn=episodic.init_episodic_tables, db_file="starter_python_state.db")
 
-            session_id, session_name = episodic.get_or_create_active_session(db, user_id=author_id)
+            is_scheduled = payload.get("source") in ("schedule", "cron") or (
+                isinstance(payload.get("caller"), dict) and payload["caller"].get("source") in ("schedule", "cron")
+            )
+            if is_scheduled:
+                session_id, session_name = episodic.get_or_create_scheduled_session(
+                    db,
+                    user_id=author_id,
+                    schedule_id=payload.get("scheduleId") if isinstance(payload.get("scheduleId"), str) else None,
+                    schedule_name=payload.get("scheduleName") if isinstance(payload.get("scheduleName"), str) else None,
+                )
+            else:
+                session_id, session_name = episodic.get_or_create_active_session(db, user_id=author_id)
 
-            # Handle fast-path intents if user submitted a session command
-            is_handled, intent_reply = episodic.handle_turn_intent(db, user_id=author_id, text=user_message)
+            # Handle fast-path intents if user submitted a session command on an interactive turn
+            is_handled, intent_reply = (
+                (False, None) if is_scheduled else episodic.handle_turn_intent(db, user_id=author_id, text=user_message)
+            )
             if is_handled:
                 summary = intent_reply or ""
             else:
@@ -110,9 +123,12 @@ def main() -> int:
                     max_chars=bounds["max_chars"],
                 )
                 context = {"whiteboardTurns": len(turns), "awarenessBanner": banner}
-                summary = f"Processed alert for {payload.get('service', 'general')}: {payload.get('event', payload.get('ping', 'ok'))}"
+                if payload.get("silent") is True:
+                    summary = ""
+                else:
+                    summary = f"Processed alert for {payload.get('service', 'general')}: {payload.get('event', payload.get('ping', 'ok'))}"
 
-                # Record user and assistant turn in episodic memory
+                # Record user and assistant turn in episodic memory (silent turns record NO_REPLY_SENTINEL)
                 episodic.remember_turn(
                     db,
                     session_id=session_id,

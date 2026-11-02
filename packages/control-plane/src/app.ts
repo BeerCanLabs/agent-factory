@@ -905,17 +905,24 @@ async function handOff(
     payload = own;
   }
   const active = state.runs.list({ agentId: agent.id, active: true });
+  const isBackgroundRun = (t?: string) => t === 'schedule' || t === 'cron' || t === 'smoke';
+  // #345: background single-turn runs (`schedule`, `cron`, `smoke`) never poll `/mailbox`; never hand interactive turns into them.
+  const conversationalActive = active.filter((r) => !isBackgroundRun(r.trigger));
+  const payloadTurnId =
+    payload && typeof payload === 'object' && !Array.isArray(payload) && typeof (payload as Record<string, unknown>).turnId === 'string'
+      ? ((payload as Record<string, unknown>).turnId as string)
+      : undefined;
   // E12 item 4: a run's roles are those of the person it was started for. A message from a person whose roles deny a
   // skill route must not be handled inside someone else's run, where it would have that person's reach. It waits.
-  if (active.length > 0 && opts.requestedBy) {
+  if (conversationalActive.length > 0 && opts.requestedBy) {
     const sender = accessForRequester(state, agent, { kind: 'identity', provider: opts.requestedBy.provider, id: opts.requestedBy.id });
-    const sameAsRun = active.every((r) => r.requestedBy && r.requestedBy.provider === opts.requestedBy!.provider && r.requestedBy.id === opts.requestedBy!.id);
+    const sameAsRun = conversationalActive.every((r) => r.requestedBy && r.requestedBy.provider === opts.requestedBy!.provider && r.requestedBy.id === opts.requestedBy!.id);
     if (hasDeniedRoute(sender) && !sameAsRun) {
       state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'HANDOFF_REFUSED_BUSY_FOR_ANOTHER_PERSON', actor });
       return { status: 409, body: { error: 'busy_with_another_person', message: 'the agent is working for someone else; try again in a moment' } };
     }
   }
-  if (active.length === 0) {
+  if (conversationalActive.length === 0) {
     const out = await createRun(state, agent.id, {
       actor,
       trigger: 'conversation',
@@ -926,24 +933,45 @@ async function handOff(
       factoryTurn: true,
     });
     if (out.status >= 300) return { status: out.status, body: out.body as Record<string, unknown> };
-    const woke = out.body as { runId: string };
-    state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, runId: woke.runId, type: 'action', action: 'CONVERSATION_HANDOFF', actor, content: payload });
+    const woke = out.body as { runId: string; trigger?: string };
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: agent.id,
+      runId: woke.runId,
+      trigger: woke.trigger ?? 'conversation',
+      ...(payloadTurnId ? { turnId: payloadTurnId } : {}),
+      type: 'action',
+      action: 'CONVERSATION_HANDOFF',
+      actor,
+      content: payload,
+    });
     return { status: 202, body: { ok: true, woke: true, runId: woke.runId } };
   }
   await state.runtime.deliver(agent, payload);
   deliverToMailbox(state, agent.id, payload);
-  const currentRun = activeRun(state, agent.id);
+  const liveCandidate = activeRun(state, agent.id);
+  const currentRun = liveCandidate && !isBackgroundRun(liveCandidate.trigger) ? liveCandidate : conversationalActive[0];
   if (currentRun) {
     if (currentRun.input === undefined) currentRun.input = payload;
-    scheduleTimeout(state, currentRun);
+    if (currentRun.state !== 'QUEUED') scheduleTimeout(state, currentRun);
     // Warm-run taint protection (§6.9 M2, GAP-210): if a warm run receives a turn from a non-manager, taint it against model changes.
     if (!isSenderManager(state, agent.id, { requestedBy: opts.requestedBy, caller: opts.caller, actor })) {
       if (!state.nonManagerSharedRuns) state.nonManagerSharedRuns = new Set();
       state.nonManagerSharedRuns.add(currentRun.runId);
     }
   }
-  state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, runId: currentRun?.runId, type: 'action', action: 'CONVERSATION_HANDOFF', actor, content: payload });
-  return { status: 202, body: { ok: true } };
+  state.ledger.append({
+    timestamp: new Date().toISOString(),
+    agentId: agent.id,
+    runId: currentRun?.runId,
+    ...(currentRun?.trigger ? { trigger: currentRun.trigger } : {}),
+    ...(payloadTurnId ? { turnId: payloadTurnId } : {}),
+    type: 'action',
+    action: 'CONVERSATION_HANDOFF',
+    actor,
+    content: payload,
+  });
+  return { status: 202, body: { ok: true, ...(currentRun ? { runId: currentRun.runId } : {}) } };
 }
 
 /** AM2: a console turn the agent may answer, kept for an hour; the oldest are dropped past the cap. */
@@ -2433,6 +2461,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         timestamp: reply.at,
         agentId: run.agentId,
         runId: run.runId,
+        ...(run.trigger ? { trigger: run.trigger } : {}),
         type: 'action',
         action: 'CONVERSATION_REPLY',
         actor: `run:${run.agentId}:${run.runId}`,
@@ -3024,10 +3053,11 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       return;
     }
     const actor = isGatekeeperEgress && run && event.actor === `run:${run.agentId}` ? event.actor : principal.actor;
-    // E1.5 (#296): a helper run's rows carry its parent, taken from the run record; a writer's own parent fields are dropped.
-    const { parentRunId: _callerParentRun, parentAgentId: _callerParentAgent, ...fields } = event;
+    // E1.5 (#296) & #345: parent and trigger attribution come from the run record; a writer's own parent/trigger fields are dropped.
+    const { parentRunId: _callerParentRun, parentAgentId: _callerParentAgent, trigger: _callerTrigger, ...fields } = event;
     const stored = state.ledger.append({
       ...fields,
+      ...(run?.trigger ? { trigger: run.trigger } : {}),
       ...(run?.parentRunId ? { parentRunId: run.parentRunId, parentAgentId: run.parentAgentId } : {}),
       ...(isGatekeeperEgress ? {} : { costUsd: undefined }),
       agentId: event.agentId,

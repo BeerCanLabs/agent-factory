@@ -3,7 +3,7 @@ import type { AuthProvider } from '@beercanlabs/factory-auth';
 import type { GatekeeperIngress } from './index.js';
 
 /** Health is public; presence changes come only from the control plane (GATEKEEPER_INGRESS_TOKEN). */
-type ActivityEvent = { agentId?: string; route?: string; model?: string; kind?: string };
+type ActivityEvent = { agentId?: string; runId?: string; trigger?: string; route?: string; model?: string; kind?: string };
 
 /** `POST /api/v1/activity` bounds: progress batches are small metadata (the control plane sends at most 500 events). */
 const ACTIVITY_MAX_BODY_BYTES = 256 * 1024;

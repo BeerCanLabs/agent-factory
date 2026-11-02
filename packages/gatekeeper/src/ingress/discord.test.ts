@@ -496,4 +496,84 @@ describe('gatekeeper-ingress discord client', () => {
       await discord.destroy();
     });
   });
+
+  describe('per-run activity attribution (#345)', () => {
+    it('ignores schedule/cron/smoke activity and isolates turn footer stats strictly to the bound runId', async () => {
+      const { mockClient } = createMockClient();
+      const discord = createDiscordClient(mockClient as any);
+      await discord.setPresence('available');
+
+      let sentMessage: any = null;
+      const channel = {
+        sendTyping: async () => {},
+        send: async (options: any) => {
+          sentMessage = {
+            id: 'progress-msg-iso',
+            content: typeof options === 'string' ? options : options.content,
+            edit: async (c: string) => {
+              sentMessage.content = c;
+            },
+          };
+          return sentMessage;
+        },
+      };
+
+      // User starts an interactive turn in ch1 while a background scheduled run (run-sched) is finishing
+      mockClient.emit(Events.MessageCreate, userMsg(channel));
+
+      // 1) Scheduled run emits tool & token events (both with trigger='schedule' and before bindTurnRun resolves)
+      await discord.recordActivity?.({ runId: 'run-sched', trigger: 'schedule', route: 'google-gmail', kind: 'call.start' });
+      await discord.recordActivity?.({ runId: 'run-sched', trigger: 'schedule', route: 'google-gmail', kind: 'call.end', durationMs: 900 });
+      await discord.recordActivity?.({
+        runId: 'run-sched',
+        trigger: 'schedule',
+        route: 'models',
+        model: 'claude-sonnet-4-6',
+        kind: 'call.end',
+        durationMs: 4000,
+        inputTokens: 59000,
+        outputTokens: 600,
+      });
+
+      // Even an untagged-trigger event from another runId arriving before bindTurnRun is discarded once bound
+      await discord.recordActivity?.({ runId: 'run-other', route: 'tavily', kind: 'call.end', durationMs: 700 });
+      await discord.recordActivity?.({ runId: 'run-other', route: 'models', kind: 'call.end', durationMs: 1000, inputTokens: 9999, outputTokens: 999 });
+
+      // Wake/handoff binds ch1's turn to 'run-interactive' (queued behind run-sched)
+      discord.bindTurnRun?.('ch1', 'run-interactive', true);
+
+      // Straggler event from 'run-other' after binding is also ignored
+      await discord.recordActivity?.({ runId: 'run-other', route: 'github', kind: 'call.end', durationMs: 300 });
+
+      // Actual interactive run executes 1 tool and 1 LLM call
+      await discord.recordActivity?.({ runId: 'run-interactive', trigger: 'conversation', route: 'google-calendar', kind: 'call.end', durationMs: 600, outcome: 'ok' });
+      await discord.recordActivity?.({
+        runId: 'run-interactive',
+        trigger: 'conversation',
+        route: 'models',
+        model: 'claude-sonnet-4-6',
+        kind: 'call.end',
+        durationMs: 1500,
+        outcome: 'ok',
+        inputTokens: 2100,
+        outputTokens: 140,
+      });
+
+      // Bot replies
+      mockClient.emit(Events.MessageCreate, {
+        id: 'bot-reply-iso',
+        channelId: 'ch1',
+        guildId: null,
+        author: { id: 'bot-id-123', bot: true },
+        channel,
+        content: 'Good morning! Your calendar is clear.',
+      });
+
+      assert.equal(
+        sentMessage.content,
+        '✓ Thought for 1.5s, called 1 tool, spent 2,100 input tokens and 140 output tokens',
+      );
+      await discord.destroy();
+    });
+  });
 });

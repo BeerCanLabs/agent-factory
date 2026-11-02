@@ -429,3 +429,16 @@ describe('parent fields (E1.5)', () => {
     assert.equal(bad.parentAgentId, undefined);
   });
 });
+
+describe('trigger attribution field (#345)', () => {
+  it('keeps well-formed run trigger identifiers and drops free-text values', () => {
+    for (const trigger of ['schedule', 'cron', 'conversation', 'smoke', 'event:crash']) {
+      const ok = toLedgerEvent({ agentId: 'donna', type: 'action', action: 'RUN_READY', trigger });
+      assert.equal(ok.trigger, trigger);
+    }
+    for (const badTrigger of ['has spaces', 'prompt\ninjection', '', 42]) {
+      const bad = toLedgerEvent({ agentId: 'donna', type: 'action', action: 'RUN_READY', trigger: badTrigger });
+      assert.equal(bad.trigger, undefined);
+    }
+  });
+});

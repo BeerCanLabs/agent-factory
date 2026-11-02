@@ -179,4 +179,22 @@ describe('gatekeeper-ingress', () => {
     assert.deepEqual(gw.unauthorizedRefusals, ['c1']);
     assert.equal(gw.presence, 'available');
   });
+
+  it('binds turn runId on both cold wake and warm/queued handoff (#345)', async () => {
+    const gw = fakeDiscordClient();
+    const door = createGatekeeperIngress({
+      discord: gw,
+      providers: [envProvider({ DISCORD_BOT_TOKEN: 'bot-token' })],
+      wake: async () => ({ runId: 'run-wake-1', woke: true }),
+      handoff: async () => ({ runId: 'run-handoff-2', woke: true }),
+    });
+    await door.reconcile([{ agentId: 'echo-agent', secretRef: 'DISCORD_BOT_TOKEN' }]);
+    await door.receive(msg('m1', 'cold start'));
+    await door.onAgentWorking('echo-agent');
+    await door.receive(msg('m2', 'queued behind schedule'));
+    assert.deepEqual(gw.boundRuns, [
+      { channelId: 'c1', runId: 'run-wake-1', woke: true },
+      { channelId: 'c1', runId: 'run-handoff-2', woke: true },
+    ]);
+  });
 });

@@ -11,6 +11,7 @@ Provides:
 - Non-destructive notebook rotation per AM3 (zero turn deletion)
 """
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -22,6 +23,20 @@ from typing import Any
 DEFAULT_MAX_MESSAGES = 20
 DEFAULT_MAX_CHARS = 24000
 DEFAULT_RETENTION_DAYS = 30
+
+# Canonical sentinel stored when a turn intentionally produces no reply (#345).
+NO_REPLY_SENTINEL = "[no reply]"
+SILENT_REPLY_TOKENS = frozenset({"no_reply", "[no_reply]", "[no reply]", "(no reply)"})
+
+
+def is_silent_reply(text: str | None) -> bool:
+    """Return True when an assistant reply represents an intentional no-reply / silent completion."""
+    if text is None:
+        return True
+    stripped = str(text).strip()
+    if not stripped:
+        return True
+    return stripped.lower() in SILENT_REPLY_TOKENS
 
 # Fast-path regex patterns
 NEW_SESSION_RE = re.compile(
@@ -122,9 +137,9 @@ def init_episodic_tables(conn: sqlite3.Connection):
 
 
 def get_or_create_active_session(conn: sqlite3.Connection, user_id: str, channel_id: str | None = None) -> tuple[str, str | None]:
-    """Retrieve the currently active session for this user, or create one if none exists."""
+    """Retrieve the currently active interactive session for this user, or create one if none exists."""
     row = conn.execute(
-        "SELECT id, name FROM conversation_sessions WHERE user_id = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1",
+        "SELECT id, name FROM conversation_sessions WHERE user_id = ? AND is_active = 1 AND id NOT LIKE 's_sched_%' ORDER BY updated_at DESC LIMIT 1",
         (user_id,),
     ).fetchone()
     if row:
@@ -139,6 +154,42 @@ def get_or_create_active_session(conn: sqlite3.Connection, user_id: str, channel
     )
     conn.commit()
     return session_id, None
+
+
+def get_or_create_scheduled_session(
+    conn: sqlite3.Connection,
+    user_id: str,
+    schedule_id: str | None = None,
+    schedule_name: str | None = None,
+    channel_id: str | None = None,
+) -> tuple[str, str]:
+    """Retrieve or create an isolated non-active session (`is_active = 0`) for background scheduled/cron runs.
+
+    Scheduled checks never enter `is_active = 1` interactive sessions (#345), while remaining persisted and
+    searchable via `recall_conversation` for the user.
+    """
+    key = f"{user_id}:{schedule_id or schedule_name or 'scheduled'}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+    session_id = f"s_sched_{digest}"
+    clean_name = (
+        f"Schedule: {schedule_name.strip()}"
+        if isinstance(schedule_name, str) and schedule_name.strip()
+        else (f"Schedule: {schedule_id.strip()}" if isinstance(schedule_id, str) and schedule_id.strip() else "Scheduled runs")
+    )
+    row = conn.execute(
+        "SELECT id, name FROM conversation_sessions WHERE id = ? AND user_id = ? LIMIT 1",
+        (session_id, user_id),
+    ).fetchone()
+    if row:
+        return row[0], row[1] or clean_name
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO conversation_sessions (id, user_id, name, channel_id, created_at, updated_at, is_active) VALUES (?, ?, ?, ?, ?, ?, 0)",
+        (session_id, user_id, clean_name, channel_id, now, now),
+    )
+    conn.commit()
+    return session_id, clean_name
 
 
 def start_new_session(conn: sqlite3.Connection, user_id: str, name: str | None = None, channel_id: str | None = None) -> tuple[str, str]:
@@ -169,18 +220,18 @@ def rename_active_session(conn: sqlite3.Connection, user_id: str, new_name: str)
 
 
 def resume_session(conn: sqlite3.Connection, user_id: str, name_or_id: str) -> tuple[bool, str | None, int]:
-    """Resume an existing session by name or ID. Sets it as active. Returns (found, name, turn_count)."""
+    """Resume an existing interactive session by name or ID. Sets it as active. Returns (found, name, turn_count)."""
     target = name_or_id.strip()
-    # Try exact match on name or ID, case-insensitive
+    # Try exact match on name or ID, case-insensitive (never activate background scheduled sessions)
     row = conn.execute(
-        "SELECT id, name FROM conversation_sessions WHERE user_id = ? AND (LOWER(name) = LOWER(?) OR id = ?) ORDER BY updated_at DESC LIMIT 1",
+        "SELECT id, name FROM conversation_sessions WHERE user_id = ? AND id NOT LIKE 's_sched_%' AND (LOWER(name) = LOWER(?) OR id = ?) ORDER BY updated_at DESC LIMIT 1",
         (user_id, target, target),
     ).fetchone()
 
     # Try partial name match if not found
     if not row:
         row = conn.execute(
-            "SELECT id, name FROM conversation_sessions WHERE user_id = ? AND LOWER(name) LIKE LOWER(?) ORDER BY updated_at DESC LIMIT 1",
+            "SELECT id, name FROM conversation_sessions WHERE user_id = ? AND id NOT LIKE 's_sched_%' AND LOWER(name) LIKE LOWER(?) ORDER BY updated_at DESC LIMIT 1",
             (user_id, f"%{target}%"),
         ).fetchone()
 
@@ -357,9 +408,15 @@ def remember_turn(
     surface: str = "discord",
     channel_id: str | None = None,
 ):
-    """Record a complete user + assistant conversational turn in SQLite and FTS5."""
+    """Record a complete user + assistant conversational turn in SQLite and FTS5.
+
+    When `user_text` is non-empty and `reply_text` is empty or a silent token (`NO_REPLY`),
+    records `NO_REPLY_SENTINEL` (`[no reply]`) for the assistant turn so no user prompt is
+    ever left dangling/unanswered in conversation history (#345).
+    """
     now = datetime.now(timezone.utc).isoformat()
-    for role, content in (("user", user_text), ("assistant", reply_text)):
+    effective_reply = NO_REPLY_SENTINEL if (user_text and is_silent_reply(reply_text)) else reply_text
+    for role, content in (("user", user_text), ("assistant", effective_reply)):
         if not content:
             continue
         cur = conn.execute(
@@ -370,11 +427,12 @@ def remember_turn(
             (session_id, user_id, surface, channel_id, role, content, now),
         )
         turn_id = cur.lastrowid
-        # Update FTS5 virtual table
-        conn.execute(
-            "INSERT INTO conversation_fts (content, turn_id, session_id, user_id) VALUES (?, ?, ?, ?)",
-            (content, str(turn_id), session_id, user_id),
-        )
+        if content != NO_REPLY_SENTINEL:
+            # Update FTS5 virtual table (skip bare no-reply sentinels)
+            conn.execute(
+                "INSERT INTO conversation_fts (content, turn_id, session_id, user_id) VALUES (?, ?, ?, ?)",
+                (content, str(turn_id), session_id, user_id),
+            )
 
     # Touch session updated_at
     conn.execute("UPDATE conversation_sessions SET updated_at = ? WHERE id = ?", (now, session_id))

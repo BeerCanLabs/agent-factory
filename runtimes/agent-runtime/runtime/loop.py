@@ -13,8 +13,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from memory import episodic
 from runtime.factory import Factory, FactoryError
-from runtime.mind import Mind, open_mind
+from runtime.mind import Mind, is_scheduled_payload, open_mind
 from runtime.skills import Tool, load_skills, run_tool
 
 MAX_ROUNDS = 6
@@ -52,14 +53,17 @@ def system_prompt(soul: str, payload: dict) -> str:
         # A display name is typed by a person: one short plain line, never a way to add instructions.
         name = " ".join(str(caller.get("name") or caller["actor"]).split())[:60]
         speaking = f"\n\nYou are speaking with {name}."
+    scheduled_note = ""
+    if is_scheduled_payload(payload):
+        scheduled_note = "\n\nThis is a scheduled background check. If nothing needs to be reported or said, respond with NO_REPLY."
     now = datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
-    return f"{soul.strip() or DEFAULT_SOUL}{speaking}\n\nIt is {now}."
+    return f"{soul.strip() or DEFAULT_SOUL}{speaking}{scheduled_note}\n\nIt is {now}."
 
 
 def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], payload: dict) -> str:
     who = who_of(payload)
     user_text = text_of(payload)
-    fast = mind.fast_path(who, user_text)
+    fast = None if is_scheduled_payload(payload) else mind.fast_path(who, user_text)
     if fast is not None:
         return fast
     history, banner = mind.history(who, payload)
@@ -96,13 +100,18 @@ def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], pa
     return reply
 
 
-def deliver(factory: Factory, payload: dict, reply: str) -> None:
-    """Reply on the channel the turn came from; a turn with nowhere to reply is reported in the result only."""
+def deliver(factory: Factory, payload: dict, reply: str) -> bool:
+    """Reply on the channel the turn came from; silent/no-reply turns suppress channel delivery (#345)."""
+    if episodic.is_silent_reply(reply):
+        return False
     to = payload.get("replyTo") if isinstance(payload.get("replyTo"), dict) else {}
     if to.get("channel") == "console" and payload.get("turnId"):
         factory.reply_console(str(payload["turnId"]), reply)
+        return True
     elif to.get("channel") == "discord" and to.get("channelId"):
         factory.reply_discord(str(to["channelId"]), reply)
+        return True
+    return False
 
 
 def answer_request(mind: Mind, payload: dict) -> str:
@@ -180,7 +189,7 @@ def main(factory: Factory | None = None) -> int:
         last_reply = handle(factory, soul, mind, tools, payload)
         turns += 1
         # A conversational agent stays warm to answer follow-ups without a cold start; the idle window is the factory's.
-        is_background = payload.get("source") in ("schedule", "cron")
+        is_background = is_scheduled_payload(payload)
         warm = 0 if (is_smoke or is_background) else int(config.get("warmDownSeconds") or 0)
         deadline = time.time() + warm
         while warm and time.time() < deadline:
@@ -222,6 +231,8 @@ def main(factory: Factory | None = None) -> int:
         "archetype": mind.archetype,
         "processed_at": datetime.now(timezone.utc).isoformat(),
     }
+    if not is_smoke and last_reply is not None and episodic.is_silent_reply(last_reply):
+        output["silent"] = True
     if is_smoke and last_reply is not None:
         output["reply"] = last_reply
     write_result({"status": "succeeded", "output": output})

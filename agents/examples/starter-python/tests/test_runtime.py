@@ -128,6 +128,46 @@ class TestRuntime(unittest.TestCase):
                 os.environ.pop("FACTORY_RESULT_FILE", None)
                 os.environ.pop("FACTORY_INPUT", None)
 
+    def test_silent_scheduled_turn_isolated_from_interactive_session(self):
+        """#345: silent scheduled turns record [no reply] in a non-active scheduled session and do not pollute interactive turns."""
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            mind_dir = Path(tmp_dir) / "mind"
+            result_file = Path(tmp_dir) / "factory-result.json"
+            os.environ["MEMORY_DIR"] = str(mind_dir)
+            os.environ["FACTORY_RESULT_FILE"] = str(result_file)
+            try:
+                # 1. Silent scheduled turn
+                os.environ["FACTORY_INPUT"] = json.dumps({
+                    "authorId": "dale",
+                    "message": "Check steps; if over 10k say nothing.",
+                    "source": "schedule",
+                    "scheduleId": "sched-1",
+                    "silent": True,
+                })
+                self.assertEqual(agent.main(), 0)
+
+                # 2. Interactive turn for same user sees 0 prior interactive whiteboard turns
+                os.environ["FACTORY_INPUT"] = json.dumps({
+                    "authorId": "dale",
+                    "message": "What is on my agenda?",
+                })
+                self.assertEqual(agent.main(), 0)
+                result_data = json.loads(result_file.read_text("utf-8"))
+                self.assertEqual(result_data["output"]["context"]["whiteboardTurns"], 0)
+
+                conn = sqlite3.connect(str(mind_dir / "starter_python_state.db"))
+                sched_turns = conn.execute(
+                    "SELECT role, content FROM conversation_turns WHERE session_id LIKE 's_sched_%' ORDER BY id ASC"
+                ).fetchall()
+                self.assertEqual(sched_turns, [("user", "Check steps; if over 10k say nothing."), ("assistant", "[no reply]")])
+                conn.close()
+            finally:
+                os.environ.pop("MEMORY_DIR", None)
+                os.environ.pop("FACTORY_RESULT_FILE", None)
+                os.environ.pop("FACTORY_INPUT", None)
+
 
 if __name__ == "__main__":
     unittest.main()

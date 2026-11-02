@@ -17,6 +17,18 @@ from typing import Any
 DEFAULT_MAX_MESSAGES = 20
 DEFAULT_MAX_CHARS = 24000
 
+NO_REPLY_SENTINEL = "[no reply]"
+SILENT_REPLY_TOKENS = frozenset({"no_reply", "[no_reply]", "[no reply]", "(no reply)"})
+
+
+def is_silent_reply(text: str | None) -> bool:
+    if text is None:
+        return True
+    stripped = str(text).strip()
+    if not stripped:
+        return True
+    return stripped.lower() in SILENT_REPLY_TOKENS
+
 
 class EphemeralWhiteboard:
     """In-memory sliding window Whiteboard for ephemeral agents."""
@@ -39,16 +51,17 @@ class EphemeralWhiteboard:
     ) -> None:
         """Record a single conversational turn in the in-memory log."""
         now = datetime.now(timezone.utc).isoformat()
+        effective_reply = NO_REPLY_SENTINEL if (user_text and is_silent_reply(reply_text)) else reply_text
         if user_text:
             self._turns.append({
                 "role": user_role,
                 "content": user_text,
                 "timestamp": now,
             })
-        if reply_text:
+        if effective_reply:
             self._turns.append({
                 "role": assistant_role,
-                "content": reply_text,
+                "content": effective_reply,
                 "timestamp": now,
             })
 

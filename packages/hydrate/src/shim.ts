@@ -40,7 +40,7 @@ async function get(path: string): Promise<unknown | undefined> {
   }
 }
 
-async function post(path: string, body: unknown): Promise<number | undefined> {
+async function post(path: string, body: unknown, timeoutMs = 5000): Promise<number | undefined> {
   const base = process.env.FACTORY_URL?.replace(/\/$/, '');
   const runId = process.env.FACTORY_RUN_ID;
   const token = process.env.FACTORY_RUN_TOKEN;
@@ -50,12 +50,23 @@ async function post(path: string, body: unknown): Promise<number | undefined> {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     return res.status;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * #345: `/result` triggers synchronous task teardown and queued-run handoff on the control plane, which can exceed 5s
+ * on ECS (`stop-task` + `run-task`). Use a 30s timeout and retry once on transient network/5xx errors.
+ */
+async function postResult(report: unknown): Promise<number | undefined> {
+  const first = await post('result', report, 30_000);
+  if (first !== undefined && first < 500) return first;
+  await new Promise((r) => setTimeout(r, 250));
+  return await post('result', report, 30_000);
 }
 
 /**
@@ -240,7 +251,7 @@ export async function main(argv: string[]): Promise<number> {
     report = { status: 'failed', error: `worker exited ${code}` };
   }
   if (report !== undefined) {
-    const status = await post('result', report);
+    const status = await postResult(report);
     if (status === undefined || status >= 300) console.error(`[shim] result was not accepted: ${status ?? 'no response'}`);
   }
   return code;

@@ -359,5 +359,54 @@ describe('a scheduled run carries its requester’s authority, never more (E12, 
       state.runs.update(run.runId, { state: 'DONE' });
       state.runs.update((out.body as { runId: string }).runId, { state: 'DONE' });
     });
+
+    it('interactive /conversation during an active schedule run queues a dedicated conversation run instead of dropping into the schedule mailbox (#345)', async () => {
+      for (const r of state.runs.list({ agentId: 'donna', active: true })) {
+        state.runs.update(r.runId, { state: 'DONE' });
+      }
+      if (state.mailboxes) state.mailboxes.delete('donna');
+
+      // Start an active scheduled run
+      const s = sched({ requestedBy: { kind: 'identity', provider: 'discord', id: '201' } });
+      const schedOut = await fireScheduledAction(state, s);
+      assert.ok(schedOut);
+      const schedRunId = (schedOut.body as { runId: string }).runId;
+      state.runs.update(schedRunId, { state: 'WORKING' });
+
+      // While the scheduled run is WORKING, an interactive Discord conversation arrives
+      const convRes = await api('/api/v1/agents/donna/conversation', 'POST', OPERATOR, {
+        channelId: '1490373419240521769',
+        messageId: 'msg-interactive-1',
+        authorId: '100',
+        content: 'good morning donna',
+      });
+      assert.equal(convRes.status, 202, JSON.stringify(convRes.body));
+      assert.equal(convRes.body.ok, true);
+      assert.equal(convRes.body.woke, true, 'must queue a fresh conversation run rather than putting in schedule mailbox');
+      assert.equal(typeof convRes.body.runId, 'string');
+      assert.notEqual(convRes.body.runId, schedRunId);
+
+      const convRun = state.runs.get(convRes.body.runId)!;
+      assert.equal(convRun.trigger, 'conversation');
+      assert.equal(convRun.state, 'QUEUED');
+      assert.equal(state.mailboxes?.get('donna')?.messages.length ?? 0, 0, 'nothing left in unread mailbox');
+
+      // Also verify POST /api/v1/ledger stamps authoritative run.trigger and strips forged trigger
+      const ledgerRes = await api('/api/v1/ledger', 'POST', ADMIN, {
+        agentId: 'donna',
+        runId: schedRunId,
+        type: 'llm',
+        inputTokens: 500,
+        outputTokens: 10,
+        trigger: 'conversation', // forged!
+      });
+      assert.equal(ledgerRes.status, 201);
+      const stamped = ledger.query().find((e) => e.runId === schedRunId && e.type === 'llm');
+      assert.ok(stamped);
+      assert.equal(stamped.trigger, 'schedule', 'stamps authoritative run.trigger, ignoring caller-supplied trigger');
+
+      state.runs.update(schedRunId, { state: 'DONE' });
+      state.runs.update(convRes.body.runId, { state: 'DONE' });
+    });
   });
 });

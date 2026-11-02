@@ -148,15 +148,34 @@ async function notifyGatekeeperIngress(state: PropertyManagerState, agentId: str
   }
 }
 
-function record(state: PropertyManagerState, run: Pick<Run, 'agentId' | 'runId'>, action: string, actor: string) {
+function record(state: PropertyManagerState, run: Pick<Run, 'agentId' | 'runId'> & { trigger?: string }, action: string, actor: string) {
   state.ledger.append({
     timestamp: new Date().toISOString(),
     agentId: run.agentId,
     runId: run.runId,
+    ...(run.trigger ? { trigger: run.trigger } : {}),
     type: 'action',
     action,
     actor,
   });
+}
+
+/** Per-state count of runs currently tearing down in `finishRun` before the next queued run transitions to `STARTING` (#345). */
+const finishingCounts = new WeakMap<PropertyManagerState, Map<string, number>>();
+
+function markFinishing(state: PropertyManagerState, agentId: string, delta: 1 | -1): void {
+  let map = finishingCounts.get(state);
+  if (!map) {
+    map = new Map();
+    finishingCounts.set(state, map);
+  }
+  const next = (map.get(agentId) ?? 0) + delta;
+  if (next <= 0) map.delete(agentId);
+  else map.set(agentId, next);
+}
+
+function isFinishing(state: PropertyManagerState, agentId: string): boolean {
+  return (finishingCounts.get(state)?.get(agentId) ?? 0) > 0;
 }
 
 export function activeRun(state: PropertyManagerState, agentId: string): Run | undefined {
@@ -369,7 +388,8 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
     return { status: 412, body: { error: 'unbound_secrets', missing: bound.missing, runId: run.runId } };
   }
 
-  const busy = activeRun(state, agentId);
+  const hasQueued = state.runs.list({ agentId, active: true }).some((r) => r.state === 'QUEUED');
+  const busy = Boolean(activeRun(state, agentId)) || isFinishing(state, agentId) || hasQueued;
   const run = state.runs.create({
     agentId,
     state: 'QUEUED',
@@ -402,10 +422,21 @@ const startsInFlight = new Set<string>();
 
 async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<string, string>): Promise<Run> {
   const agent = state.agents.get(run.agentId)!;
+  // #345: transition to STARTING synchronously before any async secret binding so activeRun() immediately blocks concurrent wakes.
+  let cur = state.runs.update(run.runId, { state: 'STARTING' });
+  startsInFlight.add(run.runId);
+
   let env = secrets;
   if (!env) {
-    const bound = await bindAgentSecrets(state, agent.ungated ?? agent.requires);
+    let bound: Awaited<ReturnType<typeof bindAgentSecrets>>;
+    try {
+      bound = await bindAgentSecrets(state, agent.ungated ?? agent.requires);
+    } catch (e) {
+      startsInFlight.delete(run.runId);
+      throw e;
+    }
     if (!bound.ok) {
+      startsInFlight.delete(run.runId);
       const failed = state.runs.update(run.runId, { state: 'PRE_FLIGHT_MISSING_SECRET', missing: bound.missing });
       record(state, failed, 'PRE_FLIGHT_MISSING_SECRET', SYSTEM.runtime);
       void fireCallback(state, failed);
@@ -416,11 +447,8 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
   for (const value of Object.values(env)) if (value.length >= 4) state.secretValues.add(value);
 
   // E7 deny-by-default: starting a run never changes the agent's policy; only admin actions do.
-
-  let cur = state.runs.update(run.runId, { state: 'STARTING' });
   // P1: a started task is not a ready agent. Presence shows starting now and available only on markRunReady.
   // In flight from here: the notification and the token mint can take seconds, and the reconciler must not reap the run.
-  startsInFlight.add(run.runId);
   let runToken: string;
   let runEnv: Record<string, string>;
   try {
@@ -541,81 +569,95 @@ export async function finishRun(
     return cur;
   }
   const agent = state.agents.get(cur.agentId);
-
-  const done = state.runs.update(runId, {
-    state: terminal,
-    ...(extra.exitCode !== undefined ? { exitCode: extra.exitCode } : {}),
-    ...(extra.result !== undefined ? { result: extra.result } : {}),
-    ...(extra.error !== undefined ? { error: extra.error } : {}),
-  });
-  record(state, done, `RUN_${terminal}`, extra.actor);
-  state.metrics?.runs.add(1, { agent: done.agentId, state: terminal, trigger: done.trigger });
-  if (done.startedAt) {
-    state.metrics?.runSeconds.record((Date.parse(done.updatedAt) - Date.parse(done.startedAt)) / 1000, { agent: done.agentId, state: terminal });
-  }
-
-  if (state.idleTimers) {
-    const timer = state.idleTimers.get(done.agentId);
-    if (timer) clearTimeout(timer);
-    state.idleTimers.delete(done.agentId);
-  }
-
-  const queue = state.mailboxes?.get(done.agentId);
-  if (queue) {
-    while (queue.waiters.length > 0) {
-      const w = queue.waiters.shift();
-      w?.({ id: 'done', timestamp: new Date().toISOString(), payload: null });
+  markFinishing(state, cur.agentId, 1);
+  let done: Run;
+  try {
+    done = state.runs.update(runId, {
+      state: terminal,
+      ...(extra.exitCode !== undefined ? { exitCode: extra.exitCode } : {}),
+      ...(extra.result !== undefined ? { result: extra.result } : {}),
+      ...(extra.error !== undefined ? { error: extra.error } : {}),
+    });
+    record(state, done, `RUN_${terminal}`, extra.actor);
+    state.metrics?.runs.add(1, { agent: done.agentId, state: terminal, trigger: done.trigger });
+    if (done.startedAt) {
+      state.metrics?.runSeconds.record((Date.parse(done.updatedAt) - Date.parse(done.startedAt)) / 1000, { agent: done.agentId, state: terminal });
     }
-    queue.messages.length = 0;
-  }
 
-  if (agent) {
-    if (state.runtime.running(agent.id) || done.taskHandle) {
-      try {
-        await state.runtime.stop(agent, done.taskHandle);
-      } catch (err) {
-        console.error(`[control-plane] stop ${agent.id}: ${err instanceof Error ? err.message : String(err)}`);
+    if (state.idleTimers) {
+      const timer = state.idleTimers.get(done.agentId);
+      if (timer) clearTimeout(timer);
+      state.idleTimers.delete(done.agentId);
+    }
+
+    const queue = state.mailboxes?.get(done.agentId);
+    if (queue) {
+      while (queue.waiters.length > 0) {
+        const w = queue.waiters.shift();
+        w?.({ id: 'done', timestamp: new Date().toISOString(), payload: null });
       }
+      queue.messages.length = 0;
+    }
+
+    if (agent) {
+      if (state.runtime.running(agent.id) || done.taskHandle) {
+        try {
+          await state.runtime.stop(agent, done.taskHandle);
+        } catch (err) {
+          console.error(`[control-plane] stop ${agent.id}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (cur.trigger !== 'smoke') {
+        if (agent.state === 'WORKING') {
+          agent.state = (terminal === 'DONE' || terminal === 'TIMED_OUT') ? 'SLEEPING' : 'ERROR';
+          registryOf(state).update(agent);
+        }
+        if (agent.pendingDrain && agent.stagedCommit) {
+          console.log(`[property-manager] Applying pending drained update for ${agent.id} at ${agent.stagedCommit}...`);
+          agent.commit = agent.stagedCommit;
+          agent.deployedCommit = agent.stagedCommit;
+          if (agent.stagedVersion) agent.installedVersion = agent.stagedVersion;
+          if (agent.stagedVersion && agent.offeredVersion === agent.stagedVersion) {
+            agent.updateAvailable = false;
+          }
+          delete agent.pendingDrain;
+          delete agent.stagedCommit;
+          delete agent.stagedVersion;
+        }
+        await notifyGatekeeperIngress(state, agent.id, 'offline', cur.trigger);
+      }
+    }
+    // E1.4 (#295): a helper run is torn down when it ends: its in-memory agent record and policy go with it.
+    if (agent?.ephemeral) {
+      state.agents.delete(agent.id);
+      state.policies.forgetEphemeral?.(agent.id);
     }
     if (cur.trigger !== 'smoke') {
-      if (agent.state === 'WORKING') {
-        agent.state = (terminal === 'DONE' || terminal === 'TIMED_OUT') ? 'SLEEPING' : 'ERROR';
-        registryOf(state).update(agent);
+      if (terminal === 'FAILED' && done.agentId !== 'med-doc' && state.agents.has('med-doc')) {
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId: done.agentId,
+          runId,
+          ...(done.trigger ? { trigger: done.trigger } : {}),
+          type: 'crash',
+          actor: SYSTEM.runtime,
+        });
+        await createRun(state, 'med-doc', { actor: SYSTEM.router, trigger: 'event:crash', input: { agentId: done.agentId, runId } });
       }
-      if (agent.pendingDrain && agent.stagedCommit) {
-        console.log(`[property-manager] Applying pending drained update for ${agent.id} at ${agent.stagedCommit}...`);
-        agent.commit = agent.stagedCommit;
-        agent.deployedCommit = agent.stagedCommit;
-        if (agent.stagedVersion) agent.installedVersion = agent.stagedVersion;
-        if (agent.stagedVersion && agent.offeredVersion === agent.stagedVersion) {
-          agent.updateAvailable = false;
-        }
-        delete agent.pendingDrain;
-        delete agent.stagedCommit;
-        delete agent.stagedVersion;
-      }
-      await notifyGatekeeperIngress(state, agent.id, 'offline', cur.trigger);
-    }
-  }
-  // E1.4 (#295): a helper run is torn down when it ends: its in-memory agent record and policy go with it.
-  if (agent?.ephemeral) {
-    state.agents.delete(agent.id);
-    state.policies.forgetEphemeral?.(agent.id);
-  }
-  if (cur.trigger !== 'smoke') {
-    if (terminal === 'FAILED' && done.agentId !== 'med-doc' && state.agents.has('med-doc')) {
-      state.ledger.append({ timestamp: new Date().toISOString(), agentId: done.agentId, runId, type: 'crash', actor: SYSTEM.runtime });
-      await createRun(state, 'med-doc', { actor: SYSTEM.router, trigger: 'event:crash', input: { agentId: done.agentId, runId } });
-    }
 
-    void fireCallback(state, done);
-    if (terminal === 'FAILED') await breakCrashLoop(state, done.agentId);
-  } else {
-    void fireCallback(state, done);
+      void fireCallback(state, done);
+      if (terminal === 'FAILED') await breakCrashLoop(state, done.agentId);
+    } else {
+      void fireCallback(state, done);
+    }
+  } finally {
+    markFinishing(state, cur.agentId, -1);
   }
 
   const next = state.runs.list({ agentId: done.agentId, active: true }).find((r) => r.state === 'QUEUED');
-  if (next && agent && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED') await startRun(state, next);
+  if (next && agent && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED' && !activeRun(state, done.agentId)) {
+    await startRun(state, next);
+  }
   return done;
 }
 

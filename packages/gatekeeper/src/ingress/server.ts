@@ -66,6 +66,8 @@ const door = createGatekeeperIngress({
       body: wakeBody(msg),
     });
     if (!res.ok) throw wakeFailure(res.status, await res.text().catch(() => ''));
+    const body = (await res.json().catch(() => ({}))) as { runId?: unknown };
+    return typeof body.runId === 'string' && body.runId ? { runId: body.runId, woke: true } : undefined;
   },
   handoff: async (msg) => {
     const res = await fetch(`${FACTORY_URL}/api/v1/agents/${encodeURIComponent(msg.agentId)}/conversation`, {
@@ -79,7 +81,10 @@ const door = createGatekeeperIngress({
         ...(msg.authorId ? { requestedBy: { provider: 'discord', id: msg.authorId } } : {}),
       }),
     });
-    if (res.ok) return;
+    if (res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { runId?: unknown; woke?: unknown };
+      return typeof body.runId === 'string' && body.runId ? { runId: body.runId, woke: body.woke === true } : undefined;
+    }
     const failure = wakeFailure(res.status, await res.text().catch(() => ''), 'handoff');
     if (failure instanceof WakeRefusedError || failure instanceof UnauthorizedCallerError) throw failure;
     console.error(`[gatekeeper-ingress] handoff ${msg.agentId} ${res.status}`);

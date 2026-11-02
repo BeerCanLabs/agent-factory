@@ -149,6 +149,43 @@ describe('shim process', () => {
     assert.ok(calls.slice(0, resultAt).filter((c) => c.path.endsWith('/heartbeat')).length >= 5, 'heartbeats kept flowing during the push');
   });
 
+  it('retries POST /result once on transient 503 or socket reset so slow finishRun handoffs succeed (#345)', async () => {
+    let resultAttempts = 0;
+    const flakyServer = http.createServer((req, res) => {
+      let b = '';
+      req.on('data', (c) => (b += c));
+      req.on('end', () => {
+        if (req.url === '/api/v1/runs/run-9/result') {
+          resultAttempts++;
+          if (resultAttempts === 1) {
+            res.writeHead(503, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: 'busy' }));
+            return;
+          }
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    await new Promise<void>((r) => flakyServer.listen(0, '127.0.0.1', r));
+    const addr = flakyServer.address();
+    const flakyPort = typeof addr === 'object' && addr ? addr.port : 0;
+    try {
+      const { out } = await run(
+        `
+        import { writeFileSync } from 'node:fs';
+        writeFileSync(process.env.FACTORY_RESULT_FILE, JSON.stringify({ status: 'succeeded', output: { silent: true } }));
+        `,
+        { FACTORY_URL: `http://127.0.0.1:${flakyPort}` },
+      );
+      assert.equal(out.status, 0, out.stderr);
+      assert.equal(resultAttempts, 2, 'shim retried POST /result after transient 503');
+      assert.equal(out.stderr.includes('result was not accepted'), false, out.stderr);
+    } finally {
+      await new Promise<void>((r) => flakyServer.close(() => r()));
+    }
+  });
+
   it('refuses to start without MEMORY_DIR', () => {
     const out = spawnSync(process.execPath, ['--import', 'tsx', shim, '--', 'true'], { env: { PATH: process.env.PATH }, encoding: 'utf8' });
     assert.equal(out.status, 2);
