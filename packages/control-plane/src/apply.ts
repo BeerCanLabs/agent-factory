@@ -10,7 +10,7 @@
  * records the outcome on the agent and in the ledger. The control plane is one process, so the "apply again" flags below
  * are in memory.
  */
-import { BUILTIN_AGENT_IDS, admissionOf, admit, beginAdmission, pinSource, stateAfterRefusal, type AgentRecord } from '@beercanlabs/factory-registrar';
+import { BUILTIN_AGENT_IDS, admissionOf, admit, beginAdmission, pinSource, stateAfterRefusal, interruptedAdmission, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { redactSecrets } from '@beercanlabs/factory-ledger';
 import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type SourceRef } from '@beercanlabs/factory-property-manager';
 import { type FactoryState } from './app.js';
@@ -360,7 +360,7 @@ export function recoverInterruptedDeploys(state: FactoryState, opts: { reapply?:
     if (agent.state !== 'DEPLOYING' || isDeploying(state, agent.id)) continue;
     const commit = agent.admission?.commit;
     agent.state = agent.deployedCommit ? 'SLEEPING' : 'ERROR';
-    agent.admission = admissionOf({ status: 'refused', commit: commit ?? agent.deployedCommit ?? 'unknown', reason: 'interrupted', message: 'the control plane restarted while this deploy ran' });
+    agent.admission = interruptedAdmission(commit ?? agent.deployedCommit ?? 'unknown');
     registryOf(state).save(agent);
     row(state, agent.id, 'AGENT_DEPLOY_INTERRUPTED', 'system:control-plane', commit);
     console.warn(`[control-plane] deploy of ${agent.id} was interrupted by a restart; now ${agent.state}`);

@@ -50,6 +50,11 @@ export function beginAdmission(commit: string, now: Date = new Date()): Admissio
   return { commit, status: 'building', at: now.toISOString() };
 }
 
+/** #346: the record of an admission a control-plane restart cut off; the agent keeps the version it was running. */
+export function interruptedAdmission(commit: string, now: Date = new Date()): Admission {
+  return admissionOf({ status: 'refused', commit, reason: 'interrupted', message: 'the control plane restarted while this deploy ran' }, now);
+}
+
 export type AdmissionOutcome =
   | { status: 'admitted'; commit: string; imageUri: string }
   | { status: 'refused'; commit: string; reason: string; phase?: string; message: string };
