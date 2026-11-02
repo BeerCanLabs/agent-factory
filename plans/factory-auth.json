@@ -1,0 +1,58 @@
+{
+  "id": "factory-auth",
+  "title": "Agent Factory: factory-owned authorization and login",
+  "status": "awaiting-approval",
+  "outcome": "The IdP handles identity only; every role, grant and check lives in factory storage behind the factory's one API, so access changes need no redeploy and no Cloudflare edit, and no route answers without a verified credential except the login page.",
+  "target_repo": "BeerCanLabs/agent-factory",
+  "companion": "plans/factory-auth.md",
+  "finops": {
+    "status": "not-built-estimate-pending"
+  },
+  "risks": [
+    "HOLD: the story-breaker creates no issues from this plan until Dale completes the product-flow walkthrough listed in the companion, even after merge.",
+    "Lockout: cutover leaves no admin. Mitigated by importing Dale's admin grant, a bootstrap-only-when-no-admin recovery command, and a sealed break-glass key (S6).",
+    "Grant-store outage denies all access; fail-closed is intended (R8) but takes the factory down with the store.",
+    "Removing Access as defense in depth for API-key requests on /api/v1 (D9) makes key verification the only barrier; keys are verified before any handling (D23).",
+    "Owner-string migration could orphan live agents; dry-run must show none (S18).",
+    "Health behind keys could break load-balancer probes unless a private listener or key is used (S16).",
+    "Shadow-mode mismatches could delay cutover; 7 clean days required (S8).",
+    "Paused until SDLC phase 5 per Dale's Oct 31 roadmap call; product-flow walkthrough still pending."
+  ],
+  "epics": [
+    {
+      "id": "factory-auth",
+      "title": "Factory-owned authorization (IdP = identity only)",
+      "deploy_point": true,
+      "acceptance_criteria": [
+        "R1-R18 hold, each covered by unit and e2e tests (see companion).",
+        "Stories S1-S24, S2b, S3b, S5b meet their acceptance criteria (see companion).",
+        "No route answers without a verified credential except the login page and named, protected exceptions in the route-exception registry; conformance tests enforce it.",
+        "No reads of FACTORY_ADMIN_EMAILS or FACTORY_TOKENS remain; FACTORY_TOKEN and the shared Access service token are retired.",
+        "Onboarding a person needs only a factory grant, no Cloudflare edit or redeploy.",
+        "DESIGN_AUTHORITY.md (A1, A2 amendments, ownership section) and SPEC.md updated.",
+        "Deploy check proves an anonymous request gets the factory login page and every other route refuses it."
+      ]
+    },
+    {
+      "id": "skill-egress",
+      "title": "Follow-on: Skill-driven egress policy",
+      "deploy_point": false,
+      "acceptance_criteria": [
+        "Out of this plan's delivery (D17): recorded for linkage only; the story-breaker creates no stories for it until its own plan is merged.",
+        "Adopting a skill writes its declared requires.routes into the agent's AgentPolicy automatically, one direction only.",
+        "Policy is not a second manual edit surface; no agent route exists that no skill justifies.",
+        "Adoption brings the skill's default hold policy into the agent's hold settings (S23)."
+      ]
+    },
+    {
+      "id": "cloud-spend",
+      "title": "Follow-on: Cloud spend enforcement",
+      "deploy_point": false,
+      "acceptance_criteria": [
+        "Out of this plan's delivery (D17): recorded for linkage only; the story-breaker creates no stories for it until its own plan is merged.",
+        "Provisioning checks estimated cost against the budget-owner's allocation (D25) before creating anything.",
+        "Provisioning is refused when no allocation exists."
+      ]
+    }
+  ]
+}
