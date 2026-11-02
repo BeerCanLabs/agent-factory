@@ -32,7 +32,12 @@ export function archiveStamp(now = new Date()): string {
 
 const execFileAsync = promisify(execFile);
 
-export type ConfigSkill = { id: string; version: string };
+export type ConfigSkill = {
+  id: string;
+  version: string;
+  /** S23 (D31): effective per-action hold settings propagated at adoption and tightened by owner/lead overrides. */
+  holds?: Record<string, boolean>;
+};
 
 /**
  * The admin-set policy as the store holds it: copied and hashed, never read, so it is any JSON object (the control

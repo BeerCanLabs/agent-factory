@@ -103,7 +103,22 @@ describe('E9 held requests: the gatekeeper-egress holds what an agent sends in a
       });
     });
     const upPort = await listen(upstream);
-    gk = createGatekeeperEgress({ routes: [route(upPort)], prices: {}, runTokens: tokens, control, providers: [], contextTtlMs: 0 });
+    gk = createGatekeeperEgress({
+      routes: [
+        route(upPort),
+        {
+          id: 'google-gmail',
+          kind: 'http',
+          upstream: `http://127.0.0.1:${upPort}`,
+          connection: 'google',
+        },
+      ],
+      prices: {},
+      runTokens: tokens,
+      control,
+      providers: [],
+      contextTtlMs: 0,
+    });
     port = await listen(gk);
     const { holdRequest: _omit, ...withoutHolds } = control;
     bare = createGatekeeperEgress({ routes: [route(upPort)], prices: {}, runTokens: tokens, control: withoutHolds, providers: [], contextTtlMs: 0 });
@@ -209,5 +224,35 @@ describe('E9 held requests: the gatekeeper-egress holds what an agent sends in a
     const huge = await call(port, '/linkedin/rest/posts', { token, body: JSON.stringify({ commentary: 'x'.repeat(HELD_BODY_LIMIT) }) });
     assert.equal(huge.status, 413);
     assert.equal(seen.length, 0);
+  });
+
+  it('S23 (#369) honors effective skill action holds even when the route itself declares no route-wide hold', async () => {
+    ctx.policy.routes = ['linkedin', 'google-gmail'];
+    ctx.skillHolds = [
+      { skillId: 'mail', actionId: 'send_email', route: 'google-gmail', method: 'POST', path: '/gmail/v1/users/{userId}/messages/send', hold: true },
+      { skillId: 'mail', actionId: 'search_mail', route: 'google-gmail', method: 'GET', path: '/gmail/v1/users/{userId}/messages', hold: false },
+    ];
+
+    // Autonomous action (search_mail hold: false) passes straight through
+    const searchOk = await call(port, '/google-gmail/gmail/v1/users/me/messages?q=invoice', { token, method: 'GET' });
+    assert.equal(searchOk.status, 201);
+    assert.equal(seen.length, 1);
+    assert.equal(holds.length, 0);
+
+    // Mandatory held action (send_email hold: true) is held for human approval
+    const emailBody = JSON.stringify({ raw: 'dGVzdA==' });
+    const sendHeld = await call(port, '/google-gmail/gmail/v1/users/me/messages/send', { token, method: 'POST', body: emailBody });
+    assert.equal(sendHeld.status, 202);
+    assert.equal(holds.length, 1);
+    assert.equal(seen.length, 1);
+
+    // Owner tightens search_mail to hold: true -> GET /messages is now held too
+    ctx.skillHolds = [
+      { skillId: 'mail', actionId: 'send_email', route: 'google-gmail', method: 'POST', path: '/gmail/v1/users/{userId}/messages/send', hold: true },
+      { skillId: 'mail', actionId: 'search_mail', route: 'google-gmail', method: 'GET', path: '/gmail/v1/users/{userId}/messages', hold: true },
+    ];
+    const searchHeld = await call(port, '/google-gmail/gmail/v1/users/me/messages?q=secret', { token, method: 'GET' });
+    assert.equal(searchHeld.status, 202);
+    assert.equal(holds.length, 2);
   });
 });

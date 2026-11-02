@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { skillDesignIssues, validateSkillManifest, type SkillManifest } from './skill.js';
+import { skillActionHoldDefaults, skillDesignIssues, validateSkillManifest, type SkillManifest } from './skill.js';
 
 const base = {
   id: 'discord-progress',
@@ -131,6 +131,30 @@ describe('skill manifest: visibility, owner and actions (SK1, SK2)', () => {
       smoke: { action: 'ping-pong' },
     }));
     assert.deepEqual(noActionsSmoke, []);
+  });
+
+  it('S23 (#369) accepts snake_case and kebab-case action ids and extracts per-action default holds', () => {
+    const manifest = parse({
+      requires: { routes: ['google-gmail'] },
+      actions: [
+        { id: 'send_email', route: 'google-gmail', method: 'POST', path: '/gmail/v1/users/{userId}/messages/send', hold: true },
+        { id: 'search_mail', route: 'google-gmail', method: 'GET', path: '/gmail/v1/users/{userId}/messages', hold: false },
+      ],
+      smoke: { action: 'search_mail', input: { q: 'is:unread' } },
+    });
+    assert.deepEqual(skillDesignIssues(manifest), []);
+    assert.deepEqual(skillActionHoldDefaults(manifest), {
+      send_email: true,
+      search_mail: false,
+    });
+
+    for (const badId of ['__proto__', '_send', 'send_', 'send__email', 'send--email', 'Send_Email']) {
+      assert.equal(
+        validateSkillManifest({ ...base, actions: [{ ...post, id: badId }] }).ok,
+        false,
+        `expected action id ${badId} to be rejected`,
+      );
+    }
   });
 });
 

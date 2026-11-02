@@ -46,13 +46,16 @@ export const SKILL_OWNER = /^[a-z0-9][a-z0-9_-]*$/;
 
 export const SKILL_ACTION_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] as const;
 
+/** Action ids are lowercase letters and digits, words joined by single hyphens or underscores (e.g. post-message, send_email). */
+export const SKILL_ACTION_ID = /^[a-z0-9]+(?:[-_][a-z0-9]+)*$/;
+
 /**
  * One thing a skill does at a system (E11): the route it goes through, the method and the path. `hold` has no default
  * (E9: there is no factory default): the author says true (a person approves the exact request first) or false.
  */
 export const skillActionSchema = z
   .object({
-    id: z.string().max(64).regex(SKILL_ID, 'action id must be kebab-case (e.g. post-message)'),
+    id: z.string().max(64).regex(SKILL_ACTION_ID, 'action id must be lowercase kebab-case or snake_case (e.g. post-message or send_email)'),
     route: z.string().min(1),
     method: z.enum(SKILL_ACTION_METHODS),
     path: z.string().max(512).regex(/^\/(?!\/)[^\s?#]*$/, 'action path must start with a single "/" and hold no query, fragment or spaces'),
@@ -65,7 +68,7 @@ export const skillActionSchema = z
 
 export const skillSmokeSchema = z
   .object({
-    action: z.string().max(64).regex(SKILL_ID, 'smoke action must be a kebab-case action id'),
+    action: z.string().max(64).regex(SKILL_ACTION_ID, 'smoke action must be a lowercase kebab-case or snake_case action id'),
     input: z.record(z.unknown()).default({}),
     dryRun: z.boolean().optional(),
   })
@@ -98,6 +101,15 @@ export type SkillCredential = z.infer<typeof skillCredentialSchema>;
 
 export type SkillIssue = { path: string; message: string };
 export type SkillValidation = { ok: true; manifest: SkillManifest } | { ok: false; issues: SkillIssue[] };
+
+/** Per-action default hold policy declared in `skill.yaml` (`{ [action.id]: action.hold }`, D31, S23). */
+export function skillActionHoldDefaults(manifest?: { actions?: ReadonlyArray<Pick<SkillAction, 'id' | 'hold'>> } | null): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const action of manifest?.actions ?? []) {
+    out[action.id] = action.hold;
+  }
+  return out;
+}
 
 /** Validates a parsed `skill.yaml` against the schema, filling defaults (public, and an absent `requires` or `actions` list is empty). */
 export function validateSkillManifest(raw: unknown): SkillValidation {

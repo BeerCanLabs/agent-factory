@@ -55,7 +55,7 @@ import { agentConfigForRun, deployConfigured, handleAgentCreation, handleConvert
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
 import { changeReason, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
-import { handleSkills, resumeSkillChecks } from './skills.js';
+import { effectiveAgentSkillActionHolds, handleSkills, resumeSkillChecks } from './skills.js';
 import { applyTrainingForCaller, handleSkillTraining } from './skill-training.js';
 import { buildSkillsFor, isDeploying, runDeploy } from './apply.js';
 import { handleRunProgress } from './progress-routes.js';
@@ -3437,6 +3437,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     }
     const payerBuiltin = Boolean(payerAgent?.isBuiltin || payerAgent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(payer.agentId));
     const budgetUsd = payer.parent ? (payerBuiltin ? undefined : state.policies.get(payer.agentId).budgetUsd) : pol.budgetUsd;
+    const skillHolds = isBuiltin ? [] : effectiveAgentSkillActionHolds(state, run.agentId);
     json(res, 200, {
       run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state), ...(run.model ? { model: run.model } : {}) },
       agentState: agent.state,
@@ -3450,6 +3451,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       // A built-in agent is the factory's own and has no person's roles.
       access: isBuiltin ? { restricted: false } : accessForRun(state, run, agent),
       canManageModels: isBuiltin ? false : canRunManageModels(state, run).allowed,
+      ...(skillHolds.length ? { skillHolds } : {}),
     });
     return;
   }

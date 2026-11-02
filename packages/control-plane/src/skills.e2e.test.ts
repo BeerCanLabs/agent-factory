@@ -1462,6 +1462,20 @@ describe('TSK-278 Slice 4: Publishing workflow, adoption rules, retirement, and 
       description: 'External',
       language: 'python',
       entry: 'entry.py',
+      repo: '',
+      path: '.',
+      commit: '4444444444444444444444444444444444444444',
+      manifest: {
+        id: 'external-skill',
+        name: 'External Skill',
+        version: '1.0.0',
+        description: 'External',
+        language: 'python',
+        entry: 'entry.py',
+        visibility: 'public',
+        requires: { routes: [], connections: [], credentials: [], models: [] },
+        actions: [],
+      },
       tests: 'passed',
       status: 'approved',
       registeredBy: 'oidc:contractor@external-idp.example.com',
@@ -1473,5 +1487,173 @@ describe('TSK-278 Slice 4: Publishing workflow, adoption rules, retirement, and 
     assert.equal(adminOverride.status, 409);
     assert.equal(adminOverride.body.error, 'owner_rights_indeterminate');
     assert.equal(adminOverride.body.message, "cannot determine the owner's rights");
+  });
+
+  it('S23 (#369) propagates skill default holds on adoption, rejects loosening with 422, tightens autonomous actions, and surfaces runtime skillHolds', async () => {
+    const buildActionSkillPackage = (id: string, version: string, extraAction = ''): Buffer => {
+      const yaml = [
+        'spec: 1',
+        `id: ${id}`,
+        'name: Mail Assistant',
+        `version: ${version}`,
+        'language: python',
+        'description: Mail skill with held send_email and autonomous search_mail',
+        'entry: entry.py',
+        'requires:',
+        '  routes: [google-gmail]',
+        'actions:',
+        '  - id: send_email',
+        '    route: google-gmail',
+        '    method: POST',
+        '    path: /gmail/v1/users/{userId}/messages/send',
+        '    hold: true',
+        '  - id: search_mail',
+        '    route: google-gmail',
+        '    method: GET',
+        '    path: /gmail/v1/users/{userId}/messages',
+        '    hold: false',
+        ...(extraAction ? [extraAction] : []),
+        'smoke:',
+        '  action: search_mail',
+        '  input: {}',
+        '',
+      ].join('\n');
+      const entry = 'def tools():\n    return []\n';
+      const test = 'def test_smoke():\n    assert True\n';
+      const yBuf = Buffer.from(yaml, 'utf8');
+      const eBuf = Buffer.from(entry, 'utf8');
+      const tBuf = Buffer.from(test, 'utf8');
+      return zlib.gzipSync(
+        makeTarball([
+          { header: createTarHeader({ name: 'skill.yaml', size: yBuf.length }), content: yBuf },
+          { header: createTarHeader({ name: 'entry.py', size: eBuf.length }), content: eBuf },
+          { header: createTarHeader({ name: 'test_entry.py', size: tBuf.length }), content: tBuf },
+        ]),
+      );
+    };
+
+    // 1. Alice registers mail-assistant@1.0.0 and marks checks passed + approved
+    const regRes = await call(port, '/api/v1/registry/skills', 'POST', ALICE, buildActionSkillPackage('mail-assistant', '1.0.0'));
+    assert.equal(regRes.status, 201, JSON.stringify(regRes.body));
+    const reg = skillRegistry(state);
+    const rec10 = reg.get('mail-assistant', '1.0.0')!;
+    rec10.tests = 'passed';
+    rec10.status = 'approved';
+    reg.save(rec10);
+
+    // 2. AC1 at adoption request time: loosening send_email (hold: true -> false) is rejected with 422
+    const badReq = await call(port, '/api/v1/agents/alice-agent/skills', 'POST', ALICE, {
+      skillId: 'mail-assistant',
+      version: '1.0.0',
+      holds: { send_email: false },
+    });
+    assert.equal(badReq.status, 422, JSON.stringify(badReq.body));
+    assert.equal(badReq.body.error, 'hold_loosening_forbidden');
+    assert.equal(badReq.body.action, 'send_email');
+
+    // 3. Alice adopts mail-assistant@1.0.0 without overrides -> default holds propagate onto adoption request and agent config
+    const adoptReq = await call(port, '/api/v1/agents/alice-agent/skills', 'POST', ALICE, {
+      skillId: 'mail-assistant',
+      version: '1.0.0',
+    });
+    assert.equal(adoptReq.status, 201, JSON.stringify(adoptReq.body));
+    assert.deepEqual(adoptReq.body.holds, { send_email: true, search_mail: false });
+
+    const approveRes = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant/adoption/approve', 'POST', ADMIN, {});
+    assert.equal(approveRes.status, 200, JSON.stringify(approveRes.body));
+    assert.deepEqual(approveRes.body.holds, { send_email: true, search_mail: false });
+
+    const listDefault = await call(port, '/api/v1/agents/alice-agent/skills', 'GET', ALICE);
+    assert.equal(listDefault.status, 200);
+    const adoptedMail = listDefault.body.adopted.find((s: any) => s.id === 'mail-assistant');
+    assert.ok(adoptedMail);
+    assert.deepEqual(adoptedMail.holds, { send_email: true, search_mail: false });
+    assert.deepEqual(adoptedMail.defaultHolds, { send_email: true, search_mail: false });
+
+    // 4. Non-owner (Bob) cannot modify Alice's agent hold overrides -> 403
+    const bobAttempt = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant/holds', 'PUT', BOB, {
+      holds: { search_mail: true },
+    });
+    assert.equal(bobAttempt.status, 403);
+
+    // 5. AC1 on adopted skill: Alice attempts to loosen send_email to hold: false -> rejected with 422 (both PUT /holds and PATCH)
+    const loosenPut = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant/holds', 'PUT', ALICE, {
+      holds: { send_email: false },
+    });
+    assert.equal(loosenPut.status, 422, JSON.stringify(loosenPut.body));
+    assert.equal(loosenPut.body.error, 'hold_loosening_forbidden');
+    assert.equal(loosenPut.body.action, 'send_email');
+
+    const loosenPatch = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant', 'PATCH', ALICE, {
+      holds: { send_email: false },
+    });
+    assert.equal(loosenPatch.status, 422, JSON.stringify(loosenPatch.body));
+    assert.equal(loosenPatch.body.error, 'hold_loosening_forbidden');
+
+    // 6. AC1 on adopted skill: Alice tightens search_mail (hold: false -> true) -> 200, new config version + ledgered
+    const beforeVer = state.configs!.current('alice-agent')!.version;
+    const tightenRes = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant/holds', 'PUT', ALICE, {
+      holds: { search_mail: true },
+      reason: 'Require approval before searching confidential mailbox',
+    });
+    assert.equal(tightenRes.status, 200, JSON.stringify(tightenRes.body));
+    assert.deepEqual(tightenRes.body.holds, { send_email: true, search_mail: true });
+    assert.equal(tightenRes.body.configVersion, beforeVer + 1);
+    assert.ok(ledger.query().some((e) => e.agentId === 'alice-agent' && e.action === 'SKILL_HOLDS_UPDATED' && e.actor === 'token:alice'));
+
+    // 7. Runtime egress run context exposes effective skillHolds with both send_email: true and search_mail: true
+    state.policies.set('alice-agent', { routes: ['google-gmail'], budgetUsd: { perRun: 5 } } as any);
+    const liveRun = state.runs.create({
+      agentId: 'alice-agent',
+      state: 'WORKING',
+      actor: 'token:alice',
+      trigger: 'api',
+    });
+    const runCtxRes = await call(port, `/api/v1/gatekeeper-egress/runs/${liveRun.runId}`, 'GET', ADMIN);
+    assert.equal(runCtxRes.status, 200, JSON.stringify(runCtxRes.body));
+    assert.deepEqual(runCtxRes.body.skillHolds, [
+      {
+        skillId: 'mail-assistant',
+        actionId: 'send_email',
+        route: 'google-gmail',
+        method: 'POST',
+        path: '/gmail/v1/users/{userId}/messages/send',
+        hold: true,
+      },
+      {
+        skillId: 'mail-assistant',
+        actionId: 'search_mail',
+        route: 'google-gmail',
+        method: 'GET',
+        path: '/gmail/v1/users/{userId}/messages',
+        hold: true,
+      },
+    ]);
+
+    // 8. Upgrading to 1.1.0 (which adds delete_thread hold: true) carries forward Alice's tightened search_mail: true
+    const extraDelete = [
+      '  - id: delete_thread',
+      '    route: google-gmail',
+      '    method: DELETE',
+      '    path: /gmail/v1/users/{userId}/threads/{threadId}',
+      '    hold: true',
+    ].join('\n');
+    const reg11 = await call(port, '/api/v1/registry/skills', 'POST', ALICE, buildActionSkillPackage('mail-assistant', '1.1.0', extraDelete));
+    assert.equal(reg11.status, 201, JSON.stringify(reg11.body));
+    const rec11 = reg.get('mail-assistant', '1.1.0')!;
+    rec11.tests = 'passed';
+    rec11.status = 'approved';
+    reg.save(rec11);
+
+    const upReq = await call(port, '/api/v1/agents/alice-agent/skills', 'POST', ALICE, {
+      skillId: 'mail-assistant',
+      version: '1.1.0',
+    });
+    assert.equal(upReq.status, 201, JSON.stringify(upReq.body));
+    assert.deepEqual(upReq.body.holds, { send_email: true, search_mail: true, delete_thread: true });
+
+    const upApp = await call(port, '/api/v1/agents/alice-agent/skills/mail-assistant/adoption/approve', 'POST', ADMIN, {});
+    assert.equal(upApp.status, 200, JSON.stringify(upApp.body));
+    assert.deepEqual(upApp.body.holds, { send_email: true, search_mail: true, delete_thread: true });
   });
 });

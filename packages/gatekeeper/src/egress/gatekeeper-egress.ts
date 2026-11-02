@@ -4,7 +4,7 @@ import net from 'node:net';
 import stream from 'node:stream';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { RunTokens } from '@beercanlabs/factory-auth';
-import { checkHold, checkToolApproval, describeHeldRequest, type HoldRule, type ApprovalOutcome, type ApprovalRequest, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
+import { checkHold, checkToolApproval, describeHeldRequest, type HoldRule, type SkillActionHoldRule, type ApprovalOutcome, type ApprovalRequest, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
@@ -109,6 +109,8 @@ export type RunContext = {
   access?: { restricted: false } | { restricted: true; routes: Record<string, 'allowed' | 'denied'> };
   /** Whether the run requester is authorized to manage models (§6.9 M2, GAP-210, TSK-287). */
   canManageModels?: boolean;
+  /** S23 (D31): effective per-action hold rules from the agent's adopted skills (`manifestHold || overrideHold`). */
+  skillHolds?: SkillActionHoldRule[];
 };
 
 export type RunModelsInfo = {
@@ -1784,7 +1786,16 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           ledger(ctx, route, { type: 'action', action: 'REPLY_FOOTNOTED', footnote: marked.footnote });
         }
       }
-      if (checkHold({ hold: route.hold, method: req.method ?? 'GET' }).held && (await holdOrRelease(req, res, ctx, route, rest, raw))) return;
+      if (
+        checkHold({
+          hold: route.hold,
+          skillActions: ctx.skillHolds,
+          route: route.id,
+          method: req.method ?? 'GET',
+          path: rest,
+        }).held &&
+        (await holdOrRelease(req, res, ctx, route, rest, raw))
+      ) return;
       if (route.connection) return await handleConnection(req, res, ctx, route, rest, raw);
       // #334: the agent's own GitHub App key when it has one installed on the target org; else the route's credential.
       const appCred = await githubAppCredential(route, ctx, rest);

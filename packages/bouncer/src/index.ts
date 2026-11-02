@@ -4,8 +4,8 @@ export type { ApprovalOutcome, ApprovalRequest, HoldOutcome, HoldRequest } from 
 export { HELD_BODY_LIMIT, HELD_HEADERS, HELD_STORED_BODY_LIMIT } from './wire.js';
 export type { DescribedHold, ParsedHold } from './hold.js';
 export { describeHeldRequest, heldCopyOf, heldToolName, parseHoldRequest } from './hold.js';
-export type { HoldCheck, HoldDecision, HoldRule, ToolApprovalCheck, ToolApprovalDecision } from './decisions.js';
-export { checkHold, checkToolApproval } from './decisions.js';
+export type { HoldCheck, HoldDecision, HoldRule, SkillActionHoldRule, ToolApprovalCheck, ToolApprovalDecision } from './decisions.js';
+export { checkHold, checkToolApproval, findHeldSkillAction, matchSkillActionPath } from './decisions.js';
 export type { DerivedRole, Privilege } from './privileges.js';
 export { PRIVILEGES, AGENT_SCOPED } from './privileges.js';
 export type { AuthorizeRequest, AuthorizeResource, AuthorizeResult } from './authorize.js';
