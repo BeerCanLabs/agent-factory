@@ -126,7 +126,6 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/agents/nope/conversation-requests', privilege: 'agents.converse', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/conversation-requests', privilege: 'conversations.read-others', role: 'admin', firstRole: 'operator', body: { op: 'list', subject: 'cloudflare:someone@example.com' } },
   { method: 'POST', path: '/api/v1/agents/nope/wake', privilege: 'runs.attest-requester', role: 'operator', thenExclusive: 'gatekeeper-ingress', body: { requestedBy: { provider: 'discord', id: '1' } } },
-  { method: 'POST', path: '/api/v1/hooks/hooked', privilege: 'hooks.invoke', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/schedules', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
   { method: 'PATCH', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
   { method: 'PUT', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
@@ -374,10 +373,12 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       assert.equal(r.status, cred === 'none' ? 401 : 200, `whoami as ${cred}`);
     }
     // GAP-211, TSK-285: without a valid signature every credential, including admin, gets 401.
-    for (const cred of CREDENTIALS) {
-      const r = await call(port, 'POST', '/api/v1/hooks/github', cred, {});
-      assert.equal(r.status, 401, `/api/v1/hooks/github without signature as ${cred}`);
-      assert.deepEqual(r.body, { error: 'bad_webhook_signature' });
+    for (const ghPath of ['/api/v1/hooks/github', '/hooks/github', '/api/v1/webhooks/github', '/webhooks/github']) {
+      for (const cred of CREDENTIALS) {
+        const r = await call(port, 'POST', ghPath, cred, {});
+        assert.equal(r.status, 401, `${ghPath} without signature as ${cred}`);
+        assert.deepEqual(r.body, { error: 'bad_webhook_signature' });
+      }
     }
     // With a valid signature every credential, including none and admin, is accepted.
     const secret = 'test-github-webhook-secret';
@@ -385,10 +386,12 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     try {
       const payload = JSON.stringify({});
       const sig = 'sha256=' + createHmac('sha256', secret).update(payload).digest('hex');
-      for (const cred of CREDENTIALS) {
-        const r = await call(port, 'POST', '/api/v1/hooks/github', cred, payload, { 'x-hub-signature-256': sig });
-        assert.equal(r.status, 200, `/api/v1/hooks/github with valid signature as ${cred}`);
-        assert.deepEqual(r.body, { ok: true, ignored: true });
+      for (const ghPath of ['/api/v1/hooks/github', '/hooks/github', '/api/v1/webhooks/github', '/webhooks/github']) {
+        for (const cred of CREDENTIALS) {
+          const r = await call(port, 'POST', ghPath, cred, payload, { 'x-hub-signature-256': sig });
+          assert.equal(r.status, 200, `${ghPath} with valid signature as ${cred}`);
+          assert.deepEqual(r.body, { ok: true, ignored: true });
+        }
       }
     } finally {
       state.providers = [];
@@ -602,6 +605,9 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
   it('the webhook with a secretRef and the run-token routes ignore roles: every credential is refused alike', async () => {
     const rows = [
       { method: 'POST', path: '/api/v1/hooks/secret-hook', body: {} },
+      { method: 'POST', path: '/api/v1/hooks/hooked', body: {} },
+      { method: 'POST', path: '/hooks/secret-hook', body: {} },
+      { method: 'POST', path: '/hooks/hooked', body: {} },
       { method: 'GET', path: '/api/v1/runs/nope/input' },
       { method: 'POST', path: '/api/v1/runs/nope/result', body: {} },
       { method: 'POST', path: '/api/v1/runs/nope/heartbeat', body: {} },
