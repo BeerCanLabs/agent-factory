@@ -9,6 +9,7 @@
     "status": "not-built-estimate-pending"
   },
   "risks": [
+    "HOLD: the story-breaker creates no issues from this plan until Dale completes the product-flow walkthrough listed in the companion, even after merge.",
     "Lockout: cutover leaves no admin. Mitigated by importing Dale's admin grant, a bootstrap-only-when-no-admin recovery command, and a sealed break-glass key (S6).",
     "Grant-store outage denies all access; fail-closed is intended (R8) but takes the factory down with the store.",
     "Removing Access as defense in depth for API-key requests on /api/v1 (D9) makes key verification the only barrier; keys are verified before any handling (D23).",

@@ -64,7 +64,7 @@ The IdP answers only "who is this?". The factory answers "what may they do?": ro
 
 ## Stories (epic: factory-auth)
 
-Story-breaker creates these as issues only after this plan is merged; each links back here.
+Story-breaker creates these as issues only after this plan is merged **and** Dale has completed the product-flow walkthrough below; each issue links back here.
 
 - **S1 Canonical principal:** Access JWT maps to `user:<email>` with zero roles; `sub` recorded; `cloudflare:`/`oidc:` strings in config-store owners, identity links and group members normalize to `user:<email>`, and content-owner grants reference it; tests cover email case and service-token CN.
 - **S2 Grant store:** Versioned store on the config backend with fleet/agent/skill/group scopes, expiry, pending states; one `content-owner` grant type scoped `{kind: agent | skill, id}`; unique owner constraint on personal agents and on skills; grants may name an email before first login (pre-provisioning, no shadow records); unknown subject rejected before write with no ledger entry; fails closed on read error; e2e restart test.
