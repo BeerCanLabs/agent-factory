@@ -126,7 +126,6 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/agents/nope/conversation-requests', privilege: 'agents.converse', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/conversation-requests', privilege: 'conversations.read-others', role: 'admin', firstRole: 'operator', body: { op: 'list', subject: 'cloudflare:someone@example.com' } },
   { method: 'POST', path: '/api/v1/agents/nope/wake', privilege: 'runs.attest-requester', role: 'operator', thenExclusive: 'gatekeeper-ingress', body: { requestedBy: { provider: 'discord', id: '1' } } },
-  { method: 'POST', path: '/api/v1/hooks/hooked', privilege: 'hooks.invoke', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/schedules', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
   { method: 'PATCH', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
   { method: 'PUT', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
@@ -602,6 +601,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
   it('the webhook with a secretRef and the run-token routes ignore roles: every credential is refused alike', async () => {
     const rows = [
       { method: 'POST', path: '/api/v1/hooks/secret-hook', body: {} },
+      { method: 'POST', path: '/api/v1/hooks/hooked', body: {} },
       { method: 'GET', path: '/api/v1/runs/nope/input' },
       { method: 'POST', path: '/api/v1/runs/nope/result', body: {} },
       { method: 'POST', path: '/api/v1/runs/nope/heartbeat', body: {} },
