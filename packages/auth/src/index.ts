@@ -97,12 +97,15 @@ export type OidcOptions = {
 
 async function discoverJwks(issuer: string): Promise<string> {
   const url = `${issuer.replace(/\/$/, '')}/.well-known/openid-configuration`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
   if (!res.ok) throw new Error(`OIDC discovery ${res.status} at ${url}`);
   const doc = (await res.json()) as { jwks_uri?: string; issuer?: string };
   if (!doc.jwks_uri) throw new Error('OIDC discovery document has no jwks_uri');
   return doc.jwks_uri;
 }
+
+const MAX_OIDC_RESOLVERS = 64;
+const oidcResolverCache = new Map<string, () => Promise<JWTVerifyGetKey>>();
 
 function createOidcKeyResolver(opts: OidcOptions): () => Promise<JWTVerifyGetKey> {
   let keys: JWTVerifyGetKey | undefined = opts.keys;
@@ -121,6 +124,20 @@ function createOidcKeyResolver(opts: OidcOptions): () => Promise<JWTVerifyGetKey
       throw err;
     }
   };
+}
+
+function getOidcKeyResolver(opts: OidcOptions): () => Promise<JWTVerifyGetKey> {
+  if (opts.keys) return createOidcKeyResolver(opts);
+  const cacheKey = `${opts.issuer}\0${opts.jwksUrl ?? ''}`;
+  const cached = oidcResolverCache.get(cacheKey);
+  if (cached) return cached;
+  if (oidcResolverCache.size >= MAX_OIDC_RESOLVERS) {
+    const oldest = oidcResolverCache.keys().next().value;
+    if (oldest !== undefined) oidcResolverCache.delete(oldest);
+  }
+  const resolver = createOidcKeyResolver(opts);
+  oidcResolverCache.set(cacheKey, resolver);
+  return resolver;
 }
 
 async function verifyOidcPayload(
@@ -159,16 +176,16 @@ function toIdentityResult(payload: JWTPayload & { sub: string }): OidcIdentityRe
 export async function verifyOidcIdentity(tokenOrAuth: string | undefined, opts: OidcOptions): Promise<OidcIdentityResult> {
   const trimmed = tokenOrAuth?.trim();
   const jwt = bearerOf(tokenOrAuth) ?? (trimmed && !/\s/.test(trimmed) ? trimmed : undefined);
-  const verified = await verifyOidcPayload(jwt, opts, createOidcKeyResolver(opts));
+  const verified = await verifyOidcPayload(jwt, opts, getOidcKeyResolver(opts));
   if (!verified.ok) return verified;
   return toIdentityResult(verified.payload);
 }
 
 /** OIDC/JWT (Entra, Cloudflare Access, Google, Cognito): signature via JWKS, iss, aud, exp/nbf. */
 export function oidcAuth(opts: OidcOptions): AuthProvider {
-  const resolveKeys = createOidcKeyResolver(opts);
+  const resolveKeys = getOidcKeyResolver(opts);
   const claim = opts.rolesClaim ?? 'roles';
-  const identityMode = opts.identityOnly ?? Boolean(opts.requireEmailVerified);
+  const identityMode = Boolean(opts.identityOnly);
 
   return {
     name: 'oidc',

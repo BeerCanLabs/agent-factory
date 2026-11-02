@@ -208,7 +208,7 @@ export function cloudflareAccessAuth(opts: AccessOptions): AccessAuth {
     const sub = typeof payload.sub === 'string' ? payload.sub : undefined;
     const emailVerified = typeof payload.email_verified === 'boolean' ? payload.email_verified : undefined;
     if (email) {
-      if ((opts.requireEmailVerified && emailVerified !== true) || (opts.identityOnly && emailVerified === false)) {
+      if ((opts.requireEmailVerified || opts.identityOnly) && emailVerified !== true) {
         return { ok: false, reason: 'email not verified' };
       }
       return { ok: true, claims: { email, sub, ...(emailVerified !== undefined ? { emailVerified } : {}) } };

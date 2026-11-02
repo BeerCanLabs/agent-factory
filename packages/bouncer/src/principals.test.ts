@@ -12,13 +12,18 @@ import {
   DuplicatePrincipalEmailError,
   DuplicatePrincipalIdError,
   FileDocBackend,
+  GcsDocBackend,
+  PRINCIPAL_ID,
   PrincipalStore,
   PrincipalStoreUnavailableError,
   S3CliDocBackend,
+  SERVICE_PRINCIPAL_ID,
   docBackendFromUri,
   normalizeEmail,
+  snapshotSha256,
   type AwsCliRunner,
   type PrincipalsDoc,
+  type VersionedSnapshot,
 } from './principals.js';
 
 const TEAM = 'team.example.cloudflareaccess.com';
@@ -268,20 +273,43 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
     assert.equal(added.version, 2);
     assert.deepEqual(added.emails, ['alex@gmail.com', 'alex.work@example.com']);
 
-    // Removing secondary email succeeds and releases it; removing the last email is refused
+    // Record IdP bindings for both emails, then remove secondary email: bindings for removed email must be pruned (F7)
+    await store.recordSignIn({ idp: 'google', sub: 'g-1', email: 'alex@gmail.com', emailVerified: true });
+    await store.recordSignIn({ idp: 'entra', sub: 'e-1', email: 'alex.work@example.com', emailVerified: true });
+    assert.equal(store.get('user:alex')?.idpBindings.length, 2);
+
+    // Removing secondary email succeeds, prunes its idpBindings, and releases it; removing the last email is refused
     const afterRemove = await store.removeEmail('user:alex', 'ALEX.WORK@EXAMPLE.COM', 'user:admin');
     assert.deepEqual(afterRemove.emails, ['alex@gmail.com']);
+    assert.deepEqual(
+      afterRemove.idpBindings.map((b) => ({ idp: b.idp, sub: b.sub, email: b.email })),
+      [{ idp: 'google', sub: 'g-1', email: 'alex@gmail.com' }],
+    );
     assert.equal(store.findByEmail('alex.work@example.com'), undefined);
     await assert.rejects(() => store.removeEmail('user:alex', 'alex@gmail.com', 'user:admin'), /last email/i);
+
+    // Email-shaped canonical principal IDs (user:<email>, user:alice+tag@sub.example.com) and SERVICE_PRINCIPAL_ID (F3)
+    const emailShaped = await store.create({
+      id: 'user:Dale@Example.com',
+      displayName: 'Dale',
+      emails: ['dale@example.com'],
+      by: 'user:admin',
+    });
+    assert.equal(emailShaped.id, 'user:dale@example.com');
+    assert.equal(PRINCIPAL_ID.test('user:alice+tag@sub.example.com'), true);
+    assert.equal(SERVICE_PRINCIPAL_ID.test('service:deploy-check.access'), true);
+    assert.equal(SERVICE_PRINCIPAL_ID.test('service:///'), false);
 
     // Invalid emails and invalid principal IDs are rejected
     for (const badEmail of ['', 'plain', '@domain.com', 'a@b', 'a..b@example.com', '.a@example.com']) {
       assert.throws(() => normalizeEmail(badEmail));
     }
-    await assert.rejects(
-      () => store.create({ id: 'cloudflare:bad@example.com', displayName: 'Bad', emails: ['ok@example.com'], by: 'user:admin' }),
-      /invalid principal id/,
-    );
+    for (const badId of ['cloudflare:bad@example.com', 'user:@', 'user:///', 'user:foo@bar', 'user:a..b@example.com']) {
+      await assert.rejects(
+        () => store.create({ id: badId, displayName: 'Bad', emails: [`ok-${Math.random().toString(36).slice(2)}@example.com`], by: 'user:admin' }),
+        /invalid principal id/,
+      );
+    }
   });
 
   it('R2 & R8: FileDocBackend persists versioned snapshots across restarts and fails closed on corruption or write error', async () => {
@@ -305,7 +333,7 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
       const store2 = await PrincipalStore.open(new FileDocBackend<PrincipalsDoc>(dir));
       assert.deepEqual(store2.get('user:dale')?.emails, ['dale@sackrider.org', 'dale.alt@example.com']);
 
-      // Write failure leaves in-memory state untouched (no uncommitted grant/email in memory)
+      // Write failure marks store unhealthy (503 fail-closed, F2/R8) and leaves durable state untouched on reload
       const failingStore = await PrincipalStore.open({
         description: 'failing://',
         loadLatest: () => backend.loadLatest(),
@@ -314,7 +342,49 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
         },
       });
       await assert.rejects(() => failingStore.addEmail('user:dale', 'uncommitted@example.com', 'user:dale'), /disk full/);
+      assert.equal(failingStore.healthy, false);
+      assert.throws(() => failingStore.findByEmail('dale@sackrider.org'), PrincipalStoreUnavailableError);
+      await failingStore.reload();
+      assert.equal(failingStore.healthy, true);
       assert.equal(failingStore.findByEmail('uncommitted@example.com'), undefined);
+
+      // Orphaned uncommitted <n>.json (crash after writing 3.json before current.json):
+      // reload serves current.json (v2) rather than 3.json, and next commit skips 3.json to allocate 4.json (F2)
+      const orphanedData: PrincipalsDoc = {
+        principals: [
+          {
+            ...store2.get('user:dale')!,
+            emails: ['dale@sackrider.org', 'dale.alt@example.com', 'orphaned@example.com'],
+            version: 3,
+          },
+        ],
+      };
+      const orphanedSnap: VersionedSnapshot<PrincipalsDoc> = {
+        version: 3,
+        updatedAt: new Date().toISOString(),
+        updatedBy: 'user:dale',
+        sha256: snapshotSha256(orphanedData),
+        data: orphanedData,
+      };
+      writeFileSync(join(dir, '3.json'), `${JSON.stringify(orphanedSnap, null, 2)}\n`);
+      const recovered = await PrincipalStore.open(new FileDocBackend<PrincipalsDoc>(dir));
+      assert.equal(recovered.findByEmail('orphaned@example.com'), undefined, 'uncommitted 3.json must not be served');
+      assert.deepEqual(recovered.get('user:dale')?.emails, ['dale@sackrider.org', 'dale.alt@example.com']);
+      await recovered.addEmail('user:dale', 'committed4@example.com', 'user:dale');
+      assert.equal(existsSync(join(dir, '4.json')), true, 'next commit skips orphaned 3.json and writes 4.json');
+      assert.equal(JSON.parse(readFileSync(join(dir, 'current.json'), 'utf8')).version, 4);
+
+      // Missing current.json when version files exist fails closed (F2/R8)
+      const missingCurrentDir = mkdtempSync(join(tmpdir(), 'principals-nocurrent-'));
+      try {
+        cpSync(join(dir, '1.json'), join(missingCurrentDir, '1.json'));
+        await assert.rejects(
+          () => PrincipalStore.open(new FileDocBackend<PrincipalsDoc>(missingCurrentDir)),
+          /missing current\.json/,
+        );
+      } finally {
+        rmSync(missingCurrentDir, { recursive: true, force: true });
+      }
 
       // Tampering with snapshot data triggers sha256 mismatch -> open/reload throws and marks store unhealthy (R8 fail closed)
       const snap2 = JSON.parse(readFileSync(join(dir, '2.json'), 'utf8'));
@@ -398,5 +468,103 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
     } finally {
       rmSync(bucketDir, { recursive: true, force: true });
     }
+  });
+
+  it('R2, R8 & R12: GcsDocBackend supports gs:// and gcs:// via native GCS JSON API with ifGenerationMatch=0, retry, and fail-closed corruption checks', async () => {
+    const objects = new Map<string, string>();
+    let transientListFailures = 1;
+    let transientPointerFailures = 1;
+    const seenUrls: string[] = [];
+
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      seenUrls.push(`${init?.method ?? 'GET'} ${url.pathname}${url.search}`);
+      assert.equal((init?.headers as Record<string, string>)?.Authorization, 'Bearer test-gcs-token');
+
+      // Upload endpoint
+      if (url.pathname === '/upload/storage/v1/b/factory-gcp-cfg/o' && init?.method === 'POST') {
+        const name = url.searchParams.get('name')!;
+        const genMatch = url.searchParams.get('ifGenerationMatch');
+        if (genMatch === '0' && objects.has(name)) {
+          return new Response('PreconditionFailed', { status: 412 });
+        }
+        if (name.endsWith('/current.json') && transientPointerFailures > 0) {
+          transientPointerFailures--;
+          return new Response('Service Unavailable', { status: 503 });
+        }
+        objects.set(name, String(init?.body ?? ''));
+        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      // List endpoint (paginated into 1 item per page to exercise nextPageToken)
+      if (url.pathname === '/storage/v1/b/factory-gcp-cfg/o' && (!init?.method || init.method === 'GET')) {
+        if (transientListFailures > 0) {
+          transientListFailures--;
+          return new Response('Bad Gateway', { status: 502 });
+        }
+        const prefix = url.searchParams.get('prefix') ?? '';
+        const matching = [...objects.keys()].filter((k) => k.startsWith(prefix)).sort();
+        const idx = Number(url.searchParams.get('pageToken') ?? '0');
+        const slice = matching.slice(idx, idx + 1).map((name) => ({ name }));
+        const nextPageToken = idx + 1 < matching.length ? String(idx + 1) : undefined;
+        return new Response(JSON.stringify({ items: slice, ...(nextPageToken ? { nextPageToken } : {}) }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Media download endpoint
+      const dlMatch = url.pathname.match(/^\/storage\/v1\/b\/factory-gcp-cfg\/o\/(.+)$/);
+      if (dlMatch && url.searchParams.get('alt') === 'media') {
+        const key = decodeURIComponent(dlMatch[1]);
+        const content = objects.get(key);
+        if (content === undefined) return new Response('Not Found', { status: 404 });
+        return new Response(content, { status: 200 });
+      }
+
+      return new Response('Unexpected route', { status: 500 });
+    };
+
+    const gcsOpts = {
+      fetch: mockFetch,
+      getAccessToken: async () => 'test-gcs-token',
+      maxAttempts: 3,
+      retryDelayMs: 1,
+      apiEndpoint: 'https://storage.example.test',
+    };
+
+    const gcsBackend = docBackendFromUri<PrincipalsDoc>('gcs://factory-gcp-cfg/auth/principals', '/unused', { gcs: gcsOpts });
+    assert.equal(gcsBackend instanceof GcsDocBackend, true);
+    assert.equal(gcsBackend.description, 'gs://factory-gcp-cfg/auth/principals/');
+
+    const store = await PrincipalStore.open(gcsBackend);
+    await store.create({
+      id: 'user:stephanie',
+      displayName: 'Stephanie Sackrider',
+      emails: ['stephaniesackrider@hotmail.com', 'stephanie.sackrider@gmail.com'],
+      by: 'user:dale',
+    });
+
+    assert.ok(seenUrls.some((u) => u.includes('ifGenerationMatch=0') && u.includes('1.json')));
+    assert.equal(transientPointerFailures, 0, 'pointer upload retried after transient 503');
+
+    // Reload via gs:// URI exercises pagination + snapshot verification
+    const reloaded = await PrincipalStore.open(
+      docBackendFromUri<PrincipalsDoc>('gs://factory-gcp-cfg/auth/principals', '/unused', { gcs: gcsOpts }),
+    );
+    assert.equal(reloaded.findByEmail('stephanie.sackrider@gmail.com')?.id, 'user:stephanie');
+
+    // Conditional write collision (412 PreconditionFailed) throws
+    const rawSnap = (await gcsBackend.loadLatest())!;
+    await assert.rejects(() => gcsBackend.write(rawSnap), /412: PreconditionFailed/);
+
+    // Corrupting stored GCS object triggers fail-closed error on open (R8)
+    const tampered = JSON.parse(objects.get('auth/principals/1.json')!);
+    tampered.data.principals[0].emails.push('tampered@example.com');
+    objects.set('auth/principals/1.json', JSON.stringify(tampered));
+    await assert.rejects(
+      () => PrincipalStore.open(new GcsDocBackend<PrincipalsDoc>('gs://factory-gcp-cfg/auth/principals', gcsOpts)),
+      /sha256 mismatch/,
+    );
   });
 });

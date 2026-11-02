@@ -118,16 +118,52 @@ describe('oidc', () => {
     assert.deepEqual(await verifyOidcIdentity(goodJwt, opts), expected);
     assert.deepEqual(await verifyOidcIdentity(`Bearer ${goodJwt}`, opts), expected);
   });
+
+  it('requireEmailVerified alone enforces email_verified=true while preserving legacy oidc: actor and mapped roles', async () => {
+    const legacyVerifiedProvider = oidcAuth({
+      issuer: ISS,
+      audience: AUD,
+      keys: createLocalJWKSet(jwks as never),
+      requireEmailVerified: true,
+      adminEmails: ['dale@example.com'],
+    });
+
+    for (const unverified of [
+      { sub: 'u1', email: 'dale@example.com', roles: ['operator'] },
+      { sub: 'u1', email: 'dale@example.com', email_verified: false, roles: ['operator'] },
+      { sub: 'u1', email: 'dale@example.com', email_verified: 'true', roles: ['operator'] },
+    ]) {
+      assert.deepEqual(await legacyVerifiedProvider.verify(`Bearer ${await sign(unverified)}`), {
+        ok: false,
+        reason: 'email not verified',
+      });
+    }
+
+    const okRes = await legacyVerifiedProvider.verify(
+      `Bearer ${await sign({ sub: 'u1', email: 'dale@example.com', email_verified: true, roles: ['operator'] })}`,
+    );
+    assert.equal(okRes.ok, true);
+    if (okRes.ok) {
+      assert.equal(okRes.principal.actor, 'oidc:dale@example.com');
+      assert.deepEqual(okRes.principal.roles, ['operator', 'admin']);
+      assert.equal(okRes.claims, undefined);
+    }
+  });
 });
 
 describe('oidc discovery + remote JWKS', () => {
   let server: http.Server;
   let base = '';
+  let discoveryCalls = 0;
   before(async () => {
     server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      if (req.url === '/.well-known/openid-configuration') res.end(JSON.stringify({ issuer: base, jwks_uri: `${base}/jwks` }));
-      else res.end(JSON.stringify(jwks));
+      if (req.url === '/.well-known/openid-configuration') {
+        discoveryCalls++;
+        res.end(JSON.stringify({ issuer: base, jwks_uri: `${base}/jwks` }));
+      } else {
+        res.end(JSON.stringify(jwks));
+      }
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const addr = server.address();
@@ -136,10 +172,20 @@ describe('oidc discovery + remote JWKS', () => {
   });
   after(() => new Promise<void>((r) => server.close(() => r())));
 
-  it('fetches keys from the issuer and verifies', async () => {
+  it('fetches keys from the issuer and verifies, caching discovery across verifyOidcIdentity calls', async () => {
+    discoveryCalls = 0;
+    const jwt1 = await sign({ sub: 'u-steph-1', email: 'stephanie@example.com', email_verified: true }, signer, { iss: base });
+    const jwt2 = await sign({ sub: 'u-steph-2', email: 'dale@example.com', email_verified: true }, signer, { iss: base });
+    const r1 = await verifyOidcIdentity(jwt1, { issuer: base, audience: AUD });
+    const r2 = await verifyOidcIdentity(jwt2, { issuer: base, audience: AUD });
+    assert.equal(r1.ok, true, JSON.stringify(r1));
+    assert.equal(r2.ok, true, JSON.stringify(r2));
+    assert.equal(discoveryCalls, 1, 'verifyOidcIdentity must reuse cached OIDC discovery/JWKS resolver per issuer');
+
     const auth = oidcAuth({ issuer: base, audience: AUD });
-    const r = await auth.verify(`Bearer ${await sign({ sub: 'u3', roles: 'viewer' }, signer, { iss: base })}`);
-    assert.equal(r.ok, true, JSON.stringify(r));
+    const r3 = await auth.verify(`Bearer ${await sign({ sub: 'u3', roles: 'viewer' }, signer, { iss: base })}`);
+    assert.equal(r3.ok, true, JSON.stringify(r3));
+    assert.equal(discoveryCalls, 1);
   });
 });
 

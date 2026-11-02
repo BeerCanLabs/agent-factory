@@ -495,11 +495,32 @@ describe('AM2 a person conversing directly speaks as themselves', () => {
 describe('S1 canonical & legacy actor normalization (AC3)', () => {
   it('parseActor accepts canonical user:/service: alongside legacy cloudflare:/oidc:/token:', () => {
     assert.equal(parseActor('USER:Stephanie'), 'user:stephanie');
+    assert.equal(parseActor('USER:Alice+Tag@Sub.Example.com'), 'user:alice+tag@sub.example.com');
     assert.equal(parseActor('Service:Gatekeeper-Egress'), 'service:gatekeeper-egress');
     assert.equal(parseActor('Cloudflare:Alice@Example.com'), 'cloudflare:alice@example.com');
     assert.equal(parseActor('OIDC:Bob@Example.com'), 'oidc:bob@example.com');
+    assert.equal(parseActor('OIDC:Carol'), 'oidc:carol');
     assert.equal(parseActor('token:Admin'), 'token:admin');
-    for (const bad of ['', 'alice', 'email:alice@example.com', 'user:', 'service:', 'user:a b', 42, null]) {
+    assert.equal(parseActor('token:agent:helper'), 'token:agent:helper');
+    for (const bad of [
+      '',
+      'alice',
+      'email:alice@example.com',
+      'user:',
+      'user:///',
+      'user:@',
+      'user:a..b@example.com',
+      'service:',
+      'service:///',
+      'service:a b',
+      'token:',
+      'token:///',
+      'cloudflare:',
+      'cloudflare:///',
+      'user:a b',
+      42,
+      null,
+    ]) {
       assert.equal(parseActor(bad), undefined, JSON.stringify(bad));
     }
   });
@@ -520,6 +541,9 @@ describe('S1 canonical & legacy actor normalization (AC3)', () => {
     assert.equal(normalizeActorToPrincipal('Service:Ingress'), 'service:ingress');
     assert.equal(normalizeActorToPrincipal('cloudflare-service:Deploy.Access'), 'service:deploy.access');
     assert.equal(normalizeActorToPrincipal('Token:Admin'), 'token:admin');
+    assert.equal(normalizeActorToPrincipal('token:agent:helper'), 'token:agent:helper');
+    assert.equal(normalizeActorToPrincipal('OIDC:Carol'), 'user:carol');
+    assert.equal(normalizeActorToPrincipal('user:Alice+Tag@Sub.Example.com'), 'user:alice+tag@sub.example.com');
 
     // With store: multi-email aliases across IdPs collapse to the one canonical PrincipalRecord.id
     assert.equal(normalizeActorToPrincipal('cloudflare:StephanieSackrider@Hotmail.com', store), 'user:stephanie');
@@ -562,8 +586,25 @@ describe('S1 canonical & legacy actor normalization (AC3)', () => {
     assert.equal(normalizedLink.linkedBy, 'user:dale@example.com');
     assert.deepEqual({ ...normalizedLink.agentRoles }, { higgins: ['Realtor'] });
 
-    assert.throws(() => normalizeActorToPrincipal(''), /invalid actor/);
-    assert.throws(() => normalizeActorToPrincipal('not-an-actor-or-email'), /invalid/);
-    assert.throws(() => normalizeActorToPrincipal('unknown:alice'), /invalid actor/);
+    for (const bad of [
+      '',
+      'not-an-actor-or-email',
+      'unknown:alice',
+      'user:///',
+      'user:@',
+      'user:foo@bar',
+      'user:a..b@example.com',
+      'service:a b',
+      'service:///',
+      'cloudflare:',
+      'cloudflare:notanemail',
+      'cloudflare:///',
+      'oidc:///',
+      'oidc:foo@bar',
+      'token:///',
+      'token:agent:',
+    ]) {
+      assert.throws(() => normalizeActorToPrincipal(bad, store), /invalid/, `expected throw for ${JSON.stringify(bad)}`);
+    }
   });
 });

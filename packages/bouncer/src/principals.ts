@@ -8,7 +8,11 @@ import type { Principal } from '@beercanlabs/factory-auth';
 
 const execFileAsync = promisify(execFile);
 
-export const PRINCIPAL_ID = /^user:[a-z0-9][a-z0-9._-]{0,127}$/;
+/** Canonical user principal actor (`user:<slug>` or `user:<lowercased-email>`, length <= 256). */
+export const PRINCIPAL_ID = /^(?!.*@.*@)(?!.*\.\.)user:[a-z0-9](?:[a-z0-9._@+-]{0,249}[a-z0-9])?$/;
+/** Canonical service principal actor (`service:<name>`, length <= 256). */
+export const SERVICE_PRINCIPAL_ID = /^service:[a-z0-9][a-z0-9._-]{0,247}$/;
+
 const VERSION_FILE = /^([1-9]\d*)\.json$/;
 const EMAIL_LOCAL = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/;
 const EMAIL_DOMAIN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
@@ -21,13 +25,27 @@ export type VersionedSnapshot<T> = {
   data: T;
 };
 
+export type VersionedLoadState<T> = {
+  snapshot: VersionedSnapshot<T> | undefined;
+  maxSeenVersion: number;
+};
+
 export interface VersionedDocBackend<T> {
   readonly description: string;
   loadLatest(): Promise<VersionedSnapshot<T> | undefined>;
+  loadState?(): Promise<VersionedLoadState<T>>;
   write(snapshot: VersionedSnapshot<T>): Promise<void>;
 }
 
 export type AwsCliRunner = (args: string[]) => Promise<string>;
+
+export type GcsDocBackendOptions = {
+  maxAttempts?: number;
+  retryDelayMs?: number;
+  fetch?: typeof fetch;
+  getAccessToken?: () => Promise<string>;
+  apiEndpoint?: string;
+};
 
 function sortDeep(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortDeep);
@@ -46,8 +64,8 @@ export function snapshotSha256(data: unknown): string {
   return createHash('sha256').update(JSON.stringify(sortDeep(data))).digest('hex');
 }
 
-function readSnapshotDir<T>(dir: string): VersionedSnapshot<T> | undefined {
-  if (!existsSync(dir)) return undefined;
+function readSnapshotDir<T>(dir: string): VersionedLoadState<T> {
+  if (!existsSync(dir)) return { snapshot: undefined, maxSeenVersion: 0 };
   const entries = readdirSync(dir);
   const versions = new Map<number, VersionedSnapshot<T>>();
   for (const name of entries) {
@@ -64,19 +82,22 @@ function readSnapshotDir<T>(dir: string): VersionedSnapshot<T> | undefined {
     versions.set(expectedVersion, raw);
   }
   const currentPath = join(dir, 'current.json');
-  if (existsSync(currentPath)) {
-    const ptr = JSON.parse(readFileSync(currentPath, 'utf8')) as { version?: unknown; sha256?: unknown };
-    if (typeof ptr?.version !== 'number' || typeof ptr?.sha256 !== 'string') {
-      throw new Error('corrupt current.json pointer');
-    }
-    const target = versions.get(ptr.version);
-    if (!target || target.sha256 !== ptr.sha256) {
-      throw new Error(`current.json points to missing or mismatched version ${String(ptr.version)}`);
-    }
+  const hasCurrent = existsSync(currentPath);
+  if (versions.size === 0 && !hasCurrent) {
+    return { snapshot: undefined, maxSeenVersion: 0 };
   }
-  if (versions.size === 0) return undefined;
-  const maxVersion = Math.max(...versions.keys());
-  return versions.get(maxVersion);
+  if (!hasCurrent) {
+    throw new Error('corrupt snapshot store: missing current.json pointer');
+  }
+  const ptr = JSON.parse(readFileSync(currentPath, 'utf8')) as { version?: unknown; sha256?: unknown };
+  if (typeof ptr?.version !== 'number' || typeof ptr?.sha256 !== 'string') {
+    throw new Error('corrupt current.json pointer');
+  }
+  const target = versions.get(ptr.version);
+  if (!target || target.sha256 !== ptr.sha256) {
+    throw new Error(`current.json points to missing or mismatched version ${String(ptr.version)}`);
+  }
+  return { snapshot: target, maxSeenVersion: Math.max(...versions.keys()) };
 }
 
 let tmpSeq = 0;
@@ -88,8 +109,12 @@ export class FileDocBackend<T> implements VersionedDocBackend<T> {
     this.description = `file://${dir}`;
   }
 
-  async loadLatest(): Promise<VersionedSnapshot<T> | undefined> {
+  async loadState(): Promise<VersionedLoadState<T>> {
     return readSnapshotDir<T>(this.dir);
+  }
+
+  async loadLatest(): Promise<VersionedSnapshot<T> | undefined> {
+    return (await this.loadState()).snapshot;
   }
 
   async write(snapshot: VersionedSnapshot<T>): Promise<void> {
@@ -136,7 +161,7 @@ export class S3CliDocBackend<T> implements VersionedDocBackend<T> {
       });
   }
 
-  async loadLatest(): Promise<VersionedSnapshot<T> | undefined> {
+  async loadState(): Promise<VersionedLoadState<T>> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       const dir = mkdtempSync(join(tmpdir(), 'bouncer-doc-load-'));
@@ -153,6 +178,10 @@ export class S3CliDocBackend<T> implements VersionedDocBackend<T> {
       }
     }
     throw lastErr;
+  }
+
+  async loadLatest(): Promise<VersionedSnapshot<T> | undefined> {
+    return (await this.loadState()).snapshot;
   }
 
   async write(snapshot: VersionedSnapshot<T>): Promise<void> {
@@ -174,26 +203,192 @@ export class S3CliDocBackend<T> implements VersionedDocBackend<T> {
         '--checksum-algorithm', 'SHA256',
         '--if-none-match', '*',
       ]);
-      await this.cli([
-        's3api', 'put-object',
-        '--bucket', this.bucket,
-        '--key', `${this.prefix}current.json`,
-        '--body', currentFile,
-        '--content-type', 'application/json',
-        '--checksum-algorithm', 'SHA256',
-      ]);
+      let pointerErr: unknown;
+      for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+        try {
+          await this.cli([
+            's3api', 'put-object',
+            '--bucket', this.bucket,
+            '--key', `${this.prefix}current.json`,
+            '--body', currentFile,
+            '--content-type', 'application/json',
+            '--checksum-algorithm', 'SHA256',
+          ]);
+          pointerErr = undefined;
+          break;
+        } catch (err) {
+          pointerErr = err;
+          if (attempt < this.maxAttempts && this.retryDelayMs > 0) {
+            await new Promise((r) => setTimeout(r, this.retryDelayMs * 2 ** (attempt - 1)));
+          }
+        }
+      }
+      if (pointerErr !== undefined) throw pointerErr;
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }
 }
 
+let cachedBouncerGcsToken: { token: string; expiresAt: number } | undefined;
+
+async function defaultBouncerGcsToken(fetchFn: typeof fetch = fetch): Promise<string> {
+  if (process.env.GOOGLE_OAUTH_ACCESS_TOKEN) return process.env.GOOGLE_OAUTH_ACCESS_TOKEN.trim();
+  if (cachedBouncerGcsToken && Date.now() < cachedBouncerGcsToken.expiresAt - 60_000) return cachedBouncerGcsToken.token;
+  try {
+    const res = await fetchFn('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', {
+      headers: { 'Metadata-Flavor': 'Google' },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { access_token: string; expires_in?: number };
+      if (data.access_token) {
+        cachedBouncerGcsToken = { token: data.access_token, expiresAt: Date.now() + (data.expires_in ?? 300) * 1000 };
+        return data.access_token;
+      }
+    }
+  } catch {
+    // Fall back to gcloud CLI on local developer machines
+  }
+  const { stdout } = await execFileAsync('gcloud', ['auth', 'print-access-token'], { encoding: 'utf8', timeout: 10_000 });
+  return stdout.trim();
+}
+
+/** GCS versioned document store via native GCS JSON API (`ifGenerationMatch=0`, no cloud SDK in kernel per GAP-014; R2, R8, R12). */
+export class GcsDocBackend<T> implements VersionedDocBackend<T> {
+  readonly description: string;
+  private readonly bucket: string;
+  private readonly prefix: string;
+  private readonly maxAttempts: number;
+  private readonly retryDelayMs: number;
+  private readonly fetchFn: typeof fetch;
+  private readonly tokenFn: () => Promise<string>;
+  private readonly endpoint: string;
+
+  constructor(uri: string, options?: GcsDocBackendOptions) {
+    const m = uri.match(/^(?:gs|gcs):\/\/([^/]+)\/?(.*)$/);
+    if (!m) throw new Error(`not a gs:// or gcs:// uri: ${uri}`);
+    this.bucket = m[1];
+    this.prefix = m[2] ? `${m[2].replace(/\/+$/, '')}/` : '';
+    this.description = `gs://${this.bucket}/${this.prefix}`;
+    this.maxAttempts = Math.max(1, options?.maxAttempts ?? 3);
+    this.retryDelayMs = Math.max(0, options?.retryDelayMs ?? 500);
+    this.fetchFn = options?.fetch ?? fetch;
+    this.tokenFn = options?.getAccessToken ?? (() => defaultBouncerGcsToken(this.fetchFn));
+    this.endpoint = (options?.apiEndpoint ?? process.env.GCS_API_ENDPOINT ?? 'https://storage.googleapis.com').replace(/\/$/, '');
+  }
+
+  async loadState(): Promise<VersionedLoadState<T>> {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      const dir = mkdtempSync(join(tmpdir(), 'bouncer-gcs-load-'));
+      try {
+        const token = await this.tokenFn();
+        let pageToken: string | undefined;
+        do {
+          const params = new URLSearchParams();
+          if (this.prefix) params.set('prefix', this.prefix);
+          if (pageToken) params.set('pageToken', pageToken);
+          const listRes = await this.fetchFn(
+            `${this.endpoint}/storage/v1/b/${encodeURIComponent(this.bucket)}/o?${params.toString()}`,
+            { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) },
+          );
+          if (!listRes.ok) throw new Error(`GCS doc list failed (${listRes.status})`);
+          const data = (await listRes.json()) as { items?: Array<{ name?: string }>; nextPageToken?: string };
+          for (const item of data.items ?? []) {
+            const name = item.name ?? '';
+            if (!name.startsWith(this.prefix)) continue;
+            const rel = name.slice(this.prefix.length);
+            if (!rel || rel.includes('/') || (!VERSION_FILE.test(rel) && rel !== 'current.json')) continue;
+            const dlRes = await this.fetchFn(
+              `${this.endpoint}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(name)}?alt=media`,
+              { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) },
+            );
+            if (!dlRes.ok) throw new Error(`GCS doc download failed (${dlRes.status})`);
+            writeFileSync(join(dir, rel), await dlRes.text());
+          }
+          pageToken = data.nextPageToken;
+        } while (pageToken);
+        return readSnapshotDir<T>(dir);
+      } catch (err) {
+        lastErr = err;
+        if (attempt < this.maxAttempts && this.retryDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, this.retryDelayMs * 2 ** (attempt - 1)));
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+    throw lastErr;
+  }
+
+  async loadLatest(): Promise<VersionedSnapshot<T> | undefined> {
+    return (await this.loadState()).snapshot;
+  }
+
+  async write(snapshot: VersionedSnapshot<T>): Promise<void> {
+    if (!Number.isInteger(snapshot.version) || snapshot.version < 1) {
+      throw new Error(`invalid snapshot version: ${snapshot.version}`);
+    }
+    const token = await this.tokenFn();
+    const versionKey = `${this.prefix}${snapshot.version}.json`;
+    const currentKey = `${this.prefix}current.json`;
+
+    const vRes = await this.fetchFn(
+      `${this.endpoint}/upload/storage/v1/b/${encodeURIComponent(this.bucket)}/o?uploadType=media&ifGenerationMatch=0&name=${encodeURIComponent(versionKey)}`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: `${JSON.stringify(snapshot, null, 2)}\n`,
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+    if (!vRes.ok) {
+      throw new Error(`GCS doc write failed (${vRes.status}: PreconditionFailed)`);
+    }
+
+    const ptrBody = `${JSON.stringify({ version: snapshot.version, sha256: snapshot.sha256 })}\n`;
+    let pointerErr: unknown;
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      try {
+        const cRes = await this.fetchFn(
+          `${this.endpoint}/upload/storage/v1/b/${encodeURIComponent(this.bucket)}/o?uploadType=media&name=${encodeURIComponent(currentKey)}`,
+          {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: ptrBody,
+            signal: AbortSignal.timeout(30_000),
+          },
+        );
+        if (!cRes.ok) throw new Error(`GCS doc pointer write failed (${cRes.status})`);
+        pointerErr = undefined;
+        break;
+      } catch (err) {
+        pointerErr = err;
+        if (attempt < this.maxAttempts && this.retryDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, this.retryDelayMs * 2 ** (attempt - 1)));
+        }
+      }
+    }
+    if (pointerErr !== undefined) throw pointerErr;
+  }
+}
+
 export class MemoryDocBackend<T> implements VersionedDocBackend<T> {
   readonly description = 'memory://';
   private latest?: VersionedSnapshot<T>;
+
+  async loadState(): Promise<VersionedLoadState<T>> {
+    return {
+      snapshot: this.latest ? structuredClone(this.latest) : undefined,
+      maxSeenVersion: this.latest?.version ?? 0,
+    };
+  }
+
   async loadLatest(): Promise<VersionedSnapshot<T> | undefined> {
     return this.latest ? structuredClone(this.latest) : undefined;
   }
+
   async write(snapshot: VersionedSnapshot<T>): Promise<void> {
     if (this.latest && snapshot.version <= this.latest.version) {
       throw new Error(`snapshot version ${snapshot.version} already exists`);
@@ -202,10 +397,17 @@ export class MemoryDocBackend<T> implements VersionedDocBackend<T> {
   }
 }
 
-export function docBackendFromUri<T>(uri: string | undefined, fallbackDir: string, cli?: AwsCliRunner): VersionedDocBackend<T> {
+export function docBackendFromUri<T>(
+  uri: string | undefined,
+  fallbackDir: string,
+  cliOrOptions?: AwsCliRunner | { cli?: AwsCliRunner; gcs?: GcsDocBackendOptions },
+): VersionedDocBackend<T> {
+  const cli = typeof cliOrOptions === 'function' ? cliOrOptions : cliOrOptions?.cli;
+  const gcs = typeof cliOrOptions === 'object' ? cliOrOptions?.gcs : undefined;
   const u = uri?.trim();
   if (!u) return new FileDocBackend<T>(fallbackDir);
   if (u.startsWith('s3://')) return new S3CliDocBackend<T>(u, cli);
+  if (u.startsWith('gs://') || u.startsWith('gcs://')) return new GcsDocBackend<T>(u, gcs);
   if (u.startsWith('file://')) return new FileDocBackend<T>(u.slice('file://'.length));
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) throw new Error(`unsupported backend uri: ${u}`);
   return new FileDocBackend<T>(u);
@@ -281,6 +483,19 @@ export function normalizeEmail(raw: unknown): string {
   return clean;
 }
 
+export function isValidUserPrincipalId(id: string): boolean {
+  if (!PRINCIPAL_ID.test(id)) return false;
+  const suffix = id.slice('user:'.length);
+  if (suffix.includes('@')) {
+    try {
+      return normalizeEmail(suffix) === suffix;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 export type CreatePrincipalInput = {
   id?: string;
   displayName: string;
@@ -315,7 +530,7 @@ function deriveSlugFromEmail(email: string, existing: ReadonlyMap<string, Princi
 
 /**
  * Versioned canonical principal directory (D2, D6, D32, R2, R8).
- * Maps each person (`user:<slug>`) to 1..N globally unique verified lowercased emails across IdPs.
+ * Maps each person (`user:<slug>` or `user:<email>`) to 1..N globally unique verified lowercased emails across IdPs.
  */
 export class PrincipalStore {
   private byId = new Map<string, PrincipalRecord>();
@@ -357,11 +572,17 @@ export class PrincipalStore {
 
   async reload(): Promise<void> {
     try {
-      const snap = await this.backend.loadLatest();
+      const state = this.backend.loadState
+        ? await this.backend.loadState()
+        : await (async () => {
+            const snapshot = await this.backend.loadLatest();
+            return { snapshot, maxSeenVersion: snapshot?.version ?? 0 };
+          })();
+      const snap = state.snapshot;
       const nextById = new Map<string, PrincipalRecord>();
       const nextByEmail = new Map<string, string>();
       for (const raw of snap?.data?.principals ?? []) {
-        if (!raw || !PRINCIPAL_ID.test(raw.id) || nextById.has(raw.id)) {
+        if (!raw || !isValidUserPrincipalId(raw.id) || nextById.has(raw.id)) {
           throw new Error(`invalid or duplicate principal id in store: ${JSON.stringify(raw?.id)}`);
         }
         if (typeof raw.displayName !== 'string' || !raw.displayName.trim()) {
@@ -388,7 +609,7 @@ export class PrincipalStore {
       }
       this.byId = nextById;
       this.byEmail = nextByEmail;
-      this.docVersion = snap?.version ?? 0;
+      this.docVersion = Math.max(snap?.version ?? 0, state.maxSeenVersion);
       this.unhealthy = undefined;
     } catch (err) {
       this.unhealthy = err;
@@ -435,7 +656,7 @@ export class PrincipalStore {
         if (!emails.includes(norm)) emails.push(norm);
       }
       const id = input.id !== undefined ? input.id.trim().toLowerCase() : deriveSlugFromEmail(emails[0], this.byId);
-      if (!PRINCIPAL_ID.test(id)) throw new Error(`invalid principal id '${id}': expected user:<slug>`);
+      if (!isValidUserPrincipalId(id)) throw new Error(`invalid principal id '${id}': expected user:<slug> or user:<email>`);
       if (this.byId.has(id)) throw new DuplicatePrincipalIdError(id);
 
       const nowIso = this.now().toISOString();
@@ -499,6 +720,7 @@ export class PrincipalStore {
       const next: PrincipalRecord = {
         ...structuredClone(target),
         emails: target.emails.filter((e) => e !== norm),
+        idpBindings: target.idpBindings.filter((b) => b.email !== norm).map((b) => ({ ...b })),
         version: target.version + 1,
         updatedAt: nowIso,
         updatedBy: actor,
@@ -573,13 +795,18 @@ export class PrincipalStore {
     const principals = [...nextMap.values()].sort((a, b) => a.id.localeCompare(b.id));
     const data: PrincipalsDoc = { principals };
     const nextVersion = this.docVersion + 1;
-    await this.backend.write({
-      version: nextVersion,
-      updatedAt,
-      updatedBy,
-      sha256: snapshotSha256(data),
-      data,
-    });
+    try {
+      await this.backend.write({
+        version: nextVersion,
+        updatedAt,
+        updatedBy,
+        sha256: snapshotSha256(data),
+        data,
+      });
+    } catch (err) {
+      this.unhealthy = err;
+      throw err;
+    }
     this.byId = nextMap;
     if (removedEmail) this.byEmail.delete(removedEmail);
     for (const e of record.emails) this.byEmail.set(e, record.id);

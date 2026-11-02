@@ -207,11 +207,39 @@ describe('A2 Cloudflare Access assertion verifier', () => {
       principal: { actor: 'service:ci-runner.access', roles: [] },
     });
 
-    // Explicit email_verified: false is refused in identityOnly mode; missing email_verified is refused when requireEmailVerified: true.
-    assert.deepEqual(await identityAuth.verify(token({ email: 'admin@example.com', email_verified: false })), {
+    // R13/D1: identityOnly alone (without requireEmailVerified) requires explicit boolean email_verified === true.
+    for (const bad of [
+      { email: 'admin@example.com' },
+      { email: 'admin@example.com', email_verified: false },
+      { email: 'admin@example.com', email_verified: 'false' },
+      { email: 'admin@example.com', email_verified: 'true' },
+      { email: 'admin@example.com', email_verified: 0 },
+    ]) {
+      assert.deepEqual(
+        await identityAuth.verify(token(bad)),
+        { ok: false, reason: 'email not verified' },
+        `expected rejection for ${JSON.stringify(bad)}`,
+      );
+      assert.deepEqual(
+        await identityAuth.verifyAssertion(token(bad)),
+        { ok: false, reason: 'email not verified' },
+        `expected verifyAssertion rejection for ${JSON.stringify(bad)}`,
+      );
+    }
+
+    // requireEmailVerified alone enforces email_verified === true while keeping legacy cloudflare: principal mapping.
+    const { auth: legacyStrictAuth } = auth({ requireEmailVerified: true, adminEmails: ['admin@example.com'] });
+    assert.deepEqual(await legacyStrictAuth.verify(token({ email: 'admin@example.com' })), {
       ok: false,
       reason: 'email not verified',
     });
+    const legacyVerified = await legacyStrictAuth.verify(token({ email: 'admin@example.com', email_verified: true }));
+    assert.equal(legacyVerified.ok, true);
+    if (legacyVerified.ok) {
+      assert.equal(legacyVerified.principal.actor, 'cloudflare:admin@example.com');
+      assert.ok(legacyVerified.principal.roles.includes('admin'));
+    }
+
     const { auth: strictAuth } = auth({ identityOnly: true, requireEmailVerified: true });
     assert.deepEqual(await strictAuth.verify(token({ email: 'admin@example.com' })), {
       ok: false,

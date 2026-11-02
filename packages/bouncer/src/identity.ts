@@ -2,10 +2,18 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
 import { authorize } from './authorize.js';
-import { normalizeEmail, type PrincipalStore } from './principals.js';
+import {
+  SERVICE_PRINCIPAL_ID,
+  isValidUserPrincipalId,
+  normalizeEmail,
+  type PrincipalStore,
+} from './principals.js';
 import { ROLE_PRIVILEGES, type Privilege } from './privileges.js';
 
-export const PRINCIPAL_ACTOR = /^(user|service|cloudflare|oidc|token):\S+$/;
+const TOKEN_ACTOR = /^token:[a-z0-9](?:[a-z0-9._:-]{0,247}[a-z0-9])?$/;
+
+export const PRINCIPAL_ACTOR =
+  /^(?:(?!.*@.*@)(?!.*\.\.)user:[a-z0-9](?:[a-z0-9._@+-]{0,249}[a-z0-9])?|service:[a-z0-9][a-z0-9._-]{0,247}|token:[a-z0-9](?:[a-z0-9._:-]{0,247}[a-z0-9])?|(?:cloudflare|oidc):[a-z0-9](?:[a-z0-9._@+-]{0,249}[a-z0-9])?)$/;
 
 /** A principal actor as stored (trimmed, lower-case), or undefined when it is not one. */
 export function parseActor(value: unknown): string | undefined {
@@ -27,23 +35,44 @@ export function normalizeActorToPrincipal(actor: string, store?: PrincipalStore)
   const colon = trimmed.indexOf(':');
   if (colon === -1) {
     const email = normalizeEmail(trimmed);
-    return store?.findByEmail(email)?.id ?? `user:${email}`;
+    const candidate = `user:${email}`;
+    if (!isValidUserPrincipalId(candidate)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
+    return store?.findByEmail(email)?.id ?? candidate;
   }
   const prefix = trimmed.slice(0, colon);
   const rest = trimmed.slice(colon + 1);
   if (!rest) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
-  if (prefix === 'cloudflare' || prefix === 'oidc') {
-    const found = store?.findByEmail(rest) ?? store?.get(`user:${rest}`);
-    return found ? found.id : `user:${rest}`;
+  if (prefix === 'cloudflare') {
+    const email = normalizeEmail(rest);
+    const candidate = `user:${email}`;
+    if (!isValidUserPrincipalId(candidate)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
+    const found = store?.findByEmail(email) ?? store?.get(candidate);
+    return found ? found.id : candidate;
+  }
+  if (prefix === 'oidc') {
+    if (rest.includes('@')) {
+      const email = normalizeEmail(rest);
+      const candidate = `user:${email}`;
+      if (!isValidUserPrincipalId(candidate)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
+      const found = store?.findByEmail(email) ?? store?.get(candidate);
+      return found ? found.id : candidate;
+    }
+    const candidate = `user:${rest}`;
+    if (!isValidUserPrincipalId(candidate)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
+    return store?.get(candidate)?.id ?? candidate;
   }
   if (prefix === 'user') {
-    const found = store?.get(trimmed) ?? store?.findByEmail(rest);
+    if (!isValidUserPrincipalId(trimmed)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
+    const found = store?.get(trimmed) ?? (rest.includes('@') ? store?.findByEmail(rest) : undefined);
     return found ? found.id : trimmed;
   }
   if (prefix === 'service' || prefix === 'cloudflare-service') {
-    return `service:${rest}`;
+    const candidate = `service:${rest}`;
+    if (!SERVICE_PRINCIPAL_ID.test(candidate)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
+    return candidate;
   }
   if (prefix === 'token') {
+    if (!TOKEN_ACTOR.test(trimmed)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
     return trimmed;
   }
   throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
