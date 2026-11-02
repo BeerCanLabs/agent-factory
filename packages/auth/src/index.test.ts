@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type CryptoKey } from 'jose';
-import { authFromEnv, bearerAuth, oidcAuth } from './index.js';
+import { authFromEnv, bearerAuth, oidcAuth, verifyOidcIdentity } from './index.js';
 
 const ISS = 'https://idp.example';
 const AUD = 'factory';
@@ -74,6 +74,49 @@ describe('oidc', () => {
     const r = await mapped.verify(`Bearer ${await sign({ sub: 'u2', groups: ['grp-approvers', 'grp-other'] })}`);
     assert.ok(r.ok);
     if (r.ok) assert.deepEqual(r.principal.roles, ['approver']);
+  });
+
+  it('S1 identityOnly / verifyOidcIdentity requires email_verified=true and strips all claim/env roles', async () => {
+    const opts = {
+      issuer: ISS,
+      audience: AUD,
+      keys: createLocalJWKSet(jwks as never),
+      identityOnly: true,
+      adminEmails: ['stephaniesackrider@hotmail.com'],
+    };
+    const identityProvider = oidcAuth(opts);
+
+    // Unverified or missing email_verified is refused before any principal resolution
+    for (const badClaims of [
+      { sub: 'u1', email: 'stephaniesackrider@hotmail.com', email_verified: false, roles: ['admin'] },
+      { sub: 'u1', email: 'stephaniesackrider@hotmail.com', roles: ['admin'] },
+      { sub: 'u1', email: 'stephaniesackrider@hotmail.com', email_verified: 'true' },
+    ]) {
+      const jwt = await sign(badClaims);
+      assert.deepEqual(await identityProvider.verify(`Bearer ${jwt}`), { ok: false, reason: 'email not verified' });
+      assert.deepEqual(await verifyOidcIdentity(jwt, opts), { ok: false, reason: 'email not verified' });
+    }
+
+    assert.deepEqual(
+      await verifyOidcIdentity(await sign({ sub: 'u1', email_verified: true }), opts),
+      { ok: false, reason: 'jwt has no email' },
+    );
+
+    // Verified assertion normalizes email to lowercase and yields zero roles regardless of JWT claims or adminEmails
+    const goodJwt = await sign({
+      sub: 'ms-sub-42',
+      email: 'StephanieSackrider@Hotmail.COM',
+      email_verified: true,
+      roles: ['admin', 'operator'],
+    });
+    const expected = {
+      ok: true as const,
+      principal: { actor: 'user:stephaniesackrider@hotmail.com', roles: [] },
+      claims: { email: 'stephaniesackrider@hotmail.com', emailVerified: true as const, sub: 'ms-sub-42' },
+    };
+    assert.deepEqual(await identityProvider.verify(`Bearer ${goodJwt}`), expected);
+    assert.deepEqual(await verifyOidcIdentity(goodJwt, opts), expected);
+    assert.deepEqual(await verifyOidcIdentity(`Bearer ${goodJwt}`, opts), expected);
   });
 });
 

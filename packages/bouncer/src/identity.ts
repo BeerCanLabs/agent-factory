@@ -2,14 +2,76 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
 import { authorize } from './authorize.js';
+import { normalizeEmail, type PrincipalStore } from './principals.js';
 import { ROLE_PRIVILEGES, type Privilege } from './privileges.js';
 
-export const PRINCIPAL_ACTOR = /^(cloudflare|oidc|token):\S+$/;
+export const PRINCIPAL_ACTOR = /^(user|service|cloudflare|oidc|token):\S+$/;
 
 /** A principal actor as stored (trimmed, lower-case), or undefined when it is not one. */
 export function parseActor(value: unknown): string | undefined {
   const actor = typeof value === 'string' ? value.trim().toLowerCase() : '';
   return PRINCIPAL_ACTOR.test(actor) && actor.length <= 256 ? actor : undefined;
+}
+
+/**
+ * Maps legacy `cloudflare:<email>` / `oidc:<email>` (and bare group emails) to the matching `PrincipalRecord.id`
+ * in `store` (or deterministic `user:<lowercased-email>` when no store record exists yet), and normalizes
+ * `user:<id>`, `service:<name>`, `cloudflare-service:<cn>`, and `token:<name>` to lowercase (D2, S1).
+ */
+export function normalizeActorToPrincipal(actor: string, store?: PrincipalStore): string {
+  if (typeof actor !== 'string') throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
+  const trimmed = actor.trim().toLowerCase();
+  if (!trimmed || trimmed.length > 256 || /\s/.test(trimmed)) {
+    throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
+  }
+  const colon = trimmed.indexOf(':');
+  if (colon === -1) {
+    const email = normalizeEmail(trimmed);
+    return store?.findByEmail(email)?.id ?? `user:${email}`;
+  }
+  const prefix = trimmed.slice(0, colon);
+  const rest = trimmed.slice(colon + 1);
+  if (!rest) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
+  if (prefix === 'cloudflare' || prefix === 'oidc') {
+    const found = store?.findByEmail(rest) ?? store?.get(`user:${rest}`);
+    return found ? found.id : `user:${rest}`;
+  }
+  if (prefix === 'user') {
+    const found = store?.get(trimmed) ?? store?.findByEmail(rest);
+    return found ? found.id : trimmed;
+  }
+  if (prefix === 'service' || prefix === 'cloudflare-service') {
+    return `service:${rest}`;
+  }
+  if (prefix === 'token') {
+    return trimmed;
+  }
+  throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
+}
+
+export const normalizeLegacyActor = normalizeActorToPrincipal;
+
+export function normalizeOwnersToPrincipals(owners: readonly string[], store?: PrincipalStore): string[] {
+  return [...new Set(owners.map((o) => normalizeActorToPrincipal(o, store)))].sort();
+}
+
+export function normalizeGroupMembersToPrincipals(members: readonly string[], store?: PrincipalStore): string[] {
+  return [...new Set(members.map((m) => normalizeActorToPrincipal(m, store)))].sort();
+}
+
+export function normalizeIdentityLink(link: IdentityLink, store?: PrincipalStore): IdentityLink {
+  let linkedBy = link.linkedBy;
+  try {
+    linkedBy = normalizeActorToPrincipal(link.linkedBy, store);
+  } catch {
+    // Preserve non-actor provenance labels (e.g. 'system') unchanged.
+  }
+  return {
+    ...structuredClone(link),
+    ...(link.agentRoles ? { agentRoles: sanitizeAgentRoles(link.agentRoles) } : {}),
+    actor: normalizeActorToPrincipal(link.actor, store),
+    linkedBy,
+  };
 }
 
 export const PROVIDERS = ['discord', 'slack', 'teams', 'webui', 'cli'] as const;
@@ -360,7 +422,7 @@ export function directCaller(principal: Principal, owners: readonly string[], pr
     : isOwner
       ? 'agent-owner'
       : (principal.roles.find((r) => ROLE_PRIVILEGES[r]?.includes(privilege)) ?? principal.roles[0] ?? 'operator');
-  // A service token (token:<name>) is an API client, not a person at the console.
-  const provider = principal.actor.startsWith('token:') ? 'api' : 'console';
+  // A service token (token:<name> or service:<name>) is an API client, not a person at the console.
+  const provider = principal.actor.startsWith('token:') || principal.actor.startsWith('service:') ? 'api' : 'console';
   return { actor: principal.actor, role, roles: [...principal.roles], isOwner, provider, id: principal.actor };
 }

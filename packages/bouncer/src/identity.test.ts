@@ -1,6 +1,17 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { authorizeIngress, directCaller, IdentityLinkStore } from './identity.js';
+import {
+  authorizeIngress,
+  directCaller,
+  IdentityLinkStore,
+  normalizeActorToPrincipal,
+  normalizeGroupMembersToPrincipals,
+  normalizeIdentityLink,
+  normalizeLegacyActor,
+  normalizeOwnersToPrincipals,
+  parseActor,
+} from './identity.js';
+import { PrincipalStore } from './principals.js';
 
 describe('Bouncer authorizeIngress', () => {
   it('allows internal actions with no requestedBy when not ingress caller', () => {
@@ -474,5 +485,85 @@ describe('AM2 a person conversing directly speaks as themselves', () => {
     const operator = directCaller({ actor: 'token:op', roles: ['viewer', 'operator'] }, [], 'agents.converse');
     assert.equal(operator.role, 'operator', 'the role that holds the privilege, not the first listed');
     assert.equal(operator.provider, 'api', 'a service token is an API client, not a person at the console');
+    const svc = directCaller({ actor: 'service:deploy', roles: ['operator'] }, [], 'agents.converse');
+    assert.equal(svc.provider, 'api', 'a canonical service principal is an API client');
+    const user = directCaller({ actor: 'user:dale', roles: ['admin'] }, [], 'agents.converse');
+    assert.equal(user.provider, 'console');
+  });
+});
+
+describe('S1 canonical & legacy actor normalization (AC3)', () => {
+  it('parseActor accepts canonical user:/service: alongside legacy cloudflare:/oidc:/token:', () => {
+    assert.equal(parseActor('USER:Stephanie'), 'user:stephanie');
+    assert.equal(parseActor('Service:Gatekeeper-Egress'), 'service:gatekeeper-egress');
+    assert.equal(parseActor('Cloudflare:Alice@Example.com'), 'cloudflare:alice@example.com');
+    assert.equal(parseActor('OIDC:Bob@Example.com'), 'oidc:bob@example.com');
+    assert.equal(parseActor('token:Admin'), 'token:admin');
+    for (const bad of ['', 'alice', 'email:alice@example.com', 'user:', 'service:', 'user:a b', 42, null]) {
+      assert.equal(parseActor(bad), undefined, JSON.stringify(bad));
+    }
+  });
+
+  it('normalizes legacy cloudflare:/oidc:, identity links, owners, and group members deterministically', async () => {
+    const store = await PrincipalStore.open();
+    await store.create({
+      id: 'user:stephanie',
+      displayName: 'Stephanie Sackrider',
+      emails: ['stephaniesackrider@hotmail.com', 'stephanie.sackrider@gmail.com'],
+      by: 'user:dale',
+    });
+
+    // Without store: deterministic user:<lowercased-email>
+    assert.equal(normalizeActorToPrincipal('Cloudflare:Alice@Example.COM'), 'user:alice@example.com');
+    assert.equal(normalizeLegacyActor('OIDC:Bob@Example.COM'), 'user:bob@example.com');
+    assert.equal(normalizeActorToPrincipal('USER:Dale'), 'user:dale');
+    assert.equal(normalizeActorToPrincipal('Service:Ingress'), 'service:ingress');
+    assert.equal(normalizeActorToPrincipal('cloudflare-service:Deploy.Access'), 'service:deploy.access');
+    assert.equal(normalizeActorToPrincipal('Token:Admin'), 'token:admin');
+
+    // With store: multi-email aliases across IdPs collapse to the one canonical PrincipalRecord.id
+    assert.equal(normalizeActorToPrincipal('cloudflare:StephanieSackrider@Hotmail.com', store), 'user:stephanie');
+    assert.equal(normalizeActorToPrincipal('oidc:STEPHANIE.SACKRIDER@GMAIL.COM', store), 'user:stephanie');
+    assert.equal(normalizeActorToPrincipal('user:Stephanie.Sackrider@Gmail.com', store), 'user:stephanie');
+    assert.equal(normalizeActorToPrincipal('cloudflare:Unseen@Example.org', store), 'user:unseen@example.org');
+
+    // Owners array collapses duplicate aliases for the same person into one canonical principal
+    assert.deepEqual(
+      normalizeOwnersToPrincipals(
+        ['Cloudflare:StephanieSackrider@Hotmail.com', 'oidc:stephanie.sackrider@gmail.com', 'cloudflare:Dale@Example.com'],
+        store,
+      ),
+      ['user:dale@example.com', 'user:stephanie'],
+    );
+
+    // Group members handle bare emails, legacy prefixes, and canonical user:<id>
+    assert.deepEqual(
+      normalizeGroupMembersToPrincipals(
+        ['Stephanie.Sackrider@Gmail.com', 'cloudflare:stephaniesackrider@hotmail.com', 'Dave@Example.com', 'USER:Dale'],
+        store,
+      ),
+      ['user:dale', 'user:dave@example.com', 'user:stephanie'],
+    );
+
+    // IdentityLink normalization updates actor & linkedBy and preserves sanitized agentRoles
+    const normalizedLink = normalizeIdentityLink(
+      {
+        provider: 'discord',
+        id: '12345',
+        actor: 'Cloudflare:StephanieSackrider@Hotmail.com',
+        name: 'Stephanie',
+        agentRoles: { higgins: ['Realtor', 'Owner'] },
+        linkedBy: 'cloudflare:Dale@Example.com',
+        linkedAt: '2026-11-01T00:00:00.000Z',
+      },
+      store,
+    );
+    assert.equal(normalizedLink.actor, 'user:stephanie');
+    assert.equal(normalizedLink.linkedBy, 'user:dale@example.com');
+    assert.deepEqual({ ...normalizedLink.agentRoles }, { higgins: ['Realtor'] });
+
+    assert.throws(() => normalizeActorToPrincipal(''), /invalid actor/);
+    assert.throws(() => normalizeActorToPrincipal('not-an-actor-or-email'), /invalid/);
+    assert.throws(() => normalizeActorToPrincipal('unknown:alice'), /invalid actor/);
   });
 });

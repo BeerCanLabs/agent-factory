@@ -2,7 +2,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac, generateKeyPairSync, sign as rsaSign, type KeyObject } from 'node:crypto';
-import { accessAssertionOf, accessAuthFromEnv, cloudflareAccessAuth } from './index.js';
+import { accessAssertionOf, accessAuthFromEnv, accessIdentityPrincipal, cloudflareAccessAuth } from './index.js';
 
 const TEAM = 'team.example.cloudflareaccess.com';
 const ISS = `https://${TEAM}`;
@@ -176,5 +176,50 @@ describe('A2 Cloudflare Access assertion verifier', () => {
     assert.equal(accessAssertionOf({ 'cf-access-jwt-assertion': 'h.p.s' }), 'h.p.s');
     assert.equal(accessAssertionOf({ cookie: 'a=1; CF_Authorization=c.p.s; b=2' }), 'c.p.s');
     assert.equal(accessAssertionOf({ 'cf-access-authenticated-user-email': 'admin@example.com' }), undefined);
+  });
+
+  it('S1 identityOnly maps users and service tokens to canonical principals with zero roles', async () => {
+    assert.deepEqual(accessIdentityPrincipal({ email: 'Stephanie.Sackrider@Gmail.COM', sub: 'u-steph' }), {
+      actor: 'user:stephanie.sackrider@gmail.com',
+      roles: [],
+    });
+    assert.deepEqual(accessIdentityPrincipal({ commonName: 'Deploy-Check.Access' }), {
+      actor: 'service:deploy-check.access',
+      roles: [],
+    });
+
+    const { auth: identityAuth } = auth({ identityOnly: true, adminEmails: ['admin@example.com'] });
+    const adminAssertion = await identityAuth.verify(token({ email: 'Admin@Example.com', sub: 'sub-1', email_verified: true }));
+    assert.deepEqual(adminAssertion, {
+      ok: true,
+      principal: { actor: 'user:admin@example.com', roles: [] },
+    });
+
+    const claimsRes = await identityAuth.verifyAssertion(token({ email: 'Admin@Example.com', sub: 'sub-1', email_verified: true }));
+    assert.deepEqual(claimsRes, {
+      ok: true,
+      claims: { email: 'admin@example.com', sub: 'sub-1', emailVerified: true },
+    });
+
+    const svcAssertion = await identityAuth.verify(token({ common_name: 'CI-Runner.Access' }));
+    assert.deepEqual(svcAssertion, {
+      ok: true,
+      principal: { actor: 'service:ci-runner.access', roles: [] },
+    });
+
+    // Explicit email_verified: false is refused in identityOnly mode; missing email_verified is refused when requireEmailVerified: true.
+    assert.deepEqual(await identityAuth.verify(token({ email: 'admin@example.com', email_verified: false })), {
+      ok: false,
+      reason: 'email not verified',
+    });
+    const { auth: strictAuth } = auth({ identityOnly: true, requireEmailVerified: true });
+    assert.deepEqual(await strictAuth.verify(token({ email: 'admin@example.com' })), {
+      ok: false,
+      reason: 'email not verified',
+    });
+    assert.deepEqual(await strictAuth.verify(token({ common_name: 'Probe.Access' })), {
+      ok: true,
+      principal: { actor: 'service:probe.access', roles: [] },
+    });
   });
 });

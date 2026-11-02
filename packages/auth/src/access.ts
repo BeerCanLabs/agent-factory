@@ -4,7 +4,7 @@
 import { createPublicKey, verify as verifySignature, type KeyObject } from 'node:crypto';
 import type { AuthResult, Principal, Role } from './index.js';
 
-export type AccessClaims = { email?: string; commonName?: string; sub?: string };
+export type AccessClaims = { email?: string; commonName?: string; sub?: string; emailVerified?: boolean };
 
 export type AccessVerifyResult = { ok: true; claims: AccessClaims } | { ok: false; reason: string };
 
@@ -18,6 +18,10 @@ export type AccessOptions = {
   audience: string | string[];
   /** Verified user emails that get every operator role. Empty: nobody is an admin through Access. */
   adminEmails?: string[];
+  /** D1/R1: emit canonical identity-only principals (`user:<email>` / `service:<cn>`) with zero roles. */
+  identityOnly?: boolean;
+  /** R13: require explicit `email_verified: true` on user assertions. */
+  requireEmailVerified?: boolean;
   fetchJwks?: JwksFetcher;
   /** Allowed clock skew for exp/nbf/iat. Default 60 s. */
   clockSkewSec?: number;
@@ -141,6 +145,17 @@ export function accessPrincipal(claims: AccessClaims, adminEmails: string[]): Pr
   return { actor: `cloudflare-service:${claims.commonName}`, roles: [] };
 }
 
+/** Canonical identity-only principal (R1, D1, D2): zero roles from IdP claims or env lists. */
+export function accessIdentityPrincipal(claims: AccessClaims): Principal {
+  if (claims.email) {
+    return { actor: `user:${claims.email.trim().toLowerCase()}`, roles: [] };
+  }
+  if (claims.commonName) {
+    return { actor: `service:${claims.commonName.trim().toLowerCase()}`, roles: [] };
+  }
+  throw new Error('AccessClaims names no user or service');
+}
+
 export function cloudflareAccessAuth(opts: AccessOptions): AccessAuth {
   const team = normalizeTeamDomain(opts.teamDomain);
   const issuer = `https://${team}`;
@@ -191,7 +206,13 @@ export function cloudflareAccessAuth(opts: AccessOptions): AccessAuth {
     const email = typeof payload.email === 'string' ? payload.email.trim().toLowerCase() : '';
     const commonName = typeof payload.common_name === 'string' ? payload.common_name.trim() : '';
     const sub = typeof payload.sub === 'string' ? payload.sub : undefined;
-    if (email) return { ok: true, claims: { email, sub } };
+    const emailVerified = typeof payload.email_verified === 'boolean' ? payload.email_verified : undefined;
+    if (email) {
+      if ((opts.requireEmailVerified && emailVerified !== true) || (opts.identityOnly && emailVerified === false)) {
+        return { ok: false, reason: 'email not verified' };
+      }
+      return { ok: true, claims: { email, sub, ...(emailVerified !== undefined ? { emailVerified } : {}) } };
+    }
     if (commonName) return { ok: true, claims: { commonName, sub } };
     return { ok: false, reason: 'assertion names no user or service' };
   }
@@ -201,7 +222,8 @@ export function cloudflareAccessAuth(opts: AccessOptions): AccessAuth {
     verifyAssertion,
     async verify(token) {
       const r = await verifyAssertion(token);
-      return r.ok ? { ok: true, principal: accessPrincipal(r.claims, admins) } : r;
+      if (!r.ok) return r;
+      return { ok: true, principal: opts.identityOnly ? accessIdentityPrincipal(r.claims) : accessPrincipal(r.claims, admins) };
     },
   };
 }
