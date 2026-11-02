@@ -41,3 +41,8 @@ output "accountant_role_arn" {
   description = "The Accountant IAM role for Cost Explorer and ECS inventory."
   value       = aws_iam_role.accountant.arn
 }
+
+output "cloudflare_access_aud" {
+  description = "Generated Cloudflare Access root application audience tag (empty when cloudflare_zone_id is unset)."
+  value       = local.cloudflare_enabled ? cloudflare_zero_trust_access_application.factory[0].aud : ""
+}
