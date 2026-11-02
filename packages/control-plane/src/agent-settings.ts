@@ -152,7 +152,9 @@ export async function handleAgentSettings(state: FactoryState, req: http.Incomin
     newName = parsed.name;
     body = rest;
     if (!Object.keys(rest).length) {
-      const { previous, changed } = renameAgent(state, agent, newName, principal.actor);
+      const latest = state.agents.get(agentId);
+      if (!latest) return json(res, 404, { error: 'not_found' }), true;
+      const { previous, changed } = renameAgent(state, latest, newName, principal.actor);
       const current = state.configs.current(agentId);
       json(res, 200, { agentId, name: newName, previous, managed: !!current?.agent, ...(current?.agent ? { settings: current.agent } : {}), version: current?.version ?? null, changed: changed ? ['name'] : [] });
       return true;
