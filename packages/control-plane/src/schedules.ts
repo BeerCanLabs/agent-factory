@@ -13,7 +13,7 @@ import type { Role } from '@beercanlabs/factory-auth';
 import { authorize, authorizeIngress, type AuthenticatedCaller } from '@beercanlabs/factory-bouncer';
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { DEFAULT_TIMEZONE, cronIssue, isTimeZone, type ScheduledAction, type ScheduleRequester } from '@beercanlabs/factory-timekeeper';
-import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import { actorIsAdmin, agentKindOf, effectiveGrantsForActor, json, readJson, requirePrivilege, type FactoryState } from './app.js';
 import { createRun, isTerminal, SYSTEM, type Run } from '@beercanlabs/factory-property-manager';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { ownersOf } from './config-store.js';
@@ -129,14 +129,16 @@ export function requesterOfRun(state: FactoryState, run: Run): ScheduleRequester
     return isLegacy ? { kind: 'system' } : readRequester(s.requestedBy);
   }
   if (run.requestedBy) return { kind: 'identity', provider: run.requestedBy.provider, id: run.requestedBy.id };
-  // Started by an authenticated principal (a console or API wake); allowlist principal actor kinds (cloudflare:, token:, oidc:, test)
+  // Started by an authenticated principal (a console or API wake); allowlist principal actor kinds (user:, service:, cloudflare:, token:, oidc:, test)
   const isPrincipal = Boolean(
     run.actor &&
-      (run.actor.startsWith('cloudflare:') ||
+      (run.actor.startsWith('user:') ||
+        run.actor.startsWith('service:') ||
+        run.actor.startsWith('cloudflare:') ||
         run.actor.startsWith('token:') ||
         run.actor.startsWith('oidc:') ||
         run.actor === 'test' ||
-        run.actor.startsWith('test:'))
+        run.actor.startsWith('test:')),
   );
   return isPrincipal ? { kind: 'principal', actor: run.actor } : undefined;
 }
@@ -163,12 +165,41 @@ export function requestersEqual(a?: ScheduleRequester, b?: ScheduleRequester): b
   return false;
 }
 
+function isAgentScheduleManager(state: FactoryState, agentId: string, actor: string): boolean {
+  if (state.grants) {
+    if (!state.grants.healthy) return false;
+    const grantRes = effectiveGrantsForActor(state, actor);
+    if (!grantRes.ok || !grantRes.grants) return false;
+    if (actorIsAdmin(state, actor)) return true;
+    const kind = agentKindOf(state, agentId) ?? 'personal';
+    const lowerAgentId = agentId.toLowerCase();
+    return grantRes.grants.some(
+      (eg) =>
+        !eg.readOnly &&
+        eg.source === 'direct' &&
+        eg.grant.scope.kind === 'agent' &&
+        eg.grant.scope.id.toLowerCase() === lowerAgentId &&
+        ((kind === 'personal' && eg.grant.role === 'content-owner') ||
+          (kind === 'team' && eg.grant.role === 'accountable-lead')),
+    );
+  }
+  const owners = ownersOf(state, agentId);
+  if (owners.some((o) => o.toLowerCase() === actor.toLowerCase())) return true;
+  const adminEmails = adminEmailsFromEnv();
+  const isCloudflare = actor.startsWith('cloudflare:');
+  const email = isCloudflare ? actor.slice('cloudflare:'.length).trim().toLowerCase() : '';
+  const tokenName = actor.startsWith('token:') ? actor.slice('token:'.length) : undefined;
+  const tokenRoles = tokenName ? tokenRolesFromEnv(tokenName) : undefined;
+  return Boolean((email && adminEmails.includes(email)) || tokenRoles?.includes('admin'));
+}
+
 /** Whether the caller has authority to modify or delete this schedule. */
 export function canModifySchedule(
   state: FactoryState,
   caller: ScheduleCaller,
   existing: ScheduledAction,
 ): boolean {
+  if (state.grants && !state.grants.healthy) return false;
   if (caller.kind === 'run') {
     if (existing.agentId !== caller.agentId) return false;
     if (!existing.requestedBy) return true;
@@ -176,20 +207,17 @@ export function canModifySchedule(
     if (!run || run.agentId !== existing.agentId) return false;
     const runReq = requesterOfRun(state, run);
     if (!runReq) return false;
-    const owners = ownersOf(state, existing.agentId);
-    if (run.actor && owners.some((o) => o.toLowerCase() === run.actor.toLowerCase())) return true;
+    const runHumanActor =
+      runReq.kind === 'principal'
+        ? runReq.actor
+        : runReq.kind === 'identity'
+          ? state.identityLinks?.resolve(runReq.provider, runReq.id)
+          : undefined;
+    if (runHumanActor && isAgentScheduleManager(state, existing.agentId, runHumanActor)) return true;
     return requestersEqual(existing.requestedBy, runReq);
   }
   if (!existing.requestedBy) return true;
-  const owners = ownersOf(state, existing.agentId);
-  const isOwner = owners.some((o) => o.toLowerCase() === caller.actor.toLowerCase());
-  const adminEmails = adminEmailsFromEnv();
-  const isCloudflare = caller.actor.startsWith('cloudflare:');
-  const email = isCloudflare ? caller.actor.slice('cloudflare:'.length).trim().toLowerCase() : '';
-  const tokenName = caller.actor.startsWith('token:') ? caller.actor.slice('token:'.length) : undefined;
-  const tokenRoles = tokenName ? tokenRolesFromEnv(tokenName) : undefined;
-  const isAdmin = Boolean((email && adminEmails.includes(email)) || tokenRoles?.includes('admin'));
-  if (isOwner || isAdmin) return true;
+  if (isAgentScheduleManager(state, existing.agentId, caller.actor)) return true;
   if (existing.requestedBy.kind === 'principal' && existing.requestedBy.actor.toLowerCase() === caller.actor.toLowerCase()) {
     return true;
   }
@@ -238,17 +266,23 @@ export function scheduleRunOptions(
   };
   if (!requester) return skip('its requester is not readable');
   if (requester.kind === 'system') return { caller: SCHEDULER_BADGE(sched.name) };
+  if (state.grants && !state.grants.healthy) return skip('grant store is unhealthy');
 
   const adminEmails = adminEmailsFromEnv();
   const owners = ownersOf(state, sched.agentId);
+  const agentKind = agentKindOf(state, sched.agentId);
 
   if (requester.kind === 'identity') {
     const link = state.identityLinks?.resolveLink(requester.provider, requester.id);
+    const linkGrants = link ? effectiveGrantsForActor(state, link.actor) : undefined;
+    if (linkGrants && !linkGrants.ok) return skip('grant store is unhealthy');
     const auth = authorizeIngress({
       requestedBy: { provider: requester.provider, id: requester.id },
       agentId: sched.agentId,
+      agentKind,
       privilege: 'agents.wake',
       owners,
+      ...(linkGrants?.grants !== undefined ? { grants: linkGrants.grants } : {}),
       link,
       adminEmails,
       isIngressCaller: true,
@@ -263,6 +297,8 @@ export function scheduleRunOptions(
   }
 
   // requester.kind === 'principal'
+  const principalGrants = effectiveGrantsForActor(state, requester.actor);
+  if (!principalGrants.ok) return skip('grant store is unhealthy');
   // 1. Evaluate bare principal candidate first.
   const tokenName = requester.actor.startsWith('token:') ? requester.actor.slice('token:'.length) : undefined;
   const tokenRoles = tokenName ? tokenRolesFromEnv(tokenName) : undefined;
@@ -273,8 +309,10 @@ export function scheduleRunOptions(
   const bareAuth = authorizeIngress({
     requestedBy: bareCandidate.requestedBy,
     agentId: sched.agentId,
+    agentKind,
     privilege: 'agents.wake',
     owners,
+    ...(principalGrants.grants !== undefined ? { grants: principalGrants.grants } : {}),
     link: bareCandidate.link,
     adminEmails,
     isIngressCaller: true,
@@ -295,8 +333,10 @@ export function scheduleRunOptions(
     const auth = authorizeIngress({
       requestedBy: reqBy,
       agentId: sched.agentId,
+      agentKind,
       privilege: 'agents.wake',
       owners,
+      ...(principalGrants.grants !== undefined ? { grants: principalGrants.grants } : {}),
       link,
       adminEmails,
       isIngressCaller: true,

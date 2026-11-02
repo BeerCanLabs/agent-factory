@@ -21,10 +21,18 @@ import {
 import { FileConfigBackend, GroupStore, VersionedConfigStore } from '@beercanlabs/factory-registrar';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
-import { createFactoryServer, type FactoryState } from './app.js';
+import { ScheduleStore } from '@beercanlabs/factory-timekeeper';
+import {
+  canRunManageModels,
+  checkOwnsAnyAgent,
+  createFactoryServer,
+  resolveRequesterActor,
+  type FactoryState,
+} from './app.js';
 import { accessForRun } from './access-enforcement.js';
 import { IdentityLinkStore } from './identity-links.js';
 import { ownersOf } from './config-store.js';
+import { requesterOfRun, scheduleRunOptions } from './schedules.js';
 import { loadSkills } from './skills.js';
 
 const TOKENS = {
@@ -149,7 +157,7 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
       await grants.grant({ subject: viewer, scope: { kind: 'fleet' }, role: 'viewer', by: 'user:admin', granterIsAdmin: true });
     }
 
-    await groups.createGroup({ id: 'sre', name: 'SRE Team', roles: [], members: ['user:geordi'], createdBy: 'user:admin' });
+    await groups.createGroup({ id: 'sre', name: 'SRE Team', roles: [], members: ['user:geordi'] });
 
     const identityLinks = new IdentityLinkStore(join(dir, 'links'));
     identityLinks.link('discord', 'dale-discord-1', 'user:dale', 'user:admin');
@@ -167,6 +175,7 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
       grants,
       groups,
       identityLinks,
+      schedules: new ScheduleStore(),
       version: '0.1.0',
       providers: [envProvider({})],
       runtime: noopRuntime(),
@@ -187,8 +196,8 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
       defaultModel: 'gemini-2.0-flash',
       sharedRuntime: { repo: 'https://github.com/BeerCanLabs/agent-factory', commit: RUNTIME_SHA, image: IMAGE },
       deployProvider: {
-        buildImage: async (agentId, source) => `registry.example/${agentId}:${source.commit}`,
-        provisionIdentity: async (agentId) => ({ identity: `role/${agentId}`, executionIdentity: `exec/${agentId}` }),
+        buildImage: async (agentId: string, source: { commit: string }) => `registry.example/${agentId}:${source.commit}`,
+        provisionIdentity: async (agentId: string) => ({ identity: `role/${agentId}`, executionIdentity: `exec/${agentId}` }),
         registerCompute: async () => {},
       },
     } as unknown as FactoryState;
@@ -771,6 +780,15 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     // Stephanie wakes and converses with donna (both direct and via Discord ingress)
     const stephWake = await call('POST', '/api/v1/agents/donna/wake', { input: { text: 'grocery list' } }, TOKENS.stephanie);
     assert.equal(stephWake.status, 202, JSON.stringify(stephWake.body));
+    const stephDirectWakeRun = state.runs.get(stephWake.body.runId)!;
+    assert.equal(stephDirectWakeRun.caller?.actor, 'user:stephanie');
+    assert.deepEqual(stephDirectWakeRun.caller?.agentRoles, ['Family'], 'direct /wake populates caller with stripped subrole:');
+    assert.deepEqual(
+      accessForRun(state, stephDirectWakeRun, donnaRecord),
+      { restricted: true, routes: { gcal: 'allowed', plaid: 'denied' } },
+      'F1: direct Console/API /wake by restricted subrole principal enforces E12 route ceiling',
+    );
+    state.runs.update(stephDirectWakeRun.runId, { state: 'DONE' } as never);
 
     const stephConvo = await call(
       'POST',
@@ -779,6 +797,71 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
       TOKENS.stephanie,
     );
     assert.equal(stephConvo.status, 202, JSON.stringify(stephConvo.body));
+    const stephDirectConvoRun = state.runs.get(stephConvo.body.runId)!;
+    assert.deepEqual(accessForRun(state, stephDirectConvoRun, donnaRecord), {
+      restricted: true,
+      routes: { gcal: 'allowed', plaid: 'denied' },
+    });
+    state.runs.update(stephDirectConvoRun.runId, { state: 'DONE' } as never);
+
+    // F1: Warm-run isolation (`409 busy_with_another_person`) when Dale (owner) has a live WORKING run on donna
+    // and Stephanie (restricted subrole:Family) sends a direct Console/API `/conversation` without requestedBy!
+    for (const r of state.runs.list({ agentId: 'donna', active: true })) {
+      state.runs.update(r.runId, { state: 'DONE' } as never);
+    }
+    const daleWarmRun = state.runs.create({
+      agentId: 'donna',
+      state: 'WORKING',
+      actor: 'user:dale',
+      trigger: 'conversation',
+    });
+    const stephIntoDaleWarm = await call(
+      'POST',
+      '/api/v1/agents/donna/conversation',
+      { message: 'read plaid inside dale run' },
+      TOKENS.stephanie,
+    );
+    assert.equal(stephIntoDaleWarm.status, 409, JSON.stringify(stephIntoDaleWarm.body));
+    assert.equal(stephIntoDaleWarm.body.error, 'busy_with_another_person');
+    state.runs.update(daleWarmRun.runId, { state: 'DONE' } as never);
+
+    // F1: Approval decision delivery preserves principal origin (`user:stephanie`) when Stephanie's direct run finishes
+    // and owner Dale rejects with notes — spawned `approval` run stays Stephanie's and restricted (`plaid: 'denied'`)!
+    const stephOriginRun = state.runs.create({
+      agentId: 'donna',
+      state: 'WORKING',
+      actor: 'user:stephanie',
+      trigger: 'manual',
+      caller: stephDirectWakeRun.caller,
+    });
+    const { approval: stephOriginHold } = state.approvals.hold({
+      runId: stephOriginRun.runId,
+      agentId: 'donna',
+      route: 'plaid',
+      tool: 'POST /accounts/transfer',
+      argsSha256: randomUUID().replace(/-/g, '').padEnd(64, '0'),
+      request: { method: 'POST', path: '/accounts/transfer', headers: {}, body: '{}', bodyEncoding: 'utf8' },
+    });
+    state.runs.update(stephOriginRun.runId, { state: 'DONE' } as never);
+    const daleRejectsDirectOrigin = await call(
+      'POST',
+      `/api/v1/approvals/${stephOriginHold.approvalId}`,
+      { decision: 'reject', notes: 'family role cannot use bank' },
+      TOKENS.dale,
+    );
+    assert.equal(daleRejectsDirectOrigin.status, 200, JSON.stringify(daleRejectsDirectOrigin.body));
+    assert.equal(daleRejectsDirectOrigin.body.delivered, 'run');
+    const approvalSpawnedRun = state.runs
+      .list({ agentId: 'donna' })
+      .filter((r) => r.trigger === 'approval')
+      .pop()!;
+    assert.equal(approvalSpawnedRun.actor, 'user:stephanie', 'decision run preserves principal requester actor');
+    assert.equal((approvalSpawnedRun.input as { notes?: string }).notes, 'family role cannot use bank');
+    assert.deepEqual(accessForRun(state, approvalSpawnedRun, donnaRecord), {
+      restricted: true,
+      routes: { gcal: 'allowed', plaid: 'denied' },
+    });
+    state.runs.update(approvalSpawnedRun.runId, { state: 'DONE' } as never);
 
     const stephIngressWake = await call(
       'POST',
@@ -796,6 +879,12 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
       restricted: true,
       routes: { gcal: 'allowed', plaid: 'denied' },
     });
+    const geordiDirectWakeRun = state.runs.get(geordiWake.body.runId)!;
+    const triageRecord = state.agents.get('incident-triage')!;
+    triageRecord.skillIds = ['pagerduty'];
+    triageRecord.skillRoutes = { pagerduty: ['pd-api'] };
+    assert.deepEqual(accessForRun(state, geordiDirectWakeRun, triageRecord), { restricted: false });
+
     const aliceBotRecord = state.agents.get('alice-bot')!;
     aliceBotRecord.skillIds = ['calendar'];
     aliceBotRecord.skillRoutes = { calendar: ['gcal'] };
@@ -808,9 +897,6 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     });
     assert.deepEqual(accessForRun(state, aliceRun, aliceBotRecord), { restricted: false });
 
-    const triageRecord = state.agents.get('incident-triage')!;
-    triageRecord.skillIds = ['pagerduty'];
-    triageRecord.skillRoutes = { pagerduty: ['pd-api'] };
     const geordiIngressRun = state.runs.get(geordiIngressWake.body.runId)!;
     assert.deepEqual(accessForRun(state, geordiIngressRun, triageRecord), { restricted: false });
     const sarahRun = state.runs.create({
@@ -1012,6 +1098,75 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
       0,
     );
 
+    // Rotate `ops-watch` accountable-lead in GrantStore from user:sarah to user:bob, then re-register via CI & admin
+    // with stale checked-in `cartridge.accountableLead: 'user:sarah'` inside `body.cartridge` -> rotated lead `user:bob` is preserved & synced!
+    await grants.grant({
+      subject: 'user:bob',
+      scope: { kind: 'agent', id: 'ops-watch' },
+      role: 'accountable-lead',
+      agentKind: 'team',
+      by: 'user:admin',
+      granterIsAdmin: true,
+      replaceExisting: true,
+    });
+    const repoTeamCiAfterRotate = await call(
+      'POST',
+      '/api/v1/registry/agents',
+      {
+        repo: 'https://github.com/BeerCanLabs/SM-ops-watch',
+        commit: NEXT_SHA,
+        cartridge: {
+          id: 'ops-watch',
+          name: 'Ops Watch v4',
+          kind: 'team',
+          accountableLead: 'user:sarah',
+          memory: { archetype: 'team-member' },
+        },
+      },
+      TOKENS.ci,
+    );
+    assert.equal(repoTeamCiAfterRotate.status, 201, JSON.stringify(repoTeamCiAfterRotate.body));
+    assert.equal(repoTeamCiAfterRotate.body.accountableLead, 'user:bob', 'F3: non-mutating re-registration syncs rotated accountable-lead from GrantStore');
+    const activeOpsLeadsAfterCi = grants
+      .list({ scopeKind: 'agent', scopeId: 'ops-watch' })
+      .filter((g) => g.role === 'accountable-lead' && g.state === 'active');
+    assert.equal(activeOpsLeadsAfterCi.length, 1);
+    assert.equal(activeOpsLeadsAfterCi[0].subject, 'user:bob');
+
+    const repoTeamAdminAfterRotate = await call(
+      'POST',
+      '/api/v1/registry/agents',
+      {
+        repo: 'https://github.com/BeerCanLabs/SM-ops-watch',
+        commit: SHA,
+        cartridge: {
+          id: 'ops-watch',
+          name: 'Ops Watch v5',
+          kind: 'team',
+          accountableLead: 'user:sarah',
+          memory: { archetype: 'team-member' },
+        },
+      },
+      TOKENS.admin,
+    );
+    assert.equal(repoTeamAdminAfterRotate.status, 201, JSON.stringify(repoTeamAdminAfterRotate.body));
+    assert.equal(repoTeamAdminAfterRotate.body.accountableLead, 'user:bob');
+
+    // Explicit top-level `body.accountableLead` by admin DOES rotate the GrantStore lead intentionally
+    const explicitTopLevelLead = await call(
+      'POST',
+      '/api/v1/registry/agents',
+      {
+        repo: 'https://github.com/BeerCanLabs/SM-ops-watch',
+        commit: NEXT_SHA,
+        accountableLead: 'user:sarah',
+        cartridge: { id: 'ops-watch', name: 'Ops Watch v6', kind: 'team', memory: { archetype: 'team-member' } },
+      },
+      TOKENS.admin,
+    );
+    assert.equal(explicitTopLevelLead.status, 201, JSON.stringify(explicitTopLevelLead.body));
+    assert.equal(explicitTopLevelLead.body.accountableLead, 'user:sarah');
+
     // Attempting to flip kind on re-registration (`team` -> `personal` or `personal` -> `team`) returns 409 agent_kind_conflict
     const flipTeamToPersonal = await call(
       'POST',
@@ -1055,6 +1210,129 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     );
   });
 
+  it('F2/F4: requesterOfRun recognizes canonical user:/service: principals across run-scoped models, role-requests, and schedules; checkOwnsAnyAgent treats GrantStore as sole source of truth', async () => {
+    // F4: checkOwnsAnyAgent returns true for active GrantStore owner/lead and false when GrantStore has no active grant,
+    // even if stale legacy `agent.owners` or ConfigStore owners exist.
+    assert.equal(checkOwnsAnyAgent(state, 'user:dale'), true);
+    assert.equal(checkOwnsAnyAgent(state, 'user:sarah'), true);
+    const donnaRec = state.agents.get('donna') as unknown as { owners?: string[] };
+    donnaRec.owners = ['user:bob'];
+    try {
+      assert.equal(checkOwnsAnyAgent(state, 'user:bob'), false, 'F4: GrantStore is authoritative in checkOwnsAnyAgent');
+    } finally {
+      delete donnaRec.owners;
+    }
+
+    // F2: Direct Console/API runs started by canonical `user:<id>` and `service:<id>` principals resolve via `requesterOfRun`
+    const daleDirectRun = state.runs.create({
+      agentId: 'donna',
+      state: 'WORKING',
+      actor: 'user:dale',
+      trigger: 'manual',
+    });
+    const sarahDirectRun = state.runs.create({
+      agentId: 'incident-triage',
+      state: 'WORKING',
+      actor: 'user:sarah',
+      trigger: 'manual',
+    });
+    const stephDirectRun = state.runs.create({
+      agentId: 'donna',
+      state: 'WORKING',
+      actor: 'user:stephanie',
+      trigger: 'manual',
+    });
+    const ciDirectRun = state.runs.create({
+      agentId: 'ops-watch',
+      state: 'WORKING',
+      actor: 'service:ci',
+      trigger: 'api',
+    });
+
+    assert.deepEqual(requesterOfRun(state, daleDirectRun), { kind: 'principal', actor: 'user:dale' });
+    assert.deepEqual(requesterOfRun(state, sarahDirectRun), { kind: 'principal', actor: 'user:sarah' });
+    assert.deepEqual(requesterOfRun(state, stephDirectRun), { kind: 'principal', actor: 'user:stephanie' });
+    assert.deepEqual(requesterOfRun(state, ciDirectRun), { kind: 'principal', actor: 'service:ci' });
+
+    assert.equal(resolveRequesterActor(state, daleDirectRun), 'user:dale');
+    assert.equal(resolveRequesterActor(state, sarahDirectRun), 'user:sarah');
+    assert.deepEqual(canRunManageModels(state, daleDirectRun), { allowed: true, actor: 'user:dale' });
+    assert.deepEqual(canRunManageModels(state, sarahDirectRun), { allowed: true, actor: 'user:sarah' });
+    assert.deepEqual(canRunManageModels(state, stephDirectRun), { allowed: false });
+
+    const daleRunTok = await state.runTokens!.mint({ runId: daleDirectRun.runId, agentId: 'donna' });
+    const stephRunTok = await state.runTokens!.mint({ runId: stephDirectRun.runId, agentId: 'donna' });
+
+    // 1. Run-token model switch (`PUT /api/v1/runs/:id/models`): allowed for user:dale (200), refused for user:stephanie (403)
+    const daleSetModels = await call(
+      'PUT',
+      `/api/v1/runs/${daleDirectRun.runId}/models`,
+      { currentModel: 'claude-sonnet' },
+      daleRunTok,
+    );
+    assert.equal(daleSetModels.status, 200, JSON.stringify(daleSetModels.body));
+
+    const stephSetModels = await call(
+      'PUT',
+      `/api/v1/runs/${stephDirectRun.runId}/models`,
+      { currentModel: 'gemini-2.0-flash' },
+      stephRunTok,
+    );
+    assert.equal(stephSetModels.status, 403, JSON.stringify(stephSetModels.body));
+
+    // 2. Run-token role-assignment request (`POST /api/v1/runs/:id/role-requests`): allowed for user:dale (202), refused for user:stephanie (403)
+    const daleRoleReq = await call(
+      'POST',
+      `/api/v1/runs/${daleDirectRun.runId}/role-requests`,
+      { provider: 'discord', identity: 'alice-discord-1', roles: ['Family'] },
+      daleRunTok,
+    );
+    assert.equal(daleRoleReq.status, 202, JSON.stringify(daleRoleReq.body));
+
+    const stephRoleReq = await call(
+      'POST',
+      `/api/v1/runs/${stephDirectRun.runId}/role-requests`,
+      { provider: 'discord', identity: 'alice-discord-1', roles: ['Family'] },
+      stephRunTok,
+    );
+    assert.equal(stephRoleReq.status, 403, JSON.stringify(stephRoleReq.body));
+    assert.equal(stephRoleReq.body.error, 'requester_not_owner');
+
+    // 3. Run-token schedule creation (`POST /api/v1/schedules`): records `requestedBy: { kind: 'principal', actor: 'user:stephanie' }`
+    // and firing it carries Stephanie's restricted `subrole:Family` reach (`gcal` allowed, `plaid` denied)!
+    const stephSchedCreate = await call(
+      'POST',
+      '/api/v1/schedules',
+      { name: 'Morning Calendar', cron: '0 8 * * *', prompt: 'Check calendar' },
+      stephRunTok,
+    );
+    assert.equal(stephSchedCreate.status, 200, JSON.stringify(stephSchedCreate.body));
+    const createdSched = state.schedules!.get(stephSchedCreate.body.schedule.id)!;
+    assert.deepEqual(createdSched.requestedBy, { kind: 'principal', actor: 'user:stephanie' });
+
+    const schedOpts = scheduleRunOptions(state, createdSched);
+    assert.ok(schedOpts, 'scheduleRunOptions resolves GrantStore wake authority for user:stephanie');
+    assert.equal(schedOpts.caller.actor, 'user:stephanie');
+    assert.deepEqual(schedOpts.caller.agentRoles, ['Family']);
+
+    const firedSchedRun = state.runs.create({
+      agentId: 'donna',
+      state: 'WORKING',
+      actor: 'factory:timekeeper',
+      trigger: 'schedule',
+      input: { scheduleId: createdSched.id },
+      caller: schedOpts.caller,
+    });
+    assert.deepEqual(accessForRun(state, firedSchedRun, state.agents.get('donna')!), {
+      restricted: true,
+      routes: { gcal: 'allowed', plaid: 'denied' },
+    });
+
+    for (const r of [daleDirectRun, sarahDirectRun, stephDirectRun, ciDirectRun, firedSchedRun]) {
+      state.runs.update(r.runId, { state: 'DONE' } as never);
+    }
+  });
+
   it('fails closed with 503 (and denied skill routes) when GrantStore is unhealthy (including F6 agent-builder)', async () => {
     const heldId = holdOnRun('donna');
     const builderRun = state.runs.create({
@@ -1076,6 +1354,7 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     grants.markUnhealthy('simulated S3 backend failure');
     assert.equal(grants.healthy, false);
     assert.deepEqual(ownersOf(state, 'donna'), []);
+    assert.equal(checkOwnsAnyAgent(state, 'user:dale'), false, 'F4: checkOwnsAnyAgent fails closed when GrantStore is unhealthy');
 
     // F5: accessForRun fails closed (all routes denied) when GrantStore is unhealthy
     assert.deepEqual(accessForRun(state, stephRun, state.agents.get('donna')!), {

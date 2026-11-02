@@ -488,6 +488,25 @@ export function directCaller(
     .map((eg) => eg.grant.role as Role);
   const allRoles = [...new Set([...principal.roles, ...grantFleetRoles])];
   const hasAgentMemberGrant = agentGrants.some((eg) => !eg.readOnly && eg.grant.role !== 'content-owner');
+  const stripSubrolePrefix = (r: string): string =>
+    r.toLowerCase().startsWith('subrole:') ? r.slice('subrole:'.length) : r;
+  const grantRoleLabels = agentGrants
+    .filter(
+      (eg) =>
+        !eg.readOnly &&
+        eg.grant.role !== 'content-owner' &&
+        eg.grant.role !== 'accountable-lead' &&
+        eg.grant.role !== 'agent-member' &&
+        eg.grant.role !== 'owner',
+    )
+    .map((eg) => stripSubrolePrefix(eg.grant.role))
+    .filter((r) => r.trim() !== '' && r.trim().toLowerCase() !== 'owner');
+  const effectiveAgentRoles =
+    opts?.grants !== undefined
+      ? isOwner
+        ? ['Owner', ...new Set(grantRoleLabels)]
+        : [...new Set(grantRoleLabels)]
+      : undefined;
   const role: AuthenticatedCaller['role'] = allRoles.includes('admin')
     ? 'admin'
     : isOwner
@@ -496,5 +515,13 @@ export function directCaller(
         (hasAgentMemberGrant ? 'agent-member' : (allRoles[0] ?? 'operator')));
   // A service token (token:<name> or service:<name>) is an API client, not a person at the console.
   const provider = principal.actor.startsWith('token:') || principal.actor.startsWith('service:') ? 'api' : 'console';
-  return { actor: principal.actor, role, roles: [...principal.roles], isOwner, provider, id: principal.actor };
+  return {
+    actor: principal.actor,
+    role,
+    roles: opts?.grants !== undefined ? allRoles : [...principal.roles],
+    ...(effectiveAgentRoles !== undefined ? { agentRoles: effectiveAgentRoles } : {}),
+    isOwner,
+    provider,
+    id: principal.actor,
+  };
 }

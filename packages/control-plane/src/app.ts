@@ -81,7 +81,7 @@ import { applyTrainingForCaller, handleSkillTraining } from './skill-training.js
 import { buildSkillsFor, isDeploying, runDeploy } from './apply.js';
 import { handleRunProgress } from './progress-routes.js';
 import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercanlabs/factory-inspector';
-import { handleSchedules, requesterOfRun } from './schedules.js';
+import { handleSchedules, requesterOfRun, requestersEqual } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleGroupRoutes } from './group-routes.js';
 import { handleChannelApprovals } from './channel-approvals.js';
@@ -415,20 +415,16 @@ export function effectiveGrantsForActor(
 }
 
 export function checkOwnsAnyAgent(state: FactoryState, actor: string): boolean {
-  if (state.grants && state.grants.healthy) {
+  if (state.grants) {
+    if (!state.grants.healthy) return false;
     const grantRes = effectiveGrantsForActor(state, actor);
-    if (grantRes.ok && grantRes.grants) {
-      if (
-        grantRes.grants.some(
-          (eg) =>
-            !eg.readOnly &&
-            eg.grant.scope.kind === 'agent' &&
-            (eg.grant.role === 'content-owner' || eg.grant.role === 'accountable-lead'),
-        )
-      ) {
-        return true;
-      }
-    }
+    if (!grantRes.ok || !grantRes.grants) return false;
+    return grantRes.grants.some(
+      (eg) =>
+        !eg.readOnly &&
+        eg.grant.scope.kind === 'agent' &&
+        (eg.grant.role === 'content-owner' || eg.grant.role === 'accountable-lead'),
+    );
   }
   const target = actor.toLowerCase();
   for (const agent of state.agents.values()) {
@@ -1184,9 +1180,12 @@ async function handOff(
   const handoffTargets = hasWarmDown ? conversationalActive : conversationalActive.filter((r) => r.state !== 'QUEUED');
   // E12 item 4: a run's roles are those of the person it was started for. A message from a person whose roles deny a
   // skill route must not be handled inside someone else's run, where it would have that person's reach. It waits.
-  if (handoffTargets.length > 0 && opts.requestedBy) {
-    const sender = accessForRequester(state, agent, { kind: 'identity', provider: opts.requestedBy.provider, id: opts.requestedBy.id });
-    const sameAsRun = handoffTargets.every((r) => r.requestedBy && r.requestedBy.provider === opts.requestedBy!.provider && r.requestedBy.id === opts.requestedBy!.id);
+  if (handoffTargets.length > 0) {
+    const senderRequester = opts.requestedBy
+      ? ({ kind: 'identity' as const, provider: opts.requestedBy.provider, id: opts.requestedBy.id })
+      : ({ kind: 'principal' as const, actor });
+    const sender = accessForRequester(state, agent, senderRequester, false, opts.caller?.roles);
+    const sameAsRun = handoffTargets.every((r) => requestersEqual(requesterOfRun(state, r), senderRequester));
     if (hasDeniedRoute(sender) && !sameAsRun) {
       state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'HANDOFF_REFUSED_BUSY_FOR_ANOTHER_PERSON', actor });
       return { status: 409, body: { error: 'busy_with_another_person', message: 'the agent is working for someone else; try again in a moment' } };
@@ -2237,13 +2236,14 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
     if (!r) return 'unknown';
     return requesterOfRun(state, r) ?? (r.trigger === 'schedule' ? 'unknown' : 'none');
   };
-  const who = whoOf(state.runs.get(a.runId));
+  const originRun = state.runs.get(a.runId);
+  const who = whoOf(originRun);
   const sameRequester = (r: Run | undefined): boolean => {
     const there = whoOf(r);
     if (who === 'unknown' || there === 'unknown') return false;
     if (who === 'none' || there === 'none') return who === there;
     if (who.kind === 'identity') return there.kind === 'identity' && there.provider === who.provider && there.id === who.id;
-    if (who.kind === 'principal') return there.kind === 'principal' && there.actor === who.actor;
+    if (who.kind === 'principal') return there.kind === 'principal' && there.actor.toLowerCase() === who.actor.toLowerCase();
     return there.kind === who.kind;
   };
   const plain = {
@@ -2267,13 +2267,19 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
   }
   // A person's request stays that person's. An origin that cannot be placed starts a run that holds nothing: a
   // requester no identity link resolves to is restricted to nothing.
+  const runActor = typeof who === 'object' && who.kind === 'principal' ? who.actor : actor;
   const forPerson =
     who === 'unknown'
       ? { requestedBy: { provider: 'factory', id: 'unplaceable-origin' } }
       : typeof who === 'object' && who.kind === 'identity'
-        ? { requestedBy: { provider: who.provider, id: who.id } }
-        : {};
-  const out = await createRun(state, a.agentId, { actor, trigger: 'approval', input: who === 'unknown' ? plain : full, factoryKind: 'approval', ...forPerson });
+        ? {
+            requestedBy: { provider: who.provider, id: who.id },
+            ...(originRun?.caller ? { caller: originRun.caller } : {}),
+          }
+        : typeof who === 'object' && who.kind === 'principal'
+          ? { ...(originRun?.caller ? { caller: originRun.caller } : {}) }
+          : {};
+  const out = await createRun(state, a.agentId, { actor: runActor, trigger: 'approval', input: who === 'unknown' ? plain : full, factoryKind: 'approval', ...forPerson });
   if (out.status < 300) return 'run';
   state.ledger.append({
     timestamp: new Date().toISOString(),
@@ -2963,6 +2969,18 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         return;
       }
       caller = ingressAuth.caller;
+    } else if (!isIngress) {
+      const callerGrantRes = effectiveGrantsForActor(state, principal.actor);
+      if (!callerGrantRes.ok) {
+        json(res, 503, { error: callerGrantRes.error });
+        return;
+      }
+      const wakeAgent = state.agents.get(runCreate[1]);
+      caller = directCaller(principal, ownersOf(state, runCreate[1]), 'agents.wake', {
+        agentId: runCreate[1],
+        agentKind: wakeAgent ? effectiveAgentKind(wakeAgent) : agentKindOf(state, runCreate[1]),
+        ...(callerGrantRes.grants !== undefined ? { grants: callerGrantRes.grants } : {}),
+      });
     }
     // AM2: the turn id and reply address are the factory's. A message from an ingress that wakes the agent is a turn like
     // any other (the first of a Discord session arrives here); an operator's run is a job and gets neither.
@@ -2975,6 +2993,7 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       if (replyTo) Object.assign(copy, { turnId: randomUUID(), replyTo });
       input = copy;
     }
+    const injectCallerIntoInput = Boolean(caller && (requestedBy || runCreate[2] === 'wake'));
     const out = await createRun(state, runCreate[1], {
       actor: principal.actor,
       trigger: runCreate[2] === 'wake' ? 'manual' : 'api',
@@ -2982,9 +3001,14 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
       callbackUrl: body.callbackUrl as string | undefined,
       model: body.model as string | undefined,
       ...(requestedBy ? { requestedBy } : {}),
-      ...(caller ? { caller } : {}),
+      ...(injectCallerIntoInput ? { caller } : {}),
       factoryTurn: true,
     });
+    if (caller && !injectCallerIntoInput && out.status < 300) {
+      const wokeRun = state.runs.get((out.body as { runId: string }).runId);
+      if (wokeRun) wokeRun.caller = caller;
+      (out.body as Record<string, unknown>).caller = caller;
+    }
     json(res, out.status, out.body);
     return;
   }
@@ -4074,8 +4098,17 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 
     const recordId = typeof cartridge.id === 'string' ? cartridge.id : agentId;
     const previousAgent = state.agents.get(recordId);
+    const hasCartridgeWrapper = Boolean(body.cartridge && typeof body.cartridge === 'object');
     const rawKind = body.kind !== undefined ? body.kind : cartridge.kind;
-    const rawLead = body.accountableLead !== undefined ? body.accountableLead : cartridge.accountableLead;
+    // On re-registration (`previousAgent !== undefined`), `cartridge.accountableLead` inside `body.cartridge` is the
+    // checked-in manifest default (for first-time registration) and NEVER an explicit ownership override — only
+    // top-level `body.accountableLead`, `body.owners`, `body.actAs`, or `body.onBehalfOf` mutates live GrantStore state.
+    const rawLead =
+      body.accountableLead !== undefined
+        ? body.accountableLead
+        : !previousAgent || !hasCartridgeWrapper
+          ? cartridge.accountableLead
+          : undefined;
     const hasExplicitOwnershipMutation =
       rawLead !== undefined ||
       body.owners !== undefined ||
@@ -4114,7 +4147,18 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
         }
       }
       resolvedRecordKind = explicitKind ?? previousAgent.kind;
-      resolvedAccountableLead = prevEffectiveKind === 'team' ? previousAgent.accountableLead : undefined;
+      if (prevEffectiveKind === 'team') {
+        if (state.grants) {
+          const activeLeadGrant = state.grants
+            .list({ scopeKind: 'agent', scopeId: recordId.toLowerCase() })
+            .find((g) => g.role === 'accountable-lead' && g.state === 'active');
+          resolvedAccountableLead = activeLeadGrant?.subject;
+        } else {
+          resolvedAccountableLead = previousAgent.accountableLead;
+        }
+      } else {
+        resolvedAccountableLead = undefined;
+      }
     } else {
       if (previousAgent && rawKind !== undefined && rawKind !== null) {
         const parsedReRegKind = parseAgentKind(rawKind);
