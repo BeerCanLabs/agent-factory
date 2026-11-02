@@ -19,6 +19,8 @@ export type Conversation = {
 };
 
 export type AgentActivity = {
+  runId?: string;
+  trigger?: string;
   route?: string;
   model?: string;
   kind?: string;
@@ -29,12 +31,16 @@ export type AgentActivity = {
   outputTokens?: number;
 };
 
+export type WakeOrHandoffResult = { runId?: string; woke?: boolean } | void;
+
 export type DiscordClient = {
   connected: boolean;
   presence: Presence;
   login(token: string): Promise<void>;
   setPresence(status: Presence): Promise<void>;
   setAgentName?(name: string): void;
+  /** Bind the active turn in `channelId` to a specific `runId` so activity/footer stats never merge across runs (#345). */
+  bindTurnRun?(channelId: string, runId: string, woke?: boolean): void;
   /** The factory refused to wake the agent over budget: tell the channel why, replacing the standby message. */
   refuseWake?(channelId: string, window: string, kind?: 'wake' | 'handoff'): Promise<void>;
   /** The factory refused the caller because they are unmapped or unauthorized. */
@@ -55,6 +61,7 @@ export function fakeDiscordClient(): DiscordClient & {
   refusals: Array<{ channelId: string; window: string; kind: 'wake' | 'handoff' }>;
   unauthorizedRefusals: string[];
   activities: AgentActivity[];
+  boundRuns: Array<{ channelId: string; runId: string; woke?: boolean }>;
   sent: Array<{ channelId: string; text: string }>;
   /** A message arriving from Discord: the interceptor first, then the handlers, as the real client does. */
   inbound(msg: Omit<Conversation, 'agentId'>): Promise<void>;
@@ -79,7 +86,11 @@ export function fakeDiscordClient(): DiscordClient & {
     refusals: [] as Array<{ channelId: string; window: string; kind: 'wake' | 'handoff' }>,
     unauthorizedRefusals: [] as string[],
     activities: [] as AgentActivity[],
+    boundRuns: [] as Array<{ channelId: string; runId: string; woke?: boolean }>,
     setAgentName(_name) {},
+    bindTurnRun(channelId, runId, woke) {
+      this.boundRuns.push({ channelId, runId, ...(woke !== undefined ? { woke } : {}) });
+    },
     async refuseWake(channelId, window, kind = 'wake') {
       this.refusals.push({ channelId, window, kind });
     },
@@ -153,8 +164,8 @@ export function createGatekeeperIngress(opts: {
   discordFactory?: () => DiscordClient;
   providers: SecretProvider[];
   /** Rejects if the factory did not accept the wake, so presence falls back to offline. */
-  wake: (agentId: string, msg?: unknown) => Promise<void>;
-  handoff: (msg: Conversation) => Promise<void>;
+  wake: (agentId: string, msg?: unknown) => Promise<WakeOrHandoffResult>;
+  handoff: (msg: Conversation) => Promise<WakeOrHandoffResult>;
   /** CF4: absent, the ingress asks for no approvals and consumes no replies. */
   approvals?: ApprovalAdapter;
 }): GatekeeperIngress {
@@ -268,7 +279,10 @@ export function createGatekeeperIngress(opts: {
         // Starting or available: the agent has a run, so the message goes to it (its mailbox holds the message
         // until the run polls). Waking again would queue a second run behind the one that is starting.
         try {
-          await opts.handoff(msg);
+          const out = await opts.handoff(msg);
+          if (out && typeof out.runId === 'string' && out.runId) {
+            state.discord.bindTurnRun?.(msg.channelId, out.runId, out.woke);
+          }
         } catch (err) {
           // The agent is out of budget: say so from the Gatekeeper; the agent never sees the message.
           if (err instanceof WakeRefusedError) await state.discord.refuseWake?.(msg.channelId, err.window, err.kind).catch(() => {});
@@ -280,7 +294,10 @@ export function createGatekeeperIngress(opts: {
       // A wake request is not readiness: show starting until the control plane reports the run ready.
       await state.discord.setPresence('starting');
       try {
-        await opts.wake(msg.agentId, msg);
+        const out = await opts.wake(msg.agentId, msg);
+        if (out && typeof out.runId === 'string' && out.runId) {
+          state.discord.bindTurnRun?.(msg.channelId, out.runId, true);
+        }
       } catch (err) {
         if (err instanceof WakeRefusedError) await state.discord.refuseWake?.(msg.channelId, err.window, err.kind).catch(() => {});
         else if (err instanceof UnauthorizedCallerError) await state.discord.refuseUnauthorized?.(msg.channelId).catch(() => {});

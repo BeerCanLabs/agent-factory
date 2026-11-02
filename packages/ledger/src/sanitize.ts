@@ -9,6 +9,8 @@ export type LedgerEvent = {
   actor?: string;
   requestId?: string;
   runId?: string;
+  /** Authoritative trigger of the run (`schedule`, `cron`, `conversation`, `discord`, `api`, `smoke`, etc., #345). */
+  trigger?: string;
   model?: string;
   inputTokens?: number;
   outputTokens?: number;
@@ -72,6 +74,7 @@ const ALLOWED = new Set<keyof LedgerEvent>([
   'actor',
   'requestId',
   'runId',
+  'trigger',
   'model',
   'inputTokens',
   'outputTokens',
@@ -187,6 +190,7 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (raw.gatedSecret !== undefined) event.gatedSecret = String(raw.gatedSecret);
   if (raw.turnId !== undefined) event.turnId = String(raw.turnId);
   const ident = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(v);
+  if (ident(raw.trigger)) event.trigger = raw.trigger;
   if (ident(raw.parentRunId)) event.parentRunId = raw.parentRunId;
   if (ident(raw.parentAgentId)) event.parentAgentId = raw.parentAgentId;
   // Only well-formed values: these fields must never become a channel for arbitrary text.

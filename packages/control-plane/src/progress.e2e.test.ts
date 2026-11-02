@@ -203,9 +203,11 @@ describe('§6.5 run progress events: run-scoped, bounded, headless', { concurren
 
       assert.equal(received.length, 1);
       assert.equal(received[0].auth, 'Bearer ingress-test-token');
-      const body = received[0].body as { events: Array<{ agentId: string; route: string; kind: string }> };
+      const body = received[0].body as { events: Array<{ agentId: string; runId?: string; trigger?: string; route: string; kind: string }> };
       assert.equal(body.events.length, 1);
       assert.equal(body.events[0].agentId, 'donna');
+      assert.equal(body.events[0].runId, run.runId);
+      assert.equal(body.events[0].trigger, 'test');
       assert.equal(body.events[0].route, 'github');
       assert.equal(body.events[0].kind, 'call.start');
 
@@ -213,9 +215,17 @@ describe('§6.5 run progress events: run-scoped, bounded, headless', { concurren
       await report([ev(run.runId, 'donna', { route: 'anthropic', model: 'claude-test', kind: 'call.end', inputTokens: 1200, outputTokens: 300 })]);
       for (let i = 0; i < 200 && received.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
       assert.equal(received.length, 2);
-      const tokenEvent = (received[1].body as { events: Array<{ inputTokens?: number; outputTokens?: number }> }).events[0];
+      const tokenEvent = (received[1].body as { events: Array<{ runId?: string; trigger?: string; inputTokens?: number; outputTokens?: number }> }).events[0];
+      assert.equal(tokenEvent.runId, run.runId);
+      assert.equal(tokenEvent.trigger, 'test');
       assert.equal(tokenEvent.inputTokens, 1200);
       assert.equal(tokenEvent.outputTokens, 300);
+
+      // #345: smoke runs must never relay activity to gatekeeper-ingress.
+      const smokeRun = state.runs.create({ agentId: 'donna', state: 'WORKING', actor: 'test', trigger: 'smoke' });
+      await report([ev(smokeRun.runId, 'donna', { route: 'github', kind: 'call.start' })]);
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(received.length, 2, 'smoke run activity must not be relayed to gatekeeper-ingress');
     } finally {
       delete state.gatekeeperIngressUrl;
       delete state.gatekeeperIngressToken;

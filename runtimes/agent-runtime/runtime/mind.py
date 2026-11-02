@@ -19,6 +19,31 @@ from memory import ephemeral, episodic, workspace, notebook
 
 
 
+def is_scheduled_payload(payload: dict) -> bool:
+    """Return True when the turn payload represents a background schedule or cron invocation (#345)."""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("source") in ("schedule", "cron"):
+        return True
+    caller = payload.get("caller")
+    return isinstance(caller, dict) and caller.get("source") in ("schedule", "cron")
+
+
+def _schedule_meta(payload: dict) -> tuple[str | None, str | None, str | None]:
+    if not isinstance(payload, dict):
+        return None, None, None
+    schedule_id = payload.get("scheduleId") if isinstance(payload.get("scheduleId"), str) else None
+    caller = payload.get("caller") if isinstance(payload.get("caller"), dict) else {}
+    schedule_name = (
+        payload.get("scheduleName")
+        if isinstance(payload.get("scheduleName"), str)
+        else (caller.get("scheduleName") if isinstance(caller.get("scheduleName"), str) else None)
+    )
+    reply_to = payload.get("replyTo") if isinstance(payload.get("replyTo"), dict) else {}
+    channel_id = str(reply_to["channelId"]) if reply_to.get("channelId") else None
+    return schedule_id, schedule_name, channel_id
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     db = sqlite3.connect(str(path))
     db.execute("PRAGMA journal_mode = WAL;")
@@ -59,16 +84,21 @@ class PurposeBuilt(Mind):
         # One board per person: people who join one warm run never see each other's turns (AM2).
         self.boards: dict[str, ephemeral.EphemeralWhiteboard] = {}
 
-    def _board(self, who: str) -> ephemeral.EphemeralWhiteboard:
-        if who not in self.boards:
-            self.boards[who] = ephemeral.EphemeralWhiteboard(max_messages=self.bounds["max_messages"], max_chars=self.bounds["max_chars"])
-        return self.boards[who]
+    def _board(self, who: str, payload: dict) -> ephemeral.EphemeralWhiteboard:
+        if is_scheduled_payload(payload):
+            sched_id, sched_name, _ = _schedule_meta(payload)
+            key = f"{who}#schedule:{sched_id or sched_name or 'default'}"
+        else:
+            key = who
+        if key not in self.boards:
+            self.boards[key] = ephemeral.EphemeralWhiteboard(max_messages=self.bounds["max_messages"], max_chars=self.bounds["max_chars"])
+        return self.boards[key]
 
     def history(self, who, payload):
-        return self._board(who).load_whiteboard()
+        return self._board(who, payload).load_whiteboard()
 
     def remember(self, who, payload, user_text, reply, surface, channel_id):
-        self._board(who).remember_turn(user_text, reply)
+        self._board(who, payload).remember_turn(user_text, reply)
 
 
 class PersonalAssistant(Mind):
@@ -91,12 +121,24 @@ class PersonalAssistant(Mind):
         handled, reply = episodic.handle_turn_intent(self.db, user_id=who, text=text)
         return (reply or "") if handled else None
 
+    def _session(self, who: str, payload: dict) -> tuple[str, str | None]:
+        if is_scheduled_payload(payload):
+            sched_id, sched_name, channel_id = _schedule_meta(payload)
+            return episodic.get_or_create_scheduled_session(
+                self.db,
+                user_id=who,
+                schedule_id=sched_id,
+                schedule_name=sched_name,
+                channel_id=channel_id,
+            )
+        return episodic.get_or_create_active_session(self.db, user_id=who)
+
     def history(self, who, payload):
-        session_id, name = episodic.get_or_create_active_session(self.db, user_id=who)
+        session_id, name = self._session(who, payload)
         return episodic.load_whiteboard(self.db, user_id=who, session_id=session_id, session_name=name, max_messages=self.bounds["max_messages"], max_chars=self.bounds["max_chars"])
 
     def remember(self, who, payload, user_text, reply, surface, channel_id):
-        session_id, _ = episodic.get_or_create_active_session(self.db, user_id=who)
+        session_id, _ = self._session(who, payload)
         episodic.remember_turn(self.db, session_id=session_id, user_id=who, user_text=user_text, reply_text=reply, surface=surface, channel_id=channel_id)
 
     def tools(self):
@@ -170,7 +212,8 @@ class TeamMember(Mind):
         db = self._db(project)
         workspace.create_or_update_task(db, project_id=project, task_id=task, title=user_text[:200])
         workspace.record_task_turn(db, project_id=project, task_id=task, role="user", content=user_text)
-        workspace.record_task_turn(db, project_id=project, task_id=task, role="assistant", content=reply)
+        effective_reply = episodic.NO_REPLY_SENTINEL if (user_text and episodic.is_silent_reply(reply)) else reply
+        workspace.record_task_turn(db, project_id=project, task_id=task, role="assistant", content=effective_reply)
 
     def tools(self):
         def recall(args: dict, who: str) -> str:

@@ -19,6 +19,8 @@ interface ProgressStats {
   recentLines: string[];
 }
 
+type RunStatsCounters = Omit<ProgressStats, 'startedAt'>;
+
 interface ActiveTurnSession {
   channelId: string;
   channel: {
@@ -29,6 +31,9 @@ interface ActiveTurnSession {
   userMessageId?: string;
   progressMessageId?: string;
   progressMessage?: any;
+  runId?: string;
+  queuedWake?: boolean;
+  statsByRunId: Map<string, RunStatsCounters>;
   stats: ProgressStats;
   typingInterval?: NodeJS.Timeout;
   lastActivityAt: number;
@@ -36,6 +41,16 @@ interface ActiveTurnSession {
   editTimer?: NodeJS.Timeout;
   lastEditAt: number;
   dirty: boolean;
+}
+
+function emptyRunStats(): RunStatsCounters {
+  return {
+    thoughtMs: 0,
+    toolCallsCount: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    recentLines: [],
+  };
 }
 
 export type DiscordClientOptions = {
@@ -57,6 +72,49 @@ function isMessagingActivity(activity: { route?: string }): boolean {
 
 function isInternalActivity(activity: { route?: string }): boolean {
   return Boolean(activity.route === 'control-plane' || activity.route === 'auth');
+}
+
+function isBackgroundTrigger(trigger?: string): boolean {
+  return trigger === 'schedule' || trigger === 'cron' || trigger === 'smoke';
+}
+
+function applyActivityToStats(
+  stats: RunStatsCounters,
+  activity: AgentActivity,
+  isModel: boolean,
+  isMessaging: boolean,
+  isInternal: boolean,
+  isTool: boolean,
+): void {
+  if (activity.kind === 'call.end') {
+    if (isModel) {
+      stats.thoughtMs += activity.durationMs ?? 0;
+      stats.inputTokens += activity.inputTokens ?? 0;
+      stats.outputTokens += activity.outputTokens ?? 0;
+    } else if (isTool) {
+      stats.toolCallsCount += 1;
+    }
+  }
+
+  if (!isMessaging && !isInternal) {
+    const label = routeLabel(activity.route, activity.model);
+    if (activity.kind === 'call.start') {
+      stats.recentLines.push(`${label}…`);
+    } else if (activity.kind === 'call.end') {
+      const outcomeSymbol =
+        activity.outcome === 'error' || activity.outcome === 'timeout' || (activity.status !== undefined && activity.status >= 400)
+          ? '⚠️'
+          : '✓';
+      const durStr = activity.durationMs !== undefined ? ` ${formatDuration(activity.durationMs)}` : '';
+      const finishedLine = `${label} ${outcomeSymbol}${durStr}`.trim();
+      const lastIdx = stats.recentLines.map((l) => l.replace(/…$/, '')).lastIndexOf(label);
+      if (lastIdx !== -1) {
+        stats.recentLines[lastIdx] = finishedLine;
+      } else {
+        stats.recentLines.push(finishedLine);
+      }
+    }
+  }
 }
 
 function formatDuration(ms?: number): string {
@@ -199,7 +257,8 @@ export function createDiscordClient(
     const turn = activeTurns.get(channelId);
     if (!turn) return;
     if (standbySessions.has(channelId)) return;
-    if (Date.now() - turn.lastActivityAt > turnLeaseMs) {
+    const effectiveLeaseMs = turn.queuedWake ? Math.max(turnLeaseMs, 180_000) : turnLeaseMs;
+    if (Date.now() - turn.lastActivityAt > effectiveLeaseMs) {
       console.log(`[gatekeeper-ingress] Turn lease expired for channel ${channelId}, going silent.`);
       if (turn.progressMessage || turn.progressMessageId) {
         const summary = formatSummary(turn.stats, true);
@@ -217,16 +276,13 @@ export function createDiscordClient(
     const now = Date.now();
     const stats: ProgressStats = {
       startedAt: now,
-      thoughtMs: 0,
-      toolCallsCount: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      recentLines: [],
+      ...emptyRunStats(),
     };
     const turn: ActiveTurnSession = {
       channelId,
       channel,
       userMessageId,
+      statsByRunId: new Map(),
       stats,
       lastActivityAt: now,
       lastTypingAt: now,
@@ -437,11 +493,36 @@ export function createDiscordClient(
     setAgentName(name: string) {
       if (name) agentName = name;
     },
+    bindTurnRun(channelId: string, runId: string, woke?: boolean) {
+      const turn = activeTurns.get(channelId);
+      if (!turn || !runId) return;
+      const priorLines = turn.stats.recentLines.join('\n');
+      turn.runId = runId;
+      if (woke) turn.queuedWake = true;
+      // #345: if events arrived while wake/handoff was in flight, keep ONLY events belonging to `runId` and drop other runs.
+      if (turn.statsByRunId.size > 0) {
+        const mine = turn.statsByRunId.get(runId) ?? emptyRunStats();
+        turn.stats = {
+          startedAt: turn.stats.startedAt,
+          thoughtMs: mine.thoughtMs,
+          toolCallsCount: mine.toolCallsCount,
+          inputTokens: mine.inputTokens,
+          outputTokens: mine.outputTokens,
+          recentLines: [...mine.recentLines],
+        };
+        turn.statsByRunId.clear();
+        if (turn.stats.recentLines.join('\n') !== priorLines) {
+          scheduleEdit(turn);
+        }
+      }
+    },
     async login(token: string) {
       if (client.isReady()) return;
       await client.login(token);
     },
     async recordActivity(activity: AgentActivity) {
+      // #345: background scheduled/cron/smoke runs never update Discord status, typing, or interactive reply footers.
+      if (isBackgroundTrigger(activity.trigger)) return;
       // A late event (after the reply, after the lease lapsed) has no turn to belong to; setting a status now would
       // leave it on the bot with nothing to clear it.
       if (activeTurns.size === 0) return;
@@ -452,6 +533,38 @@ export function createDiscordClient(
       const isInternal = isInternalActivity(activity);
       const isTool = !isModel && !isMessaging && !isInternal && Boolean(activity.route);
       const routeName = isTool ? activity.route : undefined;
+
+      const now = Date.now();
+      let matchedAnyTurn = false;
+      for (const turn of activeTurns.values()) {
+        // #345: once a turn is bound to a runId, ignore activity belonging to any other runId.
+        if (turn.runId !== undefined && activity.runId !== undefined && turn.runId !== activity.runId) {
+          continue;
+        }
+        matchedAnyTurn = true;
+        if (turn.runId !== undefined && activity.runId === turn.runId) {
+          turn.queuedWake = false;
+        }
+        if (turn.runId === undefined && activity.runId !== undefined) {
+          let perRun = turn.statsByRunId.get(activity.runId);
+          if (!perRun) {
+            perRun = emptyRunStats();
+            turn.statsByRunId.set(activity.runId, perRun);
+          }
+          applyActivityToStats(perRun, activity, isModel, isMessaging, isInternal, isTool);
+        }
+
+        turn.lastActivityAt = now;
+        if (!standbySessions.has(turn.channelId) && now - turn.lastTypingAt > TYPING_MIN_GAP_MS) pulseTyping(turn);
+
+        applyActivityToStats(turn.stats, activity, isModel, isMessaging, isInternal, isTool);
+
+        if (!isMessaging && !isInternal) {
+          scheduleEdit(turn);
+        }
+      }
+
+      if (!matchedAnyTurn) return;
 
       let text: string;
       if (activity.kind === 'call.end') {
@@ -466,43 +579,6 @@ export function createDiscordClient(
       if (text.length > 120) text = text.slice(0, 117) + '...';
 
       client.user?.setActivity(text, { type: ActivityType.Custom });
-
-      // The event names an agent, not a channel, and one agent runs one turn at a time: it is alive, so every open
-      // turn of this client is kept alive.
-      const now = Date.now();
-      for (const turn of activeTurns.values()) {
-        turn.lastActivityAt = now;
-        if (!standbySessions.has(turn.channelId) && now - turn.lastTypingAt > TYPING_MIN_GAP_MS) pulseTyping(turn);
-
-        if (activity.kind === 'call.end') {
-          if (isModel) {
-            turn.stats.thoughtMs += activity.durationMs ?? 0;
-            turn.stats.inputTokens += activity.inputTokens ?? 0;
-            turn.stats.outputTokens += activity.outputTokens ?? 0;
-          } else if (isTool) {
-            turn.stats.toolCallsCount += 1;
-          }
-        }
-
-        if (!isMessaging && !isInternal) {
-          const label = routeLabel(activity.route, activity.model);
-          if (activity.kind === 'call.start') {
-            turn.stats.recentLines.push(`${label}…`);
-          } else if (activity.kind === 'call.end') {
-            const outcomeSymbol = activity.outcome === 'error' || activity.outcome === 'timeout' || (activity.status !== undefined && activity.status >= 400) ? '⚠️' : '✓';
-            const durStr = activity.durationMs !== undefined ? ` ${formatDuration(activity.durationMs)}` : '';
-            const finishedLine = `${label} ${outcomeSymbol}${durStr}`.trim();
-            const lastIdx = turn.stats.recentLines.map((l) => l.replace(/…$/, '')).lastIndexOf(label);
-            if (lastIdx !== -1) {
-              turn.stats.recentLines[lastIdx] = finishedLine;
-            } else {
-              turn.stats.recentLines.push(finishedLine);
-            }
-          }
-
-          scheduleEdit(turn);
-        }
-      }
     },
     async refuseWake(channelId: string, window: string, kind: 'wake' | 'handoff' = 'wake') {
       const session = standbySessions.get(channelId);
@@ -561,10 +637,14 @@ export function createDiscordClient(
       if (!client.isReady()) return;
       client.user?.setStatus(discordStatus(status));
       if (status === 'offline') {
-        for (const channelId of activeTurns.keys()) {
+        for (const [channelId, turn] of activeTurns.entries()) {
+          // #345: preserve queued interactive wakes across transient offline presence notifications while a prior run tears down.
+          if (turn.queuedWake) continue;
           clearActiveTurn(channelId);
         }
-        client.user?.setPresence({ activities: [] });
+        if (activeTurns.size === 0) {
+          client.user?.setPresence({ activities: [] });
+        }
       }
     },
     onMessage(handler) {

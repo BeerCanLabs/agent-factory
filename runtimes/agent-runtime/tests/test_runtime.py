@@ -408,6 +408,100 @@ class TestLoop(Base):
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["output"]["summary"], "handled 1 turn(s)")
 
+    def test_silent_scheduled_turns_do_not_post_empty_discord_messages_or_bleed_into_interactive_session(self):
+        """#345: silent scheduled checks complete cleanly with NO_REPLY_SENTINEL in an isolated scheduled session and never replay on interactive turns."""
+        import sqlite3
+
+        # 1. Interactive turn establishes Dale's active conversation session
+        code1, _, _ = self.wake(
+            PA,
+            [turn("hello pip", reply={"channel": "discord", "channelId": "1490373419240521769"})],
+            lambda m, t: {"role": "assistant", "content": "Hi Dale!"},
+        )
+        self.assertEqual(code1, 0)
+
+        # 2. Scheduled check fires for Dale and returns empty string ("say nothing")
+        sched_prompt = "Check Dale's step count for today. If he's already over 10k, say nothing."
+        seen_sched_sys = []
+        code2, fake_sched_empty, res_empty = self.wake(
+            {**PA, "warmDownSeconds": 3600},
+            [
+                turn(
+                    sched_prompt,
+                    source="schedule",
+                    scheduleId="sched-steps",
+                    scheduleName="Evening steps",
+                    reply={"channel": "discord", "channelId": "1490373419240521769"},
+                )
+            ],
+            lambda m, t: (seen_sched_sys.append(m[0]["content"]) or {"role": "assistant", "content": ""}),
+        )
+        self.assertEqual(code2, 0)
+        self.assertEqual(res_empty["status"], "succeeded")
+        self.assertTrue(res_empty["output"].get("silent"))
+        self.assertIn("NO_REPLY", seen_sched_sys[0])
+        self.assertEqual([r for r in fake_sched_empty.requests if "/discord/channels/" in r[1]], [], "silent turn must not post to Discord")
+
+        # 3. Second scheduled check returns explicit NO_REPLY sentinel
+        code3, fake_sched_token, res_token = self.wake(
+            PA,
+            [
+                turn(
+                    sched_prompt,
+                    source="schedule",
+                    scheduleId="sched-steps",
+                    scheduleName="Evening steps",
+                    reply={"channel": "discord", "channelId": "1490373419240521769"},
+                )
+            ],
+            lambda m, t: {"role": "assistant", "content": "NO_REPLY"},
+        )
+        self.assertEqual(code3, 0)
+        self.assertTrue(res_token["output"].get("silent"))
+        self.assertEqual([r for r in fake_sched_token.requests if "/discord/channels/" in r[1]], [], "NO_REPLY must not post to Discord")
+
+        # 4. Next interactive Discord message from Dale must NOT see the scheduled prompts in its history
+        interactive_messages_seen = []
+        code4, fake_interactive, _ = self.wake(
+            PA,
+            [turn("which board positions are up for nomination?", reply={"channel": "discord", "channelId": "1490373419240521769"})],
+            lambda m, t: (interactive_messages_seen.append(list(m)) or {"role": "assistant", "content": "Vice Chair and Treasurer."}),
+        )
+        self.assertEqual(code4, 0)
+        prompt_contents = [msg["content"] for msg in interactive_messages_seen[0]]
+        self.assertNotIn(sched_prompt, prompt_contents, "scheduled prompt must never bleed into interactive history")
+        self.assertEqual(
+            [(msg["role"], msg["content"]) for msg in interactive_messages_seen[0][1:]],
+            [
+                ("user", "hello pip"),
+                ("assistant", "Hi Dale!"),
+                ("user", "which board positions are up for nomination?"),
+            ],
+        )
+
+        # Verify SQLite sessions: interactive session stays is_active=1; scheduled session is is_active=0 with paired [no reply] turns
+        conn = sqlite3.connect(str(self.mind / "agent_state.db"))
+        sessions = conn.execute("SELECT id, name, is_active FROM conversation_sessions ORDER BY is_active DESC").fetchall()
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual(sessions[0][2], 1)
+        self.assertFalse(sessions[0][0].startswith("s_sched_"))
+        self.assertEqual(sessions[1][2], 0)
+        self.assertTrue(sessions[1][0].startswith("s_sched_"))
+        sched_turns = conn.execute(
+            "SELECT role, content FROM conversation_turns WHERE session_id = ? ORDER BY id ASC",
+            (sessions[1][0],),
+        ).fetchall()
+        self.assertEqual(
+            sched_turns,
+            [
+                ("user", sched_prompt),
+                ("assistant", "[no reply]"),
+                ("user", sched_prompt),
+                ("assistant", "[no reply]"),
+            ],
+        )
+        conn.close()
+
 
 class TestSkills(Base):
     def write_skill(self, sid="notes", body=None, entry="notes/tools.py"):
