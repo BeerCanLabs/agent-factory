@@ -404,6 +404,22 @@ describe('a change takes the parts it does not author from the latest record, at
       // Without `replaces`, the content is stored exactly as given (every existing caller and test).
       await store.put(content({ owners: ['token:b'] }), meta);
       assert.equal(store.current('ada')!.agent, undefined);
+      // S23 (#369): changing skill holds creates a new immutable version and preserves holds on reload.
+      const withDefaults = await store.put(
+        content({ skills: [{ id: 'mail', version: '1.0.0', holds: { send_email: true, search_mail: false } }] }),
+        { ...meta, replaces: ['skills'] },
+      );
+      assert.equal(withDefaults.created, true);
+      const tightened = await store.put(
+        content({ skills: [{ id: 'mail', version: '1.0.0', holds: { send_email: true, search_mail: true } }] }),
+        { ...meta, replaces: ['skills'] },
+      );
+      assert.equal(tightened.created, true);
+      assert.equal(tightened.record.version, withDefaults.record.version + 1);
+      const reopened = await VersionedConfigStore.open(new FileConfigBackend(dir));
+      assert.deepEqual(reopened.current('ada')!.skills, [
+        { id: 'mail', version: '1.0.0', holds: { send_email: true, search_mail: true } },
+      ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -29,11 +29,16 @@ import {
   beginAdmission,
   canAdopt,
   changedParts,
+  effectiveSkillHolds,
   loadSharedRuntime,
+  ownerOf,
   parseAgentKind,
   registryOf,
   saveSharedRuntime,
+  validateSkillHoldOverrides,
+  visibilityOf,
   type AgentRecord,
+  type ConfigSkill,
   type SharedRuntimePin,
   type SkillAdoptionProvenance,
 } from '@beercanlabs/factory-registrar';
@@ -583,19 +588,19 @@ export async function createFromConfiguration(
       ? (ownership.accountableLead ? [ownership.accountableLead] : [])
       : (ownership.configOwners ?? [principal.actor]);
 
-  const initialSkills: Array<{ id: string; version: string }> = [];
+  const initialSkills: ConfigSkill[] = [];
   const seenSkillIds = new Set<string>();
+  const registry = skillRegistry(state);
 
   if (spec.skills !== undefined) {
     if (!Array.isArray(spec.skills)) {
       return { status: 400, body: { error: 'invalid_skills', message: 'skills must be an array' } };
     }
-    const registry = skillRegistry(state);
     for (const item of spec.skills) {
       if (!item || typeof item !== 'object') {
         return { status: 400, body: { error: 'invalid_skills', message: 'skill entry must be an object' } };
       }
-      const s = item as { id?: unknown; version?: unknown };
+      const s = item as { id?: unknown; version?: unknown; holds?: unknown; holdOverrides?: unknown };
       if (typeof s.id !== 'string' || !SKILL_ID.test(s.id) || typeof s.version !== 'string' || !SEMVER.test(s.version)) {
         return { status: 400, body: { error: 'invalid_skills', message: 'each skill needs a valid id and semantic version' } };
       }
@@ -607,8 +612,33 @@ export async function createFromConfiguration(
         const status = check.error === 'not_found' ? 404 : check.error === 'skill_private' ? 403 : 409;
         return { status, body: { error: check.error, message: check.message } };
       }
+      const rawHolds = s.holds !== undefined ? s.holds : s.holdOverrides;
+      let holds: Record<string, boolean>;
+      if (rawHolds !== undefined) {
+        const validated = validateSkillHoldOverrides(check.record.manifest, rawHolds);
+        if (!validated.ok) {
+          return {
+            status: validated.status,
+            body: {
+              error: validated.error,
+              agentId: id,
+              skillId: s.id,
+              version: s.version,
+              ...(validated.action ? { action: validated.action } : {}),
+              message: validated.message,
+            },
+          };
+        }
+        holds = validated.holds;
+      } else {
+        holds = effectiveSkillHolds(check.record.manifest);
+      }
       seenSkillIds.add(s.id);
-      initialSkills.push({ id: s.id, version: s.version });
+      initialSkills.push({
+        id: s.id,
+        version: s.version,
+        ...(Object.keys(holds).length ? { holds } : {}),
+      });
     }
   }
 
@@ -620,8 +650,14 @@ export async function createFromConfiguration(
   if (spec.includeDefaultSkills !== false) {
     for (const def of activeDefaultSkills(state)) {
       if (!seenSkillIds.has(def.id) && !excludeSet.has(def.id)) {
+        const defRec = registry.get(def.id, def.version);
+        const holds = effectiveSkillHolds(defRec?.manifest);
         seenSkillIds.add(def.id);
-        initialSkills.push({ id: def.id, version: def.version });
+        initialSkills.push({
+          id: def.id,
+          version: def.version,
+          ...(Object.keys(holds).length ? { holds } : {}),
+        });
       }
     }
   }
@@ -1103,7 +1139,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     json(res, 400, { error: 'invalid_skills', message: 'skills must be an array' });
     return true;
   }
-  const validatedSkills: Array<{ id: string; version: string }> = [];
+  const validatedSkills: ConfigSkill[] = [];
   const registry = skillRegistry(state);
   const agentOwners = ownersOf(state, agentId);
 
@@ -1112,7 +1148,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
       json(res, 400, { error: 'invalid_skills', message: 'each skill must have id and version strings' });
       return true;
     }
-    const skillItem = s as { id: string; version: string };
+    const skillItem = s as { id: string; version: string; holds?: unknown; holdOverrides?: unknown };
     const rec = registry.get(skillItem.id, skillItem.version);
     const usable = Boolean(rec && !rec.retired && rec.status !== 'rejected' && (rec.status === 'approved' || Boolean(rec.packageHash && rec.tests === 'passed')));
     if (!usable) {
@@ -1137,7 +1173,30 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
       });
       return true;
     }
-    validatedSkills.push({ id: skillItem.id, version: skillItem.version });
+    const rawHolds = skillItem.holds !== undefined ? skillItem.holds : skillItem.holdOverrides;
+    let holds: Record<string, boolean>;
+    if (rawHolds !== undefined) {
+      const validated = validateSkillHoldOverrides(rec!.manifest, rawHolds);
+      if (!validated.ok) {
+        json(res, validated.status, {
+          error: validated.error,
+          agentId,
+          skillId: skillItem.id,
+          version: skillItem.version,
+          ...(validated.action ? { action: validated.action } : {}),
+          message: validated.message,
+        });
+        return true;
+      }
+      holds = validated.holds;
+    } else {
+      holds = effectiveSkillHolds(rec!.manifest);
+    }
+    validatedSkills.push({
+      id: skillItem.id,
+      version: skillItem.version,
+      ...(Object.keys(holds).length ? { holds } : {}),
+    });
   }
 
   const excludeDefaultSkills = new Set<string>(
@@ -1149,8 +1208,14 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     const existingIds = new Set(validatedSkills.map((s) => s.id));
     for (const def of activeDefaultSkills(state)) {
       if (!existingIds.has(def.id) && !excludeDefaultSkills.has(def.id)) {
+        const defRec = registry.get(def.id, def.version);
+        const holds = effectiveSkillHolds(defRec?.manifest);
         existingIds.add(def.id);
-        validatedSkills.push({ id: def.id, version: def.version });
+        validatedSkills.push({
+          id: def.id,
+          version: def.version,
+          ...(Object.keys(holds).length ? { holds } : {}),
+        });
       }
     }
   }
@@ -1230,6 +1295,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     if (prevRoles === undefined) delete agent.roles; else agent.roles = prevRoles;
     if (prevSkillIds === undefined) delete agent.skillIds; else agent.skillIds = prevSkillIds;
     if (prevSkillRoutes === undefined) delete agent.skillRoutes; else agent.skillRoutes = prevSkillRoutes;
+    delete (agent as any).pendingConfig;
     if (prevAdmission === undefined) delete agent.admission; else agent.admission = prevAdmission;
     if (prevPolicy) state.policies.set(agentId, prevPolicy);
     registryOf(state).save(agent);

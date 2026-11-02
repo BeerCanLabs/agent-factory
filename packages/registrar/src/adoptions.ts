@@ -11,7 +11,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SKILL_ID } from '@beercanlabs/factory-contract';
+import { SKILL_ID, skillActionHoldDefaults, type SkillAction, type SkillManifest } from '@beercanlabs/factory-contract';
 import { AGENT_ID, adoptionProvenance, type ConfigStore } from './config-store.js';
 
 export type AdoptionState = 'requested' | 'rejected' | 'revoked';
@@ -33,6 +33,8 @@ export type AdoptionRecord = {
   decidedAt?: string;
   decisionReason?: string;
   accessAdded?: AccessAdded;
+  /** S23 (D31): effective per-action holds requested on adoption (skill defaults plus any stricter owner overrides). */
+  holds?: Record<string, boolean>;
 };
 
 export type AdoptionRequest = {
@@ -42,7 +44,138 @@ export type AdoptionRequest = {
   requestedBy: string;
   reason?: string;
   accessAdded?: AccessAdded;
+  holds?: Record<string, boolean>;
 };
+
+function setHoldKey(target: Record<string, boolean>, key: string, value: boolean): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+function isPlainHoldMap(value: unknown): value is Record<string, boolean> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  for (const k of Object.keys(value as Record<string, unknown>)) {
+    if (k === '__proto__' || typeof (value as Record<string, unknown>)[k] !== 'boolean') return false;
+  }
+  return true;
+}
+
+type ManifestActionsLike = { actions?: ReadonlyArray<Pick<SkillAction, 'id' | 'hold'>> } | Pick<SkillManifest, 'actions'> | undefined | null;
+
+/** S23 (D31): per-action default hold map declared by a skill manifest (`{ [action.id]: action.hold }`). */
+export function defaultSkillActionHolds(manifest?: ManifestActionsLike): Record<string, boolean> {
+  return skillActionHoldDefaults(manifest);
+}
+
+/**
+ * S23 (D31): computes effective per-action hold settings for `manifest`, monotonically combining manifest defaults
+ * with any stored agent hold settings (`manifest.hold || Boolean(storedHolds[action.id])`). A skill-declared
+ * `hold: true` can never evaluate to `false`, even if `storedHolds` came from an older version or tampered record.
+ */
+export function effectiveSkillHolds(
+  manifest: ManifestActionsLike,
+  storedHolds?: Record<string, boolean>,
+): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const action of manifest?.actions ?? []) {
+    const tightened =
+      storedHolds !== undefined &&
+      Object.prototype.hasOwnProperty.call(storedHolds, action.id) &&
+      storedHolds[action.id] === true;
+    setHoldKey(out, action.id, action.hold || tightened);
+  }
+  return out;
+}
+
+export type SkillHoldValidationResult =
+  | {
+      ok: true;
+      holds: Record<string, boolean>;
+      overrides: Record<string, boolean>;
+    }
+  | {
+      ok: false;
+      status: 400 | 422;
+      error: 'invalid_holds' | 'unknown_skill_action' | 'hold_loosening_forbidden';
+      action?: string;
+      message: string;
+    };
+
+/**
+ * S23 (D31): validates per-action hold overrides against `manifest.actions`.
+ * - Owners/leads/admins may tighten an autonomous action (`hold: false` -> `true`) or reset it back to `false`.
+ * - Loosening a mandatory skill-declared hold (`hold: true` -> `false`) is rejected with `422 hold_loosening_forbidden`.
+ * - Unknown action ids are rejected with `422 unknown_skill_action`.
+ * - Malformed payloads or non-boolean values are rejected with `400 invalid_holds`.
+ */
+export function validateSkillHoldOverrides(
+  manifest: ManifestActionsLike,
+  rawOverrides: unknown,
+  baseHolds?: Record<string, boolean>,
+): SkillHoldValidationResult {
+  if (!rawOverrides || typeof rawOverrides !== 'object' || Array.isArray(rawOverrides)) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'invalid_holds',
+      message: 'holds must be an object mapping declared skill action ids to booleans',
+    };
+  }
+  const actions = manifest?.actions ?? [];
+  const actionMap = new Map<string, boolean>();
+  for (const action of actions) {
+    actionMap.set(action.id, action.hold);
+  }
+  const input = rawOverrides as Record<string, unknown>;
+  for (const key of Object.keys(input)) {
+    const val = input[key];
+    if (typeof val !== 'boolean') {
+      return {
+        ok: false,
+        status: 400,
+        error: 'invalid_holds',
+        action: key,
+        message: `hold value for action "${key}" must be true or false`,
+      };
+    }
+    if (!actionMap.has(key)) {
+      return {
+        ok: false,
+        status: 422,
+        error: 'unknown_skill_action',
+        action: key,
+        message: `skill does not declare action "${key}"`,
+      };
+    }
+    const manifestHold = actionMap.get(key)!;
+    if (manifestHold && val === false) {
+      return {
+        ok: false,
+        status: 422,
+        error: 'hold_loosening_forbidden',
+        action: key,
+        message: `action "${key}" declares hold: true in skill.yaml and cannot be loosened to hold: false (D31, S23)`,
+      };
+    }
+  }
+
+  const holds: Record<string, boolean> = {};
+  const overrides: Record<string, boolean> = {};
+  for (const action of actions) {
+    let effective: boolean;
+    if (Object.prototype.hasOwnProperty.call(input, action.id)) {
+      effective = action.hold || (input[action.id] as boolean);
+    } else if (baseHolds && Object.prototype.hasOwnProperty.call(baseHolds, action.id)) {
+      effective = action.hold || Boolean(baseHolds[action.id]);
+    } else {
+      effective = action.hold;
+    }
+    setHoldKey(holds, action.id, effective);
+    if (!action.hold && effective) {
+      setHoldKey(overrides, action.id, true);
+    }
+  }
+  return { ok: true, holds, overrides };
+}
 
 function check(agentId: string, skillId: string): void {
   if (!AGENT_ID.test(agentId)) throw new Error(`agent id ${JSON.stringify(agentId)} cannot name an adoption`);
@@ -73,6 +206,9 @@ export class AdoptionStore {
           if (!STATES.includes(rec.state)) throw new Error(`unknown adoption state ${JSON.stringify(rec.state)}`);
           for (const k of ['version', 'requestedBy', 'requestedAt'] as const) {
             if (typeof rec[k] !== 'string' || !rec[k]) throw new Error(`adoption record has no ${k}`);
+          }
+          if (rec.holds !== undefined && !isPlainHoldMap(rec.holds)) {
+            throw new Error('adoption record has invalid holds map');
           }
           this.records.set(`${agentId}/${rec.skillId}`, rec);
         } catch (err) {
@@ -125,6 +261,33 @@ export class AdoptionStore {
       requestedAt: now.toISOString(),
       ...(input.reason ? { reason: input.reason } : {}),
       ...(input.accessAdded ? { accessAdded: structuredClone(input.accessAdded) } : {}),
+      ...(input.holds && Object.keys(input.holds).length ? { holds: structuredClone(input.holds) } : {}),
+    });
+  }
+
+  /**
+   * S23 (D31): updates per-action `holds` on a pending (`requested`) adoption record while preserving
+   * the original `requestedBy` and `requestedAt` provenance. Returns `undefined` when no pending request exists.
+   */
+  updateHolds(
+    agentId: string,
+    skillId: string,
+    holds: Record<string, boolean>,
+    reason?: string,
+  ): AdoptionRecord | undefined {
+    check(agentId, skillId);
+    const rec = this.records.get(`${agentId}/${skillId}`);
+    if (!rec || rec.state !== 'requested') return undefined;
+    return this.save({
+      agentId: rec.agentId,
+      skillId: rec.skillId,
+      version: rec.version,
+      state: 'requested',
+      requestedBy: rec.requestedBy,
+      requestedAt: rec.requestedAt,
+      ...(reason ?? rec.reason ? { reason: (reason ?? rec.reason)! } : {}),
+      ...(rec.accessAdded ? { accessAdded: structuredClone(rec.accessAdded) } : {}),
+      ...(Object.keys(holds).length ? { holds: structuredClone(holds) } : {}),
     });
   }
 
@@ -132,7 +295,8 @@ export class AdoptionStore {
   reject(agentId: string, skillId: string, by: string, reason?: string, now: Date = new Date()): AdoptionRecord | undefined {
     const rec = this.records.get(`${agentId}/${skillId}`);
     if (!rec || rec.state !== 'requested') return undefined;
-    return this.save({ ...rec, state: 'rejected', decidedBy: by, decidedAt: now.toISOString(), ...(reason ? { decisionReason: reason } : {}) });
+    const { holds: _droppedHolds, ...rest } = rec;
+    return this.save({ ...rest, state: 'rejected', decidedBy: by, decidedAt: now.toISOString(), ...(reason ? { decisionReason: reason } : {}) });
   }
 
   /**
@@ -212,7 +376,15 @@ export function adopters(configs: Pick<ConfigStore, 'agentIds' | 'current' | 'hi
 
 export type AgentSkills = {
   /** What the agent's current configuration adopts, with who asked and who approved when that was recorded. */
-  adopted: Array<{ id: string; version: string; requestedBy?: string; approvedBy?: string; approvedAt?: string; auto?: true }>;
+  adopted: Array<{
+    id: string;
+    version: string;
+    holds?: Record<string, boolean>;
+    requestedBy?: string;
+    approvedBy?: string;
+    approvedAt?: string;
+    auto?: true;
+  }>;
   /** Pending requests. */
   requests: AdoptionRecord[];
   /** Revoked adoptions (SK6), which stop a private skill's later versions from being adopted by themselves. */
@@ -223,7 +395,12 @@ export type AgentSkills = {
 export function skillsOf(configs: Pick<ConfigStore, 'current' | 'history'>, adoptions: AdoptionStore, agentId: string): AgentSkills {
   const adopted = (configs.current(agentId)?.skills ?? []).map((k) => {
     const p = adoptionProvenance(configs, agentId, k.id);
-    return { id: k.id, version: k.version, ...(p ? { requestedBy: p.requestedBy, approvedBy: p.approvedBy, approvedAt: p.approvedAt, ...(p.auto ? { auto: true as const } : {}) } : {}) };
+    return {
+      id: k.id,
+      version: k.version,
+      ...(k.holds && Object.keys(k.holds).length ? { holds: structuredClone(k.holds) } : {}),
+      ...(p ? { requestedBy: p.requestedBy, approvedBy: p.approvedBy, approvedAt: p.approvedAt, ...(p.auto ? { auto: true as const } : {}) } : {}),
+    };
   });
   const records = adoptions.forAgent(agentId);
   return {

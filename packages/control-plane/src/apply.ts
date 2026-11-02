@@ -10,7 +10,7 @@
  * records the outcome on the agent and in the ledger. The control plane is one process, so the "apply again" flags below
  * are in memory.
  */
-import { BUILTIN_AGENT_IDS, admissionOf, admit, beginAdmission, pinSource, stateAfterRefusal, interruptedAdmission, type AgentRecord } from '@beercanlabs/factory-registrar';
+import { BUILTIN_AGENT_IDS, admissionOf, admit, beginAdmission, pinSource, stateAfterRefusal, interruptedAdmission, type AgentRecord, type ConfigSkill } from '@beercanlabs/factory-registrar';
 import { redactSecrets } from '@beercanlabs/factory-ledger';
 import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type SourceRef } from '@beercanlabs/factory-property-manager';
 import { type FactoryState } from './app.js';
@@ -201,9 +201,17 @@ async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult
       return 'failed';
     }
 
+    const configuredSkills =
+      (agent as { pendingConfig?: { skills?: ReadonlyArray<ConfigSkill> } }).pendingConfig?.skills ??
+      state.configs?.current(agentId)?.skills ??
+      [];
+    const configSkillMap = new Map(configuredSkills.map((s) => [`${s.id}@${s.version}`, s]));
     agent.artifact = imageUri;
     agent.deployedCommit = commit;
-    agent.deployedSkills = skills.map(({ id, version }) => ({ id, version }));
+    agent.deployedSkills = skills.map(({ id, version }) => {
+      const c = configSkillMap.get(`${id}@${version}`);
+      return c?.holds ? { id, version, holds: structuredClone(c.holds) } : { id, version };
+    });
     if (agent.createdFrom === 'configuration' && state.sharedRuntime) {
       agent.repo = state.sharedRuntime.repo;
       agent.commit = state.sharedRuntime.commit;

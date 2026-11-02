@@ -768,6 +768,34 @@ describe('Skill Package Specification & Validator (A1, A19, A22, H7)', () => {
       const gz = zlib.gzipSync(tar);
       const result = await validateSkillPackage(gz);
       assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.deepEqual(result.actionHolds, { 'write-data': true });
+      }
+    });
+
+    it('extracts per-action hold defaults for snake_case actions and rejects duplicate action ids (S23, #369)', async () => {
+      const yaml = `spec: 1\nid: mail-skill\nname: Mail\ndescription: Mail skill\nversion: 1.0.0\nentry: entry.py\nlanguage: python\nrequires:\n  routes: [google-gmail]\nactions:\n  - id: send_email\n    route: google-gmail\n    method: POST\n    path: /gmail/v1/users/{userId}/messages/send\n    hold: true\n  - id: search_mail\n    route: google-gmail\n    method: GET\n    path: /gmail/v1/users/{userId}/messages\n    hold: false\nsmoke:\n  action: search_mail\n  input: {}\n`;
+      const testBuf = Buffer.from(VALID_TEST_PY);
+      const tar = makeTarball([
+        { header: createTarHeader({ name: 'skill.yaml', size: Buffer.byteLength(yaml) }), content: Buffer.from(yaml) },
+        { header: createTarHeader({ name: 'test_entry.py', size: testBuf.length }), content: testBuf },
+      ]);
+      const result = await validateSkillPackage(zlib.gzipSync(tar));
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.deepEqual(result.actionHolds, { send_email: true, search_mail: false });
+      }
+
+      const dupYaml = `spec: 1\nid: mail-skill\nname: Mail\ndescription: Mail skill\nversion: 1.0.0\nentry: entry.py\nlanguage: python\nrequires:\n  routes: [google-gmail]\nactions:\n  - id: send_email\n    route: google-gmail\n    method: POST\n    path: /send\n    hold: true\n  - id: send_email\n    route: google-gmail\n    method: POST\n    path: /send2\n    hold: false\nsmoke:\n  action: send_email\n  input: {}\n  dryRun: true\n`;
+      const dupTar = makeTarball([
+        { header: createTarHeader({ name: 'skill.yaml', size: Buffer.byteLength(dupYaml) }), content: Buffer.from(dupYaml) },
+        { header: createTarHeader({ name: 'test_entry.py', size: testBuf.length }), content: testBuf },
+      ]);
+      const dupRes = await validateSkillPackage(zlib.gzipSync(dupTar));
+      assert.equal(dupRes.ok, false);
+      if (!dupRes.ok) {
+        assert.ok(dupRes.issues.some((i) => i.includes('declared more than once')));
+      }
     });
 
     it('refuses package with no tests outside vendor/', async () => {

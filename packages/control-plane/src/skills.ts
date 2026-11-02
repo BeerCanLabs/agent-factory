@@ -51,7 +51,7 @@ import {
   type SkillPublishDecisionInput,
   type SkillUnpublishInput,
 } from '@beercanlabs/factory-contract';
-import { authorize } from '@beercanlabs/factory-bouncer';
+import { authorize, type SkillActionHoldRule } from '@beercanlabs/factory-bouncer';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
 import {
   identify,
@@ -79,9 +79,12 @@ import {
   adopters,
   availableTo,
   canAdopt,
+  defaultSkillActionHolds,
+  effectiveSkillHolds,
   ownerOf,
   skillVisibleTo,
   skillsOf,
+  validateSkillHoldOverrides,
   visibilityOf,
   type AccessAdded,
   type ConfigSkill,
@@ -1058,8 +1061,15 @@ async function autoAdoptPrivate(state: FactoryState, rec: SkillVersionRecord, pr
   const result = await withAgentLock(state, owner, async () => {
     const skills = currentSkills(state, owner);
     if (skills.some((k) => k.id === rec.id && k.version === rec.version)) return { ok: true as const, created: false };
+    const existing = skills.find((k) => k.id === rec.id);
+    const holds = effectiveSkillHolds(rec.manifest, existing?.holds);
+    const nextSkill: ConfigSkill = {
+      id: rec.id,
+      version: rec.version,
+      ...(Object.keys(holds).length ? { holds } : {}),
+    };
     const now = new Date().toISOString();
-    return writeSkills(state, owner, [...skills.filter((k) => k.id !== rec.id), { id: rec.id, version: rec.version }], {
+    return writeSkills(state, owner, [...skills.filter((k) => k.id !== rec.id), nextSkill], {
       actor: principal.actor,
       reason: `adopt private skill ${rec.id}@${rec.version}`,
       provenance: [{ id: rec.id, version: rec.version, requestedBy: rec.registeredBy, requestedAt: rec.registeredAt, approvedBy: principal.actor, approvedAt: now, auto: true }],
@@ -1073,7 +1083,14 @@ async function autoAdoptPrivate(state: FactoryState, rec: SkillVersionRecord, pr
     return { adopted: result.created ? [owner] : [] };
   }
   ledgerAdoption(state, owner, 'SKILL_ADOPTION_FAILED', principal.actor, rec.id, rec.version, result.error, rec.commit);
-  adoptions.request({ agentId: owner, skillId: rec.id, version: rec.version, requestedBy: rec.registeredBy, reason: 'automatic adoption failed; approve to retry', accessAdded: accessAddedFor(state, owner, rec) });
+  adoptions.request({
+    agentId: owner,
+    skillId: rec.id,
+    version: rec.version,
+    requestedBy: rec.registeredBy,
+    reason: 'automatic adoption failed; approve to retry',
+    accessAdded: accessAddedFor(state, owner, rec),
+  });
   return { adopted: [], failed: result.error };
 }
 
@@ -1117,13 +1134,117 @@ async function agentSkillsList(state: FactoryState, req: http.IncomingMessage, r
     ? agentOwners.flatMap((o) => state.groups!.getUserRoles(o).length > 0 ? state.groups!.listUserGroups(o).map((g) => g.id) : [])
     : [];
   const adoptCtx = { agentOwners, userGroups };
+  const existingById = new Map(mine.adopted.map((a) => [a.id, a]));
+  const adopted = mine.adopted
+    .filter((a) => visible(a.id))
+    .map((a) => {
+      const rec = registry.get(a.id, a.version);
+      if (!rec?.manifest?.actions?.length) return a;
+      return {
+        ...a,
+        holds: effectiveSkillHolds(rec.manifest, a.holds),
+        defaultHolds: defaultSkillActionHolds(rec.manifest),
+      };
+    });
+  const requests = mine.requests
+    .filter((r) => visible(r.skillId))
+    .map((r) => {
+      const rec = registry.get(r.skillId, r.version);
+      if (!rec?.manifest?.actions?.length) return r;
+      const base = existingById.get(r.skillId)?.holds;
+      const validated = r.holds ? validateSkillHoldOverrides(rec.manifest, r.holds, base) : undefined;
+      const holds = validated?.ok ? validated.holds : effectiveSkillHolds(rec.manifest, r.holds ?? base);
+      return {
+        ...r,
+        holds,
+        defaultHolds: defaultSkillActionHolds(rec.manifest),
+      };
+    });
   json(res, 200, {
     agentId,
-    adopted: mine.adopted.filter((a) => visible(a.id)),
-    requests: mine.requests.filter((r) => visible(r.skillId)),
+    adopted,
+    requests,
     revoked: mine.revoked.filter((r) => visible(r.skillId)),
     available: availableTo(registry, agentId, adoptCtx).filter((s) => visible(s.id)),
   });
+}
+
+/**
+ * S23 (D31): effective per-action hold rules across an agent's currently configured (or legacy deployed) skills.
+ * Served on `GET /api/v1/gatekeeper-egress/runs/:id` (including activation `smoke` runs) so `gatekeeper-egress`
+ * enforces both skill-declared default holds and tighter owner overrides at runtime.
+ */
+export function effectiveAgentSkillActionHolds(state: FactoryState, agentId: string): SkillActionHoldRule[] {
+  const agent = state.agents.get(agentId) as
+    | (ReturnType<FactoryState['agents']['get']> & {
+        pendingConfig?: { skills?: ReadonlyArray<{ id: string; version: string; holds?: Record<string, boolean> }> };
+      })
+    | undefined;
+  const configured = agent?.pendingConfig?.skills ?? state.configs?.current(agentId)?.skills;
+  const configuredList = configured ?? [];
+  const configuredById = new Map<string, ConfigSkill | { id: string; version: string; holds?: Record<string, boolean> }>(
+    configuredList.map((c) => [c.id, c]),
+  );
+
+  const byKey = new Map<string, { id: string; version: string; holds?: Record<string, boolean> }>();
+  for (const c of configuredList) {
+    byKey.set(`${c.id}@${c.version}`, { ...c, ...(c.holds ? { holds: { ...c.holds } } : {}) });
+  }
+  for (const d of (agent?.deployedSkills ?? []) as ReadonlyArray<{ id: string; version: string; holds?: Record<string, boolean> }>) {
+    const key = `${d.id}@${d.version}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      let matchedHistorySkill: ConfigSkill | undefined;
+      const history = state.configs?.history(agentId) ?? [];
+      for (let i = history.length - 1; i >= 0; i--) {
+        const match = history[i].skills?.find((s) => s.id === d.id && s.version === d.version);
+        if (match) {
+          matchedHistorySkill = match;
+          break;
+        }
+      }
+      const baseForDeployed = matchedHistorySkill?.holds !== undefined ? matchedHistorySkill.holds : d.holds;
+      const currentConfiguredHolds = configuredById.get(d.id)?.holds;
+      const mergedHolds: Record<string, boolean> = baseForDeployed ? { ...baseForDeployed } : {};
+      if (currentConfiguredHolds) {
+        for (const [k, v] of Object.entries(currentConfiguredHolds)) {
+          if (v === true) mergedHolds[k] = true;
+          else if (mergedHolds[k] === undefined) mergedHolds[k] = false;
+        }
+      }
+      byKey.set(key, {
+        id: d.id,
+        version: d.version,
+        holds: Object.keys(mergedHolds).length ? mergedHolds : undefined,
+      });
+    } else if (d.holds) {
+      if (existing.holds === undefined) {
+        existing.holds = { ...d.holds };
+      }
+    }
+  }
+
+  if (!byKey.size) return [];
+  const registry = skillRegistry(state);
+  const rules: SkillActionHoldRule[] = [];
+  for (const s of byKey.values()) {
+    const rec = registry.get(s.id, s.version);
+    const actions = rec?.manifest?.actions;
+    if (!rec || !actions?.length) continue;
+    const configuredHolds = configuredById.get(s.id)?.holds;
+    const effective = effectiveSkillHolds(rec.manifest, s.holds ?? configuredHolds);
+    for (const action of actions) {
+      rules.push({
+        skillId: s.id,
+        actionId: action.id,
+        route: action.route,
+        method: action.method,
+        path: action.path,
+        hold: Boolean(effective[action.id]),
+      });
+    }
+  }
+  return rules;
 }
 
 /** Asks to adopt a skill version for an agent (SK3): validated, ledgered, and held for an admin's decision. Nothing is adopted here. */
@@ -1134,22 +1255,69 @@ export async function requestAdoptionFor(
   version: string,
   requestedBy: string,
   reason?: string,
+  rawHolds?: unknown,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   // Under the agent's lock: an approval being written clears the request it approved, so a newer request for the same
   // skill must wait for it, or the approval would clear that one too and the asker's 201 would be a lie.
   return withAgentLock(state, agentId, async () => {
     const check = adoptCheck(state, agentId, skillId, version);
     if (!check.ok) return { status: REFUSAL_STATUS[check.error], body: { error: check.error, skillId, version, message: check.message } };
-    if (currentSkills(state, agentId).some((k) => k.id === skillId && k.version === version)) {
+    const skills = currentSkills(state, agentId);
+    if (skills.some((k) => k.id === skillId && k.version === version)) {
       return { status: 409, body: { error: 'already_adopted', skillId, version, message: `${agentId} already runs ${skillId}@${version}` } };
+    }
+    const existing = skills.find((k) => k.id === skillId);
+    let responseHolds: Record<string, boolean>;
+    let storedHolds: Record<string, boolean> | undefined;
+    if (rawHolds !== undefined) {
+      const validated = validateSkillHoldOverrides(check.record.manifest, rawHolds, existing?.holds);
+      if (!validated.ok) {
+        return {
+          status: validated.status,
+          body: {
+            error: validated.error,
+            skillId,
+            version,
+            ...(validated.action ? { action: validated.action } : {}),
+            message: validated.message,
+          },
+        };
+      }
+      responseHolds = validated.holds;
+      // Persist only explicit caller-supplied action keys on `AdoptionRecord.holds` so untouched actions
+      // inherit the latest `existing?.holds` at approval time rather than a stale request-time snapshot.
+      const explicit: Record<string, boolean> = {};
+      for (const key of Object.keys(rawHolds as Record<string, unknown>)) {
+        if (Object.prototype.hasOwnProperty.call(validated.holds, key)) {
+          explicit[key] = validated.holds[key]!;
+        }
+      }
+      if (Object.keys(explicit).length > 0) storedHolds = explicit;
+    } else {
+      responseHolds = effectiveSkillHolds(check.record.manifest, existing?.holds);
     }
     const store = adoptionStore(state);
     const earlier = store.get(agentId, skillId);
-    const record = store.request({ agentId, skillId, version, requestedBy, ...(reason ? { reason } : {}), accessAdded: accessAddedFor(state, agentId, check.record) });
+    const record = store.request({
+      agentId,
+      skillId,
+      version,
+      requestedBy,
+      ...(reason ? { reason } : {}),
+      accessAdded: accessAddedFor(state, agentId, check.record),
+      ...(storedHolds ? { holds: storedHolds } : {}),
+    });
     ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REQUESTED', requestedBy, skillId, version, reason, check.record.commit);
     // A newer request for the same skill replaces a pending one; say so, so the asker is not surprised.
     const replaced = earlier?.state === 'requested' ? { replacedRequest: { version: earlier.version, requestedBy: earlier.requestedBy, requestedAt: earlier.requestedAt } } : {};
-    return { status: 201, body: { ...record, ...replaced } };
+    return {
+      status: 201,
+      body: {
+        ...record,
+        ...(Object.keys(responseHolds).length ? { holds: responseHolds } : {}),
+        ...replaced,
+      },
+    };
   });
 }
 
@@ -1165,7 +1333,8 @@ async function requestAdoption(state: FactoryState, req: http.IncomingMessage, r
   if (typeof skillId !== 'string' || !SKILL_ID.test(skillId) || typeof version !== 'string' || !SEMVER.test(version)) {
     return json(res, 400, { error: 'invalid_skill', message: 'skillId (kebab-case) and version (semantic version) are required' });
   }
-  const out = await requestAdoptionFor(state, agentId, skillId, version, principal.actor, reason);
+  const rawHolds = body.holds !== undefined ? body.holds : body.holdOverrides;
+  const out = await requestAdoptionFor(state, agentId, skillId, version, principal.actor, reason, rawHolds);
   json(res, out.status, out.body);
 }
 
@@ -1186,6 +1355,7 @@ async function decideAdoption(state: FactoryState, req: http.IncomingMessage, re
     });
     return json(res, out.status, out.body);
   }
+  const rawHolds = body.holds !== undefined ? body.holds : body.holdOverrides;
   const outcome = await withAgentLock(state, agentId, async () => {
     const request = adoptions.get(agentId, skillId);
     if (!request || request.state !== 'requested') return { status: 409, body: { error: 'no_request', agentId, skillId, message: 'there is no pending adoption request for this agent and skill' } };
@@ -1197,7 +1367,46 @@ async function decideAdoption(state: FactoryState, req: http.IncomingMessage, re
     if (skills.some((k) => k.id === skillId && k.version === request.version)) {
       return { status: 409, body: { error: 'already_adopted', skillId, version: request.version, message: `${agentId} already runs ${skillId}@${request.version}` } };
     }
-    const written = await writeSkills(state, agentId, [...skills.filter((k) => k.id !== skillId), { id: skillId, version: request.version }], {
+    const existing = skills.find((k) => k.id === skillId);
+    let holds = effectiveSkillHolds(check.record.manifest, existing?.holds);
+    if (request.holds !== undefined) {
+      const rechecked = validateSkillHoldOverrides(check.record.manifest, request.holds, existing?.holds);
+      if (!rechecked.ok) {
+        return {
+          status: rechecked.status,
+          body: {
+            error: rechecked.error,
+            skillId,
+            version: request.version,
+            ...(rechecked.action ? { action: rechecked.action } : {}),
+            message: rechecked.message,
+          },
+        };
+      }
+      holds = rechecked.holds;
+    }
+    if (rawHolds !== undefined) {
+      const validated = validateSkillHoldOverrides(check.record.manifest, rawHolds, holds);
+      if (!validated.ok) {
+        return {
+          status: validated.status,
+          body: {
+            error: validated.error,
+            skillId,
+            version: request.version,
+            ...(validated.action ? { action: validated.action } : {}),
+            message: validated.message,
+          },
+        };
+      }
+      holds = validated.holds;
+    }
+    const nextSkill: ConfigSkill = {
+      id: skillId,
+      version: request.version,
+      ...(Object.keys(holds).length ? { holds } : {}),
+    };
+    const written = await writeSkills(state, agentId, [...skills.filter((k) => k.id !== skillId), nextSkill], {
       actor: principal.actor,
       reason: reason ?? `adopt ${skillId}@${request.version}`,
       provenance: [{ id: skillId, version: request.version, requestedBy: request.requestedBy, requestedAt: request.requestedAt, approvedBy: principal.actor, approvedAt: new Date().toISOString() }],
@@ -1205,9 +1414,209 @@ async function decideAdoption(state: FactoryState, req: http.IncomingMessage, re
     if (!written.ok) return { status: 500, body: { error: written.error, message: 'the adoption could not be written; the request is still pending' } };
     adoptions.clear(agentId, skillId);
     ledgerAdoption(state, agentId, 'SKILL_ADOPTION_APPROVED', principal.actor, skillId, request.version, reason, check.record.commit);
-    return { status: 200, body: { agentId, skillId, version: request.version, configVersion: written.version, hash: written.hash } };
+    return {
+      status: 200,
+      body: {
+        agentId,
+        skillId,
+        version: request.version,
+        configVersion: written.version,
+        hash: written.hash,
+        ...(Object.keys(holds).length ? { holds } : {}),
+      },
+    };
   });
   if (outcome.status === 200) triggerApply(state, agentId, principal.actor, `adopt ${skillId}`);
+  json(res, outcome.status, outcome.body);
+}
+
+/**
+ * S23 (D31): updates per-action hold overrides on an adopted skill (or pending adoption request) for `agentId`.
+ * Owners/leads/admins can tighten autonomous actions (`hold: false` -> `true`) or reset tightened overrides back to
+ * `false`, but attempting to loosen a skill-declared mandatory hold (`hold: true` -> `false`) is rejected with `422`.
+ */
+async function updateSkillHolds(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  agentId: string,
+  skillId: string,
+  mode: 'replace' | 'merge',
+): Promise<void> {
+  const principal = await requirePrivilege(req, res, state, 'skills.adopt.request', { agentId });
+  if (!principal) return;
+  if (!state.agents.has(agentId)) return json(res, 404, { error: 'not_found' });
+  if (!state.configs) return json(res, 503, { error: 'config_store_unavailable' });
+  const body = await readJson(req);
+  const reason = reasonOf(res, body);
+  if (reason === null) return;
+  const rawHolds = body.holds !== undefined ? body.holds : body.holdOverrides;
+  if (rawHolds === undefined) {
+    return json(res, 400, { error: 'invalid_holds', message: 'holds object mapping action ids to booleans is required' });
+  }
+  const adoptions = adoptionStore(state);
+  const registry = skillRegistry(state);
+  const outcome = await withAgentLock(state, agentId, async () => {
+    const skills = currentSkills(state, agentId);
+    const adopted = skills.find((k) => k.id === skillId);
+    if (!adopted) {
+      const pending = adoptions.get(agentId, skillId);
+      if (pending?.state !== 'requested') {
+        return { status: 404, body: { error: 'not_adopted', agentId, skillId } };
+      }
+      const pendingRec = registry.get(skillId, pending.version);
+      if (!pendingRec) return { status: 404, body: { error: 'not_found', skillId, version: pending.version } };
+      const basePending = mode === 'merge' ? effectiveSkillHolds(pendingRec.manifest, pending.holds) : undefined;
+      const validated = validateSkillHoldOverrides(pendingRec.manifest, rawHolds, basePending);
+      if (!validated.ok) {
+        return {
+          status: validated.status,
+          body: {
+            error: validated.error,
+            agentId,
+            skillId,
+            version: pending.version,
+            ...(validated.action ? { action: validated.action } : {}),
+            message: validated.message,
+          },
+        };
+      }
+      const updatedReq = adoptions.updateHolds(agentId, skillId, validated.holds, reason);
+      if (!updatedReq) {
+        return { status: 404, body: { error: 'not_adopted', agentId, skillId } };
+      }
+      const agent = state.agents.get(agentId);
+      if (agent?.deployedSkills) {
+        let deployedChanged = false;
+        for (const d of agent.deployedSkills) {
+          if (d.id === skillId && d.version === pending.version) {
+            d.holds = Object.keys(validated.holds).length ? { ...validated.holds } : undefined;
+            deployedChanged = true;
+          }
+        }
+        if (deployedChanged) {
+          registryOf(state).save(agent);
+        }
+      }
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId,
+        type: 'action',
+        action: 'SKILL_HOLDS_UPDATED',
+        actor: principal.actor,
+        payloadSha256: payloadHash({ skillId, version: pending.version, state: 'requested', holds: validated.holds, ...(reason ? { reason } : {}) }),
+      });
+      return {
+        status: 200,
+        body: {
+          agentId,
+          skillId,
+          version: pending.version,
+          state: updatedReq.state,
+          holds: validated.holds,
+          defaultHolds: defaultSkillActionHolds(pendingRec.manifest),
+        },
+      };
+    }
+
+    const rec = registry.get(skillId, adopted.version);
+    if (!rec) return { status: 404, body: { error: 'not_found', skillId, version: adopted.version } };
+    const baseHolds = mode === 'merge' ? effectiveSkillHolds(rec.manifest, adopted.holds) : undefined;
+    const validated = validateSkillHoldOverrides(rec.manifest, rawHolds, baseHolds);
+    if (!validated.ok) {
+      return {
+        status: validated.status,
+        body: {
+          error: validated.error,
+          agentId,
+          skillId,
+          version: adopted.version,
+          ...(validated.action ? { action: validated.action } : {}),
+          message: validated.message,
+        },
+      };
+    }
+    const nextSkill: ConfigSkill = {
+      id: skillId,
+      version: adopted.version,
+      ...(Object.keys(validated.holds).length ? { holds: validated.holds } : {}),
+    };
+    const written = await writeSkills(
+      state,
+      agentId,
+      [...skills.filter((k) => k.id !== skillId), nextSkill],
+      {
+        actor: principal.actor,
+        reason: reason ?? `update skill holds for ${skillId}@${adopted.version}`,
+      },
+    );
+    if (!written.ok) return { status: 500, body: { error: written.error, message: 'skill hold update could not be stored' } };
+    const agent = state.agents.get(agentId);
+    if (agent?.deployedSkills) {
+      let deployedChanged = false;
+      for (const d of agent.deployedSkills) {
+        if (d.id === skillId && d.version === adopted.version) {
+          d.holds = Object.keys(validated.holds).length ? { ...validated.holds } : undefined;
+          deployedChanged = true;
+        }
+      }
+      if (deployedChanged) {
+        registryOf(state).save(agent);
+      }
+    }
+    // S23 F3: if an upgrade request is pending for this same (agentId, skillId) with explicit holds, sync updated action
+    // overrides onto `pending.holds` so approving the upgrade later never reverts a newer PUT/PATCH /holds change.
+    const pending = adoptions.get(agentId, skillId);
+    if (pending?.state === 'requested' && pending.holds !== undefined) {
+      const pendingRec = registry.get(skillId, pending.version);
+      const pendingManifestActions = new Map((pendingRec?.manifest.actions ?? []).map((a) => [a.id, a.hold]));
+      const nextPendingHolds: Record<string, boolean> = {};
+      if (mode === 'replace') {
+        for (const [k, v] of Object.entries(pending.holds)) {
+          if (!Object.prototype.hasOwnProperty.call(validated.holds, k)) {
+            nextPendingHolds[k] = v;
+          }
+        }
+        for (const [k, v] of Object.entries(validated.holds)) {
+          if (!pendingRec || pendingManifestActions.has(k)) {
+            const mandatory = pendingManifestActions.get(k) ?? false;
+            nextPendingHolds[k] = mandatory || v;
+          }
+        }
+      } else {
+        for (const [k, v] of Object.entries(pending.holds)) {
+          nextPendingHolds[k] = v;
+        }
+        for (const k of Object.keys(rawHolds as Record<string, unknown>)) {
+          if (Object.prototype.hasOwnProperty.call(validated.holds, k) && (!pendingRec || pendingManifestActions.has(k))) {
+            const mandatory = pendingManifestActions.get(k) ?? false;
+            nextPendingHolds[k] = mandatory || validated.holds[k]!;
+          }
+        }
+      }
+      adoptions.updateHolds(agentId, skillId, nextPendingHolds, pending.reason);
+    }
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'SKILL_HOLDS_UPDATED',
+      actor: principal.actor,
+      payloadSha256: payloadHash({ skillId, version: adopted.version, holds: validated.holds, ...(reason ? { reason } : {}) }),
+    });
+    return {
+      status: 200,
+      body: {
+        agentId,
+        skillId,
+        version: adopted.version,
+        holds: validated.holds,
+        defaultHolds: defaultSkillActionHolds(rec.manifest),
+        configVersion: written.version,
+        hash: written.hash,
+      },
+    };
+  });
   json(res, outcome.status, outcome.body);
 }
 
@@ -1902,6 +2311,7 @@ const RETIRE = /^\/api\/v1\/registry\/skills\/([^/]+)\/retire$/;
 const SKILL_RETIRE_DIRECT = /^\/api\/v1\/skills\/([^/]+)\/retire$/;
 const AGENT_SKILLS = /^\/api\/v1\/agents\/([^/]+)\/skills$/;
 const AGENT_SKILL = /^\/api\/v1\/agents\/([^/]+)\/skills\/([^/]+)$/;
+const AGENT_SKILL_HOLDS = /^\/api\/v1\/agents\/([^/]+)\/skills\/([^/]+)\/holds$/;
 const ADOPTION_DECISION = /^\/api\/v1\/agents\/([^/]+)\/skills\/([^/]+)\/adoption\/(approve|reject)$/;
 const SKILL_TRANSFER = /^\/api\/v1\/skills\/([^/]+)\/transfer$/;
 const SKILL_TRANSFER_ACCEPT = /^\/api\/v1\/skills\/([^/]+)\/transfer\/accept$/;
@@ -2039,7 +2449,17 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
     return true;
   }
 
+  const agentSkillHolds = path.match(AGENT_SKILL_HOLDS);
+  if (agentSkillHolds && (req.method === 'PUT' || req.method === 'PATCH')) {
+    await updateSkillHolds(state, req, res, decode(agentSkillHolds[1]), decode(agentSkillHolds[2]), req.method === 'PUT' ? 'replace' : 'merge');
+    return true;
+  }
+
   const agentSkill = path.match(AGENT_SKILL);
+  if (agentSkill && req.method === 'PATCH') {
+    await updateSkillHolds(state, req, res, decode(agentSkill[1]), decode(agentSkill[2]), 'merge');
+    return true;
+  }
   if (agentSkill && req.method === 'DELETE') {
     await removeAdoption(state, req, res, decode(agentSkill[1]), decode(agentSkill[2]));
     return true;
