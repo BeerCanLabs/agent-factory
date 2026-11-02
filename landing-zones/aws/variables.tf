@@ -254,8 +254,8 @@ variable "cloudflare_webhook_paths" {
   default     = ["/api/v1/hooks/*"]
   description = "Signature-verified inbound webhook paths that bypass interactive Cloudflare Access (§6.12 A1, D22, TSK-285, TSK-286). Restricted strictly to /api/v1/hooks/* or /hooks/*."
   validation {
-    condition     = alltrue([for p in var.cloudflare_webhook_paths : can(regex("^/(?:api/v1/)?hooks/(?:\\*|[A-Za-z0-9_./*-]+)$", p)) && !can(regex("\\.\\.", p))])
-    error_message = "cloudflare_webhook_paths may only contain signature-verified webhook paths under /api/v1/hooks/ or /hooks/ (never /*, /api/v1/*, or /ui)."
+    condition     = alltrue([for p in var.cloudflare_webhook_paths : can(regex("^/(?:api/v1/)?hooks/(?:\\*|[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*(?:/\\*)?)$", p)) && !can(regex("(?:^|/)\\.\\.?($|/)", p)) && !can(regex("\\.\\.", p))])
+    error_message = "cloudflare_webhook_paths may only contain canonical signature-verified webhook paths under /api/v1/hooks/ or /hooks/ with optional trailing /* (never mid-path wildcards, /*, /api/v1/*, or /ui)."
   }
 }
 

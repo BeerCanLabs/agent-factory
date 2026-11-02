@@ -357,7 +357,7 @@ function evalWirefilter(expr: string, req: { host: string; path: string; headers
   return v;
 }
 
-/** Match a Cloudflare Access destination pattern (`<host><pathPattern>`, with optional trailing `/*`). */
+/** Match a Cloudflare Access destination pattern (`<host><pathPattern>`, inheriting subpaths on non-`/*` paths). */
 function matchesAccessDestination(destUri: string, host: string, path: string): { matched: boolean; specificity: number } {
   const slash = destUri.indexOf('/');
   const destHost = (slash >= 0 ? destUri.slice(0, slash) : destUri).toLowerCase();
@@ -369,7 +369,11 @@ function matchesAccessDestination(destUri: string, host: string, path: string): 
     if (path.toLowerCase().startsWith(prefix)) return { matched: true, specificity: prefix.length + 10 };
     return { matched: false, specificity: -1 };
   }
-  if (path.toLowerCase() === destPath.toLowerCase()) return { matched: true, specificity: destPath.length + 100 };
+  const base = (destPath.endsWith('/') && destPath.length > 1 ? destPath.slice(0, -1) : destPath).toLowerCase();
+  const lowerPath = path.toLowerCase();
+  if (lowerPath === base || lowerPath.startsWith(`${base}/`)) {
+    return { matched: true, specificity: base.length + 100 };
+  }
   return { matched: false, specificity: -1 };
 }
 
@@ -398,18 +402,36 @@ async function loadCloudflareEdgeConfig(
 
   const bypassPrefix = hclStringAttr(tf, 'cloudflare_fk_bypass_prefix');
 
-  const webhookClauses = webhookPaths.map((p) =>
-    p.endsWith('/*')
-      ? `starts_with(lower(http.request.uri.path), "${p.slice(0, -1).toLowerCase()}")`
-      : `lower(http.request.uri.path) eq "${p.toLowerCase()}"`,
+  // Ensure cloudflare.tf itself encodes both exact and subpath matching for non-`/*` webhook destinations.
+  assert.match(
+    tf,
+    /cloudflare_webhook_path_clauses\s*=\s*\[[\s\S]*?lower\(http\.request\.uri\.path\)\s+eq\s+\\"\$\{lower\(trimsuffix\(p,\s*"\/"\)\)\}\\"\s+or\s+starts_with\(lower\(http\.request\.uri\.path\),\s*\\"\$\{lower\(trimsuffix\(p,\s*"\/"\)\)\}\/\\"\)/,
+    'cloudflare_webhook_path_clauses must match both exact path and subpath prefix for non-/* webhook paths',
   );
+  assert.match(
+    tf,
+    /cloudflare_rewritten_webhook_path_clauses\s*=\s*\[[\s\S]*?lower\(http\.request\.uri\.path\)\s+eq\s+\\"\$\{local\.cloudflare_fk_bypass_prefix\}\$\{lower\(trimsuffix\(p,\s*"\/"\)\)\}\\"\s+or\s+starts_with\(lower\(http\.request\.uri\.path\),\s*\\"\$\{local\.cloudflare_fk_bypass_prefix\}\$\{lower\(trimsuffix\(p,\s*"\/"\)\)\}\/\\"\)/,
+    'cloudflare_rewritten_webhook_path_clauses must match both exact path and subpath prefix for non-/* webhook paths',
+  );
+
+  const trimTrailingSlash = (s: string) => (s.endsWith('/') && s.length > 1 ? s.slice(0, -1) : s);
+
+  const webhookClauses = webhookPaths.map((p) => {
+    if (p.endsWith('/*')) {
+      return `starts_with(lower(http.request.uri.path), "${p.slice(0, -1).toLowerCase()}")`;
+    }
+    const base = trimTrailingSlash(p).toLowerCase();
+    return `(lower(http.request.uri.path) eq "${base}" or starts_with(lower(http.request.uri.path), "${base}/"))`;
+  });
   const webhookPathExpr = webhookClauses.length > 0 ? `(${webhookClauses.join(' or ')})` : 'false';
 
-  const rewrittenWebhookClauses = webhookPaths.map((p) =>
-    p.endsWith('/*')
-      ? `starts_with(lower(http.request.uri.path), "${bypassPrefix}${p.slice(0, -1).toLowerCase()}")`
-      : `lower(http.request.uri.path) eq "${bypassPrefix}${p.toLowerCase()}"`,
-  );
+  const rewrittenWebhookClauses = webhookPaths.map((p) => {
+    if (p.endsWith('/*')) {
+      return `starts_with(lower(http.request.uri.path), "${bypassPrefix}${p.slice(0, -1).toLowerCase()}")`;
+    }
+    const base = `${bypassPrefix}${trimTrailingSlash(p).toLowerCase()}`;
+    return `(lower(http.request.uri.path) eq "${base}" or starts_with(lower(http.request.uri.path), "${base}/"))`;
+  });
   const rewrittenWebhookPathExpr = rewrittenWebhookClauses.length > 0 ? `(${rewrittenWebhookClauses.join(' or ')})` : 'false';
 
   const noTraversalExpr = hclStringAttr(tf, 'cloudflare_no_traversal_expr');
@@ -473,8 +495,12 @@ async function loadCloudflareEdgeConfig(
 
   const workerJsMatch = tf.match(/cloudflare_fk_strip_worker_js\s*=\s*<<-?EOT\r?\n([\s\S]*?)\r?\n\s*EOT/);
   assert.ok(workerJsMatch, 'missing cloudflare_fk_strip_worker_js heredoc in cloudflare.tf');
+  const workerJs = workerJsMatch[1].replaceAll(
+    '${jsonencode([for p in var.cloudflare_webhook_paths : lower(p)])}',
+    JSON.stringify(webhookPaths.map((p) => p.toLowerCase())),
+  );
   const workerModule = (await import(
-    `data:text/javascript;base64,${Buffer.from(workerJsMatch[1]).toString('base64')}`
+    `data:text/javascript;base64,${Buffer.from(workerJs).toString('base64')}`
   )) as { default: { fetch(req: Request): Promise<Response> } };
 
   const apps: Array<{ name: string; kind: 'root' | 'bypass'; destinations: string[] }> = [
@@ -618,8 +644,28 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
     const ecsTf = read('landing-zones/aws/ecs.tf');
     assert.match(
       ecsTf,
-      /\{\s*name\s*=\s*"FACTORY_ACCESS_AUD",\s*value\s*=\s*var\.access_aud\s*!=\s*""\s*\?\s*var\.access_aud\s*:\s*\(local\.cloudflare_enabled\s*\?\s*cloudflare_zero_trust_access_application\.factory\[0\]\.aud\s*:\s*""\)\s*\}/,
-      'ecs.tf must wire FACTORY_ACCESS_AUD from var.access_aud or cloudflare_zero_trust_access_application.factory[0].aud',
+      /\{\s*name\s*=\s*"FACTORY_ACCESS_AUD",\s*value\s*=\s*var\.access_aud\s*!=\s*""\s*\?\s*var\.access_aud\s*:\s*\(local\.cloudflare_enabled\s*&&\s*var\.access_team_domain\s*!=\s*""\s*\?\s*cloudflare_zero_trust_access_application\.factory\[0\]\.aud\s*:\s*""\)\s*\}/,
+      'ecs.tf must wire FACTORY_ACCESS_AUD from var.access_aud, falling back to factory[0].aud only when both local.cloudflare_enabled and var.access_team_domain != ""',
+    );
+
+    const resolveEffectiveAud = (cloudflareEnabled: boolean, accessTeamDomain: string, accessAud: string, generatedAud = 'example-aud-1') =>
+      accessAud !== '' ? accessAud : cloudflareEnabled && accessTeamDomain !== '' ? generatedAud : '';
+
+    // When cloudflare_zone_id is set but access_team_domain and access_aud are left at default "",
+    // FACTORY_ACCESS_AUD must remain "" so accessAuthFromEnv() cleanly disables Access identity instead of throwing!
+    assert.equal(
+      accessAuthFromEnv({
+        FACTORY_ACCESS_TEAM_DOMAIN: '',
+        FACTORY_ACCESS_AUD: resolveEffectiveAud(true, '', ''),
+      }),
+      undefined,
+    );
+    assert.ok(
+      accessAuthFromEnv({
+        FACTORY_ACCESS_TEAM_DOMAIN: 'conformance.cloudflareaccess.com',
+        FACTORY_ACCESS_AUD: resolveEffectiveAud(true, 'conformance.cloudflareaccess.com', ''),
+      }),
+      'when cloudflare_zone_id and access_team_domain are set, FACTORY_ACCESS_AUD must populate from factory[0].aud',
     );
   });
 
@@ -680,16 +726,49 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
     const webhookVar = hclBlocks(varsTf, 'variable').find((v) => v.name === 'cloudflare_webhook_paths');
     assert.ok(webhookVar, 'variable cloudflare_webhook_paths must be declared');
     assert.match(webhookVar.body, /default\s*=\s*\["\/api\/v1\/hooks\/\*"\]/);
-    const regexMatch = webhookVar.body.match(/regex\("((?:\\.|[^"\\])*)"\s*,\s*p\)/);
-    assert.ok(regexMatch, 'cloudflare_webhook_paths must validate each path with regex(..., p)');
-    const webhookPattern = new RegExp(JSON.parse(`"${regexMatch[1]}"`) as string);
-    const validWebhook = (p: string) => webhookPattern.test(p) && !p.includes('..');
+    const posRegexMatch = webhookVar.body.match(/(?<!!)\bcan\(regex\("((?:\\.|[^"\\])*)"\s*,\s*p\)\)/);
+    assert.ok(posRegexMatch, 'cloudflare_webhook_paths must validate each path with positive can(regex(..., p))');
+    const webhookPattern = new RegExp(JSON.parse(`"${posRegexMatch[1]}"`) as string);
+    const negPatterns = [...webhookVar.body.matchAll(/!can\(regex\("((?:\\.|[^"\\])*)"\s*,\s*p\)\)/g)].map(
+      (m) => new RegExp(JSON.parse(`"${m[1]}"`) as string),
+    );
+    assert.ok(negPatterns.length > 0, 'cloudflare_webhook_paths must include negative dot-segment regex checks');
+    const validWebhook = (p: string) => webhookPattern.test(p) && negPatterns.every((re) => !re.test(p));
 
-    for (const allowed of ['/api/v1/hooks/*', '/api/v1/hooks/github', '/hooks/*', '/hooks/github']) {
+    for (const allowed of [
+      '/api/v1/hooks/*',
+      '/api/v1/hooks/github',
+      '/api/v1/hooks/github/*',
+      '/api/v1/hooks/github/events',
+      '/hooks/*',
+      '/hooks/github',
+    ]) {
       assert.equal(validWebhook(allowed), true, `expected webhook path ${allowed} to pass validation`);
     }
-    for (const forbidden of ['/*', '/', '/api/v1', '/api/v1/*', '/mcp', '/mcp/*', '/ui', '/healthz', '/.cf-fk-bypass/*', '/api/v1/hooks/../agents']) {
-      assert.equal(validWebhook(forbidden), false, `expected non-webhook path ${forbidden} to fail validation`);
+    for (const forbidden of [
+      '/*',
+      '/',
+      '/api/v1',
+      '/api/v1/*',
+      '/mcp',
+      '/mcp/*',
+      '/ui',
+      '/healthz',
+      '/.cf-fk-bypass/*',
+      '/api/v1/hooks',
+      '/api/v1/hooks/',
+      '/api/v1/hooks/github/',
+      '/api/v1/hooks//github',
+      '/api/v1/hooks/git*',
+      '/api/v1/hooks/*git',
+      '/api/v1/hooks/*/events',
+      '/api/v1/hooks/a*b*c',
+      '/api/v1/hooks/**',
+      '/api/v1/hooks/../agents',
+      '/api/v1/hooks/./github',
+      '/api/v1/hooks/.',
+    ]) {
+      assert.equal(validWebhook(forbidden), false, `expected non-webhook or malformed path ${forbidden} to fail validation`);
     }
   });
 
@@ -893,8 +972,64 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
       assert.equal(denied.bypassesInteractiveAccess, false);
     }
 
-    // 8. Negative sanity checks on destination matcher so evaluator itself cannot be vacuous.
+    // 8. Non-`/*` webhook path destinations (e.g. `/api/v1/hooks/github`) inherit onto subpaths (`/api/v1/hooks/github/*`)
+    //    in Cloudflare Access: verify `cloudflare_webhook_path_expr` and `cloudflare_rewritten_webhook_path_expr` match
+    //    both exact and subpath requests so spoofed `cf-access-*` headers are always stripped and `Bearer fk_` never
+    //    rewrites webhook subpaths onto `/.cf-fk-bypass/*`!
+    const exactWebhookCfg = await loadCloudflareEdgeConfig(host, ['/api/v1/hooks/github']);
+    for (const path of ['/api/v1/hooks/github', '/api/v1/hooks/github/sub', '/api/v1/hooks/github/sub/deep']) {
+      const keylessHook = await exactWebhookCfg.evaluate({
+        method: 'POST',
+        host,
+        path,
+        headers: {
+          'x-hub-signature-256': 'sha256=deadbeef',
+          'cf-access-jwt-assertion': 'forged.jwt.value',
+          'cf-access-authenticated-user-email': 'spoof@example.com',
+        },
+      });
+      assert.equal(keylessHook.action, 'origin', `expected webhook subpath ${path} to reach origin via webhooks_bypass`);
+      assert.equal(keylessHook.app, 'webhooks_bypass');
+      assert.equal(keylessHook.bypassesInteractiveAccess, true);
+      assert.equal(keylessHook.forwardedHeaders['cf-access-jwt-assertion'], undefined);
+      assert.equal(keylessHook.forwardedHeaders['cf-access-authenticated-user-email'], undefined);
+
+      const fkOnHook = await exactWebhookCfg.evaluate({
+        method: 'POST',
+        host,
+        path,
+        headers: {
+          authorization: 'Bearer fk_example_key_1',
+          'cf-access-jwt-assertion': 'forged.jwt.value',
+          'cf-access-authenticated-user-email': 'spoof@example.com',
+        },
+      });
+      assert.equal(fkOnHook.action, 'origin');
+      assert.equal(fkOnHook.app, 'webhooks_bypass', `fk_ bearer on webhook subpath ${path} must NOT rewrite onto api_keys_bypass`);
+      assert.equal(fkOnHook.originPath, path);
+      assert.equal(fkOnHook.forwardedHeaders['cf-access-jwt-assertion'], undefined);
+      assert.equal(fkOnHook.forwardedHeaders['cf-access-authenticated-user-email'], undefined);
+
+      const directRewrittenProbe = await exactWebhookCfg.evaluate({
+        method: 'POST',
+        host,
+        path: `/.cf-fk-bypass${path}`,
+        headers: { authorization: 'Bearer fk_example_key_1' },
+      });
+      assert.equal(directRewrittenProbe.action, 'waf_block', `direct /.cf-fk-bypass${path} probe must be blocked by WAF`);
+      assert.equal(directRewrittenProbe.bypassesInteractiveAccess, false);
+    }
+    for (const nonMatchingHook of ['/api/v1/hooks/github2', '/api/v1/hooks/switch']) {
+      const res = await exactWebhookCfg.evaluate({ host, path: nonMatchingHook });
+      assert.equal(res.action, 'access_challenge', `sibling path ${nonMatchingHook} must remain gated by root Access`);
+      assert.equal(res.bypassesInteractiveAccess, false);
+    }
+
+    // 9. Negative sanity checks on destination matcher so evaluator itself cannot be vacuous.
     assert.equal(matchesAccessDestination(`${host}/*`, host, '/ui').matched, true);
+    assert.equal(matchesAccessDestination(`${host}/api/v1/hooks/github`, host, '/api/v1/hooks/github').matched, true);
+    assert.equal(matchesAccessDestination(`${host}/api/v1/hooks/github`, host, '/api/v1/hooks/github/sub').matched, true);
+    assert.equal(matchesAccessDestination(`${host}/api/v1/hooks/github`, host, '/api/v1/hooks/github2').matched, false);
     assert.equal(matchesAccessDestination(`${host}/.cf-fk-bypass/*`, host, '/api/v1/whoami').matched, false);
     assert.equal(matchesAccessDestination(`other.example.com/.cf-fk-bypass/*`, host, '/.cf-fk-bypass/api/v1').matched, false);
   });

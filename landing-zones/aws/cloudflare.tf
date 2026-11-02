@@ -61,7 +61,7 @@ locals {
     for p in var.cloudflare_webhook_paths : (
       endswith(p, "/*")
       ? "starts_with(lower(http.request.uri.path), \"${lower(trimsuffix(p, "*"))}\")"
-      : "lower(http.request.uri.path) eq \"${lower(p)}\""
+      : "(lower(http.request.uri.path) eq \"${lower(trimsuffix(p, "/"))}\" or starts_with(lower(http.request.uri.path), \"${lower(trimsuffix(p, "/"))}/\"))"
     )
   ]
   cloudflare_webhook_path_expr = length(local.cloudflare_webhook_path_clauses) > 0 ? "(${join(" or ", local.cloudflare_webhook_path_clauses)})" : "false"
@@ -70,7 +70,7 @@ locals {
     for p in var.cloudflare_webhook_paths : (
       endswith(p, "/*")
       ? "starts_with(lower(http.request.uri.path), \"${local.cloudflare_fk_bypass_prefix}${lower(trimsuffix(p, "*"))}\")"
-      : "lower(http.request.uri.path) eq \"${local.cloudflare_fk_bypass_prefix}${lower(p)}\""
+      : "(lower(http.request.uri.path) eq \"${local.cloudflare_fk_bypass_prefix}${lower(trimsuffix(p, "/"))}\" or starts_with(lower(http.request.uri.path), \"${local.cloudflare_fk_bypass_prefix}${lower(trimsuffix(p, "/"))}/\"))"
     )
   ]
   cloudflare_rewritten_webhook_path_expr = length(local.cloudflare_rewritten_webhook_path_clauses) > 0 ? "(${join(" or ", local.cloudflare_rewritten_webhook_path_clauses)})" : "false"
@@ -90,6 +90,7 @@ locals {
 
   cloudflare_fk_strip_worker_js = <<-EOT
     const PREFIX = "/.cf-fk-bypass";
+    const WEBHOOK_PATHS = ${jsonencode([for p in var.cloudflare_webhook_paths : lower(p)])};
     export default {
       async fetch(request) {
         const url = new URL(request.url);
@@ -98,7 +99,13 @@ locals {
         }
         const stripped = url.pathname.slice(PREFIX.length);
         const lower = stripped.toLowerCase();
+        const isWebhook = WEBHOOK_PATHS.some((p) => {
+          if (p.endsWith("/*")) return lower.startsWith(p.slice(0, -1));
+          const base = p.endsWith("/") && p.length > 1 ? p.slice(0, -1) : p;
+          return lower === base || lower.startsWith(base + "/");
+        });
         if (
+          isWebhook ||
           (stripped !== "/api/v1" && !stripped.startsWith("/api/v1/") && stripped !== "/mcp") ||
           stripped.includes("..") ||
           lower.includes("%2e") ||
