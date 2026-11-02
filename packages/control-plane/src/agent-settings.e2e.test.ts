@@ -356,4 +356,59 @@ describe('an agent’s settings are part of its versioned configuration (CF1, TS
   it('the other agent was never touched', async () => {
     assert.equal((await call('GET', '/api/v1/agents/theirs/settings')).body.managed, false);
   });
+  it('#65: the display name of a repository agent is changed by its owner or an admin, ledgered, and survives re-registration', async () => {
+    assert.equal((await call('PUT', '/api/v1/agents/mine/name', { name: 'Cody' }, OTHER)).status, 403);
+    assert.equal((await call('PUT', '/api/v1/agents/mine/name', { name: 'Cody' }, VIEWER)).status, 403);
+    assert.equal((await call('PUT', '/api/v1/agents/mine/name', { name: '   ' })).status, 400);
+    assert.equal((await call('PUT', '/api/v1/agents/mine/name', { name: 'x'.repeat(121) })).status, 400);
+    assert.equal((await call('PUT', '/api/v1/agents/mine/name', {})).status, 400);
+    assert.equal((await call('PUT', '/api/v1/agents/nobody/name', { name: 'X' })).status, 404);
+    const before = ledger.query({ agent: 'mine' }).filter((r) => r.action === 'AGENT_RENAMED').length;
+    const ok = await call('PUT', '/api/v1/agents/mine/name', { name: '  Cody ' }, OWNER);
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.name, 'Cody');
+    assert.equal(ok.body.changed, true);
+    assert.equal(state.agents.get('mine')!.name, 'Cody');
+    const rows = ledger.query({ agent: 'mine' }).filter((r) => r.action === 'AGENT_RENAMED');
+    assert.equal(rows.length, before + 1);
+    assert.equal(rows.at(-1)!.actor, 'token:owner-svc');
+    // Same name again: no new ledger row.
+    assert.equal((await call('PUT', '/api/v1/agents/mine/name', { name: 'Cody' })).body.changed, false);
+    assert.equal(ledger.query({ agent: 'mine' }).filter((r) => r.action === 'AGENT_RENAMED').length, before + 1);
+    const listed = await call('GET', '/api/v1/registry/agents');
+    assert.equal(listed.body.find((a: { id: string }) => a.id === 'mine').name, 'Cody');
+    // A re-registration from the repository keeps the name set in the factory.
+    const reg = await call('POST', '/api/v1/registry/agents', { repo: 'https://github.com/beercanlabs/SM-mine', commit: SHA, cartridge: cartridge('mine') });
+    assert.equal(reg.status, 201, JSON.stringify(reg.body));
+    assert.equal(state.agents.get('mine')!.name, 'Cody');
+  });
+
+  it('#65: the settings PUT accepts name, alone or with other settings; a bad name changes nothing', async () => {
+    const alone = await call('PUT', '/api/v1/agents/mine/settings', { name: 'Rev' });
+    assert.equal(alone.status, 200, JSON.stringify(alone.body));
+    assert.deepEqual(alone.body.changed, ['name']);
+    assert.equal(state.agents.get('mine')!.name, 'Rev');
+    const both = await call('PUT', '/api/v1/agents/mine/settings', { name: 'Flow', soul: 'You keep the line moving.' });
+    assert.equal(both.status, 200, JSON.stringify(both.body));
+    assert.ok(both.body.changed.includes('name'));
+    assert.equal(state.agents.get('mine')!.name, 'Flow');
+    assert.equal(both.body.settings.soul, 'You keep the line moving.');
+    assert.equal((await call('PUT', '/api/v1/agents/mine/settings', { name: '' })).status, 400);
+    assert.equal((await call('PUT', '/api/v1/agents/mine/settings', { name: 'Ok', soul: 42 })).status, 400);
+    assert.equal(state.agents.get('mine')!.name, 'Flow');
+  });
+
+  it('#65: a configuration agent is renamed the same way and its saved record carries the name', async () => {
+    const base = state.agents.get('theirs')!;
+    const { registryOf } = await import('@beercanlabs/factory-registrar');
+    const cfg = { ...base, id: 'cfgagent', name: 'cfgagent', createdFrom: 'configuration' as const, repo: undefined, commit: undefined };
+    state.agents.set('cfgagent', cfg);
+    registryOf(state).save(cfg);
+    const r = await call('PUT', '/api/v1/agents/cfgagent/name', { name: 'Archie' });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(state.agents.get('cfgagent')!.name, 'Archie');
+    const { readFileSync } = await import('node:fs');
+    assert.equal(JSON.parse(readFileSync(join(dir, 'registry', 'cfgagent.json'), 'utf8')).name, 'Archie');
+    state.agents.delete('cfgagent');
+  });
 });
