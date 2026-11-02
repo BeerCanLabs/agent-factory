@@ -18,7 +18,9 @@ import {
   PrincipalStoreUnavailableError,
   S3CliDocBackend,
   SERVICE_PRINCIPAL_ID,
+  deriveSlugFromEmail,
   docBackendFromUri,
+  isValidUserPrincipalId,
   normalizeEmail,
   snapshotSha256,
   type AwsCliRunner,
@@ -288,7 +290,16 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
     assert.equal(store.findByEmail('alex.work@example.com'), undefined);
     await assert.rejects(() => store.removeEmail('user:alex', 'alex@gmail.com', 'user:admin'), /last email/i);
 
-    // Email-shaped canonical principal IDs (user:<email>, user:alice+tag@sub.example.com) and SERVICE_PRINCIPAL_ID (F3)
+    // Email-shaped canonical principal IDs (254-char RFC 5322, o'connor@example.com, _svc@example.com) and slug truncation safety
+    const email254 = `${'a'.repeat(64)}@${'b'.repeat(61)}.${'c'.repeat(61)}.${'d'.repeat(61)}.com`;
+    const email255 = `${'a'.repeat(64)}@${'b'.repeat(62)}.${'c'.repeat(61)}.${'d'.repeat(61)}.com`;
+    assert.equal(email254.length, 254);
+    assert.equal(email255.length, 255);
+    assert.equal(normalizeEmail(email254), email254);
+    assert.throws(() => normalizeEmail(email255));
+    assert.equal(isValidUserPrincipalId(`user:${email254}`), true);
+    assert.equal(isValidUserPrincipalId(`user:${email255}`), false);
+
     const emailShaped = await store.create({
       id: 'user:Dale@Example.com',
       displayName: 'Dale',
@@ -296,15 +307,42 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
       by: 'user:admin',
     });
     assert.equal(emailShaped.id, 'user:dale@example.com');
+
+    const rfc5322Principal = await store.create({
+      id: "user:O'Connor@Example.com",
+      displayName: "O'Connor",
+      emails: ["O'Connor@Example.com", '_svc@example.com', email254],
+      by: 'user:admin',
+    });
+    assert.equal(rfc5322Principal.id, "user:o'connor@example.com");
+    assert.equal(PRINCIPAL_ID.test('user:_svc@example.com'), true);
     assert.equal(PRINCIPAL_ID.test('user:alice+tag@sub.example.com'), true);
     assert.equal(SERVICE_PRINCIPAL_ID.test('service:deploy-check.access'), true);
     assert.equal(SERVICE_PRINCIPAL_ID.test('service:///'), false);
+
+    // deriveSlugFromEmail strips trailing [-_.] AFTER slicing at char 120 / 124
+    const base118 = 'x'.repeat(118);
+    const existingForSlug = new Map([[`user:${base118}`, emailShaped]]);
+    for (const sep of ['.', '-', '_']) {
+      // `${base118}-abcd${sep}ef` has `sep` at 1-based char 124 (`118 + 1 + 4 + 1 = 124`)
+      const derived = deriveSlugFromEmail(`${base118}@abcd${sep}ef.com`, existingForSlug);
+      assert.equal(derived, `user:${base118}-abcd`, `trailing '${sep}' at slice boundary 124 must be stripped`);
+      assert.equal(isValidUserPrincipalId(derived), true);
+    }
 
     // Invalid emails and invalid principal IDs are rejected
     for (const badEmail of ['', 'plain', '@domain.com', 'a@b', 'a..b@example.com', '.a@example.com']) {
       assert.throws(() => normalizeEmail(badEmail));
     }
-    for (const badId of ['cloudflare:bad@example.com', 'user:@', 'user:///', 'user:foo@bar', 'user:a..b@example.com']) {
+    for (const badId of [
+      'cloudflare:bad@example.com',
+      'user:@',
+      'user:///',
+      'user:foo@bar',
+      'user:a..b@example.com',
+      `user:${email255}`,
+      'user:trailing-',
+    ]) {
       await assert.rejects(
         () => store.create({ id: badId, displayName: 'Bad', emails: [`ok-${Math.random().toString(36).slice(2)}@example.com`], by: 'user:admin' }),
         /invalid principal id/,
@@ -374,6 +412,24 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
       assert.equal(existsSync(join(dir, '4.json')), true, 'next commit skips orphaned 3.json and writes 4.json');
       assert.equal(JSON.parse(readFileSync(join(dir, 'current.json'), 'utf8')).version, 4);
 
+      // Truncated / 0-byte uncommitted <n>.json (5.json) alongside valid current.json -> 4.json:
+      // open/reload ignores corrupt uncommitted 5.json without SyntaxError and advances next write to 6.json!
+      writeFileSync(join(dir, '5.json'), '');
+      const recoveredFromZeroByte = await PrincipalStore.open(new FileDocBackend<PrincipalsDoc>(dir));
+      assert.equal(recoveredFromZeroByte.healthy, true);
+      assert.ok(recoveredFromZeroByte.findByEmail('committed4@example.com'));
+      await recoveredFromZeroByte.addEmail('user:dale', 'committed6@example.com', 'user:dale');
+      assert.equal(existsSync(join(dir, '6.json')), true, 'next commit skips 0-byte 5.json and writes 6.json');
+      assert.equal(JSON.parse(readFileSync(join(dir, 'current.json'), 'utf8')).version, 6);
+
+      // Truncated partial JSON in uncommitted 7.json also recovers cleanly to 6.json and writes 8.json next
+      writeFileSync(join(dir, '7.json'), '{"version":7,"broken":');
+      const recoveredFromTruncated = await PrincipalStore.open(new FileDocBackend<PrincipalsDoc>(dir));
+      assert.equal(recoveredFromTruncated.healthy, true);
+      await recoveredFromTruncated.addEmail('user:dale', 'committed8@example.com', 'user:dale');
+      assert.equal(existsSync(join(dir, '8.json')), true);
+      assert.equal(JSON.parse(readFileSync(join(dir, 'current.json'), 'utf8')).version, 8);
+
       // Missing current.json when version files exist fails closed (F2/R8)
       const missingCurrentDir = mkdtempSync(join(tmpdir(), 'principals-nocurrent-'));
       try {
@@ -386,10 +442,10 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
         rmSync(missingCurrentDir, { recursive: true, force: true });
       }
 
-      // Tampering with snapshot data triggers sha256 mismatch -> open/reload throws and marks store unhealthy (R8 fail closed)
-      const snap2 = JSON.parse(readFileSync(join(dir, '2.json'), 'utf8'));
-      snap2.data.principals[0].emails.push('forged@example.com');
-      writeFileSync(join(dir, '2.json'), JSON.stringify(snap2));
+      // Tampering with the COMMITTED snapshot (8.json) triggers sha256 mismatch -> open/reload throws and marks store unhealthy (R8)
+      const snap8 = JSON.parse(readFileSync(join(dir, '8.json'), 'utf8'));
+      snap8.data.principals[0].emails.push('forged@example.com');
+      writeFileSync(join(dir, '8.json'), JSON.stringify(snap8));
 
       await assert.rejects(() => PrincipalStore.open(new FileDocBackend<PrincipalsDoc>(dir)), /sha256 mismatch/);
       await assert.rejects(() => store2.reload(), /sha256 mismatch/);
@@ -406,21 +462,39 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
     }
   });
 
-  it('R2 & R8: S3CliDocBackend uses aws s3 / s3api subprocesses, retries transient errors, and fails closed', async () => {
+  it('R2 & R8: S3CliDocBackend uses O(1) s3api list-objects-v2 + get-object, retries transient errors, and fails closed', async () => {
     const bucketDir = mkdtempSync(join(tmpdir(), 'principals-s3-sim-'));
     const calls: string[][] = [];
     let transientLoadFailures = 1;
 
     const fakeAwsCli: AwsCliRunner = async (args) => {
       calls.push(args);
-      if (args[0] === 's3' && args[1] === 'sync') {
+      if (args[0] === 's3api' && args[1] === 'list-objects-v2') {
         if (transientLoadFailures > 0) {
           transientLoadFailures--;
           throw new Error('transient network error');
         }
-        const dest = args[3];
-        if (existsSync(bucketDir)) cpSync(bucketDir, dest, { recursive: true });
-        return '';
+        if (!existsSync(bucketDir)) return '{}';
+        const files = existsSync(bucketDir)
+          ? (await import('node:fs')).readdirSync(bucketDir).sort()
+          : [];
+        const tokenIdx = args.indexOf('--continuation-token');
+        const offset = tokenIdx >= 0 ? Number(args[tokenIdx + 1]) : 0;
+        const page = files.slice(offset, offset + 2).map((f) => ({ Key: `auth/principals/${f}` }));
+        const next = offset + 2 < files.length ? String(offset + 2) : undefined;
+        return JSON.stringify({
+          Contents: page,
+          IsTruncated: Boolean(next),
+          ...(next ? { NextContinuationToken: next } : {}),
+        });
+      }
+      if (args[0] === 's3api' && args[1] === 'get-object') {
+        const key = args[args.indexOf('--key') + 1].replace(/^auth\/principals\//, '');
+        const outFile = args[args.length - 1];
+        const src = join(bucketDir, key);
+        if (!existsSync(src)) throw new Error('NoSuchKey');
+        writeFileSync(outFile, readFileSync(src));
+        return '{}';
       }
       if (args[0] === 's3api' && args[1] === 'put-object') {
         const key = args[args.indexOf('--key') + 1].replace(/^auth\/principals\//, '');
@@ -447,13 +521,19 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
         emails: ['stephaniesackrider@hotmail.com'],
         by: 'user:dale',
       });
+      await store.addEmail('user:stephanie', 'stephanie.sackrider@gmail.com', 'user:dale');
+      // Leave a 0-byte uncommitted 3.json in S3 bucket; reload must fetch ONLY current.json and 2.json!
+      writeFileSync(join(bucketDir, '3.json'), '');
+      calls.length = 0;
 
       const reloaded = await PrincipalStore.open(
         docBackendFromUri<PrincipalsDoc>('s3://factory-config/auth/principals', '/unused', fakeAwsCli),
       );
       assert.equal(reloaded.findByEmail('stephaniesackrider@hotmail.com')?.id, 'user:stephanie');
-      assert.ok(calls.some((c) => c[0] === 's3' && c[1] === 'sync'));
-      assert.ok(calls.some((c) => c[0] === 's3api' && c.includes('--if-none-match')));
+      const getCalls = calls.filter((c) => c[0] === 's3api' && c[1] === 'get-object');
+      assert.equal(getCalls.length, 2, 'S3 reload performs exactly 2 get-object calls (current.json + 2.json)');
+      await reloaded.addEmail('user:stephanie', 'stephanie.alt@example.com', 'user:dale');
+      assert.equal(existsSync(join(bucketDir, '4.json')), true, 'advances past orphaned 3.json to 4.json');
 
       // Persistent S3 failure fails closed on open
       const downCli: AwsCliRunner = async () => {
@@ -548,20 +628,34 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
     assert.ok(seenUrls.some((u) => u.includes('ifGenerationMatch=0') && u.includes('1.json')));
     assert.equal(transientPointerFailures, 0, 'pointer upload retried after transient 503');
 
-    // Reload via gs:// URI exercises pagination + snapshot verification
+    // Populate 50 historical snapshots (1.json..50.json) + current.json -> 50.json + corrupt orphan 51.json:
+    // GcsDocBackend.loadState() must perform ONLY 2 media GETs (current.json and 50.json), never O(N)!
+    const snap1 = JSON.parse(objects.get('auth/principals/1.json')!) as VersionedSnapshot<PrincipalsDoc>;
+    for (let v = 2; v <= 50; v++) {
+      const s: VersionedSnapshot<PrincipalsDoc> = { ...snap1, version: v };
+      objects.set(`auth/principals/${v}.json`, JSON.stringify(s));
+    }
+    objects.set('auth/principals/current.json', JSON.stringify({ version: 50, sha256: snap1.sha256 }));
+    objects.set('auth/principals/51.json', ''); // 0-byte uncommitted orphan
+    seenUrls.length = 0;
+
+    // Reload via gs:// URI exercises pagination + O(1) media GETs
     const reloaded = await PrincipalStore.open(
       docBackendFromUri<PrincipalsDoc>('gs://factory-gcp-cfg/auth/principals', '/unused', { gcs: gcsOpts }),
     );
     assert.equal(reloaded.findByEmail('stephanie.sackrider@gmail.com')?.id, 'user:stephanie');
+    const mediaGets = seenUrls.filter((u) => u.startsWith('GET ') && u.includes('alt=media'));
+    assert.equal(mediaGets.length, 2, `expected exactly 2 media GETs across 50 versions, got ${mediaGets.length}`);
 
     // Conditional write collision (412 PreconditionFailed) throws
     const rawSnap = (await gcsBackend.loadLatest())!;
+    assert.equal(rawSnap.version, 50);
     await assert.rejects(() => gcsBackend.write(rawSnap), /412: PreconditionFailed/);
 
-    // Corrupting stored GCS object triggers fail-closed error on open (R8)
-    const tampered = JSON.parse(objects.get('auth/principals/1.json')!);
+    // Corrupting the COMMITTED GCS object (50.json) triggers fail-closed error on open (R8)
+    const tampered = JSON.parse(objects.get('auth/principals/50.json')!);
     tampered.data.principals[0].emails.push('tampered@example.com');
-    objects.set('auth/principals/1.json', JSON.stringify(tampered));
+    objects.set('auth/principals/50.json', JSON.stringify(tampered));
     await assert.rejects(
       () => PrincipalStore.open(new GcsDocBackend<PrincipalsDoc>('gs://factory-gcp-cfg/auth/principals', gcsOpts)),
       /sha256 mismatch/,

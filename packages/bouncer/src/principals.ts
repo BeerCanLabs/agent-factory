@@ -1,6 +1,16 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -8,14 +18,21 @@ import type { Principal } from '@beercanlabs/factory-auth';
 
 const execFileAsync = promisify(execFile);
 
-/** Canonical user principal actor (`user:<slug>` or `user:<lowercased-email>`, length <= 256). */
-export const PRINCIPAL_ID = /^(?!.*@.*@)(?!.*\.\.)user:[a-z0-9](?:[a-z0-9._@+-]{0,249}[a-z0-9])?$/;
+export const SLUG_BODY = '(?!.*\\.\\.)[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?';
+const EMAIL_LOCAL_ATOM = "[a-z0-9!#$%&'*+/=?^_`{|}~-]";
+const EMAIL_LOCAL_DOT = "[a-z0-9.!#$%&'*+/=?^_`{|}~-]";
+export const EMAIL_BODY = `(?=.{3,254}$)(?!.*\\.\\.)${EMAIL_LOCAL_ATOM}(?:${EMAIL_LOCAL_DOT}{0,62}${EMAIL_LOCAL_ATOM})?@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+`;
+export const SERVICE_BODY = '(?!.*\\.\\.)[a-z0-9](?:[a-z0-9._-]{0,246}[a-z0-9])?';
+export const TOKEN_BODY = '(?!.*::)[a-z0-9](?:[a-z0-9._:-]{0,247}[a-z0-9])?';
+
+const EMAIL_REGEX = new RegExp(`^${EMAIL_BODY}$`);
+
+/** Canonical user principal actor (`user:<slug>` up to 128-char slug, or `user:<lowercased-email>` up to 254-char RFC 5322 email). */
+export const PRINCIPAL_ID = new RegExp(`^user:(?:${SLUG_BODY}|${EMAIL_BODY})$`);
 /** Canonical service principal actor (`service:<name>`, length <= 256). */
-export const SERVICE_PRINCIPAL_ID = /^service:[a-z0-9][a-z0-9._-]{0,247}$/;
+export const SERVICE_PRINCIPAL_ID = new RegExp(`^service:${SERVICE_BODY}$`);
 
 const VERSION_FILE = /^([1-9]\d*)\.json$/;
-const EMAIL_LOCAL = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/;
-const EMAIL_DOMAIN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 
 export type VersionedSnapshot<T> = {
   version: number;
@@ -64,40 +81,69 @@ export function snapshotSha256(data: unknown): string {
   return createHash('sha256').update(JSON.stringify(sortDeep(data))).digest('hex');
 }
 
+class CorruptSnapshotError extends Error {}
+
+function parsePointer(ptrText: string): { version: number; sha256: string } {
+  let ptr: { version?: unknown; sha256?: unknown };
+  try {
+    ptr = JSON.parse(ptrText) as { version?: unknown; sha256?: unknown };
+  } catch {
+    throw new CorruptSnapshotError('corrupt current.json pointer: invalid JSON');
+  }
+  if (
+    typeof ptr?.version !== 'number' ||
+    !Number.isInteger(ptr.version) ||
+    ptr.version < 1 ||
+    typeof ptr?.sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(ptr.sha256)
+  ) {
+    throw new CorruptSnapshotError('corrupt current.json pointer');
+  }
+  return { version: ptr.version, sha256: ptr.sha256 };
+}
+
+function parseVerifiedSnapshot<T>(snapText: string, expectedVersion: number, expectedSha256: string): VersionedSnapshot<T> {
+  let raw: VersionedSnapshot<T>;
+  try {
+    raw = JSON.parse(snapText) as VersionedSnapshot<T>;
+  } catch {
+    throw new CorruptSnapshotError(`corrupt snapshot ${expectedVersion}.json: invalid JSON`);
+  }
+  if (!raw || typeof raw !== 'object' || raw.version !== expectedVersion || typeof raw.sha256 !== 'string') {
+    throw new CorruptSnapshotError(`corrupt snapshot ${expectedVersion}.json: invalid version metadata`);
+  }
+  if (raw.sha256 !== expectedSha256 || snapshotSha256(raw.data) !== expectedSha256) {
+    throw new CorruptSnapshotError(`corrupt snapshot ${expectedVersion}.json: sha256 mismatch`);
+  }
+  return raw;
+}
+
 function readSnapshotDir<T>(dir: string): VersionedLoadState<T> {
   if (!existsSync(dir)) return { snapshot: undefined, maxSeenVersion: 0 };
   const entries = readdirSync(dir);
-  const versions = new Map<number, VersionedSnapshot<T>>();
+  let maxSeenVersion = 0;
+  const versionFiles = new Set<number>();
   for (const name of entries) {
     const m = name.match(VERSION_FILE);
     if (!m) continue;
-    const expectedVersion = Number(m[1]);
-    const raw = JSON.parse(readFileSync(join(dir, name), 'utf8')) as VersionedSnapshot<T>;
-    if (!raw || typeof raw !== 'object' || raw.version !== expectedVersion || typeof raw.sha256 !== 'string') {
-      throw new Error(`corrupt snapshot ${name}: invalid version metadata`);
-    }
-    if (snapshotSha256(raw.data) !== raw.sha256) {
-      throw new Error(`corrupt snapshot ${name}: sha256 mismatch`);
-    }
-    versions.set(expectedVersion, raw);
+    const v = Number(m[1]);
+    versionFiles.add(v);
+    if (v > maxSeenVersion) maxSeenVersion = v;
   }
   const currentPath = join(dir, 'current.json');
   const hasCurrent = existsSync(currentPath);
-  if (versions.size === 0 && !hasCurrent) {
+  if (versionFiles.size === 0 && !hasCurrent) {
     return { snapshot: undefined, maxSeenVersion: 0 };
   }
   if (!hasCurrent) {
-    throw new Error('corrupt snapshot store: missing current.json pointer');
+    throw new CorruptSnapshotError('corrupt snapshot store: missing current.json pointer');
   }
-  const ptr = JSON.parse(readFileSync(currentPath, 'utf8')) as { version?: unknown; sha256?: unknown };
-  if (typeof ptr?.version !== 'number' || typeof ptr?.sha256 !== 'string') {
-    throw new Error('corrupt current.json pointer');
+  const ptr = parsePointer(readFileSync(currentPath, 'utf8'));
+  if (!versionFiles.has(ptr.version)) {
+    throw new CorruptSnapshotError(`current.json points to missing or mismatched version ${String(ptr.version)}`);
   }
-  const target = versions.get(ptr.version);
-  if (!target || target.sha256 !== ptr.sha256) {
-    throw new Error(`current.json points to missing or mismatched version ${String(ptr.version)}`);
-  }
-  return { snapshot: target, maxSeenVersion: Math.max(...versions.keys()) };
+  const target = parseVerifiedSnapshot<T>(readFileSync(join(dir, `${ptr.version}.json`), 'utf8'), ptr.version, ptr.sha256);
+  return { snapshot: target, maxSeenVersion: Math.max(maxSeenVersion, ptr.version) };
 }
 
 let tmpSeq = 0;
@@ -122,11 +168,22 @@ export class FileDocBackend<T> implements VersionedDocBackend<T> {
       throw new Error(`invalid snapshot version: ${snapshot.version}`);
     }
     mkdirSync(this.dir, { recursive: true });
-    writeFileSync(join(this.dir, `${snapshot.version}.json`), `${JSON.stringify(snapshot, null, 2)}\n`, { flag: 'wx' });
+    const versionPath = join(this.dir, `${snapshot.version}.json`);
+    const versionTmp = `${versionPath}.tmp.${process.pid}.${Date.now()}.${++tmpSeq}.${Math.random().toString(36).slice(2)}`;
+    try {
+      writeFileSync(versionTmp, `${JSON.stringify(snapshot, null, 2)}\n`);
+      linkSync(versionTmp, versionPath);
+    } finally {
+      rmSync(versionTmp, { force: true });
+    }
     const current = join(this.dir, 'current.json');
-    const tmp = `${current}.${process.pid}.${++tmpSeq}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify({ version: snapshot.version, sha256: snapshot.sha256 })}\n`);
-    renameSync(tmp, current);
+    const currentTmp = `${current}.tmp.${process.pid}.${Date.now()}.${++tmpSeq}.${Math.random().toString(36).slice(2)}`;
+    try {
+      writeFileSync(currentTmp, `${JSON.stringify({ version: snapshot.version, sha256: snapshot.sha256 })}\n`);
+      renameSync(currentTmp, current);
+    } finally {
+      rmSync(currentTmp, { force: true });
+    }
   }
 }
 
@@ -166,9 +223,61 @@ export class S3CliDocBackend<T> implements VersionedDocBackend<T> {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       const dir = mkdtempSync(join(tmpdir(), 'bouncer-doc-load-'));
       try {
-        await this.cli(['s3', 'sync', `s3://${this.bucket}/${this.prefix}`, dir, '--only-show-errors', '--no-progress']);
-        return readSnapshotDir<T>(dir);
+        let maxSeenVersion = 0;
+        const versionKeys = new Map<number, string>();
+        let currentKey: string | undefined;
+        let continuationToken: string | undefined;
+        do {
+          const listArgs = ['s3api', 'list-objects-v2', '--no-paginate', '--bucket', this.bucket];
+          if (this.prefix) listArgs.push('--prefix', this.prefix);
+          if (continuationToken) listArgs.push('--continuation-token', continuationToken);
+          listArgs.push('--output', 'json');
+          const out = await this.cli(listArgs);
+          const page = out.trim()
+            ? (JSON.parse(out) as {
+                Contents?: Array<{ Key?: string }>;
+                IsTruncated?: boolean;
+                NextContinuationToken?: string;
+              })
+            : {};
+          for (const obj of page.Contents ?? []) {
+            const key = obj.Key ?? '';
+            if (!key.startsWith(this.prefix)) continue;
+            const rel = key.slice(this.prefix.length);
+            if (!rel || rel.includes('/')) continue;
+            if (rel === 'current.json') {
+              currentKey = key;
+            } else {
+              const vm = rel.match(VERSION_FILE);
+              if (vm) {
+                const v = Number(vm[1]);
+                versionKeys.set(v, key);
+                if (v > maxSeenVersion) maxSeenVersion = v;
+              }
+            }
+          }
+          continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+        } while (continuationToken);
+
+        if (versionKeys.size === 0 && !currentKey) {
+          return { snapshot: undefined, maxSeenVersion: 0 };
+        }
+        if (!currentKey) {
+          throw new CorruptSnapshotError('corrupt snapshot store: missing current.json pointer');
+        }
+        const currentFile = join(dir, 'current.json');
+        await this.cli(['s3api', 'get-object', '--bucket', this.bucket, '--key', currentKey, currentFile]);
+        const ptr = parsePointer(readFileSync(currentFile, 'utf8'));
+        const targetKey = versionKeys.get(ptr.version);
+        if (!targetKey) {
+          throw new CorruptSnapshotError(`current.json points to missing or mismatched version ${String(ptr.version)}`);
+        }
+        const versionFile = join(dir, `${ptr.version}.json`);
+        await this.cli(['s3api', 'get-object', '--bucket', this.bucket, '--key', targetKey, versionFile]);
+        const target = parseVerifiedSnapshot<T>(readFileSync(versionFile, 'utf8'), ptr.version, ptr.sha256);
+        return { snapshot: target, maxSeenVersion: Math.max(maxSeenVersion, ptr.version) };
       } catch (err) {
+        if (err instanceof CorruptSnapshotError) throw err;
         lastErr = err;
         if (attempt < this.maxAttempts && this.retryDelayMs > 0) {
           await new Promise((r) => setTimeout(r, this.retryDelayMs * 2 ** (attempt - 1)));
@@ -281,9 +390,11 @@ export class GcsDocBackend<T> implements VersionedDocBackend<T> {
   async loadState(): Promise<VersionedLoadState<T>> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
-      const dir = mkdtempSync(join(tmpdir(), 'bouncer-gcs-load-'));
       try {
         const token = await this.tokenFn();
+        let maxSeenVersion = 0;
+        const versionKeys = new Map<number, string>();
+        let currentKey: string | undefined;
         let pageToken: string | undefined;
         do {
           const params = new URLSearchParams();
@@ -299,24 +410,53 @@ export class GcsDocBackend<T> implements VersionedDocBackend<T> {
             const name = item.name ?? '';
             if (!name.startsWith(this.prefix)) continue;
             const rel = name.slice(this.prefix.length);
-            if (!rel || rel.includes('/') || (!VERSION_FILE.test(rel) && rel !== 'current.json')) continue;
-            const dlRes = await this.fetchFn(
-              `${this.endpoint}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(name)}?alt=media`,
-              { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) },
-            );
-            if (!dlRes.ok) throw new Error(`GCS doc download failed (${dlRes.status})`);
-            writeFileSync(join(dir, rel), await dlRes.text());
+            if (!rel || rel.includes('/')) continue;
+            if (rel === 'current.json') {
+              currentKey = name;
+            } else {
+              const vm = rel.match(VERSION_FILE);
+              if (vm) {
+                const v = Number(vm[1]);
+                versionKeys.set(v, name);
+                if (v > maxSeenVersion) maxSeenVersion = v;
+              }
+            }
           }
           pageToken = data.nextPageToken;
         } while (pageToken);
-        return readSnapshotDir<T>(dir);
+
+        if (versionKeys.size === 0 && !currentKey) {
+          return { snapshot: undefined, maxSeenVersion: 0 };
+        }
+        if (!currentKey) {
+          throw new CorruptSnapshotError('corrupt snapshot store: missing current.json pointer');
+        }
+
+        const currentRes = await this.fetchFn(
+          `${this.endpoint}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(currentKey)}?alt=media`,
+          { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) },
+        );
+        if (!currentRes.ok) throw new Error(`GCS doc download failed (${currentRes.status})`);
+        const ptr = parsePointer(await currentRes.text());
+
+        const targetKey = versionKeys.get(ptr.version);
+        if (!targetKey) {
+          throw new CorruptSnapshotError(`current.json points to missing or mismatched version ${String(ptr.version)}`);
+        }
+
+        const snapRes = await this.fetchFn(
+          `${this.endpoint}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(targetKey)}?alt=media`,
+          { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) },
+        );
+        if (!snapRes.ok) throw new Error(`GCS doc download failed (${snapRes.status})`);
+        const target = parseVerifiedSnapshot<T>(await snapRes.text(), ptr.version, ptr.sha256);
+        return { snapshot: target, maxSeenVersion: Math.max(maxSeenVersion, ptr.version) };
       } catch (err) {
+        if (err instanceof CorruptSnapshotError) throw err;
         lastErr = err;
         if (attempt < this.maxAttempts && this.retryDelayMs > 0) {
           await new Promise((r) => setTimeout(r, this.retryDelayMs * 2 ** (attempt - 1)));
         }
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
       }
     }
     throw lastErr;
@@ -464,36 +604,14 @@ export class PrincipalStoreUnavailableError extends Error {
 export function normalizeEmail(raw: unknown): string {
   if (typeof raw !== 'string') throw new Error('email must be a string');
   const clean = raw.trim().toLowerCase();
-  const at = clean.indexOf('@');
-  if (clean.length < 3 || clean.length > 254 || at <= 0 || at !== clean.lastIndexOf('@')) {
-    throw new Error(`invalid email: ${JSON.stringify(raw)}`);
-  }
-  const local = clean.slice(0, at);
-  const domain = clean.slice(at + 1);
-  if (
-    local.length > 64 ||
-    local.startsWith('.') ||
-    local.endsWith('.') ||
-    local.includes('..') ||
-    !EMAIL_LOCAL.test(local) ||
-    !EMAIL_DOMAIN.test(domain)
-  ) {
+  if (!EMAIL_REGEX.test(clean)) {
     throw new Error(`invalid email: ${JSON.stringify(raw)}`);
   }
   return clean;
 }
 
 export function isValidUserPrincipalId(id: string): boolean {
-  if (!PRINCIPAL_ID.test(id)) return false;
-  const suffix = id.slice('user:'.length);
-  if (suffix.includes('@')) {
-    try {
-      return normalizeEmail(suffix) === suffix;
-    } catch {
-      return false;
-    }
-  }
-  return true;
+  return typeof id === 'string' && PRINCIPAL_ID.test(id);
 }
 
 export type CreatePrincipalInput = {
@@ -515,17 +633,27 @@ export type RecordSignInResult =
   | { ok: true; principal: undefined; normalizedEmail: string }
   | { ok: false; reason: 'email_not_verified' | 'invalid_email' | 'invalid_idp' };
 
-function deriveSlugFromEmail(email: string, existing: ReadonlyMap<string, PrincipalRecord>): string {
+function cleanSlug(raw: string, maxLen: number): string {
+  const collapsed = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/\.{2,}/g, '.')
+    .replace(/^[^a-z0-9]+/, '')
+    .slice(0, maxLen)
+    .replace(/[^a-z0-9]+$/, '');
+  return collapsed || 'user';
+}
+
+export function deriveSlugFromEmail(email: string, existing: ReadonlyMap<string, PrincipalRecord>): string {
   const [local, domain] = email.split('@');
-  const sanitize = (s: string) =>
-    s.replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z0-9]+/, '').replace(/[-_.]+$/, '').slice(0, 120) || 'u';
-  const base = sanitize(local);
+  const base = cleanSlug(local, 120);
   if (!existing.has(`user:${base}`)) return `user:${base}`;
-  const withDomain = `${base}-${sanitize(domain)}`.slice(0, 124);
+  const withDomain = cleanSlug(`${base}-${cleanSlug(domain, 120)}`, 124);
   if (!existing.has(`user:${withDomain}`)) return `user:${withDomain}`;
+  const prefix = cleanSlug(base, 118);
   let i = 2;
-  while (existing.has(`user:${base.slice(0, 118)}-${i}`)) i++;
-  return `user:${base.slice(0, 118)}-${i}`;
+  while (existing.has(`user:${prefix}-${i}`)) i++;
+  return `user:${prefix}-${i}`;
 }
 
 /**

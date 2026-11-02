@@ -57,6 +57,7 @@ export {
   PrincipalStoreUnavailableError,
   S3CliDocBackend,
   SERVICE_PRINCIPAL_ID,
+  deriveSlugFromEmail,
   docBackendFromUri,
   isValidUserPrincipalId,
   normalizeEmail,

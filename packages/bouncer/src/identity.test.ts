@@ -493,12 +493,23 @@ describe('AM2 a person conversing directly speaks as themselves', () => {
 });
 
 describe('S1 canonical & legacy actor normalization (AC3)', () => {
-  it('parseActor accepts canonical user:/service: alongside legacy cloudflare:/oidc:/token:', () => {
+  it('parseActor accepts canonical user:/service: alongside legacy cloudflare:/oidc:/token: (including 254-char & RFC 5322 emails)', () => {
+    const email254 = `${'a'.repeat(64)}@${'b'.repeat(61)}.${'c'.repeat(61)}.${'d'.repeat(61)}.com`;
+    const email255 = `${'a'.repeat(64)}@${'b'.repeat(62)}.${'c'.repeat(61)}.${'d'.repeat(61)}.com`;
+    assert.equal(email254.length, 254);
+
     assert.equal(parseActor('USER:Stephanie'), 'user:stephanie');
     assert.equal(parseActor('USER:Alice+Tag@Sub.Example.com'), 'user:alice+tag@sub.example.com');
+    assert.equal(parseActor("USER:O'Connor@Example.com"), "user:o'connor@example.com");
+    assert.equal(parseActor('user:_svc@example.com'), 'user:_svc@example.com');
+    assert.equal(parseActor(`USER:${email254}`), `user:${email254}`);
     assert.equal(parseActor('Service:Gatekeeper-Egress'), 'service:gatekeeper-egress');
+    assert.equal(parseActor('cloudflare-service:Deploy-Check.Access'), 'cloudflare-service:deploy-check.access');
     assert.equal(parseActor('Cloudflare:Alice@Example.com'), 'cloudflare:alice@example.com');
+    assert.equal(parseActor("Cloudflare:O'Connor@Example.com"), "cloudflare:o'connor@example.com");
+    assert.equal(parseActor(`Cloudflare:${email254}`), `cloudflare:${email254}`);
     assert.equal(parseActor('OIDC:Bob@Example.com'), 'oidc:bob@example.com');
+    assert.equal(parseActor(`OIDC:${email254}`), `oidc:${email254}`);
     assert.equal(parseActor('OIDC:Carol'), 'oidc:carol');
     assert.equal(parseActor('token:Admin'), 'token:admin');
     assert.equal(parseActor('token:agent:helper'), 'token:agent:helper');
@@ -509,14 +520,22 @@ describe('S1 canonical & legacy actor normalization (AC3)', () => {
       'user:',
       'user:///',
       'user:@',
+      'user:foo@bar',
       'user:a..b@example.com',
+      `user:${email255}`,
       'service:',
       'service:///',
       'service:a b',
       'token:',
       'token:///',
+      'token:agent:',
       'cloudflare:',
+      'cloudflare:notanemail',
+      'cloudflare:foo@bar',
+      `cloudflare:${email255}`,
       'cloudflare:///',
+      'oidc:foo@bar',
+      'oidc:///',
       'user:a b',
       42,
       null,
@@ -540,6 +559,13 @@ describe('S1 canonical & legacy actor normalization (AC3)', () => {
     assert.equal(normalizeActorToPrincipal('USER:Dale'), 'user:dale');
     assert.equal(normalizeActorToPrincipal('Service:Ingress'), 'service:ingress');
     assert.equal(normalizeActorToPrincipal('cloudflare-service:Deploy.Access'), 'service:deploy.access');
+    const email254 = `${'a'.repeat(64)}@${'b'.repeat(61)}.${'c'.repeat(61)}.${'d'.repeat(61)}.com`;
+    assert.equal(normalizeActorToPrincipal(email254), `user:${email254}`);
+    assert.equal(normalizeActorToPrincipal(`user:${email254}`), `user:${email254}`);
+    assert.equal(normalizeActorToPrincipal(`cloudflare:${email254}`), `user:${email254}`);
+    assert.equal(normalizeActorToPrincipal(`oidc:${email254}`), `user:${email254}`);
+    assert.equal(normalizeActorToPrincipal("Cloudflare:O'Connor@Example.com"), "user:o'connor@example.com");
+    assert.equal(normalizeActorToPrincipal('oidc:_svc@example.com'), 'user:_svc@example.com');
     assert.equal(normalizeActorToPrincipal('Token:Admin'), 'token:admin');
     assert.equal(normalizeActorToPrincipal('token:agent:helper'), 'token:agent:helper');
     assert.equal(normalizeActorToPrincipal('OIDC:Carol'), 'user:carol');

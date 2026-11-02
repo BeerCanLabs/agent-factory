@@ -3,22 +3,24 @@ import { join } from 'node:path';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
 import { authorize } from './authorize.js';
 import {
-  SERVICE_PRINCIPAL_ID,
-  isValidUserPrincipalId,
+  EMAIL_BODY,
+  SERVICE_BODY,
+  SLUG_BODY,
+  TOKEN_BODY,
   normalizeEmail,
   type PrincipalStore,
 } from './principals.js';
 import { ROLE_PRIVILEGES, type Privilege } from './privileges.js';
 
-const TOKEN_ACTOR = /^token:[a-z0-9](?:[a-z0-9._:-]{0,247}[a-z0-9])?$/;
-
-export const PRINCIPAL_ACTOR =
-  /^(?:(?!.*@.*@)(?!.*\.\.)user:[a-z0-9](?:[a-z0-9._@+-]{0,249}[a-z0-9])?|service:[a-z0-9][a-z0-9._-]{0,247}|token:[a-z0-9](?:[a-z0-9._:-]{0,247}[a-z0-9])?|(?:cloudflare|oidc):[a-z0-9](?:[a-z0-9._@+-]{0,249}[a-z0-9])?)$/;
+export const PRINCIPAL_ACTOR = new RegExp(
+  `^(?:(?:user|oidc):(?:${SLUG_BODY}|${EMAIL_BODY})|cloudflare:${EMAIL_BODY}|(?:service|cloudflare-service):${SERVICE_BODY}|token:${TOKEN_BODY})$`,
+);
 
 /** A principal actor as stored (trimmed, lower-case), or undefined when it is not one. */
 export function parseActor(value: unknown): string | undefined {
-  const actor = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  return PRINCIPAL_ACTOR.test(actor) && actor.length <= 256 ? actor : undefined;
+  if (typeof value !== 'string') return undefined;
+  const actor = value.trim().toLowerCase();
+  return actor.length <= 320 && PRINCIPAL_ACTOR.test(actor) ? actor : undefined;
 }
 
 /**
@@ -29,53 +31,38 @@ export function parseActor(value: unknown): string | undefined {
 export function normalizeActorToPrincipal(actor: string, store?: PrincipalStore): string {
   if (typeof actor !== 'string') throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
   const trimmed = actor.trim().toLowerCase();
-  if (!trimmed || trimmed.length > 256 || /\s/.test(trimmed)) {
+  if (!trimmed || trimmed.length > 320 || /\s/.test(trimmed)) {
     throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
   }
   const colon = trimmed.indexOf(':');
   if (colon === -1) {
     const email = normalizeEmail(trimmed);
-    const candidate = `user:${email}`;
-    if (!isValidUserPrincipalId(candidate)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
-    return store?.findByEmail(email)?.id ?? candidate;
+    return store?.findByEmail(email)?.id ?? `user:${email}`;
+  }
+  if (!PRINCIPAL_ACTOR.test(trimmed)) {
+    throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
   }
   const prefix = trimmed.slice(0, colon);
   const rest = trimmed.slice(colon + 1);
-  if (!rest) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
   if (prefix === 'cloudflare') {
-    const email = normalizeEmail(rest);
-    const candidate = `user:${email}`;
-    if (!isValidUserPrincipalId(candidate)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
-    const found = store?.findByEmail(email) ?? store?.get(candidate);
-    return found ? found.id : candidate;
+    const found = store?.findByEmail(rest) ?? store?.get(`user:${rest}`);
+    return found ? found.id : `user:${rest}`;
   }
   if (prefix === 'oidc') {
     if (rest.includes('@')) {
-      const email = normalizeEmail(rest);
-      const candidate = `user:${email}`;
-      if (!isValidUserPrincipalId(candidate)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
-      const found = store?.findByEmail(email) ?? store?.get(candidate);
-      return found ? found.id : candidate;
+      const found = store?.findByEmail(rest) ?? store?.get(`user:${rest}`);
+      return found ? found.id : `user:${rest}`;
     }
-    const candidate = `user:${rest}`;
-    if (!isValidUserPrincipalId(candidate)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
-    return store?.get(candidate)?.id ?? candidate;
+    return store?.get(`user:${rest}`)?.id ?? `user:${rest}`;
   }
   if (prefix === 'user') {
-    if (!isValidUserPrincipalId(trimmed)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
     const found = store?.get(trimmed) ?? (rest.includes('@') ? store?.findByEmail(rest) : undefined);
     return found ? found.id : trimmed;
   }
   if (prefix === 'service' || prefix === 'cloudflare-service') {
-    const candidate = `service:${rest}`;
-    if (!SERVICE_PRINCIPAL_ID.test(candidate)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
-    return candidate;
+    return `service:${rest}`;
   }
-  if (prefix === 'token') {
-    if (!TOKEN_ACTOR.test(trimmed)) throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
-    return trimmed;
-  }
-  throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
+  return trimmed;
 }
 
 export const normalizeLegacyActor = normalizeActorToPrincipal;
