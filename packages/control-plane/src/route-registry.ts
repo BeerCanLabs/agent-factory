@@ -66,16 +66,9 @@ export const ROUTE_EXCEPTIONS = {
     retiringStory: 'S17',
     rationale: 'Public CLI discovery config; S17 retires pre-credential discovery in favor of direct browser login flow',
   },
-  'transitional-webhook-hooks': {
-    id: 'transitional-webhook-hooks',
-    protection: 'transitional',
-    retiringStory: 'S15',
-    rationale: 'Generic webhook endpoint with mixed x-factory-secret cartridge verification and hooks.invoke fallback; S15 migrates all webhooks to fail-closed HMAC signature verification',
-  },
   'webhook-hooks': {
     id: 'webhook-hooks',
     protection: 'webhook-hmac',
-    plannedIn: 'S15',
     rationale: 'Generic agent webhook endpoint verified fail-closed via HMAC signature against agent cartridge secret (D18, D22, S15)',
   },
   'identity-whoami': {
@@ -167,7 +160,11 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
 
   // Webhooks
   { method: 'POST', pattern: '/api/v1/hooks/github', exception: 'webhook-github', description: 'GitHub release webhook (HMAC signature)' },
-  { method: 'POST', pattern: '/api/v1/hooks/:id', exception: 'transitional-webhook-hooks', description: 'Cartridge webhook trigger' },
+  { method: 'POST', pattern: '/hooks/github', exception: 'webhook-github', description: 'GitHub release webhook alias (HMAC signature)' },
+  { method: 'POST', pattern: '/api/v1/webhooks/github', exception: 'webhook-github', description: 'GitHub release webhook alias (HMAC signature)' },
+  { method: 'POST', pattern: '/webhooks/github', exception: 'webhook-github', description: 'GitHub release webhook alias (HMAC signature)' },
+  { method: 'POST', pattern: '/api/v1/hooks/:id', exception: 'webhook-hooks', description: 'Cartridge webhook trigger (HMAC signature)' },
+  { method: 'POST', pattern: '/hooks/:id', exception: 'webhook-hooks', description: 'Cartridge webhook trigger alias (HMAC signature)' },
 
   // Agents & Runtime
   { method: 'GET', pattern: '/api/v1/agents', privilege: 'agents.read', description: 'List registered agents' },
@@ -359,6 +356,7 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'PUT', pattern: '/api/v1/groups/:id', privilege: 'groups.manage', description: 'Update group details' },
   { method: 'DELETE', pattern: '/api/v1/groups/:id', privilege: 'groups.manage', description: 'Delete user group' },
   { method: 'POST', pattern: '/api/v1/groups/:id/members', privilege: 'groups.manage', description: 'Add group member' },
+  { method: 'POST', pattern: '/api/v1/groups/:id/members/:member', privilege: 'groups.manage', description: 'Add group member' },
   { method: 'DELETE', pattern: '/api/v1/groups/:id/members', privilege: 'groups.manage', description: 'Remove group member' },
   { method: 'DELETE', pattern: '/api/v1/groups/:id/members/:member', privilege: 'groups.manage', description: 'Remove group member by path' },
 
