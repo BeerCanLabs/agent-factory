@@ -211,7 +211,7 @@ export type AgentRecord = {
    * SK4: the skills the deployed image contains, each as the approved version it was built from. Absent or empty: none.
    * What runs, as `deployedCommit` is for the source; the configuration says what should run (SK3).
    */
-  deployedSkills?: Array<{ id: string; version: string }>;
+  deployedSkills?: Array<{ id: string; version: string; holds?: Record<string, boolean> }>;
   /**
    * SK6: set when a forced retire or revocation paused this agent because it ran the skill. Redeploying the agent
    * without that skill resumes it; an agent paused for any other reason is never resumed by a skill change.
