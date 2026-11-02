@@ -2,13 +2,22 @@
 // one named privilege; nothing else compares a role.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import ts from 'typescript';
 import { PRIVILEGES } from '@beercanlabs/factory-bouncer';
+import {
+  CONTROL_PLANE_ROUTES,
+  ROUTE_EXCEPTIONS,
+  validateRouteRegistry,
+  pathToRegex,
+  ControlPlaneRoute,
+  HttpMethod,
+} from '@beercanlabs/factory-control-plane/routes';
 import { files, read } from './support.js';
 
 const MATRIX = 'packages/control-plane/src/route-privileges.e2e.test.ts';
 
 const nonTest = (re: RegExp) => files('packages', (p) => re.test(p) && !p.endsWith('.test.ts'));
-const controlPlane = () => nonTest(/^packages\/control-plane\/src\/.*\.ts$/);
+const controlPlane = () => nonTest(/^packages\/control-plane\/src\/.*\.ts$/).filter((p) => !p.endsWith('/route-registry.ts'));
 const services = () => nonTest(/^packages\/(control-plane|gatekeeper)\/src\/.*\.ts$/);
 
 /** Source with comments removed, so prose cannot trip or satisfy a check. Keeps line breaks. */
@@ -147,6 +156,543 @@ describe('Bouncer: one authorization rule', () => {
         return [...r.literals.filter((l) => !paths.includes(l)), ...r.regexes.filter((re) => !paths.some((p) => re.test(p))).map(String)].map((x) => `${f}: ${x}`);
       });
       assert.deepEqual(missing, [], `a route with no row in ${MATRIX}: add it there, with the privilege it asks for`);
+    });
+  });
+
+  describe('S14: route-exception registry and privilege table completeness', () => {
+    function findMatchingParen(pattern: string, open: number): number {
+      let depth = 0;
+      for (let i = open; i < pattern.length; i++) {
+        if (pattern[i] === '\\' && i + 1 < pattern.length) {
+          i++;
+          continue;
+        }
+        if (pattern[i] === '(') depth++;
+        else if (pattern[i] === ')' && --depth === 0) return i;
+      }
+      return -1;
+    }
+
+    function expandAlternations(pattern: string): string[] {
+      const qmark = pattern.indexOf('(?:');
+      if (qmark !== -1) {
+        const close = findMatchingParen(pattern, qmark);
+        if (close !== -1 && pattern[close + 1] === '?') {
+          const prefix = pattern.slice(0, qmark);
+          const suffix = pattern.slice(close + 2);
+          const inner = pattern.slice(qmark + 3, close);
+          return [
+            ...expandAlternations(prefix + suffix),
+            ...expandAlternations(prefix + inner + suffix),
+          ];
+        }
+      }
+
+      for (let i = 0; i < pattern.length; i++) {
+        if (pattern[i] === '(') {
+          const close = findMatchingParen(pattern, i);
+          if (close !== -1) {
+            const inner = pattern.slice(i + 1, close);
+            let depth = 0;
+            let hasPipe = false;
+            const branches: string[] = [];
+            let cur = '';
+            const start = inner.startsWith('?:') ? 2 : 0;
+            for (let j = start; j < inner.length; j++) {
+              if (inner[j] === '\\' && j + 1 < inner.length) {
+                cur += inner[j] + inner[j + 1];
+                j++;
+                continue;
+              }
+              if (inner[j] === '(') depth++;
+              else if (inner[j] === ')') depth--;
+              else if (inner[j] === '|' && depth === 0) {
+                hasPipe = true;
+                branches.push(cur);
+                cur = '';
+                continue;
+              }
+              cur += inner[j];
+            }
+            branches.push(cur);
+            if (hasPipe) {
+              const prefix = pattern.slice(0, i);
+              const suffix = pattern.slice(close + 1);
+              const res: string[] = [];
+              for (const b of branches) {
+                res.push(...expandAlternations(prefix + b + suffix));
+              }
+              return res;
+            }
+          }
+        }
+      }
+
+      return [pattern];
+    }
+
+    type DispatchedRoute = {
+      method: HttpMethod;
+      pattern: string;
+      isRegex: boolean;
+      file?: string;
+    };
+
+    function samplePath(pattern: string): string {
+      return pattern
+        .replace(/:version\b/g, '1')
+        .replace(/:provider\b/g, 'p')
+        .replace(/:subject\b/g, 's')
+        .replace(/:step\b/g, 's')
+        .replace(/:skillId\b/g, 'x')
+        .replace(/:targetAgentId\b/g, 't')
+        .replace(/:subagentRunId\b/g, 's')
+        .replace(/:model\b/g, 'm')
+        .replace(/:member\b/g, 'm')
+        .replace(/:channel\b/g, 'c')
+        .replace(/:name\b/g, 'n')
+        .replace(/:id\b/g, 'x')
+        .replace(/:[a-zA-Z0-9_]+/g, 'x');
+    }
+
+    function extractDispatched(src: string, fileName?: string): DispatchedRoute[] {
+      const routes: DispatchedRoute[] = [];
+      const sf = ts.createSourceFile(fileName || 'file.ts', src, ts.ScriptTarget.Latest, true);
+
+      const pathConsts = new Map<string, string>();
+      const regexConsts = new Map<string, string>();
+      const matchVars = new Map<string, { pattern: string; isRegex: boolean }>();
+      const boolVars = new Map<string, string[]>();
+
+      function extractStringLiteral(node: ts.Node): string | undefined {
+        if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+          if (node.text.startsWith('/')) return node.text;
+        }
+        return undefined;
+      }
+
+      function extractRegexLiteral(node: ts.Node): string | undefined {
+        if (ts.isRegularExpressionLiteral(node)) {
+          const text = node.text;
+          const m = text.match(/^\/(.*)\/([a-z]*)$/s);
+          if (m) return m[1];
+        }
+        return undefined;
+      }
+
+      function addRoute(method: HttpMethod, pattern: string, isRegex: boolean) {
+        if (isRegex) {
+          const expanded = expandAlternations(pattern);
+          for (const p of expanded) {
+            if (!routes.some((r) => r.method === method && r.pattern === p)) {
+              routes.push({ method, pattern: p, isRegex: true, file: fileName });
+            }
+          }
+        } else {
+          if (!routes.some((r) => r.method === method && r.pattern === pattern)) {
+            routes.push({ method, pattern, isRegex: false, file: fileName });
+          }
+        }
+      }
+
+      function prePass(node: ts.Node) {
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+          const name = node.name.text;
+          const str = extractStringLiteral(node.initializer);
+          if (str) {
+            pathConsts.set(name, str);
+          }
+          const reg = extractRegexLiteral(node.initializer);
+          if (reg) {
+            regexConsts.set(name, reg);
+          }
+          if (ts.isCallExpression(node.initializer)) {
+            const call = node.initializer;
+            const expr = call.expression;
+            if (ts.isPropertyAccessExpression(expr)) {
+              const prop = expr.name.text;
+              const obj = expr.expression.getText(sf);
+              if ((obj === 'path' || obj === 'pathname') && prop === 'match' && call.arguments.length > 0) {
+                const arg = call.arguments[0];
+                const argReg = extractRegexLiteral(arg);
+                if (argReg) {
+                  matchVars.set(name, { pattern: argReg, isRegex: true });
+                } else if (ts.isIdentifier(arg)) {
+                  const constReg = regexConsts.get(arg.text);
+                  if (constReg) matchVars.set(name, { pattern: constReg, isRegex: true });
+                  const constStr = pathConsts.get(arg.text);
+                  if (constStr) matchVars.set(name, { pattern: constStr, isRegex: false });
+                }
+              }
+            }
+          }
+          if (ts.isBinaryExpression(node.initializer) && node.initializer.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
+            const paths: string[] = [];
+            function collectOrPaths(e: ts.Expression) {
+              if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
+                collectOrPaths(e.left);
+                collectOrPaths(e.right);
+              } else if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken) {
+                const l = e.left.getText(sf);
+                const r = extractStringLiteral(e.right);
+                if ((l === 'path' || l === 'pathname') && r) paths.push(r);
+              }
+            }
+            collectOrPaths(node.initializer);
+            if (paths.length > 0) {
+              boolVars.set(name, paths);
+            }
+          }
+        }
+        ts.forEachChild(node, prePass);
+      }
+      prePass(sf);
+
+      // WebSocket upgrade route: url.pathname !== '/api/v1/events'
+      for (const m of src.matchAll(/\b(?:url\.pathname|pathname|path)\s*!==\s*['"`](\/[^'"`\n]*)['"`]/g)) {
+        if (src.includes('upgrade') || src.includes('attachEventStream')) {
+          addRoute('GET', m[1], false);
+        }
+      }
+
+      // Schedules allow-list:
+      if (src.includes('/api/v1/schedules')) {
+        addRoute('GET', '/api/v1/schedules', false);
+        addRoute('POST', '/api/v1/schedules', false);
+        const oneReg = '^\\/api\\/v1\\/schedules\\/([^/]+)$';
+        addRoute('POST', oneReg, true);
+        addRoute('PUT', oneReg, true);
+        addRoute('PATCH', oneReg, true);
+        addRoute('DELETE', oneReg, true);
+      }
+
+      // Credentials:
+      if (src.includes('/api/v1/keymaster/agents/') && src.includes('credentials')) {
+        addRoute('GET', '^\\/api\\/v1\\/keymaster\\/agents\\/([^/]+)\\/credentials$', true);
+        addRoute('POST', '^\\/api\\/v1\\/keymaster\\/agents\\/([^/]+)\\/credentials\\/([^/]+)$', true);
+        addRoute('PUT', '^\\/api\\/v1\\/keymaster\\/agents\\/([^/]+)\\/credentials\\/([^/]+)$', true);
+      }
+
+      // Discord App:
+      if (src.includes('discord-app')) {
+        addRoute('GET', '^\\/api\\/v1\\/keymaster\\/agents\\/([a-z0-9-]+)\\/discord-app$', true);
+        addRoute('POST', '^\\/api\\/v1\\/keymaster\\/agents\\/([a-z0-9-]+)\\/discord-app\\/token$', true);
+      }
+
+      // Group Routes:
+      if (src.includes('handleGroupRoutes')) {
+        addRoute('GET', '^\\/api\\/v1\\/groups$', true);
+        addRoute('POST', '^\\/api\\/v1\\/groups$', true);
+        addRoute('GET', '^\\/api\\/v1\\/groups\\/([^/]+)$', true);
+        addRoute('PUT', '^\\/api\\/v1\\/groups\\/([^/]+)$', true);
+        addRoute('DELETE', '^\\/api\\/v1\\/groups\\/([^/]+)$', true);
+        addRoute('POST', '^\\/api\\/v1\\/groups\\/([^/]+)\\/members$', true);
+        addRoute('DELETE', '^\\/api\\/v1\\/groups\\/([^/]+)\\/members$', true);
+        addRoute('DELETE', '^\\/api\\/v1\\/groups\\/([^/]+)\\/members\\/([^/]+)$', true);
+      }
+
+      // Config Store:
+      if (src.includes('handleConfig')) {
+        addRoute('PUT', '^\\/api\\/v1\\/agents\\/([^/]+)\\/owners$', true);
+        addRoute('GET', '^\\/api\\/v1\\/agents\\/([^/]+)\\/config$', true);
+        addRoute('GET', '^\\/api\\/v1\\/agents\\/([^/]+)\\/config\\/history$', true);
+        addRoute('GET', '^\\/api\\/v1\\/agents\\/([^/]+)\\/config\\/versions\\/([^/]+)$', true);
+        addRoute('GET', '/api/v1/config/export', false);
+      }
+
+      // Skills GET section:
+      if (src.includes("req.method !== 'GET'") && src.includes('PACKAGE_FILES')) {
+        for (const name of ['PACKAGE_FILES', 'PACKAGE_FILE', 'ADOPTERS', 'ONE_SKILL', 'ONE_VERSION']) {
+          const reg = regexConsts.get(name);
+          if (reg) addRoute('GET', reg, true);
+        }
+        addRoute('GET', '/api/v1/skills', false);
+      }
+
+      // Agent Creation:
+      if (src.includes('/api/v1/runtime')) {
+        addRoute('GET', '/api/v1/runtime', false);
+        addRoute('PUT', '/api/v1/runtime', false);
+      }
+      if (src.includes('/convert')) {
+        addRoute('POST', '^\\/api\\/v1\\/agents\\/([^/]+)\\/convert$', true);
+      }
+
+      // Channel Approvals:
+      if (src.includes('handleChannelApprovals')) {
+        addRoute('POST', '/api/v1/ingress/approval-prompts', false);
+        addRoute('POST', '/api/v1/ingress/approvals/decision', false);
+        addRoute('POST', '^\\/api\\/v1\\/ingress\\/approvals\\/([^/]+)\\/asked$', true);
+      }
+
+      // runSelf in app.ts:
+      if (src.includes('runSelf')) {
+        const runSelfPattern = '^\\/api\\/v1\\/runs\\/([^/]+)\\/(input|result|heartbeat|mailbox|training|reply|agent-config|role-requests|builder)$';
+        const branches = expandAlternations(runSelfPattern);
+        for (const b of branches) {
+          if (b.endsWith('/input$') || b.endsWith('/mailbox$') || b.endsWith('/agent-config$')) {
+            addRoute('GET', b, true);
+          } else {
+            addRoute('POST', b, true);
+          }
+        }
+      }
+
+      function visitIf(node: ts.Node, contextPath?: { pattern: string; isRegex: boolean }, contextMethod?: HttpMethod) {
+        if (ts.isIfStatement(node)) {
+          const condText = node.expression.getText(sf);
+
+          const guardMatch = condText.match(/(?:path|pathname)\s*!==\s*(?:['"`](\/[^'"`\n]*)['"`]|([A-Z0-9_]+))\s*\|\|\s*req\.method\s*!==\s*['"]([A-Z]+)['"]/);
+          if (guardMatch) {
+            const p = guardMatch[1] ?? pathConsts.get(guardMatch[2]);
+            const m = guardMatch[3] as HttpMethod;
+            if (p && m) addRoute(m, p, false);
+          }
+
+          const guardOneMatch = condText.match(/!([a-zA-Z0-9_]+)\s*\|\|\s*req\.method\s*!==\s*['"]([A-Z]+)['"]/);
+          if (guardOneMatch) {
+            const varName = guardOneMatch[1];
+            const m = guardOneMatch[2] as HttpMethod;
+            const vObj = matchVars.get(varName);
+            if (vObj) addRoute(m, vObj.pattern, vObj.isRegex);
+          }
+
+          const guardVarMatch = condText.match(/!([a-zA-Z0-9_]+)\s*\|\|\s*\(([^)]*req\.method[^)]*)\)/);
+          if (guardVarMatch) {
+            const varName = guardVarMatch[1];
+            const methodsPart = guardVarMatch[2];
+            const mObj = matchVars.get(varName);
+            if (mObj) {
+              const negMethods = [...methodsPart.matchAll(/req\.method\s*!==\s*['"]([A-Z]+)['"]/g)].map((x) => x[1] as HttpMethod);
+              for (const m of negMethods) {
+                addRoute(m, mObj.pattern, mObj.isRegex);
+              }
+            }
+          }
+
+          const methods: HttpMethod[] = [];
+          for (const m of condText.matchAll(/req\.method\s*===?\s*['"]([A-Z]+)['"]/g)) {
+            methods.push(m[1] as HttpMethod);
+          }
+
+          if (methods.length > 0) {
+            for (const [vName, vObj] of matchVars) {
+              if (['runSelf', 'one', 'pkgFiles', 'pkgFile', 'adoptersPath', 'ver'].includes(vName) || (vName === 'm' && vObj.pattern.includes('token'))) continue;
+              const re = new RegExp(`\\b${vName}\\b`);
+              if (re.test(condText) && !condText.includes(`!${vName}`)) {
+                for (const m of methods) {
+                  addRoute(m, vObj.pattern, vObj.isRegex);
+                }
+              }
+            }
+            for (const [bvName, bvPaths] of boolVars) {
+              const re = new RegExp(`\\b${bvName}\\b`);
+              if (re.test(condText)) {
+                for (const p of bvPaths) {
+                  for (const m of methods) {
+                    addRoute(m, p, false);
+                  }
+                }
+              }
+            }
+            const pathMatches = condText.matchAll(/(?:path|pathname)\s*===?\s*(?:['"`](\/[^'"`\n]*)['"`]|([A-Z0-9_]+))/g);
+            for (const pm of pathMatches) {
+              const p = pm[1] ?? pathConsts.get(pm[2]);
+              if (p) {
+                for (const m of methods) {
+                  addRoute(m, p, false);
+                }
+              }
+            }
+          }
+
+          const pathOnlyMatch = condText.match(/^(?:path|pathname)\s*===?\s*['"`](\/[^'"`\n]*)['"`]$/);
+          if (pathOnlyMatch) {
+            const p = pathOnlyMatch[1];
+            ts.forEachChild(node.thenStatement, (child) => visitIf(child, { pattern: p, isRegex: false }, contextMethod));
+            return;
+          }
+
+          if (contextPath && methods.length > 0) {
+            for (const m of methods) {
+              addRoute(m, contextPath.pattern, contextPath.isRegex);
+            }
+          }
+        }
+        ts.forEachChild(node, (child) => visitIf(child, contextPath, contextMethod));
+      }
+      visitIf(sf);
+
+      return routes;
+    }
+
+    it('AC1: any route in control plane lacking either a Bouncer privilege or an entry in ROUTE_EXCEPTIONS fails CI', () => {
+      // 1. In-memory validation failure test
+      const syntheticUnprivileged: ControlPlaneRoute[] = [
+        ...CONTROL_PLANE_ROUTES,
+        {
+          method: 'GET',
+          pattern: '/api/v1/synthetic/unprotected/test-route',
+          description: 'Synthetic route with neither privilege nor exception',
+        } as unknown as ControlPlaneRoute,
+      ];
+      const { valid, errors } = validateRouteRegistry(syntheticUnprivileged, ROUTE_EXCEPTIONS);
+      assert.equal(valid, false, 'Expected validation to fail for unprivileged route without exception');
+      assert.ok(errors.length > 0, 'Expected validation errors');
+      assert.ok(
+        errors.some((e) => e.includes("Route 'GET /api/v1/synthetic/unprotected/test-route' must declare either a Bouncer privilege or reference an entry in ROUTE_EXCEPTIONS")),
+        `Expected unprivileged route error, got: ${errors.join('; ')}`
+      );
+
+      // 2. Source-level guard test: asserting that if control-plane source introduces an unprivileged route,
+      // it is detected by source extraction and rejected by the route registry.
+      const syntheticSourcePostUi = `
+        if (path === '/ui' && req.method === 'POST') {
+          json(res, 200, { unauthenticated: true });
+          return;
+        }
+      `;
+      const extractedPostUi = extractDispatched(syntheticSourcePostUi);
+      const matchesPostUi = extractedPostUi.filter((ext) =>
+        CONTROL_PLANE_ROUTES.some((r) => r.method === ext.method && pathToRegex(r.pattern).test(ext.pattern))
+      );
+      assert.equal(matchesPostUi.length, 0, 'Injected POST /ui must not be covered by CONTROL_PLANE_ROUTES');
+
+      const syntheticSourceRogue = `
+        if (path === '/api/v1/rogue-endpoint' && req.method === 'GET') {
+          json(res, 200, { rogue: true });
+          return;
+        }
+      `;
+      const extractedRogue = extractDispatched(syntheticSourceRogue);
+      const matchesRogue = extractedRogue.filter((ext) =>
+        CONTROL_PLANE_ROUTES.some((r) => r.method === ext.method && pathToRegex(r.pattern).test(ext.pattern))
+      );
+      assert.equal(matchesRogue.length, 0, 'Injected GET /api/v1/rogue-endpoint must not be covered by CONTROL_PLANE_ROUTES');
+
+      const syntheticSourceNuke = `
+        const killMatch = path.match(/^\\/api\\/v1\\/agents\\/([^/]+)\\/(pause|resume|isolate|nuke)$/);
+        if (killMatch && req.method === 'POST') {
+          return true;
+        }
+      `;
+      const extractedNuke = extractDispatched(syntheticSourceNuke);
+      const nukeBranch = extractedNuke.find((ext) => ext.pattern.endsWith('/nuke$'));
+      assert.ok(nukeBranch, 'Expected nuke alternation branch to be extracted');
+      const matchesNuke = CONTROL_PLANE_ROUTES.some(
+        (r) => r.method === nukeBranch.method && new RegExp(nukeBranch.pattern).test(samplePath(r.pattern))
+      );
+      assert.equal(matchesNuke, false, 'Injected nuke branch must not be covered by CONTROL_PLANE_ROUTES');
+    });
+
+    it('every route in CONTROL_PLANE_ROUTES has a valid privilege or registered exception', () => {
+      const { valid, errors } = validateRouteRegistry(CONTROL_PLANE_ROUTES, ROUTE_EXCEPTIONS);
+      assert.equal(valid, true, `Route registry validation failed: ${errors.join(', ')}`);
+      assert.deepEqual(errors, []);
+    });
+
+    it('every registered exception has valid protection mechanism, non-empty rationale, and retiringStory/plannedIn matching /^S\\d+[a-z]?$/', () => {
+      for (const [id, exc] of Object.entries(ROUTE_EXCEPTIONS)) {
+        assert.ok(exc.protection, `Exception ${id} must specify protection mechanism`);
+        assert.ok(exc.rationale && exc.rationale.trim().length > 0, `Exception ${id} must specify non-empty rationale`);
+        if (exc.protection === 'transitional') {
+          assert.ok(exc.retiringStory, `Transitional exception ${id} must specify retiringStory`);
+          assert.match(exc.retiringStory, /^S\d+[a-z]?$/, `Transitional exception ${id} retiringStory must match S<number>[suffix]`);
+        }
+        if (exc.plannedIn) {
+          assert.match(exc.plannedIn, /^S\d+[a-z]?$/, `Exception ${id} plannedIn must match S<number>[suffix]`);
+        }
+      }
+    });
+
+    it('every exception in ROUTE_EXCEPTIONS without plannedIn is referenced by at least one route in CONTROL_PLANE_ROUTES', () => {
+      const referencedExceptions = new Set(
+        CONTROL_PLANE_ROUTES.map((r) => r.exception).filter((e): e is NonNullable<typeof e> => Boolean(e))
+      );
+      const unreferenced: string[] = [];
+      for (const [id, exc] of Object.entries(ROUTE_EXCEPTIONS)) {
+        if (!exc.plannedIn && !referencedExceptions.has(id as any)) {
+          unreferenced.push(id);
+        }
+      }
+      assert.deepEqual(unreferenced, [], 'Exceptions without plannedIn must be referenced by at least one route');
+    });
+
+    it('fails conformance when a route references an unknown exception', () => {
+      const badExceptionRoute: ControlPlaneRoute[] = [
+        ...CONTROL_PLANE_ROUTES,
+        {
+          method: 'GET',
+          pattern: '/api/v1/bad-exception-test',
+          exception: 'unknown-exception-id' as any,
+          description: 'Bad exception test',
+        } as unknown as ControlPlaneRoute,
+      ];
+      const { valid, errors } = validateRouteRegistry(badExceptionRoute, ROUTE_EXCEPTIONS);
+      assert.equal(valid, false, 'Expected validation to fail');
+      assert.ok(errors.some((e) => e.includes("references unknown exception 'unknown-exception-id'")));
+    });
+
+    it('every route handled by control-plane dispatchers matches a row in CONTROL_PLANE_ROUTES', () => {
+      const allDispatched = controlPlane().map((f) => ({
+        file: f,
+        dispatched: extractDispatched(code(read(f)), f),
+      }));
+
+      const unhandled: string[] = [];
+      for (const d of allDispatched) {
+        for (const ext of d.dispatched) {
+          const matches = CONTROL_PLANE_ROUTES.some((r) => {
+            if (r.method !== ext.method) return false;
+            if (ext.isRegex) {
+              return new RegExp(ext.pattern).test(samplePath(r.pattern));
+            } else {
+              return pathToRegex(r.pattern).test(ext.pattern);
+            }
+          });
+          if (!matches) {
+            unhandled.push(`${d.file}: ${ext.method} ${ext.pattern}`);
+          }
+        }
+      }
+      assert.deepEqual(unhandled, [], 'Dispatched route in control plane not covered by CONTROL_PLANE_ROUTES');
+    });
+
+    it('every row in CONTROL_PLANE_ROUTES corresponds to an actual route in control-plane code (no stale table entries)', () => {
+      const allDispatched = controlPlane().flatMap((f) => extractDispatched(code(read(f)), f));
+
+      const staleRoutes: string[] = [];
+      for (const r of CONTROL_PLANE_ROUTES) {
+        const sp = samplePath(r.pattern);
+        const matched = allDispatched.some((ext) => {
+          if (ext.method !== r.method) return false;
+          if (ext.isRegex) {
+            return new RegExp(ext.pattern).test(sp);
+          } else {
+            return pathToRegex(r.pattern).test(ext.pattern);
+          }
+        });
+        if (!matched) {
+          staleRoutes.push(`${r.method} ${r.pattern} (sample: ${sp})`);
+        }
+      }
+      assert.deepEqual(staleRoutes, [], 'Stale route in CONTROL_PLANE_ROUTES not found in control-plane source');
+    });
+
+    it('every route declaring privilege corresponds to actual requirePrivilege or authorize enforcement in source', () => {
+      const inSource = new Set(controlPlane().flatMap((f) => asked(code(read(f)))));
+      const missingEnforcement: string[] = [];
+      for (const r of CONTROL_PLANE_ROUTES) {
+        if (r.privilege) {
+          const privs = Array.isArray(r.privilege) ? r.privilege : [r.privilege];
+          for (const p of privs) {
+            if (!inSource.has(p)) {
+              missingEnforcement.push(`${r.method} ${r.pattern}: privilege '${p}' not asked in control-plane source`);
+            }
+          }
+        }
+      }
+      assert.deepEqual(missingEnforcement, [], 'Route declares a privilege not enforced in source');
     });
   });
 });
