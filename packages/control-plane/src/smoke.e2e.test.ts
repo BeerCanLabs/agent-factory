@@ -648,7 +648,7 @@ describe('Activation smoke gate (TSK-281, §6.8 L4, §6.14 SK1)', { concurrency:
 
     it('a dependency-down hello-world failure still blocks activation (#342)', async () => {
       const agent = await deployWithSkill('hw-agent', 'hw-skill', async ({ smokeType }) => (
-        smokeType === 'hello-world' ? { ok: false, error: 'model gateway HTTP 503' } : { ok: true }
+        smokeType === 'hello-world' ? { ok: false, error: 'model route HTTP 503' } : { ok: true }
       ), ['SLEEPING', 'ERROR']);
       assert.equal(agent.state, 'ERROR');
     });

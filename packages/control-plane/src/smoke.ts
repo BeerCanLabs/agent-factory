@@ -45,7 +45,7 @@ async function waitForRun(state: FactoryState, runId: string, timeoutMs = Number
 /** A skill smoke failure caused by the outside service behind a route (5xx, unreachable), not by the runtime. */
 export function isDependencyDown(error: unknown): boolean {
   const e = String(error ?? '');
-  return /\bHTTP 5\d\d\b|\bstatus[\s:=]*5\d\d\b|\b5\d\d (Bad Gateway|Service Unavailable|Gateway Timeout|Origin)|\bNetworkError\b|Unable to reach|\bdependency[_ ]down\b/i.test(e);
+  return /\bHTTP 5\d\d\b|\bstatus[\s:=]*5\d\d\b|\b5\d\d (Service Unavailable|Origin)|\bNetworkError\b|Unable to reach|\bdependency[_ ]down\b/i.test(e);
 }
 
 function upstreamStatus(error: unknown): number | undefined {
