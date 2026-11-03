@@ -8,7 +8,6 @@ export type { ManagerReply, ManagerTurn, ToolCall, ToolResult, ToolSpec } from '
 export { TOOLS, toolsFor, redact } from './tools.js';
 export { AccessSession, KeychainStore, FileStore, clearCloudflaredTokens, forgetSignIn } from './credentials.js';
 export { OidcSession } from './oidc.js';
-export { discoverAuth, parseDiscovery } from './discover.js';
 export { makeSession, knownMethod } from './methods.js';
 export type { Session, Credential, SignInMethod } from './session.js';
 export type { CredentialStore as CredentialStoreLike } from './credentials.js';

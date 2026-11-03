@@ -7,7 +7,7 @@ import { checkAgentUpdate, extractGitHubRepo, isNewerVersion, parseSemVer } from
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import { redactSecrets, payloadHash, type CheckpointSink, type LedgerStore } from '@beercanlabs/factory-ledger';
-import { ROLES, accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role, type CliDiscovery } from '@beercanlabs/factory-auth';
+import { ROLES, accessAssertionOf, type AccessAuth, type AuthProvider, type AuthResult, type Principal, type Role } from '@beercanlabs/factory-auth';
 import { cartridgeRoleProblems, classifySecrets, effectiveAccess, type Surface } from '@beercanlabs/factory-contract';
 import {
   AgentRecord,
@@ -160,8 +160,6 @@ export type FactoryState = {
    */
   access?: AccessAuth;
   version: string;
-  /** §6.17 CL9: how a CLI signs people in, published at `/.well-known/factory-cli` when the deployment configures it. */
-  cliDiscovery?: CliDiscovery;
   providers: SecretProvider[];
   runtime: Runtime;
   /** Provider-specific deploy lifecycle (build → identity → compute). Absent = deploy endpoint returns 501. */
@@ -2481,13 +2479,6 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (path.startsWith('/api/v1/groups') && (await handleGroupRoutes(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/systems') || path === '/api/v1/gatekeeper-egress/routes') && (await handleSystems(state, req, res, path))) return;
   if (path.startsWith('/api/v1/spend/') && (await handleSpend(state, req, res, path))) return;
-
-  // CL9: public, no secret in it, and only when the deployment configured a CLI client.
-  if (path === '/.well-known/factory-cli' && req.method === 'GET') {
-    if (!state.cliDiscovery) return json(res, 404, { error: 'not_found' });
-    res.setHeader('cache-control', 'public, max-age=300');
-    return json(res, 200, state.cliDiscovery);
-  }
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
     // S16 (R17, D18, D22): health tells nothing to an anonymous caller. Probes use the internal listener or a key.

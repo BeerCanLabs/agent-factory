@@ -7,8 +7,8 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
-import { cliDiscoveryFromEnv, oidcAuth, RunTokens } from '@beercanlabs/factory-auth';
-import { FactoryClient, discoverAuth, makeSession, type CredentialStoreLike } from '@beercanlabs/factory-cli';
+import { oidcAuth, RunTokens } from '@beercanlabs/factory-auth';
+import { FactoryClient, makeSession, type CredentialStoreLike } from '@beercanlabs/factory-cli';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
@@ -63,12 +63,10 @@ async function startProvider() {
 
 before(async () => {
   provider = await startProvider();
-  const env = { FACTORY_OIDC_ISSUER: provider.issuer, FACTORY_OIDC_AUDIENCE: CLIENT_ID, FACTORY_OIDC_CLI_CLIENT_ID: CLIENT_ID };
   const state = {
     agents: new Map(),
     ledger: new MemoryLedger(),
     auth: oidcAuth({ issuer: provider.issuer, audience: CLIENT_ID, keys: async () => publicKey as never, adminEmails: ['dale@example.com'] }),
-    cliDiscovery: cliDiscoveryFromEnv(env),
     version: 'test',
     providers: [envProvider({})],
     runtime: noopRuntime(),
@@ -96,14 +94,14 @@ const memory = (): CredentialStoreLike & { data: Map<string, string> } => {
   return { data, get: async (i) => data.get(i), set: async (i, t) => void data.set(i, t), delete: async (i) => void data.delete(i) };
 };
 
+/** S17: no discovery; the OIDC client settings are what the deployment hands the CLI. */
+const oidcConfig = () => ({ issuer: provider.issuer, clientId: CLIENT_ID, scopes: ['openid', 'email'], tokenUse: 'id_token' as const });
+
 describe('§6.17 CL9 the CLI against a factory that verifies OIDC', () => {
-  it('CL9 the factory says how to sign in, the CLI signs in with PKCE, and the factory accepts the signed token as that person', async () => {
-    const found = await discoverAuth(factory.base);
-    assert.equal(found.type, 'oidc');
-    assert.equal(found.type === 'oidc' && found.clientId, CLIENT_ID);
+  it('CL9 the CLI signs in with PKCE, and the factory accepts the signed token as that person', async () => {
 
     const store = memory();
-    const session = makeSession('oidc', factory.base, { store, openBrowser: (provider as unknown as { browse: (u: string) => Promise<void> }).browse, say: () => {} }, found.type === 'oidc' ? found : undefined);
+    const session = makeSession('oidc', factory.base, { store, openBrowser: (provider as unknown as { browse: (u: string) => Promise<void> }).browse, say: () => {} }, oidcConfig());
     await session.login();
     assert.equal(provider.authorize[0].get('code_challenge_method'), 'S256');
 
@@ -116,8 +114,7 @@ describe('§6.17 CL9 the CLI against a factory that verifies OIDC', () => {
     provider.forge = true;
     try {
       const store = memory();
-      const found = await discoverAuth(factory.base);
-      const session = makeSession('oidc', factory.base, { store, openBrowser: (provider as unknown as { browse: (u: string) => Promise<void> }).browse, say: () => {} }, found.type === 'oidc' ? found : undefined);
+      const session = makeSession('oidc', factory.base, { store, openBrowser: (provider as unknown as { browse: (u: string) => Promise<void> }).browse, say: () => {} }, oidcConfig());
       await session.login(); // the CLI cannot tell a forged signature; only the factory can (A2)
       const client = new FactoryClient({ baseUrl: factory.base, credential: (r) => session.credential(r) });
       await assert.rejects(client.whoami(), /not signed in|sign-in/);
@@ -127,9 +124,7 @@ describe('§6.17 CL9 the CLI against a factory that verifies OIDC', () => {
     assert.equal((await fetch(`${factory.base}/api/v1/whoami`)).status, 401);
   });
 
-  it('CL9 the discovery document is public and holds only what a CLI needs', async () => {
-    const res = await fetch(`${factory.base}/.well-known/factory-cli`);
-    assert.equal(res.status, 200);
-    assert.deepEqual(Object.keys(((await res.json()) as { auth: object }).auth).sort(), ['clientId', 'issuer', 'scopes', 'tokenUse', 'type']);
+  it('S17: no discovery document is published', async () => {
+    assert.equal((await fetch(`${factory.base}/.well-known/factory-cli`)).status, 404);
   });
 });

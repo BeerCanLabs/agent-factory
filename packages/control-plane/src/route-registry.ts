@@ -36,12 +36,6 @@ export interface RouteException {
  * their protection mechanisms.
  */
 export const ROUTE_EXCEPTIONS = {
-  'transitional-cli-discovery': {
-    id: 'transitional-cli-discovery',
-    protection: 'transitional',
-    retiringStory: 'S17',
-    rationale: 'Public CLI discovery config; S17 retires pre-credential discovery in favor of direct browser login flow',
-  },
   'webhook-hooks': {
     id: 'webhook-hooks',
     protection: 'webhook-hmac',
@@ -247,7 +241,6 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'GET', pattern: '/', exception: 'login-page', description: 'Login page for browsers; health for verified principals' },
   { method: 'GET', pattern: '/healthz', exception: 'health-probe', description: 'Liveness probe' },
   { method: 'GET', pattern: '/api/v1/health', exception: 'health-probe', description: 'Health check probe' },
-  { method: 'GET', pattern: '/.well-known/factory-cli', exception: 'transitional-cli-discovery', description: 'CLI discovery config' },
 
   // Identity probe (Authenticated principal, no elevated privilege)
   { method: 'GET', pattern: '/api/v1/whoami', exception: 'identity-whoami', description: 'Caller identity and roles probe' },

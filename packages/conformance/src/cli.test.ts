@@ -99,16 +99,9 @@ describe('§6.17 CL9 sign-in methods and discovery', () => {
     assert.match(oidc, /value: `Bearer \$\{s\.token\}`/);
   });
 
-  it('CL9 the discovery document is built in one place from deployment configuration and served from state, not rebuilt', () => {
-    const doc = code('packages/auth/src/discovery.ts');
-    assert.match(doc, /FACTORY_OIDC_CLI_CLIENT_ID/);
-    assert.doesNotMatch(doc, /FACTORY_TOKEN|SECRET|client_secret|FACTORY_ACCESS_AUD/);
-    const app = read('packages/control-plane/src/app.ts');
-    assert.match(app, /path === '\/\.well-known\/factory-cli'[\s\S]{0,300}state\.cliDiscovery/);
-  });
-
-  it('CL9 the CLI accepts a Cloudflare redirect only from the proxy\'s own domain', () => {
-    assert.match(code('packages/cli/src/discover.ts'), /endsWith\('\.cloudflareaccess\.com'\)/);
+  it('S17 no pre-credential discovery surface remains in auth, cli, or the control plane', () => {
+    for (const f of ['packages/auth/src/discovery.ts', 'packages/cli/src/discover.ts']) assert.equal(existsSync(join(repoRoot, f)), false, `${f} is retired (S17)`);
+    assert.doesNotMatch(read('packages/control-plane/src/app.ts'), /well-known\/factory-cli/);
   });
 });
 

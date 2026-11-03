@@ -16,8 +16,6 @@ export {
 } from './access.js';
 
 export { API_KEY_PREFIX, apiKeyFromAuthorization, generateApiKey, hashApiKey, sameHash } from './keys.js';
-export { CLI_DISCOVERY_PATH, cliDiscoveryFromEnv } from './discovery.js';
-export type { CliDiscovery } from './discovery.js';
 
 export const ROLES =['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
