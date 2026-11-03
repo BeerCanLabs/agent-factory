@@ -180,7 +180,7 @@ describe('an agent with adopted skills runs the shared runtime with them layered
     const second = await adoptSkill('orion', 'orion-extra');
     release();
     hold = undefined;
-    await waitFor(() => a.artifact === SKILLS_IMAGE('orion', [first, second]), 'the skill adopted during the build to be applied after it');
+    await waitFor(() => a.artifact === SKILLS_IMAGE('orion', [first, second]) && a.deployedSkills?.length === 2 && a.state === 'SLEEPING', 'the skill adopted during the build to be applied after it');
     assert.deepEqual(a.deployedSkills?.map((k) => k.id).sort(), ['orion-extra', 'orion-notes']);
     assert.equal(a.state, 'SLEEPING');
     assert.equal(a.admission?.status, 'admitted');
