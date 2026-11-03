@@ -126,7 +126,7 @@ describe('who decides what an agent did (TSK-108)', { concurrency: false }, () =
         for (const token of [DAVE, OWNER]) {
           const r = await decide(id, token);
           assert.equal(r.status, 403);
-          assert.equal(r.body.required, 'approver');
+          assert.equal(r.body.required, 'admin');
         }
         assert.equal(state.approvals.get(id)?.state, 'pending');
       });
@@ -146,8 +146,11 @@ describe('who decides what an agent did (TSK-108)', { concurrency: false }, () =
         assert.equal((await decide(id, ADMIN)).status, 200);
       });
 
-      it('the global approver and admin still decide any agent', async () => {
-        assert.equal((await decide(pending(kind, { provider: 'discord', id: '42' }), APPROVER)).status, 200);
+      it('the global admin still decides any agent; the approver role no longer clears holds (S4, D29)', async () => {
+        const refused = await decide(pending(kind, { provider: 'discord', id: '42' }), APPROVER);
+        assert.equal(refused.status, 403);
+        assert.equal(refused.body.required, 'admin');
+        assert.equal((await decide(pending(kind, { provider: 'discord', id: '42' }), ADMIN)).status, 200);
         assert.equal((await decide(pending(kind), ADMIN)).status, 200);
       });
 
@@ -166,15 +169,16 @@ describe('who decides what an agent did (TSK-108)', { concurrency: false }, () =
     assert.equal((await decide(id, OWNER)).status, 403);
   });
 
-  it('a run that is gone lets no owner decide, because nobody can say who asked; an approver still can', async () => {
+  it('a run that is gone lets no owner decide, because nobody can say who asked; an admin still can', async () => {
     const run = state.runs.create({ agentId: 'ada', state: 'DONE', actor: 'token:operator', trigger: 'manual' });
     const { approval } = state.approvals.request({ runId: `${run.runId}-gone`, agentId: 'ada', route: 'r', tool: 't', argsSha256: 'a'.repeat(64) });
     assert.equal((await decide(approval.approvalId, OWNER)).status, 403);
-    assert.equal((await decide(approval.approvalId, APPROVER)).status, 200);
+    assert.equal((await decide(approval.approvalId, APPROVER)).status, 403);
+    assert.equal((await decide(approval.approvalId, ADMIN)).status, 200);
   });
 
   it('an unknown id is 409 for a caller who may decide and 403 for one who may not', async () => {
-    assert.equal((await decide('nope', APPROVER)).status, 409);
+    assert.equal((await decide('nope', APPROVER)).status, 403);
     assert.equal((await decide('nope', ADMIN)).status, 409);
     assert.equal((await decide('nope', DAVE)).status, 403);
     assert.equal((await decide('nope', OWNER)).status, 403);
@@ -187,14 +191,15 @@ describe('who decides what an agent did (TSK-108)', { concurrency: false }, () =
     assert.equal((await decide(id, undefined)).status, 401);
   });
 
-  it('the MCP tool decides as the REST route does for a global approver, and still asks the role for the others', async () => {
+  it('the MCP tool decides as the REST route does for a global admin, and still asks the role for the others', async () => {
     const mcp = (token: string, approvalId: string) =>
       call('/mcp', 'POST', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'decide_approval', arguments: { approvalId, decision: 'approve' } } });
-    const ok = await mcp(APPROVER, pending('held'));
+    const ok = await mcp(ADMIN, pending('held'));
     assert.equal(ok.body.error, undefined);
     assert.equal(JSON.parse(ok.body.result.content[0].text).state, 'approved');
     const refused = await mcp(ALICE, pending('held', { provider: 'discord', id: '42' }));
     assert.equal(refused.body.error.code, -32001);
+    assert.equal((await mcp(APPROVER, pending('held'))).body.error.code, -32001);
   });
 
   it('a decision for a bad body is still a 400 for a caller who may decide, after the authorization', async () => {

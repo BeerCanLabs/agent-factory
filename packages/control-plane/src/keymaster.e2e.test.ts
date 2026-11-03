@@ -58,7 +58,8 @@ describe('Keymaster Subsystem E2E & Secrets Gating', { concurrency: false }, () 
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
         { name: 'gatekeeper-egress', token: GATEKEEPER_EGRESS, roles: ['gatekeeper-egress'] },
-        { name: 'approver', token: APPROVER, roles: ['approver'] },
+        // S4, D29: run-time holds are cleared by admin or the content side, no longer by the approver role.
+        { name: 'approver', token: APPROVER, roles: ['admin'] },
       ]),
       version: '0.1.0-test',
       providers: [envProvider(secretValues)],
