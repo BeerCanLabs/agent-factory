@@ -51,7 +51,13 @@ import {
   type SkillPublishDecisionInput,
   type SkillUnpublishInput,
 } from '@beercanlabs/factory-contract';
-import { authorize, type SkillActionHoldRule } from '@beercanlabs/factory-bouncer';
+import {
+  authorize,
+  isValidUserPrincipalId,
+  normalizeActorToPrincipal,
+  requiredRoleForPrivilege,
+  type SkillActionHoldRule,
+} from '@beercanlabs/factory-bouncer';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
 import {
   identify,
@@ -63,23 +69,28 @@ import {
   userHoldsSkillsRegister,
   requestRunRequester,
   actorIsAdmin,
+  agentKindOf,
+  effectiveGrantsForActor,
+  findAgentRecord,
   type FactoryState,
 } from './app.js';
 import { applyKillSwitch } from '@beercanlabs/factory-property-manager';
 import { registryOf } from '@beercanlabs/factory-registrar';
 import { triggerApply } from './apply.js';
-import { configOf, ledgerVersion, ownersOf } from './config-store.js';
+import { accountableLeadOf, configOf, ledgerVersion, ownersOf } from './config-store.js';
 import {
   AdoptionStore,
   FULL_SHA,
   LocalSkillPackageStore,
   SkillRegistry,
+  type AdoptContext,
   type SkillPackageStore,
   skillPackageStoreFromUri,
   adopters,
   availableTo,
   canAdopt,
   defaultSkillActionHolds,
+  effectiveAgentKind,
   effectiveSkillHolds,
   ownerOf,
   skillVisibleTo,
@@ -88,6 +99,7 @@ import {
   visibilityOf,
   type AccessAdded,
   type ConfigSkill,
+  type SkillSummary,
   type SkillViewer,
   checkRefName,
   checkRepoUrl,
@@ -213,11 +225,111 @@ function callerGroupRoles(state: FactoryState, actor: string, groupId?: string):
   if (!groupId || !state.groups) return [];
   const g = state.groups.getGroup(groupId);
   if (!g) return [];
-  const lower = actor.toLowerCase();
-  if (g.members.some((m) => m.toLowerCase() === lower)) {
+  const candidates = new Set<string>([actor.toLowerCase()]);
+  if (state.principals) {
+    try {
+      candidates.add(normalizeActorToPrincipal(actor, state.principals).toLowerCase());
+    } catch {
+      // keep raw lowercased actor
+    }
+  }
+  if (g.members.some((m) => candidates.has(m.toLowerCase()))) {
     return g.roles;
   }
   return [];
+}
+
+/**
+ * Authority actors for an agent (`D26`, `S3`):
+ * - `team` agents -> `[accountableLead]` (if present)
+ * - `personal` agents -> `ownersOf(state, agentId)`
+ */
+export function agentAuthorityActors(state: FactoryState, agentId: string): string[] {
+  const rec = findAgentRecord(state, agentId);
+  const kind = rec ? effectiveAgentKind(rec) : agentKindOf(state, agentId);
+  if (kind === 'team') {
+    const lead = accountableLeadOf(state, agentId, rec);
+    return lead ? [lead] : [];
+  }
+  return ownersOf(state, agentId);
+}
+
+/**
+ * Resolves the authoritative `content-owner` of a skill (`D10`, `D26`, `S3`):
+ * - When `state.grants` is configured: fails closed (`null`) if stores are unhealthy; returns active `content-owner`
+ *   grant subject when any `content-owner` grant exists on `skill:<id>` (so `pending-revoked` yields `null`), else
+ *   normalizes legacy `rec.owner ?? rec.registeredBy`.
+ * - When `state.grants` is absent: returns `undefined` so `canAdopt` falls back to `rec.owner ?? rec.registeredBy`.
+ */
+export function resolveSkillContentOwner(
+  state: FactoryState,
+  skillId: string,
+  rec?: SkillVersionRecord,
+): string | null | undefined {
+  if (!state.grants) return undefined;
+  if (!state.grants.healthy) return null;
+  if (state.principals && !state.principals.healthy) return null;
+  const ownerGrants = state.grants
+    .list({
+      scopeKind: 'skill',
+      scopeId: skillId.toLowerCase(),
+      includeExpired: true,
+    })
+    .filter((g) => g.role === 'content-owner');
+  if (ownerGrants.length > 0) {
+    return state.grants.activeContentOwnerOf({ kind: 'skill', id: skillId }) ?? null;
+  }
+  const fallbackRec = rec ?? skillRegistry(state).versions(skillId)[0];
+  const rawOwner = fallbackRec ? (fallbackRec.owner ?? fallbackRec.registeredBy) : undefined;
+  if (!rawOwner) return undefined;
+  try {
+    return normalizeActorToPrincipal(rawOwner, state.principals);
+  } catch {
+    return rawOwner.toLowerCase();
+  }
+}
+
+export function adoptContextForAgent(
+  state: FactoryState,
+  agentId: string,
+  authorityActorsOverride?: string[],
+): AdoptContext {
+  const rawActors = authorityActorsOverride ?? agentAuthorityActors(state, agentId);
+  const normalizedActors = state.principals
+    ? rawActors.map((a) => {
+        try {
+          return normalizeActorToPrincipal(a, state.principals);
+        } catch {
+          return a;
+        }
+      })
+    : rawActors;
+  const allActorRefs = [...new Set([...rawActors, ...normalizedActors])];
+  const userGroups = state.groups
+    ? allActorRefs.flatMap((o) =>
+        state.groups!.getUserRoles(o).length > 0 ? state.groups!.listUserGroups(o).map((g) => g.id) : [],
+      )
+    : [];
+  return {
+    agentOwners: normalizedActors,
+    userGroups: [...new Set(userGroups)],
+    ...(state.grants
+      ? {
+          resolveSkillOwner: (skillId: string, rec: SkillVersionRecord) =>
+            resolveSkillContentOwner(state, skillId, rec),
+        }
+      : {}),
+  };
+}
+
+function enrichSkillSummaryOwner(state: FactoryState, summary: SkillSummary): SkillSummary {
+  if (!state.grants) return summary;
+  const resolved = resolveSkillContentOwner(state, summary.id);
+  if (resolved === undefined) return summary;
+  return {
+    ...summary,
+    userOwner: resolved ?? undefined,
+  };
 }
 
 /** Ledger key for a skill version: the ledger is keyed by agent, so skills are `skill:<id>@<version>`. */
@@ -249,10 +361,20 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     res.setHeader('Deprecation', 'true');
   }
 
-  // A11, H4: An agent registers only on behalf of a verified human requester who holds skills.register
+  // A11, H4, D10, D12: An agent registers on behalf of its verified human requester; an admin acting on behalf of a
+  // user (`X-Factory-Act-As` -> `principal.onBehalfOf`) attributes content ownership to that target user.
   const isAgent = principal.actor.startsWith('agent:') || principal.actor.startsWith('token:agent:');
   const verifiedRequester = requestRunRequester.get(req);
-  const contentOwner = isAgent && verifiedRequester ? verifiedRequester : principal.actor;
+  const rawContentOwner = principal.onBehalfOf ?? (isAgent && verifiedRequester ? verifiedRequester : principal.actor);
+  let contentOwner = rawContentOwner;
+  if (state.principals || state.grants) {
+    try {
+      const normalized = normalizeActorToPrincipal(rawContentOwner, state.principals);
+      if (normalized.startsWith('user:')) contentOwner = normalized;
+    } catch {
+      // keep rawContentOwner
+    }
+  }
 
   if (isGzip) {
     const checker = await checkerFor(state);
@@ -337,15 +459,21 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
       if (existing.length) {
         const first = existing[0];
         const skillOwner = first.owner ?? first.registeredBy;
-        const effectiveActor = (isAgent && verifiedRequester) ? verifiedRequester : principal.actor;
+        const effectiveActor = (isAgent && verifiedRequester) ? verifiedRequester : (principal.onBehalfOf ?? principal.actor);
         const effectivePrincipal: Principal = (isAgent && verifiedRequester)
           ? { actor: verifiedRequester, roles: (actorIsAdmin(state, verifiedRequester) ? ['admin'] : []) as Role[] }
           : principal;
         const groupRoles = callerGroupRoles(state, effectiveActor, first.groupId);
+        const grantRes = effectiveGrantsForActor(state, effectivePrincipal.actor);
         const canAddVersion = authorize({
           principal: effectivePrincipal,
           privilege: 'skills.version.add',
-          resource: { skillId: manifest.id, skillOwner, groupRoles },
+          resource: {
+            skillId: manifest.id,
+            skillOwner,
+            groupRoles,
+            ...(grantRes.ok && grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+          },
         }).allowed;
         if (!canAddVersion) {
           return { ok: false, reason: `id: ${manifest.id} is owned by ${skillOwner}; new versions must come from the owner or an admin (A15)` };
@@ -435,12 +563,36 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
       return;
     }
 
+    if (!firstExisting && state.grants && state.grants.healthy) {
+      let grantSubject = recOwner;
+      try {
+        grantSubject = normalizeActorToPrincipal(recOwner, state.principals);
+      } catch {
+        // leave grantSubject as recOwner
+      }
+      if (isValidUserPrincipalId(grantSubject)) {
+        await state.grants
+          .grant({
+            subject: grantSubject,
+            scope: { kind: 'skill', id: rec.id },
+            role: 'content-owner',
+            by: principal.actor,
+            ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}),
+            granterIsAdmin: actorIsAdmin(state, principal.actor, principal.roles),
+            initialSubmission: true,
+            principals: state.principals,
+          })
+          .catch((err) => console.warn(`[control-plane] skill content-owner grant not seeded for ${rec.id}:`, err));
+      }
+    }
+
     state.ledger.append({
       timestamp: now,
       agentId: ledgerKey(rec.id, rec.version),
       type: 'action',
       action: 'SKILL_REGISTERED',
       actor: principal.actor,
+      ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}),
       ...(verifiedRequester ? { subject: verifiedRequester } : {}),
       commit: rec.commit,
       payloadSha256: validated.sha256,
@@ -503,15 +655,21 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
           reasons.push(`id: ${manifest.id} is registered from ${existing.repo} (${existing.path}); a different repository or path is a different skill, so give it a different id`);
         } else {
           const skillOwner = existing.owner ?? existing.registeredBy;
-          const effectiveActor = (isAgent && verifiedRequester) ? verifiedRequester : principal.actor;
+          const effectiveActor = (isAgent && verifiedRequester) ? verifiedRequester : (principal.onBehalfOf ?? principal.actor);
           const effectivePrincipal: Principal = (isAgent && verifiedRequester)
             ? { actor: verifiedRequester, roles: (actorIsAdmin(state, verifiedRequester) ? ['admin'] : []) as Role[] }
             : principal;
           const groupRoles = callerGroupRoles(state, effectiveActor, existing.groupId);
+          const grantRes = effectiveGrantsForActor(state, effectivePrincipal.actor);
           const canAddVersion = authorize({
             principal: effectivePrincipal,
             privilege: 'skills.version.add',
-            resource: { skillId: manifest.id, skillOwner, groupRoles },
+            resource: {
+              skillId: manifest.id,
+              skillOwner,
+              groupRoles,
+              ...(grantRes.ok && grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+            },
           }).allowed;
           if (!canAddVersion) {
             reasons.push(`id: ${manifest.id} is owned by ${skillOwner}; new versions must come from the owner or an admin (A15)`);
@@ -532,8 +690,22 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
       if (manifest.visibility === 'private' && manifest.owner) {
         if (!state.agents.has(manifest.owner)) {
           reasons.push(`manifest.owner: agent ${manifest.owner} is not registered`);
-        } else if (!authorize({ principal, privilege: 'skills.adopt.request', resource: { agentId: manifest.owner, owners: ownersOf(state, manifest.owner) } }).allowed) {
-          reasons.push(`manifest.owner: only an admin or an owner of ${manifest.owner} may register a skill private to it`);
+        } else {
+          const grantRes = effectiveGrantsForActor(state, principal.actor);
+          if (
+            !authorize({
+              principal,
+              privilege: 'skills.adopt.request',
+              resource: {
+                agentId: manifest.owner,
+                agentKind: agentKindOf(state, manifest.owner),
+                owners: ownersOf(state, manifest.owner),
+                ...(grantRes.ok && grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+              },
+            }).allowed
+          ) {
+            reasons.push(`manifest.owner: only an admin or an owner of ${manifest.owner} may register a skill private to it`);
+          }
         }
       }
     }
@@ -595,12 +767,35 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
     json(res, 500, { error: 'persist_failed', message: 'the skill record could not be written; nothing was registered' });
     return;
   }
+  if (!firstExistingRepo && state.grants && state.grants.healthy) {
+    let grantSubject = recRepoOwner;
+    try {
+      grantSubject = normalizeActorToPrincipal(recRepoOwner, state.principals);
+    } catch {
+      // leave grantSubject as recRepoOwner
+    }
+    if (isValidUserPrincipalId(grantSubject)) {
+      await state.grants
+        .grant({
+          subject: grantSubject,
+          scope: { kind: 'skill', id: rec.id },
+          role: 'content-owner',
+          by: principal.actor,
+          ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}),
+          granterIsAdmin: actorIsAdmin(state, principal.actor, principal.roles),
+          initialSubmission: true,
+          principals: state.principals,
+        })
+        .catch((err) => console.warn(`[control-plane] skill content-owner grant not seeded for ${rec.id}:`, err));
+    }
+  }
   state.ledger.append({
     timestamp: now,
     agentId: ledgerKey(rec.id, rec.version),
     type: 'action',
     action: 'SKILL_REGISTERED',
     actor: principal.actor,
+    ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}),
     commit,
     payloadSha256: payloadHash(manifest),
   });
@@ -636,17 +831,46 @@ async function decide(
     return;
   }
   const principal = identified.principal;
+  const grantRes = effectiveGrantsForActor(state, principal.actor);
+  if (!grantRes.ok) {
+    json(res, 503, { error: grantRes.error });
+    return;
+  }
   const registry = skillRegistry(state);
   const authorizeFor = (r: SkillVersionRecord | undefined) => {
     const owner = r ? ownerOf(r) : undefined;
     const ownerScoped = !!r && visibilityOf(r) === 'private' && !!owner && r.status === 'pending';
     return ownerScoped
-      ? authorize({ principal, privilege: 'skills.decide.private', resource: { agentId: owner!, owners: ownersOf(state, owner!) } })
-      : authorize({ principal, privilege: 'skills.decide' });
+      ? authorize({
+          principal,
+          privilege: 'skills.decide.private',
+          resource: {
+            agentId: owner!,
+            agentKind: agentKindOf(state, owner!),
+            owners: ownersOf(state, owner!),
+            ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+          },
+        })
+      : authorize({
+          principal,
+          privilege: 'skills.decide',
+          ...(grantRes.grants !== undefined ? { resource: { grants: grantRes.grants } } : {}),
+        });
   };
-  const first = authorizeFor(registry.get(id, version));
+  const firstRec = registry.get(id, version);
+  const first = authorizeFor(firstRec);
   if (!first.allowed) {
-    json(res, 403, { error: 'forbidden', required: first.required });
+    const firstOwner = firstRec ? ownerOf(firstRec) : undefined;
+    const ownerScoped = !!firstRec && visibilityOf(firstRec) === 'private' && !!firstOwner && firstRec.status === 'pending';
+    json(res, 403, {
+      error: 'forbidden',
+      required: first.required,
+      requiredRole: requiredRoleForPrivilege(
+        ownerScoped ? 'skills.decide.private' : 'skills.decide',
+        ownerScoped && firstOwner ? { agentId: firstOwner, agentKind: agentKindOf(state, firstOwner) } : undefined,
+        first.required,
+      ),
+    });
     return;
   }
   const body = await readJson(req);
@@ -659,7 +883,17 @@ async function decide(
   const rec = registry.get(id, version);
   const again = authorizeFor(rec);
   if (!again.allowed) {
-    json(res, 403, { error: 'forbidden', required: again.required });
+    const recOwner = rec ? ownerOf(rec) : undefined;
+    const ownerScoped = !!rec && visibilityOf(rec) === 'private' && !!recOwner && rec.status === 'pending';
+    json(res, 403, {
+      error: 'forbidden',
+      required: again.required,
+      requiredRole: requiredRoleForPrivilege(
+        ownerScoped ? 'skills.decide.private' : 'skills.decide',
+        ownerScoped && recOwner ? { agentId: recOwner, agentKind: agentKindOf(state, recOwner) } : undefined,
+        again.required,
+      ),
+    });
     return;
   }
   if (!rec) {
@@ -1000,11 +1234,7 @@ const isRetiring = (state: FactoryState, id: string): boolean => retiring.get(st
 /** `canAdopt`, and also refuses a skill that is being retired (SK6). */
 function adoptCheck(state: FactoryState, agentId: string, id: string, version: string): ReturnType<typeof canAdopt> {
   if (isRetiring(state, id)) return { ok: false, error: 'skill_retired', message: `skill ${id} is being retired (SK6)` };
-  const agentOwners = ownersOf(state, agentId);
-  const userGroups = state.groups
-    ? agentOwners.flatMap((o) => state.groups!.getUserRoles(o).length > 0 ? state.groups!.listUserGroups(o).map((g) => g.id) : [])
-    : [];
-  return canAdopt(skillRegistry(state), agentId, id, version, { agentOwners, userGroups });
+  return canAdopt(skillRegistry(state), agentId, id, version, adoptContextForAgent(state, agentId));
 }
 
 const REFUSAL_STATUS = {
@@ -1094,13 +1324,40 @@ async function autoAdoptPrivate(state: FactoryState, rec: SkillVersionRecord, pr
   return { adopted: [], failed: result.error };
 }
 
-/** SK7: who is looking. An admin sees every skill; anyone else sees public skills and the private skills of agents they own. */
+/** SK7, D26: who is looking. An admin sees every skill; anyone else sees public skills, their own private skills, and the private skills of agents they control. */
 function viewerOf(state: FactoryState, principal: Principal): SkillViewer {
-  const admin = authorize({ principal, privilege: 'skills.decide' }).allowed;
+  const grantRes = effectiveGrantsForActor(state, principal.actor);
+  const admin = authorize({
+    principal,
+    privilege: 'skills.decide',
+    ...(grantRes.ok && grantRes.grants !== undefined ? { resource: { grants: grantRes.grants } } : {}),
+  }).allowed;
   if (admin) return { admin, ownedAgents: [] };
-  const actor = principal.actor.toLowerCase();
-  const ownedAgents = (state.configs?.agentIds() ?? []).filter((id) => ownersOf(state, id).some((o) => o.toLowerCase() === actor));
-  return { admin, ownedAgents };
+  const effectiveActor = principal.onBehalfOf ?? principal.actor;
+  let normActor = effectiveActor.toLowerCase();
+  if (state.principals) {
+    try {
+      normActor = normalizeActorToPrincipal(effectiveActor, state.principals).toLowerCase();
+    } catch {
+      // keep raw lowercased actor
+    }
+  }
+  const candidateIds = new Set<string>([...state.agents.keys(), ...(state.configs?.agentIds() ?? [])]);
+  const ownedAgents = [...candidateIds].filter((id) =>
+    agentAuthorityActors(state, id).some((o) => {
+      const low = o.toLowerCase();
+      if (low === effectiveActor.toLowerCase() || low === normActor) return true;
+      if (state.principals) {
+        try {
+          return normalizeActorToPrincipal(o, state.principals).toLowerCase() === normActor;
+        } catch {
+          return false;
+        }
+      }
+      return false;
+    }),
+  );
+  return { admin, ownedAgents, actor: normActor };
 }
 
 function adoptersOf(state: FactoryState, id: string, version?: string) {
@@ -1126,14 +1383,10 @@ async function agentSkillsList(state: FactoryState, req: http.IncomingMessage, r
   // SK7: this route is open to every viewer, so a private skill the viewer may not see is left out of every list.
   const visible = (skillId: string): boolean => {
     const summary = summarizeSkill(registry, skillId);
-    return !summary || skillVisibleTo(summary, viewer);
+    return !summary || skillVisibleTo(enrichSkillSummaryOwner(state, summary), viewer);
   };
   const mine = skillsOf(state.configs, adoptionStore(state), agentId);
-  const agentOwners = ownersOf(state, agentId);
-  const userGroups = state.groups
-    ? agentOwners.flatMap((o) => state.groups!.getUserRoles(o).length > 0 ? state.groups!.listUserGroups(o).map((g) => g.id) : [])
-    : [];
-  const adoptCtx = { agentOwners, userGroups };
+  const adoptCtx = adoptContextForAgent(state, agentId);
   const existingById = new Map(mine.adopted.map((a) => [a.id, a]));
   const adopted = mine.adopted
     .filter((a) => visible(a.id))
@@ -1261,7 +1514,20 @@ export async function requestAdoptionFor(
   // skill must wait for it, or the approval would clear that one too and the asker's 201 would be a lie.
   return withAgentLock(state, agentId, async () => {
     const check = adoptCheck(state, agentId, skillId, version);
-    if (!check.ok) return { status: REFUSAL_STATUS[check.error], body: { error: check.error, skillId, version, message: check.message } };
+    if (!check.ok) {
+      return {
+        status: REFUSAL_STATUS[check.error],
+        body: {
+          error: check.error,
+          skillId,
+          version,
+          message: check.message,
+          ...(check.error === 'skill_private'
+            ? { requiredRole: agentKindOf(state, agentId) === 'team' ? 'accountable-lead' : 'content-owner' }
+            : {}),
+        },
+      };
+    }
     const skills = currentSkills(state, agentId);
     if (skills.some((k) => k.id === skillId && k.version === version)) {
       return { status: 409, body: { error: 'already_adopted', skillId, version, message: `${agentId} already runs ${skillId}@${version}` } };
@@ -1362,7 +1628,20 @@ async function decideAdoption(state: FactoryState, req: http.IncomingMessage, re
     if (!state.agents.has(agentId)) return { status: 404, body: { error: 'not_found' } };
     // The skill may have been retired or revoked since the request was made.
     const check = adoptCheck(state, agentId, skillId, request.version);
-    if (!check.ok) return { status: REFUSAL_STATUS[check.error], body: { error: check.error, skillId, version: request.version, message: check.message } };
+    if (!check.ok) {
+      return {
+        status: REFUSAL_STATUS[check.error],
+        body: {
+          error: check.error,
+          skillId,
+          version: request.version,
+          message: check.message,
+          ...(check.error === 'skill_private'
+            ? { requiredRole: agentKindOf(state, agentId) === 'team' ? 'accountable-lead' : 'content-owner' }
+            : {}),
+        },
+      };
+    }
     const skills = currentSkills(state, agentId);
     if (skills.some((k) => k.id === skillId && k.version === request.version)) {
       return { status: 409, body: { error: 'already_adopted', skillId, version: request.version, message: `${agentId} already runs ${skillId}@${request.version}` } };
@@ -2547,7 +2826,10 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
       200,
       registry
         .ids()
-        .map((id) => summarizeSkill(registry, id))
+        .map((id) => {
+          const s = summarizeSkill(registry, id);
+          return s ? enrichSkillSummaryOwner(state, s) : undefined;
+        })
         .filter((s): s is NonNullable<typeof s> => !!s && skillVisibleTo(s, viewer))
         .map((s) => {
           const defaultVersion = defMap.get(s.id);
@@ -2566,7 +2848,8 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
     const principal = await requirePrivilege(req, res, state, 'skills.read');
     if (!principal) return true;
     const id = decode(adoptersPath[1]);
-    const summary = summarizeSkill(skillRegistry(state), id);
+    const rawSummary = summarizeSkill(skillRegistry(state), id);
+    const summary = rawSummary ? enrichSkillSummaryOwner(state, rawSummary) : undefined;
     if (!summary || !skillVisibleTo(summary, viewerOf(state, principal))) return json(res, 404, { error: 'not_found', id }), true;
     json(res, 200, adoptersOf(state, id).map((a) => {
       const latest = summary.latestApproved;
@@ -2581,7 +2864,8 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
     if (!principal) return true;
     const registry = skillRegistry(state);
     const id = decode(one[1]);
-    const summary = summarizeSkill(registry, id);
+    const rawSummary = summarizeSkill(registry, id);
+    const summary = rawSummary ? enrichSkillSummaryOwner(state, rawSummary) : undefined;
     // SK7: a private skill the viewer may not see does not exist for them.
     if (!summary || !skillVisibleTo(summary, viewerOf(state, principal))) return json(res, 404, { error: 'not_found', id }), true;
     const def = activeDefaultSkills(state).find((d) => d.id === id);
@@ -2601,7 +2885,8 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
     const [id, version] = [decode(ver[1]), decode(ver[2])];
     const rec = skillRegistry(state).get(id, version);
     const owner = rec ? ownerOf(rec) : undefined;
-    if (!rec || !skillVisibleTo({ visibility: visibilityOf(rec), ...(owner ? { owner } : {}) }, viewerOf(state, principal))) return json(res, 404, { error: 'not_found', id, version }), true;
+    const contentOwner = rec ? (resolveSkillContentOwner(state, id, rec) ?? (rec.owner ?? rec.registeredBy)) : undefined;
+    if (!rec || !skillVisibleTo({ visibility: visibilityOf(rec), ...(owner ? { owner } : {}), ...(contentOwner ? { userOwner: contentOwner } : {}) }, viewerOf(state, principal))) return json(res, 404, { error: 'not_found', id, version }), true;
     json(res, 200, rec);
     return true;
   }

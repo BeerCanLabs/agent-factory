@@ -21,7 +21,7 @@ export type { CliDiscovery } from './discovery.js';
 export const ROLES =['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
 
-export type Principal = { actor: string; roles: Role[] };
+export type Principal = { actor: string; roles: Role[]; onBehalfOf?: string };
 
 export type OidcIdentityClaims = { email: string; emailVerified: true; sub: string };
 

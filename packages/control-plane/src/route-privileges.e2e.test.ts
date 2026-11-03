@@ -231,6 +231,15 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: `/api/v1/skills/${SKILL}/publish`, privilege: 'skills.publish.request', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/skills/${SKILL}/publish/decide`, privilege: 'skills.decide', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/skills/${SKILL}/unpublish`, privilege: 'skills.unpublish', role: 'admin', body: {} },
+  // TSK-300 (S3): Principals & Grants management (R4, D7, D10-D15, D32)
+  { method: 'GET', path: '/api/v1/principals', privilege: 'grants.manage', role: 'admin' },
+  { method: 'POST', path: '/api/v1/principals', privilege: 'grants.manage', role: 'admin', body: {} },
+  { method: 'GET', path: '/api/v1/principals/user:nope', privilege: 'grants.manage', role: 'admin' },
+  { method: 'POST', path: '/api/v1/principals/user:nope/emails', privilege: 'grants.manage', role: 'admin', body: {} },
+  { method: 'DELETE', path: '/api/v1/principals/user:nope/emails/a@b.co', privilege: 'grants.manage', role: 'admin' },
+  { method: 'GET', path: '/api/v1/grants', privilege: 'grants.manage', role: 'admin' },
+  { method: 'POST', path: '/api/v1/grants', privilege: 'grants.manage', role: 'admin', body: {} },
+  { method: 'DELETE', path: '/api/v1/grants/g_nope', privilege: 'grants.manage', role: 'admin' },
   { method: 'POST', path: `/api/v1/skills/${SKILL}/retire`, privilege: 'skills.retire.force', role: 'admin', body: { force: true } },
 ];
 
@@ -374,6 +383,10 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     for (const cred of CREDENTIALS) {
       const r = await call(port, 'GET', '/api/v1/whoami', cred);
       assert.equal(r.status, cred === 'none' ? 401 : 200, `whoami as ${cred}`);
+      const cMissing = await call(port, 'GET', '/api/v1/authz/check', cred);
+      assert.equal(cMissing.status, cred === 'none' ? 401 : 400, `authz/check (no privilege) as ${cred}`);
+      const c = await call(port, 'GET', '/api/v1/authz/check?privilege=agents.read', cred);
+      assert.equal(c.status, cred === 'none' ? 401 : 200, `authz/check as ${cred}`);
     }
     // GAP-211, TSK-285: without a valid signature every credential, including admin, gets 401.
     for (const ghPath of ['/api/v1/hooks/github', '/hooks/github', '/api/v1/webhooks/github', '/webhooks/github']) {
@@ -645,9 +658,24 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       error?: { code: number; message: string };
     };
     const names = async (cred: Role) => (await rpc(cred, 'tools/list')).result?.tools?.map((t) => t.name).sort();
-    const viewerTools = ['get_agent_models', 'get_run', 'list_agents', 'list_approvals', 'list_model_catalog', 'query_ledger'];
+    const viewerTools = ['authz_check', 'get_agent_models', 'get_run', 'list_agents', 'list_approvals', 'list_model_catalog', 'query_ledger', 'whoami'];
     const operatorTools = ['check_agent_update', 'isolate_agent', 'pause_agent', 'resume_agent', 'wake_agent'];
-    const adminTools = ['admit_model', 'install_agent_update', 'retire_vendor_or_model', 'scan_vendor_models', 'set_agent_models', 'set_default_model', 'update_model_pricing'];
+    const adminTools = [
+      'add_principal_email',
+      'admit_model',
+      'create_principal',
+      'grant_role',
+      'install_agent_update',
+      'list_grants',
+      'list_principals',
+      'remove_principal_email',
+      'retire_vendor_or_model',
+      'revoke_grant',
+      'scan_vendor_models',
+      'set_agent_models',
+      'set_default_model',
+      'update_model_pricing',
+    ];
     assert.deepEqual(await names('viewer'), viewerTools);
     assert.deepEqual(await names('operator'), [...viewerTools, ...operatorTools].sort());
     assert.deepEqual(await names('approver'), [...viewerTools, 'decide_approval'].sort());

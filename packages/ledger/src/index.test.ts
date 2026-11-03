@@ -59,6 +59,70 @@ describe('toLedgerEvent', () => {
     assert.equal(event.action, 'used ***');
     assert.equal(JSON.stringify(event).includes('sk-live-super-secret'), false);
   });
+
+  it('keeps structured onBehalfOf, scope, before, and after audit fields while stripping secrets and free text (R5, D30)', () => {
+    const secret = 'fk_live_super_secret_value';
+    const event = toLedgerEvent(
+      {
+        agentId: 'control-plane',
+        type: 'action',
+        action: 'GRANT_CREATED',
+        actor: 'user:admin',
+        onBehalfOf: 'user:stephanie',
+        subject: 'user:stephanie',
+        scope: { kind: 'agent', id: 'ops-bot', prompt: 'ignore me' },
+        before: null,
+        after: {
+          id: 'grant-1',
+          subject: 'user:stephanie',
+          subjectKind: 'user',
+          scope: { kind: 'agent', id: 'ops-bot' },
+          role: 'member',
+          state: 'active',
+          expiresAt: null,
+          version: 1,
+          createdAt: '2026-11-02T00:00:00.000Z',
+          createdBy: 'user:admin',
+          onBehalfOf: 'user:stephanie',
+          secretToken: secret,
+          prompt: 'drop free text',
+        },
+      },
+      [secret],
+    );
+    assert.equal(event.actor, 'user:admin');
+    assert.equal(event.onBehalfOf, 'user:stephanie');
+    assert.equal(event.subject, 'user:stephanie');
+    assert.deepEqual(event.scope, { kind: 'agent', id: 'ops-bot' });
+    assert.equal(event.before, null);
+    assert.deepEqual(event.after, {
+      id: 'grant-1',
+      subject: 'user:stephanie',
+      subjectKind: 'user',
+      scope: { kind: 'agent', id: 'ops-bot' },
+      role: 'member',
+      state: 'active',
+      expiresAt: null,
+      version: 1,
+      createdAt: '2026-11-02T00:00:00.000Z',
+      createdBy: 'user:admin',
+      onBehalfOf: 'user:stephanie',
+    });
+    assert.equal(JSON.stringify(event).includes(secret), false);
+    assert.equal(JSON.stringify(event).includes('drop free text'), false);
+
+    // Malformed onBehalfOf or scope are dropped
+    const bad = toLedgerEvent({
+      agentId: 'control-plane',
+      type: 'action',
+      onBehalfOf: 'has spaces',
+      scope: { kind: 'unknown', id: 'x' },
+      before: { arbitraryKey: 'dropped' },
+    });
+    assert.equal(bad.onBehalfOf, undefined);
+    assert.equal(bad.scope, undefined);
+    assert.equal(bad.before, undefined);
+  });
 });
 
 describe('FileLedger', () => {

@@ -19,7 +19,7 @@ import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createR
 import { fireScheduledAction, scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
-import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { ApprovalStore, docBackendFromUri, GrantStore, PrincipalStore, type GrantsDoc, type PrincipalsDoc } from '@beercanlabs/factory-bouncer';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from '@beercanlabs/factory-gatekeeper/policy';
@@ -187,10 +187,22 @@ const modelStore = new ModelStore(
 
 const GROUPS_DIR = process.env.FACTORY_GROUPS_DIR || join(DATA_DIR, 'groups');
 const groups = await GroupStore.open(GROUPS_DIR);
+const principals = await PrincipalStore.open(
+  docBackendFromUri<PrincipalsDoc>(process.env.FACTORY_PRINCIPALS_STORE_URI, join(DATA_DIR, 'auth', 'principals')),
+);
+const grants = await GrantStore.open(
+  docBackendFromUri<GrantsDoc>(process.env.FACTORY_GRANTS_STORE_URI, join(DATA_DIR, 'auth', 'grants')),
+  {
+    principals,
+    knownGroups: (groupId) => Boolean(groups.getGroup(groupId)),
+  },
+);
 
 const state: FactoryState = {
   agents: new Map(allAgents.map((a) => [a.id, a])),
   groups,
+  principals,
+  grants,
   modelStore,
   // §6.9 M3: the dynamic catalog gatekeeper-egress serves, so the admin chooses from what is actually offered.
   modelCatalog: modelStore.toEgressCatalog(),

@@ -29,6 +29,7 @@ import {
   beginAdmission,
   canAdopt,
   changedParts,
+  effectiveAgentKind,
   effectiveSkillHolds,
   loadSharedRuntime,
   ownerOf,
@@ -47,7 +48,7 @@ import { applyConfig, buildSkillsFor, runDeploy } from './apply.js';
 import { changeReason, configOf, ledgerVersion, ownersOf, parseOwners, recordConfig, removeConfig } from './config-store.js';
 import { SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type Run } from '@beercanlabs/factory-property-manager';
 import { runActivationSmoke } from './smoke.js';
-import { skillRegistry, activeDefaultSkills } from './skills.js';
+import { adoptContextForAgent, agentAuthorityActors, skillRegistry, activeDefaultSkills } from './skills.js';
 
 export { loadSharedRuntime, saveSharedRuntime, type SharedRuntimePin };
 
@@ -166,6 +167,8 @@ function resolveHumanUserSubject(
         body: {
           error: 'unknown_subject',
           message: `non-admin callers may only reference already-known principals ('${normalized}' not found)`,
+          required: 'admin',
+          requiredRole: 'admin',
         },
       };
     }
@@ -189,7 +192,7 @@ function resolveHumanUserSubject(
  */
 export function resolveAgentOwnershipOnSubmit(
   state: FactoryState,
-  principal: { actor: string; roles?: readonly Role[] },
+  principal: { actor: string; roles?: readonly Role[]; onBehalfOf?: string },
   input: {
     kind?: unknown;
     accountableLead?: unknown;
@@ -217,13 +220,18 @@ export function resolveAgentOwnershipOnSubmit(
   const isAdmin = actorIsAdmin(state, principal.actor, principal.roles);
 
   const rawActAs = input.actAs !== undefined ? input.actAs : input.onBehalfOf;
-  let onBehalfOf: string | undefined;
+  let onBehalfOf: string | undefined = principal.onBehalfOf;
   if (rawActAs !== undefined && rawActAs !== null) {
     if (!isAdmin) {
       return {
         ok: false,
         status: 403,
-        body: { error: 'forbidden', message: 'only an admin may act on behalf of another principal', required: 'admin' },
+        body: {
+          error: 'forbidden',
+          message: 'only an admin may act on behalf of another principal',
+          required: 'admin',
+          requiredRole: 'admin',
+        },
       };
     }
     if (typeof rawActAs !== 'string') {
@@ -235,6 +243,16 @@ export function resolveAgentOwnershipOnSubmit(
       label: 'actAs / onBehalfOf',
     });
     if (!resolvedActAs.ok) return resolvedActAs;
+    if (principal.onBehalfOf && resolvedActAs.subject !== principal.onBehalfOf) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          error: 'act_as_mismatch',
+          message: 'body actAs / onBehalfOf conflicts with X-Factory-Act-As header',
+        },
+      };
+    }
     onBehalfOf = resolvedActAs.subject;
   }
 
@@ -394,6 +412,7 @@ export function resolveAgentOwnershipOnSubmit(
             error: 'forbidden',
             message: 'only an admin may assign personal agent ownership to another principal at creation',
             required: 'admin',
+            requiredRole: 'admin',
           },
         };
       }
@@ -551,7 +570,7 @@ export type Created = { status: number; body: Record<string, unknown>; record?: 
 /** Creates an agent from a configuration (CF6): the one place that does it, for `POST /agents` and for an import (CF3). */
 export async function createFromConfiguration(
   state: FactoryState,
-  principal: { actor: string; roles?: readonly Role[] },
+  principal: { actor: string; roles?: readonly Role[]; onBehalfOf?: string },
   spec: NewConfiguredAgent,
 ): Promise<Created> {
   const pin = state.sharedRuntime;
@@ -607,10 +626,19 @@ export async function createFromConfiguration(
       if (seenSkillIds.has(s.id)) {
         return { status: 400, body: { error: 'duplicate_skill', message: `duplicate skill id ${s.id}` } };
       }
-      const check = canAdopt(registry, id, s.id, s.version, { agentOwners: authorityActors });
+      const check = canAdopt(registry, id, s.id, s.version, adoptContextForAgent(state, id, authorityActors));
       if (!check.ok) {
         const status = check.error === 'not_found' ? 404 : check.error === 'skill_private' ? 403 : 409;
-        return { status, body: { error: check.error, message: check.message } };
+        return {
+          status,
+          body: {
+            error: check.error,
+            message: check.message,
+            ...(check.error === 'skill_private'
+              ? { requiredRole: ownership.effectiveKind === 'team' ? 'accountable-lead' : 'content-owner' }
+              : {}),
+          },
+        };
       }
       const rawHolds = s.holds !== undefined ? s.holds : s.holdOverrides;
       let holds: Record<string, boolean>;
@@ -1141,7 +1169,8 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
   }
   const validatedSkills: ConfigSkill[] = [];
   const registry = skillRegistry(state);
-  const agentOwners = ownersOf(state, agentId);
+  const authorityActors = [principal.onBehalfOf ?? principal.actor, ...agentAuthorityActors(state, agentId)];
+  const adoptCtx = adoptContextForAgent(state, agentId, authorityActors);
 
   for (const s of rawSkills) {
     if (!s || typeof s !== 'object' || typeof (s as any).id !== 'string' || typeof (s as any).version !== 'string') {
@@ -1159,17 +1188,12 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
       });
       return true;
     }
-    const userGroups = state.groups
-      ? [principal.actor, ...agentOwners].flatMap((u) => (state.groups!.getUserRoles(u).length > 0 ? state.groups!.listUserGroups(u).map((g) => g.id) : []))
-      : undefined;
-    const adopt = canAdopt(registry, agentId, skillItem.id, skillItem.version, {
-      agentOwners: [principal.actor, ...agentOwners],
-      userGroups,
-    });
+    const adopt = canAdopt(registry, agentId, skillItem.id, skillItem.version, adoptCtx);
     if (!adopt.ok) {
       json(res, 403, {
         error: 'skill_private',
         message: adopt.message,
+        requiredRole: effectiveAgentKind(agent) === 'team' ? 'accountable-lead' : 'content-owner',
       });
       return true;
     }

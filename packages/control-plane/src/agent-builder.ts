@@ -21,8 +21,8 @@ import { authorize } from '@beercanlabs/factory-bouncer';
 import type { Role, Principal } from '@beercanlabs/factory-auth';
 import type { Run } from '@beercanlabs/factory-property-manager';
 import { effectiveGrantsForActor, json, readJson, type FactoryState } from './app.js';
-import { createFromConfiguration, discardCreated, resolveAgentOwnershipOnSubmit } from './agent-creation.js';
-import { skillRegistry, adoptionStore, requestAdoptionFor, activeDefaultSkills } from './skills.js';
+import { createFromConfiguration, discardCreated, resolveAgentOwnershipOnSubmit, type ResolvedAgentOwnership } from './agent-creation.js';
+import { adoptContextForAgent, skillRegistry, adoptionStore, requestAdoptionFor, activeDefaultSkills } from './skills.js';
 
 export const ARCHETYPES = ['purpose-built', 'personal-assistant', 'team-member'] as const;
 
@@ -161,6 +161,7 @@ export function validateBuilderSpec(state: FactoryState, spec: unknown, caller?:
     return { ok: false, status: 409, error: 'configuration_exists', message: `a configuration for ${id} is still stored` };
   }
 
+  let resolvedOwnership: Extract<ResolvedAgentOwnership, { ok: true }> | undefined;
   if (caller) {
     const ownership = resolveAgentOwnershipOnSubmit(state, caller, {
       kind: s.kind,
@@ -178,6 +179,7 @@ export function validateBuilderSpec(state: FactoryState, spec: unknown, caller?:
         message: String(ownership.body.message ?? 'invalid agent ownership specification'),
       };
     }
+    resolvedOwnership = ownership;
   } else if (s.kind !== undefined && !parseAgentKind(s.kind)) {
     return { ok: false, status: 400, error: 'invalid_kind', message: 'kind must be "personal" or "team"' };
   }
@@ -218,6 +220,16 @@ export function validateBuilderSpec(state: FactoryState, spec: unknown, caller?:
   const requestedSkills: Array<{ id: string; version?: string }> = Array.isArray(s.skills) ? s.skills : [];
   const adoptableSkillIds = new Set<string>();
   const skillsToAdopt: Array<{ id: string; version: string }> = [];
+  const authorityActors = resolvedOwnership
+    ? resolvedOwnership.effectiveKind === 'team'
+      ? resolvedOwnership.accountableLead
+        ? [resolvedOwnership.accountableLead]
+        : []
+      : resolvedOwnership.configOwners ?? (caller ? [caller.onBehalfOf ?? caller.actor] : [])
+    : caller
+      ? [caller.onBehalfOf ?? caller.actor]
+      : [];
+  const adoptCtx = adoptContextForAgent(state, id, authorityActors);
 
   for (const item of requestedSkills) {
     if (!item || typeof item.id !== 'string') {
@@ -232,10 +244,11 @@ export function validateBuilderSpec(state: FactoryState, spec: unknown, caller?:
     if (!version) {
       return { ok: false, status: 422, error: 'unknown_skill', skill: skillId, message: `skill "${skillId}" has no approved version` };
     }
-    const check = canAdopt(reg, id, skillId, version);
+    const check = canAdopt(reg, id, skillId, version, adoptCtx);
     if (!check.ok) {
       const errCode = check.error === 'not_found' ? 'unknown_skill' : (check.error ?? 'cannot_adopt');
-      return { ok: false, status: 422, error: errCode, skill: skillId, message: check.message };
+      const status = check.error === 'skill_private' ? 403 : 422;
+      return { ok: false, status, error: errCode, skill: skillId, message: check.message };
     }
     adoptableSkillIds.add(skillId);
     skillsToAdopt.push({ id: skillId, version });

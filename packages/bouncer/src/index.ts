@@ -7,9 +7,9 @@ export { describeHeldRequest, heldCopyOf, heldToolName, parseHoldRequest } from 
 export type { CanonicalRouteRequest, HoldCheck, HoldDecision, HoldRule, SkillActionHoldRule, ToolApprovalCheck, ToolApprovalDecision } from './decisions.js';
 export { canonicalizeRouteRequest, checkHold, checkToolApproval, findHeldSkillAction, matchSkillActionPath } from './decisions.js';
 export type { DerivedRole, Privilege } from './privileges.js';
-export { PRIVILEGES, AGENT_SCOPED, SKILL_CONTENT_OWNER_READONLY_PRIVILEGES } from './privileges.js';
+export { PRIVILEGES, AGENT_SCOPED, SKILL_SCOPED, SKILL_CONTENT_OWNER_READONLY_PRIVILEGES } from './privileges.js';
 export type { AuthorizeRequest, AuthorizeResource, AuthorizeResult } from './authorize.js';
-export { authorize } from './authorize.js';
+export { authorize, requiredRoleForPrivilege } from './authorize.js';
 export type {
   AuthenticatedCaller,
   ExternalIdentity,

@@ -62,6 +62,17 @@ export function authorize(req: AuthorizeRequest): AuthorizeResult {
     }
   }
 
+  if (privilege === 'mcp.use' && !resource?.agentId && !resource?.skillId) {
+    if (
+      resource?.ownsAnyAgent ||
+      resource?.grants?.some(
+        (eg) => !eg.readOnly && (eg.grant.scope.kind === 'agent' || eg.grant.scope.kind === 'skill'),
+      )
+    ) {
+      return { allowed: true };
+    }
+  }
+
   if (privilege === 'skills.register') {
     if (resource?.ownsAnyAgent || resource?.groupRoles?.includes('skills.register')) {
       return { allowed: true };
@@ -206,5 +217,42 @@ export function authorize(req: AuthorizeRequest): AuthorizeResult {
   const required = ROLE_ORDER.find((r) => ROLE_PRIVILEGES[r].includes(privilege));
   if (!required) throw new Error(`no role holds privilege ${privilege}`);
   return { allowed: false, required };
+}
+
+/**
+ * R6, R7, S3: Returns the most specific role name a caller would need to hold `privilege` on `resource`
+ * (e.g., `'member'` or `'accountable-lead'` on a team agent, `'agent-member'` or `'content-owner'` on a personal agent,
+ * `'content-owner'` on a skill, or the fleet `Role` otherwise).
+ */
+export function requiredRoleForPrivilege(
+  privilege: Privilege,
+  resource?: AuthorizeResource,
+  fallback?: Role,
+): string {
+  const defaultRole = fallback ?? ROLE_ORDER.find((r) => ROLE_PRIVILEGES[r].includes(privilege)) ?? 'admin';
+  if (resource?.agentId && AGENT_SCOPED.has(privilege)) {
+    const agentGrants = resource.grants?.filter(
+      (eg) => eg.grant.scope.kind === 'agent' && same(eg.grant.scope.id, resource.agentId!),
+    );
+    const effectiveKind =
+      resource.agentKind ??
+      (agentGrants?.some((eg) => eg.grant.role === 'accountable-lead') ? 'team' : undefined);
+    if (effectiveKind === 'team') {
+      if (DERIVED_ROLE_PRIVILEGES['team-member'].includes(privilege)) return 'member';
+      if (DERIVED_ROLE_PRIVILEGES['accountable-lead'].includes(privilege)) return 'accountable-lead';
+      return defaultRole;
+    }
+    if (effectiveKind === 'personal' || resource.grants !== undefined || resource.owners !== undefined) {
+      if (DERIVED_ROLE_PRIVILEGES['agent-member'].includes(privilege)) return 'agent-member';
+      if (DERIVED_ROLE_PRIVILEGES['content-owner'].includes(privilege)) return 'content-owner';
+      return defaultRole;
+    }
+  }
+  if (resource?.skillId && SKILL_SCOPED.has(privilege)) {
+    if (privilege === 'skills.transfer' || DERIVED_ROLE_PRIVILEGES['skill-owner'].includes(privilege)) {
+      return 'content-owner';
+    }
+  }
+  return defaultRole;
 }
 

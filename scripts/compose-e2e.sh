@@ -129,7 +129,7 @@ ok "isolate refuses new runs; resume restores"
 echo "== a new agent runs on the shared runtime, created from a configuration (RT1, CF6)"
 SOUL="You are Nova, a careful assistant. SOUL-MARKER-7731."
 [ "$(api -X POST -d '{"repo":"https://github.com/beercanlabs/SM-fresh","commit":"1111111111111111111111111111111111111111","cartridge":{"id":"fresh","name":"fresh","memory":{"archetype":"personal-assistant"}}}' -o /dev/null -w '%{http_code}' $CP/api/v1/registry/agents)" = 422 ] || die "a new agent id was registered from a repository"
-created="$(api -X POST -d "{\"id\":\"nova\",\"name\":\"Nova\",\"model\":\"test-small\",\"soul\":\"$SOUL\",\"memory\":{\"archetype\":\"personal-assistant\"}}" $CP/api/v1/agents)"
+created="$(api -X POST -d "{\"id\":\"nova\",\"name\":\"Nova\",\"model\":\"test-small\",\"soul\":\"$SOUL\",\"memory\":{\"archetype\":\"personal-assistant\"},\"actAs\":\"user:nova-owner@example.com\"}" $CP/api/v1/agents)"
 jq -e '.id == "nova" and .createdFrom == "configuration" and (.repo | test("agent-factory"))' >/dev/null <<<"$created" || die "create from configuration: $created"
 api -X PUT -d '{"routes":["models"],"models":["test-small"]}' $CP/api/v1/agents/nova/policy >/dev/null
 [ "$(api -X POST -d '{"content":"hello nova"}' -o /dev/null -w '%{http_code}' $CP/api/v1/agents/nova/conversation)" = 202 ] || die "turn to the new agent"
