@@ -137,14 +137,25 @@ export async function cutover(state: FactoryState, by: string) {
 }
 
 export async function handleAuthMigration(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
-  const routes: Record<string, string> = { '/api/v1/auth-migration/import': 'POST', '/api/v1/auth-migration/readiness': 'GET', '/api/v1/auth-migration/cutover': 'POST' };
-  if (routes[path] !== req.method) return false;
-  const who = await requirePrivilege(req, res, state, 'grants.manage');
-  if (!who) return true;
-  if (!state.principals || !state.grants) return json(res, 503, { error: 'auth_stores_unavailable' }), true;
-  res.setHeader('cache-control', 'no-store');
-  if (path.endsWith('/import')) return json(res, 200, await importLegacyAuth(state, legacySource(state), who.actor)), true;
-  if (path.endsWith('/readiness')) return json(res, 200, await readiness(state)), true;
-  const c = await cutover(state, who.actor);
-  return json(res, c.ok ? 200 : 409, c), true;
+  if (path === '/api/v1/auth-migration/import' && req.method === 'POST') {
+    const who = await requirePrivilege(req, res, state, 'grants.manage');
+    if (!who) return true;
+    if (!state.principals || !state.grants) return json(res, 503, { error: 'auth_stores_unavailable' }), true;
+    res.setHeader('cache-control', 'no-store');
+    return json(res, 200, await importLegacyAuth(state, legacySource(state), who.actor)), true;
+  }
+  if (path === '/api/v1/auth-migration/readiness' && req.method === 'GET') {
+    const who = await requirePrivilege(req, res, state, 'grants.manage');
+    if (!who) return true;
+    if (!state.principals || !state.grants) return json(res, 503, { error: 'auth_stores_unavailable' }), true;
+    return json(res, 200, await readiness(state)), true;
+  }
+  if (path === '/api/v1/auth-migration/cutover' && req.method === 'POST') {
+    const who = await requirePrivilege(req, res, state, 'grants.manage');
+    if (!who) return true;
+    if (!state.principals || !state.grants) return json(res, 503, { error: 'auth_stores_unavailable' }), true;
+    const c = await cutover(state, who.actor);
+    return json(res, c.ok ? 200 : 409, c), true;
+  }
+  return false;
 }
