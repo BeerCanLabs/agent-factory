@@ -24,6 +24,7 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { createFactoryServer, type FactoryState } from './app.js';
+import { IdpConfigStore } from './idp-config.js';
 import { IdentityLinkStore } from './identity-links.js';
 import { accountableLeadOf, ownersOf } from './config-store.js';
 import { loadSkills, recordSkillChecks, skillRegistry } from './skills.js';
@@ -220,6 +221,7 @@ describe('S5: factory API keys (#357)', { concurrency: false }, () => {
     } as unknown as FactoryState;
 
     state.keys = await ApiKeyStore.open();
+    state.idpConfig = await IdpConfigStore.open();
     state.configs = await VersionedConfigStore.open(new FileConfigBackend(join(dir, 'config')));
     loadSkills(state, join(dir, 'skills'));
 
@@ -344,5 +346,28 @@ describe('S5: factory API keys (#357)', { concurrency: false }, () => {
     assert.ok(listed.body.keys.every((k: { owner: string }) => k.owner === 'user:bob'));
     const bogus = await call('POST', '/api/v1/agents', { headers: bearer('fk_not-a-real-key'), body: { id: 'x' } });
     assert.equal(bogus.status, 401);
+  });
+
+  it('S6 AC2: a break-glass call is ledgered and whoami/status flag breakGlassAlert until the key is rotated; IdP setup is admin-only', async () => {
+    const bg = await call('POST', '/api/v1/keys', { token: TOKENS.admin, body: { owner: 'service:break-glass', roles: ['admin'] } });
+    assert.equal(bg.status, 201, JSON.stringify(bg.body));
+    assert.equal((await call('GET', '/api/v1/setup/status', { token: TOKENS.alice })).body.breakGlassAlert, false);
+    const used = await call('GET', '/api/v1/agents', { headers: bearer(bg.body.secret) });
+    assert.equal(used.status, 200);
+    assert.ok(ledger.query().some((e) => e.action === 'BREAK_GLASS_USED'));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal((await call('GET', '/api/v1/whoami', { token: TOKENS.alice })).body.breakGlassAlert, true);
+    assert.equal((await call('GET', '/api/v1/setup/status', { token: TOKENS.alice })).body.breakGlassAlert, true);
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal((await call('POST', `/api/v1/keys/${bg.body.key.id}/rotate`, { token: TOKENS.admin, body: {} })).status, 200);
+    assert.equal((await call('GET', '/api/v1/whoami', { token: TOKENS.alice })).body.breakGlassAlert, false);
+
+    const idp = { providers: [{ id: 'google', clientId: 'cid', clientSecretRef: 'factory/prod/GOOGLE_OAUTH', allowedDomains: ['sackrider.org'] }] };
+    assert.equal((await call('PUT', '/api/v1/setup/idp', { token: TOKENS.alice, body: idp })).status, 403);
+    assert.equal((await call('PUT', '/api/v1/setup/idp', { token: TOKENS.admin, body: { providers: [{ id: 'google', clientId: 'x', clientSecret: 'nope' }] } })).status, 400);
+    assert.equal((await call('PUT', '/api/v1/setup/idp', { token: TOKENS.admin, body: idp })).status, 200);
+    const st = await call('GET', '/api/v1/setup/status', { token: TOKENS.alice });
+    assert.equal(st.body.setupComplete, true);
+    assert.deepEqual(st.body.providers, ['google']);
   });
 });
