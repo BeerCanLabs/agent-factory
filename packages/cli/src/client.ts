@@ -25,6 +25,8 @@ export type ClientOptions = {
    */
   credential: (refresh: boolean) => Promise<Credential | string>;
   fetch?: typeof fetch;
+  /** S9: `--as <principal>`: an admin acts on behalf of this person (`X-Factory-Act-As`); the factory checks and ledgers it. */
+  actAs?: string;
   sleep?: (ms: number) => Promise<void>;
 };
 
@@ -35,12 +37,14 @@ export class FactoryClient {
   private readonly credential: ClientOptions['credential'];
   private readonly doFetch: typeof fetch;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly actAs?: string;
 
   constructor(opts: ClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
     this.credential = opts.credential;
     this.doFetch = opts.fetch ?? fetch;
     this.sleep = opts.sleep ?? defaultSleep;
+    this.actAs = opts.actAs;
   }
 
   private async send(method: string, path: string, body: unknown, refresh: boolean): Promise<FactoryResponse> {
@@ -51,6 +55,7 @@ export class FactoryClient {
       headers: {
         [cred.name]: cred.value,
         accept: 'application/json',
+        ...(this.actAs ? { 'x-factory-act-as': this.actAs } : {}),
         ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),

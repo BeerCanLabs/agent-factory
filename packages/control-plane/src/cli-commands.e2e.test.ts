@@ -99,8 +99,21 @@ describe('§6.17 CL11 commands against the real control plane', () => {
 
   it('CL11 the reads in the list cover every read command there is', () => {
     const covered = new Set([...READS, 'run x'].map((l) => l.split(' ')[0]));
-    const reads = COMMANDS.filter((c) => !['budget', 'factory-budget', 'pause', 'resume', 'isolate', 'wake', 'reset', 'cancel', 'retire', 'reinstate', 'approve', 'reject'].includes(c.name));
+    const reads = COMMANDS.filter((c) => !['budget', 'factory-budget', 'pause', 'resume', 'isolate', 'wake', 'reset', 'cancel', 'retire', 'reinstate', 'approve', 'reject', 'principals', 'grants', 'grant', 'revoke-grant'].includes(c.name));
     assert.deepEqual(reads.filter((c) => !covered.has(c.name)).map((c) => c.name), []);
+  });
+
+  it('S9 people commands are offered only with grants.manage: a viewer is refused, an admin reaches the factory', async () => {
+    const viewer = await as(VIEWER);
+    for (const line of ['principals', 'grants', 'grant user:x viewer', 'revoke-grant g1']) {
+      const out = await viewer.run(line, { yes: true });
+      assert.equal(out.ok, false, `${line}: ${out.output}`);
+      // principals is fleet-only; grant tools are scoped (owners/leads on their own items), so the factory refuses them.
+      if (line === 'principals') assert.match(out.output, /Your roles do not allow/, `${line}: ${out.output}`);
+    }
+    const admin = await as(ADMIN);
+    const out = await admin.run('principals');
+    assert.ok(out.ok || /unavailable|503/.test(out.output), out.output);
   });
 
   it('CL11 --json is valid JSON of the factory\'s own answer', async () => {

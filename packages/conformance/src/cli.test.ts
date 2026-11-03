@@ -109,9 +109,12 @@ describe('§6.17 CL6 the CLI never handles a secret (K5, S1)', () => {
   it('CL6 no CLI source calls the Keymaster, credentials, connections or secret routes', () => {
     for (const f of cliSource) {
       for (const m of routes(f)) {
+        // S9: `factory keys` may list and revoke the person's own keys (no secret is ever returned); never issue or rotate.
+        if (f.endsWith('/cli/src/main.ts') && /^\/api\/v1\/keys(\/\u0001)?$/.test(m)) continue;
         assert.doesNotMatch(m, /keymaster|credentials|connections|secrets?\b|keys\b/i, `${f}: ${m}`);
       }
     }
+    assert.doesNotMatch(code('packages/cli/src/main.ts'), /'POST', [`']\/api\/v1\/keys/, 'S9: the CLI never issues or rotates a key');
   });
 });
 

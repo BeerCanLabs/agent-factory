@@ -15,6 +15,9 @@ import { SkillsView } from './views/SkillsView.js';
 import { SystemsView } from './views/SystemsView.js';
 import { IdentitiesView } from './views/IdentitiesView.js';
 import { ExecutiveOfficeView } from './views/ExecutiveOfficeView.js';
+import { PeopleView } from './views/PeopleView.js';
+import { KeysView } from './views/KeysView.js';
+import { canManagePeople, hasAnyAccess } from './auth/access-gate.js';
 import { DrainModal } from './components/DrainModal.js';
 import { UpdateDrawer } from './components/UpdateDrawer.js';
 import { factoryApi } from './api/client.js';
@@ -34,8 +37,48 @@ function initialLocation(): { screen: ScreenId; agentId?: string } {
 }
 
 
+/** S9: a signed-in person with no grant sees only this, and the console asks the factory for nothing else. */
+const NoAccess: React.FC<{ actor?: string }> = ({ actor }) => {
+  const { actAs, setActAs } = useAuth();
+  return (
+  <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-300">
+    <div className="max-w-md text-center p-8">
+      <h1 className="text-lg font-semibold">No access yet</h1>
+      <p className="text-sm mt-2">{actor ? `You are signed in as ${actor}, but` : 'You are not signed in, or'} this factory has not granted you anything. Ask an admin for a grant.</p>
+      {actAs && <p className="text-sm mt-4">You were acting as {actAs}. <button className="underline" onClick={() => setActAs(null)}>Stop acting as</button></p>}
+      <p className="text-sm mt-4"><a className="underline" href="/login">Sign in as someone else</a></p>
+    </div>
+  </div>
+  );
+};
+
+/** S9: what the factory says applies right now: act-as and break-glass. */
+const Banners: React.FC = () => {
+  const { actAs, setActAs, whoami } = useAuth();
+  return (
+    <>
+      {actAs && (
+        <div className="bg-amber-100 text-amber-900 text-xs px-4 py-2 flex justify-between">
+          <span>Acting as <b>{actAs}</b>. Every action is ledgered as you on their behalf.</span>
+          <button className="underline" onClick={() => setActAs(null)}>Stop acting as</button>
+        </div>
+      )}
+      {Boolean(whoami?.breakGlassAlert) && (
+        <div className="bg-red-100 text-red-900 text-xs px-4 py-2">Break-glass key was used. Rotate it in Your API Keys / People &amp; Access.</div>
+      )}
+    </>
+  );
+};
+
+const Gate: React.FC = () => {
+  const { isLoading, whoami } = useAuth();
+  if (isLoading) return null;
+  if (!hasAnyAccess(whoami)) return <NoAccess actor={whoami?.actor} />;
+  return <MainLayout />;
+};
+
 const MainLayout: React.FC = () => {
-  const { hasRole } = useAuth();
+  const { hasRole, whoami } = useAuth();
   const [initial] = useState(initialLocation);
   const [currentScreen, setCurrentScreen] = useState<ScreenId>(initial.screen);
   const [agents, setAgents] = useState<AgentRecord[]>([]);
@@ -110,6 +153,7 @@ const MainLayout: React.FC = () => {
         onOpenUpdates={() => setIsUpdateDrawerOpen(true)}
       />
 
+      <Banners />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar
           currentScreen={currentScreen}
@@ -163,6 +207,8 @@ const MainLayout: React.FC = () => {
             )
           )}
 
+          {currentScreen === 'people' && canManagePeople(whoami) && <PeopleView />}
+          {currentScreen === 'keys' && <KeysView />}
           {currentScreen === 'models' && <ExecutiveOfficeView />}
           {currentScreen === 'skills' && <SkillsView />}
           {currentScreen === 'systems' && <SystemsView />}
@@ -232,7 +278,7 @@ export const App: React.FC = () => {
   return (
     <ThemeProvider>
       <CloudflareAuthProvider>
-        <MainLayout />
+        <Gate />
       </CloudflareAuthProvider>
     </ThemeProvider>
   );

@@ -99,7 +99,8 @@ export function createConsoleServer(opts: ConsoleOptions): http.Server {
           const email = access ? who.actor.slice('cloudflare:'.length) : who.actor;
           const roles = (who.roles ?? []).filter((x) => ['admin', 'operator', 'approver', 'viewer'].includes(x));
           res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-          res.end(JSON.stringify({ user: { email, name: email, actor: who.actor, roles, provider: access ? 'Cloudflare Access' : 'Factory token' } }));
+          const w = who as { grants?: unknown[]; privileges?: unknown; onBehalfOf?: string; breakGlassAlert?: unknown };
+          res.end(JSON.stringify({ user: { email, name: email, actor: who.actor, roles, provider: access ? 'Cloudflare Access' : 'Factory token' }, whoami: { actor: who.actor, roles, grants: w.grants ?? [], privileges: w.privileges ?? {}, ...(w.onBehalfOf ? { onBehalfOf: w.onBehalfOf } : {}), ...(w.breakGlassAlert ? { breakGlassAlert: w.breakGlassAlert } : {}) } }));
         });
       });
       r.on('error', (err) => {
