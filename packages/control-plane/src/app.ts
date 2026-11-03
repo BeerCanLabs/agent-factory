@@ -4479,7 +4479,7 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
   if (allocMatch && req.method === 'PUT') {
     const principal = await requirePrivilege(req, res, state, 'budget.allocate');
     if (!principal) return;
-    const agentId = decodeURIComponent(allocMatch[1]);
+    const agentId = allocMatch[1];
     const agent = state.agents.get(agentId);
     if (!agent) {
       json(res, 404, { error: 'not_found' });

@@ -159,6 +159,7 @@ describe('S19: budget-owner allocates agent budget outside submission (#365)', {
   it('an unknown agent is 404 and nothing is ledgered', async () => {
     const before = ledger.query({}).length;
     assert.equal((await call('PUT', '/api/v1/budget/agents/nope', TOKENS.budget, { budgetUsd: { perDay: 1 } })).status, 404);
+    assert.equal((await call('PUT', '/api/v1/budget/agents/%E0%A4%A', TOKENS.budget, { budgetUsd: { perDay: 1 } })).status, 404, 'a malformed escape is not a 500');
     assert.equal(ledger.query({}).length, before);
   });
 });
