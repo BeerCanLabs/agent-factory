@@ -332,7 +332,7 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
     typeof raw.subject === 'string' &&
     raw.subject.length <= 320 &&
     !raw.subject.startsWith('fk_') &&
-    /^(?:user|domain|group|service|cloudflare|oidc):[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.-]{1,315}$/.test(raw.subject)
+    /^(?:user|domain|group|service|cloudflare|oidc|token|agent):[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.-]{1,315}$/.test(raw.subject)
   ) {
     event.subject = raw.subject;
   }
