@@ -4473,6 +4473,55 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
     return;
   }
 
+  // S19 (D25, D27, D28): the budget-owner (admin as backup) allocates an agent's AI model budget, outside submission.
+  // Only `budgetUsd` changes: routes and every other policy field stay as they are.
+  const allocMatch = path.match(/^\/api\/v1\/budget\/agents\/([^/]+)$/);
+  if (allocMatch && req.method === 'PUT') {
+    const principal = await requirePrivilege(req, res, state, 'budget.allocate');
+    if (!principal) return;
+    const agentId = decodeURIComponent(allocMatch[1]);
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    if (agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id)) {
+      json(res, 400, { error: 'builtin_agents_exempt_from_budget' });
+      return;
+    }
+    const body = (await readJson(req)) as { budgetUsd?: unknown } | undefined;
+    const b = body && typeof body === 'object' ? (body.budgetUsd as Record<string, unknown> | undefined) : undefined;
+    const keys = b && typeof b === 'object' && !Array.isArray(b) ? Object.keys(b) : [];
+    const valid =
+      keys.length > 0 &&
+      Object.keys(body ?? {}).every((k) => k === 'budgetUsd') &&
+      keys.every((k) => (k === 'perDay' || k === 'perMonth') && typeof b![k] === 'number' && Number.isFinite(b![k] as number) && (b![k] as number) >= 0);
+    if (!valid) {
+      json(res, 400, { error: 'invalid_budget', message: 'body must be { budgetUsd: { perDay?: number >= 0, perMonth?: number >= 0 } } and nothing else' });
+      return;
+    }
+    const current = state.policies.get(agentId) ?? { routes: ['anthropic', 'openai'] };
+    const checked = validatePolicy({ ...current, budgetUsd: { ...current.budgetUsd, ...(b as object) } });
+    if (!checked.ok) {
+      json(res, 400, { error: checked.error });
+      return;
+    }
+    state.policies.set(agentId, checked.policy);
+    unblockAffordableRuns(state, agentId, checked.policy?.budgetUsd, principal.actor);
+    if (agent.state === 'PENDING_BUDGET') agent.state = 'PENDING_DEPLOY';
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'BUDGET_ALLOCATED',
+      actor: principal.actor,
+    });
+    await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, 'budget allocated') });
+    registryOf(state).save(agent);
+    json(res, 200, { agentId, budgetUsd: checked.policy?.budgetUsd ?? {} });
+    return;
+  }
+
   const budgetMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/budget$/);
   if (budgetMatch && req.method === 'PUT') {
     const principal = await requirePrivilege(req, res, state, 'registry.budget.set');
