@@ -84,6 +84,17 @@ describe('A2 console forwards the caller, adds no credential', () => {
     assert.equal(seen[0]['cf-access-jwt-assertion'], 'jwt-for-admin');
   });
 
+  it('S12 AC1: SPA assets need a verified caller; browsers go to /login, other requests get 401', async () => {
+    const nav = await fetch(`http://127.0.0.1:${port}/`, { headers: { accept: 'text/html' }, redirect: 'manual' });
+    assert.equal(nav.status, 302);
+    assert.equal(nav.headers.get('location'), '/login');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/assets/app.js`)).status, 401);
+    const ok = await fetch(`http://127.0.0.1:${port}/assets/app.js`, { headers: { 'cf-access-jwt-assertion': 'signed.jwt' } });
+    assert.ok(ok.status !== 401 && ok.status !== 302, String(ok.status));
+    const login = await fetch(`http://127.0.0.1:${port}/login`);
+    assert.equal(((await login.json()) as { path: string }).path, '/login', 'the login page comes from the control plane');
+  });
+
   it('/healthz returns ok and dynamic console version from package.json', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/healthz`);
     assert.equal(res.status, 200);

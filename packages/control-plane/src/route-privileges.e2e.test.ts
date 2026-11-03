@@ -411,8 +411,12 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     }
     const page = await call(port, 'GET', '/', 'none', undefined, { accept: 'text/html' });
     assert.equal(page.status, 200);
-    assert.match(String(page.body), /Sign in/);
+    assert.match(String(page.body), /Agent Factory/);
     assert.ok(!String(page.body).includes('uptime') && !String(page.body).includes('version'));
+  });
+
+  it('S12: logout needs no credential and only clears the cookie', async () => {
+    for (const cred of CREDENTIALS) assert.equal((await call(port, 'POST', '/api/v1/auth/logout', cred)).status, 200, `logout as ${cred}`);
   });
 
   it('S16 AC2: the private probe listener answers /healthz with 200 and nothing else', async () => {
@@ -431,7 +435,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
   });
 
   it('public routes and the OAuth callback answer every credential alike, and whoami needs only a verified principal', async () => {
-    for (const path of ['/ui', '/.well-known/factory-cli', '/api/v1/connections/p/callback', '/api/v1/keymaster/github-app/callback']) {
+    for (const path of ['/ui', '/login', '/api/v1/auth/oidc/start', '/api/v1/auth/oidc/callback', '/.well-known/factory-cli', '/api/v1/connections/p/callback', '/api/v1/keymaster/github-app/callback']) {
       for (const cred of CREDENTIALS) {
         const r = await call(port, 'GET', path, cred);
         assert.ok(r.status !== 401 && r.status !== 403, `${path} as ${cred}: ${r.status}`);
