@@ -36,12 +36,6 @@ export interface RouteException {
  * their protection mechanisms.
  */
 export const ROUTE_EXCEPTIONS = {
-  'transitional-ui': {
-    id: 'transitional-ui',
-    protection: 'transitional',
-    retiringStory: 'S12',
-    rationale: 'Unauthenticated web UI static assets; S12 restricts /ui to authenticated session cookie',
-  },
   'transitional-cli-discovery': {
     id: 'transitional-cli-discovery',
     protection: 'transitional',
@@ -177,6 +171,26 @@ export const ROUTE_EXCEPTIONS = {
     protection: 'run-token',
     rationale: 'Agent runtime endpoint authenticated via ephemeral run token minted at container start (D18, SV2)',
   },
+  'ui-session': {
+    id: 'ui-session',
+    protection: 'identity-probe',
+    rationale: 'Web UI HTML only for a verified principal (session, key or token); others are redirected to /login (D22, S12)',
+  },
+  'login-start': {
+    id: 'login-start',
+    protection: 'login-page',
+    rationale: 'Begins sign-in with a configured IdP: mints a one-time state and PKCE challenge and redirects; reveals nothing (D19, S12)',
+  },
+  'login-callback': {
+    id: 'login-callback',
+    protection: 'oauth-state-pkce',
+    rationale: 'IdP redirect accepted only with a live one-time state bound to that IdP; code exchanged with the PKCE verifier; email_verified required (R13, D18, S12)',
+  },
+  'logout': {
+    id: 'logout',
+    protection: 'login-page',
+    rationale: 'Ends the caller\'s own session and clears the cookie; a cookie from another origin is refused; without a session it only clears the cookie (S12)',
+  },
   'login-page': {
     id: 'login-page',
     protection: 'login-page',
@@ -219,7 +233,11 @@ export function pathToRegex(pattern: string): RegExp {
  */
 export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   // UI & Health (Transitional)
-  { method: 'GET', pattern: '/ui', exception: 'transitional-ui', description: 'Factory web UI HTML' },
+  { method: 'GET', pattern: '/ui', exception: 'ui-session', description: 'Factory web UI HTML (session-gated, S12)' },
+  { method: 'GET', pattern: '/login', exception: 'login-page', description: 'Factory login page (S12)' },
+  { method: 'GET', pattern: '/api/v1/auth/:idp/start', exception: 'login-start', description: 'Begin IdP sign-in (S12)' },
+  { method: 'GET', pattern: '/api/v1/auth/:idp/callback', exception: 'login-callback', description: 'IdP sign-in callback (S12)' },
+  { method: 'POST', pattern: '/api/v1/auth/logout', exception: 'logout', description: 'Sign out (S12)' },
   { method: 'GET', pattern: '/', exception: 'login-page', description: 'Login page for browsers; health for verified principals' },
   { method: 'GET', pattern: '/healthz', exception: 'health-probe', description: 'Liveness probe' },
   { method: 'GET', pattern: '/api/v1/health', exception: 'health-probe', description: 'Health check probe' },

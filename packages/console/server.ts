@@ -114,7 +114,33 @@ export function createConsoleServer(opts: ConsoleOptions): http.Server {
       return proxy(req, res, new URL(pathname + parsedUrl.search, cp));
     }
 
-    // 4. Static file serving (SPA)
+    // 4. The factory's own login page (S12) comes from the control plane, with its own minimal inline assets.
+    if (pathname === '/login') {
+      return proxy(req, res, new URL(pathname + parsedUrl.search, cp));
+    }
+
+    // 5. SPA assets only for a caller the control plane verifies (S12, D22): HTML navigations go to /login, the rest 401.
+    return verifyCaller(req, (ok) => {
+      if (ok) return serveStatic(pathname, res);
+      const html = String(req.headers.accept ?? '').includes('text/html');
+      res.writeHead(html ? 302 : 401, html ? { Location: '/login', 'Cache-Control': 'no-store' } : { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(html ? '' : JSON.stringify({ error: 'unauthorized' }));
+    });
+  });
+
+  function verifyCaller(req: http.IncomingMessage, done: (ok: boolean) => void) {
+    const target = new URL('/api/v1/whoami', cp);
+    const headers = { ...req.headers, host: target.host };
+    delete headers['content-length'];
+    const r = http.request(target, { method: 'GET', headers }, (cpRes) => {
+      cpRes.resume();
+      cpRes.on('end', () => done(cpRes.statusCode === 200));
+    });
+    r.on('error', () => done(false));
+    r.end();
+  }
+
+  function serveStatic(pathname: string, res: http.ServerResponse) {
     let filePath = path.join(clientDir, path.normalize(pathname));
     if (!filePath.startsWith(clientDir) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
       filePath = path.join(clientDir, 'index.html');
@@ -134,7 +160,7 @@ export function createConsoleServer(opts: ConsoleOptions): http.Server {
       });
       res.end(content);
     });
-  });
+  }
 }
 
 // Run as the entry point (`tsx server.ts`); imported by tests without listening.
