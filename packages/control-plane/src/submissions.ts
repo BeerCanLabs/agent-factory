@@ -159,6 +159,35 @@ function holds(state: FactoryState, principal: Principal, privilege: Privilege):
 /** What a submitter or admitter sees. */
 const view = (s: Submission) => s;
 
+/**
+ * Creates a pending draft and runs the gates: the one entry point for `POST /submissions` and the S21 interview, so an
+ * interview draft is exactly as untrusted as any other.
+ */
+export async function createSubmission(state: FactoryState, principal: Principal, kind: 'agent' | 'skill', input: Record<string, unknown>): Promise<Submission> {
+  const raw = { ...input };
+  const stripped = BUDGET_FIELDS.filter((f) => f in raw);
+  for (const f of stripped) delete raw[f];
+  delete raw.actAs;
+  delete raw.onBehalfOf;
+  const content = kind === 'skill' ? { skillId: raw.skillId, version: raw.version } : raw;
+  const sub: Submission = {
+    id: `sub_${randomUUID()}`,
+    kind,
+    submitter: principal.onBehalfOf ?? principal.actor,
+    ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}),
+    content,
+    ...(stripped.length ? { strippedFields: stripped } : {}),
+    status: 'pending',
+    gates: { security: { state: 'pending' }, compliance: { state: 'pending' }, budget: { state: 'pending' } },
+    createdAt: new Date().toISOString(),
+  };
+  ledger(state, sub, 'CONTENT_SUBMITTED', principal.actor);
+  await evaluate(state, sub, 'factory:gates');
+  store(state).all.set(sub.id, sub);
+  save(state);
+  return sub;
+}
+
 const ONE = /^\/api\/v1\/submissions\/([^/]+)$/;
 const ADMIT = /^\/api\/v1\/submissions\/([^/]+)\/admit$/;
 const ALLOCATE = /^\/api\/v1\/budget\/submissions\/([^/]+)$/;
@@ -178,28 +207,7 @@ export async function handleSubmissions(state: FactoryState, req: http.IncomingM
       json(res, 400, { error: 'invalid_content', message: 'content must be an object' });
       return true;
     }
-    const stripped = BUDGET_FIELDS.filter((f) => f in raw);
-    for (const f of stripped) delete raw[f];
-    // The submitter is who the draft's ownership resolves to; an admin acting as someone submits as them.
-    delete raw.actAs;
-    delete raw.onBehalfOf;
-    const content = kind === 'skill' ? { skillId: raw.skillId, version: raw.version } : raw;
-    const sub: Submission = {
-      id: `sub_${randomUUID()}`,
-      kind,
-      submitter: principal.onBehalfOf ?? principal.actor,
-      ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}),
-      content,
-      ...(stripped.length ? { strippedFields: stripped } : {}),
-      status: 'pending',
-      gates: { security: { state: 'pending' }, compliance: { state: 'pending' }, budget: { state: 'pending' } },
-      createdAt: new Date().toISOString(),
-    };
-    ledger(state, sub, 'CONTENT_SUBMITTED', principal.actor);
-    await evaluate(state, sub, 'factory:gates');
-    store(state).all.set(sub.id, sub);
-    save(state);
-    json(res, 201, view(sub));
+    json(res, 201, view(await createSubmission(state, principal, kind, raw)));
     return true;
   }
 

@@ -197,4 +197,31 @@ describe('S20: content submission and admission gates (#366)', { concurrency: fa
     assert.equal(steph.body.submitter, 'user:steph');
     assert.equal((await call('POST', '/api/v1/submissions', undefined, draft('x'))).status, 401);
   });
+
+  it('S21: a finished interview becomes a pending S20 draft that runs the same three gates and needs the same admission', async () => {
+    const steps = await call('GET', '/api/v1/submissions/interview', 'steph');
+    assert.equal(steps.status, 200);
+    assert.ok(steps.body.steps.length >= 4);
+    const answers = { name: 'Recipe Bot', kind: 'personal', purpose: 'Plans weekly dinners for the family.' };
+    const bad = await call('POST', '/api/v1/submissions/interview', 'steph', { answers: { name: 'Recipe Bot' }, finalize: true });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error, 'interview_incomplete');
+    const preview = await call('POST', '/api/v1/submissions/interview', 'steph', { answers });
+    assert.equal(preview.status, 200);
+    assert.equal(preview.body.preview.id, 'recipe-bot');
+    assert.equal((await call('GET', '/api/v1/submissions', 'steph')).body.submissions.filter((x: any) => x.content.id === 'recipe-bot').length, 0, 'a preview stores nothing');
+    const done = await call('POST', '/api/v1/submissions/interview', 'steph', { answers, finalize: true });
+    assert.equal(done.status, 201, JSON.stringify(done.body));
+    assert.equal(done.body.status, 'pending');
+    assert.equal(done.body.submitter, 'user:steph');
+    assert.equal(done.body.gates.security.state, 'passed');
+    assert.equal(done.body.gates.compliance.state, 'passed');
+    assert.equal(done.body.gates.budget.state, 'pending');
+    assert.equal((await call('POST', `/api/v1/submissions/${done.body.id}/admit`, 'approver', {})).status, 409, 'no bypass of the budget gate');
+    await call('PUT', `/api/v1/budget/submissions/${done.body.id}`, 'bea', { budgetUsd: { perDay: 2 } });
+    assert.equal((await call('POST', `/api/v1/submissions/${done.body.id}/admit`, 'steph', {})).status, 403, 'the interviewee cannot admit');
+    assert.equal((await call('POST', `/api/v1/submissions/${done.body.id}/admit`, 'approver', {})).status, 200);
+    assert.ok(state.agents.has('recipe-bot'));
+  });
 });
+

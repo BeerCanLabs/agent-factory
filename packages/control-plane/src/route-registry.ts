@@ -354,6 +354,8 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'GET', pattern: '/api/v1/registry/agents', privilege: 'agents.read', description: 'List agent catalog' },
   { method: 'POST', pattern: '/api/v1/registry/agents', privilege: 'registry.register', description: 'Register new cartridge agent' },
   { method: 'GET', pattern: '/api/v1/registry/agents/:id', privilege: 'agents.read', description: 'Get agent catalog entry' },
+  { method: 'GET', pattern: '/api/v1/submissions/interview', privilege: 'content.submit', description: 'Interview questions (S21)' },
+  { method: 'POST', pattern: '/api/v1/submissions/interview', privilege: 'content.submit', description: 'Preview or finalize an interview draft into an S20 submission (S21)' },
   { method: 'POST', pattern: '/api/v1/submissions', privilege: 'content.submit', description: 'Submit an agent or skill draft (S20)' },
   { method: 'GET', pattern: '/api/v1/submissions', privilege: 'content.submit', description: 'List own (or, for approvers, all) submissions (S20)' },
   { method: 'GET', pattern: '/api/v1/submissions/:id', privilege: 'content.submit', description: 'Read a submission (S20)' },
