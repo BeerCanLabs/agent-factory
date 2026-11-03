@@ -3,6 +3,7 @@ import type { EffectiveGrant } from './grants.js';
 import {
   AGENT_SCOPED,
   DERIVED_ROLE_PRIVILEGES,
+  FLEET_GRANT_ROLE_PRIVILEGES,
   ROLE_PRIVILEGES,
   SKILL_CONTENT_OWNER_READONLY_PRIVILEGES,
   SKILL_SCOPED,
@@ -72,7 +73,8 @@ function authorizeUnscoped(req: AuthorizeRequest): AuthorizeResult {
   if (resource?.grants) {
     for (const eg of resource.grants) {
       if (!eg.readOnly && eg.grant.scope.kind === 'fleet') {
-        const fleetPrivs = ROLE_PRIVILEGES[eg.grant.role as Role];
+        const fleetPrivs =
+          ROLE_PRIVILEGES[eg.grant.role as Role] ?? FLEET_GRANT_ROLE_PRIVILEGES[eg.grant.role as keyof typeof FLEET_GRANT_ROLE_PRIVILEGES];
         if (fleetPrivs?.includes(privilege)) return { allowed: true };
       }
     }

@@ -318,6 +318,7 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'GET', pattern: '/api/v1/registry/agents', privilege: 'agents.read', description: 'List agent catalog' },
   { method: 'POST', pattern: '/api/v1/registry/agents', privilege: 'registry.register', description: 'Register new cartridge agent' },
   { method: 'GET', pattern: '/api/v1/registry/agents/:id', privilege: 'agents.read', description: 'Get agent catalog entry' },
+  { method: 'PUT', pattern: '/api/v1/budget/agents/:id', privilege: 'budget.allocate', description: 'Allocate agent AI model budget (S19)' },
   { method: 'PUT', pattern: '/api/v1/registry/agents/:id/budget', privilege: 'registry.budget.set', description: 'Set agent budget limit' },
   { method: 'POST', pattern: '/api/v1/registry/agents/:id/retire', privilege: 'registry.retire', description: 'Retire agent cartridge' },
   { method: 'POST', pattern: '/api/v1/registry/agents/:id/reinstate', privilege: 'registry.reinstate', description: 'Reinstate retired agent' },
