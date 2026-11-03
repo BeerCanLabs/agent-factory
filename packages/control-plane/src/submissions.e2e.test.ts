@@ -149,7 +149,7 @@ describe('S20: content submission and admission gates (#366)', { concurrency: fa
   });
 
   it('a draft carrying a credential fails the security scan and is never admitted, even with budget', async () => {
-    const sub = await call('POST', '/api/v1/submissions', 'vic', draft('leaky', { soul: 'Use key AKIAABCDEFGHIJKLMNOP.' }));
+    const sub = await call('POST', '/api/v1/submissions', 'vic', draft('leaky', { soul: 'Use key AKIAABCDEFGHIJKLMNOP.' })); // secret-scan:allow (test fixture: a fake AWS key shape the scan must refuse)
     assert.equal(sub.body.gates.security.state, 'failed');
     await call('PUT', `/api/v1/budget/submissions/${sub.body.id}`, 'bea', { budgetUsd: { perDay: 1 } });
     assert.equal((await call('POST', `/api/v1/submissions/${sub.body.id}/admit`, 'approver', {})).status, 409);
