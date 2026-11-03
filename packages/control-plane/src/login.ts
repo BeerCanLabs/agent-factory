@@ -106,6 +106,7 @@ function sameOrigin(state: FactoryState, req: http.IncomingMessage): boolean {
   if (!origin) return false;
   const allowed = new Set<string>();
   if (state.publicBaseUrl) allowed.add(safeOrigin(state.publicBaseUrl) ?? '');
+  if (state.loginBaseUrl) allowed.add(safeOrigin(state.loginBaseUrl) ?? '');
   if (req.headers.host) for (const p of ['https', 'http']) allowed.add(`${p}://${req.headers.host}`);
   return allowed.has(String(origin));
 }
@@ -180,7 +181,9 @@ function provider(state: FactoryState, id: string): IdpProvider | undefined {
   return state.idpConfig?.get().providers.find((p) => p.id === id);
 }
 
-const callbackUrl = (state: FactoryState, idp: string) => `${state.publicBaseUrl!.replace(/\/$/, '')}/api/v1/auth/${idp}/callback`;
+/** Sign-in callbacks land on the host people browse (the console), so its session cookie is set there (S12). */
+const loginBase = (state: FactoryState) => state.loginBaseUrl || state.publicBaseUrl;
+const callbackUrl = (state: FactoryState, idp: string) => `${loginBase(state)!.replace(/\/$/, '')}/api/v1/auth/${idp}/callback`;
 
 function ledger(state: FactoryState, action: 'SIGN_IN' | 'SIGN_OUT', email: string, idp: string): void {
   state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'control-plane', type: 'action', action, actor: `oidc:${email}`, subject: `idp:${idp}` });
@@ -210,7 +213,7 @@ export async function handleLoginRoutes(state: FactoryState, req: http.IncomingM
 async function resolveIdp(state: FactoryState, res: http.ServerResponse, id: string): Promise<{ p: IdpProvider; ep: Endpoints } | undefined> {
   const p = provider(state, id);
   if (!p) return void json(res, 404, { error: 'unknown_idp' });
-  if (!state.publicBaseUrl) return void json(res, 503, { error: 'login_unconfigured', message: 'FACTORY_PUBLIC_BASE_URL is required' });
+  if (!loginBase(state)) return void json(res, 503, { error: 'login_unconfigured', message: 'FACTORY_PUBLIC_BASE_URL is required' });
   const ep = await endpointsFor(state, p).catch(() => undefined);
   if (!ep) return void json(res, 502, { error: 'idp_unreachable' });
   return { p, ep };

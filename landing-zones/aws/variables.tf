@@ -357,3 +357,9 @@ variable "shared_runtime_repo" {
   type        = string
   default     = "https://github.com/BeerCanLabs/agent-factory"
 }
+
+variable "factory_login_base_url" {
+  description = "Origin people browse to sign in (the console host), e.g. https://console.example.com. Sign-in callbacks are <this>/api/v1/auth/<idp>/callback, so the session cookie lands on that host. Empty uses factory_public_base_url."
+  type        = string
+  default     = ""
+}

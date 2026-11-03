@@ -263,6 +263,7 @@ const state: FactoryState = {
   sharedRuntime: loadSharedRuntime(REGISTRY_DIR, process.env),
   callbacks: callbackPolicyFromEnv(),
   publicBaseUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
+  loginBaseUrl: process.env.FACTORY_LOGIN_BASE_URL || undefined,
   publicUrl: process.env.FACTORY_PUBLIC_URL || process.env.FACTORY_URL || 'http://control-plane.factory.internal:8088',
   gatekeeperEgressUrl: process.env.FACTORY_GATEKEEPER_EGRESS_URL,
   gatekeeperEgressToken: process.env.FACTORY_GATEKEEPER_EGRESS_TOKEN,

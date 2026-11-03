@@ -114,6 +114,7 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_PUBLIC_URL", value = local.cp_url },
         # §6.11: where people's browsers reach the factory (OAuth consent callbacks and reconnect links).
         { name = "FACTORY_PUBLIC_BASE_URL", value = var.factory_public_base_url },
+        { name = "FACTORY_LOGIN_BASE_URL", value = var.factory_login_base_url },
         { name = "FACTORY_GATEKEEPER_EGRESS_URL", value = local.gatekeeper_egress_url },
         # Where factory-registered agents keep their minds and send logs (aws/ecs.ts registers their task definitions).
         { name = "FACTORY_MIND_BUCKET", value = aws_s3_bucket.mind.bucket },
