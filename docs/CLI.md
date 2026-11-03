@@ -105,7 +105,7 @@ Tools: list and inspect agents, factory metrics, spend (by agent, the monthly re
 
 Left to the console on purpose: registering, deploying and purging agents, and anything that supplies or reads a credential (CL6, K5). Nothing sensitive is shown in the terminal or sent to the manager; values under secret-looking names are hidden.
 
-To talk to the manager at all you need the `agents.converse` privilege, which the Bouncer gives the `operator` role. Today a person who signs in through Cloudflare Access is an admin if their email is in `FACTORY_ADMIN_EMAILS` and a viewer otherwise (`packages/auth/src/access.ts`), so **only admins can use the manager yet**. A viewer who tries is told what role is missing. Giving other people the operator role is a Bouncer and Access question, not a CLI one (GAP-190, open).
+To talk to the manager at all you need the `agents.converse` privilege, which the Bouncer gives the `operator` role. A person who signs in holds exactly the roles their factory grants give them (S11; `FACTORY_ADMIN_EMAILS` is no longer read). A viewer who tries is told what role is missing. Giving other people the operator role is a Bouncer and Access question, not a CLI one (GAP-190, open).
 
 ## Setting up the manager
 
@@ -113,7 +113,7 @@ The Factory Manager is optional house staff (`agents/staff/factory-manager`, L2,
 
 1. Register and deploy the cartridge as you would any other (see `agents/staff/factory-manager/README.md`).
 2. Set its policy (E7): grant the `models` route, a model, and a small daily budget. It makes a few model calls per question.
-3. The people who should use it need the `operator` role, which today means being in `FACTORY_ADMIN_EMAILS` (see above).
+3. The people who should use it need the `operator` role, which an admin grants with `factory grant` (see above).
 
 Every model call it makes is metered through the gatekeeper-egress and charged to its own budget.
 

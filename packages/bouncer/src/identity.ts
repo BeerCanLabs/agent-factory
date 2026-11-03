@@ -351,7 +351,7 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
 
   // Resolve roles:
   // 1. Explicit link roles if set
-  // 2. Admin if email listed in FACTORY_ADMIN_EMAILS
+  // 2. Admin if the caller passed this email in adminEmails (S11: the control plane no longer does)
   // 3. Clean slate mapping: zero grandfathering for un-roled legacy links.
   //    External callers without explicit roles have no roles assigned and must be granted roles by an admin.
   const resolvedRoles: readonly Role[] =

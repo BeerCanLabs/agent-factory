@@ -2686,31 +2686,17 @@ describe('Bouncer: one authorization rule', () => {
   });
 });
 
-// S4 AC2 (R1, D4): roles come from grants. The legacy env role lists are read only by the migration sources the S8
-// importer converts and S10 deletes at cutover; any other read fails this suite.
-describe('no env-based role reads outside the migration sources (S4)', () => {
-  const MIGRATION_SOURCES = new Set([
-    'packages/control-plane/src/legacy-env-roles.ts',
-    // The legacy authenticator that turns FACTORY_TOKENS bearers and FACTORY_ADMIN_EMAILS identities into callers
-    // until keys (S5/S6) and the S8 import replace them.
-    'packages/auth/src/index.ts',
-    'packages/auth/src/access.ts',
-  ]);
+// S4 AC2 / S11 AC2 (R1, R10, D4, D8): roles come from grants only. After cutover nothing in packages/ reads the legacy
+// env role lists; any read fails this suite.
+describe('no env-based role reads (S4, S11)', () => {
   const ENV_READ = /(\benv\s*(\.|\[\s*['"`])\s*(FACTORY_ADMIN_EMAILS|FACTORY_TOKENS)\b)|(\{[^}]*\b(FACTORY_ADMIN_EMAILS|FACTORY_TOKENS)\b[^}]*\}\s*=\s*[\w.]*env\b)/;
 
-  it('no module outside the migration sources reads FACTORY_ADMIN_EMAILS or FACTORY_TOKENS', () => {
-    const offenders = nonTest(/^packages\/[^/]+\/src\/.*\.(ts|tsx|js|mjs)$/)
-      .filter((p) => !MIGRATION_SOURCES.has(p))
-      .flatMap((p) =>
-        code(read(p))
-          .split('\n')
-          .flatMap((line, i) => (ENV_READ.test(line) ? [`${p}:${i + 1}: ${line.trim()}`] : [])),
-      );
-    assert.deepEqual(offenders, [], 'read legacy roles through packages/control-plane/src/legacy-env-roles.ts');
-  });
-
-  it('every migration source still exists, so the allow-list cannot hide a rename', () => {
-    const all = new Set(files('packages', () => true));
-    for (const p of MIGRATION_SOURCES) assert.ok(all.has(p), `${p} is missing; update MIGRATION_SOURCES`);
+  it('S11 AC2: no module reads FACTORY_ADMIN_EMAILS or FACTORY_TOKENS', () => {
+    const offenders = nonTest(/^packages\/[^/]+\/src\/.*\.(ts|tsx|js|mjs)$/).flatMap((p) =>
+      code(read(p))
+        .split('\n')
+        .flatMap((line, i) => (ENV_READ.test(line) ? [`${p}:${i + 1}: ${line.trim()}`] : [])),
+    );
+    assert.deepEqual(offenders, [], 'grants decide; the legacy env role lists were imported at cutover (S8/S10)');
   });
 });

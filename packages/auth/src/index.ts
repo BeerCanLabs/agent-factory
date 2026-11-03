@@ -201,7 +201,7 @@ export function oidcAuth(opts: OidcOptions): AuthProvider {
       }
       const email = typeof payload.email === 'string' ? payload.email : undefined;
       const roles = asRoles(payload[claim], opts.roleMap);
-      // No built-in admins: only the deployment names them (FACTORY_ADMIN_EMAILS).
+      // No built-in admins: S11 grants decide; a caller may still pass adminEmails explicitly.
       const adminList = opts.adminEmails ?? [];
       if (email && adminList.some((e) => e.toLowerCase() === email.toLowerCase())) {
         if (!roles.includes('admin')) roles.push('admin');
@@ -240,21 +240,9 @@ export function insecureNoAuth(): AuthProvider {
   };
 }
 
-function parseTokens(raw: string | undefined): NamedToken[] {
-  if (!raw) return [];
-  const parsed = JSON.parse(raw) as Array<{ name?: string; token?: string; roles?: unknown }>;
-  if (!Array.isArray(parsed)) throw new Error('FACTORY_TOKENS must be a JSON array');
-  return parsed.map((t, i) => {
-    if (!t.name || !t.token) throw new Error(`FACTORY_TOKENS[${i}] needs name and token`);
-    const roles = asRoles(t.roles);
-    if (!roles.length) throw new Error(`FACTORY_TOKENS[${i}] has no valid roles`);
-    return { name: t.name, token: t.token, roles };
-  });
-}
-
 /**
  * Fails closed: with nothing configured this throws. Configure any of
- *  - FACTORY_TOKEN (admin bearer) and/or FACTORY_TOKENS (JSON [{name, token, roles}])
+ *  - FACTORY_TOKEN (admin bearer). S11: FACTORY_TOKENS and FACTORY_ADMIN_EMAILS are no longer read; grants decide.
  *  - FACTORY_OIDC_ISSUER + FACTORY_OIDC_AUDIENCE (+ FACTORY_OIDC_JWKS_URL, _ROLES_CLAIM, _ROLE_MAP)
  * FACTORY_AUTH=none is honored only together with FACTORY_INSECURE_NO_AUTH=1.
  */
@@ -266,17 +254,13 @@ export function authFromEnv(env: NodeJS.ProcessEnv = process.env): AuthProvider 
     return insecureNoAuth();
   }
   const providers: AuthProvider[] = [];
-  const tokens = parseTokens(env.FACTORY_TOKENS);
+  const tokens: NamedToken[] = [];
   if (env.FACTORY_TOKEN) tokens.push({ name: 'admin', token: env.FACTORY_TOKEN, roles: ['admin'] });
   if (tokens.length) providers.push(bearerAuth(tokens));
   if (env.FACTORY_OIDC_ISSUER || env.FACTORY_OIDC_AUDIENCE) {
     if (!env.FACTORY_OIDC_ISSUER || !env.FACTORY_OIDC_AUDIENCE) {
       throw new Error('OIDC needs both FACTORY_OIDC_ISSUER and FACTORY_OIDC_AUDIENCE');
     }
-    const adminEmails = (env.FACTORY_ADMIN_EMAILS ?? '')
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
     providers.push(
       oidcAuth({
         issuer: env.FACTORY_OIDC_ISSUER,
@@ -284,12 +268,11 @@ export function authFromEnv(env: NodeJS.ProcessEnv = process.env): AuthProvider 
         jwksUrl: env.FACTORY_OIDC_JWKS_URL || undefined,
         rolesClaim: env.FACTORY_OIDC_ROLES_CLAIM || undefined,
         roleMap: env.FACTORY_OIDC_ROLE_MAP ? (JSON.parse(env.FACTORY_OIDC_ROLE_MAP) as Record<string, Role>) : undefined,
-        adminEmails,
       }),
     );
   }
   if (!providers.length) {
-    throw new Error('no auth configured: set FACTORY_TOKEN/FACTORY_TOKENS or FACTORY_OIDC_ISSUER+AUDIENCE');
+    throw new Error('no auth configured: set FACTORY_TOKEN or FACTORY_OIDC_ISSUER+AUDIENCE');
   }
   return providers.length === 1 ? providers[0] : anyAuth(providers);
 }

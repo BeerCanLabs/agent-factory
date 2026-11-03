@@ -230,7 +230,7 @@ export function cloudflareAccessAuth(opts: AccessOptions): AccessAuth {
 
 /**
  * FACTORY_ACCESS_TEAM_DOMAIN + FACTORY_ACCESS_AUD (comma-separated for several applications) enable Access identity;
- * FACTORY_ADMIN_EMAILS names the admins. Both unset or empty: Access identity is disabled (undefined) and only
+ * Admins come from grants (S11), not env. Both unset or empty: Access identity is disabled (undefined) and only
  * factory credentials work. Exactly one set is a configuration error.
  */
 export function accessAuthFromEnv(env: NodeJS.ProcessEnv = process.env): AccessAuth | undefined {
@@ -241,7 +241,6 @@ export function accessAuthFromEnv(env: NodeJS.ProcessEnv = process.env): AccessA
   return cloudflareAccessAuth({
     teamDomain: team,
     audience: aud,
-    adminEmails: (env.FACTORY_ADMIN_EMAILS ?? '').split(','),
   });
 }
 

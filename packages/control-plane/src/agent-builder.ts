@@ -23,27 +23,18 @@ import type { Run } from '@beercanlabs/factory-property-manager';
 import { effectiveGrantsForActor, json, readJson, type FactoryState } from './app.js';
 import { createFromConfiguration, discardCreated, resolveAgentOwnershipOnSubmit, type ResolvedAgentOwnership } from './agent-creation.js';
 import { adoptContextForAgent, skillRegistry, adoptionStore, requestAdoptionFor, activeDefaultSkills } from './skills.js';
-import { legacyAdminEmails, legacyTokenRoles } from './legacy-env-roles.js';
 
 export const ARCHETYPES = ['purpose-built', 'personal-assistant', 'team-member'] as const;
-
-function adminEmailsFromEnv(): string[] {
-  return legacyAdminEmails();
-}
 
 function tokenRolesFromEnv(tokenName: string): Role[] | undefined {
   if (tokenName === 'admin') return ['admin'];
   if (tokenName === 'operator') return ['operator'];
-  return legacyTokenRoles(tokenName);
+  return undefined;
 }
 
 function enrichRoles(state: FactoryState, actor: string, roles: Set<Role>): void {
   const lower = actor.toLowerCase();
   if (lower.startsWith('cloudflare:')) {
-    const email = lower.slice('cloudflare:'.length).trim();
-    if (adminEmailsFromEnv().includes(email)) {
-      roles.add('admin');
-    }
   }
   if (lower.startsWith('token:')) {
     const tokenName = lower.slice('token:'.length).trim();
@@ -55,10 +46,6 @@ function enrichRoles(state: FactoryState, actor: string, roles: Set<Role>): void
   const link = state.identityLinks?.list().find((l) => l.actor.toLowerCase() === lower);
   if (link) {
     for (const r of link.roles ?? []) roles.add(r);
-    const email = lower.startsWith('cloudflare:') ? lower.slice('cloudflare:'.length).trim() : '';
-    if (email && adminEmailsFromEnv().includes(email)) {
-      roles.add('admin');
-    }
   }
   if (state.grants) {
     if (!state.grants.healthy) {

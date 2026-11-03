@@ -213,16 +213,16 @@ describe('authFromEnv', () => {
     assert.equal(authFromEnv({ FACTORY_AUTH: 'none', FACTORY_INSECURE_NO_AUTH: '1' }).name, 'none');
   });
 
-  it('combines service tokens with OIDC', () => {
+  it('combines the admin token with OIDC', () => {
     const auth = authFromEnv({
-      FACTORY_TOKENS: JSON.stringify([{ name: 'gatekeeper-ingress', token: 't', roles: ['operator'] }]),
+      FACTORY_TOKEN: 't',
       FACTORY_OIDC_ISSUER: ISS,
       FACTORY_OIDC_AUDIENCE: AUD,
     });
     assert.equal(auth.name, 'bearer+oidc');
   });
 
-  it('rejects tokens with no valid roles', () => {
-    assert.throws(() => authFromEnv({ FACTORY_TOKENS: JSON.stringify([{ name: 'x', token: 't', roles: ['root'] }]) }));
+  it('S11: FACTORY_TOKENS is no longer read, so it alone configures no auth', () => {
+    assert.throws(() => authFromEnv({ FACTORY_TOKENS: JSON.stringify([{ name: 'x', token: 't', roles: ['admin'] }]) }), /no auth configured/);
   });
 });

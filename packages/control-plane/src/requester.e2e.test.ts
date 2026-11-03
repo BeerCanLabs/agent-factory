@@ -455,15 +455,14 @@ describe('the requesting user on the run (TSK-106)', { concurrency: false }, () 
     assert.equal(rBob.body.error, 'unauthorized_caller');
   });
 
-  it('resolves roles via FACTORY_ADMIN_EMAILS and enforces clean slate (un-roled non-admin rejected)', async () => {
+  it('S11: FACTORY_ADMIN_EMAILS no longer grants admin; clean slate for un-roled links', async () => {
     const oldEnv = process.env.FACTORY_ADMIN_EMAILS;
     process.env.FACTORY_ADMIN_EMAILS = 'admin@example.com';
     try {
-      // Un-roled link for email in FACTORY_ADMIN_EMAILS -> admin
+      // S11: an un-roled link for an email still in FACTORY_ADMIN_EMAILS is no longer admin; grants decide
       state.identityLinks!.link('discord', 'admin-id', 'cloudflare:admin@example.com', 'admin');
       const rAdmin = await wake(INGRESS, { input: { messageId: 'm-leg1' }, requestedBy: discord('admin-id') });
-      assert.equal(rAdmin.status, 202);
-      assert.equal(rAdmin.body.caller.role, 'admin');
+      assert.equal(rAdmin.status, 403);
 
       // Un-roled link for email NOT in FACTORY_ADMIN_EMAILS -> rejected with 403 (clean slate: zero grandfathering)
       state.identityLinks!.link('discord', 'unroled-id', 'cloudflare:other@example.com', 'admin');
