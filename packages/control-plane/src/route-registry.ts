@@ -186,6 +186,11 @@ export const ROUTE_EXCEPTIONS = {
     protection: 'oauth-state-pkce',
     rationale: 'IdP redirect accepted only with a live one-time state bound to that IdP; code exchanged with the PKCE verifier; email_verified required (R13, D18, S12)',
   },
+  'login-cli-token': {
+    id: 'login-cli-token',
+    protection: 'oauth-state-pkce',
+    rationale: 'CLI loopback exchange: a one-time code minted after a verified browser sign-in plus the CLI PKCE verifier yields the person\'s own cli key (S13)',
+  },
   'logout': {
     id: 'logout',
     protection: 'login-page',
@@ -237,6 +242,7 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'GET', pattern: '/login', exception: 'login-page', description: 'Factory login page (S12)' },
   { method: 'GET', pattern: '/api/v1/auth/:idp/start', exception: 'login-start', description: 'Begin IdP sign-in (S12)' },
   { method: 'GET', pattern: '/api/v1/auth/:idp/callback', exception: 'login-callback', description: 'IdP sign-in callback (S12)' },
+  { method: 'POST', pattern: '/api/v1/auth/cli/token', exception: 'login-cli-token', description: 'CLI key exchange after browser sign-in (S13)' },
   { method: 'POST', pattern: '/api/v1/auth/logout', exception: 'logout', description: 'Sign out (S12)' },
   { method: 'GET', pattern: '/', exception: 'login-page', description: 'Login page for browsers; health for verified principals' },
   { method: 'GET', pattern: '/healthz', exception: 'health-probe', description: 'Liveness probe' },

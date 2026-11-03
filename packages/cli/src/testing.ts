@@ -31,6 +31,8 @@ export function fakeFactory(token = 'good-token'): FakeFactory {
     const method = init?.method ?? 'GET';
     f.seen.push({ method, path: url.pathname + url.search, headers, body });
     const authed = headers['cf-access-token'] === f.token || Boolean(headers.authorization && f.acceptBearer?.(headers.authorization));
+    const pub = url.pathname.startsWith('/api/v1/auth/') ? f.routes.get(`${method} ${url.pathname}`) : undefined; // pre-credential sign-in routes (S13)
+    if (pub) { const out = pub(body); return json(out.status, out.body); }
     if (!authed) return new Response(null, { status: 302, headers: { location: 'https://example.cloudflareaccess.com/cdn-cgi/access/login/f.example.com' } });
     if (url.pathname === '/api/v1/whoami') return json(200, { actor: 'access:dale@example.com', roles: f.roles });
     const custom = f.routes.get(`${method} ${url.pathname}`);

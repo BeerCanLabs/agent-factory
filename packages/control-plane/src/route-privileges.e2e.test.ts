@@ -422,6 +422,10 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     for (const cred of CREDENTIALS) assert.equal((await call(port, 'POST', '/api/v1/auth/logout', cred)).status, 200, `logout as ${cred}`);
   });
 
+  it('S13: the CLI key exchange needs no credential and refuses a code it never issued', async () => {
+    for (const cred of CREDENTIALS) assert.equal((await call(port, 'POST', '/api/v1/auth/cli/token', cred, { code: 'never-issued-code-0123', verifier: 'v' })).status, 400, `cli token as ${cred}`);
+  });
+
   it('S16 AC2: the private probe listener answers /healthz with 200 and nothing else', async () => {
     const { createProbeServer } = await import('./app.js');
     const probe = createProbeServer();

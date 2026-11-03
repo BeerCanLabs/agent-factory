@@ -91,10 +91,10 @@ describe('§6.17 CL9 sign-in methods and discovery', () => {
     assert.match(oidc, /url\.pathname !== '\/callback'/);
   });
 
-  it('CL9 only the OIDC session sends an Authorization header, and only the token it was given by the provider', () => {
+  it('CL9 only the OIDC session and the factory-key session (S13) send an Authorization header', () => {
     for (const f of cliSource) {
       const hit = /name: 'authorization'/.test(code(f));
-      assert.equal(hit, f.endsWith('/oidc.ts'), `${f}: an Authorization credential outside the OIDC session`);
+      assert.equal(hit, f.endsWith('/oidc.ts') || f.endsWith('/cli/src/login.ts'), `${f}: an Authorization credential outside the OIDC or factory-key session`);
     }
     assert.match(oidc, /value: `Bearer \$\{s\.token\}`/);
   });

@@ -808,7 +808,7 @@ export function canRunManageModels(
 
 const AUTH_ROLE_SET_APP: ReadonlySet<string> = new Set<string>(ROLES);
 
-async function resolveVerifiedPrincipal(
+export async function resolveVerifiedPrincipal(
   state: FactoryState,
   verified: Principal,
   allowMaterialize: boolean,

@@ -1,8 +1,8 @@
 /** A way of signing a person in and the credential it yields (§6.17 CL1, CL9). */
 export type Credential = { name: string; value: string };
 
-export type SignInMethod = 'cloudflare-access' | 'oidc';
-export const SIGN_IN_METHODS: readonly SignInMethod[] = ['cloudflare-access', 'oidc'];
+export type SignInMethod = 'cloudflare-access' | 'oidc' | 'factory';
+export const SIGN_IN_METHODS: readonly SignInMethod[] = ['cloudflare-access', 'oidc', 'factory'];
 
 export interface Session {
   readonly kind: SignInMethod;
