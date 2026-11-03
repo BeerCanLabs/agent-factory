@@ -2149,19 +2149,9 @@ export function mayDecide(state: FactoryState, principal: { actor: string; roles
   if (approval?.kind === 'change') return mayApproveChange(state, principal, approval.agentId) ? { ok: true } : { ok: false, required: 'admin' };
   if (global.allowed) return { ok: true };
   if (!approval) return { ok: false, required: global.required };
-  const run = state.runs.get(approval.runId);
-  // The run is the record of who asked. If it is gone nobody can say, so no owner or requester decides (fail closed);
-  // an admin or approver already passed above.
-  if (!run) return { ok: false, required: global.required };
-  // A scheduled run carries its schedule's requester, not a `requestedBy` of its own: an owner never decides what a schedule
-  // does in another person's name, and a schedule that cannot be read leaves no requester, so no owner (fail closed).
-  let requester: { actor: string | undefined } | undefined = run.requestedBy ? { actor: state.identityLinks?.resolve(run.requestedBy.provider, run.requestedBy.id) } : undefined;
-  if (run.trigger === 'schedule') {
-    const who = requesterOfRun(state, run);
-    if (!who) return { ok: false, required: global.required };
-    if (who.kind === 'identity') requester = { actor: state.identityLinks?.resolve(who.provider, who.id) };
-    else if (who.kind === 'principal') requester = { actor: who.actor };
-  }
+  // S22, D29: a run-time hold is the content side's to clear: the one `content-owner` of a personal agent, or any
+  // `member` / `accountable-lead` of a team agent (an admin passed above, acting as a user when `actAs` is set). The old
+  // requester and approver paths are gone, so who asked and whether the run still exists do not matter here.
   const scoped = authorize({
     principal,
     privilege: 'approvals.decide',
@@ -2169,7 +2159,6 @@ export function mayDecide(state: FactoryState, principal: { actor: string; roles
       agentId: approval.agentId,
       agentKind: agentKindOf(state, approval.agentId),
       owners: ownersOf(state, approval.agentId),
-      ...(requester ? { requester } : {}),
       ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
     },
   });
@@ -2206,6 +2195,22 @@ export async function decideApproval(state: FactoryState, id: string, decision: 
     // CF4: decided in a channel: where, as the ingress attested it, written before anything is allowed.
     ...(via ? { requestId: `${via.provider}:${via.channelId}` } : {}),
   });
+  // S22, D29: a run-time hold was cleared (approved or rejected): record the specific principal who cleared it.
+  // `onBehalfOf` is stamped by the act-as ledger wrapper when an admin acts as a user.
+  if (decided.kind !== 'change') {
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: decided.agentId,
+      runId: decided.runId,
+      type: 'action',
+      action: 'HOLD_CLEARED',
+      actor,
+      approvalId: decided.approvalId,
+      mcpName: decided.tool,
+      route: decided.route,
+      ...(via ? { requestId: `${via.provider}:${via.channelId}` } : {}),
+    });
+  }
   if (decided.kind === 'change') {
     // The decision is ledgered above before anything is applied. The agent is not told and carries nothing.
     if (decision !== 'approve') return { status: 200, body: decided };

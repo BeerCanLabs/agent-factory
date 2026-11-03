@@ -90,18 +90,17 @@ describe('agent-owner and requester', () => {
     assert.deepEqual([...DERIVED_ROLE_PRIVILEGES['agent-owner']].sort(), [...OWNER_RIGHTS].sort());
   });
 
-  it('the requester decides its own run; an owner does not when a requester exists', () => {
+  it('S22, D29: the requester no longer decides its own run', () => {
     const owners = ['cloudflare:owner@example.com'];
     const requester = { actor: 'cloudflare:alice@example.com' };
-    assert.ok(allowed(as('cloudflare:alice@example.com'), 'approvals.decide', on('a', owners, requester)));
-    assert.equal(allowed(as('cloudflare:owner@example.com'), 'approvals.decide', on('a', owners, requester)), false);
+    assert.equal(allowed(as('cloudflare:alice@example.com'), 'approvals.decide', on('a', owners, requester)), false);
     assert.equal(allowed(as('cloudflare:other@example.com'), 'approvals.decide', on('a', owners, requester)), false);
   });
 
-  it('the requester holds nothing but approvals.decide', () => {
+  it('the requester holds nothing (S22)', () => {
     const alice = as('cloudflare:alice@example.com');
     const r = on('a', [], { actor: 'cloudflare:alice@example.com' });
-    assert.deepEqual(PRIVILEGES.filter((p) => allowed(alice, p, r)), ['approvals.decide']);
+    assert.deepEqual(PRIVILEGES.filter((p) => allowed(alice, p, r)), []);
   });
 
   it('an owner decides when the run has no requesting user', () => {

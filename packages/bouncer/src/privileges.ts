@@ -503,7 +503,8 @@ export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> 
    * may reach that agent, and nothing else: start a run and converse. Never clears holds (`approvals.decide`).
    */
   'agent-member': ['agents.wake', 'agents.converse'],
-  requester: ['approvals.decide'],
+  // S22, D29: the requester no longer clears holds; the derived role stays for its other uses and holds nothing here.
+  requester: [],
   /**
    * A9: Built-in `skill-owner` role. It carries `skills.version.add`, `skills.retire`, `skills.assign`,
    * `skills.publish.request`, `skills.unpublish`, and `skills.package.read`, and not `skills.transfer`.
