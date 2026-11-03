@@ -19,7 +19,7 @@ import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createR
 import { fireScheduledAction, scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
-import { ApprovalStore, docBackendFromUri, GrantStore, PrincipalStore, type GrantsDoc, type PrincipalsDoc } from '@beercanlabs/factory-bouncer';
+import { ApiKeyStore, ApprovalStore, docBackendFromUri, type ApiKeysDoc, GrantStore, PrincipalStore, type GrantsDoc, type PrincipalsDoc } from '@beercanlabs/factory-bouncer';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from '@beercanlabs/factory-gatekeeper/policy';
@@ -209,6 +209,10 @@ const grants = await GrantStore.open(
   },
 );
 
+const keys = await ApiKeyStore.open(
+  docBackendFromUri<ApiKeysDoc>(process.env.FACTORY_KEYS_STORE_URI, join(DATA_DIR, 'auth', 'keys')),
+);
+
 const state: FactoryState = {
   agents: new Map(allAgents.map((a) => [a.id, a])),
   groups,
@@ -236,6 +240,7 @@ const state: FactoryState = {
   maxRssMb: parseInt(process.env.FACTORY_MAX_RSS_MB || '0', 10),
   crashLoopThreshold: parseInt(process.env.FACTORY_CRASH_LOOP_THRESHOLD || '3', 10),
   auth: authFromEnv(),
+  keys,
   // §6.12 A2: FACTORY_ACCESS_TEAM_DOMAIN + FACTORY_ACCESS_AUD; unset disables Access identity (bearer tokens only).
   access: accessAuthFromEnv(),
   cliDiscovery: cliDiscoveryFromEnv(),
