@@ -27,7 +27,7 @@ factory
 
 Settings live in `~/.config/factory-cli/config.json` (readable by you only) and are never sent to the factory or the manager. Changing the factory address signs you out of the old one. The theme is `auto` and `dark` for dark terminals, `light` for light ones, `mono` for no colour; colour is also off when `NO_COLOR` is set or output is not a terminal.
 
-Shortcuts for scripts: `factory login <address>`, `factory logout`, `factory whoami`, `factory config get`, and `factory config set <address|auth|theme|manager> <value>` (the ops repository's installer uses the last one). `FACTORY_URL` overrides the saved address, `FACTORY_MANAGER_AGENT` or `--manager <id>` the manager, and `FACTORY_CLI_ACCESS_TOKEN` supplies an Access assertion directly (for example from `cloudflared access token`) when you cannot use the browser flow.
+Shortcuts for scripts: `factory login --url <address>`, `factory logout`, `factory whoami`, `factory config get`, and `factory config set <address|auth|theme|manager> <value>` (the ops repository's installer uses the last one). `FACTORY_URL` overrides the saved address, `FACTORY_MANAGER_AGENT` or `--manager <id>` the manager, and `FACTORY_CLI_ACCESS_TOKEN` supplies an Access assertion directly (for example from `cloudflared access token`) when you cannot use the browser flow.
 
 ## Use
 
@@ -94,23 +94,8 @@ A command that changes state asks on a terminal, and is refused elsewhere unless
 
 ## How people sign in
 
-A deployment signs people in one of two ways, and the CLI follows whichever it finds at `/login`:
+`factory login --url <address>` (or `/login` in the conversation) opens the factory's own login page in your browser (S13). Sign in with any identity provider the factory is configured for (Google, Meta, Cloudflare, OIDC). The factory then sends a one-time code to a listener the CLI runs on `127.0.0.1`, checked against a per-attempt state. The CLI trades that code, together with its PKCE verifier, at `POST /api/v1/auth/cli/token` for your own revocable `cli` device-family key (`fk_…`). It keeps that key in the Keychain or its credentials file and sends it as `Authorization: Bearer`. Signing in again rotates the same key. The CLI fetches nothing before sign-in. The old `GET /.well-known/factory-cli` discovery document and the `FACTORY_OIDC_CLI_*` settings were retired in S17. Sign-ins saved by earlier versions (Cloudflare Access, OIDC) keep working until they expire.
 
-- **Cloudflare Access** (a proxy in front of the factory, as on `submind-aws`). Nothing is reachable before sign-in (A1), so the CLI recognises it by the proxy's redirect and runs `cloudflared access login`. Requests carry the assertion as `cf-access-token`.
-- **OIDC** (any provider the factory verifies: Entra, Google, Cognito, Okta). The factory publishes a small public document at `GET /.well-known/factory-cli` (issuer, public client id, scopes, which token to present, optionally a fixed loopback port). The CLI signs in with authorization code and PKCE (S256) with a state and a nonce, redirecting to `http://127.0.0.1:<port>/callback` on your own machine, holds no client secret, and sends the token as `Authorization: Bearer`. A refresh token, when the provider issues one, keeps you signed in.
-
-### For the person deploying a factory: enabling OIDC sign-in for the CLI
-
-The factory already verifies OIDC tokens with `FACTORY_OIDC_ISSUER` and `FACTORY_OIDC_AUDIENCE`. To let the CLI sign in, register a **public / native application** at the provider (no client secret) with PKCE enabled and a loopback redirect, then set:
-
-| Setting | Meaning |
-|---|---|
-| `FACTORY_OIDC_CLI_CLIENT_ID` | the application's client id. Setting it turns the discovery document on |
-| `FACTORY_OIDC_CLI_SCOPES` | default `openid email profile`. Add `offline_access` where the provider needs it for refresh tokens |
-| `FACTORY_OIDC_CLI_TOKEN_USE` | `id_token` (default) or `access_token`; it must be the token whose `aud` is `FACTORY_OIDC_AUDIENCE` |
-| `FACTORY_OIDC_CLI_REDIRECT_PORT` | only for providers that match the redirect address exactly (register `http://127.0.0.1:<port>/callback`); otherwise register `http://127.0.0.1` and any port is accepted |
-
-Roles come from the token as for the web console (`FACTORY_OIDC_ROLES_CLAIM`, `FACTORY_ADMIN_EMAILS`). The landing zones do not pass the `FACTORY_OIDC_CLI_*` settings through yet (GAP-192); set them in the deployment's environment. Tested here against a fake provider and a locally signed token, not a real provider: expect to check audience and refresh behaviour with yours.
 
 ## What the manager can do for you
 
