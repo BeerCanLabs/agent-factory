@@ -165,6 +165,8 @@ export async function readiness(state: FactoryState) {
     cutover: Boolean(state.authCutover),
     mismatches: mismatches.length,
     ownerOrphans: owners.orphans.length,
+    // Which items lack an owner/lead, so an admin can grant one through /api/v1/grants (no legacy owner strings shown).
+    orphans: owners.orphans.map((o) => ({ targetKind: o.targetKind, targetId: o.targetId, agentKind: o.agentKind, reason: o.reason })),
     sample: mismatches.slice(0, 20),
   };
 }
