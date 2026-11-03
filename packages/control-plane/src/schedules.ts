@@ -17,31 +17,16 @@ import { actorIsAdmin, agentKindOf, effectiveGrantsForActor, json, readJson, req
 import { createRun, isTerminal, SYSTEM, type Run } from '@beercanlabs/factory-property-manager';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { ownersOf } from './config-store.js';
+import { legacyAdminEmails, legacyTokenRoles } from './legacy-env-roles.js';
 
 function adminEmailsFromEnv(): string[] {
-  return (process.env.FACTORY_ADMIN_EMAILS ?? '')
-    .split(',')
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
+  return legacyAdminEmails();
 }
 
 function tokenRolesFromEnv(tokenName: string): Role[] | undefined {
   if (tokenName === 'admin') return ['admin'];
   if (tokenName === 'operator') return ['operator'];
-  const raw = process.env.FACTORY_TOKENS;
-  if (!raw) return undefined;
-  try {
-    const list = JSON.parse(raw);
-    if (Array.isArray(list)) {
-      const match = list.find((t: any) => t && t.name === tokenName);
-      if (match && Array.isArray(match.roles)) {
-        return match.roles;
-      }
-    }
-  } catch {
-    // Ignore invalid JSON
-  }
-  return undefined;
+  return legacyTokenRoles(tokenName, true);
 }
 
 // ---------------------------------------------------------------------------
