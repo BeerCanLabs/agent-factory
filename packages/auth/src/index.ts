@@ -15,13 +15,17 @@ export {
   type JwksFetcher,
 } from './access.js';
 
+export { API_KEY_PREFIX, apiKeyFromAuthorization, generateApiKey, hashApiKey, sameHash } from './keys.js';
 export { CLI_DISCOVERY_PATH, cliDiscoveryFromEnv } from './discovery.js';
 export type { CliDiscovery } from './discovery.js';
 
 export const ROLES =['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
 
-export type Principal = { actor: string; roles: Role[]; onBehalfOf?: string };
+/** S5: scopes a factory API key narrows its owner's live grants to (absent = no narrowing). */
+export type KeyScopes = { privileges?: string[]; agents?: string[] };
+
+export type Principal = { actor: string; roles: Role[]; onBehalfOf?: string; keyId?: string; keyScopes?: KeyScopes };
 
 export type OidcIdentityClaims = { email: string; emailVerified: true; sub: string };
 

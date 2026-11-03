@@ -373,6 +373,17 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     }
   });
 
+  it('S5: API key routes need a signed-in caller (the handler scopes them to the caller or an admin)', async () => {
+    for (const [method, path] of [
+      ['GET', '/api/v1/keys'],
+      ['POST', '/api/v1/keys'],
+      ['POST', '/api/v1/keys/key_nope/rotate'],
+      ['DELETE', '/api/v1/keys/key_nope'],
+    ] as const) {
+      assert.equal((await call(port, method, path, 'none')).status, 401, `${method} ${path} without a credential`);
+    }
+  });
+
   it('public routes and the OAuth callback answer every credential alike, and whoami needs only a verified principal', async () => {
     for (const path of ['/ui', '/healthz', '/', '/api/v1/health', '/.well-known/factory-cli', '/api/v1/connections/p/callback', '/api/v1/keymaster/github-app/callback']) {
       for (const cred of CREDENTIALS) {

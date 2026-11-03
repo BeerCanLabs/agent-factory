@@ -49,7 +49,23 @@ const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCas
  * Gatekeeper's authentication; this maps its roles and effective grants to privileges. On a denial `required` is the
  * first role (in the order above) that holds it.
  */
+/**
+ * S5 (D14): a factory API key narrows its owner's live grants. A privilege outside `keyScopes.privileges`, or an
+ * agent outside `keyScopes.agents`, is refused even when the owner holds it; the owner's grants still cap the key.
+ */
 export function authorize(req: AuthorizeRequest): AuthorizeResult {
+  const scopes = req.principal.keyScopes;
+  if (scopes) {
+    if (scopes.privileges && !scopes.privileges.includes(req.privilege)) return { allowed: false, required: 'admin' };
+    const agentId = req.resource?.agentId?.toLowerCase();
+    if (scopes.agents && (agentId === undefined ? req.privilege !== 'mcp.use' : !scopes.agents.includes(agentId))) {
+      return { allowed: false, required: 'admin' };
+    }
+  }
+  return authorizeUnscoped(req);
+}
+
+function authorizeUnscoped(req: AuthorizeRequest): AuthorizeResult {
   const { principal, privilege, resource } = req;
   if (principal.roles.some((r) => ROLE_PRIVILEGES[r]?.includes(privilege))) return { allowed: true };
 
