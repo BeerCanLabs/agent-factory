@@ -36,6 +36,7 @@ import { AwsComputeSource, AwsCostSource } from './aws/accountant.js';
 import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
 import { ModelStore } from './models.js';
 import { loadSharedRuntime } from './agent-creation.js';
+import { startTransferSweeper } from './transfers.js';
 
 export {
   convertLegacyOwners,
@@ -375,7 +376,8 @@ recoverInterruptedDeploys(state);
 await reconcileRuns(state);
 
 setInterval(() => void checkHealth(state), 15_000).unref();
-
+// S3b (D15): roll back ownership transfers left pending past their 7-day TTL.
+startTransferSweeper(state);
 // S6: FACTORY_BOOTSTRAP_ADMIN only while zero human admins exist; queued out-of-band recovery rows join the ledger.
 try {
   const boot = await bootstrapAdmin({ principals, grants, ledger: state.ledger }, process.env.FACTORY_BOOTSTRAP_ADMIN);

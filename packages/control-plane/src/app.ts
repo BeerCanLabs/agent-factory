@@ -97,6 +97,7 @@ import { handleSubmissions } from './submissions.js';
 import { handleInterview } from './interview-draft.js';
 import { handleLoginRoutes, sendLoginPage, verifySession, type SessionStore } from './login.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
+import { handleAgentTransfers } from './transfers.js';
 import { handleSkillModels, skillModelsForAgent } from './skill-models.js';
 import { handleMcp } from './mcp.js';
 export { handleMcp } from './mcp.js';
@@ -2455,6 +2456,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     return;
   }
 
+  if (/^\/api\/v1\/agents\/[^/]+\/transfer(\/|$)/.test(path) && (await handleAgentTransfers(state, req, res, path))) return;
   if (path.startsWith('/api/v1/skills/') && path.endsWith('/model') && (await handleSkillModels(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleGitHubAppSetup(state, req, res, path))) return;

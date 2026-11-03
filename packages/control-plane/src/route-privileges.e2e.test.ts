@@ -252,6 +252,9 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/grants', privilege: 'grants.manage', role: 'admin' },
   { method: 'POST', path: '/api/v1/grants', privilege: 'grants.manage', role: 'admin', body: {} },
   { method: 'DELETE', path: '/api/v1/grants/g_nope', privilege: 'grants.manage', role: 'admin' },
+  { method: 'GET', path: '/api/v1/agents/nope/transfer', privilege: 'grants.manage', role: 'admin' },
+  { method: 'POST', path: '/api/v1/agents/nope/transfer', privilege: 'grants.manage', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/transfer/accept', privilege: 'grants.manage', role: 'admin', body: {} },
   // S6: IdP setup (D16)
   { method: 'GET', path: '/api/v1/setup/idp', privilege: 'grants.manage', role: 'admin' },
   { method: 'PUT', path: '/api/v1/setup/idp', privilege: 'grants.manage', role: 'admin', body: {} },
