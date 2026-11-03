@@ -13,6 +13,7 @@ import { ApiKeyStore, ApprovalStore, FileDocBackend, GrantStore, IdentityLinkSto
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { createFactoryServer, type FactoryState } from './app.js';
+import { mapLegacyAgentRole } from './auth-migration.js';
 
 const ADMIN = 'tok-s8-admin'; // secret-scan:allow (test fixture)
 const bearer: AuthProvider = {
@@ -29,8 +30,8 @@ describe('S8: legacy auth import, shadow mode and cutover (#373)', { concurrency
   let ledger: MemoryLedger;
   let port = 0;
   const saved = { a: process.env.FACTORY_ADMIN_EMAILS, t: process.env.FACTORY_TOKENS };
-  const call = async (method: string, path: string, token = ADMIN) => {
-    const res = await fetch(`http://127.0.0.1:${port}${path}`, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: method === 'GET' ? undefined : '{}' });
+  const call = async (method: string, path: string, token = ADMIN, body = '{}') => {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: method === 'GET' ? undefined : body });
     return { status: res.status, body: (await res.json()) as any };
   };
 
@@ -45,6 +46,8 @@ describe('S8: legacy auth import, shadow mode and cutover (#373)', { concurrency
     await grants.grant({ subject: 'user:admin', scope: { kind: 'fleet' }, role: 'admin', by: 'user:admin', granterIsAdmin: true });
     const identityLinks = new IdentityLinkStore(join(dir, 'links'));
     identityLinks.link('discord', '1001', 'cloudflare:viewer@example.com', 'user:admin', { name: 'Vee', roles: ['viewer'], agentRoles: { higgins: ['member'] } });
+    // Production-shaped (the Nov 3 import failure): a fleet operator whose legacy per-agent role is "Operator".
+    identityLinks.link('discord', '1002', 'cloudflare:op@example.com', 'user:admin', { name: 'Op', roles: ['operator', 'viewer'], agentRoles: { switch: ['Operator'] } });
     state = {
       agents: new Map(), registryDir: join(dir, 'registry'), ledger, auth: bearer, principals, grants, identityLinks,
       keys: await ApiKeyStore.open(), version: 'test', providers: [envProvider({})], runtime: noopRuntime(), runs: new MemoryRunStore(),
@@ -74,7 +77,7 @@ describe('S8: legacy auth import, shadow mode and cutover (#373)', { concurrency
   it('S8 AC1: the importer creates principals, grants and a service key once, and is idempotent', async () => {
     const first = await call('POST', '/api/v1/auth-migration/import');
     assert.equal(first.status, 200, JSON.stringify(first.body));
-    assert.equal(first.body.principals, 3, 'dale, ops and the linked viewer');
+    assert.equal(first.body.principals, 4, 'dale, ops, the linked viewer and the linked operator');
     assert.ok(first.body.grants >= 4);
     assert.equal(first.body.keys, 1);
     assert.match(first.body.secrets[0].secret, /^fk_/);
@@ -83,6 +86,27 @@ describe('S8: legacy auth import, shadow mode and cutover (#373)', { concurrency
     assert.ok(state.principals!.findByEmail('dale@example.com'));
     assert.ok(state.grants!.list({ subject: 'service:deployer' }).some((g) => g.role === 'operator'));
     assert.ok(!JSON.stringify(ledger.query()).includes(first.body.secrets[0].secret), 'the key secret is never ledgered');
+  });
+
+  it('S8: a legacy agent "Operator" maps to the fleet operator grant the person already holds, never widening access', async () => {
+    assert.deepEqual(mapLegacyAgentRole('Operator', ['operator', 'viewer']), { fleet: 'operator' });
+    assert.deepEqual(mapLegacyAgentRole('Operator', ['viewer']), { refused: 'Operator' });
+    assert.deepEqual(mapLegacyAgentRole('Realtor', []), { agent: 'Realtor' });
+    const op = state.principals!.list().find((p) => p.emails?.includes('op@example.com'));
+    assert.ok(op, 'the production-shaped link imported without a 400');
+    assert.ok(state.grants!.list({ subject: op.id, scopeKind: 'fleet' }).some((g) => g.role === 'operator'));
+  });
+
+  it('S8: reissueKeys revokes keys left by a partial run and returns fresh secrets once', async () => {
+    const owner = state.keys!.list().find((k) => k.owner.startsWith('service:'))!.owner;
+    const old = state.keys!.list({ owner });
+    const r = await call('POST', '/api/v1/auth-migration/import', ADMIN, JSON.stringify({ reissueKeys: true }));
+    assert.equal(r.status, 200);
+    assert.equal(r.body.revokedKeys, old.length);
+    assert.equal(r.body.keys, 1);
+    assert.match(r.body.secrets[0].secret, /^fk_/);
+    assert.ok(old.every((k) => state.keys!.get(k.id)!.revokedAt), 'the orphaned keys are revoked');
+    assert.equal(r.body.grants, 0, 'grants are ensure-style; a rerun adds none');
   });
 
   it('S8 AC1: after import shadow mode shows zero mismatches; cutover strips link roles and is ledgered', async () => {
