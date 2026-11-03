@@ -193,13 +193,16 @@ describe('the gatekeeper-egress enforces a person’s roles (E12 item 4, TSK-174
   });
 
   it('Dale’s own run (the owner, no factory role), an admin’s and an operator’s are not restricted', async () => {
-    for (const id of ['100', '203', '204', '208']) {
+    for (const id of ['100', '203', '204']) {
       saw.length = 0;
       const { token } = await asPerson(id);
       const r = await forwardCall(token, 'google-gmail');
       assert.equal(r.status, 200, `${id}: ${r.body}`);
       assert.deepEqual(saw, [{ path: '/gmail/x', key: GMAIL_KEY }], 'the credential is injected only for the run that may use it');
     }
+    // S11: an email still listed in FACTORY_ADMIN_EMAILS, with no grant, is no longer an admin.
+    const { token } = await asPerson('208');
+    assert.equal((await forwardCall(token, 'google-gmail')).status, 403);
   });
 
   it('a console or API caller, a cartridge cron and a system schedule are not restricted (E12 item 5)', async () => {

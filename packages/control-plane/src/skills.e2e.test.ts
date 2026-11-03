@@ -1021,14 +1021,11 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
     assert.equal(agentReq2.status, 400);
     assert.equal(agentReq2.body.error, 'invalid_recipient');
 
-    // Finding 3: Transfer to human admin (via FACTORY_ADMIN_EMAILS) succeeds
+    // S11: an email in FACTORY_ADMIN_EMAILS is no longer an admin recipient; only grants confer skills.register.
     process.env.FACTORY_ADMIN_EMAILS = 'boss@example.com';
     try {
       const adminReq = await call(port, '/api/v1/skills/text-analysis/transfer', 'POST', ALICE, { recipient: 'cloudflare:boss@example.com' });
-      assert.equal(adminReq.status, 200, JSON.stringify(adminReq.body));
-      assert.equal(adminReq.body.transferPending.recipient, 'cloudflare:boss@example.com');
-      // Cancel so subsequent steps can continue with Bob
-      await call(port, '/api/v1/skills/text-analysis/transfer/cancel', 'POST', ALICE, {});
+      assert.equal(adminReq.body.error, 'recipient_lacks_skills_register', JSON.stringify(adminReq.body));
     } finally {
       delete process.env.FACTORY_ADMIN_EMAILS;
     }
@@ -1083,6 +1080,8 @@ describe('TSK-277 Sub-slice 3b: Skill ownership, transfer, groups, and package i
     state.agents.delete('bob-agent');
     state.agents.delete('helper');
     await state.configs.remove('bob-agent');
+    // S11: FACTORY_TOKENS no longer makes token:bob known; a group membership without skills.register does.
+    state.groups!.createGroup({ id: 'readers', name: 'Readers', roles: ['skill-owner'], members: ['token:bob'] });
     try {
       const okAdmin = await call(port, '/api/v1/skills/text-analysis/transfer/admin', 'POST', ADMIN, { recipient: 'token:alice' });
       assert.equal(okAdmin.status, 200, JSON.stringify(okAdmin.body));

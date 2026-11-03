@@ -17,16 +17,11 @@ import { actorIsAdmin, agentKindOf, effectiveGrantsForActor, json, readJson, req
 import { createRun, isTerminal, SYSTEM, type Run } from '@beercanlabs/factory-property-manager';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { ownersOf } from './config-store.js';
-import { legacyAdminEmails, legacyTokenRoles } from './legacy-env-roles.js';
-
-function adminEmailsFromEnv(): string[] {
-  return legacyAdminEmails();
-}
 
 function tokenRolesFromEnv(tokenName: string): Role[] | undefined {
   if (tokenName === 'admin') return ['admin'];
   if (tokenName === 'operator') return ['operator'];
-  return legacyTokenRoles(tokenName, true);
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,12 +165,9 @@ function isAgentScheduleManager(state: FactoryState, agentId: string, actor: str
   }
   const owners = ownersOf(state, agentId);
   if (owners.some((o) => o.toLowerCase() === actor.toLowerCase())) return true;
-  const adminEmails = adminEmailsFromEnv();
-  const isCloudflare = actor.startsWith('cloudflare:');
-  const email = isCloudflare ? actor.slice('cloudflare:'.length).trim().toLowerCase() : '';
   const tokenName = actor.startsWith('token:') ? actor.slice('token:'.length) : undefined;
   const tokenRoles = tokenName ? tokenRolesFromEnv(tokenName) : undefined;
-  return Boolean((email && adminEmails.includes(email)) || tokenRoles?.includes('admin'));
+  return Boolean(tokenRoles?.includes('admin'));
 }
 
 /** Whether the caller has authority to modify or delete this schedule. */
@@ -253,7 +245,6 @@ export function scheduleRunOptions(
   if (requester.kind === 'system') return { caller: SCHEDULER_BADGE(sched.name) };
   if (state.grants && !state.grants.healthy) return skip('grant store is unhealthy');
 
-  const adminEmails = adminEmailsFromEnv();
   const owners = ownersOf(state, sched.agentId);
   const agentKind = agentKindOf(state, sched.agentId);
 
@@ -269,7 +260,6 @@ export function scheduleRunOptions(
       owners,
       ...(linkGrants?.grants !== undefined ? { grants: linkGrants.grants } : {}),
       link,
-      adminEmails,
       isIngressCaller: true,
     });
     if (auth.allowed && auth.caller) {
@@ -299,7 +289,6 @@ export function scheduleRunOptions(
     owners,
     ...(principalGrants.grants !== undefined ? { grants: principalGrants.grants } : {}),
     link: bareCandidate.link,
-    adminEmails,
     isIngressCaller: true,
   });
   if (bareAuth.allowed && bareAuth.caller) {
@@ -323,7 +312,6 @@ export function scheduleRunOptions(
       owners,
       ...(principalGrants.grants !== undefined ? { grants: principalGrants.grants } : {}),
       link,
-      adminEmails,
       isIngressCaller: true,
     });
     if (auth.allowed && auth.caller) {

@@ -403,6 +403,12 @@ describe('S3: Principals & Grants API, admin act-as, private skill assignment, a
     assert.equal(grants.list({ includeExpired: true }).length, grantsBefore, 'unknown caller must not write to GrantStore');
     assert.equal(ledger.query().length, ledgerBefore, 'whoami and authz/check must not append ledger noise');
 
+    // S11 AC1: with no principal or domain grant, every endpoint but whoami (and the side-effect-free check) refuses (and writes no principal or grant).
+    for (const p of ['/api/v1/agents', '/api/v1/grants', '/api/v1/principals', '/api/v1/runs', '/api/v1/skills']) {
+      assert.equal((await call('GET', p, { cfEmail: 'stranger@external.org' })).status, 403, p);
+    }
+    assert.equal(principals.list().length, principalsBefore);
+
     // 2. Admin grants fleet 'viewer' to domain:beercanlabs.com
     const domGrant = await call('POST', '/api/v1/grants', {
       token: TOKENS.admin,

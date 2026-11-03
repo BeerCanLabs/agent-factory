@@ -13,7 +13,8 @@ import { ApiKeyStore, ApprovalStore, FileDocBackend, GrantStore, IdentityLinkSto
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { mapLegacyAgentRole } from './auth-migration.js';
+import { importLegacyAuth, mapLegacyAgentRole } from './auth-migration.js';
+import type { Role } from '@beercanlabs/factory-auth';
 
 const ADMIN = 'tok-s8-admin'; // secret-scan:allow (test fixture)
 const bearer: AuthProvider = {
@@ -74,18 +75,15 @@ describe('S8: legacy auth import, shadow mode and cutover (#373)', { concurrency
     assert.ok(ledger.query().some((e) => e.action === 'AUTH_SHADOW_MISMATCH' && e.privilege));
   });
 
-  it('S8 AC1: the importer creates principals, grants and a service key once, and is idempotent', async () => {
+  it('S8 AC1 / S11: the route imports link roles only (env lists are no longer read) and is idempotent', async () => {
     const first = await call('POST', '/api/v1/auth-migration/import');
     assert.equal(first.status, 200, JSON.stringify(first.body));
-    assert.equal(first.body.principals, 4, 'dale, ops, the linked viewer and the linked operator');
-    assert.ok(first.body.grants >= 4);
-    assert.equal(first.body.keys, 1);
-    assert.match(first.body.secrets[0].secret, /^fk_/);
+    assert.equal(first.body.principals, 2, 'the linked viewer and the linked operator; FACTORY_ADMIN_EMAILS is ignored');
+    assert.ok(first.body.grants >= 3);
+    assert.equal(first.body.keys, 0, 'FACTORY_TOKENS is ignored, so no service key is issued');
     const second = await call('POST', '/api/v1/auth-migration/import');
     assert.deepEqual([second.body.principals, second.body.grants, second.body.keys], [0, 0, 0]);
-    assert.ok(state.principals!.findByEmail('dale@example.com'));
-    assert.ok(state.grants!.list({ subject: 'service:deployer' }).some((g) => g.role === 'operator'));
-    assert.ok(!JSON.stringify(ledger.query()).includes(first.body.secrets[0].secret), 'the key secret is never ledgered');
+    assert.equal(state.principals!.findByEmail('dale@example.com'), undefined);
   });
 
   it('S8: a legacy agent "Operator" maps to the fleet operator grant the person already holds, never widening access', async () => {
@@ -97,16 +95,18 @@ describe('S8: legacy auth import, shadow mode and cutover (#373)', { concurrency
     assert.ok(state.grants!.list({ subject: op.id, scopeKind: 'fleet' }).some((g) => g.role === 'operator'));
   });
 
-  it('S8: reissueKeys revokes keys left by a partial run and returns fresh secrets once', async () => {
-    const owner = state.keys!.list().find((k) => k.owner.startsWith('service:'))!.owner;
-    const old = state.keys!.list({ owner });
-    const r = await call('POST', '/api/v1/auth-migration/import', ADMIN, JSON.stringify({ reissueKeys: true }));
-    assert.equal(r.status, 200);
-    assert.equal(r.body.revokedKeys, old.length);
-    assert.equal(r.body.keys, 1);
-    assert.match(r.body.secrets[0].secret, /^fk_/);
+  it('S8: an explicit token source issues a key once; reissueKeys revokes it and returns a fresh secret once', async () => {
+    const src = { adminEmails: [], tokens: [{ name: 'deployer', roles: ['operator'] as Role[] }], links: [] };
+    const first = await importLegacyAuth(state, src, 'user:admin');
+    assert.equal(first.keys, 1);
+    assert.match(first.secrets[0].secret, /^fk_/);
+    assert.ok(!JSON.stringify(ledger.query()).includes(first.secrets[0].secret), 'the key secret is never ledgered');
+    const old = state.keys!.list({ owner: 'service:deployer' });
+    const r = await importLegacyAuth(state, src, 'user:admin', { reissueKeys: true });
+    assert.equal(r.revokedKeys, old.length);
+    assert.equal(r.keys, 1);
     assert.ok(old.every((k) => state.keys!.get(k.id)!.revokedAt), 'the orphaned keys are revoked');
-    assert.equal(r.body.grants, 0, 'grants are ensure-style; a rerun adds none');
+    assert.equal(r.grants, 0, 'grants are ensure-style; a rerun adds none');
   });
 
   it('S8 AC1: after import shadow mode shows zero mismatches; cutover strips link roles and is ledgered', async () => {

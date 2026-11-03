@@ -12,7 +12,6 @@ import { authorize, deriveSlugFromEmail, PRIVILEGES, type IdentityLink, type Pri
 import type { Principal, Role } from '@beercanlabs/factory-auth';
 import { json, readJson, requirePrivilege, resolveVerifiedPrincipal, type FactoryState } from './app.js';
 import { convertLegacyOwners } from './migration-owners.js';
-import { legacyAdminEmails, legacyTokenNames, legacyTokenRoles } from './legacy-env-roles.js';
 
 export type LegacyToken = { name: string; roles: Role[] };
 export type LegacySource = { adminEmails: string[]; tokens: LegacyToken[]; links: IdentityLink[] };
@@ -20,8 +19,9 @@ export type Mismatch = { subject: string; privilege: string; agentId?: string; l
 
 export function legacySource(state: FactoryState): LegacySource {
   return {
-    adminEmails: legacyAdminEmails(),
-    tokens: legacyTokenNames().map((name) => ({ name, roles: legacyTokenRoles(name, true) ?? [] })).filter((t) => t.roles.length),
+    // S11: the env role lists (FACTORY_ADMIN_EMAILS, FACTORY_TOKENS) are no longer read; they were imported at cutover.
+    adminEmails: [],
+    tokens: [],
     links: (state.identityLinks?.list() ?? []).filter((l) => l.roles?.length || Object.keys(l.agentRoles ?? {}).length),
   };
 }

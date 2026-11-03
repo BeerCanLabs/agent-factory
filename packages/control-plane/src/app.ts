@@ -551,27 +551,16 @@ export function actorIsAdmin(state: FactoryState, actor: string, knownRoles?: re
     }
   }
   const clean = actor.toLowerCase();
-  const adminEmails = legacyAdminEmails();
-
-  if (clean.startsWith('user:') && state.principals && state.principals.healthy) {
-    const rec = state.principals.get(clean);
-    if (rec && rec.emails.some((e) => adminEmails.includes(e))) return true;
-  }
-
   if (!clean.startsWith('token:') && !clean.startsWith('cloudflare:') && !clean.startsWith('oidc:')) {
     return false;
   }
 
   if (clean.startsWith('token:')) {
     const tokenName = clean.slice(6);
-    for (const r of legacyTokenRoles(tokenName) ?? []) {
-      if (r === 'admin') return true;
-    }
     return false;
   }
 
   const email = clean.startsWith('cloudflare:') ? clean.slice(11) : clean.slice(5);
-  if (adminEmails.includes(email)) return true;
 
   if (state.identityLinks) {
     const matching = state.identityLinks.list().filter((l) => l.actor.toLowerCase() === clean);
@@ -627,7 +616,6 @@ export function isSenderManager(
   sender: { requestedBy?: { provider: string; id: string }; caller?: AuthenticatedCaller; actor?: string },
 ): boolean {
   const owners = ownersOf(state, agentId).map((o) => o.toLowerCase());
-  const adminEmails = legacyAdminEmails();
 
   if (sender.requestedBy) {
     const link = state.identityLinks?.resolveLink(sender.requestedBy.provider, sender.requestedBy.id);
@@ -657,7 +645,7 @@ export function isSenderManager(
     const email = isCloudflare ? actorLower.slice('cloudflare:'.length).trim() : (actorLower.startsWith('oidc:') ? actorLower.slice(5).trim() : '');
     let linkHasAdmin = false;
     for (const r of roles) if (r === 'admin') linkHasAdmin = true;
-    return linkHasAdmin || (roles.length === 0 && email !== '' && adminEmails.includes(email));
+    return linkHasAdmin;
   }
 
   const actor = sender.caller?.actor ?? sender.actor;
@@ -694,7 +682,6 @@ export function isSenderManager(
   if (actorLower === 'token:admin') return true;
   const isCloudflare = actorLower.startsWith('cloudflare:');
   const email = isCloudflare ? actorLower.slice('cloudflare:'.length).trim() : (actorLower.startsWith('oidc:') ? actorLower.slice(5).trim() : '');
-  if (email !== '' && adminEmails.includes(email)) return true;
 
   return false;
 }
@@ -712,7 +699,6 @@ export function canRunManageModels(
   if (!req) return { allowed: false };
 
   const owners = ownersOf(state, run.agentId).map((o) => o.toLowerCase());
-  const adminEmails = legacyAdminEmails();
 
   if (req.kind === 'identity') {
     const link = state.identityLinks?.resolveLink(req.provider, req.id);
@@ -752,7 +738,7 @@ export function canRunManageModels(
     const email = isCloudflare ? actorLower.slice('cloudflare:'.length).trim() : (actorLower.startsWith('oidc:') ? actorLower.slice(5).trim() : '');
     let linkHasAdmin = false;
     for (const r of roles) if (r === 'admin') linkHasAdmin = true;
-    const isAdmin = linkHasAdmin || (roles.length === 0 && email !== '' && adminEmails.includes(email));
+    const isAdmin = linkHasAdmin;
     if (isAdmin) {
       return { allowed: true, actor };
     }
@@ -794,11 +780,6 @@ export function canRunManageModels(
       return { allowed: true, actor };
     }
     if (actorLower === 'token:admin') {
-      return { allowed: true, actor };
-    }
-    const isCloudflare = actorLower.startsWith('cloudflare:');
-    const email = isCloudflare ? actorLower.slice('cloudflare:'.length).trim() : (actorLower.startsWith('oidc:') ? actorLower.slice(5).trim() : '');
-    if (email !== '' && adminEmails.includes(email)) {
       return { allowed: true, actor };
     }
     return { allowed: false };
@@ -2361,7 +2342,6 @@ export function getKeymaster(state: FactoryState): Keymaster {
 }
 
 import { UI_HTML } from './ui.js';
-import { legacyAdminEmails, legacyTokenRoles } from './legacy-env-roles.js';
 
 export function createFactoryServer(state: FactoryState): http.Server {
   wireGrantStoreKindLookup(state);
@@ -3080,8 +3060,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     }
 
     if (requestedBy) {
-      const adminEmails = legacyAdminEmails();
-      const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
+          const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
       const linkGrants = link ? effectiveGrantsForActor(state, link.actor) : undefined;
       if (linkGrants && !linkGrants.ok) {
         json(res, 503, { error: linkGrants.error });
@@ -3095,7 +3074,6 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         owners: ownersOf(state, runCreate[1]),
         grants: linkGrants?.grants,
         link,
-        adminEmails,
         isIngressCaller: isIngress,
       });
 
@@ -3321,8 +3299,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
 
     let caller: AuthenticatedCaller | undefined;
     if (requestedBy) {
-      const adminEmails = legacyAdminEmails();
-      const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
+          const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
       const linkGrants = link ? effectiveGrantsForActor(state, link.actor) : undefined;
       if (linkGrants && !linkGrants.ok) {
         json(res, 503, { error: linkGrants.error });
@@ -3336,7 +3313,6 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         owners: ownersOf(state, agent.id),
         grants: linkGrants?.grants,
         link,
-        adminEmails,
         isIngressCaller: isIngress,
       });
       if (!ingressAuth.allowed) {

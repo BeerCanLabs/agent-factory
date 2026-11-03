@@ -119,7 +119,6 @@ import {
   type SkillStatus,
   type SkillVersionRecord,
 } from '@beercanlabs/factory-registrar';
-import { legacyTokenEntry } from './legacy-env-roles.js';
 
 /**
  * The checker this deployment uses (see the header). Called once per control plane; `undefined` means none is
@@ -2185,10 +2184,6 @@ function isOwnerKnownInFactory(state: FactoryState, actor: string): boolean {
   if (state.identityLinks) {
     const clean = actor.toLowerCase();
     if (state.identityLinks.list().some((l) => l.actor.toLowerCase() === clean)) return true;
-  }
-  if (actor.toLowerCase().startsWith('token:')) {
-    const tokenName = actor.toLowerCase().slice(6);
-    if (legacyTokenEntry(tokenName)) return true;
   }
   return false;
 }

@@ -8,7 +8,6 @@ import { agentKindOf, effectiveGrantsForActor, type FactoryState } from './app.j
 import { ownersOf } from './config-store.js';
 import { requesterOfRun } from './schedules.js';
 import { agentInForce } from './agent-settings.js';
-import { legacyAdminEmails } from './legacy-env-roles.js';
 
 /**
  * `restricted: false`: the rule does not apply to this run. `restricted: true`: each route some skill declares is
@@ -17,10 +16,6 @@ import { legacyAdminEmails } from './legacy-env-roles.js';
 export type RunAccess = { restricted: false } | { restricted: true; routes: Record<string, RouteAccess> };
 
 const NOT_RESTRICTED: RunAccess = { restricted: false };
-
-function adminEmails(): string[] {
-  return legacyAdminEmails();
-}
 
 /** Every skill the record can name: the declared ids, the skills that have routes, and the skills a role mentions. */
 function skillIdsOf(agent: Pick<AgentRecord, 'skillIds' | 'skillRoutes' | 'roles'>): string[] {
@@ -46,7 +41,7 @@ function evaluateGrantStoreAccess(
   const lowerActor = actor.toLowerCase();
   const email = lowerActor.startsWith('cloudflare:') ? lowerActor.slice('cloudflare:'.length).trim() : '';
   const isAdmin =
-    explicitRoles.includes('admin') || (explicitRoles.length === 0 && email !== '' && adminEmails().includes(email));
+    explicitRoles.includes('admin');
 
   const grantRes = effectiveGrantsForActor(state, actor);
   if (!grantRes.ok || !grantRes.grants) return restrictedTo(agent, []);
@@ -143,7 +138,7 @@ export function accessForRequester(
 
   const email = actor.startsWith('cloudflare:') ? actor.slice('cloudflare:'.length).trim() : '';
   // As the Bouncer reads a link (`authorizeIngress`): explicit roles replace the email-admin default.
-  const isAdmin = roles.includes('admin') || (roles.length === 0 && email !== '' && adminEmails().includes(email));
+  const isAdmin = roles.includes('admin');
 
   const kind = agentKindOf(state, agentId) ?? effectiveAgentKind(agent);
   if (kind !== 'team') {
