@@ -65,11 +65,14 @@ export type LedgerEvent = {
   after?: Record<string, unknown> | null;
   /** S18: legacy owner string converted to canonical principal and grant. */
   legacyOwner?: string;
+  /** S7: the privilege a denied (`AUTHZ_DENIED`) call asked for; its resource is `scope`. */
+  privilege?: string;
   principalId?: string;
   role?: string;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
+  'privilege',
   'legacyOwner',
   'principalId',
   'role',
@@ -314,6 +317,7 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (raw.footnote === '[no tools called]' || raw.footnote === '[no model or tools used]') event.footnote = raw.footnote;
   if (typeof raw.retryRequestId === 'string' && /^[0-9a-f-]{36}$/.test(raw.retryRequestId)) event.retryRequestId = raw.retryRequestId;
   if (typeof raw.toolCalled === 'boolean') event.toolCalled = raw.toolCalled;
+  if (typeof raw.privilege === 'string' && /^[a-z][a-z0-9-]*(?:\.[a-z0-9-]+){0,4}$/.test(raw.privilege) && raw.privilege.length <= 96) event.privilege = raw.privilege;
   if (typeof raw.onBehalfOf === 'string' && AUDIT_ID_FIELD.test(raw.onBehalfOf)) event.onBehalfOf = raw.onBehalfOf;
   const cleanScope = sanitizeGrantScope(raw.scope);
   if (cleanScope) event.scope = cleanScope;

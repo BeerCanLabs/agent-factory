@@ -6,6 +6,13 @@ import { join } from 'node:path';
 import { Checkpointer, FileCheckpointSink, FileLedger, MemoryLedger, S3CheckpointSink, GcsCheckpointSink, checkpointSinkFromEnv, payloadHash, redactSecrets, toLedgerEvent } from './index.js';
 
 describe('toLedgerEvent', () => {
+  it('S7: keeps a well-formed privilege on an AUTHZ_DENIED row and drops anything else in that field', () => {
+    assert.equal(toLedgerEvent({ agentId: 'cp', type: 'action', action: 'AUTHZ_DENIED', privilege: 'grants.manage' }).privilege, 'grants.manage');
+    // secret-scan:allow (test fixture)
+    for (const bad of ['fk_live_0123456789abcdef', 'grants manage', 'GRANTS.MANAGE', 42, 'a'.repeat(120)])
+      assert.equal(toLedgerEvent({ agentId: 'cp', type: 'action', privilege: bad }).privilege, undefined, String(bad));
+  });
+
   it('keeps well-formed connection fields (§6.11) and drops anything that could carry text or tokens', () => {
     const ok = toLedgerEvent({
       agentId: 'donna',

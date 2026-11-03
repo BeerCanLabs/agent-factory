@@ -898,6 +898,7 @@ export function resolveActAsForPrincipal(
       agentId: 'control-plane',
       type: 'action',
       action: 'AUTHZ_DENIED:act_as_requires_admin',
+      privilege: 'grants.manage',
       actor: principal.actor,
       scope: { kind: 'fleet' },
     });
@@ -1189,6 +1190,7 @@ export async function requirePrivilege(
         agentId: resource?.agentId ?? 'control-plane',
         type: 'action',
         action: 'AUTHZ_DENIED',
+        privilege,
         actor: result.principal.actor,
         ...(result.principal.onBehalfOf ? { onBehalfOf: result.principal.onBehalfOf } : {}),
         scope: resource?.agentId

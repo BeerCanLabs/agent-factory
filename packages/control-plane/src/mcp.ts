@@ -718,6 +718,8 @@ export async function handleMcp(
             agentId: targetAgentId ?? 'control-plane',
             type: 'action',
             action: 'AUTHZ_DENIED',
+            privilege: spec.privilege,
+            scope: targetAgentId ? { kind: 'agent', id: targetAgentId } : { kind: 'fleet' },
             actor: effectivePrincipal.actor,
             ...(effectivePrincipal.onBehalfOf ? { onBehalfOf: effectivePrincipal.onBehalfOf } : {}),
             reason: `mcp:${spec.name}:requires:${requiredRole}`,
