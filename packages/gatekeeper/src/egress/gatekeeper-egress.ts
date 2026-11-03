@@ -886,7 +886,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       allowedModels: ctx.policy.models,
       defaultModel: activeDefaultModel,
       training: ctx.agentState === 'TRAINING',
-      pinnedModel: skillModel ?? ctx.run.model,
+      // S24: an explicit run pin (e.g. a skill eval comparing candidates) wins over the skill's default binding.
+      pinnedModel: ctx.run.model ?? skillModel,
       currentModel: ctx.policy.currentModel,
       primaryModel: ctx.policy.primaryModel,
       secondaryModel: ctx.policy.secondaryModel,

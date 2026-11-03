@@ -107,6 +107,13 @@ describe('S24: gatekeeper egress serves a skill-bound model for calls made on a 
     assert.equal(res.body.model, 'claude-sonnet');
   });
 
+  it('an explicit run pin (a skill eval) wins over the skill binding', async () => {
+    ctx.run.model = 'claude-haiku';
+    const res = await chat(port, token, { [SKILL_CONTEXT_HEADER]: 'summarize-doc' });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.model, 'claude-haiku');
+  });
+
   it('a skill the agent does not run (no binding in context) falls back to the agent model', async () => {
     const res = await chat(port, token, { [SKILL_CONTEXT_HEADER]: 'not-adopted' });
     assert.equal(res.status, 200);

@@ -13,7 +13,8 @@ import http from 'node:http';
 import { dirname, join } from 'node:path';
 import { payloadHash } from '@beercanlabs/factory-ledger';
 import { SkillModelBindingStore, isValidSkillModelName } from '@beercanlabs/factory-registrar';
-import { approvedModels, json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import { authorize } from '@beercanlabs/factory-bouncer';
+import { approvedModels, effectiveGrantsForActor, json, readJson, requirePrivilege, type FactoryState } from './app.js';
 import { resolveSkillContentOwner, skillRegistry } from './skills.js';
 
 const SKILL_MODEL = /^\/api\/v1\/skills\/([^/]+)\/model$/;
@@ -93,6 +94,23 @@ export async function handleSkillModels(
 
   const principal = await requirePrivilege(req, res, state, 'skills.version.add', resource);
   if (!principal) return true;
+  // D31: only the skill's content-owner (or an admin) picks its model. `skills.version.add` is also held by a skill
+  // `member` grant, so with the grant store the caller must hold a direct, active content-owner grant or be an admin.
+  if (state.grants) {
+    const g = effectiveGrantsForActor(state, principal.actor);
+    if (!g.ok) return json(res, g.status, { error: g.error }), true;
+    const isAdmin = authorize({ principal, privilege: 'grants.manage', ...(g.grants !== undefined ? { resource: { grants: g.grants } } : {}) }).allowed;
+    const subject = principal.onBehalfOf ? effectiveGrantsForActor(state, principal.onBehalfOf) : g;
+    const isOwner =
+      subject.ok &&
+      (subject.grants ?? []).some(
+        (eg) => eg.source === 'direct' && !eg.readOnly && eg.grant.role === 'content-owner' && eg.grant.scope.kind === 'skill' && eg.grant.scope.id.toLowerCase() === skillId,
+      );
+    if (!isAdmin && !isOwner) {
+      json(res, 403, { error: 'forbidden', required: 'admin', requiredRole: 'content-owner' });
+      return true;
+    }
+  }
   if (!versions.length) return json(res, 404, { error: 'not_found', id: skillId }), true;
   const body = await readJson(req);
   const store = skillModelStore(state);

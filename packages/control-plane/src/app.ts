@@ -1,4 +1,6 @@
 import http from 'node:http';
+import { apiKeyFromAuthorization } from '@beercanlabs/factory-auth';
+import type { ApiKeyStore, ApiKeyRecord } from '@beercanlabs/factory-bouncer';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { timingSafeEqual, randomUUID, createHash, createHmac } from 'node:crypto';
 import { checkAgentUpdate, extractGitHubRepo, isNewerVersion, parseSemVer } from './updates.js';
@@ -89,6 +91,7 @@ import { incidentsFromRuns, type FactoryMetrics, type Inspector } from '@beercan
 import { handleSchedules, requesterOfRun, requestersEqual } from './schedules.js';
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleGroupRoutes } from './group-routes.js';
+import { handleKeysRoutes } from './keys-routes.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
 import { handleSkillModels, skillModelsForAgent } from './skill-models.js';
 import { handleMcp } from './mcp.js';
@@ -138,6 +141,8 @@ export type FactoryState = {
   registryDir?: string;
   ledger: LedgerStore;
   auth: AuthProvider;
+  /** S5: factory API keys (`fk_`), verified before routing on /api/v1 and /mcp. */
+  keys?: ApiKeyStore;
   /**
    * §6.12 A2: the identity-aware proxy's signed assertion, verified against its issuer, audience and keys. Absent:
    * Access identity is disabled and only factory credentials (bearer tokens, OIDC, run tokens) authenticate.
@@ -1016,6 +1021,12 @@ export async function identify(
 ): Promise<AuthResult> {
   const allowMaterialize = opts?.allowMaterialize !== false;
   let base = allowMaterialize ? requestBasePrincipal.get(req) : undefined;
+  const key = requestApiKey.get(req);
+  if (!base && key) {
+    // S5: the key was verified before routing. Its owner's live grants decide; its scopes only narrow them.
+    const owner = await resolveVerifiedPrincipal(state, { actor: key.owner, roles: key.roles ?? [] }, false);
+    base = { ...owner, keyId: key.id, ...(key.scopes ? { keyScopes: structuredClone(key.scopes) } : {}) };
+  }
   if (!base) {
     const reasons: string[] = [];
     let verified: AuthResult | undefined;
@@ -2363,6 +2374,7 @@ export function createFactoryServer(state: FactoryState): http.Server {
 }
 
 async function route(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
+  if (!verifyApiKeyBeforeRouting(state, req, res)) return;
   wireGrantStoreKindLookup(state);
   tapActAsLedger(state);
   const actAsCheck = await enforceActAsHeader(state, req, res);
@@ -2371,6 +2383,27 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
     return actAsStorage.run(actAsCheck.ctx, () => routeInner(state, req, res));
   }
   return routeInner(state, req, res);
+}
+
+/** S5: keys verified for this request (set before routing, read by identify). */
+export const requestApiKey = new WeakMap<http.IncomingMessage, ApiKeyRecord>();
+
+/**
+ * S5 / D23: an `fk_` key on /api/v1 or /mcp is checked before anything else, including body reads. An unknown, revoked
+ * or expired key gets 401 here; a valid one is remembered for identify(). Requests without an fk_ key pass through.
+ */
+export function verifyApiKeyBeforeRouting(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): boolean {
+  const path = (req.url ?? '/').split('?')[0];
+  if (!(path === '/mcp' || path.startsWith('/api/v1/'))) return true;
+  const plaintext = apiKeyFromAuthorization(req.headers.authorization);
+  if (plaintext === undefined) return true;
+  const rec = plaintext && state.keys ? state.keys.verify(plaintext) : undefined;
+  if (!rec) {
+    json(res, 401, { error: 'invalid_key', message: 'API key is unknown, revoked or expired' });
+    return false;
+  }
+  requestApiKey.set(req, rec);
+  return true;
 }
 
 async function routeInner(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
@@ -2382,6 +2415,8 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     res.end(UI_HTML);
     return;
   }
+
+  if (path.startsWith('/api/v1/keys') && (await handleKeysRoutes(state, req, res, path))) return;
 
   if (
     (path === '/api/v1/whoami' ||

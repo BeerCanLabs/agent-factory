@@ -99,6 +99,7 @@ describe('S24: factory-side per-skill model binding (#370)', { concurrency: fals
       await grants.grant({ subject: v, scope: { kind: 'fleet' }, role: 'viewer', by: 'user:admin', granterIsAdmin: true });
     }
     await grants.grant({ subject: 'user:alice', scope: { kind: 'skill', id: 'summarize-doc' }, role: 'content-owner', by: 'user:admin', granterIsAdmin: true });
+    await grants.grant({ subject: 'user:bob', scope: { kind: 'skill', id: 'summarize-doc' }, role: 'member', by: 'user:admin', granterIsAdmin: true });
 
     state = {
       agents: new Map(),
@@ -200,8 +201,10 @@ describe('S24: factory-side per-skill model binding (#370)', { concurrency: fals
 
   it('PUT/GET is guarded: the skill content-owner and admin may bind; another person may not', async () => {
     assert.equal((await call('GET', '/api/v1/skills/summarize-doc/model', undefined, TOKENS.alice)).body.binding, null);
+    // Bob holds a skill `member` grant (which carries skills.version.add) but is not the content-owner (D31).
     const denied = await call('PUT', '/api/v1/skills/summarize-doc/model', { model: 'claude-haiku' }, TOKENS.bob);
     assert.equal(denied.status, 403, JSON.stringify(denied.body));
+    assert.equal(denied.body.requiredRole, 'content-owner');
     assert.equal(skillModelStore(state).get('summarize-doc'), undefined);
     assert.equal((await call('PUT', '/api/v1/skills/missing-skill/model', { model: 'claude-haiku' }, TOKENS.admin)).status, 404);
     assert.equal((await call('PUT', '/api/v1/skills/summarize-doc/model', { model: 'not-offered' }, TOKENS.alice)).status, 422);

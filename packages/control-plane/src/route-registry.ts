@@ -94,6 +94,30 @@ export const ROUTE_EXCEPTIONS = {
     rationale: 'Grant list/create/revoke authorize per scope inside the handler (admin via grants.manage, or content-owner / accountable-lead on their own item, D10, D24, S3); S4 moves this into single Bouncer enforcement',
     retiringStory: 'S4',
   },
+  'keys-self-list': {
+    id: 'keys-self-list',
+    protection: 'transitional',
+    rationale: 'API key management authorizes in the handler: a signed-in person manages keys they own, an admin any key and service keys; API-key callers are refused (D10, D14, S5); S4 moves this into single Bouncer enforcement',
+    retiringStory: 'S4',
+  },
+  'keys-self-create': {
+    id: 'keys-self-create',
+    protection: 'transitional',
+    rationale: 'API key management authorizes in the handler: a signed-in person manages keys they own, an admin any key and service keys; API-key callers are refused (D10, D14, S5); S4 moves this into single Bouncer enforcement',
+    retiringStory: 'S4',
+  },
+  'keys-self-rotate': {
+    id: 'keys-self-rotate',
+    protection: 'transitional',
+    rationale: 'API key management authorizes in the handler: a signed-in person manages keys they own, an admin any key and service keys; API-key callers are refused (D10, D14, S5); S4 moves this into single Bouncer enforcement',
+    retiringStory: 'S4',
+  },
+  'keys-self-revoke': {
+    id: 'keys-self-revoke',
+    protection: 'transitional',
+    rationale: 'API key management authorizes in the handler: a signed-in person manages keys they own, an admin any key and service keys; API-key callers are refused (D10, D14, S5); S4 moves this into single Bouncer enforcement',
+    retiringStory: 'S4',
+  },
   'identity-whoami': {
     id: 'identity-whoami',
     protection: 'identity-probe',
@@ -170,6 +194,10 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
 
   // Identity probe (Authenticated principal, no elevated privilege)
   { method: 'GET', pattern: '/api/v1/whoami', exception: 'identity-whoami', description: 'Caller identity and roles probe' },
+  { method: 'GET', pattern: '/api/v1/keys', exception: 'keys-self-list', description: 'List API keys (S5)' },
+  { method: 'POST', pattern: '/api/v1/keys', exception: 'keys-self-create', description: 'Issue API key (S5)' },
+  { method: 'POST', pattern: '/api/v1/keys/:id/rotate', exception: 'keys-self-rotate', description: 'Rotate API key (S5)' },
+  { method: 'DELETE', pattern: '/api/v1/keys/:id', exception: 'keys-self-revoke', description: 'Revoke API key (S5)' },
   { method: 'GET', pattern: '/api/v1/authz/check', exception: 'authz-check', description: 'Authorization preflight (S3)' },
   { method: 'GET', pattern: '/api/v1/principals', privilege: 'grants.manage', description: 'List principals (S3)' },
   { method: 'POST', pattern: '/api/v1/principals', privilege: 'grants.manage', description: 'Create principal (S3)' },
