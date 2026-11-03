@@ -106,6 +106,7 @@ const CENSUS: Record<string, Role> = {
   'skills.defaults.set': 'admin',
   'grants.manage': 'admin',
   'content.admit': 'approver',
+  'budget.allocate': 'admin',
 };
 // Held by one service role alone; an admin does not hold them. `runs.attest-requester` moved from `operator` to
 // `gatekeeper-ingress` (TSK-111): the old rule no longer matches it, so the proof below reads it from here.
@@ -138,7 +139,7 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 98);
+    assert.equal(PRIVILEGES.length, 99);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 
@@ -252,5 +253,24 @@ describe('approver scope (S4)', () => {
     assert.equal(authorize({ principal: principal(['operator']), privilege: 'content.admit' }).allowed, false);
     assert.equal(authorize({ principal: principal(['viewer']), privilege: 'content.admit' }).allowed, false);
     assert.equal(authorize({ principal: principal(['admin']), privilege: 'content.admit' }).allowed, true);
+  });
+});
+
+// S19 (D7, D25): budget-owner exists only as a fleet grant and allocates budget, nothing else.
+describe('budget-owner grant (S19)', () => {
+  const grant = (role: string, readOnly = false) =>
+    ({ readOnly, grant: { id: 'g', subject: 'user:bea', scope: { kind: 'fleet' }, role } }) as never;
+  const bea = principal([]);
+  it('allocates budget and reads agents, spend and policy', () => {
+    const held = PRIVILEGES.filter((p) => authorize({ principal: bea, privilege: p, resource: { grants: [grant('budget-owner')] } }).allowed);
+    assert.deepEqual(held.sort(), ['agents.read', 'budget.allocate', 'policy.read', 'spend.read']);
+  });
+  it('a read-only budget-owner grant allocates nothing', () => {
+    assert.equal(authorize({ principal: bea, privilege: 'budget.allocate', resource: { grants: [grant('budget-owner', true)] } }).allowed, false);
+  });
+  it('admin holds budget.allocate as backup; approver and operator do not', () => {
+    assert.ok(authorize({ principal: principal(['admin']), privilege: 'budget.allocate' }).allowed);
+    assert.equal(authorize({ principal: principal(['approver']), privilege: 'budget.allocate' }).allowed, false);
+    assert.equal(authorize({ principal: principal(['operator']), privilege: 'budget.allocate' }).allowed, false);
   });
 });
