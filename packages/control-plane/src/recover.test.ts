@@ -49,6 +49,14 @@ describe('S6 lockout recovery, bootstrap and IdP config (#359)', () => {
     assert.equal(await drainRecoveryOutbox({ outbox: s.outbox, ledger: s.ledger, reload: async () => {} }), 0, 'drains once');
   });
 
+  it('a failed secret write keeps the old break-glass key and drops the new one', async () => {
+    const s = await stores();
+    const old = await s.keys.create({ owner: BREAK_GLASS_OWNER, roles: ['admin'], by: 'test' });
+    await assert.rejects(recoverLockout({ ...s, operator: 'op', reseedBreakGlass: true, writeSecret: async () => { throw new Error('denied'); } }), /denied/);
+    assert.equal(s.keys.verify(old.plaintext)?.id, old.record.id);
+    assert.equal(s.keys.list({ owner: BREAK_GLASS_OWNER }).length, 1);
+  });
+
   it('FACTORY_BOOTSTRAP_ADMIN applies only while zero human admins exist', async () => {
     const s = await stores();
     assert.equal(await bootstrapAdmin(s, undefined), 'unset');

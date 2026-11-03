@@ -83,9 +83,16 @@ export async function recoverLockout(input: RecoverInput): Promise<{ adminId?: s
     events.push({ timestamp: new Date().toISOString(), action: 'LOCKOUT_RECOVERED:admin', actor, subject: out.adminId });
   }
   if (input.reseedBreakGlass) {
-    for (const k of input.keys.list({ owner: BREAK_GLASS_OWNER })) await input.keys.revoke(k.id, { by: actor });
+    const old = input.keys.list({ owner: BREAK_GLASS_OWNER });
     const { record, plaintext } = await input.keys.create({ owner: BREAK_GLASS_OWNER, roles: ['admin'], expiresAt: null, by: actor });
-    await input.writeSecret!(plaintext);
+    try {
+      await input.writeSecret!(plaintext);
+    } catch (err) {
+      // Never leave a key nobody holds: drop the new one and keep the old ones.
+      await input.keys.revoke(record.id, { by: actor });
+      throw err;
+    }
+    for (const k of old) await input.keys.revoke(k.id, { by: actor });
     out.breakGlassKeyId = record.id;
     events.push({ timestamp: new Date().toISOString(), action: `LOCKOUT_RECOVERED:break-glass:${record.id}`, actor, subject: BREAK_GLASS_OWNER });
   }
