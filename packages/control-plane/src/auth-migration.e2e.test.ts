@@ -120,6 +120,12 @@ describe('S8: legacy auth import, shadow mode and cutover (#373)', { concurrency
     assert.equal(state.authCutover, true);
     assert.equal(state.identityLinks!.list()[0].roles, undefined, 'link roles are gone; grants decide');
     assert.ok(ledger.query().some((e) => e.action === 'AUTH_CUTOVER' && e.actor === 'user:admin'));
+    assert.ok(state.identityLinks!.list().every((l) => !l.roles?.length && !Object.keys(l.agentRoles ?? {}).length), 'agent link roles are stripped too');
+    const after = await call('GET', '/api/v1/auth-migration/readiness');
+    assert.equal(after.body.mismatches, 0, 'no legacy link roles remain to compare');
+    state.authCutover = undefined; // a restart loses the flag; the ledgered AUTH_CUTOVER row keeps it
+    assert.equal((await call('GET', '/api/v1/auth-migration/readiness')).body.cutover, true);
+    assert.equal((await call('POST', '/api/v1/auth-migration/cutover')).status, 200, 'a rerun after cutover is allowed');
   });
 
   it('S8: the migration routes need grants.manage', async () => {
