@@ -539,10 +539,7 @@ export function actorIsAdmin(state: FactoryState, actor: string, knownRoles?: re
     }
   }
   const clean = actor.toLowerCase();
-  const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
-    .split(',')
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
+  const adminEmails = legacyAdminEmails();
 
   if (clean.startsWith('user:') && state.principals && state.principals.healthy) {
     const rec = state.principals.get(clean);
@@ -555,19 +552,8 @@ export function actorIsAdmin(state: FactoryState, actor: string, knownRoles?: re
 
   if (clean.startsWith('token:')) {
     const tokenName = clean.slice(6);
-    const rawTokens = process.env.FACTORY_TOKENS;
-    if (rawTokens) {
-      try {
-        const list = JSON.parse(rawTokens);
-        if (Array.isArray(list)) {
-          const match = list.find((t: any) => t && typeof t.name === 'string' && t.name.toLowerCase() === tokenName);
-          if (match && Array.isArray(match.roles)) {
-            for (const r of match.roles) {
-              if (r === 'admin') return true;
-            }
-          }
-        }
-      } catch {}
+    for (const r of legacyTokenRoles(tokenName) ?? []) {
+      if (r === 'admin') return true;
     }
     return false;
   }
@@ -629,10 +615,7 @@ export function isSenderManager(
   sender: { requestedBy?: { provider: string; id: string }; caller?: AuthenticatedCaller; actor?: string },
 ): boolean {
   const owners = ownersOf(state, agentId).map((o) => o.toLowerCase());
-  const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
-    .split(',')
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
+  const adminEmails = legacyAdminEmails();
 
   if (sender.requestedBy) {
     const link = state.identityLinks?.resolveLink(sender.requestedBy.provider, sender.requestedBy.id);
@@ -717,10 +700,7 @@ export function canRunManageModels(
   if (!req) return { allowed: false };
 
   const owners = ownersOf(state, run.agentId).map((o) => o.toLowerCase());
-  const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
-    .split(',')
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
+  const adminEmails = legacyAdminEmails();
 
   if (req.kind === 'identity') {
     const link = state.identityLinks?.resolveLink(req.provider, req.id);
@@ -2154,7 +2134,7 @@ export function visibleApprovals(state: FactoryState, reader: Principal, all: Ap
 
 export function mayDecide(state: FactoryState, principal: { actor: string; roles: Role[] }, approvalId: string): { ok: true } | { ok: false; required: Role } {
   const grantRes = effectiveGrantsForActor(state, principal.actor);
-  if (!grantRes.ok) return { ok: false, required: 'approver' };
+  if (!grantRes.ok) return { ok: false, required: 'admin' };
   const global = authorize({
     principal,
     privilege: 'approvals.decide',
@@ -2357,6 +2337,7 @@ export function getKeymaster(state: FactoryState): Keymaster {
 }
 
 import { UI_HTML } from './ui.js';
+import { legacyAdminEmails, legacyTokenRoles } from './legacy-env-roles.js';
 
 export function createFactoryServer(state: FactoryState): http.Server {
   wireGrantStoreKindLookup(state);
@@ -3053,10 +3034,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     }
 
     if (requestedBy) {
-      const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
-        .split(',')
-        .map((e) => e.trim().toLowerCase())
-        .filter(Boolean);
+      const adminEmails = legacyAdminEmails();
       const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
       const linkGrants = link ? effectiveGrantsForActor(state, link.actor) : undefined;
       if (linkGrants && !linkGrants.ok) {
@@ -3297,10 +3275,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
 
     let caller: AuthenticatedCaller | undefined;
     if (requestedBy) {
-      const adminEmails = (process.env.FACTORY_ADMIN_EMAILS ?? '')
-        .split(',')
-        .map((e) => e.trim().toLowerCase())
-        .filter(Boolean);
+      const adminEmails = legacyAdminEmails();
       const link = state.identityLinks?.resolveLink(requestedBy.provider, requestedBy.id);
       const linkGrants = link ? effectiveGrantsForActor(state, link.actor) : undefined;
       if (linkGrants && !linkGrants.ok) {

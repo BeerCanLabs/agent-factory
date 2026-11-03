@@ -23,31 +23,18 @@ import type { Run } from '@beercanlabs/factory-property-manager';
 import { effectiveGrantsForActor, json, readJson, type FactoryState } from './app.js';
 import { createFromConfiguration, discardCreated, resolveAgentOwnershipOnSubmit, type ResolvedAgentOwnership } from './agent-creation.js';
 import { adoptContextForAgent, skillRegistry, adoptionStore, requestAdoptionFor, activeDefaultSkills } from './skills.js';
+import { legacyAdminEmails, legacyTokenRoles } from './legacy-env-roles.js';
 
 export const ARCHETYPES = ['purpose-built', 'personal-assistant', 'team-member'] as const;
 
 function adminEmailsFromEnv(): string[] {
-  return (process.env.FACTORY_ADMIN_EMAILS ?? '')
-    .split(',')
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
+  return legacyAdminEmails();
 }
 
 function tokenRolesFromEnv(tokenName: string): Role[] | undefined {
   if (tokenName === 'admin') return ['admin'];
   if (tokenName === 'operator') return ['operator'];
-  const raw = process.env.FACTORY_TOKENS;
-  if (!raw) return undefined;
-  try {
-    const list = JSON.parse(raw);
-    if (Array.isArray(list)) {
-      const match = list.find((t: any) => t && typeof t.name === 'string' && t.name.toLowerCase() === tokenName.toLowerCase());
-      if (match && Array.isArray(match.roles)) {
-        return match.roles;
-      }
-    }
-  } catch {}
-  return undefined;
+  return legacyTokenRoles(tokenName);
 }
 
 function enrichRoles(state: FactoryState, actor: string, roles: Set<Role>): void {

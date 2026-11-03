@@ -119,6 +119,7 @@ import {
   type SkillStatus,
   type SkillVersionRecord,
 } from '@beercanlabs/factory-registrar';
+import { legacyTokenEntry } from './legacy-env-roles.js';
 
 /**
  * The checker this deployment uses (see the header). Called once per control plane; `undefined` means none is
@@ -838,6 +839,12 @@ async function decide(
     return;
   }
   const registry = skillRegistry(state);
+  // S4, D27: admitting a skill version is content admission, which the approver role holds through `content.admit`.
+  const decideResource = grantRes.grants !== undefined ? { resource: { grants: grantRes.grants } } : {};
+  const admitOrDecide = () => {
+    const gate = authorize({ principal, privilege: 'content.admit', ...decideResource });
+    return gate.allowed ? gate : authorize({ principal, privilege: 'skills.decide', ...decideResource });
+  };
   const authorizeFor = (r: SkillVersionRecord | undefined) => {
     const owner = r ? ownerOf(r) : undefined;
     const ownerScoped = !!r && visibilityOf(r) === 'private' && !!owner && r.status === 'pending';
@@ -852,11 +859,7 @@ async function decide(
             ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
           },
         })
-      : authorize({
-          principal,
-          privilege: 'skills.decide',
-          ...(grantRes.grants !== undefined ? { resource: { grants: grantRes.grants } } : {}),
-        });
+      : admitOrDecide();
   };
   const firstRec = registry.get(id, version);
   const first = authorizeFor(firstRec);
@@ -2185,12 +2188,7 @@ function isOwnerKnownInFactory(state: FactoryState, actor: string): boolean {
   }
   if (actor.toLowerCase().startsWith('token:')) {
     const tokenName = actor.toLowerCase().slice(6);
-    try {
-      const list = JSON.parse(process.env.FACTORY_TOKENS ?? '[]');
-      if (Array.isArray(list) && list.some((t: any) => t && typeof t.name === 'string' && t.name.toLowerCase() === tokenName)) {
-        return true;
-      }
-    } catch {}
+    if (legacyTokenEntry(tokenName)) return true;
   }
   return false;
 }

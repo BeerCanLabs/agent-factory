@@ -58,7 +58,8 @@ describe('E9 held requests in the control plane', { concurrency: false }, () => 
       ledger: new MemoryLedger(),
       auth: bearerAuth([
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
-        { name: 'dale', token: APPROVER, roles: ['viewer', 'approver'] },
+        // S4, D29: run-time holds are cleared by admin or the content side, no longer by the approver role.
+        { name: 'dale', token: APPROVER, roles: ['viewer', 'admin'] },
         { name: 'gatekeeper-egress', token: GATEKEEPER_EGRESS, roles: ['gatekeeper-egress'] },
       ]),
       version: '0.1.0-test',

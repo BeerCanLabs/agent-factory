@@ -129,6 +129,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/route-registry.ts',
       'packages/control-plane/src/keys-routes.ts',
       'packages/control-plane/src/transfers.ts',
+      'packages/control-plane/src/legacy-env-roles.ts',
     ],
   },
   timekeeper: {
