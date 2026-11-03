@@ -63,9 +63,16 @@ export type LedgerEvent = {
   before?: Record<string, unknown> | null;
   /** S3 / S7: structured post-mutation principal/grant snapshot (`null` when deleted/revoked). */
   after?: Record<string, unknown> | null;
+  /** S18: legacy owner string converted to canonical principal and grant. */
+  legacyOwner?: string;
+  principalId?: string;
+  role?: string;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
+  'legacyOwner',
+  'principalId',
+  'role',
   'requestedModel',
   'parentRunId',
   'parentAgentId',
@@ -307,7 +314,6 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (raw.footnote === '[no tools called]' || raw.footnote === '[no model or tools used]') event.footnote = raw.footnote;
   if (typeof raw.retryRequestId === 'string' && /^[0-9a-f-]{36}$/.test(raw.retryRequestId)) event.retryRequestId = raw.retryRequestId;
   if (typeof raw.toolCalled === 'boolean') event.toolCalled = raw.toolCalled;
-  if (typeof raw.subject === 'string' && /^[A-Za-z0-9:._@+-]{1,256}$/.test(raw.subject)) event.subject = raw.subject;
   if (typeof raw.onBehalfOf === 'string' && AUDIT_ID_FIELD.test(raw.onBehalfOf)) event.onBehalfOf = raw.onBehalfOf;
   const cleanScope = sanitizeGrantScope(raw.scope);
   if (cleanScope) event.scope = cleanScope;
@@ -319,6 +325,30 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
     const cleanAfter = sanitizeAuditSnapshot(raw.after);
     if (cleanAfter !== undefined) event.after = cleanAfter;
   }
+  if (
+    typeof raw.subject === 'string' &&
+    raw.subject.length <= 320 &&
+    !raw.subject.startsWith('fk_') &&
+    /^(?:[a-z][a-z0-9-]{0,31}:[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.:-]{1,287}|[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9.-]+)$/.test(raw.subject)
+  ) {
+    event.subject = raw.subject;
+  }
+  if (
+    typeof raw.legacyOwner === 'string' &&
+    raw.legacyOwner.length <= 320 &&
+    !raw.legacyOwner.startsWith('fk_') &&
+    /^(?:(?:user|cloudflare|oidc):[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.-]{1,315}|[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9.-]+)$/.test(raw.legacyOwner)
+  ) {
+    event.legacyOwner = raw.legacyOwner;
+  }
+  if (
+    typeof raw.principalId === 'string' &&
+    raw.principalId.length <= 320 &&
+    /^user:[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.-]{1,315}$/.test(raw.principalId)
+  ) {
+    event.principalId = raw.principalId;
+  }
+  if (typeof raw.role === 'string' && /^[a-z0-9_-]{1,64}$/.test(raw.role)) event.role = raw.role;
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);

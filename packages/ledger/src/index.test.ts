@@ -506,3 +506,98 @@ describe('trigger attribution field (#345)', () => {
     }
   });
 });
+
+describe('owner conversion fields (S18)', () => {
+  it('keeps well-formed legacyOwner, principalId, and role', () => {
+    const ok = toLedgerEvent({
+      agentId: 'donna',
+      type: 'action',
+      action: 'OWNER_CONVERTED',
+      actor: 'admin@example.com',
+      legacyOwner: 'cloudflare:dale@example.com',
+      principalId: 'user:dale',
+      role: 'content-owner',
+    });
+    assert.equal(ok.legacyOwner, 'cloudflare:dale@example.com');
+    assert.equal(ok.principalId, 'user:dale');
+    assert.equal(ok.role, 'content-owner');
+
+    const bad = toLedgerEvent({
+      agentId: 'donna',
+      type: 'action',
+      action: 'OWNER_CONVERTED',
+      legacyOwner: 'free text with spaces',
+      principalId: 'bad principal <script>',
+      role: 'Invalid Role With Spaces',
+    });
+    assert.equal(bad.legacyOwner, undefined);
+    assert.equal(bad.principalId, undefined);
+    assert.equal(bad.role, undefined);
+  });
+
+  it('keeps RFC 5322 apostrophe emails and 265-char cloudflare emails, while rejecting fk_ tokens and prefixless strings (F5)', () => {
+    const oconnor = toLedgerEvent({
+      agentId: 'donna',
+      type: 'action',
+      action: 'OWNER_CONVERTED',
+      legacyOwner: "cloudflare:o'connor@example.com",
+      principalId: "user:o'connor@example.com",
+      subject: "user:o'connor@example.com",
+      role: 'content-owner',
+    });
+    assert.equal(oconnor.legacyOwner, "cloudflare:o'connor@example.com");
+    assert.equal(oconnor.principalId, "user:o'connor@example.com");
+    assert.equal(oconnor.subject, "user:o'connor@example.com");
+
+    const rawEmail = toLedgerEvent({
+      agentId: 'donna',
+      type: 'action',
+      action: 'OWNER_CONVERTED',
+      legacyOwner: "o'connor@example.com",
+    });
+    assert.equal(rawEmail.legacyOwner, "o'connor@example.com");
+
+    // 254-char email prefixed with 'cloudflare:' = 265 chars (under 320 max)
+    const longLocal = 'a'.repeat(64);
+    const longDomain = `${'b'.repeat(60)}.${'c'.repeat(60)}.${'d'.repeat(60)}.com`;
+    const longEmail = `${longLocal}@${longDomain}`;
+    const longPrefixed = `cloudflare:${longEmail}`;
+    const longEvent = toLedgerEvent({
+      agentId: 'donna',
+      type: 'action',
+      action: 'OWNER_CONVERTED',
+      legacyOwner: longPrefixed,
+      principalId: `user:${longEmail}`,
+      subject: `user:${longEmail}`,
+    });
+    assert.equal(longEvent.legacyOwner, longPrefixed);
+    assert.equal(longEvent.principalId, `user:${longEmail}`);
+    assert.equal(longEvent.subject, `user:${longEmail}`);
+
+    // Reject fk_ tokens and prefixless strings
+    const rejected = toLedgerEvent({
+      agentId: 'donna',
+      type: 'action',
+      action: 'OWNER_CONVERTED',
+      legacyOwner: 'fk_live_abc123secrettoken',
+      principalId: 'fk_live_abc123secrettoken',
+      subject: 'fk_live_abc123secrettoken',
+    });
+    assert.equal(rejected.legacyOwner, undefined);
+    assert.equal(rejected.principalId, undefined);
+    assert.equal(rejected.subject, undefined);
+
+    const prefixless = toLedgerEvent({
+      agentId: 'donna',
+      type: 'action',
+      action: 'OWNER_CONVERTED',
+      legacyOwner: 'just_a_bare_token_without_at_or_prefix',
+      principalId: 'dale@example.com', // lacks user: prefix
+      subject: 'bare_subject',
+    });
+    assert.equal(prefixless.legacyOwner, undefined);
+    assert.equal(prefixless.principalId, undefined);
+    assert.equal(prefixless.subject, undefined);
+  });
+});
+

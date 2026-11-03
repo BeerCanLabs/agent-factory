@@ -35,6 +35,17 @@ import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
 import { ModelStore } from './models.js';
 import { loadSharedRuntime } from './agent-creation.js';
 
+export {
+  convertLegacyOwners,
+  ZeroOrphanCutoverError,
+  type ConvertLegacyOwnersOptions,
+  type OwnerConversionResult,
+  type OwnerConversionMapping,
+  type OrphanRecord,
+  type OwnerConversionRole,
+  type MultiOwnerAmbiguityPolicy,
+} from './migration-owners.js';
+
 const PORT = parseInt(process.env.PORT || '8088', 10);
 const AGENTS_ROOT = process.env.AGENTS_ROOT || fileURLToPath(new URL('../../../agents', import.meta.url));
 const VERSION = '0.1.0';
