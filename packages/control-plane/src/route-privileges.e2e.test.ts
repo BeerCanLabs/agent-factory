@@ -240,6 +240,9 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/grants', privilege: 'grants.manage', role: 'admin' },
   { method: 'POST', path: '/api/v1/grants', privilege: 'grants.manage', role: 'admin', body: {} },
   { method: 'DELETE', path: '/api/v1/grants/g_nope', privilege: 'grants.manage', role: 'admin' },
+  { method: 'GET', path: '/api/v1/agents/nope/transfer', privilege: 'grants.manage', role: 'admin' },
+  { method: 'POST', path: '/api/v1/agents/nope/transfer', privilege: 'grants.manage', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/agents/nope/transfer/accept', privilege: 'grants.manage', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/skills/${SKILL}/retire`, privilege: 'skills.retire.force', role: 'admin', body: { force: true } },
 ];
 

@@ -34,6 +34,7 @@ import { AwsComputeSource, AwsCostSource } from './aws/accountant.js';
 import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
 import { ModelStore } from './models.js';
 import { loadSharedRuntime } from './agent-creation.js';
+import { startTransferSweeper } from './transfers.js';
 
 export {
   convertLegacyOwners,
@@ -367,6 +368,8 @@ recoverInterruptedDeploys(state);
 await reconcileRuns(state);
 
 setInterval(() => void checkHealth(state), 15_000).unref();
+// S3b (D15): roll back ownership transfers left pending past their 7-day TTL.
+startTransferSweeper(state);
 if (state.runtime.status) {
   setInterval(() => void reconcileRuns(state), 15_000).unref();
 }

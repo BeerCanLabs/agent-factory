@@ -93,6 +93,7 @@ import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js
 import { handleGroupRoutes } from './group-routes.js';
 import { handleKeysRoutes } from './keys-routes.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
+import { handleAgentTransfers } from './transfers.js';
 import { handleMcp } from './mcp.js';
 export { handleMcp } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
@@ -2429,6 +2430,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     return;
   }
 
+  if (/^\/api\/v1\/agents\/[^/]+\/transfer(\/|$)/.test(path) && (await handleAgentTransfers(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleGitHubAppSetup(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleDiscordAppSetup(state, req, res, path))) return;

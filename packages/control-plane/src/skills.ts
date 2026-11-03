@@ -77,6 +77,7 @@ import {
 import { applyKillSwitch } from '@beercanlabs/factory-property-manager';
 import { registryOf } from '@beercanlabs/factory-registrar';
 import { triggerApply } from './apply.js';
+import { handleSkillGrantTransfer } from './transfers.js';
 import { accountableLeadOf, configOf, ledgerVersion, ownersOf } from './config-store.js';
 import {
   AdoptionStore,
@@ -1259,6 +1260,30 @@ async function pauseForSkill(state: FactoryState, agentId: string, skillId: stri
     registryOf(state).save(agent);
   }
   return true;
+}
+
+/**
+ * S3b (D15, D26): on accept of a personal-agent ownership transfer, detaches every private skill on `agentId` whose
+ * content-owner is the outgoing owner, so the new owner never inherits it. Public skills and other people's private
+ * skills stay. Each removal is a new configuration version, ledgered; returns what was detached and what failed.
+ */
+export async function detachOwnerPrivateSkills(
+  state: FactoryState,
+  agentId: string,
+  outgoingOwner: string,
+  actor: string,
+): Promise<{ detached: string[]; failed: string[] }> {
+  const registry = skillRegistry(state);
+  const detached: string[] = [];
+  const failed: string[] = [];
+  for (const k of currentSkills(state, agentId)) {
+    const rec = registry.get(k.id, k.version) ?? registry.versions(k.id)[0];
+    if (!rec || visibilityOf(rec) !== 'private') continue;
+    if (resolveSkillContentOwner(state, k.id, rec) !== outgoingOwner) continue;
+    const ok = await stripSkill(state, agentId, k.id, actor, `ownership transfer: detach ${outgoingOwner}'s private skill (D15, D26)`);
+    (ok ? detached : failed).push(k.id);
+  }
+  return { detached, failed };
 }
 
 /** Removes a skill from an agent's configuration (a new version, ledgered). True when the agent no longer adopts it. */
@@ -2580,6 +2605,7 @@ const AGENT_SKILL = /^\/api\/v1\/agents\/([^/]+)\/skills\/([^/]+)$/;
 const AGENT_SKILL_HOLDS = /^\/api\/v1\/agents\/([^/]+)\/skills\/([^/]+)\/holds$/;
 const ADOPTION_DECISION = /^\/api\/v1\/agents\/([^/]+)\/skills\/([^/]+)\/adoption\/(approve|reject)$/;
 const SKILL_TRANSFER = /^\/api\/v1\/skills\/([^/]+)\/transfer$/;
+const SKILL_GRANT_TRANSFER = /^\/api\/v1\/skills\/([^/]+)\/transfer(?:\/(accept|decline|cancel))?$/;
 const SKILL_TRANSFER_ACCEPT = /^\/api\/v1\/skills\/([^/]+)\/transfer\/accept$/;
 const SKILL_TRANSFER_CANCEL = /^\/api\/v1\/skills\/([^/]+)\/transfer\/cancel$/;
 const SKILL_TRANSFER_ADMIN = /^\/api\/v1\/skills\/([^/]+)\/transfer\/admin$/;
@@ -2729,6 +2755,15 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
   if (agentSkill && req.method === 'DELETE') {
     await removeAdoption(state, req, res, decode(agentSkill[1]), decode(agentSkill[2]));
     return true;
+  }
+
+  // S3b (D15): with the grant store configured, skill ownership moves through the two-phase grant transaction.
+  if (state.grants) {
+    const grantTransfer = path.match(SKILL_GRANT_TRANSFER);
+    if (grantTransfer && (req.method === 'POST' || (req.method === 'GET' && !grantTransfer[2]))) {
+      await handleSkillGrantTransfer(state, req, res, decode(grantTransfer[1]), grantTransfer[2] as 'accept' | 'decline' | 'cancel' | undefined);
+      return true;
+    }
   }
 
   const transfer = path.match(SKILL_TRANSFER);

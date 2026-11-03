@@ -199,6 +199,28 @@ export class ConnectionKeymaster {
     }
   }
 
+  /**
+   * S3b (D15): deletes an agent's user-OAuth grant for `provider` (the personal tokens of an outgoing owner) by
+   * overwriting it with a tombstone `getGrant` never reads as a grant, drops cached tokens, and ledgers the purge.
+   * Returns false when there was nothing to purge. Never reads or logs the token values.
+   */
+  async purgeGrant(agentId: string, provider: string, by: string): Promise<boolean> {
+    if (!SLUG.test(agentId) || !SLUG.test(provider)) return false;
+    const existing = await this.getGrant(agentId, provider);
+    if (!existing) return false;
+    await this.writeSecret(grantSecretName(agentId, provider), JSON.stringify({ provider, purged: true, purgedAt: new Date(this.now()).toISOString() }));
+    for (const k of this.cache.keys()) if (k.startsWith(`${agentId}\u0000${provider}\u0000`)) this.cache.delete(k);
+    this.ledger?.append({
+      timestamp: new Date(this.now()).toISOString(),
+      agentId,
+      type: 'action',
+      action: 'CONNECTION_PURGED',
+      actor: by,
+      provider,
+    });
+    return true;
+  }
+
   static view(g: Grant, def?: ConnectionProvider): GrantView {
     const ends = def?.kind === 'oauth-user' && def.refresh === false && g.status === 'active' ? g.expiresAt : undefined;
     return { provider: g.provider, scopes: g.scopes, status: g.status, obtainedAt: g.obtainedAt, grantedBy: g.grantedBy, ...(ends ? { endsAt: ends } : {}) };
