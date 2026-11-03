@@ -15,6 +15,7 @@ import { GroupStore } from '@beercanlabs/factory-registrar';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { createFactoryServer, type FactoryState } from './app.js';
+import { ApiKeyStore } from '@beercanlabs/factory-bouncer';
 import { IdpConfigStore } from './idp-config.js';
 import { SessionStore } from './login.js';
 
@@ -52,9 +53,9 @@ describe('S12: login page, OAuth state/PKCE, sessions (#362)', { concurrency: fa
   const get = (path: string, headers: Record<string, string> = {}) => fetch(`http://127.0.0.1:${port}${path}`, { headers, redirect: 'manual' });
 
   /** Drives start → IdP authorize → callback like a browser, returning the callback response. */
-  async function signIn(user: Record<string, unknown>, opts: { tamperState?: boolean; badVerifier?: boolean; otherBrowser?: boolean } = {}) {
+  async function signIn(user: Record<string, unknown>, opts: { tamperState?: boolean; badVerifier?: boolean; otherBrowser?: boolean; cliQuery?: string } = {}) {
     nextUser = user;
-    const start = await get('/api/v1/auth/oidc/start');
+    const start = await get(`/api/v1/auth/oidc/start${opts.cliQuery ?? ''}`);
     assert.equal(start.status, 302);
     const auth = new URL(start.headers.get('location')!);
     assert.equal(auth.origin + auth.pathname, `${ISSUER}/authorize`);
@@ -99,6 +100,7 @@ describe('S12: login page, OAuth state/PKCE, sessions (#362)', { concurrency: fa
       oauthFetch: idpFetch,
       sessions: new SessionStore(),
     } as unknown as FactoryState;
+    state.keys = await ApiKeyStore.open();
     state.idpConfig = await IdpConfigStore.open();
     await state.idpConfig.put({ providers: [{ id: 'oidc', clientId: 'factory-client', issuer: ISSUER, clientSecretRef: 'S12_IDP_SECRET' }] }, 'user:admin');
     cp = createFactoryServer(state);
@@ -176,5 +178,55 @@ describe('S12: login page, OAuth state/PKCE, sessions (#362)', { concurrency: fa
     const c = sessionCookie(await signIn({ email: 'stephanie@example.com', email_verified: true }));
     const r = await fetch(`http://127.0.0.1:${port}/api/v1/keys`, { method: 'POST', headers: { cookie: c, origin: 'https://evil.test', 'content-type': 'application/json' }, body: '{}' });
     assert.equal(r.status, 401);
+  });
+
+  it('S13 AC1: the CLI loopback gets a one-time code and trades it with its PKCE verifier for a cli fk_ key; a second login rotates it', async () => {
+    const verifier = 'cli-verifier-0123456789abcdefghijklmnop';
+    const cliChallenge = createHash('sha256').update(verifier).digest('base64url');
+    const q = `?cli_port=53682&cli_state=clistate0123456789ab&cli_challenge=${cliChallenge}`;
+    const page = await (await get(`/login${q}`)).text();
+    assert.ok(page.includes(`/api/v1/auth/oidc/start${q.replace(/&/g, '&#38;')}`), 'the IdP button carries the CLI request');
+    const loginOnce = async () => {
+      const cb = await signIn({ email: 'stephanie@example.com', email_verified: true }, { cliQuery: q });
+      assert.equal(cb.status, 302);
+      const loc = new URL(cb.headers.get('location')!);
+      assert.equal(loc.origin, 'http://127.0.0.1:53682');
+      assert.equal(loc.searchParams.get('state'), 'clistate0123456789ab');
+      assert.equal(loc.searchParams.get('key'), null, 'the key never rides the redirect');
+      const code = loc.searchParams.get('code')!;
+      const bad = await fetch(`http://127.0.0.1:${port}/api/v1/auth/cli/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, verifier: 'wrong-verifier-0123456789abcdefgh' }) });
+      assert.equal(bad.status, 400);
+      return { code, cb };
+    };
+    // A wrong verifier burns the code.
+    const first = await loginOnce();
+    const burned = await fetch(`http://127.0.0.1:${port}/api/v1/auth/cli/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: first.code, verifier }) });
+    assert.equal(burned.status, 400);
+    const second = await signIn({ email: 'stephanie@example.com', email_verified: true }, { cliQuery: q });
+    const code2 = new URL(second.headers.get('location')!).searchParams.get('code')!;
+    const tok = await fetch(`http://127.0.0.1:${port}/api/v1/auth/cli/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: code2, verifier }) });
+    assert.equal(tok.status, 200);
+    const out = (await tok.json()) as { secret: string; key: { id: string; deviceFamily: string; owner: string; hash?: string } };
+    assert.match(out.secret, /^fk_/);
+    assert.equal(out.key.deviceFamily, 'cli');
+    assert.equal(out.key.owner, 'user:stephanie');
+    assert.equal(out.key.hash, undefined);
+    const who = await get('/api/v1/whoami', { authorization: `Bearer ${out.secret}` });
+    assert.equal(who.status, 200);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/v1/auth/cli/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: code2, verifier }) })).status, 400, 'the code is one-time');
+    const third = await signIn({ email: 'stephanie@example.com', email_verified: true }, { cliQuery: q });
+    const code3 = new URL(third.headers.get('location')!).searchParams.get('code')!;
+    const again = (await (await fetch(`http://127.0.0.1:${port}/api/v1/auth/cli/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: code3, verifier }) })).json()) as { secret: string; key: { id: string } };
+    assert.equal(again.key.id, out.key.id, 'the same cli key is rotated, not duplicated');
+    assert.equal((await get('/api/v1/whoami', { authorization: `Bearer ${out.secret}` })).status, 401, 'the old cli secret stops working');
+  });
+
+  it('S13: a malformed CLI request is ignored, and a stranger gets no key', async () => {
+    const cb = await signIn({ email: 'stephanie@example.com', email_verified: true }, { cliQuery: '?cli_port=80&cli_state=x&cli_challenge=y' });
+    assert.equal(cb.headers.get('location'), '/ui');
+    const verifier = 'cli-verifier-0123456789abcdefghijklmnop';
+    const q = `?cli_port=53682&cli_state=clistate0123456789ab&cli_challenge=${createHash('sha256').update(verifier).digest('base64url')}`;
+    const stranger = await signIn({ email: 'nobody@elsewhere.test', email_verified: true }, { cliQuery: q });
+    assert.equal(stranger.status, 403);
   });
 });

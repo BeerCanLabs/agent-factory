@@ -7,7 +7,6 @@ import { AuthRequiredError, ConversationRefused, FactoryClient } from './client.
 import { talk, renderReply, stripControl, type Io } from './conversation.js';
 import { ManagerSession } from './manager.js';
 import { NeedsLoginError, forgetSignIn, type Cloudflared, type CredentialStore } from './credentials.js';
-import { discoverAuth, type Discovered } from './discover.js';
 import { knownMethod, makeSession } from './methods.js';
 import type { OidcConfig } from './oidc.js';
 import type { Session } from './session.js';
@@ -30,7 +29,7 @@ const BASIC_HELP = [
   '  /help              this text',
   '  /exit              leave',
   '',
-  'Direct forms: /config address <url>, /config theme <auto|dark|light|mono>, /config manager <agent>, /config auth <auto|cloudflare-access|oidc>.',
+  'Direct forms: /config address <url>, /config theme <auto|dark|light|mono>, /config manager <agent>, /config auth <auto|cloudflare-access|oidc|factory>.',
 ].join('\n');
 
 /** Commands work with no Factory Manager at all, and for anyone whose roles allow them (add --json for raw output). */
@@ -96,8 +95,6 @@ export type ReplOptions = {
   managerOverride?: string;
   cloudflared?: Cloudflared;
   cloudflaredDir?: string;
-  /** Finds out how the factory signs people in (§6.17 CL9). */
-  discover?: (instance: string) => Promise<Discovered>;
   openBrowser?: (url: string) => Promise<void>;
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
@@ -353,23 +350,15 @@ class App {
     await this.signIn();
   }
 
-  /** Asks the factory how it signs people in, and builds the session for it. A factory that cannot be asked keeps the saved hint. */
+  /** S13: sign-in is always the factory's own login page; nothing is asked of the factory first (no discovery). */
   private async chooseMethod(): Promise<boolean> {
-    const find = this.o.discover ?? ((i: string) => discoverAuth(i, this.o.fetch));
-    try {
-      const found = await find(this.instance!);
-      this.oidc = found.type === 'oidc' ? found : undefined;
-      if (this.config.auth !== found.type) {
-        this.config.auth = found.type;
-        await this.save();
-      }
-      this.session = this.buildSession(found.type);
-      return true;
-    } catch (err) {
-      if (this.session) return true; // could not ask; use what is known
-      this.io.say(`${this.style.bad('Could not find out how to sign in:')} ${stripControl(err instanceof Error ? err.message : String(err))}`);
-      return false;
+    this.oidc = undefined;
+    if (this.config.auth !== 'factory') {
+      this.config.auth = 'factory';
+      await this.save();
     }
+    this.session = this.buildSession('factory');
+    return true;
   }
 
   private async signOut(): Promise<boolean> {

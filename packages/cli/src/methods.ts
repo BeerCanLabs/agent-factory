@@ -1,6 +1,7 @@
 /** Choosing the session that matches how a deployment signs people in (§6.17 CL9). */
 import { AccessSession, type Cloudflared, type CredentialStore } from './credentials.js';
 import { OidcSession, STORED_PREFIX, openBrowser, type OidcConfig, type OidcDeps } from './oidc.js';
+import { FactoryKeySession, KEY_PREFIX } from './login.js';
 import type { Session, SignInMethod } from './session.js';
 
 export type MethodDeps = {
@@ -15,6 +16,7 @@ export type MethodDeps = {
 };
 
 export function makeSession(kind: SignInMethod, instance: string, deps: MethodDeps, oidc?: OidcConfig): Session {
+  if (kind === 'factory') return new FactoryKeySession(instance, deps.store, { fetch: deps.fetch, openBrowser: deps.openBrowser, say: deps.say, timeoutMs: deps.signInTimeoutMs });
   if (kind === 'oidc') {
     const d: OidcDeps = { fetch: deps.fetch ?? fetch, openBrowser: deps.openBrowser ?? openBrowser, say: deps.say ?? (() => {}), timeoutMs: deps.signInTimeoutMs };
     return new OidcSession(instance, deps.store, d, oidc);
@@ -30,6 +32,7 @@ export async function knownMethod(instance: string, hint: SignInMethod | undefin
   if (hint) return hint;
   if (env.FACTORY_CLI_ACCESS_TOKEN?.trim()) return 'cloudflare-access'; // an assertion given directly is Access's
   const stored = await store.get(instance).catch(() => undefined);
+  if (stored?.startsWith(KEY_PREFIX)) return 'factory';
   if (stored) return stored.startsWith(STORED_PREFIX) ? 'oidc' : 'cloudflare-access';
   return undefined;
 }

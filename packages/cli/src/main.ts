@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url';
 import { FactoryClient } from './client.js';
 import { loadConfig, normalizeInstance, parseAuth, parseManager, parseTheme, saveConfig, type CliConfig } from './config.js';
 import { defaultStore, forgetSignIn, type CredentialStore } from './credentials.js';
-import { discoverAuth } from './discover.js';
 import { knownMethod, makeSession } from './methods.js';
 import { repl } from './repl.js';
 import { commandHelp } from './commands.js';
@@ -22,7 +21,7 @@ const version = (() => {
 const USAGE = `factory ${version}
 
   factory                         open the CLI (set up and sign in from inside: /config, /login)
-  factory login <address>         shortcut: point the CLI at your factory and sign in
+  factory login --url <address>   shortcut: point the CLI at your factory and sign in
   factory logout                  forget the sign-in
   factory whoami                  show who you are signed in as
   factory config get              show the settings
@@ -136,18 +135,15 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   }
 
   if (cmd === 'login') {
-    if (!arg) throw new Error('usage: factory login <address>');
-    const instance = normalizeInstance(arg);
+    // S13: `factory login --url <address>` (or the address alone): the factory login page in a browser, then a cli key.
+    const addr = arg === '--url' ? argv[2] : arg;
+    if (!addr) throw new Error('usage: factory login --url <address>');
+    const instance = normalizeInstance(addr);
     const saved = await loadConfig();
-    // The factory may not be askable (a proxy that does not redirect, a network blip): the installer's saved hint stands in.
-    const found = await discoverAuth(instance).catch((err: unknown) => {
-      if (saved.instance === instance && saved.auth === 'cloudflare-access') return { type: 'cloudflare-access' } as const;
-      throw err;
-    });
-    await makeSession(found.type, instance, { store, say: (t) => void streams.stdout.write(`${t}\n`) }, found.type === 'oidc' ? found : undefined).login();
+    await makeSession('factory', instance, { store, say: (t) => void streams.stdout.write(`${t}\n`) }).login();
     // A sign-in belongs to one factory (CL8): the old address is signed out once the new one is signed in.
     if (saved.instance && saved.instance !== instance) await forgetSignIn(saved.instance, store);
-    await saveConfig({ ...saved, instance, auth: found.type });
+    await saveConfig({ ...saved, instance, auth: 'factory' });
     await writeAll(streams.stdout, `Signed in to ${instance}.\n`);
     return 0;
   }

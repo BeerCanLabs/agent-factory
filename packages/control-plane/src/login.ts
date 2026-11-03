@@ -3,7 +3,8 @@ import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import type { AuthResult } from '@beercanlabs/factory-auth';
-import { json, type FactoryState } from './app.js';
+import { publicKeyView } from '@beercanlabs/factory-bouncer';
+import { json, readJson, resolveVerifiedPrincipal, type FactoryState } from './app.js';
 import type { IdpKind, IdpProvider } from './idp-config.js';
 
 export const SESSION_COOKIE = 'factory_session';
@@ -14,7 +15,10 @@ const STATE_TTL_MS = 10 * 60 * 1000;
 const LABELS: Record<IdpKind, string> = { google: 'Google', meta: 'Meta', cloudflare: 'Cloudflare', oidc: 'Single sign-on' };
 
 type Session = { email: string; idp: IdpKind; expiresAt: number };
-type Pending = { idp: IdpKind; verifier: string; expiresAt: number };
+type Pending = { idp: IdpKind | 'cli'; verifier: string; expiresAt: number; cli?: CliLogin; owner?: string };
+/** S13: a CLI sign-in in flight: the loopback port, the CLI's own state, and its PKCE challenge for the key exchange. */
+export type CliLogin = { port: number; state: string; challenge: string };
+const CLI_CODE_TTL_MS = 2 * 60 * 1000;
 type Endpoints = { authorize: string; token: string; userinfo: string; scope: string };
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest();
@@ -48,25 +52,42 @@ export class SessionStore {
     return s;
   }
   /** OAuth state: one-time, short-lived, bound to its IdP and PKCE verifier. */
-  begin(idp: IdpKind): { state: string; challenge: string } {
+  begin(idp: IdpKind, cli?: CliLogin): { state: string; challenge: string } {
     for (const [k, p] of this.pending) if (p.expiresAt <= this.now()) this.pending.delete(k);
     const state = b64url(randomBytes(24));
     const verifier = b64url(randomBytes(32));
-    this.pending.set(state, { idp, verifier, expiresAt: this.now() + STATE_TTL_MS });
+    this.pending.set(state, { idp, verifier, expiresAt: this.now() + STATE_TTL_MS, ...(cli ? { cli } : {}) });
     return { state, challenge: b64url(sha256(verifier)) };
   }
-  take(state: string, idp: IdpKind): string | undefined {
+  take(state: string, idp: IdpKind | 'cli'): Pending | undefined {
     const p = this.pending.get(state);
     this.pending.delete(state);
     if (!p || p.idp !== idp || p.expiresAt <= this.now()) return undefined;
-    return p.verifier;
+    return p;
+  }
+  /** S13: a one-time code the CLI trades, with the verifier for `challenge`, for its key. */
+  cliCode(owner: string, challenge: string): string {
+    const code = b64url(randomBytes(24));
+    this.pending.set(code, { idp: 'cli', verifier: challenge, owner, expiresAt: this.now() + CLI_CODE_TTL_MS });
+    return code;
   }
 }
 
 /** The one-time state check for the IdP callback: the PKCE verifier bound to it, or undefined when forged/expired/replayed. */
-export function verifyOAuthState(state: FactoryState, st: string, idp: IdpKind): string | undefined {
+export function verifyOAuthState(state: FactoryState, st: string, idp: IdpKind | 'cli'): Pending | undefined {
   return st ? sessions(state).take(st, idp) : undefined;
 }
+
+const B64URL = /^[A-Za-z0-9_-]{16,128}$/;
+/** S13: the CLI's loopback request, or undefined when absent or malformed. */
+export function cliLoginOf(q: URLSearchParams): CliLogin | undefined {
+  const port = Number(q.get('cli_port'));
+  const st = q.get('cli_state') ?? '';
+  const challenge = q.get('cli_challenge') ?? '';
+  if (!Number.isInteger(port) || port < 1024 || port > 65535 || !B64URL.test(st) || !B64URL.test(challenge)) return undefined;
+  return { port, state: st, challenge };
+}
+const cliQuery = (c?: CliLogin) => (c ? `?${new URLSearchParams({ cli_port: String(c.port), cli_state: c.state, cli_challenge: c.challenge })}` : '');
 
 export function sessions(state: FactoryState): SessionStore {
   return (state.sessions ??= new SessionStore());
@@ -122,17 +143,17 @@ function cookie(value: string, maxAgeSeconds: number): string {
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 /** The standalone login page: no SPA assets, no status, one button per configured IdP (D19, D22). */
-export function loginPage(state: FactoryState, error?: string): string {
+export function loginPage(state: FactoryState, error?: string, cli?: CliLogin): string {
   const providers = state.idpConfig?.get().providers ?? [];
   const buttons = providers.length
-    ? providers.map((p) => `<li><a class="b" href="/api/v1/auth/${p.id}/start">Sign in with ${esc(LABELS[p.id])}</a></li>`).join('')
+    ? providers.map((p) => `<li><a class="b" href="/api/v1/auth/${p.id}/start${esc(cliQuery(cli))}">Sign in with ${esc(LABELS[p.id])}</a></li>`).join('')
     : '<li>No sign-in provider is configured yet.</li>';
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Factory: sign in</title><style>body{font-family:system-ui,sans-serif;max-width:24rem;margin:4rem auto;padding:0 1rem}ul{list-style:none;padding:0}.b{display:block;padding:.7rem 1rem;margin:.5rem 0;border:1px solid #888;border-radius:.4rem;text-decoration:none;color:inherit}.e{color:#b00}</style></head><body><main><h1>Agent Factory</h1>${error ? `<p class="e">${esc(error)}</p>` : ''}<ul>${buttons}</ul></main></body></html>`;
 }
 
-export function sendLoginPage(state: FactoryState, res: http.ServerResponse, status = 200, error?: string): void {
+export function sendLoginPage(state: FactoryState, res: http.ServerResponse, status = 200, error?: string, cli?: CliLogin): void {
   res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY' });
-  res.end(loginPage(state, error));
+  res.end(loginPage(state, error, cli));
 }
 
 const fetcher = (state: FactoryState) => state.oauthFetch ?? fetch;
@@ -167,7 +188,8 @@ function ledger(state: FactoryState, action: 'SIGN_IN' | 'SIGN_OUT', email: stri
 
 /** GET /login, GET /api/v1/auth/:idp/start, GET /api/v1/auth/:idp/callback, POST /api/v1/auth/logout. */
 export async function handleLoginRoutes(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
-  if (path === '/login' && req.method === 'GET') return sendLoginPage(state, res), true;
+  if (path === '/login' && req.method === 'GET') return sendLoginPage(state, res, 200, undefined, cliLoginOf(new URL(req.url ?? '/', 'http://x').searchParams)), true;
+  if (path === '/api/v1/auth/cli/token' && req.method === 'POST') return cliToken(state, req, res);
 
   if (path === '/api/v1/auth/logout' && req.method === 'POST') {
     const id = cookieValue(req, SESSION_COOKIE);
@@ -179,7 +201,7 @@ export async function handleLoginRoutes(state: FactoryState, req: http.IncomingM
   }
 
   const start = path.match(/^\/api\/v1\/auth\/([^/]+)\/start$/);
-  if (start && req.method === 'GET') return beginSignIn(state, res, start[1]);
+  if (start && req.method === 'GET') return beginSignIn(state, res, start[1], cliLoginOf(new URL(req.url ?? '/', 'http://x').searchParams));
   const cb = path.match(/^\/api\/v1\/auth\/([^/]+)\/callback$/);
   if (cb && req.method === 'GET') return finishSignIn(state, req, res, cb[1]);
   return false;
@@ -194,12 +216,12 @@ async function resolveIdp(state: FactoryState, res: http.ServerResponse, id: str
   return { p, ep };
 }
 
-async function beginSignIn(state: FactoryState, res: http.ServerResponse, id: string): Promise<boolean> {
+async function beginSignIn(state: FactoryState, res: http.ServerResponse, id: string, cli?: CliLogin): Promise<boolean> {
   const r = await resolveIdp(state, res, id);
   if (!r) return true;
   const { p, ep } = r;
   {
-    const { state: st, challenge } = sessions(state).begin(p.id);
+    const { state: st, challenge } = sessions(state).begin(p.id, cli);
     const u = new URL(ep.authorize);
     u.search = new URLSearchParams({ response_type: 'code', client_id: p.clientId, redirect_uri: callbackUrl(state, p.id), scope: ep.scope, state: st, code_challenge: challenge, code_challenge_method: 'S256' }).toString();
     res.writeHead(302, { location: u.toString(), 'cache-control': 'no-store', 'set-cookie': `${STATE_COOKIE}=${st}; HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=${STATE_TTL_MS / 1000}` });
@@ -215,7 +237,8 @@ async function finishSignIn(state: FactoryState, req: http.IncomingMessage, res:
   const q = new URL(req.url ?? '/', 'http://x').searchParams;
   const st = q.get('state') ?? '';
   const code = q.get('code') ?? '';
-  const verifier = st && cookieValue(req, STATE_COOKIE) === st ? verifyOAuthState(state, st, p.id) : undefined;
+  const pending = st && cookieValue(req, STATE_COOKIE) === st ? verifyOAuthState(state, st, p.id) : undefined;
+  const verifier = pending?.verifier;
   if (!verifier || !code) return sendLoginPage(state, res, 400, 'Sign-in expired or was not started here. Try again.'), true;
 
   let secret: string | undefined;
@@ -239,8 +262,34 @@ async function finishSignIn(state: FactoryState, req: http.IncomingMessage, res:
 
   const sid = sessions(state).create(email, p.id);
   ledger(state, 'SIGN_IN', email, p.id);
+  if (pending?.cli) {
+    // S13: hand the CLI a one-time code on its loopback; the key itself only travels in the CLI's own POST.
+    const who = await resolveVerifiedPrincipal(state, { actor: `oidc:${email}`, roles: [] }, true);
+    if (!state.keys || !/^user:/.test(who.actor)) return sendLoginPage(state, res, 403, 'You are signed in, but this factory has not granted you access yet.'), true;
+    const code = sessions(state).cliCode(who.actor, pending.cli.challenge);
+    res.writeHead(302, { location: `http://127.0.0.1:${pending.cli.port}/callback?${new URLSearchParams({ code, state: pending.cli.state })}`, 'set-cookie': cookie(sid, SESSION_TTL_MS / 1000), 'cache-control': 'no-store' });
+    res.end();
+    return true;
+  }
   res.writeHead(302, { location: '/ui', 'set-cookie': cookie(sid, SESSION_TTL_MS / 1000), 'cache-control': 'no-store' });
   res.end();
   return true;
 }
 
+
+/**
+ * S13: POST /api/v1/auth/cli/token {code, verifier}. The one-time code from the loopback plus the CLI's PKCE verifier
+ * yield the person's `cli` device-family key: the active one is rotated (its old secret stops working), else one is issued.
+ */
+async function cliToken(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
+  const body = (await readJson(req).catch(() => ({}))) as { code?: unknown; verifier?: unknown };
+  const pending = typeof body.code === 'string' ? verifyOAuthState(state, body.code, 'cli') : undefined;
+  const ok = pending?.owner && typeof body.verifier === 'string' && b64url(sha256(body.verifier)) === pending.verifier;
+  if (!ok || !state.keys) return json(res, 400, { error: 'invalid_grant' }), true;
+  const owner = pending.owner!;
+  const existing = state.keys.list({ owner }).find((k) => k.deviceFamily === 'cli' && !k.revokedAt);
+  const out = existing ? await state.keys.rotate(existing.id, { by: owner }) : await state.keys.create({ owner, deviceFamily: 'cli', by: owner });
+  state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'control-plane', type: 'action', action: `${existing ? 'KEY_ROTATED' : 'KEY_ISSUED'}:${out.record.id}`, actor: owner, subject: owner });
+  res.setHeader('cache-control', 'no-store');
+  return json(res, 200, { key: publicKeyView(out.record), secret: out.plaintext }), true;
+}
