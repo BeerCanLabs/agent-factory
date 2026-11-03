@@ -178,20 +178,45 @@ export async function startTransfer(state: FactoryState, principal: Principal, s
   return { status: 202, body: { scope, transfer: { ...detail, state: 'pending' } } };
 }
 
+/**
+ * Every provider that may hold a user-OAuth grant on `agentId`: the factory's oauth-user systems, the agent's declared
+ * connections, and any `connections/<agentId>/<provider>` secret a listing backend reports (a provider removed from the
+ * catalog can still hold an old owner's token).
+ */
+async function oauthProvidersFor(state: FactoryState, agentId: string): Promise<string[]> {
+  const agent = state.agents.get(agentId) ?? findAgentRecord(state, agentId);
+  const names = new Set<string>([
+    ...(state.systems?.getConnectionProviders().filter((p) => p.kind === 'oauth-user').map((p) => p.provider) ?? []),
+    ...((agent as { connections?: Array<{ provider: string }> } | undefined)?.connections?.map((c) => c.provider) ?? []),
+  ]);
+  const prefix = `connections/${agentId}/`;
+  for (const p of state.providers) {
+    if (!p.present) continue;
+    try {
+      for (const n of await p.present()) if (n.startsWith(prefix) && !n.slice(prefix.length).includes('/')) names.add(n.slice(prefix.length));
+    } catch (err) {
+      console.error(`[transfers] list ${p.name}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return [...names];
+}
+
+async function hasUserOAuthGrants(state: FactoryState, agentId: string): Promise<boolean> {
+  const km = getConnections(state);
+  for (const provider of await oauthProvidersFor(state, agentId)) {
+    const def = await km.resolveProvider(provider).catch(() => undefined);
+    if (def && def.kind !== 'oauth-user') continue;
+    if (await km.getGrant(agentId, provider).catch(() => undefined)) return true;
+  }
+  return false;
+}
+
 /** Purges every `oauth-user` grant on a personal agent (D15). Returns purged and failed providers; never token values. */
 async function purgeUserOAuth(state: FactoryState, agentId: string, actor: string): Promise<{ purged: string[]; failed: string[] }> {
   const purged: string[] = [];
   const failed: string[] = [];
-  const agent = state.agents.get(agentId) ?? findAgentRecord(state, agentId);
-  const providers = [
-    ...new Set([
-      ...(state.systems?.getConnectionProviders().filter((p) => p.kind === 'oauth-user').map((p) => p.provider) ?? []),
-      ...((agent as { connections?: Array<{ provider: string }> } | undefined)?.connections?.map((c) => c.provider) ?? []),
-    ]),
-  ];
-  if (!providers.length) return { purged, failed };
   const km = getConnections(state);
-  for (const provider of providers) {
+  for (const provider of await oauthProvidersFor(state, agentId)) {
     try {
       const def = await km.resolveProvider(provider);
       if (def && def.kind !== 'oauth-user') continue; // app-level (jwt-bearer) credentials are not personal tokens
@@ -225,8 +250,25 @@ export async function resolveTransfer(state: FactoryState, principal: Principal,
   // D15: on accept of a personal agent, purging the outgoing owner's OAuth tokens needs a writable secrets backend;
   // refuse before ownership moves rather than hand the new owner the old owner's tokens.
   const personalAgent = scope.kind === 'agent' && !isTeamAgent(state, scope.id);
-  if (action === 'accept' && personalAgent && state.systems?.getConnectionProviders().some((p) => p.kind === 'oauth-user') && !writableProvider(state.providers)) {
-    return { status: 503, body: { error: 'connections_unpurgeable', message: 'no writable secrets backend: personal OAuth tokens could not be purged, so the transfer was not accepted' } };
+  const detail: Record<string, unknown> = { transferId: pending.transferId, from: pending.from, to: pending.to };
+
+  // D15: for a personal agent the outgoing owner's OAuth tokens and private skills are removed BEFORE ownership moves,
+  // so a failed cleanup can never hand them to the new owner: on any failure the transfer stays pending (the outgoing
+  // owner is still read-only and may cancel; the recipient may retry). Failing this way only ever removes access.
+  if (action === 'accept' && personalAgent) {
+    if (!writableProvider(state.providers) && (await hasUserOAuthGrants(state, scope.id))) {
+      return { status: 503, body: { error: 'connections_unpurgeable', message: 'no writable secrets backend: personal OAuth tokens could not be purged, so the transfer was not accepted' } };
+    }
+    const oauth = await purgeUserOAuth(state, scope.id, principal.actor);
+    const skills = oauth.failed.length ? { detached: [] as string[], failed: [] as string[] } : await detachOwnerPrivateSkills(state, scope.id, pending.from, principal.actor);
+    detail.oauthPurged = oauth.purged;
+    detail.privateSkillsDetached = skills.detached;
+    if (oauth.failed.length || skills.failed.length) {
+      detail.oauthPurgeFailed = oauth.failed;
+      detail.privateSkillDetachFailed = skills.failed;
+      ledgerTransfer(state, scope, 'OWNERSHIP_TRANSFER_CLEANUP_FAILED', principal.actor, detail);
+      return { status: 500, body: { error: 'transfer_cleanup_failed', message: 'the outgoing owner’s OAuth tokens or private skills could not all be removed; ownership did not move. Retry accept, or cancel.', ...detail } };
+    }
   }
 
   try {
@@ -234,33 +276,18 @@ export async function resolveTransfer(state: FactoryState, principal: Principal,
   } catch (err) {
     return fromStoreError(err);
   }
-  const detail: Record<string, unknown> = { transferId: pending.transferId, from: pending.from, to: pending.to };
 
-  if (action === 'accept') {
-    if (scope.kind === 'skill') {
-      // Keep the registry's legacy owner field in step with the grant (used where no grant store is configured).
-      try {
-        skillRegistry(state).setOwner(scope.id, pending.to);
-      } catch (err) {
-        console.error(`[transfers] skill owner sync ${scope.id}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    if (personalAgent) {
-      const oauth = await purgeUserOAuth(state, scope.id, principal.actor);
-      const skills = await detachOwnerPrivateSkills(state, scope.id, pending.from, principal.actor);
-      detail.oauthPurged = oauth.purged;
-      detail.privateSkillsDetached = skills.detached;
-      if (oauth.failed.length || skills.failed.length) {
-        detail.oauthPurgeFailed = oauth.failed;
-        detail.privateSkillDetachFailed = skills.failed;
-        ledgerTransfer(state, scope, 'OWNERSHIP_TRANSFER_CLEANUP_INCOMPLETE', principal.actor, detail);
-      }
+  if (action === 'accept' && scope.kind === 'skill') {
+    // Keep the registry's legacy owner field in step with the grant (used where no grant store is configured).
+    try {
+      skillRegistry(state).setOwner(scope.id, pending.to);
+    } catch (err) {
+      console.error(`[transfers] skill owner sync ${scope.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   const verb = action === 'accept' ? 'ACCEPTED' : action === 'decline' ? 'DECLINED' : 'CANCELLED';
   ledgerTransfer(state, scope, `OWNERSHIP_TRANSFER_${verb}`, principal.actor, detail);
   await notify(state, { kind: action === 'accept' ? 'accepted' : action === 'decline' ? 'declined' : 'cancelled', scope, transferId: pending.transferId, from: pending.from, to: pending.to });
-  const cleanupIncomplete = Array.isArray(detail.oauthPurgeFailed) && ((detail.oauthPurgeFailed as string[]).length > 0 || (detail.privateSkillDetachFailed as string[]).length > 0);
   return {
     status: 200,
     body: {
@@ -268,7 +295,6 @@ export async function resolveTransfer(state: FactoryState, principal: Principal,
       action,
       owner: action === 'accept' ? pending.to : pending.from,
       ...detail,
-      ...(cleanupIncomplete ? { cleanupIncomplete: true } : {}),
     },
   };
 }

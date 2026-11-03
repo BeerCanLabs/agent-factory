@@ -56,18 +56,23 @@ function identityOnlyAuth(): AuthProvider {
 }
 
 /** A writable in-memory secrets backend (the factory's Secrets Manager in production). */
-function memorySecrets(): SecretProvider & { values: Map<string, string> } {
+function memorySecrets(): SecretProvider & { values: Map<string, string>; failPut?: string } {
   const values = new Map<string, string>();
-  return {
+  const p: SecretProvider & { values: Map<string, string>; failPut?: string } = {
     name: 'memory',
     values,
     async get(n) {
       return values.get(n);
     },
     async put(n, v) {
+      if (p.failPut && n === p.failPut) throw new Error('backend write refused');
       values.set(n, v);
     },
+    async present() {
+      return new Set(values.keys());
+    },
   };
+  return p;
 }
 
 const GMAIL = { kind: 'oauth-user', provider: 'gmail', authUrl: 'https://accounts.example/auth', tokenUrl: 'https://accounts.example/token', clientSecret: 'shared/gmail/oauth-client', authParams: {} } as const;
@@ -255,12 +260,28 @@ describe('S3b: two-phase ownership transfer with OAuth & private-skill purge (#3
     assert.ok(ledger.query().some((e) => e.action === 'OWNERSHIP_TRANSFER_EXPIRED'));
   });
 
-  it('AC2: Bob accepts; Bob owns, Alice is revoked, OAuth purged, Alice private skills detached, static secrets kept', async () => {
+  it('D15: if a purge fails, ownership does not move (500), the transfer stays pending, and a retry completes it', async () => {
     assert.equal((await call('POST', '/api/v1/agents/friday/transfer', { to: 'user:bob' }, TOKENS.alice)).status, 202);
+    secrets.failPut = 'connections/friday/gmail';
+    const failed = await call('POST', '/api/v1/agents/friday/transfer/accept', {}, TOKENS.bob);
+    assert.equal(failed.status, 500, JSON.stringify(failed.body));
+    assert.equal(failed.body.error, 'transfer_cleanup_failed');
+    assert.deepEqual(failed.body.oauthPurgeFailed, ['gmail']);
+    assert.equal(grants.activeContentOwnerOf({ kind: 'agent', id: 'friday' }), undefined, 'still pending: nobody active');
+    assert.equal((await call('GET', '/api/v1/agents/friday/settings', undefined, TOKENS.bob)).status, 403, 'Bob got nothing');
+    assert.equal((await call('GET', '/api/v1/agents/friday/transfer', undefined, TOKENS.alice)).body.transfer.to, 'user:bob');
+    assert.ok(ledger.query().some((e) => e.action === 'OWNERSHIP_TRANSFER_CLEANUP_FAILED'));
+    secrets.failPut = undefined;
+    // Leave it pending; the next test accepts it.
+  });
+
+  it('AC2: Bob accepts; Bob owns, Alice is revoked, OAuth purged, Alice private skills detached, static secrets kept', async () => {
+    // An orphaned grant for a provider no longer in the catalog is still the old owner's token: it is purged too.
+    await secrets.put!('connections/friday/legacy-crm', JSON.stringify({ provider: 'legacy-crm', clientRef: 'c', refreshToken: 'rt-legacy-0123456789', scopes: [], obtainedAt: 'x', grantedBy: 'user:alice', status: 'active' })); // secret-scan:allow (test fixture)
     const accepted = await call('POST', '/api/v1/agents/friday/transfer/accept', {}, TOKENS.bob);
     assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
     assert.equal(accepted.body.owner, 'user:bob');
-    assert.deepEqual(accepted.body.oauthPurged, ['gmail']);
+    assert.deepEqual([...accepted.body.oauthPurged].sort(), ['gmail', 'legacy-crm']);
     assert.deepEqual(accepted.body.privateSkillsDetached, ['alice-notes']);
 
     assert.deepEqual(ownersOf(state, 'friday'), ['user:bob']);
@@ -280,6 +301,7 @@ describe('S3b: two-phase ownership transfer with OAuth & private-skill purge (#3
       assert.ok(actions.includes(a), `ledgered ${a}`);
     }
     assert.deepEqual(notified.map((n) => n.kind), ['started', 'cancelled', 'started', 'declined', 'started', 'expired', 'started', 'accepted']);
+    assert.equal(await getConnections(state).getGrant('friday', 'legacy-crm'), undefined);
   });
 
   it('D23: an admin completes a departed owner’s transfer: starts it, and accepts for the recipient via act-as', async () => {
