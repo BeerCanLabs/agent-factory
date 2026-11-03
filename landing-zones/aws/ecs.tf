@@ -6,6 +6,13 @@ resource "aws_ecs_cluster" "factory" {
   }
 }
 
+# S10 (#376): gatekeepers authenticate with their service:<name> factory API keys (fk_, grants-backed), minted by the
+# S8 import into factory/<env>/FACTORY_KEY_<NAME>; FACTORY_TOKENS is no longer read.
+data "aws_secretsmanager_secret" "service_key" {
+  for_each = toset(["GATEKEEPER_INGRESS", "GATEKEEPER_EGRESS"])
+  name     = "factory/${var.environment}/FACTORY_KEY_${each.key}"
+}
+
 locals {
   log = { for svc in ["control-plane", "gatekeeper-egress", "gatekeeper-ingress", "otel", "agent"] : svc => {
     logDriver = "awslogs"
@@ -130,8 +137,7 @@ resource "aws_ecs_task_definition" "control_plane" {
       ])
       secrets = concat([
         { name = "FACTORY_TOKEN", valueFrom = local.secret["FACTORY_TOKEN"] },
-        { name = "FACTORY_GATEKEEPER_EGRESS_TOKEN", valueFrom = local.secret["GATEKEEPER_EGRESS_TOKEN"] },
-        { name = "FACTORY_TOKENS", valueFrom = aws_secretsmanager_secret.factory_tokens.arn },
+        { name = "FACTORY_GATEKEEPER_EGRESS_TOKEN", valueFrom = data.aws_secretsmanager_secret.service_key["GATEKEEPER_EGRESS"].arn },
         { name = "GATEKEEPER_INGRESS_TOKEN", valueFrom = local.secret["GATEKEEPER_INGRESS_TOKEN"] },
         { name = "FACTORY_RUN_TOKEN_KEY", valueFrom = local.secret["FACTORY_RUN_TOKEN_KEY"] },
         { name = "FACTORY_CALLBACK_SIGNING_KEY", valueFrom = local.secret["FACTORY_CALLBACK_SIGNING_KEY"] },
@@ -172,9 +178,7 @@ resource "aws_ecs_service" "control_plane" {
   service_registries {
     registry_arn = aws_service_discovery_service.svc["control-plane"].arn
   }
-  # The control plane reads FACTORY_TOKENS when a task starts, and the ingress token's roles must already be in it
-  # (TSK-111): a new control plane against the old roles refuses every wake that names a requester with 403.
-  depends_on = [aws_lb_listener.https, aws_efs_mount_target.ledger, aws_secretsmanager_secret_version.factory_tokens]
+  depends_on = [aws_lb_listener.https, aws_efs_mount_target.ledger]
 }
 
 # ---- gatekeeper-egress: the only route out for agents --------------------------------------------------
@@ -210,7 +214,7 @@ resource "aws_ecs_task_definition" "gatekeeper_egress" {
         { name = "FACTORY_TRACE_DIR", value = "/tmp/traces" },
       ])
       secrets = [
-        { name = "FACTORY_GATEKEEPER_EGRESS_TOKEN", valueFrom = local.secret["GATEKEEPER_EGRESS_TOKEN"] },
+        { name = "FACTORY_GATEKEEPER_EGRESS_TOKEN", valueFrom = data.aws_secretsmanager_secret.service_key["GATEKEEPER_EGRESS"].arn },
         { name = "FACTORY_RUN_TOKEN_KEY", valueFrom = local.secret["FACTORY_RUN_TOKEN_KEY"] },
       ]
       logConfiguration = local.log["gatekeeper-egress"]
@@ -276,7 +280,7 @@ resource "aws_ecs_task_definition" "gatekeeper_ingress" {
       { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
     ]
     secrets = [
-      { name = "FACTORY_TOKEN", valueFrom = local.secret["GATEKEEPER_INGRESS_OPERATOR_TOKEN"] },
+      { name = "FACTORY_TOKEN", valueFrom = data.aws_secretsmanager_secret.service_key["GATEKEEPER_INGRESS"].arn },
       { name = "GATEKEEPER_INGRESS_TOKEN", valueFrom = local.secret["GATEKEEPER_INGRESS_TOKEN"] },
     ]
     logConfiguration = local.log["gatekeeper-ingress"]
