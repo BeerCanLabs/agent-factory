@@ -32,11 +32,23 @@ echo "== build and start"
 "${DC[@]}" up -d --wait control-plane gatekeeper-egress gatekeeper-ingress mock-provider >/dev/null
 ok "stack healthy"
 
+echo "== service keys (S11: no FACTORY_TOKENS; gatekeepers hold grants-backed API keys)"
+mint() { # name role... -> plaintext key on stdout
+  local n=$1; shift
+  for r in "$@"; do api -X POST -d "{\"subject\":\"service:$n\",\"scope\":{\"kind\":\"fleet\"},\"role\":\"$r\"}" "$CP/api/v1/grants" >/dev/null || die "grant $r to service:$n"; done
+  api -X POST -d "{\"owner\":\"service:$n\"}" "$CP/api/v1/keys" | jq -er .secret || die "key for service:$n"
+}
+DEV_GATEKEEPER_INGRESS_KEY="$(mint gatekeeper-ingress operator gatekeeper-ingress)"
+DEV_GATEKEEPER_EGRESS_KEY="$(mint gatekeeper-egress gatekeeper-egress)"
+export DEV_GATEKEEPER_INGRESS_KEY DEV_GATEKEEPER_EGRESS_KEY
+"${DC[@]}" up -d --wait --force-recreate control-plane gatekeeper-egress gatekeeper-ingress >/dev/null
+ok "gatekeepers restarted on their service keys"
+
 echo "== identity"
 [ "$(curl -s -o /dev/null -w '%{http_code}' $CP/api/v1/agents)" = 401 ] || die "unauthenticated catalog read"
 forged="$(printf '{"alg":"RS256"}' | base64 | tr -d '=').$(printf '{"sub":"x","roles":["admin"]}' | base64 | tr -d '=').c2ln"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $forged" $CP/api/v1/agents)" = 401 ] || die "forged JWT accepted"
-[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: Bearer dev-gatekeeper-ingress-token' -d '{"agentId":"echo-agent","type":"llm"}' $CP/api/v1/ledger)" = 403 ] || die "operator wrote to the ledger"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $DEV_GATEKEEPER_INGRESS_KEY" -d '{"agentId":"echo-agent","type":"llm"}' $CP/api/v1/ledger)" = 403 ] || die "operator wrote to the ledger"
 ok "401 without token, 401 forged JWT, 403 operator->ledger"
 
 echo "== network isolation (agents network is internal)"

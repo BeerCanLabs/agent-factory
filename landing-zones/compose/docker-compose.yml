@@ -38,13 +38,13 @@ services:
       AGENTS_ROOT: /app/agents
       # Dev-only tokens. Each service gets its own name and least role.
       FACTORY_TOKEN: dev-admin-token
-      FACTORY_TOKENS: '[{"name":"gatekeeper-ingress","token":"dev-gatekeeper-ingress-token","roles":["operator","gatekeeper-ingress"]},{"name":"gatekeeper-egress","token":"dev-gatekeeper-egress-token","roles":["gatekeeper-egress"]}]'
+      # S11: gatekeepers use service:<name> API keys minted after first start (scripts/compose-e2e.sh); grants decide.
       GATEKEEPER_INGRESS_URL: http://gatekeeper-ingress:8090
       GATEKEEPER_INGRESS_TOKEN: dev-presence-token
       FACTORY_CALLBACK_SIGNING_KEY: dev-callback-signing-key
       FACTORY_PUBLIC_URL: http://control-plane:8088
       FACTORY_GATEKEEPER_EGRESS_URL: http://gatekeeper-egress:8081
-      FACTORY_GATEKEEPER_EGRESS_TOKEN: dev-gatekeeper-egress-token
+      FACTORY_GATEKEEPER_EGRESS_TOKEN: ${DEV_GATEKEEPER_EGRESS_KEY:-unset-mint-a-key}
       FACTORY_LEDGER_PATH: /data/ledger.jsonl
       # Local anchor only; not write-once. Production binds an Object Lock / immutable bucket.
       FACTORY_LEDGER_WORM_URI: file:///data/worm
@@ -87,7 +87,7 @@ services:
     environment:
       <<: *factory-keys
       FACTORY_URL: http://control-plane:8088
-      FACTORY_GATEKEEPER_EGRESS_TOKEN: dev-gatekeeper-egress-token
+      FACTORY_GATEKEEPER_EGRESS_TOKEN: ${DEV_GATEKEEPER_EGRESS_KEY:-unset-mint-a-key}
       FACTORY_GATEKEEPER_EGRESS_HELD_SECRETS: ANTHROPIC_API_KEY,OPENAI_API_KEY
       FACTORY_GATEKEEPER_EGRESS_CONFIG: /config/gatekeeper-egress.json
     volumes:
@@ -106,7 +106,7 @@ services:
     environment:
       PORT: 8090
       FACTORY_URL: http://control-plane:8088
-      FACTORY_TOKEN: dev-gatekeeper-ingress-token
+      FACTORY_TOKEN: ${DEV_GATEKEEPER_INGRESS_KEY:-unset-mint-a-key}
       GATEKEEPER_INGRESS_TOKEN: dev-presence-token
       FACTORY_SECRETS_FILE: /run/factory.secrets
     volumes:
