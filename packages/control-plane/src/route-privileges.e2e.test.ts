@@ -133,6 +133,10 @@ const ROUTES: RouteRow[] = [
   { method: 'PUT', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
   { method: 'DELETE', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer' },
   // approver
+  { method: 'GET', path: '/api/v1/submissions', privilege: 'content.submit', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/submissions/nope', privilege: 'content.submit', role: 'viewer' },
+  { method: 'POST', path: '/api/v1/submissions/nope/admit', privilege: 'content.admit', role: 'approver', body: {} },
+  { method: 'PUT', path: '/api/v1/budget/submissions/nope', privilege: 'budget.allocate', role: 'admin', body: { budgetUsd: { perDay: 1 } } },
   { method: 'PUT', path: '/api/v1/budget/agents/castle', privilege: 'budget.allocate', role: 'admin', body: { budgetUsd: { perDay: 1 } } },
   { method: 'POST', path: '/api/v1/approvals/nope', privilege: 'approvals.decide', role: 'admin', body: { decision: 'approved' } },
   // ingest
