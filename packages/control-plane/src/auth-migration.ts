@@ -10,7 +10,7 @@
 import type http from 'node:http';
 import { authorize, deriveSlugFromEmail, PRIVILEGES, type IdentityLink, type Privilege } from '@beercanlabs/factory-bouncer';
 import type { Principal, Role } from '@beercanlabs/factory-auth';
-import { json, requirePrivilege, resolveVerifiedPrincipal, type FactoryState } from './app.js';
+import { json, readJson, requirePrivilege, resolveVerifiedPrincipal, type FactoryState } from './app.js';
 import { convertLegacyOwners } from './migration-owners.js';
 import { legacyAdminEmails, legacyTokenNames, legacyTokenRoles } from './legacy-env-roles.js';
 
@@ -55,28 +55,59 @@ async function ensureGrant(state: FactoryState, subject: string, scope: { kind: 
 }
 
 /** Idempotent: a second run creates nothing. */
-export async function importLegacyAuth(state: FactoryState, source: LegacySource, by: string) {
-  const out = { principals: 0, grants: 0, keys: 0, secrets: [] as Array<{ owner: string; secret: string }> };
+/**
+ * A legacy per-agent link role named like a reserved fleet role ("Operator") cannot be an agent subrole. The plan's role
+ * set (D7) has `operator` at fleet scope only, so it maps there, but only for a person who already holds fleet
+ * `operator` or `admin` through the same link: the import never widens anyone's access.
+ */
+export function mapLegacyAgentRole(role: string, fleetRoles: readonly string[]): { fleet: 'operator' } | { agent: string } | { refused: string } {
+  if (role.trim().toLowerCase() !== 'operator') return { agent: role };
+  return fleetRoles.includes('operator') || fleetRoles.includes('admin') ? { fleet: 'operator' } : { refused: role };
+}
+
+/**
+ * Rerunnable: every write is ensure-style, grants go first and service keys last, so a failed run issues no key whose
+ * secret is lost. `reissueKeys` revokes the import-shaped (no roles, no scopes) active keys of the legacy token subjects (left by an earlier
+ * partial run, their secrets never returned) and issues fresh ones; secrets are returned once, never ledgered.
+ */
+export async function importLegacyAuth(state: FactoryState, source: LegacySource, by: string, opts: { reissueKeys?: boolean } = {}) {
+  const out = { principals: 0, grants: 0, keys: 0, revokedKeys: 0, refused: [] as Array<{ subject: string; agentId: string; role: string }>, secrets: [] as Array<{ owner: string; secret: string }> };
   const before = stores(state).principals.list().length;
   for (const email of source.adminEmails) {
     const subject = (await subjectFor(state, `cloudflare:${email}`, by, true))!;
     if (await ensureGrant(state, subject, { kind: 'fleet' }, 'admin', by)) out.grants++;
   }
   for (const t of source.tokens) {
-    const subject = serviceOf(t.name);
-    for (const role of t.roles) if (await ensureGrant(state, subject, { kind: 'fleet' }, role, by)) out.grants++;
-    if (state.keys && !state.keys.list({ owner: subject }).some((k) => !k.revokedAt)) {
-      const k = await state.keys.create({ owner: subject, deviceFamily: 'service', by });
-      out.keys++;
-      out.secrets.push({ owner: subject, secret: k.plaintext });
-      state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'control-plane', type: 'action', action: `KEY_ISSUED:${k.record.id}`, actor: by, subject });
-    }
+    for (const role of t.roles) if (await ensureGrant(state, serviceOf(t.name), { kind: 'fleet' }, role, by)) out.grants++;
   }
   for (const l of source.links) {
     const subject = await subjectFor(state, l.actor, by, true);
     if (!subject) continue;
-    for (const role of l.roles ?? []) if (await ensureGrant(state, subject, { kind: 'fleet' }, role, by)) out.grants++;
-    for (const [agentId, roles] of Object.entries(l.agentRoles ?? {})) for (const role of roles) if (await ensureGrant(state, subject, { kind: 'agent', id: agentId }, role, by)) out.grants++;
+    const fleetRoles = [...(l.roles ?? [])];
+    for (const role of fleetRoles) if (await ensureGrant(state, subject, { kind: 'fleet' }, role, by)) out.grants++;
+    for (const [agentId, roles] of Object.entries(l.agentRoles ?? {})) {
+      for (const role of roles) {
+        const m = mapLegacyAgentRole(role, fleetRoles);
+        if ('refused' in m) out.refused.push({ subject, agentId, role });
+        else if (await ensureGrant(state, subject, 'fleet' in m ? { kind: 'fleet' } : { kind: 'agent', id: agentId }, 'fleet' in m ? m.fleet : m.agent, by)) out.grants++;
+      }
+    }
+  }
+  for (const t of source.tokens) {
+    const subject = serviceOf(t.name);
+    if (!state.keys) break;
+    const active = state.keys.list({ owner: subject }).filter((k) => !k.revokedAt);
+    if (opts.reissueKeys) {
+      for (const k of active.filter((k) => !k.roles && !k.scopes)) {
+        await state.keys.revoke(k.id, { by });
+        out.revokedKeys++;
+        state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'control-plane', type: 'action', action: `KEY_REVOKED:${k.id}`, actor: by, subject });
+      }
+    } else if (active.length) continue;
+    const k = await state.keys.create({ owner: subject, deviceFamily: 'service', by });
+    out.keys++;
+    out.secrets.push({ owner: subject, secret: k.plaintext });
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'control-plane', type: 'action', action: `KEY_ISSUED:${k.record.id}`, actor: by, subject });
   }
   out.principals = stores(state).principals.list().length - before;
   state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'control-plane', type: 'action', action: 'AUTH_LEGACY_IMPORTED', actor: by });
@@ -110,7 +141,12 @@ export async function shadowCompare(state: FactoryState, source: LegacySource): 
     const subject = found ?? l.actor;
     for (const [agentId, roles] of Object.entries(l.agentRoles ?? {})) {
       const held = new Set(!found ? [] : stores(state).grants.list({ subject, scopeKind: 'agent', scopeId: agentId }).filter((g) => (g.state ?? 'active') === 'active').map((g) => g.role));
-      for (const role of roles) if (!held.has(role)) out.push({ subject, privilege: `agent-role.${role}`, agentId, legacy: true, grants: false });
+      const fleetHeld = new Set(!found ? [] : stores(state).grants.list({ subject, scopeKind: 'fleet' }).filter((g) => (g.state ?? 'active') === 'active').map((g) => g.role));
+      for (const role of roles) {
+        const m = mapLegacyAgentRole(role, [...(l.roles ?? [])]);
+        const ok = 'fleet' in m ? fleetHeld.has(m.fleet) : 'agent' in m && held.has(m.agent);
+        if (!ok) out.push({ subject, privilege: `agent-role.${role}`, agentId, legacy: true, grants: false });
+      }
     }
   }
   for (const m of out.slice(0, 50)) {
@@ -151,7 +187,8 @@ export async function handleAuthMigration(state: FactoryState, req: http.Incomin
     if (!who) return true;
     if (!state.principals || !state.grants) return json(res, 503, { error: 'auth_stores_unavailable' }), true;
     res.setHeader('cache-control', 'no-store');
-    return json(res, 200, await importLegacyAuth(state, legacySource(state), who.actor)), true;
+    const body = await readJson(req).catch(() => ({}) as Record<string, unknown>);
+    return json(res, 200, await importLegacyAuth(state, legacySource(state), who.actor, { reissueKeys: body.reissueKeys === true })), true;
   }
   if (path === '/api/v1/auth-migration/readiness' && req.method === 'GET') {
     const who = await requirePrivilege(req, res, state, 'grants.manage');
