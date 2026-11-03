@@ -426,7 +426,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     for (const cred of CREDENTIALS) assert.equal((await call(port, 'POST', '/api/v1/auth/cli/token', cred, { code: 'never-issued-code-0123', verifier: 'v' })).status, 400, `cli token as ${cred}`);
   });
 
-  it('S17 AC1: the retired CLI discovery endpoint answers 404 to anyone', async () => {
+  it('CL9 S17 AC1: the retired CLI discovery endpoint answers 404 to anyone', async () => {
     for (const cred of CREDENTIALS) {
       const r = await call(port, 'GET', '/.well-known/factory-cli', cred);
       assert.ok(r.status === 404 || r.status === 401, `/.well-known/factory-cli as ${cred}: ${r.status}`);

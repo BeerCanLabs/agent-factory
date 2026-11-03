@@ -180,7 +180,7 @@ describe('S12: login page, OAuth state/PKCE, sessions (#362)', { concurrency: fa
     assert.equal(r.status, 401);
   });
 
-  it('S13 AC1: the CLI loopback gets a one-time code and trades it with its PKCE verifier for a cli fk_ key; a second login rotates it', async () => {
+  it('CL9 S13 AC1: the CLI loopback gets a one-time code and trades it with its PKCE verifier for a cli fk_ key; a second login rotates it', async () => {
     const verifier = 'cli-verifier-0123456789abcdefghijklmnop';
     const cliChallenge = createHash('sha256').update(verifier).digest('base64url');
     const q = `?cli_port=53682&cli_state=clistate0123456789ab&cli_challenge=${cliChallenge}`;
