@@ -1196,4 +1196,31 @@ describe('Owner migration converter (S18)', () => {
       assert.equal(res.skippedCount, RETIRED_PLACEHOLDER_IDS.size);
     });
   });
+
+  it('review F3: an occupying lead grant makes a kind-less agent team (idempotent re-run), and opposite-kind grants refuse cutover in dry-run', async () => {
+    const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+    const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+    const configs = await VersionedConfigStore.open(new MemoryConfigBackend());
+    const ledger = new MemoryLedger();
+    await principals.create({ id: 'user:admin', displayName: 'Admin', emails: ['admin@example.com'], by: 'bootstrap' });
+    await principals.create({ id: 'user:lead', displayName: 'Lead', emails: ['lead@example.com'], by: 'bootstrap' });
+    await principals.create({ id: 'user:pat', displayName: 'Pat', emails: ['pat@example.com'], by: 'bootstrap' });
+    const put = (agentId: string, owners: string[]) =>
+      configs.put({ agentId, source: { repo: `BeerCanLabs/${agentId}` }, skills: [], policy: null, owners }, { by: 'user:admin', reason: 'initial' });
+    await put('crew', ['user:lead', 'user:pat']);
+    await put('clash', ['user:pat']);
+    const admin = { by: 'user:admin', granterRole: 'admin' as const, granterIsAdmin: true };
+    await grants.grant({ subject: 'user:lead', scope: { kind: 'agent', id: 'crew' }, role: 'accountable-lead', ...admin });
+    await grants.grant({ subject: 'user:pat', scope: { kind: 'agent', id: 'crew' }, role: 'member', ...admin });
+    await grants.grant({ subject: 'user:pat', scope: { kind: 'agent', id: 'clash' }, role: 'content-owner', ...admin });
+    const agents = new Map<string, AgentRecord>();
+    agents.set('crew', makeAgent('crew'));
+    agents.set('clash', makeAgent('clash', { kind: 'team' } as Partial<AgentRecord>));
+    const res = await convertLegacyOwners({ agents, configs, principals, grants, ledger }, { dryRun: true, by: 'user:admin' });
+    assert.equal(res.mappings.filter((m) => m.targetId === 'crew').length, 0, JSON.stringify(res.mappings));
+    assert.ok(!res.orphans.some((o) => o.targetId === 'crew'), JSON.stringify(res.orphans));
+    const clash = res.orphans.find((o) => o.targetId === 'clash');
+    assert.equal(clash?.reason, 'agent_kind_conflict');
+    assert.equal(res.ready, false);
+  });
 });

@@ -384,14 +384,6 @@ export async function convertLegacyOwners(
       continue;
     }
 
-    // Determine kind
-    const isTeam = Boolean(
-      opts.defaultTeamAgents?.has(agent.id) ||
-        agent.kind === 'team' ||
-        effectiveAgentKind(agent) === 'team',
-    );
-    const agentKind: AgentKind = isTeam ? 'team' : 'personal';
-
     // Check existing occupying grants in GrantStore
     let existingGrants: GrantRecord[] = [];
     if (state.grants) {
@@ -412,6 +404,29 @@ export async function convertLegacyOwners(
     const occupyingMemberGrants = existingGrants.filter(
       (g) => g.role === 'member' && isOccupyingSlot(g, now()),
     );
+
+    // Determine kind. An occupying accountable-lead grant means the agent is already a team agent, even when the
+    // record has no kind (e.g. a ConfigStore-backed agent after restart), so re-runs are idempotent (review F3).
+    const isTeam = Boolean(
+      opts.defaultTeamAgents?.has(agent.id) ||
+        agent.kind === 'team' ||
+        effectiveAgentKind(agent) === 'team' ||
+        (agent.kind === undefined && occupyingLeadGrant !== undefined && occupyingContentOwnerGrant === undefined),
+    );
+    const agentKind: AgentKind = isTeam ? 'team' : 'personal';
+
+    // Opposite-kind grants already in the store would make apply throw 409 agent_kind_conflict mid-run, so refuse
+    // in dry-run instead (review F3).
+    if ((agentKind === 'team' && occupyingContentOwnerGrant) || (agentKind === 'personal' && occupyingLeadGrant)) {
+      orphans.push({
+        targetKind: 'agent',
+        targetId: agent.id,
+        agentKind,
+        reason: 'agent_kind_conflict' as OrphanReason,
+        message: `${agentKind} agent '${agent.id}' already holds an opposite-kind ${agentKind === 'team' ? 'content-owner' : 'accountable-lead'} grant`,
+      });
+      continue;
+    }
 
     // Get legacy owners from ConfigStore, falling back to agent.owners
     const configOwners = state.configs?.current(agent.id)?.owners;
@@ -869,8 +884,9 @@ export async function convertLegacyOwners(
     if (mapping.targetKind === 'agent' && mapping.agentKind) {
       const agentRec =
         state.agents.get(mapping.targetId) ??
-        findAgentRecord(state as FactoryState, mapping.targetId) ??
-        agentsMap.get(mapping.targetId);
+        findAgentRecord(state as FactoryState, mapping.targetId);
+      // Never inject or persist the synthesized ConfigStore-only shell from agentsMap: saving it would override the
+      // real catalog record on restart (review F2). Such agents keep their kind in the grant store only.
       if (agentRec) {
         if (!state.agents.has(mapping.targetId)) {
           state.agents.set(mapping.targetId, agentRec);

@@ -314,7 +314,6 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (raw.footnote === '[no tools called]' || raw.footnote === '[no model or tools used]') event.footnote = raw.footnote;
   if (typeof raw.retryRequestId === 'string' && /^[0-9a-f-]{36}$/.test(raw.retryRequestId)) event.retryRequestId = raw.retryRequestId;
   if (typeof raw.toolCalled === 'boolean') event.toolCalled = raw.toolCalled;
-  if (typeof raw.subject === 'string' && /^[A-Za-z0-9:._@+-]{1,256}$/.test(raw.subject)) event.subject = raw.subject;
   if (typeof raw.onBehalfOf === 'string' && AUDIT_ID_FIELD.test(raw.onBehalfOf)) event.onBehalfOf = raw.onBehalfOf;
   const cleanScope = sanitizeGrantScope(raw.scope);
   if (cleanScope) event.scope = cleanScope;
@@ -326,13 +325,11 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
     const cleanAfter = sanitizeAuditSnapshot(raw.after);
     if (cleanAfter !== undefined) event.after = cleanAfter;
   }
-  if (typeof raw.legacyOwner === 'string' && /^[A-Za-z0-9:._@+-]{1,256}$/.test(raw.legacyOwner)) event.legacyOwner = raw.legacyOwner;
-  if (typeof raw.principalId === 'string' && /^[A-Za-z0-9:._@+-]{1,256}$/.test(raw.principalId)) event.principalId = raw.principalId;
   if (
     typeof raw.subject === 'string' &&
     raw.subject.length <= 320 &&
     !raw.subject.startsWith('fk_') &&
-    /^(?:user|domain|group|service|cloudflare|oidc|token|agent):[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.-]{1,315}$/.test(raw.subject)
+    /^(?:[a-z][a-z0-9-]{0,31}:[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.:-]{1,287}|[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9.-]+)$/.test(raw.subject)
   ) {
     event.subject = raw.subject;
   }
