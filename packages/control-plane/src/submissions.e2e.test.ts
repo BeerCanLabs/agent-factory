@@ -16,7 +16,7 @@ import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { loadSkills, skillRegistry } from './skills.js';
 
-const PEOPLE = ['admin', 'vic', 'approver', 'bea', 'otto'] as const;
+const PEOPLE = ['admin', 'vic', 'approver', 'bea', 'otto', 'steph'] as const;
 const tok = (p: string) => `tok-s20-${p}`; // secret-scan:allow (test fixture)
 
 function identityOnlyBearer(): AuthProvider {
@@ -65,6 +65,8 @@ describe('S20: content submission and admission gates (#366)', { concurrency: fa
     await g('user:vic', 'viewer');
     await g('user:approver', 'approver');
     await g('user:bea', 'budget-owner');
+    // Stephanie has factory access only through an agent sub-role (no fleet role).
+    await grants.grant({ subject: 'user:steph', scope: { kind: 'agent', id: 'donna' }, role: 'Family', by: 'user:admin', granterIsAdmin: true } as never);
 
     state = {
       agents: new Map(),
@@ -189,7 +191,10 @@ describe('S20: content submission and admission gates (#366)', { concurrency: fa
     assert.ok((await call('GET', '/api/v1/submissions', 'approver')).body.submissions.length > mine);
     assert.equal((await call('GET', `/api/v1/submissions/${sub.body.id}`, 'vic')).status, 404);
     assert.equal((await call('GET', `/api/v1/submissions/${sub.body.id}`, 'approver')).status, 200);
-    assert.equal((await call('GET', '/api/v1/submissions', 'otto')).status, 403, 'no fleet role, no submissions');
+    assert.equal((await call('GET', '/api/v1/submissions', 'otto')).status, 403, 'no grant at all, no submissions');
+    const steph = await call('POST', '/api/v1/submissions', 'steph', draft('steph-bot'));
+    assert.equal(steph.status, 201, 'an agent-scoped grant is factory access too (D27)');
+    assert.equal(steph.body.submitter, 'user:steph');
     assert.equal((await call('POST', '/api/v1/submissions', undefined, draft('x'))).status, 401);
   });
 });

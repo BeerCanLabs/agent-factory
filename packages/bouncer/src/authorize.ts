@@ -91,6 +91,11 @@ function authorizeUnscoped(req: AuthorizeRequest): AuthorizeResult {
     }
   }
 
+  // S20, D27: any signed-in user with factory access may submit a draft: a fleet role (above) or any live grant.
+  if (privilege === 'content.submit' && resource?.grants?.some((eg) => !eg.readOnly)) {
+    return { allowed: true };
+  }
+
   if (privilege === 'skills.register') {
     if (resource?.ownsAnyAgent || resource?.groupRoles?.includes('skills.register')) {
       return { allowed: true };
