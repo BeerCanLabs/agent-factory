@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { apiKeyFromAuthorization } from '@beercanlabs/factory-auth';
-import type { ApiKeyStore, ApiKeyRecord } from '@beercanlabs/factory-bouncer';
+import { BREAK_GLASS_OWNER, type ApiKeyStore, type ApiKeyRecord } from '@beercanlabs/factory-bouncer';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { timingSafeEqual, randomUUID, createHash, createHmac } from 'node:crypto';
 import { checkAgentUpdate, extractGitHubRepo, isNewerVersion, parseSemVer } from './updates.js';
@@ -92,8 +92,10 @@ import { handleSchedules, requesterOfRun, requestersEqual } from './schedules.js
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleGroupRoutes } from './group-routes.js';
 import { handleKeysRoutes } from './keys-routes.js';
+import { handleSetupRoutes, type IdpConfigStore } from './idp-config.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
 import { handleAgentTransfers } from './transfers.js';
+import { handleSkillModels, skillModelsForAgent } from './skill-models.js';
 import { handleMcp } from './mcp.js';
 export { handleMcp } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
@@ -143,6 +145,8 @@ export type FactoryState = {
   auth: AuthProvider;
   /** S5: factory API keys (`fk_`), verified before routing on /api/v1 and /mcp. */
   keys?: ApiKeyStore;
+  /** S6: trusted identity providers for this deployment (a setup value, D16). */
+  idpConfig?: IdpConfigStore;
   /**
    * §6.12 A2: the identity-aware proxy's signed assertion, verified against its issuer, audience and keys. Absent:
    * Access identity is disabled and only factory credentials (bearer tokens, OIDC, run tokens) authenticate.
@@ -2146,19 +2150,9 @@ export function mayDecide(state: FactoryState, principal: { actor: string; roles
   if (approval?.kind === 'change') return mayApproveChange(state, principal, approval.agentId) ? { ok: true } : { ok: false, required: 'admin' };
   if (global.allowed) return { ok: true };
   if (!approval) return { ok: false, required: global.required };
-  const run = state.runs.get(approval.runId);
-  // The run is the record of who asked. If it is gone nobody can say, so no owner or requester decides (fail closed);
-  // an admin or approver already passed above.
-  if (!run) return { ok: false, required: global.required };
-  // A scheduled run carries its schedule's requester, not a `requestedBy` of its own: an owner never decides what a schedule
-  // does in another person's name, and a schedule that cannot be read leaves no requester, so no owner (fail closed).
-  let requester: { actor: string | undefined } | undefined = run.requestedBy ? { actor: state.identityLinks?.resolve(run.requestedBy.provider, run.requestedBy.id) } : undefined;
-  if (run.trigger === 'schedule') {
-    const who = requesterOfRun(state, run);
-    if (!who) return { ok: false, required: global.required };
-    if (who.kind === 'identity') requester = { actor: state.identityLinks?.resolve(who.provider, who.id) };
-    else if (who.kind === 'principal') requester = { actor: who.actor };
-  }
+  // S22, D29: a run-time hold is the content side's to clear: the one `content-owner` of a personal agent, or any
+  // `member` / `accountable-lead` of a team agent (an admin passed above, acting as a user when `actAs` is set). The old
+  // requester and approver paths are gone, so who asked and whether the run still exists do not matter here.
   const scoped = authorize({
     principal,
     privilege: 'approvals.decide',
@@ -2166,7 +2160,6 @@ export function mayDecide(state: FactoryState, principal: { actor: string; roles
       agentId: approval.agentId,
       agentKind: agentKindOf(state, approval.agentId),
       owners: ownersOf(state, approval.agentId),
-      ...(requester ? { requester } : {}),
       ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
     },
   });
@@ -2203,6 +2196,22 @@ export async function decideApproval(state: FactoryState, id: string, decision: 
     // CF4: decided in a channel: where, as the ingress attested it, written before anything is allowed.
     ...(via ? { requestId: `${via.provider}:${via.channelId}` } : {}),
   });
+  // S22, D29: a run-time hold was cleared (approved or rejected): record the specific principal who cleared it.
+  // `onBehalfOf` is stamped by the act-as ledger wrapper when an admin acts as a user.
+  if (decided.kind !== 'change') {
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: decided.agentId,
+      runId: decided.runId,
+      type: 'action',
+      action: 'HOLD_CLEARED',
+      actor,
+      approvalId: decided.approvalId,
+      mcpName: decided.tool,
+      route: decided.route,
+      ...(via ? { requestId: `${via.provider}:${via.channelId}` } : {}),
+    });
+  }
   if (decided.kind === 'change') {
     // The decision is ledgered above before anything is applied. The agent is not told and carries nothing.
     if (decision !== 'approve') return { status: 200, body: decided };
@@ -2375,7 +2384,8 @@ export const requestApiKey = new WeakMap<http.IncomingMessage, ApiKeyRecord>();
  */
 export function verifyApiKeyBeforeRouting(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const path = (req.url ?? '/').split('?')[0];
-  if (!(path === '/mcp' || path.startsWith('/api/v1/'))) return true;
+  // S16: health and metrics take a machine key too, so probes can present one.
+  if (!(path === '/mcp' || path.startsWith('/api/v1/') || path === '/healthz' || path === '/' || path === '/metrics')) return true;
   const plaintext = apiKeyFromAuthorization(req.headers.authorization);
   if (plaintext === undefined) return true;
   const rec = plaintext && state.keys ? state.keys.verify(plaintext) : undefined;
@@ -2384,6 +2394,18 @@ export function verifyApiKeyBeforeRouting(state: FactoryState, req: http.Incomin
     return false;
   }
   requestApiKey.set(req, rec);
+  if (rec.owner === BREAK_GLASS_OWNER) {
+    // S6 (R11): every break-glass call is ledgered and raises the alert until the key is rotated.
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: 'control-plane',
+      type: 'action',
+      action: 'BREAK_GLASS_USED',
+      actor: BREAK_GLASS_OWNER,
+      subject: `${req.method ?? 'GET'}:${path}`.slice(0, 200).replace(/[^A-Za-z0-9:._@+/-]/g, '_').replace(/^/, 'route:'),
+    });
+    void state.keys!.markUsed(rec.id).catch(() => undefined);
+  }
   return true;
 }
 
@@ -2397,6 +2419,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     return;
   }
 
+  if (path.startsWith('/api/v1/setup/') && (await handleSetupRoutes(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keys') && (await handleKeysRoutes(state, req, res, path))) return;
 
   if (
@@ -2412,6 +2435,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   }
 
   if (/^\/api\/v1\/agents\/[^/]+\/transfer(\/|$)/.test(path) && (await handleAgentTransfers(state, req, res, path))) return;
+  if (path.startsWith('/api/v1/skills/') && path.endsWith('/model') && (await handleSkillModels(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleGitHubAppSetup(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleDiscordAppSetup(state, req, res, path))) return;
@@ -2444,13 +2468,17 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   }
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
-
-    json(res, 200, {
-      status: 'ok',
-      version: state.version,
-      uptime: Math.round((Date.now() - started) / 1000),
-      timestamp: new Date().toISOString(),
-    });
+    // S16 (R17, D18, D22): health tells nothing to an anonymous caller. Probes use the internal listener or a key.
+    const who = await identify(req, state);
+    if (!who.ok) {
+      if (path === '/' && wantsHtml(req)) {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(LOGIN_HTML);
+        return;
+      }
+      return json(res, 401, { error: 'unauthorized' });
+    }
+    json(res, 200, healthBody(state, started));
     return;
   }
 
@@ -3813,6 +3841,8 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
     const pol = state.policies.get(run.agentId);
     const skillHolds = isBuiltin ? [] : effectiveAgentSkillActionHolds(state, run.agentId);
+    // S24 (D31): factory-side model bindings of the skills this agent runs; egress applies one per call made for a skill.
+    const skillModels = isBuiltin ? {} : skillModelsForAgent(state, run.agentId);
 
     if (run.trigger === 'smoke') {
       const inputObj = (run.input && typeof run.input === 'object') ? (run.input as Record<string, unknown>) : {};
@@ -3850,6 +3880,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         access: { restricted: false },
         canManageModels: false,
         ...(skillHolds.length ? { skillHolds } : {}),
+        ...(Object.keys(skillModels).length ? { skillModels } : {}),
       });
       return;
     }
@@ -3878,6 +3909,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       access: isBuiltin ? { restricted: false } : accessForRun(state, run, agent),
       canManageModels: isBuiltin ? false : canRunManageModels(state, run).allowed,
       ...(skillHolds.length ? { skillHolds } : {}),
+      ...(Object.keys(skillModels).length ? { skillModels } : {}),
     });
     return;
   }
@@ -4475,6 +4507,55 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
     return;
   }
 
+  // S19 (D25, D27, D28): the budget-owner (admin as backup) allocates an agent's AI model budget, outside submission.
+  // Only `budgetUsd` changes: routes and every other policy field stay as they are.
+  const allocMatch = path.match(/^\/api\/v1\/budget\/agents\/([^/]+)$/);
+  if (allocMatch && req.method === 'PUT') {
+    const principal = await requirePrivilege(req, res, state, 'budget.allocate');
+    if (!principal) return;
+    const agentId = allocMatch[1];
+    const agent = state.agents.get(agentId);
+    if (!agent) {
+      json(res, 404, { error: 'not_found' });
+      return;
+    }
+    if (agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id)) {
+      json(res, 400, { error: 'builtin_agents_exempt_from_budget' });
+      return;
+    }
+    const body = (await readJson(req)) as { budgetUsd?: unknown } | undefined;
+    const b = body && typeof body === 'object' ? (body.budgetUsd as Record<string, unknown> | undefined) : undefined;
+    const keys = b && typeof b === 'object' && !Array.isArray(b) ? Object.keys(b) : [];
+    const valid =
+      keys.length > 0 &&
+      Object.keys(body ?? {}).every((k) => k === 'budgetUsd') &&
+      keys.every((k) => (k === 'perDay' || k === 'perMonth') && typeof b![k] === 'number' && Number.isFinite(b![k] as number) && (b![k] as number) >= 0);
+    if (!valid) {
+      json(res, 400, { error: 'invalid_budget', message: 'body must be { budgetUsd: { perDay?: number >= 0, perMonth?: number >= 0 } } and nothing else' });
+      return;
+    }
+    const current = state.policies.get(agentId) ?? { routes: ['anthropic', 'openai'] };
+    const checked = validatePolicy({ ...current, budgetUsd: { ...current.budgetUsd, ...(b as object) } });
+    if (!checked.ok) {
+      json(res, 400, { error: checked.error });
+      return;
+    }
+    state.policies.set(agentId, checked.policy);
+    unblockAffordableRuns(state, agentId, checked.policy?.budgetUsd, principal.actor);
+    if (agent.state === 'PENDING_BUDGET') agent.state = 'PENDING_DEPLOY';
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'BUDGET_ALLOCATED',
+      actor: principal.actor,
+    });
+    await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, 'budget allocated') });
+    registryOf(state).save(agent);
+    json(res, 200, { agentId, budgetUsd: checked.policy?.budgetUsd ?? {} });
+    return;
+  }
+
   const budgetMatch = path.match(/^\/api\/v1\/registry\/agents\/([^/]+)\/budget$/);
   if (budgetMatch && req.method === 'PUT') {
     const principal = await requirePrivilege(req, res, state, 'registry.budget.set');
@@ -4732,4 +4813,28 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
   }
   // --- END REGISTRY SERVICE ---
   json(res, 404, { error: 'not_found' });
+}
+
+/** S16: the login page an unauthenticated browser gets at `/`. It names no version, uptime, or status. */
+export const LOGIN_HTML = '<!doctype html><html><head><meta charset="utf-8"><title>Agent Factory: sign in</title></head><body><main><h1>Agent Factory</h1><p><a href="/ui">Sign in</a></p></main></body></html>';
+
+function wantsHtml(req: http.IncomingMessage): boolean {
+  return String(req.headers.accept ?? '').includes('text/html');
+}
+
+function healthBody(state: FactoryState, started: number) {
+  return { status: 'ok', version: state.version, uptime: Math.round((Date.now() - started) / 1000), timestamp: new Date().toISOString() };
+}
+
+/**
+ * S16 (D22): the private probe listener for ALB/ECS health checks. It answers GET /healthz with `{status:'ok'}` only and
+ * 404 for everything else, so it leaks nothing even when reachable. Bind it to a port the security group opens only to
+ * the load balancer.
+ */
+export function createProbeServer(): http.Server {
+  return http.createServer((req, res) => {
+    const path = (req.url ?? '/').split('?')[0];
+    if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
+    return json(res, 404, { error: 'not_found' });
+  });
 }

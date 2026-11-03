@@ -164,8 +164,9 @@ describe('control plane', { concurrency: false }, () => {
   const tokenFor = (runId: string) => state.runtime.started.find((s) => s.runEnv.FACTORY_RUN_ID === runId)!.runEnv.FACTORY_RUN_TOKEN;
 
   describe('auth and roles', () => {
-    it('serves health without auth and rejects the catalog without a bearer', async () => {
-      assert.equal((await request(port, '/healthz')).status, 200);
+    it('serves health only to a verified caller and rejects the catalog without a bearer', async () => {
+      assert.equal((await request(port, '/healthz')).status, 401);
+      assert.equal((await request(port, '/healthz', { token: TOKENS.viewer })).status, 200);
       assert.equal((await request(port, '/api/v1/agents')).status, 401);
       assert.equal((await request(port, '/api/v1/agents', { token: TOKENS.viewer })).status, 200);
     });

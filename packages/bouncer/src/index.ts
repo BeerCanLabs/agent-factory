@@ -109,4 +109,4 @@ export {
   parseIsoTimestamp,
 } from './grants.js';
 
-export { ApiKeyStore, ApiKeyStoreError, publicKeyView, type ApiKeyRecord, type ApiKeysDoc } from './keys.js';
+export { ApiKeyStore, ApiKeyStoreError, BREAK_GLASS_OWNER, publicKeyView, type ApiKeyRecord, type ApiKeysDoc } from './keys.js';

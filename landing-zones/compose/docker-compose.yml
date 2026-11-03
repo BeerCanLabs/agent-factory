@@ -63,6 +63,7 @@ services:
       MEMORY_EPHEMERAL_DIR: /tmp/ephemeral
       FACTORY_IDLE_MS: 300000
       FACTORY_CRON: 1
+      FACTORY_INTERNAL_HEALTH_PORT: 8089
     volumes:
       - factory-data:/data
       - factory-mind:/data/mind
@@ -72,7 +73,7 @@ services:
     networks: [agents, control, egress]
     depends_on: [docker-proxy]
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8088/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8089/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 5s
       retries: 20
     stop_grace_period: 20s

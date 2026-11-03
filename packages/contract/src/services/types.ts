@@ -130,6 +130,8 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/keys-routes.ts',
       'packages/control-plane/src/transfers.ts',
       'packages/control-plane/src/legacy-env-roles.ts',
+      'packages/control-plane/src/idp-config.ts',
+      'packages/control-plane/src/recover.ts',
     ],
   },
   timekeeper: {
@@ -159,6 +161,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/ai-providers.ts',
       'packages/control-plane/src/updates.ts',
       'packages/control-plane/src/group-routes.ts',
+      'packages/control-plane/src/skill-models.ts',
     ],
   },
   inspector: {

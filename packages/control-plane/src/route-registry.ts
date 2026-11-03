@@ -42,24 +42,6 @@ export const ROUTE_EXCEPTIONS = {
     retiringStory: 'S12',
     rationale: 'Unauthenticated web UI static assets; S12 restricts /ui to authenticated session cookie',
   },
-  'transitional-root': {
-    id: 'transitional-root',
-    protection: 'transitional',
-    retiringStory: 'S16',
-    rationale: 'Root liveness ping; S16 places health endpoints behind machine API keys and redirects browsers to login',
-  },
-  'transitional-healthz': {
-    id: 'transitional-healthz',
-    protection: 'transitional',
-    retiringStory: 'S16',
-    rationale: 'Unauthenticated liveness probe; S16 places health endpoints behind machine API keys or private internal listener',
-  },
-  'transitional-api-health': {
-    id: 'transitional-api-health',
-    protection: 'transitional',
-    retiringStory: 'S16',
-    rationale: 'Unauthenticated health endpoint; S16 places health endpoints behind machine API keys or private internal listener',
-  },
   'transitional-cli-discovery': {
     id: 'transitional-cli-discovery',
     protection: 'transitional',
@@ -160,6 +142,15 @@ export const ROUTE_EXCEPTIONS = {
     rationale: 'Two-phase ownership transfer (D15, D23, S3b) authorizes per party inside the handler: start by the active content-owner or admin, accept by the recipient (admin via act-as), decline by recipient or admin, cancel by the read-only outgoing owner or admin, read by any of those; S4 moves this into single Bouncer enforcement',
     retiringStory: 'S4',
   },
+  'setup-status': {
+    id: 'setup-status',
+    protection: 'identity-probe',
+    rationale: 'Setup completion and break-glass alert for any verified principal; read-only, names no secrets (R11, D16, S6)',
+  'health-probe': {
+    id: 'health-probe',
+    protection: 'identity-probe',
+    rationale: 'Health for any verified principal (session or machine key, e.g. a health-probe key); 401 otherwise. Load balancers use the private FACTORY_INTERNAL_HEALTH_PORT listener (R17, D18, D22, S16)',
+  },
   'identity-whoami': {
     id: 'identity-whoami',
     protection: 'identity-probe',
@@ -188,8 +179,7 @@ export const ROUTE_EXCEPTIONS = {
   'login-page': {
     id: 'login-page',
     protection: 'login-page',
-    plannedIn: 'S12',
-    rationale: 'Planned human login page HTML served without credentials (D18, D19, S12)',
+    rationale: 'Login page HTML served without credentials at `/` to unauthenticated browsers; names no status (D18, D19, S16; full flow S12)',
   },
 } as const satisfies Record<string, RouteException>;
 
@@ -229,13 +219,16 @@ export function pathToRegex(pattern: string): RegExp {
 export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   // UI & Health (Transitional)
   { method: 'GET', pattern: '/ui', exception: 'transitional-ui', description: 'Factory web UI HTML' },
-  { method: 'GET', pattern: '/', exception: 'transitional-root', description: 'Root liveness ping' },
-  { method: 'GET', pattern: '/healthz', exception: 'transitional-healthz', description: 'Liveness probe' },
-  { method: 'GET', pattern: '/api/v1/health', exception: 'transitional-api-health', description: 'Health check probe' },
+  { method: 'GET', pattern: '/', exception: 'login-page', description: 'Login page for browsers; health for verified principals' },
+  { method: 'GET', pattern: '/healthz', exception: 'health-probe', description: 'Liveness probe' },
+  { method: 'GET', pattern: '/api/v1/health', exception: 'health-probe', description: 'Health check probe' },
   { method: 'GET', pattern: '/.well-known/factory-cli', exception: 'transitional-cli-discovery', description: 'CLI discovery config' },
 
   // Identity probe (Authenticated principal, no elevated privilege)
   { method: 'GET', pattern: '/api/v1/whoami', exception: 'identity-whoami', description: 'Caller identity and roles probe' },
+  { method: 'GET', pattern: '/api/v1/setup/status', exception: 'setup-status', description: 'Setup status and break-glass alert (S6)' },
+  { method: 'GET', pattern: '/api/v1/setup/idp', privilege: 'grants.manage', description: 'Read IdP configuration (S6)' },
+  { method: 'PUT', pattern: '/api/v1/setup/idp', privilege: 'grants.manage', description: 'Set IdP configuration (S6)' },
   { method: 'GET', pattern: '/api/v1/keys', exception: 'keys-self-list', description: 'List API keys (S5)' },
   { method: 'POST', pattern: '/api/v1/keys', exception: 'keys-self-create', description: 'Issue API key (S5)' },
   { method: 'POST', pattern: '/api/v1/keys/:id/rotate', exception: 'keys-self-rotate', description: 'Rotate API key (S5)' },
@@ -365,6 +358,7 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'GET', pattern: '/api/v1/registry/agents', privilege: 'agents.read', description: 'List agent catalog' },
   { method: 'POST', pattern: '/api/v1/registry/agents', privilege: 'registry.register', description: 'Register new cartridge agent' },
   { method: 'GET', pattern: '/api/v1/registry/agents/:id', privilege: 'agents.read', description: 'Get agent catalog entry' },
+  { method: 'PUT', pattern: '/api/v1/budget/agents/:id', privilege: 'budget.allocate', description: 'Allocate agent AI model budget (S19)' },
   { method: 'PUT', pattern: '/api/v1/registry/agents/:id/budget', privilege: 'registry.budget.set', description: 'Set agent budget limit' },
   { method: 'POST', pattern: '/api/v1/registry/agents/:id/retire', privilege: 'registry.retire', description: 'Retire agent cartridge' },
   { method: 'POST', pattern: '/api/v1/registry/agents/:id/reinstate', privilege: 'registry.reinstate', description: 'Reinstate retired agent' },
@@ -446,6 +440,8 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'PUT', pattern: '/api/v1/skills/:id/training-baseline', privilege: 'skills.training.run', description: 'Set skill training baseline' },
   { method: 'POST', pattern: '/api/v1/skills/:id/training-runs', privilege: 'skills.training.run', description: 'Execute skill training run' },
   { method: 'POST', pattern: '/api/v1/skills/:id/training-recommendation', privilege: 'skills.training.run', description: 'Generate skill training recommendation' },
+  { method: 'GET', pattern: '/api/v1/skills/:id/model', privilege: 'skills.package.read', description: 'Read skill model binding (S24)' },
+  { method: 'PUT', pattern: '/api/v1/skills/:id/model', privilege: 'skills.version.add', description: 'Bind or swap skill model (S24)' },
   { method: 'POST', pattern: '/api/v1/skills/:id/transfer', privilege: 'skills.transfer', description: 'Initiate skill ownership transfer' },
   { method: 'POST', pattern: '/api/v1/skills/:id/transfer/accept', privilege: 'skills.register', description: 'Accept skill ownership transfer' },
   { method: 'GET', pattern: '/api/v1/skills/:id/transfer', exception: 'skill-transfer-read', description: 'Read pending skill ownership transfer (S3b)' },

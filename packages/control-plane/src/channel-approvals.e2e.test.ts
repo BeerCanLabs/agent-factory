@@ -160,11 +160,11 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
     state.approvals.decide(a.approvalId, 'rejected', 'test');
   });
 
-  it('does not ask when no one who could decide is known: an unlinked requester, a run that is gone', async () => {
+  it('S22, D29: a hold from an unlinked requester is asked of the owner (content side), not the requester', async () => {
     const stranger = await runFor({ provider: 'discord', id: '555' });
     const a = hold(stranger.run.runId);
-    assert.equal((await prompts()).body.prompts.some((x: { approvalId: string }) => x.approvalId === a.approvalId), false);
-    assert.equal((await asked(a.approvalId)).status, 404, 'no code was ever issued for it');
+    const p = (await prompts()).body.prompts.find((x: { approvalId: string }) => x.approvalId === a.approvalId);
+    assert.deepEqual(p?.deciders, ['100']);
     state.approvals.decide(a.approvalId, 'rejected', 'test');
   });
 
@@ -204,16 +204,18 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
     assert.ok(actions('APPROVAL_REJECTED').some((e) => e.approvalId === a.approvalId));
   });
 
-  it('an owner decides what a run with no requesting user held, and not what another person asked for', async () => {
+  it('S22, D29: the owner decides what any run of their agent held, including what another person asked for', async () => {
     const queued = await runFor(undefined);
     const mine = hold(queued.run.runId);
     const p = await askFor(mine);
-    assert.deepEqual(p.deciders, ['100'], 'the owner, as no one asked');
+    assert.deepEqual(p.deciders, ['100'], 'the owner');
     assert.equal((await reply(p.code, 'approve', '100')).status, 200);
     const stephanie = await runFor({ provider: 'discord', id: '201' });
     const hers = hold(stephanie.run.runId);
-    assert.equal((await prompts()).body.prompts.some((x: { approvalId: string }) => x.approvalId === hers.approvalId && x.deciders.includes('100')), false, 'an owner is not asked about what is done in Stephanie’s name');
-    state.approvals.decide(hers.approvalId, 'rejected', 'test');
+    const q = await askFor(hers);
+    assert.deepEqual(q.deciders, ['100'], 'the owner is asked; Stephanie, the requester, is not');
+    assert.equal((await reply(q.code, 'approve', '201')).status, 403, 'the requester cannot clear the hold');
+    assert.equal((await reply(q.code, 'approve', '100')).status, 200);
   });
 
   it('a question expires after a day', async () => {
@@ -375,26 +377,20 @@ describe('CF4 approvals are asked and answered in the channel (TSK-267)', { conc
     state.approvals.decide(a.approvalId, 'rejected', 'test');
   });
 
-  it('what a schedule holds in another person’s name is not decided by an owner; one whose schedule cannot be read is decided by no owner', async () => {
+  it('S22, D29: whatever a schedule holds, in whoever’s name, is the owner’s to decide', async () => {
     const mkScheduled = (scheduleId: string) => {
       const run = state.runs.create({ agentId: 'mine', state: 'WORKING', actor: 'factory:timekeeper', trigger: 'schedule', input: { scheduleId } } as never);
       return hold(run.runId);
     };
-    state.schedules = { get: (id: string) => (id === 'prin' ? { createdVia: 'api', requestedBy: { kind: 'principal', actor: 'token:approver' } } : id === 'hers' ? { createdVia: 'chat', requestedBy: { kind: 'identity', provider: 'discord', id: '201' } } : id === 'his' ? { createdVia: 'chat', requestedBy: { kind: 'identity', provider: 'discord', id: '100' } } : undefined) } as never;
+    state.schedules = { get: (id: string) => (id === 'hers' ? { createdVia: 'chat', requestedBy: { kind: 'identity', provider: 'discord', id: '201' } } : undefined) } as never;
     const hers = mkScheduled('hers');
-    const his = mkScheduled('his');
     const gone = mkScheduled('gone');
-    const prin = mkScheduled('prin');
     const asked = (await prompts()).body.prompts;
     const decidersFor = (id: string) => asked.find((x: { approvalId: string }) => x.approvalId === id)?.deciders;
-    assert.deepEqual(decidersFor(hers.approvalId), ['201'], 'Stephanie’s schedule: Stephanie, the requester, is asked; the owner is not');
-    assert.deepEqual(decidersFor(his.approvalId), ['100']);
-    assert.equal(decidersFor(gone.approvalId), undefined);
-    assert.equal((await call('POST', `/api/v1/approvals/${hers.approvalId}`, { decision: 'approve' }, OWNER)).status, 403);
-    assert.equal((await call('POST', `/api/v1/approvals/${gone.approvalId}`, { decision: 'approve' }, OWNER)).status, 403);
-    assert.equal((await call('POST', `/api/v1/approvals/${prin.approvalId}`, { decision: 'approve' }, OWNER)).status, 403, 'a schedule made by a signed-in person: not the owner');
-    assert.equal((await call('POST', `/api/v1/approvals/${his.approvalId}`, { decision: 'approve' }, OWNER)).status, 200, 'their own schedule: the owner is the requester');
-    for (const a of [hers, gone, prin]) state.approvals.decide(a.approvalId, 'rejected', 'test');
+    assert.deepEqual(decidersFor(hers.approvalId), ['100'], 'Stephanie’s schedule: the owner is asked, not Stephanie');
+    assert.deepEqual(decidersFor(gone.approvalId), ['100']);
+    assert.equal((await call('POST', `/api/v1/approvals/${hers.approvalId}`, { decision: 'approve' }, OWNER)).status, 200);
+    assert.equal((await call('POST', `/api/v1/approvals/${gone.approvalId}`, { decision: 'approve' }, OWNER)).status, 200);
     state.schedules = undefined as never;
   });
 });

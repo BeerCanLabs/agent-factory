@@ -112,6 +112,8 @@ export const PRIVILEGES = [
   'grants.manage',
   // S4 (D27): the content admission gate decision, the approver role's one privilege beyond reads.
   'content.admit',
+  // S19 (D25): allocate AI model budget to an agent, outside submission. Held by `budget-owner` and `admin`.
+  'budget.allocate',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -318,7 +320,16 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'skills.defaults.set',
     'grants.manage',
     'content.admit',
+    'budget.allocate',
   ],
+};
+
+/**
+ * S19 (D7, D25): fleet roles that exist only as grants (not as credential roles). `budget-owner` is a grantor that
+ * allocates AI model budget and reads what it needs to; it admits nothing and edits nothing else.
+ */
+export const FLEET_GRANT_ROLE_PRIVILEGES: Readonly<Record<'budget-owner', readonly Privilege[]>> = {
+  'budget-owner': ['agents.read', 'spend.read', 'policy.read', 'budget.allocate'],
 };
 
 /**
@@ -492,7 +503,8 @@ export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> 
    * may reach that agent, and nothing else: start a run and converse. Never clears holds (`approvals.decide`).
    */
   'agent-member': ['agents.wake', 'agents.converse'],
-  requester: ['approvals.decide'],
+  // S22, D29: the requester no longer clears holds; the derived role stays for its other uses and holds nothing here.
+  requester: [],
   /**
    * A9: Built-in `skill-owner` role. It carries `skills.version.add`, `skills.retire`, `skills.assign`,
    * `skills.publish.request`, `skills.unpublish`, and `skills.package.read`, and not `skills.transfer`.

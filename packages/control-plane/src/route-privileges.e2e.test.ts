@@ -133,6 +133,7 @@ const ROUTES: RouteRow[] = [
   { method: 'PUT', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
   { method: 'DELETE', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer' },
   // approver
+  { method: 'PUT', path: '/api/v1/budget/agents/castle', privilege: 'budget.allocate', role: 'admin', body: { budgetUsd: { perDay: 1 } } },
   { method: 'POST', path: '/api/v1/approvals/nope', privilege: 'approvals.decide', role: 'admin', body: { decision: 'approved' } },
   // ingest
   { method: 'POST', path: '/api/v1/ledger', privilege: 'ledger.ingest', role: 'ingest', body: {} },
@@ -230,6 +231,8 @@ const ROUTES: RouteRow[] = [
   { method: 'PUT', path: `/api/v1/skills/${SKILL}/group`, privilege: 'skills.assign', role: 'admin', body: {} },
   { method: 'DELETE', path: `/api/v1/skills/${SKILL}/group`, privilege: 'skills.assign', role: 'admin' },
   { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1/package/files`, privilege: 'skills.package.read', role: 'admin' },
+  { method: 'GET', path: `/api/v1/skills/${SKILL}/model`, privilege: 'skills.package.read', role: 'admin' },
+  { method: 'PUT', path: `/api/v1/skills/${SKILL}/model`, privilege: 'skills.version.add', role: 'admin', body: {} },
   { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1/package/file`, privilege: 'skills.package.read', role: 'admin' },
   // TSK-278 (Slice 4): Publishing workflow and retirement (H8, H9, A8, A13)
   { method: 'POST', path: `/api/v1/skills/${SKILL}/publish`, privilege: 'skills.publish.request', role: 'admin', body: {} },
@@ -247,6 +250,9 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/agents/nope/transfer', privilege: 'grants.manage', role: 'admin' },
   { method: 'POST', path: '/api/v1/agents/nope/transfer', privilege: 'grants.manage', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/agents/nope/transfer/accept', privilege: 'grants.manage', role: 'admin', body: {} },
+  // S6: IdP setup (D16)
+  { method: 'GET', path: '/api/v1/setup/idp', privilege: 'grants.manage', role: 'admin' },
+  { method: 'PUT', path: '/api/v1/setup/idp', privilege: 'grants.manage', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/skills/${SKILL}/retire`, privilege: 'skills.retire.force', role: 'admin', body: { force: true } },
 ];
 
@@ -386,13 +392,44 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       ['POST', '/api/v1/keys'],
       ['POST', '/api/v1/keys/key_nope/rotate'],
       ['DELETE', '/api/v1/keys/key_nope'],
+      ['GET', '/api/v1/setup/status'],
     ] as const) {
       assert.equal((await call(port, method, path, 'none')).status, 401, `${method} ${path} without a credential`);
     }
   });
 
+  it('S16 AC1: health on the main port needs a verified principal; browsers get the login page at /', async () => {
+    for (const path of ['/healthz', '/', '/api/v1/health', '/metrics', '/api/v1/metrics']) {
+      const r = await call(port, 'GET', path, 'none');
+      assert.equal(r.status, 401, `${path} without a credential`);
+      assert.ok(!JSON.stringify(r.body).includes('uptime'), `${path} leaks status`);
+    }
+    for (const cred of CREDENTIALS.filter((c) => c !== 'none')) {
+      for (const path of ['/healthz', '/api/v1/health']) assert.equal((await call(port, 'GET', path, cred)).status, 200, `${path} as ${cred}`);
+    }
+    const page = await call(port, 'GET', '/', 'none', undefined, { accept: 'text/html' });
+    assert.equal(page.status, 200);
+    assert.match(String(page.body), /Sign in/);
+    assert.ok(!String(page.body).includes('uptime') && !String(page.body).includes('version'));
+  });
+
+  it('S16 AC2: the private probe listener answers /healthz with 200 and nothing else', async () => {
+    const { createProbeServer } = await import('./app.js');
+    const probe = createProbeServer();
+    const p = await listen(probe);
+    try {
+      const ok = await call(p, 'GET', '/healthz', 'none');
+      assert.equal(ok.status, 200);
+      assert.deepEqual(ok.body, { status: 'ok' });
+      assert.equal((await call(p, 'GET', '/api/v1/agents', 'none')).status, 404);
+      assert.equal((await call(p, 'POST', '/healthz', 'none')).status, 404);
+    } finally {
+      await new Promise<void>((r) => probe.close(() => r()));
+    }
+  });
+
   it('public routes and the OAuth callback answer every credential alike, and whoami needs only a verified principal', async () => {
-    for (const path of ['/ui', '/healthz', '/', '/api/v1/health', '/.well-known/factory-cli', '/api/v1/connections/p/callback', '/api/v1/keymaster/github-app/callback']) {
+    for (const path of ['/ui', '/.well-known/factory-cli', '/api/v1/connections/p/callback', '/api/v1/keymaster/github-app/callback']) {
       for (const cred of CREDENTIALS) {
         const r = await call(port, 'GET', path, cred);
         assert.ok(r.status !== 401 && r.status !== 403, `${path} as ${cred}: ${r.status}`);
