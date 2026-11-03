@@ -94,6 +94,7 @@ import { handleGroupRoutes } from './group-routes.js';
 import { handleKeysRoutes } from './keys-routes.js';
 import { handleSetupRoutes, type IdpConfigStore } from './idp-config.js';
 import { handleSubmissions } from './submissions.js';
+import { handleInterview } from './interview-draft.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
 import { handleSkillModels, skillModelsForAgent } from './skill-models.js';
 import { handleMcp } from './mcp.js';
@@ -2421,6 +2422,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
 
   if (path.startsWith('/api/v1/setup/') && (await handleSetupRoutes(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keys') && (await handleKeysRoutes(state, req, res, path))) return;
+  if (path === '/api/v1/submissions/interview' && (await handleInterview(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/submissions') || path.startsWith('/api/v1/budget/submissions/')) && (await handleSubmissions(state, req, res, path))) return;
 
   if (
