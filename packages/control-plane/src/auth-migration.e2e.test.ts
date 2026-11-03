@@ -113,6 +113,7 @@ describe('S8: legacy auth import, shadow mode and cutover (#373)', { concurrency
     const r = await call('GET', '/api/v1/auth-migration/readiness');
     assert.equal(r.body.mismatches, 0, JSON.stringify(r.body.sample));
     assert.equal(r.body.ownerOrphans, 0, 'every live item has an owner/lead for hold routing');
+    assert.deepEqual(r.body.orphans, [], 'readiness names each orphan so an admin can grant its owner');
     assert.equal(r.body.ready, true);
     const c = await call('POST', '/api/v1/auth-migration/cutover');
     assert.equal(c.status, 200);
