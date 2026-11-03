@@ -1,7 +1,6 @@
-// TSK-108 (GAP-088, E9, E4): who decides what an agent did. The requesting user of the run decides; when the run has no
-// requesting user, any owner of the agent; the global admin and approver roles keep deciding any agent's (Dale,
-// 2026-10-03). A requester whose Discord id is not linked to a person lets no owner decide. The agent, which holds
-// only a run token, never decides.
+// TSK-108 (GAP-088, E4), superseded by S22 (D29): who decides what an agent did. The content side decides: the owner of
+// a personal agent (legacy owners until the S8 import), or a member / accountable-lead of a team agent. The requester and
+// approver paths are removed; the global admin still decides any agent's. The agent, which holds only a run token, never decides.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -113,17 +112,20 @@ describe('who decides what an agent did (TSK-108)', { concurrency: false }, () =
 
   for (const kind of ['held', 'tool'] as const) {
     describe(`a ${kind === 'held' ? 'held request' : 'tool-call approval'}`, () => {
-      it('the linked requesting user decides it', async () => {
-        const id = pending(kind, { provider: 'discord', id: '42' });
-        const r = await decide(id, ALICE);
-        assert.equal(r.status, 200, JSON.stringify(r.body));
-        assert.equal(r.body.state, 'approved');
-        assert.equal(r.body.decidedBy, 'token:alice');
+      // S22, D29: holds go to the content side; the requester and approver paths are removed.
+      it('the owner (content side) decides it, whether or not the run has a requester', async () => {
+        for (const requestedBy of [{ provider: 'discord', id: '42' }, undefined]) {
+          const id = pending(kind, requestedBy);
+          const r = await decide(id, OWNER);
+          assert.equal(r.status, 200, JSON.stringify(r.body));
+          assert.equal(r.body.state, 'approved');
+          assert.equal(r.body.decidedBy, 'token:owner');
+        }
       });
 
-      it('an unrelated viewer is refused, and so is an owner when the run has a requester', async () => {
+      it('the linked requester, an unrelated viewer and the approver are refused', async () => {
         const id = pending(kind, { provider: 'discord', id: '42' });
-        for (const token of [DAVE, OWNER]) {
+        for (const token of [ALICE, DAVE, APPROVER]) {
           const r = await decide(id, token);
           assert.equal(r.status, 403);
           assert.equal(r.body.required, 'admin');
@@ -131,34 +133,19 @@ describe('who decides what an agent did (TSK-108)', { concurrency: false }, () =
         assert.equal(state.approvals.get(id)?.state, 'pending');
       });
 
-      it('an owner decides when the run has no requesting user, and an unrelated viewer does not', async () => {
-        const id = pending(kind);
-        assert.equal((await decide(id, DAVE)).status, 403);
-        const r = await decide(id, OWNER, 'reject');
-        assert.equal(r.status, 200);
-        assert.equal(r.body.state, 'rejected');
+      it('an admin decides any agent', async () => {
+        assert.equal((await decide(pending(kind, { provider: 'discord', id: '99' }), ADMIN)).status, 200);
+        assert.equal((await decide(pending(kind), ADMIN, 'reject')).status, 200);
       });
 
-      it('a requester who is not linked to anyone lets no owner decide; an admin still can', async () => {
-        const id = pending(kind, { provider: 'discord', id: '99' });
-        assert.equal((await decide(id, OWNER)).status, 403);
-        assert.equal((await decide(id, DAVE)).status, 403);
-        assert.equal((await decide(id, ADMIN)).status, 200);
-      });
-
-      it('the global admin still decides any agent; the approver role no longer clears holds (S4, D29)', async () => {
-        const refused = await decide(pending(kind, { provider: 'discord', id: '42' }), APPROVER);
-        assert.equal(refused.status, 403);
-        assert.equal(refused.body.required, 'admin');
-        assert.equal((await decide(pending(kind, { provider: 'discord', id: '42' }), ADMIN)).status, 200);
-        assert.equal((await decide(pending(kind), ADMIN)).status, 200);
-      });
-
-      it('a second decision is 409 for the caller who may decide', async () => {
+      it('a second decision is 409 for the caller who may decide, and HOLD_CLEARED names who cleared it', async () => {
         const id = pending(kind, { provider: 'discord', id: '42' });
-        assert.equal((await decide(id, ALICE)).status, 200);
-        assert.equal((await decide(id, ALICE)).status, 409);
+        assert.equal((await decide(id, OWNER)).status, 200);
+        assert.equal((await decide(id, OWNER)).status, 409);
         assert.equal((await decide(id, DAVE)).status, 403);
+        const cleared = state.ledger.query({ agent: 'ada' }).filter((e) => e.action === 'HOLD_CLEARED' && e.approvalId === id);
+        assert.equal(cleared.length, 1);
+        assert.equal(cleared[0].actor, 'token:owner');
       });
     });
   }
@@ -169,12 +156,12 @@ describe('who decides what an agent did (TSK-108)', { concurrency: false }, () =
     assert.equal((await decide(id, OWNER)).status, 403);
   });
 
-  it('a run that is gone lets no owner decide, because nobody can say who asked; an admin still can', async () => {
+  it('a run that is gone is still the content side\'s to decide (S22, D29); the approver is refused', async () => {
     const run = state.runs.create({ agentId: 'ada', state: 'DONE', actor: 'token:operator', trigger: 'manual' });
     const { approval } = state.approvals.request({ runId: `${run.runId}-gone`, agentId: 'ada', route: 'r', tool: 't', argsSha256: 'a'.repeat(64) });
-    assert.equal((await decide(approval.approvalId, OWNER)).status, 403);
+    assert.equal((await decide(approval.approvalId, DAVE)).status, 403);
     assert.equal((await decide(approval.approvalId, APPROVER)).status, 403);
-    assert.equal((await decide(approval.approvalId, ADMIN)).status, 200);
+    assert.equal((await decide(approval.approvalId, OWNER)).status, 200);
   });
 
   it('an unknown id is 409 for a caller who may decide and 403 for one who may not', async () => {
