@@ -95,6 +95,7 @@ import { handleKeysRoutes } from './keys-routes.js';
 import { handleSetupRoutes, type IdpConfigStore } from './idp-config.js';
 import { handleSubmissions } from './submissions.js';
 import { handleInterview } from './interview-draft.js';
+import { handleLoginRoutes, sendLoginPage, verifySession, type SessionStore } from './login.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
 import { handleSkillModels, skillModelsForAgent } from './skill-models.js';
 import { handleMcp } from './mcp.js';
@@ -148,6 +149,10 @@ export type FactoryState = {
   keys?: ApiKeyStore;
   /** S6: trusted identity providers for this deployment (a setup value, D16). */
   idpConfig?: IdpConfigStore;
+  /** S12: server-backed browser sessions and pending OAuth states. */
+  sessions?: SessionStore;
+  /** S12: test seam for the IdP's token/userinfo/discovery calls; defaults to global fetch. */
+  oauthFetch?: typeof fetch;
   /**
    * §6.12 A2: the identity-aware proxy's signed assertion, verified against its issuer, audience and keys. Absent:
    * Access identity is disabled and only factory credentials (bearer tokens, OIDC, run tokens) authenticate.
@@ -1019,6 +1024,11 @@ export async function identify(
       const r = await state.auth.verify(req.headers.authorization);
       if (r.ok) verified = r;
       else reasons.push(r.reason);
+    }
+    if (!verified && !req.headers.authorization) {
+      // S12 (D19): the factory's own HttpOnly session, resolved to a principal from its verified email every request.
+      const r = verifySession(state, req);
+      if (r.ok) verified = r;
     }
     if (!verified) {
       const assertion = accessAssertionOf(req.headers);
@@ -2414,8 +2424,16 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   const path = (req.url ?? '/').split('?')[0];
   const started = Number(process.env.FACTORY_STARTED_AT ?? Date.now());
 
+  if ((path === '/login' || path.startsWith('/api/v1/auth/')) && (await handleLoginRoutes(state, req, res, path))) return;
+
   if (path === '/ui' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    // S12 (D22): the web UI is served only to a signed-in caller; everyone else goes to the login page.
+    if (!(await identify(req, state)).ok) {
+      res.writeHead(302, { location: '/login', 'cache-control': 'no-store' });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     res.end(UI_HTML);
     return;
   }
@@ -2474,8 +2492,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const who = await identify(req, state);
     if (!who.ok) {
       if (path === '/' && wantsHtml(req)) {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-        res.end(LOGIN_HTML);
+        sendLoginPage(state, res);
         return;
       }
       return json(res, 401, { error: 'unauthorized' });
@@ -4817,8 +4834,6 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
   json(res, 404, { error: 'not_found' });
 }
 
-/** S16: the login page an unauthenticated browser gets at `/`. It names no version, uptime, or status. */
-export const LOGIN_HTML = '<!doctype html><html><head><meta charset="utf-8"><title>Agent Factory: sign in</title></head><body><main><h1>Agent Factory</h1><p><a href="/ui">Sign in</a></p></main></body></html>';
 
 function wantsHtml(req: http.IncomingMessage): boolean {
   return String(req.headers.accept ?? '').includes('text/html');

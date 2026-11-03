@@ -85,7 +85,7 @@ describe('Route Registry (plans/factory-auth.md S14, #355)', () => {
   it('matchRoute locates declared routes by HTTP method and URL path', () => {
     const uiRoute = matchRoute('GET', '/ui');
     assert.ok(uiRoute);
-    assert.equal(uiRoute?.exception, 'transitional-ui');
+    assert.equal(uiRoute?.exception, 'ui-session');
 
     const agentPolicy = matchRoute('GET', '/api/v1/agents/castle/policy');
     assert.ok(agentPolicy);
@@ -108,10 +108,10 @@ describe('Route Registry (plans/factory-auth.md S14, #355)', () => {
     assert.equal(isRoutePrivileged(multiPrivRoute), true);
     assert.deepEqual(getRoutePrivileges(multiPrivRoute), ['skills.register', 'skills.version.add']);
 
-    const excRoute: ControlPlaneRoute = { method: 'GET', pattern: '/ui', exception: 'transitional-ui' };
+    const excRoute: ControlPlaneRoute = { method: 'GET', pattern: '/ui', exception: 'ui-session' };
     assert.equal(isRoutePrivileged(excRoute), false);
     assert.deepEqual(getRoutePrivileges(excRoute), []);
-    assert.equal(getRouteException(excRoute)?.protection, 'transitional');
+    assert.equal(getRouteException(excRoute)?.protection, 'identity-probe');
   });
 
   describe('validateRouteRegistry validation rules', () => {
@@ -126,7 +126,7 @@ describe('Route Registry (plans/factory-auth.md S14, #355)', () => {
 
     it('flags route declaring both privilege and exception', () => {
       const badRoutes = [
-        { method: 'GET', pattern: '/mixed', privilege: 'agents.read', exception: 'transitional-ui' },
+        { method: 'GET', pattern: '/mixed', privilege: 'agents.read', exception: 'ui-session' },
       ] as unknown as ControlPlaneRoute[];
       const res = validateRouteRegistry(badRoutes, ROUTE_EXCEPTIONS);
       assert.equal(res.valid, false);
