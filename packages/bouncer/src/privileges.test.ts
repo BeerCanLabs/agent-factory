@@ -107,6 +107,7 @@ const CENSUS: Record<string, Role> = {
   'grants.manage': 'admin',
   'content.admit': 'approver',
   'budget.allocate': 'admin',
+  'content.submit': 'viewer',
 };
 // Held by one service role alone; an admin does not hold them. `runs.attest-requester` moved from `operator` to
 // `gatekeeper-ingress` (TSK-111): the old rule no longer matches it, so the proof below reads it from here.
@@ -139,7 +140,7 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 99);
+    assert.equal(PRIVILEGES.length, 100);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 
@@ -229,7 +230,7 @@ describe('approver scope (S4)', () => {
   const READS = new Set<Privilege>([
     'agents.read', 'agents.models.read', 'policy.read', 'config.read', 'runs.read', 'ledger.read', 'models.read', 'metrics.read',
     'triage.read', 'spend.read', 'approvals.read', 'skills.read', 'systems.read', 'systems.propose', 'connections.read',
-    'credentials.provider.read', 'events.subscribe', 'schedules.read', 'mcp.use',
+    'credentials.provider.read', 'events.subscribe', 'schedules.read', 'mcp.use', 'content.submit',
   ]);
 
   it('admits content', () => {
@@ -263,7 +264,7 @@ describe('budget-owner grant (S19)', () => {
   const bea = principal([]);
   it('allocates budget and reads agents, spend and policy', () => {
     const held = PRIVILEGES.filter((p) => authorize({ principal: bea, privilege: p, resource: { grants: [grant('budget-owner')] } }).allowed);
-    assert.deepEqual(held.sort(), ['agents.read', 'budget.allocate', 'policy.read', 'spend.read']);
+    assert.deepEqual(held.sort(), ['agents.read', 'budget.allocate', 'content.submit', 'policy.read', 'spend.read']);
   });
   it('a read-only budget-owner grant allocates nothing', () => {
     assert.equal(authorize({ principal: bea, privilege: 'budget.allocate', resource: { grants: [grant('budget-owner', true)] } }).allowed, false);

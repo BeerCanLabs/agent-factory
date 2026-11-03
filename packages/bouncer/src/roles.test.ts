@@ -273,7 +273,8 @@ describe('S2b: personal vs team agent grant authorization (D7, D11, D15, D24, D2
     };
     assert.deepEqual(
       PRIVILEGES.filter((p) => allowed(stephanie, p, stephRes)).sort(),
-      ['agents.converse', 'agents.wake'],
+      // S20: any live grant is factory access, so a draft may be submitted.
+      ['agents.converse', 'agents.wake', 'content.submit'],
     );
     assert.equal(allowed(stephanie, 'approvals.decide', stephRes), false);
 
@@ -362,7 +363,7 @@ describe('S2b: personal vs team agent grant authorization (D7, D11, D15, D24, D2
     };
     assert.deepEqual(
       PRIVILEGES.filter((p) => allowed(geordi, p, memberRes)).sort(),
-      ['agents.converse', 'agents.wake', 'approvals.decide'].sort(),
+      ['agents.converse', 'agents.wake', 'approvals.decide', 'content.submit'].sort(),
     );
 
     // Stale legacy owners on a team agent grant nothing

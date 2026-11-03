@@ -114,6 +114,8 @@ export const PRIVILEGES = [
   'content.admit',
   // S19 (D25): allocate AI model budget to an agent, outside submission. Held by `budget-owner` and `admin`.
   'budget.allocate',
+  // S20 (D27): submit an agent or skill draft. Any signed-in user with a fleet role.
+  'content.submit',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -145,6 +147,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'events.subscribe',
     'schedules.read',
     'mcp.use',
+    'content.submit',
   ],
   operator: [
     'agents.read',
@@ -166,6 +169,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'events.subscribe',
     'schedules.read',
     'mcp.use',
+    'content.submit',
     'agents.wake',
     'agents.pause',
     'agents.resume',
@@ -197,6 +201,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'events.subscribe',
     'schedules.read',
     'mcp.use',
+    'content.submit',
     // S4, D27, D29: approver is the admission gate only; run-time holds go to the content side.
     'content.admit',
   ],
@@ -248,6 +253,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'events.subscribe',
     'schedules.read',
     'mcp.use',
+    'content.submit',
     'agents.wake',
     'agents.pause',
     'agents.resume',

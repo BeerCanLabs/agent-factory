@@ -132,6 +132,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/legacy-env-roles.ts',
       'packages/control-plane/src/idp-config.ts',
       'packages/control-plane/src/recover.ts',
+      'packages/control-plane/src/submissions.ts',
     ],
   },
   timekeeper: {

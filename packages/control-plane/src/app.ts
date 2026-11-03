@@ -93,6 +93,7 @@ import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js
 import { handleGroupRoutes } from './group-routes.js';
 import { handleKeysRoutes } from './keys-routes.js';
 import { handleSetupRoutes, type IdpConfigStore } from './idp-config.js';
+import { handleSubmissions } from './submissions.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
 import { handleAgentTransfers } from './transfers.js';
 import { handleSkillModels, skillModelsForAgent } from './skill-models.js';
@@ -2421,6 +2422,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
 
   if (path.startsWith('/api/v1/setup/') && (await handleSetupRoutes(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keys') && (await handleKeysRoutes(state, req, res, path))) return;
+  if ((path.startsWith('/api/v1/submissions') || path.startsWith('/api/v1/budget/submissions/')) && (await handleSubmissions(state, req, res, path))) return;
 
   if (
     (path === '/api/v1/whoami' ||
