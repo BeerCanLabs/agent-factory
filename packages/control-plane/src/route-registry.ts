@@ -118,6 +118,11 @@ export const ROUTE_EXCEPTIONS = {
     rationale: 'API key management authorizes in the handler: a signed-in person manages keys they own, an admin any key and service keys; API-key callers are refused (D10, D14, S5); S4 moves this into single Bouncer enforcement',
     retiringStory: 'S4',
   },
+  'setup-status': {
+    id: 'setup-status',
+    protection: 'identity-probe',
+    rationale: 'Setup completion and break-glass alert for any verified principal; read-only, names no secrets (R11, D16, S6)',
+  },
   'identity-whoami': {
     id: 'identity-whoami',
     protection: 'identity-probe',
@@ -194,6 +199,9 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
 
   // Identity probe (Authenticated principal, no elevated privilege)
   { method: 'GET', pattern: '/api/v1/whoami', exception: 'identity-whoami', description: 'Caller identity and roles probe' },
+  { method: 'GET', pattern: '/api/v1/setup/status', exception: 'setup-status', description: 'Setup status and break-glass alert (S6)' },
+  { method: 'GET', pattern: '/api/v1/setup/idp', privilege: 'grants.manage', description: 'Read IdP configuration (S6)' },
+  { method: 'PUT', pattern: '/api/v1/setup/idp', privilege: 'grants.manage', description: 'Set IdP configuration (S6)' },
   { method: 'GET', pattern: '/api/v1/keys', exception: 'keys-self-list', description: 'List API keys (S5)' },
   { method: 'POST', pattern: '/api/v1/keys', exception: 'keys-self-create', description: 'Issue API key (S5)' },
   { method: 'POST', pattern: '/api/v1/keys/:id/rotate', exception: 'keys-self-rotate', description: 'Rotate API key (S5)' },

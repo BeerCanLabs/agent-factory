@@ -247,6 +247,9 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/grants', privilege: 'grants.manage', role: 'admin' },
   { method: 'POST', path: '/api/v1/grants', privilege: 'grants.manage', role: 'admin', body: {} },
   { method: 'DELETE', path: '/api/v1/grants/g_nope', privilege: 'grants.manage', role: 'admin' },
+  // S6: IdP setup (D16)
+  { method: 'GET', path: '/api/v1/setup/idp', privilege: 'grants.manage', role: 'admin' },
+  { method: 'PUT', path: '/api/v1/setup/idp', privilege: 'grants.manage', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/skills/${SKILL}/retire`, privilege: 'skills.retire.force', role: 'admin', body: { force: true } },
 ];
 
@@ -386,6 +389,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       ['POST', '/api/v1/keys'],
       ['POST', '/api/v1/keys/key_nope/rotate'],
       ['DELETE', '/api/v1/keys/key_nope'],
+      ['GET', '/api/v1/setup/status'],
     ] as const) {
       assert.equal((await call(port, method, path, 'none')).status, 401, `${method} ${path} without a credential`);
     }

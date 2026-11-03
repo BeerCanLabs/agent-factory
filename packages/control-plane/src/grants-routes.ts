@@ -1223,7 +1223,9 @@ export async function handleGrantsRoutes(
       return true;
     }
     const out = getWhoami(state, who.principal);
-    json(res, out.status, out.body);
+    // S6 (R11): every signed-in client sees the break-glass alert until the key is rotated.
+    const body = state.keys && out.status === 200 && out.body && typeof out.body === 'object' ? { ...(out.body as object), breakGlassAlert: state.keys.breakGlassAlert() } : out.body;
+    json(res, out.status, body);
     return true;
   }
 
