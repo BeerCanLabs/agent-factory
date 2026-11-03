@@ -231,6 +231,8 @@ const ROUTES: RouteRow[] = [
   { method: 'PUT', path: `/api/v1/skills/${SKILL}/group`, privilege: 'skills.assign', role: 'admin', body: {} },
   { method: 'DELETE', path: `/api/v1/skills/${SKILL}/group`, privilege: 'skills.assign', role: 'admin' },
   { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1/package/files`, privilege: 'skills.package.read', role: 'admin' },
+  { method: 'GET', path: `/api/v1/skills/${SKILL}/model`, privilege: 'skills.package.read', role: 'admin' },
+  { method: 'PUT', path: `/api/v1/skills/${SKILL}/model`, privilege: 'skills.version.add', role: 'admin', body: {} },
   { method: 'GET', path: `/api/v1/skills/${SKILL}/versions/1/package/file`, privilege: 'skills.package.read', role: 'admin' },
   // TSK-278 (Slice 4): Publishing workflow and retirement (H8, H9, A8, A13)
   { method: 'POST', path: `/api/v1/skills/${SKILL}/publish`, privilege: 'skills.publish.request', role: 'admin', body: {} },

@@ -111,7 +111,15 @@ export type RunContext = {
   canManageModels?: boolean;
   /** S23 (D31): effective per-action hold rules from the agent's adopted skills (`manifestHold || overrideHold`). */
   skillHolds?: SkillActionHoldRule[];
+  /**
+   * S24 (D31): factory-side model bindings `{ skillId: model }` for the skills this agent runs. A model call made on a
+   * skill's behalf (`x-factory-skill: <skillId>`) is served the skill's bound model; the agent's own model is untouched.
+   */
+  skillModels?: Record<string, string>;
 };
+
+/** S24: header a runtime sets on a factory model API call made on behalf of one of its adopted skills. */
+export const SKILL_CONTEXT_HEADER = 'x-factory-skill';
 
 export type RunModelsInfo = {
   agentId: string;
@@ -873,16 +881,29 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   }
 
   /** What the Executive needs to decide whether this run may use a model (E4, E7): shared by provider routes and the factory model API. */
-  function modelPolicyOf(ctx: RunContext): ModelPolicy {
+  function modelPolicyOf(ctx: RunContext, skillModel?: string): ModelPolicy {
     return {
       allowedModels: ctx.policy.models,
       defaultModel: activeDefaultModel,
       training: ctx.agentState === 'TRAINING',
-      pinnedModel: ctx.run.model,
+      // S24: an explicit run pin (e.g. a skill eval comparing candidates) wins over the skill's default binding.
+      pinnedModel: ctx.run.model ?? skillModel,
       currentModel: ctx.policy.currentModel,
       primaryModel: ctx.policy.primaryModel,
       secondaryModel: ctx.policy.secondaryModel,
     };
+  }
+
+  /** S24: the bound model for the skill named by the call's skill-context header, when granted to this run. */
+  function skillModelFor(ctx: RunContext, req: http.IncomingMessage): string | undefined {
+    const raw = req.headers[SKILL_CONTEXT_HEADER];
+    const skillId = typeof raw === 'string' ? raw.trim().toLowerCase() : undefined;
+    if (!skillId || !ctx.skillModels) return undefined;
+    const bound = Object.prototype.hasOwnProperty.call(ctx.skillModels, skillId) ? ctx.skillModels[skillId] : undefined;
+    if (!bound) return undefined;
+    const granted = modelPolicyOf(ctx);
+    const allowed = granted.allowedModels ?? (granted.defaultModel ? [granted.defaultModel] : []);
+    return granted.training || allowed.includes(bound) ? bound : undefined;
   }
 
   function throttled(ctx: RunContext): boolean {
@@ -1053,7 +1074,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     // M2 (GAP-181): agents never choose. The factory serves the pin, the policy's first model or the default, whatever
     // model name the call carries; a differing name is recorded as `requestedModel`.
     const requestedName = typeof parsed.model === 'string' && parsed.model ? parsed.model : undefined;
-    const selection = selectModel(modelPolicyOf(ctx), requestedName);
+    // S24 (D31): a call made for an adopted skill gets the skill's factory-side model binding, still bounded by the
+    // agent's granted models (E7). A binding the agent's policy does not grant falls back to the agent's own model.
+    const skillModel = skillModelFor(ctx, req);
+    const selection = selectModel(modelPolicyOf(ctx, skillModel), requestedName);
     if (!selection.ok) return deny(res, ctx, route, selection.status, selection.code, 'detail' in selection ? selection.detail : undefined);
 
     const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
@@ -1126,7 +1150,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     let round = 0;
 
     while (round < MAX_ROUNDS) {
-      const candidates = failbackCandidates(modelPolicyOf(ctx), round === 0 ? requestedName : undefined);
+      const candidates = failbackCandidates(modelPolicyOf(ctx, skillModel), round === 0 ? requestedName : undefined);
       const failures: Failure[] = [];
       let succeeded: {
         candidate: string;
