@@ -2891,3 +2891,34 @@ export async function handleSkills(state: FactoryState, req: http.IncomingMessag
 
   return false;
 }
+
+/**
+ * S20 (D27): admit a registered, pending skill version through the content admission gate. The same effects as an
+ * approval through `POST /registry/skills/:id/versions/:version/approve` (SK1 checks passed, not retired, `SKILL_APPROVED`
+ * ledgered, a private skill auto-adopted by its owner agent), called only after every admission gate has passed.
+ */
+export async function admitSkillVersion(
+  state: FactoryState,
+  rec: SkillVersionRecord,
+  principal: Principal,
+): Promise<{ ok: true; record: SkillVersionRecord } | { ok: false; error: string }> {
+  if (rec.retired || isRetiring(state, rec.id)) return { ok: false, error: 'skill_retired' };
+  if (rec.tests !== 'passed') return { ok: false, error: rec.tests === 'failed' ? 'checks_failed' : 'checks_pending' };
+  if (rec.status !== 'pending') return { ok: false, error: `already_${rec.status}` };
+  const now = new Date().toISOString();
+  const next: SkillVersionRecord = { ...rec, status: 'approved', decidedBy: principal.actor, decidedAt: now };
+  delete next.revoked;
+  delete next.reason;
+  skillRegistry(state).save(next);
+  state.ledger.append({
+    timestamp: now,
+    agentId: ledgerKey(rec.id, rec.version),
+    type: 'action',
+    action: 'SKILL_APPROVED',
+    actor: principal.actor,
+    commit: rec.commit,
+  });
+  await autoAdoptPrivate(state, next, principal);
+  return { ok: true, record: next };
+}
+
