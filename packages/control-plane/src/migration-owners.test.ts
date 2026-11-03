@@ -582,6 +582,19 @@ describe('Owner migration converter (S18)', () => {
     assert.equal(res.orphans[0].reason, 'unresolvable_owner');
   });
 
+  it('an unresolvable legacy owner is not an orphan once an admin grants the content-owner slot directly', async () => {
+    const principals = await PrincipalStore.open(new MemoryDocBackend<any>());
+    const grants = await GrantStore.open(new MemoryDocBackend<any>(), { principals });
+    const configs = await VersionedConfigStore.open(new MemoryConfigBackend());
+    await configs.put({ agentId: 'broken-agent', source: { repo: 'BeerCanLabs/broken' }, skills: [], policy: null, owners: ['not-an-email-or-valid-prefix'] }, { by: 'bootstrap', reason: 'initial' });
+    await principals.create({ id: 'user:dale', displayName: 'Dale', emails: ['dale@example.com'], by: 'user:dale' });
+    await grants.grant({ subject: 'user:dale', scope: { kind: 'agent', id: 'broken-agent' }, role: 'content-owner', by: 'user:dale', granterIsAdmin: true });
+    const agents = new Map<string, AgentRecord>([['broken-agent', makeAgent('broken-agent')]]);
+    const res = await convertLegacyOwners({ agents, configs, principals, grants, ledger: new MemoryLedger() }, { dryRun: true, by: 'user:admin' });
+    assert.equal(res.orphans.length, 0);
+    assert.equal(res.ready, true);
+  });
+
   describe('F1: team-kind conversion crash & persistence and zero dryRun mutation', () => {
     it('apply mode converts legacy (kind: undefined) agent to team via defaultTeamAgents without 409 conflict and updates kind', async () => {
       const principals = await PrincipalStore.open(new MemoryDocBackend<any>());

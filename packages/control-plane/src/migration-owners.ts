@@ -783,6 +783,18 @@ export async function convertLegacyOwners(
     }
   }
 
+  // An agent whose legacy owner string cannot be resolved is not an orphan once an admin has granted its owner/lead
+  // slot directly: hold routing has someone, and the unresolvable string is simply not converted.
+  const slotHeld = (agentId: string) =>
+    (state.grants?.list({ scopeKind: 'agent', scopeId: agentId, includeExpired: false, at: now() }) ?? []).some(
+      (g) => (g.role === 'content-owner' || g.role === 'accountable-lead') && isOccupyingSlot(g, now()),
+    );
+  for (let i = orphans.length - 1; i >= 0; i--) {
+    if (orphans[i].reason === 'unresolvable_owner' && orphans[i].targetKind === 'agent' && slotHeld(orphans[i].targetId)) {
+      orphans.splice(i, 1);
+      skippedCount++;
+    }
+  }
   const ready = orphans.length === 0;
 
   // 5. Dry-Run Mode: ZERO writes to any store or ledger!
