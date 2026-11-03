@@ -243,4 +243,15 @@ describe('Route Registry (plans/factory-auth.md S14, #355)', () => {
       );
     });
   });
+
+  it('review F3: the most specific route wins and :id vs :agentId duplicates are caught', () => {
+    const staticHit = CONTROL_PLANE_ROUTES.find((x) => x.method === 'GET' && !x.pattern.includes(':') && CONTROL_PLANE_ROUTES.some((y) => y !== x && y.method === 'GET' && y.pattern.includes(':') && pathToRegex(y.pattern).test(x.pattern)));
+    if (staticHit) assert.equal(matchRoute('GET', staticHit.pattern)?.pattern, staticHit.pattern);
+    const dup: ControlPlaneRoute[] = [
+      { method: 'GET', pattern: '/api/v1/agents/:id', privilege: 'agents.read', description: 'a' } as ControlPlaneRoute,
+      { method: 'GET', pattern: '/api/v1/agents/:agentId', privilege: 'agents.read', description: 'b' } as ControlPlaneRoute,
+    ];
+    const res = validateRouteRegistry(dup, ROUTE_EXCEPTIONS);
+    assert.ok(res.errors.some((e) => e.includes('Duplicate route registration')), JSON.stringify(res.errors));
+  });
 });

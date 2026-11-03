@@ -71,6 +71,29 @@ export const ROUTE_EXCEPTIONS = {
     protection: 'webhook-hmac',
     rationale: 'Generic agent webhook endpoint verified fail-closed via HMAC signature against agent cartridge secret (D18, D22, S15)',
   },
+  'authz-check': {
+    id: 'authz-check',
+    protection: 'identity-probe',
+    rationale: 'Side-effect-free authorization preflight for any verified principal; answers only for the caller (R5, R7, S3)',
+  },
+  'grants-scoped-list': {
+    id: 'grants-scoped-list',
+    protection: 'transitional',
+    rationale: 'Grant list/create/revoke authorize per scope inside the handler (admin via grants.manage, or content-owner / accountable-lead on their own item, D10, D24, S3); S4 moves this into single Bouncer enforcement',
+    retiringStory: 'S4',
+  },
+  'grants-scoped-create': {
+    id: 'grants-scoped-create',
+    protection: 'transitional',
+    rationale: 'Grant list/create/revoke authorize per scope inside the handler (admin via grants.manage, or content-owner / accountable-lead on their own item, D10, D24, S3); S4 moves this into single Bouncer enforcement',
+    retiringStory: 'S4',
+  },
+  'grants-scoped-revoke': {
+    id: 'grants-scoped-revoke',
+    protection: 'transitional',
+    rationale: 'Grant list/create/revoke authorize per scope inside the handler (admin via grants.manage, or content-owner / accountable-lead on their own item, D10, D24, S3); S4 moves this into single Bouncer enforcement',
+    retiringStory: 'S4',
+  },
   'identity-whoami': {
     id: 'identity-whoami',
     protection: 'identity-probe',
@@ -147,6 +170,15 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
 
   // Identity probe (Authenticated principal, no elevated privilege)
   { method: 'GET', pattern: '/api/v1/whoami', exception: 'identity-whoami', description: 'Caller identity and roles probe' },
+  { method: 'GET', pattern: '/api/v1/authz/check', exception: 'authz-check', description: 'Authorization preflight (S3)' },
+  { method: 'GET', pattern: '/api/v1/principals', privilege: 'grants.manage', description: 'List principals (S3)' },
+  { method: 'POST', pattern: '/api/v1/principals', privilege: 'grants.manage', description: 'Create principal (S3)' },
+  { method: 'GET', pattern: '/api/v1/principals/:id', privilege: 'grants.manage', description: 'Get principal (S3)' },
+  { method: 'POST', pattern: '/api/v1/principals/:id/emails', privilege: 'grants.manage', description: 'Add principal email (S3)' },
+  { method: 'DELETE', pattern: '/api/v1/principals/:id/emails/:email', privilege: 'grants.manage', description: 'Remove principal email (S3)' },
+  { method: 'GET', pattern: '/api/v1/grants', exception: 'grants-scoped-list', description: 'List grants (S3)' },
+  { method: 'POST', pattern: '/api/v1/grants', exception: 'grants-scoped-create', description: 'Create grant (S3)' },
+  { method: 'DELETE', pattern: '/api/v1/grants/:id', exception: 'grants-scoped-revoke', description: 'Revoke grant (S3)' },
 
   // Metrics, spend & triage
   { method: 'GET', pattern: '/api/v1/metrics', privilege: 'metrics.read', description: 'Platform metrics' },
@@ -385,9 +417,25 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
  */
 export function matchRoute(method: string, path: string): ControlPlaneRoute | undefined {
   const cleanPath = path.split('?')[0];
-  return CONTROL_PLANE_ROUTES.find(
-    (r) => r.method === method && pathToRegex(r.pattern).test(cleanPath),
-  );
+  // Most specific wins regardless of declaration order: fewer :params first, then more literal segments
+  // (so a later static `GET /api/v1/skills/drafts` beats an earlier `GET /api/v1/skills/:id`).
+  let best: ControlPlaneRoute | undefined;
+  let bestScore: [number, number] | undefined;
+  for (const r of CONTROL_PLANE_ROUTES) {
+    if (r.method !== method || !pathToRegex(r.pattern).test(cleanPath)) continue;
+    const params = (r.pattern.match(/:[a-zA-Z0-9_]+/g) ?? []).length;
+    const literal = r.pattern.replace(/:[a-zA-Z0-9_]+/g, '').length;
+    if (!bestScore || params < bestScore[0] || (params === bestScore[0] && literal > bestScore[1])) {
+      best = r;
+      bestScore = [params, literal];
+    }
+  }
+  return best;
+}
+
+/** Canonical form for duplicate detection: `:id` and `:agentId` name the same route. */
+export function canonicalRoutePattern(pattern: string): string {
+  return pattern.replace(/:[a-zA-Z0-9_]+/g, ':param');
 }
 
 /**
@@ -472,9 +520,9 @@ export function validateRouteRegistry(
 
   // 2. Validate CONTROL_PLANE_ROUTES
   for (const route of routes) {
-    const key = `${route.method} ${route.pattern}`;
+    const key = `${route.method} ${canonicalRoutePattern(route.pattern)}`;
     if (seenPairs.has(key)) {
-      errors.push(`Duplicate route registration: '${key}'`);
+      errors.push(`Duplicate route registration: '${route.method} ${route.pattern}' (canonical '${key}')`);
     }
     seenPairs.add(key);
 

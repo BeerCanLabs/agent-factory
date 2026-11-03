@@ -709,6 +709,11 @@ describe('Bouncer: one authorization rule', () => {
       return { ...u, sf, fileScope };
     }
 
+    // ACCEPTED LIMITS (S14 review F1/F2, decided under plan D/S4): this static coverage check is best-effort.
+    // It does not extract routes matched by `path.startsWith(...)`, regexes without a trailing `$`, destructured or
+    // aliased path/method bindings (`const { pathname } = ...`, `const method = req.method`, `req.method ?? 'GET'`),
+    // or handlers whose path parameter is not named `path`/`pathname`. Enforcement does not rely on it: S4 makes the
+    // control plane refuse at runtime any request whose route is missing from CONTROL_PLANE_ROUTES/ROUTE_EXCEPTIONS.
     function analyzeControlPlane(units: readonly SourceUnit[]): DispatchedRoute[] {
       const parsedUnits = units.map(parseSourceUnit);
 

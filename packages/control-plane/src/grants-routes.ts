@@ -1243,20 +1243,18 @@ export async function handleGrantsRoutes(
     return true;
   }
 
-  if (path === '/api/v1/principals') {
-    if (req.method === 'GET') {
-      if (!(await requirePrivilege(req, res, state, 'grants.manage'))) return true;
-      const out = listPrincipals(state);
-      json(res, out.status, out.body);
-      return true;
-    }
-    if (req.method === 'POST') {
-      const principal = await requirePrivilege(req, res, state, 'grants.manage');
-      if (!principal) return true;
-      const out = await createPrincipal(state, principal, await readJson(req));
-      json(res, out.status, out.body);
-      return true;
-    }
+  if (path === '/api/v1/principals' && req.method === 'GET') {
+    if (!(await requirePrivilege(req, res, state, 'grants.manage'))) return true;
+    const out = listPrincipals(state);
+    json(res, out.status, out.body);
+    return true;
+  }
+  if (path === '/api/v1/principals' && req.method === 'POST') {
+    const principal = await requirePrivilege(req, res, state, 'grants.manage');
+    if (!principal) return true;
+    const out = await createPrincipal(state, principal, await readJson(req));
+    json(res, out.status, out.body);
+    return true;
   }
 
   const principalMatch = path.match(PRINCIPAL_ONE);
@@ -1295,33 +1293,31 @@ export async function handleGrantsRoutes(
     return true;
   }
 
-  if (path === '/api/v1/grants') {
-    if (req.method === 'GET') {
-      const who = await identify(req, state);
-      if (!who.ok) {
-        json(res, 401, { error: 'unauthorized' });
-        return true;
-      }
-      const url = new URL(req.url ?? '/', 'http://factory.local');
-      const out = listGrants(state, who.principal, {
-        subject: url.searchParams.get('subject') ?? undefined,
-        scopeKind: url.searchParams.get('scopeKind') ?? undefined,
-        scopeId: url.searchParams.get('scopeId') ?? undefined,
-        includeExpired: url.searchParams.get('includeExpired') ?? undefined,
-      });
-      json(res, out.status, out.body);
+  if (path === '/api/v1/grants' && req.method === 'GET') {
+    const who = await identify(req, state);
+    if (!who.ok) {
+      json(res, 401, { error: 'unauthorized' });
       return true;
     }
-    if (req.method === 'POST') {
-      const who = await identify(req, state);
-      if (!who.ok) {
-        json(res, 401, { error: 'unauthorized' });
-        return true;
-      }
-      const out = await grantRole(state, who.principal, await readJson(req));
-      json(res, out.status, out.body);
+    const url = new URL(req.url ?? '/', 'http://factory.local');
+    const out = listGrants(state, who.principal, {
+      subject: url.searchParams.get('subject') ?? undefined,
+      scopeKind: url.searchParams.get('scopeKind') ?? undefined,
+      scopeId: url.searchParams.get('scopeId') ?? undefined,
+      includeExpired: url.searchParams.get('includeExpired') ?? undefined,
+    });
+    json(res, out.status, out.body);
+    return true;
+  }
+  if (path === '/api/v1/grants' && req.method === 'POST') {
+    const who = await identify(req, state);
+    if (!who.ok) {
+      json(res, 401, { error: 'unauthorized' });
       return true;
     }
+    const out = await grantRole(state, who.principal, await readJson(req));
+    json(res, out.status, out.body);
+    return true;
   }
 
   const grantOneMatch = path.match(GRANT_ONE);
