@@ -2546,7 +2546,7 @@ describe('Bouncer: one authorization rule', () => {
           `Expected missing oauth-state-pkce protection violation, got: ${noOauthViolations.join('; ')}`,
         );
 
-        // 4. Reusing a transitional exception ('transitional-cli-discovery') on a second route fails both registry validation and enforcement check
+        // 4. Reusing a transitional exception ('grants-scoped-list') on a second route fails both registry validation and enforcement check
         const piggybackUnits = controlPlaneUnits().map((u) => {
           if (!u.file.endsWith('/group-routes.ts')) return u;
           const target = "if (!pathname.startsWith('/api/v1/groups')) return false;";
@@ -2558,13 +2558,13 @@ describe('Bouncer: one authorization rule', () => {
         });
         const piggybackRegistry: ControlPlaneRoute[] = [
           ...CONTROL_PLANE_ROUTES,
-          { method: 'POST', pattern: '/api/v1/groups/piggyback', exception: 'transitional-cli-discovery', description: 'Piggyback' },
+          { method: 'POST', pattern: '/api/v1/groups/piggyback', exception: 'grants-scoped-list', description: 'Piggyback' },
         ];
         const piggybackRegCheck = validateRouteRegistry(piggybackRegistry, ROUTE_EXCEPTIONS);
         assert.equal(piggybackRegCheck.valid, false);
         const piggybackViolations = findPrivilegeEnforcementViolations(analyzeControlPlane(piggybackUnits), piggybackRegistry);
         assert.ok(
-          piggybackViolations.some((v) => v.includes("transitional exception 'transitional-cli-discovery' may only cover a single route")),
+          piggybackViolations.some((v) => v.includes("transitional exception 'grants-scoped-list' may only cover a single route")),
           `Expected transitional single-route violation, got: ${piggybackViolations.join('; ')}`,
         );
       });
