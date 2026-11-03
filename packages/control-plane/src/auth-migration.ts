@@ -162,7 +162,7 @@ export async function readiness(state: FactoryState) {
   const owners = await convertLegacyOwners(state, { by: 'system:shadow', dryRun: true });
   return {
     ready: mismatches.length === 0 && owners.orphans.length === 0,
-    cutover: Boolean(state.authCutover),
+    cutover: isCutOver(state),
     mismatches: mismatches.length,
     ownerOrphans: owners.orphans.length,
     // Which items lack an owner/lead, so an admin can grant one through /api/v1/grants (no legacy owner strings shown).
@@ -172,11 +172,23 @@ export async function readiness(state: FactoryState) {
 }
 
 /** Grants-only: refused unless shadow mode shows zero mismatches; then link roles are stripped and the cutover ledgered. */
+/**
+ * Whether the cutover already ran. The flag in memory is lost on restart, so the ledgered AUTH_CUTOVER row is the
+ * durable record; once found it is cached.
+ */
+export function isCutOver(state: FactoryState): boolean {
+  if (!state.authCutover && state.ledger.query({ agent: 'control-plane' }).some((e) => e.action === 'AUTH_CUTOVER')) state.authCutover = true;
+  return Boolean(state.authCutover);
+}
+
 export async function cutover(state: FactoryState, by: string) {
+  // A rerun after cutover skips the readiness gate: it only finishes stripping legacy link roles.
+  const already = isCutOver(state);
   const r = await readiness(state);
-  if (!r.ready) return { ok: false as const, ...r };
+  if (!r.ready && !already) return { ok: false as const, ...r };
   for (const l of state.identityLinks?.list() ?? []) {
-    if (l.roles?.length || Object.keys(l.agentRoles ?? {}).length) state.identityLinks!.link(l.provider, l.id, l.actor, by, l.name ? { name: l.name } : undefined);
+    // agentRoles must be cleared explicitly: link() keeps the current ones when the actor is unchanged.
+    if (l.roles?.length || Object.keys(l.agentRoles ?? {}).length) state.identityLinks!.link(l.provider, l.id, l.actor, by, { ...(l.name ? { name: l.name } : {}), agentRoles: {} });
   }
   state.authCutover = true;
   state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'control-plane', type: 'action', action: 'AUTH_CUTOVER', actor: by });
