@@ -73,7 +73,26 @@ const change = (name: string, description: string, privilege: Privilege, paramet
   run: async (c, a) => run(c, a),
 });
 
+const SUBJECT = /^(?:user|service|group|domain):[A-Za-z0-9._@+-]{1,200}$/;
+function subject(args: Args, key = 'subject'): string {
+  const v = args[key];
+  if (typeof v !== 'string' || !SUBJECT.test(v)) throw new ToolArgumentError(`${key} must be a principal such as user:alice, service:ci, group:ops or domain:example.com`);
+  return v;
+}
+function grantScope(args: Args): { kind: 'fleet' } | { kind: 'agent' | 'skill'; id: string } {
+  const v = args.scope;
+  if (v === undefined || v === 'fleet') return { kind: 'fleet' };
+  const m = typeof v === 'string' ? /^(agent|skill):([a-z0-9][a-z0-9._-]{0,127})$/i.exec(v) : null;
+  if (!m) throw new ToolArgumentError('scope must be fleet, agent:<id> or skill:<id>');
+  return { kind: m[1].toLowerCase() as 'agent' | 'skill', id: m[2] };
+}
+
 export const TOOLS: Tool[] = [
+  // S9: people, grants and keys. Scoped owners and leads may manage grants on their own items, so the factory decides.
+  read('list_principals', 'The people and services the factory knows, with their emails.', 'grants.manage', obj({}), (c) => c.request('GET', '/api/v1/principals')),
+  read('list_grants', 'Role grants, optionally for one subject.', 'grants.manage', obj({ subject: { type: 'string' } }), (c, a) => c.request('GET', `/api/v1/grants${query({ subject: a.subject === undefined ? undefined : subject(a) })}`), true),
+  change('grant_role', 'Grant a role to a subject at fleet, agent:<id> or skill:<id> scope.', 'grants.manage', obj({ subject: { type: 'string' }, role: { type: 'string' }, scope: { type: 'string' } }, ['subject', 'role']), (c, a) => c.request('POST', '/api/v1/grants', { subject: subject(a), role: decodeURIComponent(id(a, 'role')), scope: grantScope(a) }), true),
+  change('revoke_grant', 'Revoke one grant by id.', 'grants.manage', obj({ id: { type: 'string' } }, ['id']), (c, a) => c.request('DELETE', `/api/v1/grants/${id(a, 'id')}`), true),
   read('list_agents', 'List every agent with its state, budget standing and owners.', 'agents.read', obj({}), (c) => c.request('GET', '/api/v1/agents')),
   read('get_agent', 'Details and lifecycle state of one agent.', 'agents.read', obj({ id: agentId }, ['id']), (c, a) => c.request('GET', `/api/v1/registry/agents/${id(a, 'id')}`)),
   read('get_agent_policy', "An agent's policy: granted routes, models and budget.", 'policy.read', obj({ id: agentId }, ['id']), (c, a) => c.request('GET', `/api/v1/agents/${id(a, 'id')}/policy`)),

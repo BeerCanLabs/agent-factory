@@ -23,7 +23,7 @@ describe('§6.17 CL3 the person\'s roles decide what is offered', () => {
   });
 
   it('CL3 every tool that changes state says so, so the CLI asks first (CL4)', () => {
-    const changing = ['set_factory_budgets', 'set_agent_budget', 'decide_approval', 'pause_agent', 'resume_agent', 'isolate_agent', 'wake_agent', 'reset_agent', 'cancel_run', 'retire_agent', 'reinstate_agent'];
+    const changing = ['set_factory_budgets', 'set_agent_budget', 'decide_approval', 'pause_agent', 'resume_agent', 'isolate_agent', 'wake_agent', 'reset_agent', 'cancel_run', 'retire_agent', 'reinstate_agent', 'grant_role', 'revoke_grant'];
     for (const t of TOOLS) assert.equal(t.spec.mutating, changing.includes(t.spec.name), t.spec.name);
   });
 

@@ -63,6 +63,7 @@ describe('A2 console forwards the caller, adds no credential', () => {
     const me = await fetch(`http://127.0.0.1:${port}/api/auth/me`, { headers: { 'cf-access-jwt-assertion': 'h.p.s' } });
     assert.deepEqual(await me.json(), {
       user: { email: 'owner@example.com', name: 'owner@example.com', actor: 'cloudflare:owner@example.com', roles: ['admin', 'operator', 'approver', 'viewer'], provider: 'Cloudflare Access' },
+      whoami: { actor: 'cloudflare:owner@example.com', roles: ['admin', 'operator', 'approver', 'viewer'], grants: [], privileges: {} },
     });
     const anon = await fetch(`http://127.0.0.1:${port}/api/auth/me`, { headers: { 'cf-access-authenticated-user-email': 'owner@example.com' } });
     assert.equal(anon.status, 401);

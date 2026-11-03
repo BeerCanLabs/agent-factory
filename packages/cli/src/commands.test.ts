@@ -76,3 +76,23 @@ describe('§6.17 CL11 the CLI works without the manager: the command table', () 
     assert.deepEqual(parse('factory-budget total=5 alert=0.5'), { totalMonthUsd: 5, alertAt: [0.5] });
   });
 });
+
+describe('S9 people, grants and keys commands', () => {
+  it('S9 AC1: grant parses subject, role and scope; people tools are offered by role', async () => {
+    const { findCommand } = await import('./commands.js');
+    const { toolsFor } = await import('./tools.js');
+    assert.deepEqual(findCommand('grant')!.parse(['user:alice', 'viewer', 'agent:higgins'], { json: false, yes: false, active: false }), { subject: 'user:alice', role: 'viewer', scope: 'agent:higgins' });
+    assert.throws(() => findCommand('grant')!.parse(['user:alice'], { json: false, yes: false, active: false }));
+    const names = (roles: string[]) => toolsFor(roles, 'user:x').map((t) => t.spec.name);
+    assert.ok(names(['admin']).includes('list_principals'), 'admin sees people');
+    assert.ok(!names([]).includes('list_principals'), 'a zero-grant user does not');
+  });
+
+  it('S9: --as sends X-Factory-Act-As on every request', async () => {
+    const { FactoryClient } = await import('./client.js');
+    const seen: Record<string, string>[] = [];
+    const client = new FactoryClient({ baseUrl: 'https://f.example.com', actAs: 'user:alice', credential: async () => ({ name: 'authorization', value: 'Bearer x' }), fetch: (async (_u: string, init: RequestInit) => { seen.push(init.headers as Record<string, string>); return new Response('{"actor":"user:alice","roles":[]}', { status: 200 }); }) as unknown as typeof fetch });
+    await client.request('GET', '/api/v1/whoami');
+    assert.equal(seen[0]['x-factory-act-as'], 'user:alice');
+  });
+});

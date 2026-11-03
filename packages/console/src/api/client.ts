@@ -21,6 +21,9 @@ export class ApiError extends Error {
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
   headers.set('Accept', 'application/json');
+  // S9: an admin's Act-As choice rides every call; the factory checks and ledgers it (D10, D30).
+  const actAs = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('factory.actAs') : null;
+  if (actAs && !headers.has('x-factory-act-as')) headers.set('x-factory-act-as', actAs);
   if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
@@ -57,7 +60,21 @@ export interface HelperDefinition {
   approvedModels?: string[];
 }
 
+export type PrincipalView = { id: string; displayName?: string; emails?: string[] };
+export type GrantView = { id: string; subject: string; role: string; scope: { kind: string; id?: string }; state?: string; expiresAt?: string | null };
+export type KeyView = { id: string; deviceFamily?: string; createdAt?: string; lastUsedAt?: string; revokedAt?: string | null };
+
 export const factoryApi = {
+  // S9: people, grants and keys.
+  listPrincipals: () => request<{ principals: PrincipalView[] }>('/api/v1/principals'),
+  addPrincipalEmail: (id: string, email: string) => request<unknown>(`/api/v1/principals/${encodeURIComponent(id)}/emails`, { method: 'POST', body: JSON.stringify({ email }) }),
+  listGrants: () => request<{ grants: GrantView[] }>('/api/v1/grants'),
+  createGrant: (subject: string, role: string, scope: GrantView['scope']) => request<unknown>('/api/v1/grants', { method: 'POST', body: JSON.stringify({ subject, role, scope }) }),
+  revokeGrant: (id: string) => request<unknown>(`/api/v1/grants/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  listKeys: () => request<{ keys: KeyView[] }>('/api/v1/keys'),
+  issueKey: (deviceFamily: string) => request<{ key: KeyView; secret: string }>('/api/v1/keys', { method: 'POST', body: JSON.stringify({ deviceFamily }) }),
+  rotateKey: (id: string) => request<{ key: KeyView; secret: string }>(`/api/v1/keys/${encodeURIComponent(id)}/rotate`, { method: 'POST' }),
+  revokeKey: (id: string) => request<unknown>(`/api/v1/keys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   // Agent Registry & Lifecycle
   async listAgents(): Promise<AgentRecord[]> {
     const res = await request<AgentRecord[] | { agents: AgentRecord[] }>('/registry/agents');

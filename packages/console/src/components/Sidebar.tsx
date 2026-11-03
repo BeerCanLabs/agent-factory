@@ -15,6 +15,7 @@ import {
   Fingerprint,
 } from 'lucide-react';
 import { useAuth } from '../auth/CloudflareAuth.js';
+import { canManagePeople } from '../auth/access-gate.js';
 
 export type ScreenId =
   | 'fleet'
@@ -28,7 +29,9 @@ export type ScreenId =
   | 'finops'
   | 'ledger'
   | 'triage'
-  | 'studio';
+  | 'studio'
+  | 'people'
+  | 'keys';
 
 interface SidebarProps {
   currentScreen: ScreenId;
@@ -56,8 +59,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeAgentsCount,
   outstandingCredentialsCount = 0,
 }) => {
-  const { activeRole, hasRole } = useAuth();
+  const { activeRole, hasRole, whoami } = useAuth();
   const isAdmin = hasRole('admin');
+  const managesPeople = canManagePeople(whoami);
 
   const navSections: NavSection[] = [
     {
@@ -112,6 +116,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           badge: outstandingCredentialsCount > 0 ? outstandingCredentialsCount : undefined,
           badgeColor: 'bg-amber-950 text-amber-400 border border-amber-800/80',
         },
+        { id: 'keys' as const, label: 'Your API Keys', icon: <KeyRound className="w-4 h-4" /> },
+        ...(managesPeople ? [{ id: 'people' as const, label: 'People & Access', icon: <Users className="w-4 h-4" /> }] : []),
         ...(isAdmin
           ? [
               {

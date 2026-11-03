@@ -14,7 +14,7 @@ export type CommandSpec = {
   /** Shown in help, e.g. `/budget <agent> <amount> daily|monthly`. */
   usage: string;
   summary: string;
-  group: 'Look' | 'Money' | 'Agents' | 'Approvals';
+  group: 'Look' | 'Money' | 'Agents' | 'Approvals' | 'People';
   parse(args: string[], flags: Flags): Record<string, unknown>;
 };
 
@@ -42,6 +42,10 @@ const PERIODS = new Map<string, 'daily' | 'monthly'>([['daily', 'daily'], ['day'
 const FACTORY_KEYS = new Map<string, string>([['total', 'totalMonthUsd'], ['ai', 'aiMonthUsd'], ['infra', 'infraMonthUsd']]);
 
 export const COMMANDS: CommandSpec[] = [
+  { name: 'principals', tool: 'list_principals', usage: '/principals', summary: 'people and services the factory knows', group: 'People', parse: (a) => none(a) },
+  { name: 'grants', tool: 'list_grants', usage: '/grants [subject]', summary: 'role grants, optionally for one subject', group: 'People', parse: (a) => (a.length > 1 ? (() => { throw new UsageError('give at most one subject'); })() : a[0] ? { subject: a[0] } : {}) },
+  { name: 'grant', tool: 'grant_role', usage: '/grant <subject> <role> [fleet|agent:<id>|skill:<id>]', summary: 'grant a role', group: 'People', parse: (a) => { if (a.length < 2 || a.length > 3) throw new UsageError('give a subject, a role and optionally a scope'); return { subject: a[0], role: a[1], ...(a[2] ? { scope: a[2] } : {}) }; } },
+  { name: 'revoke-grant', tool: 'revoke_grant', usage: '/revoke-grant <grant id>', summary: 'revoke a grant', group: 'People', parse: idOf('a grant id') },
   { name: 'agents', tool: 'list_agents', usage: '/agents', summary: 'every agent with its state', group: 'Look', parse: (a) => none(a) },
   { name: 'agent', tool: 'get_agent', usage: '/agent <id>', summary: 'one agent in detail', group: 'Look', parse: idOf('an agent id') },
   { name: 'policy', tool: 'get_agent_policy', usage: '/policy <agent>', summary: "an agent's routes, models and budget", group: 'Look', parse: idOf('an agent id') },
@@ -173,7 +177,7 @@ export function parseFlags(tokens: string[]): { args: string[]; flags: Flags } {
 
 /** The command line as help: grouped, one line each. */
 export function commandHelp(): string {
-  const groups = ['Look', 'Money', 'Agents', 'Approvals'] as const;
+  const groups = ['Look', 'Money', 'Agents', 'Approvals', 'People'] as const;
   return groups
     .map((g) => `${g}:\n${COMMANDS.filter((c) => c.group === g).map((c) => `  ${c.usage.padEnd(46)} ${c.summary}`).join('\n')}`)
     .join('\n');

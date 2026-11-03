@@ -29,6 +29,9 @@ const USAGE = `factory ${version}
   factory skill pack <dir>        package a skill directory into a conforming .tar.gz
   factory skill register <dir|package.tar.gz>  pack and register a skill package with the factory
   factory --manager <id>          use a manager agent with another id for this run
+  factory <command> --as user:<id>  (admins) run one command on behalf of a person; ledgered
+  factory grants|grant|revoke-grant|principals   people and role grants
+  factory keys [revoke <id>]      your API keys (never their secrets; issue or rotate in the console)
   factory --version
 
 Any command from the conversation also runs on its own, for scripts: factory spend --json, factory runs donna --active,
@@ -81,13 +84,14 @@ const writeAll = (stream: { write: (text: string, cb?: () => void) => boolean | 
   new Promise((resolve) => void stream.write(text, () => resolve()));
 
 /** `factory <command> ...` outside the conversation (§6.17 CL11): output on stdout, anything else on stderr, a failure exits 1. */
-async function runOneCommand(argv: string[], store: CredentialStore, streams: { stdout: { write: (text: string, cb?: () => void) => boolean | void }; stderr: { write: (text: string, cb?: () => void) => boolean | void } }): Promise<number> {
+async function runOneCommand(argv: string[], store: CredentialStore, actAs: string | undefined, streams: { stdout: { write: (text: string, cb?: () => void) => boolean | void }; stderr: { write: (text: string, cb?: () => void) => boolean | void } }): Promise<number> {
   const instance = await instanceInUse();
   const kind = await knownMethod(instance, (await loadConfig()).auth, store);
   if (!kind) throw new Error(`not signed in to ${instance}. Run: factory login ${instance}`);
   const session = makeSession(kind, instance, { store });
-  const client = new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh) });
+  const client = new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh), ...(actAs ? { actAs } : {}) });
   const me = await client.whoami();
+  if (actAs) streams.stderr.write(`Acting as ${me.actor} (ledgered).\n`);
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY); // the question is on stderr, so it must be seen
   const io = {
     note: (t: string) => void streams.stderr.write(`${t}\n`),
@@ -116,6 +120,15 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     stderr: opts.streams?.stderr ?? process.stderr,
   };
   const store = opts.store ?? defaultStore();
+  // S9: `--as <principal>` anywhere before `--`: an admin acting for someone (only for one-shot commands).
+  const asAt = argv.indexOf('--as');
+  const stop = argv.indexOf('--');
+  let actAs: string | undefined;
+  if (asAt >= 0 && (stop < 0 || asAt < stop)) {
+    actAs = argv[asAt + 1];
+    if (!actAs || !/^user:[A-Za-z0-9._@+-]{1,200}$/.test(actAs)) throw new Error('usage: --as user:<id>');
+    argv = [...argv.slice(0, asAt), ...argv.slice(asAt + 2)];
+  }
   const [cmd, arg] = argv;
   if (cmd === '--help' || cmd === '-h' || cmd === 'help') { await writeAll(streams.stdout, USAGE); return 0; }
   if (cmd === '--version' || cmd === '-v') { await writeAll(streams.stdout, `${version}\n`); return 0; }
@@ -145,6 +158,29 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     if (saved.instance && saved.instance !== instance) await forgetSignIn(saved.instance, store);
     await saveConfig({ ...saved, instance, auth: 'factory' });
     await writeAll(streams.stdout, `Signed in to ${instance}.\n`);
+    return 0;
+  }
+
+  if (cmd === 'keys') {
+    // S9: your own keys, outside the tool catalog (CL6: no tool reads or sends a credential). Secrets are never shown.
+    const instance = await instanceInUse();
+    const kind = await knownMethod(instance, (await loadConfig()).auth, store);
+    if (!kind) throw new Error(`not signed in to ${instance}. Run: factory login --url ${instance}`);
+    const session = makeSession(kind, instance, { store });
+    const client = new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh), ...(actAs ? { actAs } : {}) });
+    if (arg === 'revoke') {
+      const id = argv[2];
+      if (!id || !/^[A-Za-z0-9._:-]{1,128}$/.test(id)) throw new Error('usage: factory keys revoke <id>');
+      const r = await client.request('DELETE', `/api/v1/keys/${encodeURIComponent(id)}`);
+      if (r.status >= 300) throw new Error(`the factory refused (HTTP ${r.status})`);
+      await writeAll(streams.stdout, `Revoked ${id}.\n`);
+      return 0;
+    }
+    if (arg) throw new Error('usage: factory keys [revoke <id>]');
+    const r = await client.request('GET', '/api/v1/keys');
+    if (r.status !== 200) throw new Error(`the factory refused (HTTP ${r.status})`);
+    const keys = ((r.body as { keys?: Array<Record<string, unknown>> }).keys ?? []).map((k) => `${k.id}  ${k.deviceFamily ?? '-'}  ${k.revokedAt ? 'revoked' : 'active'}  ${k.lastUsedAt ?? ''}`.trimEnd());
+    await writeAll(streams.stdout, `${keys.join('\n') || 'No keys.'}\n`);
     return 0;
   }
 
@@ -242,7 +278,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     throw new Error('usage: factory skill pack <dir> | factory skill register <dir|package.tar.gz>');
   }
 
-  if (cmd && isCommand(cmd)) return await runOneCommand(argv, store, streams);
+  if (cmd && isCommand(cmd)) return await runOneCommand(argv, store, actAs, streams);
 
   const m = argv.indexOf('--manager');
   const stray = argv.filter((_, i) => m < 0 || (i !== m && i !== m + 1));
