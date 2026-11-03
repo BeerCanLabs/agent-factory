@@ -90,6 +90,7 @@ import { handleSchedules, requesterOfRun, requestersEqual } from './schedules.js
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleGroupRoutes } from './group-routes.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
+import { handleSkillModels, skillModelsForAgent } from './skill-models.js';
 import { handleMcp } from './mcp.js';
 export { handleMcp } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
@@ -2394,6 +2395,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     return;
   }
 
+  if (path.startsWith('/api/v1/skills/') && path.endsWith('/model') && (await handleSkillModels(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleGitHubAppSetup(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleDiscordAppSetup(state, req, res, path))) return;
@@ -3801,6 +3803,8 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
     const pol = state.policies.get(run.agentId);
     const skillHolds = isBuiltin ? [] : effectiveAgentSkillActionHolds(state, run.agentId);
+    // S24 (D31): factory-side model bindings of the skills this agent runs; egress applies one per call made for a skill.
+    const skillModels = isBuiltin ? {} : skillModelsForAgent(state, run.agentId);
 
     if (run.trigger === 'smoke') {
       const inputObj = (run.input && typeof run.input === 'object') ? (run.input as Record<string, unknown>) : {};
@@ -3838,6 +3842,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         access: { restricted: false },
         canManageModels: false,
         ...(skillHolds.length ? { skillHolds } : {}),
+        ...(Object.keys(skillModels).length ? { skillModels } : {}),
       });
       return;
     }
@@ -3866,6 +3871,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       access: isBuiltin ? { restricted: false } : accessForRun(state, run, agent),
       canManageModels: isBuiltin ? false : canRunManageModels(state, run).allowed,
       ...(skillHolds.length ? { skillHolds } : {}),
+      ...(Object.keys(skillModels).length ? { skillModels } : {}),
     });
     return;
   }

@@ -1,2 +1,2 @@
-export { createGatekeeperEgress } from './egress/gatekeeper-egress.js';
+export { createGatekeeperEgress, SKILL_CONTEXT_HEADER } from './egress/gatekeeper-egress.js';
 export type { ControlClient, ConnectionTokenResult, Policy, Route, RunContext, ToolRule } from './egress/gatekeeper-egress.js';

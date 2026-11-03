@@ -371,6 +371,8 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'PUT', pattern: '/api/v1/skills/:id/training-baseline', privilege: 'skills.training.run', description: 'Set skill training baseline' },
   { method: 'POST', pattern: '/api/v1/skills/:id/training-runs', privilege: 'skills.training.run', description: 'Execute skill training run' },
   { method: 'POST', pattern: '/api/v1/skills/:id/training-recommendation', privilege: 'skills.training.run', description: 'Generate skill training recommendation' },
+  { method: 'GET', pattern: '/api/v1/skills/:id/model', privilege: 'skills.package.read', description: 'Read skill model binding (S24)' },
+  { method: 'PUT', pattern: '/api/v1/skills/:id/model', privilege: 'skills.version.add', description: 'Bind or swap skill model (S24)' },
   { method: 'POST', pattern: '/api/v1/skills/:id/transfer', privilege: 'skills.transfer', description: 'Initiate skill ownership transfer' },
   { method: 'POST', pattern: '/api/v1/skills/:id/transfer/accept', privilege: 'skills.register', description: 'Accept skill ownership transfer' },
   { method: 'POST', pattern: '/api/v1/skills/:id/transfer/cancel', privilege: 'skills.transfer', description: 'Cancel skill ownership transfer' },
