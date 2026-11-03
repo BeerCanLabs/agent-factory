@@ -38,15 +38,19 @@ function initialLocation(): { screen: ScreenId; agentId?: string } {
 
 
 /** S9: a signed-in person with no grant sees only this, and the console asks the factory for nothing else. */
-const NoAccess: React.FC<{ actor?: string }> = ({ actor }) => (
+const NoAccess: React.FC<{ actor?: string }> = ({ actor }) => {
+  const { actAs, setActAs } = useAuth();
+  return (
   <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-300">
     <div className="max-w-md text-center p-8">
       <h1 className="text-lg font-semibold">No access yet</h1>
       <p className="text-sm mt-2">{actor ? `You are signed in as ${actor}, but` : 'You are not signed in, or'} this factory has not granted you anything. Ask an admin for a grant.</p>
+      {actAs && <p className="text-sm mt-4">You were acting as {actAs}. <button className="underline" onClick={() => setActAs(null)}>Stop acting as</button></p>}
       <p className="text-sm mt-4"><a className="underline" href="/login">Sign in as someone else</a></p>
     </div>
   </div>
-);
+  );
+};
 
 /** S9: what the factory says applies right now: act-as and break-glass. */
 const Banners: React.FC = () => {
