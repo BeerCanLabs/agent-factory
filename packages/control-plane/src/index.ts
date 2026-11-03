@@ -14,7 +14,7 @@ import {
   mergeAgents,
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
-import { createFactoryServer, FactoryState, relinkVendorModels } from './app.js';
+import { createFactoryServer, createProbeServer, FactoryState, relinkVendorModels } from './app.js';
 import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerDeployProvider, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
 import { fireScheduledAction, scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
@@ -462,6 +462,11 @@ startQueuePollers(state.agents.values(), (id, o) => createRun(state, id, o));
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[control-plane] listening on :${PORT} with ${state.agents.size} cartridges`);
 });
+// S16 (D22): load balancers and container health checks probe this private port; the main port's health needs a key.
+const PROBE_PORT = parseInt(process.env.FACTORY_INTERNAL_HEALTH_PORT ?? '', 10);
+if (Number.isInteger(PROBE_PORT) && PROBE_PORT > 0 && PROBE_PORT !== PORT) {
+  createProbeServer().listen(PROBE_PORT, '0.0.0.0', () => console.log(`[control-plane] health probe listener on :${PROBE_PORT}`));
+}
 
 if (process.env.FACTORY_CRON !== '0') {
   createTimekeeper({
