@@ -24,7 +24,12 @@ export type ApiKeyRecord = {
   rotatedAt?: string;
   revokedAt?: string;
   revokedBy?: string;
+  /** S6: last use, recorded only for the break-glass key (drives the alert until it is rotated). */
+  lastUsedAt?: string;
 };
+
+/** S6: the sealed break-glass machine key's owner. */
+export const BREAK_GLASS_OWNER = 'service:break-glass';
 
 export type ApiKeysDoc = { keys: ApiKeyRecord[] };
 
@@ -209,6 +214,27 @@ export class ApiKeyStore {
       await this.commit(next, input.by);
       return structuredClone(next);
     });
+  }
+
+  /** S6: record a use of a key (only called for `service:break-glass`, so writes stay rare). */
+  markUsed(id: string): Promise<void> {
+    return this.serial(async () => {
+      const cur = this.byId.get(id);
+      if (!cur || !this.healthy) return;
+      await this.commit({ ...structuredClone(cur), lastUsedAt: this.now().toISOString() }, 'service:break-glass');
+    });
+  }
+
+  /** S6 (R11): true while an active break-glass key has been used since it was last issued or rotated. */
+  breakGlassAlert(): boolean {
+    const at = this.now();
+    return [...this.byId.values()].some(
+      (k) =>
+        k.owner === BREAK_GLASS_OWNER &&
+        this.isActive(k, at) &&
+        k.lastUsedAt !== undefined &&
+        Date.parse(k.lastUsedAt) >= Date.parse(k.rotatedAt ?? k.createdAt),
+    );
   }
 
   private assertHealthy(): void {

@@ -19,6 +19,8 @@ import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createR
 import { fireScheduledAction, scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
+import { IdpConfigStore, type IdpConfigDoc } from './idp-config.js';
+import { bootstrapAdmin, drainRecoveryOutbox, type RecoveryOutboxDoc } from './recover.js';
 import { ApiKeyStore, ApprovalStore, docBackendFromUri, type ApiKeysDoc, GrantStore, PrincipalStore, type GrantsDoc, type PrincipalsDoc } from '@beercanlabs/factory-bouncer';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
@@ -213,6 +215,11 @@ const keys = await ApiKeyStore.open(
   docBackendFromUri<ApiKeysDoc>(process.env.FACTORY_KEYS_STORE_URI, join(DATA_DIR, 'auth', 'keys')),
 );
 
+const idpConfig = await IdpConfigStore.open(
+  docBackendFromUri<IdpConfigDoc>(process.env.FACTORY_IDP_CONFIG_STORE_URI, join(DATA_DIR, 'auth', 'idp-config')),
+);
+const recoveryOutbox = docBackendFromUri<RecoveryOutboxDoc>(process.env.FACTORY_RECOVERY_OUTBOX_URI, join(DATA_DIR, 'auth', 'recovery-outbox'));
+
 const state: FactoryState = {
   agents: new Map(allAgents.map((a) => [a.id, a])),
   groups,
@@ -241,6 +248,7 @@ const state: FactoryState = {
   crashLoopThreshold: parseInt(process.env.FACTORY_CRASH_LOOP_THRESHOLD || '3', 10),
   auth: authFromEnv(),
   keys,
+  idpConfig,
   // §6.12 A2: FACTORY_ACCESS_TEAM_DOMAIN + FACTORY_ACCESS_AUD; unset disables Access identity (bearer tokens only).
   access: accessAuthFromEnv(),
   cliDiscovery: cliDiscoveryFromEnv(),
@@ -367,6 +375,28 @@ recoverInterruptedDeploys(state);
 await reconcileRuns(state);
 
 setInterval(() => void checkHealth(state), 15_000).unref();
+
+// S6: FACTORY_BOOTSTRAP_ADMIN only while zero human admins exist; queued out-of-band recovery rows join the ledger.
+try {
+  const boot = await bootstrapAdmin({ principals, grants, ledger: state.ledger }, process.env.FACTORY_BOOTSTRAP_ADMIN);
+  if (boot !== 'unset') console.log(`[control-plane] FACTORY_BOOTSTRAP_ADMIN ${boot}`);
+} catch (err) {
+  console.error(`[control-plane] bootstrap admin failed: ${err instanceof Error ? err.message : String(err)}`);
+}
+const drainRecovery = () =>
+  drainRecoveryOutbox({
+    outbox: recoveryOutbox,
+    ledger: state.ledger,
+    reload: async () => {
+      await principals.reload();
+      await grants.reload();
+      await keys.reload();
+    },
+  })
+    .then((n) => (n ? console.log(`[control-plane] applied ${n} lockout recovery row(s)`) : undefined))
+    .catch((err) => console.error(`[control-plane] recovery outbox: ${err instanceof Error ? err.message : String(err)}`));
+await drainRecovery();
+setInterval(() => void drainRecovery(), 30_000).unref();
 if (state.runtime.status) {
   setInterval(() => void reconcileRuns(state), 15_000).unref();
 }

@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { apiKeyFromAuthorization } from '@beercanlabs/factory-auth';
-import type { ApiKeyStore, ApiKeyRecord } from '@beercanlabs/factory-bouncer';
+import { BREAK_GLASS_OWNER, type ApiKeyStore, type ApiKeyRecord } from '@beercanlabs/factory-bouncer';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { timingSafeEqual, randomUUID, createHash, createHmac } from 'node:crypto';
 import { checkAgentUpdate, extractGitHubRepo, isNewerVersion, parseSemVer } from './updates.js';
@@ -92,6 +92,7 @@ import { handleSchedules, requesterOfRun, requestersEqual } from './schedules.js
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleGroupRoutes } from './group-routes.js';
 import { handleKeysRoutes } from './keys-routes.js';
+import { handleSetupRoutes, type IdpConfigStore } from './idp-config.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
 import { handleMcp } from './mcp.js';
 export { handleMcp } from './mcp.js';
@@ -142,6 +143,8 @@ export type FactoryState = {
   auth: AuthProvider;
   /** S5: factory API keys (`fk_`), verified before routing on /api/v1 and /mcp. */
   keys?: ApiKeyStore;
+  /** S6: trusted identity providers for this deployment (a setup value, D16). */
+  idpConfig?: IdpConfigStore;
   /**
    * §6.12 A2: the identity-aware proxy's signed assertion, verified against its issuer, audience and keys. Absent:
    * Access identity is disabled and only factory credentials (bearer tokens, OIDC, run tokens) authenticate.
@@ -2383,6 +2386,18 @@ export function verifyApiKeyBeforeRouting(state: FactoryState, req: http.Incomin
     return false;
   }
   requestApiKey.set(req, rec);
+  if (rec.owner === BREAK_GLASS_OWNER) {
+    // S6 (R11): every break-glass call is ledgered and raises the alert until the key is rotated.
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId: 'control-plane',
+      type: 'action',
+      action: 'BREAK_GLASS_USED',
+      actor: BREAK_GLASS_OWNER,
+      subject: `${req.method ?? 'GET'}:${path}`.slice(0, 200).replace(/[^A-Za-z0-9:._@+/-]/g, '_').replace(/^/, 'route:'),
+    });
+    void state.keys!.markUsed(rec.id).catch(() => undefined);
+  }
   return true;
 }
 
@@ -2396,6 +2411,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     return;
   }
 
+  if (path.startsWith('/api/v1/setup/') && (await handleSetupRoutes(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keys') && (await handleKeysRoutes(state, req, res, path))) return;
 
   if (
