@@ -44,7 +44,7 @@ describe('S8: legacy auth import, shadow mode and cutover (#373)', { concurrency
     await principals.create({ id: 'user:admin', displayName: 'Admin', emails: ['admin@example.com'], by: 'user:admin' });
     await grants.grant({ subject: 'user:admin', scope: { kind: 'fleet' }, role: 'admin', by: 'user:admin', granterIsAdmin: true });
     const identityLinks = new IdentityLinkStore(join(dir, 'links'));
-    identityLinks.link('discord', '1001', 'cloudflare:viewer@example.com', 'user:admin', { name: 'Vee', roles: ['viewer'] });
+    identityLinks.link('discord', '1001', 'cloudflare:viewer@example.com', 'user:admin', { name: 'Vee', roles: ['viewer'], agentRoles: { higgins: ['member'] } });
     state = {
       agents: new Map(), registryDir: join(dir, 'registry'), ledger, auth: bearer, principals, grants, identityLinks,
       keys: await ApiKeyStore.open(), version: 'test', providers: [envProvider({})], runtime: noopRuntime(), runs: new MemoryRunStore(),
@@ -64,7 +64,7 @@ describe('S8: legacy auth import, shadow mode and cutover (#373)', { concurrency
 
   it('S8 AC1: before import shadow mode reports mismatches and cutover is refused', async () => {
     const r = await call('GET', '/api/v1/auth-migration/readiness');
-    assert.equal(r.status, 200);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal(r.body.ready, false);
     assert.ok(r.body.mismatches > 0);
     assert.equal((await call('POST', '/api/v1/auth-migration/cutover')).status, 409);

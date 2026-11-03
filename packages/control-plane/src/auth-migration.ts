@@ -104,6 +104,15 @@ export async function shadowCompare(state: FactoryState, source: LegacySource): 
       }
     }
   }
+  // Per-agent link roles: each must be held as an active agent-scope grant by the same person.
+  for (const l of source.links) {
+    const found = await subjectFor(state, l.actor, 'system:shadow', false);
+    const subject = found ?? l.actor;
+    for (const [agentId, roles] of Object.entries(l.agentRoles ?? {})) {
+      const held = new Set(!found ? [] : stores(state).grants.list({ subject, scopeKind: 'agent', scopeId: agentId }).filter((g) => (g.state ?? 'active') === 'active').map((g) => g.role));
+      for (const role of roles) if (!held.has(role)) out.push({ subject, privilege: `agent-role.${role}`, agentId, legacy: true, grants: false });
+    }
+  }
   for (const m of out.slice(0, 50)) {
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'control-plane', type: 'action', action: 'AUTH_SHADOW_MISMATCH', actor: 'system:shadow', subject: m.subject, privilege: m.privilege, ...(m.agentId ? { scope: { kind: 'agent', id: m.agentId } } : {}) });
   }
