@@ -38,3 +38,8 @@ export function legacyTokenRoles(name: string, exact = false): Role[] | undefine
   const match = legacyTokenEntry(name, exact);
   return match && Array.isArray(match.roles) ? (match.roles as Role[]) : undefined;
 }
+
+/** S8: the names of every legacy `FACTORY_TOKENS` entry, for the importer. */
+export function legacyTokenNames(): string[] {
+  return legacyTokenEntries().map((t) => t.name);
+}

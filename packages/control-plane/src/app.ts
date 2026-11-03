@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { handleAuthMigration } from './auth-migration.js';
 import { apiKeyFromAuthorization } from '@beercanlabs/factory-auth';
 import { BREAK_GLASS_OWNER, type ApiKeyStore, type ApiKeyRecord } from '@beercanlabs/factory-bouncer';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -214,6 +215,8 @@ export type FactoryState = {
   schedules?: ScheduleStore;
   /** GAP-088: which person a Discord user is, set by an admin. Absent: nobody is linked. */
   identityLinks?: IdentityLinkStore;
+  /** S8: set once the shadow comparison showed zero mismatches and link roles were stripped (grants-only). */
+  authCutover?: boolean;
   /** User groups and group membership store (H6, A10, A17, GAP-203). */
   groups?: GroupStore;
   /** Canonical multi-email principal directory (`plans/factory-auth.md` S1, S2b). */
@@ -2478,6 +2481,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (await handleRunProgress(state, req, res, path)) return;
   if (path.startsWith('/api/v1/schedules') && (await handleSchedules(state, req, res, path))) return;
   if (path.startsWith('/api/v1/identity-links') && (await handleIdentityLinks(state, req, res, path))) return;
+  if (path.startsWith('/api/v1/auth-migration/') && (await handleAuthMigration(state, req, res, path))) return;
   if (path.startsWith('/api/v1/groups') && (await handleGroupRoutes(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/systems') || path === '/api/v1/gatekeeper-egress/routes') && (await handleSystems(state, req, res, path))) return;
   if (path.startsWith('/api/v1/spend/') && (await handleSpend(state, req, res, path))) return;

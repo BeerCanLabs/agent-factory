@@ -244,6 +244,9 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: `/api/v1/skills/${SKILL}/publish/decide`, privilege: 'skills.decide', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/skills/${SKILL}/unpublish`, privilege: 'skills.unpublish', role: 'admin', body: {} },
   // TSK-300 (S3): Principals & Grants management (R4, D7, D10-D15, D32)
+  { method: 'POST', path: '/api/v1/auth-migration/import', privilege: 'grants.manage', role: 'admin', body: {} },
+  { method: 'GET', path: '/api/v1/auth-migration/readiness', privilege: 'grants.manage', role: 'admin' },
+  { method: 'POST', path: '/api/v1/auth-migration/cutover', privilege: 'grants.manage', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/principals', privilege: 'grants.manage', role: 'admin' },
   { method: 'POST', path: '/api/v1/principals', privilege: 'grants.manage', role: 'admin', body: {} },
   { method: 'GET', path: '/api/v1/principals/user:nope', privilege: 'grants.manage', role: 'admin' },
