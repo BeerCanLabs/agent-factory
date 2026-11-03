@@ -264,7 +264,7 @@ describe('budget-owner grant (S19)', () => {
   const bea = principal([]);
   it('allocates budget and reads agents, spend and policy', () => {
     const held = PRIVILEGES.filter((p) => authorize({ principal: bea, privilege: p, resource: { grants: [grant('budget-owner')] } }).allowed);
-    assert.deepEqual(held.sort(), ['agents.read', 'budget.allocate', 'policy.read', 'spend.read']);
+    assert.deepEqual(held.sort(), ['agents.read', 'budget.allocate', 'content.submit', 'policy.read', 'spend.read']);
   });
   it('a read-only budget-owner grant allocates nothing', () => {
     assert.equal(authorize({ principal: bea, privilege: 'budget.allocate', resource: { grants: [grant('budget-owner', true)] } }).allowed, false);
