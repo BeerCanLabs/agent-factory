@@ -772,7 +772,9 @@ describe('control plane', { concurrency: false }, () => {
 
       assert.equal((await request(port, `/api/v1/approvals/${approval.approvalId}`, { method: 'POST', token: TOKENS.operator, body: { decision: 'approve' } })).status, 403);
       assert.equal((await request(port, `/api/v1/gatekeeper-egress/approvals/${approval.approvalId}/consume`, { method: 'POST', token: TOKENS.gatekeeperEgress })).status, 409);
-      const decided = await request(port, `/api/v1/approvals/${approval.approvalId}`, { method: 'POST', token: TOKENS.approver, body: { decision: 'approve' } });
+      // S4, D29: run-time holds are cleared by admin or the content side, no longer by the approver role.
+      assert.equal((await request(port, `/api/v1/approvals/${approval.approvalId}`, { method: 'POST', token: TOKENS.approver, body: { decision: 'approve' } })).status, 403);
+      const decided = await request(port, `/api/v1/approvals/${approval.approvalId}`, { method: 'POST', token: TOKENS.admin, body: { decision: 'approve' } });
       assert.equal(decided.status, 200);
       assert.equal(state.runs.get(run.runId)?.state, 'WORKING');
       assert.equal((await request(port, `/api/v1/gatekeeper-egress/approvals/${approval.approvalId}/consume`, { method: 'POST', token: TOKENS.gatekeeperEgress })).status, 200);
@@ -781,7 +783,7 @@ describe('control plane', { concurrency: false }, () => {
       const trail = actions('echo-agent').filter((e) => e.action?.startsWith('APPROVAL_'));
       assert.deepEqual(trail.map((e) => [e.action, e.actor]), [
         ['APPROVAL_REQUESTED', 'run:echo-agent'],
-        ['APPROVAL_GRANTED', 'token:dale'],
+        ['APPROVAL_GRANTED', 'token:admin'],
       ]);
     });
   });

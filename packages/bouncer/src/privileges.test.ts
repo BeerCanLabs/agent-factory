@@ -36,7 +36,8 @@ const CENSUS: Record<string, Role> = {
   'schedules.write': 'operator',
   'runs.attest-requester': 'gatekeeper-ingress',
   'approvals.channel': 'gatekeeper-ingress',
-  'approvals.decide': 'approver',
+  // S4, D27, D29: run-time hold clearance left the approver role; it is admin (and content-side derived roles) only.
+  'approvals.decide': 'admin',
   'ledger.ingest': 'ingest',
   'ledger.attest-run-actor': 'gatekeeper-egress',
   'egress.run.read': 'gatekeeper-egress',
@@ -104,6 +105,7 @@ const CENSUS: Record<string, Role> = {
   'egress.models.failover': 'gatekeeper-egress',
   'skills.defaults.set': 'admin',
   'grants.manage': 'admin',
+  'content.admit': 'approver',
 };
 // Held by one service role alone; an admin does not hold them. `runs.attest-requester` moved from `operator` to
 // `gatekeeper-ingress` (TSK-111): the old rule no longer matches it, so the proof below reads it from here.
@@ -136,7 +138,7 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 97);
+    assert.equal(PRIVILEGES.length, 98);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 
@@ -217,5 +219,38 @@ describe('authorize', () => {
     assert.ok(authorize({ principal: otherPrincipal, privilege: 'skills.version.add', resource: { skillOwner: 'alice', groupRoles: ['skill-owner'] } }).allowed);
     assert.ok(authorize({ principal: otherPrincipal, privilege: 'skills.package.read', resource: { skillOwner: 'alice', groupRoles: ['skill-owner'] } }).allowed);
     assert.equal(authorize({ principal: otherPrincipal, privilege: 'skills.transfer', resource: { skillOwner: 'alice', groupRoles: ['skill-owner'] } }).allowed, false);
+  });
+});
+
+// S4 AC1 (D27, D29): approver is the content admission gate only.
+describe('approver scope (S4)', () => {
+  const approverOnly = principal(['approver']);
+  const READS = new Set<Privilege>([
+    'agents.read', 'agents.models.read', 'policy.read', 'config.read', 'runs.read', 'ledger.read', 'models.read', 'metrics.read',
+    'triage.read', 'spend.read', 'approvals.read', 'skills.read', 'systems.read', 'systems.propose', 'connections.read',
+    'credentials.provider.read', 'events.subscribe', 'schedules.read', 'mcp.use',
+  ]);
+
+  it('admits content', () => {
+    assert.deepEqual(authorize({ principal: approverOnly, privilege: 'content.admit' }), { allowed: true });
+  });
+
+  it('cannot clear run-time holds', () => {
+    assert.deepEqual(authorize({ principal: approverOnly, privilege: 'approvals.decide' }), { allowed: false, required: 'admin' });
+    assert.equal(
+      authorize({ principal: approverOnly, privilege: 'approvals.decide', resource: { agentId: 'a', owners: [], requester: {} } }).allowed,
+      false,
+    );
+  });
+
+  it('holds no mutation beyond content admission', () => {
+    const held = PRIVILEGES.filter((p) => authorize({ principal: approverOnly, privilege: p }).allowed && !READS.has(p));
+    assert.deepEqual(held, ['content.admit']);
+  });
+
+  it('operator and viewer cannot admit content; admin can', () => {
+    assert.equal(authorize({ principal: principal(['operator']), privilege: 'content.admit' }).allowed, false);
+    assert.equal(authorize({ principal: principal(['viewer']), privilege: 'content.admit' }).allowed, false);
+    assert.equal(authorize({ principal: principal(['admin']), privilege: 'content.admit' }).allowed, true);
   });
 });

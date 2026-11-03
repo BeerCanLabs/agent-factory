@@ -110,6 +110,8 @@ export const PRIVILEGES = [
   'skills.defaults.set',
   // TSK-300 (S3): Principals & grants management (R4, GAP-226)
   'grants.manage',
+  // S4 (D27): the content admission gate decision, the approver role's one privilege beyond reads.
+  'content.admit',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -193,7 +195,8 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'events.subscribe',
     'schedules.read',
     'mcp.use',
-    'approvals.decide',
+    // S4, D27, D29: approver is the admission gate only; run-time holds go to the content side.
+    'content.admit',
   ],
   ingest: [
     'ledger.ingest',
@@ -314,6 +317,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'runtime.set',
     'skills.defaults.set',
     'grants.manage',
+    'content.admit',
   ],
 };
 

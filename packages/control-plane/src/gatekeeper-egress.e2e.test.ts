@@ -74,7 +74,8 @@ describe('control plane + gatekeeper-egress, over HTTP', { concurrency: false },
       auth: bearerAuth([
         { name: 'admin', token: ADMIN, roles: ['admin'] },
         { name: 'gatekeeper-egress', token: GATEKEEPER_EGRESS, roles: ['gatekeeper-egress'] },
-        { name: 'dale', token: APPROVER, roles: ['approver'] },
+        // S4, D29: run-time holds are cleared by admin or the content side, no longer by the approver role.
+        { name: 'dale', token: APPROVER, roles: ['admin'] },
       ]),
       version: 'e2e',
       providers: [envProvider({ ECHO_WEBHOOK_SECRET: 'whsec' })],

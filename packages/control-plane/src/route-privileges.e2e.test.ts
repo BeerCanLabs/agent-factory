@@ -49,6 +49,8 @@ type RouteRow = {
   /** Asked after `role`, and held by this service role alone: no single-role credential passes, so the credentials that pass `role` are named this role. The requester.e2e test covers the credential that passes both. */
   thenExclusive?: Role;
   body?: unknown;
+  /** S4, D27: a second role that also passes (the approver admits content through `content.admit`). */
+  alsoRole?: Role;
 };
 
 // Asked outside a row: the WebSocket upgrade and the ledger's attestation of the run as the actor.
@@ -131,7 +133,7 @@ const ROUTES: RouteRow[] = [
   { method: 'PUT', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
   { method: 'DELETE', path: '/api/v1/schedules/nope', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer' },
   // approver
-  { method: 'POST', path: '/api/v1/approvals/nope', privilege: 'approvals.decide', role: 'approver', body: { decision: 'approved' } },
+  { method: 'POST', path: '/api/v1/approvals/nope', privilege: 'approvals.decide', role: 'admin', body: { decision: 'approved' } },
   // ingest
   { method: 'POST', path: '/api/v1/ledger', privilege: 'ledger.ingest', role: 'ingest', body: {} },
   // gatekeeper-egress
@@ -192,10 +194,12 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/connections/castle/p/import', privilege: 'connections.import', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/systems/nope/approve', privilege: 'systems.decide', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/systems/nope/reject', privilege: 'systems.decide', role: 'admin', body: {} },
-  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/approve`, privilege: 'skills.decide', role: 'admin', body: {} },
-  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/reject`, privilege: 'skills.decide', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/approve`, privilege: 'skills.decide', role: 'admin', alsoRole: 'approver', body: {} },
+  // S4, D27: content admission; denials name admin because the route falls back to `skills.decide`.
+  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/approve`, privilege: 'content.admit', role: 'admin', alsoRole: 'approver', body: {} },
+  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/reject`, privilege: 'skills.decide', role: 'admin', alsoRole: 'approver', body: {} },
   // CF5: asked instead of `skills.decide` for a version private to an agent; an unknown version asks for the admin one first.
-  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/approve`, privilege: 'skills.decide.private', role: 'admin', body: {} },
+  { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/approve`, privilege: 'skills.decide.private', role: 'admin', alsoRole: 'approver', body: {} },
   { method: 'POST', path: `/api/v1/registry/skills/${SKILL}/versions/1/checks`, privilege: 'skills.checks.run', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/agents/castle/skills', privilege: 'skills.adopt.request', role: 'admin', body: {} },
   { method: 'PATCH', path: `/api/v1/agents/castle/skills/${SKILL}`, privilege: 'skills.adopt.request', role: 'admin', body: {} },
@@ -355,7 +359,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
           if (r.status !== 401) failures.push(`${label} (want 401)`);
           continue;
         }
-        const allowed = row.thenExclusive ? false : row.exclusive ? cred === row.role : oldHasRole(roles, row.role);
+        const allowed = row.thenExclusive ? false : row.exclusive ? cred === row.role : oldHasRole(roles, row.role) || row.alsoRole === cred;
         const named = row.firstRole && !oldHasRole(roles, row.firstRole) ? row.firstRole : row.thenExclusive && oldHasRole(roles, row.role) ? row.thenExclusive : row.role;
         if (allowed) {
           if (r.status === 401 || r.status === 403) failures.push(`${label} (want it to pass)`);
@@ -691,11 +695,12 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     ];
     assert.deepEqual(await names('viewer'), viewerTools);
     assert.deepEqual(await names('operator'), [...viewerTools, ...operatorTools].sort());
-    assert.deepEqual(await names('approver'), [...viewerTools, 'decide_approval'].sort());
+    // S4, D27, D29: the approver role no longer clears run-time holds.
+    assert.deepEqual(await names('approver'), [...viewerTools].sort());
     assert.deepEqual(await names('admin'), [...viewerTools, ...operatorTools, ...adminTools, 'decide_approval'].sort());
     assert.deepEqual(await names('ingest'), undefined);
     assert.equal((await rpc('viewer', 'tools/call', { name: 'wake_agent', arguments: { id: 'castle' } })).error?.message, 'forbidden: requires operator');
-    assert.equal((await rpc('operator', 'tools/call', { name: 'decide_approval', arguments: {} })).error?.message, 'forbidden: requires approver');
+    assert.equal((await rpc('operator', 'tools/call', { name: 'decide_approval', arguments: {} })).error?.message, 'forbidden: requires admin');
     assert.equal((await rpc('viewer', 'tools/call', { name: 'list_agents' })).error, undefined);
   });
 

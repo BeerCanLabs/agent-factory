@@ -8,6 +8,7 @@ import { agentKindOf, effectiveGrantsForActor, type FactoryState } from './app.j
 import { ownersOf } from './config-store.js';
 import { requesterOfRun } from './schedules.js';
 import { agentInForce } from './agent-settings.js';
+import { legacyAdminEmails } from './legacy-env-roles.js';
 
 /**
  * `restricted: false`: the rule does not apply to this run. `restricted: true`: each route some skill declares is
@@ -18,10 +19,7 @@ export type RunAccess = { restricted: false } | { restricted: true; routes: Reco
 const NOT_RESTRICTED: RunAccess = { restricted: false };
 
 function adminEmails(): string[] {
-  return (process.env.FACTORY_ADMIN_EMAILS ?? '')
-    .split(',')
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
+  return legacyAdminEmails();
 }
 
 /** Every skill the record can name: the declared ids, the skills that have routes, and the skills a role mentions. */

@@ -113,19 +113,20 @@ describe('agent-owner and requester', () => {
     assert.equal(allowed(as('cloudflare:owner@example.com'), 'approvals.decide', on('a', owners, {})), false);
   });
 
-  it('admin and approver still decide any agent, with or without a resource', () => {
-    for (const role of ['admin', 'approver'] as Role[]) {
-      const p = as('token:x', [role]);
-      assert.ok(allowed(p, 'approvals.decide'));
-      assert.ok(allowed(p, 'approvals.decide', on('a', [], {})));
-    }
+  it('admin still decides any agent, with or without a resource; approver no longer does (S4, D29)', () => {
+    const admin = as('token:x', ['admin']);
+    assert.ok(allowed(admin, 'approvals.decide'));
+    assert.ok(allowed(admin, 'approvals.decide', on('a', [], {})));
+    const approver = as('token:x', ['approver']);
+    assert.equal(allowed(approver, 'approvals.decide'), false);
+    assert.equal(allowed(approver, 'approvals.decide', on('a', [], {})), false);
   });
 
   it('a denial still names the role the route names today', () => {
     const alice = as('cloudflare:alice@example.com');
     const r = on('b', ['cloudflare:bob@example.com']);
     assert.deepEqual(authorize({ principal: alice, privilege: 'agents.wake', resource: r }), { allowed: false, required: 'operator' });
-    assert.deepEqual(authorize({ principal: alice, privilege: 'approvals.decide', resource: r }), { allowed: false, required: 'approver' });
+    assert.deepEqual(authorize({ principal: alice, privilege: 'approvals.decide', resource: r }), { allowed: false, required: 'admin' });
     assert.deepEqual(authorize({ principal: alice, privilege: 'credentials.agent.set', resource: r }), { allowed: false, required: 'admin' });
   });
 });
