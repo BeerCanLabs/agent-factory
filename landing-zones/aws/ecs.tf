@@ -60,9 +60,10 @@ resource "aws_ecs_task_definition" "control_plane" {
       name         = "control-plane"
       image        = var.control_plane_image
       essential    = true
-      portMappings = [{ containerPort = 8088 }]
+      portMappings = [{ containerPort = 8088 }, { containerPort = 8089 }]
       environment = concat(local.otel_env, [
         { name = "PORT", value = "8088" },
+        { name = "FACTORY_INTERNAL_HEALTH_PORT", value = "8089" },
         { name = "AGENTS_ROOT", value = "/app/agents" },
         { name = "AWS_ACCOUNT_ID", value = var.account_id },
         { name = "FACTORY_OIDC_ISSUER", value = var.oidc_issuer },

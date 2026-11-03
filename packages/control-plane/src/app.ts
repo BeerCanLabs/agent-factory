@@ -2382,7 +2382,8 @@ export const requestApiKey = new WeakMap<http.IncomingMessage, ApiKeyRecord>();
  */
 export function verifyApiKeyBeforeRouting(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const path = (req.url ?? '/').split('?')[0];
-  if (!(path === '/mcp' || path.startsWith('/api/v1/'))) return true;
+  // S16: health and metrics take a machine key too, so probes can present one.
+  if (!(path === '/mcp' || path.startsWith('/api/v1/') || path === '/healthz' || path === '/' || path === '/metrics')) return true;
   const plaintext = apiKeyFromAuthorization(req.headers.authorization);
   if (plaintext === undefined) return true;
   const rec = plaintext && state.keys ? state.keys.verify(plaintext) : undefined;
@@ -2463,13 +2464,17 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   }
 
   if ((path === '/healthz' || path === '/' || path === '/api/v1/health') && req.method === 'GET') {
-
-    json(res, 200, {
-      status: 'ok',
-      version: state.version,
-      uptime: Math.round((Date.now() - started) / 1000),
-      timestamp: new Date().toISOString(),
-    });
+    // S16 (R17, D18, D22): health tells nothing to an anonymous caller. Probes use the internal listener or a key.
+    const who = await identify(req, state);
+    if (!who.ok) {
+      if (path === '/' && wantsHtml(req)) {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(LOGIN_HTML);
+        return;
+      }
+      return json(res, 401, { error: 'unauthorized' });
+    }
+    json(res, 200, healthBody(state, started));
     return;
   }
 
@@ -4800,4 +4805,28 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
   }
   // --- END REGISTRY SERVICE ---
   json(res, 404, { error: 'not_found' });
+}
+
+/** S16: the login page an unauthenticated browser gets at `/`. It names no version, uptime, or status. */
+export const LOGIN_HTML = '<!doctype html><html><head><meta charset="utf-8"><title>Agent Factory: sign in</title></head><body><main><h1>Agent Factory</h1><p><a href="/ui">Sign in</a></p></main></body></html>';
+
+function wantsHtml(req: http.IncomingMessage): boolean {
+  return String(req.headers.accept ?? '').includes('text/html');
+}
+
+function healthBody(state: FactoryState, started: number) {
+  return { status: 'ok', version: state.version, uptime: Math.round((Date.now() - started) / 1000), timestamp: new Date().toISOString() };
+}
+
+/**
+ * S16 (D22): the private probe listener for ALB/ECS health checks. It answers GET /healthz with `{status:'ok'}` only and
+ * 404 for everything else, so it leaks nothing even when reachable. Bind it to a port the security group opens only to
+ * the load balancer.
+ */
+export function createProbeServer(): http.Server {
+  return http.createServer((req, res) => {
+    const path = (req.url ?? '/').split('?')[0];
+    if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
+    return json(res, 404, { error: 'not_found' });
+  });
 }

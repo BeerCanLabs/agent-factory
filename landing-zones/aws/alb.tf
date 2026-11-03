@@ -29,8 +29,10 @@ resource "aws_lb_target_group" "control" {
   # GAP-176: a stopped control plane gets SIGTERM only after draining. With the 300 s default it kept running, unreachable
   # by agents, and halted every live run for a lost heartbeat. Agents' long polls retry, so a short drain is enough.
   deregistration_delay = 15
+  # S16 (D22): main-port health needs a key; the ALB probes the private listener only it can reach.
   health_check {
     path = "/healthz"
+    port = "8089"
   }
 }
 

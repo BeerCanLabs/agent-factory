@@ -42,24 +42,6 @@ export const ROUTE_EXCEPTIONS = {
     retiringStory: 'S12',
     rationale: 'Unauthenticated web UI static assets; S12 restricts /ui to authenticated session cookie',
   },
-  'transitional-root': {
-    id: 'transitional-root',
-    protection: 'transitional',
-    retiringStory: 'S16',
-    rationale: 'Root liveness ping; S16 places health endpoints behind machine API keys and redirects browsers to login',
-  },
-  'transitional-healthz': {
-    id: 'transitional-healthz',
-    protection: 'transitional',
-    retiringStory: 'S16',
-    rationale: 'Unauthenticated liveness probe; S16 places health endpoints behind machine API keys or private internal listener',
-  },
-  'transitional-api-health': {
-    id: 'transitional-api-health',
-    protection: 'transitional',
-    retiringStory: 'S16',
-    rationale: 'Unauthenticated health endpoint; S16 places health endpoints behind machine API keys or private internal listener',
-  },
   'transitional-cli-discovery': {
     id: 'transitional-cli-discovery',
     protection: 'transitional',
@@ -123,6 +105,11 @@ export const ROUTE_EXCEPTIONS = {
     protection: 'identity-probe',
     rationale: 'Setup completion and break-glass alert for any verified principal; read-only, names no secrets (R11, D16, S6)',
   },
+  'health-probe': {
+    id: 'health-probe',
+    protection: 'identity-probe',
+    rationale: 'Health for any verified principal (session or machine key, e.g. a health-probe key); 401 otherwise. Load balancers use the private FACTORY_INTERNAL_HEALTH_PORT listener (R17, D18, D22, S16)',
+  },
   'identity-whoami': {
     id: 'identity-whoami',
     protection: 'identity-probe',
@@ -151,8 +138,7 @@ export const ROUTE_EXCEPTIONS = {
   'login-page': {
     id: 'login-page',
     protection: 'login-page',
-    plannedIn: 'S12',
-    rationale: 'Planned human login page HTML served without credentials (D18, D19, S12)',
+    rationale: 'Login page HTML served without credentials at `/` to unauthenticated browsers; names no status (D18, D19, S16; full flow S12)',
   },
 } as const satisfies Record<string, RouteException>;
 
@@ -192,9 +178,9 @@ export function pathToRegex(pattern: string): RegExp {
 export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   // UI & Health (Transitional)
   { method: 'GET', pattern: '/ui', exception: 'transitional-ui', description: 'Factory web UI HTML' },
-  { method: 'GET', pattern: '/', exception: 'transitional-root', description: 'Root liveness ping' },
-  { method: 'GET', pattern: '/healthz', exception: 'transitional-healthz', description: 'Liveness probe' },
-  { method: 'GET', pattern: '/api/v1/health', exception: 'transitional-api-health', description: 'Health check probe' },
+  { method: 'GET', pattern: '/', exception: 'login-page', description: 'Login page for browsers; health for verified principals' },
+  { method: 'GET', pattern: '/healthz', exception: 'health-probe', description: 'Liveness probe' },
+  { method: 'GET', pattern: '/api/v1/health', exception: 'health-probe', description: 'Health check probe' },
   { method: 'GET', pattern: '/.well-known/factory-cli', exception: 'transitional-cli-discovery', description: 'CLI discovery config' },
 
   // Identity probe (Authenticated principal, no elevated privilege)

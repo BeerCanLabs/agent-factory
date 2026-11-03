@@ -318,6 +318,14 @@ describe('S5: factory API keys (#357)', { concurrency: false }, () => {
     }
   });
 
+  it('S16 AC2: a health-probe machine key gets 200 from /healthz and /api/v1/health; a revoked one gets 401', async () => {
+    const minted = await call('POST', '/api/v1/keys', { token: TOKENS.alice, body: { deviceFamily: 'health-probe' } });
+    assert.equal(minted.status, 201, JSON.stringify(minted.body));
+    for (const p of ['/healthz', '/api/v1/health']) assert.equal((await call('GET', p, { headers: bearer(minted.body.secret) })).status, 200, p);
+    assert.equal((await call('DELETE', `/api/v1/keys/${minted.body.key.id}`, { token: TOKENS.alice })).status, 200);
+    assert.equal((await call('GET', '/healthz', { headers: bearer(minted.body.secret) })).status, 401);
+  });
+
   it('AC2: a second active tesla key is 409; rotate with graceSeconds issues a new secret on the same record and the old one works only inside the grace window', async () => {
     const first = await call('POST', '/api/v1/keys', { token: TOKENS.alice, body: { deviceFamily: 'tesla' } });
     assert.equal(first.status, 201, JSON.stringify(first.body));

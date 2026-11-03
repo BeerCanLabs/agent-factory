@@ -97,6 +97,7 @@ locals {
   # [sg, port, source sg or "vpc", description]. Load balancer ingress is in alb.tf (§6.12 A1).
   ingress = {
     cp_from_alb       = [aws_security_group.control_plane.id, 8088, aws_security_group.alb.id, "API via ALB"]
+    cp_probe_alb      = [aws_security_group.control_plane.id, 8089, aws_security_group.alb.id, "S16 private health probe"]
     garrison_from_alb = [aws_security_group.control_plane.id, 3000, aws_security_group.alb.id, "Garrison via ALB"]
     cp_from_cp        = [aws_security_group.control_plane.id, 8088, aws_security_group.control_plane.id, "control plane from garrison/internal"]
     cp_from_ag        = [aws_security_group.control_plane.id, 8088, aws_security_group.agents.id, "run input/result/heartbeat"]
