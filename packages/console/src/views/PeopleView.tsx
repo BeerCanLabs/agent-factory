@@ -8,13 +8,6 @@ const box = 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slat
 const input = 'border border-slate-300 dark:border-slate-700 rounded px-2 py-1 bg-transparent';
 const btn = 'px-2 py-1 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800';
 
-
-/** #434: the Add person form is ready when there is a name (1..256) and one plausible email. */
-export function validNewPerson(name: string, email: string): boolean {
-  const n = name.trim();
-  return n.length > 0 && n.length <= 256 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
-}
-
 /** #434: the Add person form is ready when there is a name (1..256) and one plausible email. */
 export function validNewPerson(name: string, email: string): boolean {
   const n = name.trim();
