@@ -58,6 +58,8 @@ COPY --from=builder /app/packages/executive/dist ./packages/executive/dist
 COPY --from=builder /app/packages/gatekeeper/dist ./packages/gatekeeper/dist
 COPY --from=builder /app/packages/control-plane/dist ./packages/control-plane/dist
 COPY agents ./agents
+# S6: out-of-band lockout recovery runs as a one-off task of this image (scripts/factory-recover.mjs, #421).
+COPY scripts/factory-recover.mjs ./scripts/factory-recover.mjs
 RUN mkdir -p /data/mind && chown -R node:node /data
 ENV PORT=8088
 ENV AGENTS_ROOT=/app/agents
