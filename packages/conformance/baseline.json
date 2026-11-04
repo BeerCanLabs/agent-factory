@@ -26,19 +26,5 @@
     "detail": "aws_secretsmanager_secret_version.generated",
     "gap": "GAP-050",
     "why": "Part (b): Terraform generates the platform's own tokens and keeps their values in state. Awaiting a design decision (Keymaster bootstrap; rotates every platform token)."
-  },
-  {
-    "rule": "K5",
-    "where": "landing-zones/aws/secrets.tf",
-    "detail": "aws_secretsmanager_secret.factory_tokens",
-    "gap": "GAP-050",
-    "why": "Part (b): Terraform generates the platform's own tokens and keeps their values in state. Awaiting a design decision (Keymaster bootstrap; rotates every platform token)."
-  },
-  {
-    "rule": "K5",
-    "where": "landing-zones/aws/secrets.tf",
-    "detail": "aws_secretsmanager_secret_version.factory_tokens",
-    "gap": "GAP-050",
-    "why": "Part (b): Terraform generates the platform's own tokens and keeps their values in state. Awaiting a design decision (Keymaster bootstrap; rotates every platform token)."
   }
 ]
