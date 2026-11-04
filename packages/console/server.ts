@@ -48,6 +48,12 @@ export type ConsoleOptions = { controlPlaneUrl: string; clientDir?: string };
  * identity-aware proxy's signed assertion in `cf-access-jwt-assertion` / the `CF_Authorization` cookie, or their own
  * bearer token) are forwarded unchanged, and the control plane verifies them, so every operator acts as themselves.
  */
+/** #432: the label for how the current session signed in (from whoami's signedInWith), never a linked IdP. */
+export function providerLabel(signedInWith: unknown, access = false): string {
+  const labels: Record<string, string> = { google: 'Google', meta: 'Meta', cloudflare: 'Cloudflare', oidc: 'OIDC', 'cloudflare-access': 'Cloudflare Access', 'api-key': 'API key' };
+  return (typeof signedInWith === 'string' && labels[signedInWith]) || (access ? 'Cloudflare Access' : 'API key');
+}
+
 export function createConsoleServer(opts: ConsoleOptions): http.Server {
   const clientDir = opts.clientDir ?? path.join(__dirname, 'dist', 'client');
   const cp = opts.controlPlaneUrl;
@@ -100,7 +106,7 @@ export function createConsoleServer(opts: ConsoleOptions): http.Server {
           const roles = (who.roles ?? []).filter((x) => ['admin', 'operator', 'approver', 'viewer'].includes(x));
           res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
           const w = who as { grants?: unknown[]; privileges?: unknown; onBehalfOf?: string; breakGlassAlert?: unknown };
-          res.end(JSON.stringify({ user: { email, name: email, actor: who.actor, roles, provider: access ? 'Cloudflare Access' : 'Factory token' }, whoami: { actor: who.actor, roles, grants: w.grants ?? [], privileges: w.privileges ?? {}, ...(w.onBehalfOf ? { onBehalfOf: w.onBehalfOf } : {}), ...(w.breakGlassAlert ? { breakGlassAlert: w.breakGlassAlert } : {}) } }));
+          res.end(JSON.stringify({ user: { email, name: email, actor: who.actor, roles, provider: providerLabel((who as { signedInWith?: unknown }).signedInWith, access) }, whoami: { actor: who.actor, roles, grants: w.grants ?? [], privileges: w.privileges ?? {}, ...(w.onBehalfOf ? { onBehalfOf: w.onBehalfOf } : {}), ...(w.breakGlassAlert ? { breakGlassAlert: w.breakGlassAlert } : {}) } }));
         });
       });
       r.on('error', (err) => {

@@ -1,3 +1,4 @@
+import { sessionIdp } from './login.js';
 import http from 'node:http';
 import { ROLES, type Principal, type Role } from '@beercanlabs/factory-auth';
 import {
@@ -1224,7 +1225,10 @@ export async function handleGrantsRoutes(
     }
     const out = getWhoami(state, who.principal);
     // S6 (R11): every signed-in client sees the break-glass alert until the key is rotated.
-    const body = state.keys && out.status === 200 && out.body && typeof out.body === 'object' ? { ...(out.body as object), breakGlassAlert: state.keys.breakGlassAlert() } : out.body;
+    // #432: how this request signed in, in identify()'s order (key or bearer, factory session, Access assertion), so the
+    // console names the IdP of the current session rather than one the principal was linked through.
+    const signedInWith = req.headers.authorization ? 'api-key' : (sessionIdp(state, req) ?? 'cloudflare-access');
+    const body = out.status === 200 && out.body && typeof out.body === 'object' ? { ...(out.body as object), signedInWith, ...(state.keys ? { breakGlassAlert: state.keys.breakGlassAlert() } : {}) } : out.body;
     json(res, out.status, body);
     return true;
   }

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 
 process.env.FACTORY_TOKEN = 'console-must-never-send-this'; // secret-scan:allow (test fixture)
-const { createConsoleServer } = await import('./server.js');
+const { createConsoleServer, providerLabel } = await import('./server.js');
 
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -23,7 +23,7 @@ describe('A2 console forwards the caller, adds no credential', () => {
     cp = http.createServer((req, res) => {
       seen.push(req.headers);
       if (req.url === '/api/v1/whoami') {
-        const who = req.headers['cf-access-jwt-assertion'] ? { actor: 'cloudflare:owner@example.com', roles: ['admin', 'operator', 'approver', 'viewer', 'ingest'] } : null;
+        const who = req.headers['cf-access-jwt-assertion'] ? { actor: 'cloudflare:owner@example.com', roles: ['admin', 'operator', 'approver', 'viewer', 'ingest'] } : String(req.headers.cookie ?? '').includes('factory_session=g') ? { actor: 'user:dale', roles: ['admin'], signedInWith: 'google' } : null;
         res.writeHead(who ? 200 : 401, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify(who ?? { error: 'unauthorized' }));
       }
@@ -106,5 +106,17 @@ describe('A2 console forwards the caller, adds no credential', () => {
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.deepEqual(body, { ok: true, service: 'factory-console', version: '0.2.0' });
+  });
+
+  it('#432: the provider label names the IdP of the current session, not a linked one', async () => {
+    const me = await fetch(`http://127.0.0.1:${port}/api/auth/me`, { headers: { cookie: 'factory_session=g' } });
+    assert.equal(me.status, 200);
+    const body = (await me.json()) as { user: { provider: string; actor: string } };
+    assert.equal(body.user.actor, 'user:dale');
+    assert.equal(body.user.provider, 'Google');
+    assert.equal(providerLabel('cloudflare'), 'Cloudflare');
+    assert.equal(providerLabel('meta'), 'Meta');
+    assert.equal(providerLabel('api-key'), 'API key');
+    assert.equal(providerLabel(undefined, true), 'Cloudflare Access');
   });
 });

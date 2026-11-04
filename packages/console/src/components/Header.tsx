@@ -143,7 +143,7 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing, updateC
           <UserCheck className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
           <span className="font-semibold text-slate-800 dark:text-slate-200 hidden sm:inline">{user.email}</span>
           <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider hidden lg:inline">
-            (Cloudflare Zero Trust)
+            ({user.provider})
           </span>
         </div>
         <button

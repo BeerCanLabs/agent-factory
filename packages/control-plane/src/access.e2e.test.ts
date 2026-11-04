@@ -113,7 +113,7 @@ describe('A2 identity is verified, not asserted (control plane)', { concurrency:
   it('a verified admin assertion (header or cookie) maps to the admin roles', async () => {
     const a = assertion({ email: ADMIN_EMAIL });
     const who = await call(on.port, '/api/v1/whoami', { 'cf-access-jwt-assertion': a });
-    assert.deepEqual(who.body, { actor: `cloudflare:${ADMIN_EMAIL}`, roles: ['admin', 'operator', 'approver', 'viewer', 'ingest'] });
+    assert.deepEqual(who.body, { actor: `cloudflare:${ADMIN_EMAIL}`, roles: ['admin', 'operator', 'approver', 'viewer', 'ingest'], signedInWith: 'cloudflare-access' });
     assert.equal((await call(on.port, '/api/v1/agents', { cookie: `x=1; CF_Authorization=${a}` })).status, 200);
     // Admin route: past authentication and authorization (whatever registration then decides).
     const admin = await call(on.port, '/api/v1/registry/agents', { 'cf-access-jwt-assertion': a }, 'POST', {});
@@ -126,7 +126,7 @@ describe('A2 identity is verified, not asserted (control plane)', { concurrency:
     assert.equal((await call(on.port, '/api/v1/agents', { 'cf-access-jwt-assertion': viewer })).status, 200);
     assert.equal((await call(on.port, '/api/v1/registry/agents', { 'cf-access-jwt-assertion': viewer }, 'POST', {})).status, 403);
     const service = assertion({ common_name: 'deploy-check.access', sub: '' });
-    assert.deepEqual((await call(on.port, '/api/v1/whoami', { 'cf-access-jwt-assertion': service })).body, { actor: 'cloudflare-service:deploy-check.access', roles: [] });
+    assert.deepEqual((await call(on.port, '/api/v1/whoami', { 'cf-access-jwt-assertion': service })).body, { actor: 'cloudflare-service:deploy-check.access', roles: [], signedInWith: 'cloudflare-access' });
     assert.equal((await call(on.port, '/api/v1/agents', { 'cf-access-jwt-assertion': service })).status, 403);
     assert.equal((await call(on.port, '/api/v1/schedules', { 'cf-access-jwt-assertion': service })).status, 403);
   });
@@ -134,7 +134,7 @@ describe('A2 identity is verified, not asserted (control plane)', { concurrency:
   it('bearer tokens keep working, alongside a service-token assertion', async () => {
     const service = assertion({ common_name: 'deploy-check.access', sub: '' });
     const r = await call(on.port, '/api/v1/whoami', { authorization: `Bearer ${ADMIN_TOKEN}`, 'cf-access-jwt-assertion': service });
-    assert.deepEqual(r.body, { actor: 'token:admin', roles: ['admin'] });
+    assert.deepEqual(r.body, { actor: 'token:admin', roles: ['admin'], signedInWith: 'api-key' });
     assert.equal((await call(off.port, '/api/v1/agents', { authorization: `Bearer ${ADMIN_TOKEN}` })).status, 200);
   });
 });
