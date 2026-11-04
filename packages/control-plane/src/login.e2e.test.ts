@@ -240,3 +240,16 @@ describe('S12: login page, OAuth state/PKCE, sessions (#362)', { concurrency: fa
     assert.equal(stranger.status, 403);
   });
 });
+
+describe('R13 verified email per provider (#420)', () => {
+  it('Cloudflare Access may omit email_verified; every other provider must assert it, and false always refuses', async () => {
+    const { emailVerified } = await import('./login.js');
+    assert.equal(emailVerified('cloudflare', {}), true);
+    assert.equal(emailVerified('cloudflare', { email_verified: false }), false);
+    assert.equal(emailVerified('cloudflare', { email_verified: 'false' }), false);
+    assert.equal(emailVerified('google', {}), false);
+    assert.equal(emailVerified('oidc', {}), false);
+    assert.equal(emailVerified('meta', {}), false);
+    assert.equal(emailVerified('google', { email_verified: true }), true);
+  });
+});
