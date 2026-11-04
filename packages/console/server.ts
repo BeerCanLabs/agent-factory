@@ -123,7 +123,10 @@ export function createConsoleServer(opts: ConsoleOptions): http.Server {
     // 5. SPA assets only for a caller the control plane verifies (S12, D22): HTML navigations go to /login, the rest 401.
     return verifyCaller(req, (ok) => {
       if (ok) return serveStatic(pathname, res);
-      const html = String(req.headers.accept ?? '').includes('text/html');
+      // A page navigation (GET/HEAD of a path with no file extension, or one asking for HTML) goes to /login; asset
+      // and API-style requests get 401.
+      const page = (req.method === 'GET' || req.method === 'HEAD') && !/\.[A-Za-z0-9]+$/.test(pathname);
+      const html = page || String(req.headers.accept ?? '').includes('text/html');
       res.writeHead(html ? 302 : 401, html ? { Location: '/login', 'Cache-Control': 'no-store' } : { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(html ? '' : JSON.stringify({ error: 'unauthorized' }));
     });
