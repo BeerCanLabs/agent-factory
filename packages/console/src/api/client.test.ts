@@ -51,3 +51,15 @@ it('#434: Add person posts the display name and email to /api/v1/principals', as
   assert.equal(validNewPerson('Ada', 'not-an-email'), false);
   assert.equal(validNewPerson('x'.repeat(257), 'ada@example.com'), false);
 });
+
+it('#434: Rename sends PATCH /api/v1/principals/:id with the trimmed display name', async () => {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response('{"principal":{"id":"user:dale","displayName":"Dale"}}', { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  await factoryApi.renamePrincipal('user:dale', '  Dale  ');
+  assert.equal(calls[0].url, '/api/v1/principals/user%3Adale');
+  assert.equal(calls[0].init?.method, 'PATCH');
+  assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { displayName: 'Dale' });
+});

@@ -141,7 +141,8 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing, updateC
         <div className="flex items-center space-x-2 bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-1.5 text-xs">
           <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
           <UserCheck className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
-          <span className="font-semibold text-slate-800 dark:text-slate-200 hidden sm:inline">{user.email}</span>
+          <span className="font-semibold text-slate-800 dark:text-slate-200 hidden sm:inline">{user.name || user.email}</span>
+          <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400 hidden lg:inline">{user.actor ?? user.email}</span>
           <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider hidden lg:inline">
             ({user.provider})
           </span>

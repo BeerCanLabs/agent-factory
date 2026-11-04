@@ -327,6 +327,19 @@ describe('S3: Principals & Grants API, admin act-as, private skill assignment, a
     assert.equal(rmAlias.body.principal.emails.length, 2);
     assert.ok(ledger.query().some((e) => e.action === 'PRINCIPAL_EMAIL_REMOVED' && e.subject === 'user:stephanie'));
 
+    // #434: an admin renames a principal (friendly display name, id unchanged), ledgered; bad names are refused
+    const renamed = await call('PATCH', '/api/v1/principals/user:stephanie', { token: TOKENS.admin, body: { displayName: '  Stephanie S.  ' } });
+    assert.equal(renamed.status, 200);
+    assert.equal(renamed.body.principal.id, 'user:stephanie');
+    assert.equal(renamed.body.principal.displayName, 'Stephanie S.');
+    const renameRow = ledger.query().find((e) => e.action === 'PRINCIPAL_RENAMED' && e.subject === 'user:stephanie');
+    assert.equal(renameRow?.actor, 'user:admin');
+    assert.equal((renameRow?.after as any)?.displayName, 'Stephanie S.');
+    assert.equal((await call('PATCH', '/api/v1/principals/user:stephanie', { token: TOKENS.admin, body: { displayName: '' } })).status, 400);
+    assert.equal((await call('PATCH', '/api/v1/principals/user:nobody', { token: TOKENS.admin, body: { displayName: 'X' } })).status, 404);
+    assert.equal((await call('PATCH', '/api/v1/principals/user:stephanie', { body: { displayName: 'Mallory' } })).status, 401);
+    assert.equal((await call('PATCH', '/api/v1/principals/user:stephanie', { token: TOKENS.bob, body: { displayName: 'Mallory' } })).status, 403, 'only grants.manage may rename');
+
     // Removing the last remaining email on a single-email principal returns 409 last_principal_email
     const rmLast = await call('DELETE', '/api/v1/principals/user:alice/emails/alice%40beercanlabs.com', {
       token: TOKENS.admin,

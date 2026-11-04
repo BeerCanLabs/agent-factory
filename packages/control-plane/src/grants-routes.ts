@@ -578,6 +578,38 @@ export async function createPrincipal(
   }
 }
 
+/** #434: PATCH /api/v1/principals/:id { displayName } (grants.manage), ledgered PRINCIPAL_RENAMED. */
+export async function renamePrincipal(state: FactoryState, principal: Principal, rawId: string, body: Record<string, unknown>): Promise<RouteOutcome> {
+  const unready = assertPrincipalStoreReady(state);
+  if (unready) return unready;
+  const before = state.principals!.get(rawId.trim().toLowerCase());
+  if (!before) return { status: 404, body: { error: 'not_found', message: `principal '${rawId}' not found` } };
+  const displayName = typeof body.displayName === 'string' ? body.displayName.trim() : '';
+  if (!displayName || displayName.length > 256) {
+    return { status: 400, body: { error: 'invalid_principal', message: 'displayName must be 1..256 characters' } };
+  }
+  try {
+    const after = await state.principals!.rename(before.id, displayName, principal.actor);
+    if (after.version !== before.version) {
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: 'control-plane',
+        type: 'action',
+        action: 'PRINCIPAL_RENAMED',
+        actor: principal.actor,
+        ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}),
+        subject: after.id,
+        before,
+        after,
+      });
+    }
+    return { status: 200, body: { principal: after } };
+  } catch (err) {
+    if (err instanceof PrincipalStoreUnavailableError) return { status: 503, body: { error: err.code, message: err.message } };
+    return { status: 400, body: { error: 'invalid_principal', message: err instanceof Error ? err.message : String(err) } };
+  }
+}
+
 export async function addPrincipalEmail(
   state: FactoryState,
   principal: Principal,
@@ -1264,6 +1296,13 @@ export async function handleGrantsRoutes(
   }
 
   const principalMatch = path.match(PRINCIPAL_ONE);
+  if (principalMatch && req.method === 'PATCH') {
+    const principal = await requirePrivilege(req, res, state, 'grants.manage');
+    if (!principal) return true;
+    const out = await renamePrincipal(state, principal, decodeURIComponent(principalMatch[1]), await readJson(req));
+    json(res, out.status, out.body);
+    return true;
+  }
   if (principalMatch && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'grants.manage'))) return true;
     const out = getPrincipal(state, decodeURIComponent(principalMatch[1]));

@@ -106,7 +106,7 @@ export function createConsoleServer(opts: ConsoleOptions): http.Server {
           const roles = (who.roles ?? []).filter((x) => ['admin', 'operator', 'approver', 'viewer'].includes(x));
           res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
           const w = who as { grants?: unknown[]; privileges?: unknown; onBehalfOf?: string; breakGlassAlert?: unknown };
-          res.end(JSON.stringify({ user: { email, name: email, actor: who.actor, roles, provider: providerLabel((who as { signedInWith?: unknown }).signedInWith, access) }, whoami: { actor: who.actor, roles, grants: w.grants ?? [], privileges: w.privileges ?? {}, ...(w.onBehalfOf ? { onBehalfOf: w.onBehalfOf } : {}), ...(w.breakGlassAlert ? { breakGlassAlert: w.breakGlassAlert } : {}) } }));
+          res.end(JSON.stringify({ user: { email, name: (typeof (who as { displayName?: unknown }).displayName === 'string' && (who as { displayName: string }).displayName) || email, actor: who.actor, roles, provider: providerLabel((who as { signedInWith?: unknown }).signedInWith, access) }, whoami: { actor: who.actor, roles, grants: w.grants ?? [], privileges: w.privileges ?? {}, ...(w.onBehalfOf ? { onBehalfOf: w.onBehalfOf } : {}), ...(w.breakGlassAlert ? { breakGlassAlert: w.breakGlassAlert } : {}) } }));
         });
       });
       r.on('error', (err) => {

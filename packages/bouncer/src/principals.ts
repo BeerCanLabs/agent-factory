@@ -815,6 +815,24 @@ export class PrincipalStore {
     });
   }
 
+  /** #434: an admin renames a principal (its friendly display name; the id never changes). */
+  rename(id: string, displayName: string, by: string): Promise<PrincipalRecord> {
+    return this.enqueue(async () => {
+      this.assertHealthy();
+      const target = this.byId.get(id.trim().toLowerCase());
+      if (!target) throw new Error(`principal '${id}' not found`);
+      const actor = by.trim();
+      if (!actor) throw new Error('by actor is required');
+      const name = displayName.trim();
+      if (!name || name.length > 256) throw new Error('displayName must be 1..256 characters');
+      if (target.displayName === name) return structuredClone(target);
+      const nowIso = this.now().toISOString();
+      const next: PrincipalRecord = { ...structuredClone(target), displayName: name, version: target.version + 1, updatedAt: nowIso, updatedBy: actor };
+      await this.commitRecord(next, actor, nowIso);
+      return structuredClone(next);
+    });
+  }
+
   addEmail(id: string, email: string, by: string): Promise<PrincipalRecord> {
     return this.enqueue(async () => {
       this.assertHealthy();

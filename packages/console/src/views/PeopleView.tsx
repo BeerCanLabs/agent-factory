@@ -29,6 +29,7 @@ export const PeopleView: React.FC = () => {
   const [form, setForm] = useState({ subject: '', role: 'viewer', scope: 'fleet' });
   const [email, setEmail] = useState<Record<string, string>>({});
   const [person, setPerson] = useState({ name: '', email: '' });
+  const [rename, setRename] = useState<{ id: string; name: string } | null>(null);
 
   const load = async () => {
     setError('');
@@ -76,8 +77,21 @@ export const PeopleView: React.FC = () => {
         <table className="w-full"><tbody>
           {principals.map((p) => (
             <tr key={p.id} className="border-t border-slate-100 dark:border-slate-800">
-              <td className="py-1 font-mono">{p.id}</td>
-              <td>{p.displayName}</td>
+              <td className="py-1">
+                {rename?.id === p.id ? (
+                  <span className="space-x-1">
+                    <input className={input} aria-label="New display name" value={rename.name} onChange={(e) => setRename({ id: p.id, name: e.target.value })} />
+                    <button className={btn} disabled={!rename.name.trim() || rename.name.trim().length > 256} onClick={() => act(async () => { await factoryApi.renamePrincipal(p.id, rename.name); setRename(null); })}>Save</button>
+                    <button className={btn} onClick={() => setRename(null)}>Cancel</button>
+                  </span>
+                ) : (
+                  <>
+                    <span className="font-medium">{p.displayName || p.id}</span>{' '}
+                    <span className="font-mono text-slate-500">{p.id}</span>{' '}
+                    <button className={btn} onClick={() => setRename({ id: p.id, name: p.displayName ?? '' })}>Edit</button>
+                  </>
+                )}
+              </td>
               <td>{(p.emails ?? []).join(', ')}</td>
               <td className="text-right space-x-1">
                 <input className={input} placeholder="add email" value={email[p.id] ?? ''} onChange={(e) => setEmail({ ...email, [p.id]: e.target.value })} />

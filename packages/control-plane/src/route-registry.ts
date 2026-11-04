@@ -258,6 +258,7 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'GET', pattern: '/api/v1/principals', privilege: 'grants.manage', description: 'List principals (S3)' },
   { method: 'POST', pattern: '/api/v1/principals', privilege: 'grants.manage', description: 'Create principal (S3)' },
   { method: 'GET', pattern: '/api/v1/principals/:id', privilege: 'grants.manage', description: 'Get principal (S3)' },
+  { method: 'PATCH', pattern: '/api/v1/principals/:id', privilege: 'grants.manage', description: 'Rename principal (display name; #434)' },
   { method: 'POST', pattern: '/api/v1/principals/:id/emails', privilege: 'grants.manage', description: 'Add principal email (S3)' },
   { method: 'DELETE', pattern: '/api/v1/principals/:id/emails/:email', privilege: 'grants.manage', description: 'Remove principal email (S3)' },
   { method: 'GET', pattern: '/api/v1/grants', exception: 'grants-scoped-list', description: 'List grants (S3)' },
