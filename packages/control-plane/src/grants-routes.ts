@@ -42,6 +42,7 @@ const PRIVILEGE_SET: ReadonlySet<string> = new Set<string>(PRIVILEGES);
 const AUTH_ROLE_SET: ReadonlySet<string> = new Set<string>(ROLES);
 
 const PRINCIPAL_ONE = /^\/api\/v1\/principals\/([^/]+)$/;
+const PRINCIPAL_REVOKE_ALL = /^\/api\/v1\/principals\/([^/]+)\/revoke-access$/;
 const PRINCIPAL_EMAILS = /^\/api\/v1\/principals\/([^/]+)\/emails$/;
 const PRINCIPAL_EMAIL_ONE = /^\/api\/v1\/principals\/([^/]+)\/emails\/([^/]+)$/;
 const GRANT_ONE = /^\/api\/v1\/grants\/([^/]+)$/;
@@ -576,6 +577,51 @@ export async function createPrincipal(
       body: { error: 'invalid_principal', message: err instanceof Error ? err.message : String(err) },
     };
   }
+}
+
+/**
+ * #436: POST /api/v1/principals/:id/revoke-access { confirm: "<id>" } (grants.manage). One action removes every grant the
+ * principal holds (fleet and scoped, atomically, refused 409 last_admin), its group memberships, its sign-in sessions and
+ * CLI login tokens. Long-lived fk_ API keys are NOT revoked (they hold no power without grants). Ledgered as ACCESS_REVOKED_ALL with what was removed. The principal record itself stays (re-grantable).
+ */
+export async function revokeAllAccess(state: FactoryState, principal: Principal, rawId: string, body: Record<string, unknown>): Promise<RouteOutcome> {
+  const unready = assertPrincipalStoreReady(state) ?? assertGrantStoreReady(state);
+  if (unready) return unready;
+  const target = state.principals!.get(rawId.trim().toLowerCase());
+  if (!target) return { status: 404, body: { error: 'not_found', message: `principal '${rawId}' not found` } };
+  if (body.confirm !== target.id) {
+    return { status: 400, body: { error: 'confirmation_required', message: `send { "confirm": "${target.id}" } to revoke all access` } };
+  }
+  let grants: GrantRecord[];
+  try {
+    grants = await state.grants!.revokeAllForSubject(target.id, { by: principal.actor, ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}) });
+  } catch (err) {
+    if (err instanceof GrantStoreError) return { status: err.status, body: { error: err.code, message: err.message } };
+    if (err instanceof GrantStoreUnavailableError || err instanceof PrincipalStoreUnavailableError) return { status: 503, body: { error: err.code, message: err.message } };
+    throw err;
+  }
+  const groups: string[] = [];
+  for (const g of state.groups?.listUserGroups(target.id) ?? []) {
+    state.groups!.removeMember(g.id, target.id);
+    groups.push(g.id);
+  }
+  // Long-lived fk_ API keys stay (powerless without grants; revoking one is a separate action). Sign-in-issued
+  // credentials end: the CLI login token is a key minted by the sign-in flow (deviceFamily 'cli').
+  const cliTokens: string[] = [];
+  for (const k of state.keys?.list({ owner: target.id }) ?? []) {
+    if (k.revokedAt || k.deviceFamily !== 'cli') continue;
+    await state.keys!.revoke(k.id, { by: principal.actor });
+    cliTokens.push(k.id);
+  }
+  const sessions = state.sessions?.destroyForEmails(target.emails) ?? 0;
+  const ts = new Date().toISOString();
+  const by = { actor: principal.actor, ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}) };
+  for (const g of grants) {
+    state.ledger.append({ timestamp: ts, agentId: g.scope.kind === 'agent' ? g.scope.id : 'control-plane', type: 'action', action: 'GRANT_REVOKED', ...by, subject: g.subject, scope: g.scope, before: g, after: null });
+  }
+  const summary = { grants: grants.map((g) => g.id), groups, cliTokens, sessions };
+  state.ledger.append({ timestamp: ts, agentId: 'control-plane', type: 'action', action: 'ACCESS_REVOKED_ALL', ...by, subject: target.id, after: summary });
+  return { status: 200, body: { ok: true, principal: target.id, revoked: summary } };
 }
 
 /** #434: PATCH /api/v1/principals/:id { displayName } (grants.manage), ledgered PRINCIPAL_RENAMED. */
@@ -1295,6 +1341,14 @@ export async function handleGrantsRoutes(
     return true;
   }
 
+  const revokeAllMatch = path.match(PRINCIPAL_REVOKE_ALL);
+  if (revokeAllMatch && req.method === 'POST') {
+    const principal = await requirePrivilege(req, res, state, 'grants.manage');
+    if (!principal) return true;
+    const out = await revokeAllAccess(state, principal, decodeURIComponent(revokeAllMatch[1]), await readJson(req));
+    json(res, out.status, out.body);
+    return true;
+  }
   const principalMatch = path.match(PRINCIPAL_ONE);
   if (principalMatch && req.method === 'PATCH') {
     const principal = await requirePrivilege(req, res, state, 'grants.manage');

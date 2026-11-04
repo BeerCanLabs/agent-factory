@@ -42,6 +42,7 @@ import {
   listPrincipals,
   removePrincipalEmail,
   revokeGrant,
+  revokeAllAccess,
   rolesForSubjectActor,
   type RouteOutcome,
 } from './grants-routes.js';
@@ -155,6 +156,13 @@ const TOOLS: ToolSpec[] = [
       grantId: { type: 'string' },
       actAs: { type: 'string' },
     },
+  },
+  {
+    name: 'revoke_all_access',
+    description: 'Remove every grant and group membership of a principal and end its sign-in sessions and CLI login tokens (API keys stay) (confirm must equal its id); refused 409 for the last admin',
+    privilege: 'grants.manage',
+    args: { id: { type: 'string' }, confirm: { type: 'string' } },
+    required: ['id', 'confirm'],
   },
   { name: 'list_agents', description: 'List factory cartridges', privilege: 'agents.read', args: {} },
   { name: 'query_ledger', description: 'Read the execution ledger', privilege: 'ledger.read', args: { agent: { type: 'string' } } },
@@ -354,6 +362,10 @@ async function dispatchSharedRouteTool(
   }
   if (name === 'grant_role') {
     return grantRole(state, principal, args);
+  }
+  if (name === 'revoke_all_access') {
+    if (typeof args.id !== 'string' || !args.id.trim()) return { status: 400, body: { error: 'invalid_principal', message: 'id is required' } };
+    return revokeAllAccess(state, principal, args.id, { confirm: args.confirm });
   }
   if (name === 'revoke_grant') {
     const grantId = typeof args.grantId === 'string' && args.grantId.trim()

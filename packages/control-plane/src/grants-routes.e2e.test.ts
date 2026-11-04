@@ -8,12 +8,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
+import { SessionStore } from './login.js';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import { RunTokens, cloudflareAccessAuth, type AuthProvider } from '@beercanlabs/factory-auth';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import {
   ApprovalStore,
   FileDocBackend,
+  ApiKeyStore,
   GrantStore,
   PrincipalStore,
   type GrantsDoc,
@@ -1017,6 +1019,52 @@ describe('S3: Principals & Grants API, admin act-as, private skill assignment, a
       assert.equal(unhealthyMcp.status, 503);
     } finally {
       state.grants = savedGrants;
+    }
+  });
+
+  it('#436: Revoke all access removes every grant and group membership, ends sessions and CLI login tokens, keeps fk_ API keys, and has MCP parity', async () => {
+    const savedKeys = state.keys;
+    const savedSessions = state.sessions;
+    state.keys = await ApiKeyStore.open();
+    state.sessions = new SessionStore();
+    try {
+      await principals.create({ id: 'user:revokee', displayName: 'Revokee', emails: ['revokee@example.com'], by: 'user:admin' } as never);
+      await grants.grant({ subject: 'user:revokee', scope: { kind: 'fleet' }, role: 'viewer', by: 'user:admin', granterIsAdmin: true });
+      await grants.grant({ subject: 'user:revokee', scope: { kind: 'fleet' }, role: 'operator', by: 'user:admin', granterIsAdmin: true });
+      groups.addMember('ops-team', 'user:revokee');
+      const apiKey = await state.keys.create({ owner: 'user:revokee', deviceFamily: 'laptop', roles: [], expiresAt: null, by: 'user:admin' } as never);
+      const cliKey = await state.keys.create({ owner: 'user:revokee', deviceFamily: 'cli', roles: [], expiresAt: null, by: 'user:revokee' } as never);
+      const sid = state.sessions.create('revokee@example.com', 'google');
+
+      const path = '/api/v1/principals/user:revokee/revoke-access';
+      assert.equal((await call('POST', path, { token: TOKENS.admin, body: {} })).status, 400, 'one confirmed action: confirm must name the principal');
+      assert.equal((await call('POST', path, { token: TOKENS.bob, body: { confirm: 'user:revokee' } })).status, 403, 'admin only');
+      assert.equal((await call('POST', path, { body: { confirm: 'user:revokee' } })).status, 401);
+
+      const out = await call('POST', path, { token: TOKENS.admin, body: { confirm: 'user:revokee' } });
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      assert.equal(out.body.revoked.grants.length, 2);
+      assert.deepEqual(out.body.revoked.groups, ['ops-team']);
+      assert.deepEqual(out.body.revoked.cliTokens, [cliKey.record.id]);
+      assert.equal(out.body.revoked.sessions, 1);
+      assert.equal(grants.list({ subject: 'user:revokee' } as never).filter((g: any) => !g.revokedAt && (g.state ?? 'active') === 'active').length, 0);
+      assert.equal(groups.listUserGroups('user:revokee').length, 0);
+      assert.equal(state.sessions.get(sid), undefined, 'sign-in sessions end');
+      const keysNow = state.keys.list({ owner: 'user:revokee', includeRevoked: true });
+      assert.ok(keysNow.find((k) => k.id === cliKey.record.id)?.revokedAt, 'the CLI login token is revoked');
+      assert.equal(keysNow.find((k) => k.id === apiKey.record.id)?.revokedAt, undefined, 'long-lived fk_ API keys stay (powerless without grants)');
+      const row = ledger.query().find((e) => e.action === 'ACCESS_REVOKED_ALL' && e.subject === 'user:revokee');
+      assert.equal(row?.actor, 'user:admin');
+      assert.equal(ledger.query().filter((e) => e.action === 'GRANT_REVOKED' && e.subject === 'user:revokee').length, 2);
+
+      // MCP parity: same function, same confirmation, and last-admin protection is the store's 409.
+      const noConfirm = await mcp('tools/call', { name: 'revoke_all_access', arguments: { id: 'user:revokee' } }, { token: TOKENS.admin });
+      assert.match(JSON.stringify(noConfirm.rpc), /confirmation_required/);
+      const listed = await mcp('tools/list', {}, { token: TOKENS.admin });
+      assert.ok(listed.rpc.result.tools.some((t: any) => t.name === 'revoke_all_access'));
+    } finally {
+      state.keys = savedKeys;
+      state.sessions = savedSessions;
     }
   });
 });
