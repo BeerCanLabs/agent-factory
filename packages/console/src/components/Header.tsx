@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { ShieldCheck, UserCheck, RefreshCw, AlertTriangle, CheckCircle, Database, Sun, Moon, Bell } from 'lucide-react';
+import { ShieldCheck, UserCheck, RefreshCw, AlertTriangle, CheckCircle, Database, Sun, Moon, Bell, LogOut } from 'lucide-react';
 import { useAuth } from '../auth/CloudflareAuth.js';
 import { useTheme } from '../context/ThemeContext.js';
-import { factoryApi } from '../api/client.js';
+import { factoryApi, signOut } from '../api/client.js';
 
 interface HeaderProps {
   onRefresh: () => void;
@@ -146,6 +146,16 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing, updateC
             (Cloudflare Zero Trust)
           </span>
         </div>
+        <button
+          type="button"
+          onClick={() => void signOut()}
+          title="Sign out"
+          aria-label="Sign out"
+          className="flex items-center space-x-1 text-xs px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950 text-slate-700 dark:text-slate-300 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/40 dark:hover:text-red-400 transition"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+          <span>Sign out</span>
+        </button>
       </div>
     </header>
   );
