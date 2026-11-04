@@ -9,6 +9,9 @@
 // Store locations come from the same env as the control plane: FACTORY_PRINCIPALS_STORE_URI, FACTORY_GRANTS_STORE_URI,
 // FACTORY_KEYS_STORE_URI, FACTORY_RECOVERY_OUTBOX_URI (s3://..., gs://... or a local path).
 import { execFile } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { ApiKeyStore, GrantStore, PrincipalStore, docBackendFromUri } from '../packages/bouncer/dist/index.js';
 import { recoverLockout } from '../packages/control-plane/dist/recover.js';
@@ -24,7 +27,7 @@ const { values: a } = parseArgs({
 
 function aws(args, input) {
   return new Promise((resolve, reject) => {
-    const child = execFile('aws', args, { maxBuffer: 1 << 20 }, (err, stdout) => (err ? reject(new Error(`aws ${args[0]} ${args[1]} failed`)) : resolve(stdout)));
+    const child = execFile('aws', args, { maxBuffer: 1 << 20 }, (err, stdout, stderr) => (err ? reject(new Error(`aws ${args[0]} ${args[1]} failed: ${String(stderr).trim().slice(0, 300)}`)) : resolve(stdout)));
     if (input !== undefined) child.stdin.end(input);
   });
 }
@@ -57,7 +60,15 @@ const out = await recoverLockout({
   email: a.email,
   reseedBreakGlass: a['reseed-break-glass'],
   writeSecret: async (plaintext) => {
-    await aws(['secretsmanager', 'put-secret-value', '--secret-id', a['secret-id'], '--secret-string', 'file:///dev/stdin', '--output', 'json'], plaintext);
+    // A 0600 file in a private temp dir, removed at once: /dev/stdin is not readable by the CLI in every container (#421).
+    const dir = mkdtempSync(join(tmpdir(), 'factory-recover-'));
+    const file = join(dir, 'secret');
+    try {
+      writeFileSync(file, plaintext, { mode: 0o600 });
+      await aws(['secretsmanager', 'put-secret-value', '--secret-id', a['secret-id'], '--secret-string', `file://${file}`, '--query', 'VersionId', '--output', 'text']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   },
 });
 console.log(JSON.stringify({ recovered: true, ...out, secretId: a['reseed-break-glass'] ? a['secret-id'] : undefined }));
