@@ -46,6 +46,14 @@ export class SessionStore {
     if (s.expiresAt <= this.now()) return void this.sessions.delete(key);
     return s;
   }
+  /** #436: end every session of these (verified) emails; returns how many ended. */
+  destroyForEmails(emails: readonly string[]): number {
+    const set = new Set(emails.map((e) => e.trim().toLowerCase()));
+    let n = 0;
+    for (const [k, s] of this.sessions) if (set.has(s.email)) n += Number(this.sessions.delete(k));
+    return n;
+  }
+
   destroy(id: string | undefined): Session | undefined {
     const s = this.get(id);
     if (id) this.sessions.delete(b64url(sha256(id)));

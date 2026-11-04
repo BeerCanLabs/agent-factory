@@ -83,6 +83,8 @@ export const factoryApi = {
   /** #434: an admin (grants.manage) adds a person; the factory assigns the user:<id>. */
   createPrincipal: (displayName: string, email: string) => request<{ principal?: PrincipalView } & Partial<PrincipalView>>('/principals', { method: 'POST', body: JSON.stringify({ displayName: displayName.trim(), emails: [email.trim().toLowerCase()] }) }),
   renamePrincipal: (id: string, displayName: string) => request<{ principal: PrincipalView }>(`/principals/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ displayName: displayName.trim() }) }),
+  /** #436: one confirmed action; ends grants, groups, sessions and CLI login tokens (API keys stay). */
+  revokeAllAccess: (id: string) => request<{ revoked: { grants: string[]; groups: string[]; cliTokens: string[]; sessions: number } }>(`/principals/${encodeURIComponent(id)}/revoke-access`, { method: 'POST', body: JSON.stringify({ confirm: id }) }),
   addPrincipalEmail: (id: string, email: string) => request<unknown>(`/principals/${encodeURIComponent(id)}/emails`, { method: 'POST', body: JSON.stringify({ email }) }),
   listGrants: () => request<{ grants: GrantView[] }>('/grants'),
   createGrant: (subject: string, role: string, scope: GrantView['scope']) => request<unknown>('/grants', { method: 'POST', body: JSON.stringify({ subject, role, scope }) }),
