@@ -183,6 +183,16 @@ function provider(state: FactoryState, id: string): IdpProvider | undefined {
 
 /** Sign-in callbacks land on the host people browse (the console), so its session cookie is set there (S12). */
 const loginBase = (state: FactoryState) => state.loginBaseUrl || state.publicBaseUrl;
+/**
+ * R13: only a verified email counts. Cloudflare Access issues a SaaS OIDC token only after it has verified the user's
+ * email itself (one-time PIN or its upstream IdP), and its id_token/userinfo omit `email_verified` (#420). So for the
+ * `cloudflare` provider only, an email without the claim is verified; an explicit false is still refused.
+ */
+export function emailVerified(idp: string, info: { email_verified?: unknown }): boolean {
+  if (info.email_verified === true || info.email_verified === 'true') return true;
+  return idp === 'cloudflare' && info.email_verified === undefined;
+}
+
 const callbackUrl = (state: FactoryState, idp: string) => `${loginBase(state)!.replace(/\/$/, '')}/api/v1/auth/${idp}/callback`;
 
 function ledger(state: FactoryState, action: 'SIGN_IN' | 'SIGN_OUT', email: string, idp: string): void {
@@ -262,7 +272,7 @@ async function finishSignIn(state: FactoryState, req: http.IncomingMessage, res:
   const info = ui?.ok ? ((await ui.json()) as { email?: unknown; email_verified?: unknown }) : {};
   const email = typeof info.email === 'string' ? info.email.trim().toLowerCase() : '';
   // R13: only a verified email counts.
-  if (!email || !(info.email_verified === true || info.email_verified === 'true')) return sendLoginPage(state, res, 403, 'Your identity provider did not confirm a verified email.'), true;
+  if (!email || !emailVerified(p.id, info)) return sendLoginPage(state, res, 403, 'Your identity provider did not confirm a verified email.'), true;
   const domain = email.slice(email.indexOf('@') + 1);
   if (p.allowedDomains?.length && !p.allowedDomains.map((d) => d.toLowerCase()).includes(domain)) return sendLoginPage(state, res, 403, 'This email domain may not sign in here.'), true;
 
