@@ -15,6 +15,12 @@ export function validNewPerson(name: string, email: string): boolean {
   return n.length > 0 && n.length <= 256 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
 
+/** #434: the Add person form is ready when there is a name (1..256) and one plausible email. */
+export function validNewPerson(name: string, email: string): boolean {
+  const n = name.trim();
+  return n.length > 0 && n.length <= 256 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+}
+
 /** S9: principals (1..N emails), domain grants and role grants; Act-As. Shown only to holders of `grants.manage`. */
 export const PeopleView: React.FC = () => {
   const { setActAs } = useAuth();
