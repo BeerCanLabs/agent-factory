@@ -18,6 +18,19 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Sign out (#427): end the factory session (the server clears the HttpOnly cookie and ledgers SIGN_OUT), then go to
+ * /login. Navigates even if the call fails, so the button never strands anyone on a page.
+ */
+export async function signOut(go: (url: string) => void = (u) => window.location.assign(u)): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/auth/logout`, { method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/json' } });
+  } catch {
+    // fall through to /login
+  }
+  go('/login');
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
   headers.set('Accept', 'application/json');
