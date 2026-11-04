@@ -90,6 +90,11 @@ describe('A2 console forwards the caller, adds no credential', () => {
     assert.equal(nav.status, 302);
     assert.equal(nav.headers.get('location'), '/login');
     assert.equal((await fetch(`http://127.0.0.1:${port}/assets/app.js`)).status, 401);
+    for (const p of ['/', '/agents', '/people']) {
+      const r = await fetch(`http://127.0.0.1:${port}${p}`, { redirect: 'manual' });
+      assert.equal(r.status, 302, `${p} without an Accept header still goes to /login`);
+      assert.equal(r.headers.get('location'), '/login');
+    }
     const ok = await fetch(`http://127.0.0.1:${port}/assets/app.js`, { headers: { 'cf-access-jwt-assertion': 'signed.jwt' } });
     assert.ok(ok.status !== 401 && ok.status !== 302, String(ok.status));
     const login = await fetch(`http://127.0.0.1:${port}/login`);
