@@ -14,6 +14,12 @@ function parseScope(v: string): GrantView['scope'] | undefined {
   return m ? { kind: m[1], id: m[2] } : undefined;
 }
 
+/** #434: the Add person form is ready when there is a name (1..256) and one plausible email. */
+export function validNewPerson(name: string, email: string): boolean {
+  const n = name.trim();
+  return n.length > 0 && n.length <= 256 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+}
+
 /** S9: principals (1..N emails), domain grants and role grants; Act-As. Shown only to holders of `grants.manage`. */
 export const PeopleView: React.FC = () => {
   const { setActAs } = useAuth();
@@ -22,6 +28,7 @@ export const PeopleView: React.FC = () => {
   const [error, setError] = useState('');
   const [form, setForm] = useState({ subject: '', role: 'viewer', scope: 'fleet' });
   const [email, setEmail] = useState<Record<string, string>>({});
+  const [person, setPerson] = useState({ name: '', email: '' });
 
   const load = async () => {
     setError('');
@@ -50,6 +57,22 @@ export const PeopleView: React.FC = () => {
       {error && <p className="text-red-600 text-xs">{error}</p>}
       <section className={box}>
         <h2 className="font-semibold mb-2">Principals</h2>
+        <form
+          className="flex gap-2 mb-2"
+          aria-label="Add person"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!validNewPerson(person.name, person.email)) return;
+            void act(async () => {
+              await factoryApi.createPrincipal(person.name, person.email);
+              setPerson({ name: '', email: '' });
+            });
+          }}
+        >
+          <input className={input} placeholder="Display name" aria-label="Display name" value={person.name} onChange={(e) => setPerson({ ...person, name: e.target.value })} />
+          <input className={input} type="email" placeholder="email@example.com" aria-label="Email" value={person.email} onChange={(e) => setPerson({ ...person, email: e.target.value })} />
+          <button type="submit" className={btn} disabled={!validNewPerson(person.name, person.email)}>Add person</button>
+        </form>
         <table className="w-full"><tbody>
           {principals.map((p) => (
             <tr key={p.id} className="border-t border-slate-100 dark:border-slate-800">

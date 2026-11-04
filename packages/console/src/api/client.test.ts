@@ -34,3 +34,20 @@ it('Sign out posts /api/v1/auth/logout with the session cookie, then lands on /l
   await signOut((u) => went.push(u));
   assert.deepEqual(went, ['/login', '/login']);
 });
+
+it('#434: Add person posts the display name and email to /api/v1/principals', async () => {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response('{"id":"user:ada","displayName":"Ada","emails":["ada@example.com"]}', { status: 201, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  await factoryApi.createPrincipal(' Ada ', 'Ada@Example.com ');
+  assert.equal(calls[0].url, '/api/v1/principals');
+  assert.equal(calls[0].init?.method, 'POST');
+  assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { displayName: 'Ada', emails: ['ada@example.com'] });
+  const { validNewPerson } = await import('../views/PeopleView.js');
+  assert.equal(validNewPerson('Ada', 'ada@example.com'), true);
+  assert.equal(validNewPerson('', 'ada@example.com'), false);
+  assert.equal(validNewPerson('Ada', 'not-an-email'), false);
+  assert.equal(validNewPerson('x'.repeat(257), 'ada@example.com'), false);
+});
