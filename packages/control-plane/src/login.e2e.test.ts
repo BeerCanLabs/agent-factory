@@ -137,7 +137,9 @@ describe('S12: login page, OAuth state/PKCE, sessions (#362)', { concurrency: fa
     const c = sessionCookie(cb);
     const who = await get('/api/v1/whoami', { cookie: c });
     assert.equal(who.status, 200);
-    assert.equal(((await who.json()) as { actor: string }).actor, 'user:stephanie');
+    const whoBody = (await who.json()) as { actor: string; signedInWith?: string };
+    assert.equal(whoBody.actor, 'user:stephanie');
+    assert.equal(whoBody.signedInWith, 'oidc', 'whoami names the IdP of this session (#432)');
     assert.equal((await get('/ui', { cookie: c })).status, 200);
     const rows = ledger.query() as Array<{ action?: string; actor?: string }>;
     assert.ok(rows.some((r) => r.action === 'SIGN_IN' && r.actor === 'oidc:stephanie@example.com'));

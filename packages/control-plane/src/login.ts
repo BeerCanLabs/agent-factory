@@ -131,6 +131,11 @@ export function sessionEmail(state: FactoryState, req: http.IncomingMessage): st
   return s.email;
 }
 
+/** The IdP of the caller's live factory session, if that is how they signed in (#432). */
+export function sessionIdp(state: FactoryState, req: http.IncomingMessage): IdpKind | undefined {
+  return sessionEmail(state, req) ? state.sessions?.get(cookieValue(req, SESSION_COOKIE))?.idp : undefined;
+}
+
 /** The session verifier: a live factory session is a verified email with zero claim-derived roles (D2). */
 export function verifySession(state: FactoryState, req: http.IncomingMessage): AuthResult {
   const email = sessionEmail(state, req);
