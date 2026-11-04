@@ -199,7 +199,10 @@ export async function handleLoginRoutes(state: FactoryState, req: http.IncomingM
     if (id && state.sessions?.get(id) && !sessionEmail(state, req)) return json(res, 403, { error: 'cross_origin' }), true;
     const s = state.sessions?.destroy(id);
     if (s) ledger(state, 'SIGN_OUT', s.email, s.idp);
-    res.setHeader('set-cookie', cookie('', 0));
+    // Also expire a Cloudflare Access cookie on this host (#427): the console host used to sit behind Access, and a
+    // browser still holding CF_Authorization stayed signed in as cloudflare:<email> after the factory session ended.
+    res.setHeader('set-cookie', [cookie('', 0), 'CF_Authorization=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0']);
+    res.setHeader('clear-site-data', '"cookies"');
     return json(res, 200, { ok: true }), true;
   }
 
