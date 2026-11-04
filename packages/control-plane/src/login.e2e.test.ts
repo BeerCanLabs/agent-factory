@@ -162,6 +162,16 @@ describe('S12: login page, OAuth state/PKCE, sessions (#362)', { concurrency: fa
     assert.equal((await signIn({ email: 'stephanie@example.com', email_verified: true }, { otherBrowser: true })).status, 400);
   });
 
+  it('S12: with a login base (the console host) the IdP redirect_uri uses it, so the cookie lands where people browse', async () => {
+    state.loginBaseUrl = 'https://console.example.test';
+    try {
+      const start = await get('/api/v1/auth/oidc/start');
+      assert.equal(new URL(start.headers.get('location')!).searchParams.get('redirect_uri'), 'https://console.example.test/api/v1/auth/oidc/callback');
+    } finally {
+      state.loginBaseUrl = undefined;
+    }
+  });
+
   it('logout ends the session, clears the cookie and ledgers SIGN_OUT; a cross-origin cookie POST is refused', async () => {
     const c = sessionCookie(await signIn({ email: 'stephanie@example.com', email_verified: true }));
     const cross = await fetch(`http://127.0.0.1:${port}/api/v1/auth/logout`, { method: 'POST', headers: { cookie: c, origin: 'https://evil.test' } });

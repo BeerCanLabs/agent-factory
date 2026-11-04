@@ -205,6 +205,8 @@ export type FactoryState = {
   connections?: ConnectionKeymaster;
   /** The factory's public origin for browser flows (OAuth consent callbacks). From the landing zone; never hard-coded. */
   publicBaseUrl?: string;
+  /** S12: origin for sign-in callbacks when people browse a different host than publicBaseUrl (the console). */
+  loginBaseUrl?: string;
   /** Signs OAuth consent state. Defaults to the callback signing key. */
   connectionStateKey?: string;
   /** GitHub API and web origins for app setup (E5.1). Default to github.com; tests point them at fakes. */
