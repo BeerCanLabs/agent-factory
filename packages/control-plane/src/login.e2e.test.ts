@@ -179,8 +179,15 @@ describe('S12: login page, OAuth state/PKCE, sessions (#362)', { concurrency: fa
     assert.equal((await get('/api/v1/whoami', { cookie: c })).status, 200, 'a refused cross-origin logout leaves the session');
     const out = await fetch(`http://127.0.0.1:${port}/api/v1/auth/logout`, { method: 'POST', headers: { cookie: c, origin: BASE } });
     assert.equal(out.status, 200);
-    assert.match(out.headers.get('set-cookie') ?? '', /Max-Age=0/);
+    const cleared = out.headers.getSetCookie();
+    assert.ok(cleared.some((h) => /^factory_session=;.*Path=\/;.*Max-Age=0/.test(h)), 'the session cookie is expired with the attributes it was set with');
+    assert.ok(cleared.some((h) => /^CF_Authorization=;.*Path=\/;.*Max-Age=0/.test(h)), 'a stale Access cookie on the host is expired too (#427)');
+    assert.equal(out.headers.get('clear-site-data'), '"cookies"');
+    // Regression (#427): replaying the old cookie after sign-out is refused everywhere, not just on whoami.
     assert.equal((await get('/api/v1/whoami', { cookie: c })).status, 401);
+    for (const path of ['/api/v1/principals', '/api/v1/keys', '/api/v1/setup/status']) {
+      assert.equal((await get(path, { cookie: c })).status, 401, `${path} with the signed-out cookie`);
+    }
     assert.ok((ledger.query() as Array<{ action?: string }>).some((r) => r.action === 'SIGN_OUT'));
   });
 
