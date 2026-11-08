@@ -590,4 +590,53 @@ describe('subscription connections: refresh, rotation, reuse, redaction', () => 
     assert.equal((await c.km.get(id))!.status, 'active');
     assert.ok((await c.km.accessToken(id)).ok);
   });
+
+  it('invalidate / accessToken({ invalidate: true }) bypasses both the in-memory cache and the stored unexpired access token', async () => {
+    const c = setup();
+    const r = await signIn(c, 'xai-subscription');
+    const id = (r as any).out.connection.id as string;
+    // Sign-in token is unexpired in both memory and storage.
+    const t0 = await c.km.accessToken(id);
+    assert.ok(t0.ok && t0.accessToken === 'xai-access-0-aaaaaaaa');
+    assert.equal(c.vendors.st.xai.refreshCount, 0);
+
+    // Force invalidation while still unexpired: must run a single refresh rather than returning stored `xai-access-0-aaaaaaaa`.
+    const t1 = await c.km.accessToken(id, { invalidate: true });
+    assert.ok(t1.ok && t1.accessToken === 'xai-access-r1-aaaaaaaa');
+    assert.equal(c.vendors.st.xai.refreshCount, 1);
+    assert.ok(c.secretValues.has('xai-access-r1-aaaaaaaa'));
+
+    // Subsequent normal calls use the refreshed cached token without refreshing again.
+    const t2 = await c.km.accessToken(id);
+    assert.ok(t2.ok && t2.accessToken === 'xai-access-r1-aaaaaaaa');
+    assert.equal(c.vendors.st.xai.refreshCount, 1);
+
+    // Even on a freshly constructed Keymaster (cold cache, unexpired stored access token), `invalidate(id)` forces a refresh.
+    const restarted = new SubscriptionKeymaster({ providers: [c.mem.provider], ledger: c.ledger as any, secretValues: c.secretValues, fetch: c.vendors.fn, now: () => 1_700_000_010_000 });
+    restarted.invalidate(id);
+    const t3 = await restarted.accessToken(id);
+    assert.ok(t3.ok && t3.accessToken === 'xai-access-r2-aaaaaaaa');
+    assert.equal(c.vendors.st.xai.refreshCount, 2);
+  });
+
+  it('accessToken({ invalidate: true }) marks needs_reconsent on invalid_grant and keeps invalidation across transient 503', async () => {
+    const c = setup();
+    const r = await signIn(c, 'openai-subscription');
+    const id = (r as any).out.connection.id as string;
+    // Transient 503 during forced refresh does not hand back the rejected stored token on the next call.
+    c.vendors.st.openai.refresh = () => json(503, { error: 'server_error' });
+    const down = await c.km.accessToken(id, { invalidate: true });
+    assert.ok(!down.ok && down.error === 'connection_unavailable');
+    assert.equal(c.vendors.st.openai.refreshCount, 1);
+    // Next call still refreshes instead of resurrecting `oa-access-0-aaaaaaaa`, and if vendor returns invalid_grant, marks needs_reconsent.
+    c.vendors.st.openai.refresh = () => json(400, { error: 'invalid_grant' });
+    const refused = await c.km.accessToken(id);
+    assert.ok(!refused.ok && refused.error === 'needs_reconsent');
+    assert.equal(c.vendors.st.openai.refreshCount, 2);
+    assert.equal((await c.km.get(id))!.status, 'needs_reconsent');
+    // Once marked, even `{ invalidate: true }` never retries the dead refresh token.
+    const again = await c.km.accessToken(id, { invalidate: true });
+    assert.ok(!again.ok && again.error === 'needs_reconsent');
+    assert.equal(c.vendors.st.openai.refreshCount, 2);
+  });
 });

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import { createGatekeeperEgress, type ControlClient, type LimitWindowView, type Policy, type RunContext } from './gatekeeper-egress.js';
-import { parseModelCatalog, type ModelAdapter, type SubscriptionTokenResult } from '@beercanlabs/factory-executive';
+import { ModelUpstreamError, parseModelCatalog, type ModelAdapter, type SubscriptionTokenResult } from '@beercanlabs/factory-executive';
 
 // DESIGN_AUTHORITY.md TSK-327 (§6.9 M5(3), (6), (7)): subscription models on the factory model API, against a fake vendor and a
 // fake control plane whose window store is shared by every egress instance (as the real one is).
@@ -75,6 +75,7 @@ const catalog = parseModelCatalog(
     'gpt-sub': { provider: 'openai-subscription', id: 'gpt-5-codex', credentialMode: 'subscription', connection: 'c-openai', templateId: 'openai-subscription', price: { inputPerMTok: 0, outputPerMTok: 0 } },
     'grok-sub-2': { provider: 'xai-subscription', id: 'grok-3', credentialMode: 'subscription', connection: 'c-xai', templateId: 'xai-subscription', price: { inputPerMTok: 0, outputPerMTok: 0 } },
     'api-model': { provider: 'mock', id: 'mock-1', price: { inputPerMTok: 1, outputPerMTok: 2 } },
+    'api-bad': { provider: 'mock', id: 'mock-503', price: { inputPerMTok: 1, outputPerMTok: 2 } },
   }),
 );
 
@@ -85,8 +86,10 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
   const ledger: Array<Record<string, any>> = [];
   const vendor: VendorSeen[] = [];
   const tokenCalls: string[] = [];
+  const tokenReqs: Array<{ connection: string; invalidate?: boolean }> = [];
   const failoverCalls: any[] = [];
   let tokenResult: Record<string, SubscriptionTokenResult> = {};
+  let onTokenReq: ((req: { connection: string; invalidate?: boolean }) => SubscriptionTokenResult | undefined) | undefined;
   let vendorReply: (seen: VendorSeen) => Response = () => ok('from vendor');
   let ctx: RunContext;
   let runSeq = 0;
@@ -118,7 +121,8 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
   }) as typeof fetch;
 
   const mock: ModelAdapter = {
-    async complete() {
+    async complete(entry) {
+      if (entry.id === 'mock-503') throw new ModelUpstreamError(503, 'upstream_error', 'api-bad down', 503);
       apiCalls++;
       return { content: 'from api', finishReason: 'stop', usage: { input: 5, output: 2 } };
     },
@@ -138,7 +142,8 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
     },
     async subscriptionToken(req) {
       tokenCalls.push(req.connection);
-      return tokenResult[req.connection] ?? { ok: false, kind: 'unavailable' };
+      tokenReqs.push(req);
+      return onTokenReq?.(req) ?? tokenResult[req.connection] ?? { ok: false, kind: 'unavailable' };
     },
     ...(shared
       ? {
@@ -148,7 +153,7 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
       : {}),
   });
 
-  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['models'], models: ['grok-sub', 'gpt-sub', 'grok-sub-2', 'api-model'], ...p });
+  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['models'], models: ['grok-sub', 'gpt-sub', 'grok-sub-2', 'api-model', 'api-bad'], ...p });
   const chatBody = (extra: Record<string, unknown> = {}) => ({ model: 'whatever', messages: [{ role: 'user', content: 'hello' }], ...extra });
   const ask = (p = port, body: unknown = chatBody()) => call(p, '/models/v1/chat/completions', { token: runToken, body });
   const settle = () => new Promise((r) => setTimeout(r, 30));
@@ -193,11 +198,13 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
     ledger.length = 0;
     vendor.length = 0;
     tokenCalls.length = 0;
+    tokenReqs.length = 0;
     failoverCalls.length = 0;
     windows.windows.clear();
     windows.lastProbe.clear();
     windows.rows.length = 0;
     apiCalls = 0;
+    onTokenReq = undefined;
     tokenResult = {
       'c-xai': { ok: true, accessToken: XAI_TOKEN, templateId: 'xai-subscription' },
       'c-openai': { ok: true, accessToken: OPENAI_TOKEN, templateId: 'openai-subscription' },
@@ -491,6 +498,79 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
       assert.equal(failoverCalls[0].toModel, 'api-model');
     });
 
+    it('mixed walk [503, skip, ok]: candidate 0 failed ordinarily, so currentModel is persisted via modelFailover with candidate 0\'s reason', async () => {
+      // [api-bad (503), grok-sub (limit skip), api-model (ok)]
+      vendorReply = () => limitIn(3600);
+      await setRun('donna', policy({ currentModel: 'api-bad', primaryModel: 'grok-sub', secondaryModel: 'api-model' }));
+      const res = await ask();
+      assert.equal(res.status, 200, res.text);
+      assert.equal(res.json().choices[0].message.content, 'from api');
+      await settle();
+      assert.equal(failoverCalls.length, 1, 'candidate 0 failed for a non-skip reason: M2 persistent failback runs');
+      assert.deepEqual(
+        [failoverCalls[0].fromModel, failoverCalls[0].toModel, failoverCalls[0].reason],
+        ['api-bad', 'api-model', 'upstream_error'],
+      );
+      assert.equal(ctx.policy.currentModel, 'api-model');
+    });
+
+    it('mixed walk [skip, 503, ok]: candidate 0 was skipped, so currentModel stays unchanged and modelFailover is bypassed', async () => {
+      // [grok-sub (limit skip), api-bad (503), api-model (ok)]
+      vendorReply = () => limitIn(3600);
+      await setRun('donna', policy({ currentModel: 'grok-sub', primaryModel: 'api-bad', secondaryModel: 'api-model' }));
+      const res = await ask();
+      assert.equal(res.status, 200, res.text);
+      assert.equal(res.json().choices[0].message.content, 'from api');
+      await settle();
+      assert.equal(failoverCalls.length, 0, 'candidate 0 was skipped: temporary failover never calls modelFailover');
+      assert.equal(ctx.policy.currentModel, 'grok-sub');
+      const fo = actions('MODEL_FAILOVER');
+      assert.equal(fo.length, 1);
+      assert.deepEqual([fo[0].requestedModel, fo[0].model, fo[0].failoverReason], ['grok-sub', 'api-model', 'subscription_limit_reached']);
+    });
+
+    it('vendor 401 invalidates once: retries with fresh token (redacting it), or skips cleanly on needs_reconsent instead of 502', async () => {
+      const freshToken = 'xai-access-fresh-eeeeeeee'; // secret-scan:allow (fake fixture)
+      let calls = 0;
+      vendorReply = () => (calls++ === 0 ? new Response('{"error":"unauthorized"}', { status: 401 }) : ok('after refresh'));
+      onTokenReq = (req) => (req.invalidate ? { ok: true, accessToken: freshToken, templateId: 'xai-subscription' } : undefined);
+      const res = await ask();
+      assert.equal(res.status, 200, res.text);
+      assert.equal(res.json().choices[0].message.content, 'after refresh');
+      assert.deepEqual(tokenReqs, [{ connection: 'c-xai' }, { connection: 'c-xai', invalidate: true }]);
+      assert.equal(vendor[1].headers.authorization, `Bearer ${freshToken}`);
+
+      // Fresh token is in the egress redaction set too: if a subsequent call fails with it in the upstream message, it is scrubbed.
+      tokenResult['c-xai'] = { ok: true, accessToken: freshToken, templateId: 'xai-subscription' };
+      onTokenReq = undefined;
+      vendorReply = () => new Response(`leaked ${freshToken}`, { status: 500 });
+      await setRun('donna', policy({ models: ['grok-sub'], currentModel: 'grok-sub', primaryModel: 'grok-sub' }));
+      const failed = await ask();
+      await settle();
+      assert.equal(failed.text.includes(freshToken), false);
+      assert.equal(JSON.stringify(ledger).includes(freshToken), false);
+
+      // And when invalidated refresh hits invalid_grant (needs_reconsent), failback skips cleanly (and pinned returns 503 subscription_needs_reconsent) rather than 502.
+      ledger.length = 0;
+      tokenReqs.length = 0;
+      tokenResult['c-xai'] = { ok: true, accessToken: XAI_TOKEN, templateId: 'xai-subscription' };
+      onTokenReq = (req) => (req.invalidate ? { ok: false, kind: 'needs_reconsent', reason: 'invalid_grant' } : undefined);
+      vendorReply = () => new Response('{"error":"unauthorized"}', { status: 401 });
+      await setRun('donna', policy({ currentModel: 'grok-sub', primaryModel: 'api-model' }));
+      const skippedRes = await ask();
+      assert.equal(skippedRes.status, 200, skippedRes.text);
+      assert.equal(skippedRes.json().choices[0].message.content, 'from api');
+      await settle();
+      assert.equal(failoverCalls.length, 0);
+      assert.equal(actions('MODEL_FAILOVER')[0]?.failoverReason, 'subscription_needs_reconsent');
+
+      // Pinned run surfaces 503 subscription_needs_reconsent (not 502) when 401 triggers invalid_grant on another egress instance.
+      await setRun('donna', policy({ currentModel: 'api-model' }), { model: 'grok-sub' });
+      const pinnedRes = await ask(port2);
+      assert.equal(pinnedRes.status, 503, pinnedRes.text);
+      assert.equal(pinnedRes.json().error, 'subscription_needs_reconsent');
+    });
+
     it('a restart or another instance sees an open window: a fresh egress with the same store skips it', async () => {
       vendorReply = () => limitIn(3600);
       await ask();
@@ -546,9 +626,16 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
       assert.equal(vendor[0].url, 'https://api.x.ai/v1/models');
     });
 
-    it('a failed fetch is a 502 that tells the caller to retire nothing; a needs-re-consent connection is a 409', async () => {
+    it('a failed fetch is a 502 that tells the caller to retire nothing; a needs-re-consent connection is a 409 (including on vendor 401 -> invalid_grant)', async () => {
       vendorReply = () => new Response('x', { status: 503 });
       assert.equal((await disc('c-xai')).status, 502);
+      // Vendor 401 during discovery invalidates once: if Keymaster hits invalid_grant, returns 409 subscription_needs_reconsent instead of 502.
+      vendorReply = () => new Response('{}', { status: 401 });
+      onTokenReq = (req) => (req.invalidate ? { ok: false, kind: 'needs_reconsent', reason: 'invalid_grant' } : undefined);
+      const res401 = await disc('c-xai');
+      assert.equal(res401.status, 409, res401.text);
+      assert.equal(res401.json().error, 'subscription_needs_reconsent');
+      onTokenReq = undefined;
       tokenResult['c-xai'] = { ok: false, kind: 'needs_reconsent' };
       const res = await disc('c-xai');
       assert.equal(res.status, 409);

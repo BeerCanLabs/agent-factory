@@ -162,7 +162,8 @@ export async function handleSubscriptionWindows(state: FactoryState, req: http.I
   if (one && req.method === 'PUT') {
     if (!(await requirePrivilege(req, res, state, 'egress.subscription-windows.write'))) return true;
     const connection = decodeURIComponent(one[1]);
-    if (!(await getSubscriptions(state).get(connection))) return json(res, 404, { error: 'unknown_connection' }), true;
+    const sub = await getSubscriptions(state).get(connection);
+    if (!sub) return json(res, 404, { error: 'unknown_connection' }), true;
     const b = await readJson(req);
     const windows = getSubscriptionWindows(state);
     if (b.action === 'open') {
@@ -178,6 +179,8 @@ export async function handleSubscriptionWindows(state: FactoryState, req: http.I
       return true;
     }
     if (b.action === 'probe') {
+      // M5(6): while a connection needs re-consent, no probe runs and its hourly probe slot is not consumed.
+      if (sub.status !== 'active') return json(res, 200, { granted: false }), true;
       json(res, 200, { granted: windows.claimProbe(connection) });
       return true;
     }

@@ -236,6 +236,63 @@ describe('subscription adapter', () => {
     await subscriptionResponses({ token: async () => tokens['c-xai'], version: '1', fetch: f, onToken: (t) => got.push(t) }).complete(xaiEntry, chat());
     assert.deepEqual(got, [XAI_TOKEN]);
   });
+
+  it('on vendor 401, invalidates the token once, remembers the fresh token for redaction, and retries once', async () => {
+    const freshToken = 'xai-access-fresh-cccccccc'; // secret-scan:allow (fake fixture)
+    const tokenCalls: Array<{ c: string; invalidate?: boolean }> = [];
+    const redacted: string[] = [];
+    let attempt = 0;
+    const { fetch: f, seen } = fake(() => {
+      if (attempt++ === 0) return new Response(JSON.stringify({ error: 'invalid_token' }), { status: 401 });
+      return sse([{ type: 'response.completed', response: { output: [{ type: 'message', content: [{ type: 'output_text', text: 'retried ok' }] }], usage: { input_tokens: 3, output_tokens: 2 } } }]);
+    });
+    const a = subscriptionResponses({
+      token: async (c, opts) => {
+        tokenCalls.push({ c, invalidate: opts?.invalidate });
+        return opts?.invalidate ? { ok: true, accessToken: freshToken, templateId: 'xai-subscription' } : tokens['c-xai'];
+      },
+      version: '1.0.0',
+      fetch: f,
+      onToken: (t) => redacted.push(t),
+    });
+    const out = await a.complete(xaiEntry, chat());
+    assert.equal(out.content, 'retried ok');
+    assert.deepEqual(tokenCalls, [{ c: 'c-xai', invalidate: undefined }, { c: 'c-xai', invalidate: true }]);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[0].headers.authorization, `Bearer ${XAI_TOKEN}`);
+    assert.equal(seen[1].headers.authorization, `Bearer ${freshToken}`);
+    assert.deepEqual(redacted, [XAI_TOKEN, freshToken]);
+  });
+
+  it('on vendor 401, surfaces SubscriptionNeedsReconsentError when invalidated refresh hits invalid_grant, and never refreshes twice on repeated 401', async () => {
+    const { fetch: f, seen } = fake(() => new Response('{"error":"unauthorized"}', { status: 401 }));
+    const reconsent = subscriptionResponses({
+      token: async (_c, opts) => (opts?.invalidate ? { ok: false, kind: 'needs_reconsent', reason: 'invalid_grant' } : tokens['c-xai']),
+      version: '1.0.0',
+      fetch: f,
+    });
+    await assert.rejects(reconsent.complete(xaiEntry, chat()), (e: unknown) => e instanceof SubscriptionNeedsReconsentError && e.connection === 'c-xai');
+    assert.equal(seen.length, 1, 'no retry when refresh reports needs_reconsent');
+
+    // Repeated 401 even with a fresh token: refreshes only once and redacts both tokens.
+    const freshToken = 'xai-access-fresh-dddddddd'; // secret-scan:allow (fake fixture)
+    let tokCount = 0;
+    const g = fake(() => new Response(`denied ${XAI_TOKEN} and ${freshToken}`, { status: 401 }));
+    const still401 = subscriptionResponses({
+      token: async (_c, opts) => {
+        tokCount++;
+        return { ok: true, accessToken: opts?.invalidate ? freshToken : XAI_TOKEN, templateId: 'xai-subscription' };
+      },
+      version: '1.0.0',
+      fetch: g.fetch,
+    });
+    await assert.rejects(
+      still401.complete(xaiEntry, chat()),
+      (e: unknown) => e instanceof ModelUpstreamError && e.upstreamStatus === 401 && !e.message.includes(XAI_TOKEN) && !e.message.includes(freshToken),
+    );
+    assert.equal(tokCount, 2, 'at most one invalidated refresh');
+    assert.equal(g.seen.length, 2);
+  });
 });
 
 describe('account id claim', () => {
@@ -310,9 +367,32 @@ describe('discovery (M5(4a))', () => {
     }
   });
 
-  it('a needs-re-consent connection is not asked', async () => {
+  it('a needs-re-consent connection is not asked, and a 401 on discovery invalidates once (retrying with fresh token or surfacing needs_reconsent)', async () => {
     const { fetch: f, seen } = fake(() => new Response('{}'));
     await assert.rejects(discoverSubscriptionModels({ token: async () => ({ ok: false, kind: 'needs_reconsent' }), version: '1', fetch: f }, 'c-xai'), SubscriptionNeedsReconsentError);
     assert.equal(seen.length, 0);
+
+    // 401 -> invalidate -> fresh token succeeds
+    const freshToken = jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct-123' }, jti: 'fresh' });
+    let n = 0;
+    const d1 = fake(() => (n++ === 0 ? new Response('{}', { status: 401 }) : new Response(JSON.stringify({ models: [{ slug: 'gpt-5-codex' }] }), { status: 200 })));
+    const out = await discoverSubscriptionModels({
+      token: async (_c, opts) => ({ ok: true, accessToken: opts?.invalidate ? freshToken : OPENAI_TOKEN, templateId: 'openai-subscription' }),
+      version: '1',
+      fetch: d1.fetch,
+    }, 'c-openai');
+    assert.deepEqual(out, { ok: true, models: [{ id: 'gpt-5-codex' }] });
+    assert.equal(d1.seen[1].headers.authorization, `Bearer ${freshToken}`);
+
+    // 401 -> invalidate -> needs_reconsent throws SubscriptionNeedsReconsentError
+    const d2 = fake(() => new Response('{}', { status: 401 }));
+    await assert.rejects(
+      discoverSubscriptionModels({
+        token: async (_c, opts) => (opts?.invalidate ? { ok: false, kind: 'needs_reconsent' } : tokens['c-xai']),
+        version: '1',
+        fetch: d2.fetch,
+      }, 'c-xai'),
+      SubscriptionNeedsReconsentError,
+    );
   });
 });

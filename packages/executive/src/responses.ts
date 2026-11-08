@@ -44,7 +44,7 @@ export class SubscriptionLimitError extends ModelUpstreamError {
 
 export type ResponsesAdapterOptions = {
   /** The connection's current access token from the Keymaster (through the control plane), per call. */
-  token(connection: string): Promise<SubscriptionTokenResult>;
+  token(connection: string, opts?: { invalidate?: boolean }): Promise<SubscriptionTokenResult>;
   /** The factory version, for the template's `User-Agent`. */
   version: string;
   fetch?: typeof fetch;
@@ -255,10 +255,14 @@ export function subscriptionInferenceUrl(template: SubscriptionTemplate): string
   return new URL(template.inference.path, template.inference.upstream).toString();
 }
 
-async function resolveToken(opts: ResponsesAdapterOptions, connection: string): Promise<{ tok: Extract<SubscriptionTokenResult, { ok: true }>; template: SubscriptionTemplate }> {
+async function resolveToken(
+  opts: ResponsesAdapterOptions,
+  connection: string,
+  tokenOpts?: { invalidate?: boolean },
+): Promise<{ tok: Extract<SubscriptionTokenResult, { ok: true }>; template: SubscriptionTemplate }> {
   let tok: SubscriptionTokenResult;
   try {
-    tok = await opts.token(connection);
+    tok = await (tokenOpts ? opts.token(connection, tokenOpts) : opts.token(connection));
   } catch {
     throw new ModelUpstreamError(502, 'subscription_token_unavailable', 'the subscription token could not be fetched');
   }
@@ -282,22 +286,39 @@ export function subscriptionResponses(opts: ResponsesAdapterOptions): ModelAdapt
         throw new ModelUpstreamError(503, 'subscription_unconfigured', 'the catalog entry names no subscription connection');
       }
       const connection = entry.connection;
-      const { tok, template } = await resolveToken(opts, connection);
-      const headers = { ...subscriptionHeaders(template, tok, opts.version), 'Content-Type': 'application/json' };
-      let res: Response;
-      try {
-        res = await doFetch(subscriptionInferenceUrl(template), {
-          method: 'POST',
-          // GAP-182: the token is bound to the template's inference host; never follow a redirect elsewhere with it.
-          redirect: 'error',
-          headers,
-          body: JSON.stringify(toResponsesRequest(entry.id, req, template.vendor)),
-          signal: AbortSignal.timeout(opts.timeoutMs ?? 300_000),
-        });
-      } catch (err) {
-        throw new ModelUpstreamError(502, 'upstream_unreachable', err instanceof Error ? err.message.split(tok.accessToken).join('***') : String(err));
+      const seenTokens: string[] = [];
+      const redact = (s: string): string => {
+        let out = s;
+        for (const t of seenTokens) if (t) out = out.split(t).join('***');
+        return out;
+      };
+      let { tok, template } = await resolveToken(opts, connection);
+      seenTokens.push(tok.accessToken);
+      const sendOnce = async () => {
+        const headers = { ...subscriptionHeaders(template, tok, opts.version), 'Content-Type': 'application/json' };
+        try {
+          return await doFetch(subscriptionInferenceUrl(template), {
+            method: 'POST',
+            // GAP-182: the token is bound to the template's inference host; never follow a redirect elsewhere with it.
+            redirect: 'error',
+            headers,
+            body: JSON.stringify(toResponsesRequest(entry.id, req, template.vendor)),
+            signal: AbortSignal.timeout(opts.timeoutMs ?? 300_000),
+          });
+        } catch (err) {
+          throw new ModelUpstreamError(502, 'upstream_unreachable', redact(err instanceof Error ? err.message : String(err)));
+        }
+      };
+      let res = await sendOnce();
+      let text = await res.text();
+      // A vendor 401 may mean an access token revoked server-side before its local expiry: invalidate once so Keymaster
+      // runs a single refresh (surfacing `SubscriptionNeedsReconsentError` on `invalid_grant`, or retrying once with the fresh token).
+      if (res.status === 401 && !recogniseSubscriptionError(template, 401, (() => { try { return JSON.parse(text); } catch { return undefined; } })(), now())) {
+        ({ tok, template } = await resolveToken(opts, connection, { invalidate: true }));
+        seenTokens.push(tok.accessToken);
+        res = await sendOnce();
+        text = await res.text();
       }
-      const text = await res.text();
       const contentType = res.headers.get('content-type') ?? '';
       const asStream = contentType.includes('text/event-stream');
       let json: unknown;
@@ -316,18 +337,18 @@ export function subscriptionResponses(opts: ResponsesAdapterOptions): ModelAdapt
         const parsed = json ?? (() => { try { return JSON.parse(text); } catch { return undefined; } })();
         const errObj = (parsed as { error?: { message?: unknown } | string; detail?: unknown } | undefined);
         const msg = typeof errObj?.error === 'object' ? errObj.error?.message : typeof errObj?.error === 'string' ? errObj.error : errObj?.detail;
-        return fail(res.status, parsed, String(msg ?? text).slice(0, 500).split(tok.accessToken).join('***'), res.status);
+        return fail(res.status, parsed, redact(String(msg ?? text).slice(0, 500)), res.status);
       }
       if (asStream) {
         const read = readResponsesStream(text);
         if ('failure' in read) {
           const f = read.failure;
-          return fail(f.status, f.body, String(f.message ?? f.code ?? 'stream failed').slice(0, 500), f.status ?? 200);
+          return fail(f.status, f.body, redact(String(f.message ?? f.code ?? 'stream failed').slice(0, 500)), f.status ?? 200);
         }
         return fromResponses(read.response, read.text);
       }
       const body = (json ?? {}) as ResponsesObject & { error?: unknown };
-      if (body.error && typeof body.error === 'object') return fail(undefined, body, String((body.error as { message?: unknown }).message ?? 'upstream error').slice(0, 500), 200);
+      if (body.error && typeof body.error === 'object') return fail(undefined, body, redact(String((body.error as { message?: unknown }).message ?? 'upstream error').slice(0, 500)), 200);
       return fromResponses(body);
     },
   };
@@ -354,17 +375,34 @@ const CODEX_CLIENT_VERSIONS = ['99.0.0', '0.0.0'];
  */
 export async function discoverSubscriptionModels(opts: ResponsesAdapterOptions, connection: string): Promise<SubscriptionDiscovery> {
   const doFetch = opts.fetch ?? fetch;
-  const { tok, template } = await resolveToken(opts, connection);
-  const headers = subscriptionHeaders(template, tok, opts.version);
+  let { tok, template } = await resolveToken(opts, connection);
+  let headers = subscriptionHeaders(template, tok, opts.version);
   const base = new URL(template.aiProvider.discoveryPath, template.inference.upstream);
   const urls = template.vendor === 'openai' ? CODEX_CLIENT_VERSIONS.map((v) => `${base.toString()}?client_version=${v}`) : [base.toString()];
   let last: { status: number } | undefined;
+  let retried401 = false;
   for (const url of urls) {
     let res: Response;
     try {
       res = await doFetch(url, { method: 'GET', redirect: 'error', headers, signal: AbortSignal.timeout(opts.timeoutMs ?? 15_000) });
     } catch {
       return { ok: false, listAvailable: true, reason: 'fetch_failed', message: 'the vendor could not be reached' };
+    }
+    if (res.status === 401 && !retried401) {
+      retried401 = true;
+      await res.text().catch(() => '');
+      try {
+        ({ tok, template } = await resolveToken(opts, connection, { invalidate: true }));
+      } catch (err) {
+        if (err instanceof SubscriptionNeedsReconsentError) throw err;
+        return { ok: false, listAvailable: true, reason: 'fetch_failed', message: err instanceof Error ? err.message : 'the subscription token could not be fetched' };
+      }
+      headers = subscriptionHeaders(template, tok, opts.version);
+      try {
+        res = await doFetch(url, { method: 'GET', redirect: 'error', headers, signal: AbortSignal.timeout(opts.timeoutMs ?? 15_000) });
+      } catch {
+        return { ok: false, listAvailable: true, reason: 'fetch_failed', message: 'the vendor could not be reached' };
+      }
     }
     last = { status: res.status };
     if (res.status >= 500 || res.status === 429) return { ok: false, listAvailable: true, reason: 'fetch_failed', message: `the vendor answered ${res.status}` };

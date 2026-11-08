@@ -153,7 +153,7 @@ export type ControlClient = {
    * Keymaster through the control plane. It goes only to the connection template's inference host. Absent: subscription
    * entries cannot be served.
    */
-  subscriptionToken?(req: { connection: string }): Promise<SubscriptionTokenResult>;
+  subscriptionToken?(req: { connection: string; invalidate?: boolean }): Promise<SubscriptionTokenResult>;
   /**
    * M5(7a): the open plan-limit windows, held by the control plane so every egress instance and restart sees them.
    * Absent: this instance keeps its own windows in memory (single instance only).
@@ -596,8 +596,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   // The Responses adapter asks the Keymaster (through the control plane) for the connection's access token on every call
   // and sends it only to the connection template's inference host. A subscription entry never reaches an API-key adapter.
   const subscriptionOptions = {
-    token: async (connection: string): Promise<SubscriptionTokenResult> =>
-      opts.control.subscriptionToken ? opts.control.subscriptionToken({ connection }) : { ok: false, kind: 'unavailable', message: 'no subscription token source' },
+    token: async (connection: string, tokenOpts?: { invalidate?: boolean }): Promise<SubscriptionTokenResult> =>
+      opts.control.subscriptionToken
+        ? opts.control.subscriptionToken({ connection, ...(tokenOpts?.invalidate ? { invalidate: true } : {}) })
+        : { ok: false, kind: 'unavailable', message: 'no subscription token source' },
     version: opts.version ?? '0.0.0',
     fetch: opts.modelFetch,
     onToken: (t: string) => {
@@ -1290,6 +1292,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       body: Record<string, unknown>;
       reason: string;
       isDeny?: boolean;
+      isSkip?: boolean;
       detail?: Record<string, unknown>;
       outcome?: 'error' | 'timeout';
     };
@@ -1374,7 +1377,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
               return deny(res, ctx, route, skip.reason === 'subscription_limit_reached' ? 429 : 503, skip.reason, { model: candidate, ...(skip.resetAt ? { resetAt: skip.resetAt } : {}) });
             }
             skipped.push(skip.reason);
-            failures.push({ status: skip.reason === 'subscription_limit_reached' ? 429 : 503, body: { error: skip.reason, model: candidate, ...(skip.resetAt ? { resetAt: skip.resetAt } : {}) }, reason: skip.reason });
+            failures.push({ status: skip.reason === 'subscription_limit_reached' ? 429 : 503, body: { error: skip.reason, model: candidate, ...(skip.resetAt ? { resetAt: skip.resetAt } : {}) }, reason: skip.reason, isSkip: true });
             continue;
           }
         }
@@ -1406,7 +1409,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
               return deny(res, ctx, route, skip.reason === 'subscription_limit_reached' ? 429 : 503, skip.reason, { model: candidate, ...('resetAt' in skip && skip.resetAt ? { resetAt: skip.resetAt } : {}) });
             }
             skipped.push(skip.reason);
-            failures.push({ status: skip.reason === 'subscription_limit_reached' ? 429 : 503, body: { error: skip.reason, model: candidate, ...('resetAt' in skip && skip.resetAt ? { resetAt: skip.resetAt } : {}) }, reason: skip.reason });
+            failures.push({ status: skip.reason === 'subscription_limit_reached' ? 429 : 503, body: { error: skip.reason, model: candidate, ...('resetAt' in skip && skip.resetAt ? { resetAt: skip.resetAt } : {}) }, reason: skip.reason, isSkip: true });
             continue;
           }
         }
@@ -1523,20 +1526,24 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (succeeded.index > 0) {
         const fromModel = candidates[0];
         const toModel = succeeded.candidate;
-        const firstFailureReason = failures[0]?.reason;
+        const firstFailure = failures[0];
+        const firstFailureReason = firstFailure?.reason;
 
-        if (skipped.length > 0) {
-          // M5(6), (7): a subscription skip is temporary. Only MODEL_FAILOVER is written; the policy route (which writes
-          // `POLICY_UPDATED` and sets `currentModel`) is never called, so the owner's selection stays as it is.
+        if (firstFailure?.isSkip) {
+          // M5(6), (7): candidate 0 (`fromModel`) was skipped for a subscription limit window or needs-re-consent, which is
+          // temporary. Only MODEL_FAILOVER is written; the policy route (which writes `POLICY_UPDATED` and sets `currentModel`)
+          // is never called, even if a later candidate failed ordinarily before `toModel` succeeded, so the owner's selection stays as it is.
           ledger(ctx, route, {
             type: 'action',
             action: 'MODEL_FAILOVER',
             model: toModel,
             requestedModel: fromModel,
             models: [fromModel, toModel],
-            failoverReason: skipped[0],
+            failoverReason: firstFailureReason,
           });
         } else {
+          // M5(7): when candidate 0 (`fromModel`) failed for a non-skip reason, M2 persistent failback applies unchanged,
+          // even if an intermediate candidate in the walk was skipped.
           if (opts.control.modelFailover) {
             try {
               await opts.control.modelFailover({
@@ -1555,6 +1562,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
               model: toModel,
               requestedModel: fromModel,
               models: [fromModel, toModel],
+              ...(firstFailureReason ? { failoverReason: firstFailureReason } : {}),
             });
           }
 

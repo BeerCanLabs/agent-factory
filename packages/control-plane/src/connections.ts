@@ -348,12 +348,18 @@ async function subscriptionTokenForGatekeeperEgress(state: FactoryState, req: ht
   const principal = await requirePrivilege(req, res, state, 'egress.connections.token');
   if (!principal) return;
   const b = await readJson(req);
-  const connection = typeof b.connection === 'string' ? b.connection : undefined;
+  const connection =
+    typeof b.connection === 'string' && b.connection
+      ? b.connection
+      : typeof b.id === 'string' && b.id
+        ? b.id
+        : undefined;
   if (!connection) return json(res, 400, { error: 'connection required' });
+  const invalidate = b.invalidate === true;
   const km = getSubscriptions(state);
   const view = await km.get(connection);
   if (!view) return json(res, 404, { error: 'unknown_connection', connection });
-  const out = await km.accessToken(connection);
+  const out = await km.accessToken(connection, invalidate ? { invalidate: true } : undefined);
   if (out.ok) {
     return json(res, 200, {
       accessToken: out.accessToken,

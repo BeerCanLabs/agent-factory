@@ -3957,6 +3957,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       model: body.toModel,
       requestedModel: fromModel,
       models: [fromModel, body.toModel],
+      ...(typeof body.reason === 'string' && body.reason ? { failoverReason: body.reason } : {}),
     });
     state.ledger.append({
       timestamp: new Date().toISOString(),

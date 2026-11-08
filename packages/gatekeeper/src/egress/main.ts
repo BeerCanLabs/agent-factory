@@ -77,7 +77,11 @@ const control: ControlClient = {
   // M5(6): a subscription connection's access token. A 428 is the Keymaster's needs-re-consent; nothing else is a re-consent.
   async subscriptionToken(req) {
     try {
-      const res = await call('POST', '/api/v1/gatekeeper-egress/subscriptions/token', { connection: req.connection });
+      const res = await call('POST', '/api/v1/gatekeeper-egress/subscriptions/token', {
+        connection: req.connection,
+        id: req.connection,
+        ...(req.invalidate ? { invalidate: true } : {}),
+      });
       const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (res.ok && typeof body.accessToken === 'string' && typeof body.templateId === 'string') {
         return { ok: true, accessToken: body.accessToken, templateId: body.templateId, ...(typeof body.accountId === 'string' ? { accountId: body.accountId } : {}) };

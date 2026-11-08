@@ -126,15 +126,27 @@ describe('subscription token route and plan-limit windows (TSK-327)', { concurre
       assert.equal(ok.body.accessToken, 'xai-access-0-aaaaaaaa');
       assert.equal(ok.body.templateId, 'xai-subscription');
       assert.equal(ok.body.provider, 'xai');
+      assert.equal((await api(TOK, 'POST', T.egress, { id })).body.accessToken, 'xai-access-0-aaaaaaaa');
       assert.equal((await api(TOK, 'POST', T.egress, { connection: 'c-nope' })).status, 404);
       assert.equal((await api(TOK, 'POST', T.egress, {})).status, 400);
+    });
+
+    it('supports { id, invalidate: true } to force a single refresh when a vendor rejects an unexpired token with 401', async () => {
+      let calls = 0;
+      refresh = () => (calls++, j(200, { access_token: 'xai-access-r1-aaaaaaaa', refresh_token: 'xai-refresh-r1-aaaaaaaa', expires_in: 3600 })); // secret-scan:allow (fake vendor fixture)
+      const fresh = await api(TOK, 'POST', T.egress, { id, invalidate: true });
+      assert.equal(fresh.status, 200, fresh.text);
+      assert.equal(fresh.body.accessToken, 'xai-access-r1-aaaaaaaa');
+      assert.equal(calls, 1, 'forced refresh ran once despite unexpired token');
+      const cached = await api(TOK, 'POST', T.egress, { id });
+      assert.equal(cached.body.accessToken, 'xai-access-r1-aaaaaaaa');
+      assert.equal(calls, 1, 'subsequent call uses the refreshed cached token');
     });
 
     it('a refused refresh is reported as needs re-consent (428), and is never retried', async () => {
       let calls = 0;
       refresh = () => (calls++, j(400, { error: 'invalid_grant' }));
-      clock += 3_700_000; // past the access token's expiry: the next call must refresh
-      const r = await api(TOK, 'POST', T.egress, { connection: id });
+      const r = await api(TOK, 'POST', T.egress, { id, invalidate: true });
       assert.equal(r.status, 428, r.text);
       assert.equal(r.body.error, 'needs_reconsent');
       assert.equal(r.text.includes('xai-'), false, 'no token in the answer');
@@ -175,9 +187,26 @@ describe('subscription token route and plan-limit windows (TSK-327)', { concurre
       assert.equal(rows('MODEL_FAILOVER').length, 0);
     });
 
+    it('a connection in needs_reconsent refuses probe slots ({ granted: false }) without writing SUBSCRIPTION_LIMIT_PROBE or consuming the hourly slot', async () => {
+      // `id` is currently `needs_reconsent` from the invalid_grant test above, and has an open window.
+      const denied = await api(`${WIN}/${id}`, 'PUT', T.egress, { action: 'probe' });
+      assert.equal(denied.status, 200, denied.text);
+      assert.equal(denied.body.granted, false, 'no probe runs while needs_reconsent (M5(6))');
+      assert.equal(rows('SUBSCRIPTION_LIMIT_PROBE').length, 0, 'no probe row written');
+
+      // Reconnect `id` back to `active`: the hourly probe slot was NOT consumed, so it is immediately available below.
+      pending = 0;
+      const re = await api(`/api/v1/subscriptions/${id}/reconnect`, 'POST', T.admin, { subscriberAttested: true });
+      assert.equal(re.status, 201, re.text);
+      clock += 6000;
+      const done = await api(`/api/v1/subscriptions/sign-ins/${re.body.signIn.signInId}`, 'GET', T.admin);
+      assert.equal(done.body.status, 'connected', done.text);
+    });
+
     it('the probe slot is granted once per hour, and close ledgers SUBSCRIPTION_LIMIT_RESET once', async () => {
       const p1 = await api(`${WIN}/${id}`, 'PUT', T.egress, { action: 'probe' });
       assert.equal(p1.body.granted, true);
+      assert.equal(rows('SUBSCRIPTION_LIMIT_PROBE').length, 1);
       assert.equal((await api(`${WIN}/${id}`, 'PUT', T.egress, { action: 'probe' })).body.granted, false);
       const c = await api(`${WIN}/${id}`, 'PUT', T.egress, { action: 'close', by: 'probe' });
       assert.equal(c.body.closed, true);
