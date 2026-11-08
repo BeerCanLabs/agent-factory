@@ -33,6 +33,8 @@ function memory(opts: { failWritesAfter?: number } = {}) {
   return { provider, values, writes, failAll: () => (opts.failWritesAfter = 0), failFrom: (k: number) => ((opts.failWritesAfter = n + k)) };
 }
 
+const j200 = (b: unknown) => new Response(JSON.stringify(b), { status: 200 });
+const j400 = (b: unknown) => new Response(JSON.stringify(b), { status: 400 });
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 type Call = { url: string; method: string; body: string; headers: Record<string, string> };
@@ -516,5 +518,76 @@ describe('subscription connections: refresh, rotation, reuse, redaction', () => 
     };
     await c.km.accessToken(id);
     assert.equal((await c.km.get(id))!.status, 'active');
+  });
+
+  it('a rename made while a refresh is in flight survives the rotated save (no lost update)', async () => {
+    const c = setup();
+    const id = await connected(c);
+    const orig = c.vendors.st.xai.refresh;
+    let renamed: Promise<unknown> | undefined;
+    c.vendors.st.xai.refresh = (n) => {
+      renamed = c.km.rename(id, 'Renamed mid-flight', 'oidc:admin@example.com');
+      return orig(n);
+    };
+    const tok = await c.km.accessToken(id);
+    await renamed;
+    assert.ok(tok.ok);
+    const stored = JSON.parse(c.mem.values.get(subscriptionSecretName('xai', id))!);
+    assert.equal(stored.name, 'Renamed mid-flight');
+    assert.equal(stored.refreshToken, 'xai-refresh-r1-aaaaaaaa');
+    assert.equal((await c.km.get(id))!.name, 'Renamed mid-flight');
+  });
+
+  it('a disconnect during a refresh does not repopulate the token cache (rotated and not rotated)', async () => {
+    for (const rotate of [true, false]) {
+      const c = setup();
+      const id = await connected(c);
+      const orig = c.vendors.st.xai.refresh;
+      c.vendors.st.xai.refresh = (n) => {
+        void c.km.disconnect(id, 'oidc:admin@example.com');
+        return rotate ? orig(n) : j200({ access_token: 'xai-access-nr-aaaaaaaa', expires_in: 3600 });
+      };
+      const t1 = await c.km.accessToken(id);
+      assert.ok(!t1.ok && t1.error === 'unknown_connection', `rotate=${rotate}`);
+      const t2 = await c.km.accessToken(id);
+      assert.ok(!t2.ok, 'no cached token is served for a disconnected connection');
+    }
+  });
+
+  it('a needs-re-consent mark during a refresh does not repopulate the cache (not rotated)', async () => {
+    const c = setup();
+    const id = await connected(c);
+    c.vendors.st.xai.refresh = () => {
+      const name = subscriptionSecretName('xai', id);
+      const rec = JSON.parse(c.mem.values.get(name)!);
+      c.mem.values.set(name, JSON.stringify({ ...rec, status: 'needs_reconsent' }));
+      return j200({ access_token: 'xai-access-nr-aaaaaaaa', expires_in: 3600 });
+    };
+    const t1 = await c.km.accessToken(id);
+    assert.ok(!t1.ok && t1.error === 'needs_reconsent');
+    const t2 = await c.km.accessToken(id);
+    assert.ok(!t2.ok && t2.error === 'needs_reconsent');
+  });
+
+  it('when the needs-re-consent mark cannot be written, it is kept in memory and the dead refresh token is never retried', async () => {
+    const notified: NeedsReconsentEvent[] = [];
+    const c = setup({ onNeedsReconsent: (e) => void notified.push(e) });
+    const id = await connected(c, 'openai-subscription');
+    c.vendors.st.openai.refresh = () => j400({ error: { code: 'refresh_token_reused' } });
+    c.mem.failFrom(0); // every write fails
+    const t1 = await c.km.accessToken(id);
+    assert.ok(!t1.ok && t1.error === 'needs_reconsent');
+    const t2 = await c.km.accessToken(id);
+    assert.ok(!t2.ok && t2.error === 'needs_reconsent');
+    assert.equal(c.vendors.st.openai.refreshCount, 1, 'the refused refresh token is not retried');
+    assert.equal((await c.km.get(id))!.status, 'needs_reconsent');
+    assert.equal(notified.length, 1);
+    // A reconnect (a new grant) ends it, even though the mark was never written.
+    c.mem.provider.put = async (k, v) => void c.mem.values.set(k, v);
+    c.vendors.st.openai.pendingPolls = 0;
+    const re = await signIn(c, 'openai-subscription', 'oidc:admin@example.com', { reconnect: id });
+    assert.ok((re as any).out.ok);
+    assert.equal((await c.km.get(id))!.status, 'active');
+    assert.ok((await c.km.accessToken(id)).ok);
   });
 });

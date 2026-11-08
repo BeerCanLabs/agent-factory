@@ -245,6 +245,8 @@ export class SubscriptionKeymaster {
   private readonly signIns = new Map<string, SignInSession>();
   /** A rotated grant whose write failed: persisted first on the next call, so a single-use refresh token is never lost. */
   private readonly unsaved = new Map<string, SubscriptionRecord>();
+  /** A refused refresh whose needs-re-consent mark could not be written: the dead refresh token is never retried (M5(6)). */
+  private readonly marks = new Map<string, { refreshToken: string; at: string }>();
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(opts: SubscriptionKeymasterOptions) {
@@ -308,17 +310,28 @@ export class SubscriptionKeymaster {
 
   private async load(provider: string, id: string): Promise<SubscriptionRecord | undefined> {
     const pending = this.unsaved.get(id);
-    if (pending) return pending;
+    if (pending) return this.withMark(pending);
     const raw = await this.read(subscriptionSecretName(provider, id));
     if (!raw) return undefined;
     try {
       const r = JSON.parse(raw) as SubscriptionRecord & { retired?: boolean };
       if (!r || r.retired || typeof r.refreshToken !== 'string' || r.id !== id) return undefined;
       this.rememberRecord(r);
-      return r;
+      return this.withMark(r);
     } catch {
       return undefined;
     }
+  }
+
+  /** An in-memory needs-re-consent mark (the write failed) applies while the stored grant still has the refused refresh token. */
+  private withMark(r: SubscriptionRecord): SubscriptionRecord {
+    const m = this.marks.get(r.id);
+    if (!m) return r;
+    if (m.refreshToken !== r.refreshToken) {
+      this.marks.delete(r.id); // reconnected: a new grant
+      return r;
+    }
+    return r.status === 'needs_reconsent' ? r : { ...r, status: 'needs_reconsent', statusAt: m.at, accessToken: undefined, expiresAt: undefined };
   }
 
   private async save(r: SubscriptionRecord) {
@@ -637,6 +650,7 @@ export class SubscriptionKeymaster {
         };
         await this.save(next);
         this.unsaved.delete(next.id);
+        this.marks.delete(next.id);
         this.cache.delete(next.id);
         this.cacheToken(next);
         this.ledgerRow({ action: 'SUBSCRIPTION_CONNECTED', actor: s.actor, provider: next.provider, connection: next.id, connectionName: next.name, subscriber: next.subscriberEmail, tier: next.tier ?? 'unknown', attested: true, reconnect: true });
@@ -709,6 +723,7 @@ export class SubscriptionKeymaster {
       await this.writeIndex(rec.provider, (await this.index(rec.provider)).filter((i) => i !== id));
       this.cache.delete(id);
       this.unsaved.delete(id);
+      this.marks.delete(id);
       this.ledgerRow({ action: 'SUBSCRIPTION_DISCONNECTED', actor, provider: rec.provider, connection: id, connectionName: rec.name, subscriber: rec.subscriberEmail, tier: rec.tier ?? 'unknown', entriesRetired });
       return { ok: true as const, connection: view, entriesRetired };
     });
@@ -723,7 +738,7 @@ export class SubscriptionKeymaster {
    */
   async accessToken(id: string): Promise<SubscriptionTokenOutcome> {
     const hit = this.cache.get(id);
-    if (hit && hit.expiresAtMs - this.skewMs > this.now() && !this.unsaved.has(id)) {
+    if (hit && hit.expiresAtMs - this.skewMs > this.now() && !this.unsaved.has(id) && !this.marks.has(id)) {
       return { ok: true, accessToken: hit.accessToken, expiresAt: new Date(hit.expiresAtMs).toISOString(), ...(hit.accountId ? { accountId: hit.accountId } : {}) };
     }
     const running = this.inflight.get(id);
@@ -792,30 +807,48 @@ export class SubscriptionKeymaster {
     if (rotated) {
       // M5(6): the rotated refresh token is persisted BEFORE the new access token is used, because both vendors rotate
       // single-use refresh tokens. If the write fails the access token is withheld and the rotated grant is kept in memory.
-      const next: SubscriptionRecord = { ...current, refreshToken: body.refresh_token!, accessToken: body.access_token, expiresAt: new Date(expiresAtMs).toISOString() };
       const claimedId = profileFromTokens(t, body)?.accountId;
-      if (claimedId) next.accountId = claimedId;
-      let superseded = false;
+      const fresh = { refreshToken: body.refresh_token!, accessToken: body.access_token, expiresAt: new Date(expiresAtMs).toISOString(), ...(claimedId ? { accountId: claimedId } : {}) };
+      let committed: SubscriptionRecord | undefined;
+      const flow = { state: 'ok' as 'ok' | 'gone' | 'marked' | 'superseded' };
       try {
         await this.locked(async () => {
           const stored = await this.find(id);
-          if (!stored || stored.refreshToken !== current.refreshToken) {
-            superseded = true; // reconnected or disconnected while we refreshed: that grant wins
-            return;
+          if (!stored) return void (flow.state = 'gone');
+          if (stored.refreshToken !== current.refreshToken) return void (flow.state = 'superseded'); // reconnected meanwhile: that grant wins
+          if (stored.status !== 'active') return void (flow.state = 'marked');
+          // Merge into what is stored NOW: a rename (or other change) made while the vendor answered must survive.
+          committed = { ...stored, ...fresh };
+          try {
+            await this.save(committed);
+          } catch (err) {
+            this.unsaved.set(id, committed);
+            throw err;
           }
-          await this.save(next);
+          this.cacheToken(committed);
         });
       } catch {
-        this.unsaved.set(id, next);
         return { ok: false, error: 'connection_unavailable', message: 'the rotated refresh token could not be persisted' };
       }
-      if (superseded) return this.refresh(id);
-      this.cacheToken(next);
-      this.ledgerRow({ action: 'SUBSCRIPTION_REFRESH_TOKEN_ROTATED', actor: 'factory:keymaster', provider: next.provider, connection: id });
-      return { ok: true, accessToken: next.accessToken!, expiresAt: next.expiresAt!, ...(next.accountId ? { accountId: next.accountId } : {}) };
+      if (flow.state === 'superseded') return this.refresh(id);
+      if (flow.state === 'gone') return { ok: false, error: 'unknown_connection', message: `no connection "${id}"` };
+      if (flow.state === 'marked') return { ok: false, error: 'needs_reconsent', connection: id, reason: 'grant_marked' };
+      this.ledgerRow({ action: 'SUBSCRIPTION_REFRESH_TOKEN_ROTATED', actor: 'factory:keymaster', provider: committed!.provider, connection: id });
+      return { ok: true, accessToken: committed!.accessToken!, expiresAt: committed!.expiresAt!, ...(committed!.accountId ? { accountId: committed!.accountId } : {}) };
     }
+    // No rotation: nothing to persist, but the token is cached only if the grant it came from is still the live, active one.
     const next: SubscriptionRecord = { ...current, accessToken: body.access_token, expiresAt: new Date(expiresAtMs).toISOString() };
-    this.cacheToken(next);
+    const flow = { state: 'ok' as 'ok' | 'gone' | 'marked' | 'superseded' };
+    await this.locked(async () => {
+      const stored = await this.find(id);
+      if (!stored) return void (flow.state = 'gone');
+      if (stored.refreshToken !== current.refreshToken) return void (flow.state = 'superseded');
+      if (stored.status !== 'active') return void (flow.state = 'marked');
+      this.cacheToken(next);
+    });
+    if (flow.state === 'superseded') return this.refresh(id);
+    if (flow.state === 'gone') return { ok: false, error: 'unknown_connection', message: `no connection "${id}"` };
+    if (flow.state === 'marked') return { ok: false, error: 'needs_reconsent', connection: id, reason: 'grant_marked' };
     return { ok: true, accessToken: next.accessToken!, expiresAt: next.expiresAt!, ...(next.accountId ? { accountId: next.accountId } : {}) };
   }
 
@@ -830,7 +863,10 @@ export class SubscriptionKeymaster {
       const marked: SubscriptionRecord = { ...rec, status: 'needs_reconsent', statusAt: at, accessToken: undefined, expiresAt: undefined };
       try {
         await this.save(marked);
+        this.marks.delete(id);
       } catch (err) {
+        // Keep the mark in memory so the dead refresh token is never retried and the connection reads as needing re-consent.
+        this.marks.set(id, { refreshToken: usedRefreshToken, at });
         console.error(`[keymaster] could not mark subscription ${id} needs_reconsent: ${err instanceof Error ? err.message : String(err)}`);
       }
       view = SubscriptionKeymaster.view(marked);
