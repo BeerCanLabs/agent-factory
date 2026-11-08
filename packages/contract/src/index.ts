@@ -95,6 +95,8 @@ export {
   platformCredentialName,
   aiProviderConfigSchema,
   AI_PROVIDER_TEMPLATES,
+  SUBSCRIPTION_TEMPLATES,
+  subscriptionDefaultHeaders,
 } from './system.js';
 export type {
   SystemCredential,
@@ -107,6 +109,9 @@ export type {
   SystemIssue,
   SystemValidation,
   AiProviderConfig,
+  SubscriptionTemplate,
+  SubscriptionHeader,
+  SubscriptionErrorRecogniser,
 } from './system.js';
 
 export * from './services/index.js';
