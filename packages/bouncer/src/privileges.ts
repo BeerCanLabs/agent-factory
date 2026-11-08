@@ -46,6 +46,9 @@ export const PRIVILEGES = [
   'egress.routes.read',
   'egress.models.read',
   'egress.connections.token',
+  // TSK-327 (M5(7a)): subscription plan-limit windows, held in the control plane for the egress
+  'egress.subscription-windows.read',
+  'egress.subscription-windows.write',
   'registry.register',
   'registry.budget.set',
   'registry.retire',
@@ -225,6 +228,8 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'egress.models.read',
     'egress.connections.token',
     'egress.models.failover',
+    'egress.subscription-windows.read',
+    'egress.subscription-windows.write',
   ],
   // The ingress is the one party that sees who sent a message, so it alone may say who asked (Dale, 2026-10-04: an
   // operator or admin must not be able to name the requester). Its token also carries `operator`, which it needs to

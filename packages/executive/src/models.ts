@@ -8,7 +8,23 @@ import { awsCredentialsFromEnv, signV4, type AwsCredentials } from './sigv4.js';
  */
 
 /** One offered model. `provider` selects the adapter; `id`/`region` are provider-specific; `endpoint` is optional custom base URL; `secret` is optional platform credential name. */
-export type CatalogEntry = { provider: string; id: string; endpoint?: string; region?: string; secret?: string; price?: Price };
+export type CatalogEntry = {
+  provider: string;
+  id: string;
+  endpoint?: string;
+  region?: string;
+  secret?: string;
+  price?: Price;
+  /**
+   * M5(1): `api-key` (a platform credential, the default) or `subscription` (served on one subscription connection).
+   * TSK-328 finishes the catalog; the adapter and the failback rules read only these three optional fields.
+   */
+  credentialMode?: 'api-key' | 'subscription';
+  /** M5(4): the subscription connection a `subscription` entry is served on (a connection id, never a display name). */
+  connection?: string;
+  /** M5(5): the shipped subscription template the connection was created from. */
+  templateId?: string;
+};
 export type ModelCatalog = Record<string, CatalogEntry>;
 
 export type ToolCall = {
@@ -114,6 +130,9 @@ export function parseModelCatalog(json: string | undefined): ModelCatalog {
       ...(typeof (e as any).secret === 'string' ? { secret: (e as any).secret } : {}),
       ...(e.region ? { region: e.region } : {}),
       ...(p ? { price: p } : {}),
+      ...((e as any).credentialMode === 'subscription' && typeof (e as any).connection === 'string' && (e as any).connection
+        ? { credentialMode: 'subscription' as const, connection: (e as any).connection as string, ...(typeof (e as any).templateId === 'string' ? { templateId: (e as any).templateId as string } : {}) }
+        : {}),
     };
   }
   return out;

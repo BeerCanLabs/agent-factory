@@ -3,7 +3,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages ./packages
 RUN npm install
-RUN npm run build -w @beercanlabs/factory-auth -w @beercanlabs/factory-ledger -w @beercanlabs/factory-budget -w @beercanlabs/factory-executive -w @beercanlabs/factory-bouncer -w @beercanlabs/factory-secrets-bind -w @beercanlabs/factory-telemetry -w @beercanlabs/factory-inspector -w @beercanlabs/factory-contract -w @beercanlabs/factory-keymaster -w @beercanlabs/factory-registrar -w @beercanlabs/factory-gatekeeper
+RUN npm run build -w @beercanlabs/factory-contract -w @beercanlabs/factory-auth -w @beercanlabs/factory-ledger -w @beercanlabs/factory-budget -w @beercanlabs/factory-executive -w @beercanlabs/factory-bouncer -w @beercanlabs/factory-secrets-bind -w @beercanlabs/factory-telemetry -w @beercanlabs/factory-inspector -w @beercanlabs/factory-keymaster -w @beercanlabs/factory-registrar -w @beercanlabs/factory-gatekeeper
 
 FROM node:22-alpine
 RUN apk add --no-cache aws-cli

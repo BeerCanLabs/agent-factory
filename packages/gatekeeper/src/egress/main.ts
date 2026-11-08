@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
-import { createGatekeeperEgress, type ControlClient, type Route } from './gatekeeper-egress.js';
+import { createGatekeeperEgress, type ControlClient, type LimitWindowView, type Route } from './gatekeeper-egress.js';
 import type { Price } from '@beercanlabs/factory-budget';
 import { parseModelCatalog, type ModelCatalog } from '@beercanlabs/factory-executive';
 import { traceConfigFromEnv } from '@beercanlabs/factory-inspector';
@@ -73,6 +73,37 @@ const control: ControlClient = {
       provider: typeof body.provider === 'string' ? body.provider : undefined,
       connectUrl: typeof body.connectUrl === 'string' ? body.connectUrl : undefined,
     };
+  },
+  // M5(6): a subscription connection's access token. A 428 is the Keymaster's needs-re-consent; nothing else is a re-consent.
+  async subscriptionToken(req) {
+    try {
+      const res = await call('POST', '/api/v1/gatekeeper-egress/subscriptions/token', {
+        connection: req.connection,
+        id: req.connection,
+        ...(req.invalidate ? { invalidate: true } : {}),
+      });
+      const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (res.ok && typeof body.accessToken === 'string' && typeof body.templateId === 'string') {
+        return { ok: true, accessToken: body.accessToken, templateId: body.templateId, ...(typeof body.accountId === 'string' ? { accountId: body.accountId } : {}) };
+      }
+      if (res.status === 428) return { ok: false, kind: 'needs_reconsent', reason: typeof body.reason === 'string' ? body.reason : undefined };
+      return { ok: false, kind: 'unavailable', message: typeof body.error === 'string' ? body.error : `control_plane_${res.status}` };
+    } catch (err) {
+      return { ok: false, kind: 'unavailable', message: err instanceof Error ? err.message : String(err) };
+    }
+  },
+  // M5(7a): plan-limit windows live in the control plane so every egress instance and restart sees them.
+  async subscriptionWindows() {
+    const res = await call('GET', '/api/v1/gatekeeper-egress/subscription-windows');
+    if (!res.ok) throw new Error(`control plane subscription windows ${res.status}`);
+    const body = (await res.json()) as { windows?: LimitWindowView[] };
+    return body.windows ?? [];
+  },
+  async subscriptionWindow(req) {
+    const { connection, ...rest } = req;
+    const res = await call('PUT', `/api/v1/gatekeeper-egress/subscription-windows/${encodeURIComponent(connection)}`, rest);
+    if (!res.ok) throw new Error(`control plane subscription window ${res.status}`);
+    return (await res.json()) as { opened?: boolean; closed?: boolean; granted?: boolean; window?: LimitWindowView };
   },
   // #334: the agent's GitHub App installation key; any failure means the route's own credential is used.
   async githubAppToken(req) {
@@ -183,6 +214,7 @@ const server = createGatekeeperEgress({
   modelCatalog,
   defaultModel: process.env.FACTORY_DEFAULT_MODEL || undefined,
   serviceToken: TOKEN,
+  version: process.env.FACTORY_VERSION || '0.1.0',
   // GAP-182: hosts the operator trusts with model provider keys beyond each key's own vendor (comma-separated host[:port]).
   trustedModelHosts: (process.env.FACTORY_MODEL_TRUSTED_HOSTS ?? '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),
 });

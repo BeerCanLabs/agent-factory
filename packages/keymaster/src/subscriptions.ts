@@ -241,6 +241,7 @@ export class SubscriptionKeymaster {
   private readonly onNeedsReconsent?: SubscriptionKeymasterOptions['onNeedsReconsent'];
   private readonly templates: Record<string, SubscriptionTemplate>;
   private readonly cache = new Map<string, { accessToken: string; expiresAtMs: number; accountId?: string }>();
+  private readonly invalidated = new Set<string>();
   private readonly inflight = new Map<string, Promise<SubscriptionTokenOutcome>>();
   private readonly signIns = new Map<string, SignInSession>();
   /** A rotated grant whose write failed: persisted first on the next call, so a single-use refresh token is never lost. */
@@ -651,6 +652,7 @@ export class SubscriptionKeymaster {
         await this.save(next);
         this.unsaved.delete(next.id);
         this.marks.delete(next.id);
+        this.invalidated.delete(next.id);
         this.cache.delete(next.id);
         this.cacheToken(next);
         this.ledgerRow({ action: 'SUBSCRIPTION_CONNECTED', actor: s.actor, provider: next.provider, connection: next.id, connectionName: next.name, subscriber: next.subscriberEmail, tier: next.tier ?? 'unknown', attested: true, reconnect: true });
@@ -681,6 +683,7 @@ export class SubscriptionKeymaster {
       // Write the grant before the index: an index entry never points at nothing.
       await this.save(rec);
       await this.writeIndex(t.vendor, [...(await this.index(t.vendor)), id]);
+      this.invalidated.delete(id);
       this.cacheToken(rec);
       this.ledgerRow({ action: 'SUBSCRIPTION_CONNECTED', actor: s.actor, provider: rec.provider, connection: rec.id, connectionName: rec.name, subscriber: rec.subscriberEmail, tier: rec.tier ?? 'unknown', attested: true, reconnect: false });
       return { ok: true as const, status: 'connected' as const, connection: SubscriptionKeymaster.view(rec), reconnect: false };
@@ -722,6 +725,7 @@ export class SubscriptionKeymaster {
       await this.write(subscriptionSecretName(rec.provider, id), JSON.stringify({ id, provider: rec.provider, retired: true, retiredAt: new Date(this.now()).toISOString() }));
       await this.writeIndex(rec.provider, (await this.index(rec.provider)).filter((i) => i !== id));
       this.cache.delete(id);
+      this.invalidated.delete(id);
       this.unsaved.delete(id);
       this.marks.delete(id);
       this.ledgerRow({ action: 'SUBSCRIPTION_DISCONNECTED', actor, provider: rec.provider, connection: id, connectionName: rec.name, subscriber: rec.subscriberEmail, tier: rec.tier ?? 'unknown', entriesRetired });
@@ -734,12 +738,17 @@ export class SubscriptionKeymaster {
   /**
    * A current access token for a connection, refreshing as needed (the gatekeeper-egress, where the Executive's adapters run,
    * calls this per request and sends the token only to the template's inference host). Refresh is serialized per grant:
-   * concurrent callers share one refresh.
+   * concurrent callers share one refresh. Passing `{ invalidate: true }` drops both the in-memory cache and any stored
+   * unexpired access token so a single refresh runs (for example after a vendor 401).
    */
-  async accessToken(id: string): Promise<SubscriptionTokenOutcome> {
-    const hit = this.cache.get(id);
-    if (hit && hit.expiresAtMs - this.skewMs > this.now() && !this.unsaved.has(id) && !this.marks.has(id)) {
-      return { ok: true, accessToken: hit.accessToken, expiresAt: new Date(hit.expiresAtMs).toISOString(), ...(hit.accountId ? { accountId: hit.accountId } : {}) };
+  async accessToken(id: string, opts?: { invalidate?: boolean }): Promise<SubscriptionTokenOutcome> {
+    if (opts?.invalidate) {
+      this.invalidate(id);
+    } else {
+      const hit = this.cache.get(id);
+      if (hit && hit.expiresAtMs - this.skewMs > this.now() && !this.unsaved.has(id) && !this.marks.has(id) && !this.invalidated.has(id)) {
+        return { ok: true, accessToken: hit.accessToken, expiresAt: new Date(hit.expiresAtMs).toISOString(), ...(hit.accountId ? { accountId: hit.accountId } : {}) };
+      }
     }
     const running = this.inflight.get(id);
     if (running) return running;
@@ -748,17 +757,27 @@ export class SubscriptionKeymaster {
     return p;
   }
 
-  /** Drop a cached token (for example the vendor rejected it). */
+  /** Drop a cached or stored unexpired access token (for example the vendor rejected it) so the next call refreshes once. */
   invalidate(id: string): void {
     this.cache.delete(id);
+    if (!this.inflight.has(id)) this.invalidated.add(id);
   }
 
   private async refresh(id: string): Promise<SubscriptionTokenOutcome> {
     const rec = await this.find(id);
-    if (!rec) return { ok: false, error: 'unknown_connection', message: `no connection "${id}"` };
-    if (rec.status === 'needs_reconsent') return { ok: false, error: 'needs_reconsent', connection: id, reason: 'grant_marked' };
+    if (!rec) {
+      this.invalidated.delete(id);
+      return { ok: false, error: 'unknown_connection', message: `no connection "${id}"` };
+    }
+    if (rec.status === 'needs_reconsent') {
+      this.invalidated.delete(id);
+      return { ok: false, error: 'needs_reconsent', connection: id, reason: 'grant_marked' };
+    }
     const t = this.templates[rec.templateId];
-    if (!t) return { ok: false, error: 'unknown_connection', message: `connection ${id} names a template that no longer exists` };
+    if (!t) {
+      this.invalidated.delete(id);
+      return { ok: false, error: 'unknown_connection', message: `connection ${id} names a template that no longer exists` };
+    }
 
     // A rotated grant whose write failed earlier: persist it before anything else. The refresh token in storage is dead.
     const pending = this.unsaved.get(id);
@@ -769,14 +788,16 @@ export class SubscriptionKeymaster {
       } catch {
         return { ok: false, error: 'connection_unavailable', message: 'the rotated refresh token could not be persisted yet' };
       }
-      this.cacheToken(pending);
-      const c = this.cache.get(id);
-      if (c && c.expiresAtMs - this.skewMs > this.now()) return { ok: true, accessToken: c.accessToken, expiresAt: new Date(c.expiresAtMs).toISOString(), ...(c.accountId ? { accountId: c.accountId } : {}) };
+      if (!this.invalidated.has(id)) {
+        this.cacheToken(pending);
+        const c = this.cache.get(id);
+        if (c && c.expiresAtMs - this.skewMs > this.now()) return { ok: true, accessToken: c.accessToken, expiresAt: new Date(c.expiresAtMs).toISOString(), ...(c.accountId ? { accountId: c.accountId } : {}) };
+      }
     }
     const current = pending ?? rec;
 
-    // A stored access token (from sign-in) survives a restart.
-    if (current.accessToken && current.expiresAt && Date.parse(current.expiresAt) - this.skewMs > this.now()) {
+    // A stored access token (from sign-in) survives a restart unless invalidated (e.g. vendor 401).
+    if (!this.invalidated.has(id) && current.accessToken && current.expiresAt && Date.parse(current.expiresAt) - this.skewMs > this.now()) {
       this.cacheToken(current);
       return { ok: true, accessToken: current.accessToken, expiresAt: current.expiresAt, ...(current.accountId ? { accountId: current.accountId } : {}) };
     }
@@ -825,6 +846,7 @@ export class SubscriptionKeymaster {
             this.unsaved.set(id, committed);
             throw err;
           }
+          this.invalidated.delete(id);
           this.cacheToken(committed);
         });
       } catch {
@@ -836,24 +858,28 @@ export class SubscriptionKeymaster {
       this.ledgerRow({ action: 'SUBSCRIPTION_REFRESH_TOKEN_ROTATED', actor: 'factory:keymaster', provider: committed!.provider, connection: id });
       return { ok: true, accessToken: committed!.accessToken!, expiresAt: committed!.expiresAt!, ...(committed!.accountId ? { accountId: committed!.accountId } : {}) };
     }
-    // No rotation: nothing to persist, but the token is cached only if the grant it came from is still the live, active one.
-    const next: SubscriptionRecord = { ...current, accessToken: body.access_token, expiresAt: new Date(expiresAtMs).toISOString() };
+    // No rotation: update the stored access token best-effort and cache it only if the grant is still the live, active one.
+    let committedNonRotated: SubscriptionRecord | undefined;
     const flow = { state: 'ok' as 'ok' | 'gone' | 'marked' | 'superseded' };
     await this.locked(async () => {
       const stored = await this.find(id);
       if (!stored) return void (flow.state = 'gone');
       if (stored.refreshToken !== current.refreshToken) return void (flow.state = 'superseded');
       if (stored.status !== 'active') return void (flow.state = 'marked');
-      this.cacheToken(next);
+      committedNonRotated = { ...stored, accessToken: body.access_token, expiresAt: new Date(expiresAtMs).toISOString() };
+      await this.save(committedNonRotated).catch(() => undefined);
+      this.invalidated.delete(id);
+      this.cacheToken(committedNonRotated);
     });
     if (flow.state === 'superseded') return this.refresh(id);
     if (flow.state === 'gone') return { ok: false, error: 'unknown_connection', message: `no connection "${id}"` };
     if (flow.state === 'marked') return { ok: false, error: 'needs_reconsent', connection: id, reason: 'grant_marked' };
-    return { ok: true, accessToken: next.accessToken!, expiresAt: next.expiresAt!, ...(next.accountId ? { accountId: next.accountId } : {}) };
+    return { ok: true, accessToken: committedNonRotated!.accessToken!, expiresAt: committedNonRotated!.expiresAt!, ...(committedNonRotated!.accountId ? { accountId: committedNonRotated!.accountId } : {}) };
   }
 
   private async markNeedsReconsent(id: string, usedRefreshToken: string, reason: string) {
     this.cache.delete(id);
+    this.invalidated.delete(id);
     let view: SubscriptionView | undefined;
     await this.locked(async () => {
       const rec = await this.find(id);
