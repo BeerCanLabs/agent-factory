@@ -6,6 +6,7 @@
  *   POST /api/v1/connections/:agentId/:provider/import           admin: import an existing authorized-user credential
  *   GET  /api/v1/connections/:agentId                             viewer: connections, scopes, status (never tokens)
  *   POST /api/v1/gatekeeper-egress/connections/token                        gatekeeper-egress only: access token for a live run (K3/K4)
+ *   POST /api/v1/gatekeeper-egress/subscriptions/token                      gatekeeper-egress only: access token for a model subscription connection (M5(6))
  */
 import http from 'node:http';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -13,6 +14,7 @@ import { ConnectionKeymaster, grantSecretName, type Grant } from '@beercanlabs/f
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { isTerminal } from '@beercanlabs/factory-property-manager';
 import { invalidateCredentials } from './credentials.js';
+import { getSubscriptions } from './subscriptions.js';
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 const SLUG = /^[a-z0-9][a-z0-9_-]*$/i;
@@ -132,6 +134,11 @@ export async function handleConnections(state: FactoryState, req: http.IncomingM
 
   if (path === '/api/v1/gatekeeper-egress/connections/token' && req.method === 'POST') {
     await tokenForGatekeeperEgress(state, req, res);
+    return true;
+  }
+
+  if (path === '/api/v1/gatekeeper-egress/subscriptions/token' && req.method === 'POST') {
+    await subscriptionTokenForGatekeeperEgress(state, req, res);
     return true;
   }
 
@@ -329,4 +336,34 @@ async function tokenForGatekeeperEgress(state: FactoryState, req: http.IncomingM
   }
   console.error(`[keymaster] ${agentId}/${connection}: ${out.error}: ${out.message}`);
   return json(res, out.error === 'connection_unavailable' ? 502 : 503, { error: out.error });
+}
+
+/**
+ * M5(6): the access token of a subscription connection, for the gatekeeper-egress to send to the template's inference host.
+ * The connection is the factory's, not an agent's, so no run is involved (a probe or a discovery has none). The reply names
+ * the connection's template so the egress takes the host and headers from the reviewed template, never from the catalog.
+ * A grant that needs re-consent is reported as such and is never refreshed again (428); no token is ever logged.
+ */
+async function subscriptionTokenForGatekeeperEgress(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
+  const principal = await requirePrivilege(req, res, state, 'egress.connections.token');
+  if (!principal) return;
+  const b = await readJson(req);
+  const connection = typeof b.connection === 'string' ? b.connection : undefined;
+  if (!connection) return json(res, 400, { error: 'connection required' });
+  const km = getSubscriptions(state);
+  const view = await km.get(connection);
+  if (!view) return json(res, 404, { error: 'unknown_connection', connection });
+  const out = await km.accessToken(connection);
+  if (out.ok) {
+    return json(res, 200, {
+      accessToken: out.accessToken,
+      expiresAt: out.expiresAt,
+      templateId: view.templateId,
+      provider: view.provider,
+      ...(out.accountId ? { accountId: out.accountId } : {}),
+    });
+  }
+  if (out.error === 'needs_reconsent') return json(res, 428, { error: 'needs_reconsent', connection, reason: out.reason });
+  console.error(`[keymaster] subscription ${connection}: ${out.error}`);
+  return json(res, out.error === 'connection_unavailable' ? 502 : 404, { error: out.error });
 }

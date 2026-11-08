@@ -77,9 +77,23 @@ export type LedgerEvent = {
   attested?: boolean;
   reconnect?: boolean;
   entriesRetired?: number;
+  /** M5(6) to (8): a plan-limit window row (`SUBSCRIPTION_LIMIT_*`): what opened it, the vendor's error code, its reset time, what closed it. Never vendor text. */
+  limitKind?: 'plan-limit' | 'tier-refused';
+  limitCode?: string;
+  resetAt?: string;
+  closedBy?: 'reset' | 'probe' | 'disconnect';
+  /** M5: the credential mode a call was served on (`subscription`), and why a failover skipped the selected entry. */
+  credentialMode?: 'api-key' | 'subscription';
+  failoverReason?: string;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
+  'limitKind',
+  'limitCode',
+  'resetAt',
+  'closedBy',
+  'credentialMode',
+  'failoverReason',
   'subscriber',
   'tier',
   'connectionName',
@@ -377,6 +391,13 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (typeof raw.attested === 'boolean') event.attested = raw.attested;
   if (typeof raw.reconnect === 'boolean') event.reconnect = raw.reconnect;
   if (typeof raw.entriesRetired === 'number' && Number.isInteger(raw.entriesRetired) && raw.entriesRetired >= 0) event.entriesRetired = raw.entriesRetired;
+  // M5(6) to (8): plan-limit window rows and the credential mode of a call. Closed enums, a vendor error code's shape, an ISO time.
+  if (raw.limitKind === 'plan-limit' || raw.limitKind === 'tier-refused') event.limitKind = raw.limitKind;
+  if (typeof raw.limitCode === 'string' && /^[A-Za-z0-9_.:-]{1,100}$/.test(raw.limitCode)) event.limitCode = raw.limitCode;
+  if (typeof raw.resetAt === 'string' && raw.resetAt.length <= 40 && Number.isFinite(Date.parse(raw.resetAt))) event.resetAt = raw.resetAt;
+  if (raw.closedBy === 'reset' || raw.closedBy === 'probe' || raw.closedBy === 'disconnect') event.closedBy = raw.closedBy;
+  if (raw.credentialMode === 'api-key' || raw.credentialMode === 'subscription') event.credentialMode = raw.credentialMode;
+  if (typeof raw.failoverReason === 'string' && /^[a-z0-9_]{1,64}$/.test(raw.failoverReason)) event.failoverReason = raw.failoverReason;
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);

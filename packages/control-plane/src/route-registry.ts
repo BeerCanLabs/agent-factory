@@ -405,6 +405,9 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'GET', pattern: '/api/v1/gatekeeper-egress/routes', privilege: 'egress.routes.read', description: 'Egress query route declarations' },
   { method: 'POST', pattern: '/api/v1/gatekeeper-egress/connections/token', privilege: 'egress.connections.token', description: 'Egress fetch connection OAuth token' },
   { method: 'POST', pattern: '/api/v1/gatekeeper-egress/github-app/token', privilege: 'egress.connections.token', description: 'Egress fetch GitHub App token' },
+  { method: 'POST', pattern: '/api/v1/gatekeeper-egress/subscriptions/token', privilege: 'egress.connections.token', description: 'Egress fetch a subscription connection access token (M5(6))' },
+  { method: 'GET', pattern: '/api/v1/gatekeeper-egress/subscription-windows', privilege: 'egress.subscription-windows.read', description: 'Egress read open subscription plan-limit windows (M5(7))' },
+  { method: 'PUT', pattern: '/api/v1/gatekeeper-egress/subscription-windows/:connection', privilege: 'egress.subscription-windows.write', description: 'Egress open or close a subscription plan-limit window, or claim the probe slot (M5(7))' },
 
   // Keymaster & Credentials
   { method: 'POST', pattern: '/api/v1/keymaster/checkout', exception: 'run-token', description: 'Checkout platform secret' },

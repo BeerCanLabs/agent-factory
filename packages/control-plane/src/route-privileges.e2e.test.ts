@@ -158,6 +158,9 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/gatekeeper-egress/routes', privilege: 'egress.routes.read', role: 'gatekeeper-egress' },
   { method: 'GET', path: '/api/v1/models/internal/catalog', privilege: 'egress.models.read', role: 'gatekeeper-egress' },
   { method: 'POST', path: '/api/v1/gatekeeper-egress/connections/token', privilege: 'egress.connections.token', role: 'gatekeeper-egress', exclusive: true, body: {} },
+  { method: 'POST', path: '/api/v1/gatekeeper-egress/subscriptions/token', privilege: 'egress.connections.token', role: 'gatekeeper-egress', exclusive: true, body: {} },
+  { method: 'GET', path: '/api/v1/gatekeeper-egress/subscription-windows', privilege: 'egress.subscription-windows.read', role: 'gatekeeper-egress', exclusive: true },
+  { method: 'PUT', path: '/api/v1/gatekeeper-egress/subscription-windows/nope', privilege: 'egress.subscription-windows.write', role: 'gatekeeper-egress', exclusive: true, body: {} },
   { method: 'POST', path: '/api/v1/gatekeeper-egress/runs/nope/failover', privilege: 'egress.models.failover', role: 'gatekeeper-egress', exclusive: true, body: {} },
   // admin
   { method: 'PUT', path: '/api/v1/runtime', privilege: 'runtime.set', role: 'admin', body: {} },

@@ -49,6 +49,8 @@ const CENSUS: Record<string, Role> = {
   'egress.routes.read': 'gatekeeper-egress',
   'egress.models.read': 'gatekeeper-egress',
   'egress.connections.token': 'gatekeeper-egress',
+  'egress.subscription-windows.read': 'gatekeeper-egress',
+  'egress.subscription-windows.write': 'gatekeeper-egress',
   'registry.register': 'admin',
   'registry.budget.set': 'admin',
   'registry.retire': 'admin',
@@ -117,6 +119,8 @@ const EXCLUSIVE: Record<string, Role> = {
   'ledger.attest-run-actor': 'gatekeeper-egress',
   'egress.connections.token': 'gatekeeper-egress',
   'egress.models.failover': 'gatekeeper-egress',
+  'egress.subscription-windows.read': 'gatekeeper-egress',
+  'egress.subscription-windows.write': 'gatekeeper-egress',
   'runs.attest-requester': 'gatekeeper-ingress',
   'approvals.channel': 'gatekeeper-ingress',
 };
@@ -142,7 +146,7 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 102);
+    assert.equal(PRIVILEGES.length, 104);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 

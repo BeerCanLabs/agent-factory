@@ -14,12 +14,13 @@
  *
  * Deferred to TSK-328 (the catalog does not exist yet): retiring a connection's catalog entries on disconnect goes through
  * `setSubscriptionEntryRetirer`; until it is set, no entries exist to retire and disconnect reports `entriesRetired: 0`.
- * Deferred to TSK-327: the gatekeeper-egress route that hands a token to the adapter (`SubscriptionKeymaster.accessToken`).
+ * The gatekeeper-egress's token route is in `connections.ts` (TSK-327) and the plan-limit windows are in `subscription-windows.ts`.
  */
 import http from 'node:http';
 import { SUBSCRIPTION_TEMPLATES } from '@beercanlabs/factory-contract';
 import { SubscriptionKeymaster, catalogEntry, catalogView, type NeedsReconsentEvent, type SubscriptionView } from '@beercanlabs/factory-keymaster';
 import { actorIsAdmin, json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import { getSubscriptionWindows } from './subscription-windows.js';
 
 export function getSubscriptions(state: FactoryState): SubscriptionKeymaster {
   if (!state.subscriptions) {
@@ -193,6 +194,8 @@ export async function handleSubscriptions(state: FactoryState, req: http.Incomin
     const retire = retirers.get(state);
     const r = await km.disconnect(decodeURIComponent(del[1]), principal.actor, retire);
     if (!r.ok) return fail(res, r), true;
+    // A disconnected connection has no plan to be limited on: its window (M5(7)) closes with it.
+    getSubscriptionWindows(state).close(r.connection.id, 'disconnect');
     json(res, 200, { connection: r.connection, entriesRetired: r.entriesRetired });
     return true;
   }

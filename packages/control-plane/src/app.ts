@@ -72,6 +72,7 @@ import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { Keymaster, type ConnectionKeymaster, type SubscriptionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
 import { handleSubscriptions } from './subscriptions.js';
+import { handleSubscriptionWindows } from './subscription-windows.js';
 import { handleCredentials } from './credentials.js';
 import { handleGitHubAppSetup } from './github-app-setup.js';
 import { handleGitHubAppInstall } from './github-app-install.js';
@@ -2448,8 +2449,9 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
 
   if (/^\/api\/v1\/agents\/[^/]+\/transfer(\/|$)/.test(path) && (await handleAgentTransfers(state, req, res, path))) return;
   if (path.startsWith('/api/v1/skills/') && path.endsWith('/model') && (await handleSkillModels(state, req, res, path))) return;
-  if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
+  if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token' || path === '/api/v1/gatekeeper-egress/subscriptions/token') && (await handleConnections(state, req, res, path))) return;
   if (path.startsWith('/api/v1/subscriptions') && (await handleSubscriptions(state, req, res, path))) return;
+  if (path.startsWith('/api/v1/gatekeeper-egress/subscription-windows') && (await handleSubscriptionWindows(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleGitHubAppSetup(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleDiscordAppSetup(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleAppSetup(state, req, res, path))) return;
