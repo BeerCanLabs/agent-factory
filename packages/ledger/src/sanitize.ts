@@ -57,8 +57,10 @@ export type LedgerEvent = {
   subject?: string;
   /** S3 / D10: canonical human principal (`user:<id>`) on whose behalf an admin executed the action. */
   onBehalfOf?: string;
-  /** S3 / S7: structured grant scope (`fleet` or `agent`/`skill` with id) for grant/authz audit rows. */
-  scope?: { kind: 'fleet' } | { kind: 'agent' | 'skill'; id: string };
+  /** S3 / S7 / M5(4): structured grant scope (`fleet` or `agent`/`skill` with id) for grant/authz rows, or subscription scope (`'factory' | 'personal'`). */
+  scope?: { kind: 'fleet' } | { kind: 'agent' | 'skill'; id: string } | 'factory' | 'personal';
+  /** M5(4): canonical owner principal (`user:<id>`) of a `personal` subscription connection. */
+  ownerPrincipalId?: string;
   /** S3 / S7: structured pre-mutation principal/grant snapshot (`null` when newly created). */
   before?: Record<string, unknown> | null;
   /** S3 / S7: structured post-mutation principal/grant snapshot (`null` when deleted/revoked). */
@@ -117,6 +119,7 @@ const ALLOWED = new Set<keyof LedgerEvent>([
   'subject',
   'onBehalfOf',
   'scope',
+  'ownerPrincipalId',
   'before',
   'after',
   'timestamp',
@@ -240,7 +243,7 @@ const AUDIT_SAFE_SCALAR_KEYS = new Set([
   'updatedBy',
 ]);
 
-function sanitizeGrantScope(raw: unknown): LedgerEvent['scope'] | undefined {
+function sanitizeGrantScope(raw: unknown): { kind: 'fleet' } | { kind: 'agent' | 'skill'; id: string } | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const s = raw as Record<string, unknown>;
   if (s.kind === 'fleet') return { kind: 'fleet' };
@@ -348,8 +351,19 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (typeof raw.toolCalled === 'boolean') event.toolCalled = raw.toolCalled;
   if (typeof raw.privilege === 'string' && /^[a-z][a-z0-9-]*(?:\.[a-z0-9-]+){0,4}$/.test(raw.privilege) && raw.privilege.length <= 96) event.privilege = raw.privilege;
   if (typeof raw.onBehalfOf === 'string' && AUDIT_ID_FIELD.test(raw.onBehalfOf)) event.onBehalfOf = raw.onBehalfOf;
-  const cleanScope = sanitizeGrantScope(raw.scope);
-  if (cleanScope) event.scope = cleanScope;
+  if (raw.scope === 'factory' || raw.scope === 'personal') {
+    event.scope = raw.scope;
+  } else {
+    const cleanScope = sanitizeGrantScope(raw.scope);
+    if (cleanScope) event.scope = cleanScope;
+  }
+  if (
+    typeof raw.ownerPrincipalId === 'string' &&
+    raw.ownerPrincipalId.length <= 320 &&
+    /^user:[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.-]{1,315}$/.test(raw.ownerPrincipalId)
+  ) {
+    event.ownerPrincipalId = raw.ownerPrincipalId;
+  }
   if (raw.before !== undefined) {
     const cleanBefore = sanitizeAuditSnapshot(raw.before);
     if (cleanBefore !== undefined) event.before = cleanBefore;

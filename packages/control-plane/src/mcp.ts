@@ -15,6 +15,7 @@ import {
   attachCallerToRunResult,
   badRunModel,
   checkOwnsAnyAgent,
+  checkOwnsPersonalAgent,
   decideApproval,
   defaultModelOf,
   discoverViaEgress,
@@ -592,6 +593,7 @@ export async function handleMcp(
       : rolesForSubjectActor(state, evalActor, grantRes.grants, principal.roles);
     const evalPrincipal: Principal = { actor: evalActor, roles: evalRoles };
     const ownsAny = checkOwnsAnyAgent(state, evalActor);
+    const ownsPersonal = checkOwnsPersonalAgent(state, evalActor);
     const canDelegateScoped = callerMayUseScopedGrantTools(state, evalPrincipal, grantRes.grants);
     const agentGrantList = grantRes.grants?.filter((eg) => eg.grant.scope.kind === 'agent') ?? [];
 
@@ -602,6 +604,7 @@ export async function handleMcp(
           privilege: t.privilege,
           resource: {
             ownsAnyAgent: ownsAny,
+            ownsPersonalAgent: ownsPersonal,
             ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
           },
         }).allowed
@@ -707,8 +710,12 @@ export async function handleMcp(
             ? rawArgs.agentId
             : undefined;
       const ownsAny = spec.privilege === 'mcp.use' ? checkOwnsAnyAgent(state, effectivePrincipal.actor) : false;
+      const ownsPersonal =
+        spec.privilege === 'subscriptions.own'
+          ? checkOwnsPersonalAgent(state, effectivePrincipal.onBehalfOf ?? effectivePrincipal.actor)
+          : undefined;
       const resource =
-        targetAgentId || grantRes.grants !== undefined || ownsAny
+        targetAgentId || grantRes.grants !== undefined || ownsAny || ownsPersonal !== undefined
           ? {
               ...(targetAgentId
                 ? {
@@ -718,6 +725,7 @@ export async function handleMcp(
                   }
                 : {}),
               ownsAnyAgent: ownsAny,
+              ...(ownsPersonal !== undefined ? { ownsPersonalAgent: ownsPersonal } : {}),
               ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
             }
           : undefined;

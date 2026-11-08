@@ -606,5 +606,55 @@ describe('owner conversion fields (S18)', () => {
     assert.equal(prefixless.principalId, undefined);
     assert.equal(prefixless.subject, undefined);
   });
+
+  it('preserves sanitized subscription scope (factory | personal) and ownerPrincipalId without leaking tokens (TSK-332)', () => {
+    const personal = toLedgerEvent(
+      {
+        agentId: 'factory',
+        type: 'action',
+        action: 'SUBSCRIPTION_CONNECTED',
+        actor: 'user:alice',
+        onBehalfOf: 'user:alice',
+        scope: 'personal',
+        ownerPrincipalId: 'user:alice',
+        provider: 'xai',
+        connection: 'c-123456abcdef',
+        connectionName: "Alice's Grok Subscription",
+        subscriber: 'alice@example.com',
+        tier: 'unknown',
+        attested: true,
+        reconnect: false,
+        accessToken: 'xai-at-super-secret',
+        refreshToken: 'xai-rt-super-secret',
+      },
+      ['xai-at-super-secret', 'xai-rt-super-secret'],
+    );
+    assert.equal(personal.scope, 'personal');
+    assert.equal(personal.ownerPrincipalId, 'user:alice');
+    assert.equal(personal.onBehalfOf, 'user:alice');
+    assert.equal((personal as Record<string, unknown>).accessToken, undefined);
+    assert.equal((personal as Record<string, unknown>).refreshToken, undefined);
+
+    const factoryEvt = toLedgerEvent({
+      agentId: 'factory',
+      type: 'action',
+      action: 'SUBSCRIPTION_DISCONNECTED',
+      actor: 'user:admin',
+      scope: 'factory',
+      ownerPrincipalId: 'service:not-a-user', // invalid ownerPrincipalId must be stripped
+    });
+    assert.equal(factoryEvt.scope, 'factory');
+    assert.equal(factoryEvt.ownerPrincipalId, undefined);
+
+    const invalidScope = toLedgerEvent({
+      agentId: 'factory',
+      type: 'action',
+      action: 'SUBSCRIPTION_CONNECTED',
+      scope: 'xai-rt-secret-token',
+      ownerPrincipalId: 'fk_live_secrettoken12345',
+    });
+    assert.equal(invalidScope.scope, undefined);
+    assert.equal(invalidScope.ownerPrincipalId, undefined);
+  });
 });
 

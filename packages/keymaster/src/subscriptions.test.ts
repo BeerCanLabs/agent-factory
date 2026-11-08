@@ -7,8 +7,10 @@ import {
   SubscriptionKeymaster,
   defaultConnectionName,
   endpointMeetsHostRule,
+  subscriptionPrincipalKey,
   subscriptionSecretName,
   type NeedsReconsentEvent,
+  type SubscriptionScope,
   type SubscriptionTokenOutcome,
 } from './subscriptions.js';
 
@@ -638,5 +640,286 @@ describe('subscription connections: refresh, rotation, reuse, redaction', () => 
     const again = await c.km.accessToken(id, { invalidate: true });
     assert.ok(!again.ok && again.error === 'needs_reconsent');
     assert.equal(c.vendors.st.openai.refreshCount, 2);
+  });
+});
+
+describe('subscription connections: Owner BYOM scope, vault paths, tampering & cross-owner guard (TSK-332, M5(4))', () => {
+  async function scopedSignIn(
+    c: Ctx,
+    templateId: string,
+    actor: string,
+    opts: { scope?: SubscriptionScope; ownerPrincipalId?: string; onBehalfOf?: string; name?: string; reconnect?: string } = {},
+  ) {
+    const started = await c.km.startSignIn({ templateId, actor, subscriberAttested: true, ...opts });
+    if (!started.ok) return started;
+    let out;
+    for (let i = 0; i < 5; i++) {
+      c.tick(6000);
+      out = await c.km.pollSignIn(started.signIn.signInId, actor, {
+        scope: opts.scope,
+        ownerPrincipalId: opts.ownerPrincipalId,
+        onBehalfOf: opts.onBehalfOf,
+      });
+      if (!(out.ok && out.status === 'pending')) break;
+    }
+    return { started, out: out! };
+  }
+
+  it('stores personal BYOM grants at users/u-<sha256>/<provider>/subscription/<id> and validates scope/ownerPrincipalId', async () => {
+    const c = setup();
+    const alicePk = subscriptionPrincipalKey('user:alice');
+    assert.match(alicePk, /^u-[0-9a-f]{64}$/);
+    assert.equal(alicePk, subscriptionPrincipalKey('user:alice'), 'deterministic principalKey');
+    for (const seg of subscriptionSecretName('xai', 'c-0123456789ab', { scope: 'personal', ownerPrincipalId: 'user:alice' }).split('/')) {
+      assert.match(seg, /^[a-z0-9_-]+$/, `vault-safe segment across aws-sm, gcp-sm, and file: ${seg}`);
+    }
+    assert.throws(() => subscriptionPrincipalKey('oidc:alice@example.com'));
+    assert.throws(() => subscriptionSecretName('xai', 'c-0123456789ab', { scope: 'personal' }));
+    assert.throws(() => subscriptionSecretName('xai', 'c-0123456789ab', { scope: 'factory', ownerPrincipalId: 'user:alice' }));
+
+    // Missing or non-canonical ownerPrincipalId on personal scope, or ownerPrincipalId on factory scope, is refused up front.
+    const missingOwner = await c.km.startSignIn({ templateId: 'xai-subscription', actor: 'user:alice', subscriberAttested: true, scope: 'personal' });
+    assert.equal(!missingOwner.ok && missingOwner.error, 'invalid_owner');
+    const badOwner = await c.km.startSignIn({ templateId: 'xai-subscription', actor: 'oidc:alice@example.com', subscriberAttested: true, scope: 'personal', ownerPrincipalId: 'oidc:alice@example.com' });
+    assert.equal(!badOwner.ok && badOwner.error, 'invalid_owner');
+    const factoryWithOwner = await c.km.startSignIn({ templateId: 'xai-subscription', actor: 'user:admin', subscriberAttested: true, scope: 'factory', ownerPrincipalId: 'user:alice' });
+    assert.equal(!factoryWithOwner.ok && factoryWithOwner.error, 'invalid_owner');
+
+    const res = await scopedSignIn(c, 'xai-subscription', 'user:alice', { scope: 'personal', ownerPrincipalId: 'user:alice' });
+    assert.ok('out' in res && res.out.ok && res.out.status === 'connected');
+    const conn = res.out.connection;
+    const expectedPath = `users/${alicePk}/xai/subscription/${conn.id}`;
+    assert.equal(conn.scope, 'personal');
+    assert.equal(conn.ownerPrincipalId, 'user:alice');
+    assert.equal(conn.secretName, expectedPath);
+    assert.ok(c.mem.values.has(expectedPath), 'personal grant stored under users/u-<sha256>/...');
+    assert.equal(c.mem.values.has(`shared/xai/subscription/${conn.id}`), false, 'personal grant is never stored under shared/...');
+    const persisted = JSON.parse(c.mem.values.get(expectedPath)!);
+    assert.equal(persisted.scope, 'personal');
+    assert.equal(persisted.ownerPrincipalId, 'user:alice');
+
+    // Legacy factory record without `scope` field defaults cleanly to `scope: 'factory'`.
+    const legacyId = 'c-aaaaaaaaaaaa';
+    c.mem.values.set(
+      `shared/openai/subscription/${legacyId}`,
+      JSON.stringify({
+        id: legacyId,
+        provider: 'openai',
+        templateId: 'openai-subscription',
+        name: 'Legacy Shared Plan',
+        subscriberEmail: 'legacy@example.com',
+        accountKey: 'acct-leg:sub-leg',
+        accountId: 'acct-leg',
+        tokenUrl: 'https://auth.openai.com/oauth/token',
+        scopes: ['openid'],
+        refreshToken: 'oa-legacy-refresh-0001', // secret-scan:allow (fake vendor fixture)
+        connectedBy: 'oidc:admin@example.com',
+        connectedAt: '2026-11-08T00:00:00.000Z',
+        status: 'active',
+      }),
+    );
+    c.mem.values.set('shared/openai/subscription/_index', JSON.stringify({ ids: [legacyId] }));
+    const loadedLegacy = await c.km.get(legacyId);
+    assert.ok(loadedLegacy);
+    assert.equal(loadedLegacy.scope, 'factory');
+    assert.equal(loadedLegacy.ownerPrincipalId, undefined);
+  });
+
+  it('fails closed on tampered vault records whose scope or ownerPrincipalId mismatches their vault path', async () => {
+    const c = setup();
+    const res = await scopedSignIn(c, 'xai-subscription', 'user:alice', { scope: 'personal', ownerPrincipalId: 'user:alice' });
+    assert.ok('out' in res && res.out.ok && res.out.status === 'connected');
+    const id = res.out.connection.id;
+    const path = res.out.connection.secretName;
+    const origRaw = c.mem.values.get(path)!;
+    const orig = JSON.parse(origRaw);
+
+    // 1. Tamper ownerPrincipalId to user:bob inside users/<alicePk>/...
+    c.mem.values.set(path, JSON.stringify({ ...orig, ownerPrincipalId: 'user:bob', refreshToken: 'tampered-rt-bob-0001' })); // secret-scan:allow
+    c.km.invalidate(id);
+    assert.equal(await c.km.get(id), undefined);
+    assert.deepEqual(await c.km.list(), []);
+    const tok1 = await c.km.accessToken(id);
+    assert.ok(!tok1.ok && tok1.error === 'unknown_connection');
+    assert.ok(c.secretValues.has('tampered-rt-bob-0001'), 'tokens in tampered records still enter redaction set');
+
+    // 2. Tamper scope to 'factory' inside users/<alicePk>/...
+    c.mem.values.set(path, JSON.stringify({ ...orig, scope: 'factory' }));
+    assert.equal(await c.km.get(id), undefined);
+
+    // 3. Restore valid personal record -> works again.
+    c.mem.values.set(path, origRaw);
+    assert.equal((await c.km.get(id))?.ownerPrincipalId, 'user:alice');
+
+    // 4. Tamper a shared/... record with scope: 'personal' or ownerPrincipalId -> fails closed.
+    const fId = 'c-bbbbbbbbbbbb';
+    c.mem.values.set(
+      `shared/openai/subscription/${fId}`,
+      JSON.stringify({ ...orig, id: fId, provider: 'openai', templateId: 'openai-subscription', scope: 'personal', ownerPrincipalId: 'user:alice' }),
+    );
+    c.mem.values.set('shared/openai/subscription/_index', JSON.stringify({ ids: [fId] }));
+    assert.equal(await c.km.get(fId), undefined);
+  });
+
+  it('enforces single-connection-per-vendor-account across scopes: same owner reconnects; cross-owner returns account_already_connected with existing grant untouched and new tokens redacted', async () => {
+    const c = setup();
+    const r1 = await scopedSignIn(c, 'xai-subscription', 'user:alice', { scope: 'personal', ownerPrincipalId: 'user:alice', name: 'Alice Grok' });
+    assert.ok('out' in r1 && r1.out.ok && r1.out.status === 'connected');
+    const aliceConn = r1.out.connection;
+    const storedBefore = c.mem.values.get(aliceConn.secretName)!;
+
+    // Issue distinct tokens on the next sign-in so we can prove new tokens are redacted AND never overwrite Alice's grant.
+    let attempt = 0;
+    const baseFetch = c.vendors.fn;
+    const customKm = new SubscriptionKeymaster({
+      providers: [c.mem.provider],
+      ledger: c.ledger,
+      secretValues: c.secretValues,
+      now: c.now,
+      version: '9.9.9',
+      fetch: (async (input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        const f = new URLSearchParams(String(init?.body ?? ''));
+        if (url === 'https://auth.x.ai/oauth2/token' && f.get('grant_type') === 'urn:ietf:params:oauth:grant-type:device_code') {
+          attempt++;
+          return json(200, {
+            access_token: `xai-cross-access-${attempt}-zzzzzzzz`,
+            refresh_token: `xai-cross-refresh-${attempt}-zzzzzzzz`, // secret-scan:allow (fake vendor fixture)
+            id_token: jwt({ sub: 'xai-sub-1', email: 'Dale@example.com', name: 'Dale Rider' }),
+            expires_in: 3600,
+          });
+        }
+        return baseFetch(input, init);
+      }) as typeof fetch,
+    });
+
+    // Cross-owner 1: user:bob tries to connect the same vendor account -> account_already_connected.
+    const bobStart = await customKm.startSignIn({ templateId: 'xai-subscription', actor: 'user:bob', subscriberAttested: true, scope: 'personal', ownerPrincipalId: 'user:bob', name: 'Bob Grok' });
+    assert.ok(bobStart.ok);
+    c.tick(6000);
+    const bobPoll = await customKm.pollSignIn(bobStart.signIn.signInId, 'user:bob', { scope: 'personal', ownerPrincipalId: 'user:bob' });
+    assert.ok(!bobPoll.ok && bobPoll.error === 'account_already_connected');
+    assert.equal(c.mem.values.get(aliceConn.secretName), storedBefore, 'Alice grant untouched after Bob collision');
+    assert.ok(c.secretValues.has('xai-cross-access-1-zzzzzzzz') && c.secretValues.has('xai-cross-refresh-1-zzzzzzzz'), 'discarded tokens redacted');
+
+    // Cross-owner 2: factory admin tries to connect Alice's personal vendor account as scope: 'factory' -> account_already_connected.
+    const adminStart = await customKm.startSignIn({ templateId: 'xai-subscription', actor: 'user:admin', subscriberAttested: true, scope: 'factory', name: 'Shared Grok' });
+    assert.ok(adminStart.ok);
+    c.tick(6000);
+    const adminPoll = await customKm.pollSignIn(adminStart.signIn.signInId, 'user:admin', { scope: 'factory' });
+    assert.ok(!adminPoll.ok && adminPoll.error === 'account_already_connected');
+    assert.equal(c.mem.values.get(aliceConn.secretName), storedBefore, 'Alice grant untouched after factory collision');
+    assert.ok(c.secretValues.has('xai-cross-access-2-zzzzzzzz') && c.secretValues.has('xai-cross-refresh-2-zzzzzzzz'));
+
+    // Explicit reconnect by another owner (user:bob or factory) is refused with forbidden_connection before device flow starts.
+    const bobReconnect = await customKm.reconnect(aliceConn.id, { actor: 'user:bob', subscriberAttested: true, scope: 'personal', ownerPrincipalId: 'user:bob' });
+    assert.ok(!bobReconnect.ok && bobReconnect.error === 'forbidden_connection');
+    const factoryReconnect = await customKm.startSignIn({ templateId: 'xai-subscription', actor: 'user:admin', subscriberAttested: true, scope: 'factory', reconnect: aliceConn.id });
+    assert.ok(!factoryReconnect.ok && factoryReconnect.error === 'forbidden_connection');
+
+    // Same-owner sign-in (user:alice again) reconnects cleanly, keeping id, name, scope, and ownerPrincipalId!
+    const aliceAgainStart = await customKm.startSignIn({ templateId: 'xai-subscription', actor: 'user:alice', subscriberAttested: true, scope: 'personal', ownerPrincipalId: 'user:alice' });
+    assert.ok(aliceAgainStart.ok);
+    c.tick(6000);
+    const aliceAgainPoll = await customKm.pollSignIn(aliceAgainStart.signIn.signInId, 'user:alice', { scope: 'personal', ownerPrincipalId: 'user:alice' });
+    assert.ok(aliceAgainPoll.ok && aliceAgainPoll.status === 'connected' && aliceAgainPoll.reconnect === true);
+    assert.equal(aliceAgainPoll.connection.id, aliceConn.id);
+    assert.equal(aliceAgainPoll.connection.name, 'Alice Grok');
+    assert.equal(aliceAgainPoll.connection.scope, 'personal');
+    assert.equal(aliceAgainPoll.connection.ownerPrincipalId, 'user:alice');
+    const tok = await customKm.accessToken(aliceConn.id);
+    assert.ok(tok.ok && tok.accessToken === 'xai-cross-access-3-zzzzzzzz');
+
+    // Vice versa: factory connection first, then personal sign-in to same vendor account -> account_already_connected.
+    c.vendors.st.openai.pendingPolls = 0;
+    const sharedOa = await scopedSignIn(c, 'openai-subscription', 'user:admin', { scope: 'factory', name: 'Shared ChatGPT' });
+    assert.ok('out' in sharedOa && sharedOa.out.ok && sharedOa.out.status === 'connected');
+    c.vendors.st.openai.pendingPolls = 0;
+    const aliceOa = await scopedSignIn(c, 'openai-subscription', 'user:alice', { scope: 'personal', ownerPrincipalId: 'user:alice', name: 'Alice ChatGPT' });
+    assert.ok('out' in aliceOa && !aliceOa.out.ok && aliceOa.out.error === 'account_already_connected');
+  });
+
+  it('enforces factory-wide unique display names across scopes and supports full personal lifecycle + ledger fields', async () => {
+    const notified: NeedsReconsentEvent[] = [];
+    const c = setup({ onNeedsReconsent: (ev) => void notified.push(ev) });
+
+    // Factory connection takes "Shared Plan"
+    c.vendors.st.xai.pendingPolls = 0;
+    const shared = await scopedSignIn(c, 'xai-subscription', 'user:admin', { scope: 'factory', name: 'Shared Plan' });
+    assert.ok('out' in shared && shared.out.ok && shared.out.status === 'connected');
+
+    // Personal connection colliding with factory display name is refused (`name_taken`).
+    const clashStart = await c.km.startSignIn({
+      templateId: 'openai-subscription',
+      actor: 'user:alice',
+      subscriberAttested: true,
+      scope: 'personal',
+      ownerPrincipalId: 'user:alice',
+      name: 'shared plan',
+    });
+    assert.ok(!clashStart.ok && clashStart.error === 'name_taken');
+
+    // Admin acting on behalf of user:alice connects OpenAI personal subscription.
+    c.vendors.st.openai.pendingPolls = 0;
+    const personal = await scopedSignIn(c, 'openai-subscription', 'user:admin', {
+      scope: 'personal',
+      ownerPrincipalId: 'user:alice',
+      onBehalfOf: 'user:alice',
+      name: 'Alice Personal Plus',
+    });
+    assert.ok('out' in personal && personal.out.ok && personal.out.status === 'connected');
+    const pConn = personal.out.connection;
+    assert.equal((await c.km.list()).length, 2);
+    assert.equal((await c.km.list({ scope: 'personal', ownerPrincipalId: 'user:alice' })).length, 1);
+    assert.equal((await c.km.list({ scope: 'personal', ownerPrincipalId: 'user:bob' })).length, 0);
+
+    // Refresh + invalidate on personal connection
+    const tok1 = await c.km.accessToken(pConn.id, { invalidate: true });
+    assert.ok(tok1.ok && tok1.accessToken === 'oa-access-r1-aaaaaaaa');
+
+    // Rename on personal connection (refuses collision with factory connection; succeeds with unique name)
+    const clashRename = await c.km.rename(pConn.id, 'SHARED PLAN', 'user:alice');
+    assert.ok(!clashRename.ok && clashRename.error === 'name_taken');
+    const renamed = await c.km.rename(pConn.id, 'Alice Renamed Plus', 'user:admin', { onBehalfOf: 'user:alice' });
+    assert.ok(renamed.ok && renamed.connection.name === 'Alice Renamed Plus');
+
+    // Refused refresh marks personal connection needs_reconsent
+    c.vendors.st.openai.refresh = () => json(400, { error: 'invalid_grant' });
+    const refused = await c.km.accessToken(pConn.id, { invalidate: true });
+    assert.ok(!refused.ok && refused.error === 'needs_reconsent');
+    assert.equal(notified.length, 1);
+    assert.equal(notified[0].connection.scope, 'personal');
+    assert.equal(notified[0].connection.ownerPrincipalId, 'user:alice');
+
+    // Disconnect personal connection tombstones users/<pk>/... and cleans index
+    const disc = await c.km.disconnect(pConn.id, 'user:admin', () => 1, { onBehalfOf: 'user:alice' });
+    assert.ok(disc.ok && disc.entriesRetired === 1);
+    assert.equal(await c.km.get(pConn.id), undefined);
+    assert.equal(JSON.parse(c.mem.values.get(pConn.secretName)!).retired, true);
+
+    // Verify ledger events carry scope, ownerPrincipalId, and onBehalfOf, and zero tokens
+    const connectedRow = c.ledger.events.find((e) => e.action === 'SUBSCRIPTION_CONNECTED' && e.connection === pConn.id)!;
+    assert.equal(connectedRow.scope, 'personal');
+    assert.equal(connectedRow.ownerPrincipalId, 'user:alice');
+    assert.equal(connectedRow.onBehalfOf, 'user:alice');
+
+    const renamedRow = c.ledger.events.find((e) => e.action === 'SUBSCRIPTION_RENAMED' && e.connection === pConn.id)!;
+    assert.equal(renamedRow.scope, 'personal');
+    assert.equal(renamedRow.ownerPrincipalId, 'user:alice');
+    assert.equal(renamedRow.onBehalfOf, 'user:alice');
+
+    const reconsentRow = c.ledger.events.find((e) => e.action === 'SUBSCRIPTION_NEEDS_RECONSENT' && e.connection === pConn.id)!;
+    assert.equal(reconsentRow.scope, 'personal');
+    assert.equal(reconsentRow.ownerPrincipalId, 'user:alice');
+
+    const disconnectedRow = c.ledger.events.find((e) => e.action === 'SUBSCRIPTION_DISCONNECTED' && e.connection === pConn.id)!;
+    assert.equal(disconnectedRow.scope, 'personal');
+    assert.equal(disconnectedRow.ownerPrincipalId, 'user:alice');
+    assert.equal(disconnectedRow.onBehalfOf, 'user:alice');
+
+    const fullLedger = ledgerText(c);
+    for (const secret of c.secretValues) {
+      assert.equal(fullLedger.includes(secret), false, `token leaked into ledger: ${secret.slice(0, 6)}`);
+    }
   });
 });

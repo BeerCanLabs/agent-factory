@@ -539,6 +539,75 @@ export function checkOwnsAnyAgent(state: FactoryState, actor: string): boolean {
   return false;
 }
 
+/**
+ * TSK-332 (M5(4)): Whether `actor` resolves to a canonical `user:<id>` principal who actively owns at least one
+ * `kind: 'personal'` agent — either via an active (`!readOnly`, excluding D15 `pending-revoked`) `content-owner` grant
+ * or via legacy `personal` `agent-owner` ownership on an agent not yet governed by `GrantStore`.
+ * Never returns true for `kind: 'team'` `accountable-lead` or `member`.
+ */
+export function checkOwnsPersonalAgent(state: FactoryState, actor: string): boolean {
+  let canonicalActor = actor;
+  try {
+    canonicalActor = normalizeActorToPrincipal(actor, state.principals);
+  } catch {
+    canonicalActor = actor;
+  }
+  if (!isValidUserPrincipalId(canonicalActor)) return false;
+
+  if (state.grants) {
+    if (!state.grants.healthy) return false;
+    const grantRes = effectiveGrantsForActor(state, canonicalActor);
+    if (!grantRes.ok) return false;
+    for (const eg of grantRes.grants ?? []) {
+      if (
+        !eg.readOnly &&
+        eg.source === 'direct' &&
+        eg.grant.scope.kind === 'agent' &&
+        eg.grant.role === 'content-owner' &&
+        agentKindOf(state, eg.grant.scope.id) !== 'team'
+      ) {
+        return true;
+      }
+    }
+  }
+
+  const matchesActor = (rawOwner: string): boolean => {
+    try {
+      return normalizeActorToPrincipal(rawOwner, state.principals) === canonicalActor;
+    } catch {
+      return rawOwner.toLowerCase() === canonicalActor.toLowerCase();
+    }
+  };
+  const agentHasManagedGrants = (agentId: string): boolean => {
+    if (!state.grants) return false;
+    try {
+      return state.grants.list({ scopeKind: 'agent', scopeId: agentId, includeExpired: true }).length > 0;
+    } catch {
+      return true;
+    }
+  };
+
+  for (const [agentId, agent] of state.agents.entries()) {
+    if (effectiveAgentKind(agent) === 'team') continue;
+    if (agentHasManagedGrants(agentId)) continue;
+    const directOwners = (agent as unknown as { owners?: string[] }).owners;
+    if (directOwners && directOwners.some(matchesActor)) {
+      return true;
+    }
+  }
+  if (!state.configs) return false;
+  const ids = new Set([...state.agents.keys(), ...(state.configs.agentIds ? state.configs.agentIds() : [])]);
+  for (const agentId of ids) {
+    if (agentKindOf(state, agentId) === 'team') continue;
+    if (agentHasManagedGrants(agentId)) continue;
+    const owners = ownersOf(state, agentId);
+    if (owners.some(matchesActor)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export const requestRun = new WeakMap<http.IncomingMessage, Run>();
 export const requestRunRequester = new WeakMap<http.IncomingMessage, string>();
 
@@ -1057,6 +1126,7 @@ export type RequirePrivilegeResource = {
   groupId?: string;
   groupRoles?: readonly string[];
   ownsAnyAgent?: boolean;
+  ownsPersonalAgent?: boolean;
 };
 
 /**
@@ -1131,6 +1201,10 @@ export async function requirePrivilege(
     privilege === 'skills.register' || privilege === 'mcp.use'
       ? checkOwnsAnyAgent(state, result.principal.actor)
       : false;
+  const ownsPersonal =
+    privilege === 'subscriptions.own'
+      ? checkOwnsPersonalAgent(state, result.principal.actor)
+      : undefined;
   const computedGroupRoles = resource?.groupId && state.groups
     ? (state.groups.getGroup(resource.groupId)?.members.some((m) => {
         try {
@@ -1167,6 +1241,9 @@ export async function requirePrivilege(
     ...(resource?.uploader ? { uploader: resource.uploader } : {}),
     groupRoles: resource?.groupRoles ?? computedGroupRoles ?? userGroupRoles,
     ownsAnyAgent: resource?.ownsAnyAgent ?? ownsAny,
+    ...((resource?.ownsPersonalAgent ?? ownsPersonal) !== undefined
+      ? { ownsPersonalAgent: resource?.ownsPersonalAgent ?? ownsPersonal }
+      : {}),
     ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
   };
   const decision = authorize({

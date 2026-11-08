@@ -35,6 +35,7 @@ export type { AssessOptions, CredentialAction, CredentialItem, CredentialStatus,
 export { stripSignInLinksFromJson, stripSignInLinksFromText } from './signin-links.js';
 export {
   SubscriptionKeymaster,
+  subscriptionPrincipalKey,
   subscriptionSecretName,
   defaultConnectionName,
   cleanConnectionName,
@@ -42,6 +43,7 @@ export {
   endpointMeetsHostRule,
 } from './subscriptions.js';
 export type {
+  SubscriptionScope,
   SubscriptionRecord,
   SubscriptionView,
   SubscriptionStatus,
@@ -49,6 +51,7 @@ export type {
   SubscriptionTokenOutcome,
   NeedsReconsentEvent,
   SignInView,
+  SignInMetadata,
   PollOutcome,
   StartSignInError,
   Profile,

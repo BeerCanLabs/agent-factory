@@ -1,5 +1,6 @@
 import type { Principal, Role } from '@beercanlabs/factory-auth';
 import type { EffectiveGrant } from './grants.js';
+import { isValidUserPrincipalId } from './principals.js';
 import {
   AGENT_SCOPED,
   DERIVED_ROLE_PRIVILEGES,
@@ -33,6 +34,7 @@ export type AuthorizeResource = {
   requester?: { actor?: string };
   memberRoles?: readonly string[];
   ownsAnyAgent?: boolean;
+  ownsPersonalAgent?: boolean;
   skillId?: string;
   skillOwner?: string;
   uploader?: string;
@@ -94,6 +96,36 @@ function authorizeUnscoped(req: AuthorizeRequest): AuthorizeResult {
   // S20, D27: any signed-in user with factory access may submit a draft: a fleet role (above) or any live grant.
   if (privilege === 'content.submit' && resource?.grants?.some((eg) => !eg.readOnly)) {
     return { allowed: true };
+  }
+
+  // TSK-332 (M5(4)): personal BYOM subscription ownership. Held by fleet roles with content.submit (above) plus any
+  // canonical user:<id> principal who is an active personal-agent content-owner (excluding D15 pending-revoked / readOnly)
+  // or legacy personal agent-owner — never a team accountable-lead via ownsAnyAgent.
+  if (privilege === 'subscriptions.own' && isValidUserPrincipalId(principal.actor)) {
+    const hasActivePersonalGrant = Boolean(
+      resource?.grants?.some(
+        (eg) =>
+          !eg.readOnly &&
+          eg.source === 'direct' &&
+          eg.grant.scope.kind === 'agent' &&
+          eg.grant.role === 'content-owner',
+      ),
+    );
+    const hasReadOnlyPersonalGrant = Boolean(
+      resource?.grants?.some(
+        (eg) =>
+          eg.readOnly &&
+          eg.grant.scope.kind === 'agent' &&
+          eg.grant.role === 'content-owner',
+      ),
+    );
+    if (resource?.ownsPersonalAgent !== undefined) {
+      if (resource.ownsPersonalAgent && (hasActivePersonalGrant || !hasReadOnlyPersonalGrant)) {
+        return { allowed: true };
+      }
+    } else if (hasActivePersonalGrant) {
+      return { allowed: true };
+    }
   }
 
   if (privilege === 'skills.register') {

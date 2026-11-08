@@ -1,36 +1,54 @@
 /**
- * Keymaster subscription connections (DESIGN_AUTHORITY.md §6.9 M5(4), (5), (6); §6.11 K1 to K4 as amended).
+ * Keymaster subscription connections (DESIGN_AUTHORITY.md §6.9 M5(4), (5), (6); §6.11 K1 to K5.1 as amended).
  *
- * A subscription connection is the factory's, not an agent's: a model vendor's OAuth grant for a person's own plan
- * (SuperGrok, ChatGPT Plus/Pro) that an admin signed in, with the subscriber's confirmation. Only the Keymaster holds the
- * grant (K1), at `shared/<provider>/subscription/<connection>`, declared by no agent (K5.1 as amended).
+ * A subscription connection is held only by the Keymaster (K1), declared by no agent (E8, K5.1 as amended), in one of two scopes:
+ * - `factory`: shared factory subscription at `shared/<provider>/subscription/<connection>`, connected by an admin with subscriber attestation.
+ * - `personal`: Owner BYOM subscription at `users/<principalKey>/<provider>/subscription/<connection>` (`<principalKey>` = `u-<sha256-hex>`
+ *   of canonical `ownerPrincipalId`), connected by `ownerPrincipalId` attesting the plan is their own.
  *
  * - Sign-in is the vendor's device-code flow with the vendor's public client (no secret): the Keymaster starts it and the
- *   admin's console shows the code and the vendor's URL; nothing redirects to the factory (M5(5), K2 as amended).
+ *   console shows the code and the vendor's URL; nothing redirects to the factory (M5(5), K2 as amended).
  *   The flow, hosts and client come from `SUBSCRIPTION_TEMPLATES` (contract code), never from a caller.
  * - A connection is named for its subscriber (first name + the vendor's plan, else the email's local part), unique within
- *   the factory, and one vendor account has at most one connection: signing in to a connected account reconnects it.
+ *   the factory across both scopes, and one vendor account has at most one connection across all scopes: signing in again as
+ *   the same owner reconnects it; signing in as a different owner is refused with `account_already_connected`.
  * - Refresh is serialized per grant, the rotated refresh token is persisted BEFORE the new access token is used, and every
  *   access, refresh, id and device token joins the redaction set (S1) the moment it is obtained (M5(6)).
- * - A refused refresh marks the grant needs re-consent (K4), tells the admin who connected it (every admin if that admin no
- *   longer holds the role; the control plane resolves who), and is never retried.
+ * - A refused refresh marks the grant needs re-consent (K4), notifies the owner (on `personal`) or connecting admin / all admins
+ *   (on `factory`; the control plane resolves who), and is never retried.
  *
  * No provider SDKs: plain HTTPS posts. Nothing here logs, returns or ledgers a token.
  */
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { isValidUserPrincipalId } from '@beercanlabs/factory-bouncer';
 import type { LedgerStore } from '@beercanlabs/factory-ledger';
 import { writableProvider, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { SUBSCRIPTION_TEMPLATES, type SubscriptionTemplate } from '@beercanlabs/factory-contract';
 
+export type SubscriptionScope = 'factory' | 'personal';
 export type SubscriptionStatus = 'active' | 'needs_reconsent';
 
-/** What the Keymaster stores at `shared/<provider>/subscription/<connection>`. Tokens never leave it. */
+const PRINCIPAL_KEY_RE = /^u-[0-9a-f]{64}$/;
+
+/** Deterministic `[a-z0-9_-]+` vault-safe key (`u-<sha256-hex>`) for canonical `user:<id>` ownerPrincipalId (M5(4)). */
+export function subscriptionPrincipalKey(ownerPrincipalId: string): string {
+  if (!isValidUserPrincipalId(ownerPrincipalId)) {
+    throw new Error(`invalid canonical ownerPrincipalId: ${JSON.stringify(ownerPrincipalId)}`);
+  }
+  return `u-${createHash('sha256').update(ownerPrincipalId, 'utf8').digest('hex')}`;
+}
+
+/** What the Keymaster stores at `shared/<provider>/subscription/<connection>` or `users/<principalKey>/<provider>/subscription/<connection>`. Tokens never leave it. */
 export type SubscriptionRecord = {
   id: string;
   /** The vendor (`xai`, `openai`): the `<provider>` of the secret name. */
   provider: string;
   templateId: string;
   name: string;
+  /** Connection scope (`'factory'` by default on legacy records; `'personal'` for Owner BYOM). */
+  scope: SubscriptionScope;
+  /** Canonical `'user:<id>'` principal when `scope === 'personal'`; forbidden when `scope === 'factory'`. */
+  ownerPrincipalId?: string;
   subscriberEmail: string;
   /** What identifies the vendor account (OpenAI: account id and subject; xAI: subject). One connection per key. */
   accountKey: string;
@@ -43,7 +61,7 @@ export type SubscriptionRecord = {
   refreshToken: string;
   accessToken?: string;
   expiresAt?: string;
-  /** The admin who last connected (or reconnected) it: told when the grant needs re-consent (K4). */
+  /** The actor who last connected (or reconnected) it: told on `factory` when the grant needs re-consent (K4). */
   connectedBy: string;
   connectedAt: string;
   reconnectedAt?: string;
@@ -57,6 +75,8 @@ export type SubscriptionView = {
   provider: string;
   templateId: string;
   name: string;
+  scope: SubscriptionScope;
+  ownerPrincipalId?: string;
   subscriberEmail: string;
   tier?: string;
   status: SubscriptionStatus;
@@ -68,7 +88,23 @@ export type SubscriptionView = {
   secretName: string;
 };
 
-export const subscriptionSecretName = (provider: string, connection: string) => `shared/${provider}/subscription/${connection}`;
+export function subscriptionSecretName(
+  provider: string,
+  connection: string,
+  opts?: { scope?: SubscriptionScope; ownerPrincipalId?: string },
+): string {
+  const scope = opts?.scope ?? 'factory';
+  if (scope === 'personal') {
+    if (!opts?.ownerPrincipalId) {
+      throw new Error('ownerPrincipalId is required for personal-scoped subscription secrets');
+    }
+    return `users/${subscriptionPrincipalKey(opts.ownerPrincipalId)}/${provider}/subscription/${connection}`;
+  }
+  if (opts?.ownerPrincipalId !== undefined) {
+    throw new Error('ownerPrincipalId is forbidden for factory-scoped subscription secrets');
+  }
+  return `shared/${provider}/subscription/${connection}`;
+}
 const indexSecretName = (provider: string) => `shared/${provider}/subscription/_index`;
 const CONNECTION_ID = /^c-[a-f0-9]{12}$/;
 
@@ -77,7 +113,9 @@ export const NAME_MAX = 80;
 export type SignInView = {
   signInId: string;
   templateId: string;
-  /** What the admin shows the subscriber: the vendor's own URL and the code to type there. */
+  scope: SubscriptionScope;
+  ownerPrincipalId?: string;
+  /** What the console shows the subscriber: the vendor's own URL and the code to type there. */
   userCode: string;
   verificationUrl: string;
   verificationUrlComplete?: string;
@@ -86,8 +124,31 @@ export type SignInView = {
   reconnect?: string;
 };
 
+export type SignInMetadata = {
+  signInId: string;
+  templateId: string;
+  actor: string;
+  onBehalfOf?: string;
+  scope: SubscriptionScope;
+  ownerPrincipalId?: string;
+  reconnect?: string;
+};
+
 export type StartSignInError =
-  | { ok: false; error: 'unknown_template' | 'attestation_required' | 'invalid_name' | 'name_taken' | 'unknown_connection' | 'provider_mismatch'; message: string }
+  | {
+      ok: false;
+      error:
+        | 'unknown_template'
+        | 'attestation_required'
+        | 'invalid_scope'
+        | 'invalid_owner'
+        | 'invalid_name'
+        | 'name_taken'
+        | 'unknown_connection'
+        | 'forbidden_connection'
+        | 'provider_mismatch';
+      message: string;
+    }
   | { ok: false; error: 'sign_in_unavailable' | 'sign_in_rate_limited' | 'discovery_invalid'; message: string };
 
 export type PollOutcome =
@@ -102,6 +163,7 @@ export type PollOutcome =
         | 'sign_in_failed'
         | 'profile_unavailable'
         | 'name_taken'
+        | 'account_already_connected'
         | 'account_mismatch'
         | 'sign_in_unavailable';
       message: string;
@@ -134,6 +196,9 @@ type SignInSession = {
   id: string;
   template: SubscriptionTemplate;
   actor: string;
+  onBehalfOf?: string;
+  scope: SubscriptionScope;
+  ownerPrincipalId?: string;
   name?: string;
   reconnectId?: string;
   expiresAtMs: number;
@@ -147,6 +212,22 @@ type SignInSession = {
   userCode: string;
   done?: boolean;
 };
+
+type ProviderIndex = {
+  ids: string[];
+  personal: Record<string, string>;
+};
+
+function sameSubscriptionOwner(
+  r: Pick<SubscriptionRecord, 'scope' | 'ownerPrincipalId'>,
+  scope: SubscriptionScope,
+  ownerPrincipalId?: string,
+): boolean {
+  const recScope: SubscriptionScope = r.scope ?? 'factory';
+  if (recScope !== scope) return false;
+  if (scope === 'factory') return r.ownerPrincipalId === undefined && ownerPrincipalId === undefined;
+  return typeof r.ownerPrincipalId === 'string' && r.ownerPrincipalId === ownerPrincipalId;
+}
 
 type Tokens = { access_token: string; refresh_token?: string; id_token?: string; expires_in?: number };
 
@@ -294,31 +375,98 @@ export class SubscriptionKeymaster {
     this.remember(r.refreshToken, r.accessToken);
   }
 
-  private async index(provider: string): Promise<string[]> {
+  private async readProviderIndex(provider: string): Promise<ProviderIndex> {
     const raw = await this.read(indexSecretName(provider));
-    if (!raw) return [];
+    if (!raw) return { ids: [], personal: {} };
     try {
-      const j = JSON.parse(raw) as { ids?: unknown };
-      return Array.isArray(j.ids) ? j.ids.filter((i): i is string => typeof i === 'string' && CONNECTION_ID.test(i)) : [];
+      const j = JSON.parse(raw) as { ids?: unknown; personal?: unknown };
+      const ids = Array.isArray(j.ids) ? j.ids.filter((i): i is string => typeof i === 'string' && CONNECTION_ID.test(i)) : [];
+      const personal: Record<string, string> = {};
+      if (j.personal && typeof j.personal === 'object' && !Array.isArray(j.personal)) {
+        for (const [id, pk] of Object.entries(j.personal as Record<string, unknown>)) {
+          if (CONNECTION_ID.test(id) && typeof pk === 'string' && PRINCIPAL_KEY_RE.test(pk)) {
+            personal[id] = pk;
+          }
+        }
+      }
+      return { ids, personal };
     } catch {
-      return [];
+      return { ids: [], personal: {} };
     }
   }
 
-  private async writeIndex(provider: string, ids: string[]) {
-    await this.write(indexSecretName(provider), JSON.stringify({ ids: [...new Set(ids)] }));
+  private async writeProviderIndex(provider: string, idx: ProviderIndex) {
+    const ids = [...new Set(idx.ids.filter((i) => CONNECTION_ID.test(i)))];
+    const personalEntries = Object.entries(idx.personal).filter(
+      ([id, pk]) => CONNECTION_ID.test(id) && PRINCIPAL_KEY_RE.test(pk),
+    );
+    const payload =
+      personalEntries.length > 0
+        ? { ids, personal: Object.fromEntries(personalEntries) }
+        : { ids };
+    await this.write(indexSecretName(provider), JSON.stringify(payload));
   }
 
-  private async load(provider: string, id: string): Promise<SubscriptionRecord | undefined> {
+  private async load(provider: string, id: string, principalKey?: string): Promise<SubscriptionRecord | undefined> {
+    if (principalKey !== undefined && !PRINCIPAL_KEY_RE.test(principalKey)) return undefined;
     const pending = this.unsaved.get(id);
-    if (pending) return this.withMark(pending);
-    const raw = await this.read(subscriptionSecretName(provider, id));
+    if (pending) {
+      if (pending.provider !== provider) return undefined;
+      if (principalKey !== undefined) {
+        if (
+          pending.scope !== 'personal' ||
+          typeof pending.ownerPrincipalId !== 'string' ||
+          !isValidUserPrincipalId(pending.ownerPrincipalId) ||
+          subscriptionPrincipalKey(pending.ownerPrincipalId) !== principalKey
+        ) {
+          return undefined;
+        }
+      } else if ((pending.scope ?? 'factory') !== 'factory' || pending.ownerPrincipalId !== undefined) {
+        return undefined;
+      }
+      return this.withMark(pending);
+    }
+    const secretPath =
+      principalKey !== undefined
+        ? `users/${principalKey}/${provider}/subscription/${id}`
+        : subscriptionSecretName(provider, id);
+    const raw = await this.read(secretPath);
     if (!raw) return undefined;
     try {
-      const r = JSON.parse(raw) as SubscriptionRecord & { retired?: boolean };
-      if (!r || r.retired || typeof r.refreshToken !== 'string' || r.id !== id) return undefined;
-      this.rememberRecord(r);
-      return this.withMark(r);
+      const r = JSON.parse(raw) as Partial<SubscriptionRecord> & { retired?: boolean };
+      if (!r || typeof r !== 'object' || Array.isArray(r)) return undefined;
+      if (typeof r.refreshToken === 'string') this.remember(r.refreshToken);
+      if (typeof r.accessToken === 'string') this.remember(r.accessToken);
+      if (r.retired || typeof r.refreshToken !== 'string' || r.id !== id) return undefined;
+      if (r.provider !== undefined && r.provider !== provider) return undefined;
+      if (principalKey !== undefined) {
+        // Fail closed on users/<principalKey>/... if scope or canonical ownerPrincipalId does not match the vault path.
+        if (
+          r.scope !== 'personal' ||
+          typeof r.ownerPrincipalId !== 'string' ||
+          !isValidUserPrincipalId(r.ownerPrincipalId) ||
+          subscriptionPrincipalKey(r.ownerPrincipalId) !== principalKey
+        ) {
+          return undefined;
+        }
+        const normalized: SubscriptionRecord = {
+          ...(r as SubscriptionRecord),
+          provider,
+          scope: 'personal',
+          ownerPrincipalId: r.ownerPrincipalId,
+        };
+        return this.withMark(normalized);
+      }
+      // Fail closed on shared/<provider>/... if tampered with personal scope or ownerPrincipalId.
+      if ((r.scope !== undefined && r.scope !== 'factory') || r.ownerPrincipalId !== undefined) {
+        return undefined;
+      }
+      const normalized: SubscriptionRecord = {
+        ...(r as SubscriptionRecord),
+        provider,
+        scope: 'factory',
+      };
+      return this.withMark(normalized);
     } catch {
       return undefined;
     }
@@ -335,16 +483,37 @@ export class SubscriptionKeymaster {
     return r.status === 'needs_reconsent' ? r : { ...r, status: 'needs_reconsent', statusAt: m.at, accessToken: undefined, expiresAt: undefined };
   }
 
+  private secretPathForRecord(r: Pick<SubscriptionRecord, 'provider' | 'id' | 'scope' | 'ownerPrincipalId'>): string {
+    return subscriptionSecretName(r.provider, r.id, { scope: r.scope ?? 'factory', ownerPrincipalId: r.ownerPrincipalId });
+  }
+
   private async save(r: SubscriptionRecord) {
     this.rememberRecord(r);
-    await this.write(subscriptionSecretName(r.provider, r.id), JSON.stringify(r));
+    const scope: SubscriptionScope = r.scope ?? 'factory';
+    const recordToSave: SubscriptionRecord =
+      scope === 'personal'
+        ? { ...r, scope: 'personal', ownerPrincipalId: r.ownerPrincipalId! }
+        : { ...r, scope: 'factory' };
+    if (scope === 'factory') {
+      delete (recordToSave as { ownerPrincipalId?: string }).ownerPrincipalId;
+    }
+    await this.write(this.secretPathForRecord(recordToSave), JSON.stringify(recordToSave));
+  }
+
+  private uniqueVendors(): string[] {
+    return [...new Set(Object.values(this.templates).map((t) => t.vendor))];
   }
 
   private async allRecords(): Promise<SubscriptionRecord[]> {
     const out: SubscriptionRecord[] = [];
-    for (const t of Object.values(this.templates)) {
-      for (const id of await this.index(t.vendor)) {
-        const r = await this.load(t.vendor, id);
+    for (const vendor of this.uniqueVendors()) {
+      const idx = await this.readProviderIndex(vendor);
+      for (const id of idx.ids) {
+        const r = await this.load(vendor, id);
+        if (r) out.push(r);
+      }
+      for (const [id, pk] of Object.entries(idx.personal)) {
+        const r = await this.load(vendor, id, pk);
         if (r) out.push(r);
       }
     }
@@ -352,11 +521,14 @@ export class SubscriptionKeymaster {
   }
 
   static view(r: SubscriptionRecord): SubscriptionView {
+    const scope: SubscriptionScope = r.scope ?? 'factory';
     return {
       id: r.id,
       provider: r.provider,
       templateId: r.templateId,
       name: r.name,
+      scope,
+      ...(scope === 'personal' && r.ownerPrincipalId ? { ownerPrincipalId: r.ownerPrincipalId } : {}),
       subscriberEmail: r.subscriberEmail,
       ...(r.tier ? { tier: r.tier } : {}),
       status: r.status,
@@ -364,12 +536,19 @@ export class SubscriptionKeymaster {
       connectedBy: r.connectedBy,
       connectedAt: r.connectedAt,
       ...(r.reconnectedAt ? { reconnectedAt: r.reconnectedAt } : {}),
-      secretName: subscriptionSecretName(r.provider, r.id),
+      secretName: subscriptionSecretName(r.provider, r.id, { scope, ownerPrincipalId: r.ownerPrincipalId }),
     };
   }
 
-  async list(): Promise<SubscriptionView[]> {
-    return (await this.allRecords()).map(SubscriptionKeymaster.view).sort((a, b) => a.name.localeCompare(b.name));
+  async list(opts?: { scope?: SubscriptionScope; ownerPrincipalId?: string }): Promise<SubscriptionView[]> {
+    let records = await this.allRecords();
+    if (opts?.scope !== undefined) {
+      records = records.filter((r) => (r.scope ?? 'factory') === opts.scope);
+    }
+    if (opts?.ownerPrincipalId !== undefined) {
+      records = records.filter((r) => r.scope === 'personal' && r.ownerPrincipalId === opts.ownerPrincipalId);
+    }
+    return records.map(SubscriptionKeymaster.view).sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async get(id: string): Promise<SubscriptionView | undefined> {
@@ -379,8 +558,12 @@ export class SubscriptionKeymaster {
 
   private async find(id: string): Promise<SubscriptionRecord | undefined> {
     if (!CONNECTION_ID.test(id)) return undefined;
-    for (const t of Object.values(this.templates)) {
-      if ((await this.index(t.vendor)).includes(id)) return this.load(t.vendor, id);
+    for (const vendor of this.uniqueVendors()) {
+      const idx = await this.readProviderIndex(vendor);
+      if (idx.ids.includes(id)) return this.load(vendor, id);
+      if (Object.prototype.hasOwnProperty.call(idx.personal, id)) {
+        return this.load(vendor, id, idx.personal[id]);
+      }
     }
     return undefined;
   }
@@ -440,15 +623,53 @@ export class SubscriptionKeymaster {
   // ---- sign-in (M5(4), (5)) ------------------------------------------------------------------
 
   /**
-   * Starts the vendor's device-code flow for a template. `subscriberAttested` is the admin's attestation that the subscriber
-   * agreed to their plan being used by the factory (M5(4)); without it nothing starts. `reconnect` names the connection the
-   * sign-in must be for (its account must match); omitted, a sign-in to a connected account reconnects it anyway.
+   * Starts the vendor's device-code flow for a template. `subscriberAttested` is the caller's attestation that the subscriber
+   * agreed to their plan being used (`factory`) or that the plan is the caller's own (`personal`, M5(4)); without it nothing
+   * starts. `reconnect` names the connection the sign-in must be for (its owner and account must match); omitted, signing in
+   * again as the same owner reconnects that connection while signing in as a different owner is refused with
+   * `account_already_connected`.
    */
-  async startSignIn(p: { templateId: string; actor: string; subscriberAttested: boolean; name?: string; reconnect?: string }): Promise<{ ok: true; signIn: SignInView } | StartSignInError> {
+  async startSignIn(p: {
+    templateId: string;
+    actor: string;
+    subscriberAttested: boolean;
+    scope?: SubscriptionScope;
+    ownerPrincipalId?: string;
+    onBehalfOf?: string;
+    name?: string;
+    reconnect?: string;
+  }): Promise<{ ok: true; signIn: SignInView } | StartSignInError> {
+    const scope: SubscriptionScope = p.scope ?? 'factory';
+    if (scope !== 'factory' && scope !== 'personal') {
+      return { ok: false, error: 'invalid_scope', message: 'scope must be "factory" or "personal"' };
+    }
+    if (scope === 'factory' && p.ownerPrincipalId !== undefined) {
+      return { ok: false, error: 'invalid_owner', message: 'ownerPrincipalId is forbidden when scope is "factory"' };
+    }
+    if (scope === 'personal' && (!p.ownerPrincipalId || !isValidUserPrincipalId(p.ownerPrincipalId))) {
+      return { ok: false, error: 'invalid_owner', message: 'a canonical user:<id> ownerPrincipalId is required when scope is "personal"' };
+    }
     const template = this.templates[p.templateId];
     if (!template) return { ok: false, error: 'unknown_template', message: `no subscription template "${p.templateId}"` };
     if (p.subscriberAttested !== true) {
-      return { ok: false, error: 'attestation_required', message: 'the connecting admin must attest that the subscriber agreed to their plan being used by the factory (M5(4))' };
+      return {
+        ok: false,
+        error: 'attestation_required',
+        message:
+          scope === 'personal'
+            ? 'the owner must attest that this subscription plan is their own (M5(4))'
+            : 'the connecting admin must attest that the subscriber agreed to their plan being used by the factory (M5(4))',
+      };
+    }
+    if (p.reconnect !== undefined) {
+      const existing = await this.find(p.reconnect);
+      if (!existing) return { ok: false, error: 'unknown_connection', message: `no connection "${p.reconnect}"` };
+      if (!sameSubscriptionOwner(existing, scope, p.ownerPrincipalId)) {
+        return { ok: false, error: 'forbidden_connection', message: 'cannot reconnect a connection owned by another principal or scope' };
+      }
+      if (existing.templateId !== template.id) {
+        return { ok: false, error: 'provider_mismatch', message: `connection ${existing.id} is a ${existing.provider} connection` };
+      }
     }
     let name: string | undefined;
     if (p.name !== undefined) {
@@ -457,16 +678,14 @@ export class SubscriptionKeymaster {
       const taken = (await this.allRecords()).find((r) => sameName(r.name, name!) && r.id !== p.reconnect);
       if (taken) return { ok: false, error: 'name_taken', message: `a connection is already named "${taken.name}"` };
     }
-    if (p.reconnect !== undefined) {
-      const existing = await this.find(p.reconnect);
-      if (!existing) return { ok: false, error: 'unknown_connection', message: `no connection "${p.reconnect}"` };
-      if (existing.templateId !== template.id) return { ok: false, error: 'provider_mismatch', message: `connection ${existing.id} is a ${existing.provider} connection` };
-    }
 
     const session: SignInSession = {
       id: randomUUID(),
       template,
       actor: p.actor,
+      ...(p.onBehalfOf ? { onBehalfOf: p.onBehalfOf } : {}),
+      scope,
+      ...(scope === 'personal' && p.ownerPrincipalId ? { ownerPrincipalId: p.ownerPrincipalId } : {}),
       name,
       reconnectId: p.reconnect,
       expiresAtMs: 0,
@@ -475,7 +694,7 @@ export class SubscriptionKeymaster {
       tokenUrl: template.tokenUrl,
       userCode: '',
     };
-    let view: Omit<SignInView, 'signInId' | 'templateId' | 'reconnect'>;
+    let view: Omit<SignInView, 'signInId' | 'templateId' | 'scope' | 'ownerPrincipalId' | 'reconnect'>;
     if (template.vendor === 'xai') {
       const started = await this.startXai(template, session);
       if (!started.ok) return started;
@@ -488,14 +707,83 @@ export class SubscriptionKeymaster {
     session.nextPollAtMs = this.now() + session.intervalMs;
     this.signIns.set(session.id, session);
     this.sweepSignIns();
-    return { ok: true, signIn: { signInId: session.id, templateId: template.id, ...view, ...(p.reconnect ? { reconnect: p.reconnect } : {}) } };
+    return {
+      ok: true,
+      signIn: {
+        signInId: session.id,
+        templateId: template.id,
+        scope,
+        ...(scope === 'personal' && p.ownerPrincipalId ? { ownerPrincipalId: p.ownerPrincipalId } : {}),
+        ...view,
+        ...(p.reconnect ? { reconnect: p.reconnect } : {}),
+      },
+    };
+  }
+
+  /**
+   * Starts an explicit reconnect sign-in for an existing connection `id`, enforcing that the caller's `(scope, ownerPrincipalId)`
+   * matches the connection's owner (`forbidden_connection` when owned by another principal or scope).
+   */
+  async reconnect(
+    id: string,
+    p: {
+      actor: string;
+      subscriberAttested: boolean;
+      scope?: SubscriptionScope;
+      ownerPrincipalId?: string;
+      onBehalfOf?: string;
+    },
+  ): Promise<{ ok: true; signIn: SignInView } | StartSignInError> {
+    const scope: SubscriptionScope = p.scope ?? 'factory';
+    if (scope !== 'factory' && scope !== 'personal') {
+      return { ok: false, error: 'invalid_scope', message: 'scope must be "factory" or "personal"' };
+    }
+    if (scope === 'factory' && p.ownerPrincipalId !== undefined) {
+      return { ok: false, error: 'invalid_owner', message: 'ownerPrincipalId is forbidden when scope is "factory"' };
+    }
+    if (scope === 'personal' && (!p.ownerPrincipalId || !isValidUserPrincipalId(p.ownerPrincipalId))) {
+      return { ok: false, error: 'invalid_owner', message: 'a canonical user:<id> ownerPrincipalId is required when scope is "personal"' };
+    }
+    const existing = await this.find(id);
+    if (!existing) return { ok: false, error: 'unknown_connection', message: `no connection "${id}"` };
+    if (!sameSubscriptionOwner(existing, scope, p.ownerPrincipalId)) {
+      return { ok: false, error: 'forbidden_connection', message: 'cannot reconnect a connection owned by another principal or scope' };
+    }
+    return this.startSignIn({
+      templateId: existing.templateId,
+      actor: p.actor,
+      subscriberAttested: p.subscriberAttested,
+      scope,
+      ...(p.ownerPrincipalId ? { ownerPrincipalId: p.ownerPrincipalId } : {}),
+      ...(p.onBehalfOf ? { onBehalfOf: p.onBehalfOf } : {}),
+      reconnect: id,
+    });
+  }
+
+  /** Non-secret metadata for an open sign-in session, used by route authorization. */
+  getSignIn(signInId: string): SignInMetadata | undefined {
+    this.sweepSignIns();
+    const s = this.signIns.get(signInId);
+    if (!s || s.done) return undefined;
+    return {
+      signInId: s.id,
+      templateId: s.template.id,
+      actor: s.actor,
+      ...(s.onBehalfOf ? { onBehalfOf: s.onBehalfOf } : {}),
+      scope: s.scope,
+      ...(s.ownerPrincipalId ? { ownerPrincipalId: s.ownerPrincipalId } : {}),
+      ...(s.reconnectId ? { reconnect: s.reconnectId } : {}),
+    };
   }
 
   private sweepSignIns() {
     for (const [id, s] of this.signIns) if (s.done || s.expiresAtMs + 60_000 < this.now()) this.signIns.delete(id);
   }
 
-  private async startXai(t: SubscriptionTemplate, s: SignInSession): Promise<{ ok: true; view: Omit<SignInView, 'signInId' | 'templateId' | 'reconnect'> } | StartSignInError> {
+  private async startXai(
+    t: SubscriptionTemplate,
+    s: SignInSession,
+  ): Promise<{ ok: true; view: Omit<SignInView, 'signInId' | 'templateId' | 'scope' | 'ownerPrincipalId' | 'reconnect'> } | StartSignInError> {
     const rule = t.signIn.hostRule;
     if (!rule || !t.signIn.discoveryUrl) return { ok: false, error: 'sign_in_unavailable', message: `template ${t.id} has no discovery rule` };
     // OIDC discovery: the token endpoint comes from here, and must be https on x.ai or a subdomain (M5(5)).
@@ -534,7 +822,10 @@ export class SubscriptionKeymaster {
     return { ok: true, view: { userCode, verificationUrl: verification, ...(complete ? { verificationUrlComplete: complete } : {}), expiresAt: new Date(s.expiresAtMs).toISOString(), intervalSeconds: interval } };
   }
 
-  private async startOpenAi(t: SubscriptionTemplate, s: SignInSession): Promise<{ ok: true; view: Omit<SignInView, 'signInId' | 'templateId' | 'reconnect'> } | StartSignInError> {
+  private async startOpenAi(
+    t: SubscriptionTemplate,
+    s: SignInSession,
+  ): Promise<{ ok: true; view: Omit<SignInView, 'signInId' | 'templateId' | 'scope' | 'ownerPrincipalId' | 'reconnect'> } | StartSignInError> {
     // Not RFC 8628 (M5(5)): `client_id` only; the user visits the template's verification URL and types the user code.
     const r = await this.post(t, t.signIn.deviceCodeUrl, { json: { client_id: t.client.id } });
     if (!r) return { ok: false, error: 'sign_in_unavailable', message: 'the user-code request failed' };
@@ -552,13 +843,26 @@ export class SubscriptionKeymaster {
   }
 
   /**
-   * One poll step of a sign-in, on behalf of the admin who started it. Polls the vendor no faster than the vendor's interval
-   * (a call inside the interval just reports pending). When the subscriber has signed in, stores the grant and returns the
-   * connection. Only the admin who started the sign-in may poll it.
+   * One poll step of a sign-in, on behalf of the exact initiator/owner who started it. Polls the vendor no faster than the
+   * vendor's interval (a call inside the interval just reports pending). When the subscriber has signed in, stores the grant
+   * and returns the connection. Only the exact initiator/owner who started the sign-in may poll it.
    */
-  async pollSignIn(signInId: string, actor: string): Promise<PollOutcome> {
+  async pollSignIn(
+    signInId: string,
+    actor: string,
+    opts?: { scope?: SubscriptionScope; ownerPrincipalId?: string; onBehalfOf?: string },
+  ): Promise<PollOutcome> {
     const s = this.signIns.get(signInId);
     if (!s || s.actor !== actor || s.done) return { ok: false, error: 'unknown_sign_in', message: 'no such sign-in' };
+    if ((s.onBehalfOf ?? undefined) !== (opts?.onBehalfOf ?? undefined)) {
+      return { ok: false, error: 'unknown_sign_in', message: 'no such sign-in' };
+    }
+    if (opts?.scope !== undefined && s.scope !== opts.scope) {
+      return { ok: false, error: 'unknown_sign_in', message: 'no such sign-in' };
+    }
+    if (opts?.ownerPrincipalId !== undefined && s.ownerPrincipalId !== opts.ownerPrincipalId) {
+      return { ok: false, error: 'unknown_sign_in', message: 'no such sign-in' };
+    }
     if (this.now() >= s.expiresAtMs) {
       this.signIns.delete(signInId);
       return { ok: false, error: 'sign_in_expired', message: 'the sign-in code expired; start again' };
@@ -620,6 +924,8 @@ export class SubscriptionKeymaster {
 
   private async completeSignIn(s: SignInSession, tokens: Tokens): Promise<PollOutcome> {
     const t = s.template;
+    // S1: ensure newly obtained tokens are always added to secretValues before any validation or refusal discards them.
+    this.remember(tokens.access_token, tokens.refresh_token, tokens.id_token);
     // The grant is useless without a refresh token: both permitted vendors issue one (offline_access).
     if (typeof tokens.refresh_token !== 'string' || !tokens.refresh_token) {
       return { ok: false, error: 'sign_in_failed', message: 'the vendor issued no refresh token' };
@@ -629,17 +935,32 @@ export class SubscriptionKeymaster {
     return this.locked(async () => {
       const records = await this.allRecords();
       const sameAccount = records.find((r) => r.provider === t.vendor && r.accountKey === profile.accountKey);
-      if (s.reconnectId && (!sameAccount || sameAccount.id !== s.reconnectId)) {
-        return { ok: false as const, error: 'account_mismatch' as const, message: 'the account that signed in is not the one this connection was made for' };
+      // M5(4) single-connection-per-vendor-account guard across scopes:
+      // If this vendor account is already connected by a DIFFERENT owner (`factory` vs `personal`, or `user:alice` vs `user:bob`),
+      // refuse with `account_already_connected` without touching or overwriting the existing grant.
+      if (sameAccount && !sameSubscriptionOwner(sameAccount, s.scope, s.ownerPrincipalId)) {
+        return {
+          ok: false as const,
+          error: 'account_already_connected' as const,
+          message: 'this vendor account is already connected by another owner in this factory',
+        };
+      }
+      if (s.reconnectId) {
+        const reconnectTarget = records.find((r) => r.id === s.reconnectId);
+        if (!reconnectTarget || !sameSubscriptionOwner(reconnectTarget, s.scope, s.ownerPrincipalId) || !sameAccount || sameAccount.id !== s.reconnectId) {
+          return { ok: false as const, error: 'account_mismatch' as const, message: 'the account that signed in is not the one this connection was made for' };
+        }
       }
       const at = new Date(this.now()).toISOString();
       const expiresAt = new Date(this.now() + (typeof tokens.expires_in === 'number' ? tokens.expires_in : 3600) * 1000).toISOString();
       const grant = { refreshToken: tokens.refresh_token!, accessToken: tokens.access_token, expiresAt };
       if (sameAccount) {
-        // One vendor account, one connection: replace the grant (reconnect); the name and the catalog entries stay.
+        // Same owner (`factory` or exact same `ownerPrincipalId`): replace the grant (reconnect), keeping id, name, scope, ownerPrincipalId.
         const next: SubscriptionRecord = {
           ...sameAccount,
           ...grant,
+          scope: sameAccount.scope ?? 'factory',
+          ...(sameAccount.scope === 'personal' && sameAccount.ownerPrincipalId ? { ownerPrincipalId: sameAccount.ownerPrincipalId } : {}),
           tokenUrl: s.tokenUrl,
           subscriberEmail: profile.email,
           ...(profile.accountId ? { accountId: profile.accountId } : {}),
@@ -655,7 +976,20 @@ export class SubscriptionKeymaster {
         this.invalidated.delete(next.id);
         this.cache.delete(next.id);
         this.cacheToken(next);
-        this.ledgerRow({ action: 'SUBSCRIPTION_CONNECTED', actor: s.actor, provider: next.provider, connection: next.id, connectionName: next.name, subscriber: next.subscriberEmail, tier: next.tier ?? 'unknown', attested: true, reconnect: true });
+        this.ledgerRow({
+          action: 'SUBSCRIPTION_CONNECTED',
+          actor: s.actor,
+          ...(s.onBehalfOf ? { onBehalfOf: s.onBehalfOf } : {}),
+          scope: next.scope,
+          ...(next.scope === 'personal' && next.ownerPrincipalId ? { ownerPrincipalId: next.ownerPrincipalId } : {}),
+          provider: next.provider,
+          connection: next.id,
+          connectionName: next.name,
+          subscriber: next.subscriberEmail,
+          tier: next.tier ?? 'unknown',
+          attested: true,
+          reconnect: true,
+        });
         return { ok: true as const, status: 'connected' as const, connection: SubscriptionKeymaster.view(next), reconnect: true };
       }
       const name = s.name ?? defaultConnectionName(t.vendor, profile);
@@ -669,6 +1003,8 @@ export class SubscriptionKeymaster {
         provider: t.vendor,
         templateId: t.id,
         name,
+        scope: s.scope,
+        ...(s.scope === 'personal' && s.ownerPrincipalId ? { ownerPrincipalId: s.ownerPrincipalId } : {}),
         subscriberEmail: profile.email,
         accountKey: profile.accountKey,
         ...(profile.accountId ? { accountId: profile.accountId } : {}),
@@ -682,10 +1018,29 @@ export class SubscriptionKeymaster {
       };
       // Write the grant before the index: an index entry never points at nothing.
       await this.save(rec);
-      await this.writeIndex(t.vendor, [...(await this.index(t.vendor)), id]);
+      const idx = await this.readProviderIndex(t.vendor);
+      if (rec.scope === 'personal') {
+        idx.personal[id] = subscriptionPrincipalKey(rec.ownerPrincipalId!);
+      } else {
+        idx.ids.push(id);
+      }
+      await this.writeProviderIndex(t.vendor, idx);
       this.invalidated.delete(id);
       this.cacheToken(rec);
-      this.ledgerRow({ action: 'SUBSCRIPTION_CONNECTED', actor: s.actor, provider: rec.provider, connection: rec.id, connectionName: rec.name, subscriber: rec.subscriberEmail, tier: rec.tier ?? 'unknown', attested: true, reconnect: false });
+      this.ledgerRow({
+        action: 'SUBSCRIPTION_CONNECTED',
+        actor: s.actor,
+        ...(s.onBehalfOf ? { onBehalfOf: s.onBehalfOf } : {}),
+        scope: rec.scope,
+        ...(rec.scope === 'personal' && rec.ownerPrincipalId ? { ownerPrincipalId: rec.ownerPrincipalId } : {}),
+        provider: rec.provider,
+        connection: rec.id,
+        connectionName: rec.name,
+        subscriber: rec.subscriberEmail,
+        tier: rec.tier ?? 'unknown',
+        attested: true,
+        reconnect: false,
+      });
       return { ok: true as const, status: 'connected' as const, connection: SubscriptionKeymaster.view(rec), reconnect: false };
     });
   }
@@ -696,7 +1051,12 @@ export class SubscriptionKeymaster {
 
   // ---- rename and disconnect (M5(4)) ---------------------------------------------------------
 
-  async rename(id: string, rawName: unknown, actor: string): Promise<{ ok: true; connection: SubscriptionView } | { ok: false; error: 'unknown_connection' | 'invalid_name' | 'name_taken'; message: string }> {
+  async rename(
+    id: string,
+    rawName: unknown,
+    actor: string,
+    opts?: { onBehalfOf?: string },
+  ): Promise<{ ok: true; connection: SubscriptionView } | { ok: false; error: 'unknown_connection' | 'invalid_name' | 'name_taken'; message: string }> {
     const name = cleanConnectionName(rawName);
     if (!name) return { ok: false, error: 'invalid_name', message: `a connection name is 1 to ${NAME_MAX} characters` };
     return this.locked(async () => {
@@ -706,7 +1066,19 @@ export class SubscriptionKeymaster {
       if (clash) return { ok: false as const, error: 'name_taken' as const, message: `a connection is already named "${clash.name}"` };
       const next = { ...rec, name };
       await this.save(next);
-      this.ledgerRow({ action: 'SUBSCRIPTION_RENAMED', actor, provider: rec.provider, connection: id, connectionName: name, previousName: rec.name, subscriber: rec.subscriberEmail, tier: rec.tier ?? 'unknown' });
+      this.ledgerRow({
+        action: 'SUBSCRIPTION_RENAMED',
+        actor,
+        ...(opts?.onBehalfOf ? { onBehalfOf: opts.onBehalfOf } : {}),
+        scope: rec.scope,
+        ...(rec.scope === 'personal' && rec.ownerPrincipalId ? { ownerPrincipalId: rec.ownerPrincipalId } : {}),
+        provider: rec.provider,
+        connection: id,
+        connectionName: name,
+        previousName: rec.name,
+        subscriber: rec.subscriberEmail,
+        tier: rec.tier ?? 'unknown',
+      });
       return { ok: true as const, connection: SubscriptionKeymaster.view(next) };
     });
   }
@@ -716,19 +1088,49 @@ export class SubscriptionKeymaster {
    * is dropped, and `retireEntries` (TSK-328's catalog hook) retires the connection's catalog entries, returning how many.
    * The vendor-side grant is not revoked by the factory: the subscriber can revoke it in their vendor account.
    */
-  async disconnect(id: string, actor: string, retireEntries?: (connection: SubscriptionView) => number | Promise<number>): Promise<{ ok: true; connection: SubscriptionView; entriesRetired: number } | { ok: false; error: 'unknown_connection'; message: string }> {
+  async disconnect(
+    id: string,
+    actor: string,
+    retireEntries?: (connection: SubscriptionView) => number | Promise<number>,
+    opts?: { onBehalfOf?: string },
+  ): Promise<{ ok: true; connection: SubscriptionView; entriesRetired: number } | { ok: false; error: 'unknown_connection'; message: string }> {
     return this.locked(async () => {
       const rec = await this.find(id);
       if (!rec) return { ok: false as const, error: 'unknown_connection' as const, message: `no connection "${id}"` };
       const view = SubscriptionKeymaster.view(rec);
       const entriesRetired = retireEntries ? await retireEntries(view) : 0;
-      await this.write(subscriptionSecretName(rec.provider, id), JSON.stringify({ id, provider: rec.provider, retired: true, retiredAt: new Date(this.now()).toISOString() }));
-      await this.writeIndex(rec.provider, (await this.index(rec.provider)).filter((i) => i !== id));
+      await this.write(
+        this.secretPathForRecord(rec),
+        JSON.stringify({
+          id,
+          provider: rec.provider,
+          scope: rec.scope,
+          ...(rec.scope === 'personal' && rec.ownerPrincipalId ? { ownerPrincipalId: rec.ownerPrincipalId } : {}),
+          retired: true,
+          retiredAt: new Date(this.now()).toISOString(),
+        }),
+      );
+      const idx = await this.readProviderIndex(rec.provider);
+      idx.ids = idx.ids.filter((i) => i !== id);
+      delete idx.personal[id];
+      await this.writeProviderIndex(rec.provider, idx);
       this.cache.delete(id);
       this.invalidated.delete(id);
       this.unsaved.delete(id);
       this.marks.delete(id);
-      this.ledgerRow({ action: 'SUBSCRIPTION_DISCONNECTED', actor, provider: rec.provider, connection: id, connectionName: rec.name, subscriber: rec.subscriberEmail, tier: rec.tier ?? 'unknown', entriesRetired });
+      this.ledgerRow({
+        action: 'SUBSCRIPTION_DISCONNECTED',
+        actor,
+        ...(opts?.onBehalfOf ? { onBehalfOf: opts.onBehalfOf } : {}),
+        scope: rec.scope,
+        ...(rec.scope === 'personal' && rec.ownerPrincipalId ? { ownerPrincipalId: rec.ownerPrincipalId } : {}),
+        provider: rec.provider,
+        connection: id,
+        connectionName: rec.name,
+        subscriber: rec.subscriberEmail,
+        tier: rec.tier ?? 'unknown',
+        entriesRetired,
+      });
       return { ok: true as const, connection: view, entriesRetired };
     });
   }
@@ -855,7 +1257,14 @@ export class SubscriptionKeymaster {
       if (flow.state === 'superseded') return this.refresh(id);
       if (flow.state === 'gone') return { ok: false, error: 'unknown_connection', message: `no connection "${id}"` };
       if (flow.state === 'marked') return { ok: false, error: 'needs_reconsent', connection: id, reason: 'grant_marked' };
-      this.ledgerRow({ action: 'SUBSCRIPTION_REFRESH_TOKEN_ROTATED', actor: 'factory:keymaster', provider: committed!.provider, connection: id });
+      this.ledgerRow({
+        action: 'SUBSCRIPTION_REFRESH_TOKEN_ROTATED',
+        actor: 'factory:keymaster',
+        scope: committed!.scope,
+        ...(committed!.scope === 'personal' && committed!.ownerPrincipalId ? { ownerPrincipalId: committed!.ownerPrincipalId } : {}),
+        provider: committed!.provider,
+        connection: id,
+      });
       return { ok: true, accessToken: committed!.accessToken!, expiresAt: committed!.expiresAt!, ...(committed!.accountId ? { accountId: committed!.accountId } : {}) };
     }
     // No rotation: update the stored access token best-effort and cache it only if the grant is still the live, active one.
@@ -896,7 +1305,17 @@ export class SubscriptionKeymaster {
         console.error(`[keymaster] could not mark subscription ${id} needs_reconsent: ${err instanceof Error ? err.message : String(err)}`);
       }
       view = SubscriptionKeymaster.view(marked);
-      this.ledgerRow({ action: 'SUBSCRIPTION_NEEDS_RECONSENT', actor: 'factory:keymaster', provider: rec.provider, connection: id, connectionName: rec.name, subscriber: rec.subscriberEmail, tier: rec.tier ?? 'unknown' });
+      this.ledgerRow({
+        action: 'SUBSCRIPTION_NEEDS_RECONSENT',
+        actor: 'factory:keymaster',
+        scope: rec.scope,
+        ...(rec.scope === 'personal' && rec.ownerPrincipalId ? { ownerPrincipalId: rec.ownerPrincipalId } : {}),
+        provider: rec.provider,
+        connection: id,
+        connectionName: rec.name,
+        subscriber: rec.subscriberEmail,
+        tier: rec.tier ?? 'unknown',
+      });
     });
     if (view && this.onNeedsReconsent) {
       try {
