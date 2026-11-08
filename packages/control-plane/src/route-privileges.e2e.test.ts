@@ -140,6 +140,12 @@ const ROUTES: RouteRow[] = [
   { method: 'PUT', path: '/api/v1/budget/submissions/nope', privilege: 'budget.allocate', role: 'admin', body: { budgetUsd: { perDay: 1 } } },
   { method: 'PUT', path: '/api/v1/budget/agents/castle', privilege: 'budget.allocate', role: 'admin', body: { budgetUsd: { perDay: 1 } } },
   { method: 'POST', path: '/api/v1/approvals/nope', privilege: 'approvals.decide', role: 'admin', body: { decision: 'approved' } },
+  { method: 'GET', path: '/api/v1/subscriptions', privilege: 'subscriptions.read', role: 'admin' },
+  { method: 'POST', path: '/api/v1/subscriptions/connect', privilege: 'subscriptions.manage', role: 'admin', body: {} },
+  { method: 'GET', path: '/api/v1/subscriptions/sign-ins/nope', privilege: 'subscriptions.manage', role: 'admin' },
+  { method: 'POST', path: '/api/v1/subscriptions/nope/reconnect', privilege: 'subscriptions.manage', role: 'admin', body: {} },
+  { method: 'POST', path: '/api/v1/subscriptions/nope/rename', privilege: 'subscriptions.manage', role: 'admin', body: {} },
+  { method: 'DELETE', path: '/api/v1/subscriptions/nope', privilege: 'subscriptions.manage', role: 'admin' },
   // ingest
   { method: 'POST', path: '/api/v1/ledger', privilege: 'ledger.ingest', role: 'ingest', body: {} },
   // gatekeeper-egress

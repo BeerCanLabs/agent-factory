@@ -201,6 +201,36 @@ LinkedIn issues no refresh token to standard apps: the grant ends after 60 days.
 3. Open the service account → **Keys** → **Add key** → **Create new key** → **JSON**. Your organization's policy may forbid key creation; an administrator must then allow it for this project.
 4. Paste the whole downloaded JSON file contents into the write-only field on this page and save, then delete the downloaded file. It is never shown again.`,
   },
+  {
+    id: 'xai-subscription',
+    title: 'xAI (Grok) subscription (factory connection)',
+    kind: 'oauth',
+    approved: null,
+    instructions: `A subscription connection is the factory's, not an agent's: a factory admin connects it, and agents never see or hold it (M5). It serves Grok models on a subscriber's own SuperGrok or X Premium plan.
+
+1. Ask the subscriber. The plan's owner must agree to the factory using their plan; you attest to that when you connect, and the factory records it with your name and the subscriber's account email.
+2. In the console choose **Connect a subscription**, pick **xAI (Grok) subscription**, tick the confirmation that the subscriber agreed, and choose **Start sign-in**.
+3. The console shows a code and a link on \`x.ai\` (xAI's own sign-in page; the factory never sees the password). The subscriber opens the link, signs in to the Grok account, and enters the code.
+4. When the subscriber approves, the console shows the connection, named \`<first name>'s Grok Subscription\` (rename it any time; names are unique). If that account is already connected, signing in again reconnects it and keeps its name and models.
+5. Nothing is added to the model catalog on connecting: choose which of its models to offer and set their prices (M3).
+
+If the connection shows **needs re-consent** (xAI revoked or refused the sign-in), the admin who connected it is told. Reconnect it by signing in again. The subscriber can also revoke the factory's access at any time in their xAI account.`,
+  },
+  {
+    id: 'openai-subscription',
+    title: 'OpenAI (ChatGPT) subscription (factory connection)',
+    kind: 'oauth',
+    approved: null,
+    instructions: `A subscription connection is the factory's, not an agent's: a factory admin connects it, and agents never see or hold it (M5). It serves OpenAI models on a subscriber's own ChatGPT Go, Plus or Pro plan.
+
+1. Ask the subscriber. The plan's owner must agree to the factory using their plan; you attest to that when you connect, and the factory records it with your name, the subscriber's account email and the plan.
+2. In the console choose **Connect a subscription**, pick **OpenAI (ChatGPT) subscription**, tick the confirmation that the subscriber agreed, and choose **Start sign-in**.
+3. The console shows a code and the link \`https://auth.openai.com/codex/device\` (OpenAI's own sign-in page; the factory never sees the password). The subscriber opens the link, signs in to ChatGPT, and enters the code.
+4. When the subscriber approves, the console shows the connection, named \`<first name>'s ChatGPT Subscription\` (rename it any time; names are unique). If that account is already connected, signing in again reconnects it and keeps its name and models.
+5. Nothing is added to the model catalog on connecting: choose which of its models to offer and set their prices (M3).
+
+If the connection shows **needs re-consent** (OpenAI revoked, expired or refused the sign-in), the admin who connected it is told. Reconnect it by signing in again. The subscriber can also revoke the factory's access at any time in their ChatGPT settings.`,
+  },
 ];
 
 export function catalogEntry(id: string | undefined): CatalogEntry | undefined {

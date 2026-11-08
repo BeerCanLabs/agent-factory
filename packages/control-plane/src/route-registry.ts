@@ -439,6 +439,14 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'POST', pattern: '/api/v1/connections/:id/:provider/import', privilege: 'connections.import', description: 'Import connection credentials' },
   { method: 'GET', pattern: '/api/v1/connections/:id', privilege: 'connections.read', description: 'List agent active connections' },
 
+  // Subscription connections (M5(4)): the factory's own, admin only
+  { method: 'GET', pattern: '/api/v1/subscriptions', privilege: 'subscriptions.read', description: 'List subscription connections, templates and instructions' },
+  { method: 'POST', pattern: '/api/v1/subscriptions/connect', privilege: 'subscriptions.manage', description: 'Start a subscription sign-in (device code) with the subscriber attestation' },
+  { method: 'GET', pattern: '/api/v1/subscriptions/sign-ins/:id', privilege: 'subscriptions.manage', description: 'Poll a subscription sign-in; connects when the subscriber has signed in' },
+  { method: 'POST', pattern: '/api/v1/subscriptions/:id/reconnect', privilege: 'subscriptions.manage', description: 'Start a sign-in that reconnects a subscription connection' },
+  { method: 'POST', pattern: '/api/v1/subscriptions/:id/rename', privilege: 'subscriptions.manage', description: 'Rename a subscription connection' },
+  { method: 'DELETE', pattern: '/api/v1/subscriptions/:id', privilege: 'subscriptions.manage', description: 'Disconnect a subscription connection' },
+
   // Config store
   { method: 'GET', pattern: '/api/v1/config/export', privilege: ['config.export', 'config.export.agent'], description: 'Export full factory configuration' },
 
