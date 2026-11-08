@@ -1,6 +1,15 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { platformCredentialName, validateSystemProposal, systemDefinitionSchema } from './system.js';
+import {
+  platformCredentialName,
+  validateSystemProposal,
+  systemDefinitionSchema,
+  SUBSCRIPTION_TEMPLATES,
+  subscriptionTemplateIssue,
+  subscriptionTemplateHosts,
+  subscriptionDefaultHeaders,
+  type SubscriptionTemplate,
+} from './system.js';
 
 describe('system definition schemas', () => {
   it('gives each vendor its own platform credential name', () => {
@@ -170,3 +179,150 @@ describe('system definition schemas', () => {
   });
 });
 
+
+const subscriptionDefinition = (templateId: string, over: Record<string, unknown> = {}) => {
+  const t = SUBSCRIPTION_TEMPLATES[templateId]!;
+  return {
+    id: t.id,
+    name: t.name,
+    kind: 'ai-provider',
+    upstream: t.inference.upstream,
+    aiProvider: {
+      adapter: t.aiProvider.adapter,
+      discoveryPath: t.aiProvider.discoveryPath,
+      credentialMode: 'subscription',
+      templateId: t.id,
+      defaultHeaders: subscriptionDefaultHeaders(t),
+    },
+    oauth: { kind: 'oauth-user', authUrl: t.signIn.deviceCodeUrl, tokenUrl: t.tokenUrl, refresh: true, defaultScopes: t.scopes },
+    version: 1,
+    status: 'approved',
+    proposedBy: 'system',
+    proposedAt: '2026-11-08T00:00:00Z',
+    hash: 'h',
+    ...over,
+  };
+};
+
+describe('subscription templates (M5)', () => {
+  it('ships exactly the xAI and OpenAI templates with the public clients', () => {
+    assert.deepEqual(Object.keys(SUBSCRIPTION_TEMPLATES).sort(), ['openai-subscription', 'xai-subscription']);
+    assert.equal(SUBSCRIPTION_TEMPLATES['xai-subscription']!.client.id, 'b1a00492-073a-47ea-816f-4c329264a828');
+    assert.equal(SUBSCRIPTION_TEMPLATES['openai-subscription']!.client.id, 'app_EMoamEEZ73f0CkXaXp7hrann');
+  });
+
+  it('records hosts, scopes, headers with roles, error recognisers and the permission record', () => {
+    for (const t of Object.values(SUBSCRIPTION_TEMPLATES)) {
+      assert.match(t.signIn.deviceCodeUrl, /^https:\/\//);
+      assert.match(t.tokenUrl, /^https:\/\//);
+      assert.match(t.inference.upstream, /^https:\/\//);
+      assert.ok(t.scopes.includes('offline_access'));
+      assert.ok(t.headers.length > 0);
+      for (const h of t.headers) assert.ok(h.role === 'factory-identity' || h.role === 'vendor-required');
+      assert.ok(t.headers.some((h) => h.name === 'User-Agent' && h.role === 'factory-identity' && /BeerCanLabs/.test(h.value)));
+      assert.ok(t.errors.some((e) => e.kind === 'plan-limit'));
+      assert.ok(t.errors.some((e) => e.kind === 'tier-refused'));
+      assert.equal(t.permission.checkedDate, '2026-11-07');
+      assert.ok(t.permission.statementUrls.length > 0 && t.permission.tiers.length > 0);
+      assert.equal(subscriptionTemplateIssue(t), undefined);
+      assert.ok(t.aiProvider.discoveryPath.startsWith('/'));
+    }
+    const xai = SUBSCRIPTION_TEMPLATES['xai-subscription']!;
+    assert.equal(xai.signIn.discoveryUrl, 'https://auth.x.ai/.well-known/openid-configuration');
+    assert.deepEqual(xai.signIn.hostRule, { scheme: 'https', host: 'x.ai', allowSubdomains: true });
+    const confirmed = Object.values(SUBSCRIPTION_TEMPLATES).flatMap((t) => t.errors.filter((e) => e.confirmed));
+    assert.deepEqual(confirmed.map((e) => e.code), ['usage_limit_reached']);
+    const openai = SUBSCRIPTION_TEMPLATES['openai-subscription']!;
+    assert.deepEqual(openai.headers.find((h) => h.name === 'ChatGPT-Account-ID')?.role, 'vendor-required');
+    assert.equal(openai.headers.find((h) => h.name === 'originator')?.role, 'factory-identity');
+    assert.equal(openai.inference.upstream + openai.inference.path, 'https://chatgpt.com/backend-api/codex/responses');
+    assert.equal(SUBSCRIPTION_TEMPLATES['xai-subscription']!.inference.upstream + SUBSCRIPTION_TEMPLATES['xai-subscription']!.inference.path, 'https://api.x.ai/v1/responses');
+  });
+
+  it('refuses with subscription_not_permitted any template with an Anthropic or Google host', () => {
+    const base = SUBSCRIPTION_TEMPLATES['xai-subscription']!;
+    const bad: SubscriptionTemplate[] = [
+      { ...base, signIn: { ...base.signIn, deviceCodeUrl: 'https://accounts.google.com/o/oauth2/device/code' } },
+      { ...base, tokenUrl: 'https://console.anthropic.com/v1/oauth/token' },
+      { ...base, tokenUrl: 'https://oauth2.googleapis.com/token' },
+      { ...base, inference: { ...base.inference, upstream: 'https://api.anthropic.com' } },
+      { ...base, inference: { ...base.inference, upstream: 'https://cloudcode-pa.googleapis.com' } },
+      { ...base, signIn: { ...base.signIn, verificationUrl: 'https://claude.ai/device' } },
+    ];
+    for (const t of bad) {
+      assert.equal(subscriptionTemplateIssue(t), 'subscription_not_permitted', subscriptionTemplateHosts(t).join(','));
+    }
+  });
+});
+
+describe('subscription credential mode (M5)', () => {
+  it('accepts a definition created from each shipped template, with OAuth on a non-http system', () => {
+    for (const id of Object.keys(SUBSCRIPTION_TEMPLATES)) {
+      const r = systemDefinitionSchema.safeParse(subscriptionDefinition(id));
+      assert.equal(r.success, true, JSON.stringify(r.success ? '' : r.error.issues));
+    }
+  });
+
+  it('accepts api-key mode unchanged and still refuses OAuth on a non-http system without the mode', () => {
+    const ok = validateSystemProposal({ id: 'deepseek', name: 'DeepSeek', kind: 'ai-provider', upstream: 'https://api.deepseek.com', aiProvider: { credentialMode: 'api-key' } });
+    assert.equal(ok.ok, true);
+    const t = SUBSCRIPTION_TEMPLATES['xai-subscription']!;
+    const oauth = { kind: 'oauth-user', authUrl: t.signIn.deviceCodeUrl, tokenUrl: t.tokenUrl };
+    const bad = validateSystemProposal({ id: 'deepseek', name: 'DeepSeek', kind: 'ai-provider', upstream: 'https://api.deepseek.com', oauth });
+    assert.equal(bad.ok, false);
+    const badDef = systemDefinitionSchema.safeParse(subscriptionDefinition('xai-subscription', { aiProvider: { credentialMode: 'api-key' } }));
+    assert.equal(badDef.success, false);
+  });
+
+  it('refuses the mode on any admin-proposed system, even one mimicking a template', () => {
+    const t = SUBSCRIPTION_TEMPLATES['xai-subscription']!;
+    const { version: _v, status: _s, proposedBy: _p, proposedAt: _a, hash: _h, ...proposal } = subscriptionDefinition('xai-subscription');
+    const r = validateSystemProposal(proposal);
+    assert.equal(r.ok, false);
+    const r2 = validateSystemProposal({ id: 'my-sub', name: 'X', kind: 'ai-provider', upstream: 'https://api.example.com', aiProvider: { credentialMode: 'subscription' } });
+    assert.equal(r2.ok, false);
+    const r3 = validateSystemProposal({ ...proposal, aiProvider: { templateId: t.id } });
+    assert.equal(r3.ok, false);
+  });
+
+  it('refuses a definition with the mode but no known template id', () => {
+    assert.equal(systemDefinitionSchema.safeParse(subscriptionDefinition('xai-subscription', { aiProvider: { credentialMode: 'subscription' } })).success, false);
+    assert.equal(systemDefinitionSchema.safeParse(subscriptionDefinition('xai-subscription', { aiProvider: { credentialMode: 'subscription', templateId: 'made-up' } })).success, false);
+  });
+
+  it('takes client, hosts, scopes and headers from the template: an admin cannot change them', () => {
+    const t = SUBSCRIPTION_TEMPLATES['openai-subscription']!;
+    const d = subscriptionDefinition('openai-subscription') as { oauth: Record<string, unknown>; aiProvider: Record<string, unknown> };
+    const variants = [
+      { upstream: 'https://evil.example.com' },
+      { id: 'other-id' },
+      { credential: { secret: 'S', header: 'Authorization' } },
+      { oauth: { ...d.oauth, tokenUrl: 'https://evil.example.com/token' } },
+      { oauth: { ...d.oauth, authUrl: 'https://evil.example.com/device' } },
+      { oauth: { ...d.oauth, defaultScopes: [...t.scopes, 'extra'] } },
+      { oauth: undefined },
+      { oauth: { ...d.oauth, clientSecret: 'shared/x/secret' } },
+      { oauth: { ...d.oauth, authParams: { audience: 'x' } } },
+      { oauth: { ...d.oauth, refresh: false } },
+      { oauth: { ...d.oauth, refresh: undefined } },
+      { aiProvider: { ...d.aiProvider, adapter: 'anthropicMessages' } },
+      { aiProvider: { ...d.aiProvider, discoveryPath: '/v1/other' } },
+      { aiProvider: { ...d.aiProvider, defaultHeaders: undefined } },
+      { aiProvider: { ...d.aiProvider, defaultHeaders: {} } },
+      { hold: { methods: ['POST'] } },
+      { scopes: ['x'] },
+      { aiProvider: { ...d.aiProvider, defaultHeaders: { 'User-Agent': 'claude-cli/1.0' } } },
+    ];
+    for (const v of variants) {
+      assert.equal(systemDefinitionSchema.safeParse({ ...d, ...v }).success, false, JSON.stringify(v).slice(0, 80));
+    }
+  });
+
+  it('refuses a subscription definition on an Anthropic or Google host with subscription_not_permitted', () => {
+    for (const upstream of ['https://api.anthropic.com', 'https://generativelanguage.googleapis.com']) {
+      const r = systemDefinitionSchema.safeParse(subscriptionDefinition('xai-subscription', { upstream }));
+      assert.equal(r.success, false);
+      if (!r.success) assert.ok(r.error.issues.some((i) => /subscription_not_permitted/.test(i.message)));
+    }
+  });
+});
