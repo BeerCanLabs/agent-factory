@@ -33,3 +33,23 @@ export type { CatalogEntry, CatalogKind, CatalogView } from './catalog.js';
 export { assessCredentials, assessPlatformCredentials, submittableSecrets, summarize } from './credentials.js';
 export type { AssessOptions, CredentialAction, CredentialItem, CredentialStatus, CredentialSummary } from './credentials.js';
 export { stripSignInLinksFromJson, stripSignInLinksFromText } from './signin-links.js';
+export {
+  SubscriptionKeymaster,
+  subscriptionSecretName,
+  defaultConnectionName,
+  cleanConnectionName,
+  profileFromTokens,
+  endpointMeetsHostRule,
+} from './subscriptions.js';
+export type {
+  SubscriptionRecord,
+  SubscriptionView,
+  SubscriptionStatus,
+  SubscriptionKeymasterOptions,
+  SubscriptionTokenOutcome,
+  NeedsReconsentEvent,
+  SignInView,
+  PollOutcome,
+  StartSignInError,
+  Profile,
+} from './subscriptions.js';

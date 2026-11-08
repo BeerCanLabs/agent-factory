@@ -69,8 +69,9 @@ import { validatePolicy, applyModelsRemoval, effectiveAgentModels, type AgentPol
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
-import { Keymaster, type ConnectionKeymaster } from '@beercanlabs/factory-keymaster';
+import { Keymaster, type ConnectionKeymaster, type SubscriptionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
+import { handleSubscriptions } from './subscriptions.js';
 import { handleCredentials } from './credentials.js';
 import { handleGitHubAppSetup } from './github-app-setup.js';
 import { handleGitHubAppInstall } from './github-app-install.js';
@@ -203,6 +204,10 @@ export type FactoryState = {
   keymaster?: Keymaster;
   /** Keymaster connections (§6.11): OAuth grants and app credentials. Created on first use. */
   connections?: ConnectionKeymaster;
+  /** Model subscription connections (§6.9 M5(4)): the factory's vendor grants, held by the Keymaster. Created on first use. */
+  subscriptions?: SubscriptionKeymaster;
+  /** The fetch the subscription Keymaster uses for vendor sign-in and token calls. Default global fetch; tests point it at fakes. */
+  subscriptionFetch?: typeof fetch;
   /** The factory's public origin for browser flows (OAuth consent callbacks). From the landing zone; never hard-coded. */
   publicBaseUrl?: string;
   /** S12: origin for sign-in callbacks when people browse a different host than publicBaseUrl (the console). */
@@ -2444,6 +2449,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (/^\/api\/v1\/agents\/[^/]+\/transfer(\/|$)/.test(path) && (await handleAgentTransfers(state, req, res, path))) return;
   if (path.startsWith('/api/v1/skills/') && path.endsWith('/model') && (await handleSkillModels(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token') && (await handleConnections(state, req, res, path))) return;
+  if (path.startsWith('/api/v1/subscriptions') && (await handleSubscriptions(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleGitHubAppSetup(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleDiscordAppSetup(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleAppSetup(state, req, res, path))) return;

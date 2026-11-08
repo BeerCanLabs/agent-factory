@@ -69,9 +69,24 @@ export type LedgerEvent = {
   privilege?: string;
   principalId?: string;
   role?: string;
+  /** M5(4): a model subscription connection's row. The subscriber's account email and plan tier, the connection's display name, whether the admin attested the subscriber agreed, and whether this connect replaced an existing grant. Never a token. */
+  subscriber?: string;
+  tier?: string;
+  connectionName?: string;
+  previousName?: string;
+  attested?: boolean;
+  reconnect?: boolean;
+  entriesRetired?: number;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
+  'subscriber',
+  'tier',
+  'connectionName',
+  'previousName',
+  'attested',
+  'reconnect',
+  'entriesRetired',
   'privilege',
   'legacyOwner',
   'principalId',
@@ -353,6 +368,15 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
     event.principalId = raw.principalId;
   }
   if (typeof raw.role === 'string' && /^[a-z0-9_-]{1,64}$/.test(raw.role)) event.role = raw.role;
+  // M5(4): subscription connection rows. Email, tier and names are shape-checked; nothing here can carry a token.
+  if (typeof raw.subscriber === 'string' && raw.subscriber.length <= 320 && /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9.-]+$/.test(raw.subscriber)) event.subscriber = raw.subscriber;
+  if (typeof raw.tier === 'string' && /^[A-Za-z0-9 ._+:-]{1,64}$/.test(raw.tier)) event.tier = raw.tier;
+  const displayName = (v: unknown): v is string => typeof v === 'string' && v.replace(/[\x00-\x1f\x7f]/g, ' ').trim().length > 0;
+  if (displayName(raw.connectionName)) event.connectionName = raw.connectionName.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 80);
+  if (displayName(raw.previousName)) event.previousName = raw.previousName.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 80);
+  if (typeof raw.attested === 'boolean') event.attested = raw.attested;
+  if (typeof raw.reconnect === 'boolean') event.reconnect = raw.reconnect;
+  if (typeof raw.entriesRetired === 'number' && Number.isInteger(raw.entriesRetired) && raw.entriesRetired >= 0) event.entriesRetired = raw.entriesRetired;
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);

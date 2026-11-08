@@ -116,6 +116,9 @@ export const PRIVILEGES = [
   'budget.allocate',
   // S20 (D27): submit an agent or skill draft. Any signed-in user with a fleet role.
   'content.submit',
+  // TSK-326 (M5(4)): subscription connections are the factory's, connected, renamed and disconnected only by an admin.
+  'subscriptions.read',
+  'subscriptions.manage',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -327,6 +330,8 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'grants.manage',
     'content.admit',
     'budget.allocate',
+    'subscriptions.read',
+    'subscriptions.manage',
   ],
 };
 
