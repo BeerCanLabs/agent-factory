@@ -42,17 +42,25 @@ async function run(lines: string[], s: Setup = {}) {
     if (args[1] === 'login' && r.code === 0) loggedIn = true;
     return r;
   };
+  const browserUrls: string[] = [];
+  const openBrowser = async (url: string) => {
+    browserUrls.push(url);
+    const fn = s.openBrowser ?? s.provider?.openBrowser;
+    if (fn) return await fn(url);
+    if (s.login === 'fail') throw new Error('browser sign-in failed');
+    throw new Error(`unexpected browser sign-in in test (pass openBrowser or login: 'fail'): ${url}`);
+  };
   const input = new PassThrough();
   const output = new PassThrough();
   let text = '';
   output.on('data', (d) => (text += d));
-  const done = repl({ version: 'test', store, input, output, env: s.env ?? {}, configFile, cloudflared: wrapped, cloudflaredDir: cfDir, fetch: f.fetch, sleep: async () => {}, intervalMs: 0, timeoutMs: 3000, isTTY: false, openBrowser: s.openBrowser ?? s.provider?.openBrowser });
+  const done = repl({ version: 'test', store, input, output, env: s.env ?? {}, configFile, cloudflared: wrapped, cloudflaredDir: cfDir, fetch: f.fetch, sleep: async () => {}, intervalMs: 0, timeoutMs: 3000, isTTY: false, openBrowser });
   for (const l of lines) input.write(l + '\n');
   input.end();
   await done;
   const cfFiles = async () => (await readdir(cfDir)).sort();
   const saved = async () => JSON.parse(await readFile(configFile, 'utf8')) as Record<string, unknown>;
-  return { f, text, store, saved, cloudflaredCalls, cfDir, token, cfFiles, configFile };
+  return { f, text, store, saved, cloudflaredCalls, browserUrls, cfDir, token, cfFiles, configFile };
 }
 
 describe('§6.17 CL8 opens with nothing set up', () => {
@@ -77,8 +85,10 @@ describe('§6.17 CL8 opens with nothing set up', () => {
     assert.match(out.text, /Factory\s+https:\/\/f\.example\.com/);
     assert.match(out.text, /Signed in\s+no/);
     assert.ok(!out.cloudflaredCalls.some((c) => c[1] === 'login'), 'startup never opens the browser');
+    assert.equal(out.browserUrls.length, 0, 'startup never invokes openBrowser');
 
     const signed = await run(['/exit'], { config: { instance: 'https://f.example.com' }, stored: true });
+    assert.equal(signed.browserUrls.length, 0, 'stored sign-in never invokes openBrowser');
     assert.match(signed.text, /Signed in\s+access:dale@example\.com \(admin\)/);
     assert.match(signed.text, /Ask the Factory Manager anything/);
   });
@@ -124,8 +134,17 @@ describe('§6.17 CL8 /config', () => {
 
 describe('§6.17 CL1 /login', () => {
   it('CL1 a failed sign-in is reported and leaves the person signed out', async () => {
-    const { text } = await run(['/login', '/exit'], { config: { instance: 'https://f.example.com' }, login: 'fail' });
-    assert.match(text, /Sign-in failed/);
+    const { text, browserUrls } = await run(['/login', '/exit'], { config: { instance: 'https://f.example.com' }, login: 'fail' });
+    assert.equal(browserUrls.length, 1, 'default openBrowser stub intercepted sign-in rather than spawning an OS browser');
+    assert.match(browserUrls[0], /^https:\/\/f\.example\.com\/login\?cli_port=\d+&cli_state=/);
+    assert.match(text, /Sign-in failed: browser sign-in failed/);
+    assert.match(text, /Signed in\s+no/);
+  });
+
+  it('CL1 /login without an explicit openBrowser stub hits the harness guard instead of spawning an OS browser', async () => {
+    const { text, browserUrls } = await run(['/login', '/exit'], { config: { instance: 'https://f.example.com' } });
+    assert.equal(browserUrls.length, 1);
+    assert.match(text, /Sign-in failed: unexpected browser sign-in in test/);
     assert.match(text, /Signed in\s+no/);
   });
 
