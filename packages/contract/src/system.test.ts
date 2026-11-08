@@ -188,7 +188,8 @@ const subscriptionDefinition = (templateId: string, over: Record<string, unknown
     kind: 'ai-provider',
     upstream: t.inference.upstream,
     aiProvider: {
-      adapter: 'openAiCompatible',
+      adapter: t.aiProvider.adapter,
+      discoveryPath: t.aiProvider.discoveryPath,
       credentialMode: 'subscription',
       templateId: t.id,
       defaultHeaders: subscriptionDefaultHeaders(t),
@@ -224,7 +225,13 @@ describe('subscription templates (M5)', () => {
       assert.equal(t.permission.checkedDate, '2026-11-07');
       assert.ok(t.permission.statementUrls.length > 0 && t.permission.tiers.length > 0);
       assert.equal(subscriptionTemplateIssue(t), undefined);
+      assert.ok(t.aiProvider.discoveryPath.startsWith('/'));
     }
+    const xai = SUBSCRIPTION_TEMPLATES['xai-subscription']!;
+    assert.equal(xai.signIn.discoveryUrl, 'https://auth.x.ai/.well-known/openid-configuration');
+    assert.deepEqual(xai.signIn.hostRule, { scheme: 'https', host: 'x.ai', allowSubdomains: true });
+    const confirmed = Object.values(SUBSCRIPTION_TEMPLATES).flatMap((t) => t.errors.filter((e) => e.confirmed));
+    assert.deepEqual(confirmed.map((e) => e.code), ['usage_limit_reached']);
     const openai = SUBSCRIPTION_TEMPLATES['openai-subscription']!;
     assert.deepEqual(openai.headers.find((h) => h.name === 'ChatGPT-Account-ID')?.role, 'vendor-required');
     assert.equal(openai.headers.find((h) => h.name === 'originator')?.role, 'factory-identity');
@@ -294,6 +301,16 @@ describe('subscription credential mode (M5)', () => {
       { oauth: { ...d.oauth, authUrl: 'https://evil.example.com/device' } },
       { oauth: { ...d.oauth, defaultScopes: [...t.scopes, 'extra'] } },
       { oauth: undefined },
+      { oauth: { ...d.oauth, clientSecret: 'shared/x/secret' } },
+      { oauth: { ...d.oauth, authParams: { audience: 'x' } } },
+      { oauth: { ...d.oauth, refresh: false } },
+      { oauth: { ...d.oauth, refresh: undefined } },
+      { aiProvider: { ...d.aiProvider, adapter: 'anthropicMessages' } },
+      { aiProvider: { ...d.aiProvider, discoveryPath: '/v1/other' } },
+      { aiProvider: { ...d.aiProvider, defaultHeaders: undefined } },
+      { aiProvider: { ...d.aiProvider, defaultHeaders: {} } },
+      { hold: { methods: ['POST'] } },
+      { scopes: ['x'] },
       { aiProvider: { ...d.aiProvider, defaultHeaders: { 'User-Agent': 'claude-cli/1.0' } } },
     ];
     for (const v of variants) {

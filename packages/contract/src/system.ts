@@ -119,7 +119,9 @@ export interface SubscriptionErrorRecogniser {
   /** The vendor's own error code, read from `error.code` or `error.type` in the response body. */
   code: string;
   /** Where the vendor gives a reset time, in the body: epoch seconds (`resets_at`) or seconds from now (`resets_in_seconds`). */
-  resetField?: 'resets_at' | 'resets_in_seconds';
+  resetFields?: ('resets_at' | 'resets_in_seconds' | 'reset_at')[];
+  /** False where the code is our best knowledge and not yet confirmed against a vendor response (TSK-327 confirms it against fixtures). */
+  confirmed: boolean;
 }
 
 export interface SubscriptionTemplate {
@@ -129,10 +131,19 @@ export interface SubscriptionTemplate {
   description: string;
   /** The vendor's public client for third-party tools. Neither client needs a secret. */
   client: { id: string };
-  signIn: { flow: 'device-code'; deviceCodeUrl: string; verificationUrl: string };
+  signIn: {
+    flow: 'device-code';
+    deviceCodeUrl: string;
+    verificationUrl: string;
+    /** xAI: the OIDC discovery document, and the origin rule every discovered endpoint must meet (TSK-326). */
+    discoveryUrl?: string;
+    hostRule?: { scheme: 'https'; host: string; allowSubdomains: boolean };
+  };
   tokenUrl: string;
   scopes: string[];
   inference: { upstream: string; path: string; adapter: 'responses' };
+  /** What a system created from this template carries as `aiProvider.adapter` and `aiProvider.discoveryPath`. */
+  aiProvider: { adapter: 'openAiCompatible'; discoveryPath: string };
   headers: SubscriptionHeader[];
   errors: SubscriptionErrorRecogniser[];
   permission: { statementUrls: string[]; checkedDate: string; tiers: string[] };
@@ -148,18 +159,27 @@ export const SUBSCRIPTION_TEMPLATES: Record<string, SubscriptionTemplate> = {
     signIn: {
       flow: 'device-code',
       deviceCodeUrl: 'https://auth.x.ai/oauth2/device/code',
+      // The verification URL comes from the device-code response and the token endpoint from OIDC discovery
+      // (/tmp/hermes-ref hermes_cli/auth_xai.py); the values here are the expected ones, not vendor-documented constants.
+      // TSK-326 must take both from discovery and the device-code response, accepting only https on x.ai or *.x.ai.
       verificationUrl: 'https://auth.x.ai/oauth2/device',
+      discoveryUrl: 'https://auth.x.ai/.well-known/openid-configuration',
+      hostRule: { scheme: 'https', host: 'x.ai', allowSubdomains: true },
     },
+    // token_endpoint: from OIDC discovery (see above).
     tokenUrl: 'https://auth.x.ai/oauth2/token',
     scopes: ['openid', 'profile', 'email', 'offline_access', 'grok-cli:access', 'api:access'],
     inference: { upstream: 'https://api.x.ai', path: '/v1/responses', adapter: 'responses' },
+    aiProvider: { adapter: 'openAiCompatible', discoveryPath: '/v1/models' },
     headers: [
       { name: 'User-Agent', value: 'BeerCanLabs-AgentFactory/{version}', role: 'factory-identity' },
       { name: 'Authorization', value: 'Bearer {access_token}', role: 'vendor-required' },
     ],
     errors: [
-      { kind: 'plan-limit', status: 429, code: 'usage_limit_reached', resetField: 'resets_at' },
-      { kind: 'tier-refused', status: 403, code: 'subscription_required' },
+      // unverified: no xAI source confirms these codes.
+      { kind: 'plan-limit', status: 429, code: 'usage_limit_reached', resetFields: ['resets_at'], confirmed: false },
+      // unverified
+      { kind: 'tier-refused', status: 403, code: 'subscription_required', confirmed: false },
     ],
     permission: {
       statementUrls: ['https://x.ai/news/grok-hermes', 'https://x.ai/news/grok-openclaw', 'https://x.ai/news/grok-opencode'],
@@ -173,6 +193,9 @@ export const SUBSCRIPTION_TEMPLATES: Record<string, SubscriptionTemplate> = {
     name: 'OpenAI (ChatGPT) subscription',
     description: 'OpenAI models on a subscriber\'s ChatGPT Go, Plus or Pro plan',
     client: { id: 'app_EMoamEEZ73f0CkXaXp7hrann' },
+    // Not RFC 8628: OpenAI's Codex device flow posts `client_id` only to the usercode endpoint and polls
+    // `deviceauth/token`; the scopes below are informational (they apply to the browser flow). TSK-326 must not
+    // treat `oauth.authUrl` (= the usercode URL) as an RFC 8628 device authorization endpoint.
     signIn: {
       flow: 'device-code',
       deviceCodeUrl: 'https://auth.openai.com/api/accounts/deviceauth/usercode',
@@ -181,6 +204,9 @@ export const SUBSCRIPTION_TEMPLATES: Record<string, SubscriptionTemplate> = {
     tokenUrl: 'https://auth.openai.com/oauth/token',
     scopes: ['openid', 'profile', 'email', 'offline_access'],
     inference: { upstream: 'https://chatgpt.com', path: '/backend-api/codex/responses', adapter: 'responses' },
+    aiProvider: { adapter: 'openAiCompatible', discoveryPath: '/backend-api/codex/models' },
+    // Hermes also sends the optional `x-openai-internal-codex-residency` header; it is intentionally omitted (M5(3): only
+    // identity and vendor-required headers). TSK-327: a 401 may follow on residency-enforced workspaces.
     headers: [
       { name: 'User-Agent', value: 'BeerCanLabs-AgentFactory/{version}', role: 'factory-identity' },
       { name: 'originator', value: 'beercanlabs-agent-factory', role: 'factory-identity' },
@@ -188,8 +214,10 @@ export const SUBSCRIPTION_TEMPLATES: Record<string, SubscriptionTemplate> = {
       { name: 'ChatGPT-Account-ID', value: '{account_id}', role: 'vendor-required' },
     ],
     errors: [
-      { kind: 'plan-limit', status: 429, code: 'usage_limit_reached', resetField: 'resets_at' },
-      { kind: 'tier-refused', status: 403, code: 'usage_not_included' },
+      // Confirmed: 429 with error.type or error.code `usage_limit_reached`.
+      { kind: 'plan-limit', status: 429, code: 'usage_limit_reached', resetFields: ['resets_at', 'resets_in_seconds', 'reset_at'], confirmed: true },
+      // unverified
+      { kind: 'tier-refused', status: 403, code: 'usage_not_included', confirmed: false },
     ],
     permission: {
       statementUrls: ['https://help.openai.com/en/articles/20001542'],
@@ -238,10 +266,12 @@ type SystemShape = {
   id: string;
   kind: 'http' | 'mcp' | 'ai-provider';
   upstream: string;
-  aiProvider?: { credentialMode?: string; templateId?: string; defaultHeaders?: Record<string, string> };
+  aiProvider?: { adapter?: string; discoveryPath?: string; credentialMode?: string; templateId?: string; defaultHeaders?: Record<string, string> };
   credential?: unknown;
   connection?: string;
-  oauth?: { kind: string; authUrl?: string; tokenUrl: string; defaultScopes?: string[] };
+  oauth?: { kind: string; authUrl?: string; tokenUrl: string; defaultScopes?: string[]; clientSecret?: string; authParams?: Record<string, string>; refresh?: boolean };
+  hold?: unknown;
+  scopes?: unknown;
 };
 
 const isSubscription = (d: SystemShape) => d.aiProvider?.credentialMode === 'subscription';
@@ -266,20 +296,36 @@ function subscriptionDefinitionIssues(d: SystemShape): SystemIssue[] {
     issues.push({ path: 'upstream', message: SUBSCRIPTION_NOT_PERMITTED_MESSAGE });
   }
   if (d.kind !== 'ai-provider') issues.push({ path: 'kind', message: 'a subscription system is an ai-provider system' });
+  // One system per template: the system's id is its template's id (connections are per vendor account, M5(4)).
   if (d.id !== template.id) issues.push({ path: 'id', message: `a subscription system created from ${template.id} has that id` });
   if (d.credential) issues.push({ path: 'credential', message: 'a subscription system carries no static credential' });
   if (d.connection) issues.push({ path: 'connection', message: 'a subscription system carries no Keymaster connection declaration' });
   if (d.upstream !== template.inference.upstream) issues.push({ path: 'upstream', message: 'a subscription system takes its inference host from its template' });
   const o = d.oauth;
-  if (!o || o.kind !== 'oauth-user' || o.authUrl !== template.signIn.deviceCodeUrl || o.tokenUrl !== template.tokenUrl || !sameList(o.defaultScopes, template.scopes)) {
-    issues.push({ path: 'oauth', message: 'a subscription system takes its client sign-in, token host and scopes from its template' });
+  const oauthKeys = ['kind', 'authUrl', 'tokenUrl', 'defaultScopes', 'refresh'];
+  if (
+    !o || o.kind !== 'oauth-user' || o.authUrl !== template.signIn.deviceCodeUrl || o.tokenUrl !== template.tokenUrl ||
+    !sameList(o.defaultScopes, template.scopes) || o.refresh !== true ||
+    o.clientSecret !== undefined || o.authParams !== undefined ||
+    Object.keys(o).some((k) => !oauthKeys.includes(k))
+  ) {
+    issues.push({ path: 'oauth', message: 'a subscription system takes its public client sign-in, token host, scopes and refresh from its template, with no client secret or extra auth parameters' });
   }
-  const headers = d.aiProvider?.defaultHeaders;
-  if (headers) {
-    const want = subscriptionDefaultHeaders(template);
-    const same = Object.keys(headers).length === Object.keys(want).length && Object.entries(want).every(([k, v]) => headers[k] === v);
-    if (!same) issues.push({ path: 'aiProvider.defaultHeaders', message: 'a subscription system takes its headers from its template' });
+  const ap = d.aiProvider ?? {};
+  if (ap.adapter !== template.aiProvider.adapter || ap.discoveryPath !== template.aiProvider.discoveryPath) {
+    issues.push({ path: 'aiProvider', message: 'a subscription system takes its adapter and discovery path from its template' });
   }
+  const apKeys = ['adapter', 'discoveryPath', 'defaultHeaders', 'credentialMode', 'templateId'];
+  if (Object.keys(ap).some((k) => !apKeys.includes(k))) {
+    issues.push({ path: 'aiProvider', message: 'a subscription system carries no aiProvider field its template does not set' });
+  }
+  if (d.hold !== undefined || d.scopes !== undefined) {
+    issues.push({ path: 'hold', message: 'a subscription system carries no hold or scopes its template does not set' });
+  }
+  const headers = ap.defaultHeaders;
+  const want = subscriptionDefaultHeaders(template);
+  const same = !!headers && Object.keys(headers).length === Object.keys(want).length && Object.entries(want).every(([k, v]) => headers[k] === v);
+  if (!same) issues.push({ path: 'aiProvider.defaultHeaders', message: 'a subscription system carries exactly its template\'s factory-identity headers' });
   return issues;
 }
 
