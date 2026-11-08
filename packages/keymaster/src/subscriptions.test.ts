@@ -74,7 +74,7 @@ function fakeVendors() {
       if (f.get('grant_type') === 'urn:ietf:params:oauth:grant-type:device_code') {
         if (st.xai.pendingPolls-- > 0) return json(400, { error: 'authorization_pending' });
         st.xai.issued++;
-        return json(200, { access_token: 'xai-access-0-aaaaaaaa', refresh_token: 'xai-refresh-0-aaaaaaaa', id_token: jwt(st.xai.claims), expires_in: 3600 });
+        return json(200, { access_token: 'xai-access-0-aaaaaaaa', refresh_token: 'xai-refresh-0-aaaaaaaa', id_token: jwt(st.xai.claims), expires_in: 3600 }); // secret-scan:allow (fake vendor fixture)
       }
       st.xai.refreshCount++;
       return st.xai.refresh(st.xai.refreshCount);
@@ -88,7 +88,7 @@ function fakeVendors() {
       const f = form();
       if (f.get('grant_type') === 'authorization_code') {
         st.openai.issued++;
-        return json(200, { access_token: jwt({ sub: st.openai.claims.sub, 'https://api.openai.com/auth': st.openai.claims['https://api.openai.com/auth'] }), refresh_token: 'oa-refresh-0-aaaaaaaa', id_token: jwt(st.openai.claims), expires_in: 3600 });
+        return json(200, { access_token: jwt({ sub: st.openai.claims.sub, 'https://api.openai.com/auth': st.openai.claims['https://api.openai.com/auth'] }), refresh_token: 'oa-refresh-0-aaaaaaaa', id_token: jwt(st.openai.claims), expires_in: 3600 }); // secret-scan:allow (fake vendor fixture)
       }
       st.openai.refreshCount++;
       return st.openai.refresh(st.openai.refreshCount);

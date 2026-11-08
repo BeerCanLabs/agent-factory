@@ -64,6 +64,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/connections.ts',
+      'packages/control-plane/src/subscriptions.ts',
       'packages/control-plane/src/credentials.ts',
       'packages/control-plane/src/github-app-setup.ts',
       'packages/control-plane/src/github-app-install.ts',

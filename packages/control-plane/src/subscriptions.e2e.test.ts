@@ -24,7 +24,7 @@ describe('subscription connection routes (TSK-326)', { concurrency: false }, () 
   let api: (path: string, method?: string, token?: string, body?: unknown) => Promise<{ status: number; body: any; text: string }>;
   let clock = Date.parse('2026-11-08T00:00:00Z');
   let pending = 1;
-  let refresh: () => Response = () => j(200, { access_token: 'xai-access-r1-aaaaaaaa', refresh_token: 'xai-refresh-r1-aaaaaaaa', expires_in: 3600 });
+  let refresh: () => Response = () => j(200, { access_token: 'xai-access-r1-aaaaaaaa', refresh_token: 'xai-refresh-r1-aaaaaaaa', expires_in: 3600 }); // secret-scan:allow (fake vendor fixture)
   const mem = new Map<string, string>();
   const provider: SecretProvider = { name: 'mem', get: async (k) => mem.get(k), put: async (k, v) => void mem.set(k, v) };
   const notices: SubscriptionNotice[] = [];
