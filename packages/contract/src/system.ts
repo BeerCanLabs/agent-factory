@@ -23,6 +23,10 @@ export const aiProviderConfigSchema = z
     adapter: z.enum(['openAiCompatible', 'anthropicMessages', 'vertexGemini', 'vertexAnthropic', 'bedrockConverse']).default('openAiCompatible'),
     discoveryPath: z.string().optional().default('/v1/models'),
     defaultHeaders: z.record(z.string()).optional(),
+    /** M5(1): `api-key` (a platform credential, today's only mode, the default) or `subscription` (a subscriber's plan). */
+    credentialMode: z.enum(['api-key', 'subscription']).optional(),
+    /** M5(5): the shipped subscription template this system was created from. Only meaningful with `subscription`. */
+    templateId: z.string().min(1).optional(),
   })
   .strict();
 
@@ -91,6 +95,209 @@ export const systemOAuthSchema = z.discriminatedUnion('kind', [
   systemJwtBearerSchema,
 ]);
 
+/**
+ * Subscription templates (DESIGN_AUTHORITY.md §6.9 M5).
+ *
+ * A subscription template is contract code, reviewed with the Design Authority like AI_PROVIDER_TEMPLATES. It names the
+ * vendor's public client its permission covers, the sign-in, token and inference hosts, the scopes, every header the
+ * factory sends with its role, the vendor errors that mean plan limit or tier refused, and the vendor's permission record.
+ * An admin cannot change any of it, and a system an admin proposes cannot carry the `subscription` mode.
+ */
+export type SubscriptionHeaderRole = 'factory-identity' | 'vendor-required';
+
+export interface SubscriptionHeader {
+  name: string;
+  /** `{version}` is the factory version, `{access_token}` the Keymaster's current token, `{account_id}` the signed-in account's id. */
+  value: string;
+  role: SubscriptionHeaderRole;
+}
+
+/** A vendor response that means the plan's usage limit is spent, or the plan's tier is refused (M5(7)); never an ordinary rate limit. */
+export interface SubscriptionErrorRecogniser {
+  kind: 'plan-limit' | 'tier-refused';
+  status: number;
+  /** The vendor's own error code, read from `error.code` or `error.type` in the response body. */
+  code: string;
+  /** Where the vendor gives a reset time, in the body: epoch seconds (`resets_at`) or seconds from now (`resets_in_seconds`). */
+  resetField?: 'resets_at' | 'resets_in_seconds';
+}
+
+export interface SubscriptionTemplate {
+  id: string;
+  vendor: 'xai' | 'openai';
+  name: string;
+  description: string;
+  /** The vendor's public client for third-party tools. Neither client needs a secret. */
+  client: { id: string };
+  signIn: { flow: 'device-code'; deviceCodeUrl: string; verificationUrl: string };
+  tokenUrl: string;
+  scopes: string[];
+  inference: { upstream: string; path: string; adapter: 'responses' };
+  headers: SubscriptionHeader[];
+  errors: SubscriptionErrorRecogniser[];
+  permission: { statementUrls: string[]; checkedDate: string; tiers: string[] };
+}
+
+export const SUBSCRIPTION_TEMPLATES: Record<string, SubscriptionTemplate> = {
+  'xai-subscription': {
+    id: 'xai-subscription',
+    vendor: 'xai',
+    name: 'xAI (Grok) subscription',
+    description: 'Grok models on a subscriber\'s SuperGrok or X Premium plan',
+    client: { id: 'b1a00492-073a-47ea-816f-4c329264a828' },
+    signIn: {
+      flow: 'device-code',
+      deviceCodeUrl: 'https://auth.x.ai/oauth2/device/code',
+      verificationUrl: 'https://auth.x.ai/oauth2/device',
+    },
+    tokenUrl: 'https://auth.x.ai/oauth2/token',
+    scopes: ['openid', 'profile', 'email', 'offline_access', 'grok-cli:access', 'api:access'],
+    inference: { upstream: 'https://api.x.ai', path: '/v1/responses', adapter: 'responses' },
+    headers: [
+      { name: 'User-Agent', value: 'BeerCanLabs-AgentFactory/{version}', role: 'factory-identity' },
+      { name: 'Authorization', value: 'Bearer {access_token}', role: 'vendor-required' },
+    ],
+    errors: [
+      { kind: 'plan-limit', status: 429, code: 'usage_limit_reached', resetField: 'resets_at' },
+      { kind: 'tier-refused', status: 403, code: 'subscription_required' },
+    ],
+    permission: {
+      statementUrls: ['https://x.ai/news/grok-hermes', 'https://x.ai/news/grok-openclaw', 'https://x.ai/news/grok-opencode'],
+      checkedDate: '2026-11-07',
+      tiers: ['SuperGrok', 'X Premium'],
+    },
+  },
+  'openai-subscription': {
+    id: 'openai-subscription',
+    vendor: 'openai',
+    name: 'OpenAI (ChatGPT) subscription',
+    description: 'OpenAI models on a subscriber\'s ChatGPT Go, Plus or Pro plan',
+    client: { id: 'app_EMoamEEZ73f0CkXaXp7hrann' },
+    signIn: {
+      flow: 'device-code',
+      deviceCodeUrl: 'https://auth.openai.com/api/accounts/deviceauth/usercode',
+      verificationUrl: 'https://auth.openai.com/codex/device',
+    },
+    tokenUrl: 'https://auth.openai.com/oauth/token',
+    scopes: ['openid', 'profile', 'email', 'offline_access'],
+    inference: { upstream: 'https://chatgpt.com', path: '/backend-api/codex/responses', adapter: 'responses' },
+    headers: [
+      { name: 'User-Agent', value: 'BeerCanLabs-AgentFactory/{version}', role: 'factory-identity' },
+      { name: 'originator', value: 'beercanlabs-agent-factory', role: 'factory-identity' },
+      { name: 'Authorization', value: 'Bearer {access_token}', role: 'vendor-required' },
+      { name: 'ChatGPT-Account-ID', value: '{account_id}', role: 'vendor-required' },
+    ],
+    errors: [
+      { kind: 'plan-limit', status: 429, code: 'usage_limit_reached', resetField: 'resets_at' },
+      { kind: 'tier-refused', status: 403, code: 'usage_not_included' },
+    ],
+    permission: {
+      statementUrls: ['https://help.openai.com/en/articles/20001542'],
+      checkedDate: '2026-11-07',
+      tiers: ['ChatGPT Go', 'ChatGPT Plus', 'ChatGPT Pro'],
+    },
+  },
+};
+
+/** Vendors that prohibit subscription use in third-party software (M5(2)): Anthropic and Google. */
+export const SUBSCRIPTION_PROHIBITED_HOST =
+  /(^|\.)(anthropic\.com|claude\.ai|claude\.com|google|google\.com|googleapis\.com|googleusercontent\.com|geminicli\.com)$/;
+
+export const SUBSCRIPTION_NOT_PERMITTED_MESSAGE =
+  'subscription_not_permitted: Anthropic and Google prohibit using consumer plans in third-party agent software (M5(2)); use an API key or a cloud model service (M3)';
+
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Every sign-in, token and inference host a template names. */
+export function subscriptionTemplateHosts(t: SubscriptionTemplate): string[] {
+  return [t.signIn.deviceCodeUrl, t.signIn.verificationUrl, t.tokenUrl, t.inference.upstream]
+    .map(hostOf)
+    .filter((h): h is string => h !== undefined);
+}
+
+/** The M5(2) backstop: `subscription_not_permitted` for a template whose sign-in, token or inference host is Anthropic's or Google's. */
+export function subscriptionTemplateIssue(t: SubscriptionTemplate): 'subscription_not_permitted' | undefined {
+  return subscriptionTemplateHosts(t).some((h) => SUBSCRIPTION_PROHIBITED_HOST.test(h)) ? 'subscription_not_permitted' : undefined;
+}
+
+/** The static (factory identity) headers a subscription system carries; vendor-required ones are injected per call (M5(6)). */
+export function subscriptionDefaultHeaders(t: SubscriptionTemplate): Record<string, string> {
+  return Object.fromEntries(t.headers.filter((h) => h.role === 'factory-identity').map((h) => [h.name, h.value]));
+}
+
+const sameList = (a: readonly string[] | undefined, b: readonly string[]) =>
+  !!a && a.length === b.length && a.every((v, i) => v === b[i]);
+
+type SystemShape = {
+  id: string;
+  kind: 'http' | 'mcp' | 'ai-provider';
+  upstream: string;
+  aiProvider?: { credentialMode?: string; templateId?: string; defaultHeaders?: Record<string, string> };
+  credential?: unknown;
+  connection?: string;
+  oauth?: { kind: string; authUrl?: string; tokenUrl: string; defaultScopes?: string[] };
+};
+
+const isSubscription = (d: SystemShape) => d.aiProvider?.credentialMode === 'subscription';
+
+/** M5(5): a stored definition may carry `subscription` only when created from a shipped template, taking everything from it. */
+function subscriptionDefinitionIssues(d: SystemShape): SystemIssue[] {
+  const issues: SystemIssue[] = [];
+  if (!isSubscription(d)) {
+    if (d.aiProvider?.templateId) issues.push({ path: 'aiProvider.templateId', message: 'templateId applies only to the subscription credential mode' });
+    return issues;
+  }
+  const templateId = d.aiProvider?.templateId;
+  const template = templateId ? SUBSCRIPTION_TEMPLATES[templateId] : undefined;
+  if (!template) {
+    issues.push({ path: 'aiProvider.templateId', message: 'the subscription mode requires a shipped subscription template id (M5(5))' });
+    return issues;
+  }
+  const backstop = subscriptionTemplateIssue(template);
+  if (backstop) issues.push({ path: 'aiProvider.templateId', message: SUBSCRIPTION_NOT_PERMITTED_MESSAGE });
+  const hosts = [d.upstream, d.oauth?.tokenUrl, d.oauth?.authUrl].filter((u): u is string => !!u).map(hostOf);
+  if (hosts.some((h) => h && SUBSCRIPTION_PROHIBITED_HOST.test(h))) {
+    issues.push({ path: 'upstream', message: SUBSCRIPTION_NOT_PERMITTED_MESSAGE });
+  }
+  if (d.kind !== 'ai-provider') issues.push({ path: 'kind', message: 'a subscription system is an ai-provider system' });
+  if (d.id !== template.id) issues.push({ path: 'id', message: `a subscription system created from ${template.id} has that id` });
+  if (d.credential) issues.push({ path: 'credential', message: 'a subscription system carries no static credential' });
+  if (d.connection) issues.push({ path: 'connection', message: 'a subscription system carries no Keymaster connection declaration' });
+  if (d.upstream !== template.inference.upstream) issues.push({ path: 'upstream', message: 'a subscription system takes its inference host from its template' });
+  const o = d.oauth;
+  if (!o || o.kind !== 'oauth-user' || o.authUrl !== template.signIn.deviceCodeUrl || o.tokenUrl !== template.tokenUrl || !sameList(o.defaultScopes, template.scopes)) {
+    issues.push({ path: 'oauth', message: 'a subscription system takes its client sign-in, token host and scopes from its template' });
+  }
+  const headers = d.aiProvider?.defaultHeaders;
+  if (headers) {
+    const want = subscriptionDefaultHeaders(template);
+    const same = Object.keys(headers).length === Object.keys(want).length && Object.entries(want).every(([k, v]) => headers[k] === v);
+    if (!same) issues.push({ path: 'aiProvider.defaultHeaders', message: 'a subscription system takes its headers from its template' });
+  }
+  return issues;
+}
+
+/** M5(5): an admin-proposed system cannot carry the subscription mode, or name a template. */
+function subscriptionProposalIssues(d: SystemShape): SystemIssue[] {
+  if (isSubscription(d) || d.aiProvider?.templateId) {
+    return [{
+      path: 'aiProvider.credentialMode',
+      message: 'the subscription mode is valid only on a system created from a shipped subscription template, never on a proposed system (M5(5))',
+    }];
+  }
+  return [];
+}
+
+const addIssues = (issues: SystemIssue[], ctx: z.RefinementCtx) => {
+  for (const i of issues) ctx.addIssue({ code: z.ZodIssueCode.custom, message: i.message, path: i.path.split('.') });
+};
+
 export const systemProposalSchema = z
   .object({
     id: z.string().max(64).regex(SYSTEM_ID, 'system id must be kebab-case (e.g. github, discord, closing-climb)'),
@@ -132,9 +339,10 @@ export const systemProposalSchema = z
     { message: 'Keymaster connections are supported on http systems only', path: ['connection'] },
   )
   .refine(
-    (data) => !(data.oauth && data.kind !== 'http'),
+    (data) => !(data.oauth && data.kind !== 'http' && !isSubscription(data)),
     { message: 'OAuth providers are supported on http systems only', path: ['oauth'] },
-  );
+  )
+  .superRefine((data, ctx) => addIssues(subscriptionProposalIssues(data), ctx));
 
 export const systemDefinitionSchema = z
   .object({
@@ -185,9 +393,10 @@ export const systemDefinitionSchema = z
     { message: 'Keymaster connections are supported on http systems only', path: ['connection'] },
   )
   .refine(
-    (data) => !(data.oauth && data.kind !== 'http'),
+    (data) => !(data.oauth && data.kind !== 'http' && !isSubscription(data)),
     { message: 'OAuth providers are supported on http systems only', path: ['oauth'] },
-  );
+  )
+  .superRefine((data, ctx) => addIssues(subscriptionDefinitionIssues(data), ctx));
 
 export type AiProviderConfig = z.infer<typeof aiProviderConfigSchema>;
 export type SystemCredential = z.infer<typeof systemCredentialSchema>;
