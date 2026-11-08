@@ -112,6 +112,7 @@ const CENSUS: Record<string, Role> = {
   'content.submit': 'viewer',
   'subscriptions.read': 'admin',
   'subscriptions.manage': 'admin',
+  'subscriptions.own': 'viewer',
 };
 // Held by one service role alone; an admin does not hold them. `runs.attest-requester` moved from `operator` to
 // `gatekeeper-ingress` (TSK-111): the old rule no longer matches it, so the proof below reads it from here.
@@ -146,7 +147,7 @@ const principal = (roles: Role[]): Principal => ({ actor: 'test:a', roles });
 
 describe('authorize', () => {
   it('the census has exactly the PRIVILEGES names', () => {
-    assert.equal(PRIVILEGES.length, 104);
+    assert.equal(PRIVILEGES.length, 105);
     assert.deepEqual([...PRIVILEGES].sort(), Object.keys(CENSUS).sort());
   });
 
@@ -236,7 +237,7 @@ describe('approver scope (S4)', () => {
   const READS = new Set<Privilege>([
     'agents.read', 'agents.models.read', 'policy.read', 'config.read', 'runs.read', 'ledger.read', 'models.read', 'metrics.read',
     'triage.read', 'spend.read', 'approvals.read', 'skills.read', 'systems.read', 'systems.propose', 'connections.read',
-    'credentials.provider.read', 'events.subscribe', 'schedules.read', 'mcp.use', 'content.submit',
+    'credentials.provider.read', 'events.subscribe', 'schedules.read', 'mcp.use', 'content.submit', 'subscriptions.own',
   ]);
 
   it('admits content', () => {
@@ -279,5 +280,54 @@ describe('budget-owner grant (S19)', () => {
     assert.ok(authorize({ principal: principal(['admin']), privilege: 'budget.allocate' }).allowed);
     assert.equal(authorize({ principal: principal(['approver']), privilege: 'budget.allocate' }).allowed, false);
     assert.equal(authorize({ principal: principal(['operator']), privilege: 'budget.allocate' }).allowed, false);
+  });
+});
+
+describe('subscriptions.own qualification (TSK-332, M5(4))', () => {
+  const alice: Principal = { actor: 'user:alice', roles: [] };
+  const serviceBot: Principal = { actor: 'service:bot', roles: [] };
+  const agentGrant = (role: string, readOnly = false) =>
+    ({
+      source: 'direct',
+      readOnly,
+      grant: { id: 'g1', subject: 'user:alice', scope: { kind: 'agent', id: 'donna' }, role },
+    }) as never;
+
+  it('grants subscriptions.own to active personal-agent content-owner and legacy personal agent-owner on canonical user:<id>', () => {
+    assert.equal(
+      authorize({ principal: alice, privilege: 'subscriptions.own', resource: { grants: [agentGrant('content-owner', false)] } }).allowed,
+      true,
+    );
+    assert.equal(
+      authorize({ principal: alice, privilege: 'subscriptions.own', resource: { ownsPersonalAgent: true } }).allowed,
+      true,
+    );
+  });
+
+  it('denies subscriptions.own to team-only accountable-lead, team member, D15 pending-revoked content-owner, and non-user principals without fleet roles', () => {
+    assert.deepEqual(
+      authorize({
+        principal: alice,
+        privilege: 'subscriptions.own',
+        resource: { ownsAnyAgent: true, ownsPersonalAgent: false, grants: [agentGrant('accountable-lead', false)] },
+      }),
+      { allowed: false, required: 'viewer' },
+    );
+    assert.equal(
+      authorize({ principal: alice, privilege: 'subscriptions.own', resource: { grants: [agentGrant('member', false)] } }).allowed,
+      false,
+    );
+    assert.equal(
+      authorize({
+        principal: alice,
+        privilege: 'subscriptions.own',
+        resource: { ownsPersonalAgent: true, grants: [agentGrant('content-owner', true)] },
+      }).allowed,
+      false,
+    );
+    assert.equal(
+      authorize({ principal: serviceBot, privilege: 'subscriptions.own', resource: { ownsPersonalAgent: true } }).allowed,
+      false,
+    );
   });
 });

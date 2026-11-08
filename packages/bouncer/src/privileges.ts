@@ -122,6 +122,8 @@ export const PRIVILEGES = [
   // TSK-326 (M5(4)): subscription connections are the factory's, connected, renamed and disconnected only by an admin.
   'subscriptions.read',
   'subscriptions.manage',
+  // TSK-332 (M5(4)): personal BYOM subscription connections, held by fleet content.submit roles, personal-agent owners, and admin.
+  'subscriptions.own',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -154,6 +156,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'schedules.read',
     'mcp.use',
     'content.submit',
+    'subscriptions.own',
   ],
   operator: [
     'agents.read',
@@ -176,6 +179,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'schedules.read',
     'mcp.use',
     'content.submit',
+    'subscriptions.own',
     'agents.wake',
     'agents.pause',
     'agents.resume',
@@ -208,6 +212,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'schedules.read',
     'mcp.use',
     'content.submit',
+    'subscriptions.own',
     // S4, D27, D29: approver is the admission gate only; run-time holds go to the content side.
     'content.admit',
   ],
@@ -337,6 +342,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'budget.allocate',
     'subscriptions.read',
     'subscriptions.manage',
+    'subscriptions.own',
   ],
 };
 

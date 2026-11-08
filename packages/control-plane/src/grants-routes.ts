@@ -27,6 +27,7 @@ import {
   actorIsAdmin,
   agentKindOf,
   checkOwnsAnyAgent,
+  checkOwnsPersonalAgent,
   effectiveGrantsForActor,
   findAgentRecord,
   identify,
@@ -170,6 +171,7 @@ export function getWhoami(
   const evalPrincipal: Principal = { actor: canonicalPrincipal, roles: evalRoles };
 
   const ownsAny = checkOwnsAnyAgent(state, canonicalPrincipal);
+  const ownsPersonal = checkOwnsPersonalAgent(state, canonicalPrincipal);
   const userGroupRoles = state.groups
     ? state.groups.listUserGroups(canonicalPrincipal).flatMap((g) => g.roles)
     : undefined;
@@ -182,6 +184,7 @@ export function getWhoami(
         privilege: priv,
         resource: {
           ownsAnyAgent: ownsAny,
+          ownsPersonalAgent: ownsPersonal,
           groupRoles: userGroupRoles,
           ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
         },
@@ -343,6 +346,9 @@ export function checkAuthz(
   const ownsAny = targetPrivilege === 'skills.register' || targetPrivilege === 'mcp.use'
     ? checkOwnsAnyAgent(state, canonicalActor)
     : false;
+  const ownsPersonal = targetPrivilege === 'subscriptions.own'
+    ? checkOwnsPersonalAgent(state, canonicalActor)
+    : undefined;
   const userGroupRoles = state.groups
     ? state.groups.listUserGroups(canonicalActor).flatMap((g) => g.roles)
     : undefined;
@@ -359,6 +365,7 @@ export function checkAuthz(
     ...(skillOwner ? { skillOwner } : {}),
     groupRoles: userGroupRoles,
     ownsAnyAgent: ownsAny,
+    ...(ownsPersonal !== undefined ? { ownsPersonalAgent: ownsPersonal } : {}),
     ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
   };
 
