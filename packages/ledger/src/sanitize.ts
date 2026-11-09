@@ -83,7 +83,7 @@ export type LedgerEvent = {
   limitKind?: 'plan-limit' | 'tier-refused';
   limitCode?: string;
   resetAt?: string;
-  closedBy?: 'reset' | 'probe' | 'disconnect';
+  closedBy?: 'reset' | 'probe' | 'disconnect' | 'cap_updated';
   /** M5: the credential mode a call was served on (`subscription`), and why a failover skipped the selected entry. */
   credentialMode?: 'api-key' | 'subscription';
   failoverReason?: string;
@@ -418,7 +418,7 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (raw.limitKind === 'plan-limit' || raw.limitKind === 'tier-refused') event.limitKind = raw.limitKind;
   if (typeof raw.limitCode === 'string' && /^[A-Za-z0-9_.:-]{1,100}$/.test(raw.limitCode)) event.limitCode = raw.limitCode;
   if (typeof raw.resetAt === 'string' && raw.resetAt.length <= 40 && Number.isFinite(Date.parse(raw.resetAt))) event.resetAt = raw.resetAt;
-  if (raw.closedBy === 'reset' || raw.closedBy === 'probe' || raw.closedBy === 'disconnect') event.closedBy = raw.closedBy;
+  if (raw.closedBy === 'reset' || raw.closedBy === 'probe' || raw.closedBy === 'disconnect' || raw.closedBy === 'cap_updated') event.closedBy = raw.closedBy;
   if (raw.credentialMode === 'api-key' || raw.credentialMode === 'subscription') event.credentialMode = raw.credentialMode;
   if (typeof raw.failoverReason === 'string' && /^[a-z0-9_]{1,64}$/.test(raw.failoverReason)) event.failoverReason = raw.failoverReason;
   if (raw.dailyTokenCap === null || (typeof raw.dailyTokenCap === 'number' && Number.isInteger(raw.dailyTokenCap) && raw.dailyTokenCap > 0)) {

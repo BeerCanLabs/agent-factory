@@ -695,8 +695,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (entry.dailyTokenCap !== undefined && entry.dailyTokenCap > 0) {
       const today = new Date(nowMs()).toISOString().slice(0, 10);
       const loc = localAgentDayTokens.get(key);
-      const localCount = opts.control.subscriptionWindows ? (loc?.unacked ?? 0) : (loc?.total ?? 0);
-      if (loc && loc.utcDay === today && localCount >= entry.dailyTokenCap) {
+      if (loc && loc.utcDay === today && loc.total >= entry.dailyTokenCap) {
         const resetAt = new Date(Date.parse(`${today}T00:00:00.000Z`) + 86_400_000).toISOString();
         return { resetAt };
       }
@@ -1174,21 +1173,51 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     return { credentialMode: 'api-key' };
   }
 
+  /**
+   * M5(1), TSK-330: Agent-facing model projection — strictly presentation fields only
+   * (`name`, `id`, `subscription`, `connectionName`, `displayLabel`), never internal catalog
+   * or credential fields (`credentialMode`, `scope`, `connection`, `ownerPrincipalId`, etc.).
+   */
   function formatCatalogModelView(name: string, entry: CatalogEntry | undefined): Record<string, unknown> {
-    if (!entry) return { name, id: name };
+    if (!entry) return { name, id: name, subscription: false, displayLabel: name };
     const isSub = isSubscriptionEntry(entry);
     return {
       name,
       id: entry.id,
-      provider: entry.provider,
-      credentialMode: isSub ? 'subscription' : 'api-key',
       subscription: isSub,
-      ...(isSub ? { scope: entry.scope ?? 'factory' } : {}),
-      ...(isSub && entry.ownerPrincipalId ? { ownerPrincipalId: entry.ownerPrincipalId } : {}),
-      ...(isSub ? { connection: entry.connection } : {}),
       ...(isSub && entry.connectionName ? { connectionName: entry.connectionName } : {}),
-      ...(isSub && entry.dailyTokenCap !== undefined ? { dailyTokenCap: entry.dailyTokenCap } : {}),
       displayLabel: formatModelDisplayLabel(entry),
+    };
+  }
+
+  function sanitizeRunModelsInfo(rawInfo: RunModelsInfo | undefined, cat: ModelCatalog): RunModelsInfo | undefined {
+    if (!rawInfo) return undefined;
+    const models = rawInfo.models
+      ? rawInfo.models.map((m) => {
+          const name = typeof m.name === 'string' ? m.name : typeof m.id === 'string' ? m.id : '';
+          const entry = name ? findModel(cat, name) : undefined;
+          const isSub = typeof m.subscription === 'boolean' ? m.subscription : entry ? isSubscriptionEntry(entry) : false;
+          const connectionName =
+            typeof m.connectionName === 'string' && m.connectionName ? m.connectionName : entry?.connectionName;
+          const id = typeof m.id === 'string' ? m.id : entry?.id ?? name;
+          const displayLabel =
+            typeof m.displayLabel === 'string' && m.displayLabel
+              ? m.displayLabel
+              : entry
+                ? formatModelDisplayLabel(entry)
+                : name;
+          return {
+            name,
+            id,
+            subscription: isSub,
+            ...(isSub && connectionName ? { connectionName } : {}),
+            displayLabel,
+          };
+        })
+      : (rawInfo.approvedModels ?? []).map((name) => formatCatalogModelView(name, findModel(cat, name)));
+    return {
+      ...rawInfo,
+      models,
     };
   }
 
@@ -1255,7 +1284,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (capKey) {
         const curCap = localAgentDayTokens.get(capKey);
         if (curCap) curCap.unacked = Math.max(0, curCap.unacked - tokens);
-        if (windowCache && call.dailyTokenCap !== undefined && (curCap?.total ?? 0) >= call.dailyTokenCap) {
+        if (windowCache && call.dailyTokenCap !== undefined && tokens > 0) {
           windowCache.at = 0;
         }
       }
@@ -1375,13 +1404,9 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
             id,
             object: 'model',
             owned_by: 'factory',
-            credentialMode: isSub ? 'subscription' : 'api-key',
             subscription: isSub,
-            ...(e && isSub ? { scope: e.scope ?? 'factory', connection: e.connection } : {}),
-            ...(e && isSub && e.ownerPrincipalId ? { ownerPrincipalId: e.ownerPrincipalId } : {}),
             ...(e && isSub && e.connectionName ? { connectionName: e.connectionName } : {}),
-            ...(e && isSub && e.dailyTokenCap !== undefined ? { dailyTokenCap: e.dailyTokenCap } : {}),
-            ...(e ? { displayLabel: formatModelDisplayLabel(e) } : {}),
+            displayLabel: e ? formatModelDisplayLabel(e) : id,
           };
         }),
       });
@@ -1843,14 +1868,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           const rawInfo = opts.control.getRunModels
             ? await opts.control.getRunModels({ runId: ctx.run.runId, runToken: presentedToken(req) ?? '' })
             : undefined;
-          const info = rawInfo
-            ? {
-                ...rawInfo,
-                models:
-                  rawInfo.models ??
-                  (rawInfo.approvedModels ?? []).map((name) => formatCatalogModelView(name, findModel(catalog, name))),
-              }
-            : undefined;
+          const info = sanitizeRunModelsInfo(rawInfo, catalog);
           toolMessages.push({
             role: 'tool',
             tool_call_id: tc.id,
@@ -1859,7 +1877,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           });
         } else if (tc.function?.name === 'factory_set_models') {
           const args = (tryJson(tc.function.arguments) ?? {}) as Record<string, unknown>;
-          const info = opts.control.setRunModels
+          const rawSetInfo = opts.control.setRunModels
             ? await opts.control.setRunModels({
                 runId: ctx.run.runId,
                 runToken: presentedToken(req) ?? '',
@@ -1868,6 +1886,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
                 secondaryModel: typeof args.secondaryModel === 'string' ? args.secondaryModel : undefined,
               })
             : undefined;
+          const info = sanitizeRunModelsInfo(rawSetInfo, catalog);
           if (info) {
             ctxCache.delete(ctx.run.runId);
             const fresh = await opts.control.runContext(ctx.run.runId);

@@ -797,8 +797,8 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
       assert.equal(pinnedCap.json().error, 'subscription_cap_reached');
     });
 
-    it('M5(1): GET /models/v1/models surfaces subscription markers + connection display names and hides disallowed personal BYOM entries', async () => {
-      // Personal agent owned by user:dale sees dale-byom with connectionName & displayLabel.
+    it('M5(1), TSK-330: GET /models/v1/models and factory_get_models surface only presentation fields and strip internal catalog/credential fields', async () => {
+      // Personal agent owned by user:dale sees dale-byom with subscription, connectionName & displayLabel — NO internal fields.
       await setRun('dale-1', policy({ models: ['dale-byom', 'grok-sub', 'api-model'], currentModel: 'dale-byom' }));
       ctx.agentKind = 'personal';
       ctx.activeOwnerPrincipalId = 'user:dale';
@@ -807,13 +807,25 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
       const data1 = m1.json().data as any[];
       const daleEntry = data1.find((d) => d.id === 'dale-byom');
       assert.ok(daleEntry);
-      assert.equal(daleEntry.credentialMode, 'subscription');
       assert.equal(daleEntry.subscription, true);
-      assert.equal(daleEntry.scope, 'personal');
-      assert.equal(daleEntry.connection, 'c-dale');
       assert.equal(daleEntry.connectionName, "Dale's Grok");
       assert.equal(daleEntry.displayLabel, "grok-4.6 · Dale's Grok");
-      assert.equal(daleEntry.dailyTokenCap, 100);
+      for (const forbidden of [
+        'credentialMode',
+        'connection',
+        'scope',
+        'ownerPrincipalId',
+        'templateId',
+        'dailyTokenCap',
+        'price',
+        'endpoint',
+        'vendorId',
+        'provider',
+        'admittedBy',
+        'admittedAt',
+      ]) {
+        assert.equal(daleEntry[forbidden], undefined, `GET /models/v1/models must not leak ${forbidden}`);
+      }
 
       // Team agent does NOT see dale-byom in GET /models/v1/models even if stale policy listed it.
       ctx.agentKind = 'team';
@@ -823,6 +835,149 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
       const ids2 = (m2.json().data as any[]).map((d) => d.id);
       assert.equal(ids2.includes('dale-byom'), false);
       assert.equal(ids2.includes('grok-sub'), true);
+
+      // Even if ControlClient.getRunModels returns raw model objects, factory_get_models sanitizes all internal fields.
+      let toolPayload: any;
+      const toolEgress = make({
+        ...control(),
+        async getRunModels() {
+          return {
+            agentId: 'dale-1',
+            approvedModels: ['dale-byom'],
+            currentModel: 'dale-byom',
+            models: [
+              {
+                name: 'dale-byom',
+                id: 'grok-4.6',
+                credentialMode: 'subscription',
+                subscription: true,
+                scope: 'personal',
+                ownerPrincipalId: 'user:dale',
+                connection: 'c-dale',
+                connectionName: "Dale's Grok",
+                templateId: 'xai-subscription',
+                dailyTokenCap: 100,
+                price: { inputPerMTok: 0, outputPerMTok: 0 },
+                endpoint: 'https://api.x.ai',
+                displayLabel: "grok-4.6 · Dale's Grok",
+              },
+            ],
+          };
+        },
+      });
+      const toolPort = await listen(toolEgress);
+      try {
+        ctx.agentKind = 'personal';
+        ctx.activeOwnerPrincipalId = 'user:dale';
+        let round = 0;
+        vendorReply = (seen) => {
+          if (round++ === 0) {
+            return ok('', [{ type: 'function_call', call_id: 'fc-1', name: 'factory_get_models', arguments: '{}' }]);
+          }
+          const outItem = (seen.body?.input ?? []).find((it: any) => it.type === 'function_call_output' && it.call_id === 'fc-1');
+          toolPayload = outItem ? JSON.parse(outItem.output) : undefined;
+          return ok('checked');
+        };
+        const toolRes = await ask(toolPort);
+        assert.equal(toolRes.status, 200, toolRes.text);
+        const mod = toolPayload?.models?.[0];
+        assert.ok(mod);
+        assert.equal(mod.subscription, true);
+        assert.equal(mod.connectionName, "Dale's Grok");
+        assert.equal(mod.displayLabel, "grok-4.6 · Dale's Grok");
+        for (const forbidden of ['credentialMode', 'connection', 'scope', 'ownerPrincipalId', 'templateId', 'dailyTokenCap', 'price', 'endpoint']) {
+          assert.equal(mod[forbidden], undefined, `factory_get_models must not leak ${forbidden}`);
+        }
+      } finally {
+        vendorReply = () => ok('from vendor');
+        await new Promise<void>((r) => toolEgress.close(() => r()));
+      }
+    });
+
+    it('M5(8): default 5s subscriptionWindowCacheMs closes bypass window on prior-spend cap crossing and multi-call local crossing', async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      // Prior spend earlier in the UTC day (e.g. before restart or on another replica): 90 / 100 tokens already used.
+      capUsage.set('c-dale::dale-cached', { used: 90, cap: 100, day: today });
+
+      const baseCtrl = control();
+      const cachedCtrl: ControlClient = {
+        ...baseCtrl,
+        async ledger(event) {
+          ledger.push(event);
+          if (event.type === 'llm' && event.connection === 'c-dale' && event.agentId) {
+            const key = `c-dale::${event.agentId}`;
+            const cur = capUsage.get(key);
+            const delta = Number(event.inputTokens ?? 0) + Number(event.outputTokens ?? 0);
+            if (cur) cur.used += delta;
+          }
+        },
+      };
+      // Default 5000ms cache TTL (NOT 0!)
+      const cachedEgress = make(cachedCtrl, { subscriptionWindowCacheMs: 5000 });
+      const cachedPort = await listen(cachedEgress);
+      try {
+        await setRun(
+          'dale-cached',
+          policy({
+            models: ['dale-byom', 'api-model'],
+            currentModel: 'dale-byom',
+            primaryModel: 'api-model',
+            budgetUsd: { perDay: 5, perMonth: 50 },
+          }),
+        );
+        ctx.agentKind = 'personal';
+        ctx.activeOwnerPrincipalId = 'user:dale';
+
+        // Call 1: 90 < 100 so windowCache populates empty; call uses 10 + 4 = 14 tokens -> control plane total is now 104 >= 100 (while local total is only 14 < 100).
+        const first = await ask(cachedPort);
+        assert.equal(first.status, 200, first.text);
+        assert.equal(first.json().choices[0].message.content, 'from vendor');
+        await settle();
+        assert.equal(capUsage.get('c-dale::dale-cached')?.used, 104);
+
+        // Call 2 immediately (well within 5000ms TTL): ledger ack invalidated windowCache.at = 0, so egress sees the cap immediately and skips to api-model!
+        const second = await ask(cachedPort);
+        assert.equal(second.status, 200, second.text);
+        assert.equal(second.json().choices[0].message.content, 'from api');
+
+        // Same-process multi-call local crossing within 5000ms even if control-plane caps have not yet reflected a cap:
+        const lagCtrl: ControlClient = {
+          ...baseCtrl,
+          async subscriptionWindows() {
+            return { windows: [], caps: [] };
+          },
+        };
+        const localEgress = make(lagCtrl, { subscriptionWindowCacheMs: 5000 });
+        const localPort = await listen(localEgress);
+        try {
+          await setRun(
+            'dale-local',
+            policy({
+              models: ['dale-byom', 'api-model'],
+              currentModel: 'dale-byom',
+              primaryModel: 'api-model',
+              budgetUsd: { perDay: 5, perMonth: 50 },
+            }),
+          );
+          ctx.agentKind = 'personal';
+          ctx.activeOwnerPrincipalId = 'user:dale';
+          // 8 calls * 14 tokens = 112 >= 100 (dailyTokenCap on dale-byom)
+          for (let i = 0; i < 8; i++) {
+            const r = await ask(localPort);
+            assert.equal(r.status, 200);
+            assert.equal(r.json().choices[0].message.content, 'from vendor');
+            await settle();
+          }
+          // 9th call within 5s hits loc.total (112 >= 100) even after ledger ack zeroed loc.unacked!
+          const ninth = await ask(localPort);
+          assert.equal(ninth.status, 200);
+          assert.equal(ninth.json().choices[0].message.content, 'from api');
+        } finally {
+          await new Promise<void>((r) => localEgress.close(() => r()));
+        }
+      } finally {
+        await new Promise<void>((r) => cachedEgress.close(() => r()));
+      }
     });
   });
 });

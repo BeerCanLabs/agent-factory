@@ -906,15 +906,35 @@ export async function detachDisallowedPersonalModelsOnAgent(
     }
   }
 
-  for (const run of state.runs.list({ agentId, active: true })) {
-    if (run.model && toRemoveSet.has(run.model)) {
-      run.model = fallbackModel;
-      state.runs.update(run.runId, { model: fallbackModel });
-    }
-  }
-
   await recordConfig(state, agentId, { actor, reason });
   return { detached };
+}
+
+export type AgentFacingModelView = {
+  name: string;
+  id: string;
+  subscription: boolean;
+  connectionName?: string;
+  displayLabel: string;
+};
+
+/**
+ * M5(1), TSK-330: Agent-facing / run-token model projection.
+ * Exposes ONLY presentation fields (`name`, `id`, `subscription`, `connectionName`, `displayLabel`),
+ * never internal catalog/credential fields (`credentialMode`, `scope`, `connection`, `ownerPrincipalId`,
+ * `templateId`, `dailyTokenCap`, `endpoint`, `vendorId`, `price`, `admittedBy`, `admittedAt`).
+ */
+export function agentFacingModelsForNames(state: FactoryState, names: ReadonlyArray<string>): AgentFacingModelView[] {
+  return enrichedCatalogModelsForNames(state, names).map((m) => {
+    const isSub = Boolean(m.subscription);
+    return {
+      name: m.name,
+      id: m.id,
+      subscription: isSub,
+      ...(isSub && m.connectionName ? { connectionName: m.connectionName } : {}),
+      displayLabel: m.displayLabel,
+    };
+  });
 }
 
 export function enrichedCatalogModelsForNames(state: FactoryState, names: ReadonlyArray<string>): EnrichedModelView[] {
@@ -2319,7 +2339,7 @@ async function applyRunModelSwitch(
       ok: true,
       agentId: run.agentId,
       ...updatedEff,
-      models: enrichedCatalogModelsForNames(state, updatedEff.approvedModels),
+      models: agentFacingModelsForNames(state, updatedEff.approvedModels),
       defaultModel: defaultModelOf(state) ?? null,
     },
   };
@@ -2338,7 +2358,7 @@ async function handleRunModels(state: FactoryState, run: Run, req: http.Incoming
     json(res, 200, {
       agentId: run.agentId,
       ...eff,
-      models: enrichedCatalogModelsForNames(state, eff.approvedModels),
+      models: agentFacingModelsForNames(state, eff.approvedModels),
       defaultModel: defaultModelOf(state) ?? null,
       canManageModels: canManage.allowed,
     });
@@ -2466,7 +2486,7 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
               text: JSON.stringify({
                 agentId: run.agentId,
                 ...eff,
-                models: enrichedCatalogModelsForNames(state, eff.approvedModels),
+                models: agentFacingModelsForNames(state, eff.approvedModels),
                 defaultModel: defaultModelOf(state) ?? null,
                 canManageModels: canManage.allowed,
               }),

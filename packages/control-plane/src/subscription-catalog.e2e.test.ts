@@ -697,7 +697,30 @@ describe('Subscription catalog, Owner BYOM, discovery, D24/D15/S24, $0 standing,
       "grok-4.6 · Dale's SuperGrok",
     );
 
-    // Run models + egress GET /models/v1/models + egress factory_get_models tool call
+    // Run models + run-token MCP + egress GET /models/v1/models + egress factory_get_models tool call
+    // M5(1), TSK-330: Agent-facing surfaces expose ONLY presentation fields, never internal catalog/credential fields.
+    const assertAgentModelStripped = (m: Record<string, unknown>, surface: string) => {
+      assert.equal(m.subscription, true, `${surface}: subscription`);
+      assert.equal(m.connectionName, "Dale's SuperGrok", `${surface}: connectionName`);
+      assert.equal(m.displayLabel, "grok-4.6 · Dale's SuperGrok", `${surface}: displayLabel`);
+      for (const forbidden of [
+        'credentialMode',
+        'connection',
+        'scope',
+        'ownerPrincipalId',
+        'templateId',
+        'dailyTokenCap',
+        'price',
+        'endpoint',
+        'vendorId',
+        'provider',
+        'admittedBy',
+        'admittedAt',
+      ]) {
+        assert.equal(m[forbidden], undefined, `${surface} must not leak ${forbidden}`);
+      }
+    };
+
     const run = state.runs.create({ agentId: 'dale-personal', state: 'WORKING', actor: 'user:dale', trigger: 'manual' } as never);
     const runToken = await state.runTokens!.mint({ runId: run.runId, agentId: 'dale-personal' });
 
@@ -705,21 +728,60 @@ describe('Subscription catalog, Owner BYOM, discovery, D24/D15/S24, $0 standing,
       headers: { authorization: `Bearer ${runToken}` },
     });
     const runModelsBody = (await runModelsRes.json()) as any;
-    assert.equal(
-      runModelsBody.models.find((m: any) => m.name === 'grok-4.6-dale-sub').displayLabel,
-      "grok-4.6 · Dale's SuperGrok",
+    assertAgentModelStripped(
+      runModelsBody.models.find((m: any) => m.name === 'grok-4.6-dale-sub'),
+      'GET /api/v1/runs/:id/models',
+    );
+
+    const runSwitchRes = await fetch(`http://127.0.0.1:${cpPort}/api/v1/runs/${run.runId}/models`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${runToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ currentModel: 'grok-4.6-dale-sub' }),
+    });
+    assert.equal(runSwitchRes.status, 200);
+    const runSwitchBody = (await runSwitchRes.json()) as any;
+    assertAgentModelStripped(
+      runSwitchBody.models.find((m: any) => m.name === 'grok-4.6-dale-sub'),
+      'PUT /api/v1/runs/:id/models',
+    );
+
+    const runMcpGetRes = await fetch(`http://127.0.0.1:${cpPort}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${runToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'get_agent_models', arguments: {} } }),
+    });
+    const runMcpGetBody = JSON.parse(((await runMcpGetRes.json()) as any).result.content[0].text);
+    assertAgentModelStripped(
+      runMcpGetBody.models.find((m: any) => m.name === 'grok-4.6-dale-sub'),
+      'run-token MCP get_agent_models',
+    );
+
+    const runMcpSetRes = await fetch(`http://127.0.0.1:${cpPort}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${runToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 12,
+        method: 'tools/call',
+        params: { name: 'set_agent_models', arguments: { currentModel: 'grok-4.6-dale-sub' } },
+      }),
+    });
+    const runMcpSetBody = JSON.parse(((await runMcpSetRes.json()) as any).result.content[0].text);
+    assertAgentModelStripped(
+      runMcpSetBody.models.find((m: any) => m.name === 'grok-4.6-dale-sub'),
+      'run-token MCP set_agent_models',
     );
 
     const egressModelsRes = await fetch(`http://127.0.0.1:${gkPort}/models/v1/models`, {
       headers: { authorization: `Bearer ${runToken}` },
     });
     const egressModelsBody = (await egressModelsRes.json()) as any;
-    assert.equal(
-      egressModelsBody.data.find((m: any) => m.id === 'grok-4.6-dale-sub').displayLabel,
-      "grok-4.6 · Dale's SuperGrok",
+    assertAgentModelStripped(
+      egressModelsBody.data.find((m: any) => m.id === 'grok-4.6-dale-sub'),
+      'egress GET /models/v1/models',
     );
 
-    // Trigger factory_get_models inside egress chat loop and verify tool output carries renamed displayLabel
+    // Trigger factory_get_models inside egress chat loop and verify tool output carries renamed displayLabel without internal fields
     let capturedToolResult: any;
     let roundCount = 0;
     responsesReply = (_url, body) => {
@@ -732,11 +794,12 @@ describe('Subscription catalog, Owner BYOM, discovery, D24/D15/S24, $0 standing,
     };
     const fgmChat = await chat(runToken);
     assert.equal(fgmChat.status, 200, fgmChat.text);
-    assert.equal(
-      capturedToolResult?.models?.find((m: any) => m.name === 'grok-4.6-dale-sub')?.displayLabel,
-      "grok-4.6 · Dale's SuperGrok",
+    assertAgentModelStripped(
+      capturedToolResult?.models?.find((m: any) => m.name === 'grok-4.6-dale-sub'),
+      'egress factory_get_models',
     );
     responsesReply = () => sseOk('hello from subscription');
+    state.runs.update(run.runId, { state: 'DONE' });
   });
 
   it('2. M5(2), (4), (4a): discovery triggers (explicit, reconnect, timer), no_model_list/vendor_refused/failed retire nothing & allow explicit modelId, and successful drop/disconnect/vendor-withdrawal run M2 retirements', async () => {
@@ -919,8 +982,18 @@ describe('Subscription catalog, Owner BYOM, discovery, D24/D15/S24, $0 standing,
     });
     assert.equal(badTraining.status, 403);
 
-    // D15 Auto-detach 1: Transfer ownership of dale-personal-2 from user:dale to user:carol -> auto-detaches grok-4.6-dale-sub with M2 transition + POLICY_UPDATED!
+    // D15 Auto-detach 1: Transfer ownership of dale-personal-2 from user:dale to user:carol -> auto-detaches grok-4.6-dale-sub with M2 transition + POLICY_UPDATED,
+    // while preserving an active pinned run's `run.model` untouched so egress fails closed (403)!
     assert.equal(state.policies.get('dale-personal-2')!.models?.includes('grok-4.6-dale-sub'), true);
+    const pinnedTransferRun = state.runs.create({
+      agentId: 'dale-personal-2',
+      state: 'WORKING',
+      model: 'grok-4.6-dale-sub',
+      actor: 'user:dale',
+      trigger: 'manual',
+    } as never);
+    const pinnedTransferTok = await state.runTokens!.mint({ runId: pinnedTransferRun.runId, agentId: 'dale-personal-2' });
+
     const offerRes = await api('/api/v1/agents/dale-personal-2/transfer', 'POST', TOKENS.dale, {
       to: 'user:carol',
     });
@@ -931,6 +1004,14 @@ describe('Subscription catalog, Owner BYOM, discovery, D24/D15/S24, $0 standing,
     const afterTransferPol = state.policies.get('dale-personal-2')!;
     assert.equal(afterTransferPol.models?.includes('grok-4.6-dale-sub'), false, 'outgoing owner personal BYOM auto-detached on transfer');
     assert.equal(afterTransferPol.currentModel, 'api-fallback', 'M2 promoted secondaryModel to currentModel');
+    assert.equal(
+      state.runs.get(pinnedTransferRun.runId)!.model,
+      'grok-4.6-dale-sub',
+      'explicitly pinned run.model is never substituted on personal BYOM detachment',
+    );
+    const pinnedAfterDetach = await chat(pinnedTransferTok);
+    assert.equal(pinnedAfterDetach.status, 403, 'pinned run fails closed (403) at egress after personal BYOM detachment');
+    state.runs.update(pinnedTransferRun.runId, { state: 'DONE' });
 
     // D15 Auto-detach 2: Revoking Bob's grant on bob-personal auto-detaches grok-4.6-bob-sub + ledgers POLICY_UPDATED!
     const bobGrant = state.grants!.list({ scopeKind: 'agent', scopeId: 'bob-personal' }).find((g) => g.subject === 'user:bob')!;
@@ -1228,7 +1309,24 @@ describe('Subscription catalog, Owner BYOM, discovery, D24/D15/S24, $0 standing,
     assert.ok(pricedSpend.body.agents['dale-personal'].day.usd > 0, 'priced fallback USD spend tracked separately');
     assert.ok(pricedSpend.body.subscriptions?.connections?.[daleConnId], 'GET /api/v1/spend includes separate subscriptions breakdown');
 
-    // Advance clock past midnight UTC -> SUBSCRIPTION_CAP_RESET is ledgered naming dale-personal, and dale-personal serves grok-4.6-dale-sub again!
+    // Raise dailyTokenCap above dale-personal's usage (64 < 200) -> immediately emits SUBSCRIPTION_CAP_RESET with closedBy === 'cap_updated'!
+    const raiseCapRes = await api(`/api/v1/subscriptions/${daleConnId}`, 'PATCH', TOKENS.dale, {
+      dailyTokenCap: 200,
+    });
+    assert.equal(raiseCapRes.status, 200, raiseCapRes.text);
+    const capUpdatedReset = state.ledger
+      .query()
+      .find((e) => e.action === 'SUBSCRIPTION_CAP_RESET' && e.agentId === 'dale-personal' && e.closedBy === 'cap_updated');
+    assert.ok(capUpdatedReset, 'SUBSCRIPTION_CAP_RESET preserves closedBy: cap_updated in ledger');
+    assert.equal(capUpdatedReset.closedBy, 'cap_updated');
+
+    // Restore dailyTokenCap = 50 -> re-evaluates 64 >= 50 so cap is active again before midnight UTC reset test:
+    const restoreCapRes = await api(`/api/v1/subscriptions/${daleConnId}`, 'PATCH', TOKENS.dale, {
+      dailyTokenCap: 50,
+    });
+    assert.equal(restoreCapRes.status, 200, restoreCapRes.text);
+
+    // Advance clock past midnight UTC -> SUBSCRIPTION_CAP_RESET (closedBy: 'reset') is ledgered naming dale-personal, and dale-personal serves grok-4.6-dale-sub again!
     clock = Date.parse(`${baseUtcDay}T00:00:00.000Z`) + 86_400_000 + 5 * 60_000;
     responsesReply = () => sseOk('back after midnight UTC', 6, 3);
     const afterMidnight = await chat(tok1);
@@ -1236,7 +1334,9 @@ describe('Subscription catalog, Owner BYOM, discovery, D24/D15/S24, $0 standing,
     assert.equal(afterMidnight.body.choices[0].message.content, 'back after midnight UTC');
     await settle();
     const resetRows = state.ledger.query().filter((e) => e.action === 'SUBSCRIPTION_CAP_RESET' && e.agentId === 'dale-personal');
-    assert.equal(resetRows.length, 1);
+    assert.equal(resetRows.length, 2);
+    assert.equal(resetRows[0].closedBy, 'cap_updated');
+    assert.equal(resetRows[1].closedBy, 'reset');
 
     // Finally, M5(2) vendor-permission-withdrawn helper retires all remaining xai-subscription entries with M2 transitions and disconnects xai grants!
     const withdrawn = await withdrawSubscriptionVendor(state, 'xai');
