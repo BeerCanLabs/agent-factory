@@ -8,7 +8,7 @@ It is a client of the factory's existing API (KPF): it adds no interface and no 
 
 ```
 brew install cloudflared          # the identity-aware proxy's own client
-npm install && npm run build -w @beercanlabs/factory-auth -w @beercanlabs/factory-ledger -w @beercanlabs/factory-bouncer -w @beercanlabs/factory-cli
+npm install && npm run build -w @beercanlabs/factory-contract -w @beercanlabs/factory-auth -w @beercanlabs/factory-ledger -w @beercanlabs/factory-bouncer -w @beercanlabs/factory-cli
 npm link -w @beercanlabs/factory-cli   # puts `factory` on your PATH
 factory
 ```
@@ -79,6 +79,7 @@ Done: set an agent's spend limit.
 |---|---|
 | Look | `/agents`, `/agent <id>`, `/policy <agent>`, `/status`, `/runs [agent] [--active] [--limit n]`, `/run <id>`, `/ledger [agent] [--limit n]`, `/models`, `/skills`, `/incidents`, `/schedules` |
 | Money | `/spend`, `/report [current\|last]`, `/compute`, `/budgets`, `/budget <agent> <amount> daily\|monthly`, `/factory-budget total=<$> ai=<$> infra=<$> alert=0.8,1` |
+| Subscriptions | `/subscriptions [factory\|personal]`, `/subscription-spend`, `/subscription-connect <template> [personal\|factory] ["name"] --attested [--no-wait]`, `/subscription-signin <signInId>`, `/subscription-reconnect <id> --attested [--no-wait]`, `/subscription-rename <id> "<new name>"`, `/subscription-cap <id> <tokens\|none>`, `/subscription-discover <id>`, `/subscription-add-model <id> <name> <modelId> [inputPer1M outputPer1M]`, `/subscription-retire-model <id> <name>`, `/subscription-disconnect <id>` |
 | Agents | `/pause`, `/resume`, `/isolate`, `/wake`, `/reset`, `/retire`, `/reinstate` `<agent>`; `/cancel <run id>` |
 | Approvals | `/approvals`, `/approve <id> [notes]`, `/reject <id> [notes]` |
 
@@ -101,7 +102,7 @@ A command that changes state asks on a terminal, and is refused elsewhere unless
 
 Only what **your own roles** allow (CL3). The manager has no power of its own: it asks for a tool, the CLI runs it as you, and the factory decides. A viewer can read costs; only an admin can set a budget. Every state-changing call is shown to you and runs only if you say yes (the answer must be typed after the question appears, so piped or pasted-ahead input cannot approve a change), and it is ledgered under your identity exactly as if you had used the console.
 
-Tools: list and inspect agents, factory metrics, spend (by agent, the monthly report, compute, the factory budgets), set factory budgets, set an agent's budget, list runs, ledger rows, held approvals and decide them, pause/resume/isolate/wake/reset an agent, cancel a run, retire and reinstate an agent, models, skills, incidents and schedules.
+Tools: list and inspect agents, factory metrics, spend (by agent, the monthly report, compute, the factory budgets), set factory budgets, set an agent's budget, list runs, ledger rows, held approvals and decide them, pause/resume/isolate/wake/reset an agent, cancel a run, retire and reinstate an agent, models, skills, incidents, schedules, and subscription connections (factory-shared and personal BYOM, device-code sign-in without holding OAuth tokens in the CLI).
 
 Left to the console on purpose: registering, deploying and purging agents, and anything that supplies or reads a credential (CL6, K5). Nothing sensitive is shown in the terminal or sent to the manager; values under secret-looking names are hidden.
 

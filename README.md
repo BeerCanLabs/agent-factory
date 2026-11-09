@@ -38,12 +38,12 @@ Agent Factory is architected around **10 canonical services ("The Cast of Charac
    - **Contract:** Inbound webhook & presence protocol, token-authenticated egress proxy (`<ROUTE>_BASE_URL`), the per-agent policy store (`@beercanlabs/factory-gatekeeper/policy`) and `verifyRun` (`@beercanlabs/factory-gatekeeper/run-token`: does this token speak for a live run of the agent it names?). Relays wake refusals (such as budget caps) directly to callers.
 
 2. **Keymaster (Credential Facilitation):**
-   - **Role:** Owns OAuth connections, consent flows, token refreshes (K1–K4), write-only static secret onboarding (K5), and vault mapping.
-   - **Contract:** Zero-knowledge credential evaluation, ephemeral leases, token rotation events, and write-only platform secrets onboarding without exposing plaintext credentials to agents.
+   - **Role:** Owns OAuth connections, consent flows, token refreshes (K1–K4), model subscription grants (`shared/<provider>/subscription/<id>` for factory-shared and `users/<principalKey>/<provider>/subscription/<id>` for Agent Owner BYOM, M5), write-only static secret onboarding (K5), and vault mapping.
+   - **Contract:** Zero-knowledge credential evaluation, ephemeral leases, token rotation events, single-connection-per-vendor-account enforcement, and write-only platform secrets onboarding without exposing plaintext credentials to agents.
 
 3. **Executive (Model Service / Inference Provider):**
-   - **Role:** Provides a uniform OpenAI-compatible Chat Completions API (M1), translates calls to model providers (Bedrock today), decides whether an agent may use a model (M2), manages two-tier model authority with persistent failback across slots (`currentModel`, `primaryModel`, `secondaryModel`), transparently supports conversational model switching via run tokens and injected egress tools (GAP-210), and counts tokens (E5).
-   - **Contract:** `checkModel`, `offeredModels`, and `failbackCandidates` (may this agent use this model, and what is its failover chain?), `complete` (serve one call and return the result, a refusal, or the provider's failure), the model catalog and provider adapters; normalizes token usage (`input`, `output`, `cacheRead`, `cacheWrite`) and reports it to the Accountant for pricing. Lives in `packages/executive`.
+   - **Role:** Provides a uniform OpenAI-compatible Chat Completions API (M1), translates calls to model providers (Bedrock, API-key providers, and M5 streaming Responses adapters for `xai-subscription` and `openai-subscription`), decides whether an agent may use a model (M2, M5), manages two-tier model authority with persistent failback across slots (`currentModel`, `primaryModel`, `secondaryModel`), skips subscription limit windows and needs-re-consent connections without changing agent selections, transparently supports conversational model switching via run tokens and injected egress tools (GAP-210), and counts tokens (E5).
+   - **Contract:** `checkModel`, `offeredModels`, and `failbackCandidates` (may this agent use this model, and what is its failover chain?), `complete` (serve one call and return the result, a refusal, or the provider's failure), model catalog with factory-shared and `$0` Agent Owner BYOM entries, Responses adapters, and model discovery; normalizes token usage (`input`, `output`, `cacheRead`, `cacheWrite`) and reports it to the Accountant for pricing and subscription token metering. Lives in `packages/executive`.
 
 4. **Property Manager (Compute & State Lifecycle, Turn Broker):**
    - **Role:** Property Manager, Compute & State. Manages serverless min=0 compute, wake-from-zero, warm-down windows, operational pause/kill-switches, turn coordination via `/mailbox` long-polling, container runtime state hydration ("The Safe", §6.6), and two-stage retirement (§6.4).
@@ -54,8 +54,8 @@ Agent Factory is architected around **10 canonical services ("The Cast of Charac
    - **Contract:** Single-writer leased file ledger with SHA-256 hash chaining, WORM checkpointing (S3 Object Lock / GCS retention), and automated secret and prompt redaction.
 
 6. **Accountant (Spend Governance & FinOps):**
-   - **Role:** Spend governance, real-time token pricing, and budget circuit-breakers (E5, M3). Resides in `packages/budget`.
-   - **Contract:** Exposes `checkStanding({ limits, spend, pendingUsd? })` returning `{ inGoodStanding: true }` or `{ inGoodStanding: false, window }`. Gatekeeper-egress checks standing before every model call, and the Property Manager checks before waking an agent.
+   - **Role:** Spend governance, real-time token pricing, budget circuit-breakers (E5, M3), `$0` BYOM standing across admission, wake, conversation handoff, and egress (D25), per-agent daily subscription token caps (M5(8)), and separate reporting of subscription token usage versus priced USD spend. Resides in `packages/budget`.
+   - **Contract:** Exposes `checkStanding({ limits, spend, pendingUsd? })` returning `{ inGoodStanding: true }` or `{ inGoodStanding: false, window }` (with `$0` standing for `$0` BYOM under `{ perDay: 0, perMonth: 0 }` ceilings), per-agent daily token cap enforcement, and FinOps/spend reporting for both priced USD spend and unpriced subscription tokens.
 
 7. **Bouncer (Governance & Approvals):**
    - **Role:** Intercepts and holds sensitive actions (writes in a person's name, sensitive tools) until explicit human sign-off is granted (E4, E9).
@@ -101,6 +101,7 @@ The architecture is opinionated and accepts certain limits by design:
 - **[Skills Guide](docs/SKILLS.md)** — Guide to authoring, testing, packaging, and publishing stdlib Python skills (`spec: 1`), declaring mandatory `smoke:` blocks, managing own-use vs. fleet publication, and configuring admin-managed fleet default skills (`GET/PUT /api/v1/skills/defaults`).
 - **[Agent Memory Models Guide](docs/architecture/agent-memory-models.md)** — Architectural specification for the 3 Agent Archetypes, the Storage Triad (Whiteboard vs. Notebook vs. Safe), FTS5 episodic state, and multi-user isolation.
 - **[Cartridge Developer Guide](docs/CARTRIDGE_DEVELOPER_GUIDE.md)** — Deep-dive implementation guide for Repository-Based Cartridges using the "New Hire" model, Factory Model API (`M1`), `AM3` notebook rotation, and E12 role-based route access.
+- **[Factory CLI](docs/CLI.md)** — Terminal client for the Factory Manager, agent inspection, runs, approvals, and subscription connections (factory-shared and personal BYOM).
 - **[DESIGN_AUTHORITY.md](DESIGN_AUTHORITY.md)** — The Single Source of Truth (SSOT) for architectural intent, component contracts, and AI governance.
 - **[POSITION_PAPER.md](POSITION_PAPER.md)** — The foundational manifesto: Console vs. Cartridge.
 - **[AGENTS.md](AGENTS.md)** — Instructions for implementing AIs deploying the Factory.
@@ -108,6 +109,7 @@ The architecture is opinionated and accepts certain limits by design:
 ```
 docs/CREATING_AGENTS.md           # Dual-mode hosting, activation smoke gate & migration runbook
 docs/SKILLS.md                    # Skills authoring, manifest, packaging & publishing guide
+docs/CLI.md                       # Factory CLI guide & subscription commands
 docs/architecture/agent-memory-models.md # Agent memory models & storage triad spec
 docs/CARTRIDGE_DEVELOPER_GUIDE.md # Developer tutorial for building cartridges
 DESIGN_AUTHORITY.md               # SSOT architecture & AI locking board
