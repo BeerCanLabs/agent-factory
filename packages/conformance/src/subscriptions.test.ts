@@ -1425,13 +1425,10 @@ describe('M5 Conformance: Model Subscriptions & Owner BYOM', { concurrency: fals
     const iam = read('landing-zones/aws/iam.tf');
     // Must protect Keymaster grant arns in both control_plane and gatekeeper_egress
     assert.match(iam, /keymaster_grant_arns/);
+    assert.match(iam, /Sid\s*=\s*"KeymasterGrantStore"/);
     assert.match(iam, /Sid\s*=\s*"NeverKeymasterGrants"/);
 
-    // If TSK-331 has merged into iam.tf, verify shared/*/subscription/* and users/*; otherwise verify connections/*
-    if (iam.includes('shared/*/subscription/*')) {
-      assert.match(iam, /keymaster_grant_arns\s*=\s*\[[\s\S]*?connections\/\*[\s\S]*?shared\/\*\/subscription\/\*[\s\S]*?users\/\*/);
-    } else {
-      assert.match(iam, /keymaster_grant_arns\s*=\s*\[[\s\S]*?connections\/\*/);
-    }
+    // Unconditionally assert connections/*, shared/*/subscription/*, and users/* in keymaster_grant_arns
+    assert.match(iam, /keymaster_grant_arns\s*=\s*\[[\s\S]*?connections\/\*[\s\S]*?shared\/\*\/subscription\/\*[\s\S]*?users\/\*/);
   });
 });

@@ -79,7 +79,7 @@ Done: set an agent's spend limit.
 |---|---|
 | Look | `/agents`, `/agent <id>`, `/policy <agent>`, `/status`, `/runs [agent] [--active] [--limit n]`, `/run <id>`, `/ledger [agent] [--limit n]`, `/models`, `/skills`, `/incidents`, `/schedules` |
 | Money | `/spend`, `/report [current\|last]`, `/compute`, `/budgets`, `/budget <agent> <amount> daily\|monthly`, `/factory-budget total=<$> ai=<$> infra=<$> alert=0.8,1` |
-| Subscriptions | `/subscriptions [--scope factory\|personal]`, `/subscription-spend`, `/subscription-connect <template> [--scope factory\|personal] [--name <name>] --attested [--no-wait]`, `/subscription-signin <signInId>`, `/subscription-reconnect <id> [--no-wait]`, `/subscription-rename <id> <name>`, `/subscription-cap <id> <tokens\|none>`, `/subscription-discover <id>`, `/subscription-add-model <id> <name> <modelId> [inputPer1M outputPer1M]`, `/subscription-retire-model <id> <name>`, `/subscription-disconnect <id>` |
+| Subscriptions | `/subscriptions [factory\|personal]`, `/subscription-spend`, `/subscription-connect <template> [personal\|factory] ["name"] --attested [--no-wait]`, `/subscription-signin <signInId>`, `/subscription-reconnect <id> --attested [--no-wait]`, `/subscription-rename <id> "<new name>"`, `/subscription-cap <id> <tokens\|none>`, `/subscription-discover <id>`, `/subscription-add-model <id> <name> <modelId> [inputPer1M outputPer1M]`, `/subscription-retire-model <id> <name>`, `/subscription-disconnect <id>` |
 | Agents | `/pause`, `/resume`, `/isolate`, `/wake`, `/reset`, `/retire`, `/reinstate` `<agent>`; `/cancel <run id>` |
 | Approvals | `/approvals`, `/approve <id> [notes]`, `/reject <id> [notes]` |
 
