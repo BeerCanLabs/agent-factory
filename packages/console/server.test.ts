@@ -23,7 +23,7 @@ describe('A2 console forwards the caller, adds no credential', () => {
     cp = http.createServer((req, res) => {
       seen.push(req.headers);
       if (req.url === '/api/v1/whoami') {
-        const who = req.headers['cf-access-jwt-assertion'] ? { actor: 'cloudflare:owner@example.com', roles: ['admin', 'operator', 'approver', 'viewer', 'ingest'] } : String(req.headers.cookie ?? '').includes('factory_session=g') ? { actor: 'user:dale', roles: ['admin'], signedInWith: 'google', displayName: 'Dale' } : null;
+        const who = req.headers['cf-access-jwt-assertion'] ? { actor: 'cloudflare:owner@example.com', roles: ['admin', 'operator', 'approver', 'viewer', 'ingest'] } : String(req.headers.cookie ?? '').includes('factory_session=g') ? { actor: 'user:dale', principal: 'user:dale', roles: ['admin'], signedInWith: 'google', displayName: 'Dale' } : null;
         res.writeHead(who ? 200 : 401, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify(who ?? { error: 'unauthorized' }));
       }
@@ -111,8 +111,9 @@ describe('A2 console forwards the caller, adds no credential', () => {
   it('#432: the provider label names the IdP of the current session, not a linked one', async () => {
     const me = await fetch(`http://127.0.0.1:${port}/api/auth/me`, { headers: { cookie: 'factory_session=g' } });
     assert.equal(me.status, 200);
-    const body = (await me.json()) as { user: { provider: string; actor: string; name: string } };
+    const body = (await me.json()) as { user: { provider: string; actor: string; name: string }; whoami: { principal?: string } };
     assert.equal(body.user.actor, 'user:dale');
+    assert.equal(body.whoami.principal, 'user:dale');
     assert.equal(body.user.provider, 'Google');
     assert.equal(body.user.name, 'Dale', '#434: the friendly display name, with the id kept as actor');
     assert.equal(providerLabel('cloudflare'), 'Cloudflare');

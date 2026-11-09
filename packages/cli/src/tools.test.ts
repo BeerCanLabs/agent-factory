@@ -23,7 +23,29 @@ describe('§6.17 CL3 the person\'s roles decide what is offered', () => {
   });
 
   it('CL3 every tool that changes state says so, so the CLI asks first (CL4)', () => {
-    const changing = ['set_factory_budgets', 'set_agent_budget', 'decide_approval', 'pause_agent', 'resume_agent', 'isolate_agent', 'wake_agent', 'reset_agent', 'cancel_run', 'retire_agent', 'reinstate_agent', 'grant_role', 'revoke_grant'];
+    const changing = [
+      'set_factory_budgets',
+      'set_agent_budget',
+      'decide_approval',
+      'pause_agent',
+      'resume_agent',
+      'isolate_agent',
+      'wake_agent',
+      'reset_agent',
+      'cancel_run',
+      'retire_agent',
+      'reinstate_agent',
+      'grant_role',
+      'revoke_grant',
+      'connect_subscription',
+      'reconnect_subscription',
+      'rename_subscription',
+      'set_subscription_cap',
+      'discover_subscription_models',
+      'add_subscription_model',
+      'retire_subscription_model',
+      'disconnect_subscription',
+    ];
     for (const t of TOOLS) assert.equal(t.spec.mutating, changing.includes(t.spec.name), t.spec.name);
   });
 
@@ -61,9 +83,21 @@ describe('§6.17 CL6 nothing sensitive reaches the terminal', () => {
     assert.doesNotMatch(JSON.stringify(out), /abc|xyz/);
   });
 
-  it('CL6 hides string values under secret-looking names, at any depth, and keeps numbers', () => {
-    const out = redact({ id: 'a', apiKey: 'sk-123', nested: [{ client_secret: 'x', tokensIn: 5, authorization: 'Bearer y' }], password: 'p' });
-    assert.deepEqual(out, { id: 'a', apiKey: '[hidden]', nested: [{ client_secret: '[hidden]', tokensIn: 5, authorization: '[hidden]' }], password: '[hidden]' });
+  it('CL6 hides string values under secret-looking names, at any depth, and keeps numbers and credentialMode enum', () => {
+    const out = redact({ id: 'a', credentialMode: 'subscription', apiKey: 'sk-123', nested: [{ client_secret: 'x', tokensIn: 5, authorization: 'Bearer y' }], password: 'p' });
+    assert.deepEqual(out, { id: 'a', credentialMode: 'subscription', apiKey: '[hidden]', nested: [{ client_secret: '[hidden]', tokensIn: 5, authorization: '[hidden]' }], password: '[hidden]' });
+  });
+
+  it('§6.9 M5 subscription tools enforce attestation and cap invariants before calling the factory', async () => {
+    const f = fakeFactory();
+    const c = new FactoryClient({ baseUrl: 'https://f.example.com', fetch: f.fetch, credential: async () => 'good-token' });
+    const connect = TOOLS.find((t) => t.spec.name === 'connect_subscription')!;
+    const setCap = TOOLS.find((t) => t.spec.name === 'set_subscription_cap')!;
+    const addModel = TOOLS.find((t) => t.spec.name === 'add_subscription_model')!;
+    await assert.rejects(connect.run(c, { templateId: 'xai-subscription', subscriberAttested: false }), ToolArgumentError);
+    await assert.rejects(setCap.run(c, { id: 'sub_1', cap: 0 }), ToolArgumentError);
+    await assert.rejects(addModel.run(c, { id: 'sub_1', name: 'grok-sub', modelId: 'grok-4.6', inputPerMTok: 1 }), ToolArgumentError);
+    assert.equal(f.seen.length, 0);
   });
 
   it('CL4 trims a long list for the manager and says it did', () => {

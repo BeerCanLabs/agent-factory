@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import type { AgentPolicy, AgentRecord, OfferedModel } from '../api/types.js';
 import {
   providerGroupOf,
+  isSubscriptionModel,
+  isPersonalByomModel,
+  modelDisplayLabel,
+  modelPickerCatalogForAgent,
+  helperPickerCatalog,
   groupModelsByProvider,
   approvedOfferedModels,
   selectCurrentModel,
@@ -454,5 +459,93 @@ describe('models-model: dirty checks', () => {
     assert.equal(isBudgetDirty(b1, { ...b1 }), false);
     assert.equal(isBudgetDirty(b1, { ...b1, monthlyUsd: '150' }), true);
     assert.equal(isBudgetDirty(b1, { ...b1, hasDailyLimit: true, dailyUsd: '5' }), true);
+  });
+});
+
+describe('models-model: subscription & Owner BYOM display and picker scoping (TSK-329)', () => {
+  const apiGrok: OfferedModel = {
+    name: 'grok-api',
+    id: 'grok-4.6',
+    provider: 'xai',
+    credentialMode: 'api-key',
+    displayLabel: 'grok-4.6 · xAI API',
+  };
+  const factorySubGrok: OfferedModel = {
+    name: 'grok-dale-sub',
+    id: 'grok-4.6',
+    provider: 'xai-subscription',
+    templateId: 'xai-subscription',
+    credentialMode: 'subscription',
+    subscription: true,
+    scope: 'factory',
+    connection: 'sub_1',
+    connectionName: "Dale's Grok Subscription",
+    displayLabel: "grok-4.6 · Dale's Grok Subscription",
+  };
+  const aliceByomCodex: OfferedModel = {
+    name: 'codex-alice-byom',
+    id: 'gpt-5-codex',
+    provider: 'openai-subscription',
+    templateId: 'openai-subscription',
+    credentialMode: 'subscription',
+    subscription: true,
+    scope: 'personal',
+    ownerPrincipalId: 'user:alice',
+    connection: 'sub_alice',
+    connectionName: "Alice's ChatGPT Subscription",
+    price: { inputPerMTok: 0, outputPerMTok: 0 },
+  };
+  const bobByomGrok: OfferedModel = {
+    name: 'grok-bob-byom',
+    id: 'grok-4.6',
+    provider: 'xai-subscription',
+    templateId: 'xai-subscription',
+    credentialMode: 'subscription',
+    subscription: true,
+    scope: 'personal',
+    ownerPrincipalId: 'user:bob',
+    connection: 'sub_bob',
+    connectionName: "Bob's Grok Subscription",
+    price: { inputPerMTok: 0, outputPerMTok: 0 },
+  };
+
+  it('groups xai-subscription under xAI and openai-subscription under OpenAI and formats displayLabel cleanly', () => {
+    assert.equal(providerGroupOf(factorySubGrok), 'xAI');
+    assert.equal(providerGroupOf(aliceByomCodex), 'OpenAI');
+    assert.equal(isSubscriptionModel(apiGrok), false);
+    assert.equal(isSubscriptionModel(factorySubGrok), true);
+    assert.equal(isPersonalByomModel(factorySubGrok), false);
+    assert.equal(isPersonalByomModel(aliceByomCodex), true);
+    assert.equal(modelDisplayLabel(apiGrok), 'grok-4.6 · xAI API');
+    assert.equal(modelDisplayLabel(factorySubGrok), "grok-4.6 · Dale's Grok Subscription");
+    assert.equal(modelDisplayLabel(aliceByomCodex), "gpt-5-codex · Alice's ChatGPT Subscription");
+  });
+
+  it('modelPickerCatalogForAgent offers personal BYOM only on personal agents actively owned by ownerPrincipalId, never team or other users or helpers', () => {
+    const catalog = [apiGrok, factorySubGrok, aliceByomCodex, bobByomGrok];
+
+    // Alice's personal agent -> sees API, factory subscription, and Alice's BYOM (never Bob's BYOM)
+    assert.deepEqual(
+      modelPickerCatalogForAgent(catalog, { kind: 'personal', activeOwnerPrincipalId: 'user:alice' }).map((m) => m.name),
+      ['grok-api', 'grok-dale-sub', 'codex-alice-byom'],
+    );
+
+    // Team agent (even if Alice is accountable lead!) -> NEVER sees personal BYOM (D24)
+    assert.deepEqual(
+      modelPickerCatalogForAgent(catalog, { kind: 'team', activeOwnerPrincipalId: 'user:alice' }).map((m) => m.name),
+      ['grok-api', 'grok-dale-sub'],
+    );
+
+    // Another user's personal agent -> NEVER sees Alice's BYOM, sees Bob's BYOM
+    assert.deepEqual(
+      modelPickerCatalogForAgent(catalog, { kind: 'personal', activeOwnerPrincipalId: 'user:bob' }).map((m) => m.name),
+      ['grok-api', 'grok-dale-sub', 'grok-bob-byom'],
+    );
+
+    // Helpers / skills -> NEVER see personal BYOM (S24)
+    assert.deepEqual(
+      helperPickerCatalog(catalog).map((m) => m.name),
+      ['grok-api', 'grok-dale-sub'],
+    );
   });
 });

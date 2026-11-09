@@ -399,7 +399,16 @@ class App {
       return;
     }
     try {
-      const out = await runCommand({ client: this.client, roles: this.me.roles, actor: this.me.actor, line, io: this.io });
+      const out = await runCommand({
+        client: this.client,
+        roles: this.me.roles,
+        actor: this.me.actor,
+        line,
+        io: this.io,
+        sleep: this.o.sleep,
+        pollIntervalMs: this.o.intervalMs,
+        pollTimeoutMs: this.o.timeoutMs,
+      });
       this.io.say(out.output);
     } catch (err) {
       if (err instanceof NeedsLoginError || err instanceof AuthRequiredError) return this.expired();

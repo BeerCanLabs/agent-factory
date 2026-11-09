@@ -15,21 +15,27 @@ import { SkillsView } from './views/SkillsView.js';
 import { SystemsView } from './views/SystemsView.js';
 import { IdentitiesView } from './views/IdentitiesView.js';
 import { ExecutiveOfficeView } from './views/ExecutiveOfficeView.js';
+import { SubscriptionsView } from './views/SubscriptionsView.js';
 import { PeopleView } from './views/PeopleView.js';
 import { KeysView } from './views/KeysView.js';
-import { canManagePeople, hasAnyAccess } from './auth/access-gate.js';
+import { canAccessSubscriptions, canManagePeople, hasAnyAccess } from './auth/access-gate.js';
 import { DrainModal } from './components/DrainModal.js';
 import { UpdateDrawer } from './components/UpdateDrawer.js';
 import { factoryApi } from './api/client.js';
-import type { AgentRecord, ApprovalItem } from './api/types.js';
+import type { AgentRecord, ApprovalItem, OfferedModel } from './api/types.js';
 
-/** Deep link, e.g. from the OAuth consent page: `/?view=credentials&agent=<id>`, or `/?view=identities`, `/?view=skills`, `/?view=systems`, `/?view=models`. */
+/** Deep link, e.g. from the OAuth consent page: `/?view=credentials&agent=<id>`, or `/?view=identities`, `/?view=skills`, `/?view=systems`, `/?view=models`, `/?view=subscriptions`. */
 function initialLocation(): { screen: ScreenId; agentId?: string } {
   const q = new URLSearchParams(window.location.search);
   const view = q.get('view');
   return {
     screen:
-      view === 'credentials' || view === 'identities' || view === 'skills' || view === 'systems' || view === 'models'
+      view === 'credentials' ||
+      view === 'identities' ||
+      view === 'skills' ||
+      view === 'systems' ||
+      view === 'models' ||
+      view === 'subscriptions'
         ? view
         : 'fleet',
     agentId: q.get('agent') ?? undefined,
@@ -83,6 +89,7 @@ const MainLayout: React.FC = () => {
   const [currentScreen, setCurrentScreen] = useState<ScreenId>(initial.screen);
   const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [approvals, setApprovals] = useState<ApprovalItem[]>([]);
+  const [catalogModels, setCatalogModels] = useState<OfferedModel[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string>(initial.agentId ?? 'higgins');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [outstanding, setOutstanding] = useState<Record<string, number>>({});
@@ -109,12 +116,14 @@ const MainLayout: React.FC = () => {
   const loadData = async () => {
     setIsRefreshing(true);
     try {
-      const [agentList, apprList] = await Promise.all([
+      const [agentList, apprList, catRes] = await Promise.all([
         factoryApi.listAgents(),
         factoryApi.listApprovals(),
+        factoryApi.modelCatalog().catch(() => ({ models: [] as OfferedModel[], default: null })),
       ]);
       setAgents(agentList);
       setApprovals(apprList);
+      setCatalogModels(catRes.models ?? []);
       if (agentList.length > 0 && !agentList.some((a) => a.id === selectedAgentId)) {
         setSelectedAgentId(agentList[0].id);
       }
@@ -167,6 +176,7 @@ const MainLayout: React.FC = () => {
           {currentScreen === 'fleet' && (
             <FleetView
               agents={agents}
+              catalogModels={catalogModels}
               onSelectAgent={handleSelectAgent}
               onRefresh={loadData}
               outstandingCredentials={outstanding}
@@ -180,6 +190,7 @@ const MainLayout: React.FC = () => {
             <AgentWorkbench
               agent={selectedAgent}
               agents={agents}
+              catalogModels={catalogModels}
               onSelectAgent={setSelectedAgentId}
               onRefresh={loadData}
             />
@@ -209,7 +220,28 @@ const MainLayout: React.FC = () => {
 
           {currentScreen === 'people' && canManagePeople(whoami) && <PeopleView />}
           {currentScreen === 'keys' && <KeysView />}
-          {currentScreen === 'models' && <ExecutiveOfficeView />}
+          {currentScreen === 'models' && (
+            <ExecutiveOfficeView
+              onOpenSubscriptions={canAccessSubscriptions(whoami) ? () => setCurrentScreen('subscriptions') : undefined}
+            />
+          )}
+          {currentScreen === 'subscriptions' && (
+            canAccessSubscriptions(whoami) ? (
+              <SubscriptionsView
+                onNavigateModels={() => {
+                  void loadData();
+                  setCurrentScreen('models');
+                }}
+              />
+            ) : (
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-12 text-center text-xs text-slate-500">
+                <p className="font-semibold text-slate-700 dark:text-slate-300">Subscription Privileges Required</p>
+                <p className="text-slate-500 text-[11px] mt-1">
+                  Connecting personal BYOM plans requires Agent Owner authority (`subscriptions.own`); factory-shared plans require Factory Admin authority.
+                </p>
+              </div>
+            )
+          )}
           {currentScreen === 'skills' && <SkillsView />}
           {currentScreen === 'systems' && <SystemsView />}
 

@@ -385,3 +385,194 @@ describe('§6.17 CL11 commands in the conversation, with no manager needed', () 
     assert.match(text, /Unknown command/);
   });
 });
+
+describe('§6.9 M5 subscription CLI flows: Owner BYOM + Admin (TSK-329)', () => {
+  const signedIn = { config: { instance: 'https://f.example.com', auth: 'cloudflare-access' as const }, stored: true };
+
+  it('Owner BYOM & Admin connect with device-code polling, 409 account_already_connected, rename, cap, discover, add/retire model, reconnect, disconnect (zero OS browser calls)', async () => {
+    let pollCount = 0;
+    const ownerRun = await run(
+      [
+        '/subscriptions',
+        '/subscription-connect xai-subscription personal "Alice Grok" --attested --yes',
+        '/subscription-rename sub_alice "Alice SuperGrok" --yes',
+        '/subscription-cap sub_alice 150,000 --yes',
+        '/subscription-cap sub_alice none --yes',
+        '/subscription-discover sub_alice --yes',
+        '/subscription-add-model sub_alice grok-alice grok-4.6 --yes',
+        '/models',
+        '/subscription-retire-model sub_alice grok-alice --yes',
+        '/subscription-reconnect sub_alice --attested --yes',
+        '/subscription-disconnect sub_alice --yes',
+        '/exit',
+      ],
+      {
+        ...signedIn,
+        factory: (f) => {
+          f.roles = ['viewer']; // Personal agent owner without fleet admin role
+          f.routes.set('GET /api/v1/subscriptions', () => ({
+            status: 200,
+            body: {
+              connections: [],
+              templates: [
+                {
+                  id: 'xai-subscription',
+                  name: 'xAI SuperGrok',
+                  permission: {
+                    tiers: ['SuperGrok'],
+                    checkedDate: '2026-11-07',
+                    statementUrls: ['https://x.ai/legal/terms-of-service'],
+                  },
+                },
+              ],
+              notOffered: [
+                {
+                  vendor: 'anthropic',
+                  name: 'Anthropic (Claude Pro / Max)',
+                  checkedDate: '2026-11-07',
+                  reason: 'Consumer OAuth tokens prohibited.',
+                  statementUrls: ['https://code.claude.com/docs/en/legal-and-compliance'],
+                },
+                {
+                  vendor: 'google',
+                  name: 'Google (Gemini / Antigravity)',
+                  checkedDate: '2026-11-07',
+                  reason: 'Consumer credentials prohibited.',
+                  statementUrls: ['https://antigravity.google/terms'],
+                },
+              ],
+            },
+          }));
+          f.routes.set('POST /api/v1/subscriptions/connect', (b) => ({
+            status: 201,
+            body: {
+              got: b,
+              signIn: {
+                signInId: 'si_alice_1',
+                verificationUrl: 'https://accounts.x.ai/device',
+                userCode: 'GROK-1234',
+                expiresAt: new Date(Date.now() + 600_000).toISOString(),
+                intervalSeconds: 1,
+              },
+            },
+          }));
+          f.routes.set('GET /api/v1/subscriptions/sign-ins/si_alice_1', () => {
+            pollCount += 1;
+            if (pollCount === 1) {
+              return { status: 200, body: { status: 'pending', expiresAt: new Date(Date.now() + 600_000).toISOString(), intervalSeconds: 1 } };
+            }
+            return {
+              status: 200,
+              body: {
+                status: 'connected',
+                reconnect: false,
+                connection: { id: 'sub_alice', name: 'Alice Grok', scope: 'personal', ownerPrincipalId: 'user:alice', status: 'active' },
+              },
+            };
+          });
+          f.routes.set('PATCH /api/v1/subscriptions/sub_alice', (b) => ({
+            status: 200,
+            body: { connection: { id: 'sub_alice', ...(b as Record<string, unknown>) } },
+          }));
+          f.routes.set('POST /api/v1/subscriptions/sub_alice/discover', () => ({
+            status: 200,
+            body: { listAvailable: true, models: [{ id: 'grok-4.6' }], entriesRetired: 0 },
+          }));
+          f.routes.set('POST /api/v1/subscriptions/sub_alice/models', (b) => ({
+            status: 201,
+            body: { ok: true, model: { ...(b as Record<string, unknown>), scope: 'personal', price: { inputPerMTok: 0, outputPerMTok: 0 } } },
+          }));
+          f.routes.set('GET /api/v1/models', () => ({
+            status: 200,
+            body: {
+              default: 'grok-api',
+              models: [
+                {
+                  name: 'grok-alice',
+                  id: 'grok-4.6',
+                  credentialMode: 'subscription',
+                  subscription: true,
+                  scope: 'personal',
+                  ownerPrincipalId: 'user:alice',
+                  displayLabel: 'grok-4.6 · Alice SuperGrok',
+                  price: { inputPerMTok: 0, outputPerMTok: 0 },
+                },
+              ],
+            },
+          }));
+          f.routes.set('DELETE /api/v1/subscriptions/sub_alice/models/grok-alice', () => ({
+            status: 200,
+            body: { ok: true, retired: 'grok-alice', policiesUpdated: 0 },
+          }));
+          f.routes.set('POST /api/v1/subscriptions/sub_alice/reconnect', () => ({
+            status: 201,
+            body: {
+              signIn: {
+                signInId: 'si_alice_2',
+                verificationUrl: 'https://accounts.x.ai/device',
+                userCode: 'RECON-9999',
+                expiresAt: new Date(Date.now() + 600_000).toISOString(),
+                intervalSeconds: 1,
+              },
+            },
+          }));
+          f.routes.set('GET /api/v1/subscriptions/sign-ins/si_alice_2', () => ({
+            status: 200,
+            body: {
+              status: 'connected',
+              reconnect: true,
+              connection: { id: 'sub_alice', name: 'Alice SuperGrok', scope: 'personal', status: 'active' },
+            },
+          }));
+          f.routes.set('DELETE /api/v1/subscriptions/sub_alice', () => ({
+            status: 200,
+            body: { connection: { id: 'sub_alice', status: 'disconnected' }, entriesRetired: 0 },
+          }));
+        },
+      },
+    );
+
+    assert.equal(ownerRun.browserUrls.length, 0, 'subscription sign-in NEVER invokes openBrowser / OS browser');
+    assert.ok(pollCount >= 2, 'polled device-code sign-in from pending to connected');
+    assert.match(ownerRun.text, /Anthropic \(Claude Pro \/ Max\) \[NOT OFFERED, checked 2026-11-07\]/);
+    assert.match(ownerRun.text, /Google \(Gemini \/ Antigravity\) \[NOT OFFERED, checked 2026-11-07\]/);
+    assert.match(ownerRun.text, /Open https:\/\/accounts\.x\.ai\/device in your browser and enter device code: GROK-1234/);
+    assert.match(ownerRun.text, /Done: connect a permitted vendor subscription via device code\./);
+    assert.match(ownerRun.text, /grok-4\.6 · Alice SuperGrok/);
+    assert.match(ownerRun.text, /RECON-9999/);
+    assert.match(ownerRun.text, /Done: disconnect a subscription/);
+
+    // Verify 409 account_already_connected surfaces cleanly during device-code polling
+    const conflictRun = await run(
+      ['/subscription-connect openai-subscription factory "Dup Codex" --attested --yes', '/exit'],
+      {
+        ...signedIn,
+        factory: (f) => {
+          f.roles = ['admin'];
+          f.routes.set('POST /api/v1/subscriptions/connect', () => ({
+            status: 201,
+            body: {
+              signIn: {
+                signInId: 'si_dup',
+                verificationUrl: 'https://auth.openai.com/codex/device',
+                userCode: 'DUPP-0001',
+                expiresAt: new Date(Date.now() + 600_000).toISOString(),
+                intervalSeconds: 1,
+              },
+            },
+          }));
+          f.routes.set('GET /api/v1/subscriptions/sign-ins/si_dup', () => ({
+            status: 409,
+            body: {
+              error: 'account_already_connected',
+              message: 'vendor account sub-123 is already connected under another connection',
+            },
+          }));
+        },
+      },
+    );
+    assert.equal(conflictRun.browserUrls.length, 0, 'never invokes OS browser');
+    assert.match(conflictRun.text, /DUPP-0001/);
+    assert.match(conflictRun.text, /HTTP 409: account_already_connected/);
+  });
+});

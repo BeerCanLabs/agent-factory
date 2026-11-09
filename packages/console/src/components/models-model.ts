@@ -30,6 +30,7 @@ export interface BudgetFormData {
 export function providerGroupOf(model: OfferedModel): string {
   const provider = (model.provider || '').toLowerCase().trim();
   const vendorId = (model.vendorId || '').toLowerCase().trim();
+  const templateId = (model.templateId || '').toLowerCase().trim();
 
   if (provider === 'bedrock-converse') {
     return 'Bedrock';
@@ -46,17 +47,77 @@ export function providerGroupOf(model: OfferedModel): string {
     return 'Google';
   }
 
-  if (provider === 'xai' || vendorId === 'xai') {
+  if (provider === 'xai' || provider === 'xai-subscription' || vendorId === 'xai' || templateId === 'xai-subscription') {
     return 'xAI';
   }
 
-  if (provider === 'openai' || vendorId === 'openai') {
+  if (provider === 'openai' || provider === 'openai-subscription' || vendorId === 'openai' || templateId === 'openai-subscription') {
     return 'OpenAI';
   }
 
   const custom = model.vendorId?.trim() || model.provider?.trim();
   if (!custom) return 'Other';
   return custom.charAt(0).toUpperCase() + custom.slice(1);
+}
+
+/** M5(1): Whether a catalog model entry is served on a subscription connection. */
+export function isSubscriptionModel(model: Pick<OfferedModel, 'subscription' | 'credentialMode'>): boolean {
+  return Boolean(model.subscription || model.credentialMode === 'subscription');
+}
+
+/** M5(1): Whether a catalog model entry is a personal Owner BYOM subscription entry. */
+export function isPersonalByomModel(model: Pick<OfferedModel, 'subscription' | 'credentialMode' | 'scope'>): boolean {
+  return isSubscriptionModel(model) && model.scope === 'personal';
+}
+
+/**
+ * M5(1), (4): Consistent display label showing `<modelId> · <Connection Name>` for subscription entries
+ * beside `<modelId> · <Provider API>` for API-key entries. Uses the control plane's live `displayLabel` when present.
+ */
+export function modelDisplayLabel(model: OfferedModel): string {
+  if (typeof model.displayLabel === 'string' && model.displayLabel.trim()) {
+    return model.displayLabel;
+  }
+  const rawId = model.id?.trim() || model.name;
+  if (isSubscriptionModel(model)) {
+    const conn = model.connectionName?.trim() || (model.scope === 'personal' ? 'Personal Subscription' : 'Subscription');
+    return `${rawId} · ${conn}`;
+  }
+  const group = providerGroupOf(model);
+  const apiLabel = group === 'Bedrock' ? 'AWS Bedrock' : group === 'Other' ? (model.provider || 'API') : `${group} API`;
+  return `${rawId} · ${apiLabel}`;
+}
+
+/**
+ * M5(1), D24, D15, S24: Filter the model catalog for an agent model picker.
+ * - `api-key` and `scope: 'factory'` subscription entries are eligible on every agent.
+ * - `scope: 'personal'` BYOM entries are eligible ONLY on `kind: 'personal'` agents whose active owner
+ *   matches `model.ownerPrincipalId` — NEVER on `kind: 'team'` agents or other users' agents.
+ */
+export function modelPickerCatalogForAgent(
+  catalog: readonly OfferedModel[],
+  agent: Pick<AgentRecord, 'kind' | 'activeOwnerPrincipalId' | 'owners'> | null | undefined,
+  fallbackOwners?: readonly string[],
+): OfferedModel[] {
+  return catalog.filter((m) => {
+    if (!isPersonalByomModel(m)) return true;
+    if (!agent) return false;
+    if ((agent.kind ?? 'personal') !== 'personal') return false;
+    if (!m.ownerPrincipalId) return false;
+    if (agent.activeOwnerPrincipalId) {
+      return agent.activeOwnerPrincipalId === m.ownerPrincipalId;
+    }
+    const rawOwners = fallbackOwners ?? agent.owners ?? [];
+    return rawOwners.some((o) => o.trim() === m.ownerPrincipalId);
+  });
+}
+
+/**
+ * M5(1), S24: Filter the model catalog for shared helper (subagent) definitions or skills.
+ * Personal BYOM entries are strictly excluded because helpers and skills are not personal agents.
+ */
+export function helperPickerCatalog(catalog: readonly OfferedModel[]): OfferedModel[] {
+  return catalog.filter((m) => !isPersonalByomModel(m));
 }
 
 /**

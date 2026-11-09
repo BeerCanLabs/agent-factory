@@ -23,6 +23,9 @@ export async function runCommand(o: {
   /** `--json` was given as a flag by the caller (the subcommand form), in addition to anywhere in the line. */
   json?: boolean;
   yes?: boolean;
+  sleep?: (ms: number) => Promise<void>;
+  pollIntervalMs?: number;
+  pollTimeoutMs?: number;
 }): Promise<CommandOutcome> {
   const [name, ...rest] = o.argv ?? tokenize((o.line ?? '').trim().replace(/^\//, ''));
   const cmd: CommandSpec | undefined = name ? findCommand(name) : undefined;
@@ -30,10 +33,12 @@ export async function runCommand(o: {
   let args: Record<string, unknown>;
   let json = Boolean(o.json);
   let yes = Boolean(o.yes);
+  let noWait = false;
   try {
     const parsed = parseFlags(rest);
     json ||= parsed.flags.json;
     yes ||= parsed.flags.yes;
+    noWait = Boolean(parsed.flags.noWait);
     args = cmd.parse(parsed.args, parsed.flags);
   } catch (err) {
     if (err instanceof UsageError) return { ok: false, output: `${oneLine(err.message)}\nusage: ${cmd.usage}` };
@@ -47,6 +52,59 @@ export async function runCommand(o: {
   const done = await executeTool({ client: o.client, offered, call: { id: 'cmd', name: cmd.tool, arguments: args }, io, asker: 'Run' });
   if (done.result.declined) return { ok: false, declined: true, output: 'Not run.' };
   if (!done.result.ok) return { ok: false, output: oneLine(done.result.error ?? 'failed') };
+
+  // M5(4): Device-code sign-in polling for subscription connect/reconnect (prints URL + userCode, never launches OS browser).
+  if ((cmd.tool === 'connect_subscription' || cmd.tool === 'reconnect_subscription') && !noWait) {
+    const signIn = (done.body as { signIn?: Record<string, unknown> } | undefined)?.signIn;
+    const signInId = typeof signIn?.signInId === 'string' ? signIn.signInId : undefined;
+    const verificationUrl = typeof signIn?.verificationUrl === 'string' ? signIn.verificationUrl : '';
+    const userCode = typeof signIn?.userCode === 'string' ? signIn.userCode : '';
+    if (signInId) {
+      const promptBanner = `Open ${oneLine(verificationUrl)} in your browser and enter device code: ${oneLine(userCode)}`;
+      o.io.note(promptBanner);
+      const sleep = o.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+      const serverIntervalMs =
+        typeof signIn?.intervalSeconds === 'number' && signIn.intervalSeconds > 0
+          ? signIn.intervalSeconds * 1000
+          : 5000;
+      const expiresAtMs = typeof signIn?.expiresAt === 'string' ? Date.parse(signIn.expiresAt) : NaN;
+      const maxWaitMs = o.pollTimeoutMs ?? (Number.isFinite(expiresAtMs) ? Math.max(1000, expiresAtMs - Date.now()) : 300_000);
+      const deadline = Date.now() + maxWaitMs;
+      let stepMs = o.pollIntervalMs ?? serverIntervalMs;
+      while (Date.now() <= deadline) {
+        await sleep(stepMs);
+        const polled = await executeTool({
+          client: o.client,
+          offered,
+          call: { id: 'poll', name: 'poll_subscription_signin', arguments: { id: signInId } },
+          io: { confirm: io.confirm, note: () => {} },
+          asker: 'Run',
+        });
+        if (!polled.result.ok) {
+          return {
+            ok: false,
+            output: `${promptBanner}\n${oneLine(polled.result.error ?? 'subscription sign-in failed')}`,
+          };
+        }
+        const pollBody = polled.body as { status?: string; intervalSeconds?: number } | undefined;
+        if (pollBody?.status === 'connected') {
+          if (json) return { ok: true, output: JSON.stringify(polled.body, null, 2) };
+          return {
+            ok: true,
+            output: `${promptBanner}\nDone: ${cmd.summary}.\n${render(polled.body)}`.trimEnd(),
+          };
+        }
+        if (o.pollIntervalMs === undefined && typeof pollBody?.intervalSeconds === 'number' && pollBody.intervalSeconds > 0) {
+          stepMs = pollBody.intervalSeconds * 1000;
+        }
+      }
+      return {
+        ok: false,
+        output: `${promptBanner}\nTimed out waiting for vendor sign-in. Poll later with: /subscription-signin ${oneLine(signInId)}`,
+      };
+    }
+  }
+
   if (json) return { ok: true, output: JSON.stringify(done.body, null, 2) };
   return { ok: true, output: tool.spec.mutating ? `Done: ${cmd.summary}.\n${render(done.body)}`.trimEnd() : render(done.body) };
 }

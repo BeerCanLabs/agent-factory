@@ -23,6 +23,10 @@ export interface AgentRecord {
   id: string;
   name: string;
   role?: string;
+  kind?: 'personal' | 'team';
+  accountableLead?: string;
+  activeOwnerPrincipalId?: string;
+  owners?: string[];
   version: string;
   state: AgentState;
   category?: AgentCategory;
@@ -217,19 +221,29 @@ export interface AgentPolicy {
   secondaryModel?: string;
 }
 
-/** A model this factory offers (M3). */
+/** A model this factory offers (M3, M5). */
 export interface OfferedModel {
   name: string;
   provider: string;
   id?: string;
   vendorId?: string;
   price?: { inputPerMTok: number; outputPerMTok: number };
+  credentialMode?: 'api-key' | 'subscription';
+  subscription?: boolean;
+  scope?: 'factory' | 'personal';
+  ownerPrincipalId?: string;
+  connection?: string;
+  connectionName?: string;
+  templateId?: string;
+  dailyTokenCap?: number;
+  displayLabel?: string;
 }
 
 /** Effective and configured model selection state for an agent (M2). */
 export interface AgentModelsState {
   agentId: string;
   approvedModels: string[];
+  models?: OfferedModel[];
   usesDefault: boolean;
   currentModel: string | null;
   primaryModel: string | null;
@@ -524,7 +538,7 @@ export interface AgentSkills {
   available: AvailableSkill[];
 }
 
-/** Dynamic Model Catalog & FinOps Governance (GAP-162) */
+/** Dynamic Model Catalog & FinOps Governance (GAP-162, GAP-245) */
 export interface StoredModel {
   name: string;
   provider: string;
@@ -535,6 +549,15 @@ export interface StoredModel {
     inputPerMTok: number;
     outputPerMTok: number;
   };
+  credentialMode?: 'api-key' | 'subscription';
+  subscription?: boolean;
+  scope?: 'factory' | 'personal';
+  ownerPrincipalId?: string;
+  connection?: string;
+  connectionName?: string;
+  templateId?: string;
+  dailyTokenCap?: number;
+  displayLabel?: string;
   admittedAt: string;
   admittedBy?: string;
   updatedAt?: string;
@@ -579,7 +602,7 @@ export interface ScanModelsResponse {
   staged: StagedModel[];
 }
 
-/** GAP-182: name the vendor; the factory takes provider, endpoint and credential from it. `provider`/`region` only for cloud model services. */
+/** GAP-182, GAP-245: name the vendor or subscription connection; the factory takes provider, endpoint and credential from it. */
 export interface AdmitModelRequest {
   name: string;
   provider?: string;
@@ -587,8 +610,158 @@ export interface AdmitModelRequest {
   vendorId?: string;
   region?: string;
   endpoint?: string;
+  credentialMode?: 'api-key' | 'subscription';
+  connection?: string;
+  scope?: 'factory' | 'personal';
   price?: {
     inputPerMTok: number;
     outputPerMTok: number;
   };
+}
+
+// Subscription connections & BYOM (§6.9 M5, TSK-329)
+export type SubscriptionScope = 'factory' | 'personal';
+export type SubscriptionStatus = 'active' | 'needs_reconsent';
+
+export interface SubscriptionLimitWindow {
+  kind: 'plan-limit' | 'tier-refused';
+  code: string;
+  openedAt: string;
+  resetAt?: string;
+  lastProbeAt?: string;
+}
+
+export interface SubscriptionCapView {
+  connection: string;
+  agentId: string;
+  utcDay: string;
+  resetAt: string;
+  dailyTokenCap: number;
+  tokensUsed: number;
+}
+
+export interface SubscriptionDiscoveredModel {
+  id: string;
+  displayName?: string;
+}
+
+export interface SubscriptionDiscoveryMeta {
+  listAvailable: boolean;
+  reason?: 'no_model_list' | 'vendor_refused';
+  checkedAt: string;
+  status: 'ok' | 'failed';
+  error?: string;
+}
+
+export interface SubscriptionConnectionView {
+  id: string;
+  templateId: 'xai-subscription' | 'openai-subscription';
+  vendor: 'xai' | 'openai';
+  scope: SubscriptionScope;
+  ownerPrincipalId?: string;
+  name: string;
+  status: SubscriptionStatus;
+  subscriberEmail?: string;
+  subscriberName?: string;
+  tier?: string;
+  subscriberAttested: true;
+  connectedBy: string;
+  connectedAt: string;
+  refreshedAt?: string;
+  reconsentAt?: string;
+  reconsentReason?: string;
+  dailyTokenCap?: number;
+  discoveredModels?: SubscriptionDiscoveredModel[];
+  discovery?: SubscriptionDiscoveryMeta;
+  limitWindow?: SubscriptionLimitWindow;
+  activeCaps?: SubscriptionCapView[];
+  catalogModels?: StoredModel[];
+}
+
+export interface SubscriptionTemplateView {
+  id: 'xai-subscription' | 'openai-subscription';
+  vendor: 'xai' | 'openai';
+  name: string;
+  description: string;
+  signIn: {
+    flow: 'device-code';
+    verificationUrl: string;
+  };
+  permission: {
+    statementUrls: string[];
+    checkedDate: string;
+    tiers: string[];
+  };
+  instructions?: CredentialInstructions;
+}
+
+export interface NotOfferedSubscriptionVendor {
+  vendor: 'anthropic' | 'google';
+  name: string;
+  reason: string;
+  statementUrls: string[];
+  checkedDate: string;
+}
+
+export interface SubscriptionsListResponse {
+  connections: SubscriptionConnectionView[];
+  templates: SubscriptionTemplateView[];
+  notOffered?: NotOfferedSubscriptionVendor[];
+}
+
+export interface SubscriptionSignInStart {
+  signInId: string;
+  templateId: string;
+  scope: SubscriptionScope;
+  ownerPrincipalId?: string;
+  verificationUrl: string;
+  userCode: string;
+  expiresAt: string;
+  intervalSeconds: number;
+  reconnect?: string;
+}
+
+export type SubscriptionSignInPollResponse =
+  | { status: 'pending'; expiresAt: string; intervalSeconds: number }
+  | { status: 'connected'; reconnect: boolean; connection: SubscriptionConnectionView };
+
+export interface SubscriptionTokenBucket {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  calls: number;
+}
+
+export interface SubscriptionConnectionWindow extends SubscriptionTokenBucket {
+  byModel: Record<string, SubscriptionTokenBucket>;
+  byAgent: Record<string, SubscriptionTokenBucket>;
+}
+
+export interface SubscriptionAgentWindow extends SubscriptionTokenBucket {
+  byModel: Record<string, SubscriptionTokenBucket>;
+  byConnection: Record<string, SubscriptionTokenBucket>;
+}
+
+export interface SubscriptionConnectionSpendView {
+  day: SubscriptionConnectionWindow;
+  month: SubscriptionConnectionWindow;
+  connectionName?: string;
+  scope?: SubscriptionScope;
+  ownerPrincipalId?: string;
+  vendor?: string;
+  status?: SubscriptionStatus;
+  dailyTokenCap?: number;
+}
+
+export interface SubscriptionSpendReport {
+  day: string;
+  month: string;
+  connections: Record<string, SubscriptionConnectionSpendView>;
+  agents: Record<
+    string,
+    {
+      day: SubscriptionAgentWindow;
+      month: SubscriptionAgentWindow;
+    }
+  >;
 }

@@ -87,6 +87,36 @@ function grantScope(args: Args): { kind: 'fleet' } | { kind: 'agent' | 'skill'; 
   return { kind: m[1].toLowerCase() as 'agent' | 'skill', id: m[2] };
 }
 
+const VENDOR_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
+function vendorModelId(args: Args, key: string): string {
+  const v = args[key];
+  if (typeof v !== 'string' || !VENDOR_MODEL_ID.test(v)) {
+    throw new ToolArgumentError(`${key} must be a valid upstream model id`);
+  }
+  return v;
+}
+
+function connectionName(args: Args, key: string): string {
+  const v = typeof args[key] === 'string' ? args[key].trim() : '';
+  if (!v || v.length > 80 || /[\x00-\x1f\x7f]/.test(v)) {
+    throw new ToolArgumentError(`${key} must be 1..80 printable characters`);
+  }
+  return v;
+}
+
+function subscriptionScope(args: Args): 'factory' | 'personal' | undefined {
+  const v = args.scope;
+  if (v === undefined) return undefined;
+  if (v !== 'factory' && v !== 'personal') throw new ToolArgumentError('scope must be factory or personal');
+  return v;
+}
+
+function attested(args: Args): void {
+  if (args.subscriberAttested !== true) {
+    throw new ToolArgumentError('subscriberAttested must be true (confirm the subscription is yours and vendor terms permit this use)');
+  }
+}
+
 export const TOOLS: Tool[] = [
   // S9: people, grants and keys. Scoped owners and leads may manage grants on their own items, so the factory decides.
   read('list_principals', 'The people and services the factory knows, with their emails.', 'grants.manage', obj({}), (c) => c.request('GET', '/api/v1/principals')),
@@ -164,6 +194,144 @@ export const TOOLS: Tool[] = [
   read('list_skills', 'The skills catalog.', 'skills.read', obj({}), (c) => c.request('GET', '/api/v1/skills')),
   read('get_triage', 'Open incidents and faults (the Doctor).', 'triage.read', obj({}), (c) => c.request('GET', '/api/v1/triage')),
   read('list_schedules', 'Scheduled wake-ups.', 'schedules.read', obj({}), (c) => c.request('GET', '/api/v1/schedules')),
+
+  // §6.9 M5: subscription connections & BYOM. Agent-scoped so personal agent owners hold access on their own plans, while Bouncer enforces admin privileges on factory plans.
+  read(
+    'list_subscriptions',
+    'Subscription connections, permitted vendor templates with terms, and vendors not offered.',
+    'subscriptions.own',
+    obj({ scope: { type: 'string', enum: ['factory', 'personal'] } }),
+    (c, a) => c.request('GET', `/api/v1/subscriptions${query({ scope: subscriptionScope(a) })}`),
+    true,
+  ),
+  read(
+    'get_subscription_spend',
+    'Subscription token usage today and this UTC month per connection and per agent.',
+    'subscriptions.own',
+    obj({}),
+    (c) => c.request('GET', '/api/v1/subscriptions/spend'),
+    true,
+  ),
+  change(
+    'connect_subscription',
+    'Start device-code sign-in to connect a permitted vendor subscription (personal BYOM or factory-shared). Requires subscriberAttested: true.',
+    'subscriptions.own',
+    obj(
+      {
+        templateId: { type: 'string' },
+        subscriberAttested: { type: 'boolean' },
+        scope: { type: 'string', enum: ['factory', 'personal'] },
+        name: { type: 'string' },
+      },
+      ['templateId', 'subscriberAttested'],
+    ),
+    (c, a) => {
+      attested(a);
+      const scope = subscriptionScope(a);
+      return c.request('POST', '/api/v1/subscriptions/connect', {
+        templateId: decodeURIComponent(id(a, 'templateId')),
+        subscriberAttested: true,
+        ...(scope ? { scope } : {}),
+        ...(a.name !== undefined ? { name: connectionName(a, 'name') } : {}),
+      });
+    },
+    true,
+  ),
+  read(
+    'poll_subscription_signin',
+    'Poll a pending subscription device-code sign-in by signInId until connected.',
+    'subscriptions.own',
+    obj({ id: { type: 'string' } }, ['id']),
+    (c, a) => c.request('GET', `/api/v1/subscriptions/sign-ins/${id(a, 'id')}`),
+    true,
+  ),
+  change(
+    'reconnect_subscription',
+    'Start device-code sign-in to re-authorize an existing subscription connection. Requires subscriberAttested: true.',
+    'subscriptions.own',
+    obj({ id: { type: 'string' }, subscriberAttested: { type: 'boolean' } }, ['id', 'subscriberAttested']),
+    (c, a) => {
+      attested(a);
+      return c.request('POST', `/api/v1/subscriptions/${id(a, 'id')}/reconnect`, { subscriberAttested: true });
+    },
+    true,
+  ),
+  change(
+    'rename_subscription',
+    'Rename a subscription connection (catalog display labels update immediately).',
+    'subscriptions.own',
+    obj({ id: { type: 'string' }, name: { type: 'string' } }, ['id', 'name']),
+    (c, a) => c.request('PATCH', `/api/v1/subscriptions/${id(a, 'id')}`, { name: connectionName(a, 'name') }),
+    true,
+  ),
+  change(
+    'set_subscription_cap',
+    'Set or clear (null) the optional per-agent daily usage cap on a subscription connection.',
+    'subscriptions.own',
+    obj({ id: { type: 'string' }, cap: { type: ['integer', 'null'] } }, ['id', 'cap']),
+    (c, a) => {
+      if (a.cap !== null && (typeof a.cap !== 'number' || !Number.isInteger(a.cap) || a.cap < 1)) {
+        throw new ToolArgumentError('cap must be a positive whole number or null to clear');
+      }
+      return c.request('PATCH', `/api/v1/subscriptions/${id(a, 'id')}`, { dailyTokenCap: a.cap });
+    },
+    true,
+  ),
+  change(
+    'discover_subscription_models',
+    'Discover models offered by the vendor plan on a subscription connection.',
+    'subscriptions.own',
+    obj({ id: { type: 'string' } }, ['id']),
+    (c, a) => c.request('POST', `/api/v1/subscriptions/${id(a, 'id')}/discover`, {}),
+    true,
+  ),
+  change(
+    'add_subscription_model',
+    'Admit a subscription-backed model into the catalog ($0 immutable for personal BYOM; explicit price for factory).',
+    'subscriptions.own',
+    obj(
+      {
+        id: { type: 'string' },
+        name: { type: 'string' },
+        modelId: { type: 'string' },
+        inputPerMTok: { type: 'number' },
+        outputPerMTok: { type: 'number' },
+      },
+      ['id', 'name', 'modelId'],
+    ),
+    (c, a) => {
+      const hasIn = a.inputPerMTok !== undefined;
+      const hasOut = a.outputPerMTok !== undefined;
+      if (hasIn !== hasOut) {
+        throw new ToolArgumentError('give both inputPerMTok and outputPerMTok, or neither for $0 personal BYOM');
+      }
+      const price = hasIn
+        ? { inputPerMTok: amount(a, 'inputPerMTok'), outputPerMTok: amount(a, 'outputPerMTok') }
+        : undefined;
+      return c.request('POST', `/api/v1/subscriptions/${id(a, 'id')}/models`, {
+        name: decodeURIComponent(id(a, 'name')),
+        modelId: vendorModelId(a, 'modelId'),
+        ...(price ? { price } : {}),
+      });
+    },
+    true,
+  ),
+  change(
+    'retire_subscription_model',
+    'Retire a subscription-backed model from the catalog.',
+    'subscriptions.own',
+    obj({ id: { type: 'string' }, model: { type: 'string' } }, ['id', 'model']),
+    (c, a) => c.request('DELETE', `/api/v1/subscriptions/${id(a, 'id')}/models/${id(a, 'model')}`),
+    true,
+  ),
+  change(
+    'disconnect_subscription',
+    'Disconnect a subscription connection, purge its vault grant, and retire its catalog models.',
+    'subscriptions.own',
+    obj({ id: { type: 'string' } }, ['id']),
+    (c, a) => c.request('DELETE', `/api/v1/subscriptions/${id(a, 'id')}`),
+    true,
+  ),
 ];
 
 /** Handled by the CLI itself, not the factory: it moves the person into a conversation with an agent (CL5). */
@@ -182,6 +350,8 @@ export function toolsFor(roles: string[], actor = 'cli'): Tool[] {
 export const toolByName = (name: string): Tool | undefined => TOOLS.find((t) => t.spec.name === name);
 
 const HIDDEN = /secret|token|password|passwd|api[-_]?key|authorization|credential|private[-_]?key/i;
+/** Public metadata enum fields whose names contain 'credential' (`credentialMode: 'api-key' | 'subscription'`), never a secret. */
+const SAFE_METADATA_KEYS = new Set(['credentialMode']);
 
 /** A non-empty string, or a list or object with one anywhere in it. A bare number or boolean is a count or a flag (`inputTokens`), not a secret. */
 function carriesText(v: unknown): boolean {
@@ -195,7 +365,12 @@ function carriesText(v: unknown): boolean {
 export function redact(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redact);
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, HIDDEN.test(k) && carriesText(v) ? '[hidden]' : redact(v)]));
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [
+        k,
+        !SAFE_METADATA_KEYS.has(k) && HIDDEN.test(k) && carriesText(v) ? '[hidden]' : redact(v),
+      ]),
+    );
   }
   return value;
 }

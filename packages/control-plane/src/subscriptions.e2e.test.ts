@@ -21,6 +21,7 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { createFactoryServer, type FactoryState } from './app.js';
+import { getSubscriptionWindows } from './subscription-windows.js';
 import { notifyNeedsReconsent, reconsentRecipients, setSubscriptionEntryRetirer, setSubscriptionNotifier, type SubscriptionNotice } from './subscriptions.js';
 
 const T = { admin: 'admin-sub-e2e', viewer: 'viewer-sub-e2e', operator: 'operator-sub-e2e', egress: 'egress-sub-e2e' };
@@ -862,5 +863,30 @@ describe('Owner BYOM scoped subscription routes, Bouncer & re-consent (TSK-332)'
     // Zero secrets leaked anywhere in the ledger
     const ledgerText = JSON.stringify((state.ledger as MemoryLedger).events);
     for (const v of state.secretValues) assert.equal(ledgerText.includes(v), false, 'ledger leaked a token');
+  });
+
+  it('GET /api/v1/subscriptions enriches open limitWindow and lists Anthropic and Google as notOffered with M5(2) reason', async () => {
+    const resetAt = new Date(Date.now() + 3600_000).toISOString();
+    getSubscriptionWindows(state).open(factoryConnId, {
+      kind: 'plan-limit',
+      code: 'usage_limit_reached',
+      resetAt,
+    });
+    const adminView = await api('/api/v1/subscriptions', 'GET', TOK.admin);
+    assert.equal(adminView.status, 200);
+    const factoryConn = adminView.body.connections.find((c: any) => c.id === factoryConnId);
+    assert.ok(factoryConn);
+    assert.equal(factoryConn.limitWindow?.kind, 'plan-limit');
+    assert.equal(factoryConn.limitWindow?.code, 'usage_limit_reached');
+    assert.equal(factoryConn.limitWindow?.resetAt, resetAt);
+
+    const notOffered = adminView.body.notOffered as Array<{ vendor: string; reason: string; checkedDate: string; statementUrls: string[] }>;
+    assert.deepEqual(notOffered.map((v) => v.vendor), ['anthropic', 'google']);
+    for (const v of notOffered) {
+      assert.equal(v.checkedDate, '2026-11-07');
+      assert.ok(v.reason.length > 20);
+      assert.ok(v.statementUrls.length >= 1);
+    }
+    getSubscriptionWindows(state).close(factoryConnId, 'reset');
   });
 });

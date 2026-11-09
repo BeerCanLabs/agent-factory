@@ -16,8 +16,13 @@ import { factoryApi } from '../api/client.js';
 import type { StoredModel, StagedModel, AiProviderTemplate, ModelsCatalogResponse } from '../api/types.js';
 import { OnboardVendorModal } from '../components/OnboardVendorModal.js';
 import { HelperModelsPanel } from '../components/HelperModelsPanel.js';
+import { isPersonalByomModel, isSubscriptionModel, modelDisplayLabel } from '../components/models-model.js';
 
-export const ExecutiveOfficeView: React.FC = () => {
+interface ExecutiveOfficeViewProps {
+  onOpenSubscriptions?: () => void;
+}
+
+export const ExecutiveOfficeView: React.FC<ExecutiveOfficeViewProps> = ({ onOpenSubscriptions }) => {
   const [catalog, setCatalog] = useState<ModelsCatalogResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -57,14 +62,21 @@ export const ExecutiveOfficeView: React.FC = () => {
     }
   };
 
-  const handleRetire = async (name: string) => {
-    if (!confirm(`Are you sure you want to retire model "${name}"? It will be removed from all agent policies.`)) {
+  const handleRetire = async (model: StoredModel) => {
+    if (!confirm(`Are you sure you want to retire model "${model.name}"? It will be removed from all agent policies.`)) {
       return;
     }
-    setRetiringModel(name);
+    setRetiringModel(model.name);
     try {
-      const res = await factoryApi.deleteModel(name);
-      setSuccessMsg(`Model "${name}" retired. Affected agents: ${res.affectedAgents.join(', ') || 'none'}.`);
+      if (model.connection && isSubscriptionModel(model)) {
+        const res = await factoryApi.retireSubscriptionModel(model.connection, model.name);
+        setSuccessMsg(
+          `Subscription model "${model.name}" retired. Affected agents: ${res.affectedAgents?.join(', ') || 'none'}.`,
+        );
+      } else {
+        const res = await factoryApi.deleteModel(model.name);
+        setSuccessMsg(`Model "${model.name}" retired. Affected agents: ${res.affectedAgents.join(', ') || 'none'}.`);
+      }
       void loadCatalog();
     } catch (e: any) {
       setError(`Failed to retire model: ${e.message}`);
@@ -88,12 +100,16 @@ export const ExecutiveOfficeView: React.FC = () => {
     }
   };
 
-  const filteredOffered = (catalog?.models ?? []).filter(
-    (m) =>
-      m.name.toLowerCase().includes(search.toLowerCase()) ||
-      m.id.toLowerCase().includes(search.toLowerCase()) ||
-      (m.vendorId ?? '').toLowerCase().includes(search.toLowerCase()),
-  );
+  const filteredOffered = (catalog?.models ?? []).filter((m) => {
+    const q = search.toLowerCase();
+    return (
+      m.name.toLowerCase().includes(q) ||
+      m.id.toLowerCase().includes(q) ||
+      (m.vendorId ?? '').toLowerCase().includes(q) ||
+      (m.connectionName ?? '').toLowerCase().includes(q) ||
+      modelDisplayLabel(m).toLowerCase().includes(q)
+    );
+  });
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -107,16 +123,16 @@ export const ExecutiveOfficeView: React.FC = () => {
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-bold text-slate-900 dark:text-white">Office of the Executive</h1>
               <span className="px-2 py-0.5 text-[10px] font-semibold bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 rounded-md">
-                §6.9 M1–M4
+                §6.9 M1–M5
               </span>
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-2xl leading-relaxed">
-              The Executive orchestrates model discovery and vendor admissions. When you onboard a new AI provider, the Executive polls their endpoint, discovers offered models, and coordinates with the Keymaster and Accountant to admit and price them for agents.
+              The Executive orchestrates model discovery, API vendor admissions, and subscription-backed catalog entries. Every model shows its upstream ID and billing route (API key vs named subscription).
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <button
             onClick={() => void loadCatalog()}
             disabled={loading}
@@ -125,11 +141,19 @@ export const ExecutiveOfficeView: React.FC = () => {
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           </button>
+          {onOpenSubscriptions && (
+            <button
+              onClick={onOpenSubscriptions}
+              className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors border border-slate-200 dark:border-slate-700"
+            >
+              <Sparkles className="w-4 h-4 text-purple-500" /> Subscriptions &amp; BYOM
+            </button>
+          )}
           <button
             onClick={() => setIsOnboardModalOpen(true)}
             className="px-4 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-semibold flex items-center gap-2 shadow-sm transition-colors"
           >
-            <Sparkles className="w-4 h-4" /> Onboard AI Provider
+            <Plus className="w-4 h-4" /> Onboard AI Provider
           </button>
         </div>
       </div>
@@ -207,13 +231,24 @@ export const ExecutiveOfficeView: React.FC = () => {
                 {filteredOffered.map((model) => (
                   <tr key={model.name} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
                     <td className="p-3">
-                      <div className="font-semibold text-slate-900 dark:text-white flex items-center gap-1.5">
-                        {model.name}
+                      <div className="font-semibold text-slate-900 dark:text-white flex items-center gap-1.5 flex-wrap">
+                        <span>{model.name}</span>
                         {model.name === catalog?.default && (
                           <span className="px-1.5 py-0.5 text-[9px] bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300 font-semibold rounded">
                             Default
                           </span>
                         )}
+                        {isSubscriptionModel(model) && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] bg-indigo-100 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-semibold rounded">
+                            <Sparkles className="w-2.5 h-2.5" />
+                            {isPersonalByomModel(model)
+                              ? `Personal BYOM${model.ownerPrincipalId ? ` · ${model.ownerPrincipalId}` : ''}`
+                              : `Subscription${model.connectionName ? ` · ${model.connectionName}` : ''}`}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                        {modelDisplayLabel(model)}
                       </div>
                       <div className="text-[10px] text-slate-400">Admitted {model.admittedAt ? new Date(model.admittedAt).toLocaleDateString() : 'bootstrap'}</div>
                     </td>
@@ -236,7 +271,7 @@ export const ExecutiveOfficeView: React.FC = () => {
                       )}
                     </td>
                     <td className="p-3 text-right space-x-2">
-                      {model.name !== catalog?.default && (
+                      {model.name !== catalog?.default && !isPersonalByomModel(model) && (
                         <button
                           onClick={() => void handleSetDefault(model.name)}
                           disabled={settingDefault === model.name}
@@ -246,7 +281,7 @@ export const ExecutiveOfficeView: React.FC = () => {
                         </button>
                       )}
                       <button
-                        onClick={() => void handleRetire(model.name)}
+                        onClick={() => void handleRetire(model)}
                         disabled={retiringModel === model.name}
                         className="px-2.5 py-1 text-[11px] font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded transition-colors"
                       >

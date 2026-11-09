@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { DollarSign, AlertOctagon, TrendingUp, ShieldAlert, Cpu, CheckCircle } from 'lucide-react';
-import type { AgentRecord, StoredModel } from '../api/types.js';
+import { DollarSign, AlertOctagon, TrendingUp, ShieldAlert, Cpu, CheckCircle, Sparkles } from 'lucide-react';
+import type { AgentRecord, StoredModel, SubscriptionSpendReport } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
 import { factoryApi } from '../api/client.js';
+import { isPersonalByomModel, isSubscriptionModel, modelDisplayLabel } from '../components/models-model.js';
+import { subscriptionSpendTotals } from './subscriptions-model.js';
 
 interface FinOpsViewProps {
   agents: AgentRecord[];
@@ -17,19 +19,26 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
   const [editingPeriod, setEditingPeriod] = useState<'daily' | 'monthly'>('monthly');
   const [isUpdating, setIsUpdating] = useState(false);
 
-  // Model token pricing state (Accountant §6.4, GAP-162)
+  // Model token pricing state (Accountant §6.4, GAP-162) & Subscription Token Spend (§6.9 M5(8))
   const [models, setModels] = useState<StoredModel[]>([]);
+  const [subscriptionSpend, setSubscriptionSpend] = useState<SubscriptionSpendReport | null>(null);
   const [editingModel, setEditingModel] = useState<string | null>(null);
   const [modelInputPrice, setModelInputPrice] = useState<number>(0);
   const [modelOutputPrice, setModelOutputPrice] = useState<number>(0);
   const [pricingSuccess, setPricingSuccess] = useState<string | null>(null);
 
   const loadModels = async () => {
-    try {
-      const res = await factoryApi.getDynamicModelCatalog();
-      setModels(res.models);
-    } catch (e: any) {
-      console.warn('Failed to load model pricing:', e.message);
+    const [catRes, subSpendRes] = await Promise.allSettled([
+      factoryApi.getDynamicModelCatalog(),
+      factoryApi.getSubscriptionSpend(),
+    ]);
+    if (catRes.status === 'fulfilled') {
+      setModels(catRes.value.models);
+    } else {
+      console.warn('Failed to load model pricing:', catRes.reason?.message);
+    }
+    if (subSpendRes.status === 'fulfilled') {
+      setSubscriptionSpend(subSpendRes.value);
     }
   };
 
@@ -222,7 +231,38 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
                     <td className="py-3 px-4 text-slate-700 dark:text-slate-300">
                       {agent.domain || 'Submind Autonomous Operations'}
                     </td>
-                    <td className="py-3 px-4 font-mono text-[11px] text-slate-700 dark:text-slate-300">{agent.model}</td>
+                    <td className="py-3 px-4">
+                      {(() => {
+                        const cat = models.find((x) => x.name === agent.model);
+                        const agentSubTokens =
+                          viewPeriod === 'monthly'
+                            ? subscriptionSpend?.agents[agent.id]?.month.totalTokens
+                            : subscriptionSpend?.agents[agent.id]?.day.totalTokens;
+                        return (
+                          <div className="space-y-0.5">
+                            <div className="font-mono text-[11px] text-slate-700 dark:text-slate-300 flex items-center gap-1.5 flex-wrap">
+                              <span>{agent.model}</span>
+                              {cat && isSubscriptionModel(cat) && (
+                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-sans font-semibold rounded bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+                                  <Sparkles className="w-2.5 h-2.5" />
+                                  {isPersonalByomModel(cat) ? 'BYOM $0' : 'Subscription'}
+                                </span>
+                              )}
+                            </div>
+                            {cat && modelDisplayLabel(cat) !== agent.model && (
+                              <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                                {modelDisplayLabel(cat)}
+                              </div>
+                            )}
+                            {typeof agentSubTokens === 'number' && agentSubTokens > 0 && (
+                              <div className="text-[10px] text-purple-600 dark:text-purple-400 font-mono">
+                                {agentSubTokens.toLocaleString()} sub tok ({viewPeriod === 'monthly' ? 'mo' : 'today'})
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </td>
                     <td className="py-3 px-4 font-semibold text-slate-800 dark:text-slate-200">
                       ${currentSpend.toFixed(2)}
                       <div className="text-[10px] text-slate-400 dark:text-slate-500 font-normal">
@@ -328,6 +368,81 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
         </div>
       </div>
 
+      {/* Subscription Token Usage (§6.9 M5(8)) */}
+      {subscriptionSpend && Object.keys(subscriptionSpend.connections).length > 0 && (
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center space-x-2">
+                <Sparkles className="w-4 h-4 text-purple-500" />
+                <span>Subscription Token Usage (§6.9 M5)</span>
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Subscription turns consume vendor plan quota and optional daily token caps; token volume is tracked separately from USD API billing.
+              </p>
+            </div>
+            <span className="text-xs font-mono text-purple-600 dark:text-purple-400">
+              {(() => {
+                const subTotals = subscriptionSpendTotals(subscriptionSpend);
+                return viewPeriod === 'monthly'
+                  ? `${subTotals.monthTokens.toLocaleString()} tokens (${subscriptionSpend.month})`
+                  : `${subTotals.dayTokens.toLocaleString()} tokens (${subscriptionSpend.day})`;
+              })()}
+            </span>
+          </div>
+
+          <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-lg">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 text-slate-500 font-semibold text-[11px]">
+                  <th className="py-2.5 px-3">Connection</th>
+                  <th className="py-2.5 px-3">Scope</th>
+                  <th className="py-2.5 px-3">Status</th>
+                  <th className="py-2.5 px-3 text-right">Today Tokens</th>
+                  <th className="py-2.5 px-3 text-right">Month Tokens</th>
+                  <th className="py-2.5 px-3 text-right">Daily Cap / Agent</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {Object.entries(subscriptionSpend.connections).map(([connId, c]) => {
+                  const todayTok = c.day.totalTokens ?? 0;
+                  const monthTok = c.month.totalTokens ?? 0;
+                  return (
+                    <tr key={connId} className="hover:bg-slate-50 dark:hover:bg-slate-800/30">
+                      <td className="py-2.5 px-3 font-semibold text-slate-900 dark:text-white">
+                        <div>{c.connectionName ?? connId}</div>
+                        <div className="text-[10px] font-mono text-slate-400">{c.vendor ?? 'subscription'} · {connId}</div>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                          {c.scope === 'personal' ? `Personal (${c.ownerPrincipalId ?? 'owner'})` : 'Factory'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                            c.status === 'needs_reconsent'
+                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                              : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                          }`}
+                        >
+                          {c.status ?? 'active'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-mono">{todayTok.toLocaleString()}</td>
+                      <td className="py-2.5 px-3 text-right font-mono">{monthTok.toLocaleString()}</td>
+                      <td className="py-2.5 px-3 text-right font-mono text-slate-500">
+                        {typeof c.dailyTokenCap === 'number' ? c.dailyTokenCap.toLocaleString() : 'Uncapped'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Accountant Office — Model Token Rates & Cost Allocation (§6.4, GAP-162) */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
         <div className="flex items-center justify-between">
@@ -363,8 +478,17 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
                 const isEditing = editingModel === m.name;
                 return (
                   <tr key={m.name} className="hover:bg-slate-50 dark:hover:bg-slate-800/30">
-                    <td className="py-2.5 px-3 font-semibold text-slate-900 dark:text-white">
-                      {m.name}
+                    <td className="py-2.5 px-3">
+                      <div className="font-semibold text-slate-900 dark:text-white flex items-center gap-1.5 flex-wrap">
+                        <span>{m.name}</span>
+                        {isSubscriptionModel(m) && (
+                          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-semibold rounded bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+                            <Sparkles className="w-2.5 h-2.5" />
+                            {isPersonalByomModel(m) ? 'Personal BYOM' : 'Subscription'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-slate-500 dark:text-slate-400">{modelDisplayLabel(m)}</div>
                     </td>
                     <td className="py-2.5 px-3">
                       <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
@@ -398,7 +522,9 @@ export const FinOpsView: React.FC<FinOpsViewProps> = ({ agents, onRefresh }) => 
                       )}
                     </td>
                     <td className="py-2.5 px-3 text-right">
-                      {isEditing ? (
+                      {isPersonalByomModel(m) ? (
+                        <span className="text-[10px] font-semibold text-slate-400">Fixed $0.00 (BYOM)</span>
+                      ) : isEditing ? (
                         <div className="flex items-center justify-end gap-1.5">
                           <button
                             onClick={() => void handleUpdatePrice(m.name)}

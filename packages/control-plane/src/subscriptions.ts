@@ -564,6 +564,34 @@ const STATUS: Record<string, number> = {
 const fail = (res: http.ServerResponse, f: { error: string; message: string }) =>
   json(res, STATUS[f.error] ?? 400, { error: f.error, message: f.message });
 
+export type NotOfferedSubscriptionVendor = {
+  vendor: 'anthropic' | 'google';
+  name: string;
+  reason: string;
+  statementUrls: readonly string[];
+  checkedDate: string;
+};
+
+/** M5(2): Consumer subscriptions explicitly NOT offered in Agent Factory, with vendor reason and checked date. */
+export const NOT_OFFERED_SUBSCRIPTION_VENDORS: readonly NotOfferedSubscriptionVendor[] = Object.freeze([
+  Object.freeze({
+    vendor: 'anthropic',
+    name: 'Anthropic (Claude Pro / Max)',
+    reason:
+      "Anthropic's legal and compliance terms limit Claude Pro and Max subscriptions to Anthropic's own products and prohibit OAuth tokens from consumer plans in third-party or custom agent software. Use an Anthropic API key or AWS Bedrock instead.",
+    statementUrls: Object.freeze(['https://code.claude.com/docs/en/legal-and-compliance']),
+    checkedDate: '2026-11-07',
+  }),
+  Object.freeze({
+    vendor: 'google',
+    name: 'Google (Gemini / Antigravity)',
+    reason:
+      "Google's Gemini CLI and Antigravity terms prohibit third-party agent software from using consumer subscription credentials, and Google suspends accounts that do so. Use a Gemini API key or Vertex AI instead.",
+    statementUrls: Object.freeze(['https://geminicli.com/docs/resources/tos-privacy', 'https://antigravity.google/terms']),
+    checkedDate: '2026-11-07',
+  }),
+]);
+
 function templateViews() {
   return Object.values(SUBSCRIPTION_TEMPLATES).map((t) => {
     const entry = catalogEntry(t.id);
@@ -575,6 +603,44 @@ function templateViews() {
       signIn: { flow: t.signIn.flow, verificationUrl: t.signIn.verificationUrl },
       permission: t.permission,
       ...(entry ? { instructions: catalogView(entry) } : {}),
+    };
+  });
+}
+
+function enrichConnectionsForCaller(
+  state: FactoryState,
+  connections: SubscriptionView[],
+  opts: { canReadAll: boolean; canonicalUser?: string },
+) {
+  const windows = getSubscriptionWindows(state);
+  const allActiveCaps = getSubscriptionCaps(state).listActive();
+  const visibleAgentIds = opts.canReadAll
+    ? undefined
+    : new Set(opts.canonicalUser ? ownedAgentIdsForPrincipal(state, opts.canonicalUser) : []);
+
+  return connections.map((c) => {
+    const openWindow = windows.get(c.id);
+    const activeCaps = allActiveCaps.filter(
+      (cap) => cap.connection === c.id && (visibleAgentIds === undefined || visibleAgentIds.has(cap.agentId)),
+    );
+    const catalogModels = state.modelStore
+      ? state.modelStore.listForConnection(c.id).map((m) => state.modelStore!.enrich(m))
+      : [];
+    return {
+      ...c,
+      ...(openWindow
+        ? {
+            limitWindow: {
+              kind: openWindow.kind,
+              code: openWindow.code,
+              openedAt: openWindow.openedAt,
+              ...(openWindow.resetAt ? { resetAt: openWindow.resetAt } : {}),
+              ...(openWindow.lastProbeAt ? { lastProbeAt: openWindow.lastProbeAt } : {}),
+            },
+          }
+        : {}),
+      ...(activeCaps.length > 0 ? { activeCaps } : {}),
+      ...(catalogModels.length > 0 ? { catalogModels } : {}),
     };
   });
 }
@@ -637,7 +703,11 @@ export async function handleSubscriptions(state: FactoryState, req: http.Incomin
       }
       const connections = await km.list({ scope: 'factory' });
       cacheSubscriptionViews(state, connections);
-      json(res, 200, { connections, templates: templateViews() });
+      json(res, 200, {
+        connections: enrichConnectionsForCaller(state, connections, { canReadAll: true }),
+        templates: templateViews(),
+        notOffered: NOT_OFFERED_SUBSCRIPTION_VENDORS,
+      });
       return true;
     }
     const principal = await requirePrivilege(req, res, state, 'subscriptions.own');
@@ -651,7 +721,11 @@ export async function handleSubscriptions(state: FactoryState, req: http.Incomin
         ? await km.list({ scope: 'personal', ownerPrincipalId: caller.canonicalUser })
         : [];
     cacheSubscriptionViews(state, connections);
-    json(res, 200, { connections, templates: templateViews() });
+    json(res, 200, {
+      connections: enrichConnectionsForCaller(state, connections, { canReadAll, canonicalUser: caller.canonicalUser }),
+      templates: templateViews(),
+      notOffered: NOT_OFFERED_SUBSCRIPTION_VENDORS,
+    });
     return true;
   }
 
@@ -1109,6 +1183,8 @@ export function enrichSubscriptionSpendReport(
           ...(v
             ? {
                 connectionName: v.name,
+                vendor: v.provider,
+                status: v.status,
                 scope: v.scope,
                 ...(v.ownerPrincipalId ? { ownerPrincipalId: v.ownerPrincipalId } : {}),
                 ...(v.dailyTokenCap !== undefined ? { dailyTokenCap: v.dailyTokenCap } : {}),

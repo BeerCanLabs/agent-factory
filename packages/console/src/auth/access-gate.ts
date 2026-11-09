@@ -5,6 +5,7 @@
  */
 export type Whoami = {
   actor?: string;
+  principal?: string;
   roles?: string[];
   grants?: unknown[];
   onBehalfOf?: string;
@@ -28,6 +29,31 @@ export const canManagePeople = (w: Whoami | null | undefined): boolean => holds(
 
 /** Keys are each person's own: anyone with access manages their own. */
 export const canManageOwnKeys = (w: Whoami | null | undefined): boolean => hasAnyAccess(w);
+
+/** M5(4): Canonical `user:<id>` of the effective caller (respecting `onBehalfOf` when acting as a user). */
+export function effectivePrincipalOf(w: Whoami | null | undefined): string | undefined {
+  if (!w) return undefined;
+  if (typeof w.onBehalfOf === 'string' && w.onBehalfOf.startsWith('user:')) return w.onBehalfOf;
+  if (typeof w.principal === 'string' && w.principal.startsWith('user:')) return w.principal;
+  if (typeof w.actor === 'string' && w.actor.startsWith('user:')) return w.actor;
+  return undefined;
+}
+
+/** M5(4): Agent owners & submitters holding `subscriptions.own` manage their own `personal` BYOM subscriptions. */
+export const canOwnSubscriptions = (w: Whoami | null | undefined): boolean => holds(w, 'subscriptions.own');
+
+/** M5(4): Factory admins holding `subscriptions.read` inspect `factory` and fleet-wide subscription state. */
+export const canReadAllSubscriptions = (w: Whoami | null | undefined): boolean => holds(w, 'subscriptions.read');
+
+/** M5(4): Factory admins holding `subscriptions.manage` connect and manage `factory` subscriptions. */
+export const canManageFactorySubscriptions = (w: Whoami | null | undefined): boolean => holds(w, 'subscriptions.manage');
+
+/** M5(1): Factory admins holding `models.manage` admit and price `factory` catalog models. */
+export const canManageCatalogModels = (w: Whoami | null | undefined): boolean => holds(w, 'models.manage');
+
+/** Whether the caller can view the Subscriptions screen (either My Subscriptions or Factory Subscriptions). */
+export const canAccessSubscriptions = (w: Whoami | null | undefined): boolean =>
+  canOwnSubscriptions(w) || canReadAllSubscriptions(w) || canManageFactorySubscriptions(w);
 
 /** A principal id an admin may act as. */
 export const validActAs = (v: string): boolean => /^user:[A-Za-z0-9._@+-]{1,200}$/.test(v);

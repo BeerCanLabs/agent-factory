@@ -59,10 +59,169 @@ export function keyValues(o: Record<string, unknown>, indent = ''): string {
     .join('\n');
 }
 
+function renderSubscriptionSpendSection(s: Record<string, unknown>, heading = 'Subscription token usage'): string {
+  const day = oneLine(String(s.day ?? ''));
+  const month = oneLine(String(s.month ?? ''));
+  const conns = isObj(s.connections) ? Object.entries(s.connections) : [];
+  const agents = isObj(s.agents) ? Object.entries(s.agents) : [];
+  const lines: string[] = [`${heading} (today ${day}, month ${month}):`];
+  if (!conns.length && !agents.length) {
+    lines.push('  (no subscription token usage recorded)');
+    return lines.join('\n');
+  }
+  if (conns.length) {
+    const connRows = conns.map(([id, raw]) => {
+      const c = isObj(raw) ? raw : {};
+      const d = isObj(c.day) ? c.day : {};
+      const m = isObj(c.month) ? c.month : {};
+      return {
+        id,
+        name: c.connectionName ?? id,
+        scope: c.scope === 'personal' && c.ownerPrincipalId ? `personal (${oneLine(String(c.ownerPrincipalId))})` : (c.scope ?? 'factory'),
+        dayTokens: d.totalTokens ?? 0,
+        monthTokens: m.totalTokens ?? 0,
+        dailyCap: typeof c.dailyTokenCap === 'number' ? c.dailyTokenCap : 'none',
+      };
+    });
+    lines.push(table(connRows));
+  }
+  if (agents.length) {
+    const agentRows = agents.map(([agentId, raw]) => {
+      const a = isObj(raw) ? raw : {};
+      const d = isObj(a.day) ? a.day : {};
+      const m = isObj(a.month) ? a.month : {};
+      return {
+        agentId,
+        dayTokens: d.totalTokens ?? 0,
+        dayCalls: d.calls ?? 0,
+        monthTokens: m.totalTokens ?? 0,
+        monthCalls: m.calls ?? 0,
+      };
+    });
+    lines.push('By agent:');
+    lines.push(table(agentRows));
+  }
+  return lines.map((l) => stripControl(l)).join('\n');
+}
+
+function renderSubscriptionsList(body: Record<string, unknown>): string {
+  const connections = (body.connections as unknown[]).filter(isObj);
+  const templates = (body.templates as unknown[]).filter(isObj);
+  const notOffered = Array.isArray(body.notOffered) ? body.notOffered.filter(isObj) : [];
+  const parts: string[] = [];
+
+  parts.push(`Connected subscriptions (${connections.length}):`);
+  if (!connections.length) {
+    parts.push('  (none)');
+  } else {
+    for (const c of connections) {
+      const status = c.status === 'needs_reconsent' ? 'needs_reconsent [RECONSENT REQUIRED]' : String(c.status ?? 'active');
+      const scope =
+        c.scope === 'personal'
+          ? `personal (${oneLine(String(c.ownerPrincipalId ?? 'owner'))})`
+          : String(c.scope ?? 'factory');
+      const cap = typeof c.dailyTokenCap === 'number' ? `${c.dailyTokenCap} tokens/day/agent` : 'uncapped';
+      parts.push(
+        `  - ${oneLine(String(c.name ?? c.id))} [${oneLine(String(c.id))}]  scope=${oneLine(scope)}  status=${oneLine(status)}  vendor=${oneLine(String(c.vendor ?? c.templateId ?? ''))}${c.tier ? `  tier=${oneLine(String(c.tier))}` : ''}${c.accountEmail ? `  account=${oneLine(String(c.accountEmail))}` : ''}  cap=${oneLine(cap)}`,
+      );
+      if (isObj(c.limitWindow)) {
+        const w = c.limitWindow;
+        parts.push(
+          `      limit window: kind=${oneLine(String(w.kind ?? ''))} code=${oneLine(String(w.code ?? ''))} openedAt=${oneLine(String(w.openedAt ?? ''))}${w.resetAt ? ` resetAt=${oneLine(String(w.resetAt))}` : ''}`,
+        );
+      }
+      if (Array.isArray(c.activeCaps) && c.activeCaps.length) {
+        const capItems = c.activeCaps
+          .filter(isObj)
+          .map((ac) => `${oneLine(String(ac.agentId ?? ''))} (resetAt=${oneLine(String(ac.resetAt ?? ''))})`)
+          .join(', ');
+        if (capItems) parts.push(`      capped agents today: ${capItems}`);
+      }
+      if (isObj(c.discovery)) {
+        const disc = c.discovery;
+        const models = Array.isArray(c.discoveredModels)
+          ? c.discoveredModels.filter(isObj).map((m) => oneLine(String(m.id ?? ''))).filter(Boolean)
+          : [];
+        parts.push(
+          `      discovery: status=${oneLine(String(disc.status ?? 'ok'))} listAvailable=${String(Boolean(disc.listAvailable))}${disc.reason ? ` reason=${oneLine(String(disc.reason))}` : ''}${models.length ? ` models=[${models.join(', ')}]` : ''}`,
+        );
+      }
+    }
+  }
+
+  parts.push('');
+  parts.push(`Permitted vendor templates (${templates.length}):`);
+  for (const t of templates) {
+    const perm = isObj(t.permission) ? t.permission : {};
+    const tiers = Array.isArray(perm.tiers) ? perm.tiers.map((x) => oneLine(String(x))).join(', ') : '';
+    const urls = Array.isArray(perm.statementUrls) ? perm.statementUrls.map((x) => oneLine(String(x))).join(', ') : '';
+    parts.push(
+      `  - ${oneLine(String(t.id ?? ''))}: ${oneLine(String(t.name ?? ''))}${tiers ? ` (tiers: ${tiers})` : ''}${perm.checkedDate ? ` [checked ${oneLine(String(perm.checkedDate))}]` : ''}${urls ? ` — ${urls}` : ''}`,
+    );
+  }
+
+  if (notOffered.length) {
+    parts.push('');
+    parts.push('Consumer subscriptions NOT offered (§6.9 M5(2)):');
+    for (const v of notOffered) {
+      const urls = Array.isArray(v.statementUrls) ? v.statementUrls.map((x) => oneLine(String(x))).join(', ') : '';
+      parts.push(
+        `  - ${oneLine(String(v.name ?? v.vendor ?? ''))} [NOT OFFERED, checked ${oneLine(String(v.checkedDate ?? ''))}]: ${oneLine(String(v.reason ?? ''))}${urls ? ` (${urls})` : ''}`,
+      );
+    }
+  }
+
+  return parts.map((l) => stripControl(l)).join('\n');
+}
+
+function renderModelsCatalog(body: Record<string, unknown>): string {
+  const models = (body.models as unknown[]).filter(isObj);
+  const def = body.default === null || body.default === undefined ? '(none)' : oneLine(String(body.default));
+  if (!models.length) return `default: ${def}\n(none)`;
+  const rows = models.map((m) => {
+    const isSub = Boolean(m.subscription || m.credentialMode === 'subscription');
+    const billing = isSub
+      ? m.scope === 'personal'
+        ? `subscription [personal BYOM${m.ownerPrincipalId ? ` ${oneLine(String(m.ownerPrincipalId))}` : ''}]`
+        : 'subscription [factory]'
+      : 'api-key';
+    const p = isObj(m.price) ? `$${m.price.inputPerMTok ?? 0}/$${m.price.outputPerMTok ?? 0}` : 'unpriced';
+    return {
+      name: m.name,
+      label: m.displayLabel ?? m.id ?? m.name,
+      billing,
+      price: p,
+    };
+  });
+  return `default: ${def}\n${table(rows)}`;
+}
+
 /** A list of things as a table, a thing as key-value lines, anything else as it is. */
 export function render(body: unknown): string {
   if (Array.isArray(body)) return body.every(isObj) ? table(body as Record<string, unknown>[]) : body.map((b) => cell(b, 120)).join('\n');
   if (isObj(body)) {
+    if (Array.isArray(body.connections) && Array.isArray(body.templates)) {
+      return renderSubscriptionsList(body);
+    }
+    if (Array.isArray(body.models) && 'default' in body) {
+      return renderModelsCatalog(body);
+    }
+    if (isObj(body.signIn) && typeof body.signIn.verificationUrl === 'string' && typeof body.signIn.userCode === 'string') {
+      const s = body.signIn;
+      return [
+        `Verification URL:  ${oneLine(String(s.verificationUrl))}`,
+        `Device code:       ${oneLine(String(s.userCode))}`,
+        `Sign-in ID:        ${oneLine(String(s.signInId ?? ''))}`,
+        `Expires at:        ${oneLine(String(s.expiresAt ?? ''))}`,
+      ].join('\n');
+    }
+    if (typeof body.day === 'string' && typeof body.month === 'string' && isObj(body.connections) && isObj(body.agents) && !('agents' in body && isObj((Object.values(body.agents)[0] ?? null)) && 'usd' in ((Object.values(body.agents)[0] as Record<string, unknown>)?.day as Record<string, unknown> ?? {}))) {
+      return renderSubscriptionSpendSection(body);
+    }
+    if (isObj(body.subscriptions) && isObj(body.subscriptions.connections) && isObj(body.subscriptions.agents)) {
+      const { subscriptions, ...rest } = body;
+      return `${keyValues(rest)}\n\n${renderSubscriptionSpendSection(subscriptions)}`;
+    }
     // The factory often wraps a list ({ replies: [...] }, { items: [...] }): show the list when that is the whole answer.
     const keys = Object.keys(body);
     if (keys.length === 1 && Array.isArray(body[keys[0]]) && (body[keys[0]] as unknown[]).every(isObj)) return table(body[keys[0]] as Record<string, unknown>[]);

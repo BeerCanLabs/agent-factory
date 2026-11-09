@@ -16,14 +16,23 @@ import {
   UploadCloud,
   KeyRound,
   ArrowUpCircle,
+  Sparkles,
 } from 'lucide-react';
-import type { AgentPolicy, AgentRecord, AgentState } from '../api/types.js';
+import type { AgentPolicy, AgentRecord, AgentState, OfferedModel } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
 import { factoryApi } from '../api/client.js';
-import { budgetFormFromPolicy, applyBudgetFormToPolicy, type BudgetFormData } from '../components/models-model.js';
+import {
+  budgetFormFromPolicy,
+  applyBudgetFormToPolicy,
+  isPersonalByomModel,
+  isSubscriptionModel,
+  modelDisplayLabel,
+  type BudgetFormData,
+} from '../components/models-model.js';
 
 interface FleetViewProps {
   agents: AgentRecord[];
+  catalogModels?: OfferedModel[];
   onSelectAgent: (agentId: string) => void;
   onRefresh: () => void;
   /** Outstanding credentials per agent id (§6.11 K5); absent when the viewer cannot see them. */
@@ -35,6 +44,7 @@ interface FleetViewProps {
 
 export const FleetView: React.FC<FleetViewProps> = ({
   agents,
+  catalogModels = [],
   onSelectAgent,
   onRefresh,
   outstandingCredentials,
@@ -539,9 +549,29 @@ export const FleetView: React.FC<FleetViewProps> = ({
                   <td className="py-3 px-4 text-slate-700 dark:text-slate-300 font-medium">{agent.domain || 'Core'}</td>
                   <td className="py-3 px-4">{getStateBadge(agent.state)}</td>
                   <td className="py-3 px-4">
-                    <span className="font-mono text-[11px] bg-slate-100 dark:bg-slate-950 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300">
-                      {agent.model}
-                    </span>
+                    {(() => {
+                      const cat = catalogModels.find((m) => m.name === agent.model);
+                      return (
+                        <div className="space-y-0.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-mono text-[11px] bg-slate-100 dark:bg-slate-950 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300">
+                              {agent.model}
+                            </span>
+                            {cat && isSubscriptionModel(cat) && (
+                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+                                <Sparkles className="w-2.5 h-2.5" />
+                                {isPersonalByomModel(cat) ? 'BYOM' : 'Sub'}
+                              </span>
+                            )}
+                          </div>
+                          {cat && modelDisplayLabel(cat) !== agent.model && (
+                            <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                              {modelDisplayLabel(cat)}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </td>
                   <td className="py-3 px-4">
                     <div className="font-semibold text-slate-800 dark:text-slate-200">${(agent.currentSpendUsd || 0).toFixed(2)}</div>

@@ -96,3 +96,46 @@ describe('S9 people, grants and keys commands', () => {
     assert.equal(seen[0]['x-factory-act-as'], 'user:alice');
   });
 });
+
+describe('§6.9 M5 subscription commands (TSK-329)', () => {
+  it('parses personal BYOM and factory subscription commands with explicit --attested requirement', () => {
+    assert.deepEqual(parse('subscriptions'), {});
+    assert.deepEqual(parse('subscriptions personal'), { scope: 'personal' });
+    assert.deepEqual(parse('subscriptions factory'), { scope: 'factory' });
+    assert.deepEqual(parse('subscription-spend'), {});
+    assert.deepEqual(parse('subscription-connect xai-subscription personal "Alice Grok" --attested'), {
+      templateId: 'xai-subscription',
+      scope: 'personal',
+      name: 'Alice Grok',
+      subscriberAttested: true,
+    });
+    assert.deepEqual(parse('subscription-connect openai-subscription factory "Shared Codex" --attested'), {
+      templateId: 'openai-subscription',
+      scope: 'factory',
+      name: 'Shared Codex',
+      subscriberAttested: true,
+    });
+    assert.throws(() => parse('subscription-connect xai-subscription personal "Alice Grok"'), UsageError);
+    assert.throws(() => parse('subscription-reconnect sub_1'), UsageError);
+    assert.deepEqual(parse('subscription-reconnect sub_1 --attested'), { id: 'sub_1', subscriberAttested: true });
+    assert.deepEqual(parse('subscription-rename sub_1 "Dale\'s Grok Plan"'), { id: 'sub_1', name: "Dale's Grok Plan" });
+    assert.deepEqual(parse('subscription-cap sub_1 250,000'), { id: 'sub_1', cap: 250000 });
+    assert.deepEqual(parse('subscription-cap sub_1 none'), { id: 'sub_1', cap: null });
+    assert.throws(() => parse('subscription-cap sub_1 0'), UsageError);
+    assert.deepEqual(parse('subscription-discover sub_1'), { id: 'sub_1' });
+    assert.deepEqual(parse('subscription-add-model sub_1 grok-alice grok-4.6'), {
+      id: 'sub_1',
+      name: 'grok-alice',
+      modelId: 'grok-4.6',
+    });
+    assert.deepEqual(parse('subscription-add-model sub_1 codex-shared gpt-5-codex 0 0'), {
+      id: 'sub_1',
+      name: 'codex-shared',
+      modelId: 'gpt-5-codex',
+      inputPerMTok: 0,
+      outputPerMTok: 0,
+    });
+    assert.deepEqual(parse('subscription-retire-model sub_1 grok-alice'), { id: 'sub_1', model: 'grok-alice' });
+    assert.deepEqual(parse('subscription-disconnect sub_1'), { id: 'sub_1' });
+  });
+});
