@@ -180,7 +180,7 @@ function modelCatalogFromEnv(json: string | undefined): FactoryState['modelCatal
       // serves what the store holds.
       out[name] = {
         provider: m.provider,
-        ...(typeof m.id === 'string' ? { id: m.id } : {}),
+        id: typeof m.id === 'string' && m.id ? m.id : name,
         ...(typeof m.region === 'string' ? { region: m.region } : {}),
         ...(typeof m.endpoint === 'string' ? { endpoint: m.endpoint } : {}),
         ...(p && typeof p.inputPerMTok === 'number' && typeof p.outputPerMTok === 'number' ? { price: { inputPerMTok: p.inputPerMTok, outputPerMTok: p.outputPerMTok } } : {}),

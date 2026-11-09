@@ -144,6 +144,24 @@ function authorizeUnscoped(req: AuthorizeRequest): AuthorizeResult {
     }
   }
 
+  // M5(1): Active agent owners (`content-owner` / `accountable-lead`) hold `models.read`
+  // so grant-only owners can inspect the catalog and pick models for their agents.
+  if (privilege === 'models.read') {
+    if (resource?.ownsAnyAgent || resource?.ownsPersonalAgent) {
+      return { allowed: true };
+    }
+    if (
+      resource?.grants?.some(
+        (eg) =>
+          !eg.readOnly &&
+          eg.grant.scope.kind === 'agent' &&
+          (eg.grant.role === 'content-owner' || eg.grant.role === 'accountable-lead'),
+      )
+    ) {
+      return { allowed: true };
+    }
+  }
+
   if (resource && AGENT_SCOPED.has(privilege)) {
     // F1/D11/D15: When grant-backed authorization is active (`resource.grants` provided) or the agent is `team`,
     // `GrantStore` is authoritative for agent ownership; legacy `resource.owners` never resurrects transferred/revoked owners.

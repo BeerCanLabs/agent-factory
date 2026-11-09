@@ -126,6 +126,15 @@ describe('S24: factory-side per-skill model binding (#370)', { concurrency: fals
         'agent-model': { provider: 'fake', id: 'agent-model' },
         'claude-sonnet': { provider: 'fake', id: 'claude-sonnet' },
         'claude-haiku': { provider: 'fake', id: 'claude-haiku' },
+        'alice-byom': {
+          provider: 'xai-subscription',
+          id: 'grok-4',
+          credentialMode: 'subscription',
+          scope: 'personal',
+          ownerPrincipalId: 'user:alice',
+          connection: 'sub_alice',
+          price: { inputPerMTok: 0, outputPerMTok: 0 },
+        },
       },
       defaultModel: 'agent-model',
     } as unknown as FactoryState;
@@ -149,7 +158,12 @@ describe('S24: factory-side per-skill model binding (#370)', { concurrency: fals
     } as never);
 
     state.agents.set('friday', { id: 'friday', name: 'Friday', state: 'IDLE', kind: 'personal' } as never);
-    state.policies.set('friday', { routes: ['models'], models: ['agent-model', 'claude-sonnet', 'claude-haiku'], currentModel: 'agent-model' } as never);
+    state.policies.set('friday', {
+      routes: ['models'],
+      models: ['agent-model', 'claude-sonnet', 'claude-haiku'],
+      currentModel: 'agent-model',
+      budgetUsd: { perDay: 5, perMonth: 50 },
+    } as never);
     await state.configs.put(
       { agentId: 'friday', source: {}, skills: [{ id: 'summarize-doc', version: '1.0.0' }] as never, policy: null },
       { updatedBy: 'user:admin', reason: 's24 fixture' },
@@ -180,6 +194,15 @@ describe('S24: factory-side per-skill model binding (#370)', { concurrency: fals
         'agent-model': { provider: 'fake', id: 'agent-model', price: { inputPerMTok: 1, outputPerMTok: 1 } },
         'claude-sonnet': { provider: 'fake', id: 'claude-sonnet', price: { inputPerMTok: 1, outputPerMTok: 1 } },
         'claude-haiku': { provider: 'fake', id: 'claude-haiku', price: { inputPerMTok: 1, outputPerMTok: 1 } },
+        'alice-byom': {
+          provider: 'fake',
+          id: 'grok-4',
+          credentialMode: 'subscription',
+          scope: 'personal',
+          ownerPrincipalId: 'user:alice',
+          connection: 'sub_alice',
+          price: { inputPerMTok: 0, outputPerMTok: 0 },
+        },
       } as never,
       defaultModel: 'agent-model',
       modelAdapters: {
@@ -268,5 +291,22 @@ describe('S24: factory-side per-skill model binding (#370)', { concurrency: fals
     await call('PUT', '/api/v1/skills/summarize-doc/model', { model: 'claude-sonnet' }, TOKENS.alice);
     const reopened = new SkillModelBindingStore(join(dir, 'skill-models.json'));
     assert.equal(reopened.get('summarize-doc')?.model, 'claude-sonnet');
+  });
+
+  it('M5(1) / S24: refuses binding a personal BYOM entry to a skill (even by owner or admin) and refuses stale skill bindings at egress', async () => {
+    for (const tok of [TOKENS.alice, TOKENS.admin]) {
+      const denied = await call('PUT', '/api/v1/skills/summarize-doc/model', { model: 'alice-byom' }, tok);
+      assert.equal(denied.status, 403, JSON.stringify(denied.body));
+      assert.equal(denied.body.error, 'personal_model_skill_forbidden');
+    }
+
+    // Even if a stale binding existed in the store, gatekeeper-egress refuses personal BYOM on skill context at call time.
+    skillModelStore(state).set('summarize-doc', 'alice-byom', 'user:alice');
+    const run = state.runs.create({ agentId: 'friday', state: 'WORKING', actor: 'user:alice', trigger: 'manual' } as never);
+    const token = await state.runTokens!.mint({ runId: run.runId, agentId: 'friday' });
+    const res = await chat(token, { [SKILL_CONTEXT_HEADER]: 'summarize-doc' });
+    assert.equal(res.status, 403, JSON.stringify(res.body));
+    assert.equal(res.body.error, 'personal_model_skill_forbidden');
+    await call('PUT', '/api/v1/skills/summarize-doc/model', { model: 'claude-sonnet' }, TOKENS.alice);
   });
 });

@@ -41,7 +41,7 @@ import {
   type GroupStore,
 } from '@beercanlabs/factory-registrar';
 import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
-import { checkStanding, spendDetail, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
+import { ZERO_BUDGET_LIMITS, isZeroPrice, checkStanding, spendDetail, type BudgetLimits, type Price, type SpendTracker } from '@beercanlabs/factory-budget';
 import {
   AGENT_SCOPED,
   GrantStoreUnavailableError,
@@ -71,8 +71,17 @@ import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 /** E9: the largest held request body the control plane keeps (characters, base64 included). */
 import { Keymaster, type ConnectionKeymaster, type SubscriptionKeymaster } from '@beercanlabs/factory-keymaster';
 import { handleConnections } from './connections.js';
-import { handleSubscriptions } from './subscriptions.js';
+import {
+  bindModelStoreConnectionResolver,
+  cacheSubscriptionView,
+  enrichSubscriptionSpendReport,
+  getCachedSubscriptionView,
+  getSubscriptions,
+  handleSubscriptions,
+  startSubscriptionDiscoveryTimer,
+} from './subscriptions.js';
 import { handleSubscriptionWindows } from './subscription-windows.js';
+import { getSubscriptionCaps } from './subscription-caps.js';
 import { handleCredentials } from './credentials.js';
 import { handleGitHubAppSetup } from './github-app-setup.js';
 import { handleGitHubAppInstall } from './github-app-install.js';
@@ -101,7 +110,7 @@ import { handleInterview } from './interview-draft.js';
 import { handleLoginRoutes, sendLoginPage, verifySession, type SessionStore } from './login.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
 import { handleAgentTransfers } from './transfers.js';
-import { handleSkillModels, skillModelsForAgent } from './skill-models.js';
+import { clearSkillBindingsForModel, handleSkillModels, skillModelsForAgent } from './skill-models.js';
 import { handleMcp } from './mcp.js';
 export { handleMcp } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
@@ -110,8 +119,8 @@ import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
-import { resolveModelReference, type DiscoveredModel } from '@beercanlabs/factory-executive';
-import { ModelStore, type StoredModel, type StagedModel } from './models.js';
+import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
+import { ModelCatalogError, ModelStore, type EnrichedModelView, type StoredModel, type StagedModel } from './models.js';
 
 /**
  * §6.12 A1: Platform secret used to verify inbound GitHub release webhooks at `POST /api/v1/hooks/github`.
@@ -143,7 +152,7 @@ export type FactoryState = {
   /** Dynamic model store (§6.9 M3, GAP-162). */
   modelStore?: ModelStore;
   /** Models the factory offers (§6.9 M3, FACTORY_MODEL_CATALOG), by neutral name. */
-  modelCatalog?: Record<string, { provider: string; id?: string; region?: string; endpoint?: string; price?: { inputPerMTok: number; outputPerMTok: number } }>;
+  modelCatalog?: Record<string, CatalogEntry>;
   /** The model a policy that names none grants (M2): configuration seeded from FACTORY_DEFAULT_MODEL; no code default. */
   defaultModel?: string;
   registryDir?: string;
@@ -209,6 +218,14 @@ export type FactoryState = {
   subscriptions?: SubscriptionKeymaster;
   /** The fetch the subscription Keymaster uses for vendor sign-in and token calls. Default global fetch; tests point it at fakes. */
   subscriptionFetch?: typeof fetch;
+  /** Injectable clock for subscription Keymaster, windows, and daily caps (ms since epoch). */
+  subscriptionNow?: () => number;
+  /** Test seam for control-plane -> gatekeeper-egress subscription model discovery calls. */
+  discoverFetch?: typeof fetch;
+  /** Interval in ms for background subscription model discovery (`0` disables). */
+  subscriptionDiscoveryIntervalMs?: number;
+  /** Property-manager hook resolving the active canonical `user:<id>` owner of a `personal` agent (`undefined` for `team` or `pending-revoked`). */
+  activePersonalOwnerOf?: (agentId: string) => string | undefined;
   /** The factory's public origin for browser flows (OAuth consent callbacks). From the landing zone; never hard-coded. */
   publicBaseUrl?: string;
   /** S12: origin for sign-in callbacks when people browse a different host than publicBaseUrl (the console). */
@@ -606,6 +623,468 @@ export function checkOwnsPersonalAgent(state: FactoryState, actor: string): bool
     }
   }
   return false;
+}
+
+/**
+ * M5(1) / D15 / D24: Returns the active canonical `user:<id>` owner of a `personal` agent, or `undefined` when the
+ * agent is `kind: 'team'`, has no active owner, or is in D15 `pending-revoked` / `revoked` state.
+ */
+export function activePersonalOwnerOf(state: FactoryState, agentId: string): string | undefined {
+  const agent = findAgentRecord(state, agentId);
+  const kind = agent ? effectiveAgentKind(agent) : agentKindOf(state, agentId);
+  if (kind === 'team') return undefined;
+
+  if (state.grants) {
+    wireGrantStoreKindLookup(state);
+    if (!state.grants.healthy) return undefined;
+    const scopeId = (agent?.id ?? agentId).toLowerCase();
+    try {
+      const managed = state.grants.list({ scopeKind: 'agent', scopeId, includeExpired: true });
+      if (managed.length > 0) {
+        const activeOwner = state.grants.activeContentOwnerOf({ kind: 'agent', id: agent?.id ?? agentId });
+        return activeOwner && isValidUserPrincipalId(activeOwner) ? activeOwner : undefined;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  const rawOwners = state.configs?.current(agent?.id ?? agentId)?.owners ?? (agent as unknown as { owners?: string[] } | undefined)?.owners ?? [];
+  for (const raw of rawOwners) {
+    try {
+      const canon = normalizeActorToPrincipal(raw, state.principals);
+      if (isValidUserPrincipalId(canon)) return canon;
+    } catch {
+      // ignore un-normalizable legacy strings
+    }
+  }
+  return undefined;
+}
+
+/**
+ * M5(8): All agent ids actively owned by `canonicalUser` (`personal` `content-owner` or `team` `accountable-lead`)
+ * for scoped subscription token spend reporting.
+ */
+export function ownedAgentIdsForPrincipal(state: FactoryState, canonicalUser: string): string[] {
+  if (!isValidUserPrincipalId(canonicalUser)) return [];
+  const out = new Set<string>();
+  const allIds = new Set<string>([
+    ...state.agents.keys(),
+    ...(state.configs?.agentIds ? state.configs.agentIds() : []),
+  ]);
+  for (const id of allIds) {
+    if (activePersonalOwnerOf(state, id) === canonicalUser) {
+      out.add(id);
+      continue;
+    }
+    const a = findAgentRecord(state, id);
+    if (a && effectiveAgentKind(a) === 'team') {
+      const lead = accountableLeadOf(state, id, a);
+      if (lead) {
+        try {
+          if (normalizeActorToPrincipal(lead, state.principals) === canonicalUser) out.add(id);
+        } catch {
+          if (lead.toLowerCase() === canonicalUser.toLowerCase()) out.add(id);
+        }
+      }
+    }
+  }
+  return [...out].sort();
+}
+
+export function syncModelCatalogFromStore(state: FactoryState): void {
+  if (state.modelStore) {
+    bindModelStoreConnectionResolver(state);
+    state.modelCatalog = state.modelStore.toEgressCatalog();
+  }
+}
+
+export function wireSubscriptionRuntime(state: FactoryState): void {
+  state.activePersonalOwnerOf ??= (id: string) => activePersonalOwnerOf(state, id);
+  bindModelStoreConnectionResolver(state);
+}
+
+/**
+ * Parse token pricing accepting both `{ inputPerMTok, outputPerMTok }` and `{ inputPer1M, outputPer1M }` with finite `>= 0`
+ * values (supporting explicit `$0` factory entries per M5(1), (8)).
+ */
+export function parseModelPriceInput(
+  raw: unknown,
+): { ok: true; price: { inputPerMTok: number; outputPerMTok: number } } | { ok: false; error: string } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, error: 'price must be an object with numeric inputPerMTok/outputPerMTok (or inputPer1M/outputPer1M) >= 0' };
+  }
+  const obj = raw as Record<string, unknown>;
+  const inp = obj.inputPerMTok ?? obj.inputPer1M;
+  const out = obj.outputPerMTok ?? obj.outputPer1M;
+  if (typeof inp !== 'number' || !Number.isFinite(inp) || inp < 0 || typeof out !== 'number' || !Number.isFinite(out) || out < 0) {
+    return { ok: false, error: 'price inputPerMTok and outputPerMTok must be finite numbers >= 0' };
+  }
+  return { ok: true, price: { inputPerMTok: inp, outputPerMTok: out } };
+}
+
+/**
+ * M5(8) / D25: Effective USD budget limits for an agent. Unallocated explicit `kind: 'personal'` agents evaluate to
+ * `ZERO_BUDGET_LIMITS` (`{ perDay: 0, perMonth: 0 }`), never `undefined` (unlimited).
+ */
+export function effectiveAgentBudgetUsd(
+  state: FactoryState,
+  agent: AgentRecord | undefined,
+  includePerRun = false,
+): BudgetLimits | undefined {
+  if (!agent) return undefined;
+  const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
+  if (isBuiltin) return undefined;
+  const budget = state.policies.get(agent.id)?.budgetUsd;
+  if (budget) {
+    return includePerRun ? budget : { perDay: budget.perDay, perMonth: budget.perMonth };
+  }
+  return agent.kind === 'personal' ? ZERO_BUDGET_LIMITS : undefined;
+}
+
+export function catalogEntryOf(state: FactoryState, modelName: string | undefined): CatalogEntry | undefined {
+  if (!modelName) return undefined;
+  if (state.modelStore) {
+    const offered = state.modelStore.getOffered(modelName);
+    if (!offered) return undefined;
+    bindModelStoreConnectionResolver(state);
+    const enriched = state.modelStore.enrich(offered);
+    return {
+      provider: enriched.provider,
+      id: enriched.id,
+      ...(enriched.endpoint ? { endpoint: enriched.endpoint } : {}),
+      ...(enriched.secret ? { secret: enriched.secret } : {}),
+      ...(enriched.region ? { region: enriched.region } : {}),
+      ...(enriched.price ? { price: enriched.price } : {}),
+      credentialMode: enriched.credentialMode,
+      ...(enriched.scope ? { scope: enriched.scope } : {}),
+      ...(enriched.ownerPrincipalId ? { ownerPrincipalId: enriched.ownerPrincipalId } : {}),
+      ...(enriched.connection ? { connection: enriched.connection } : {}),
+      ...(enriched.connectionName ? { connectionName: enriched.connectionName } : {}),
+      ...(enriched.templateId ? { templateId: enriched.templateId } : {}),
+      ...(enriched.dailyTokenCap !== undefined ? { dailyTokenCap: enriched.dailyTokenCap } : {}),
+    };
+  }
+  return state.modelCatalog?.[modelName];
+}
+
+export function isCatalogModelZeroPrice(state: FactoryState, modelName: string | undefined, forAgentId?: string): boolean {
+  const entry = catalogEntryOf(state, modelName);
+  if (!entry || !isZeroPrice(entry.price)) return false;
+  if (entry.credentialMode === 'subscription' && entry.scope === 'personal') {
+    if (!forAgentId) return false;
+    return Boolean(entry.ownerPrincipalId && activePersonalOwnerOf(state, forAgentId) === entry.ownerPrincipalId);
+  }
+  return true;
+}
+
+export function isActiveAgentModelZeroPrice(state: FactoryState, agentId: string, pinnedModel?: string): boolean {
+  const pol = state.policies.get(agentId) ?? { routes: [] };
+  const eff = effectiveAgentModels(pol, defaultModelOf(state));
+  if (pinnedModel) {
+    if (!eff.approvedModels.includes(pinnedModel)) return false;
+    return isCatalogModelZeroPrice(state, pinnedModel, agentId);
+  }
+  if (!eff.currentModel) return false;
+  return isCatalogModelZeroPrice(state, eff.currentModel, agentId);
+}
+
+/**
+ * M5(1) / D24 / D15: Validate that any `scope: 'personal'` BYOM catalog entries in `modelNames` are attached ONLY to
+ * a `kind: 'personal'` agent whose active owner (`activePersonalOwnerOf`) equals `entry.ownerPrincipalId`.
+ * Refuses `403` even when called by a Factory Admin.
+ */
+export function checkPersonalByomModelsForAgent(
+  state: FactoryState,
+  agentId: string,
+  modelNames: ReadonlyArray<string | null | undefined>,
+  overrideTarget?: { kind: AgentKind; activeOwner?: string },
+): { ok: true } | { ok: false; status: 403; error: string; model: string; message: string } {
+  const agent = findAgentRecord(state, agentId);
+  const targetKind = overrideTarget?.kind ?? (agent ? effectiveAgentKind(agent) : (agentKindOf(state, agentId) ?? 'personal'));
+  const activeOwner = overrideTarget ? overrideTarget.activeOwner : activePersonalOwnerOf(state, agentId);
+
+  for (const m of modelNames) {
+    if (typeof m !== 'string' || !m) continue;
+    const entry = catalogEntryOf(state, m);
+    if (!entry) continue;
+    if (entry.credentialMode === 'subscription' && entry.scope === 'personal') {
+      if (targetKind === 'team') {
+        return {
+          ok: false,
+          status: 403,
+          error: 'personal_model_team_forbidden',
+          model: m,
+          message: `Personal BYOM model '${m}' cannot be approved, selected, or pinned on a team agent (D24, M5(1))`,
+        };
+      }
+      if (!activeOwner || activeOwner !== entry.ownerPrincipalId) {
+        return {
+          ok: false,
+          status: 403,
+          error: 'personal_model_owner_mismatch',
+          model: m,
+          message: `Personal BYOM model '${m}' may only be attached to a personal agent actively owned by ${entry.ownerPrincipalId ?? 'its owner'} (D15, M5(1))`,
+        };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * D15 / M5(1): Automatically unapprove any `scope: 'personal'` BYOM entries on `agentId` that do not belong to the
+ * agent's current active owner (`undefined` when `pending-revoked`, revoked, or converted to `team`), applying M2's
+ * unapproval transitions (`applyModelsRemoval`) and ledgering `POLICY_UPDATED`.
+ */
+export async function detachDisallowedPersonalModelsOnAgent(
+  state: FactoryState,
+  agentId: string,
+  actor: string,
+  reason = 'agent ownership changed (D15)',
+): Promise<{ detached: string[] }> {
+  const activeOwner = activePersonalOwnerOf(state, agentId);
+  const isDisallowed = (modelName: string | null | undefined): modelName is string => {
+    if (typeof modelName !== 'string' || !modelName) return false;
+    const entry = catalogEntryOf(state, modelName);
+    if (!entry) return false;
+    return entry.credentialMode === 'subscription' && entry.scope === 'personal' && entry.ownerPrincipalId !== activeOwner;
+  };
+
+  const toRemoveSet = new Set<string>();
+  if (state.policies.has(agentId)) {
+    const pol = state.policies.get(agentId);
+    for (const m of pol.models ?? []) {
+      if (isDisallowed(m)) toRemoveSet.add(m);
+    }
+    for (const slot of [pol.currentModel, pol.primaryModel, pol.secondaryModel]) {
+      if (isDisallowed(slot)) toRemoveSet.add(slot);
+    }
+  }
+  const agent = findAgentRecord(state, agentId);
+  if (agent) {
+    for (const m of agent.approvedModels ?? []) {
+      if (isDisallowed(m)) toRemoveSet.add(m);
+    }
+    if (isDisallowed(agent.model)) toRemoveSet.add(agent.model);
+  }
+
+  const detached = [...toRemoveSet];
+  if (detached.length === 0) return { detached: [] };
+
+  let fallbackModel: string | undefined;
+  if (state.policies.has(agentId)) {
+    const pol = state.policies.get(agentId);
+    const updated = applyModelsRemoval(pol, detached);
+    state.policies.set(agentId, updated);
+    fallbackModel = updated.currentModel ?? updated.primaryModel ?? undefined;
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'POLICY_UPDATED',
+      actor,
+      models: updated.models ?? [],
+    });
+  }
+
+  if (agent) {
+    let dirty = false;
+    if (Array.isArray(agent.approvedModels)) {
+      const nextApproved = agent.approvedModels.filter((m) => !toRemoveSet.has(m));
+      if (nextApproved.length !== agent.approvedModels.length) {
+        agent.approvedModels = nextApproved;
+        dirty = true;
+      }
+    }
+    if (agent.model && toRemoveSet.has(agent.model)) {
+      agent.model = fallbackModel ?? defaultModelOf(state) ?? '';
+      dirty = true;
+    }
+    if (dirty) {
+      registryOf(state).save(agent);
+    }
+  }
+
+  for (const run of state.runs.list({ agentId, active: true })) {
+    if (run.model && toRemoveSet.has(run.model)) {
+      run.model = fallbackModel;
+      state.runs.update(run.runId, { model: fallbackModel });
+    }
+  }
+
+  await recordConfig(state, agentId, { actor, reason });
+  return { detached };
+}
+
+export function enrichedCatalogModelsForNames(state: FactoryState, names: ReadonlyArray<string>): EnrichedModelView[] {
+  bindModelStoreConnectionResolver(state);
+  const out: EnrichedModelView[] = [];
+  for (const name of names) {
+    if (state.modelStore) {
+      const stored = state.modelStore.getOffered(name);
+      if (stored) {
+        out.push(state.modelStore.enrich(stored));
+        continue;
+      }
+    }
+    const entry = state.modelCatalog?.[name];
+    if (entry) {
+      const isSub = entry.credentialMode === 'subscription';
+      const connView = isSub && entry.connection ? getCachedSubscriptionView(state, entry.connection) : undefined;
+      const connectionName = connView?.name ?? entry.connectionName;
+      out.push({
+        name,
+        provider: entry.provider,
+        id: entry.id ?? name,
+        ...(entry.endpoint ? { endpoint: entry.endpoint } : {}),
+        ...(entry.region ? { region: entry.region } : {}),
+        ...(entry.price ? { price: entry.price } : {}),
+        credentialMode: isSub ? 'subscription' : 'api-key',
+        subscription: isSub,
+        ...(isSub ? { scope: entry.scope ?? 'factory' } : {}),
+        ...(entry.ownerPrincipalId ? { ownerPrincipalId: entry.ownerPrincipalId } : {}),
+        ...(entry.connection ? { connection: entry.connection } : {}),
+        ...(connectionName ? { connectionName } : {}),
+        ...(entry.templateId ? { templateId: entry.templateId } : {}),
+        ...(connView?.dailyTokenCap !== undefined
+          ? { dailyTokenCap: connView.dailyTokenCap }
+          : entry.dailyTokenCap !== undefined
+            ? { dailyTokenCap: entry.dailyTokenCap }
+            : {}),
+        displayLabel: formatModelDisplayLabel({
+          id: entry.id ?? name,
+          provider: entry.provider,
+          credentialMode: isSub ? 'subscription' : 'api-key',
+          connectionName,
+        }),
+        admittedAt: '',
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * M5(1): Visibility filter for `GET /api/v1/models` and MCP `list_model_catalog`:
+ *   - `api-key` and `scope: 'factory'` subscription entries are visible fleet-wide.
+ *   - `scope: 'personal'` BYOM entries are visible ONLY to `ownerPrincipalId` and to Factory Admins (`models.manage` / `subscriptions.read`).
+ */
+export function visibleModelsForPrincipal(state: FactoryState, principal: Principal): Array<EnrichedModelView | Record<string, unknown>> {
+  bindModelStoreConnectionResolver(state);
+  const subjectActor = principal.onBehalfOf ?? principal.actor;
+  const grantRes = effectiveGrantsForActor(state, subjectActor);
+  const evalPrincipal: Principal = principal.onBehalfOf
+    ? { actor: subjectActor, roles: rolesForSubjectActor(state, subjectActor, grantRes.ok ? grantRes.grants : undefined) }
+    : principal;
+  const resource: AuthorizeResource = {
+    ...(grantRes.ok && grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+  };
+  const canReadAll =
+    authorize({ principal: evalPrincipal, privilege: 'models.manage', resource }).allowed ||
+    authorize({ principal: evalPrincipal, privilege: 'subscriptions.read', resource }).allowed;
+
+  let canonicalCaller: string | undefined;
+  try {
+    const c = normalizeActorToPrincipal(subjectActor, state.principals);
+    if (isValidUserPrincipalId(c)) canonicalCaller = c;
+  } catch {
+    canonicalCaller = undefined;
+  }
+
+  const isVisible = (m: { credentialMode?: string; scope?: string; ownerPrincipalId?: string }) => {
+    if (m.credentialMode === 'subscription' && m.scope === 'personal') {
+      return canReadAll || (Boolean(canonicalCaller) && m.ownerPrincipalId === canonicalCaller);
+    }
+    return true;
+  };
+
+  if (state.modelStore) {
+    return state.modelStore
+      .listOffered()
+      .filter((m) => isVisible(m))
+      .map((m) => state.modelStore!.enrich(m));
+  }
+
+  const out: Array<EnrichedModelView | Record<string, unknown>> = [];
+  for (const [name, entry] of Object.entries(state.modelCatalog ?? {})) {
+    if (!isVisible(entry)) continue;
+    if (entry.credentialMode === 'subscription') {
+      out.push(...enrichedCatalogModelsForNames(state, [name]));
+    } else {
+      out.push({
+        name,
+        provider: entry.provider,
+        ...(entry.price ? { price: entry.price } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * M5(8): Scoped subscription token spend view for `/api/v1/spend` and `/api/v1/spend/report`.
+ * Fleet-wide for callers holding `subscriptions.read` (admins); scoped to own `personal` connections and owned agents
+ * for non-admin human principals; scoped to `[runAgentId]` for `factory-spend` run tokens.
+ */
+export async function scopedSubscriptionSpendForCaller(
+  state: FactoryState,
+  caller: { kind: 'principal'; principal: Principal } | { kind: 'run'; agentId: string },
+  nowOverride?: Date,
+) {
+  const now = nowOverride ?? (state.subscriptionNow ? new Date(state.subscriptionNow()) : undefined);
+  const allViews = await getSubscriptions(state).list().catch(() => []);
+  const viewById = new Map(allViews.map((v) => [v.id, v]));
+  for (const v of allViews) cacheSubscriptionView(state, v);
+
+  if (caller.kind === 'run') {
+    const agent = findAgentRecord(state, caller.agentId);
+    const activeOwner = activePersonalOwnerOf(state, caller.agentId);
+    const allowedConns = new Set(
+      allViews
+        .filter((v) => v.scope === 'factory' || (agent?.kind === 'personal' && activeOwner && v.ownerPrincipalId === activeOwner))
+        .map((v) => v.id),
+    );
+    const report = state.spend.subscriptionReport(now, {
+      connections: allowedConns,
+      agents: new Set([caller.agentId]),
+    });
+    return enrichSubscriptionSpendReport(report, viewById);
+  }
+
+  const principal = caller.principal;
+  const subjectActor = principal.onBehalfOf ?? principal.actor;
+  const grantRes = effectiveGrantsForActor(state, subjectActor);
+  const evalPrincipal: Principal = principal.onBehalfOf
+    ? { actor: subjectActor, roles: rolesForSubjectActor(state, subjectActor, grantRes.ok ? grantRes.grants : undefined) }
+    : principal;
+  const canReadAll = authorize({
+    principal: evalPrincipal,
+    privilege: 'subscriptions.read',
+    resource: grantRes.ok && grantRes.grants !== undefined ? { grants: grantRes.grants } : {},
+  }).allowed;
+  if (canReadAll) {
+    return enrichSubscriptionSpendReport(state.spend.subscriptionReport(now), viewById);
+  }
+
+  let canonicalCaller: string | undefined;
+  try {
+    const c = normalizeActorToPrincipal(subjectActor, state.principals);
+    if (isValidUserPrincipalId(c)) canonicalCaller = c;
+  } catch {
+    canonicalCaller = undefined;
+  }
+  const ownConnections = new Set(
+    canonicalCaller
+      ? allViews.filter((v) => v.scope === 'personal' && v.ownerPrincipalId === canonicalCaller).map((v) => v.id)
+      : [],
+  );
+  const ownAgents = new Set(canonicalCaller ? ownedAgentIdsForPrincipal(state, canonicalCaller) : []);
+  const report = state.spend.subscriptionReport(now, {
+    connections: ownConnections,
+    agents: ownAgents,
+  });
+  return enrichSubscriptionSpendReport(report, viewById);
 }
 
 export const requestRun = new WeakMap<http.IncomingMessage, Run>();
@@ -1198,7 +1677,7 @@ export async function requirePrivilege(
   }
 
   const ownsAny =
-    privilege === 'skills.register' || privilege === 'mcp.use'
+    privilege === 'skills.register' || privilege === 'mcp.use' || privilege === 'models.read'
       ? checkOwnsAnyAgent(state, result.principal.actor)
       : false;
   const ownsPersonal =
@@ -1335,9 +1814,13 @@ export function handoffRefusal(state: FactoryState, agent: AgentRecord): string 
   if (isBuiltin) return undefined;
   const run = activeRun(state, agent.id);
   if (run?.state === 'BLOCKED_BUDGET_EXCEEDED') return 'blocked';
-  const budget = state.policies.get(agent.id).budgetUsd;
-  const limits = budget ? (run ? budget : { perDay: budget.perDay, perMonth: budget.perMonth }) : undefined;
-  const standing = checkStanding({ limits, spend: state.spend.get(agent.id, run?.runId) });
+  const limits = effectiveAgentBudgetUsd(state, agent, Boolean(run));
+  const selectedModelIsZeroPrice = isActiveAgentModelZeroPrice(state, agent.id, run?.model);
+  const standing = checkStanding({
+    limits,
+    spend: state.spend.get(agent.id, run?.runId),
+    selectedModelIsZeroPrice,
+  });
   return standing.inGoodStanding ? undefined : standing.window;
 }
 
@@ -1384,9 +1867,18 @@ export function badRunModel(model: unknown): string | undefined {
 /**
  * E1.2: the models this factory offers right now (the catalog gatekeeper egress routes by), read fresh on every call so
  * a model removed from the catalog is gone at once. Names only: no endpoints, keys or vendor ids.
+ * M5(1): `scope: 'personal'` BYOM models are excluded unless `forAgentId` is a `personal` agent actively owned by `ownerPrincipalId`.
  */
-export function approvedModels(state: FactoryState): { models: string[]; default: string | null } {
-  const names = state.modelStore ? state.modelStore.listOffered().map((m) => m.name) : Object.keys(state.modelCatalog ?? {});
+export function approvedModels(state: FactoryState, forAgentId?: string): { models: string[]; default: string | null } {
+  const activeOwner = forAgentId ? activePersonalOwnerOf(state, forAgentId) : undefined;
+  const allNames = state.modelStore ? state.modelStore.listOffered().map((m) => m.name) : Object.keys(state.modelCatalog ?? {});
+  const names = allNames.filter((name) => {
+    const entry = catalogEntryOf(state, name);
+    if (entry?.credentialMode === 'subscription' && entry.scope === 'personal') {
+      return Boolean(activeOwner && entry.ownerPrincipalId === activeOwner);
+    }
+    return true;
+  });
   return { models: [...names].sort(), default: defaultModelOf(state) ?? null };
 }
 
@@ -1397,7 +1889,8 @@ export function approvedModels(state: FactoryState): { models: string[]; default
  */
 function unblockAffordableRuns(state: FactoryState, agentId: string, limits: BudgetLimits | undefined, actor: string) {
   for (const run of state.runs.list({ agentId, active: true })) {
-    if (run.state === 'BLOCKED_BUDGET_EXCEEDED' && checkStanding({ limits, spend: state.spend.get(agentId, run.runId) }).inGoodStanding) {
+    const selectedModelIsZeroPrice = isActiveAgentModelZeroPrice(state, agentId, run.model);
+    if (run.state === 'BLOCKED_BUDGET_EXCEEDED' && checkStanding({ limits, spend: state.spend.get(agentId, run.runId), selectedModelIsZeroPrice }).inGoodStanding) {
       unblockRun(state, run.runId, 'BLOCKED_BUDGET_EXCEEDED', actor);
     }
   }
@@ -1605,6 +2098,19 @@ export async function setAgentModels(
     }
   }
 
+  const byomCheck = checkPersonalByomModelsForAgent(state, agentId, [
+    ...(Array.isArray(body.approvedModels) ? body.approvedModels : []),
+    body.currentModel,
+    body.primaryModel,
+    body.secondaryModel,
+  ]);
+  if (!byomCheck.ok) {
+    return {
+      status: byomCheck.status,
+      body: { error: byomCheck.error, model: byomCheck.model, message: byomCheck.message },
+    };
+  }
+
   const existing = state.policies.get(agentId);
   let next: AgentPolicy = structuredClone(existing);
 
@@ -1672,12 +2178,15 @@ export async function setAgentModels(
     actor,
     reason: req ? changeReason(req, 'agent models updated') : 'agent models updated',
   });
+  unblockAffordableRuns(state, agentId, effectiveAgentBudgetUsd(state, agent, true), actor);
 
+  const updatedEff = effectiveAgentModels(checked.policy, defaultModelOf(state));
   return {
     status: 200,
     body: {
       agentId,
-      ...effectiveAgentModels(checked.policy, defaultModelOf(state)),
+      ...updatedEff,
+      models: enrichedCatalogModelsForNames(state, updatedEff.approvedModels),
       defaultModel: defaultModelOf(state) ?? null,
     },
   };
@@ -1733,6 +2242,18 @@ async function applyRunModelSwitch(
     if (!approved.includes(body.secondaryModel)) {
       return { status: 400, body: { error: 'invalid_model_selection', message: `secondaryModel '${body.secondaryModel}' is not in approved models: ${approved.join(', ')}` } };
     }
+  }
+
+  const runByomCheck = checkPersonalByomModelsForAgent(state, run.agentId, [
+    body.currentModel,
+    body.primaryModel,
+    body.secondaryModel,
+  ]);
+  if (!runByomCheck.ok) {
+    return {
+      status: runByomCheck.status,
+      body: { error: runByomCheck.error, model: runByomCheck.model, message: runByomCheck.message },
+    };
   }
 
   let next: AgentPolicy = structuredClone(pol ?? {});
@@ -1798,6 +2319,7 @@ async function applyRunModelSwitch(
       ok: true,
       agentId: run.agentId,
       ...updatedEff,
+      models: enrichedCatalogModelsForNames(state, updatedEff.approvedModels),
       defaultModel: defaultModelOf(state) ?? null,
     },
   };
@@ -1816,6 +2338,7 @@ async function handleRunModels(state: FactoryState, run: Run, req: http.Incoming
     json(res, 200, {
       agentId: run.agentId,
       ...eff,
+      models: enrichedCatalogModelsForNames(state, eff.approvedModels),
       defaultModel: defaultModelOf(state) ?? null,
       canManageModels: canManage.allowed,
     });
@@ -1921,7 +2444,7 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
         const body = h ? { subagent: sub, models: h.approvedModels } : { error: 'subagent_not_allowed', subagent: sub };
         return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(body) }], ...(h ? {} : { isError: true }) } };
       }
-      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(approvedModels(state)) }] } };
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(approvedModels(state, run.agentId)) }] } };
     }
     if (params.name === 'list_subagents') {
       return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify({ subagents: allowedSubagents(state, run.agentId) }) }] } };
@@ -1943,6 +2466,7 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
               text: JSON.stringify({
                 agentId: run.agentId,
                 ...eff,
+                models: enrichedCatalogModelsForNames(state, eff.approvedModels),
                 defaultModel: defaultModelOf(state) ?? null,
                 canManageModels: canManage.allowed,
               }),
@@ -2002,25 +2526,65 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
 }
 
 /**
- * Retire a model and take it out of every policy that lists it (§6.9 M2, GAP-162). Each changed policy goes through
- * the same record as a policy change: `POLICY_UPDATED` and a configuration version (GAP-181).
+ * Retire a model and take it out of every policy and skill binding that lists it (§6.9 M2, M5, GAP-162, GAP-245).
+ * Each changed policy goes through the same record as a policy change: `POLICY_UPDATED` and a configuration version (GAP-181).
  */
-export async function retireModel(state: FactoryState, modelName: string, actor: string): Promise<{ retired: false } | { retired: true; affectedAgents: string[] }> {
-  if (!state.modelStore?.retire(modelName)) return { retired: false };
+export async function retireCatalogModel(
+  state: FactoryState,
+  modelName: string,
+  actor: string,
+  opts?: { onBehalfOf?: string },
+): Promise<{ retired: false; affectedAgents: []; policiesUpdated: 0 } | { retired: true; affectedAgents: string[]; policiesUpdated: number }> {
+  const existing = state.modelStore?.getOffered(modelName);
+  if (!state.modelStore?.retire(modelName)) {
+    return { retired: false, affectedAgents: [], policiesUpdated: 0 };
+  }
   if (state.defaultModel === modelName) state.defaultModel = undefined;
   const affectedAgents: string[] = [];
   for (const agentId of state.policies.ids()) {
     const policy = state.policies.get(agentId);
-    if (!policy.models?.includes(modelName)) continue;
+    const usesModel =
+      Boolean(policy.models?.includes(modelName)) ||
+      policy.currentModel === modelName ||
+      policy.primaryModel === modelName ||
+      policy.secondaryModel === modelName;
+    if (!usesModel) continue;
     affectedAgents.push(agentId);
     const updated = applyModelsRemoval(policy, [modelName]);
     state.policies.set(agentId, updated);
-    state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'POLICY_UPDATED', actor });
+    state.ledger.append({
+      timestamp: new Date().toISOString(),
+      agentId,
+      type: 'action',
+      action: 'POLICY_UPDATED',
+      actor,
+      ...(opts?.onBehalfOf ? { onBehalfOf: opts.onBehalfOf } : {}),
+    });
     await recordConfig(state, agentId, { actor, reason: `model ${modelName} retired` });
   }
-  state.modelCatalog = state.modelStore.toEgressCatalog();
-  state.ledger.append({ action: 'MODEL_RETIRED', actor, model: modelName, affectedAgents, timestamp: new Date().toISOString() });
-  return { retired: true, affectedAgents };
+  clearSkillBindingsForModel(state, modelName, actor);
+  syncModelCatalogFromStore(state);
+  state.ledger.append({
+    action: 'MODEL_RETIRED',
+    actor,
+    ...(opts?.onBehalfOf ? { onBehalfOf: opts.onBehalfOf } : {}),
+    model: modelName,
+    ...(existing?.provider ? { provider: existing.provider } : {}),
+    ...(existing?.credentialMode ? { credentialMode: existing.credentialMode } : {}),
+    ...(existing?.scope ? { scope: existing.scope } : {}),
+    ...(existing?.ownerPrincipalId ? { ownerPrincipalId: existing.ownerPrincipalId } : {}),
+    ...(existing?.connection ? { connection: existing.connection } : {}),
+    ...(existing?.templateId ? { templateId: existing.templateId } : {}),
+    affectedAgents,
+    timestamp: new Date().toISOString(),
+  });
+  return { retired: true, affectedAgents, policiesUpdated: affectedAgents.length };
+}
+
+export async function retireModel(state: FactoryState, modelName: string, actor: string): Promise<{ retired: false } | { retired: true; affectedAgents: string[] }> {
+  const out = await retireCatalogModel(state, modelName, actor);
+  if (!out.retired) return { retired: false };
+  return { retired: true, affectedAgents: out.affectedAgents };
 }
 
 /** Registered ai-provider, else a built-in template. HTTPS only. The secret name is held by the gatekeeper-egress. */
@@ -2087,12 +2651,81 @@ function vendorCatalogFields(state: FactoryState, vendorId: string): { provider:
   };
 }
 
-export type AdmitInput = { name?: string; id?: string; vendorId?: string; provider?: string; endpoint?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } };
+export type AdmitInput = {
+  name?: string;
+  id?: string;
+  vendorId?: string;
+  provider?: string;
+  endpoint?: string;
+  region?: string;
+  price?: { inputPerMTok?: number; outputPerMTok?: number; inputPer1M?: number; outputPer1M?: number };
+  credentialMode?: 'api-key' | 'subscription';
+  connection?: string;
+  scope?: 'factory' | 'personal';
+};
+
+export function admitSubscriptionCatalogModel(
+  state: FactoryState,
+  params: {
+    name: string;
+    provider: string;
+    id: string;
+    connection: string;
+    connectionName?: string;
+    templateId: string;
+    scope: 'factory' | 'personal';
+    ownerPrincipalId?: string;
+    price?: { inputPerMTok: number; outputPerMTok: number };
+    actor: string;
+    onBehalfOf?: string;
+  },
+): StoredModel {
+  if (!state.modelStore) {
+    throw new ModelCatalogError(500, 'model_store_not_configured', 'ModelStore is not configured');
+  }
+  bindModelStoreConnectionResolver(state);
+  const model = state.modelStore.admitSubscription({
+    name: params.name,
+    provider: params.provider,
+    id: params.id,
+    connection: params.connection,
+    templateId: params.templateId,
+    scope: params.scope,
+    ...(params.ownerPrincipalId ? { ownerPrincipalId: params.ownerPrincipalId } : {}),
+    ...(params.price ? { price: params.price } : {}),
+    actor: params.actor,
+  });
+  syncModelCatalogFromStore(state);
+  state.ledger.append({
+    action: 'MODEL_ADMITTED',
+    actor: params.actor,
+    ...(params.onBehalfOf ? { onBehalfOf: params.onBehalfOf } : {}),
+    model: model.name,
+    provider: model.provider,
+    credentialMode: 'subscription',
+    scope: model.scope,
+    ...(model.ownerPrincipalId ? { ownerPrincipalId: model.ownerPrincipalId } : {}),
+    connection: model.connection,
+    ...(params.connectionName ? { connectionName: params.connectionName } : {}),
+    templateId: model.templateId,
+    price: model.price,
+    timestamp: new Date().toISOString(),
+  });
+  return model;
+}
 
 /** One admission path for REST, MCP and the console (GAP-182). */
 export function admitModel(state: FactoryState, input: AdmitInput, actor: string): { ok: true; model: StoredModel } | { ok: false; status: number; error: string; message?: string } {
   if (!state.modelStore) return { ok: false, status: 500, error: 'model_store_not_configured' };
   if (!input.name || !input.id) return { ok: false, status: 400, error: 'invalid_request', message: 'name and id are required' };
+  let normalizedPrice: { inputPerMTok: number; outputPerMTok: number } | undefined;
+  if (input.price !== undefined) {
+    const parsedPrice = parseModelPriceInput(input.price);
+    if (!parsedPrice.ok) {
+      return { ok: false, status: 400, error: 'invalid_price', message: parsedPrice.error };
+    }
+    normalizedPrice = parsedPrice.price;
+  }
   const cloud = Boolean(input.provider && CLOUD_PROVIDERS.has(input.provider));
   let vendorId = cloud ? undefined : input.vendorId;
   if (!vendorId && input.provider && API_KEY_PROVIDER_VENDOR[input.provider]) {
@@ -2111,11 +2744,23 @@ export function admitModel(state: FactoryState, input: AdmitInput, actor: string
     fields = { provider: input.provider, ...(input.region ? { region: input.region } : {}) };
   }
   try {
-    const model = state.modelStore.admit({ name: input.name, id: input.id, ...fields, vendorId: vendorId ?? input.vendorId, price: input.price, actor });
-    state.modelCatalog = state.modelStore.toEgressCatalog();
-    state.ledger.append({ action: 'MODEL_ADMITTED', actor, model: model.name, provider: model.provider, vendorId: model.vendorId, price: model.price, timestamp: new Date().toISOString() });
+    const model = state.modelStore.admit({ name: input.name, id: input.id, ...fields, vendorId: vendorId ?? input.vendorId, price: normalizedPrice, actor });
+    syncModelCatalogFromStore(state);
+    state.ledger.append({
+      action: 'MODEL_ADMITTED',
+      actor,
+      model: model.name,
+      provider: model.provider,
+      credentialMode: 'api-key',
+      vendorId: model.vendorId,
+      price: model.price,
+      timestamp: new Date().toISOString(),
+    });
     return { ok: true, model };
   } catch (err) {
+    if (err instanceof ModelCatalogError) {
+      return { ok: false, status: err.status, error: err.code, message: err.message };
+    }
     return { ok: false, status: 409, error: 'admission_failed', message: err instanceof Error ? err.message : String(err) };
   }
 }
@@ -2128,8 +2773,8 @@ export function relinkVendorModels(state: FactoryState): string[] {
   if (!state.modelStore) return [];
   const changed: string[] = [];
   for (const m of state.modelStore.listOffered()) {
-    // Cloud model services keep their provider and region; a vendor id on them is a label only.
-    if (!m.vendorId || CLOUD_PROVIDERS.has(m.provider)) continue;
+    // Cloud model services keep their provider and region; subscription models follow their Keymaster connection.
+    if (m.credentialMode === 'subscription' || !m.vendorId || CLOUD_PROVIDERS.has(m.provider)) continue;
     const v = vendorCatalogFields(state, m.vendorId);
     if ('error' in v) continue;
     if (state.modelStore.relinkVendor(m.name, v, false)) changed.push(m.name);
@@ -2431,9 +3076,14 @@ import { UI_HTML } from './ui.js';
 export function createFactoryServer(state: FactoryState): http.Server {
   wireGrantStoreKindLookup(state);
   tapActAsLedger(state);
+  wireSubscriptionRuntime(state);
   // SK1: follow skill checks a previous control plane started and did not see end.
   void resumeSkillChecks(state).catch((err) => console.warn('[control-plane] could not resume skill checks:', err));
-  return http.createServer(async (req, res) => {
+  const discoveryTimer =
+    state.subscriptionDiscoveryIntervalMs !== undefined || (state.gatekeeperEgressUrl && state.gatekeeperEgressToken)
+      ? startSubscriptionDiscoveryTimer(state, state.subscriptionDiscoveryIntervalMs)
+      : undefined;
+  const server = http.createServer(async (req, res) => {
     try {
       await route(state, req, res);
     } catch (err) {
@@ -2441,12 +3091,17 @@ export function createFactoryServer(state: FactoryState): http.Server {
       if (!res.headersSent) json(res, status, { error: err instanceof Error ? err.message : String(err) });
     }
   });
+  if (discoveryTimer) {
+    server.on('close', () => clearInterval(discoveryTimer));
+  }
+  return server;
 }
 
 async function route(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
   if (!verifyApiKeyBeforeRouting(state, req, res)) return;
   wireGrantStoreKindLookup(state);
   tapActAsLedger(state);
+  wireSubscriptionRuntime(state);
   const actAsCheck = await enforceActAsHeader(state, req, res);
   if (!actAsCheck.ok) return;
   if (actAsCheck.ctx) {
@@ -2627,6 +3282,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (path === '/api/v1/spend' && req.method === 'GET') {
     let actor: string;
     let agentId = 'factory';
+    let spendCaller: { kind: 'principal'; principal: Principal } | { kind: 'run'; agentId: string };
     const verdict = await verifyRun({ tokens: state.runTokens, token: bearerOf(req), runOf: (id) => state.runs.get(id), ended: (r) => isTerminal(r.state) });
     if (verdict.kind === 'refused') return json(res, 401, { error: 'invalid_run_token' });
     if (verdict.kind === 'ok') {
@@ -2638,12 +3294,15 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       }
       actor = `run:${claims.agentId}:${claims.runId}`;
       agentId = claims.agentId;
+      spendCaller = { kind: 'run', agentId: claims.agentId };
     } else {
       const principal = await requirePrivilege(req, res, state, 'spend.read');
       if (!principal) return;
       actor = principal.actor;
+      spendCaller = { kind: 'principal', principal };
     }
     const report = state.spend.report();
+    const subscriptions = await scopedSubscriptionSpendForCaller(state, spendCaller);
     const round = <T extends { usd: number }>(w: T): T => ({ ...w, usd: Number(w.usd.toFixed(6)) });
     const agents = Object.fromEntries(
       Object.entries(report.agents).map(([id, a]) => [
@@ -2655,7 +3314,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     );
     const total = (k: 'day' | 'month') => Number(Object.values(report.agents).reduce((n, a) => n + a[k].usd, 0).toFixed(6));
     state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'SPEND_READ', actor });
-    json(res, 200, { currency: 'USD', day: report.day, month: report.month, totalUsd: { day: total('day'), month: total('month') }, agents });
+    json(res, 200, { currency: 'USD', day: report.day, month: report.month, totalUsd: { day: total('day'), month: total('month') }, agents, subscriptions });
     return;
   }
 
@@ -2834,8 +3493,9 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   // E1.2: a run reads the factory's approved model list with its own run token.
   const runApproved = path.match(/^\/api\/v1\/runs\/([^/]+)\/approved-models$/);
   if (runApproved && req.method === 'GET') {
-    if (!(await authenticateRun(req, res, state, runApproved[1]))) return;
-    json(res, 200, approvedModels(state));
+    const authedRun = await authenticateRun(req, res, state, runApproved[1]);
+    if (!authedRun) return;
+    json(res, 200, approvedModels(state, authedRun.agentId));
     return;
   }
 
@@ -3640,13 +4300,28 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         const payer = run ? budgetHolder(run) : { agentId: stored.agentId, runId: stored.runId as string, parent: false };
         const agent = state.agents.get(payer.agentId);
         const isBuiltin = Boolean(agent?.isBuiltin || agent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(payer.agentId));
-        const policy = state.policies.get(payer.agentId);
+        const effectiveLimits = effectiveAgentBudgetUsd(state, agent, true);
         // `before` must be read before the spend is added, or a crossing is never detected.
-        const beforeStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(payer.agentId, payer.runId) });
+        const beforeStanding = checkStanding({ limits: effectiveLimits, spend: state.spend.get(payer.agentId, payer.runId) });
         const before = beforeStanding.inGoodStanding ? undefined : beforeStanding.window;
         state.spend.add(payer.agentId, payer.runId, stored.costUsd, stored.timestamp, spendDetail(stored));
-        if (!isBuiltin) {
-          const afterStanding = checkStanding({ limits: policy?.budgetUsd, spend: state.spend.get(payer.agentId, payer.runId) });
+        if (stored.credentialMode === 'subscription' && typeof stored.connection === 'string' && stored.connection) {
+          let connView = getCachedSubscriptionView(state, stored.connection);
+          if (!connView) {
+            connView = await getSubscriptions(state).get(stored.connection).catch(() => undefined);
+            if (connView) cacheSubscriptionView(state, connView);
+          }
+          getSubscriptionCaps(state).recordLlmUsage({
+            connection: stored.connection,
+            agentId: payer.agentId,
+            inputTokens: stored.inputTokens,
+            outputTokens: stored.outputTokens,
+            timestamp: stored.timestamp,
+          });
+        }
+        // M5(8): $0 calls (costUsd <= 0) never cross USD budget ceilings or block runs for budget.
+        if (!isBuiltin && stored.costUsd > 0) {
+          const afterStanding = checkStanding({ limits: effectiveLimits, spend: state.spend.get(payer.agentId, payer.runId) });
           const after = afterStanding.inGoodStanding ? undefined : afterStanding.window;
           // Alert once per crossing, even if the run already finished; block only a run that is still live.
           if (after && after !== before) {
@@ -3667,18 +4342,37 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         }
       }
     }
+    if (isGatekeeperEgress && stored.type === 'action' && stored.action === 'MODEL_FAILOVER') {
+      const connId =
+        typeof stored.connection === 'string'
+          ? stored.connection
+          : typeof stored.requestedModel === 'string'
+            ? catalogEntryOf(state, stored.requestedModel)?.connection
+            : undefined;
+      if (connId && !getCachedSubscriptionView(state, connId)) {
+        const fetched = await getSubscriptions(state).get(connId).catch(() => undefined);
+        if (fetched) cacheSubscriptionView(state, fetched);
+      }
+      getSubscriptionCaps(state).notifyPricedFallbackIfNeeded({
+        agentId: stored.agentId,
+        model: typeof stored.model === 'string' ? stored.model : undefined,
+        requestedModel: typeof stored.requestedModel === 'string' ? stored.requestedModel : undefined,
+        connection: connId,
+        failoverReason: typeof stored.failoverReason === 'string' ? stored.failoverReason : undefined,
+        resetAt: typeof stored.resetAt === 'string' ? stored.resetAt : undefined,
+      });
+    }
     await routeEvents(state, stored);
     json(res, 201, { ok: true });
     return;
   }
 
-  // §6.9 M3: the models this factory offers, for the admin choosing an agent's models.
+  // §6.9 M3, M5(1): the models this factory offers, scoped so personal BYOM entries are visible only to their owner and Factory Admins.
   if (path === '/api/v1/models' && req.method === 'GET') {
-    if (!(await requirePrivilege(req, res, state, 'models.read'))) return;
+    const principal = await requirePrivilege(req, res, state, 'models.read');
+    if (!principal) return;
     json(res, 200, {
-      models: state.modelStore
-        ? state.modelStore.listOffered().map((m) => ({ name: m.name, provider: m.provider, id: m.id, vendorId: m.vendorId, ...(m.price ? { price: m.price } : {}) }))
-        : Object.entries(state.modelCatalog ?? {}).map(([name, m]) => ({ name, provider: m.provider, ...(m.price ? { price: m.price } : {}) })),
+      models: visibleModelsForPrincipal(state, principal),
       staged: state.modelStore?.listStaged() ?? [],
       // M2: what an agent gets when its policy names no models.
       default: defaultModelOf(state) ?? null,
@@ -3690,6 +4384,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   // Internal catalog endpoint with ETag for gatekeeper-egress sync (§6.9 M3, GAP-162, GAP-163)
   if (path === '/api/v1/models/internal/catalog' && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'egress.models.read'))) return;
+    bindModelStoreConnectionResolver(state);
     const version = state.modelStore?.getVersion() ?? 1;
     res.setHeader('ETag', `"${version}"`);
     json(res, 200, {
@@ -3730,16 +4425,130 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     }
   }
 
-  // Model admission with token pricing (Accountant §6.4, GAP-162, GAP-163)
+  // Model admission with token pricing or scoped subscription entry admission (Accountant §6.4, M5(1), GAP-162, GAP-245)
   if (path === '/api/v1/models/admit' && req.method === 'POST') {
+    const who = await identify(req, state);
+    if (!who.ok) {
+      await requirePrivilege(req, res, state, 'models.manage');
+      return;
+    }
+    const input = (await readJson(req)) as AdmitInput;
+    if (input.credentialMode === 'subscription' || input.connection !== undefined) {
+      const principal = await requirePrivilege(req, res, state, 'subscriptions.own');
+      if (!principal) return;
+      const connId = typeof input.connection === 'string' ? input.connection.trim() : '';
+      if (!connId) {
+        json(res, 400, { error: 'invalid_connection', message: 'connection id is required for subscription catalog entries' });
+        return;
+      }
+      const subjectActor = principal.onBehalfOf ?? principal.actor;
+      const grantRes = effectiveGrantsForActor(state, subjectActor);
+      if (!grantRes.ok) {
+        json(res, 503, { error: grantRes.error });
+        return;
+      }
+      const evalPrincipal: Principal = principal.onBehalfOf
+        ? { actor: subjectActor, roles: rolesForSubjectActor(state, subjectActor, grantRes.grants) }
+        : principal;
+      const authRes: AuthorizeResource = grantRes.grants !== undefined ? { grants: grantRes.grants } : {};
+      const canManageModels = authorize({ principal: evalPrincipal, privilege: 'models.manage', resource: authRes }).allowed;
+      let canonicalUser: string | undefined;
+      try {
+        const c = normalizeActorToPrincipal(subjectActor, state.principals);
+        if (isValidUserPrincipalId(c)) canonicalUser = c;
+      } catch {
+        canonicalUser = undefined;
+      }
+
+      const existing = await getSubscriptions(state).get(connId);
+      if (!existing) {
+        json(res, 404, { error: 'unknown_connection', message: `no connection "${connId}"` });
+        return;
+      }
+      cacheSubscriptionView(state, existing);
+      if (existing.scope === 'factory') {
+        if (!(await requirePrivilege(req, res, state, 'models.manage'))) return;
+      } else if (!canonicalUser || existing.ownerPrincipalId !== canonicalUser) {
+        if (canManageModels) {
+          json(res, 403, {
+            error: 'forbidden_connection',
+            message: "use X-Factory-Act-As to add catalog entries on another principal's personal subscription connection",
+          });
+          return;
+        }
+        json(res, 404, { error: 'unknown_connection', message: `no connection "${connId}"` });
+        return;
+      }
+      const rawName = typeof input.name === 'string' ? input.name.trim() : '';
+      const rawModelId = typeof input.id === 'string' ? input.id.trim() : '';
+      if (!rawName || !rawModelId) {
+        json(res, 400, { error: 'invalid_request', message: 'name and id are required' });
+        return;
+      }
+      if (existing.discovery?.listAvailable === true && Array.isArray(existing.discoveredModels)) {
+        if (!existing.discoveredModels.some((m) => m.id === rawModelId)) {
+          json(res, 400, {
+            error: 'model_not_in_subscription',
+            message: `model '${rawModelId}' is not in the discovered model list for connection '${existing.id}'`,
+          });
+          return;
+        }
+      }
+      let parsedPrice: { inputPerMTok: number; outputPerMTok: number } | undefined;
+      if (existing.scope === 'personal') {
+        if (input.price !== undefined) {
+          const p = parseModelPriceInput(input.price);
+          if (!p.ok || !isZeroPrice(p.price)) {
+            json(res, 403, {
+              error: 'personal_model_price_immutable',
+              message: 'Personal BYOM subscription catalog entries have a fixed immutable $0 price',
+            });
+            return;
+          }
+        }
+        parsedPrice = { inputPerMTok: 0, outputPerMTok: 0 };
+      } else if (input.price !== undefined) {
+        const p = parseModelPriceInput(input.price);
+        if (!p.ok) {
+          json(res, 400, { error: 'invalid_price', message: p.error });
+          return;
+        }
+        parsedPrice = p.price;
+      }
+      try {
+        const stored = admitSubscriptionCatalogModel(state, {
+          name: rawName,
+          provider: existing.templateId,
+          id: rawModelId,
+          connection: existing.id,
+          connectionName: existing.name,
+          templateId: existing.templateId,
+          scope: existing.scope,
+          ...(existing.ownerPrincipalId ? { ownerPrincipalId: existing.ownerPrincipalId } : {}),
+          ...(parsedPrice ? { price: parsedPrice } : {}),
+          actor: principal.actor,
+          ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}),
+        });
+        json(res, 201, { ok: true, model: state.modelStore ? state.modelStore.enrich(stored) : stored });
+        return;
+      } catch (err) {
+        if (err instanceof ModelCatalogError) {
+          json(res, err.status, { error: err.code, message: err.message });
+          return;
+        }
+        json(res, 409, { error: 'admission_failed', message: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+    }
+
     const principal = await requirePrivilege(req, res, state, 'models.manage');
     if (!principal) return;
-    const out = admitModel(state, (await readJson(req)) as AdmitInput, principal.actor);
+    const out = admitModel(state, input, principal.actor);
     if (!out.ok) {
       json(res, out.status, { error: out.error, ...(out.message ? { message: out.message } : {}) });
       return;
     }
-    json(res, 201, { ok: true, model: out.model });
+    json(res, 201, { ok: true, model: state.modelStore ? state.modelStore.enrich(out.model) : out.model });
     return;
   }
 
@@ -3748,10 +4557,11 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (pricingMatch && req.method === 'PUT') {
     const principal = await requirePrivilege(req, res, state, 'models.manage');
     if (!principal) return;
-    const modelName = pricingMatch[1];
-    const body = (await readJson(req)) as { price?: { inputPerMTok: number; outputPerMTok: number } };
-    if (!body.price || typeof body.price.inputPerMTok !== 'number' || typeof body.price.outputPerMTok !== 'number') {
-      json(res, 400, { error: 'invalid_request', message: 'price with numeric inputPerMTok and outputPerMTok required' });
+    const modelName = decodeURIComponent(pricingMatch[1]);
+    const body = (await readJson(req)) as { price?: unknown };
+    const parsedPrice = parseModelPriceInput(body.price);
+    if (!parsedPrice.ok) {
+      json(res, 400, { error: 'invalid_request', message: parsedPrice.error });
       return;
     }
     if (!state.modelStore) {
@@ -3759,18 +4569,22 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       return;
     }
     try {
-      const model = state.modelStore.updatePricing(modelName, body.price, principal.actor);
-      state.modelCatalog = state.modelStore.toEgressCatalog();
+      const model = state.modelStore.updatePricing(modelName, parsedPrice.price, principal.actor);
+      syncModelCatalogFromStore(state);
       state.ledger.append({
         action: 'MODEL_PRICING_UPDATED',
         actor: principal.actor,
         model: modelName,
-        price: body.price,
+        price: parsedPrice.price,
         timestamp: new Date().toISOString(),
       });
-      json(res, 200, { ok: true, model });
+      json(res, 200, { ok: true, model: state.modelStore.enrich(model) });
       return;
     } catch (err: any) {
+      if (err instanceof ModelCatalogError) {
+        json(res, err.status, { error: err.code, message: err.message });
+        return;
+      }
       json(res, 404, { error: 'not_found', message: err.message });
       return;
     }
@@ -3802,17 +4616,58 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       json(res, 200, { ok: true, default: modelName });
       return;
     } catch (err: any) {
+      if (err instanceof ModelCatalogError) {
+        json(res, err.status, { error: err.code, message: err.message });
+        return;
+      }
       json(res, 400, { error: 'invalid_request', message: err.message });
       return;
     }
   }
 
-  // Model retirement with policy fallback migration (§6.9 M2, GAP-162, GAP-163)
+  // Model retirement with policy fallback migration (§6.9 M2, M5(1), GAP-162, GAP-163, GAP-245)
   const modelDeleteMatch = path.match(/^\/api\/v1\/models\/([^/]+)$/);
   if (modelDeleteMatch && req.method === 'DELETE') {
+    const modelName = decodeURIComponent(modelDeleteMatch[1]);
+    const existingEntry = state.modelStore?.getOffered(modelName);
+    if (existingEntry?.credentialMode === 'subscription' && existingEntry.scope === 'personal') {
+      const principal = await requirePrivilege(req, res, state, 'subscriptions.own');
+      if (!principal) return;
+      const subjectActor = principal.onBehalfOf ?? principal.actor;
+      const grantRes = effectiveGrantsForActor(state, subjectActor);
+      if (!grantRes.ok) {
+        json(res, 503, { error: grantRes.error });
+        return;
+      }
+      const evalPrincipal: Principal = principal.onBehalfOf
+        ? { actor: subjectActor, roles: rolesForSubjectActor(state, subjectActor, grantRes.grants) }
+        : principal;
+      const authRes: AuthorizeResource = grantRes.grants !== undefined ? { grants: grantRes.grants } : {};
+      const canManageModels = authorize({ principal: evalPrincipal, privilege: 'models.manage', resource: authRes }).allowed;
+      let canonicalUser: string | undefined;
+      try {
+        const c = normalizeActorToPrincipal(subjectActor, state.principals);
+        if (isValidUserPrincipalId(c)) canonicalUser = c;
+      } catch {
+        canonicalUser = undefined;
+      }
+      if (!canManageModels && (!canonicalUser || existingEntry.ownerPrincipalId !== canonicalUser)) {
+        json(res, 403, { error: 'forbidden', required: 'admin', requiredRole: 'admin' });
+        return;
+      }
+      const out = await retireCatalogModel(state, modelName, principal.actor, {
+        ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}),
+      });
+      if (!out.retired) {
+        json(res, 404, { error: 'not_found' });
+        return;
+      }
+      json(res, 200, { ok: true, retired: modelName, affectedAgents: out.affectedAgents });
+      return;
+    }
+
     const principal = await requirePrivilege(req, res, state, 'models.manage');
     if (!principal) return;
-    const modelName = modelDeleteMatch[1];
     if (!state.modelStore) {
       json(res, 500, { error: 'model_store_not_configured' });
       return;
@@ -3843,6 +4698,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       json(res, 200, {
         agentId,
         ...eff,
+        models: enrichedCatalogModelsForNames(state, eff.approvedModels),
         defaultModel: defaultModelOf(state) ?? null,
       });
       return;
@@ -3902,10 +4758,24 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       });
       return;
     }
+    const policyByomCheck = checkPersonalByomModelsForAgent(state, agentId, [
+      ...(checked.policy.models ?? []),
+      checked.policy.currentModel,
+      checked.policy.primaryModel,
+      checked.policy.secondaryModel,
+    ]);
+    if (!policyByomCheck.ok) {
+      json(res, policyByomCheck.status, {
+        error: policyByomCheck.error,
+        model: policyByomCheck.model,
+        message: policyByomCheck.message,
+      });
+      return;
+    }
     state.policies.set(agentId, checked.policy);
     state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'POLICY_UPDATED', actor: principal.actor });
     await recordConfig(state, agentId, { actor: principal.actor, reason: changeReason(req, 'policy updated') });
-    unblockAffordableRuns(state, agentId, checked.policy?.budgetUsd, principal.actor);
+    unblockAffordableRuns(state, agentId, effectiveAgentBudgetUsd(state, agent, true), principal.actor);
     json(res, 200, checked.policy);
     return;
   }
@@ -3943,9 +4813,13 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         : state.defaultModel
         ? [state.defaultModel]
         : undefined;
+      const smokeAgentKind = effectiveAgentKind(agent);
+      const smokeActiveOwner = smokeAgentKind === 'personal' ? activePersonalOwnerOf(state, run.agentId) : undefined;
       json(res, 200, {
         run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state), ...(run.model ? { model: run.model } : {}) },
         agentState: agent.state,
+        agentKind: smokeAgentKind,
+        ...(smokeActiveOwner ? { activeOwnerPrincipalId: smokeActiveOwner } : {}),
         isBuiltin: false,
         policySet: true,
         policy: {
@@ -3975,10 +4849,16 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       return;
     }
     const payerBuiltin = Boolean(payerAgent?.isBuiltin || payerAgent?.category === 'builtin' || BUILTIN_AGENT_IDS.has(payer.agentId));
-    const budgetUsd = payer.parent ? (payerBuiltin ? undefined : state.policies.get(payer.agentId).budgetUsd) : pol.budgetUsd;
+    const budgetUsd = payer.parent
+      ? effectiveAgentBudgetUsd(state, payerAgent, true)
+      : effectiveAgentBudgetUsd(state, agent, true);
+    const runAgentKind = effectiveAgentKind(agent);
+    const runActiveOwner = runAgentKind === 'personal' ? activePersonalOwnerOf(state, run.agentId) : undefined;
     json(res, 200, {
       run: { runId: run.runId, agentId: run.agentId, state: run.state, live: !isTerminal(run.state), ...(run.model ? { model: run.model } : {}) },
       agentState: agent.state,
+      agentKind: runAgentKind,
+      ...(runActiveOwner ? { activeOwnerPrincipalId: runActiveOwner } : {}),
       isBuiltin: payer.parent ? payerBuiltin : isBuiltin,
       // E7: a policy set for this agent implies the factory model API; the global fallback never does.
       policySet: state.policies.has(run.agentId),
@@ -4377,6 +5257,38 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         json(res, ownership.status, ownership.body);
         return;
       }
+      const explicitRegModels = [
+        typeof cartridge.model === 'string' ? cartridge.model : (typeof body.model === 'string' ? body.model : undefined),
+        ...(Array.isArray(cartridge.approvedModels) ? cartridge.approvedModels : []),
+        ...(Array.isArray(body.approvedModels) ? body.approvedModels : []),
+      ];
+      const previewKind: AgentKind = (ownership.recordKind ?? previousAgent?.kind ?? 'personal') === 'team' ? 'team' : 'personal';
+      let previewOwner: string | undefined;
+      if (previewKind === 'personal') {
+        const candidateOwner = ownership.grantSubject ?? ownership.configOwners?.[0];
+        if (candidateOwner) {
+          try {
+            const c = normalizeActorToPrincipal(candidateOwner, state.principals);
+            if (isValidUserPrincipalId(c)) previewOwner = c;
+          } catch {
+            previewOwner = undefined;
+          }
+        } else if (previousAgent) {
+          previewOwner = activePersonalOwnerOf(state, recordId);
+        }
+      }
+      const regByomCheck = checkPersonalByomModelsForAgent(state, recordId, explicitRegModels, {
+        kind: previewKind,
+        activeOwner: previewOwner,
+      });
+      if (!regByomCheck.ok) {
+        json(res, regByomCheck.status, {
+          error: regByomCheck.error,
+          model: regByomCheck.model,
+          message: regByomCheck.message,
+        });
+        return;
+      }
       const grantResult = await applyAgentOwnershipGrant(state, recordId, principal, ownership, {
         replaceExisting: Boolean(previousAgent && ownership.isAdmin),
       });
@@ -4520,6 +5432,9 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       }
     } else {
       await recordConfig(state, record.id, { actor: principal.actor, reason: changeReason(req, hadConfig ? 're-registered' : 'registered') });
+    }
+    if (previousAgent && hasExplicitOwnershipMutation) {
+      await detachDisallowedPersonalModelsOnAgent(state, record.id, principal.actor, 'ownership updated on re-registration (D15)');
     }
     json(res, 201, archetypeWarning ? { ...record, warnings: [archetypeWarning] } : record);
     return;

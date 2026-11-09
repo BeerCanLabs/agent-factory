@@ -46,7 +46,7 @@ import {
   type ConfigContent,
   type ConfigRecord,
 } from '@beercanlabs/factory-registrar';
-import { findAgentRecord, json, readJson, requirePrivilege, wireGrantStoreKindLookup, type FactoryState } from './app.js';
+import { detachDisallowedPersonalModelsOnAgent, findAgentRecord, json, readJson, requirePrivilege, wireGrantStoreKindLookup, type FactoryState } from './app.js';
 import { parseActor } from './identity-links.js';
 import { isReservedPolicyId } from '@beercanlabs/factory-gatekeeper/policy';
 import { canReadSettings } from './agent-settings.js';
@@ -415,7 +415,8 @@ async function handleOwners(state: FactoryState, req: http.IncomingMessage, res:
       { updatedBy: principal.actor, reason: changeReason(req, 'owners changed'), replaces: ['owners'] },
     );
     if (created) ledgerVersion(state, record, principal.actor);
-    json(res, 200, record);
+    const { detached } = await detachDisallowedPersonalModelsOnAgent(state, agentId, principal.actor, 'agent owners updated (D15)');
+    json(res, 200, detached.length ? (state.configs.current(agentId) ?? record) : record);
   } catch (err) {
     console.error(`[control-plane] owners for ${agentId} not stored: ${err instanceof Error ? err.message : String(err)}`);
     json(res, 500, { error: 'owners_not_stored' });

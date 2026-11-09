@@ -111,8 +111,20 @@ describe('S20: content submission and admission gates (#366)', { concurrency: fa
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('AC1: a viewer submits an agent draft with no budget; the budget gate stays pending and admission is refused until the budget-owner allocates', async () => {
-    const sub = await call('POST', '/api/v1/submissions', 'vic', draft('mailbot', { budgetUsd: { perDay: 999 }, policy: { routes: ['x'] } }));
+  it('AC1: a viewer submits a team agent draft with no budget; the budget gate stays pending and admission is refused until the budget-owner allocates', async () => {
+    const sub = await call('POST', '/api/v1/submissions', 'vic', {
+      kind: 'agent',
+      content: {
+        id: 'mailbot',
+        name: 'mailbot',
+        kind: 'team',
+        accountableLead: 'user:vic',
+        soul: 'Helps with email.',
+        memory: { archetype: 'team-member' },
+        budgetUsd: { perDay: 999 },
+        policy: { routes: ['x'] },
+      },
+    });
     assert.equal(sub.status, 201, JSON.stringify(sub.body));
     const id = sub.body.id as string;
     assert.equal(sub.body.submitter, 'user:vic');
@@ -139,8 +151,8 @@ describe('S20: content submission and admission gates (#366)', { concurrency: fa
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     assert.equal(ok.body.submission.status, 'admitted');
     assert.ok(state.agents.has('mailbot'));
-    const owner = (state.grants as GrantStore).list().filter((x: any) => x.scope?.kind === 'agent' && x.scope.id === 'mailbot' && x.role === 'content-owner');
-    assert.deepEqual(owner.map((x: any) => x.subject), ['user:vic'], 'the agent is the submitter\'s, not the approver\'s');
+    const lead = (state.grants as GrantStore).list().filter((x: any) => x.scope?.kind === 'agent' && x.scope.id === 'mailbot' && x.role === 'accountable-lead');
+    assert.deepEqual(lead.map((x: any) => x.subject), ['user:vic'], 'the team lead is vic, not the approver');
     assert.deepEqual((state.policies.get('mailbot') as { budgetUsd?: unknown }).budgetUsd, { perDay: 3 });
     const rows = actions(id);
     assert.deepEqual(rows[0], ['CONTENT_SUBMITTED', '']);
@@ -148,6 +160,19 @@ describe('S20: content submission and admission gates (#366)', { concurrency: fa
       assert.ok(rows.some((x) => x[0] === r[0] && x[1] === r[1]), JSON.stringify(r));
     }
     assert.equal((await call('POST', `/api/v1/submissions/${id}/admit`, 'approver', {})).status, 409, 'admitted once');
+  });
+
+  it('M5(8) / D25: a personal agent draft passes budgetGate at $0 ceiling ({ perDay: 0, perMonth: 0 }) without requiring a > $0 budget-owner allocation', async () => {
+    const sub = await call('POST', '/api/v1/submissions', 'vic', draft('personal-byom-bot', { budgetUsd: { perDay: 999 } }));
+    assert.equal(sub.status, 201, JSON.stringify(sub.body));
+    assert.equal(sub.body.gates.security.state, 'passed');
+    assert.equal(sub.body.gates.compliance.state, 'passed');
+    assert.equal(sub.body.gates.budget.state, 'passed');
+    const ok = await call('POST', `/api/v1/submissions/${sub.body.id}/admit`, 'approver', {});
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    const owner = (state.grants as GrantStore).list().filter((x: any) => x.scope?.kind === 'agent' && x.scope.id === 'personal-byom-bot' && x.role === 'content-owner');
+    assert.deepEqual(owner.map((x: any) => x.subject), ['user:vic']);
+    assert.deepEqual((state.policies.get('personal-byom-bot') as { budgetUsd?: unknown }).budgetUsd, { perDay: 0, perMonth: 0 });
   });
 
   it('a draft carrying a credential fails the security scan and is never admitted, even with budget', async () => {
@@ -202,7 +227,7 @@ describe('S20: content submission and admission gates (#366)', { concurrency: fa
     const steps = await call('GET', '/api/v1/submissions/interview', 'steph');
     assert.equal(steps.status, 200);
     assert.ok(steps.body.steps.length >= 4);
-    const answers = { name: 'Recipe Bot', kind: 'personal', purpose: 'Plans weekly dinners for the family.' };
+    const answers = { name: 'Recipe Bot', kind: 'team', lead: 'user:steph', purpose: 'Plans weekly dinners for the family.' };
     const bad = await call('POST', '/api/v1/submissions/interview', 'steph', { answers: { name: 'Recipe Bot' }, finalize: true });
     assert.equal(bad.status, 400);
     assert.equal(bad.body.error, 'interview_incomplete');

@@ -21,15 +21,19 @@ import {
   discoverViaEgress,
   effectiveGrantsForActor,
   enrichAgent,
+  enrichedCatalogModelsForNames,
+  parseModelPriceInput,
   resolveActAsForPrincipal,
   resolvePrincipalCaller,
-  retireModel,
+  retireCatalogModel,
   setAgentModels,
   stageDiscovered,
   vendorTarget,
   visibleApprovals,
+  visibleModelsForPrincipal,
   type FactoryState,
 } from './app.js';
+import { ModelCatalogError } from './models.js';
 import { ownersOf } from './config-store.js';
 import {
   addPrincipalEmail,
@@ -396,7 +400,7 @@ async function dispatchLegacyTool(
   if (name === 'decide_approval') return (await decideApproval(state, String(args.approvalId), String(args.decision), principal, typeof args.notes === 'string' ? args.notes : undefined)).body;
   if (name === 'list_model_catalog') {
     return {
-      offered: state.modelStore ? state.modelStore.listOffered() : Object.entries(state.modelCatalog ?? {}).map(([n, m]) => ({ name: n, ...m })),
+      offered: visibleModelsForPrincipal(state, principal),
       staged: state.modelStore?.listStaged() ?? [],
       default: defaultModelOf(state) ?? null,
     };
@@ -417,12 +421,15 @@ async function dispatchLegacyTool(
     }
   }
   if (name === 'admit_model') {
-    const price = (args.inputPerMTok && args.outputPerMTok)
-      ? {
-          inputPerMTok: parseFloat(String(args.inputPerMTok)),
-          outputPerMTok: parseFloat(String(args.outputPerMTok)),
-        }
-      : undefined;
+    let price: { inputPerMTok: number; outputPerMTok: number } | undefined;
+    if (args.inputPerMTok !== undefined && args.outputPerMTok !== undefined) {
+      const parsed = parseModelPriceInput({
+        inputPerMTok: parseFloat(String(args.inputPerMTok)),
+        outputPerMTok: parseFloat(String(args.outputPerMTok)),
+      });
+      if (!parsed.ok) return { error: 'invalid_price', message: parsed.error };
+      price = parsed.price;
+    }
     const out = admitModel(state, {
       name: typeof args.name === 'string' ? args.name : undefined,
       id: typeof args.id === 'string' ? args.id : undefined,
@@ -431,14 +438,18 @@ async function dispatchLegacyTool(
       region: typeof args.region === 'string' ? args.region : undefined,
       price,
     }, actor);
-    return out.ok ? { ok: true, model: out.model } : { error: out.error, ...(out.message ? { message: out.message } : {}) };
+    return out.ok
+      ? { ok: true, model: state.modelStore ? state.modelStore.enrich(out.model) : out.model }
+      : { error: out.error, ...(out.message ? { message: out.message } : {}) };
   }
   if (name === 'update_model_pricing') {
     if (!state.modelStore) return { error: 'model_store_not_configured' };
-    const price = {
+    const parsed = parseModelPriceInput({
       inputPerMTok: parseFloat(String(args.inputPerMTok)),
       outputPerMTok: parseFloat(String(args.outputPerMTok)),
-    };
+    });
+    if (!parsed.ok) return { error: 'invalid_price', message: parsed.error };
+    const price = parsed.price;
     try {
       const model = state.modelStore.updatePricing(String(args.name), price, actor);
       state.modelCatalog = state.modelStore.toEgressCatalog();
@@ -449,15 +460,16 @@ async function dispatchLegacyTool(
         price,
         timestamp: new Date().toISOString(),
       });
-      return { ok: true, model };
+      return { ok: true, model: state.modelStore.enrich(model) };
     } catch (err: unknown) {
+      if (err instanceof ModelCatalogError) return { error: err.code, message: err.message };
       return { error: 'not_found', message: err instanceof Error ? err.message : String(err) };
     }
   }
   if (name === 'retire_vendor_or_model') {
     if (!state.modelStore) return { error: 'model_store_not_configured' };
     const modelName = String(args.name);
-    const out = await retireModel(state, modelName, actor);
+    const out = await retireCatalogModel(state, modelName, actor);
     if (!out.retired) return { error: 'not_found' };
     return { ok: true, retired: modelName, affectedAgents: out.affectedAgents };
   }
@@ -476,6 +488,7 @@ async function dispatchLegacyTool(
       });
       return { ok: true, default: model };
     } catch (err: unknown) {
+      if (err instanceof ModelCatalogError) return { error: err.code, message: err.message };
       return { error: 'invalid_request', message: err instanceof Error ? err.message : String(err) };
     }
   }
@@ -490,6 +503,7 @@ async function dispatchLegacyTool(
     return {
       agentId: id,
       ...eff,
+      models: enrichedCatalogModelsForNames(state, eff.approvedModels),
       defaultModel: defaultModelOf(state) ?? null,
     };
   }
@@ -709,7 +723,10 @@ export async function handleMcp(
           : typeof rawArgs.agentId === 'string'
             ? rawArgs.agentId
             : undefined;
-      const ownsAny = spec.privilege === 'mcp.use' ? checkOwnsAnyAgent(state, effectivePrincipal.actor) : false;
+      const ownsAny =
+        spec.privilege === 'mcp.use' || spec.privilege === 'models.read'
+          ? checkOwnsAnyAgent(state, effectivePrincipal.onBehalfOf ?? effectivePrincipal.actor)
+          : false;
       const ownsPersonal =
         spec.privilege === 'subscriptions.own'
           ? checkOwnsPersonalAgent(state, effectivePrincipal.onBehalfOf ?? effectivePrincipal.actor)

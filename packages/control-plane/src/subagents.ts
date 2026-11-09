@@ -10,7 +10,16 @@ import { randomBytes } from 'node:crypto';
 import { createRun, type Run } from '@beercanlabs/factory-property-manager';
 import { BUILTIN_AGENT_IDS, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { checkStanding } from '@beercanlabs/factory-budget';
-import { approvedModels, json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import {
+  approvedModels,
+  catalogEntryOf,
+  effectiveAgentBudgetUsd,
+  isCatalogModelZeroPrice,
+  json,
+  readJson,
+  requirePrivilege,
+  type FactoryState,
+} from './app.js';
 
 export type { SubagentRecord };
 
@@ -98,6 +107,18 @@ export async function handleSubagents(state: FactoryState, req: http.IncomingMes
       json(res, 400, { error: 'model_not_offered', model: missing });
       return true;
     }
+    const personalModel = (list as string[]).find((x) => {
+      const entry = catalogEntryOf(state, x);
+      return entry?.credentialMode === 'subscription' && entry.scope === 'personal';
+    });
+    if (personalModel) {
+      json(res, 403, {
+        error: 'personal_model_subagent_forbidden',
+        model: personalModel,
+        message: `personal subscription model '${personalModel}' cannot be assigned to a shared subagent`,
+      });
+      return true;
+    }
     const record: SubagentRecord = { ...current, approvedModels: [...new Set(list as string[])].sort() };
     try {
       storeOf(state).save(record);
@@ -161,7 +182,14 @@ export async function spawnSubagent(state: FactoryState, parent: Run, args: Reco
   if (prompt.length > MAX_HELPER_PROMPT_CHARS) return { status: 413, body: { error: 'prompt_too_long', max: MAX_HELPER_PROMPT_CHARS } };
   // E2.1 (#297): the helper spends the parent's budget, so a parent out of budget starts none.
   const parentBuiltin = Boolean(parentAgent.isBuiltin || parentAgent.category === 'builtin' || BUILTIN_AGENT_IDS.has(parentAgent.id));
-  if (!parentBuiltin && !checkStanding({ limits: state.policies.get(parent.agentId).budgetUsd, spend: state.spend.get(parent.agentId, parent.runId) }).inGoodStanding) {
+  if (
+    !parentBuiltin &&
+    !checkStanding({
+      limits: effectiveAgentBudgetUsd(state, parentAgent),
+      spend: state.spend.get(parent.agentId, parent.runId),
+      selectedModelIsZeroPrice: isCatalogModelZeroPrice(state, model),
+    }).inGoodStanding
+  ) {
     return { status: 402, body: { error: 'supervising_agent_out_of_budget' } };
   }
   const pin = state.sharedRuntime;

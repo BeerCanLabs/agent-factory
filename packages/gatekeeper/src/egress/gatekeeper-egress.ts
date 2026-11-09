@@ -7,9 +7,9 @@ import type { RunTokens } from '@beercanlabs/factory-auth';
 import { canonicalizeRouteRequest, checkHold, checkToolApproval, describeHeldRequest, type HoldRule, type SkillActionHoldRule, type ApprovalOutcome, type ApprovalRequest, type HoldOutcome, type HoldRequest } from '@beercanlabs/factory-bouncer';
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
-import { checkStanding, costUsd, priceFor, type Price } from '@beercanlabs/factory-budget';
+import { checkStanding, costUsd, isZeroPrice, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { BUILTIN_PROVIDER_HOSTS, BUILTIN_PROVIDER_SECRETS, SseMeter, SubscriptionLimitError, SubscriptionNeedsReconsentError, checkModel, discoverSubscriptionModels, isSubscriptionEntry, subscriptionResponses, selectModel, failbackCandidates, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ChatRequest, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type SubscriptionTokenResult, type Usage } from '@beercanlabs/factory-executive';
+import { BUILTIN_PROVIDER_HOSTS, BUILTIN_PROVIDER_SECRETS, SseMeter, SubscriptionLimitError, SubscriptionNeedsReconsentError, checkModel, discoverSubscriptionModels, formatModelDisplayLabel, isSubscriptionEntry, subscriptionResponses, selectModel, failbackCandidates, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ChatRequest, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type SubscriptionTokenResult, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
 import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';
@@ -68,6 +68,16 @@ export type ConnectionTokenResult =
 /** A connection's plan-limit window as the control plane holds it (M5(7a)). */
 export type LimitWindowView = { connection: string; kind: 'plan-limit' | 'tier-refused'; code: string; openedAt: string; resetAt?: string; lastProbeAt?: string };
 
+/** A per-agent daily subscription token cap as the control plane holds it (M5(8)). */
+export type SubscriptionCapView = {
+  connection: string;
+  agentId: string;
+  utcDay: string;
+  resetAt: string;
+  dailyTokenCap?: number;
+  tokensUsed?: number;
+};
+
 export type ToolRule = { allow: string[] | '*'; requireApproval?: string[] };
 export type Policy = {
   routes: string[];
@@ -119,6 +129,10 @@ export type RunContext = {
    * skill's behalf (`x-factory-skill: <skillId>`) is served the skill's bound model; the agent's own model is untouched.
    */
   skillModels?: Record<string, string>;
+  /** M5(1) (`D24`): agent kind (`'personal'` or `'team'`). */
+  agentKind?: 'personal' | 'team';
+  /** M5(1) (`D15`): active canonical `'user:<id>'` owner of a `'personal'` agent (absent when `team` or `pending-revoked`). */
+  activeOwnerPrincipalId?: string;
 };
 
 /** S24: header a runtime sets on a factory model API call made on behalf of one of its adopted skills. */
@@ -132,6 +146,7 @@ export type RunModelsInfo = {
   secondaryModel?: string | null;
   defaultModel?: string | null;
   canManageModels?: boolean;
+  models?: Array<Record<string, unknown>>;
 };
 
 /** How the gatekeeper-egress talks to the control plane. HTTP in production, in-memory in tests. */
@@ -155,10 +170,10 @@ export type ControlClient = {
    */
   subscriptionToken?(req: { connection: string; invalidate?: boolean }): Promise<SubscriptionTokenResult>;
   /**
-   * M5(7a): the open plan-limit windows, held by the control plane so every egress instance and restart sees them.
-   * Absent: this instance keeps its own windows in memory (single instance only).
+   * M5(7a), (8): the open plan-limit windows and active per-agent daily token caps, held by the control plane so every
+   * egress instance and restart sees them. Absent: this instance keeps its own windows and caps in memory (single instance only).
    */
-  subscriptionWindows?(): Promise<LimitWindowView[]>;
+  subscriptionWindows?(): Promise<LimitWindowView[] | { windows: LimitWindowView[]; caps?: SubscriptionCapView[] }>;
   /** M5(7a): open or close a connection's window, or claim the hourly probe slot. */
   subscriptionWindow?(req:
     | { connection: string; action: 'open'; kind: 'plan-limit' | 'tier-refused'; code: string; resetAt?: string }
@@ -230,6 +245,10 @@ export type GatekeeperEgressOptions = {
   discoverFetch?: typeof fetch;
   /** Tests: replace runtime model fetch. Production uses global fetch. */
   modelFetch?: typeof fetch;
+  /** Tests: replace wall-clock `Date.now` for subscription window/cap/throttle checks. */
+  now?: () => number;
+  /** Tests: await catalog refresh on every `/models` call instead of refreshing in the background. */
+  eagerCatalogRefresh?: boolean;
   /**
    * Hosts the operator trusts with any model provider key (landing-zone configuration, e.g. a self-hosted model proxy or
    * the Compose proof's mock). GAP-182: otherwise a key goes only to its built-in vendor host or its system's upstream.
@@ -610,42 +629,84 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   /** The adapters that may serve this entry: a subscription entry only ever gets the subscription adapter. */
   const adaptersFor = (entry: CatalogEntry): Record<string, ModelAdapter> => (isSubscriptionEntry(entry) ? { [entry.provider]: subscriptionAdapter } : modelAdapters);
 
-  /** M5(7a): the control plane holds the windows; this is a few seconds' cache of its list. */
+  /** M5(7a), (8): the control plane holds the windows and per-agent daily caps; this is a few seconds' cache of its list. */
+  const nowMs = opts.now ?? Date.now;
   const WINDOW_CACHE_MS = opts.subscriptionWindowCacheMs ?? 5_000;
   const RECONSENT_CACHE_MS = 5_000;
-  let windowCache: { at: number; map: Map<string, LimitWindowView> } | undefined;
+  let windowCache: { at: number; map: Map<string, LimitWindowView>; caps: Map<string, SubscriptionCapView> } | undefined;
   /** Only when the control client has no window store (a single instance). */
   const localWindows = new Map<string, LimitWindowView>();
+  /** In-process day token totals per `(connection, agentId)` for single-instance mode and 0ms unacked cap enforcement. */
+  const localAgentDayTokens = new Map<string, { utcDay: string; unacked: number; total: number }>();
   /** Connections whose grant was just found to need re-consent: skipped without asking the Keymaster again for a moment. */
   const reconsentUntil = new Map<string, number>();
   const probing = new Set<string>();
-  const windowLive = (w: LimitWindowView | undefined): LimitWindowView | undefined => (w && (!w.resetAt || Date.parse(w.resetAt) > Date.now()) ? w : undefined);
+  const windowLive = (w: LimitWindowView | undefined): LimitWindowView | undefined => (w && (!w.resetAt || Date.parse(w.resetAt) > nowMs()) ? w : undefined);
+  const capLive = (c: SubscriptionCapView | undefined): SubscriptionCapView | undefined =>
+    c && Date.parse(c.resetAt) > nowMs() ? c : undefined;
 
-  async function windowFor(connection: string): Promise<LimitWindowView | undefined> {
-    if (!opts.control.subscriptionWindows) return windowLive(localWindows.get(connection));
-    if (!windowCache || Date.now() - windowCache.at >= WINDOW_CACHE_MS) {
+  function normalizeWindowsPayload(
+    raw: LimitWindowView[] | { windows: LimitWindowView[]; caps?: SubscriptionCapView[] },
+  ): { windows: LimitWindowView[]; caps: SubscriptionCapView[] } {
+    if (Array.isArray(raw)) return { windows: raw, caps: [] };
+    return { windows: raw.windows ?? [], caps: raw.caps ?? [] };
+  }
+
+  async function refreshWindowsIfStale(): Promise<void> {
+    if (!opts.control.subscriptionWindows) return;
+    if (!windowCache || nowMs() - windowCache.at >= WINDOW_CACHE_MS) {
       try {
-        const list = await opts.control.subscriptionWindows();
-        windowCache = { at: Date.now(), map: new Map(list.map((w) => [w.connection, w])) };
+        const raw = await opts.control.subscriptionWindows();
+        const { windows, caps } = normalizeWindowsPayload(raw);
+        windowCache = {
+          at: nowMs(),
+          map: new Map(windows.map((w) => [w.connection, w])),
+          caps: new Map(caps.map((c) => [`${c.connection}\u0000${c.agentId}`, c])),
+        };
       } catch (err) {
         // Keep serving the last list; with none, serve as if no window were open (the vendor reports the limit again).
         console.error(`[gatekeeper-egress] subscription windows: ${err instanceof Error ? err.message : String(err)}`);
-        windowCache = { at: Date.now(), map: windowCache?.map ?? new Map() };
+        windowCache = { at: nowMs(), map: windowCache?.map ?? new Map(), caps: windowCache?.caps ?? new Map() };
       }
     }
-    const held = windowCache.map.get(connection);
+  }
+
+  async function windowFor(connection: string): Promise<LimitWindowView | undefined> {
+    if (!opts.control.subscriptionWindows) return windowLive(localWindows.get(connection));
+    await refreshWindowsIfStale();
+    const held = windowCache!.map.get(connection);
     const live = windowLive(held);
     if (held && !live) {
       // The vendor's reset time has passed: the connection is served again, and the control plane is told so the close is ledgered now.
-      windowCache.map.delete(connection);
+      windowCache!.map.delete(connection);
       void opts.control.subscriptionWindow?.({ connection, action: 'close', by: 'reset' }).catch(() => undefined);
     }
     return live;
   }
 
+  async function capFor(entry: CatalogEntry, agentId: string): Promise<{ resetAt: string } | undefined> {
+    if (!entry.connection) return undefined;
+    const key = `${entry.connection}\u0000${agentId}`;
+    if (opts.control.subscriptionWindows) {
+      await refreshWindowsIfStale();
+      const held = capLive(windowCache?.caps.get(key));
+      if (held) return { resetAt: held.resetAt };
+    }
+    if (entry.dailyTokenCap !== undefined && entry.dailyTokenCap > 0) {
+      const today = new Date(nowMs()).toISOString().slice(0, 10);
+      const loc = localAgentDayTokens.get(key);
+      const localCount = opts.control.subscriptionWindows ? (loc?.unacked ?? 0) : (loc?.total ?? 0);
+      if (loc && loc.utcDay === today && localCount >= entry.dailyTokenCap) {
+        const resetAt = new Date(Date.parse(`${today}T00:00:00.000Z`) + 86_400_000).toISOString();
+        return { resetAt };
+      }
+    }
+    return undefined;
+  }
+
   /** A vendor limit opens the connection's window (idempotent in the control plane); returns it. */
   async function openWindow(err: SubscriptionLimitError): Promise<LimitWindowView> {
-    const fallback: LimitWindowView = { connection: err.connection, kind: err.kind, code: err.vendorCode, openedAt: new Date().toISOString(), ...(err.resetAt ? { resetAt: err.resetAt } : {}) };
+    const fallback: LimitWindowView = { connection: err.connection, kind: err.kind, code: err.vendorCode, openedAt: new Date(nowMs()).toISOString(), ...(err.resetAt ? { resetAt: err.resetAt } : {}) };
     let w = fallback;
     if (opts.control.subscriptionWindow) {
       try {
@@ -654,20 +715,32 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       } catch (e) {
         console.error(`[gatekeeper-egress] subscription window open: ${e instanceof Error ? e.message : String(e)}`);
       }
-      windowCache = { at: windowCache?.at ?? Date.now(), map: new Map([...(windowCache?.map ?? []), [w.connection, w]]) };
+      windowCache = {
+        at: windowCache?.at ?? nowMs(),
+        map: new Map([...(windowCache?.map ?? []), [w.connection, w]]),
+        caps: windowCache?.caps ?? new Map(),
+      };
     } else if (!windowLive(localWindows.get(err.connection))) {
       localWindows.set(err.connection, w);
     }
     return w;
   }
 
-  /** Why a call must skip this subscription entry right now (M5(6), (7)), or undefined when it may be tried. */
-  async function subscriptionSkip(connection: string): Promise<{ reason: 'subscription_limit_reached' | 'subscription_needs_reconsent'; resetAt?: string } | undefined> {
-    if ((reconsentUntil.get(connection) ?? 0) > Date.now()) return { reason: 'subscription_needs_reconsent' };
+  /** Why a call must skip this subscription entry right now (M5(6), (7), (8)), or undefined when it may be tried. */
+  async function subscriptionSkip(
+    entry: CatalogEntry,
+    agentId: string,
+  ): Promise<{ reason: 'subscription_limit_reached' | 'subscription_needs_reconsent' | 'subscription_cap_reached'; resetAt?: string } | undefined> {
+    const connection = entry.connection!;
+    if ((reconsentUntil.get(connection) ?? 0) > nowMs()) return { reason: 'subscription_needs_reconsent' };
     const w = await windowFor(connection);
     if (w) {
       void probeIfDue(connection, w);
       return { reason: 'subscription_limit_reached', ...(w.resetAt ? { resetAt: w.resetAt } : {}) };
+    }
+    const cap = await capFor(entry, agentId);
+    if (cap) {
+      return { reason: 'subscription_cap_reached', resetAt: cap.resetAt };
     }
     return undefined;
   }
@@ -678,7 +751,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
    * never probed.
    */
   async function probeIfDue(connection: string, w: LimitWindowView): Promise<void> {
-    if (w.resetAt || probing.has(connection) || (reconsentUntil.get(connection) ?? 0) > Date.now()) return;
+    if (w.resetAt || probing.has(connection) || (reconsentUntil.get(connection) ?? 0) > nowMs()) return;
     probing.add(connection);
     try {
       if (!catalogLoaded) await ensureCatalog();
@@ -689,13 +762,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         if (!slot.granted) return;
       } else {
         const last = localProbeAt.get(connection) ?? 0;
-        if (Date.now() - last < 3_600_000) return;
-        localProbeAt.set(connection, Date.now());
+        if (nowMs() - last < 3_600_000) return;
+        localProbeAt.set(connection, nowMs());
       }
       try {
         await subscriptionAdapter.complete(entry, { messages: [{ role: 'user', content: 'ping' }], maxTokens: 1 });
       } catch (err) {
-        if (err instanceof SubscriptionNeedsReconsentError) reconsentUntil.set(connection, Date.now() + RECONSENT_CACHE_MS);
+        if (err instanceof SubscriptionNeedsReconsentError) reconsentUntil.set(connection, nowMs() + RECONSENT_CACHE_MS);
         return; // still limited, or unreachable: the window stays open and the next hourly slot tries again
       }
       if (opts.control.subscriptionWindow) {
@@ -714,7 +787,9 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
 
   async function probeTick(): Promise<void> {
     try {
-      const list = opts.control.subscriptionWindows ? await opts.control.subscriptionWindows() : [...localWindows.values()];
+      const list = opts.control.subscriptionWindows
+        ? normalizeWindowsPayload(await opts.control.subscriptionWindows()).windows
+        : [...localWindows.values()];
       for (const w of list) if (windowLive(w)) await probeIfDue(w.connection, w);
     } catch (err) {
       console.error(`[gatekeeper-egress] subscription probe tick: ${err instanceof Error ? err.message : String(err)}`);
@@ -1053,27 +1128,80 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   }
 
   /** S24: the bound model for the skill named by the call's skill-context header, when granted to this run. */
-  function skillModelFor(ctx: RunContext, req: http.IncomingMessage): string | undefined {
+  function skillModelFor(
+    ctx: RunContext,
+    req: http.IncomingMessage,
+    catalog: ModelCatalog,
+  ): { ok: true; model?: string } | { ok: false; status: number; code: string; detail: Record<string, unknown> } {
     const raw = req.headers[SKILL_CONTEXT_HEADER];
     const skillId = typeof raw === 'string' ? raw.trim().toLowerCase() : undefined;
-    if (!skillId || !ctx.skillModels) return undefined;
+    if (!skillId || !ctx.skillModels) return { ok: true };
     const bound = Object.prototype.hasOwnProperty.call(ctx.skillModels, skillId) ? ctx.skillModels[skillId] : undefined;
-    if (!bound) return undefined;
+    if (!bound) return { ok: true };
+    // M5(1) / S24: a personal BYOM subscription entry may NEVER serve as a skill-bound model.
+    const boundEntry = findModel(catalog, bound);
+    if (boundEntry && isSubscriptionEntry(boundEntry) && boundEntry.scope === 'personal') {
+      return { ok: false, status: 403, code: 'personal_model_skill_forbidden', detail: { skillId, model: bound } };
+    }
     const granted = modelPolicyOf(ctx);
     const allowed = granted.allowedModels ?? (granted.defaultModel ? [granted.defaultModel] : []);
-    return granted.training || allowed.includes(bound) ? bound : undefined;
+    return { ok: true, model: granted.training || allowed.includes(bound) ? bound : undefined };
+  }
+
+  /** M5(1) (`D24` / `D15`): enforce personal BYOM scope & active owner match at call time. */
+  function personalEntryViolation(
+    entry: CatalogEntry,
+    ctx: RunContext,
+  ): 'personal_model_team_forbidden' | 'personal_model_owner_mismatch' | undefined {
+    if (!isSubscriptionEntry(entry) || entry.scope !== 'personal') return undefined;
+    if (ctx.agentKind !== 'personal') return 'personal_model_team_forbidden';
+    if (!entry.ownerPrincipalId || ctx.activeOwnerPrincipalId !== entry.ownerPrincipalId) {
+      return 'personal_model_owner_mismatch';
+    }
+    return undefined;
+  }
+
+  function catalogEntryLedgerMeta(entry: CatalogEntry): Record<string, unknown> {
+    if (isSubscriptionEntry(entry)) {
+      return {
+        credentialMode: 'subscription',
+        scope: entry.scope ?? 'factory',
+        ...(entry.ownerPrincipalId ? { ownerPrincipalId: entry.ownerPrincipalId } : {}),
+        connection: entry.connection,
+        ...(entry.connectionName ? { connectionName: entry.connectionName } : {}),
+      };
+    }
+    return { credentialMode: 'api-key' };
+  }
+
+  function formatCatalogModelView(name: string, entry: CatalogEntry | undefined): Record<string, unknown> {
+    if (!entry) return { name, id: name };
+    const isSub = isSubscriptionEntry(entry);
+    return {
+      name,
+      id: entry.id,
+      provider: entry.provider,
+      credentialMode: isSub ? 'subscription' : 'api-key',
+      subscription: isSub,
+      ...(isSub ? { scope: entry.scope ?? 'factory' } : {}),
+      ...(isSub && entry.ownerPrincipalId ? { ownerPrincipalId: entry.ownerPrincipalId } : {}),
+      ...(isSub ? { connection: entry.connection } : {}),
+      ...(isSub && entry.connectionName ? { connectionName: entry.connectionName } : {}),
+      ...(isSub && entry.dailyTokenCap !== undefined ? { dailyTokenCap: entry.dailyTokenCap } : {}),
+      displayLabel: formatModelDisplayLabel(entry),
+    };
   }
 
   function throttled(ctx: RunContext): boolean {
     const w = tpm.get(ctx.run.runId);
-    return ctx.policy.tokensPerMinute !== undefined && !!w && Date.now() - w.windowStart < 60_000 && w.tokens >= ctx.policy.tokensPerMinute;
+    return ctx.policy.tokensPerMinute !== undefined && !!w && nowMs() - w.windowStart < 60_000 && w.tokens >= ctx.policy.tokensPerMinute;
   }
 
   /** Meter, count against the budget, and ledger one model call (E5). Never records prompt bodies. */
   function recordUsage(
     ctx: RunContext,
     route: Route,
-    call: { usage: Usage; model: string | undefined; price: Price | undefined; request: unknown; requestId: string; action?: string; extra?: Record<string, unknown> },
+    call: { usage: Usage; model: string | undefined; price: Price | undefined; request: unknown; requestId: string; action?: string; extra?: Record<string, unknown>; dailyTokenCap?: number },
     res?: http.ServerResponse,
   ) {
     const { usage, model, price } = call;
@@ -1093,8 +1221,20 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     m?.cost.add(cost, attrs);
     const tokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
     const cur = tpm.get(ctx.run.runId);
-    if (!cur || Date.now() - cur.windowStart >= 60_000) tpm.set(ctx.run.runId, { windowStart: Date.now(), tokens });
+    if (!cur || nowMs() - cur.windowStart >= 60_000) tpm.set(ctx.run.runId, { windowStart: nowMs(), tokens });
     else cur.tokens += tokens;
+    const connId = typeof call.extra?.connection === 'string' ? call.extra.connection : undefined;
+    const capKey = connId ? `${connId}\u0000${ctx.run.agentId}` : undefined;
+    if (capKey && tokens > 0) {
+      const today = new Date(nowMs()).toISOString().slice(0, 10);
+      const prev = localAgentDayTokens.get(capKey);
+      if (!prev || prev.utcDay !== today) {
+        localAgentDayTokens.set(capKey, { utcDay: today, unacked: tokens, total: tokens });
+      } else {
+        prev.unacked += tokens;
+        prev.total += tokens;
+      }
+    }
     const runId = ctx.run.runId;
     unacked.set(runId, (unacked.get(runId) ?? 0) + cost);
     void ledger(ctx, route, {
@@ -1112,6 +1252,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       if (!accepted) return;
       unacked.set(runId, (unacked.get(runId) ?? 0) - cost);
       ctxCache.delete(runId);
+      if (capKey) {
+        const curCap = localAgentDayTokens.get(capKey);
+        if (curCap) curCap.unacked = Math.max(0, curCap.unacked - tokens);
+        if (windowCache && call.dailyTokenCap !== undefined && (curCap?.total ?? 0) >= call.dailyTokenCap) {
+          windowCache.at = 0;
+        }
+      }
     });
   }
 
@@ -1210,13 +1357,34 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
    */
   async function handleModels(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
     // GAP-170/171: wait until a catalog has loaded; afterwards serve the last catalog and refresh in the background (LG1).
-    if (!catalogLoaded) await ensureCatalog();
+    if (!catalogLoaded || opts.eagerCatalogRefresh) await ensureCatalog();
     else void ensureCatalog();
     const catalog = activeCatalog;
     const path = rest.split('?')[0].replace(/\/$/, '');
     if (req.method === 'GET' && path === '/v1/models') {
-      const offered = offeredModels(modelPolicyOf(ctx), Object.keys(catalog));
-      return send(res, 200, { object: 'list', data: offered.map((id) => ({ id, object: 'model', owned_by: 'factory' })) });
+      const offered = offeredModels(modelPolicyOf(ctx), Object.keys(catalog)).filter((id) => {
+        const e = findModel(catalog, id);
+        return !e || !personalEntryViolation(e, ctx);
+      });
+      return send(res, 200, {
+        object: 'list',
+        data: offered.map((id) => {
+          const e = findModel(catalog, id);
+          const isSub = e ? isSubscriptionEntry(e) : false;
+          return {
+            id,
+            object: 'model',
+            owned_by: 'factory',
+            credentialMode: isSub ? 'subscription' : 'api-key',
+            subscription: isSub,
+            ...(e && isSub ? { scope: e.scope ?? 'factory', connection: e.connection } : {}),
+            ...(e && isSub && e.ownerPrincipalId ? { ownerPrincipalId: e.ownerPrincipalId } : {}),
+            ...(e && isSub && e.connectionName ? { connectionName: e.connectionName } : {}),
+            ...(e && isSub && e.dailyTokenCap !== undefined ? { dailyTokenCap: e.dailyTokenCap } : {}),
+            ...(e ? { displayLabel: formatModelDisplayLabel(e) } : {}),
+          };
+        }),
+      });
     }
     if (req.method !== 'POST' || path !== '/v1/chat/completions') return send(res, 404, { error: 'unknown_endpoint' });
 
@@ -1234,7 +1402,9 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const requestedName = typeof parsed.model === 'string' && parsed.model ? parsed.model : undefined;
     // S24 (D31): a call made for an adopted skill gets the skill's factory-side model binding, still bounded by the
     // agent's granted models (E7). A binding the agent's policy does not grant falls back to the agent's own model.
-    const skillModel = skillModelFor(ctx, req);
+    const skillBinding = skillModelFor(ctx, req, catalog);
+    if (!skillBinding.ok) return deny(res, ctx, route, skillBinding.status, skillBinding.code, skillBinding.detail);
+    const skillModel = skillBinding.model;
     const selection = selectModel(modelPolicyOf(ctx, skillModel), requestedName);
     if (!selection.ok) return deny(res, ctx, route, selection.status, selection.code, 'detail' in selection ? selection.detail : undefined);
 
@@ -1293,6 +1463,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       reason: string;
       isDeny?: boolean;
       isSkip?: boolean;
+      connection?: string;
+      resetAt?: string;
       detail?: Record<string, unknown>;
       outcome?: 'error' | 'timeout';
     };
@@ -1312,12 +1484,13 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       const candidates = failbackCandidates(modelPolicyOf(ctx, skillModel), round === 0 ? requestedName : undefined);
       const failures: Failure[] = [];
       // A call that names one entry and never walks failback (a pinned run, or a training run's requested model, M2) is
-      // refused, never served elsewhere, when that entry's subscription cannot serve it (M5(6), (7)).
+      // refused, never served elsewhere, when that entry's subscription cannot serve it (M5(6), (7), (8)).
       const named = modelPolicyOf(ctx, skillModel);
       const namedOnly = Boolean(named.pinnedModel) || (named.training && round === 0 && Boolean(requestedName));
-      // Entries skipped because their subscription connection is limited or needs re-consent; such a call is served by the
-      // next candidate without changing any selection (no `POLICY_UPDATED`).
+      // Entries skipped because their subscription connection is limited, needs re-consent, or hit per-agent daily cap;
+      // such a call is served by the next candidate without changing any selection (no `POLICY_UPDATED`).
       const skipped: string[] = [];
+      const skippedEntries: Array<{ model: string; connection: string; reason: string; resetAt?: string }> = [];
       let succeeded: {
         candidate: string;
         index: number;
@@ -1330,20 +1503,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
 
       for (let i = 0; i < candidates.length; i++) {
         const candidate = candidates[i];
-        if (i > 0) {
-          if (!isBuiltin) {
-            const standing = checkStanding({
-              limits: ctx.policy.budgetUsd,
-              spend: ctx.spend,
-              pendingUsd: unacked.get(ctx.run.runId) ?? 0,
-            });
-            if (!standing.inGoodStanding) {
-              return deny(res, ctx, route, 402, budgetError(ctx), { window: standing.window });
-            }
-          }
-          if (throttled(ctx)) {
-            return deny(res, ctx, route, 429, 'throttled');
-          }
+        if (i > 0 && throttled(ctx)) {
+          return deny(res, ctx, route, 429, 'throttled');
         }
 
         const entry = findModel(catalog, candidate);
@@ -1352,6 +1513,21 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
             status: 503,
             body: { error: 'model_not_offered', model: candidate },
             reason: 'model_not_offered',
+            isDeny: true,
+            detail: { model: candidate },
+          });
+          continue;
+        }
+
+        const personalViolation = personalEntryViolation(entry, ctx);
+        if (personalViolation) {
+          if (namedOnly) {
+            return deny(res, ctx, route, 403, personalViolation, { model: candidate });
+          }
+          failures.push({
+            status: 403,
+            body: { error: personalViolation, model: candidate },
+            reason: personalViolation,
             isDeny: true,
             detail: { model: candidate },
           });
@@ -1370,19 +1546,46 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           continue;
         }
 
+        // M5(8) / D25: $0-priced entries (including personal BYOM) succeed on standing even at { perDay: 0, perMonth: 0 },
+        // whereas priced (> $0) entries require factory budget standing and fail closed with 402 when exhausted or at $0 ceiling.
+        if (!isBuiltin) {
+          const zeroPrice = isZeroPrice(price);
+          if (!zeroPrice && ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED') {
+            return deny(res, ctx, route, 402, budgetError(ctx), { window: 'blocked' });
+          }
+          const standing = checkStanding({
+            limits: ctx.policy.budgetUsd,
+            spend: ctx.spend,
+            pendingUsd: unacked.get(ctx.run.runId) ?? 0,
+            selectedModelIsZeroPrice: zeroPrice,
+          });
+          if (!standing.inGoodStanding) {
+            return deny(res, ctx, route, 402, budgetError(ctx), { window: standing.window });
+          }
+        }
+
         if (isSubscriptionEntry(entry)) {
-          const skip = await subscriptionSkip(entry.connection);
+          const skip = await subscriptionSkip(entry, ctx.run.agentId);
           if (skip) {
+            const skipStatus = skip.reason === 'subscription_needs_reconsent' ? 503 : 429;
             if (namedOnly) {
-              return deny(res, ctx, route, skip.reason === 'subscription_limit_reached' ? 429 : 503, skip.reason, { model: candidate, ...(skip.resetAt ? { resetAt: skip.resetAt } : {}) });
+              return deny(res, ctx, route, skipStatus, skip.reason, { model: candidate, ...(skip.resetAt ? { resetAt: skip.resetAt } : {}) });
             }
             skipped.push(skip.reason);
-            failures.push({ status: skip.reason === 'subscription_limit_reached' ? 429 : 503, body: { error: skip.reason, model: candidate, ...(skip.resetAt ? { resetAt: skip.resetAt } : {}) }, reason: skip.reason, isSkip: true });
+            skippedEntries.push({ model: candidate, connection: entry.connection, reason: skip.reason, ...(skip.resetAt ? { resetAt: skip.resetAt } : {}) });
+            failures.push({
+              status: skipStatus,
+              body: { error: skip.reason, model: candidate, ...(skip.resetAt ? { resetAt: skip.resetAt } : {}) },
+              reason: skip.reason,
+              isSkip: true,
+              connection: entry.connection,
+              ...(skip.resetAt ? { resetAt: skip.resetAt } : {}),
+            });
             continue;
           }
         }
 
-        if (i === 0 && throttled(ctx)) {
+        if (throttled(ctx)) {
           return deny(res, ctx, route, 429, 'throttled');
         }
 
@@ -1402,14 +1605,24 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
                 ? { reason: 'subscription_limit_reached' as const, resetAt: (await openWindow(e)).resetAt }
                 : undefined;
           if (skip) {
-            if (e instanceof SubscriptionNeedsReconsentError) reconsentUntil.set(entry.connection, Date.now() + RECONSENT_CACHE_MS);
+            if (e instanceof SubscriptionNeedsReconsentError) reconsentUntil.set(entry.connection, nowMs() + RECONSENT_CACHE_MS);
             markOutcome(res, 'error');
             m?.requests.add(1, { route: route.id, outcome: skip.reason, agent: ctx.run.agentId });
+            const skipStatus = skip.reason === 'subscription_limit_reached' ? 429 : 503;
+            const skipResetAt = 'resetAt' in skip && skip.resetAt ? skip.resetAt : undefined;
             if (namedOnly) {
-              return deny(res, ctx, route, skip.reason === 'subscription_limit_reached' ? 429 : 503, skip.reason, { model: candidate, ...('resetAt' in skip && skip.resetAt ? { resetAt: skip.resetAt } : {}) });
+              return deny(res, ctx, route, skipStatus, skip.reason, { model: candidate, ...(skipResetAt ? { resetAt: skipResetAt } : {}) });
             }
             skipped.push(skip.reason);
-            failures.push({ status: skip.reason === 'subscription_limit_reached' ? 429 : 503, body: { error: skip.reason, model: candidate, ...('resetAt' in skip && skip.resetAt ? { resetAt: skip.resetAt } : {}) }, reason: skip.reason, isSkip: true });
+            skippedEntries.push({ model: candidate, connection: entry.connection, reason: skip.reason, ...(skipResetAt ? { resetAt: skipResetAt } : {}) });
+            failures.push({
+              status: skipStatus,
+              body: { error: skip.reason, model: candidate, ...(skipResetAt ? { resetAt: skipResetAt } : {}) },
+              reason: skip.reason,
+              isSkip: true,
+              connection: entry.connection,
+              ...(skipResetAt ? { resetAt: skipResetAt } : {}),
+            });
             continue;
           }
         }
@@ -1460,10 +1673,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
           request: parsed,
           requestId,
           action,
+          dailyTokenCap: entry.dailyTokenCap,
           extra: {
             provider: entry.provider,
             upstreamModel: entry.id,
-            ...(isSubscriptionEntry(entry) ? { credentialMode: 'subscription', connection: entry.connection } : {}),
+            ...catalogEntryLedgerMeta(entry),
             ...(selection.requested ? { requestedModel: selection.requested } : {}),
           },
         }, res);
@@ -1530,9 +1744,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         const firstFailureReason = firstFailure?.reason;
 
         if (firstFailure?.isSkip) {
-          // M5(6), (7): candidate 0 (`fromModel`) was skipped for a subscription limit window or needs-re-consent, which is
-          // temporary. Only MODEL_FAILOVER is written; the policy route (which writes `POLICY_UPDATED` and sets `currentModel`)
-          // is never called, even if a later candidate failed ordinarily before `toModel` succeeded, so the owner's selection stays as it is.
+          // M5(6), (7), (8): candidate 0 (`fromModel`) was skipped for a subscription limit window, needs-re-consent, or
+          // per-agent daily cap, which is temporary. Only MODEL_FAILOVER is written; the policy route (which writes
+          // `POLICY_UPDATED` and sets `currentModel`) is never called, even if a later candidate failed ordinarily before
+          // `toModel` succeeded, so the owner's selection stays as it is.
           ledger(ctx, route, {
             type: 'action',
             action: 'MODEL_FAILOVER',
@@ -1540,7 +1755,21 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
             requestedModel: fromModel,
             models: [fromModel, toModel],
             failoverReason: firstFailureReason,
+            ...(firstFailure.connection ? { connection: firstFailure.connection } : {}),
+            ...(firstFailure.resetAt ? { resetAt: firstFailure.resetAt } : {}),
           });
+          for (const extraSkip of skippedEntries.slice(1)) {
+            ledger(ctx, route, {
+              type: 'action',
+              action: 'MODEL_FAILOVER',
+              model: toModel,
+              requestedModel: extraSkip.model,
+              models: [extraSkip.model, toModel],
+              failoverReason: extraSkip.reason,
+              connection: extraSkip.connection,
+              ...(extraSkip.resetAt ? { resetAt: extraSkip.resetAt } : {}),
+            });
+          }
         } else {
           // M5(7): when candidate 0 (`fromModel`) failed for a non-skip reason, M2 persistent failback applies unchanged,
           // even if an intermediate candidate in the walk was skipped.
@@ -1563,6 +1792,18 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
               requestedModel: fromModel,
               models: [fromModel, toModel],
               ...(firstFailureReason ? { failoverReason: firstFailureReason } : {}),
+            });
+          }
+          for (const extraSkip of skippedEntries) {
+            ledger(ctx, route, {
+              type: 'action',
+              action: 'MODEL_FAILOVER',
+              model: toModel,
+              requestedModel: extraSkip.model,
+              models: [extraSkip.model, toModel],
+              failoverReason: extraSkip.reason,
+              connection: extraSkip.connection,
+              ...(extraSkip.resetAt ? { resetAt: extraSkip.resetAt } : {}),
             });
           }
 
@@ -1599,8 +1840,16 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       const toolMessages: unknown[] = [];
       for (const tc of factoryCalls) {
         if (tc.function?.name === 'factory_get_models') {
-          const info = opts.control.getRunModels
+          const rawInfo = opts.control.getRunModels
             ? await opts.control.getRunModels({ runId: ctx.run.runId, runToken: presentedToken(req) ?? '' })
+            : undefined;
+          const info = rawInfo
+            ? {
+                ...rawInfo,
+                models:
+                  rawInfo.models ??
+                  (rawInfo.approvedModels ?? []).map((name) => formatCatalogModelView(name, findModel(catalog, name))),
+              }
             : undefined;
           toolMessages.push({
             role: 'tool',
@@ -1634,10 +1883,6 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         }
       }
 
-      if (!isBuiltin) {
-        const standing = checkStanding({ limits: ctx.policy.budgetUsd, spend: ctx.spend, pendingUsd: unacked.get(ctx.run.runId) ?? 0 });
-        if (!standing.inGoodStanding) return deny(res, ctx, route, 402, budgetError(ctx), { window: standing.window });
-      }
       if (throttled(ctx)) return deny(res, ctx, route, 429, 'throttled');
 
       const assistantMsg = {
@@ -1662,7 +1907,14 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     let replyUsage = { input: totalInputTokens, output: totalOutputTokens };
     // AP3.2: grounded by tool results the model was given, or by data this run fetched through a route since its last answer.
     const grounded = !toolsOffered || toolResultsInTurn(upstreamBody.messages as any) || readsGround;
-    const retryAffordable = isBuiltin || checkStanding({ limits: ctx.policy.budgetUsd, spend: ctx.spend, pendingUsd: unacked.get(ctx.run.runId) ?? 0 }).inGoodStanding;
+    const retryAffordable =
+      isBuiltin ||
+      checkStanding({
+        limits: ctx.policy.budgetUsd,
+        spend: ctx.spend,
+        pendingUsd: unacked.get(ctx.run.runId) ?? 0,
+        selectedModelIsZeroPrice: isZeroPrice(price),
+      }).inGoodStanding;
     if (!grounded && !reply.toolCalls?.length && ctx.policy.grounding === 'warn-once' && reply.content.trim() && retryAffordable && !throttled(ctx)) {
       // AP3.3: one more turn with the notice; metered, inside the budget and throttle, and held to AP1 like any answer.
       const retryBody = { ...upstreamBody, messages: [...(upstreamBody.messages as unknown[]), { role: 'assistant', content: reply.content }, { role: 'user', content: GROUNDING_RETRY_NOTICE }] };
@@ -1673,7 +1925,21 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         const retryId = randomUUID();
         const r2 = again.result;
         const u2: Usage = r2.usage ? { model, input: r2.usage.input, output: r2.usage.output, cacheRead: 0, cacheWrite: 0 } : { model, input: 0, output: again.request.maxTokens ?? 4096, cacheRead: 0, cacheWrite: 0 };
-        recordUsage(ctx, route, { usage: u2, model, price, request: retryBody, requestId: retryId, action: r2.usage ? undefined : 'METERING_GAP', extra: { provider: entry.provider, upstreamModel: entry.id } }, res);
+        recordUsage(
+          ctx,
+          route,
+          {
+            usage: u2,
+            model,
+            price,
+            request: retryBody,
+            requestId: retryId,
+            action: r2.usage ? undefined : 'METERING_GAP',
+            dailyTokenCap: entry.dailyTokenCap,
+            extra: { provider: entry.provider, upstreamModel: entry.id, ...catalogEntryLedgerMeta(entry) },
+          },
+          res,
+        );
         const leaked = !r2.toolCalls?.length && detectToolSyntaxLeak(r2.content, allToolNames);
         ledger(ctx, route, { type: 'action', action: 'GROUNDING_RETRY', model, requestId, retryRequestId: retryId, toolCalled: Boolean(r2.toolCalls?.length) });
         replyUsage = { input: replyUsage.input + u2.input, output: replyUsage.output + u2.output };
@@ -2033,7 +2299,9 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         return deny(res, ctx, route, 400, 'bad_path');
       }
       const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
-      if ((route.kind === 'llm' || route.kind === 'models') && !isBuiltin) {
+      // M5(8): native provider routes (`kind === 'llm'`, M4) never serve subscription models, so standing is checked up front;
+      // on `kind === 'models'`, standing is evaluated per candidate inside `handleModels` so $0-priced entries pass at { perDay: 0, perMonth: 0 }.
+      if (route.kind === 'llm' && !isBuiltin) {
         if (ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED') return deny(res, ctx, route, 402, budgetError(ctx), { window: 'blocked' });
         const standing = checkStanding({
           limits: ctx.policy.budgetUsd,

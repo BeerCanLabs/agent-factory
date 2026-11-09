@@ -17,6 +17,7 @@
  */
 import http from 'node:http';
 import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import { getSubscriptionCaps } from './subscription-caps.js';
 import { getSubscriptions } from './subscriptions.js';
 
 export type LimitWindowKind = 'plan-limit' | 'tier-refused';
@@ -145,7 +146,7 @@ const windowsOf = new WeakMap<FactoryState, SubscriptionWindows>();
 export function getSubscriptionWindows(state: FactoryState): SubscriptionWindows {
   let w = windowsOf.get(state);
   if (!w) {
-    w = new SubscriptionWindows(state.ledger);
+    w = new SubscriptionWindows(state.ledger, state.subscriptionNow);
     windowsOf.set(state, w);
   }
   return w;
@@ -155,7 +156,10 @@ export function getSubscriptionWindows(state: FactoryState): SubscriptionWindows
 export async function handleSubscriptionWindows(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
   if (path === '/api/v1/gatekeeper-egress/subscription-windows' && req.method === 'GET') {
     if (!(await requirePrivilege(req, res, state, 'egress.subscription-windows.read'))) return true;
-    json(res, 200, { windows: getSubscriptionWindows(state).list() });
+    json(res, 200, {
+      windows: getSubscriptionWindows(state).list(),
+      caps: getSubscriptionCaps(state).listActive(),
+    });
     return true;
   }
   const one = path.match(/^\/api\/v1\/gatekeeper-egress\/subscription-windows\/([^/]+)$/);

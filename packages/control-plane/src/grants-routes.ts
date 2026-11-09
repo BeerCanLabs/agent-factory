@@ -28,6 +28,7 @@ import {
   agentKindOf,
   checkOwnsAnyAgent,
   checkOwnsPersonalAgent,
+  detachDisallowedPersonalModelsOnAgent,
   effectiveGrantsForActor,
   findAgentRecord,
   identify,
@@ -343,7 +344,7 @@ export function checkAuthz(
   const skillVersions = skillId ? sReg.versions(skillId) : [];
   const skillRec = skillVersions.at(-1);
   const skillOwner = skillId ? resolveSkillContentOwner(state, skillId, skillRec) : undefined;
-  const ownsAny = targetPrivilege === 'skills.register' || targetPrivilege === 'mcp.use'
+  const ownsAny = targetPrivilege === 'skills.register' || targetPrivilege === 'mcp.use' || targetPrivilege === 'models.read'
     ? checkOwnsAnyAgent(state, canonicalActor)
     : false;
   const ownsPersonal = targetPrivilege === 'subscriptions.own'
@@ -625,6 +626,9 @@ export async function revokeAllAccess(state: FactoryState, principal: Principal,
   const by = { actor: principal.actor, ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}) };
   for (const g of grants) {
     state.ledger.append({ timestamp: ts, agentId: g.scope.kind === 'agent' ? g.scope.id : 'control-plane', type: 'action', action: 'GRANT_REVOKED', ...by, subject: g.subject, scope: g.scope, before: g, after: null });
+    if (g.scope.kind === 'agent' && g.role === 'content-owner') {
+      await detachDisallowedPersonalModelsOnAgent(state, g.scope.id, principal.actor, 'principal access revoked (D15)');
+    }
   }
   const summary = { grants: grants.map((g) => g.id), groups, cliTokens, sessions };
   state.ledger.append({ timestamp: ts, agentId: 'control-plane', type: 'action', action: 'ACCESS_REVOKED_ALL', ...by, subject: target.id, after: summary });
@@ -1134,6 +1138,10 @@ export async function grantRole(
       });
     }
 
+    if (parsedScope.kind === 'agent' && created.role === 'content-owner') {
+      await detachDisallowedPersonalModelsOnAgent(state, parsedScope.id, principal.actor, 'agent content-owner grant updated (D15)');
+    }
+
     return { status: previousSameId ? 200 : 201, body: { grant: created } };
   } catch (err) {
     if (err instanceof GrantStoreError) {
@@ -1284,6 +1292,9 @@ export async function revokeGrant(
       before: revoked,
       after: null,
     });
+    if (revoked.scope.kind === 'agent' && revoked.role === 'content-owner') {
+      await detachDisallowedPersonalModelsOnAgent(state, revoked.scope.id, principal.actor, 'agent content-owner grant revoked (D15)');
+    }
     return { status: 200, body: { ok: true, grant: revoked } };
   } catch (err) {
     if (err instanceof GrantStoreError) {

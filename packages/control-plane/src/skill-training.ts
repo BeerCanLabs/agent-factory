@@ -6,7 +6,7 @@ import { payloadHash } from '@beercanlabs/factory-ledger';
 import { ownerOf, skillVisibleTo, visibilityOf, type SkillViewer } from '@beercanlabs/factory-registrar';
 import type { Principal } from '@beercanlabs/factory-auth';
 import { authorize } from '@beercanlabs/factory-bouncer';
-import { json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import { catalogEntryOf, checkPersonalByomModelsForAgent, json, readJson, requirePrivilege, type FactoryState } from './app.js';
 import { ownersOf } from './config-store.js';
 import { skillRegistry } from './skills.js';
 
@@ -196,6 +196,29 @@ export async function applyTraining(state: FactoryState, principal: Principal, o
   if (op.op === 'run') {
     if (typeof op.model !== 'string' || !op.model || op.model.length > 128) return { status: 400, body: { error: 'training_run_invalid' } };
     if (typeof op.costUsd !== 'number' || !Number.isFinite(op.costUsd) || op.costUsd < 0) return { status: 400, body: { error: 'training_run_invalid' } };
+    const modelEntry = catalogEntryOf(state, op.model);
+    if (modelEntry?.credentialMode === 'subscription' && modelEntry.scope === 'personal') {
+      const known = SKILL_ID.test(id) ? skillRegistry(state).versions(id) : [];
+      const ownerAgentId = known[0] ? ownerOf(known[0]) : undefined;
+      const ownerAgent = ownerAgentId ? state.agents.get(ownerAgentId) : undefined;
+      if (!ownerAgent) {
+        return {
+          status: 403,
+          body: {
+            error: 'personal_model_skill_forbidden',
+            model: op.model,
+            message: `personal subscription model '${op.model}' may only be used to train a private skill owned by '${modelEntry.ownerPrincipalId}'s personal agent`,
+          },
+        };
+      }
+      const byomCheck = checkPersonalByomModelsForAgent(state, ownerAgent.id, [op.model]);
+      if (!byomCheck.ok) {
+        return {
+          status: byomCheck.status,
+          body: { error: byomCheck.error, model: byomCheck.model, message: byomCheck.message },
+        };
+      }
+    }
     const rec = recordOf(state, id);
     if (!rec.baseline.length) return { status: 409, body: { error: 'training_baseline_required' } };
     if (!Array.isArray(op.outputs)) return { status: 400, body: { error: 'training_run_invalid' } };
