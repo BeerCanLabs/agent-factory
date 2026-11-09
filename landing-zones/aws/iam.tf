@@ -48,9 +48,15 @@ locals {
   provider_secret_arns = [for n in local.held_secret_names : "${local.secret_arn}/${n}-??????"]
   # Gatekeeper-egress routes from variables (model routes only per E10; non-model routes are resolved dynamically via Control Plane)
   gatekeeper_egress_routes = var.gatekeeper_egress_routes
-  # §6.11 K1: OAuth grants (one secret per agent x provider) and the app credentials they depend on. Only the
-  # control plane's Keymaster reads or writes them; the gatekeeper-egress asks the control plane for access tokens.
-  keymaster_grant_arns = ["${local.secret_arn}/connections/*"]
+  # §6.11 K1/K3, §6.9 M5: OAuth grants (connections/*), factory subscription grants (shared/<provider>/subscription/*),
+  # and personal Owner BYOM subscription grants (users/<principalKey>/<provider>/subscription/*) and the app credentials
+  # they depend on. Only the control plane's Keymaster reads or writes them (KeymasterGrantStore); the gatekeeper-egress
+  # asks the control plane for access tokens and is explicitly denied access (NeverKeymasterGrants).
+  keymaster_grant_arns = [
+    "${local.secret_arn}/connections/*",
+    "${local.secret_arn}/shared/*/subscription/*",
+    "${local.secret_arn}/users/*",
+  ]
   # Legacy app-credential names (migrated providers), then the Keymaster-named entries for every provider (K5.1, TSK-067).
   keymaster_app_arns = ["${local.secret_arn}/GOOGLE_OAUTH_CLIENT*", "${local.secret_arn}/GOOGLE_SERVICE_ACCOUNT*", "${local.secret_arn}/LINKEDIN_OAUTH_CLIENT*", "${local.secret_arn}/shared/*/oauth-client-??????", "${local.secret_arn}/shared/*/service-account-key-??????"]
   telemetry_statement = {
@@ -228,9 +234,9 @@ resource "aws_iam_role_policy" "accountant" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "CostExplorerReadOnly"
-        Effect   = "Allow"
-        Action   = [
+        Sid    = "CostExplorerReadOnly"
+        Effect = "Allow"
+        Action = [
           "ce:GetCostAndUsage",
           "ce:GetCostForecast",
           "ce:GetDimensionValues",
@@ -238,9 +244,9 @@ resource "aws_iam_role_policy" "accountant" {
         Resource = "*"
       },
       {
-        Sid      = "EcsInventoryReadOnly"
-        Effect   = "Allow"
-        Action   = [
+        Sid    = "EcsInventoryReadOnly"
+        Effect = "Allow"
+        Action = [
           "ecs:ListServices",
           "ecs:DescribeServices",
           "ecs:ListTasks",
@@ -277,7 +283,7 @@ resource "aws_iam_role_policy" "gatekeeper_egress" {
         Resource = concat(local.provider_secret_arns, ["${local.secret_arn}/*"])
       },
       {
-        # K1/K3: the gatekeeper-egress never reads OAuth grants or app credentials; it gets short-lived tokens from the control plane.
+        # §6.11 K1/K3, §6.9 M5: the gatekeeper-egress never reads OAuth grants, subscription grants (connections/*, shared/*/subscription/*, users/*), or app credentials; it gets short-lived tokens from the control plane.
         Sid      = "NeverKeymasterGrants"
         Effect   = "Deny"
         Action   = ["secretsmanager:*"]

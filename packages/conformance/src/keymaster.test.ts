@@ -94,8 +94,27 @@ describe('K1 the Keymaster owns OAuth grants and app secrets', () => {
   });
 
   it('the gatekeeper-egress role cannot read grants in the AWS landing zone', () => {
-    const gw = read('landing-zones/aws/iam.tf').match(/resource "aws_iam_role_policy" "gatekeeper_egress" \{[\s\S]*?\n\}/)?.[0] ?? '';
-    assert.match(gw, /Sid\s*=\s*"NeverKeymasterGrants"[\s\S]*?Effect\s*=\s*"Deny"[\s\S]*?keymaster_grant_arns/);
+    const iamTf = read('landing-zones/aws/iam.tf');
+
+    // keymaster_grant_arns covers connections/*, shared/*/subscription/*, and users/* (§6.11 K1/K3, §6.9 M5)
+    assert.match(
+      iamTf,
+      /keymaster_grant_arns\s*=\s*\[[\s\S]*?"\$\{local\.secret_arn\}\/connections\/\*"[\s\S]*?"\$\{local\.secret_arn\}\/shared\/\*\/subscription\/\*"[\s\S]*?"\$\{local\.secret_arn\}\/users\/\*"[\s\S]*?\]/,
+    );
+
+    // control_plane KeymasterGrantStore allows keymaster_grant_arns
+    const cp = iamTf.match(/resource "aws_iam_role_policy" "control_plane" \{[\s\S]*?\n\}\n/)?.[0] ?? '';
+    assert.match(
+      cp,
+      /Sid\s*=\s*"KeymasterGrantStore"[\s\S]*?Effect\s*=\s*"Allow"[\s\S]*?Resource\s*=\s*concat\(local\.keymaster_grant_arns/,
+    );
+
+    // gatekeeper_egress NeverKeymasterGrants denies secretsmanager:* on keymaster_grant_arns
+    const gw = iamTf.match(/resource "aws_iam_role_policy" "gatekeeper_egress" \{[\s\S]*?\n\}\n/)?.[0] ?? '';
+    assert.match(
+      gw,
+      /Sid\s*=\s*"NeverKeymasterGrants"[\s\S]*?Effect\s*=\s*"Deny"[\s\S]*?Action\s*=\s*\["secretsmanager:\*"\][\s\S]*?Resource\s*=\s*concat\(local\.keymaster_grant_arns/,
+    );
   });
 });
 
