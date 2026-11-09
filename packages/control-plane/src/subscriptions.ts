@@ -1047,7 +1047,7 @@ export async function handleSubscriptions(state: FactoryState, req: http.Incomin
     }
   }
 
-  const subModelItem = path.match(/^\/api\/v1\/subscriptions\/([^/]+)\/models\/([^/]+)$/);
+  const subModelItem = path.match(/^\/api\/v1\/subscriptions\/([^/]+)\/models\/(.+)$/);
   if (subModelItem && req.method === 'DELETE') {
     const principal = await requirePrivilege(req, res, state, 'subscriptions.own');
     if (!principal) return true;
@@ -1083,7 +1083,7 @@ export async function handleSubscriptions(state: FactoryState, req: http.Incomin
     const retired = await retireCatalogModel(state, modelName, principal.actor, {
       ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}),
     });
-    json(res, 200, { ok: true, retired: modelName, policiesUpdated: retired.policiesUpdated });
+    json(res, 200, { ok: true, retired: modelName, policiesUpdated: retired.policiesUpdated, affectedAgents: retired.affectedAgents });
     return true;
   }
 

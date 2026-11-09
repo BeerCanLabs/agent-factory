@@ -25,7 +25,7 @@ export interface AgentRecord {
   role?: string;
   kind?: 'personal' | 'team';
   accountableLead?: string;
-  activeOwnerPrincipalId?: string;
+  activeOwnerPrincipalId?: string | null;
   owners?: string[];
   version: string;
   state: AgentState;
@@ -647,32 +647,33 @@ export interface SubscriptionDiscoveredModel {
 
 export interface SubscriptionDiscoveryMeta {
   listAvailable: boolean;
-  reason?: 'no_model_list' | 'vendor_refused';
-  checkedAt: string;
-  status: 'ok' | 'failed';
-  error?: string;
+  status: 'ok' | 'no_model_list' | 'vendor_refused' | 'failed' | 'needs_reconsent';
+  discoveredAt: string;
+  reason?: string;
+  message?: string;
 }
 
 export interface SubscriptionConnectionView {
   id: string;
-  templateId: 'xai-subscription' | 'openai-subscription';
-  vendor: 'xai' | 'openai';
+  provider: string;
+  templateId: string;
+  vendor?: string;
   scope: SubscriptionScope;
   ownerPrincipalId?: string;
   name: string;
   status: SubscriptionStatus;
-  subscriberEmail?: string;
+  statusAt?: string;
+  subscriberEmail: string;
   subscriberName?: string;
   tier?: string;
-  subscriberAttested: true;
+  subscriberAttested?: boolean;
   connectedBy: string;
   connectedAt: string;
-  refreshedAt?: string;
-  reconsentAt?: string;
-  reconsentReason?: string;
+  reconnectedAt?: string;
   dailyTokenCap?: number;
   discoveredModels?: SubscriptionDiscoveredModel[];
   discovery?: SubscriptionDiscoveryMeta;
+  secretName?: string;
   limitWindow?: SubscriptionLimitWindow;
   activeCaps?: SubscriptionCapView[];
   catalogModels?: StoredModel[];

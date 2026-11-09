@@ -60,9 +60,10 @@ describe('§6.17 CL11 showing what the factory returned', () => {
           scope: 'personal',
           ownerPrincipalId: 'user:dale',
           status: 'needs_reconsent',
-          vendor: 'xai',
+          provider: 'xai',
+          templateId: 'xai-subscription',
           tier: 'SuperGrok',
-          accountEmail: 'dale@example.com',
+          subscriberEmail: 'dale@example.com',
           dailyTokenCap: 250000,
           limitWindow: {
             kind: 'quota',
@@ -105,6 +106,8 @@ describe('§6.17 CL11 showing what the factory returned', () => {
     assert.match(out, /Dale's Grok Subscription \[sub_1\]/);
     assert.match(out, /personal \(user:dale\)/);
     assert.match(out, /needs_reconsent \[RECONSENT REQUIRED\]/);
+    assert.match(out, /vendor=xai/);
+    assert.match(out, /account=dale@example\.com/);
     assert.match(out, /limit window: kind=quota code=429.*resetAt=2026-11-08T14:00:00Z/);
     assert.match(out, /checked 2026-11-07.*https:\/\/x\.ai\/legal\/terms-of-service/);
     assert.match(out, /Anthropic \(Claude Pro \/ Max\) \[NOT OFFERED, checked 2026-11-07\]/);

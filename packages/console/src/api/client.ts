@@ -698,7 +698,7 @@ export const factoryApi = {
     connection: SubscriptionConnectionView;
     discovery: SubscriptionDiscoveryMeta;
     models: SubscriptionDiscoveredModel[];
-    entriesRetired: string[];
+    entriesRetired: number;
   }> {
     return request(`/subscriptions/${encodeURIComponent(id)}/discover`, {
       method: 'POST',
@@ -722,8 +722,8 @@ export const factoryApi = {
   async retireSubscriptionModel(
     id: string,
     modelName: string,
-  ): Promise<{ ok: boolean; retired: string; affectedAgents: string[] }> {
-    return request<{ ok: boolean; retired: string; affectedAgents: string[] }>(
+  ): Promise<{ ok: boolean; retired: string; policiesUpdated?: number; affectedAgents: string[] }> {
+    return request<{ ok: boolean; retired: string; policiesUpdated?: number; affectedAgents: string[] }>(
       `/subscriptions/${encodeURIComponent(id)}/models/${encodeURIComponent(modelName)}`,
       { method: 'DELETE' },
     );

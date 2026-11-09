@@ -96,12 +96,15 @@ export const ModelsView: React.FC<ModelsViewProps> = ({ agent, onRefresh }) => {
 
   // Permissions
   const canEditBudget = Boolean(permissions.canSetBudget);
-  const canEditModels = Boolean(
-    permissions.canSetPolicy ||
-      isOwnerOf(owners, user?.email) ||
-      (effectivePrincipal && owners.includes(effectivePrincipal)) ||
-      (effectivePrincipal && agent.activeOwnerPrincipalId === effectivePrincipal),
-  );
+  const isPersonal = (agent.kind ?? 'personal') === 'personal';
+  const ownerCanEdit =
+    isPersonal && agent.activeOwnerPrincipalId !== undefined
+      ? Boolean(effectivePrincipal && agent.activeOwnerPrincipalId === effectivePrincipal)
+      : Boolean(
+          isOwnerOf(owners, user?.email) ||
+            (effectivePrincipal && owners.includes(effectivePrincipal)),
+        );
+  const canEditModels = Boolean(permissions.canSetPolicy || ownerCanEdit);
 
   // Load data defensively
   const loadData = async () => {

@@ -143,7 +143,7 @@ export function allowsManualModelEntry(
   conn: Pick<SubscriptionConnectionView, 'discovery' | 'discoveredModels'>,
 ): boolean {
   if (!conn.discovery) return true;
-  if (conn.discovery.status === 'failed') return true;
+  if (conn.discovery.status === 'failed' || conn.discovery.status === 'needs_reconsent') return true;
   if (conn.discovery.listAvailable === false) return true;
   return !Array.isArray(conn.discoveredModels);
 }
@@ -158,26 +158,43 @@ export function discoveryStatusBanner(
       text: 'Model list has not been fetched yet. Click Discover Models, or enter a vendor model ID directly.',
     };
   }
-  if (d.status === 'failed') {
+  if (d.status === 'needs_reconsent') {
     return {
       tone: 'warning',
-      text: `Last model discovery failed (${d.error || 'vendor unreachable'}). Existing catalog entries were kept; you can enter a model ID manually.`,
+      text: 'Discovery requires re-consent. Reconnect this subscription to refresh credentials and discover models.',
     };
   }
-  if (!d.listAvailable) {
+  if (d.status === 'failed') {
+    const err = d.message ?? d.reason ?? 'vendor unreachable';
+    return {
+      tone: 'warning',
+      text: `Last model discovery failed (${err}). Existing catalog entries were kept; you can enter a model ID manually.`,
+    };
+  }
+  if (!d.listAvailable || d.status === 'no_model_list' || d.status === 'vendor_refused') {
     const why =
-      d.reason === 'vendor_refused'
+      d.status === 'vendor_refused' || d.reason === 'vendor_refused'
         ? 'the vendor refused model-list discovery for OAuth subscription tokens'
         : 'this vendor does not publish a subscription model list endpoint';
+    const tag = d.reason ?? (d.status === 'vendor_refused' ? 'vendor_refused' : 'no_model_list');
     return {
       tone: 'info',
-      text: `Model list unavailable (${d.reason ?? 'no_model_list'}): ${why}. Existing catalog entries were kept; enter the vendor model ID manually below.`,
+      text: `Model list unavailable (${tag}): ${why}. Existing catalog entries were kept; enter the vendor model ID manually below.`,
     };
   }
   const count = conn.discoveredModels?.length ?? 0;
+  let formattedDate = d.discoveredAt;
+  try {
+    const parsed = new Date(d.discoveredAt);
+    if (!Number.isNaN(parsed.getTime())) {
+      formattedDate = parsed.toLocaleString();
+    }
+  } catch {
+    // safe fallback
+  }
   return {
     tone: 'ok',
-    text: `${count} model${count === 1 ? '' : 's'} discovered from vendor (checked ${new Date(d.checkedAt).toLocaleString()}).`,
+    text: `${count} model${count === 1 ? '' : 's'} discovered from vendor (checked ${formattedDate}).`,
   };
 }
 

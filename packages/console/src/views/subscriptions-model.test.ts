@@ -41,6 +41,7 @@ const adminWhoami: Whoami = {
 
 const factoryConn: SubscriptionConnectionView = {
   id: 'sub_factory_1',
+  provider: 'openai',
   templateId: 'openai-subscription',
   vendor: 'openai',
   scope: 'factory',
@@ -54,13 +55,14 @@ const factoryConn: SubscriptionConnectionView = {
   discoveredModels: [{ id: 'gpt-5-codex', displayName: 'GPT-5 Codex' }],
   discovery: {
     listAvailable: true,
-    checkedAt: '2026-11-08T00:01:00Z',
+    discoveredAt: '2026-11-08T00:01:00Z',
     status: 'ok',
   },
 };
 
 const aliceConn: SubscriptionConnectionView = {
   id: 'sub_alice_1',
+  provider: 'xai',
   templateId: 'xai-subscription',
   vendor: 'xai',
   scope: 'personal',
@@ -75,8 +77,8 @@ const aliceConn: SubscriptionConnectionView = {
   discovery: {
     listAvailable: false,
     reason: 'no_model_list',
-    checkedAt: '2026-11-08T00:02:00Z',
-    status: 'ok',
+    discoveredAt: '2026-11-08T00:02:00Z',
+    status: 'no_model_list',
   },
 };
 
@@ -157,26 +159,49 @@ describe('subscriptions-model: attestation, discovery, model admission, caps & e
     });
   });
 
-  it('allows manual modelId entry when discovery reports no_model_list / vendor_refused / failed, and locks to discovered list when available', () => {
+  it('allows manual modelId entry when discovery reports no_model_list / vendor_refused / failed / needs_reconsent, and locks to discovered list when available', () => {
     assert.equal(allowsManualModelEntry(factoryConn), false);
     assert.equal(allowsManualModelEntry(aliceConn), true);
     assert.equal(
       allowsManualModelEntry({
         ...aliceConn,
-        discovery: { listAvailable: false, reason: 'vendor_refused', checkedAt: '2026-11-08T00:00:00Z', status: 'ok' },
+        discovery: { listAvailable: false, reason: 'vendor_refused', discoveredAt: '2026-11-08T00:00:00Z', status: 'vendor_refused' },
       }),
       true,
     );
     assert.equal(
       allowsManualModelEntry({
         ...factoryConn,
-        discovery: { listAvailable: true, checkedAt: '2026-11-08T00:00:00Z', status: 'failed', error: '502' },
+        discovery: { listAvailable: false, discoveredAt: '2026-11-08T00:00:00Z', status: 'failed', message: '502 Bad Gateway' },
+      }),
+      true,
+    );
+    assert.equal(
+      allowsManualModelEntry({
+        ...aliceConn,
+        discovery: { listAvailable: false, discoveredAt: '2026-11-08T00:00:00Z', status: 'needs_reconsent' },
       }),
       true,
     );
 
     assert.equal(discoveryStatusBanner(factoryConn).tone, 'ok');
     assert.match(discoveryStatusBanner(aliceConn).text, /no_model_list/);
+
+    // needs_reconsent banner checked FIRST
+    const reconsentBanner = discoveryStatusBanner({
+      ...aliceConn,
+      discovery: { listAvailable: false, status: 'needs_reconsent', discoveredAt: '2026-11-08T00:00:00Z' },
+    });
+    assert.equal(reconsentBanner.tone, 'warning');
+    assert.match(reconsentBanner.text, /re-consent/i);
+
+    // failed banner uses message ?? reason
+    const failedBanner = discoveryStatusBanner({
+      ...factoryConn,
+      discovery: { listAvailable: false, status: 'failed', message: 'token_endpoint_unreachable', reason: 'timeout', discoveredAt: 'invalid-date' },
+    });
+    assert.equal(failedBanner.tone, 'warning');
+    assert.match(failedBanner.text, /token_endpoint_unreachable/);
   });
 
   it('enforces immutable $0 on personal BYOM models and explicit price (including $0) on factory models', () => {

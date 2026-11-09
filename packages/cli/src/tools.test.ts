@@ -94,10 +94,25 @@ describe('§6.17 CL6 nothing sensitive reaches the terminal', () => {
     const connect = TOOLS.find((t) => t.spec.name === 'connect_subscription')!;
     const setCap = TOOLS.find((t) => t.spec.name === 'set_subscription_cap')!;
     const addModel = TOOLS.find((t) => t.spec.name === 'add_subscription_model')!;
+    const retireModel = TOOLS.find((t) => t.spec.name === 'retire_subscription_model')!;
     await assert.rejects(connect.run(c, { templateId: 'xai-subscription', subscriberAttested: false }), ToolArgumentError);
     await assert.rejects(setCap.run(c, { id: 'sub_1', cap: 0 }), ToolArgumentError);
     await assert.rejects(addModel.run(c, { id: 'sub_1', name: 'grok-sub', modelId: 'grok-4.6', inputPerMTok: 1 }), ToolArgumentError);
+    await assert.rejects(addModel.run(c, { id: 'sub_1', name: '$bad-name', modelId: 'grok-4.6' }), ToolArgumentError);
+    await assert.rejects(retireModel.run(c, { id: 'sub_1', model: '$bad-model' }), ToolArgumentError);
     assert.equal(f.seen.length, 0);
+
+    // Names with @ and / are accepted and URL-encoded properly
+    await addModel.run(c, { id: 'sub_1', name: 'grok-4.6@dale/sub', modelId: 'grok-4.6' });
+    assert.equal(f.seen.length, 1);
+    assert.equal(f.seen[0].path, '/api/v1/subscriptions/sub_1/models');
+    assert.equal(f.seen[0].method, 'POST');
+    assert.equal(f.seen[0].body?.name, 'grok-4.6@dale/sub');
+
+    await retireModel.run(c, { id: 'sub_1', model: 'grok-4.6@dale/sub' });
+    assert.equal(f.seen.length, 2);
+    assert.equal(f.seen[1].path, '/api/v1/subscriptions/sub_1/models/grok-4.6%40dale%2Fsub');
+    assert.equal(f.seen[1].method, 'DELETE');
   });
 
   it('CL4 trims a long list for the manager and says it did', () => {

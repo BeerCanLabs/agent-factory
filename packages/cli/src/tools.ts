@@ -22,12 +22,21 @@ export type Tool = {
 };
 
 const ID = /^[a-z0-9][a-z0-9._:-]{0,127}$/i;
+const CATALOG_MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
 
 export class ToolArgumentError extends Error {}
 
 function id(args: Args, key: string): string {
   const v = args[key];
   if (typeof v !== 'string' || !ID.test(v)) throw new ToolArgumentError(`${key} must be an id (letters, digits, . _ : -)`);
+  return encodeURIComponent(v);
+}
+
+function catalogModelName(args: Args, key: string): string {
+  const v = args[key];
+  if (typeof v !== 'string' || !CATALOG_MODEL_NAME.test(v)) {
+    throw new ToolArgumentError(`${key} must be a catalog model name (1..128 chars: letters, digits, . _ : @ / -)`);
+  }
   return encodeURIComponent(v);
 }
 
@@ -309,7 +318,7 @@ export const TOOLS: Tool[] = [
         ? { inputPerMTok: amount(a, 'inputPerMTok'), outputPerMTok: amount(a, 'outputPerMTok') }
         : undefined;
       return c.request('POST', `/api/v1/subscriptions/${id(a, 'id')}/models`, {
-        name: decodeURIComponent(id(a, 'name')),
+        name: decodeURIComponent(catalogModelName(a, 'name')),
         modelId: vendorModelId(a, 'modelId'),
         ...(price ? { price } : {}),
       });
@@ -321,7 +330,7 @@ export const TOOLS: Tool[] = [
     'Retire a subscription-backed model from the catalog.',
     'subscriptions.own',
     obj({ id: { type: 'string' }, model: { type: 'string' } }, ['id', 'model']),
-    (c, a) => c.request('DELETE', `/api/v1/subscriptions/${id(a, 'id')}/models/${id(a, 'model')}`),
+    (c, a) => c.request('DELETE', `/api/v1/subscriptions/${id(a, 'id')}/models/${catalogModelName(a, 'model')}`),
     true,
   ),
   change(

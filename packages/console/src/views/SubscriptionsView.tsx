@@ -932,7 +932,9 @@ const ConnectionCard: React.FC<{
         setCatalogNameInput(suggestSubscriptionCatalogName(res.models[0].id, conn));
       }
       const retiredNote =
-        res.entriesRetired.length > 0 ? ` Retired dropped entries: ${res.entriesRetired.join(', ')}.` : '';
+        res.entriesRetired > 0
+          ? ` Retired ${res.entriesRetired} dropped catalog ${res.entriesRetired === 1 ? 'entry' : 'entries'}.`
+          : '';
       onNotice(`Model discovery completed for "${conn.name}".${retiredNote}`);
       await onReload();
     } catch (err) {
@@ -981,8 +983,9 @@ const ConnectionCard: React.FC<{
     }
     try {
       const res = await factoryApi.retireSubscriptionModel(conn.id, modelName);
+      const affected = res.affectedAgents ?? [];
       onNotice(
-        `Retired "${res.retired}".${res.affectedAgents.length ? ` Updated ${res.affectedAgents.length} agent policies.` : ''}`,
+        `Retired "${res.retired}".${affected.length ? ` Updated ${affected.length} agent policies.` : ''}`,
       );
       await onReload();
     } catch (err) {
@@ -1095,6 +1098,9 @@ const ConnectionCard: React.FC<{
               ID: <span className="font-mono">{conn.id}</span>
             </span>
             <span>
+              Provider: <span className="font-mono">{conn.provider ?? conn.templateId}</span>
+            </span>
+            <span>
               Template: <span className="font-mono">{conn.templateId}</span>
             </span>
             {conn.subscriberEmail && (
@@ -1103,6 +1109,9 @@ const ConnectionCard: React.FC<{
               </span>
             )}
             <span>Connected {new Date(conn.connectedAt).toLocaleDateString()}</span>
+            {conn.reconnectedAt && (
+              <span>Reconnected {new Date(conn.reconnectedAt).toLocaleDateString()}</span>
+            )}
           </div>
         </div>
 
@@ -1155,7 +1164,7 @@ const ConnectionCard: React.FC<{
             <div className="font-bold">Subscription token refresh was refused — Needs Re-consent</div>
             <p className="mt-0.5 text-rose-800 dark:text-rose-300">
               Gatekeeper skips this connection without retrying refresh until reconnected
-              {conn.reconsentReason ? ` (vendor reason: ${conn.reconsentReason})` : ''}. Click <b>Reconnect</b> to sign in again with the same vendor account.
+              {conn.discovery?.message ? ` (vendor reason: ${conn.discovery.message})` : ''}. Click <b>Reconnect</b> to sign in again with the same vendor account.
             </p>
           </div>
         </div>

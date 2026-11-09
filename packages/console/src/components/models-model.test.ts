@@ -542,6 +542,26 @@ describe('models-model: subscription & Owner BYOM display and picker scoping (TS
       ['grok-api', 'grok-dale-sub', 'grok-bob-byom'],
     );
 
+    // D15 pending-revoked / revoked personal agent (activeOwnerPrincipalId: null) with stale owners -> NEVER sees personal BYOM
+    assert.deepEqual(
+      modelPickerCatalogForAgent(catalog, {
+        kind: 'personal',
+        activeOwnerPrincipalId: null,
+        owners: ['user:alice'],
+      }).map((m) => m.name),
+      ['grok-api', 'grok-dale-sub'],
+    );
+
+    // Fallback when activeOwnerPrincipalId is undefined (legacy / unenriched agent view) -> falls back to owners
+    assert.deepEqual(
+      modelPickerCatalogForAgent(catalog, {
+        kind: 'personal',
+        activeOwnerPrincipalId: undefined,
+        owners: ['user:alice'],
+      }).map((m) => m.name),
+      ['grok-api', 'grok-dale-sub', 'codex-alice-byom'],
+    );
+
     // Helpers / skills -> NEVER see personal BYOM (S24)
     assert.deepEqual(
       helperPickerCatalog(catalog).map((m) => m.name),

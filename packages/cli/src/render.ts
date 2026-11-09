@@ -121,8 +121,10 @@ function renderSubscriptionsList(body: Record<string, unknown>): string {
           ? `personal (${oneLine(String(c.ownerPrincipalId ?? 'owner'))})`
           : String(c.scope ?? 'factory');
       const cap = typeof c.dailyTokenCap === 'number' ? `${c.dailyTokenCap} tokens/day/agent` : 'uncapped';
+      const vendorOrProvider = c.provider ?? c.vendor ?? c.templateId ?? '';
+      const email = c.subscriberEmail ?? c.accountEmail;
       parts.push(
-        `  - ${oneLine(String(c.name ?? c.id))} [${oneLine(String(c.id))}]  scope=${oneLine(scope)}  status=${oneLine(status)}  vendor=${oneLine(String(c.vendor ?? c.templateId ?? ''))}${c.tier ? `  tier=${oneLine(String(c.tier))}` : ''}${c.accountEmail ? `  account=${oneLine(String(c.accountEmail))}` : ''}  cap=${oneLine(cap)}`,
+        `  - ${oneLine(String(c.name ?? c.id))} [${oneLine(String(c.id))}]  scope=${oneLine(scope)}  status=${oneLine(status)}  vendor=${oneLine(String(vendorOrProvider))}${c.tier ? `  tier=${oneLine(String(c.tier))}` : ''}${email ? `  account=${oneLine(String(email))}` : ''}  cap=${oneLine(cap)}`,
       );
       if (isObj(c.limitWindow)) {
         const w = c.limitWindow;

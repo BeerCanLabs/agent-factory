@@ -66,6 +66,28 @@ before(async () => {
     secretValues: new Set<string>(),
   } as unknown as FactoryState;
   const server = createFactoryServer(state);
+  state.subscriptions = {
+    list: async (opts?: { scope?: string }) => {
+      if (opts?.scope === 'personal') return [];
+      return [
+        {
+          id: 'c-test-sub-factory',
+          provider: 'xai',
+          templateId: 'xai-subscription',
+          name: "Admin's Grok Subscription",
+          scope: 'factory' as const,
+          subscriberEmail: 'admin@example.com',
+          tier: 'SuperGrok',
+          status: 'active' as const,
+          connectedBy: 'owner@example.com',
+          connectedAt: '2026-11-08T00:00:00Z',
+          secretName: 'shared/xai/subscription/c-test-sub-factory',
+        },
+      ];
+    },
+    get: async () => undefined,
+    getSignIn: () => undefined,
+  } as unknown as any;
   const port = await new Promise<number>((r) => server.listen(0, '127.0.0.1', () => r((server.address() as AddressInfo).port)));
   base = `http://127.0.0.1:${port}`;
   close = () => new Promise<void>((r) => server.close(() => r()));
@@ -147,6 +169,9 @@ describe('§6.17 CL11 commands against the real control plane', () => {
     const factoryOk = await admin.run('subscriptions factory');
     assert.equal(factoryOk.ok, true, factoryOk.output);
     assert.match(factoryOk.output, /Connected subscriptions/);
+    assert.match(factoryOk.output, /Admin's Grok Subscription/);
+    assert.match(factoryOk.output, /vendor=xai/);
+    assert.match(factoryOk.output, /account=admin@example\.com/);
   });
 
   it('S9 people commands are offered only with grants.manage: a viewer is refused, an admin reaches the factory', async () => {

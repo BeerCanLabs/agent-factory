@@ -104,8 +104,8 @@ export function modelPickerCatalogForAgent(
     if (!agent) return false;
     if ((agent.kind ?? 'personal') !== 'personal') return false;
     if (!m.ownerPrincipalId) return false;
-    if (agent.activeOwnerPrincipalId) {
-      return agent.activeOwnerPrincipalId === m.ownerPrincipalId;
+    if (agent.activeOwnerPrincipalId !== undefined) {
+      return agent.activeOwnerPrincipalId !== null && agent.activeOwnerPrincipalId === m.ownerPrincipalId;
     }
     const rawOwners = fallbackOwners ?? agent.owners ?? [];
     return rawOwners.some((o) => o.trim() === m.ownerPrincipalId);
