@@ -9,16 +9,22 @@ import {
   RotateCcw,
   Save,
   Shield,
+  Sparkles,
   Info,
 } from 'lucide-react';
 import type { AgentPolicy, AgentRecord, OfferedModel, AgentModelsState } from '../api/types.js';
 import { factoryApi } from '../api/client.js';
 import { useAuth } from '../auth/CloudflareAuth.js';
+import { effectivePrincipalOf } from '../auth/access-gate.js';
 import { usePermissions } from '../auth/usePermissions.js';
 import {
   providerGroupOf,
   groupModelsByProvider,
   approvedOfferedModels,
+  isSubscriptionModel,
+  isPersonalByomModel,
+  modelDisplayLabel,
+  modelPickerCatalogForAgent,
   selectCurrentModel,
   selectPrimaryModel,
   selectSecondaryModel,
@@ -41,8 +47,9 @@ interface ModelsViewProps {
 }
 
 export const ModelsView: React.FC<ModelsViewProps> = ({ agent, onRefresh }) => {
-  const { user } = useAuth();
+  const { user, whoami } = useAuth();
   const permissions = usePermissions();
+  const effectivePrincipal = effectivePrincipalOf(whoami);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -89,7 +96,15 @@ export const ModelsView: React.FC<ModelsViewProps> = ({ agent, onRefresh }) => {
 
   // Permissions
   const canEditBudget = Boolean(permissions.canSetBudget);
-  const canEditModels = Boolean(permissions.canSetPolicy || isOwnerOf(owners, user?.email));
+  const isPersonal = (agent.kind ?? 'personal') === 'personal';
+  const ownerCanEdit =
+    isPersonal && agent.activeOwnerPrincipalId !== undefined
+      ? Boolean(effectivePrincipal && agent.activeOwnerPrincipalId === effectivePrincipal)
+      : Boolean(
+          isOwnerOf(owners, user?.email) ||
+            (effectivePrincipal && owners.includes(effectivePrincipal)),
+        );
+  const canEditModels = Boolean(permissions.canSetPolicy || ownerCanEdit);
 
   // Load data defensively
   const loadData = async () => {
@@ -217,12 +232,29 @@ export const ModelsView: React.FC<ModelsViewProps> = ({ agent, onRefresh }) => {
   const modelsDirty = isDraftDirty(initialDraft, draft);
   const budgetDirty = isBudgetDirty(initialBudgetForm, budgetForm);
 
+  // Merge enriched model entries from modelsState.models into catalog lookup
+  const mergedCatalog = React.useMemo(() => {
+    const byName = new Map<string, OfferedModel>();
+    for (const m of catalog) byName.set(m.name, m);
+    for (const m of modelsState?.models ?? []) {
+      if (!byName.has(m.name)) byName.set(m.name, m);
+    }
+    return [...byName.values()];
+  }, [catalog, modelsState]);
+
+  // M5(1), D24, D15: Filter Model Access picker so personal BYOM entries appear ONLY on
+  // `kind: 'personal'` agents actively owned by `ownerPrincipalId` — never on `team` agents or other users' agents.
+  const eligibleCatalog = React.useMemo(
+    () => modelPickerCatalogForAgent(mergedCatalog, agent, owners),
+    [mergedCatalog, agent, owners],
+  );
+
   // Group approved models for dropdowns
-  const approvedOffered = approvedOfferedModels(draft.approvedModels, catalog);
+  const approvedOffered = approvedOfferedModels(draft.approvedModels, mergedCatalog);
   const approvedGroups = groupModelsByProvider(approvedOffered);
 
-  // Group full catalog for Model Access
-  const catalogGroups = groupModelsByProvider(catalog);
+  // Group eligible catalog for Model Access
+  const catalogGroups = groupModelsByProvider(eligibleCatalog);
 
   const cardStyle = 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 shadow-sm space-y-4';
   const headingStyle = 'text-sm font-bold text-slate-900 dark:text-white flex items-center space-x-2';
@@ -420,11 +452,14 @@ export const ModelsView: React.FC<ModelsViewProps> = ({ agent, onRefresh }) => {
                 {draft.currentModel === null && <option value="">Select a model…</option>}
                 {approvedGroups.map((g) => (
                   <optgroup key={g.provider} label={g.provider}>
-                    {g.models.map((m) => (
-                      <option key={m.name} value={m.name}>
-                        {m.name}
-                      </option>
-                    ))}
+                    {g.models.map((m) => {
+                      const label = modelDisplayLabel(m);
+                      return (
+                        <option key={m.name} value={m.name}>
+                          {m.name}{label !== m.name ? ` — ${label}` : ''}{isSubscriptionModel(m) ? ' [Subscription]' : ''}
+                        </option>
+                      );
+                    })}
                   </optgroup>
                 ))}
               </select>
@@ -445,11 +480,14 @@ export const ModelsView: React.FC<ModelsViewProps> = ({ agent, onRefresh }) => {
                 {draft.primaryModel === null && <option value="">Select a model…</option>}
                 {approvedGroups.map((g) => (
                   <optgroup key={g.provider} label={g.provider}>
-                    {g.models.map((m) => (
-                      <option key={m.name} value={m.name}>
-                        {m.name}
-                      </option>
-                    ))}
+                    {g.models.map((m) => {
+                      const label = modelDisplayLabel(m);
+                      return (
+                        <option key={m.name} value={m.name}>
+                          {m.name}{label !== m.name ? ` — ${label}` : ''}{isSubscriptionModel(m) ? ' [Subscription]' : ''}
+                        </option>
+                      );
+                    })}
                   </optgroup>
                 ))}
               </select>
@@ -473,13 +511,14 @@ export const ModelsView: React.FC<ModelsViewProps> = ({ agent, onRefresh }) => {
                     {g.models.map((m) => {
                       const isPrimary = m.name === draft.primaryModel;
                       const secondaryUnset = draft.secondaryModel === undefined || draft.secondaryModel === '';
+                      const label = modelDisplayLabel(m);
                       return (
                         <option
                           key={m.name}
                           value={m.name}
                           disabled={isPrimary && secondaryUnset}
                         >
-                          {m.name}
+                          {m.name}{label !== m.name ? ` — ${label}` : ''}{isSubscriptionModel(m) ? ' [Subscription]' : ''}
                           {isPrimary ? (secondaryUnset ? ' (Primary)' : ' (Swap with Primary)') : ''}
                         </option>
                       );
@@ -593,17 +632,28 @@ export const ModelsView: React.FC<ModelsViewProps> = ({ agent, onRefresh }) => {
                               : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
                           }`}
                         >
-                          <div className="flex items-center space-x-2.5">
+                          <div className="flex items-center space-x-2.5 min-w-0">
                             <input
                               type="checkbox"
                               checked={isApproved}
                               onChange={(e) => setDraft(toggleApprovedModel(draft, m.name, e.target.checked))}
                               disabled={!canEditModels || savingModels}
-                              className="rounded text-emerald-600 focus:ring-emerald-500"
+                              className="rounded text-emerald-600 focus:ring-emerald-500 shrink-0"
                             />
-                            <span className="font-mono font-medium text-slate-800 dark:text-slate-200">
-                              {m.name}
-                            </span>
+                            <div className="min-w-0">
+                              <div className="font-mono font-medium text-slate-800 dark:text-slate-200 flex items-center gap-1.5 flex-wrap">
+                                <span>{m.name}</span>
+                                {isSubscriptionModel(m) && (
+                                  <span className="inline-flex items-center gap-0.5 text-[9px] font-sans font-semibold px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+                                    <Sparkles className="w-2.5 h-2.5" />
+                                    {isPersonalByomModel(m) ? 'Personal BYOM ($0)' : 'Subscription'}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                                {modelDisplayLabel(m)}
+                              </div>
+                            </div>
                           </div>
 
                           <div className="flex items-center space-x-1.5">

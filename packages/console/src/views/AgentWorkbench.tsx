@@ -18,18 +18,21 @@ import {
   Layers,
   UploadCloud,
   Puzzle,
+  Sparkles,
 } from 'lucide-react';
-import type { AgentRecord } from '../api/types.js';
+import type { AgentRecord, OfferedModel } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
 import { factoryApi } from '../api/client.js';
 import { PolicyEditor } from '../components/PolicyEditor.js';
 import { ModelsView } from '../components/ModelsView.js';
+import { isPersonalByomModel, isSubscriptionModel, modelDisplayLabel } from '../components/models-model.js';
 import { OwnersEditor } from '../components/OwnersEditor.js';
 import { AgentSkillsTab } from './skills/AgentSkillsTab.js';
 
 interface AgentWorkbenchProps {
   agent: AgentRecord;
   agents: AgentRecord[];
+  catalogModels?: OfferedModel[];
   onSelectAgent: (id: string) => void;
   onRefresh: () => void;
 }
@@ -37,6 +40,7 @@ interface AgentWorkbenchProps {
 export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
   agent,
   agents,
+  catalogModels = [],
   onSelectAgent,
   onRefresh,
 }) => {
@@ -255,6 +259,20 @@ export const AgentWorkbench: React.FC<AgentWorkbenchProps> = ({
               <span className="text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
                 v{agent.version}
               </span>
+              {(() => {
+                const cat = catalogModels.find((m) => m.name === agent.model);
+                return (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300">
+                    {cat && isSubscriptionModel(cat) && <Sparkles className="w-3 h-3 text-purple-500" />}
+                    <span>{cat ? modelDisplayLabel(cat) : agent.model}</span>
+                    {cat && isPersonalByomModel(cat) && (
+                      <span className="font-sans text-[9px] font-semibold text-purple-600 dark:text-purple-400">
+                        (BYOM)
+                      </span>
+                    )}
+                  </span>
+                );
+              })()}
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{agent.role || 'Autonomous Cartridge'}</p>
           </div>

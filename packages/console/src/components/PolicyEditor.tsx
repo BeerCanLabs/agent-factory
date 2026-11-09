@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ArrowRight, CheckCircle, ExternalLink, Shield } from 'lucide-react';
+import { AlertTriangle, ArrowRight, CheckCircle, ExternalLink, Shield, Sparkles } from 'lucide-react';
 import type { AgentPolicy, AgentRecord, OfferedModel, AgentModelsState } from '../api/types.js';
 import { factoryApi } from '../api/client.js';
+import { isPersonalByomModel, isSubscriptionModel, modelDisplayLabel } from './models-model.js';
 
 interface PolicyEditorProps {
   agent: AgentRecord;
@@ -119,7 +120,11 @@ export const PolicyEditor: React.FC<PolicyEditorProps> = ({ agent, canEdit, onOp
 
   if (!policy && !error) return <div className={hint}>Loading policy…</div>;
 
-  const catalogMap = new Map(catalog.map((m) => [m.name, m]));
+  const catalogMap = new Map<string, OfferedModel>();
+  for (const m of catalog) catalogMap.set(m.name, m);
+  for (const m of modelsState?.models ?? []) {
+    if (!catalogMap.has(m.name)) catalogMap.set(m.name, m);
+  }
   const grantedModels = modelsState?.approvedModels ?? policy?.models ?? [];
   const usesDefault = Boolean(modelsState?.usesDefault ?? (policy && !policy.models));
 
@@ -209,11 +214,24 @@ export const PolicyEditor: React.FC<PolicyEditorProps> = ({ agent, canEdit, onOp
                     key={m}
                     className="flex items-center justify-between py-1.5 px-2 rounded bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800/80 text-xs"
                   >
-                    <span className="flex items-center space-x-2">
+                    <span className="flex items-center space-x-2 min-w-0">
                       <CheckCircle className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                      <span className="font-mono text-slate-800 dark:text-slate-200">{m}</span>
+                      <span className="min-w-0">
+                        <span className="font-mono text-slate-800 dark:text-slate-200">{m}</span>
+                        {cat && modelDisplayLabel(cat) !== m && (
+                          <span className="block text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                            {modelDisplayLabel(cat)}
+                          </span>
+                        )}
+                      </span>
                     </span>
-                    <div className="flex items-center space-x-1.5">
+                    <div className="flex items-center space-x-1.5 shrink-0">
+                      {cat && isSubscriptionModel(cat) && (
+                        <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+                          <Sparkles className="w-2.5 h-2.5" />
+                          {isPersonalByomModel(cat) ? 'BYOM $0' : 'Subscription'}
+                        </span>
+                      )}
                       {isCurrent && tag('Current', 'ok')}
                       {isPrimary && tag('Primary', 'muted')}
                       {isSecondary && tag('Secondary', 'muted')}

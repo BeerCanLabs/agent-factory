@@ -50,4 +50,125 @@ describe('§6.17 CL11 showing what the factory returned', () => {
     const out = table(wide);
     assert.match(out, /\(\d+ more columns? not shown; --json has everything\)/);
   });
+
+  it('§6.9 M5 renders subscriptions list with needs_reconsent, limitWindow + resetAt, template permission URLs, and Anthropic/Google notOffered', () => {
+    const out = render({
+      connections: [
+        {
+          id: 'sub_1',
+          name: "Dale's Grok Subscription",
+          scope: 'personal',
+          ownerPrincipalId: 'user:dale',
+          status: 'needs_reconsent',
+          provider: 'xai',
+          templateId: 'xai-subscription',
+          tier: 'SuperGrok',
+          subscriberEmail: 'dale@example.com',
+          dailyTokenCap: 250000,
+          limitWindow: {
+            kind: 'quota',
+            code: '429',
+            openedAt: '2026-11-08T10:00:00Z',
+            resetAt: '2026-11-08T14:00:00Z',
+          },
+          discovery: { status: 'ok', listAvailable: true },
+          discoveredModels: [{ id: 'grok-4.6' }],
+        },
+      ],
+      templates: [
+        {
+          id: 'xai-subscription',
+          name: 'xAI SuperGrok',
+          permission: {
+            tiers: ['SuperGrok'],
+            checkedDate: '2026-11-07',
+            statementUrls: ['https://x.ai/legal/terms-of-service'],
+          },
+        },
+      ],
+      notOffered: [
+        {
+          vendor: 'anthropic',
+          name: 'Anthropic (Claude Pro / Max)',
+          checkedDate: '2026-11-07',
+          reason: 'Consumer OAuth tokens prohibited in third-party agents.',
+          statementUrls: ['https://code.claude.com/docs/en/legal-and-compliance'],
+        },
+        {
+          vendor: 'google',
+          name: 'Google (Gemini / Antigravity)',
+          checkedDate: '2026-11-07',
+          reason: 'Consumer subscription credentials prohibited in third-party agents.',
+          statementUrls: ['https://antigravity.google/terms'],
+        },
+      ],
+    });
+    assert.match(out, /Dale's Grok Subscription \[sub_1\]/);
+    assert.match(out, /personal \(user:dale\)/);
+    assert.match(out, /needs_reconsent \[RECONSENT REQUIRED\]/);
+    assert.match(out, /vendor=xai/);
+    assert.match(out, /account=dale@example\.com/);
+    assert.match(out, /limit window: kind=quota code=429.*resetAt=2026-11-08T14:00:00Z/);
+    assert.match(out, /checked 2026-11-07.*https:\/\/x\.ai\/legal\/terms-of-service/);
+    assert.match(out, /Anthropic \(Claude Pro \/ Max\) \[NOT OFFERED, checked 2026-11-07\]/);
+    assert.match(out, /Google \(Gemini \/ Antigravity\) \[NOT OFFERED, checked 2026-11-07\]/);
+  });
+
+  it('§6.9 M5 renders /models with subscription markers & display labels and /spend with subscription token usage', () => {
+    const modelsOut = render({
+      default: 'grok-api',
+      models: [
+        {
+          name: 'grok-api',
+          id: 'grok-4.6',
+          credentialMode: 'api-key',
+          subscription: false,
+          displayLabel: 'grok-4.6 · xAI API',
+          price: { inputPerMTok: 3, outputPerMTok: 15 },
+        },
+        {
+          name: 'grok-dale',
+          id: 'grok-4.6',
+          credentialMode: 'subscription',
+          subscription: true,
+          scope: 'personal',
+          ownerPrincipalId: 'user:dale',
+          displayLabel: "grok-4.6 · Dale's Grok Subscription",
+          price: { inputPerMTok: 0, outputPerMTok: 0 },
+        },
+      ],
+    });
+    assert.match(modelsOut, /grok-4\.6 · xAI API/);
+    assert.match(modelsOut, /grok-4\.6 · Dale's Grok Subscription/);
+    assert.match(modelsOut, /subscription \[personal BYOM user:dale\]/);
+
+    const spendOut = render({
+      day: '2026-11-08',
+      month: '2026-11',
+      agents: {},
+      subscriptions: {
+        day: '2026-11-08',
+        month: '2026-11',
+        connections: {
+          sub_1: {
+            connectionName: "Dale's Grok Subscription",
+            scope: 'personal',
+            ownerPrincipalId: 'user:dale',
+            dailyTokenCap: 250000,
+            day: { totalTokens: 1200, calls: 3, inputTokens: 800, outputTokens: 400 },
+            month: { totalTokens: 9600, calls: 20, inputTokens: 6000, outputTokens: 3600 },
+          },
+        },
+        agents: {
+          'dale-agent': {
+            day: { totalTokens: 1200, calls: 3 },
+            month: { totalTokens: 9600, calls: 20 },
+          },
+        },
+      },
+    });
+    assert.match(spendOut, /Subscription token usage \(today 2026-11-08, month 2026-11\)/);
+    assert.match(spendOut, /Dale's Grok Subscription/);
+    assert.match(spendOut, /dale-agent/);
+  });
 });

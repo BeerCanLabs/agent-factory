@@ -13,9 +13,10 @@ import {
   Puzzle,
   Server,
   Fingerprint,
+  Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../auth/CloudflareAuth.js';
-import { canManagePeople } from '../auth/access-gate.js';
+import { canAccessSubscriptions, canManageFactorySubscriptions, canManagePeople } from '../auth/access-gate.js';
 
 export type ScreenId =
   | 'fleet'
@@ -25,6 +26,7 @@ export type ScreenId =
   | 'skills'
   | 'systems'
   | 'models'
+  | 'subscriptions'
   | 'approvals'
   | 'finops'
   | 'ledger'
@@ -62,6 +64,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const { activeRole, hasRole, whoami } = useAuth();
   const isAdmin = hasRole('admin');
   const managesPeople = canManagePeople(whoami);
+  const seesSubscriptions = canAccessSubscriptions(whoami);
+  const managesFactorySubs = canManageFactorySubscriptions(whoami);
 
   const navSections: NavSection[] = [
     {
@@ -72,6 +76,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: 'Models & Providers',
           icon: <Cpu className="w-4 h-4" />,
         },
+        ...(seesSubscriptions
+          ? [
+              {
+                id: 'subscriptions' as const,
+                label: managesFactorySubs ? 'Subscriptions & BYOM' : 'My Subscriptions',
+                icon: <Sparkles className="w-4 h-4" />,
+              },
+            ]
+          : []),
       ],
     },
     {

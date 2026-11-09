@@ -1,13 +1,17 @@
 import React, { useEffect, useState } from 'react';
+import { Sparkles } from 'lucide-react';
 import { factoryApi, type HelperDefinition } from '../api/client.js';
+import type { OfferedModel } from '../api/types.js';
+import { helperPickerCatalog, isSubscriptionModel, modelDisplayLabel } from './models-model.js';
 
 /**
  * #332: each helper (subagent) has its own approved model list, a subset of the factory catalog. A parent may start a
  * helper only on a model checked here; an empty list means the helper cannot start at all.
+ * M5(1), S24: personal BYOM subscription models are excluded from shared helpers.
  */
 export const HelperModelsPanel: React.FC = () => {
   const [helpers, setHelpers] = useState<HelperDefinition[]>([]);
-  const [offered, setOffered] = useState<string[]>([]);
+  const [offered, setOffered] = useState<OfferedModel[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string[]>>({});
   const [saving, setSaving] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -16,7 +20,9 @@ export const HelperModelsPanel: React.FC = () => {
     try {
       const [hs, models] = await Promise.all([factoryApi.listSubagents(), factoryApi.listModels()]);
       setHelpers(hs);
-      setOffered(models.map((m) => m.name).sort());
+      setOffered(
+        helperPickerCatalog(models).sort((a, b) => a.name.localeCompare(b.name)),
+      );
       setDrafts(Object.fromEntries(hs.map((h) => [h.id, [...(h.approvedModels ?? [])]])));
     } catch (e: any) {
       setMsg(`Could not load helpers: ${e.message}`);
@@ -73,12 +79,25 @@ export const HelperModelsPanel: React.FC = () => {
               </button>
             </div>
             <div className="flex flex-wrap gap-3 mt-2">
-              {offered.map((m) => (
-                <label key={m} className="flex items-center gap-1 text-[11px] text-slate-700 dark:text-slate-300">
-                  <input type="checkbox" checked={draft.includes(m)} onChange={() => toggle(h.id, m)} />
-                  <span className="font-mono">{m}</span>
-                </label>
-              ))}
+              {offered.map((m) => {
+                const sub = isSubscriptionModel(m);
+                const label = modelDisplayLabel(m);
+                return (
+                  <label
+                    key={m.name}
+                    className="flex items-center gap-1.5 text-[11px] text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-950/60 px-2 py-1 rounded border border-slate-200 dark:border-slate-800"
+                  >
+                    <input type="checkbox" checked={draft.includes(m.name)} onChange={() => toggle(h.id, m.name)} />
+                    <span className="font-mono font-medium">{m.name}</span>
+                    {label !== m.name && <span className="text-[10px] text-slate-500">({label})</span>}
+                    {sub && (
+                      <span className="inline-flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+                        <Sparkles className="w-2.5 h-2.5" /> Subscription
+                      </span>
+                    )}
+                  </label>
+                );
+              })}
             </div>
           </div>
         );

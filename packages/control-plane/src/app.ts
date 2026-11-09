@@ -1848,6 +1848,7 @@ export function enrichAgent(state: FactoryState, a: AgentRecord) {
   const { accountableLead: _storedLead, ...baseAgent } = a;
   const kind = effectiveAgentKind(a);
   const resolvedLead = kind === 'team' ? accountableLeadOf(state, a.id, a) : undefined;
+  const activeOwnerPrincipalId = kind === 'personal' ? (activePersonalOwnerOf(state, a.id) ?? null) : undefined;
   const s = state.spend.get(a.id, undefined);
   const pol = state.policies.get(a.id);
   const activeR = activeRun(state, a.id);
@@ -1857,6 +1858,7 @@ export function enrichAgent(state: FactoryState, a: AgentRecord) {
     ...baseAgent,
     kind,
     ...(resolvedLead ? { accountableLead: resolvedLead } : {}),
+    ...(activeOwnerPrincipalId !== undefined ? { activeOwnerPrincipalId } : {}),
     category,
     isBuiltin,
     budgetExempt: isBuiltin,
@@ -3202,6 +3204,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (/^\/api\/v1\/agents\/[^/]+\/transfer(\/|$)/.test(path) && (await handleAgentTransfers(state, req, res, path))) return;
   if (path.startsWith('/api/v1/skills/') && path.endsWith('/model') && (await handleSkillModels(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/connections/') || path === '/api/v1/gatekeeper-egress/connections/token' || path === '/api/v1/gatekeeper-egress/subscriptions/token') && (await handleConnections(state, req, res, path))) return;
+  // Subscriptions subroutes in subscriptions.ts: /api/v1/subscriptions, /connect, /sign-ins/:id, /:id/reconnect, /:id/rename, /:id/discover, /:id/models, /spend
   if (path.startsWith('/api/v1/subscriptions') && (await handleSubscriptions(state, req, res, path))) return;
   if (path.startsWith('/api/v1/gatekeeper-egress/subscription-windows') && (await handleSubscriptionWindows(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleGitHubAppSetup(state, req, res, path))) return;

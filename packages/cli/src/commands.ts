@@ -6,7 +6,7 @@
 
 export class UsageError extends Error {}
 
-export type Flags = { json: boolean; yes: boolean; active: boolean; limit?: number };
+export type Flags = { json: boolean; yes: boolean; active: boolean; limit?: number; attested?: boolean; noWait?: boolean };
 
 export type CommandSpec = {
   name: string;
@@ -14,7 +14,7 @@ export type CommandSpec = {
   /** Shown in help, e.g. `/budget <agent> <amount> daily|monthly`. */
   usage: string;
   summary: string;
-  group: 'Look' | 'Money' | 'Agents' | 'Approvals' | 'People';
+  group: 'Look' | 'Money' | 'Agents' | 'Approvals' | 'People' | 'Subscriptions';
   parse(args: string[], flags: Flags): Record<string, unknown>;
 };
 
@@ -144,6 +144,158 @@ export const COMMANDS: CommandSpec[] = [
       return { id: a[0], decision: 'reject', ...(a.length > 1 ? { notes: a.slice(1).join(' ') } : {}) };
     },
   },
+
+  {
+    name: 'subscriptions',
+    tool: 'list_subscriptions',
+    usage: '/subscriptions [factory|personal]',
+    summary: 'connected subscriptions, permitted templates and not-offered vendors',
+    group: 'Subscriptions',
+    parse: (a) => {
+      if (a.length > 1 || (a[0] && a[0] !== 'factory' && a[0] !== 'personal')) {
+        throw new UsageError('optional scope must be factory or personal');
+      }
+      return a[0] ? { scope: a[0] } : {};
+    },
+  },
+  {
+    name: 'subscription-spend',
+    tool: 'get_subscription_spend',
+    usage: '/subscription-spend',
+    summary: 'subscription token usage today and this month',
+    group: 'Subscriptions',
+    parse: (a) => none(a),
+  },
+  {
+    name: 'subscription-connect',
+    tool: 'connect_subscription',
+    usage: '/subscription-connect <template> [personal|factory] ["name"] --attested',
+    summary: 'connect a permitted vendor subscription via device code',
+    group: 'Subscriptions',
+    parse: (a, f) => {
+      if (!a[0] || a.length > 3) {
+        throw new UsageError('usage: /subscription-connect <template> [personal|factory] ["name"] --attested');
+      }
+      if (!f.attested) {
+        throw new UsageError('add --attested to confirm the subscription is yours and vendor terms permit this use');
+      }
+      let scope: 'personal' | 'factory' | undefined;
+      let name: string | undefined;
+      if (a[1] === 'personal' || a[1] === 'factory') {
+        scope = a[1];
+        name = a[2];
+      } else if (a.length === 2) {
+        name = a[1];
+      } else if (a.length === 3) {
+        throw new UsageError('scope must be personal or factory');
+      }
+      return {
+        templateId: a[0],
+        subscriberAttested: true,
+        ...(scope ? { scope } : {}),
+        ...(name !== undefined ? { name } : {}),
+      };
+    },
+  },
+  {
+    name: 'subscription-signin',
+    tool: 'poll_subscription_signin',
+    usage: '/subscription-signin <sign-in id>',
+    summary: 'poll a pending subscription device-code sign-in',
+    group: 'Subscriptions',
+    parse: idOf('a sign-in id'),
+  },
+  {
+    name: 'subscription-reconnect',
+    tool: 'reconnect_subscription',
+    usage: '/subscription-reconnect <id> --attested',
+    summary: 're-authorize a subscription connection via device code',
+    group: 'Subscriptions',
+    parse: (a, f) => {
+      const id = one(a, 'a subscription connection id');
+      if (!f.attested) {
+        throw new UsageError('add --attested to confirm the subscription is yours and vendor terms permit this use');
+      }
+      return { id, subscriberAttested: true };
+    },
+  },
+  {
+    name: 'subscription-rename',
+    tool: 'rename_subscription',
+    usage: '/subscription-rename <id> "<new name>"',
+    summary: 'rename a subscription connection',
+    group: 'Subscriptions',
+    parse: (a) => {
+      if (a.length < 2) throw new UsageError('give a connection id and a new name');
+      const name = a.slice(1).join(' ').trim();
+      if (!name) throw new UsageError('the new name cannot be empty');
+      return { id: a[0], name };
+    },
+  },
+  {
+    name: 'subscription-cap',
+    tool: 'set_subscription_cap',
+    usage: '/subscription-cap <id> <tokens|none>',
+    summary: 'set or clear the daily per-agent token cap on a subscription',
+    group: 'Subscriptions',
+    parse: (a) => {
+      if (a.length !== 2) throw new UsageError('usage: /subscription-cap <id> <tokens|none>');
+      const raw = a[1].trim().toLowerCase();
+      if (raw === 'none' || raw === 'clear' || raw === 'off') return { id: a[0], cap: null };
+      const cleaned = a[1].replace(/,/g, '');
+      if (!/^\d+$/.test(cleaned)) throw new UsageError('cap must be a positive whole number of tokens or "none"');
+      const cap = Number(cleaned);
+      if (!Number.isSafeInteger(cap) || cap < 1) throw new UsageError('cap must be a positive whole number of tokens or "none"');
+      return { id: a[0], cap };
+    },
+  },
+  {
+    name: 'subscription-discover',
+    tool: 'discover_subscription_models',
+    usage: '/subscription-discover <id>',
+    summary: 'discover models offered by a connected subscription plan',
+    group: 'Subscriptions',
+    parse: idOf('a subscription connection id'),
+  },
+  {
+    name: 'subscription-add-model',
+    tool: 'add_subscription_model',
+    usage: '/subscription-add-model <id> <name> <model-id> [<in-$> <out-$>]',
+    summary: 'admit a subscription model ($0 BYOM, or priced/$0 factory)',
+    group: 'Subscriptions',
+    parse: (a) => {
+      if (a.length !== 3 && a.length !== 5) {
+        throw new UsageError('usage: /subscription-add-model <id> <name> <model-id> [<in-$> <out-$>]');
+      }
+      return {
+        id: a[0],
+        name: a[1],
+        modelId: a[2],
+        ...(a.length === 5
+          ? { inputPerMTok: money(a[3], 'input price'), outputPerMTok: money(a[4], 'output price') }
+          : {}),
+      };
+    },
+  },
+  {
+    name: 'subscription-retire-model',
+    tool: 'retire_subscription_model',
+    usage: '/subscription-retire-model <id> <name>',
+    summary: 'retire a subscription model from the catalog',
+    group: 'Subscriptions',
+    parse: (a) => {
+      if (a.length !== 2) throw new UsageError('usage: /subscription-retire-model <id> <name>');
+      return { id: a[0], model: a[1] };
+    },
+  },
+  {
+    name: 'subscription-disconnect',
+    tool: 'disconnect_subscription',
+    usage: '/subscription-disconnect <id>',
+    summary: 'disconnect a subscription and retire its catalog models',
+    group: 'Subscriptions',
+    parse: idOf('a subscription connection id'),
+  },
 ];
 
 export const findCommand = (name: string): CommandSpec | undefined => COMMANDS.find((c) => c.name === name.replace(/^\//, '').toLowerCase());
@@ -165,6 +317,8 @@ export function parseFlags(tokens: string[]): { args: string[]; flags: Flags } {
     if (t === '--json') flags.json = true;
     else if (t === '--yes' || t === '-y') flags.yes = true;
     else if (t === '--active') flags.active = true;
+    else if (t === '--attested') flags.attested = true;
+    else if (t === '--no-wait') flags.noWait = true;
     else if (t === '--limit') {
       const n = Number(tokens[++i]);
       if (!Number.isInteger(n) || n < 1) throw new UsageError('--limit needs a whole number of 1 or more');
@@ -177,7 +331,7 @@ export function parseFlags(tokens: string[]): { args: string[]; flags: Flags } {
 
 /** The command line as help: grouped, one line each. */
 export function commandHelp(): string {
-  const groups = ['Look', 'Money', 'Agents', 'Approvals', 'People'] as const;
+  const groups = ['Look', 'Money', 'Subscriptions', 'Agents', 'Approvals', 'People'] as const;
   return groups
     .map((g) => `${g}:\n${COMMANDS.filter((c) => c.group === g).map((c) => `  ${c.usage.padEnd(46)} ${c.summary}`).join('\n')}`)
     .join('\n');

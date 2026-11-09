@@ -66,6 +66,28 @@ before(async () => {
     secretValues: new Set<string>(),
   } as unknown as FactoryState;
   const server = createFactoryServer(state);
+  state.subscriptions = {
+    list: async (opts?: { scope?: string }) => {
+      if (opts?.scope === 'personal') return [];
+      return [
+        {
+          id: 'c-test-sub-factory',
+          provider: 'xai',
+          templateId: 'xai-subscription',
+          name: "Admin's Grok Subscription",
+          scope: 'factory' as const,
+          subscriberEmail: 'admin@example.com',
+          tier: 'SuperGrok',
+          status: 'active' as const,
+          connectedBy: 'owner@example.com',
+          connectedAt: '2026-11-08T00:00:00Z',
+          secretName: 'shared/xai/subscription/c-test-sub-factory',
+        },
+      ];
+    },
+    get: async () => undefined,
+    getSignIn: () => undefined,
+  } as unknown as any;
   const port = await new Promise<number>((r) => server.listen(0, '127.0.0.1', () => r((server.address() as AddressInfo).port)));
   base = `http://127.0.0.1:${port}`;
   close = () => new Promise<void>((r) => server.close(() => r()));
@@ -81,7 +103,7 @@ const as = async (email: string) => {
 };
 
 /** The read commands, each with arguments that are valid against this factory. */
-const READS = ['agents', 'agent donna', 'policy donna', 'status', 'spend', 'report', 'report last', 'compute', 'budgets', 'runs', 'runs donna --limit 5', 'ledger --limit 5', 'ledger donna', 'models', 'skills', 'incidents', 'schedules', 'approvals'];
+const READS = ['agents', 'agent donna', 'policy donna', 'status', 'spend', 'report', 'report last', 'compute', 'budgets', 'runs', 'runs donna --limit 5', 'ledger --limit 5', 'ledger donna', 'models', 'skills', 'incidents', 'schedules', 'approvals', 'subscriptions', 'subscription-spend'];
 
 describe('§6.17 CL11 commands against the real control plane', () => {
   it('CL11 every read command works for a viewer, with no manager, and prints something readable', async () => {
@@ -99,8 +121,57 @@ describe('§6.17 CL11 commands against the real control plane', () => {
 
   it('CL11 the reads in the list cover every read command there is', () => {
     const covered = new Set([...READS, 'run x'].map((l) => l.split(' ')[0]));
-    const reads = COMMANDS.filter((c) => !['budget', 'factory-budget', 'pause', 'resume', 'isolate', 'wake', 'reset', 'cancel', 'retire', 'reinstate', 'approve', 'reject', 'principals', 'grants', 'grant', 'revoke-grant'].includes(c.name));
+    const reads = COMMANDS.filter(
+      (c) =>
+        ![
+          'budget',
+          'factory-budget',
+          'pause',
+          'resume',
+          'isolate',
+          'wake',
+          'reset',
+          'cancel',
+          'retire',
+          'reinstate',
+          'approve',
+          'reject',
+          'principals',
+          'grants',
+          'grant',
+          'revoke-grant',
+          'subscription-connect',
+          'subscription-signin',
+          'subscription-reconnect',
+          'subscription-rename',
+          'subscription-cap',
+          'subscription-discover',
+          'subscription-add-model',
+          'subscription-retire-model',
+          'subscription-disconnect',
+        ].includes(c.name),
+    );
     assert.deepEqual(reads.filter((c) => !covered.has(c.name)).map((c) => c.name), []);
+  });
+
+  it('§6.9 M5 subscription commands reach the control plane: viewer reads own BYOM view & is refused factory scope, admin reads factory scope', async () => {
+    const viewer = await as(VIEWER);
+    const ownSubs = await viewer.run('subscriptions');
+    assert.equal(ownSubs.ok, true, ownSubs.output);
+    assert.match(ownSubs.output, /Permitted vendor templates/);
+    assert.match(ownSubs.output, /Anthropic \(Claude Pro \/ Max\) \[NOT OFFERED, checked 2026-11-07\]/);
+    assert.match(ownSubs.output, /Google \(Gemini \/ Antigravity\) \[NOT OFFERED, checked 2026-11-07\]/);
+    const factoryRefused = await viewer.run('subscriptions factory');
+    assert.equal(factoryRefused.ok, false, factoryRefused.output);
+    assert.match(factoryRefused.output, /HTTP 403/, factoryRefused.output);
+
+    const admin = await as(ADMIN);
+    const factoryOk = await admin.run('subscriptions factory');
+    assert.equal(factoryOk.ok, true, factoryOk.output);
+    assert.match(factoryOk.output, /Connected subscriptions/);
+    assert.match(factoryOk.output, /Admin's Grok Subscription/);
+    assert.match(factoryOk.output, /vendor=xai/);
+    assert.match(factoryOk.output, /account=admin@example\.com/);
   });
 
   it('S9 people commands are offered only with grants.manage: a viewer is refused, an admin reaches the factory', async () => {

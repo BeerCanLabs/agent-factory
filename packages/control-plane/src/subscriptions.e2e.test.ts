@@ -4,6 +4,9 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth, RunTokens, type AuthVerifier } from '@beercanlabs/factory-auth';
 import { SubscriptionKeymaster, subscriptionPrincipalKey } from '@beercanlabs/factory-keymaster';
@@ -21,6 +24,8 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { createFactoryServer, type FactoryState } from './app.js';
+import { ModelStore } from './models.js';
+import { getSubscriptionWindows } from './subscription-windows.js';
 import { notifyNeedsReconsent, reconsentRecipients, setSubscriptionEntryRetirer, setSubscriptionNotifier, type SubscriptionNotice } from './subscriptions.js';
 
 const T = { admin: 'admin-sub-e2e', viewer: 'viewer-sub-e2e', operator: 'operator-sub-e2e', egress: 'egress-sub-e2e' };
@@ -862,5 +867,66 @@ describe('Owner BYOM scoped subscription routes, Bouncer & re-consent (TSK-332)'
     // Zero secrets leaked anywhere in the ledger
     const ledgerText = JSON.stringify((state.ledger as MemoryLedger).events);
     for (const v of state.secretValues) assert.equal(ledgerText.includes(v), false, 'ledger leaked a token');
+  });
+
+  it('GET /api/v1/subscriptions enriches open limitWindow and lists Anthropic and Google as notOffered with M5(2) reason', async () => {
+    const resetAt = new Date(Date.now() + 3600_000).toISOString();
+    getSubscriptionWindows(state).open(factoryConnId, {
+      kind: 'plan-limit',
+      code: 'usage_limit_reached',
+      resetAt,
+    });
+    const adminView = await api('/api/v1/subscriptions', 'GET', TOK.admin);
+    assert.equal(adminView.status, 200);
+    const factoryConn = adminView.body.connections.find((c: any) => c.id === factoryConnId);
+    assert.ok(factoryConn);
+    assert.equal(factoryConn.provider, 'xai');
+    assert.equal(factoryConn.subscriberEmail, 'ops@example.com');
+    assert.equal(factoryConn.limitWindow?.kind, 'plan-limit');
+    assert.equal(factoryConn.limitWindow?.code, 'usage_limit_reached');
+    assert.equal(factoryConn.limitWindow?.resetAt, resetAt);
+
+    const notOffered = adminView.body.notOffered as Array<{ vendor: string; reason: string; checkedDate: string; statementUrls: string[] }>;
+    assert.deepEqual(notOffered.map((v) => v.vendor), ['anthropic', 'google']);
+    for (const v of notOffered) {
+      assert.equal(v.checkedDate, '2026-11-07');
+      assert.ok(v.reason.length > 20);
+      assert.ok(v.statementUrls.length >= 1);
+    }
+    getSubscriptionWindows(state).close(factoryConnId, 'reset');
+  });
+
+  it('admit and retire subscription model with @ and / returns affectedAgents and updates policies', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'sub-model-test-'));
+    state.modelStore = new ModelStore(join(tmp, 'models.json'));
+
+    const modelName = 'grok-4.6@team/preview';
+    const admitRes = await api(`/api/v1/subscriptions/${factoryConnId}/models`, 'POST', TOK.admin, {
+      name: modelName,
+      modelId: 'grok-4.6',
+      price: { inputPerMTok: 0, outputPerMTok: 0 },
+    });
+    assert.equal(admitRes.status, 201, admitRes.text);
+    assert.equal(admitRes.body.model.name, modelName);
+
+    const agentId = 'agent-sub-test';
+    state.agents.set(agentId, { id: agentId, name: 'Agent', model: modelName } as any);
+    state.policies.set(agentId, {
+      agentId,
+      version: 1,
+      currentModel: modelName,
+      approvedModels: [modelName],
+    } as any);
+
+    const retireRes = await api(
+      `/api/v1/subscriptions/${factoryConnId}/models/${encodeURIComponent(modelName)}`,
+      'DELETE',
+      TOK.admin,
+    );
+    assert.equal(retireRes.status, 200, retireRes.text);
+    assert.equal(retireRes.body.ok, true);
+    assert.equal(retireRes.body.retired, modelName);
+    assert.equal(retireRes.body.policiesUpdated, 1);
+    assert.deepEqual(retireRes.body.affectedAgents, [agentId]);
   });
 });

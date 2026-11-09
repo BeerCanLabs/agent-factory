@@ -1,4 +1,41 @@
-import type { AgentCredentials, AgentPolicy, AgentRecord, ApprovalItem, FactoryMetrics, FactoryRole, IdentityLink, IdentityProvider, LedgerEvent, OfferedModel, OutstandingCredentials, AgentRolesInfo, AgentSkills, SkillAdopter, SkillSummary, SkillVersion, SystemDefinition, SystemSummary, TriageIncident, StoredModel, StagedModel, ModelsCatalogResponse, ScanModelsResponse, AdmitModelRequest, AgentModelsState, SetAgentModelsInput, DefaultSkillEntry, DefaultSkillsResponse } from './types.js';
+import type {
+  AgentCredentials,
+  AgentPolicy,
+  AgentRecord,
+  ApprovalItem,
+  FactoryMetrics,
+  FactoryRole,
+  IdentityLink,
+  IdentityProvider,
+  LedgerEvent,
+  OfferedModel,
+  OutstandingCredentials,
+  AgentRolesInfo,
+  AgentSkills,
+  SkillAdopter,
+  SkillSummary,
+  SkillVersion,
+  SystemDefinition,
+  SystemSummary,
+  TriageIncident,
+  StoredModel,
+  StagedModel,
+  ModelsCatalogResponse,
+  ScanModelsResponse,
+  AdmitModelRequest,
+  AgentModelsState,
+  SetAgentModelsInput,
+  DefaultSkillEntry,
+  DefaultSkillsResponse,
+  SubscriptionScope,
+  SubscriptionsListResponse,
+  SubscriptionSignInStart,
+  SubscriptionSignInPollResponse,
+  SubscriptionConnectionView,
+  SubscriptionDiscoveryMeta,
+  SubscriptionDiscoveredModel,
+  SubscriptionSpendReport,
+} from './types.js';
 
 
 const API_BASE = '/api/v1';
@@ -596,6 +633,100 @@ export const factoryApi = {
     return request<{ ok: boolean }>(`/identity-links/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
+  },
+
+  // Subscription connections & BYOM (§6.9 M5, TSK-329)
+  async listSubscriptions(scope?: SubscriptionScope): Promise<SubscriptionsListResponse> {
+    const q = scope ? `?scope=${encodeURIComponent(scope)}` : '';
+    return request<SubscriptionsListResponse>(`/subscriptions${q}`);
+  },
+
+  async getSubscriptionSpend(): Promise<SubscriptionSpendReport> {
+    return request<SubscriptionSpendReport>('/subscriptions/spend');
+  },
+
+  async getSpend(): Promise<{
+    utcDay: string;
+    utcMonth: string;
+    agents: Record<string, { day: number; month: number }>;
+    subscriptions?: SubscriptionSpendReport;
+  }> {
+    return request('/spend');
+  },
+
+  async startSubscriptionConnect(body: {
+    templateId: string;
+    subscriberAttested: boolean;
+    scope?: SubscriptionScope;
+    name?: string;
+  }): Promise<{ signIn: SubscriptionSignInStart }> {
+    return request<{ signIn: SubscriptionSignInStart }>('/subscriptions/connect', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  async pollSubscriptionSignIn(signInId: string): Promise<SubscriptionSignInPollResponse> {
+    return request<SubscriptionSignInPollResponse>(`/subscriptions/sign-ins/${encodeURIComponent(signInId)}`);
+  },
+
+  async startSubscriptionReconnect(id: string, subscriberAttested: boolean): Promise<{ signIn: SubscriptionSignInStart }> {
+    return request<{ signIn: SubscriptionSignInStart }>(`/subscriptions/${encodeURIComponent(id)}/reconnect`, {
+      method: 'POST',
+      body: JSON.stringify({ subscriberAttested }),
+    });
+  },
+
+  async updateSubscription(
+    id: string,
+    body: { name?: string; dailyTokenCap?: number | null },
+  ): Promise<{ connection: SubscriptionConnectionView }> {
+    return request<{ connection: SubscriptionConnectionView }>(`/subscriptions/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+  },
+
+  async disconnectSubscription(id: string): Promise<{ connection: SubscriptionConnectionView; entriesRetired: number }> {
+    return request<{ connection: SubscriptionConnectionView; entriesRetired: number }>(`/subscriptions/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async discoverSubscriptionModels(id: string): Promise<{
+    ok: boolean;
+    connection: SubscriptionConnectionView;
+    discovery: SubscriptionDiscoveryMeta;
+    models: SubscriptionDiscoveredModel[];
+    entriesRetired: number;
+  }> {
+    return request(`/subscriptions/${encodeURIComponent(id)}/discover`, {
+      method: 'POST',
+    });
+  },
+
+  async addSubscriptionModel(
+    id: string,
+    body: {
+      name: string;
+      modelId: string;
+      price?: { inputPerMTok: number; outputPerMTok: number };
+    },
+  ): Promise<{ ok: boolean; model: StoredModel }> {
+    return request<{ ok: boolean; model: StoredModel }>(`/subscriptions/${encodeURIComponent(id)}/models`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  async retireSubscriptionModel(
+    id: string,
+    modelName: string,
+  ): Promise<{ ok: boolean; retired: string; policiesUpdated?: number; affectedAgents: string[] }> {
+    return request<{ ok: boolean; retired: string; policiesUpdated?: number; affectedAgents: string[] }>(
+      `/subscriptions/${encodeURIComponent(id)}/models/${encodeURIComponent(modelName)}`,
+      { method: 'DELETE' },
+    );
   },
 };
 
