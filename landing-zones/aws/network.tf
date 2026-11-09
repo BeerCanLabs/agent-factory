@@ -123,6 +123,10 @@ resource "aws_vpc_security_group_ingress_rule" "rules" {
 }
 
 # Services talk to the internet (providers, AWS APIs, callbacks, Discord).
+# Under §6.9 M5, platform services reach subscription hosts: the control plane Keymaster reaches
+# auth.x.ai and auth.openai.com for sign-in/token refresh, and the gatekeeper-egress reaches
+# api.x.ai and chatgpt.com for Responses inference and model discovery. Agent subnets and security
+# groups have no internet egress (E6).
 resource "aws_vpc_security_group_egress_rule" "service_out" {
   for_each          = { cp = aws_security_group.control_plane.id, gw = aws_security_group.gatekeeper_egress.id, dm = aws_security_group.gatekeeper_ingress.id, alb = aws_security_group.alb.id }
   security_group_id = each.value
