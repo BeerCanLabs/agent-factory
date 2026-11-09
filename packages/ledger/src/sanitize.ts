@@ -83,13 +83,22 @@ export type LedgerEvent = {
   limitKind?: 'plan-limit' | 'tier-refused';
   limitCode?: string;
   resetAt?: string;
-  closedBy?: 'reset' | 'probe' | 'disconnect';
+  closedBy?: 'reset' | 'probe' | 'disconnect' | 'cap_updated';
   /** M5: the credential mode a call was served on (`subscription`), and why a failover skipped the selected entry. */
   credentialMode?: 'api-key' | 'subscription';
   failoverReason?: string;
+  /** M5(2), (8): per-agent daily token cap updates, cap reach/reset rows, priced-fallback notices, and vendor-withdrawal metadata. */
+  dailyTokenCap?: number | null;
+  tokensUsed?: number;
+  utcDay?: string;
+  templateId?: string;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
+  'dailyTokenCap',
+  'tokensUsed',
+  'utcDay',
+  'templateId',
   'limitKind',
   'limitCode',
   'resetAt',
@@ -409,9 +418,21 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (raw.limitKind === 'plan-limit' || raw.limitKind === 'tier-refused') event.limitKind = raw.limitKind;
   if (typeof raw.limitCode === 'string' && /^[A-Za-z0-9_.:-]{1,100}$/.test(raw.limitCode)) event.limitCode = raw.limitCode;
   if (typeof raw.resetAt === 'string' && raw.resetAt.length <= 40 && Number.isFinite(Date.parse(raw.resetAt))) event.resetAt = raw.resetAt;
-  if (raw.closedBy === 'reset' || raw.closedBy === 'probe' || raw.closedBy === 'disconnect') event.closedBy = raw.closedBy;
+  if (raw.closedBy === 'reset' || raw.closedBy === 'probe' || raw.closedBy === 'disconnect' || raw.closedBy === 'cap_updated') event.closedBy = raw.closedBy;
   if (raw.credentialMode === 'api-key' || raw.credentialMode === 'subscription') event.credentialMode = raw.credentialMode;
   if (typeof raw.failoverReason === 'string' && /^[a-z0-9_]{1,64}$/.test(raw.failoverReason)) event.failoverReason = raw.failoverReason;
+  if (raw.dailyTokenCap === null || (typeof raw.dailyTokenCap === 'number' && Number.isInteger(raw.dailyTokenCap) && raw.dailyTokenCap > 0)) {
+    event.dailyTokenCap = raw.dailyTokenCap;
+  }
+  if (typeof raw.tokensUsed === 'number' && Number.isFinite(raw.tokensUsed) && raw.tokensUsed >= 0) {
+    event.tokensUsed = raw.tokensUsed;
+  }
+  if (typeof raw.utcDay === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.utcDay)) {
+    event.utcDay = raw.utcDay;
+  }
+  if (typeof raw.templateId === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(raw.templateId)) {
+    event.templateId = raw.templateId;
+  }
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {
     const toxic = toxicPayload(raw);

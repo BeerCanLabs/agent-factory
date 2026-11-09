@@ -43,7 +43,17 @@ import {
   type SharedRuntimePin,
   type SkillAdoptionProvenance,
 } from '@beercanlabs/factory-registrar';
-import { actorIsAdmin, json, readJson, requirePrivilege, wireGrantStoreKindLookup, type FactoryState } from './app.js';
+import {
+  actorIsAdmin,
+  catalogEntryOf,
+  checkPersonalByomModelsForAgent,
+  detachDisallowedPersonalModelsOnAgent,
+  json,
+  readJson,
+  requirePrivilege,
+  wireGrantStoreKindLookup,
+  type FactoryState,
+} from './app.js';
 import { applyConfig, buildSkillsFor, runDeploy } from './apply.js';
 import { changeReason, configOf, ledgerVersion, ownersOf, parseOwners, recordConfig, removeConfig } from './config-store.js';
 import { SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type Run } from '@beercanlabs/factory-property-manager';
@@ -711,6 +721,30 @@ export async function createFromConfiguration(
     }
   }
   const model = typeof spec.model === 'string' && spec.model ? spec.model : (state.defaultModel ?? 'gemini-2.0-flash');
+  const modelEntry = catalogEntryOf(state, model);
+  if (modelEntry?.credentialMode === 'subscription' && modelEntry.scope === 'personal') {
+    if (ownership.effectiveKind === 'team') {
+      return {
+        status: 403,
+        body: {
+          error: 'personal_model_team_forbidden',
+          model,
+          message: `personal subscription model '${model}' cannot be used on team agent '${id}' (D24)`,
+        },
+      };
+    }
+    const targetOwner = ownership.grantSubject ?? ownership.configOwners?.[0];
+    if (!targetOwner || targetOwner !== modelEntry.ownerPrincipalId) {
+      return {
+        status: 403,
+        body: {
+          error: 'personal_model_owner_mismatch',
+          model,
+          message: `personal subscription model '${model}' belongs to '${modelEntry.ownerPrincipalId}' and may only be used on a personal agent actively owned by '${modelEntry.ownerPrincipalId}'`,
+        },
+      };
+    }
+  }
 
   const record: AgentRecord = {
     id,
@@ -1289,6 +1323,14 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     return true;
   }
 
+  if (typeof body.model === 'string' && body.model.trim()) {
+    const byomCheck = checkPersonalByomModelsForAgent(state, agent.id, [body.model.trim()]);
+    if (!byomCheck.ok) {
+      json(res, byomCheck.status, { error: byomCheck.error, model: byomCheck.model, message: byomCheck.message });
+      return true;
+    }
+  }
+
   // Pre-conversion snapshot
   const prevCreatedFrom = agent.createdFrom;
   const prevRepo = agent.repo;
@@ -1460,6 +1502,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     registryOf(state).save(agent);
 
     ledgerVersion(state, stored, principal.actor);
+    await detachDisallowedPersonalModelsOnAgent(state, agent.id, principal.actor, 'agent converted (D15)');
 
     state.ledger.append({
       timestamp: new Date().toISOString(),

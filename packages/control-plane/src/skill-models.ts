@@ -140,6 +140,15 @@ export async function handleSkillModels(
     json(res, 400, { error: 'invalid_model', message: 'model must be an offered model name, or null to clear' });
     return true;
   }
+  const catalogEntry = (state.modelStore?.toEgressCatalog() ?? state.modelCatalog)?.[model];
+  if (catalogEntry?.credentialMode === 'subscription' && catalogEntry.scope === 'personal') {
+    json(res, 403, {
+      error: 'personal_model_skill_forbidden',
+      model,
+      message: 'personal BYOM subscription entries cannot be bound to a skill (DESIGN_AUTHORITY.md §6.9 M5(1), S24)',
+    });
+    return true;
+  }
   const offered = approvedModels(state).models;
   if (!offered.includes(model)) {
     json(res, 422, { error: 'model_not_offered', model, message: 'the factory does not offer this model' });
@@ -158,4 +167,29 @@ export async function handleSkillModels(
   });
   json(res, 200, { skillId, binding, ...(previous ? { previous } : {}) });
   return true;
+}
+
+/** Clear any per-skill bindings pointing at a retired catalog model. */
+export function clearSkillBindingsForModel(state: FactoryState, modelName: string, actor: string): number {
+  const store = stores.get(state);
+  if (!store) return 0;
+  let cleared = 0;
+  const now = new Date().toISOString();
+  for (const b of store.list()) {
+    if (b.model !== modelName) continue;
+    const prev = store.clear(b.skillId);
+    if (prev !== undefined) {
+      cleared += 1;
+      state.ledger.append({
+        timestamp: now,
+        agentId: `skill:${b.skillId}`,
+        type: 'action',
+        action: 'SKILL_MODEL_CLEARED',
+        actor,
+        requestId: `skill-model:${b.skillId}`,
+        payloadSha256: payloadHash({ skillId: b.skillId, model: null, previous: prev }),
+      });
+    }
+  }
+  return cleared;
 }

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { authorize, type Privilege } from '@beercanlabs/factory-bouncer';
+import { ZERO_BUDGET_LIMITS } from '@beercanlabs/factory-budget';
 import type { Principal } from '@beercanlabs/factory-auth';
 import type { SkillVersionRecord } from '@beercanlabs/factory-registrar';
 import { effectiveGrantsForActor, json, readJson, requirePrivilege, type FactoryState } from './app.js';
@@ -131,6 +132,9 @@ async function complianceGate(state: FactoryState, sub: Submission): Promise<Gat
 
 async function budgetGate(_state: FactoryState, sub: Submission): Promise<Gate> {
   if (sub.kind === 'skill') return { state: 'not-applicable' }; // D28: skills spend the invoking agent's budget.
+  // M5(8) / D25: a `kind: 'personal'` agent admits with a $0 factory ceiling ({ perDay: 0, perMonth: 0 })
+  // without requiring a > $0 budget-owner allocation; `kind: 'team'` requires an explicit > $0 allocation.
+  if (sub.content.kind === undefined || sub.content.kind === 'personal') return { state: 'passed' };
   const b = sub.allocatedBudgetUsd;
   if (b && ((b.perDay ?? 0) > 0 || (b.perMonth ?? 0) > 0)) return { state: 'passed' };
   return { state: 'pending', reasons: ['no budget allocated by the budget-owner'] };
@@ -296,7 +300,11 @@ export async function handleSubmissions(state: FactoryState, req: http.IncomingM
       }
       const id = String(sub.content.id);
       const current = state.policies.get(id) ?? { routes: ['anthropic', 'openai'] };
-      state.policies.set(id, { ...current, budgetUsd: { ...current.budgetUsd, ...sub.allocatedBudgetUsd } } as never);
+      const defaultCeiling = (sub.content.kind ?? 'personal') === 'personal' ? { ...ZERO_BUDGET_LIMITS } : undefined;
+      const effectiveBudget = sub.allocatedBudgetUsd
+        ? { ...defaultCeiling, ...current.budgetUsd, ...sub.allocatedBudgetUsd }
+        : (current.budgetUsd ?? defaultCeiling);
+      state.policies.set(id, { ...current, ...(effectiveBudget ? { budgetUsd: effectiveBudget } : {}) } as never);
       admitted = created.body;
     } else {
       const rec = skillOf(state, sub)!;

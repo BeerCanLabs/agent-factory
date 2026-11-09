@@ -15,17 +15,57 @@ export type CatalogEntry = {
   region?: string;
   secret?: string;
   price?: Price;
-  /**
-   * M5(1): `api-key` (a platform credential, the default) or `subscription` (served on one subscription connection).
-   * TSK-328 finishes the catalog; the adapter and the failback rules read only these three optional fields.
-   */
+  /** M5(1): `api-key` (a platform credential, the default) or `subscription` (served on one subscription connection). */
   credentialMode?: 'api-key' | 'subscription';
+  /** M5(1), (4): subscription scope (`'factory'` or `'personal'`). */
+  scope?: 'factory' | 'personal';
+  /** M5(1), (4): canonical `'user:<id>'` principal when `credentialMode === 'subscription' && scope === 'personal'`. */
+  ownerPrincipalId?: string;
   /** M5(4): the subscription connection a `subscription` entry is served on (a connection id, never a display name). */
   connection?: string;
+  /** M5(1): dynamic presentation name of `connection` (`<Connection Name>`), presentation only and never an id. */
+  connectionName?: string;
   /** M5(5): the shipped subscription template the connection was created from. */
   templateId?: string;
+  /** M5(8): optional per-agent daily token cap on `connection`, enforced per agent until midnight UTC. */
+  dailyTokenCap?: number;
 };
 export type ModelCatalog = Record<string, CatalogEntry>;
+
+const PROVIDER_DISPLAY_LABELS: Record<string, string> = {
+  xai: 'xAI API',
+  openai: 'OpenAI API',
+  anthropic: 'Anthropic API',
+  google: 'Google API',
+  bedrock: 'Bedrock',
+  vertex: 'Vertex AI',
+  'vertex-anthropic': 'Vertex Anthropic',
+  deepseek: 'DeepSeek API',
+  groq: 'Groq API',
+  mistral: 'Mistral API',
+  openrouter: 'OpenRouter API',
+  together: 'Together API',
+};
+
+export function providerDisplayLabel(provider: string): string {
+  return PROVIDER_DISPLAY_LABELS[provider.toLowerCase()] ?? `${provider} API`;
+}
+
+/**
+ * M5(1): Presentation label distinguishing subscription entries (`<modelId> · <Connection Name>`) from API-key entries
+ * (`<modelId> · <Provider API>`). The connection's name is presentation only and never an id.
+ */
+export function formatModelDisplayLabel(entry: {
+  id: string;
+  provider: string;
+  credentialMode?: 'api-key' | 'subscription';
+  connectionName?: string;
+}): string {
+  if (entry.credentialMode === 'subscription') {
+    return `${entry.id} · ${entry.connectionName?.trim() || 'Subscription'}`;
+  }
+  return `${entry.id} · ${providerDisplayLabel(entry.provider)}`;
+}
 
 export type ToolCall = {
   id: string;
@@ -123,6 +163,18 @@ export function parseModelCatalog(json: string | undefined): ModelCatalog {
     if (p !== undefined && (typeof p.inputPerMTok !== 'number' || typeof p.outputPerMTok !== 'number')) {
       throw new Error(`FACTORY_MODEL_CATALOG.${name}.price needs inputPerMTok and outputPerMTok`);
     }
+    const rawScope = (e as any).scope;
+    const rawOwner = (e as any).ownerPrincipalId;
+    const validSubScope =
+      rawScope === undefined ||
+      (rawScope === 'factory' && rawOwner === undefined) ||
+      (rawScope === 'personal' && typeof rawOwner === 'string' && rawOwner.startsWith('user:'));
+    const isSub =
+      (e as any).credentialMode === 'subscription' &&
+      typeof (e as any).connection === 'string' &&
+      Boolean((e as any).connection.trim()) &&
+      validSubScope &&
+      (rawScope === 'personal' || rawOwner === undefined);
     out[name] = {
       provider: e.provider,
       id: e.id,
@@ -130,9 +182,23 @@ export function parseModelCatalog(json: string | undefined): ModelCatalog {
       ...(typeof (e as any).secret === 'string' ? { secret: (e as any).secret } : {}),
       ...(e.region ? { region: e.region } : {}),
       ...(p ? { price: p } : {}),
-      ...((e as any).credentialMode === 'subscription' && typeof (e as any).connection === 'string' && (e as any).connection
-        ? { credentialMode: 'subscription' as const, connection: (e as any).connection as string, ...(typeof (e as any).templateId === 'string' ? { templateId: (e as any).templateId as string } : {}) }
-        : {}),
+      ...(isSub
+        ? {
+            credentialMode: 'subscription' as const,
+            ...(rawScope === 'factory' || rawScope === 'personal' ? { scope: rawScope } : {}),
+            ...(rawScope === 'personal' ? { ownerPrincipalId: rawOwner as string } : {}),
+            connection: (e as any).connection.trim() as string,
+            ...(typeof (e as any).connectionName === 'string' && (e as any).connectionName.trim()
+              ? { connectionName: (e as any).connectionName.trim() as string }
+              : {}),
+            ...(typeof (e as any).templateId === 'string' ? { templateId: (e as any).templateId as string } : {}),
+            ...(typeof (e as any).dailyTokenCap === 'number' && Number.isFinite((e as any).dailyTokenCap) && (e as any).dailyTokenCap > 0
+              ? { dailyTokenCap: Math.floor((e as any).dailyTokenCap) }
+              : {}),
+          }
+        : (e as any).credentialMode === 'api-key'
+          ? { credentialMode: 'api-key' as const }
+          : {}),
     };
   }
   return out;

@@ -18,6 +18,8 @@ export {
   resolveProviderSecret,
   parseModelCatalog,
   parseChatRequest,
+  formatModelDisplayLabel,
+  providerDisplayLabel,
   toConverse,
   toOpenAiMessages,
   claudeAcceptsSampling,

@@ -23,7 +23,7 @@ import type { Principal } from '@beercanlabs/factory-auth';
 import { GrantStoreError, GrantStoreUnavailableError, PrincipalStoreUnavailableError, authorize, normalizeActorToPrincipal, type GrantRecord } from '@beercanlabs/factory-bouncer';
 import { effectiveAgentKind } from '@beercanlabs/factory-registrar';
 import { writableProvider } from '@beercanlabs/factory-secrets-bind';
-import { agentKindOf, effectiveGrantsForActor, findAgentRecord, identify, json, readJson, type FactoryState } from './app.js';
+import { agentKindOf, detachDisallowedPersonalModelsOnAgent, effectiveGrantsForActor, findAgentRecord, identify, json, readJson, type FactoryState } from './app.js';
 import { getConnections } from './connections.js';
 import { detachOwnerPrivateSkills, skillRegistry } from './skills.js';
 
@@ -172,7 +172,17 @@ export async function startTransfer(state: FactoryState, principal: Principal, s
   } catch (err) {
     return fromStoreError(err);
   }
-  const detail = { transferId: started.transferId, from: started.outgoing.subject, to: started.incoming.subject, pendingExpiresAt: started.incoming.pendingExpiresAt };
+  const detachedModels =
+    scope.kind === 'agent'
+      ? (await detachDisallowedPersonalModelsOnAgent(state, scope.id, principal.actor, 'ownership transfer started — pending-revoked (D15)')).detached
+      : [];
+  const detail = {
+    transferId: started.transferId,
+    from: started.outgoing.subject,
+    to: started.incoming.subject,
+    pendingExpiresAt: started.incoming.pendingExpiresAt,
+    ...(detachedModels.length ? { personalModelsDetached: detachedModels } : {}),
+  };
   ledgerTransfer(state, scope, 'OWNERSHIP_TRANSFER_STARTED', principal.actor, detail);
   await notify(state, { kind: 'started', scope, transferId: started.transferId, from: detail.from, to: detail.to });
   return { status: 202, body: { scope, transfer: { ...detail, state: 'pending' } } };
@@ -275,6 +285,11 @@ export async function resolveTransfer(state: FactoryState, principal: Principal,
     await state.grants!.resolveOwnershipTransfer({ transferId: pending.transferId, action, by: principal.actor, ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}) });
   } catch (err) {
     return fromStoreError(err);
+  }
+
+  if (action === 'accept' && scope.kind === 'agent') {
+    const { detached: detachedModels } = await detachDisallowedPersonalModelsOnAgent(state, scope.id, principal.actor, 'ownership transfer accepted (D15)');
+    if (detachedModels.length) detail.personalModelsDetached = detachedModels;
   }
 
   if (action === 'accept' && scope.kind === 'skill') {

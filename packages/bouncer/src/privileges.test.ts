@@ -330,4 +330,11 @@ describe('subscriptions.own qualification (TSK-332, M5(4))', () => {
       false,
     );
   });
+
+  it('M5(1): models.read admits agent owners even without a fleet viewer grant so BYOM owners can list their models', () => {
+    const alice = { actor: 'user:alice', roles: [] as const };
+    assert.equal(authorize({ principal: alice, privilege: 'models.read', resource: { ownsAnyAgent: true } }).allowed, true);
+    assert.equal(authorize({ principal: alice, privilege: 'models.read', resource: { ownsPersonalAgent: true } }).allowed, true);
+    assert.equal(authorize({ principal: alice, privilege: 'models.read', resource: {} }).allowed, false);
+  });
 });

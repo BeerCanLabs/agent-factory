@@ -922,4 +922,67 @@ describe('subscription connections: Owner BYOM scope, vault paths, tampering & c
       assert.equal(fullLedger.includes(secret), false, `token leaked into ledger: ${secret.slice(0, 6)}`);
     }
   });
+
+  it('M5(2), (4a), (6): setDailyTokenCap, saveDiscovery, and disconnectVendor persist cleanly without exposing tokens', async () => {
+    const c = setup();
+    const factory = await signIn(c, 'xai-subscription', 'user:admin', { name: 'Team Grok' });
+    assert.ok('out' in factory && factory.out.ok && factory.out.status === 'connected');
+    const fConn = factory.out.connection;
+
+    c.vendors.st.xai.pendingPolls = 1;
+    c.vendors.st.xai.claims = { sub: 'xai-sub-dale', email: 'dale2@example.com', name: 'Dale Two' };
+    const started = await c.km.startSignIn({
+      templateId: 'xai-subscription',
+      actor: 'user:dale',
+      subscriberAttested: true,
+      scope: 'personal',
+      ownerPrincipalId: 'user:dale',
+      name: 'Dale Personal Grok',
+    });
+    assert.ok(started.ok);
+    c.tick(6000);
+    await c.km.pollSignIn(started.signIn.signInId, 'user:dale');
+    c.tick(6000);
+    const pDone = await c.km.pollSignIn(started.signIn.signInId, 'user:dale');
+    assert.ok(pDone.ok && pDone.status === 'connected');
+    const pConn = pDone.connection;
+
+    // Daily token cap validation & persistence
+    const badCap = await c.km.setDailyTokenCap(pConn.id, -5, 'user:dale');
+    assert.ok(!badCap.ok && badCap.error === 'invalid_cap');
+    const setCap = await c.km.setDailyTokenCap(pConn.id, 25000, 'user:dale');
+    assert.ok(setCap.ok && setCap.connection.dailyTokenCap === 25000);
+    const capRow = c.ledger.events.find((e) => e.action === 'SUBSCRIPTION_CAP_UPDATED' && e.connection === pConn.id);
+    assert.ok(capRow);
+
+    // Discovery storage without exposing tokens
+    const savedDisc = await c.km.saveDiscovery(pConn.id, {
+      listAvailable: true,
+      status: 'ok',
+      discoveredAt: '2026-11-08T01:00:00.000Z',
+      models: [{ id: 'grok-4.6', name: 'Grok 4.6' }],
+    });
+    assert.ok(savedDisc.ok);
+    assert.equal(savedDisc.connection.discovery?.status, 'ok');
+    assert.equal(savedDisc.connection.discovery?.listAvailable, true);
+    assert.deepEqual(savedDisc.connection.discoveredModels, [{ id: 'grok-4.6', name: 'Grok 4.6' }]);
+
+    // Clear cap
+    const clearedCap = await c.km.setDailyTokenCap(pConn.id, null, 'user:dale');
+    assert.ok(clearedCap.ok && clearedCap.connection.dailyTokenCap === undefined);
+
+    // M5(2) disconnectVendor disconnects both factory and personal grants for the withdrawn vendor
+    const retiredIds: string[] = [];
+    const withdrawn = await c.km.disconnectVendor('xai', 'migration:vendor-permission-withdrawn', (v) => {
+      retiredIds.push(v.id);
+      return 1;
+    });
+    assert.equal(withdrawn.length, 2);
+    assert.deepEqual(retiredIds.sort(), [fConn.id, pConn.id].sort());
+    assert.deepEqual(await c.km.list(), []);
+    const discRows = c.ledger.events.filter(
+      (e) => e.action === 'SUBSCRIPTION_DISCONNECTED' && e.actor === 'migration:vendor-permission-withdrawn',
+    );
+    assert.equal(discRows.length, 2);
+  });
 });

@@ -314,6 +314,71 @@ describe('catalog entry fields', () => {
     assert.equal(c.b.credentialMode, undefined);
     assert.equal(c.c.credentialMode, undefined);
   });
+
+  it('M5(1): preserves scope, ownerPrincipalId, connectionName, dailyTokenCap and formats dynamic display labels', async () => {
+    const { formatModelDisplayLabel } = await import('./models.js');
+    const c = parseModelCatalog(JSON.stringify({
+      personalOk: {
+        provider: 'xai-subscription',
+        id: 'grok-4.6',
+        credentialMode: 'subscription',
+        scope: 'personal',
+        ownerPrincipalId: 'user:dale',
+        connection: 'c-dale',
+        connectionName: "Dale's Grok",
+        templateId: 'xai-subscription',
+        dailyTokenCap: 50000,
+        price: { inputPerMTok: 0, outputPerMTok: 0 },
+      },
+      personalMissingOwner: {
+        provider: 'xai-subscription',
+        id: 'grok-4.6',
+        credentialMode: 'subscription',
+        scope: 'personal',
+        connection: 'c-dale',
+      },
+      factoryWithOwner: {
+        provider: 'xai-subscription',
+        id: 'grok-4.6',
+        credentialMode: 'subscription',
+        scope: 'factory',
+        ownerPrincipalId: 'user:dale',
+        connection: 'c-team',
+      },
+      apiKeyEntry: {
+        provider: 'xai',
+        id: 'grok-4.6',
+        credentialMode: 'api-key',
+      },
+    }));
+    assert.equal(c.personalOk.credentialMode, 'subscription');
+    assert.equal(c.personalOk.scope, 'personal');
+    assert.equal(c.personalOk.ownerPrincipalId, 'user:dale');
+    assert.equal(c.personalOk.connection, 'c-dale');
+    assert.equal(c.personalOk.connectionName, "Dale's Grok");
+    assert.equal(c.personalOk.dailyTokenCap, 50000);
+    assert.equal(c.personalMissingOwner.credentialMode, undefined);
+    assert.equal(c.factoryWithOwner.credentialMode, undefined);
+    assert.equal(c.apiKeyEntry.credentialMode, 'api-key');
+
+    assert.equal(
+      formatModelDisplayLabel({
+        id: 'grok-4.6',
+        provider: 'xai-subscription',
+        credentialMode: 'subscription',
+        connectionName: "Dale's Grok",
+      }),
+      "grok-4.6 · Dale's Grok",
+    );
+    assert.equal(
+      formatModelDisplayLabel({
+        id: 'grok-4.6',
+        provider: 'xai',
+        credentialMode: 'api-key',
+      }),
+      'grok-4.6 · xAI API',
+    );
+  });
 });
 
 describe('discovery (M5(4a))', () => {

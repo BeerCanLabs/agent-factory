@@ -20,13 +20,21 @@ export function exceededWindow(limits: BudgetLimits | undefined, spend: Spend): 
   return undefined;
 }
 
-export type { SpendDetail, SpendWindow } from './spend.js';
+export type {
+  SpendDetail,
+  SpendWindow,
+  SubscriptionAgentWindow,
+  SubscriptionConnectionWindow,
+  SubscriptionSpendFilter,
+  SubscriptionSpendReport,
+  SubscriptionTokenTotals,
+} from './spend.js';
 export { spendDetail, SpendTracker } from './spend.js';
 export type { Price, TokenUsage } from './pricing.js';
-export { costUsd, priceFor } from './pricing.js';
+export { ZERO_PRICE, costUsd, isZeroPrice, priceFor } from './pricing.js';
 export { validateBudgetLimits } from './limits.js';
 export type { StandingDenied, StandingOk, StandingRequest, StandingResult } from './standing.js';
-export { checkStanding } from './standing.js';
+export { ZERO_BUDGET_LIMITS, checkStanding } from './standing.js';
 export type { TrainingAccount, TrainingCharge } from './training.js';
 export { chargeTraining } from './training.js';
 export type {

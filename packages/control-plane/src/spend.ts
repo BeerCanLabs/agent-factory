@@ -32,7 +32,8 @@ import {
   type RunInterval,
   type TaskSize,
 } from '@beercanlabs/factory-budget';
-import { bearerOf, json, readJson, requirePrivilege, type FactoryState } from './app.js';
+import type { Principal } from '@beercanlabs/factory-auth';
+import { bearerOf, json, readJson, requirePrivilege, scopedSubscriptionSpendForCaller, type FactoryState } from './app.js';
 import { isTerminal, routeEvents, SYSTEM } from '@beercanlabs/factory-property-manager';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 
@@ -103,7 +104,11 @@ export function createTreasury(opts: { cloud?: CloudCostSource; compute?: Comput
  * Who may read spend: a live run whose admin-set policy grants `factory-spend`, or a principal with `spend.read`.
  * Answers the request itself (401/403) and returns undefined when the caller may not read.
  */
-export async function spendReader(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): Promise<{ actor: string; agentId: string } | undefined> {
+export async function spendReader(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<{ actor: string; agentId: string; caller: { kind: 'principal'; principal: Principal } | { kind: 'run'; agentId: string } } | undefined> {
   const verdict = await verifyRun({ tokens: state.runTokens, token: bearerOf(req), runOf: (id) => state.runs.get(id), ended: (r) => isTerminal(r.state) });
   if (verdict.kind === 'refused') {
     json(res, 401, { error: 'invalid_run_token' });
@@ -117,11 +122,11 @@ export async function spendReader(state: FactoryState, req: http.IncomingMessage
       json(res, 403, { error: 'forbidden', required: 'policy.tools.factory-spend' });
       return undefined;
     }
-    return { actor: `run:${claims.agentId}:${claims.runId}`, agentId: claims.agentId };
+    return { actor: `run:${claims.agentId}:${claims.runId}`, agentId: claims.agentId, caller: { kind: 'run', agentId: claims.agentId } };
   }
   const principal = await requirePrivilege(req, res, state, 'spend.read');
   if (!principal) return undefined;
-  return { actor: principal.actor, agentId: 'factory' };
+  return { actor: principal.actor, agentId: 'factory', caller: { kind: 'principal', principal } };
 }
 
 function runIntervals(state: FactoryState): RunInterval[] {
@@ -243,9 +248,10 @@ export async function handleSpend(state: FactoryState, req: http.IncomingMessage
       return true;
     }
     const report = await spendReport(state, p);
+    const subscriptions = await scopedSubscriptionSpendForCaller(state, reader.caller);
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: reader.agentId, type: 'action', action: 'SPEND_REPORT_READ', actor: reader.actor });
     if (p === 'current') void checkFactoryBudgets(state).catch((e) => console.error(`[accountant] budget check: ${e instanceof Error ? e.message : String(e)}`));
-    json(res, 200, report);
+    json(res, 200, { ...report, subscriptions });
     return true;
   }
   if (path === '/api/v1/spend/compute' && req.method === 'GET') {

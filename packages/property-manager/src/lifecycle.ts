@@ -8,7 +8,7 @@
  * `control-plane`, where the Bouncer's privileges and the Gatekeeper's run-token rule meet a request.
  */
 import { gatekeeperEgressEnv, notebookEnv } from '@beercanlabs/factory-hydrate';
-import { checkStanding, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
+import { checkStanding, isZeroPrice, ZERO_BUDGET_LIMITS, type BudgetLimits, type SpendTracker } from '@beercanlabs/factory-budget';
 import type { AuthenticatedCaller } from '@beercanlabs/factory-bouncer';
 import type { FactoryMetrics } from '@beercanlabs/factory-inspector';
 import type { LedgerStore } from '@beercanlabs/factory-ledger';
@@ -23,10 +23,24 @@ export type Outcome<T> = { status: number; body: T | { error: string; [k: string
 
 /** What the lifecycle reads from the policy store: the budget it enforces and the routes it hands the run. */
 export type PropertyManagerPolicies = {
-  get(agentId: string): { budgetUsd?: BudgetLimits; routes?: string[]; models?: string[] };
+  get(agentId: string): {
+    budgetUsd?: BudgetLimits;
+    routes?: string[];
+    models?: string[];
+    currentModel?: string | null;
+    primaryModel?: string | null;
+    secondaryModel?: string | null;
+  };
   has(agentId: string): boolean;
   /** E1.4 (#295): drops a helper run's in-memory policy when the run ends. */
   forgetEphemeral?(agentId: string): void;
+};
+
+export type PropertyManagerCatalogEntry = {
+  price?: { inputPerMTok: number; outputPerMTok: number; cacheReadPerMTok?: number; cacheWritePerMTok?: number };
+  credentialMode?: 'api-key' | 'subscription';
+  scope?: 'factory' | 'personal';
+  ownerPrincipalId?: string;
 };
 
 /** The part of the control plane's `FactoryState` the run lifecycle uses. `FactoryState` is assignable to it. */
@@ -40,6 +54,10 @@ export type PropertyManagerState = {
   callbacks: CallbackPolicy;
   policies: PropertyManagerPolicies;
   spend: SpendTracker;
+  modelCatalog?: Record<string, PropertyManagerCatalogEntry>;
+  modelStore?: { toEgressCatalog(): Record<string, PropertyManagerCatalogEntry> };
+  /** Active canonical owner (`user:<id>`) of a `kind: 'personal'` agent, excluding `D15` `pending-revoked` (M5(1)). */
+  activePersonalOwnerOf?: (agentId: string) => string | undefined;
   providers: SecretProvider[];
   secretValues: Set<string>;
   secretCache?: Map<string, { value: string; at: number }>;
@@ -295,6 +313,25 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
     const bad = checkCallbackUrl(opts.callbackUrl, state.callbacks);
     if (bad) return { status: 400, body: { error: bad } };
   }
+  if (opts.model) {
+    const catalog = state.modelStore?.toEgressCatalog() ?? state.modelCatalog;
+    const pinnedEntry = catalog?.[opts.model];
+    if (pinnedEntry?.credentialMode === 'subscription' && pinnedEntry.scope === 'personal') {
+      if (agent.kind !== 'personal') {
+        return {
+          status: 403,
+          body: { error: 'personal_model_team_forbidden', message: `personal subscription model '${opts.model}' cannot be pinned on a team agent` },
+        };
+      }
+      const activeOwner = state.activePersonalOwnerOf?.(agentId);
+      if (!pinnedEntry.ownerPrincipalId || activeOwner !== pinnedEntry.ownerPrincipalId) {
+        return {
+          status: 403,
+          body: { error: 'personal_model_owner_mismatch', message: `personal subscription model '${opts.model}' belongs to another principal` },
+        };
+      }
+    }
+  }
 
   const isSmoke = opts.trigger === 'smoke';
   let parent: { parentRunId: string; parentAgentId: string } | undefined;
@@ -348,10 +385,38 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
   // No run exists yet, so perRun does not apply. Built-ins and smoke runs stay exempt from agent budget.
   const isBuiltin = Boolean(agent.isBuiltin || agent.category === 'builtin' || BUILTIN_AGENT_IDS.has(agent.id));
   if (!isBuiltin && !isSmoke) {
-    const budget = state.policies.get(agentId).budgetUsd;
+    const policy = state.policies.get(agentId);
+    const budget = policy.budgetUsd;
+    // M5(8) / D25: unallocated `kind: 'personal'` agents evaluate to an explicit $0 USD ceiling ({ perDay: 0, perMonth: 0 }),
+    // never `undefined` (unlimited). When the active/selected entry is $0-priced, standing succeeds even at { perDay: 0, perMonth: 0 }.
+    const effectiveLimits = budget
+      ? { perDay: budget.perDay, perMonth: budget.perMonth }
+      : agent.kind === 'personal'
+        ? ZERO_BUDGET_LIMITS
+        : undefined;
+    const catalog = state.modelStore?.toEgressCatalog() ?? state.modelCatalog;
+    const hasExplicitModels = state.policies.has(agentId) && policy.models !== undefined;
+    const candidateModel =
+      opts.model ??
+      (policy.currentModel !== undefined
+        ? (policy.currentModel ?? undefined)
+        : hasExplicitModels
+          ? (policy.primaryModel !== undefined ? (policy.primaryModel ?? undefined) : policy.models?.[0])
+          : state.defaultModel);
+    const candidateAllowed =
+      candidateModel !== undefined && (!hasExplicitModels || Boolean(policy.models?.includes(candidateModel)));
+    const candidateEntry = candidateAllowed && catalog ? catalog[candidateModel] : undefined;
+    const candidateOwnerOk =
+      !candidateEntry ||
+      !(candidateEntry.credentialMode === 'subscription' && candidateEntry.scope === 'personal') ||
+      (agent.kind === 'personal' &&
+        Boolean(candidateEntry.ownerPrincipalId) &&
+        state.activePersonalOwnerOf?.(agentId) === candidateEntry.ownerPrincipalId);
+    const selectedModelIsZeroPrice = Boolean(candidateEntry && candidateOwnerOk && isZeroPrice(candidateEntry.price));
     const standing = checkStanding({
-      limits: budget ? { perDay: budget.perDay, perMonth: budget.perMonth } : undefined,
+      limits: effectiveLimits,
       spend: state.spend.get(agentId, undefined),
+      selectedModelIsZeroPrice,
     });
     if (!standing.inGoodStanding) {
       // A queue message is left for SQS to redeliver, so a refusal row on every visibility timeout would flood the ledger.

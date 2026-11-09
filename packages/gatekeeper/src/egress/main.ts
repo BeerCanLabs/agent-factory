@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { RunTokens } from '@beercanlabs/factory-auth';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
-import { createGatekeeperEgress, type ControlClient, type LimitWindowView, type Route } from './gatekeeper-egress.js';
+import { createGatekeeperEgress, type ControlClient, type LimitWindowView, type Route, type SubscriptionCapView } from './gatekeeper-egress.js';
 import type { Price } from '@beercanlabs/factory-budget';
 import { parseModelCatalog, type ModelCatalog } from '@beercanlabs/factory-executive';
 import { traceConfigFromEnv } from '@beercanlabs/factory-inspector';
@@ -92,12 +92,12 @@ const control: ControlClient = {
       return { ok: false, kind: 'unavailable', message: err instanceof Error ? err.message : String(err) };
     }
   },
-  // M5(7a): plan-limit windows live in the control plane so every egress instance and restart sees them.
+  // M5(7a), (8): plan-limit windows and per-agent daily token caps live in the control plane so every egress instance and restart sees them.
   async subscriptionWindows() {
     const res = await call('GET', '/api/v1/gatekeeper-egress/subscription-windows');
     if (!res.ok) throw new Error(`control plane subscription windows ${res.status}`);
-    const body = (await res.json()) as { windows?: LimitWindowView[] };
-    return body.windows ?? [];
+    const body = (await res.json()) as { windows?: LimitWindowView[]; caps?: SubscriptionCapView[] };
+    return { windows: body.windows ?? [], caps: body.caps ?? [] };
   },
   async subscriptionWindow(req) {
     const { connection, ...rest } = req;

@@ -1,15 +1,27 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { formatModelDisplayLabel, type CatalogEntry } from '@beercanlabs/factory-executive';
 
 /**
- * Dynamic Model Catalog & Persistence (§6.9 M1–M4, GAP-162).
+ * Dynamic Model Catalog & Persistence (§6.9 M1–M5, GAP-162, GAP-245).
  *
  * Persists admitted models and staged vendor-discovered models under DATA_DIR/models/catalog.json.
  * Bootstraps from FACTORY_MODEL_CATALOG if no store exists yet.
  */
 
-/** A landing-zone catalog entry (FACTORY_MODEL_CATALOG) the store bootstraps from (§6.9 M3). */
-export type ModelSeed = { provider: string; id?: string; region?: string; endpoint?: string; price?: { inputPerMTok: number; outputPerMTok: number } };
+/** A landing-zone catalog entry (FACTORY_MODEL_CATALOG) the store bootstraps from (§6.9 M3, M5). */
+export type ModelSeed = {
+  provider: string;
+  id?: string;
+  region?: string;
+  endpoint?: string;
+  price?: { inputPerMTok: number; outputPerMTok: number };
+  credentialMode?: 'api-key' | 'subscription';
+  scope?: 'factory' | 'personal';
+  ownerPrincipalId?: string;
+  connection?: string;
+  templateId?: string;
+};
 
 export interface StoredModel {
   name: string;
@@ -24,10 +36,43 @@ export interface StoredModel {
     inputPerMTok: number;
     outputPerMTok: number;
   };
+  /** M5(1): `'api-key'` (platform credential) or `'subscription'` (served on one subscription connection). */
+  credentialMode?: 'api-key' | 'subscription';
+  /** M5(1), (4): subscription entry scope (`'factory'` or `'personal'`). */
+  scope?: 'factory' | 'personal';
+  /** M5(1), (4): canonical `'user:<id>'` owner when `credentialMode === 'subscription' && scope === 'personal'`. */
+  ownerPrincipalId?: string;
+  /** M5(1), (4): subscription connection id (`sub_...`), NEVER a connection's display name. */
+  connection?: string;
+  /** M5(5): shipped subscription template id (`'xai-subscription'` | `'openai-subscription'`). */
+  templateId?: string;
   admittedAt: string;
   admittedBy?: string;
   updatedAt?: string;
   updatedBy?: string;
+}
+
+export interface EnrichedModelView extends StoredModel {
+  credentialMode: 'api-key' | 'subscription';
+  subscription: boolean;
+  connectionName?: string;
+  dailyTokenCap?: number;
+  displayLabel: string;
+}
+
+export type ModelConnectionMetadata = {
+  name?: string;
+  dailyTokenCap?: number;
+};
+
+export class ModelCatalogError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
 }
 
 export interface StagedModel {
@@ -55,6 +100,7 @@ export class ModelStore {
   private defaultModel?: string;
   private models = new Map<string, StoredModel>();
   private staged: StagedModel[] = [];
+  private connectionResolver?: (connectionId: string) => ModelConnectionMetadata | undefined;
 
   constructor(
     filePath: string,
@@ -63,6 +109,15 @@ export class ModelStore {
   ) {
     this.filePath = filePath;
     this.load(seed, initialDefaultModel);
+  }
+
+  setConnectionResolver(fn: ((connectionId: string) => ModelConnectionMetadata | undefined) | undefined): void {
+    this.connectionResolver = fn;
+  }
+
+  /** Bump in-memory catalog version when live connection presentation or dailyTokenCap changes. */
+  bumpVersion(): void {
+    this.version += 1;
   }
 
   private load(
@@ -89,6 +144,7 @@ export class ModelStore {
     if (seed && Object.keys(seed).length > 0) {
       const now = new Date().toISOString();
       for (const [name, m] of Object.entries(seed)) {
+        const isSub = m.credentialMode === 'subscription';
         this.models.set(name, {
           name,
           provider: m.provider,
@@ -96,6 +152,11 @@ export class ModelStore {
           ...(m.region ? { region: m.region } : {}),
           ...(m.endpoint ? { endpoint: m.endpoint } : {}),
           price: m.price,
+          credentialMode: isSub ? 'subscription' : 'api-key',
+          ...(isSub ? { scope: m.scope ?? 'factory' } : {}),
+          ...(isSub && m.scope === 'personal' && m.ownerPrincipalId ? { ownerPrincipalId: m.ownerPrincipalId } : {}),
+          ...(isSub && m.connection ? { connection: m.connection } : {}),
+          ...(isSub && m.templateId ? { templateId: m.templateId } : {}),
           admittedAt: now,
           admittedBy: 'bootstrap',
         });
@@ -152,8 +213,12 @@ export class ModelStore {
   }
 
   setDefault(name: string, _actor?: string): void {
-    if (!this.models.has(name)) {
+    const target = this.models.get(name);
+    if (!target) {
       throw new Error(`Model '${name}' is not in the admitted model catalog`);
+    }
+    if (target.credentialMode === 'subscription' && target.scope === 'personal') {
+      throw new ModelCatalogError(403, 'personal_model_cannot_be_default', `Personal subscription model '${name}' cannot be set as the factory default model`);
     }
     this.defaultModel = name;
     this.persist();
@@ -161,6 +226,30 @@ export class ModelStore {
 
   listOffered(): StoredModel[] {
     return [...this.models.values()];
+  }
+
+  listForConnection(connectionId: string): StoredModel[] {
+    return [...this.models.values()].filter((m) => m.credentialMode === 'subscription' && m.connection === connectionId);
+  }
+
+  enrich(m: StoredModel): EnrichedModelView {
+    const isSub = m.credentialMode === 'subscription';
+    const connMeta = isSub && m.connection ? this.connectionResolver?.(m.connection) : undefined;
+    const connectionName = connMeta?.name;
+    return {
+      ...m,
+      credentialMode: isSub ? 'subscription' : 'api-key',
+      subscription: isSub,
+      ...(isSub ? { scope: m.scope ?? 'factory' } : {}),
+      ...(connectionName ? { connectionName } : {}),
+      ...(connMeta?.dailyTokenCap !== undefined ? { dailyTokenCap: connMeta.dailyTokenCap } : {}),
+      displayLabel: formatModelDisplayLabel({
+        id: m.id,
+        provider: m.provider,
+        credentialMode: isSub ? 'subscription' : 'api-key',
+        connectionName,
+      }),
+    };
   }
 
   getOffered(name: string): StoredModel | undefined {
@@ -199,6 +288,9 @@ export class ModelStore {
   }): StoredModel {
     let targetName = params.name;
     const existing = this.models.get(targetName);
+    if (existing?.credentialMode === 'subscription') {
+      throw new ModelCatalogError(409, 'model_name_taken', `Catalog name '${targetName}' is already in use by a subscription entry`);
+    }
     if (existing && (existing.id !== params.id || existing.provider !== params.provider)) {
       // Disambiguate using raw id if friendly name collides with a different model
       if (!this.models.has(params.id)) {
@@ -218,6 +310,7 @@ export class ModelStore {
       vendorId: params.vendorId,
       region: params.region,
       price: params.price,
+      credentialMode: 'api-key',
       admittedAt: now,
       admittedBy: params.actor ?? 'admin',
     };
@@ -228,6 +321,64 @@ export class ModelStore {
       this.staged = this.staged.filter((s) => !(s.vendorId === params.vendorId && s.rawId === params.id));
     }
 
+    this.persist();
+    return model;
+  }
+
+  /**
+   * M5(1), (4a): Admit a subscription catalog entry on a specific subscription connection.
+   * Factory-wide catalog names are strictly unique (no silent overwrite across connections or scopes).
+   */
+  admitSubscription(params: {
+    name: string;
+    provider: string;
+    id: string;
+    connection: string;
+    templateId: string;
+    scope: 'factory' | 'personal';
+    ownerPrincipalId?: string;
+    price?: { inputPerMTok: number; outputPerMTok: number };
+    actor: string;
+  }): StoredModel {
+    const trimmedName = params.name.trim();
+    if (!trimmedName || !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/.test(trimmedName)) {
+      throw new ModelCatalogError(400, 'invalid_model_name', 'Catalog name must be 1..128 alphanumeric or . _ : @ / - characters');
+    }
+    const existing = this.models.get(trimmedName);
+    if (existing) {
+      throw new ModelCatalogError(
+        409,
+        'model_name_taken',
+        `Catalog name '${trimmedName}' is already in use`,
+      );
+    }
+    if (!params.connection.trim()) {
+      throw new ModelCatalogError(400, 'invalid_connection', 'Subscription catalog entry requires a connection id');
+    }
+    if (params.scope === 'personal') {
+      if (!params.ownerPrincipalId || !params.ownerPrincipalId.startsWith('user:')) {
+        throw new ModelCatalogError(400, 'invalid_owner_principal', 'Personal BYOM entry requires canonical user:<id> ownerPrincipalId');
+      }
+    }
+    const effectivePrice =
+      params.scope === 'personal'
+        ? { inputPerMTok: 0, outputPerMTok: 0 }
+        : params.price;
+    const now = new Date().toISOString();
+    const model: StoredModel = {
+      name: trimmedName,
+      provider: params.provider,
+      id: params.id,
+      ...(effectivePrice ? { price: effectivePrice } : {}),
+      credentialMode: 'subscription',
+      scope: params.scope,
+      ...(params.scope === 'personal' ? { ownerPrincipalId: params.ownerPrincipalId } : {}),
+      connection: params.connection,
+      templateId: params.templateId,
+      admittedAt: now,
+      admittedBy: params.actor,
+    };
+    this.models.set(trimmedName, model);
     this.persist();
     return model;
   }
@@ -258,6 +409,13 @@ export class ModelStore {
   updatePricing(name: string, price: { inputPerMTok: number; outputPerMTok: number }, actor?: string): StoredModel {
     const model = this.models.get(name);
     if (!model) throw new Error(`Model '${name}' not found`);
+    if (model.credentialMode === 'subscription' && model.scope === 'personal') {
+      throw new ModelCatalogError(
+        403,
+        'personal_model_price_immutable',
+        `Personal BYOM subscription model '${name}' has a fixed immutable $0 price`,
+      );
+    }
 
     model.price = price;
     model.updatedAt = new Date().toISOString();
@@ -279,9 +437,11 @@ export class ModelStore {
   }
 
   /** Formats the catalog for gatekeeper-egress / Executive Consumption */
-  toEgressCatalog(): Record<string, { provider: string; id: string; endpoint?: string; secret?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }> {
-    const out: Record<string, { provider: string; id: string; endpoint?: string; secret?: string; region?: string; price?: { inputPerMTok: number; outputPerMTok: number } }> = {};
+  toEgressCatalog(): Record<string, CatalogEntry> {
+    const out: Record<string, CatalogEntry> = {};
     for (const [name, m] of this.models.entries()) {
+      const isSub = m.credentialMode === 'subscription';
+      const connMeta = isSub && m.connection ? this.connectionResolver?.(m.connection) : undefined;
       out[name] = {
         provider: m.provider,
         id: m.id,
@@ -289,6 +449,17 @@ export class ModelStore {
         ...(m.secret ? { secret: m.secret } : {}),
         ...(m.region ? { region: m.region } : {}),
         ...(m.price ? { price: m.price } : {}),
+        ...(isSub
+          ? {
+              credentialMode: 'subscription',
+              scope: m.scope ?? 'factory',
+              ...(m.scope === 'personal' && m.ownerPrincipalId ? { ownerPrincipalId: m.ownerPrincipalId } : {}),
+              connection: m.connection,
+              ...(connMeta?.name ? { connectionName: connMeta.name } : {}),
+              ...(m.templateId ? { templateId: m.templateId } : {}),
+              ...(connMeta?.dailyTokenCap !== undefined ? { dailyTokenCap: connMeta.dailyTokenCap } : {}),
+            }
+          : {}),
       };
     }
     return out;

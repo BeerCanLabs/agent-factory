@@ -28,6 +28,23 @@ import { SUBSCRIPTION_TEMPLATES, type SubscriptionTemplate } from '@beercanlabs/
 export type SubscriptionScope = 'factory' | 'personal';
 export type SubscriptionStatus = 'active' | 'needs_reconsent';
 
+export type SubscriptionDiscoveredModel = {
+  id: string;
+  name?: string;
+  displayName?: string;
+  description?: string;
+};
+
+export type SubscriptionDiscoveryStatus = 'ok' | 'no_model_list' | 'vendor_refused' | 'failed' | 'needs_reconsent';
+
+export type SubscriptionDiscoveryState = {
+  listAvailable: boolean;
+  status: SubscriptionDiscoveryStatus;
+  discoveredAt: string;
+  reason?: string;
+  message?: string;
+};
+
 const PRINCIPAL_KEY_RE = /^u-[0-9a-f]{64}$/;
 
 /** Deterministic `[a-z0-9_-]+` vault-safe key (`u-<sha256-hex>`) for canonical `user:<id>` ownerPrincipalId (M5(4)). */
@@ -67,6 +84,12 @@ export type SubscriptionRecord = {
   reconnectedAt?: string;
   status: SubscriptionStatus;
   statusAt?: string;
+  /** M5(8): optional per-agent daily token cap on this connection (positive integer tokens per agent per UTC day). */
+  dailyTokenCap?: number;
+  /** M5(4a): models last discovered for this connection (stored without tokens). */
+  discoveredModels?: SubscriptionDiscoveredModel[];
+  /** M5(4a): status and timestamp of the latest discovery attempt on this connection. */
+  discovery?: SubscriptionDiscoveryState;
 };
 
 /** What callers may see about a connection. Never tokens. */
@@ -84,6 +107,12 @@ export type SubscriptionView = {
   connectedBy: string;
   connectedAt: string;
   reconnectedAt?: string;
+  /** M5(8): optional per-agent daily token cap on this connection. */
+  dailyTokenCap?: number;
+  /** M5(4a): models last discovered for this connection. */
+  discoveredModels?: SubscriptionDiscoveredModel[];
+  /** M5(4a): status and timestamp of the latest discovery attempt on this connection. */
+  discovery?: SubscriptionDiscoveryState;
   /** Where the connection's secret lives (a name, never a value). */
   secretName: string;
 };
@@ -536,6 +565,11 @@ export class SubscriptionKeymaster {
       connectedBy: r.connectedBy,
       connectedAt: r.connectedAt,
       ...(r.reconnectedAt ? { reconnectedAt: r.reconnectedAt } : {}),
+      ...(typeof r.dailyTokenCap === 'number' && Number.isInteger(r.dailyTokenCap) && r.dailyTokenCap > 0
+        ? { dailyTokenCap: r.dailyTokenCap }
+        : {}),
+      ...(Array.isArray(r.discoveredModels) ? { discoveredModels: r.discoveredModels } : {}),
+      ...(r.discovery ? { discovery: r.discovery } : {}),
       secretName: subscriptionSecretName(r.provider, r.id, { scope, ownerPrincipalId: r.ownerPrincipalId }),
     };
   }
@@ -1080,6 +1114,150 @@ export class SubscriptionKeymaster {
         tier: rec.tier ?? 'unknown',
       });
       return { ok: true as const, connection: SubscriptionKeymaster.view(next) };
+    });
+  }
+
+  /**
+   * Sets or clears (`null`) the optional per-agent daily token cap on a connection (M5(8)).
+   */
+  async setDailyTokenCap(
+    id: string,
+    rawCap: unknown,
+    actor: string,
+    opts?: { onBehalfOf?: string },
+  ): Promise<{ ok: true; connection: SubscriptionView } | { ok: false; error: 'unknown_connection' | 'invalid_cap'; message: string }> {
+    let cap: number | undefined;
+    if (rawCap === null) {
+      cap = undefined;
+    } else if (typeof rawCap === 'number' && Number.isInteger(rawCap) && rawCap > 0) {
+      cap = rawCap;
+    } else {
+      return { ok: false, error: 'invalid_cap', message: 'dailyTokenCap must be a positive integer or null' };
+    }
+    return this.locked(async () => {
+      const rec = await this.find(id);
+      if (!rec) return { ok: false as const, error: 'unknown_connection' as const, message: `no connection "${id}"` };
+      const next: SubscriptionRecord = { ...rec };
+      if (cap === undefined) delete next.dailyTokenCap;
+      else next.dailyTokenCap = cap;
+      await this.save(next);
+      this.ledgerRow({
+        action: 'SUBSCRIPTION_CAP_UPDATED',
+        actor,
+        ...(opts?.onBehalfOf ? { onBehalfOf: opts.onBehalfOf } : {}),
+        scope: rec.scope,
+        ...(rec.scope === 'personal' && rec.ownerPrincipalId ? { ownerPrincipalId: rec.ownerPrincipalId } : {}),
+        provider: rec.provider,
+        connection: id,
+        connectionName: rec.name,
+        dailyTokenCap: cap ?? null,
+      });
+      return { ok: true as const, connection: SubscriptionKeymaster.view(next) };
+    });
+  }
+
+  /**
+   * Persists the control plane's discovery result on the connection without touching or returning any token (M5(4a)).
+   * Only `listAvailable: true` replaces `discoveredModels`; failed / `no_model_list` / `vendor_refused` / `needs_reconsent`
+   * leave any previously discovered models intact while recording the latest discovery status and timestamp.
+   */
+  async saveDiscovery(
+    id: string,
+    input: {
+      listAvailable: boolean;
+      status: SubscriptionDiscoveryStatus;
+      discoveredAt: string;
+      models?: SubscriptionDiscoveredModel[];
+      reason?: string;
+      message?: string;
+    },
+  ): Promise<{ ok: true; connection: SubscriptionView } | { ok: false; error: 'unknown_connection'; message: string }> {
+    return this.locked(async () => {
+      const rec = await this.find(id);
+      if (!rec) return { ok: false as const, error: 'unknown_connection' as const, message: `no connection "${id}"` };
+      const discovery: SubscriptionDiscoveryState = {
+        listAvailable: input.listAvailable,
+        status: input.status,
+        discoveredAt: input.discoveredAt,
+        ...(input.reason ? { reason: input.reason } : {}),
+        ...(input.message ? { message: input.message } : {}),
+      };
+      const next: SubscriptionRecord = {
+        ...rec,
+        discovery,
+        ...(input.listAvailable && Array.isArray(input.models)
+          ? {
+              discoveredModels: input.models.map((m) => ({
+                id: m.id,
+                ...(m.name ? { name: m.name } : {}),
+                ...(m.displayName ? { displayName: m.displayName } : {}),
+                ...(m.description ? { description: m.description } : {}),
+              })),
+            }
+          : {}),
+      };
+      await this.save(next);
+      return { ok: true as const, connection: SubscriptionKeymaster.view(next) };
+    });
+  }
+
+  /**
+   * Disconnects every connection stored under `vendor` (across both `factory` and `personal` scopes), even if `vendor`'s
+   * template has already been removed from `SUBSCRIPTION_TEMPLATES` (M5(2) vendor-permission-withdrawn migration).
+   */
+  async disconnectVendor(
+    vendor: string,
+    actor: string,
+    retireEntries?: (connection: SubscriptionView) => number | Promise<number>,
+  ): Promise<Array<{ connection: SubscriptionView; entriesRetired: number }>> {
+    return this.locked(async () => {
+      const idx = await this.readProviderIndex(vendor);
+      const loaded: SubscriptionRecord[] = [];
+      for (const id of idx.ids) {
+        const r = await this.load(vendor, id);
+        if (r) loaded.push(r);
+      }
+      for (const [id, pk] of Object.entries(idx.personal)) {
+        const r = await this.load(vendor, id, pk);
+        if (r) loaded.push(r);
+      }
+      const results: Array<{ connection: SubscriptionView; entriesRetired: number }> = [];
+      for (const rec of loaded) {
+        const view = SubscriptionKeymaster.view(rec);
+        const entriesRetired = retireEntries ? await retireEntries(view) : 0;
+        await this.write(
+          this.secretPathForRecord(rec),
+          JSON.stringify({
+            id: rec.id,
+            provider: rec.provider,
+            scope: rec.scope,
+            ...(rec.scope === 'personal' && rec.ownerPrincipalId ? { ownerPrincipalId: rec.ownerPrincipalId } : {}),
+            retired: true,
+            retiredAt: new Date(this.now()).toISOString(),
+          }),
+        );
+        this.cache.delete(rec.id);
+        this.invalidated.delete(rec.id);
+        this.unsaved.delete(rec.id);
+        this.marks.delete(rec.id);
+        this.ledgerRow({
+          action: 'SUBSCRIPTION_DISCONNECTED',
+          actor,
+          scope: rec.scope,
+          ...(rec.scope === 'personal' && rec.ownerPrincipalId ? { ownerPrincipalId: rec.ownerPrincipalId } : {}),
+          provider: rec.provider,
+          connection: rec.id,
+          connectionName: rec.name,
+          subscriber: rec.subscriberEmail,
+          tier: rec.tier ?? 'unknown',
+          entriesRetired,
+        });
+        results.push({ connection: view, entriesRetired });
+      }
+      if (idx.ids.length > 0 || Object.keys(idx.personal).length > 0) {
+        await this.writeProviderIndex(vendor, { ids: [], personal: {} });
+      }
+      return results;
     });
   }
 
