@@ -472,6 +472,91 @@ id: test-agent
         bounds = memory.load_memory_bounds(Path(__file__).resolve().parent.parent / "cartridge.yaml")
         self.assertEqual(bounds, {"retention_days": 30, "max_messages": 20, "max_chars": 24000})
 
+    def test_whiteboard_temporal_grounding_multi_day_gaps(self):
+        """Verify temporal grounding: [YYYY-MM-DD HH:MM UTC] prefix on historical user turns across episodic, workspace, and ephemeral whiteboards."""
+        # 1. Ephemeral Whiteboard
+        eph = ephemeral.EphemeralWhiteboard()
+        eph.add_message("user", "Morning status update", timestamp="2026-11-10T08:00:00Z")
+        eph.add_message("assistant", "All systems operational.", timestamp="2026-11-10T08:00:05Z")
+        eph.add_message("user", "Afternoon status update", timestamp="2026-11-13T16:30:00+00:00")
+        eph.add_message("assistant", "Memory pressure detected.", timestamp="2026-11-13T16:30:10+00:00")
+
+        history, _ = eph.load_whiteboard()
+        self.assertEqual(len(history), 4)
+        self.assertEqual(history[0], {"role": "user", "content": "[2026-11-10 08:00 UTC] Morning status update"})
+        self.assertEqual(history[1], {"role": "assistant", "content": "All systems operational."})
+        self.assertEqual(history[2], {"role": "user", "content": "[2026-11-13 16:30 UTC] Afternoon status update"})
+        self.assertEqual(history[3], {"role": "assistant", "content": "Memory pressure detected."})
+
+        # 2. Episodic Whiteboard & SQLite raw content preservation
+        conn_ep = sqlite3.connect(":memory:")
+        episodic.init_episodic_tables(conn_ep)
+        s_id, _ = episodic.get_or_create_active_session(conn_ep, "user1")
+        conn_ep.execute(
+            "INSERT INTO conversation_turns (session_id, user_id, surface, channel_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (s_id, "user1", "discord", "c1", "user", "Plan launch party", "2026-11-08T12:00:00Z"),
+        )
+        conn_ep.execute(
+            "INSERT INTO conversation_turns (session_id, user_id, surface, channel_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (s_id, "user1", "discord", "c1", "assistant", "Venue booked.", "2026-11-08T12:00:30Z"),
+        )
+        conn_ep.execute(
+            "INSERT INTO conversation_turns (session_id, user_id, surface, channel_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (s_id, "user1", "discord", "c1", "user", "Send invitations", "2026-11-14T09:00:00Z"),
+        )
+        conn_ep.execute(
+            "INSERT INTO conversation_turns (session_id, user_id, surface, channel_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (s_id, "user1", "discord", "c1", "assistant", "Sent 50 invites.", "2026-11-14T09:01:00Z"),
+        )
+        conn_ep.commit()
+
+        ep_hist, _ = episodic.load_whiteboard(conn_ep, user_id="user1", session_id=s_id)
+        self.assertEqual(len(ep_hist), 4)
+        self.assertEqual(ep_hist[0], {"role": "user", "content": "[2026-11-08 12:00 UTC] Plan launch party"})
+        self.assertEqual(ep_hist[1], {"role": "assistant", "content": "Venue booked."})
+        self.assertEqual(ep_hist[2], {"role": "user", "content": "[2026-11-14 09:00 UTC] Send invitations"})
+        self.assertEqual(ep_hist[3], {"role": "assistant", "content": "Sent 50 invites."})
+
+        ep_raw = conn_ep.execute("SELECT role, content FROM conversation_turns WHERE session_id = ? ORDER BY id ASC", (s_id,)).fetchall()
+        self.assertEqual(ep_raw[0], ("user", "Plan launch party"))
+        self.assertEqual(ep_raw[2], ("user", "Send invitations"))
+        conn_ep.close()
+
+        # 3. Workspace Whiteboard & SQLite raw content preservation
+        conn_ws = sqlite3.connect(":memory:")
+        workspace.init_workspace_tables(conn_ws)
+        workspace.create_or_get_project(conn_ws, "proj-alpha")
+        workspace.create_or_update_task(conn_ws, "proj-alpha", "task-1", title="Task 1")
+        conn_ws.execute(
+            "INSERT INTO workspace_turns (project_id, task_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+            ("proj-alpha", "task-1", "user", "Initial architectural design", "2026-11-01T15:00:00Z"),
+        )
+        conn_ws.execute(
+            "INSERT INTO workspace_turns (project_id, task_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+            ("proj-alpha", "task-1", "assistant", "Architecture drafted.", "2026-11-01T15:05:00Z"),
+        )
+        conn_ws.execute(
+            "INSERT INTO workspace_turns (project_id, task_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+            ("proj-alpha", "task-1", "user", "Review implementation slice", "2026-11-14T11:45:00Z"),
+        )
+        conn_ws.execute(
+            "INSERT INTO workspace_turns (project_id, task_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+            ("proj-alpha", "task-1", "assistant", "Slice approved.", "2026-11-14T11:50:00Z"),
+        )
+        conn_ws.commit()
+
+        ws_hist, _ = workspace.load_task_whiteboard(conn_ws, "proj-alpha", "task-1")
+        self.assertEqual(len(ws_hist), 4)
+        self.assertEqual(ws_hist[0], {"role": "user", "content": "[2026-11-01 15:00 UTC] Initial architectural design"})
+        self.assertEqual(ws_hist[1], {"role": "assistant", "content": "Architecture drafted."})
+        self.assertEqual(ws_hist[2], {"role": "user", "content": "[2026-11-14 11:45 UTC] Review implementation slice"})
+        self.assertEqual(ws_hist[3], {"role": "assistant", "content": "Slice approved."})
+
+        ws_raw = conn_ws.execute("SELECT role, content FROM workspace_turns WHERE project_id = ? AND task_id = ? ORDER BY id ASC", ("proj-alpha", "task-1")).fetchall()
+        self.assertEqual(ws_raw[0], ("user", "Initial architectural design"))
+        self.assertEqual(ws_raw[2], ("user", "Review implementation slice"))
+        conn_ws.close()
+
 
 if __name__ == "__main__":
     unittest.main()

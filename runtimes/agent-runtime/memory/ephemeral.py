@@ -30,6 +30,28 @@ def is_silent_reply(text: str | None) -> bool:
     return stripped.lower() in SILENT_REPLY_TOKENS
 
 
+def format_turn_content(role: str, content: str, timestamp: str | None) -> str:
+    """Prefix historical user turns with their UTC timestamp ('[YYYY-MM-DD HH:MM UTC] ') so the model sees time gaps between messages while leaving assistant turns unprefixed."""
+    if role != "user" or not content or not timestamp:
+        return content
+    raw_ts = str(timestamp).strip()
+    if not raw_ts:
+        return content
+    try:
+        dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        label = dt.strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        label = raw_ts
+    prefix = f"[{label}] "
+    if content.startswith(prefix):
+        return content
+    return f"{prefix}{content}"
+
+
 class EphemeralWhiteboard:
     """In-memory sliding window Whiteboard for ephemeral agents."""
 
@@ -95,8 +117,9 @@ class EphemeralWhiteboard:
         kept: list[dict[str, str]] = []
         size = 0
         for item in reversed(recent_slice):
-            msg = {"role": item["role"], "content": item["content"]}
-            msg_len = len(item["content"])
+            formatted = format_turn_content(item["role"], item["content"], item.get("timestamp"))
+            msg = {"role": item["role"], "content": formatted}
+            msg_len = len(formatted)
             if kept and (size + msg_len) > limit_chars:
                 break
             kept.append(msg)

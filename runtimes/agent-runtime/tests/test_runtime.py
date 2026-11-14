@@ -1,6 +1,7 @@
 """The shared runtime against a fake factory over real HTTP: a configuration alone answers a message (RT1, RT2)."""
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -12,6 +13,7 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from memory import ephemeral, episodic, workspace  # noqa: E402
 from runtime import loop  # noqa: E402
 from runtime.factory import Factory, FactoryError  # noqa: E402
 from runtime.skills import load_skills  # noqa: E402
@@ -153,9 +155,9 @@ class TestLoop(Base):
 
         self.wake(PA, [turn("what did I say?")], model)
         texts = [m["content"] for m in seen["messages"]]
-        self.assertIn("my favourite colour is green", texts, "the same person's earlier turn is in the prompt")
+        self.assertTrue(any(t.endswith("my favourite colour is green") and t.startswith("[") for t in texts), "the same person's earlier turn is in the prompt with timestamp prefix")
         self.wake(PA, [turn("what did I say?", actor="cloudflare:stephanie@example.com")], model)
-        self.assertNotIn("my favourite colour is green", [m["content"] for m in seen["messages"]], "another person's turns are not")
+        self.assertFalse(any("my favourite colour is green" in m["content"] for m in seen["messages"]), "another person's turns are not")
         self.assertTrue((self.mind / "agent_state.db").exists(), "the notebook is in the agent's own MEMORY_DIR")
 
     def test_the_factory_is_reached_directly_even_when_the_container_has_an_egress_proxy(self):
@@ -203,9 +205,9 @@ class TestLoop(Base):
         self.wake(cfg, [turn("ship the report", project_id="alpha", task_id="t9")], lambda m, t: {"role": "assistant", "content": "on it"})
         seen = {}
         self.wake(cfg, [turn("status?", project_id="alpha", task_id="t9")], lambda m, t: seen.update(m=m) or {"role": "assistant", "content": "ok"})
-        self.assertIn("ship the report", [m["content"] for m in seen["m"]])
+        self.assertTrue(any(m["content"].endswith("ship the report") and m["content"].startswith("[") for m in seen["m"]))
         self.wake(cfg, [turn("status?", project_id="beta", task_id="t9")], lambda m, t: seen.update(m=m) or {"role": "assistant", "content": "ok"})
-        self.assertNotIn("ship the report", [m["content"] for m in seen["m"]])
+        self.assertFalse(any("ship the report" in m["content"] for m in seen["m"]))
 
     def test_recall_searches_the_project_of_this_turn_only(self):
         cfg = {**PA, "memory": {"archetype": "team-member"}}
@@ -470,10 +472,12 @@ class TestLoop(Base):
         self.assertEqual(code4, 0)
         prompt_contents = [msg["content"] for msg in interactive_messages_seen[0]]
         self.assertNotIn(sched_prompt, prompt_contents, "scheduled prompt must never bleed into interactive history")
+        self.assertEqual(len(interactive_messages_seen[0]), 4)
+        self.assertEqual(interactive_messages_seen[0][1]["role"], "user")
+        self.assertRegex(interactive_messages_seen[0][1]["content"], r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\] hello pip$")
         self.assertEqual(
-            [(msg["role"], msg["content"]) for msg in interactive_messages_seen[0][1:]],
+            [(msg["role"], msg["content"]) for msg in interactive_messages_seen[0][2:]],
             [
-                ("user", "hello pip"),
                 ("assistant", "Hi Dale!"),
                 ("user", "which board positions are up for nomination?"),
             ],
@@ -890,6 +894,74 @@ class TestSkills(Base):
         self.assertEqual(code, 0)
         self.assertEqual(result["status"], "succeeded")
         self.assertIn("Top secret volume archival project 99", tool_call_seen.get("tool_result", ""))
+
+    def test_whiteboard_temporal_grounding_and_history_guidance(self):
+        """Verify historical user whiteboard turns have UTC timestamps while assistant turns and raw storage stay unprefixed."""
+        prompt = loop.system_prompt("Be helpful.", turn("hello"))
+        self.assertIn("It is ", prompt)
+        self.assertIn(
+            "Earlier user messages in history begin with [YYYY-MM-DD HH:MM UTC] showing when they were sent, "
+            "and intermediate tool calls from completed past turns are omitted. Never prefix your own replies with a timestamp.",
+            prompt,
+        )
+
+        self.mind.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self.mind / "agent_state.db"))
+        episodic.init_episodic_tables(conn)
+        actor = "cloudflare:dale@example.com"
+        s_id, _ = episodic.get_or_create_active_session(conn, actor)
+        t1_time = "2026-11-10T14:30:00+00:00"
+        conn.execute(
+            "INSERT INTO conversation_turns (session_id, user_id, surface, channel_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (s_id, actor, "discord", "c1", "user", "What is my battery level?", t1_time),
+        )
+        conn.execute(
+            "INSERT INTO conversation_turns (session_id, user_id, surface, channel_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (s_id, actor, "discord", "c1", "assistant", "Your battery level is 82%.", t1_time),
+        )
+        t2_time = "2026-11-12T09:15:00Z"
+        conn.execute(
+            "INSERT INTO conversation_turns (session_id, user_id, surface, channel_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (s_id, actor, "discord", "c1", "user", "What is my step count?", t2_time),
+        )
+        conn.execute(
+            "INSERT INTO conversation_turns (session_id, user_id, surface, channel_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (s_id, actor, "discord", "c1", "assistant", "You have taken 5,200 steps.", t2_time),
+        )
+        conn.commit()
+
+        history, _ = episodic.load_whiteboard(conn, user_id=actor, session_id=s_id)
+        self.assertEqual(len(history), 4)
+        self.assertEqual(history[0], {"role": "user", "content": "[2026-11-10 14:30 UTC] What is my battery level?"})
+        self.assertEqual(history[1], {"role": "assistant", "content": "Your battery level is 82%."})
+        self.assertEqual(history[2], {"role": "user", "content": "[2026-11-12 09:15 UTC] What is my step count?"})
+        self.assertEqual(history[3], {"role": "assistant", "content": "You have taken 5,200 steps."})
+
+        raw_turns = conn.execute("SELECT role, content FROM conversation_turns WHERE session_id = ? ORDER BY id ASC", (s_id,)).fetchall()
+        self.assertEqual(raw_turns[0], ("user", "What is my battery level?"))
+        self.assertEqual(raw_turns[2], ("user", "What is my step count?"))
+
+        recall_res = episodic.recall_conversation(conn, actor, "battery")
+        self.assertTrue(len(recall_res) > 0)
+        self.assertTrue(all(not r["content"].startswith("[") for r in recall_res))
+        user_recalled = [r["content"] for r in recall_res if r["role"] == "user"]
+        self.assertEqual(user_recalled[0], "What is my battery level?")
+        conn.close()
+
+        seen = {}
+
+        def model(messages, tools):
+            seen["messages"] = messages
+            return {"role": "assistant", "content": "Battery is currently 95%."}
+
+        code, _, _ = self.wake(PA, [turn("Current battery status?")], model)
+        self.assertEqual(code, 0)
+        hist_msgs = seen["messages"]
+        self.assertEqual(hist_msgs[-1], {"role": "user", "content": "Current battery status?"})
+        user_msgs = [m["content"] for m in hist_msgs if m["role"] == "user"]
+        self.assertIn("[2026-11-10 14:30 UTC] What is my battery level?", user_msgs)
+        self.assertIn("[2026-11-12 09:15 UTC] What is my step count?", user_msgs)
+        self.assertEqual(user_msgs[-1], "Current battery status?")
 
 
 

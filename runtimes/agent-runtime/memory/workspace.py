@@ -18,6 +18,11 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
+try:
+    from .ephemeral import format_turn_content
+except ImportError:
+    from memory.ephemeral import format_turn_content
+
 DEFAULT_MAX_MESSAGES = 20
 DEFAULT_MAX_CHARS = 24000
 DEFAULT_RETENTION_DAYS = 30
@@ -436,17 +441,18 @@ def load_task_whiteboard(
     ).fetchone()[0]
 
     rows = conn.execute(
-        "SELECT role, content FROM workspace_turns WHERE project_id = ? AND task_id = ? ORDER BY id DESC LIMIT ?",
+        "SELECT role, content, timestamp FROM workspace_turns WHERE project_id = ? AND task_id = ? ORDER BY id DESC LIMIT ?",
         (project_id, task_id, max_messages),
     ).fetchall()
 
     kept: list[dict] = []
     size = 0
-    for role, content in rows:
-        size += len(content)
+    for role, content, timestamp in rows:
+        formatted = format_turn_content(role, content, timestamp)
+        size += len(formatted)
         if kept and size > max_chars:
             break
-        kept.append({"role": role, "content": content})
+        kept.append({"role": role, "content": formatted})
 
     history = list(reversed(kept))
     shown_count = len(history)
