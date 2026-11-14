@@ -57,7 +57,8 @@ def system_prompt(soul: str, payload: dict) -> str:
     if is_scheduled_payload(payload):
         scheduled_note = "\n\nThis is a scheduled background check. If nothing needs to be reported or said, respond with NO_REPLY."
     now = datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
-    return f"{soul.strip() or DEFAULT_SOUL}{speaking}{scheduled_note}\n\nIt is {now}."
+    history_note = " Earlier user messages in history begin with [YYYY-MM-DD HH:MM UTC] showing when they were sent, and intermediate tool calls from completed past turns are omitted. Never prefix your own replies with a timestamp."
+    return f"{soul.strip() or DEFAULT_SOUL}{speaking}{scheduled_note}\n\nIt is {now}.{history_note}"
 
 
 def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], payload: dict) -> str:

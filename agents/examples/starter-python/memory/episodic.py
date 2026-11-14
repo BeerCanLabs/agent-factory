@@ -19,6 +19,11 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
+try:
+    from .ephemeral import format_turn_content
+except ImportError:
+    from memory.ephemeral import format_turn_content
+
 # Default configuration limits
 DEFAULT_MAX_MESSAGES = 20
 DEFAULT_MAX_CHARS = 24000
@@ -371,17 +376,18 @@ def load_whiteboard(
     ).fetchone()[0]
 
     rows = conn.execute(
-        "SELECT role, content FROM conversation_turns WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+        "SELECT role, content, timestamp FROM conversation_turns WHERE session_id = ? ORDER BY id DESC LIMIT ?",
         (session_id, max_messages),
     ).fetchall()
 
     kept: list[dict] = []
     size = 0
-    for role, content in rows:  # newest first
-        size += len(content)
+    for role, content, timestamp in rows:  # newest first
+        formatted = format_turn_content(role, content, timestamp)
+        size += len(formatted)
         if kept and size > max_chars:
             break
-        kept.append({"role": role, "content": content})
+        kept.append({"role": role, "content": formatted})
 
     history = list(reversed(kept))
 

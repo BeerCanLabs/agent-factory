@@ -93,3 +93,34 @@ describe('AM3 and AM4: shared runtime rotates notebooks and searches closed volu
   });
 });
 
+describe('GAP-247 (TSK-334): Temporal grounding and history guidance for historical whiteboard turns (§6.6 AM2, §6.18 RT1)', () => {
+  it('episodic.py, workspace.py, and ephemeral.py format historical user whiteboard turns via format_turn_content with UTC timestamps', () => {
+    const memoryDirs = ['runtimes/agent-runtime/memory', 'agents/examples/starter-python/memory'];
+    for (const dir of memoryDirs) {
+      const ephemeralSrc = read(`${dir}/ephemeral.py`);
+      assert.match(ephemeralSrc, /def format_turn_content\(/, `${dir}/ephemeral.py must define format_turn_content`);
+      assert.match(ephemeralSrc, /%Y-%m-%d %H:%M UTC/, `${dir}/ephemeral.py must format UTC timestamps`);
+      assert.match(ephemeralSrc, /format_turn_content\(/, `${dir}/ephemeral.py load_whiteboard must invoke format_turn_content`);
+
+      const episodicSrc = read(`${dir}/episodic.py`);
+      assert.match(episodicSrc, /format_turn_content/, `${dir}/episodic.py must import format_turn_content`);
+      assert.match(episodicSrc, /SELECT role, content, timestamp FROM conversation_turns/, `${dir}/episodic.py must select timestamp for whiteboard`);
+      assert.match(episodicSrc, /format_turn_content\(role, content, timestamp\)/, `${dir}/episodic.py load_whiteboard must format turns with format_turn_content`);
+
+      const workspaceSrc = read(`${dir}/workspace.py`);
+      assert.match(workspaceSrc, /format_turn_content/, `${dir}/workspace.py must import format_turn_content`);
+      assert.match(workspaceSrc, /SELECT role, content, timestamp FROM workspace_turns/, `${dir}/workspace.py must select timestamp for whiteboard`);
+      assert.match(workspaceSrc, /format_turn_content\(role, content, timestamp\)/, `${dir}/workspace.py load_task_whiteboard must format turns with format_turn_content`);
+    }
+  });
+
+  it('loop.py system_prompt includes temporal grounding and intermediate tool-call omission guidance', () => {
+    const loopSrc = read(`${RUNTIME}/runtime/loop.py`);
+    assert.match(
+      loopSrc,
+      /Earlier user messages in history begin with \[YYYY-MM-DD HH:MM UTC\] showing when they were sent,\s+and intermediate tool calls from completed past turns are omitted\. Never prefix your own replies with a timestamp\./,
+      'loop.py system_prompt must include exact history grounding guidance',
+    );
+  });
+});
+
