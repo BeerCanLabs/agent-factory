@@ -76,6 +76,11 @@ export interface JsonSchemaObject {
   default?: unknown;
   minimum?: number;
   maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
   format?: string;
   pattern?: string;
   oneOf?: readonly JsonSchemaObject[];
@@ -126,6 +131,8 @@ export const jsonSchema = {
     description?: string;
     minimum?: number;
     maximum?: number;
+    exclusiveMinimum?: number;
+    exclusiveMaximum?: number;
     default?: number;
   }): JsonSchemaObject {
     return {
@@ -133,6 +140,8 @@ export const jsonSchema = {
       ...(options?.description ? { description: options.description } : {}),
       ...(options?.minimum !== undefined ? { minimum: options.minimum } : {}),
       ...(options?.maximum !== undefined ? { maximum: options.maximum } : {}),
+      ...(options?.exclusiveMinimum !== undefined ? { exclusiveMinimum: options.exclusiveMinimum } : {}),
+      ...(options?.exclusiveMaximum !== undefined ? { exclusiveMaximum: options.exclusiveMaximum } : {}),
       ...(options?.default !== undefined ? { default: options.default } : {}),
     };
   },
@@ -141,6 +150,8 @@ export const jsonSchema = {
     description?: string;
     minimum?: number;
     maximum?: number;
+    exclusiveMinimum?: number;
+    exclusiveMaximum?: number;
     default?: number;
   }): JsonSchemaObject {
     return {
@@ -148,6 +159,8 @@ export const jsonSchema = {
       ...(options?.description ? { description: options.description } : {}),
       ...(options?.minimum !== undefined ? { minimum: options.minimum } : {}),
       ...(options?.maximum !== undefined ? { maximum: options.maximum } : {}),
+      ...(options?.exclusiveMinimum !== undefined ? { exclusiveMinimum: options.exclusiveMinimum } : {}),
+      ...(options?.exclusiveMaximum !== undefined ? { exclusiveMaximum: options.exclusiveMaximum } : {}),
       ...(options?.default !== undefined ? { default: options.default } : {}),
     };
   },
@@ -167,12 +180,18 @@ export const jsonSchema = {
     items: JsonSchemaObject,
     options?: {
       description?: string;
+      minItems?: number;
+      maxItems?: number;
+      uniqueItems?: boolean;
     },
   ): JsonSchemaObject {
     return {
       type: 'array',
       items,
       ...(options?.description ? { description: options.description } : {}),
+      ...(options?.minItems !== undefined ? { minItems: options.minItems } : {}),
+      ...(options?.maxItems !== undefined ? { maxItems: options.maxItems } : {}),
+      ...(options?.uniqueItems !== undefined ? { uniqueItems: options.uniqueItems } : {}),
     };
   },
 };

@@ -430,23 +430,28 @@ const AgentPolicyResponseSchema: JsonSchemaObject = jsonSchema.object({
 
 // Reusable Request Body Schemas
 const AgentCreateBodySchema: JsonSchemaObject = jsonSchema.object({
-  name: jsonSchema.string({ description: 'Human-readable agent name' }),
-  id: jsonSchema.string({ description: 'Optional agent slug ID' }),
+  id: jsonSchema.string({ description: 'Agent slug ID (1 to 128 letters, digits, dot, dash or underscore)' }),
+  name: jsonSchema.string({ description: 'Human-readable agent name (defaults to id)' }),
   role: jsonSchema.string({ description: 'Agent role or title' }),
   kind: jsonSchema.string({ description: 'Agent kind', enum: ['personal', 'team'] }),
   accountableLead: jsonSchema.string({ description: 'Accountable lead principal ID for team agents' }),
   owners: jsonSchema.array(jsonSchema.string(), { description: 'Owner principal IDs' }),
   model: jsonSchema.string({ description: 'Initial default model' }),
   soul: jsonSchema.string({ description: 'Core persona and instructions' }),
+  roles: jsonSchema.array(jsonSchema.string(), { description: 'Agent roles' }),
+  memory: jsonSchema.object({
+    archetype: jsonSchema.string({ description: 'Memory archetype (AM1)', enum: ['purpose-built', 'personal-assistant', 'team-member'] }),
+  }, { description: 'Memory configuration' }),
   skills: jsonSchema.array(jsonSchema.object({
     id: jsonSchema.string({ description: 'Skill ID' }),
     version: jsonSchema.string({ description: 'Semantic version' }),
   }), { description: 'Initial adopted skills' }),
   includeDefaultSkills: jsonSchema.boolean({ description: 'Whether to adopt platform default skills' }),
   excludeDefaultSkills: jsonSchema.array(jsonSchema.string(), { description: 'Default skill IDs to exclude' }),
-}, { required: ['name'] });
+}, { required: ['id'] });
 
 const ScheduleCreateBodySchema: JsonSchemaObject = jsonSchema.object({
+  id: jsonSchema.string({ description: 'Optional schedule identifier (sched-<uuid>)' }),
   cron: jsonSchema.string({ description: 'Standard 5-field cron expression' }),
   prompt: jsonSchema.string({ description: 'Task prompt executed at scheduled times' }),
   agentId: jsonSchema.string({ description: 'Target agent ID' }),
@@ -454,6 +459,10 @@ const ScheduleCreateBodySchema: JsonSchemaObject = jsonSchema.object({
   timezone: jsonSchema.string({ description: 'IANA timezone name' }),
   enabled: jsonSchema.boolean({ description: 'Whether schedule is enabled' }),
   channelId: jsonSchema.string({ description: 'Optional ingress channel ID' }),
+  requestedBy: jsonSchema.object({
+    actor: jsonSchema.string({ description: 'Principal actor requesting execution' }),
+    provider: jsonSchema.string({ description: 'Identity provider if authenticated externally' }),
+  }, { description: 'Authority attribution under which schedule runs execute' }),
 }, { required: ['cron', 'prompt'] });
 
 const ScheduleUpdateBodySchema: JsonSchemaObject = jsonSchema.object({
@@ -468,6 +477,7 @@ const ScheduleUpdateBodySchema: JsonSchemaObject = jsonSchema.object({
 const PrincipalCreateBodySchema: JsonSchemaObject = jsonSchema.object({
   displayName: jsonSchema.string({ description: 'Full human-readable display name' }),
   emails: jsonSchema.array(jsonSchema.string(), { description: 'Verified email addresses' }),
+  email: jsonSchema.string({ description: 'Single email address alias' }),
   id: jsonSchema.string({ description: 'Optional canonical user ID (user:<slug>)' }),
 }, { required: ['displayName', 'emails'] });
 
@@ -482,17 +492,24 @@ const PrincipalEmailBodySchema: JsonSchemaObject = jsonSchema.object({
 const PrincipalRevokeBodySchema: JsonSchemaObject = jsonSchema.object({
   confirm: jsonSchema.string({ description: 'Must match principal ID to confirm revocation' }),
   reason: jsonSchema.string({ description: 'Administrative reason for access revocation' }),
-});
+}, { required: ['confirm'] });
 
 const GrantCreateBodySchema: JsonSchemaObject = jsonSchema.object({
+  id: jsonSchema.string({ description: 'Optional explicit grant record ID' }),
   subject: jsonSchema.string({ description: 'Target principal or group ID' }),
+  subjectDisplayName: jsonSchema.string({ description: 'Optional display name alias for target subject' }),
   role: jsonSchema.string({ description: 'Factory role granted' }),
   scope: jsonSchema.object({
     kind: jsonSchema.string({ description: 'Scope kind', enum: ['fleet', 'agent', 'skill'] }),
     id: jsonSchema.string({ description: 'Scope entity ID if not fleet' }),
   }, { required: ['kind'] }),
-  state: jsonSchema.string({ description: 'Grant state', enum: ['active', 'pending'] }),
-  expiresAt: jsonSchema.string({ description: 'ISO-8601 expiration timestamp' }),
+  state: jsonSchema.string({ description: 'Grant state (only active permitted)', enum: ['active'] }),
+  expiresAt: {
+    type: ['string', 'null'],
+    format: 'date-time',
+    description: 'ISO-8601 expiration timestamp or null for non-expiring',
+  },
+  replaceExisting: jsonSchema.boolean({ description: 'Whether to atomically replace existing grants for the same scope' }),
 }, { required: ['subject', 'role', 'scope'] });
 
 const BudgetUsdBodySchema: JsonSchemaObject = jsonSchema.object({
@@ -503,9 +520,69 @@ const BudgetUsdBodySchema: JsonSchemaObject = jsonSchema.object({
 }, { required: ['budgetUsd'] });
 
 const SpendBudgetsBodySchema: JsonSchemaObject = jsonSchema.object({
-  totalMonthUsd: jsonSchema.number({ description: 'Total monthly spend ceiling in USD for entire factory', minimum: 0 }),
-  alertAt: jsonSchema.array(jsonSchema.number({ minimum: 0, maximum: 1 }), { description: 'Fractional alert thresholds (e.g. 0.5, 0.8, 1.0)' }),
-}, { required: ['totalMonthUsd'] });
+  aiMonthUsd: {
+    type: ['number', 'null'],
+    minimum: 0,
+    description: 'Monthly spend ceiling in USD for AI providers, or null to clear',
+  },
+  infraMonthUsd: {
+    type: ['number', 'null'],
+    minimum: 0,
+    description: 'Monthly spend ceiling in USD for infrastructure, or null to clear',
+  },
+  totalMonthUsd: {
+    type: ['number', 'null'],
+    minimum: 0,
+    description: 'Total monthly spend ceiling in USD for entire factory, or null to clear',
+  },
+  alertAt: jsonSchema.array(
+    jsonSchema.number({ exclusiveMinimum: 0, maximum: 10 }),
+    {
+      description: 'Non-empty list of fractional alert thresholds (e.g. [0.8, 1.0], values > 0 and <= 10)',
+      minItems: 1,
+    },
+  ),
+});
+
+const SpendBudgetVersionResponseSchema: JsonSchemaObject = jsonSchema.object({
+  version: jsonSchema.integer({ description: 'Budget version number' }),
+  budgets: jsonSchema.object({
+    aiMonthUsd: jsonSchema.number({ description: 'Monthly AI spend ceiling' }),
+    infraMonthUsd: jsonSchema.number({ description: 'Monthly infra spend ceiling' }),
+    totalMonthUsd: jsonSchema.number({ description: 'Total monthly spend ceiling' }),
+    alertAt: jsonSchema.array(jsonSchema.number(), { description: 'Alert thresholds' }),
+  }),
+  setBy: jsonSchema.string({ description: 'Actor who set budget' }),
+  setAt: jsonSchema.string({ description: 'Timestamp when budget was set' }),
+}, { required: ['version', 'budgets', 'setBy', 'setAt'] });
+
+const SpendBudgetsGetResponseSchema: JsonSchemaObject = jsonSchema.object({
+  current: {
+    type: ['object', 'null'],
+    properties: SpendBudgetVersionResponseSchema.properties,
+    description: 'Current factory budget version, or null if none set',
+  },
+  history: jsonSchema.array(SpendBudgetVersionResponseSchema, { description: 'Historical budget versions' }),
+}, { required: ['current', 'history'] });
+
+const HeartbeatBodySchema: JsonSchemaObject = jsonSchema.object({
+  rssMb: jsonSchema.number({ description: 'Current process RSS memory in megabytes', minimum: 0 }),
+});
+
+const AgentDeployBodySchema: JsonSchemaObject = jsonSchema.object({
+  repo: jsonSchema.string({ description: 'Optional repository HTTPS URL to re-pin for deploy' }),
+  commit: jsonSchema.string({ description: 'Optional 40-character git commit SHA to re-pin for deploy', pattern: '^[0-9a-f]{40}$' }),
+});
+
+const EgressFailoverBodySchema: JsonSchemaObject = jsonSchema.object({
+  toModel: jsonSchema.string({ description: 'Target model ID failover destination' }),
+  fromModel: jsonSchema.string({ description: 'Origin model ID failing over from' }),
+  reason: jsonSchema.string({ description: 'Reason for model failover' }),
+}, { required: ['toModel'] });
+
+const SkillUnpublishBodySchema: JsonSchemaObject = jsonSchema.object({
+  reason: jsonSchema.string({ description: 'Optional administrative reason for unpublishing skill (up to 2000 chars)' }),
+});
 
 const ApprovalDecideBodySchema: JsonSchemaObject = jsonSchema.object({
   decision: jsonSchema.string({ description: 'Decision outcome', enum: ['approve', 'reject'] }),
@@ -646,7 +723,8 @@ const ModelPricingBodySchema: JsonSchemaObject = jsonSchema.object({
 
 const ModelDefaultBodySchema: JsonSchemaObject = jsonSchema.object({
   model: jsonSchema.string({ description: 'Model identifier' }),
-}, { required: ['model'] });
+  name: jsonSchema.string({ description: 'Alias for model identifier (accepted if model omitted)' }),
+});
 
 const RegistryAgentBodySchema: JsonSchemaObject = jsonSchema.object({
   repo: jsonSchema.string({ description: 'HTTPS Git repository URL' }),
@@ -730,7 +808,16 @@ const ApiKeyCreateBodySchema: JsonSchemaObject = jsonSchema.object({
   name: jsonSchema.string({ description: 'Human-readable description or label' }),
   owner: jsonSchema.string({ description: 'Principal ID who owns the key (defaults to caller)' }),
   roles: jsonSchema.array(jsonSchema.string(), { description: 'Roles granted to service API key' }),
-  expiresAt: jsonSchema.string({ description: 'ISO-8601 expiration timestamp' }),
+  deviceFamily: jsonSchema.string({ description: 'Device family or client class (e.g. cli, mcp:<client_id>)' }),
+  scopes: jsonSchema.object({
+    readOnly: jsonSchema.boolean({ description: 'Whether key is restricted to read-only operations' }),
+    toolsets: jsonSchema.array(jsonSchema.string(), { description: 'Permitted MCP toolset names' }),
+  }, { description: 'Key scopes bounding authority' }),
+  expiresAt: {
+    type: ['string', 'null'],
+    format: 'date-time',
+    description: 'ISO-8601 expiration timestamp or null for non-expiring',
+  },
 });
 
 const ApiKeyRotateBodySchema: JsonSchemaObject = jsonSchema.object({
@@ -813,16 +900,17 @@ const PublishRequestBodySchema: JsonSchemaObject = jsonSchema.object({
 });
 
 const GroupCreateBodySchema: JsonSchemaObject = jsonSchema.object({
-  id: jsonSchema.string({ description: 'Group slug identifier' }),
-  name: jsonSchema.string({ description: 'Human-readable group name' }),
-  description: jsonSchema.string({ description: 'Group description' }),
+  id: jsonSchema.string({ description: 'Group slug identifier (1-64 lowercase alphanumeric, dot, hyphen or underscore)' }),
+  name: jsonSchema.string({ description: 'Human-readable group name (1-255 characters)' }),
+  description: jsonSchema.string({ description: 'Group description (up to 1000 characters)' }),
+  roles: jsonSchema.array(jsonSchema.string(), { description: 'Scoped skill roles assigned to group' }),
   members: jsonSchema.array(jsonSchema.string(), { description: 'Initial member principal IDs' }),
-}, { required: ['id'] });
+}, { required: ['id', 'name'] });
 
 const GroupUpdateBodySchema: JsonSchemaObject = jsonSchema.object({
-  name: jsonSchema.string({ description: 'Updated group name' }),
-  description: jsonSchema.string({ description: 'Updated description' }),
-  members: jsonSchema.array(jsonSchema.string(), { description: 'Updated member list' }),
+  name: jsonSchema.string({ description: 'Updated group name (1-255 characters)' }),
+  description: jsonSchema.string({ description: 'Updated description (up to 1000 characters)' }),
+  roles: jsonSchema.array(jsonSchema.string(), { description: 'Updated scoped skill roles' }),
 });
 
 const GroupMemberAddBodySchema: JsonSchemaObject = jsonSchema.object({
@@ -1274,7 +1362,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     privilege: "grants.manage",
     noRequestBody: true,
     responseSchema: SuccessResponseSchema,
-    statusCodes: [200],
+    statusCodes: [200, 409],
   },
   {
     operationId: "list_principals",
@@ -1495,7 +1583,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "get_spend_budgets",
     inCoreToolset: true,
     privilege: "spend.read",
-    responseSchema: SpendBudgetsBodySchema,
+    responseSchema: SpendBudgetsGetResponseSchema,
   },
   {
     operationId: "set_spend_budgets",
@@ -1509,7 +1597,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     inCoreToolset: true,
     privilege: "spend.budget.set",
     requestBodySchema: SpendBudgetsBodySchema,
-    responseSchema: SpendBudgetsBodySchema,
+    responseSchema: SpendBudgetVersionResponseSchema,
     statusCodes: [200],
   },
   {
@@ -2300,7 +2388,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "property-manager",
     mcpExposure: "internal",
     exception: "run-token",
-    noRequestBody: true,
+    requestBodySchema: HeartbeatBodySchema,
     responseSchema: SuccessResponseSchema,
     statusCodes: [200],
   },
@@ -2370,7 +2458,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     exception: "run-token",
     requestBodySchema: GenericObjectBodySchema,
     responseSchema: SuccessResponseSchema,
-    statusCodes: [200],
+    statusCodes: [200, 201],
   },
   {
     operationId: "run_stream_events",
@@ -2810,7 +2898,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "deploy_agent",
     privilege: "registry.deploy",
-    noRequestBody: true,
+    requestBodySchema: AgentDeployBodySchema,
     responseSchema: AgentRecordResponseSchema,
     statusCodes: [200, 202],
   },
@@ -2898,7 +2986,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.models.failover",
-    noRequestBody: true,
+    requestBodySchema: EgressFailoverBodySchema,
     responseSchema: SuccessResponseSchema,
     statusCodes: [200],
   },
@@ -2936,7 +3024,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     privilege: "egress.approvals.consume",
     noRequestBody: true,
     responseSchema: SuccessResponseSchema,
-    statusCodes: [200],
+    statusCodes: [200, 409],
   },
   {
     operationId: "egress_report_progress",
@@ -3389,7 +3477,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     privilege: "connections.import",
     requestBodySchema: ConnectionImportBodySchema,
     responseSchema: SuccessResponseSchema,
-    statusCodes: [200],
+    statusCodes: [201],
   },
   {
     operationId: "list_agent_connections",
@@ -3791,7 +3879,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     privilege: "skills.checks.run",
     noRequestBody: true,
     responseSchema: SuccessResponseSchema,
-    statusCodes: [200],
+    statusCodes: [202],
   },
   {
     operationId: "approve_skill_version",
@@ -4089,7 +4177,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "unpublish_skill",
     privilege: "skills.unpublish",
-    noRequestBody: true,
+    requestBodySchema: SkillUnpublishBodySchema,
     responseSchema: SuccessResponseSchema,
     statusCodes: [200],
   },
@@ -4192,11 +4280,11 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     method: "POST",
     pattern: "/api/v1/groups/:id/members/:member",
     summary: "Add group member alias",
-    description: "Add group member",
+    description: "Add group member (note: path :member is ignored in favor of body.member)",
     staff: "bouncer",
     mcpExposure: "internal",
     privilege: "groups.manage",
-    noRequestBody: true,
+    requestBodySchema: GroupMemberAddBodySchema,
     responseSchema: GroupRecordResponseSchema,
     statusCodes: [200],
   },
@@ -4210,6 +4298,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "remove_group_member",
     privilege: "groups.manage",
+    requestBodySchema: GroupMemberAddBodySchema,
     responseSchema: SuccessResponseSchema,
     statusCodes: [200],
   },

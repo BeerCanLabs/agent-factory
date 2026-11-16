@@ -222,4 +222,139 @@ describe('Operations Contract & Schema Conformance (GAP-249, CL11, TSK-336)', ()
     assert.ok(triggerRunOp);
     assert.ok(triggerRunOp.responses['202'], 'OpenAPI start_agent_run should declare 202 response');
   });
+
+  it('Round 3 F1-F4: verified routes have accurate requestBodySchema and no false noRequestBody', () => {
+    // F1: run_post_heartbeat
+    const heartbeat = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'run_post_heartbeat');
+    assert.ok(heartbeat);
+    assert.equal(heartbeat.noRequestBody, undefined);
+    assert.ok(heartbeat.requestBodySchema?.properties?.rssMb);
+
+    // F2: deploy_agent
+    const deploy = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'deploy_agent');
+    assert.ok(deploy);
+    assert.equal(deploy.noRequestBody, undefined);
+    assert.ok(deploy.requestBodySchema?.properties?.repo);
+    assert.ok(deploy.requestBodySchema?.properties?.commit);
+    assert.ok(deploy.statusCodes?.includes(202));
+
+    // F3: egress_record_failover
+    const failover = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'egress_record_failover');
+    assert.ok(failover);
+    assert.equal(failover.noRequestBody, undefined);
+    assert.ok(failover.requestBodySchema?.properties?.toModel);
+    assert.deepEqual(failover.requestBodySchema?.required, ['toModel']);
+    assert.ok(failover.requestBodySchema?.properties?.fromModel);
+    assert.ok(failover.requestBodySchema?.properties?.reason);
+
+    // F4: post_add_group_member_alias
+    const groupMemberAlias = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'post_add_group_member_alias');
+    assert.ok(groupMemberAlias);
+    assert.equal(groupMemberAlias.noRequestBody, undefined);
+    assert.ok(groupMemberAlias.requestBodySchema?.properties?.member);
+    assert.deepEqual(groupMemberAlias.requestBodySchema?.required, ['member']);
+
+    // unpublish_skill
+    const unpublish = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'unpublish_skill');
+    assert.ok(unpublish);
+    assert.equal(unpublish.noRequestBody, undefined);
+    assert.ok(unpublish.requestBodySchema?.properties?.reason);
+  });
+
+  it('Round 3 F5-F9: schema precision across grants, budgets, status codes, keys and schedules', () => {
+    // F5: GrantCreateBodySchema
+    const createGrant = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'create_grant');
+    assert.ok(createGrant);
+    const grantProps = createGrant.requestBodySchema?.properties;
+    assert.ok(grantProps?.id);
+    assert.ok(grantProps?.subjectDisplayName);
+    assert.ok(grantProps?.replaceExisting);
+    assert.deepEqual(grantProps?.state?.enum, ['active']);
+    assert.deepEqual(grantProps?.expiresAt?.type, ['string', 'null']);
+
+    // F6: SpendBudgetsBodySchema & distinct responseSchema
+    const setBudgets = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'set_spend_budgets');
+    assert.ok(setBudgets);
+    const budgetProps = setBudgets.requestBodySchema?.properties;
+    assert.ok(budgetProps?.aiMonthUsd);
+    assert.ok(budgetProps?.infraMonthUsd);
+    assert.ok(budgetProps?.totalMonthUsd);
+    assert.equal(setBudgets.requestBodySchema?.required, undefined);
+    assert.equal(budgetProps?.alertAt?.minItems, 1);
+    assert.equal((budgetProps?.alertAt?.items as any)?.exclusiveMinimum, 0);
+    assert.equal((budgetProps?.alertAt?.items as any)?.maximum, 10);
+    assert.ok(setBudgets.responseSchema?.properties?.version);
+    assert.ok(setBudgets.responseSchema?.properties?.setAt);
+
+    const getBudgets = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'get_spend_budgets');
+    assert.ok(getBudgets);
+    assert.ok(getBudgets.responseSchema?.properties?.current);
+    assert.ok(getBudgets.responseSchema?.properties?.history);
+
+    // F7 & F8: status codes precision
+    const skillChecks = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'run_skill_checks');
+    assert.ok(skillChecks);
+    assert.deepEqual(skillChecks.statusCodes, [202]);
+
+    const consumeApproval = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'egress_consume_approval');
+    assert.ok(consumeApproval);
+    assert.deepEqual(consumeApproval.statusCodes, [200, 409]);
+
+    const cutover = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'cutover_auth_migration');
+    assert.ok(cutover);
+    assert.deepEqual(cutover.statusCodes, [200, 409]);
+
+    // F9: handler-read fields in schedules, api keys, default model
+    const createSched = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'create_schedule');
+    assert.ok(createSched);
+    assert.ok(createSched.requestBodySchema?.properties?.id);
+    assert.ok(createSched.requestBodySchema?.properties?.requestedBy);
+
+    const createKey = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'create_api_key');
+    assert.ok(createKey);
+    assert.ok(createKey.requestBodySchema?.properties?.deviceFamily);
+    assert.ok(createKey.requestBodySchema?.properties?.scopes);
+
+    const setDefaultModel = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'set_default_model');
+    assert.ok(setDefaultModel);
+    assert.ok(setDefaultModel.requestBodySchema?.properties?.model);
+    assert.ok(setDefaultModel.requestBodySchema?.properties?.name);
+  });
+
+  it('Round 3 Conformance Guard: every noRequestBody: true route is in an audited explicit allowlist of verified bodyless handlers', () => {
+    const AUDITED_NO_REQUEST_BODY_OPERATIONS = new Set([
+      'logout_session',
+      'cutover_auth_migration',
+      'pause_agent',
+      'resume_agent',
+      'isolate_agent',
+      'reset_agent',
+      'check_agent_updates',
+      'cancel_run',
+      'admit_submission',
+      'retire_agent',
+      'reinstate_agent',
+      'purge_agent',
+      'egress_consume_approval',
+      'accept_agent_transfer',
+      'decline_agent_transfer',
+      'cancel_agent_transfer',
+      'decline_skill_transfer',
+      'discover_subscription_models',
+      'run_skill_checks',
+      'get_skill_training_recommendation',
+      'accept_skill_transfer',
+      'cancel_skill_transfer',
+    ]);
+
+    const actualNoRequestBodyRoutes = CONTROL_PLANE_ROUTES.filter((r) => r.noRequestBody === true);
+    assert.equal(actualNoRequestBodyRoutes.length, AUDITED_NO_REQUEST_BODY_OPERATIONS.size);
+
+    for (const route of actualNoRequestBodyRoutes) {
+      assert.ok(
+        AUDITED_NO_REQUEST_BODY_OPERATIONS.has(route.operationId),
+        `Route ${route.method} ${route.pattern} (${route.operationId}) has noRequestBody: true but is not in audited allowlist`
+      );
+    }
+  });
 });
