@@ -34,6 +34,7 @@ import {
   type FactoryState,
 } from './app.js';
 import { ModelCatalogError } from './models.js';
+import { fleetStateOf, setFleetState } from './fleet-state.js';
 import { ownersOf } from './config-store.js';
 import {
   addPrincipalEmail,
@@ -183,6 +184,14 @@ const TOOLS: ToolSpec[] = [
   { name: 'resume_agent', description: 'Resume agent egress', privilege: 'agents.resume', args: { id: { type: 'string' } }, required: ['id'] },
   { name: 'isolate_agent', description: 'Isolate agent egress', privilege: 'agents.isolate', args: { id: { type: 'string' } }, required: ['id'] },
   { name: 'list_approvals', description: 'List pending tool-call approvals', privilege: 'approvals.read', args: {} },
+  { name: 'get_fleet_state', description: "Read the fleet's go/stop state (status, coder_app_ready, reason)", privilege: 'agents.read', args: {} },
+  {
+    name: 'set_fleet_state',
+    description: "Set the fleet's go/stop state: status is running, deploy-freeze, deploying, prod-testing, rolled-back or paused",
+    privilege: 'fleet.state.set',
+    args: { status: { type: 'string' }, coder_app_ready: { type: 'boolean' }, reason: { type: 'string' } },
+    required: ['status'],
+  },
   {
     name: 'decide_approval',
     description: 'Approve or reject a held tool call',
@@ -396,6 +405,8 @@ async function dispatchLegacyTool(
   if (name === 'list_agents') return [...state.agents.values()].filter((a) => !a.ephemeral).map((a) => enrichAgent(state, a));
   if (name === 'query_ledger') return state.ledger.query({ agent: typeof args.agent === 'string' ? args.agent : undefined });
   if (name === 'get_run') return (typeof args.runId === 'string' ? state.runs.get(args.runId) : undefined) ?? { error: 'not_found' };
+  if (name === 'get_fleet_state') return fleetStateOf(state);
+  if (name === 'set_fleet_state') return setFleetState(state, args, principal).body;
   if (name === 'list_approvals') return visibleApprovals(state, principal, state.approvals.list({ state: 'pending' }));
   if (name === 'decide_approval') return (await decideApproval(state, String(args.approvalId), String(args.decision), principal, typeof args.notes === 'string' ? args.notes : undefined)).body;
   if (name === 'list_model_catalog') {

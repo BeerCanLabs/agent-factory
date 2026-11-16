@@ -118,6 +118,7 @@ import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
+import { handleFleetState, type FleetStateStore } from './fleet-state.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
 import { ModelCatalogError, ModelStore, type EnrichedModelView, type StoredModel, type StagedModel } from './models.js';
@@ -240,6 +241,8 @@ export type FactoryState = {
   schedules?: ScheduleStore;
   /** GAP-088: which person a Discord user is, set by an admin. Absent: nobody is linked. */
   identityLinks?: IdentityLinkStore;
+  /** GAP-252: the fleet's go/stop state; in memory (reads paused until set) when absent. */
+  fleetState?: FleetStateStore;
   /** S8: set once the shadow comparison showed zero mismatches and link roles were stripped (grants-only). */
   authCutover?: boolean;
   /** User groups and group membership store (H6, A10, A17, GAP-203). */
@@ -3219,6 +3222,8 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (await handleRuntimeRoutes(state, req, res, path)) return;
   if (await handleAgentBundle(state, req, res, path)) return;
   if (path.startsWith('/api/v1/ingress/') && (await handleChannelApprovals(state, req, res, path))) return;
+  // GAP-252: the fleet's go/stop state.
+  if (path === '/api/v1/fleet/state' && (await handleFleetState(state, req, res, path))) return;
   if (await handleRoleAssignments(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;

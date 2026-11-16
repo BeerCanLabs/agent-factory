@@ -168,6 +168,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/updates.ts',
       'packages/control-plane/src/group-routes.ts',
       'packages/control-plane/src/skill-models.ts',
+      'packages/control-plane/src/fleet-state.ts',
     ],
   },
   inspector: {
