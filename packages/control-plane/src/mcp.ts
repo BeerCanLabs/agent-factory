@@ -1,60 +1,37 @@
-import { type Principal } from '@beercanlabs/factory-auth';
+import http from 'node:http';
+import { PassThrough } from 'node:stream';
+import { randomUUID } from 'node:crypto';
+import { type Principal, type Role } from '@beercanlabs/factory-auth';
 import {
   AGENT_SCOPED,
   authorize,
   requiredRoleForPrivilege,
   type Privilege,
 } from '@beercanlabs/factory-bouncer';
-import { effectiveAgentModels } from '@beercanlabs/factory-gatekeeper/policy';
-import { applyKillSwitch, createRun } from '@beercanlabs/factory-property-manager';
-import { registryOf } from '@beercanlabs/factory-registrar';
+import {
+  buildMcpSchemaCatalog,
+  type JsonSchemaObject,
+  type McpToolDefinition,
+  type OperationContract,
+} from '@beercanlabs/factory-contract';
+import { CONTROL_PLANE_ROUTES } from './route-registry.js';
 import {
   actAsStorage,
-  admitModel,
   agentKindOf,
-  attachCallerToRunResult,
-  badRunModel,
   checkOwnsAnyAgent,
   checkOwnsPersonalAgent,
-  decideApproval,
-  defaultModelOf,
-  discoverViaEgress,
+  dispatchControlPlaneHttp,
   effectiveGrantsForActor,
-  enrichAgent,
-  enrichedCatalogModelsForNames,
-  parseModelPriceInput,
-  resolveActAsForPrincipal,
-  resolvePrincipalCaller,
-  retireCatalogModel,
-  setAgentModels,
-  stageDiscovered,
-  vendorTarget,
-  visibleApprovals,
-  APPROVAL_KINDS,
-  type ApprovalKind,
-  visibleModelsForPrincipal,
+  identify,
+  mayDecide,
+  mcpContextStorage,
+  requestBasePrincipal,
   type FactoryState,
 } from './app.js';
-import { ModelCatalogError } from './models.js';
-import { fleetStateOf, setFleetState } from './fleet-state.js';
 import { ownersOf } from './config-store.js';
-import {
-  addPrincipalEmail,
-  callerMayUseScopedGrantTools,
-  checkAuthz,
-  createPrincipal,
-  getPrincipal,
-  getWhoami,
-  grantRole,
-  listGrants,
-  listPrincipals,
-  removePrincipalEmail,
-  revokeGrant,
-  revokeAllAccess,
-  rolesForSubjectActor,
-  type RouteOutcome,
-} from './grants-routes.js';
-import { checkAgentUpdate } from './updates.js';
+import { holdDecider } from './decision-holds.js';
+import { callerMayUseScopedGrantTools, rolesForSubjectActor } from './grants-routes.js';
+import { verifySession } from './login.js';
 
 export const SUPPORTED_MCP_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'] as const;
 export type McpProtocolVersion = (typeof SUPPORTED_MCP_PROTOCOL_VERSIONS)[number];
@@ -66,16 +43,53 @@ export type ToolAnnotations = {
   openWorldHint: boolean;
 };
 
-type ToolSpec = {
+export type ToolSpec = {
   name: string;
   title: string;
   description: string;
   privilege: Privilege;
   scopedDelegation?: boolean;
-  args: Record<string, { type: string; items?: { type: string } }>;
+  args?: Record<string, { type: string; items?: { type: string } }>;
   required?: string[];
   annotations: ToolAnnotations;
+  inputSchema?: any;
+  outputSchema?: any;
+  _meta?: any;
 };
+
+export type McpChallengeRecord = {
+  id: string;
+  actor: string;
+  operationId: string;
+  method: string;
+  pattern: string;
+  path: string;
+  args: Record<string, unknown>;
+  via: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
+export type McpHandoffRecord = {
+  id: string;
+  actor: string;
+  operationId: string;
+  method: string;
+  pattern: string;
+  path: string;
+  nonSecretArgs: Record<string, unknown>;
+  secretParamNames: string[];
+  via: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
+export interface HandleMcpOptions {
+  toolsets?: readonly string[];
+  isAll?: boolean;
+  readOnly?: boolean;
+  clientId?: string;
+}
 
 export function redactMcpSecretText(text: string, secrets?: Iterable<string>): string {
   let out = text;
@@ -119,646 +133,384 @@ export function redactMcpResponse<T>(res: T, secrets?: Iterable<string>): T {
   return res;
 }
 
-export const TOOLS: ToolSpec[] = [
-  {
-    name: 'whoami',
-    title: 'Whoami',
-    description: 'Return the verified caller principal, mapped emails, effective grants, and live privileges',
-    privilege: 'mcp.use',
-    args: {},
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'authz_check',
-    title: 'Authorization Check',
-    description: 'Side-effect-free authorization preflight check returning { allowed, requiredRole } without ledger denial noise',
-    privilege: 'mcp.use',
-    args: {
-      privilege: { type: 'string' },
-      agentId: { type: 'string' },
-      skillId: { type: 'string' },
-    },
-    required: ['privilege'],
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'list_principals',
-    title: 'List Principals',
-    description: 'List canonical human principals and their mapped verified emails (or fetch one by id; admin only)',
-    privilege: 'grants.manage',
-    args: { id: { type: 'string' } },
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'create_principal',
-    title: 'Create Principal',
-    description: 'Pre-create a canonical user:<id> principal with 1..N globally unique lowercased emails (admin only)',
-    privilege: 'grants.manage',
-    args: {
-      id: { type: 'string' },
-      displayName: { type: 'string' },
-      emails: { type: 'array', items: { type: 'string' } },
-    },
-    required: ['displayName', 'emails'],
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-  },
-  {
-    name: 'add_principal_email',
-    title: 'Add Principal Email',
-    description: 'Add a globally unique lowercased verified email alias to an existing principal (admin only)',
-    privilege: 'grants.manage',
-    args: {
-      id: { type: 'string' },
-      email: { type: 'string' },
-    },
-    required: ['id', 'email'],
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'remove_principal_email',
-    title: 'Remove Principal Email',
-    description: 'Remove an email alias from a principal while preserving at least one mapped email (admin only)',
-    privilege: 'grants.manage',
-    args: {
-      id: { type: 'string' },
-      email: { type: 'string' },
-    },
-    required: ['id', 'email'],
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'list_grants',
-    title: 'List Grants',
-    description: 'List grants (admin fleet-wide, or scoped content-owner / accountable-lead on their own agent or skill)',
-    privilege: 'grants.manage',
-    scopedDelegation: true,
-    args: {
-      subject: { type: 'string' },
-      scopeKind: { type: 'string' },
-      scopeId: { type: 'string' },
-      includeExpired: { type: 'boolean' },
-    },
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'grant_role',
-    title: 'Grant Role',
-    description: 'Create a fleet, agent, or skill role grant subject to delegation ceilings',
-    privilege: 'grants.manage',
-    scopedDelegation: true,
-    args: {
-      id: { type: 'string' },
-      subject: { type: 'string' },
-      subjectDisplayName: { type: 'string' },
-      scope: { type: 'object' },
-      role: { type: 'string' },
-      expiresAt: { type: 'string' },
-      replaceExisting: { type: 'boolean' },
-    },
-    required: ['subject', 'scope', 'role'],
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-  },
-  {
-    name: 'revoke_grant',
-    title: 'Revoke Grant',
-    description: 'Revoke a grant by id subject to delegation ceilings and last-human-admin protection',
-    privilege: 'grants.manage',
-    scopedDelegation: true,
-    args: {
-      id: { type: 'string' },
-      grantId: { type: 'string' },
-    },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'revoke_all_access',
-    title: 'Revoke All Access',
-    description: 'Remove every grant and group membership of a principal and end its sign-in sessions and CLI login tokens (API keys stay) (confirm must equal its id); refused 409 for the last admin',
-    privilege: 'grants.manage',
-    args: { id: { type: 'string' }, confirm: { type: 'string' } },
-    required: ['id', 'confirm'],
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'list_agents',
-    title: 'List Agents',
-    description: 'List factory cartridges',
-    privilege: 'agents.read',
-    args: {},
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'query_ledger',
-    title: 'Query Ledger',
-    description: 'Read the execution ledger',
-    privilege: 'ledger.read',
-    args: { agent: { type: 'string' } },
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'get_run',
-    title: 'Get Run',
-    description: 'Get a run by id',
-    privilege: 'runs.read',
-    args: { runId: { type: 'string' } },
-    required: ['runId'],
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'wake_agent',
-    title: 'Wake Agent',
-    description: 'Start a run (202 semantics: returns the queued/started run). Optional model pins the run; optional input is passed to it, the same as POST /api/v1/agents/:id/runs.',
-    privilege: 'agents.wake',
-    args: { id: { type: 'string' }, model: { type: 'string' }, input: { type: 'object' } },
-    required: ['id'],
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-  },
-  {
-    name: 'pause_agent',
-    title: 'Pause Agent',
-    description: 'Pause agent egress',
-    privilege: 'agents.pause',
-    args: { id: { type: 'string' } },
-    required: ['id'],
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'resume_agent',
-    title: 'Resume Agent',
-    description: 'Resume a paused or isolated agent (refused with agent_not_paused from any other state)',
-    privilege: 'agents.resume',
-    args: { id: { type: 'string' } },
-    required: ['id'],
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'isolate_agent',
-    title: 'Isolate Agent',
-    description: 'Isolate agent egress',
-    privilege: 'agents.isolate',
-    args: { id: { type: 'string' } },
-    required: ['id'],
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'list_approvals',
-    title: 'List Approvals',
-    description: 'List pending approvals; kind narrows to tool, held, change or decision (a decision an agent asked for)',
-    privilege: 'approvals.read',
-    args: { kind: { type: 'string' } },
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'get_approval',
-    title: 'Get Approval',
-    description: 'Read one approval by id, pending or decided',
-    privilege: 'approvals.read',
-    args: { approvalId: { type: 'string' } },
-    required: ['approvalId'],
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'get_fleet_state',
-    title: 'Get Fleet State',
-    description: "Read the fleet's go/stop state (status, coder_app_ready, reason)",
-    privilege: 'agents.read',
-    args: {},
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'set_fleet_state',
-    title: 'Set Fleet State',
-    description: "Set the fleet's go/stop state: status is running, paused or deploy-freeze; opsAgents lists the registered agents that report deploy state; ops (null or {state, reason}) sets or clears that report, rolled-back included, and needs force: true while the deploying run is live",
-    privilege: 'fleet.state.set',
-    args: { status: { type: 'string' }, coder_app_ready: { type: 'boolean' }, reason: { type: 'string' }, opsAgents: { type: 'array', items: { type: 'string' } }, ops: { type: 'object' }, force: { type: 'boolean' } },
-    required: ['status'],
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'decide_approval',
-    title: 'Decide Approval',
-    description: 'Approve or reject a pending approval; capUsd sets a spending cap when approving a decision hold',
-    privilege: 'approvals.decide',
-    args: { approvalId: { type: 'string' }, decision: { type: 'string' }, notes: { type: 'string' }, capUsd: { type: 'string' } },
-    required: ['approvalId', 'decision'],
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  },
-  {
-    name: 'check_agent_update',
-    title: 'Check Agent Update',
-    description: 'Check for available cartridge updates from git repository',
-    privilege: 'agents.update.read',
-    args: { id: { type: 'string' } },
-    required: ['id'],
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  },
-  {
-    name: 'install_agent_update',
-    title: 'Install Agent Update',
-    description: 'Install an available cartridge update (mode: drain or restart_now)',
-    privilege: 'agents.update.install',
-    args: { id: { type: 'string' }, mode: { type: 'string' } },
-    required: ['id'],
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  },
-  {
-    name: 'list_model_catalog',
-    title: 'List Model Catalog',
-    description: 'List offered and staged models in the factory',
-    privilege: 'models.read',
-    args: {},
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'scan_vendor_models',
-    title: 'Scan Vendor Models',
-    description: 'Scan an AI vendor endpoint to discover available models',
-    privilege: 'models.manage',
-    args: { vendorId: { type: 'string' } },
-    required: ['vendorId'],
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-  },
-  {
-    name: 'admit_model',
-    title: 'Admit Model',
-    description: 'Admit a model to the factory offering with token pricing. Name its vendor (vendorId): provider, endpoint and credential come from the vendor. provider/region only for cloud model services (bedrock-converse, vertex-*).',
-    privilege: 'models.manage',
-    args: {
-      name: { type: 'string' },
-      id: { type: 'string' },
-      vendorId: { type: 'string' },
-      provider: { type: 'string' },
-      region: { type: 'string' },
-      inputPerMTok: { type: 'string' },
-      outputPerMTok: { type: 'string' },
-    },
-    required: ['name', 'id'],
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-  },
-  {
-    name: 'update_model_pricing',
-    title: 'Update Model Pricing',
-    description: 'Update token pricing per million tokens for an admitted model',
-    privilege: 'models.manage',
-    args: {
-      name: { type: 'string' },
-      inputPerMTok: { type: 'string' },
-      outputPerMTok: { type: 'string' },
-    },
-    required: ['name', 'inputPerMTok', 'outputPerMTok'],
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'retire_vendor_or_model',
-    title: 'Retire Vendor or Model',
-    description: 'Retire an admitted model from the factory offering',
-    privilege: 'models.manage',
-    args: {
-      name: { type: 'string' },
-    },
-    required: ['name'],
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'set_default_model',
-    title: 'Set Default Model',
-    description: 'Set the factory default model granted to agents whose policy specifies no models (requires models.manage)',
-    privilege: 'models.manage',
-    args: {
-      model: { type: 'string' },
-    },
-    required: ['model'],
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'get_agent_models',
-    title: 'Get Agent Models',
-    description: 'Get the effective and configured model slots and approved models for an agent',
-    privilege: 'agents.models.read',
-    args: { id: { type: 'string' } },
-    required: ['id'],
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  {
-    name: 'set_agent_models',
-    title: 'Set Agent Models',
-    description: 'Configure approved models and current, primary, and secondary model slots for an agent',
-    privilege: 'agents.models.set',
-    args: {
-      id: { type: 'string' },
-      approvedModels: { type: 'array', items: { type: 'string' } },
-      currentModel: { type: 'string' },
-      primaryModel: { type: 'string' },
-      secondaryModel: { type: 'string' },
-    },
-    required: ['id'],
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-];
+const catalog = buildMcpSchemaCatalog(CONTROL_PLANE_ROUTES, CONTROL_PLANE_ROUTES);
 
-function formatOutcomeForMcp(id: unknown, out: RouteOutcome): unknown {
-  const isErr = out.status >= 400;
-  const structured = typeof out.body === 'object' && out.body !== null ? (out.body as Record<string, unknown>) : { value: out.body };
-  let refusalText: string;
-  if (out.status === 403) {
-    const reqRole = String(out.body.requiredRole ?? out.body.required ?? 'admin');
-    refusalText = `forbidden: requires ${reqRole}`;
-  } else if (out.status === 503) {
-    refusalText = String(out.body.error ?? 'store_unavailable');
-  } else {
-    refusalText = typeof out.body === 'string' ? out.body : JSON.stringify(out.body);
-  }
+export const TOOLS: ToolSpec[] = catalog.tools.map((t) => {
+  const meta = t._meta as any;
   return {
-    jsonrpc: '2.0',
-    id,
-    result: {
-      content: [{ type: 'text', text: refusalText }],
-      structuredContent: structured,
-      ...(isErr ? { isError: true } : {}),
-    },
+    name: t.name,
+    title: t.title,
+    description: t.description,
+    privilege: (Array.isArray(meta?.privilege) ? meta.privilege[0] : meta?.privilege) as Privilege,
+    scopedDelegation: t.name === 'list_grants' || t.name === 'grant_role' || t.name === 'revoke_grant',
+    args: (t.inputSchema as any)?.properties ?? {},
+    required: (t.inputSchema as any)?.required ?? [],
+    annotations: t.annotations,
+    inputSchema: t.inputSchema,
+    outputSchema: t.outputSchema,
+    _meta: meta,
   };
+});
+
+const TOOL_MAP = new Map<string, McpToolDefinition>();
+for (const t of catalog.tools) {
+  TOOL_MAP.set(t.name, t);
 }
 
-async function dispatchSharedRouteTool(
-  state: FactoryState,
-  name: string,
-  args: Record<string, unknown>,
-  principal: Principal,
-): Promise<RouteOutcome | null> {
-  // GAP-259: a refused decision (not an approver, no cap where one is required, not pending) is an MCP error.
-  if (name === 'decide_approval') {
-    const notes = typeof args.notes === 'string' ? args.notes : undefined;
-    return (await decideApproval(state, String(args.approvalId), String(args.decision), principal, notes, undefined, args.capUsd)) as RouteOutcome;
+const OPERATION_MAP = new Map<string, OperationContract>();
+for (const op of CONTROL_PLANE_ROUTES) {
+  OPERATION_MAP.set(op.operationId, op);
+  OPERATION_MAP.set(`${op.method} ${op.pattern}`, op);
+  if (op.mcpToolName) {
+    OPERATION_MAP.set(op.mcpToolName, op);
   }
-  // GAP-260: a refused change (an unknown status, a bad flag) is an MCP error, never a result that reads as success.
-  if (name === 'set_fleet_state') return setFleetState(state, args, principal) as RouteOutcome;
-  if (name === 'whoami') {
-    return getWhoami(state, principal);
-  }
-  if (name === 'authz_check') {
-    return checkAuthz(state, principal, {
-      privilege: args.privilege,
-      agentId: args.agentId,
-      skillId: args.skillId,
-    });
-  }
-  if (name === 'list_principals') {
-    if (typeof args.id === 'string' && args.id.trim()) {
-      return getPrincipal(state, args.id);
-    }
-    return listPrincipals(state);
-  }
-  if (name === 'create_principal') {
-    return createPrincipal(state, principal, args);
-  }
-  if (name === 'add_principal_email') {
-    if (typeof args.id !== 'string' || !args.id.trim()) {
-      return { status: 400, body: { error: 'invalid_principal', message: 'id is required' } };
-    }
-    return addPrincipalEmail(state, principal, args.id, args);
-  }
-  if (name === 'remove_principal_email') {
-    if (typeof args.id !== 'string' || !args.id.trim()) {
-      return { status: 400, body: { error: 'invalid_principal', message: 'id is required' } };
-    }
-    if (typeof args.email !== 'string' || !args.email.trim()) {
-      return { status: 400, body: { error: 'invalid_email', message: 'email is required' } };
-    }
-    return removePrincipalEmail(state, principal, args.id, args.email);
-  }
-  if (name === 'list_grants') {
-    return listGrants(state, principal, {
-      subject: args.subject,
-      scopeKind: args.scopeKind,
-      scopeId: args.scopeId,
-      includeExpired: args.includeExpired,
-    });
-  }
-  if (name === 'grant_role') {
-    return grantRole(state, principal, args);
-  }
-  if (name === 'revoke_all_access') {
-    if (typeof args.id !== 'string' || !args.id.trim()) return { status: 400, body: { error: 'invalid_principal', message: 'id is required' } };
-    return revokeAllAccess(state, principal, args.id, { confirm: args.confirm });
-  }
-  if (name === 'revoke_grant') {
-    const grantId = typeof args.grantId === 'string' && args.grantId.trim()
-      ? args.grantId
-      : typeof args.id === 'string' && args.id.trim()
-        ? args.id
-        : '';
-    if (!grantId) {
-      return { status: 400, body: { error: 'invalid_grant', message: 'id or grantId is required' } };
-    }
-    return revokeGrant(state, principal, grantId);
-  }
-  return null;
 }
 
-async function dispatchLegacyTool(
-  state: FactoryState,
-  name: string,
-  args: Record<string, unknown>,
-  principal: Principal,
-): Promise<unknown> {
-  const actor = principal.actor;
-  if (name === 'list_agents') return [...state.agents.values()].filter((a) => !a.ephemeral).map((a) => enrichAgent(state, a));
-  if (name === 'query_ledger') return state.ledger.query({ agent: typeof args.agent === 'string' ? args.agent : undefined });
-  if (name === 'get_run') return (typeof args.runId === 'string' ? state.runs.get(args.runId) : undefined) ?? { error: 'not_found' };
-  if (name === 'get_fleet_state') return fleetStateOf(state, principal);
-  if (name === 'list_approvals') {
-    const kind = typeof args.kind === 'string' && args.kind ? args.kind : undefined;
-    if (kind && !APPROVAL_KINDS.includes(kind as ApprovalKind)) return { error: `kind must be one of ${APPROVAL_KINDS.join(', ')}` };
-    return visibleApprovals(state, principal, state.approvals.list({ state: 'pending', ...(kind ? { kind: kind as ApprovalKind } : {}) }));
-  }
-  if (name === 'get_approval') {
-    const a = typeof args.approvalId === 'string' ? state.approvals.get(args.approvalId) : undefined;
-    return a ? visibleApprovals(state, principal, [a])[0] : { error: 'not_found' };
-  }
-  if (name === 'list_model_catalog') {
-    return {
-      offered: visibleModelsForPrincipal(state, principal),
-      staged: state.modelStore?.listStaged() ?? [],
-      default: defaultModelOf(state) ?? null,
-    };
-  }
-  if (name === 'scan_vendor_models') {
-    const vendorId = typeof args.vendorId === 'string' ? args.vendorId : undefined;
-    if (!vendorId) return { error: 'vendorId is required' };
-    const target = vendorTarget(state, vendorId);
-    if ('error' in target) return target;
-    try {
-      const discovered = await discoverViaEgress(state, target);
-      const staged = stageDiscovered(state, vendorId, discovered, actor);
-      return { ok: true, count: staged.length, staged };
-    } catch (err: unknown) {
-      const e = err as { message?: string; status?: number };
-      const code = e?.message === 'credential_unbound' ? 'credential_unbound' : e?.status === 503 ? 'discovery_unavailable' : 'discovery_failed';
-      return { error: code, message: `Model discovery failed for vendor ${vendorId}` };
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  grant_role: 'create_grant',
+  list_models: 'list_model_catalog',
+  set_model_pricing: 'update_model_pricing',
+  retire_model: 'retire_vendor_or_model',
+  check_agent_updates: 'check_agent_update',
+  revoke_principal_access: 'revoke_all_access',
+  get_approval_details: 'get_approval',
+};
+
+const STAFF_TOOLSET_ALIASES: Record<string, string[]> = {
+  gatekeeper: ['access', 'systems', 'agents'],
+  bouncer: ['access'],
+  keymaster: ['credentials'],
+  executive: ['models'],
+  accountant: ['spend'],
+  'property-manager': ['runs', 'agents'],
+  timekeeper: ['schedules'],
+  registrar: ['agents', 'skills', 'submissions'],
+  'personal-trainer': ['skills'],
+  auditor: ['observe'],
+  inspector: ['observe'],
+};
+
+const VALID_TOOLSET_TOKENS = new Set([
+  'all',
+  'core',
+  'agents',
+  'runs',
+  'models',
+  'spend',
+  'access',
+  'credentials',
+  'skills',
+  'systems',
+  'schedules',
+  'observe',
+  'submissions',
+  'danger',
+  'agents-converse',
+  ...Object.keys(STAFF_TOOLSET_ALIASES),
+]);
+
+export function parseToolsetTokens(
+  raw: string | readonly string[],
+): { ok: true; toolsets: Set<string>; isAll: boolean } | { ok: false; error: 'unknown_toolset'; unknownToken: string } {
+  const tokens = Array.isArray(raw)
+    ? raw.flatMap((s) => String(s).split(','))
+    : String(raw).split(',');
+  const toolsets = new Set<string>();
+  let isAll = false;
+
+  for (const rawToken of tokens) {
+    const t = rawToken.trim().toLowerCase();
+    if (!t) continue;
+    if (!VALID_TOOLSET_TOKENS.has(t)) {
+      return { ok: false, error: 'unknown_toolset', unknownToken: t };
     }
-  }
-  if (name === 'admit_model') {
-    let price: { inputPerMTok: number; outputPerMTok: number } | undefined;
-    if (args.inputPerMTok !== undefined && args.outputPerMTok !== undefined) {
-      const parsed = parseModelPriceInput({
-        inputPerMTok: parseFloat(String(args.inputPerMTok)),
-        outputPerMTok: parseFloat(String(args.outputPerMTok)),
-      });
-      if (!parsed.ok) return { error: 'invalid_price', message: parsed.error };
-      price = parsed.price;
-    }
-    const out = admitModel(state, {
-      name: typeof args.name === 'string' ? args.name : undefined,
-      id: typeof args.id === 'string' ? args.id : undefined,
-      vendorId: typeof args.vendorId === 'string' ? args.vendorId : undefined,
-      provider: typeof args.provider === 'string' ? args.provider : undefined,
-      region: typeof args.region === 'string' ? args.region : undefined,
-      price,
-    }, actor);
-    return out.ok
-      ? { ok: true, model: state.modelStore ? state.modelStore.enrich(out.model) : out.model }
-      : { error: out.error, ...(out.message ? { message: out.message } : {}) };
-  }
-  if (name === 'update_model_pricing') {
-    if (!state.modelStore) return { error: 'model_store_not_configured' };
-    const parsed = parseModelPriceInput({
-      inputPerMTok: parseFloat(String(args.inputPerMTok)),
-      outputPerMTok: parseFloat(String(args.outputPerMTok)),
-    });
-    if (!parsed.ok) return { error: 'invalid_price', message: parsed.error };
-    const price = parsed.price;
-    try {
-      const model = state.modelStore.updatePricing(String(args.name), price, actor);
-      state.modelCatalog = state.modelStore.toEgressCatalog();
-      state.ledger.append({
-        action: 'MODEL_PRICING_UPDATED',
-        actor,
-        model: String(args.name),
-        price,
-        timestamp: new Date().toISOString(),
-      });
-      return { ok: true, model: state.modelStore.enrich(model) };
-    } catch (err: unknown) {
-      if (err instanceof ModelCatalogError) return { error: err.code, message: err.message };
-      return { error: 'not_found', message: err instanceof Error ? err.message : String(err) };
-    }
-  }
-  if (name === 'retire_vendor_or_model') {
-    if (!state.modelStore) return { error: 'model_store_not_configured' };
-    const modelName = String(args.name);
-    const out = await retireCatalogModel(state, modelName, actor);
-    if (!out.retired) return { error: 'not_found' };
-    return { ok: true, retired: modelName, affectedAgents: out.affectedAgents };
-  }
-  if (name === 'set_default_model') {
-    if (!state.modelStore) return { error: 'model_store_not_configured' };
-    const model = args.model;
-    if (!model || typeof model !== 'string') return { error: 'model is required' };
-    try {
-      state.modelStore.setDefault(model, actor);
-      state.defaultModel = model;
-      state.ledger.append({
-        action: 'MODEL_DEFAULT_UPDATED',
-        actor,
-        model,
-        timestamp: new Date().toISOString(),
-      });
-      return { ok: true, default: model };
-    } catch (err: unknown) {
-      if (err instanceof ModelCatalogError) return { error: err.code, message: err.message };
-      return { error: 'invalid_request', message: err instanceof Error ? err.message : String(err) };
+    if (t === 'all') {
+      isAll = true;
+      toolsets.add('all');
+    } else if (t in STAFF_TOOLSET_ALIASES) {
+      for (const mapped of STAFF_TOOLSET_ALIASES[t]) {
+        toolsets.add(mapped);
+      }
+    } else {
+      toolsets.add(t);
     }
   }
 
-  const id = typeof args.id === 'string' ? args.id : undefined;
-  if (!id) return { error: 'id required' };
-  if (name === 'get_agent_models') {
-    const agent = state.agents.get(id);
-    if (!agent) return { error: 'not_found' };
-    const pol = state.policies.get(id);
-    const eff = effectiveAgentModels(pol ?? {}, defaultModelOf(state));
-    return {
-      agentId: id,
-      ...eff,
-      models: enrichedCatalogModelsForNames(state, eff.approvedModels),
-      defaultModel: defaultModelOf(state) ?? null,
-    };
+  return { ok: true, toolsets, isAll };
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** The same rule the contract uses to strip secret body params from `handoff` tool input schemas (CL6). */
+function isSecretShapedParam(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower.includes('secret') || lower.includes('token') || lower === 'value' || lower === 'rawsecret' || lower === 'apikey';
+}
+
+/** The secret body params of a handoff operation, in schema order (the first is the primary secret field). */
+export function handoffSecretParamNames(op: OperationContract): string[] {
+  return Object.keys(op.requestBodySchema?.properties ?? {}).filter(isSecretShapedParam);
+}
+
+function createInProcessRequest(opts: {
+  method: string;
+  url: string;
+  headers?: http.IncomingHttpHeaders;
+  body?: string;
+}): http.IncomingMessage {
+  const sock = new PassThrough();
+  const req = new http.IncomingMessage(sock as any);
+  req.method = opts.method;
+  req.url = opts.url;
+  req.headers = {
+    'content-type': 'application/json',
+    ...(opts.body ? { 'content-length': String(Buffer.byteLength(opts.body)) } : {}),
+    ...opts.headers,
+  };
+  if (opts.body !== undefined) {
+    req.push(Buffer.from(opts.body, 'utf-8'));
   }
-  if (name === 'set_agent_models') {
-    const out = await setAgentModels(
-      state,
-      id,
-      {
-        approvedModels: Array.isArray(args.approvedModels) ? (args.approvedModels as string[]) : undefined,
-        currentModel: args.currentModel as string | null | undefined,
-        primaryModel: args.primaryModel as string | null | undefined,
-        secondaryModel: args.secondaryModel as string | null | undefined,
-      },
-      actor,
-    );
-    return out.body;
-  }
-  if (name === 'wake_agent') {
-    const bad = badRunModel(args.model);
-    if (bad) return { error: bad };
-    const resolved = resolvePrincipalCaller(state, principal, id, 'agents.wake');
-    if (!resolved.ok) return { error: resolved.error };
-    const out = await createRun(state, id, {
-      actor,
-      trigger: 'mcp',
-      ...(args.input !== undefined ? { input: args.input } : {}),
-      ...(typeof args.model === 'string' ? { model: args.model } : {}),
+  req.push(null);
+  return req;
+}
+
+export type InProcessResult = { statusCode: number; headers: http.OutgoingHttpHeaders; body: string };
+
+class InMemoryResponse extends http.ServerResponse {
+  private chunks: Buffer[] = [];
+  public readonly finishedPromise: Promise<InProcessResult>;
+
+  constructor(req: http.IncomingMessage) {
+    super(req);
+    // The body is captured from write()/end() below; the socket only exists to satisfy ServerResponse. It must be
+    // drained (resume) or a body larger than the PassThrough's highWaterMark back-pressures, the final write callback
+    // never fires, 'finish' is never emitted and the outer MCP request hangs forever (TSK-338 hang root cause).
+    const sock = new PassThrough();
+    sock.resume();
+    this.assignSocket(sock as any);
+    this.finishedPromise = new Promise((resolve) => {
+      const onEnd = () => {
+        resolve({
+          statusCode: this.statusCode || 200,
+          headers: this.getHeaders(),
+          body: Buffer.concat(this.chunks).toString('utf-8'),
+        });
+      };
+      this.once('finish', onEnd);
+      this.once('close', onEnd);
     });
-    attachCallerToRunResult(state, out, resolved.caller);
-    return out.body;
   }
-  if (name === 'pause_agent') return (await applyKillSwitch(state, id, 'PAUSE', actor)).body;
-  if (name === 'resume_agent') return (await applyKillSwitch(state, id, 'RESUME', actor)).body;
-  if (name === 'isolate_agent') return (await applyKillSwitch(state, id, 'ISOLATE', actor)).body;
-  if (name === 'check_agent_update') {
-    const agent = state.agents.get(id);
-    if (!agent) return { error: 'not_found' };
-    if (agent.createdFrom === 'configuration') return { error: 'configuration_agent' };
-    const res = await checkAgentUpdate(agent, process.env.FACTORY_AGENT_SOURCE_TOKEN);
-    Object.assign(agent, res);
-    registryOf(state).save(agent);
-    return res;
-  }
-  if (name === 'install_agent_update') {
-    const agent = state.agents.get(id);
-    if (!agent) return { error: 'not_found' };
-    if (agent.createdFrom === 'configuration') return { error: 'configuration_agent' };
-    const mode = (args.mode === 'restart_now' ? 'restart_now' : 'drain') as 'drain' | 'restart_now';
-    const targetCommit = agent.offeredCommit ?? agent.commit;
-    const targetVersion = agent.offeredVersion;
-    if (!targetCommit) return { error: 'no_commit_available' };
-    if (agent.state === 'WORKING' && mode === 'drain') {
-      agent.stagedCommit = targetCommit;
-      agent.stagedVersion = targetVersion;
-      agent.pendingDrain = true;
-      registryOf(state).save(agent);
-      return { ok: true, status: 'staged_drain', agentId: id, commit: targetCommit, version: targetVersion };
+
+  override write(chunk: any, encoding?: any, callback?: any): boolean {
+    if (chunk) {
+      this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf-8'));
     }
-    agent.commit = targetCommit;
-    agent.deployedCommit = targetCommit;
-    if (targetVersion) agent.installedVersion = targetVersion;
-    agent.updateAvailable = false;
-    delete agent.pendingDrain;
-    delete agent.stagedCommit;
-    delete agent.stagedVersion;
-    registryOf(state).save(agent);
-    return { ok: true, status: 'applied', agentId: id, commit: targetCommit, version: targetVersion };
+    return super.write(chunk, encoding, callback);
   }
-  return { error: `unknown tool ${name}` };
+
+  override end(chunk?: any, encoding?: any, callback?: any): this {
+    if (chunk && typeof chunk !== 'function') {
+      this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf-8'));
+    }
+    return super.end(chunk, encoding, callback);
+  }
+}
+
+/**
+ * Runs a route handler against an in-memory request/response pair and always settles: a thrown handler, a handler
+ * that returns without ending the response, a 202/204 empty body and a body of any size all produce a finished result.
+ */
+export async function runInProcess(
+  req: http.IncomingMessage,
+  handler: (req: http.IncomingMessage, res: http.ServerResponse) => unknown,
+): Promise<InProcessResult> {
+  const res = new InMemoryResponse(req);
+  try {
+    await handler(req, res);
+  } catch (err) {
+    if (!res.headersSent) {
+      res.writeHead((err as { status?: number }).status ?? 500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'internal_error', message: err instanceof Error ? err.message : String(err) }));
+    }
+  }
+  if (!res.writableEnded) {
+    if (!res.headersSent) {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'handler_did_not_respond' }));
+    } else {
+      res.end();
+    }
+  }
+  return res.finishedPromise;
+}
+
+async function dispatchInProcess(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  principal: Principal,
+  clientId: string,
+): Promise<InProcessResult> {
+  requestBasePrincipal.set(req, principal);
+  delete req.headers['x-factory-act-as'];
+  return mcpContextStorage.run({ via: `mcp:${clientId}` }, () =>
+    runInProcess(req, (r, s) => dispatchControlPlaneHttp(state, r, s)),
+  );
+}
+
+function redactBody(body: unknown, secrets?: Iterable<string>, extra: readonly string[] = []): unknown {
+  const all = [...(secrets ?? []), ...extra];
+  if (typeof body === 'string') return redactMcpSecretText(body, all);
+  try {
+    return JSON.parse(redactMcpSecretText(JSON.stringify(body), all));
+  } catch {
+    return body;
+  }
+}
+
+async function executeInProcessRoute(
+  state: FactoryState,
+  op: OperationContract,
+  tool: McpToolDefinition,
+  rawArgs: Record<string, unknown>,
+  principal: Principal,
+  clientId: string,
+  extraSecrets: readonly string[] = [],
+): Promise<{ status: number; body: unknown; isError: boolean }> {
+  rawArgs = { ...rawArgs };
+  // Special handling for list_principals with id: redirect to GET /api/v1/principals/:id
+  let targetPattern = op.pattern;
+  let targetMethod = op.method;
+  if (tool.name === 'list_principals' && typeof rawArgs.id === 'string' && rawArgs.id.trim()) {
+    targetPattern = '/api/v1/principals/:id';
+    targetMethod = 'GET';
+  }
+  if (tool.name === 'list_approvals' && rawArgs.state === undefined) {
+    rawArgs.state = 'pending';
+  }
+
+  // 1. Path parameters substitution
+  const pathParamMatches = targetPattern.match(/:[a-zA-Z0-9_]+/g) ?? [];
+  let resolvedUrl = targetPattern;
+  const pathParamKeys = new Set<string>();
+
+  for (const match of pathParamMatches) {
+    const key = match.slice(1);
+    pathParamKeys.add(key);
+    let val = rawArgs[key];
+    if (val === undefined) {
+      if (key === 'id') {
+        val = rawArgs.agentId ?? rawArgs.runId ?? rawArgs.approvalId ?? rawArgs.grantId ?? rawArgs.skillId ?? rawArgs.principalId ?? rawArgs.systemId ?? rawArgs.scheduleId ?? rawArgs.subscriptionId ?? rawArgs.groupId;
+      } else if (key === 'model') {
+        val = rawArgs.name ?? rawArgs.model;
+      } else if (key === 'vendorId') {
+        val = rawArgs.vendorId ?? rawArgs.vendor;
+      } else if (key === 'version') {
+        val = rawArgs.version ?? rawArgs.ver;
+      } else if (key === 'email') {
+        val = rawArgs.email;
+      }
+    }
+    if (val === undefined) {
+      return {
+        status: 400,
+        body: { error: 'missing_path_parameter', message: `Path parameter ':${key}' is required` },
+        isError: true,
+      };
+    }
+    const strVal = String(val);
+    if (strVal.includes('..') || strVal.includes('/') || strVal.includes('\\')) {
+      return {
+        status: 400,
+        body: { error: 'path_traversal_refused', message: 'Path traversal is forbidden' },
+        isError: true,
+      };
+    }
+    resolvedUrl = resolvedUrl.replace(match, encodeURIComponent(strVal));
+  }
+
+  // 2. Query parameters serialization
+  const queryProps = op.querySchema?.properties ?? {};
+  const searchParams = new URLSearchParams();
+  for (const qKey of Object.keys(queryProps)) {
+    let qVal = rawArgs[qKey];
+    if (qVal === undefined) {
+      if (qKey === 'agent' && rawArgs.agentId !== undefined) qVal = rawArgs.agentId;
+      if (qKey === 'agentId' && rawArgs.agent !== undefined) qVal = rawArgs.agent;
+    }
+    if (qVal !== undefined && qVal !== null) {
+      searchParams.set(qKey, String(qVal));
+    }
+  }
+  const queryString = searchParams.toString();
+  if (queryString) {
+    resolvedUrl += (resolvedUrl.includes('?') ? '&' : '?') + queryString;
+  }
+
+  // 3. Request body serialization
+  let bodyPayload: Record<string, unknown> | undefined;
+  if (targetMethod === 'POST' || targetMethod === 'PUT' || targetMethod === 'PATCH') {
+    bodyPayload = {};
+    for (const [k, v] of Object.entries(rawArgs)) {
+      if (k === 'confirm' || k === 'elicitationConfirmationToken') continue;
+      // Exclude if it's purely a query parameter and not in bodyProps
+      if (k in queryProps && !(op.requestBodySchema?.properties && k in op.requestBodySchema.properties)) {
+        continue;
+      }
+      // Exclude if it's purely a path parameter and not in bodyProps
+      if (pathParamKeys.has(k) && !(op.requestBodySchema?.properties && k in op.requestBodySchema.properties)) {
+        continue;
+      }
+      bodyPayload[k] = v;
+    }
+    // Alias mappings
+    if (bodyPayload.name === undefined && rawArgs.model !== undefined) bodyPayload.name = rawArgs.model;
+    if (bodyPayload.model === undefined && rawArgs.name !== undefined) bodyPayload.model = rawArgs.name;
+    if (bodyPayload.agentId === undefined && rawArgs.id !== undefined) bodyPayload.agentId = rawArgs.id;
+    if (bodyPayload.id === undefined && rawArgs.agentId !== undefined) bodyPayload.id = rawArgs.agentId;
+    if (bodyPayload.vendor === undefined && rawArgs.vendorId !== undefined) bodyPayload.vendor = rawArgs.vendorId;
+    if (bodyPayload.vendorId === undefined && rawArgs.vendor !== undefined) bodyPayload.vendorId = rawArgs.vendor;
+  }
+
+  const inReq = createInProcessRequest({
+    method: targetMethod,
+    url: resolvedUrl,
+    body: bodyPayload !== undefined ? JSON.stringify(bodyPayload) : undefined,
+  });
+
+  const resOut = await dispatchInProcess(state, inReq, principal, clientId);
+
+  let parsed: unknown = resOut.body;
+  try {
+    parsed = JSON.parse(resOut.body);
+  } catch {}
+
+  const redacted = redactBody(parsed, state.secretValues, extraSecrets);
+  const isErr = resOut.statusCode >= 400;
+
+  return {
+    status: resOut.statusCode,
+    body: redacted,
+    isError: isErr,
+  };
 }
 
 export async function handleMcp(
   state: FactoryState,
   payload: Record<string, unknown>,
   principal: Principal,
+  opts?: HandleMcpOptions,
 ): Promise<unknown> {
   const id = payload.id ?? 1;
   const method = payload.method;
+  const clientId = opts?.clientId ?? 'direct';
+
   if (method === 'initialize') {
     const params = payload.params as { protocolVersion?: string } | undefined;
     const clientVer = typeof params?.protocolVersion === 'string' ? params.protocolVersion : undefined;
@@ -775,9 +527,11 @@ export async function handleMcp(
       },
     };
   }
+
   if (method === 'ping') {
     return { jsonrpc: '2.0', id, result: {} };
   }
+
   if (method === 'tools/list') {
     const evalActor = principal.onBehalfOf ?? principal.actor;
     const grantRes = effectiveGrantsForActor(state, evalActor);
@@ -794,98 +548,174 @@ export async function handleMcp(
     };
     const ownsAny = checkOwnsAnyAgent(state, evalActor);
     const ownsPersonal = checkOwnsPersonalAgent(state, evalActor);
-    const canDelegateScoped = callerMayUseScopedGrantTools(state, evalPrincipal, grantRes.grants);
+    const canDelegateScoped =
+      (!evalPrincipal.keyScopes?.privileges || evalPrincipal.keyScopes.privileges.includes('grants.manage')) &&
+      callerMayUseScopedGrantTools(state, evalPrincipal, grantRes.grants);
     const agentGrantList = grantRes.grants?.filter((eg) => eg.grant.scope.kind === 'agent') ?? [];
 
     const hasAgentScopes = Boolean(evalPrincipal.keyScopes?.agents && evalPrincipal.keyScopes.agents.length > 0);
     const scopedAgentIds = hasAgentScopes ? evalPrincipal.keyScopes!.agents! : [];
 
-    const tools = TOOLS.filter((t) => {
-      if (hasAgentScopes) {
-        // Agent-scoped key: check if permitted fleet-wide (e.g. mcp.use tools whoami/authz_check)
+    const requestedToolsets = opts?.toolsets ? new Set(opts.toolsets) : undefined;
+    const isAll = Boolean(opts?.isAll);
+    const isReadOnly = Boolean(opts?.readOnly);
+
+    const tools = catalog.tools
+      .filter((t) => {
+        const meta = t._meta as any;
+
+        // Read-only view filter
+        if (isReadOnly && !t.annotations.readOnlyHint) {
+          return false;
+        }
+
+        // Toolset filter
+        if (isAll) {
+          // keep all authorized tools
+        } else if (requestedToolsets) {
+          const inRequested = (meta.toolset && requestedToolsets.has(meta.toolset)) || (requestedToolsets.has('core') && meta.inCore);
+          if (!inRequested) return false;
+        } else {
+          // Default: core toolset only
+          if (!meta.inCore) return false;
+        }
+
+        // Danger tool safety: danger tools require explicit 'danger' or 'all' toolset selection (except revoke_all_access in core)
+        if (meta.toolset === 'danger' && !isAll && (!requestedToolsets || !requestedToolsets.has('danger')) && t.name !== 'revoke_all_access') {
+          return false;
+        }
+
+        const rawPriv = meta.privilege;
+        const privs: Privilege[] = rawPriv === undefined
+          ? []
+          : (Array.isArray(rawPriv) ? rawPriv : [rawPriv]) as Privilege[];
+
+        // Authorization check
+        if (hasAgentScopes) {
+          if (t.name === 'whoami' || t.name === 'authz_check' || t.name === 'get_setup_status') {
+            return true;
+          }
+          if (
+            t.name === 'list_grants' ||
+            t.name === 'create_grant' ||
+            t.name === 'grant_role' ||
+            t.name === 'revoke_grant'
+          ) {
+            return canDelegateScoped;
+          }
+          if (
+            privs.some((p) =>
+              authorize({
+                principal: evalPrincipal,
+                privilege: p,
+                resource: {
+                  ownsAnyAgent: ownsAny,
+                  ownsPersonalAgent: ownsPersonal,
+                  ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+                },
+              }).allowed,
+            )
+          ) {
+            return true;
+          }
+          if (privs.some((p) => AGENT_SCOPED.has(p))) {
+            for (const aid of scopedAgentIds) {
+              if (
+                privs.some((p) =>
+                  authorize({
+                    principal: evalPrincipal,
+                    privilege: p,
+                    resource: {
+                      agentId: aid,
+                      agentKind: agentKindOf(state, aid),
+                      owners: ownersOf(state, aid),
+                      grants: grantRes.grants,
+                      ownsAnyAgent: ownsAny,
+                      ownsPersonalAgent: ownsPersonal,
+                    },
+                  }).allowed,
+                )
+              ) {
+                return true;
+              }
+            }
+          }
+          return false;
+        }
+
+        if (t.name === 'whoami' || t.name === 'authz_check' || t.name === 'get_setup_status') {
+          return true;
+        }
+
         if (
-          authorize({
-            principal: evalPrincipal,
-            privilege: t.privilege,
-            resource: {
-              ownsAnyAgent: ownsAny,
-              ownsPersonalAgent: ownsPersonal,
-              ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
-            },
-          }).allowed
+          t.name === 'list_grants' ||
+          t.name === 'create_grant' ||
+          t.name === 'grant_role' ||
+          t.name === 'revoke_grant'
+        ) {
+          return canDelegateScoped;
+        }
+
+        if (privs.length === 0) {
+          if (evalPrincipal.keyScopes?.privileges) return false;
+          return true;
+        }
+
+        if (
+          privs.some((p) =>
+            authorize({
+              principal: evalPrincipal,
+              privilege: p,
+              resource: {
+                ownsAnyAgent: ownsAny,
+                ownsPersonalAgent: ownsPersonal,
+                ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+              },
+            }).allowed,
+          )
         ) {
           return true;
         }
-        // If not permitted fleet-wide, check if permitted on any of the key's scoped agent(s)
-        if (AGENT_SCOPED.has(t.privilege)) {
-          for (const aid of scopedAgentIds) {
+
+        if (privs.some((p) => AGENT_SCOPED.has(p))) {
+          if (ownsAny) return true;
+          for (const eg of agentGrantList) {
+            if (eg.grant.scope.kind !== 'agent') continue;
+            const aid = eg.grant.scope.id;
             if (
-              authorize({
-                principal: evalPrincipal,
-                privilege: t.privilege,
-                resource: {
-                  agentId: aid,
-                  agentKind: agentKindOf(state, aid),
-                  owners: ownersOf(state, aid),
-                  grants: grantRes.grants,
-                  ownsAnyAgent: ownsAny,
-                  ownsPersonalAgent: ownsPersonal,
-                },
-              }).allowed
+              privs.some((p) =>
+                authorize({
+                  principal: evalPrincipal,
+                  privilege: p,
+                  resource: {
+                    agentId: aid,
+                    agentKind: agentKindOf(state, aid),
+                    owners: ownersOf(state, aid),
+                    grants: grantRes.grants,
+                  },
+                }).allowed,
+              )
             ) {
               return true;
             }
           }
         }
-        return false;
-      }
 
-      if (
-        authorize({
-          principal: evalPrincipal,
-          privilege: t.privilege,
-          resource: {
-            ownsAnyAgent: ownsAny,
-            ownsPersonalAgent: ownsPersonal,
-            ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
-          },
-        }).allowed
-      ) {
-        return true;
-      }
-      if (t.scopedDelegation && canDelegateScoped) {
-        return true;
-      }
-      if (AGENT_SCOPED.has(t.privilege)) {
-        if (ownsAny) return true;
-        for (const eg of agentGrantList) {
-          if (eg.grant.scope.kind !== 'agent') continue;
-          const aid = eg.grant.scope.id;
-          if (
-            authorize({
-              principal: evalPrincipal,
-              privilege: t.privilege,
-              resource: {
-                agentId: aid,
-                agentKind: agentKindOf(state, aid),
-                owners: ownersOf(state, aid),
-                grants: grantRes.grants,
-              },
-            }).allowed
-          ) {
-            return true;
-          }
-        }
-      }
-      return false;
-    }).map((t) => ({
+        return false;
+      })
+    const resultTools = tools.map((t) => ({
       name: t.name,
       title: t.title,
       description: t.description,
-      inputSchema: { type: 'object', properties: t.args, ...(t.required ? { required: t.required } : {}) },
+      inputSchema: t.inputSchema,
       annotations: t.annotations,
     }));
-    return { jsonrpc: '2.0', id, result: { tools } };
+    const cg = resultTools.find((t) => t.name === 'create_grant');
+    if (cg && !resultTools.some((t) => t.name === 'grant_role')) {
+      resultTools.push({ ...cg, name: 'grant_role', title: 'Grant Role' });
+    }
+
+    return { jsonrpc: '2.0', id, result: { tools: resultTools } };
   }
 
   if (method === 'tools/call') {
@@ -897,10 +727,18 @@ export async function handleMcp(
     if (!params || typeof params.name !== 'string' || !params.name.trim()) {
       return { jsonrpc: '2.0', id, error: { code: -32602, message: 'Tool name is required and must be a string' } };
     }
-    const spec = TOOLS.find((t) => t.name === params.name);
-    if (!spec) {
+
+    const targetName = TOOL_NAME_ALIASES[params.name] ?? params.name;
+    const tool = TOOL_MAP.get(targetName);
+    if (!tool) {
       return { jsonrpc: '2.0', id, error: { code: -32602, message: `unknown tool ${String(params.name)}` } };
     }
+
+    const op = OPERATION_MAP.get(tool._meta.operationId) ?? OPERATION_MAP.get(`${tool._meta.method} ${tool._meta.pattern}`);
+    if (!op) {
+      return { jsonrpc: '2.0', id, error: { code: -32602, message: `unknown tool ${String(params.name)}` } };
+    }
+
     const rawArgs = (params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments))
       ? (params.arguments as Record<string, unknown>)
       : {};
@@ -918,28 +756,47 @@ export async function handleMcp(
       }, state.secretValues);
     }
 
+    // Read-only view check
+    if (opts?.readOnly && !tool.annotations.readOnlyHint) {
+      return redactMcpResponse({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: 'Mutation tools are not permitted on read-only MCP view' }],
+          structuredContent: { error: 'readonly_mcp_view', message: 'Mutation tools are not permitted on read-only MCP view' },
+          isError: true,
+        },
+      }, state.secretValues);
+    }
+
+    // Danger tool safety: echo-confirm check
+    if (tool._meta.toolset === 'danger') {
+      const targetId = String(rawArgs.id ?? rawArgs.agentId ?? rawArgs.principalId ?? '');
+      if (!rawArgs.confirm || String(rawArgs.confirm).trim() !== targetId) {
+        return redactMcpResponse({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [{ type: 'text', text: `confirmation_required: destructive operation requires confirm argument matching target id '${targetId}'` }],
+            structuredContent: { error: 'confirmation_required', message: `destructive operation requires confirm argument matching target id '${targetId}'`, targetId },
+            isError: true,
+          },
+        }, state.secretValues);
+      }
+    }
+
     const effectivePrincipal = principal;
 
     const executeCall = async (): Promise<unknown> => {
-      if (spec.scopedDelegation) {
-        const sharedOut = await dispatchSharedRouteTool(state, spec.name, rawArgs, effectivePrincipal);
-        if (sharedOut) return redactMcpResponse(formatOutcomeForMcp(id, sharedOut), state.secretValues);
-      }
-
+      // 1. Authorization check
       const targetAgentId =
         typeof rawArgs.id === 'string'
           ? rawArgs.id
           : typeof rawArgs.agentId === 'string'
             ? rawArgs.agentId
             : undefined;
-      const ownsAny =
-        spec.privilege === 'mcp.use' || spec.privilege === 'models.read'
-          ? checkOwnsAnyAgent(state, effectivePrincipal.onBehalfOf ?? effectivePrincipal.actor)
-          : false;
-      const ownsPersonal =
-        spec.privilege === 'subscriptions.own'
-          ? checkOwnsPersonalAgent(state, effectivePrincipal.onBehalfOf ?? effectivePrincipal.actor)
-          : undefined;
+      const ownsAny = checkOwnsAnyAgent(state, effectivePrincipal.onBehalfOf ?? effectivePrincipal.actor);
+      const ownsPersonal = checkOwnsPersonalAgent(state, effectivePrincipal.onBehalfOf ?? effectivePrincipal.actor);
       const resource =
         targetAgentId || grantRes.grants !== undefined || ownsAny || ownsPersonal !== undefined
           ? {
@@ -955,50 +812,207 @@ export async function handleMcp(
               ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
             }
           : undefined;
-      const decision = authorize({ principal: effectivePrincipal, privilege: spec.privilege, resource });
-      if (!decision.allowed) {
-        const requiredRole = requiredRoleForPrivilege(spec.privilege, resource, decision.required);
-        if (state.grants || state.principals) {
-          state.ledger.append({
-            timestamp: new Date().toISOString(),
-            agentId: targetAgentId ?? 'control-plane',
-            type: 'action',
-            action: 'AUTHZ_DENIED',
-            privilege: spec.privilege,
-            scope: targetAgentId ? { kind: 'agent', id: targetAgentId } : { kind: 'fleet' },
-            actor: effectivePrincipal.actor,
-            ...(effectivePrincipal.onBehalfOf ? { onBehalfOf: effectivePrincipal.onBehalfOf } : {}),
-            reason: `mcp:${spec.name}:requires:${requiredRole}`,
-          });
+
+      if (targetName === 'decide_approval') {
+        const approvalId = String(rawArgs.approvalId ?? rawArgs.id ?? '');
+        const authz = mayDecide(state, effectivePrincipal, approvalId);
+        const approval = state.approvals.get(approvalId);
+        const decisionHoldDecider =
+          approval?.kind === 'decision' && approval.state === 'pending'
+            ? holdDecider(state, approval, effectivePrincipal.actor)
+            : { ok: true as const };
+        if (!authz.ok || !decisionHoldDecider.ok) {
+          const errCode = !decisionHoldDecider.ok ? 'not_an_approver' : 'forbidden';
+          const required = !authz.ok ? authz.required : 'admin';
+          if (state.grants || state.principals) {
+            state.ledger.append({
+              timestamp: new Date().toISOString(),
+              agentId: 'control-plane',
+              type: 'action',
+              action: 'AUTHZ_DENIED',
+              privilege: 'approvals.decide',
+              scope: { kind: 'fleet' },
+              actor: effectivePrincipal.actor,
+              reason: `mcp:decide_approval:${errCode}`,
+            });
+          }
+          return redactMcpResponse({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [{ type: 'text', text: !decisionHoldDecider.ok ? 'refused: not_an_approver' : `forbidden: requires ${required}` }],
+              structuredContent: { error: errCode, required },
+              isError: true,
+            },
+          }, state.secretValues);
         }
-        const refusalText = `forbidden: requires ${decision.required}`;
+      } else if (
+        targetName === 'grant_role' ||
+        targetName === 'create_grant' ||
+        targetName === 'revoke_grant' ||
+        targetName === 'list_grants'
+      ) {
+        const canDelegate =
+          (!effectivePrincipal.keyScopes?.privileges || effectivePrincipal.keyScopes.privileges.includes('grants.manage')) &&
+          callerMayUseScopedGrantTools(state, effectivePrincipal, grantRes.grants);
+        if (!canDelegate) {
+          return redactMcpResponse({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [{ type: 'text', text: 'forbidden: requires grants.manage or scoped delegation' }],
+              structuredContent: { error: 'forbidden', required: 'grants.manage' },
+              isError: true,
+            },
+          }, state.secretValues);
+        }
+      } else if (tool._meta.privilege !== undefined && targetName !== 'whoami' && targetName !== 'authz_check' && targetName !== 'get_setup_status') {
+        const rawPriv = tool._meta.privilege;
+        const privs: Privilege[] = (Array.isArray(rawPriv) ? rawPriv : [rawPriv]) as Privilege[];
+        const isAllowed = privs.some((p) => authorize({ principal: effectivePrincipal, privilege: p, resource }).allowed);
+        if (!isAllowed) {
+          const primaryPriv = privs[0];
+          const decision = authorize({ principal: effectivePrincipal, privilege: primaryPriv, resource });
+          const required = !decision.allowed ? decision.required : 'admin';
+          const requiredRole = requiredRoleForPrivilege(primaryPriv, resource, required);
+          if (state.grants || state.principals) {
+            state.ledger.append({
+              timestamp: new Date().toISOString(),
+              agentId: targetAgentId ?? 'control-plane',
+              type: 'action',
+              action: 'AUTHZ_DENIED',
+              privilege: primaryPriv,
+              scope: targetAgentId ? { kind: 'agent', id: targetAgentId } : { kind: 'fleet' },
+              actor: effectivePrincipal.actor,
+              ...(effectivePrincipal.onBehalfOf ? { onBehalfOf: effectivePrincipal.onBehalfOf } : {}),
+              reason: `mcp:${targetName}:requires:${requiredRole}`,
+            });
+          }
+          const refusalText = `forbidden: requires ${required}`;
+          return redactMcpResponse({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [{ type: 'text', text: refusalText }],
+              structuredContent: { error: 'forbidden', required, requiredRole },
+              isError: true,
+            },
+          }, state.secretValues);
+        }
+      }
+
+      // 2. Human-decision safeguards (E9, Decision 7): the model can never self-confirm. The only way to execute is a
+      // live browser session of the same principal POSTing the single-use confirmation URL.
+      if (tool._meta.exposure === 'human-decision') {
+        // Mint challenge
+        const challengeId = randomUUID();
+        const now = Date.now();
+        const expiresAt = now + 10 * 60 * 1000;
+        const { elicitationConfirmationToken: _ignored, ...challengeArgs } = rawArgs;
+        const challenge: McpChallengeRecord = {
+          id: challengeId,
+          actor: effectivePrincipal.actor,
+          operationId: op.operationId,
+          method: op.method,
+          pattern: op.pattern,
+          path: op.pattern,
+          args: challengeArgs,
+          via: `mcp:${clientId}`,
+          createdAt: now,
+          expiresAt,
+        };
+        state.mcpChallenges ??= new Map();
+        state.mcpChallenges.set(challengeId, challenge);
+        const confirmationUrl = `/api/v1/mcp/confirm/${challengeId}`;
+        const msg = `Operation '${params.name}' (${op.operationId}) requires human confirmation. Please review and confirm at ${confirmationUrl}`;
         return redactMcpResponse({
           jsonrpc: '2.0',
           id,
           result: {
-            content: [{ type: 'text', text: refusalText }],
-            structuredContent: { error: 'forbidden', required: decision.required, requiredRole },
-            isError: true,
+            content: [{ type: 'text', text: JSON.stringify({ status: 'human_confirmation_required', message: msg, confirmationUrl, challengeId, operationId: op.operationId }) }],
+            structuredContent: {
+              status: 'human_confirmation_required',
+              message: msg,
+              confirmationUrl,
+              challengeId,
+              operationId: op.operationId,
+              expiresInSeconds: 600,
+            },
           },
         }, state.secretValues);
       }
 
-      const sharedOut = await dispatchSharedRouteTool(state, spec.name, rawArgs, effectivePrincipal);
-      if (sharedOut) {
-        return redactMcpResponse(formatOutcomeForMcp(id, sharedOut), state.secretValues);
+      // 3. Secret handoff (CL6, K5)
+      if (tool._meta.exposure === 'handoff') {
+        // CL6/K5: secret values never travel over MCP. Anything secret-shaped the model sent is discarded, never
+        // stored and never echoed; the human types it into the session-bound handoff page instead.
+        const secretParamNames = handoffSecretParamNames(op);
+        const nonSecretArgs: Record<string, unknown> = {};
+        let discardedSecretArgs = false;
+        for (const [k, v] of Object.entries(rawArgs)) {
+          if (secretParamNames.includes(k) || isSecretShapedParam(k)) {
+            discardedSecretArgs = true;
+            continue;
+          }
+          nonSecretArgs[k] = v;
+        }
+        const handoffId = randomUUID();
+        const now = Date.now();
+        const expiresAt = now + 10 * 60 * 1000;
+        const handoff: McpHandoffRecord = {
+          id: handoffId,
+          actor: effectivePrincipal.actor,
+          operationId: op.operationId,
+          method: op.method,
+          pattern: op.pattern,
+          path: op.pattern,
+          nonSecretArgs,
+          secretParamNames,
+          via: `mcp:${clientId}`,
+          createdAt: now,
+          expiresAt,
+        };
+        state.mcpHandoffs ??= new Map();
+        state.mcpHandoffs.set(handoffId, handoff);
+        const handoffUrl = `/api/v1/mcp/handoff/${handoffId}`;
+        const msg = `Tool '${params.name}' (${op.operationId}) requires sensitive credentials. Never pass plaintext secrets over MCP${discardedSecretArgs ? ' (the secret arguments sent were discarded, not stored)' : ''}. Complete secret entry at ${handoffUrl}`;
+        return redactMcpResponse({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [{ type: 'text', text: JSON.stringify({ status: 'handoff_required', message: msg, handoffUrl, handoffId, operationId: op.operationId }) }],
+            structuredContent: {
+              status: 'handoff_required',
+              message: msg,
+              handoffUrl,
+              handoffId,
+              operationId: op.operationId,
+              expiresInSeconds: 600,
+              discardedSecretArgs,
+            },
+          },
+        }, state.secretValues);
       }
 
-      const legacyResult = await dispatchLegacyTool(state, spec.name, rawArgs, effectivePrincipal);
-      const isErr = Boolean(legacyResult && typeof legacyResult === 'object' && ('error' in (legacyResult as Record<string, unknown>)));
-      const text = typeof legacyResult === 'string' ? legacyResult : JSON.stringify(legacyResult);
-      const structured = (legacyResult && typeof legacyResult === 'object') ? (legacyResult as Record<string, unknown>) : { value: legacyResult };
+      // 4. In-process route dispatch for standard tool / tool-confirm
+      const outcome = await executeInProcessRoute(state, op, tool, rawArgs, effectivePrincipal, clientId);
+      const structured = (typeof outcome.body === 'object' && outcome.body !== null) ? (outcome.body as Record<string, unknown>) : { value: outcome.body };
+      let text: string;
+      if (outcome.status === 403 && ((structured as any).requiredRole || (structured as any).required)) {
+        const reqRole = String((structured as any).requiredRole ?? (structured as any).required);
+        text = `forbidden: requires ${reqRole}`;
+      } else if (outcome.status === 503) {
+        text = String((structured as any).error ?? 'store_unavailable');
+      } else {
+        text = typeof outcome.body === 'string' ? outcome.body : JSON.stringify(outcome.body);
+      }
       return redactMcpResponse({
         jsonrpc: '2.0',
         id,
         result: {
           content: [{ type: 'text', text }],
           structuredContent: structured,
-          ...(isErr ? { isError: true } : {}),
+          ...(outcome.isError ? { isError: true } : {}),
         },
       }, state.secretValues);
     };
@@ -1013,4 +1027,423 @@ export async function handleMcp(
   }
 
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method ${String(method)}` } };
+}
+
+export async function handleAgentMcp(
+  state: FactoryState,
+  payload: Record<string, unknown>,
+  principal: Principal,
+  agentId: string,
+  opts?: { clientId?: string },
+): Promise<unknown> {
+  const id = payload.id ?? 1;
+  const method = payload.method;
+  const clientId = opts?.clientId ?? 'direct';
+
+  if (method === 'initialize') {
+    const params = payload.params as { protocolVersion?: string } | undefined;
+    const clientVer = typeof params?.protocolVersion === 'string' ? params.protocolVersion : undefined;
+    const negotiatedVersion = (clientVer && (SUPPORTED_MCP_PROTOCOL_VERSIONS as readonly string[]).includes(clientVer))
+      ? clientVer
+      : '2025-11-25';
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: {
+        protocolVersion: negotiatedVersion,
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: `agent-factory:${agentId}`, version: state.version },
+      },
+    };
+  }
+
+  if (method === 'ping') {
+    return { jsonrpc: '2.0', id, result: {} };
+  }
+
+  if (method === 'tools/list') {
+    const agentTools = [
+      {
+        name: 'ask',
+        title: 'Ask Agent',
+        description: 'Send a message or conversation turn to this agent and optionally await reply.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            message: { type: 'string', description: 'The message or prompt to send to the agent' },
+            waitSeconds: { type: 'number', description: 'Optional wait seconds (0..25) to poll for immediate reply' },
+          },
+          required: ['message'],
+        },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      {
+        name: 'get_replies',
+        title: 'Get Replies',
+        description: 'Retrieve recent replies sent by this agent for the current conversation.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            after: { type: 'number', description: 'Sequence number to fetch replies after (defaults to 0)' },
+          },
+        },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      {
+        name: 'get_agent_info',
+        title: 'Get Agent Information',
+        description: 'Get configuration and runtime status information for this agent.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+    ];
+    return { jsonrpc: '2.0', id, result: { tools: agentTools } };
+  }
+
+  if (method === 'tools/call') {
+    const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+    const toolName = params.name;
+    const args = params.arguments ?? {};
+
+    if (toolName === 'ask') {
+      const message = typeof args.message === 'string' ? args.message : '';
+      if (!message.trim()) {
+        return { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: 'message is required' }] } };
+      }
+      const waitSeconds = typeof args.waitSeconds === 'number' && Number.isFinite(args.waitSeconds) ? Math.max(0, Math.min(25, args.waitSeconds)) : 0;
+      const inReq = createInProcessRequest({
+        method: 'POST',
+        url: `/api/v1/agents/${encodeURIComponent(agentId)}/conversation`,
+        body: JSON.stringify({ input: message, waitSeconds }),
+      });
+      const out = await dispatchInProcess(state, inReq, principal, clientId);
+      let parsed: unknown = out.body;
+      try { parsed = JSON.parse(out.body); } catch {}
+      const redacted = redactBody(parsed, state.secretValues);
+      const isErr = out.statusCode >= 400;
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: typeof redacted === 'string' ? redacted : JSON.stringify(redacted) }],
+          structuredContent: (typeof redacted === 'object' && redacted !== null) ? redacted : { value: redacted },
+          ...(isErr ? { isError: true } : {}),
+        },
+      };
+    }
+
+    if (toolName === 'get_replies') {
+      const after = typeof args.after === 'number' && Number.isFinite(args.after) ? args.after : 0;
+      const inReq = createInProcessRequest({
+        method: 'GET',
+        url: `/api/v1/agents/${encodeURIComponent(agentId)}/replies?after=${after}`,
+      });
+      const out = await dispatchInProcess(state, inReq, principal, clientId);
+      let parsed: unknown = out.body;
+      try { parsed = JSON.parse(out.body); } catch {}
+      const redacted = redactBody(parsed, state.secretValues);
+      const isErr = out.statusCode >= 400;
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: typeof redacted === 'string' ? redacted : JSON.stringify(redacted) }],
+          structuredContent: (typeof redacted === 'object' && redacted !== null) ? redacted : { value: redacted },
+          ...(isErr ? { isError: true } : {}),
+        },
+      };
+    }
+
+    if (toolName === 'get_agent_info') {
+      const agent = state.agents.get(agentId);
+      if (!agent) {
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [{ type: 'text', text: JSON.stringify({ error: 'agent_not_found', message: `Agent '${agentId}' not found` }) }],
+            structuredContent: { error: 'agent_not_found', message: `Agent '${agentId}' not found` },
+            isError: true,
+          },
+        };
+      }
+      const agentAny = agent as any;
+      const info = {
+        id: agent.id,
+        name: agent.name,
+        state: agent.state,
+        ...(agentAny.currentModel ? { currentModel: agentAny.currentModel } : {}),
+      };
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify(info) }],
+          structuredContent: info,
+        },
+      };
+    }
+
+    return { jsonrpc: '2.0', id, error: { code: -32602, message: `unknown tool ${String(toolName)}` } };
+  }
+
+  return { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method ${String(method)}` } };
+}
+
+type SessionGate = { ok: true; principal: Principal } | { ok: false; status: 401 | 403; error: string; message: string };
+
+/**
+ * E9 / CL6: confirmation and secret-handoff pages act only for a live factory browser session (the HttpOnly session
+ * cookie, CSRF same-origin checked on POST by `verifySession`) of the very principal that made the MCP call. A bearer
+ * token or API key is never enough, and nobody else (not even an admin) may act on another principal's challenge.
+ */
+async function sessionPrincipalFor(state: FactoryState, req: http.IncomingMessage, ownerActor: string): Promise<SessionGate> {
+  if (req.headers.authorization || !verifySession(state, req).ok) {
+    return { ok: false, status: 401, error: 'session_required', message: 'A live signed-in browser session is required' };
+  }
+  const who = await identify(req, state, { skipActAs: true });
+  if (!who.ok) {
+    return { ok: false, status: 401, error: 'session_required', message: 'A live signed-in browser session is required' };
+  }
+  if (who.principal.actor !== ownerActor) {
+    return { ok: false, status: 403, error: 'forbidden', message: 'This link belongs to another principal' };
+  }
+  return { ok: true, principal: who.principal };
+}
+
+const PAGE_HEADERS = {
+  'content-type': 'text/html; charset=utf-8',
+  'cache-control': 'no-store',
+  'x-frame-options': 'DENY',
+  'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+} as const;
+
+function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+
+function page(title: string, heading: string, inner: string): string {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${escapeHtml(title)}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 2rem; max-width: 520px; width: 100%; }
+    h1 { font-size: 1.25rem; margin: 0 0 1rem; color: #38bdf8; }
+    p { font-size: 0.875rem; color: #94a3b8; line-height: 1.5; margin: 0.5rem 0; }
+    .meta { background: #0f172a; border-radius: 8px; padding: 1rem; margin: 1rem 0; font-family: monospace; font-size: 0.8rem; overflow-x: auto; color: #e2e8f0; }
+    label { display: block; font-size: 0.8rem; color: #94a3b8; margin: 1rem 0 0.5rem; }
+    input[type="password"] { width: 100%; box-sizing: border-box; background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 0.75rem; color: white; font-family: monospace; }
+    .btn { background: #2563eb; color: white; padding: 0.75rem 1.5rem; border-radius: 6px; font-weight: 600; border: none; cursor: pointer; width: 100%; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>${escapeHtml(heading)}</h1>
+    ${inner}
+  </div>
+</body>
+</html>`;
+}
+
+function liveChallenge(state: FactoryState, id: string): McpChallengeRecord | undefined {
+  const ch = state.mcpChallenges?.get(id);
+  if (ch && ch.expiresAt <= Date.now()) {
+    state.mcpChallenges!.delete(id);
+    return undefined;
+  }
+  return ch;
+}
+
+function liveHandoff(state: FactoryState, id: string): McpHandoffRecord | undefined {
+  const h = state.mcpHandoffs?.get(id);
+  if (h && h.expiresAt <= Date.now()) {
+    state.mcpHandoffs!.delete(id);
+    return undefined;
+  }
+  return h;
+}
+
+const MAX_FORM_BYTES = 64 * 1024;
+
+async function readFormOrJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  let raw = '';
+  for await (const chunk of req) {
+    raw += chunk;
+    if (raw.length > MAX_FORM_BYTES) throw Object.assign(new Error('body too large'), { status: 413 });
+  }
+  if (!raw.trim()) return {};
+  const contentType = String(req.headers['content-type'] ?? '');
+  if (contentType.includes('application/json')) {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
+  }
+  return Object.fromEntries(new URLSearchParams(raw));
+}
+
+export async function handleMcpConfirmGet(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  confirmId: string,
+): Promise<void> {
+  const challenge = liveChallenge(state, confirmId);
+  if (!challenge) {
+    sendJson(res, 410, { error: 'challenge_expired', message: 'Confirmation link was already used, has expired, or does not exist' });
+    return;
+  }
+  const gate = await sessionPrincipalFor(state, req, challenge.actor);
+  if (!gate.ok) {
+    sendJson(res, gate.status, { error: gate.error, message: gate.message });
+    return;
+  }
+  res.writeHead(200, PAGE_HEADERS);
+  res.end(page('Confirm MCP Operation', 'Human Confirmation Required', `
+    <p>An MCP client (${escapeHtml(challenge.via)}) asked to run an operation that needs your judgement. Review it and confirm only if you intend it:</p>
+    <div class="meta">
+      <div><strong>Operation:</strong> ${escapeHtml(challenge.operationId)}</div>
+      <div><strong>Actor:</strong> ${escapeHtml(challenge.actor)}</div>
+      <div><strong>Arguments:</strong></div>
+      <pre style="margin-top:0.5rem; white-space:pre-wrap;">${escapeHtml(JSON.stringify(redactBody(challenge.args, state.secretValues), null, 2))}</pre>
+    </div>
+    <p>This link works once and expires ${escapeHtml(new Date(challenge.expiresAt).toISOString())}.</p>
+    <form method="POST" action="/api/v1/mcp/confirm/${encodeURIComponent(challenge.id)}">
+      <button type="submit" class="btn">Confirm &amp; Execute</button>
+    </form>`));
+}
+
+export async function handleMcpConfirmPost(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  confirmId: string,
+): Promise<void> {
+  const challenge = liveChallenge(state, confirmId);
+  if (!challenge) {
+    sendJson(res, 410, { error: 'challenge_expired', message: 'Confirmation link was already used, has expired, or does not exist' });
+    return;
+  }
+  const gate = await sessionPrincipalFor(state, req, challenge.actor);
+  if (!gate.ok) {
+    sendJson(res, gate.status, { error: gate.error, message: gate.message });
+    return;
+  }
+  // Single use: consumed before execution so a replay (or a concurrent second click) is 410.
+  state.mcpChallenges!.delete(confirmId);
+
+  const op = OPERATION_MAP.get(challenge.operationId);
+  const tool = op?.mcpToolName ? TOOL_MAP.get(op.mcpToolName) : undefined;
+  if (!op || !tool) {
+    sendJson(res, 500, { error: 'unknown_operation', message: `Operation ${challenge.operationId} not found` });
+    return;
+  }
+  const clientId = challenge.via.replace(/^mcp:/, '') || 'direct';
+  const outcome = await executeInProcessRoute(state, op, tool, challenge.args, gate.principal, clientId);
+
+  if (String(req.headers.accept ?? '').includes('text/html')) {
+    res.writeHead(outcome.status, PAGE_HEADERS);
+    res.end(page('MCP Operation Executed', outcome.isError ? 'Operation Refused' : 'Operation Confirmed & Executed', `
+    <p>Status: ${outcome.status}</p>
+    <div class="meta"><pre style="white-space:pre-wrap;">${escapeHtml(JSON.stringify(outcome.body, null, 2))}</pre></div>`));
+    return;
+  }
+  sendJson(res, outcome.status, { ok: !outcome.isError, status: outcome.status, result: outcome.body });
+}
+
+export async function handleMcpHandoffGet(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  handoffId: string,
+): Promise<void> {
+  const handoff = liveHandoff(state, handoffId);
+  if (!handoff) {
+    sendJson(res, 410, { error: 'handoff_expired', message: 'Handoff link was already used, has expired, or does not exist' });
+    return;
+  }
+  const gate = await sessionPrincipalFor(state, req, handoff.actor);
+  if (!gate.ok) {
+    sendJson(res, gate.status, { error: gate.error, message: gate.message });
+    return;
+  }
+  const fields = handoff.secretParamNames
+    .map((p, i) => `<label for="f${i}">${escapeHtml(p)}</label>
+      <input type="password" id="f${i}" name="${escapeHtml(p)}" required ${i === 0 ? 'autofocus' : ''} autocomplete="off" />`)
+    .join('\n      ');
+  res.writeHead(200, PAGE_HEADERS);
+  res.end(page('MCP Secret Handoff', 'Sensitive Secret Handoff', `
+    <p>An MCP client (${escapeHtml(handoff.via)}) needs a credential for <strong>${escapeHtml(handoff.operationId)}</strong>. Enter it here; it goes straight to the Keymaster and never reaches the model.</p>
+    <div class="meta"><pre style="white-space:pre-wrap;">${escapeHtml(JSON.stringify(handoff.nonSecretArgs, null, 2))}</pre></div>
+    <form method="POST" action="/api/v1/mcp/handoff/${encodeURIComponent(handoff.id)}">
+      ${fields || '<p>No secret value is needed; submitting continues the setup.</p>'}
+      <button type="submit" class="btn">Submit Securely</button>
+    </form>`));
+}
+
+export async function handleMcpHandoffPost(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  handoffId: string,
+): Promise<void> {
+  const handoff = liveHandoff(state, handoffId);
+  if (!handoff) {
+    sendJson(res, 410, { error: 'handoff_expired', message: 'Handoff link was already used, has expired, or does not exist' });
+    return;
+  }
+  const gate = await sessionPrincipalFor(state, req, handoff.actor);
+  if (!gate.ok) {
+    sendJson(res, gate.status, { error: gate.error, message: gate.message });
+    return;
+  }
+
+  const body = await readFormOrJson(req);
+  const secretArgs: Record<string, string> = {};
+  handoff.secretParamNames.forEach((p, i) => {
+    const v = body[p] ?? (i === 0 ? body.secret : undefined);
+    if (typeof v === 'string' && v.length > 0) secretArgs[p] = v;
+  });
+  const primary = handoff.secretParamNames[0];
+  if (primary !== undefined && secretArgs[primary] === undefined) {
+    sendJson(res, 400, { error: 'missing_secret', message: `${primary} is required` });
+    return;
+  }
+
+  const op = OPERATION_MAP.get(handoff.operationId);
+  const tool = op?.mcpToolName ? TOOL_MAP.get(op.mcpToolName) : undefined;
+  if (!op || !tool) {
+    sendJson(res, 500, { error: 'unknown_operation', message: `Operation ${handoff.operationId} not found` });
+    return;
+  }
+  // Single use: consumed before the Keymaster write so a replay is 410.
+  state.mcpHandoffs!.delete(handoffId);
+
+  const clientId = handoff.via.replace(/^mcp:/, '') || 'direct';
+  const secrets = Object.values(secretArgs);
+  const outcome = await executeInProcessRoute(
+    state,
+    op,
+    tool,
+    { ...handoff.nonSecretArgs, ...secretArgs },
+    gate.principal,
+    clientId,
+    secrets,
+  );
+  // The secret is never echoed: outcome.body was already redacted against it; the page only shows the status.
+  if (String(req.headers.accept ?? '').includes('text/html')) {
+    res.writeHead(outcome.status, PAGE_HEADERS);
+    res.end(page('MCP Secret Submitted', outcome.isError ? 'Secret Not Saved' : 'Secret Received & Configured', `<p>Status: ${outcome.status}</p>`));
+    return;
+  }
+  sendJson(res, outcome.status, { ok: !outcome.isError, status: outcome.status, result: outcome.body });
 }

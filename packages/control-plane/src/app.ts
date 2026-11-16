@@ -112,8 +112,21 @@ import { handleLoginRoutes, sendLoginPage, verifySession, type SessionStore } fr
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
 import { handleAgentTransfers } from './transfers.js';
 import { clearSkillBindingsForModel, handleSkillModels, skillModelsForAgent } from './skill-models.js';
-import { handleMcp, redactMcpResponse, SUPPORTED_MCP_PROTOCOL_VERSIONS, type ToolAnnotations } from './mcp.js';
-export { handleMcp, redactMcpResponse, SUPPORTED_MCP_PROTOCOL_VERSIONS } from './mcp.js';
+import {
+  handleMcp,
+  handleAgentMcp,
+  handleMcpConfirmGet,
+  handleMcpConfirmPost,
+  handleMcpHandoffGet,
+  handleMcpHandoffPost,
+  parseToolsetTokens,
+  redactMcpResponse,
+  SUPPORTED_MCP_PROTOCOL_VERSIONS,
+  type ToolAnnotations,
+  type McpChallengeRecord,
+  type McpHandoffRecord,
+} from './mcp.js';
+export { handleMcp, handleAgentMcp, redactMcpResponse, SUPPORTED_MCP_PROTOCOL_VERSIONS } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
 import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, OPS_SKILL, conductorEventFor, conductorInput, opsEventFor } from './github-webhooks.js';
 import { handleSystems, type SystemsStore } from './systems.js';
@@ -308,6 +321,10 @@ export type FactoryState = {
   consoleTurns?: Map<string, ConsoleTurn>;
   /** AM2: replies to console turns, kept briefly for the person who asked (never for anyone else). */
   consoleReplies?: ConsoleReply[];
+  /** Human decision challenges minted over MCP (E9, 10-minute TTL). */
+  mcpChallenges?: Map<string, McpChallengeRecord>;
+  /** Session-bound secret handoffs minted over MCP (CL6, 10-minute TTL). */
+  mcpHandoffs?: Map<string, McpHandoffRecord>;
   /** Activation smoke budget caps and tracking (§6.12, TSK-281). */
   smokeBudgetUsd?: { perRun?: number; perActivation?: number };
   smokeRunSpend?: Map<string, number>;
@@ -443,18 +460,24 @@ export function agentKindOf(state: FactoryState, agentId: string): AgentKind | u
 
 export const actAsStorage = new AsyncLocalStorage<{ actor: string; onBehalfOf: string }>();
 export const requestActAs = new WeakMap<http.IncomingMessage, { actor: string; onBehalfOf: string }>();
-const requestBasePrincipal = new WeakMap<http.IncomingMessage, Principal>();
+export const requestBasePrincipal = new WeakMap<http.IncomingMessage, Principal>();
+export const mcpContextStorage = new AsyncLocalStorage<{ via: string }>();
 const tappedLedgers = new WeakSet<LedgerStore>();
 
 export function tapActAsLedger(state: FactoryState): void {
   if (!state.ledger || tappedLedgers.has(state.ledger)) return;
   const origAppend = state.ledger.append.bind(state.ledger);
   state.ledger.append = ((event: Parameters<LedgerStore['append']>[0]) => {
-    const ctx = actAsStorage.getStore();
-    if (ctx && event.onBehalfOf === undefined) {
-      return origAppend({ ...event, onBehalfOf: ctx.onBehalfOf });
+    const actAsCtx = actAsStorage.getStore();
+    const mcpCtx = mcpContextStorage.getStore();
+    let ev = event;
+    if (actAsCtx && ev.onBehalfOf === undefined) {
+      ev = { ...ev, onBehalfOf: actAsCtx.onBehalfOf };
     }
-    return origAppend(event);
+    if (mcpCtx?.via && ev.via === undefined) {
+      ev = { ...ev, via: mcpCtx.via };
+    }
+    return origAppend(ev);
   }) as LedgerStore['append'];
   tappedLedgers.add(state.ledger);
 }
@@ -735,8 +758,10 @@ export function parseModelPriceInput(
     return { ok: false, error: 'price must be an object with numeric inputPerMTok/outputPerMTok (or inputPer1M/outputPer1M) >= 0' };
   }
   const obj = raw as Record<string, unknown>;
-  const inp = obj.inputPerMTok ?? obj.inputPer1M;
-  const out = obj.outputPerMTok ?? obj.outputPer1M;
+  const rawInp = obj.inputPerMTok ?? obj.inputPer1M ?? obj.inputPerMillion;
+  const rawOut = obj.outputPerMTok ?? obj.outputPer1M ?? obj.outputPerMillion;
+  const inp = typeof rawInp === 'string' ? parseFloat(rawInp) : rawInp;
+  const out = typeof rawOut === 'string' ? parseFloat(rawOut) : rawOut;
   if (typeof inp !== 'number' || !Number.isFinite(inp) || inp < 0 || typeof out !== 'number' || !Number.isFinite(out) || out < 0) {
     return { ok: false, error: 'price inputPerMTok and outputPerMTok must be finite numbers >= 0' };
   }
@@ -1590,7 +1615,7 @@ export async function identify(
   opts?: { allowMaterialize?: boolean; skipActAs?: boolean },
 ): Promise<AuthResult> {
   const allowMaterialize = opts?.allowMaterialize !== false;
-  let base = allowMaterialize ? requestBasePrincipal.get(req) : undefined;
+  let base = requestBasePrincipal.get(req);
   const key = requestApiKey.get(req);
   if (!base && key) {
     // S5: the key was verified before routing. Its owner's live grants decide; its scopes only narrow them.
@@ -2883,8 +2908,9 @@ export function admitModel(state: FactoryState, input: AdmitInput, actor: string
   if (!state.modelStore) return { ok: false, status: 500, error: 'model_store_not_configured' };
   if (!input.name || !input.id) return { ok: false, status: 400, error: 'invalid_request', message: 'name and id are required' };
   let normalizedPrice: { inputPerMTok: number; outputPerMTok: number } | undefined;
-  if (input.price !== undefined) {
-    const parsedPrice = parseModelPriceInput(input.price);
+  const rawPriceInput = input.price ?? ((input as any).inputPerMTok !== undefined && (input as any).outputPerMTok !== undefined ? { inputPerMTok: parseFloat(String((input as any).inputPerMTok)), outputPerMTok: parseFloat(String((input as any).outputPerMTok)) } : undefined);
+  if (rawPriceInput !== undefined) {
+    const parsedPrice = parseModelPriceInput(rawPriceInput);
     if (!parsedPrice.ok) {
       return { ok: false, status: 400, error: 'invalid_price', message: parsedPrice.error };
     }
@@ -3296,17 +3322,21 @@ export function createFactoryServer(state: FactoryState): http.Server {
       ? startSubscriptionDiscoveryTimer(state, state.subscriptionDiscoveryIntervalMs)
       : undefined;
   const server = http.createServer(async (req, res) => {
-    try {
-      await route(state, req, res);
-    } catch (err) {
-      const status = (err as { status?: number }).status ?? 400;
-      if (!res.headersSent) json(res, status, { error: err instanceof Error ? err.message : String(err) });
-    }
+    await dispatchControlPlaneHttp(state, req, res);
   });
   if (discoveryTimer) {
     server.on('close', () => clearInterval(discoveryTimer));
   }
   return server;
+}
+
+export async function dispatchControlPlaneHttp(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    await route(state, req, res);
+  } catch (err) {
+    const status = (err as { status?: number }).status ?? 400;
+    if (!res.headersSent) json(res, status, { error: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 async function route(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
@@ -4191,10 +4221,11 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       if (replyTo) Object.assign(copy, { turnId: randomUUID(), replyTo });
       input = copy;
     }
-    const injectCallerIntoInput = Boolean(caller && (requestedBy || runCreate[2] === 'wake'));
+    const isMcpCall = Boolean(mcpContextStorage.getStore()?.via);
+    const injectCallerIntoInput = !isMcpCall && Boolean(caller && (requestedBy || runCreate[2] === 'wake'));
     const out = await createRun(state, runCreate[1], {
       actor: principal.actor,
-      trigger: runCreate[2] === 'wake' ? 'manual' : 'api',
+      trigger: isMcpCall ? 'mcp' : (runCreate[2] === 'wake' ? 'manual' : 'api'),
       input,
       callbackUrl: body.callbackUrl as string | undefined,
       model: body.model as string | undefined,
@@ -4202,7 +4233,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       ...(injectCallerIntoInput ? { caller } : {}),
       factoryTurn: true,
     });
-    if (caller && !injectCallerIntoInput) {
+    if (caller && (isMcpCall || !injectCallerIntoInput)) {
       attachCallerToRunResult(state, out, caller);
     }
     json(res, out.status, out.body);
@@ -4447,7 +4478,26 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     if (replyTo?.channel === 'console' && caller) rememberConsoleTurn(state, turnId, agent.id, caller.actor);
 
     const handed = await handOff(state, agent, principal.actor, payload, { requestedBy, caller });
-    json(res, handed.status, handed.status >= 300 ? handed.body : { ...handed.body, ...answerable });
+
+    let replyText: string | undefined;
+    const waitSeconds = typeof rawBody?.waitSeconds === 'number' && Number.isFinite(rawBody.waitSeconds)
+      ? Math.max(0, Math.min(25, rawBody.waitSeconds))
+      : 0;
+    if (waitSeconds > 0 && handed.status < 300) {
+      const start = Date.now();
+      const maxMs = waitSeconds * 1000;
+      while (Date.now() - start < maxMs) {
+        const found = (state.consoleReplies ?? []).find((r) => r.turnId === turnId);
+        if (found) {
+          replyText = found.content;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+
+    const replyBody = replyText !== undefined ? { reply: replyText, status: 'completed' } : { status: 'queued' };
+    json(res, handed.status, handed.status >= 300 ? handed.body : { ...handed.body, ...answerable, ...replyBody });
     return;
   }
 
@@ -4704,8 +4754,10 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (path === '/api/v1/models' && req.method === 'GET') {
     const principal = await requirePrivilege(req, res, state, 'models.read');
     if (!principal) return;
+    const visible = visibleModelsForPrincipal(state, principal);
     json(res, 200, {
-      models: visibleModelsForPrincipal(state, principal),
+      models: visible,
+      offered: visible,
       staged: state.modelStore?.listStaged() ?? [],
       // M2: what an agent gets when its policy names no models.
       default: defaultModelOf(state) ?? null,
@@ -4891,8 +4943,13 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const principal = await requirePrivilege(req, res, state, 'models.manage');
     if (!principal) return;
     const modelName = decodeURIComponent(pricingMatch[1]);
-    const body = (await readJson(req)) as { price?: unknown };
-    const parsedPrice = parseModelPriceInput(body.price);
+    const body = (await readJson(req)) as Record<string, unknown>;
+    const rawPrice = body.price ?? (
+      (body.inputPerMTok !== undefined || body.inputPer1M !== undefined || body.inputPerMillion !== undefined)
+        ? body
+        : undefined
+    );
+    const parsedPrice = parseModelPriceInput(rawPrice);
     if (!parsedPrice.ok) {
       json(res, 400, { error: 'invalid_request', message: parsedPrice.error });
       return;
@@ -5421,47 +5478,136 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     return;
   }
 
-  if (path === '/mcp' && req.method === 'POST') {
-    const protoHeader = req.headers['mcp-protocol-version'];
+  function extractMcpClientId(r: http.IncomingMessage): string {
+    const apiKey = requestApiKey.get(r);
+    if (apiKey?.deviceFamily?.startsWith('mcp:')) {
+      const fromFamily = apiKey.deviceFamily.slice(4).trim();
+      if (/^[a-zA-Z0-9._-]{1,64}$/.test(fromFamily)) return fromFamily;
+    }
+    const fromHeader = r.headers['x-mcp-client-id'];
+    if (typeof fromHeader === 'string' && /^[a-zA-Z0-9._-]{1,64}$/.test(fromHeader.trim())) {
+      return fromHeader.trim();
+    }
+    return 'direct';
+  }
+
+  async function readMcpJsonRpcPayload(r: http.IncomingMessage, s: http.ServerResponse): Promise<Record<string, unknown> | null> {
+    const protoHeader = r.headers['mcp-protocol-version'];
     if (typeof protoHeader === 'string' && protoHeader.trim()) {
       const trimmed = protoHeader.trim();
       if (!(SUPPORTED_MCP_PROTOCOL_VERSIONS as readonly string[]).includes(trimmed)) {
-        json(res, 400, { error: 'unsupported_protocol_version', supported: SUPPORTED_MCP_PROTOCOL_VERSIONS });
-        return;
+        json(s, 400, { error: 'unsupported_protocol_version', supported: SUPPORTED_MCP_PROTOCOL_VERSIONS });
+        return null;
       }
     }
-    const principal = await requirePrivilege(req, res, state, 'mcp.use');
-    if (!principal) return;
-
     let payload: Record<string, unknown>;
     try {
-      const raw = await readBody(req);
+      const raw = await readBody(r);
       if (!raw.trim()) {
-        json(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request: empty body' } });
-        return;
+        json(s, 200, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request: empty body' } });
+        return null;
       }
       payload = JSON.parse(raw);
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-        json(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request: expected JSON-RPC object' } });
-        return;
+        json(s, 200, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request: expected JSON-RPC object' } });
+        return null;
       }
     } catch {
-      json(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
-      return;
+      json(s, 200, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
+      return null;
     }
-
     if (payload.jsonrpc !== '2.0' || typeof payload.method !== 'string') {
-      json(res, 200, { jsonrpc: '2.0', id: payload.id ?? null, error: { code: -32600, message: 'Invalid Request: jsonrpc must be "2.0" and method must be a string' } });
-      return;
+      json(s, 200, { jsonrpc: '2.0', id: payload.id ?? null, error: { code: -32600, message: 'Invalid Request: jsonrpc must be "2.0" and method must be a string' } });
+      return null;
     }
-
     if (!('id' in payload) || payload.id === undefined) {
-      res.writeHead(202);
-      res.end();
-      return;
+      s.writeHead(202);
+      s.end();
+      return null;
+    }
+    return payload;
+  }
+
+  const mcpConfirmMatch = path.match(/^\/api\/v1\/mcp\/confirm\/([^/]+)$/);
+  if (mcpConfirmMatch && req.method === 'GET') {
+    const principal = await requirePrivilege(req, res, state, 'mcp.use');
+    if (!principal) return;
+    await handleMcpConfirmGet(state, req, res, mcpConfirmMatch[1]);
+    return;
+  }
+  if (mcpConfirmMatch && req.method === 'POST') {
+    const principal = await requirePrivilege(req, res, state, 'mcp.use');
+    if (!principal) return;
+    await handleMcpConfirmPost(state, req, res, mcpConfirmMatch[1]);
+    return;
+  }
+
+  const mcpHandoffMatch = path.match(/^\/api\/v1\/mcp\/handoff\/([^/]+)$/);
+  if (mcpHandoffMatch && req.method === 'GET') {
+    const principal = await requirePrivilege(req, res, state, 'mcp.use');
+    if (!principal) return;
+    await handleMcpHandoffGet(state, req, res, mcpHandoffMatch[1]);
+    return;
+  }
+  if (mcpHandoffMatch && req.method === 'POST') {
+    const principal = await requirePrivilege(req, res, state, 'mcp.use');
+    if (!principal) return;
+    await handleMcpHandoffPost(state, req, res, mcpHandoffMatch[1]);
+    return;
+  }
+
+  const mcpToolsetsMatch = path.match(/^\/mcp\/x\/([^/]+)$/);
+  const mcpAgentMatch = path.match(/^\/mcp\/agents\/([^/]+)$/);
+
+  if ((path === '/mcp' || path === '/mcp/readonly' || mcpToolsetsMatch) && req.method === 'POST') {
+    const principal = await requirePrivilege(req, res, state, 'mcp.use');
+    if (!principal) return;
+
+    let toolsets: string[] | undefined;
+    let isAll = false;
+    if (mcpToolsetsMatch) {
+      const parsed = parseToolsetTokens(decodeURIComponent(mcpToolsetsMatch[1]));
+      if (!parsed.ok) {
+        json(res, 400, { error: 'unknown_toolset', message: `Unknown toolset token: ${parsed.unknownToken}` });
+        return;
+      }
+      toolsets = [...parsed.toolsets];
+      isAll = parsed.isAll;
+    } else if (typeof req.headers['x-mcp-toolsets'] === 'string' && req.headers['x-mcp-toolsets'].trim()) {
+      const parsed = parseToolsetTokens(req.headers['x-mcp-toolsets']);
+      if (!parsed.ok) {
+        json(res, 400, { error: 'unknown_toolset', message: `Unknown toolset token: ${parsed.unknownToken}` });
+        return;
+      }
+      toolsets = [...parsed.toolsets];
+      isAll = parsed.isAll;
     }
 
-    json(res, 200, await handleMcp(state, payload, principal));
+    const isReadonly = path === '/mcp/readonly' || req.headers['x-mcp-readonly'] === 'true' || req.headers['x-mcp-readonly'] === '1';
+    const clientId = extractMcpClientId(req);
+
+    const payload = await readMcpJsonRpcPayload(req, res);
+    if (!payload) return;
+
+    json(res, 200, await handleMcp(state, payload, principal, { toolsets, isAll, readOnly: isReadonly, clientId }));
+    return;
+  }
+
+  if (mcpAgentMatch && req.method === 'POST') {
+    const agentId = decodeURIComponent(mcpAgentMatch[1]);
+    const agent = state.agents.get(agentId);
+    if (!agent || agent.state === 'RETIRED_PENDING_PURGE' || agent.state === 'PURGED' || agent.retiredAt) {
+      json(res, 404, { error: 'not_found', message: 'Agent not found or retired' });
+      return;
+    }
+    const principal = await requirePrivilege(req, res, state, 'agents.converse', { agentId });
+    if (!principal) return;
+
+    const clientId = extractMcpClientId(req);
+    const payload = await readMcpJsonRpcPayload(req, res);
+    if (!payload) return;
+
+    json(res, 200, await handleAgentMcp(state, payload, principal, agentId, { clientId }));
     return;
   }
 

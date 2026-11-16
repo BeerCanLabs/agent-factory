@@ -196,16 +196,28 @@ describe('GAP-259 decision holds', { concurrency: false }, () => {
     assert.equal(state.approvals.consume(h.approvalId), undefined);
   });
 
-  it('a decision made after the run ended starts a run with the decision as input; MCP decides with a cap too', async () => {
+  it('a decision made after the run ended starts a run with the decision as input; MCP hands the capped decision to a human (E9)', async () => {
     const { run, token } = await liveRun();
     const { body: h } = await call(holdPath(), 'PUT', token, ask);
     state.runs.update(run.runId, { state: 'DONE' });
-    const out = (await handleMcp(
+    const mcpRes = (await handleMcp(
       state,
       { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'decide_approval', arguments: { approvalId: h.approvalId, decision: 'approve', capUsd: '1200' } } },
       { actor: 'token:dale', roles: ['viewer', 'admin'] },
-    )) as { result: { content: Array<{ text: string }> } };
-    assert.equal(JSON.parse(out.result.content[0].text).delivered, 'run');
+    )) as { result: { structuredContent: { status: string; challengeId: string } } };
+    assert.equal(mcpRes.result.structuredContent.status, 'human_confirmation_required');
+    // The challenge id the model sees is not a credential: replaying it as an argument mints a new challenge, decides nothing.
+    const replay = (await handleMcp(
+      state,
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'decide_approval', arguments: { approvalId: h.approvalId, decision: 'approve', capUsd: '1200', elicitationConfirmationToken: mcpRes.result.structuredContent.challengeId } } },
+      { actor: 'token:dale', roles: ['viewer', 'admin'] },
+    )) as { result: { structuredContent: { status: string } } };
+    assert.equal(replay.result.structuredContent.status, 'human_confirmation_required');
+    assert.equal(state.approvals.get(h.approvalId)?.state, 'pending');
+    assert.equal(state.runs.list().some((r) => r.trigger === 'approval'), false);
+    // The human decides (the confirmation page executes this same route as the signed-in principal).
+    const out = await call(`/api/v1/approvals/${h.approvalId}`, 'POST', ADMIN, { decision: 'approve', capUsd: '1200' });
+    assert.equal(out.body.delivered, 'run');
     const fresh = state.runs.list().find((r) => r.trigger === 'approval');
     assert.ok(fresh);
     const input = JSON.stringify(fresh!.input);
