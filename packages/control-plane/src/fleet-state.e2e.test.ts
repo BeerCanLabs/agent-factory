@@ -136,6 +136,15 @@ describe('GAP-260 fleet go/stop state', { concurrency: false }, () => {
     assert.equal(set.result!.isError, undefined);
   });
 
+  it('a legacy status and reason pass through the one sanitizer, and the old reason is kept', async () => {
+    const f = join(mkdtempSync(join(tmpdir(), 'fleet-legacy-')), 'fleet-state.json');
+    writeFileSync(f, JSON.stringify({ status: 'rolled-back\u202e\u200b\u{E0041}', coder_app_ready: false, reason: 'smoke\u001b[31m failed\u202e' }));
+    state.fleetState = new FleetStateStore(f);
+    const read = await call('GET', VIEWER);
+    assert.equal(read.body.reason, 'The stored status "rolled-back" is no longer an admin status: treated as paused. A rollback freeze was recorded. (was: smoke failed)');
+    assert.equal(sanitizeReason(read.body.reason), read.body.reason);
+  });
+
   it('a stored legacy or unknown admin status loads as paused, so status and effective agree', async () => {
     for (const legacy of ['deploying', 'prod-testing', 'rolled-back', 'go']) {
       const f = join(mkdtempSync(join(tmpdir(), 'fleet-legacy-')), 'fleet-state.json');

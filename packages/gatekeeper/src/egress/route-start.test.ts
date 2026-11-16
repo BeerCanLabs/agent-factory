@@ -6,7 +6,7 @@ import { createGatekeeperEgress, type ControlClient, type Route } from './gateke
 
 const route: Route = { id: 'svc', kind: 'http', upstream: 'https://svc.example.com' } as Route;
 
-function egress(systemRoutes: ControlClient['systemRoutes'], routeStartRetryMs: number[]) {
+function egress(systemRoutes: ControlClient['systemRoutes'], routeStartRetryMs: number[], routeRefreshIntervalMs = 60_000) {
   const control: ControlClient = {
     async runContext() { return null; },
     async requestApproval() { throw new Error('unused'); },
@@ -14,7 +14,7 @@ function egress(systemRoutes: ControlClient['systemRoutes'], routeStartRetryMs: 
     async ledger() {},
     systemRoutes,
   };
-  return createGatekeeperEgress({ routes: [], prices: {}, runTokens: new RunTokens('route-start-test-run-token-key-1234567890'), control, routeStartRetryMs, routeRefreshIntervalMs: 60_000 }) as http.Server;
+  return createGatekeeperEgress({ routes: [], prices: {}, runTokens: new RunTokens('route-start-test-run-token-key-1234567890'), control, routeStartRetryMs, routeRefreshIntervalMs }) as http.Server;
 }
 
 async function capture<T>(fn: (logs: string[]) => Promise<T>): Promise<T> {
@@ -58,6 +58,38 @@ describe('gatekeeper-egress start-up route fetch retries while the control plane
       await until(() => logs.some((l) => l.includes('not loaded after')));
       assert.equal(calls, 3);
       assert.ok(logs.some((l) => l.includes('routes not loaded after 3 attempts; they load on the next request')));
+    });
+  });
+
+  it('logs routes loaded only on the first load, a changed set, or the first success after a failure', async () => {
+    const other: Route = { id: 'svc2', kind: 'http', upstream: 'https://svc2.example.com' } as Route;
+    let answer: () => Route[] = () => [route];
+    await capture(async (logs) => {
+      const server = egress(async () => answer(), [5], 1);
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+      const port = (server.address() as { port: number }).port;
+      const health = async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        await fetch(`http://127.0.0.1:${port}/healthz`).then((r) => r.text());
+      };
+      const loaded = () => logs.filter((l) => l.includes('routes loaded')).length;
+      await until(() => loaded() === 1);
+      for (let i = 0; i < 5; i++) await health();
+      assert.equal(loaded(), 1, 'the same set again logs nothing');
+      answer = () => [route, other];
+      await health();
+      assert.equal(loaded(), 2, 'a changed set logs');
+      answer = () => {
+        throw new Error('ECONNREFUSED');
+      };
+      await health();
+      answer = () => [route, other];
+      await health();
+      assert.equal(loaded(), 3, 'the first success after a failure logs');
+      await health();
+      assert.equal(loaded(), 3);
+      assert.ok(logs.includes('[gatekeeper-egress] routes loaded (2)'));
+      server.close();
     });
   });
 });

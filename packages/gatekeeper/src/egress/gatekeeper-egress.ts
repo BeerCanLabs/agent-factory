@@ -462,6 +462,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   const MISS_REFRESH_INTERVAL_MS = Math.min(2_000, ROUTE_REFRESH_INTERVAL_MS);
 
   let inflight: Promise<void> | undefined;
+  /** What the last successful load logged (agent-factory #479): log again only on a change or after a failure. */
+  let lastLoadedSet: string | undefined;
+  let lastIgnored = '';
+  let routesFailed = false;
   const cachedPlatformCredentials = new Set<string>();
   /** Hosts each platform credential may be sent to: the upstreams of the approved systems that hold it (GAP-182). */
   const cachedCredentialHosts = new Map<string, Set<string>>();
@@ -485,6 +489,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     } catch (err) {
       // Keep the last known systems: a control-plane restart must not cut every agent off.
       console.error(`[gatekeeper-egress] system routes refresh: ${err instanceof Error ? err.message : String(err)}`);
+      routesFailed = true;
       return;
     }
     const remote = Array.isArray(remotePayload) ? remotePayload : remotePayload?.routes;
@@ -503,16 +508,23 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     }
     routes.clear();
     for (const [id, r] of staticRoutes) routes.set(id, r);
+    const ignored: string[] = [];
     for (const r of remote) {
       const problem = staticRoutes.has(r?.id) ? 'id is a landing-zone route' : routeProblem(r, true, opts.allowHttpSystems === true);
       if (problem) {
-        console.error(`[gatekeeper-egress] system ${String(r?.id)} ignored: ${problem}`);
+        ignored.push(`[gatekeeper-egress] system ${String(r?.id)} ignored: ${problem}`);
         continue;
       }
       routes.set(r.id, r);
     }
     lastRouteRefresh = Date.now();
-    console.log(`[gatekeeper-egress] routes loaded (${routes.size})`);
+    // Refreshes are lazy and an agent can drive them, so these lines appear on a change (or a recovery), not per refresh.
+    if (ignored.join('\n') !== lastIgnored) for (const line of ignored) console.error(line);
+    lastIgnored = ignored.join('\n');
+    const set = [...routes.keys()].sort().join(',');
+    if (set !== lastLoadedSet || routesFailed) console.log(`[gatekeeper-egress] routes loaded (${routes.size})`);
+    lastLoadedSet = set;
+    routesFailed = false;
   }
 
   /**
