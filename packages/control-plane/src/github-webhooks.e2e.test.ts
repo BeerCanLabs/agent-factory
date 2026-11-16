@@ -91,6 +91,9 @@ describe('/hooks/:agentId with GitHub App deliveries (GAP-258)', { concurrency: 
         GITHUB_APP_BEERCANLABS_CONDUCTOR_WEBHOOK_SECRET: APP_SECRET,
         GITHUB_APP_BEERCANLABS_CONDUCTOR_SLUG: 'flow-app',
         GITHUB_APP_BEERCANLABS_CODER_WEBHOOK_SECRET: APP_SECRET,
+        GITHUB_APP_SLUGLESS_WEBHOOK_SECRET: APP_SECRET,
+        GITHUB_APP_TRIGGERED_WEBHOOK_SECRET: APP_SECRET,
+        GITHUB_APP_TRIGGERED_SLUG: 'triggered-app',
         HOOK_SECRET,
       })],
       runtime: noopRuntime(),
@@ -106,6 +109,8 @@ describe('/hooks/:agentId with GitHub App deliveries (GAP-258)', { concurrency: 
     } as unknown as FactoryState;
     state.agents.set('beercanlabs-conductor', agent('beercanlabs-conductor', { skillIds: ['sdlc-conductor'] }) as never);
     state.agents.set('beercanlabs-coder', agent('beercanlabs-coder', {}) as never);
+    state.agents.set('slugless', agent('slugless', { skillIds: ['sdlc-conductor'] }) as never);
+    state.agents.set('triggered', agent('triggered', { skillIds: ['sdlc-conductor'], triggers: [{ type: 'webhook', path: '/hooks/triggered', secretRef: 'HOOK_SECRET' }] }) as never);
     state.agents.set('hooked', agent('hooked', { triggers: [{ type: 'webhook', path: '/hooks/hooked', secretRef: 'HOOK_SECRET' }] }) as never);
     cp = createFactoryServer(state);
     await new Promise<void>((r) => cp.listen(0, '127.0.0.1', r));
@@ -181,5 +186,54 @@ describe('/hooks/:agentId with GitHub App deliveries (GAP-258)', { concurrency: 
     assert.deepEqual(state.runs.get(r.body.runId)!.input, { ref: 'refs/heads/main', githubEvent: 'push', githubDelivery: '11111111-aaaa-bbbb-cccc-000000000005' });
     const again = await hook('hooked', 'push', '11111111-aaaa-bbbb-cccc-000000000005', { ref: 'refs/heads/main' }, HOOK_SECRET);
     assert.equal(again.body.duplicate, true);
+  });
+  it('the legacy header never maps an event; a conductor with a cartridge trigger still gets its own app\'s events', async () => {
+    const payload = { action: 'created', repository: repo, issue: { number: 7 }, comment: { id: 5, body: '/approve cap $2,500' } };
+    const body = JSON.stringify(payload);
+    const legacy = await fetch(`http://127.0.0.1:${port}/hooks/triggered`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-github-event': 'issue_comment', 'x-github-delivery': '22222222-aaaa-bbbb-cccc-000000000001', 'x-factory-secret': HOOK_SECRET },
+      body,
+    });
+    assert.equal(legacy.status, 202, 'the cartridge trigger still wakes it, as before');
+    const input = state.runs.get(((await legacy.json()) as { runId: string }).runId)!.input as Record<string, unknown>;
+    assert.equal('event' in input, false);
+    assert.equal('githubEvent' in input, false);
+    assert.equal('githubDelivery' in input, false);
+    // Signed with the cartridge secret: a GitHub repo webhook, not its app; still no conductor event.
+    const viaTrigger = await hook('triggered', 'issue_comment', '22222222-aaaa-bbbb-cccc-000000000002', payload, HOOK_SECRET);
+    assert.equal(viaTrigger.body.ignored, true);
+    const viaApp = await hook('triggered', 'issue_comment', '22222222-aaaa-bbbb-cccc-000000000003', payload);
+    assert.equal(viaApp.status, 202);
+    assert.deepEqual((state.runs.get(viaApp.body.runId)!.input as Record<string, unknown>).event, { type: 'approval-signal', repo: repo.full_name, number: 7, comment_id: 5 });
+  });
+
+  it('an app delivery needs X-GitHub-Delivery, and the same body under a new id starts no second run', async () => {
+    const before = runsOf('beercanlabs-conductor').length;
+    const payload = { action: 'opened', repository: repo, issue: { number: 31, labels: [] } };
+    const first = await hook('beercanlabs-conductor', 'issues', '33333333-aaaa-bbbb-cccc-000000000001', payload);
+    assert.equal(first.status, 202);
+    const fresh = await hook('beercanlabs-conductor', 'issues', '33333333-aaaa-bbbb-cccc-000000000002', payload);
+    assert.equal(fresh.status, 200);
+    assert.equal(fresh.body.duplicate, true);
+    assert.equal(fresh.body.runId, first.body.runId);
+    const missing = await hook('beercanlabs-conductor', 'issues', undefined, payload);
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.error, 'missing_delivery_id');
+    assert.equal(runsOf('beercanlabs-conductor').length, before + 1);
+    // The fresh id was released, so GitHub's real delivery of another body under it is not refused.
+    const other = await hook('beercanlabs-conductor', 'issues', '33333333-aaaa-bbbb-cccc-000000000002', { ...payload, issue: { number: 32, labels: [] } });
+    assert.equal(other.status, 202);
+  });
+
+  it('a conductor whose app slug is not stored maps nothing (its own comments and labels would loop)', async () => {
+    const own = { login: 'slugless-app[bot]' };
+    const comment = await hook('slugless', 'issue_comment', '44444444-aaaa-bbbb-cccc-000000000001', { action: 'created', sender: own, repository: repo, issue: { number: 3 }, comment: { id: 9, body: '/approve' } });
+    const label = await hook('slugless', 'issues', '44444444-aaaa-bbbb-cccc-000000000002', { action: 'labeled', label: { name: 'sdlc:plan' }, sender: own, repository: repo, issue: { number: 3, labels: [] } });
+    for (const r of [comment, label]) {
+      assert.equal(r.status, 200);
+      assert.equal(r.body.ignored, true);
+    }
+    assert.equal(runsOf('slugless').length, 0);
   });
 });

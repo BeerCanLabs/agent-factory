@@ -1,14 +1,18 @@
 /**
  * GAP-258: GitHub webhooks into an agent's own `/hooks/:agentId`, for the event-driven SDLC fleet (no timer, no poll).
  *
- * - The delivery's `X-GitHub-Event` and `X-GitHub-Delivery` go into the run input (`githubEvent`, `githubDelivery`).
- * - An agent with no cartridge webhook trigger (a config-only agent, such as the conductor) is reached by its own GitHub
- *   App: the delivery must carry `X-Hub-Signature-256` signed with the app's webhook secret, which the manifest flow
- *   stored (`GITHUB_APP_<AGENT>_WEBHOOK_SECRET`). Nothing else authenticates that path.
+ * - The delivery's `X-GitHub-Event` and `X-GitHub-Delivery` go into the run input (`githubEvent`, `githubDelivery`), only
+ *   for a delivery signed with `X-Hub-Signature-256`; the legacy `x-factory-secret` header never carries them.
+ * - An agent's own GitHub App signs with the app's webhook secret, which the manifest flow stored
+ *   (`GITHUB_APP_<AGENT>_WEBHOOK_SECRET`). It is tried first, so an agent with or without a cartridge webhook trigger
+ *   gets its app's deliveries. An app delivery must carry `X-GitHub-Delivery` (400 otherwise).
  * - An agent that adopted the `sdlc-conductor` skill gets each GitHub event mapped to one conductor event (the
- *   agentic-sdlc `sdlc-on-event` names, docs/INTAKE.md "Event table"); an event with no mapping starts no run. The
- *   conductor re-reads live state for every event, so the mapping only says which handler to wake, never what is true.
+ *   agentic-sdlc `sdlc-on-event` names, docs/INTAKE.md "Event table"), only from its own app, and only when its app slug
+ *   is stored (`GITHUB_APP_<AGENT>_SLUG`): without it the conductor cannot tell its own labels and comments, so nothing
+ *   is mapped (fail closed). An event with no mapping starts no run. The conductor re-reads live state for every
+ *   event, so the mapping only says which handler to wake, never what is true.
  * - Each delivery id starts at most one run per agent: a redelivery answers with the first run and starts nothing.
+ *   GitHub signs the body, not the id, so an app delivery is also deduplicated on the body's sha256 (same window).
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

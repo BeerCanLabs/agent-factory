@@ -3483,36 +3483,42 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     }
     const agent = state.agents.get(hookId);
     const trigger = agent?.triggers.find((t) => t.type === 'webhook');
-    // GAP-258: an agent with no cartridge webhook trigger is reached only by its own GitHub App, signed (HMAC) with the
-    // app's webhook secret; the legacy shared-secret header never opens that path.
+    // GAP-258: a GitHub App delivery is signed (HMAC, X-Hub-Signature-256) with the agent's app webhook secret. It is
+    // tried first for any agent that has one, so a conductor with a cartridge trigger still gets its app's deliveries.
+    // An agent with neither an app secret nor a cartridge trigger is refused; the legacy shared-secret header only ever
+    // checks the cartridge trigger's secret.
     const githubEventHeader = typeof req.headers['x-github-event'] === 'string' ? req.headers['x-github-event'] : undefined;
-    const viaApp = Boolean(agent && !(trigger?.type === 'webhook' && trigger.secretRef) && hmacSignature && githubEventHeader);
-    if (!agent || (!viaApp && (!trigger || trigger.type !== 'webhook' || !trigger.secretRef))) {
+    const hasTrigger = Boolean(trigger?.type === 'webhook' && trigger.secretRef);
+    const appSecret = agent && hmacSignature && githubEventHeader ? await readSecret(state, githubAppSecretNames(agent.id).webhookSecret) : undefined;
+    const usableApp = typeof appSecret === 'string' && appSecret.trim() ? appSecret : undefined;
+    if (!agent || (!usableApp && !hasTrigger)) {
       capDrain(req);
       json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
 
     let secret: string | undefined;
-    if (viaApp) {
-      secret = await readSecret(state, githubAppSecretNames(agent.id).webhookSecret);
-    } else if (trigger?.type === 'webhook' && trigger.secretRef) {
+    if (trigger?.type === 'webhook' && trigger.secretRef) {
       const bound = await bindSecrets([trigger.secretRef], state.providers);
       secret = bound.ok ? bound.env[trigger.secretRef] : undefined;
     }
-    if (!secret || typeof secret !== 'string' || !secret.trim()) {
+    if (typeof secret !== 'string' || !secret.trim()) secret = undefined;
+    if (!secret && !usableApp) {
       capDrain(req);
       json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
     const rawBytes = await readBodyBytes(req);
+    let viaApp = false;
     if (hmacSignature) {
-      if (!verifyWebhookHmac(rawBytes, secret, hmacSignature)) {
+      if (usableApp && verifyWebhookHmac(rawBytes, usableApp, hmacSignature)) {
+        viaApp = true;
+      } else if (!secret || !verifyWebhookHmac(rawBytes, secret, hmacSignature)) {
         json(res, 401, { error: 'bad_webhook_signature' });
         return;
       }
     } else if (legacySecret) {
-      if (!safeEqual(legacySecret, secret)) {
+      if (!secret || !safeEqual(legacySecret, secret)) {
         json(res, 401, { error: 'bad_webhook_signature' });
         return;
       }
@@ -3535,18 +3541,33 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         input = raw;
       }
     }
-    // GAP-258: the GitHub event and delivery id travel with the run; a conductor gets the one event it handles.
-    const githubEvent = githubEventHeader && GITHUB_EVENT.test(githubEventHeader) ? githubEventHeader : undefined;
+    // GAP-258: the GitHub event and delivery id travel with the run only for an HMAC-signed delivery (never the legacy
+    // header), and a conductor gets its one mapped event only from its own GitHub App.
+    const githubEvent = hmacSignature && githubEventHeader && GITHUB_EVENT.test(githubEventHeader) ? githubEventHeader : undefined;
     const rawDelivery = req.headers['x-github-delivery'];
-    const delivery = typeof rawDelivery === 'string' && DELIVERY_ID.test(rawDelivery) ? rawDelivery : undefined;
+    const delivery = hmacSignature && typeof rawDelivery === 'string' && DELIVERY_ID.test(rawDelivery) ? rawDelivery : undefined;
+    if (viaApp && !delivery) {
+      json(res, 400, { error: 'missing_delivery_id', message: 'a GitHub App delivery carries X-GitHub-Delivery' });
+      return;
+    }
     const isConductor = (agent.skillIds ?? []).includes(CONDUCTOR_SKILL) || (state.configs?.current(agent.id)?.skills ?? []).some((sk) => sk.id === CONDUCTOR_SKILL);
     if (githubEvent && (isConductor || viaApp)) {
       if (!isConductor) {
         json(res, 200, { ok: true, ignored: true, reason: 'this agent takes no GitHub events' });
         return;
       }
+      if (!viaApp) {
+        json(res, 200, { ok: true, ignored: true, reason: 'conductor events come only from the agent\'s own GitHub App' });
+        return;
+      }
+      // Fail closed: without its app's login the conductor cannot tell its own labels and comments, which would loop.
       const slug = await readSecret(state, githubAppSecretNames(agent.id).slug);
-      const mapped = conductorEventFor(githubEvent, input, slug ? `${slug}[bot]` : undefined);
+      if (!slug) {
+        console.error(`[webhooks] ${agent.id}: no ${githubAppSecretNames(agent.id).slug}; GitHub events are not mapped`);
+        json(res, 200, { ok: true, ignored: true, reason: 'the agent\'s GitHub App slug is not stored' });
+        return;
+      }
+      const mapped = conductorEventFor(githubEvent, input, `${slug}[bot]`);
       if ('ignored' in mapped) {
         json(res, 200, { ok: true, ignored: true, reason: mapped.ignored });
         return;
@@ -3555,28 +3576,35 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     } else if (githubEvent && input && typeof input === 'object' && !Array.isArray(input)) {
       input = { ...(input as Record<string, unknown>), githubEvent, ...(delivery ? { githubDelivery: delivery } : {}) };
     }
-    // One run per delivery id per agent: a redelivery (GitHub's retry, or a person's "Redeliver") starts nothing new.
+    // One run per delivery per agent: a redelivery (GitHub's retry, or a person's "Redeliver") starts nothing new. GitHub
+    // signs the body, not the delivery id, so an app delivery is also deduplicated on the body's sha256.
     const deliveries = webhookDeliveries(state);
-    if (delivery) {
-      const prior = deliveries.claim(agent.id, delivery);
-      if (prior) {
-        state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'WEBHOOK_DUPLICATE', actor: `webhook:${agent.id}`, requestId: delivery, ...(prior.runId ? { runId: prior.runId } : {}) });
-        json(res, 200, { ok: true, duplicate: true, ...(prior.runId ? { runId: prior.runId } : {}) });
-        return;
-      }
+    const keys = [...(delivery ? [delivery] : []), ...(viaApp ? [createHash('sha256').update(rawBytes).digest('hex')] : [])];
+    const claimed: string[] = [];
+    let prior: ReturnType<DeliveryLog['claim']>;
+    for (const key of keys) {
+      const seen = deliveries.claim(agent.id, key);
+      if (seen) prior ??= seen;
+      else claimed.push(key);
+    }
+    if (prior) {
+      for (const key of claimed) deliveries.release(agent.id, key);
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'WEBHOOK_DUPLICATE', actor: `webhook:${agent.id}`, ...(delivery ? { requestId: delivery } : {}), ...(prior.runId ? { runId: prior.runId } : {}) });
+      json(res, 200, { ok: true, duplicate: true, ...(prior.runId ? { runId: prior.runId } : {}) });
+      return;
     }
     const actor = `webhook:${agent.id}`;
     let out: Awaited<ReturnType<typeof createRun>>;
     try {
       out = await createRun(state, agent.id, { actor, trigger: 'webhook', input });
     } catch (err) {
-      if (delivery) deliveries.release(agent.id, delivery);
+      for (const key of claimed) deliveries.release(agent.id, key);
       throw err;
     }
-    if (delivery) {
-      const runId = (out.body as { runId?: unknown } | undefined)?.runId;
-      if (out.status < 300) deliveries.done(agent.id, delivery, typeof runId === 'string' ? runId : undefined);
-      else deliveries.release(agent.id, delivery);
+    const runId = (out.body as { runId?: unknown } | undefined)?.runId;
+    for (const key of claimed) {
+      if (out.status < 300) deliveries.done(agent.id, key, typeof runId === 'string' ? runId : undefined);
+      else deliveries.release(agent.id, key);
     }
     json(res, out.status, out.body);
     return;
