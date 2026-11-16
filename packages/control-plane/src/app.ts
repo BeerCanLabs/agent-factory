@@ -4,7 +4,6 @@ import { apiKeyFromAuthorization } from '@beercanlabs/factory-auth';
 import { BREAK_GLASS_OWNER, type ApiKeyStore, type ApiKeyRecord } from '@beercanlabs/factory-bouncer';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { timingSafeEqual, randomUUID, createHash, createHmac } from 'node:crypto';
-import { join } from 'node:path';
 import { checkAgentUpdate, extractGitHubRepo, isNewerVersion, parseSemVer } from './updates.js';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
@@ -158,6 +157,8 @@ export type FactoryState = {
   /** The model a policy that names none grants (M2): configuration seeded from FACTORY_DEFAULT_MODEL; no code default. */
   defaultModel?: string;
   registryDir?: string;
+  /** GAP-250: GitHub webhook delivery ids already handled (one run per delivery), kept across restarts. */
+  webhookDeliveries?: DeliveryLog;
   ledger: LedgerStore;
   auth: AuthProvider;
   /** S5: factory API keys (`fk_`), verified before routing on /api/v1 and /mcp. */
@@ -3059,11 +3060,12 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
 }
 
 const deliveryLogs = new WeakMap<FactoryState, DeliveryLog>();
-/** GAP-250: the webhook delivery ids already handled, beside the registry when there is one. */
+/** GAP-250: the webhook delivery ids already handled: the factory's own store, or in memory (tests, a bare state). */
 function webhookDeliveries(state: FactoryState): DeliveryLog {
+  if (state.webhookDeliveries) return state.webhookDeliveries;
   let log = deliveryLogs.get(state);
   if (!log) {
-    log = new DeliveryLog(state.registryDir ? join(state.registryDir, 'webhook-deliveries') : undefined);
+    log = new DeliveryLog();
     deliveryLogs.set(state, log);
   }
   return log;

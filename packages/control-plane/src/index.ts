@@ -15,6 +15,7 @@ import {
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, createProbeServer, FactoryState, relinkVendorModels } from './app.js';
+import { DeliveryLog } from './github-webhooks.js';
 import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerDeployProvider, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
 import { fireScheduledAction, scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
@@ -236,6 +237,7 @@ const state: FactoryState = {
   deployProvider,
   policies: new PolicyStore(process.env.FACTORY_POLICIES_DIR || join(DATA_DIR, 'policies'), defaultPolicy()),
   approvals: new ApprovalStore(join(DATA_DIR, 'approvals')),
+  webhookDeliveries: new DeliveryLog(join(DATA_DIR, 'webhook-deliveries')),
   identityLinks: new IdentityLinkStore(join(DATA_DIR, 'identity-links')),
   // Only the gatekeeper-egress can write costUsd (stripped for other writers), so every priced llm row counts.
   spend: SpendTracker.fromLedger(ledger.query(), () => true),
