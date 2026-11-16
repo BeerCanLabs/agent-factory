@@ -1,13 +1,16 @@
+import contextlib
+import io
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from runtime.skills import load_skills, run_tool
+from runtime.skills import Tool, load_skills, run_tool
 
 
 class TestSkills(unittest.TestCase):
@@ -115,3 +118,46 @@ class TestSkills(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestToolErrorsAreLogged(unittest.TestCase):
+    """GAP-254: a failing tool is logged on stderr, with known secret values masked, as well as told to the model."""
+
+    def run_logged(self, handler, raw="{}"):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            out = run_tool(Tool("sdlc-conductor", "sdlc-on-event", "", {}, handler), raw, {})
+        return out, err.getvalue()
+
+    def test_an_exception_is_logged_with_its_type_and_place_and_still_returned(self):
+        def boom(args, ctx):
+            raise ValueError("event.type must be one of plan-submitted")
+
+        out, log = self.run_logged(boom)
+        self.assertEqual(out, "error: event.type must be one of plan-submitted")
+        self.assertIn("[runtime] tool sdlc-conductor/sdlc-on-event failed: ValueError: event.type must be one of plan-submitted", log)
+        self.assertIn("test_skills.py:", log)
+
+    def test_bad_arguments_are_logged(self):
+        self.assertIn("failed: arguments must be an object", self.run_logged(lambda a, c: "ok", "[1]")[1])
+        self.assertIn("failed: JSONDecodeError", self.run_logged(lambda a, c: "ok", "{nope")[1])
+        self.assertIn("arguments too large", self.run_logged(lambda a, c: "ok", "x" * 20001)[1])
+
+    def test_a_result_that_reports_an_error_is_logged_and_a_good_one_is_not(self):
+        out, log = self.run_logged(lambda a, c: '{"event": "story-ready", "action": "error", "reason": "GitHub 403"}')
+        self.assertIn('"action": "error"', out)
+        self.assertIn("failed: reported: GitHub 403", log)
+        self.assertIn("failed: reported: error: no board", self.run_logged(lambda a, c: "error: no board")[1])
+        self.assertEqual(self.run_logged(lambda a, c: '{"action": "started"}')[1], "")
+
+    def test_the_run_token_and_credential_shapes_are_masked(self):
+        run_token = "rt" + "-example-" + "7" * 12
+        pat = "ghp" + "_" + "A1" * 12
+        with mock.patch.dict(os.environ, {"FACTORY_RUN_TOKEN": run_token}):
+            def leak(args, ctx):
+                raise RuntimeError(f"401 at {run_token}; header Bearer {run_token}; pat {pat}")
+
+            _, log = self.run_logged(leak)
+        self.assertNotIn(run_token, log)
+        self.assertNotIn(pat, log)
+        self.assertIn("401 at ***", log)

@@ -10,9 +10,11 @@ A skill reaches only the routes the agent's policy grants: the gatekeeper-egress
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import sys
+import traceback
 from pathlib import Path
 
 ENTRY = re.compile(r"^entry:\s*([^\s#]+)", re.MULTILINE)
@@ -133,15 +135,64 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
     return tools, problems
 
 
+# GAP-254: a tool that fails is logged (the container's stderr), not only told to the model. The run token and anything
+# shaped like a credential are masked; a line is short. Arguments and results are never logged whole.
+CREDENTIAL_SHAPES = re.compile(
+    r"(?i:bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}|github_pat_\w{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|sk-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{12,}"
+)
+MAX_LOG_CHARS = 1000
+
+
+def _mask(text: str) -> str:
+    token = os.environ.get("FACTORY_RUN_TOKEN") or ""
+    if len(token) >= 8:
+        text = text.replace(token, "***")
+    return CREDENTIAL_SHAPES.sub("***", text)
+
+
+def log_tool_error(label: str, what: str) -> None:
+    line = " ".join(f"[runtime] tool {label} failed: {_mask(str(what))}".split())
+    print(line[:MAX_LOG_CHARS], file=sys.stderr, flush=True)
+
+
+def _where(err: BaseException) -> str:
+    frames = traceback.extract_tb(err.__traceback__)
+    if not frames:
+        return ""
+    last = frames[-1]
+    return f" at {Path(last.filename).name}:{last.lineno} in {last.name}"
+
+
+def _reported_error(out: str) -> str | None:
+    """A result in which the tool itself reports failure: `error: ...` text, or a JSON object with `error` or `action: error`."""
+    head = out.lstrip()
+    if head.lower().startswith("error"):
+        return head[:300]
+    if head.startswith("{"):
+        try:
+            obj = json.loads(out)
+        except ValueError:
+            return None
+        if isinstance(obj, dict) and (obj.get("action") == "error" or obj.get("error")):
+            return str(obj.get("reason") or obj.get("error") or "error")[:300]
+    return None
+
+
 def run_tool(tool: Tool, raw_arguments: str, context: dict) -> str:
+    label = f"{tool.skill}/{tool.name}"
     if len(raw_arguments or "") > MAX_ARGUMENT_CHARS:
+        log_tool_error(label, f"arguments too large ({len(raw_arguments)} characters)")
         return "error: arguments too large"
     try:
-        import json
-
         args = json.loads(raw_arguments) if raw_arguments else {}
         if not isinstance(args, dict):
+            log_tool_error(label, "arguments must be an object")
             return "error: arguments must be an object"
-        return str(tool.handler(args, context))[:MAX_RESULT_CHARS]
+        out = str(tool.handler(args, context))[:MAX_RESULT_CHARS]
     except Exception as err:
+        log_tool_error(label, f"{type(err).__name__}: {err}{_where(err)}")
         return f"error: {err}"[:2000]
+    reported = _reported_error(out)
+    if reported is not None:
+        log_tool_error(label, f"reported: {reported}")
+    return out
