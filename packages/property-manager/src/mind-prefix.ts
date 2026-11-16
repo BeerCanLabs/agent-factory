@@ -14,7 +14,7 @@ export function checkMindPrefix(prefix: string): string {
 }
 
 /** As registerCompute uses it: `memoryPrefix`, else the id. */
-export const effectiveMindPrefix = (a: Rec): string => a.memoryPrefix || a.id;
+export const effectiveMindPrefix = (a: Rec): string => a.memoryPrefix ?? a.id;
 
 /** The other registered agent holding `prefix`, if any. */
 export function mindPrefixHolder(agents: Iterable<Rec>, agentId: string, prefix: string): string | undefined {
