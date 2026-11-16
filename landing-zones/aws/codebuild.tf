@@ -163,45 +163,60 @@ phases:
       - |
         # AM1 / GAP-179: the commit must declare its memory archetype (cartridge.yaml memory.archetype, or memory.yaml archetype).
         ARCH='[\"'"'"']?(purpose-built|personal-assistant|team-member|ephemeral|episodic|workspace)[\"'"'"']?[[:space:]]*(#.*)?$'
-        if ! { [ -f cartridge.yaml ] && grep -qE "^[[:space:]]+archetype:[[:space:]]*$ARCH" cartridge.yaml; } && ! { [ -f memory.yaml ] && grep -qE "^archetype:[[:space:]]*$ARCH" memory.yaml; }; then echo "ADMISSION REFUSED (archetype_required): declare memory.archetype: purpose-built, personal-assistant or team-member"; exit 7; fi
+        if ! { [ -f cartridge.yaml ] && grep -qE "^[[:space:]]+archetype:[[:space:]]*$ARCH" cartridge.yaml; } && ! { [ -f memory.yaml ] && grep -qE "^archetype:[[:space:]]*$ARCH" memory.yaml; } && ! { [ ! -f cartridge.yaml ] && [[ "$AGENT_ID" =~ ^(factory-manager|agent-builder|personal-trainer)$ ]] && [ -f "agents/staff/$AGENT_ID/cartridge.yaml" ] && [ -f "runtimes/python-staff/Dockerfile" ] && grep -qE "^[[:space:]]+archetype:[[:space:]]*$ARCH" "agents/staff/$AGENT_ID/cartridge.yaml"; }; then echo "ADMISSION REFUSED (archetype_required): declare memory.archetype: purpose-built, personal-assistant or team-member"; exit 7; fi
       - |
-        if [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f setup.py ]; then KIND=python
-        elif [ -f package.json ]; then KIND=node
-        else KIND=unknown; fi
-        echo "Agent language: $KIND"
-        case "$KIND" in
-          python) find . \( -path ./.git -o -path ./node_modules -o -path ./.venv \) -prune -o -type f \( -name 'test_*.py' -o -name '*_test.py' \) -print | grep -q . ;;
-          node) node -e "const t=(require('./package.json').scripts||{}).test||'';process.exit(t&&!/no test specified/.test(t)?0:1)" ;;
-          *) false ;;
-        esac || { echo "ADMISSION REFUSED (no_tests): no tests found for a $KIND agent"; exit 3; }
-      - |
-        case "$KIND" in
-          python)
-            python3 -m venv /tmp/admission-venv && . /tmp/admission-venv/bin/activate || exit 4
-            if [ -f requirements.txt ]; then pip install -q -r requirements.txt || exit 4; fi
-            if [ -f requirements-dev.txt ]; then pip install -q -r requirements-dev.txt || exit 4; fi
-            if [ ! -f requirements.txt ] && [ -f pyproject.toml ]; then pip install -q . || exit 4; fi
-            python -m pytest --version >/dev/null 2>&1 || pip install -q pytest || exit 4
-            python -m pytest -q; RC=$?
-            deactivate
-            [ "$RC" -eq 5 ] && { echo "ADMISSION REFUSED (no_tests): pytest collected no tests"; exit 3; }
-            [ "$RC" -eq 0 ] || { echo "ADMISSION REFUSED (tests_failed)"; exit 4; } ;;
-          node)
-            npm ci && npm test || { echo "ADMISSION REFUSED (tests_failed)"; exit 4; } ;;
-        esac
+        if [ ! -f cartridge.yaml ] && [[ "$AGENT_ID" =~ ^(factory-manager|agent-builder|personal-trainer)$ ]] && [ -f "agents/staff/$AGENT_ID/cartridge.yaml" ] && [ -f "runtimes/python-staff/Dockerfile" ]; then
+          find "agents/staff/$AGENT_ID/tests" -type f \( -name 'test_*.py' -o -name '*_test.py' \) | grep -q . || { echo "ADMISSION REFUSED (no_tests): no tests found for staff agent $AGENT_ID"; exit 3; }
+          (cd "agents/staff/$AGENT_ID" && python3 -m unittest discover -s tests -p 'test_*.py') || { echo "ADMISSION REFUSED (tests_failed)"; exit 4; }
+        else
+          if [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f setup.py ]; then KIND=python
+          elif [ -f package.json ]; then KIND=node
+          else KIND=unknown; fi
+          echo "Agent language: $KIND"
+          case "$KIND" in
+            python) find . \( -path ./.git -o -path ./node_modules -o -path ./.venv \) -prune -o -type f \( -name 'test_*.py' -o -name '*_test.py' \) -print | grep -q . ;;
+            node) node -e "const t=(require('./package.json').scripts||{}).test||'';process.exit(t&&!/no test specified/.test(t)?0:1)" ;;
+            *) false ;;
+          esac || { echo "ADMISSION REFUSED (no_tests): no tests found for a $KIND agent"; exit 3; }
+          case "$KIND" in
+            python)
+              python3 -m venv /tmp/admission-venv && . /tmp/admission-venv/bin/activate || exit 4
+              if [ -f requirements.txt ]; then pip install -q -r requirements.txt || exit 4; fi
+              if [ -f requirements-dev.txt ]; then pip install -q -r requirements-dev.txt || exit 4; fi
+              if [ ! -f requirements.txt ] && [ -f pyproject.toml ]; then pip install -q . || exit 4; fi
+              python -m pytest --version >/dev/null 2>&1 || pip install -q pytest || exit 4
+              python -m pytest -q; RC=$?
+              deactivate
+              [ "$RC" -eq 5 ] && { echo "ADMISSION REFUSED (no_tests): pytest collected no tests"; exit 3; }
+              [ "$RC" -eq 0 ] || { echo "ADMISSION REFUSED (tests_failed)"; exit 4; } ;;
+            node)
+              npm ci && npm test || { echo "ADMISSION REFUSED (tests_failed)"; exit 4; } ;;
+          esac
+        fi
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPO_URI
   build:
     on-failure: ABORT
     commands:
       - |
         LABELS=(--label "org.opencontainers.image.revision=$GIT_COMMIT" --label "org.opencontainers.image.source=$REPO_URL")
-        if [ -z "$SKILLS" ]; then
-          docker build "$${LABELS[@]}" -t "$ECR_REPO_URI:$IMAGE_TAG" . || exit 1
+        if [ ! -f cartridge.yaml ] && [[ "$AGENT_ID" =~ ^(factory-manager|agent-builder|personal-trainer)$ ]] && [ -f "agents/staff/$AGENT_ID/cartridge.yaml" ] && [ -f "runtimes/python-staff/Dockerfile" ]; then
+          if [ -z "$SKILLS" ]; then
+            docker build "$${LABELS[@]}" -f runtimes/python-staff/Dockerfile --build-arg "STAFF_ID=$AGENT_ID" -t "$ECR_REPO_URI:$IMAGE_TAG" . || exit 1
+          else
+            docker build "$${LABELS[@]}" -f runtimes/python-staff/Dockerfile --build-arg "STAFF_ID=$AGENT_ID" -t "agent-base:$IMAGE_TAG" . || exit 1
+            bash /tmp/compose-skills.sh /tmp/factory-skills; RC=$?
+            [ "$RC" -eq 0 ] || exit "$RC"
+            docker build "$${LABELS[@]}" --build-arg "BASE=agent-base:$IMAGE_TAG" -t "$ECR_REPO_URI:$IMAGE_TAG" /tmp/factory-skills || exit 1
+          fi
         else
-          docker build "$${LABELS[@]}" -t "agent-base:$IMAGE_TAG" . || exit 1
-          bash /tmp/compose-skills.sh /tmp/factory-skills; RC=$?
-          [ "$RC" -eq 0 ] || exit "$RC"
-          docker build "$${LABELS[@]}" --build-arg "BASE=agent-base:$IMAGE_TAG" -t "$ECR_REPO_URI:$IMAGE_TAG" /tmp/factory-skills || exit 1
+          if [ -z "$SKILLS" ]; then
+            docker build "$${LABELS[@]}" -t "$ECR_REPO_URI:$IMAGE_TAG" . || exit 1
+          else
+            docker build "$${LABELS[@]}" -t "agent-base:$IMAGE_TAG" . || exit 1
+            bash /tmp/compose-skills.sh /tmp/factory-skills; RC=$?
+            [ "$RC" -eq 0 ] || exit "$RC"
+            docker build "$${LABELS[@]}" --build-arg "BASE=agent-base:$IMAGE_TAG" -t "$ECR_REPO_URI:$IMAGE_TAG" /tmp/factory-skills || exit 1
+          fi
         fi
   post_build:
     on-failure: ABORT

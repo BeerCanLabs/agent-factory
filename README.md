@@ -27,6 +27,27 @@ Landing zone is a **Draftsman interview**: pick a baseline pattern in `.draft/sd
 
 ---
 
+## Headless Neck & Hot-Swappable Heads Architecture
+
+The Agent Factory is organized into three distinct tiers:
+
+1. **Hot-Swappable Heads (Clients & Frontends):** Zero-authority presentation and orchestration overlays. Any head can be swapped, redesigned, or replaced without altering kernel services:
+   - **Factory Console**: Stateless, pass-through web SPA forwarding caller identity and session tokens.
+   - **Factory CLI (`factory`)**: Terminal client for operators, scripts, and the Factory Manager.
+   - **Agent Garrison**: 3D municipal and spatial overlay storing world state, delegating all factory operations to the neck.
+   - **External AI & MCP Clients**: Cursor, Claude Desktop, VS Code Copilot, ChatGPT, and autonomous subagents connecting via Model Context Protocol (MCP).
+2. **The Headless Neck (Typed REST & MCP Surface):** Single, typed contract generated from `@beercanlabs/factory-contract`:
+   - **Canonical REST API**: `/api/v1/*`
+   - **OpenAPI 3.1 Specification**: `GET /api/v1/openapi.json`
+   - **MCP Tool Schema**: `GET /api/v1/mcp/schema.json`
+   - **Principal MCP**: `POST /mcp` (curated `core` toolset ≤40), `/mcp/x/{toolsets}`, `/mcp/readonly`, and `/mcp/x/all`
+   - **Conversational Agent MCP**: `POST /mcp/agents/:id` and `agents_converse` tool
+   - **Run MCP**: `POST /mcp/run` for container run-token callers (`FACTORY_RUN_TOKEN`)
+   - **OAuth 2.1 AS**: `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource` (RFC 9728 PRM), `/authorize`, `/token`, `/revoke`, and `/register` with PKCE, mandatory consent screens, and multi-client `mcp:<client_id>` token families (`fk_at_` access tokens, `fk_rt_` refresh tokens).
+3. **The Factory Body (Deterministic Kernel Services & Storage):** The 10 Cast members (Registrar, Accountant, Executive, Gatekeeper, Keymaster, Bouncer, Property Manager, Inspector, Doctor, Auditor). Holds state, meters spend, enforces invariant policies, and manages container runtimes.
+
+---
+
 ## The Cast: Factory Services & First-Class Contracts
 
 Agent Factory is architected around **10 canonical services ("The Cast of Characters")** defined in [`DESIGN_AUTHORITY.md` §6.15](DESIGN_AUTHORITY.md#615-factory-service-architecture-the-cast-of-characters--first-class-contracts). Every workspace package belongs to one of these 10 intentional services (SV1) or declared platform tooling.

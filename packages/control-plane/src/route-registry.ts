@@ -307,6 +307,17 @@ const SuccessResponseSchema: JsonSchemaObject = jsonSchema.object({
   ok: jsonSchema.boolean({ description: 'Operation execution status' }),
 });
 
+const PurgeAgentResponseSchema: JsonSchemaObject = jsonSchema.object({
+  ok: jsonSchema.boolean({ description: 'Operation execution status' }),
+  id: jsonSchema.string({ description: 'Agent identifier' }),
+  action: jsonSchema.string({ description: 'Purge action outcome' }),
+  teardown: jsonSchema.object({
+    deletedRoles: jsonSchema.array(jsonSchema.string({ description: 'Deleted IAM role name' })),
+    deregisteredTaskDefinitions: jsonSchema.array(jsonSchema.string({ description: 'Deregistered task definition ARN' })),
+    deletedImageTags: jsonSchema.array(jsonSchema.string({ description: 'Deleted ECR image tag' })),
+  }, { description: 'Teardown results for cloud resources' }),
+});
+
 const AgentRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
   id: jsonSchema.string({ description: 'Agent identifier' }),
   name: jsonSchema.string({ description: 'Agent display name' }),
@@ -3449,8 +3460,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "purge_agent",
     privilege: "registry.purge",
     noRequestBody: true,
-    responseSchema: SuccessResponseSchema,
-    statusCodes: [200],
+    responseSchema: PurgeAgentResponseSchema,
+    statusCodes: [200, 400, 502],
   },
   {
     operationId: "deploy_agent",

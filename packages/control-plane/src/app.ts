@@ -40,7 +40,7 @@ import {
   type SkillSource,
   type GroupStore,
 } from '@beercanlabs/factory-registrar';
-import { AdmissionRefusedError, SYSTEM, ownMindPrefix, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
+import { AdmissionRefusedError, SYSTEM, ownMindPrefix, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type PurgeComputeResult, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
 import { ZERO_BUDGET_LIMITS, isZeroPrice, checkStanding, spendDetail, type BudgetLimits, type Price, type SpendTracker } from '@beercanlabs/factory-budget';
 import {
   AGENT_SCOPED,
@@ -110,7 +110,7 @@ import { handleSubmissions } from './submissions.js';
 import { handleInterview } from './interview-draft.js';
 import { handleLoginRoutes, sendLoginPage, verifySession, type SessionStore } from './login.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
-import { handleAgentTransfers } from './transfers.js';
+import { handleAgentTransfers, purgeUserOAuth } from './transfers.js';
 import { clearSkillBindingsForModel, handleSkillModels, skillModelsForAgent } from './skill-models.js';
 import {
   handleMcp,
@@ -6300,6 +6300,37 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       json(res, 404, { error: 'not_found' });
       return;
     }
+    if (agent.isBuiltin || BUILTIN_AGENT_IDS.has(agent.id)) {
+      json(res, 400, { error: 'builtin_agent', message: 'Built-in system agents cannot be purged' });
+      return;
+    }
+
+    // Stop active runtime compute for the agent if running
+    if (state.runtime) {
+      await state.runtime.stop(agent).catch(() => undefined);
+    }
+
+    // Teardown cloud resources (IAM roles, ECS task definitions, ECR image tags)
+    let teardown: PurgeComputeResult | undefined;
+    if (state.deployProvider?.purgeCompute) {
+      try {
+        teardown = await state.deployProvider.purgeCompute(agentId);
+      } catch (err) {
+        json(res, 502, {
+          error: 'cloud_teardown_failed',
+          message: `Cloud resource teardown failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        return;
+      }
+    }
+
+    // Purge per-agent oauth-user grants best-effort
+    try {
+      await purgeUserOAuth(state, agentId, principal.actor);
+    } catch {
+      // best-effort
+    }
+
     state.agents.delete(agentId);
     if (state.consoleReplies) {
       state.consoleReplies = state.consoleReplies.filter((r) => r.agentId !== agentId);
@@ -6328,7 +6359,7 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
         await state.grants.revoke(g.id, { by: principal.actor }).catch(() => undefined);
       }
     }
-    json(res, 200, { ok: true, id: agentId, action: 'purged' });
+    json(res, 200, { ok: true, id: agentId, action: 'purged', ...(teardown ? { teardown } : {}) });
     return;
   }
   

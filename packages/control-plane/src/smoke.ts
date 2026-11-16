@@ -22,11 +22,13 @@ function extractReplyText(result: unknown): string {
   if (typeof r.reply === 'string') return r.reply;
   if (typeof r.text === 'string') return r.text;
   if (typeof r.output === 'string') return r.output;
+  if (typeof r.message === 'string') return r.message;
   if (r.output && typeof r.output === 'object') {
     const out = r.output as Record<string, unknown>;
     if (typeof out.reply === 'string') return out.reply;
     if (typeof out.text === 'string') return out.text;
     if (typeof out.summary === 'string') return out.summary;
+    if (typeof out.message === 'string') return out.message;
   }
   return '';
 }
@@ -123,24 +125,26 @@ export async function runActivationSmoke(
     const cur = state.runs.get(hwRun.runId);
     if (cur && !isTerminal(cur.state)) {
       if (handlerRes.ok) {
-        const costUsd = handlerRes.costUsd ?? 0.001;
-        state.smokeRunSpend ??= new Map();
-        state.smokeRunSpend.set(hwRun.runId, (state.smokeRunSpend.get(hwRun.runId) ?? 0) + costUsd);
-        if (activationId) {
-          state.smokeActivationSpend ??= new Map();
-          state.smokeActivationSpend.set(activationId, (state.smokeActivationSpend.get(activationId) ?? 0) + costUsd);
+        if (agent.model !== 'deterministic') {
+          const costUsd = handlerRes.costUsd ?? 0.001;
+          state.smokeRunSpend ??= new Map();
+          state.smokeRunSpend.set(hwRun.runId, (state.smokeRunSpend.get(hwRun.runId) ?? 0) + costUsd);
+          if (activationId) {
+            state.smokeActivationSpend ??= new Map();
+            state.smokeActivationSpend.set(activationId, (state.smokeActivationSpend.get(activationId) ?? 0) + costUsd);
+          }
+          state.ledger.append({
+            timestamp: new Date().toISOString(),
+            agentId: agent.id,
+            runId: hwRun.runId,
+            type: 'llm',
+            model: agent.model ?? 'default-model',
+            costUsd,
+            inputTokens: 10,
+            outputTokens: 5,
+            actor: `run:${agent.id}`,
+          });
         }
-        state.ledger.append({
-          timestamp: new Date().toISOString(),
-          agentId: agent.id,
-          runId: hwRun.runId,
-          type: 'llm',
-          model: agent.model ?? 'default-model',
-          costUsd,
-          inputTokens: 10,
-          outputTokens: 5,
-          actor: `run:${agent.id}`,
-        });
         await finishRun(state, hwRun.runId, 'DONE', {
           actor: `run:${agent.id}`,
           result: handlerRes.result ?? { reply: 'hello world from activation smoke', status: 'ok' },
@@ -154,24 +158,26 @@ export async function runActivationSmoke(
     }
   } else if (isNoop(state.runtime)) {
     // Default mock execution under noopRuntime
-    const costUsd = 0.001;
-    state.smokeRunSpend ??= new Map();
-    state.smokeRunSpend.set(hwRun.runId, (state.smokeRunSpend.get(hwRun.runId) ?? 0) + costUsd);
-    if (activationId) {
-      state.smokeActivationSpend ??= new Map();
-      state.smokeActivationSpend.set(activationId, (state.smokeActivationSpend.get(activationId) ?? 0) + costUsd);
+    if (agent.model !== 'deterministic') {
+      const costUsd = 0.001;
+      state.smokeRunSpend ??= new Map();
+      state.smokeRunSpend.set(hwRun.runId, (state.smokeRunSpend.get(hwRun.runId) ?? 0) + costUsd);
+      if (activationId) {
+        state.smokeActivationSpend ??= new Map();
+        state.smokeActivationSpend.set(activationId, (state.smokeActivationSpend.get(activationId) ?? 0) + costUsd);
+      }
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: agent.id,
+        runId: hwRun.runId,
+        type: 'llm',
+        model: agent.model ?? 'default-model',
+        costUsd,
+        inputTokens: 10,
+        outputTokens: 5,
+        actor: `run:${agent.id}`,
+      });
     }
-    state.ledger.append({
-      timestamp: new Date().toISOString(),
-      agentId: agent.id,
-      runId: hwRun.runId,
-      type: 'llm',
-      model: agent.model ?? 'default-model',
-      costUsd,
-      inputTokens: 10,
-      outputTokens: 5,
-      actor: `run:${agent.id}`,
-    });
     await finishRun(state, hwRun.runId, 'DONE', {
       actor: `run:${agent.id}`,
       result: { reply: 'hello world from activation smoke', status: 'ok' },
@@ -247,21 +253,23 @@ export async function runActivationSmoke(
     return { ok: false, error: err, runId: hwRun.runId };
   }
 
-  const hasLlm = state.ledger.query().some((e) => e.runId === hwRun.runId && e.type === 'llm');
-  if (!hasLlm) {
-    const err = 'hello-world smoke run did not record a metered llm entry on the ledger';
-    state.runs.update(hwRun.runId, { state: 'FAILED', error: err });
-    state.ledger.append({
-      timestamp: new Date().toISOString(),
-      agentId: agent.id,
-      runId: hwRun.runId,
-      type: 'action',
-      action: 'AGENT_SMOKE_FAILED',
-      actor,
-      commit,
-      error: err,
-    });
-    return { ok: false, error: err, runId: hwRun.runId };
+  if (agent.model !== 'deterministic') {
+    const hasLlm = state.ledger.query().some((e) => e.runId === hwRun.runId && e.type === 'llm');
+    if (!hasLlm) {
+      const err = 'hello-world smoke run did not record a metered llm entry on the ledger';
+      state.runs.update(hwRun.runId, { state: 'FAILED', error: err });
+      state.ledger.append({
+        timestamp: new Date().toISOString(),
+        agentId: agent.id,
+        runId: hwRun.runId,
+        type: 'action',
+        action: 'AGENT_SMOKE_FAILED',
+        actor,
+        commit,
+        error: err,
+      });
+      return { ok: false, error: err, runId: hwRun.runId };
+    }
   }
 
   // 2. Per-adopted-skill smoke turns

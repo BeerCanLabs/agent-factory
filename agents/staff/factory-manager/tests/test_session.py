@@ -1,7 +1,10 @@
 import json
+from pathlib import Path
+import sys
 import tempfile
 import unittest
-from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import session
 from session import ModelClient, Notebook, add_turn, encode, pending_call_ids, tool_definitions, trim, turn
@@ -99,6 +102,15 @@ class TurnTest(unittest.TestCase):
         turn({"content": "hi", "tools": []}, SOUL, Notebook(Path(self.tmp.name), "person-1"), model)
         turn({"content": "hi", "tools": []}, SOUL, Notebook(Path(self.tmp.name), "person-2"), model)
         self.assertEqual(len(model.seen[1]["messages"]), 2)  # system + this person's one message only
+
+    def test_factory_smoke_turn_handles_payload_without_actor_and_records_smoke_notebook(self):
+        model = FakeModel(says("Activation smoke check reply from manager."))
+        payload = {"factoryKind": "smoke", "smoke": "hello-world", "message": "Activation smoke check", "text": "Activation smoke check"}
+        content = str(payload.get("content") or payload.get("message") or payload.get("text") or "Activation smoke check")
+        reply = turn({"content": content}, SOUL, Notebook(Path(self.tmp.name), "factory:smoke"), model)
+        self.assertEqual(reply["type"], "message")
+        self.assertEqual(reply["text"], "Activation smoke check reply from manager.")
+        self.assertEqual(len(model.seen), 1)
 
 
 class HelpersTest(unittest.TestCase):

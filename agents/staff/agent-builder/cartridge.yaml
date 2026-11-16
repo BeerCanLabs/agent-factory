@@ -2,6 +2,7 @@ schemaVersion: "1.0"
 id: agent-builder
 name: "Agent Builder"
 role: "House staff: interactive creation of configuration agents"
+model: deterministic
 prompt: "./soul.md"
 category: user
 

@@ -434,6 +434,28 @@ async function loadCloudflareEdgeConfig(
   });
   const rewrittenWebhookPathExpr = rewrittenWebhookClauses.length > 0 ? `(${rewrittenWebhookClauses.join(' or ')})` : 'false';
 
+  const rawAuthMcpPaths = tf.match(/cloudflare_auth_mcp_paths\s*=\s*\[([\s\S]*?)\]/)?.[1] ?? '';
+  const authMcpPaths = [...rawAuthMcpPaths.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(authMcpPaths.length > 0, 'cloudflare_auth_mcp_paths not found in cloudflare.tf');
+
+  const authMcpClauses = authMcpPaths.map((p) => {
+    if (p.endsWith('/*')) {
+      return `starts_with(lower(http.request.uri.path), "${p.slice(0, -1).toLowerCase()}")`;
+    }
+    const base = trimTrailingSlash(p).toLowerCase();
+    return `(lower(http.request.uri.path) eq "${base}" or starts_with(lower(http.request.uri.path), "${base}/"))`;
+  });
+  const authMcpPathExpr = authMcpClauses.length > 0 ? `(${authMcpClauses.join(' or ')})` : 'false';
+
+  const rewrittenAuthMcpClauses = authMcpPaths.map((p) => {
+    if (p.endsWith('/*')) {
+      return `starts_with(lower(http.request.uri.path), "${bypassPrefix}${p.slice(0, -1).toLowerCase()}")`;
+    }
+    const base = `${bypassPrefix}${trimTrailingSlash(p).toLowerCase()}`;
+    return `(lower(http.request.uri.path) eq "${base}" or starts_with(lower(http.request.uri.path), "${base}/"))`;
+  });
+  const rewrittenAuthMcpPathExpr = rewrittenAuthMcpClauses.length > 0 ? `(${rewrittenAuthMcpClauses.join(' or ')})` : 'false';
+
   const noTraversalExpr = hclStringAttr(tf, 'cloudflare_no_traversal_expr');
   const canonicalPathExpr = hclStringAttr(tf, 'cloudflare_fk_canonical_path_expr').replaceAll(
     '${local.cloudflare_no_traversal_expr}',
@@ -447,6 +469,8 @@ async function loadCloudflareEdgeConfig(
       .replaceAll('${local.cloudflare_fk_bypass_prefix}', bypassPrefix)
       .replaceAll('${local.cloudflare_webhook_path_expr}', webhookPathExpr)
       .replaceAll('${local.cloudflare_rewritten_webhook_path_expr}', rewrittenWebhookPathExpr)
+      .replaceAll('${local.cloudflare_auth_mcp_path_expr}', authMcpPathExpr)
+      .replaceAll('${local.cloudflare_rewritten_auth_mcp_path_expr}', rewrittenAuthMcpPathExpr)
       .replaceAll('${local.cloudflare_no_traversal_expr}', noTraversalExpr)
       .replaceAll('${local.cloudflare_fk_canonical_path_expr}', canonicalPathExpr)
       .replaceAll('${local.cloudflare_fk_bearer_expr}', fkBearerExpr);
@@ -481,7 +505,26 @@ async function loadCloudflareEdgeConfig(
   const rewritePathValueExpr = resolveExpr(JSON.parse(`"${rewritePathExprMatch[1]}"`) as string);
 
   const wafBody = ruleset('api_keys_bypass_guard');
-  const wafExpr = resolveExpr(hclStringAttr(wafBody, 'expression'));
+  const ruleHeaderRe = /\{\s*enabled\s*=\s*true[\s\S]*?action\s*=\s*"([^"]+)"[\s\S]*?expression\s*=\s*"((?:\\.|[^"\\])*)"/g;
+  const wafRules = [...wafBody.matchAll(ruleHeaderRe)].map((m) => ({
+    action: m[1],
+    expression: resolveExpr(JSON.parse(`"${m[2]}"`) as string),
+  }));
+  const wafBlockRules = wafRules.filter((r) => r.action === 'block');
+  assert.ok(wafBlockRules.length >= 2, 'api_keys_bypass_guard must declare at least 2 block rules (traversal and fk guard)');
+  const botSkipRule = wafRules.find((r) => r.action === 'skip');
+  assert.ok(botSkipRule, 'api_keys_bypass_guard must declare a skip rule');
+
+  const ratelimitBody = ruleset('auth_mcp_ratelimit');
+  const rateLimitExprMatch = ratelimitBody.match(/expression\s*=\s*"((?:\\.|[^"\\])*)"/);
+  assert.ok(rateLimitExprMatch, 'missing expression in auth_mcp_ratelimit');
+  const rateLimitExpr = resolveExpr(JSON.parse(`"${rateLimitExprMatch[1]}"`) as string);
+
+  const authMcpBypassResource = resources.find(
+    (b) => b.type === 'cloudflare_zero_trust_access_application' && b.name === 'auth_mcp_bypass',
+  );
+  assert.ok(authMcpBypassResource, 'missing cloudflare_zero_trust_access_application.auth_mcp_bypass');
+  const authMcpDestUris = authMcpPaths.map((p) => `${host}${p}`);
 
   const apiKeysBypassResource = resources.find(
     (b) => b.type === 'cloudflare_zero_trust_access_application' && b.name === 'api_keys_bypass',
@@ -495,10 +538,15 @@ async function loadCloudflareEdgeConfig(
 
   const workerJsMatch = tf.match(/cloudflare_fk_strip_worker_js\s*=\s*<<-?EOT\r?\n([\s\S]*?)\r?\n\s*EOT/);
   assert.ok(workerJsMatch, 'missing cloudflare_fk_strip_worker_js heredoc in cloudflare.tf');
-  const workerJs = workerJsMatch[1].replaceAll(
-    '${jsonencode([for p in var.cloudflare_webhook_paths : lower(p)])}',
-    JSON.stringify(webhookPaths.map((p) => p.toLowerCase())),
-  );
+  const workerJs = workerJsMatch[1]
+    .replaceAll(
+      '${jsonencode([for p in var.cloudflare_webhook_paths : lower(p)])}',
+      JSON.stringify(webhookPaths.map((p) => p.toLowerCase())),
+    )
+    .replaceAll(
+      '${jsonencode([for p in local.cloudflare_auth_mcp_paths : lower(p)])}',
+      JSON.stringify(authMcpPaths.map((p) => p.toLowerCase())),
+    );
   const workerModule = (await import(
     `data:text/javascript;base64,${Buffer.from(workerJs).toString('base64')}`
   )) as { default: { fetch(req: Request): Promise<Response> } };
@@ -506,6 +554,7 @@ async function loadCloudflareEdgeConfig(
   const apps: Array<{ name: string; kind: 'root' | 'bypass'; destinations: string[] }> = [
     { name: 'factory', kind: 'root', destinations: [`${host}/*`] },
     { name: 'webhooks_bypass', kind: 'bypass', destinations: webhookPaths.map((p) => `${host}${p}`) },
+    { name: 'auth_mcp_bypass', kind: 'bypass', destinations: authMcpDestUris },
     { name: 'api_keys_bypass', kind: 'bypass', destinations: [apiKeysBypassDestUri] },
   ];
 
@@ -523,8 +572,10 @@ async function loadCloudflareEdgeConfig(
     }
 
     // Phase 8: WAF Custom Rules (`http_request_firewall_custom`)
-    if (evalWirefilter(wafExpr, { host: req.host, path: currentPath, headers: req.headers })) {
-      return { action: 'waf_block', bypassesInteractiveAccess: false };
+    for (const rule of wafBlockRules) {
+      if (evalWirefilter(rule.expression, { host: req.host, path: currentPath, headers: req.headers })) {
+        return { action: 'waf_block', bypassesInteractiveAccess: false };
+      }
     }
 
     // Phase 11: Cloudflare Access application check (most-specific destination wins)
@@ -614,7 +665,7 @@ async function loadCloudflareEdgeConfig(
     };
   }
 
-  return { apiKeyBypassPaths, apiKeysBypassDestUri, workerRoutePattern, evaluate };
+  return { apiKeyBypassPaths, authMcpPaths, apiKeysBypassDestUri, workerRoutePattern, botSkipExpr: botSkipRule.expression, rateLimitExpr, evaluate };
 }
 
 describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys on /api/v1 and /mcp (and webhooks)', () => {
@@ -703,17 +754,33 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
       bypassing.map((r) => `${r.type}.${r.name}`).sort(),
       [
         'cloudflare_zero_trust_access_application.api_keys_bypass',
+        'cloudflare_zero_trust_access_application.auth_mcp_bypass',
         'cloudflare_zero_trust_access_application.webhooks_bypass',
       ],
-      'only api_keys_bypass and webhooks_bypass may declare decision = "bypass"',
+      'only api_keys_bypass, auth_mcp_bypass, and webhooks_bypass may declare decision = "bypass"',
     );
 
     const host = 'factory.example.com';
-    const { apiKeyBypassPaths, apiKeysBypassDestUri, workerRoutePattern } = await loadCloudflareEdgeConfig(host);
+    const { apiKeyBypassPaths, authMcpPaths, apiKeysBypassDestUri, workerRoutePattern } = await loadCloudflareEdgeConfig(host);
     assert.deepEqual(
       apiKeyBypassPaths,
-      ['/api/v1', '/api/v1/*', '/mcp'],
-      'eligible external fk_ rewrite paths must be strictly /api/v1, /api/v1/*, and /mcp',
+      ['/api/v1', '/api/v1/*'],
+      'eligible external fk_ rewrite paths must be strictly /api/v1 and /api/v1/*',
+    );
+    assert.deepEqual(
+      authMcpPaths,
+      [
+        '/login',
+        '/api/v1/auth/*',
+        '/.well-known/oauth-protected-resource',
+        '/.well-known/oauth-authorization-server',
+        '/authorize',
+        '/token',
+        '/revoke',
+        '/register',
+        '/mcp',
+      ],
+      'auth_mcp_bypass must cover OAuth AS, login, and MCP endpoints',
     );
     assert.equal(
       apiKeysBypassDestUri,
@@ -778,8 +845,8 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
     const rulesets = resources.filter((b) => b.type === 'cloudflare_ruleset');
     assert.deepEqual(
       rulesets.map((r) => r.name).sort(),
-      ['api_keys_bypass_guard', 'api_keys_bypass_rewrite', 'api_keys_header_sanitize'],
-      'must declare rewrite, WAF guard, and late header sanitize rulesets (and no http_request_dynamic_redirect ruleset)',
+      ['api_keys_bypass_guard', 'api_keys_bypass_rewrite', 'api_keys_header_sanitize', 'auth_mcp_ratelimit'],
+      'must declare rewrite, WAF guard, late header sanitize, and rate limit rulesets (and no http_request_dynamic_redirect ruleset)',
     );
     assert.doesNotMatch(cfTf, /http_request_dynamic_redirect|\/cdn-cgi\/access\/login/, 'must rely on native Cloudflare Access login redirects');
 
@@ -790,7 +857,17 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
 
     const guard = rulesets.find((r) => r.name === 'api_keys_bypass_guard')!;
     assert.equal(hclStringAttr(guard.body, 'phase'), 'http_request_firewall_custom');
-    assert.equal(hclStringAttr(guard.body, 'action'), 'block');
+    assert.match(guard.body, /action\s*=\s*"block"/);
+    assert.match(guard.body, /action\s*=\s*"skip"/);
+    assert.match(guard.body, /http_request_sbfm/);
+    assert.match(guard.body, /"bic"/);
+    assert.match(guard.body, /"hot"/);
+
+    const ratelimit = rulesets.find((r) => r.name === 'auth_mcp_ratelimit')!;
+    assert.equal(hclStringAttr(ratelimit.body, 'phase'), 'http_ratelimit');
+    assert.equal(hclStringAttr(ratelimit.body, 'action'), 'block');
+    assert.match(ratelimit.body, /cf\.colo\.id/);
+    assert.match(ratelimit.body, /ip\.src/);
 
     const sanitize = rulesets.find((r) => r.name === 'api_keys_header_sanitize')!;
     assert.equal(hclStringAttr(sanitize.body, 'phase'), 'http_request_late_transform');
@@ -802,21 +879,20 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
     assert.ok(resources.find((b) => b.type === 'cloudflare_workers_route' && b.name === 'api_keys_bypass_strip'));
   });
 
-  it('evaluates edge pipeline: only Bearer fk_ on /api/v1, /api/v1/*, /mcp (and webhooks) bypasses Access while forged cookies are rejected and non-fk_ flows stay on root Access', async () => {
+  it('evaluates edge pipeline: only Bearer fk_ on /api/v1, /api/v1/*, auth_mcp_bypass, and webhooks bypass Access while forged cookies are rejected and non-fk_ flows stay on root Access', async () => {
     const host = 'factory.example.com';
-    const { evaluate } = await loadCloudflareEdgeConfig(host);
+    const { evaluate, botSkipExpr, rateLimitExpr } = await loadCloudflareEdgeConfig(host);
 
-    // 1. Positive cases: valid `Bearer fk_<token>` on `/api/v1`, `/api/v1/*`, and `/mcp` rewrites through `/.cf-fk-bypass`,
+    // 1. Positive cases: valid `Bearer fk_<token>` on `/api/v1` and `/api/v1/*` rewrites through `/.cf-fk-bypass`,
     //    bypasses interactive Access, strips spoofed `cf-access-*` headers, and arrives at origin with the original path & query!
     for (const { path, query } of [
       { path: '/api/v1', query: '' },
       { path: '/api/v1/whoami', query: '' },
       { path: '/api/v1/agents/higgins', query: '?verbose=1' },
       { path: '/api/v1/health', query: '' },
-      { path: '/mcp', query: '' },
     ]) {
       const res = await evaluate({
-        method: path === '/mcp' ? 'POST' : 'GET',
+        method: 'GET',
         host,
         path,
         query,
@@ -854,15 +930,100 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
       assert.equal(res.forwardedHeaders['cf-access-jwt-assertion'], undefined);
     }
 
-    // 3. Keyless unauthenticated requests (including OAuth callbacks with query strings) stay on root `factory` Access
+    // 3. Path-scoped Cloudflare Access bypass for external OAuth 2.1 AS, login, and MCP endpoints (A1, GAP-252, TSK-341):
+    // Unauthenticated and Bearer fk_ requests on /mcp* reach origin via auth_mcp_bypass with spoofed cf-access-* stripped!
+    for (const mcpPath of ['/mcp', '/mcp/x/spend', '/mcp/readonly', '/mcp/agents/higgins', '/mcp/run']) {
+      const anon = await evaluate({
+        method: 'POST',
+        host,
+        path: mcpPath,
+        headers: {
+          'cf-access-jwt-assertion': 'forged.jwt.value',
+          'cf-access-authenticated-user-email': 'spoof@example.com',
+        },
+      });
+      assert.equal(anon.action, 'origin', `expected unauthenticated ${mcpPath} to reach origin via auth_mcp_bypass`);
+      assert.equal(anon.app, 'auth_mcp_bypass');
+      assert.equal(anon.decision, 'bypass');
+      assert.equal(anon.bypassesInteractiveAccess, true);
+      assert.equal(anon.originPath, mcpPath);
+      assert.equal(anon.forwardedHeaders['cf-access-jwt-assertion'], undefined);
+      assert.equal(anon.forwardedHeaders['cf-access-authenticated-user-email'], undefined);
+
+      const auth = await evaluate({
+        method: 'POST',
+        host,
+        path: mcpPath,
+        headers: {
+          authorization: 'Bearer fk_example_key_1',
+          'cf-access-jwt-assertion': 'forged.jwt.value',
+          'cf-access-authenticated-user-email': 'spoof@example.com',
+        },
+      });
+      assert.equal(auth.action, 'origin', `expected Bearer fk_ on ${mcpPath} to reach origin via auth_mcp_bypass`);
+      assert.equal(auth.app, 'auth_mcp_bypass');
+      assert.equal(auth.decision, 'bypass');
+      assert.equal(auth.bypassesInteractiveAccess, true);
+      assert.equal(auth.originPath, mcpPath);
+      assert.deepEqual(auth.forwardedHeaders['authorization'], ['Bearer fk_example_key_1']);
+      assert.equal(auth.forwardedHeaders['cf-access-jwt-assertion'], undefined);
+      assert.equal(auth.forwardedHeaders['cf-access-authenticated-user-email'], undefined);
+    }
+
+    // External OAuth 2.1 AS, PRM, and login endpoints bypass interactive Access directly via auth_mcp_bypass
+    for (const authPath of [
+      '/login',
+      '/api/v1/auth/google/start',
+      '/api/v1/auth/google/callback?code=1&state=2',
+      '/api/v1/auth/register',
+      '/.well-known/oauth-protected-resource',
+      '/.well-known/oauth-protected-resource/mcp',
+      '/.well-known/oauth-authorization-server',
+      '/authorize',
+      '/token',
+      '/revoke',
+      '/register',
+    ]) {
+      const qIndex = authPath.indexOf('?');
+      const p = qIndex >= 0 ? authPath.slice(0, qIndex) : authPath;
+      const q = qIndex >= 0 ? authPath.slice(qIndex) : '';
+      const res = await evaluate({
+        method: 'GET',
+        host,
+        path: p,
+        query: q,
+        headers: {
+          'cf-access-jwt-assertion': 'forged.jwt.value',
+          'cf-access-authenticated-user-email': 'spoof@example.com',
+        },
+      });
+      assert.equal(res.action, 'origin', `expected ${authPath} to reach origin via auth_mcp_bypass`);
+      assert.equal(res.app, 'auth_mcp_bypass');
+      assert.equal(res.decision, 'bypass');
+      assert.equal(res.bypassesInteractiveAccess, true);
+      assert.equal(res.originPath, p);
+      assert.equal(res.originQuery, q);
+      assert.equal(res.forwardedHeaders['cf-access-jwt-assertion'], undefined);
+      assert.equal(res.forwardedHeaders['cf-access-authenticated-user-email'], undefined);
+    }
+
+    // 4. Keyless unauthenticated requests on non-bypassed paths (outside webhooks and auth/mcp) stay on root `factory` Access
     //    so Cloudflare Access issues a real `<team>.cloudflareaccess.com` login redirect preserving path & query string (F3, S5b).
     for (const { path, query } of [
+      { path: '/', query: '' },
+      { path: '/ui', query: '' },
+      { path: '/healthz', query: '' },
+      { path: '/metrics', query: '' },
+      { path: '/.well-known/factory-cli', query: '' },
       { path: '/api/v1', query: '' },
       { path: '/api/v1/whoami', query: '' },
+      { path: '/api/v1/agents', query: '' },
+      { path: '/api/v1/authz/check', query: '' },
+      { path: '/api/v1/auth-migration/readiness', query: '' },
       { path: '/api/v1/connections/google/callback', query: '?code=oauth_code_1&state=nonce_2' },
-      { path: '/api/v1/health', query: '' },
-      { path: '/mcp', query: '' },
-      { path: '/mcp/tools', query: '' },
+      { path: '/mcp-other', query: '' },
+      { path: '/login2', query: '' },
+      { path: '/token2', query: '' },
     ]) {
       const res = await evaluate({ host, path, query });
       assert.equal(res.action, 'access_challenge', `expected keyless request on ${path} to hit root Access challenge`);
@@ -871,31 +1032,53 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
       assert.equal(res.bypassesInteractiveAccess, false);
     }
 
-    // 4. Forged `Cookie: CF_Authorization=eyJ...`, non-fk_ credentials, malformed fk_ headers, traversal tricks,
+    // 5. Traversal attempts on any prefix are blocked by WAF (waf_block, bypassesInteractiveAccess: false)!
+    for (const travPath of [
+      '/mcp/../ui',
+      '/mcp/%2e%2e/ui',
+      '/api/v1/auth/../whoami',
+      '/login/../ui',
+      '/.well-known/oauth-protected-resource/../../ui',
+      '/api/v1/../ui',
+      '/api/v1/%2e%2e/ui',
+      '/api/v1/%2E%2E/ui',
+      '/api/v1/agents%2f..%2fui',
+      '/api/v1/agents%5c..%5cui',
+    ]) {
+      const res = await evaluate({ host, path: travPath, headers: { authorization: 'Bearer fk_example_key_1' } });
+      assert.equal(res.action, 'waf_block', `expected traversal ${travPath} to be blocked by WAF`);
+      assert.equal(res.bypassesInteractiveAccess, false);
+    }
+
+    // 6. Bot-challenge skip rule matches /mcp*, /token, /authorize, /.well-known/oauth-protected-resource and NOT /ui or /api/v1/agents
+    for (const allowed of ['/mcp', '/mcp/x/all', '/token', '/authorize', '/.well-known/oauth-protected-resource']) {
+      assert.equal(evalWirefilter(botSkipExpr, { host, path: allowed }), true, `expected bot skip rule to match ${allowed}`);
+    }
+    for (const disallowed of ['/ui', '/api/v1/agents']) {
+      assert.equal(evalWirefilter(botSkipExpr, { host, path: disallowed }), false, `expected bot skip rule NOT to match ${disallowed}`);
+    }
+
+    // 7. Rate-limit ruleset matches /token, /register, /authorize, /api/v1/auth/register, /mcp
+    for (const rlPath of ['/token', '/register', '/authorize', '/api/v1/auth/register', '/mcp']) {
+      assert.equal(evalWirefilter(rateLimitExpr, { host, path: rlPath }), true, `expected rate-limit rule to match ${rlPath}`);
+    }
+    for (const nonRlPath of ['/ui', '/api/v1/whoami']) {
+      assert.equal(evalWirefilter(rateLimitExpr, { host, path: nonRlPath }), false, `expected rate-limit rule NOT to match ${nonRlPath}`);
+    }
+
+    // 8. Forged `Cookie: CF_Authorization=eyJ...`, non-fk_ credentials, malformed fk_ headers,
     //    and direct external `/.cf-fk-bypass*` probes NEVER reach origin or bypass interactive Access (F2, F3)!
     const rejectedCases: Array<{ label: string; path: string; headers?: Record<string, string | string[]> }> = [
       { label: 'forged JWT-shaped CF_Authorization cookie on /api/v1/whoami', path: '/api/v1/whoami', headers: { cookie: 'CF_Authorization=eyJforged.payload.sig' } },
       { label: 'forged JWT-shaped CF_Authorization cookie on /api/v1/agents', path: '/api/v1/agents', headers: { cookie: 'CF_Authorization=eyJhbGciOiJSUzI1NiJ9.e30.forged' } },
-      { label: 'forged JWT-shaped CF_Authorization cookie on /api/v1//health', path: '/api/v1//health', headers: { cookie: 'CF_Authorization=eyJforged' } },
-      { label: 'forged JWT-shaped CF_Authorization cookie on /mcp', path: '/mcp', headers: { cookie: 'CF_Authorization=eyJforged' } },
       { label: 'legacy non-fk bearer', path: '/api/v1/whoami', headers: { authorization: 'Bearer legacy_shared_token' } },
-      { label: 'OIDC JWT bearer without fk_', path: '/mcp', headers: { authorization: 'Bearer eyJhbGciOiJSUzI1NiJ9.e30.sig' } },
       { label: 'empty fk_ suffix', path: '/api/v1/whoami', headers: { authorization: 'Bearer fk_' } },
       { label: 'whitespace-only fk_ suffix', path: '/api/v1/whoami', headers: { authorization: 'Bearer fk_   ' } },
-      { label: 'internal space after fk_ token', path: '/mcp', headers: { authorization: 'Bearer fk_abc extra' } },
       { label: 'lowercase bearer scheme', path: '/api/v1/agents', headers: { authorization: 'bearer fk_example_key_1' } },
       { label: 'Basic auth scheme', path: '/api/v1/agents', headers: { authorization: 'Basic dXNlcjpwYXNz' } },
-      { label: 'bare fk_ without Bearer prefix', path: '/mcp', headers: { authorization: 'fk_example_key_1' } },
       { label: 'duplicate Authorization header smuggling', path: '/api/v1/whoami', headers: { authorization: ['Bearer fk_example_key_1', 'Bearer other'] } },
       { label: 'unconfigured CF-Access-Client-Id without fk_ key', path: '/api/v1/whoami', headers: { 'cf-access-client-id': 'id', 'cf-access-client-secret': 'sec', authorization: 'Bearer old_tok' } },
-      { label: 'subpath under /mcp', path: '/mcp/subpath', headers: { authorization: 'Bearer fk_example_key_1' } },
       { label: 'uppercase /API/V1 path', path: '/API/V1/whoami', headers: { authorization: 'Bearer fk_example_key_1' } },
-      { label: 'uppercase /MCP path', path: '/MCP', headers: { authorization: 'Bearer fk_example_key_1' } },
-      { label: 'literal dot-segment traversal /api/v1/../ui', path: '/api/v1/../ui', headers: { authorization: 'Bearer fk_example_key_1' } },
-      { label: 'encoded dot-segment traversal /api/v1/%2e%2e/ui', path: '/api/v1/%2e%2e/ui', headers: { authorization: 'Bearer fk_example_key_1' } },
-      { label: 'uppercase encoded traversal /api/v1/%2E%2E/ui', path: '/api/v1/%2E%2E/ui', headers: { authorization: 'Bearer fk_example_key_1' } },
-      { label: 'encoded slash /api/v1/agents%2f..%2fui', path: '/api/v1/agents%2f..%2fui', headers: { authorization: 'Bearer fk_example_key_1' } },
-      { label: 'encoded backslash /api/v1/agents%5c..%5cui', path: '/api/v1/agents%5c..%5cui', headers: { authorization: 'Bearer fk_example_key_1' } },
       { label: 'direct probe /.cf-fk-bypass/ui with fk_ key', path: '/.cf-fk-bypass/ui', headers: { authorization: 'Bearer fk_example_key_1' } },
       { label: 'direct probe /.cf-fk-bypass/healthz with fk_ key', path: '/.cf-fk-bypass/healthz', headers: { authorization: 'Bearer fk_example_key_1' } },
       { label: 'direct probe /.cf-fk-bypass/ root with fk_ key', path: '/.cf-fk-bypass/', headers: { authorization: 'Bearer fk_example_key_1' } },
@@ -903,6 +1086,8 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
       { label: 'direct probe /.cf-fk-bypass/api/v1/hooks/github with fk_ key', path: '/.cf-fk-bypass/api/v1/hooks/github', headers: { authorization: 'Bearer fk_example_key_1' } },
       { label: 'direct probe uppercase /.CF-FK-BYPASS/api/v1/whoami with fk_ key', path: '/.CF-FK-BYPASS/api/v1/whoami', headers: { authorization: 'Bearer fk_example_key_1' } },
       { label: 'direct probe /.cf-fk-bypass/api/v1/../ui with fk_ key', path: '/.cf-fk-bypass/api/v1/../ui', headers: { authorization: 'Bearer fk_example_key_1' } },
+      { label: 'direct probe /.cf-fk-bypass/mcp with fk_ key', path: '/.cf-fk-bypass/mcp', headers: { authorization: 'Bearer fk_example_key_1' } },
+      { label: 'direct probe /.cf-fk-bypass/api/v1/auth/register with fk_ key', path: '/.cf-fk-bypass/api/v1/auth/register', headers: { authorization: 'Bearer fk_example_key_1' } },
     ];
     for (const c of rejectedCases) {
       const res = await evaluate({ host, path: c.path, headers: c.headers });
@@ -922,11 +1107,12 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
 
     // 6. Genuine cryptographically verified Access browser sessions reach `/ui`, `/api/v1/whoami`, `/api/v1/health`,
     //    and `POST /mcp` via the root `factory` Access application (`bypassesInteractiveAccess: false`) with Access JWT intact!
+    // 9. Genuine cryptographically verified Access browser sessions reach `/ui`, `/api/v1/whoami`, and `/api/v1/health`
+    //    via the root `factory` Access application (`bypassesInteractiveAccess: false`) with Access JWT intact!
     for (const { method, path } of [
       { method: 'GET', path: '/ui' },
       { method: 'GET', path: '/api/v1/whoami' },
       { method: 'GET', path: '/api/v1/health' },
-      { method: 'POST', path: '/mcp' },
     ]) {
       const res = await evaluate({
         method,
@@ -945,12 +1131,12 @@ describe('A1 / A2 / S5b Cloudflare Access bypass is restricted to fk_ API keys o
       assert.deepEqual(res.forwardedHeaders['cf-access-jwt-assertion'], ['verified.cloudflare.jwt']);
     }
 
-    // 7. Transitional `CF-Access-Client-Id` service tokens work on `/api/v1/*` and `/mcp` (`decision = "non_identity"`)
-    //    ONLY when configured in `var.cloudflare_access_service_token_ids` (F1, D9).
+    // 10. Transitional `CF-Access-Client-Id` service tokens work on `/api/v1/*` (`decision = "non_identity"`)
+    //     ONLY when configured in `var.cloudflare_access_service_token_ids` (F1, D9).
     const withTransitionalToken = await loadCloudflareEdgeConfig(host, ['/api/v1/hooks/*'], {
       serviceTokenIds: ['example-token-id-1'],
     });
-    for (const path of ['/api/v1/whoami', '/mcp']) {
+    for (const path of ['/api/v1/whoami', '/api/v1/agents']) {
       const allowed = await withTransitionalToken.evaluate({
         host,
         path,
