@@ -332,6 +332,7 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'POST', pattern: '/api/v1/runs/:id/cancel', privilege: 'runs.cancel', description: 'Cancel active run' },
 
   // Run-token authenticated agent runtime endpoints (Exceptions)
+  { method: 'PUT', pattern: '/api/v1/fleet/state/ops', exception: 'run-token', description: "Report the fleet's deploy state (an ops agent's live run token, GAP-268)" },
   { method: 'GET', pattern: '/api/v1/runs/:id/approved-models', exception: 'run-token', description: 'Read approved models list (run token)' },
   { method: 'GET', pattern: '/api/v1/runs/:id/subagents', exception: 'run-token', description: 'List allowed subagents (run token)' },
   { method: 'POST', pattern: '/api/v1/runs/:id/subagents/spawn', exception: 'run-token', description: 'Spawn subagent run (run token)' },

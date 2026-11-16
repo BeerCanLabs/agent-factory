@@ -195,9 +195,9 @@ const TOOLS: ToolSpec[] = [
   { name: 'get_fleet_state', description: "Read the fleet's go/stop state (status, coder_app_ready, reason)", privilege: 'agents.read', args: {} },
   {
     name: 'set_fleet_state',
-    description: "Set the fleet's go/stop state: status is running, deploy-freeze, deploying, prod-testing, rolled-back or paused",
+    description: "Set the fleet's go/stop state: status is running, paused or deploy-freeze; opsAgents lists the registered agents that report deploy state; ops (null or {state, reason}) sets or clears that report, rolled-back included, and needs force: true while the deploying run is live",
     privilege: 'fleet.state.set',
-    args: { status: { type: 'string' }, coder_app_ready: { type: 'boolean' }, reason: { type: 'string' } },
+    args: { status: { type: 'string' }, coder_app_ready: { type: 'boolean' }, reason: { type: 'string' }, opsAgents: { type: 'array', items: { type: 'string' } }, ops: { type: 'object' }, force: { type: 'boolean' } },
     required: ['status'],
   },
   {
@@ -420,7 +420,7 @@ async function dispatchLegacyTool(
   if (name === 'list_agents') return [...state.agents.values()].filter((a) => !a.ephemeral).map((a) => enrichAgent(state, a));
   if (name === 'query_ledger') return state.ledger.query({ agent: typeof args.agent === 'string' ? args.agent : undefined });
   if (name === 'get_run') return (typeof args.runId === 'string' ? state.runs.get(args.runId) : undefined) ?? { error: 'not_found' };
-  if (name === 'get_fleet_state') return fleetStateOf(state);
+  if (name === 'get_fleet_state') return fleetStateOf(state, principal);
   if (name === 'list_approvals') {
     const kind = typeof args.kind === 'string' && args.kind ? args.kind : undefined;
     if (kind && !APPROVAL_KINDS.includes(kind as ApprovalKind)) return { error: `kind must be one of ${APPROVAL_KINDS.join(', ')}` };
