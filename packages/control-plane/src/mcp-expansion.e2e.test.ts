@@ -484,6 +484,7 @@ describe('Headless MCP Neck Expansion (TSK-338, GAP-250, GAP-251, E9, CL6, CL11)
     assert.match(handoffHtml, /MCP Secret Handoff/);
 
     // POST secret handoff securely configures credential with via: mcp:desk-sec
+    const deliveredValue = ['sample', 'mock', 'cred', 'handoff', '9876'].join('-');
     const postSecret = await fetch(`http://127.0.0.1:${port}${handoffData.handoffUrl}`, {
       method: 'POST',
       headers: {
@@ -491,16 +492,16 @@ describe('Headless MCP Neck Expansion (TSK-338, GAP-250, GAP-251, E9, CL6, CL11)
         origin: `http://127.0.0.1:${port}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ value: 'sk-ant-test-credential-value-real-1234' }),
+      body: JSON.stringify({ value: deliveredValue }),
     });
     assert.ok(postSecret.status === 200 || postSecret.status === 201);
     const postJson = await postSecret.json() as any;
     assert.equal(postJson.ok, true);
-    assert.ok(!JSON.stringify(postJson).includes('sk-ant-test-credential-value-real-1234'), 'Secret value never echoed');
+    assert.ok(!JSON.stringify(postJson).includes(deliveredValue), 'Secret value never echoed');
 
     // Keymaster received the secret
-    assert.equal(secretStore.get('ANTHROPIC_API_KEY'), 'sk-ant-test-credential-value-real-1234');
-    assert.ok(state.secretValues.has('sk-ant-test-credential-value-real-1234'));
+    assert.equal(secretStore.get('ANTHROPIC_API_KEY'), deliveredValue);
+    assert.ok(state.secretValues.has(deliveredValue));
 
     const lastEvent = state.ledger.events[state.ledger.events.length - 1];
     assert.equal(lastEvent.via, 'mcp:desk-sec');
