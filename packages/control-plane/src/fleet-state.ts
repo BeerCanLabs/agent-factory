@@ -1,5 +1,5 @@
 /**
- * GAP-252: the fleet's one go/stop state, the resource a fleet's `SDLC_GLOBAL_STATE_URL` points at.
+ * GAP-260: the fleet's one go/stop state, the resource a fleet's `SDLC_GLOBAL_STATE_URL` points at.
  *
  * `GET /api/v1/fleet/state` answers any live run (its run token) or a person with `agents.read`:
  * `{status, coder_app_ready, reason, ...}`. `PUT` (and MCP `set_fleet_state`) is an admin's alone (`fleet.state.set`).

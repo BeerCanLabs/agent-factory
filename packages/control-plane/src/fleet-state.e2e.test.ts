@@ -1,4 +1,4 @@
-// DESIGN_AUTHORITY.md GAP-252: the fleet's go/stop state is one factory resource. It reads paused until an admin sets
+// DESIGN_AUTHORITY.md GAP-260: the fleet's go/stop state is one factory resource. It reads paused until an admin sets
 // it, any live run reads it with its run token (a fleet's SDLC_GLOBAL_STATE_URL), and only an admin changes it.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,7 +20,7 @@ const VIEWER = 'viewer-fleet-state-e2e';
 const OPERATOR = 'operator-fleet-state-e2e';
 const ADMIN = 'admin-fleet-state-e2e';
 
-describe('GAP-252 fleet go/stop state', { concurrency: false }, () => {
+describe('GAP-260 fleet go/stop state', { concurrency: false }, () => {
   let cp: http.Server;
   let port = 0;
   let state: FactoryState;

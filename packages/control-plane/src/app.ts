@@ -241,7 +241,7 @@ export type FactoryState = {
   schedules?: ScheduleStore;
   /** GAP-088: which person a Discord user is, set by an admin. Absent: nobody is linked. */
   identityLinks?: IdentityLinkStore;
-  /** GAP-252: the fleet's go/stop state; in memory (reads paused until set) when absent. */
+  /** GAP-260: the fleet's go/stop state; in memory (reads paused until set) when absent. */
   fleetState?: FleetStateStore;
   /** S8: set once the shadow comparison showed zero mismatches and link roles were stripped (grants-only). */
   authCutover?: boolean;
@@ -3222,7 +3222,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (await handleRuntimeRoutes(state, req, res, path)) return;
   if (await handleAgentBundle(state, req, res, path)) return;
   if (path.startsWith('/api/v1/ingress/') && (await handleChannelApprovals(state, req, res, path))) return;
-  // GAP-252: the fleet's go/stop state.
+  // GAP-260: the fleet's go/stop state.
   if (path === '/api/v1/fleet/state' && (await handleFleetState(state, req, res, path))) return;
   if (await handleRoleAssignments(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;

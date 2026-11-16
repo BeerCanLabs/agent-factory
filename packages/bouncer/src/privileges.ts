@@ -124,7 +124,7 @@ export const PRIVILEGES = [
   'subscriptions.manage',
   // TSK-332 (M5(4)): personal BYOM subscription connections, held by fleet content.submit roles, personal-agent owners, and admin.
   'subscriptions.own',
-  // TSK-339 (GAP-252): the fleet's one go/stop state (running, deploy-freeze, ..., paused), set only by an admin.
+  // TSK-346 (GAP-260): the fleet's one go/stop state (running, deploy-freeze, ..., paused), set only by an admin.
   'fleet.state.set',
 ] as const;
 
