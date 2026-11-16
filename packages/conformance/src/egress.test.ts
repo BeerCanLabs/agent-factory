@@ -73,8 +73,11 @@ describe('E6 network-enforced (AWS & GCP landing zones)', () => {
   it('the agent security group has no open egress, and Terraform owns its whole egress list (AWS)', () => {
     // Inline egress is authoritative: an apply revokes any rule added outside Terraform. A separate egress-rule
     // resource on this group would make the list non-authoritative again (and fight the inline blocks).
-    for (const m of network.matchAll(/resource "aws_vpc_security_group_egress_rule" "[^"]+" \{[\s\S]*?\n\}/g)) {
-      assert.doesNotMatch(m[0], /security_group_id\s*=\s*aws_security_group\.agents\.id/, m[0]);
+    // Every AWS landing-zone file, not only network.tf: a rule anywhere would bypass the authoritative list.
+    for (const f of files('landing-zones/aws', (p) => p.endsWith('.tf'))) {
+      for (const m of read(f).matchAll(/resource "(aws_vpc_security_group_egress_rule|aws_security_group_rule)" "[^"]+" \{[\s\S]*?\n\}/g)) {
+        assert.doesNotMatch(m[0], /security_group_id\s*=\s*aws_security_group\.agents\.id/, `${f}: ${m[0]}`);
+      }
     }
     const sg = network.match(/resource "aws_security_group" "agents" \{[\s\S]*?\n\}/)?.[0] ?? '';
     assert.ok(sg, 'agent security group not found');

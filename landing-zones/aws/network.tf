@@ -1,8 +1,9 @@
 # Two tiers.
 #   service subnets (public): ALB, control plane, gatekeeper-egress, gatekeeper-ingress. Internet via the IGW.
 #   agent subnets (private):  agent tasks only. NO NAT, NO IGW route. Their reachable set is the
-#                             control plane, the gatekeeper-egress, and account-locked AWS endpoints needed to
-#                             start a task (ECR, S3 layers + mind, Secrets Manager, Logs).
+#                             control plane, the gatekeeper-egress, and the AWS endpoints needed to start a task
+#                             (ECR, S3 layers + mind, Secrets Manager, Logs). Only the S3 endpoint's policy is
+#                             locked to this account today; the interface endpoints allow any principal (GAP-266).
 resource "aws_vpc" "factory" {
   cidr_block           = "10.42.0.0/16"
   enable_dns_hostnames = true
@@ -86,8 +87,9 @@ resource "aws_security_group" "gatekeeper_ingress" {
 
 # E1/E6: the agents' egress is declared inline, so Terraform owns the group's whole egress list. Any rule added by
 # hand (as the all-protocol 0.0.0.0/0 rule added with the AWS CLI on 2026-09-25 was) is revoked by the next apply.
-# Agents reach only the control plane, the gatekeeper-egress, the account-locked VPC endpoints, S3 through its VPC
-# endpoint, the VPC resolver, and the ECS task metadata/credentials address. Nothing else, and never the internet.
+# Agents reach only the control plane, the gatekeeper-egress, the VPC interface endpoints (their policies are not yet
+# account-locked, GAP-266), S3 through its VPC endpoint (account-locked), the VPC resolver, and the ECS task
+# metadata/credentials address. Nothing else, and never the internet.
 resource "aws_security_group" "agents" {
   name   = "${local.name}-agents"
   vpc_id = aws_vpc.factory.id
@@ -238,7 +240,10 @@ removed {
   }
 }
 
-# ---- endpoints: locked to this account so they cannot become an exfiltration path -----------
+# ---- endpoints --------------------------------------------------------------------------------
+# GAP-266 (open): despite its name, `endpoint_same_account` has no condition, so the interface endpoints accept any
+# principal, including credentials from another account. Only the S3 endpoint below is locked to this account
+# (aws:PrincipalAccount). Adding the condition here is the follow-up.
 
 data "aws_iam_policy_document" "endpoint_same_account" {
   statement {
