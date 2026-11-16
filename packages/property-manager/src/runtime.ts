@@ -196,8 +196,8 @@ export type DeployProvider = {
    * Throws AdmissionRefusedError with the reason when a skill is refused. Returns the image URI.
    */
   buildSkillsImage?(agentId: string, base: { image: string; commit: string }, skills: BuildSkill[]): Promise<string>;
-  /** Provision IAM / roles / service accounts for the agent. */
-  provisionIdentity(agentId: string, secrets: string[]): Promise<{ identity: string; executionIdentity?: string }>;
+  /** Provision IAM / roles / service accounts for the agent. GAP-263: it reaches only `memoryPrefix`, which it must own. */
+  provisionIdentity(agentId: string, secrets: string[], opts?: { memoryPrefix?: string }): Promise<{ identity: string; executionIdentity?: string }>;
   /** Register the agent's compute definition (ECS task def, Cloud Run job, etc.). */
   /** `memoryPrefix`: the agent's mind prefix; the runtime must hand it to the shim (MEMORY_STORE_URI + MEMORY_PREFIX). */
   /** `launchEnv`: non-secret environment the Landlord names at launch (SK4: where the skills manifest is). */
