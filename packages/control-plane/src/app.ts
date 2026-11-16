@@ -119,6 +119,7 @@ import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
 import { handleFleetState, type FleetStateStore } from './fleet-state.js';
+import { accountForWake, bindRun, chargeAccount, settleRun, type SpendAccountStore } from './spend-accounts.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
 import { ModelCatalogError, ModelStore, type EnrichedModelView, type StoredModel, type StagedModel } from './models.js';
@@ -243,6 +244,10 @@ export type FactoryState = {
   identityLinks?: IdentityLinkStore;
   /** GAP-260: the fleet's go/stop state; in memory (reads paused until set) when absent. */
   fleetState?: FleetStateStore;
+  /** GAP-261: spend charged to a plan, and who is told; in memory when absent. */
+  spendAccounts?: SpendAccountStore;
+  /** GAP-261: a plan's owner hears its spend each time it crosses a multiple of this (USD; default 5). */
+  spendUpdateStepUsd?: number;
   /** S8: set once the shadow comparison showed zero mismatches and link roles were stripped (grants-only). */
   authCutover?: boolean;
   /** User groups and group membership store (H6, A10, A17, GAP-203). */
@@ -3577,7 +3582,11 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const body = await readJson(req);
     const badModel = badRunModel(body.model);
     if (badModel) return json(res, 400, { error: badModel });
+    // GAP-261: the plan this work is charged to, named by the waking run or inherited from it.
+    const account = accountForWake(state, run, body.spendAccount);
+    if (account && 'error' in account) return json(res, account.status, { error: account.error });
     const out = await createRun(state, target, { actor, trigger: 'agent', input: body.input, model: body.model as string | undefined });
+    if (account && out.status < 300) bindRun(state, (out.body as Run).runId, account);
     json(res, out.status, out.body);
     return;
   }
@@ -3774,6 +3783,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       result: output,
       ...(typeof body.error === 'string' ? { error: redactSecrets(body.error, state.secretValues) } : {}),
     });
+    await settleRun(state, done);
     json(res, 200, done);
     return;
   }
@@ -4333,6 +4343,8 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         const beforeStanding = checkStanding({ limits: effectiveLimits, spend: state.spend.get(payer.agentId, payer.runId) });
         const before = beforeStanding.inGoodStanding ? undefined : beforeStanding.window;
         state.spend.add(payer.agentId, payer.runId, stored.costUsd, stored.timestamp, spendDetail(stored));
+        // GAP-261: a step's report is fired, not awaited: a model call never waits on waking the plan's owner.
+        chargeAccount(state, run, stored.costUsd).catch((err) => console.error(`[spend-accounts] charge failed: ${err instanceof Error ? err.message : String(err)}`));
         if (stored.credentialMode === 'subscription' && typeof stored.connection === 'string' && stored.connection) {
           let connView = getCachedSubscriptionView(state, stored.connection);
           if (!connView) {
