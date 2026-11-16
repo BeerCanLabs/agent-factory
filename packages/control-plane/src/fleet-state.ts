@@ -55,6 +55,35 @@ const MAX_FLAGS = 20;
 const MAX_REASON = 500;
 const MAX_REASON_INPUT = 8000;
 
+/**
+ * The stored `ops` record is outside the API's checks. An unknown state, or a deploy open with no holding run (a lock
+ * nobody can release but an admin), loads as `rolled-back`: effective `deploy-freeze` until an admin clears it. The
+ * file is not rewritten on load. Mutates `fs`; returns what was wrong.
+ */
+function checkedOps(fs: FleetState): string | undefined {
+  const o = fs.ops as unknown;
+  if (o === undefined || o === null) return undefined;
+  const rec = typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, unknown>) : {};
+  const st = rec.state;
+  const runId = typeof rec.runId === 'string' && rec.runId ? rec.runId : null;
+  let issue: string | undefined;
+  if (typeof st !== 'string' || !OPS_STATES.includes(st as OpsState)) issue = 'unknown-state';
+  else if ((st === 'deploying' || st === 'prod-testing') && !runId) issue = 'no-run';
+  if (!issue) return undefined;
+  const was = sanitizeReason(String(st ?? o).slice(0, 40)) ?? '(blank)';
+  const why = issue === 'no-run' ? `stored ops state "${was}" has no holding run` : `stored ops state "${was}" is not an ops state`;
+  console.warn(`[control-plane] fleet state: ${why}; it reads as rolled-back (effective deploy-freeze) until an admin clears it`);
+  fs.ops = { state: 'rolled-back', by: 'system:fleet-state-load', at: now(), reason: sanitizeReason(`The ${why}: treated as rolled-back.`), runId };
+  return issue;
+}
+
+/** Called once at start, after the ledger is open: an `ops` record repaired on load is audited. */
+export function auditFleetStateLoad(state: FactoryState): void {
+  const issue = state.fleetState?.opsIssue;
+  if (!issue) return;
+  state.ledger.append({ timestamp: now(), agentId: 'factory', type: 'action', action: 'FLEET_OPS_STATE_INVALID', actor: 'system:fleet-state-load', mcpName: `fleet-ops:invalid:${issue}->rolled-back` });
+}
+
 /** One small JSON document, written whole and renamed into place. In memory when no file is given. */
 export class FleetStateStore {
   private current: FleetState | undefined;
@@ -66,7 +95,11 @@ export class FleetStateStore {
     } catch {
       this.current = undefined;
     }
+    this.opsIssue = this.current ? checkedOps(this.current) : undefined;
   }
+
+  /** Why the stored `ops` record was not trusted on load (audited once by `auditFleetStateLoad`). */
+  opsIssue: string | undefined;
 
   get(): FleetState {
     return structuredClone(this.current ?? UNSET);

@@ -13,8 +13,9 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
-import { FleetStateStore, FLEET_STATUSES, OPS_STATES, effectiveOf, sanitizeReason } from './fleet-state.js';
+import { FleetStateStore, FLEET_STATUSES, OPS_STATES, auditFleetStateLoad, effectiveOf, sanitizeReason } from './fleet-state.js';
 import { handleMcp } from './mcp.js';
+import { writeFileSync as writeFile } from 'node:fs';
 
 const VIEWER = 'viewer-fleet-state-e2e';
 const OPERATOR = 'operator-fleet-state-e2e';
@@ -220,6 +221,47 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
         assert.equal(effectiveOf(fs), want, `${status} + ${o ?? 'none'}`);
       }
     }
+  });
+
+  it('a stored ops record with an unknown state, or an open deploy with no run, loads as rolled-back and is audited', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-ops-load-'));
+    const cases: [unknown, string | undefined, string | null][] = [
+      [{ state: 'frozen\u202e\u200b', by: 'x', at: 'then', reason: null }, 'unknown-state', null],
+      [{ state: 'prod-testing', by: 'ops-leader', at: 'then', reason: null, runId: 'run-9' }, 'unknown-state', 'run-9'],
+      [{ state: 'deploying', by: 'ops-leader', at: 'then', reason: null }, 'no-run', null],
+      [{ state: 'prod-testing', by: 'dale', at: 'then', reason: null, runId: null }, 'no-run', null],
+      ['deploying', 'unknown-state', null],
+      [{ state: 'deploying', by: 'ops-leader', at: 'then', reason: null, runId: 'run-1' }, undefined, 'run-1'],
+      [{ state: 'idle', by: null, at: null, reason: null, runId: null }, undefined, null],
+      [undefined, undefined, null],
+    ];
+    cases[1][0] = { ...(cases[1][0] as object), state: 7 };
+    for (const [i, [stored, issue, runId]] of cases.entries()) {
+      const f = join(dir, `fleet-state-${i}.json`);
+      writeFile(f, JSON.stringify({ status: 'running', coder_app_ready: true, reason: null, opsAgents: ['ops-leader'], ...(stored === undefined ? {} : { ops: stored }) }));
+      const before = rows('FLEET_OPS_STATE_INVALID').length;
+      state.fleetState = new FleetStateStore(f);
+      auditFleetStateLoad(state);
+      const view = await read();
+      const label = JSON.stringify(stored);
+      assert.equal(state.fleetState.opsIssue, issue, label);
+      if (!issue) {
+        assert.notEqual(view.ops.state, 'rolled-back', label);
+        assert.equal(rows('FLEET_OPS_STATE_INVALID').length, before, label);
+        continue;
+      }
+      assert.deepEqual({ state: view.ops.state, runId: view.ops.runId, effective: view.effective }, { state: 'rolled-back', runId, effective: 'deploy-freeze' }, label);
+      assert.equal(sanitizeReason(view.ops.reason), view.ops.reason);
+      assert.match(view.ops.reason, issue === 'no-run' ? /has no holding run: treated as rolled-back\.$/ : /is not an ops state: treated as rolled-back\.$/);
+      const audit = rows('FLEET_OPS_STATE_INVALID').slice(before);
+      assert.deepEqual(audit.map((e) => [e.actor, e.mcpName]), [['system:fleet-state-load', `fleet-ops:invalid:${issue}->rolled-back`]], label);
+    }
+    // Fail closed: no run can open a deploy over it; an admin clears it without force (no live holder).
+    state.fleetState = new FleetStateStore(join(dir, 'fleet-state-2.json'));
+    const { token } = await runOf('ops-leader');
+    await expect409(token, { state: 'deploying' }, 'rolled_back_requires_admin');
+    assert.equal((await admin({ status: 'running', ops: null })).status, 200);
+    assert.equal((await read()).effective, 'running');
   });
 
   it('R0: only registered, non-helper, non-retired agents can be listed (400 unknown_agent)', async () => {
