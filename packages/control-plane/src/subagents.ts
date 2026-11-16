@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { createRun, type Run } from '@beercanlabs/factory-property-manager';
 import { BUILTIN_AGENT_IDS, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { checkStanding } from '@beercanlabs/factory-budget';
+import { noteHelperRun } from './helper-wakes.js';
 import {
   approvedModels,
   catalogEntryOf,
@@ -253,6 +254,8 @@ export async function spawnSubagent(state: FactoryState, parent: Run, args: Reco
   } catch (err) {
     out = { status: 500, body: { error: 'spawn_failed', message: err instanceof Error ? err.message : String(err) } };
   }
+  // #481: noted durably as owed a `helper-run-ended` wake of the parent agent (once, across a restart).
+  if (out.status < 300) noteHelperRun(state, out.body as unknown as Run);
   if (out.status >= 300) {
     // Nothing started (refused, or failed before it ran): the helper record goes now, as it would at the run's end.
     if (state.runs.list({ agentId: id, active: true }).length === 0) {

@@ -91,6 +91,7 @@ import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
 import { allowedSubagents, budgetHolder, handleSubagents, spawnSubagent, type SubagentRecord } from './subagents.js';
+import { wireHelperWakes, type HelperWakeLog } from './helper-wakes.js';
 import { agentConfigForRun, applyAgentOwnershipGrant, deployConfigured, handleAgentCreation, handleConvertAgent, handleRuntimeRoutes, registrationRefusal, resolveAgentOwnershipOnSubmit, type SharedRuntimePin } from './agent-creation.js';
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
@@ -162,6 +163,10 @@ export type FactoryState = {
   registryDir?: string;
   /** GAP-258: GitHub webhook delivery ids already handled (one run per delivery), kept across restarts. */
   webhookDeliveries?: DeliveryLog;
+  /** #481: the helper runs owed a `helper-run-ended` wake of their parent agent (on disk), else in memory. */
+  helperWakes?: HelperWakeLog;
+  /** #481: told when a run first ends (property-manager `finishRun`). */
+  onRunEnded?: (run: Run) => void;
   ledger: LedgerStore;
   auth: AuthProvider;
   /** S5: factory API keys (`fk_`), verified before routing on /api/v1 and /mcp. */
@@ -2447,7 +2452,7 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
       },
       {
         name: 'spawn_subagent',
-        description: 'Start a helper run: an allowed helper id, one of that helper\'s approvedModels (list_subagents) and the task prompt. Returns the run.',
+        description: 'Start a helper run: an allowed helper id, one of that helper\'s approvedModels (list_subagents) and the task prompt. Returns the run. When it ends, the factory wakes this agent once (trigger helper-run-ended, input event {parentRunId, helperRunId, subagent, state}); any run of this agent reads the result with GET /api/v1/runs/:id/subagents/runs/:helperRunId.',
         inputSchema: { type: 'object', properties: { subagent: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' } }, required: ['subagent', 'model', 'prompt'] },
       },
     ];
@@ -3169,6 +3174,8 @@ export function createFactoryServer(state: FactoryState): http.Server {
   wireGrantStoreKindLookup(state);
   tapActAsLedger(state);
   wireSubscriptionRuntime(state);
+  // #481: a helper's end wakes its parent agent (and the wakes a previous control plane owed are finished).
+  wireHelperWakes(state);
   // SK1: follow skill checks a previous control plane started and did not see end.
   void resumeSkillChecks(state).catch((err) => console.warn('[control-plane] could not resume skill checks:', err));
   const discoveryTimer =
@@ -3715,13 +3722,15 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   }
 
   // #318: a parent run reads the helper runs it started (E1.5 parent link), with its own run token, and nothing else.
+  // #481: also any run of the same parent agent, so the run a `helper-run-ended` wake starts can read the result.
   const runHelper = path.match(/^\/api\/v1\/runs\/([^/]+)\/subagents\/runs\/([^/]+)$/);
   if (runHelper && req.method === 'GET') {
     const run = await authenticateRun(req, res, state, runHelper[1]);
     if (!run) return;
     const helper = state.runs.get(decodeURIComponent(runHelper[2]));
     // An unknown id and another run's helper look the same: no existence oracle.
-    if (!helper || helper.parentRunId !== run.runId) return json(res, 403, { error: 'not_your_helper_run' });
+    const mine = helper && helper.parentRunId && (helper.parentRunId === run.runId || (helper.parentAgentId !== undefined && helper.parentAgentId === run.agentId));
+    if (!helper || !mine) return json(res, 403, { error: 'not_your_helper_run' });
     const { runId, agentId, state: runState, result, error, startedAt, updatedAt } = helper;
     json(res, 200, { runId, agentId, state: runState, ...(result !== undefined ? { result } : {}), ...(error ? { error } : {}), ...(startedAt ? { startedAt } : {}), updatedAt });
     return;
