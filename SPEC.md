@@ -125,7 +125,8 @@ The control plane is the only ingress point to the factory kernel. Routes expect
 | GET | `/api/v1/ledger` | viewer | audit query |
 | POST | `/api/v1/ledger` | ingest | metadata-only event write |
 | GET | `/api/v1/metrics`, `/metrics` | viewer | runtime and ledger telemetry (active runs, agent states, spend) |
-| POST | `/graphql` | viewer | headless GraphQL telemetry query surface (cost, quantity, quality multi-dimensional rollups) |
+| POST | `/mcp` | viewer | headless MCP telemetry and operational query surface (tools: `query_ledger`, `verify_ledger`, `spend`, `list_runs`, etc.) |
+| POST | `/mcp/run` | run token | container run-token MCP surface for in-flight subagents and model slot inspection |
 | GET/PUT | `/api/v1/policies/budget` | admin | Manage global and departmental Policy Engine limits. |
 | GET/PUT | `/api/v1/agents/:id/policy` | viewer / admin | egress policy (routes, models, tools, per-agent budget, TPM) |
 | GET | `/api/v1/approvals?state=pending` | viewer | held tool calls |
