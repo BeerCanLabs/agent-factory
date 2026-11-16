@@ -1,0 +1,43 @@
+{
+  "id": "headless-neck",
+  "title": "Agent Factory: Headless Neck & Hot-Swappable Heads Architecture",
+  "status": "approved",
+  "outcome": "Expose 100% of Agent Factory operations via a single typed REST and MCP Neck, enabling external AI clients (Cursor, Claude Desktop, VS Code), Console, CLI, and Garrison to operate as hot-swappable heads.",
+  "target_repo": "BeerCanLabs/agent-factory",
+  "companion": "plans/headless-neck.md",
+  "approval": {
+    "by": "Dale Sackrider",
+    "at": "2026-11-15T12:00:00Z"
+  },
+  "finops": {
+    "status": "estimated",
+    "agent": "SDLC FinOps",
+    "estimate": "7 slices (TSK-335 to TSK-341): estimated 7 stories, ~$28 expected model spend."
+  },
+  "risks": [
+    "External MCP clients could flood control plane; mitigated by rate limiting and bounded default core toolset (<= 40 tools).",
+    "Prompt injection could attempt human-decision bypass; mitigated by mandatory client elicitation or console/discord handoff with via: mcp:<client_id> ledgering.",
+    "Secret exposure in model transcripts; mitigated by excluding credentials from MCP arguments and requiring session-bound URL elicitation.",
+    "Session clobbering across multiple MCP clients; mitigated by deviceFamily: \"mcp:<client_id>\" and durable OAuth refresh tokens."
+  ],
+  "epics": [
+    {
+      "id": "headless-neck",
+      "title": "Headless Neck & Hot-Swappable Heads Architecture",
+      "deploy_point": true,
+      "story_count": 7,
+      "acceptance_criteria": [
+        "Single declarative operations contract generates routes, OpenAPI 3.1 (GET /api/v1/openapi.json), MCP tools, and CLI commands.",
+        "MCP protocol compliance: JSON-RPC 2.0, HTTP 202 on notifications, version negotiation, and isError: true on refusals (CL3).",
+        "100% of headless capability domains exposed across REST and MCP with 1-operation = 1-tool curated mapping.",
+        "Curated default core toolset (<= 40 tools) on /mcp with domain toolsets (/mcp/x/{toolsets}) and opt-in /mcp/x/all.",
+        "Separated Run MCP (POST /mcp/run) from Principal MCP (POST /mcp) and explicit conversational agent surface (agents_converse and POST /mcp/agents/:id).",
+        "Human-judgement decisions (holds, admissions) require explicit human confirmation via MCP elicitation or Console handoff with via: mcp:<client_id> ledgering (E9).",
+        "No plaintext secrets or raw fk_ keys enter or leave MCP tool arguments/results; session-bound URL-mode elicitation for Keymaster writes (CL6, K5).",
+        "OAuth 2.1 AS with PKCE, dynamic client registration, mandatory consent screen, and multi-client deviceFamily: \"mcp:<client_id>\" (D14).",
+        "Cloudflare Access path bypass on /login, /api/v1/auth/*, /.well-known/oauth-*, and /mcp* with fail-closed Factory enforcement (A1).",
+        "Console verifyLedgerWorm() bug fix, ACTOR_RE user:<id> support, and complete cloud resource deprovisioning on agent purge."
+      ]
+    }
+  ]
+}
