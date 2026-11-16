@@ -3,7 +3,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
@@ -134,6 +134,20 @@ describe('GAP-260 fleet go/stop state', { concurrency: false }, () => {
     assert.match(JSON.parse(typo.result!.content[0].text).error, /status must be one of/);
     assert.equal(JSON.parse((await rpc('get_fleet_state', {}, ['viewer'])).result!.content[0].text).status, 'paused');
     assert.equal(set.result!.isError, undefined);
+  });
+
+  it('a stored legacy or unknown admin status loads as paused, so status and effective agree', async () => {
+    for (const legacy of ['deploying', 'prod-testing', 'rolled-back', 'go']) {
+      const f = join(mkdtempSync(join(tmpdir(), 'fleet-legacy-')), 'fleet-state.json');
+      writeFileSync(f, JSON.stringify({ status: legacy, coder_app_ready: true, reason: 'old', pin_merged: true }));
+      state.fleetState = new FleetStateStore(f);
+      const read = await call('GET', VIEWER);
+      assert.deepEqual({ status: read.body.status, effective: read.body.effective, ready: read.body.coder_app_ready, flag: read.body.pin_merged }, { status: 'paused', effective: 'paused', ready: true, flag: true }, legacy);
+      assert.match(read.body.reason, new RegExp(`stored status "${legacy}"`));
+      assert.equal(JSON.parse(readFileSync(f, 'utf8')).status, legacy, 'loading does not rewrite the file');
+      assert.equal((await call('PUT', ADMIN, { status: 'running' })).body.effective, 'running');
+      assert.equal(new FleetStateStore(f).get().status, 'running', 'the next admin write stores a current status');
+    }
   });
 });
 

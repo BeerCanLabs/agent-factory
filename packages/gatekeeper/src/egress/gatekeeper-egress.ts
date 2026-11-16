@@ -237,6 +237,8 @@ export type GatekeeperEgressOptions = {
   progress?: ProgressOptions;
   /** How often to refresh routes from control plane (ms); default 10_000. */
   routeRefreshIntervalMs?: number;
+  /** Delays between start-up route fetch attempts (bounded; then routes load lazily on use). Default about 30 s in all. */
+  routeStartRetryMs?: number[];
   /** Tests only: accept factory systems with an http upstream (production systems must be https). */
   allowHttpSystems?: boolean;
   /** Bearer the control plane presents on POST /internal/vendor-models. Absent: that route is not served. */
@@ -510,9 +512,28 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       routes.set(r.id, r);
     }
     lastRouteRefresh = Date.now();
+    console.log(`[gatekeeper-egress] routes loaded (${routes.size})`);
   }
 
-  void ensureRoutes();
+  /**
+   * The control plane may be restarting in the same deploy, so the first fetch retries with backoff, a bounded number
+   * of times. After that, routes still load lazily on the next request or health check.
+   */
+  async function loadRoutesAtStart(): Promise<void> {
+    if (!opts.control.systemRoutes) return;
+    const delays = opts.routeStartRetryMs ?? [500, 1_000, 2_000, 4_000, 8_000, 15_000];
+    for (let attempt = 0; ; attempt++) {
+      await ensureRoutes();
+      if (lastRouteRefresh > 0) return;
+      if (attempt >= delays.length) {
+        console.error(`[gatekeeper-egress] routes not loaded after ${attempt + 1} attempts; they load on the next request`);
+        return;
+      }
+      await new Promise<void>((r) => setTimeout(r, delays[attempt]).unref?.());
+    }
+  }
+
+  void loadRoutesAtStart();
 
   let activeCatalog: ModelCatalog = { ...(opts.modelCatalog ?? {}) };
   let activeDefaultModel: string | undefined = opts.defaultModel;

@@ -55,6 +55,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/gatekeeper/src/ingress/presence.ts',
       'packages/gatekeeper/src/ingress/server.ts',
       'packages/gatekeeper/src/ingress/wake.ts',
+      'packages/gatekeeper/src/shutdown.ts',
     ],
   },
   keymaster: {

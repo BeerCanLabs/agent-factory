@@ -55,6 +55,17 @@ const MAX_FLAGS = 20;
 const MAX_REASON = 500;
 const MAX_REASON_INPUT = 8000;
 
+/**
+ * A stored admin status from before GAP-268 (deploying, prod-testing, rolled-back) or any other value that is not an
+ * admin status loads as paused, so `status` and `effective` agree; the next admin write stores it.
+ */
+function normalized(raw: FleetState): FleetState {
+  if ((FLEET_STATUSES as readonly string[]).includes(raw.status)) return raw;
+  const was = String(raw.status).slice(0, 40);
+  console.warn(`[control-plane] fleet state: stored status ${JSON.stringify(was)} is not running, paused or deploy-freeze; it reads as paused`);
+  return { ...raw, status: 'paused', reason: `The stored status ${JSON.stringify(was)} is no longer an admin status: treated as paused.` };
+}
+
 /** One small JSON document, written whole and renamed into place. In memory when no file is given. */
 export class FleetStateStore {
   private current: FleetState | undefined;
@@ -62,7 +73,7 @@ export class FleetStateStore {
     if (!file) return;
     try {
       const raw = JSON.parse(readFileSync(file, 'utf8')) as FleetState;
-      if (raw && typeof raw.status === 'string') this.current = raw;
+      if (raw && typeof raw.status === 'string') this.current = normalized(raw);
     } catch {
       this.current = undefined;
     }
