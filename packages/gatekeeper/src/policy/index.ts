@@ -22,7 +22,54 @@ export type AgentPolicy = {
   subagents?: string[];
   /** #319: the named agents this agent may wake with its run token. Admin-set, per agent only; none by default. */
   wakeAgents?: string[];
+  /**
+   * GAP-255: non-secret deployment settings an admin gives this agent's runs as environment variables (a fleet's
+   * configuration, a URL it calls back). Never a credential: those are the agent's secrets. Per agent only.
+   */
+  env?: Record<string, string>;
 };
+
+/**
+ * GAP-255: an allow-list. A name must start with one of these prefixes (agentic-sdlc's deployment settings:
+ * SDLC_FLEET_CONFIG, SDLC_APPROVALS_URL, SDLC_APPROVALS_FALLBACK, SDLC_GLOBAL_STATE_URL, ...), so the env can never reach
+ * a name the factory, the runtimes, the memory shim or the platform use (FACTORY_*, MEMORY_*, *_BASE_URL, AGENT_ID,
+ * GIT_SSH_COMMAND, BASH_ENV, SSL_CERT_FILE, PATH, ...). Add a prefix here, in review, for another fleet.
+ */
+export const POLICY_ENV_PREFIXES = ['SDLC_'] as const;
+export const POLICY_ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
+const CREDENTIAL_ENV = /(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|API_?KEY|CREDENTIAL|COOKIE|SESSION)/;
+const CREDENTIAL_ENV_WORD = /(^|_)(KEY|PAT|PASS|AUTH|DSN)(_|$)/;
+// Values shaped like a credential: provider tokens (case-sensitive, and only where a token starts, so a repo such as
+// `acme/task-scheduler` or `acme/kiosk-frontend` is fine), a JWT, a PEM private key, a URL with a password in it.
+const CREDENTIAL_TOKEN =
+  /(?<![A-Za-z0-9])(?:github_pat_\w{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|sk-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{12,}|eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.)|-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----/;
+const CREDENTIAL_URL = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}:\/\/[^/\s@:]{1,256}:[^/\s@]{1,256}@/i;
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f]/;
+const MAX_ENV_VARS = 32;
+// A run's environment travels in the task's start request (ECS allows 8 KiB of overrides in all, in bytes), and the
+// factory adds its own FACTORY_* and egress variables to the same request, so the admin's part stays under 6,000 bytes.
+const MAX_ENV_BYTES = 6000;
+
+export function validateEnv(v: unknown): string | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return 'env must be an object of names to text values';
+  const entries = Object.entries(v as Record<string, unknown>);
+  if (entries.length > MAX_ENV_VARS) return `env holds at most ${MAX_ENV_VARS} variables`;
+  let total = 0;
+  for (const [name, value] of entries) {
+    if (!POLICY_ENV_NAME.test(name)) return `env name ${JSON.stringify(name.slice(0, 64))} must be UPPER_SNAKE_CASE`;
+    if (!POLICY_ENV_PREFIXES.some((p) => name.startsWith(p) && name.length > p.length)) {
+      return `env name ${name} is not allowed: names start with ${POLICY_ENV_PREFIXES.join(' or ')}`;
+    }
+    if (CREDENTIAL_ENV.test(name) || CREDENTIAL_ENV_WORD.test(name)) return `env name ${name} looks like a credential: set it as the agent's secret`;
+    if (typeof value !== 'string') return `env.${name} must be text`;
+    if (CONTROL.test(value)) return `env.${name} must not hold control characters (newlines, NUL)`;
+    if (CREDENTIAL_TOKEN.test(value) || CREDENTIAL_URL.test(value)) return `env.${name} looks like a credential: set it as the agent's secret`;
+    total += Buffer.byteLength(name, 'utf8') + Buffer.byteLength(value, 'utf8');
+  }
+  if (total > MAX_ENV_BYTES) return `env is at most ${MAX_ENV_BYTES} bytes (UTF-8) in all`;
+  return undefined;
+}
 
 const EMPTY: AgentPolicy = { routes: [] };
 
@@ -56,13 +103,17 @@ function positive(v: unknown): v is number {
 export function validatePolicy(raw: unknown): { ok: true; policy: AgentPolicy } | { ok: false; error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: 'policy must be an object' };
   const r = raw as Record<string, unknown>;
-  const allowed = new Set(['routes', 'models', 'hosts', 'tools', 'budgetUsd', 'tokensPerMinute', 'grounding', 'currentModel', 'primaryModel', 'secondaryModel', 'subagents', 'wakeAgents']);
+  const allowed = new Set(['routes', 'models', 'hosts', 'tools', 'budgetUsd', 'tokensPerMinute', 'grounding', 'currentModel', 'primaryModel', 'secondaryModel', 'subagents', 'wakeAgents', 'env']);
   for (const k of Object.keys(r)) if (!allowed.has(k)) return { ok: false, error: `unknown policy field ${k}` };
   if (!isStringArray(r.routes ?? [])) return { ok: false, error: 'routes must be an array of route ids' };
   if (r.models !== undefined && !isStringArray(r.models)) return { ok: false, error: 'models must be an array of model ids' };
   if (r.hosts !== undefined && !isStringArray(r.hosts)) return { ok: false, error: 'hosts must be an array of hostnames' };
   if (r.subagents !== undefined && !isStringArray(r.subagents)) return { ok: false, error: 'subagents must be an array of helper ids' };
   if (r.wakeAgents !== undefined && !isStringArray(r.wakeAgents)) return { ok: false, error: 'wakeAgents must be an array of agent ids' };
+  if (r.env !== undefined) {
+    const bad = validateEnv(r.env);
+    if (bad) return { ok: false, error: bad };
+  }
   if (r.tokensPerMinute !== undefined && !positive(r.tokensPerMinute)) return { ok: false, error: 'tokensPerMinute must be >= 0' };
   if (r.grounding !== undefined && r.grounding !== 'warn-once') return { ok: false, error: 'grounding must be "warn-once" when set' };
   if (r.budgetUsd !== undefined) {

@@ -40,7 +40,7 @@ import {
   type SkillSource,
   type GroupStore,
 } from '@beercanlabs/factory-registrar';
-import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
+import { AdmissionRefusedError, SYSTEM, ownMindPrefix, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
 import { ZERO_BUDGET_LIMITS, isZeroPrice, checkStanding, spendDetail, type BudgetLimits, type Price, type SpendTracker } from '@beercanlabs/factory-budget';
 import {
   AGENT_SCOPED,
@@ -83,10 +83,10 @@ import {
 import { handleSubscriptionWindows } from './subscription-windows.js';
 import { getSubscriptionCaps } from './subscription-caps.js';
 import { handleCredentials } from './credentials.js';
-import { handleGitHubAppSetup } from './github-app-setup.js';
+import { githubAppSecretNames, handleGitHubAppSetup } from './github-app-setup.js';
 import { handleGitHubAppInstall } from './github-app-install.js';
 import { handleDiscordAppSetup } from './discord-app-setup.js';
-import { handleAppSetup } from './app-setup-providers.js';
+import { handleAppSetup, readSecret } from './app-setup-providers.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
@@ -114,6 +114,7 @@ import { clearSkillBindingsForModel, handleSkillModels, skillModelsForAgent } fr
 import { handleMcp } from './mcp.js';
 export { handleMcp } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
+import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, conductorEventFor, conductorInput } from './github-webhooks.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
@@ -158,6 +159,8 @@ export type FactoryState = {
   /** The model a policy that names none grants (M2): configuration seeded from FACTORY_DEFAULT_MODEL; no code default. */
   defaultModel?: string;
   registryDir?: string;
+  /** GAP-258: GitHub webhook delivery ids already handled (one run per delivery), kept across restarts. */
+  webhookDeliveries?: DeliveryLog;
   ledger: LedgerStore;
   auth: AuthProvider;
   /** S5: factory API keys (`fk_`), verified before routing on /api/v1 and /mcp. */
@@ -3064,6 +3067,18 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
   return 'not_delivered';
 }
 
+const deliveryLogs = new WeakMap<FactoryState, DeliveryLog>();
+/** GAP-258: the webhook delivery ids already handled: the factory's own store, or in memory (tests, a bare state). */
+function webhookDeliveries(state: FactoryState): DeliveryLog {
+  if (state.webhookDeliveries) return state.webhookDeliveries;
+  let log = deliveryLogs.get(state);
+  if (!log) {
+    log = new DeliveryLog();
+    deliveryLogs.set(state, log);
+  }
+  return log;
+}
+
 export function bearerOf(req: http.IncomingMessage): string | undefined {
   const h = req.headers.authorization;
   return h?.startsWith('Bearer ') ? h.slice(7).trim() : undefined;
@@ -3473,27 +3488,42 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     }
     const agent = state.agents.get(hookId);
     const trigger = agent?.triggers.find((t) => t.type === 'webhook');
-    if (!agent || !trigger || trigger.type !== 'webhook' || !trigger.secretRef) {
+    // GAP-258: a GitHub App delivery is signed (HMAC, X-Hub-Signature-256) with the agent's app webhook secret. It is
+    // tried first for any agent that has one, so a conductor with a cartridge trigger still gets its app's deliveries.
+    // An agent with neither an app secret nor a cartridge trigger is refused; the legacy shared-secret header only ever
+    // checks the cartridge trigger's secret.
+    const githubEventHeader = typeof req.headers['x-github-event'] === 'string' ? req.headers['x-github-event'] : undefined;
+    const hasTrigger = Boolean(trigger?.type === 'webhook' && trigger.secretRef);
+    const appSecret = agent && hmacSignature && githubEventHeader ? await readSecret(state, githubAppSecretNames(agent.id).webhookSecret) : undefined;
+    const usableApp = typeof appSecret === 'string' && appSecret.trim() ? appSecret : undefined;
+    if (!agent || (!usableApp && !hasTrigger)) {
       capDrain(req);
       json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
 
-    const bound = await bindSecrets([trigger.secretRef], state.providers);
-    const secret = bound.ok ? bound.env[trigger.secretRef] : undefined;
-    if (!secret || typeof secret !== 'string' || !secret.trim()) {
+    let secret: string | undefined;
+    if (trigger?.type === 'webhook' && trigger.secretRef) {
+      const bound = await bindSecrets([trigger.secretRef], state.providers);
+      secret = bound.ok ? bound.env[trigger.secretRef] : undefined;
+    }
+    if (typeof secret !== 'string' || !secret.trim()) secret = undefined;
+    if (!secret && !usableApp) {
       capDrain(req);
       json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
     const rawBytes = await readBodyBytes(req);
+    let viaApp = false;
     if (hmacSignature) {
-      if (!verifyWebhookHmac(rawBytes, secret, hmacSignature)) {
+      if (usableApp && verifyWebhookHmac(rawBytes, usableApp, hmacSignature)) {
+        viaApp = true;
+      } else if (!secret || !verifyWebhookHmac(rawBytes, secret, hmacSignature)) {
         json(res, 401, { error: 'bad_webhook_signature' });
         return;
       }
     } else if (legacySecret) {
-      if (!safeEqual(legacySecret, secret)) {
+      if (!secret || !safeEqual(legacySecret, secret)) {
         json(res, 401, { error: 'bad_webhook_signature' });
         return;
       }
@@ -3516,8 +3546,71 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         input = raw;
       }
     }
+    // GAP-258: the GitHub event and delivery id travel with the run only for an HMAC-signed delivery (never the legacy
+    // header), and a conductor gets its one mapped event only from its own GitHub App.
+    const githubEvent = hmacSignature && githubEventHeader && GITHUB_EVENT.test(githubEventHeader) ? githubEventHeader : undefined;
+    const rawDelivery = req.headers['x-github-delivery'];
+    const delivery = hmacSignature && typeof rawDelivery === 'string' && DELIVERY_ID.test(rawDelivery) ? rawDelivery : undefined;
+    if (viaApp && !delivery) {
+      json(res, 400, { error: 'missing_delivery_id', message: 'a GitHub App delivery carries X-GitHub-Delivery' });
+      return;
+    }
+    const isConductor = (agent.skillIds ?? []).includes(CONDUCTOR_SKILL) || (state.configs?.current(agent.id)?.skills ?? []).some((sk) => sk.id === CONDUCTOR_SKILL);
+    if (githubEvent && (isConductor || viaApp)) {
+      if (!isConductor) {
+        json(res, 200, { ok: true, ignored: true, reason: 'this agent takes no GitHub events' });
+        return;
+      }
+      if (!viaApp) {
+        json(res, 200, { ok: true, ignored: true, reason: 'conductor events come only from the agent\'s own GitHub App' });
+        return;
+      }
+      // Fail closed: without its app's login the conductor cannot tell its own labels and comments, which would loop.
+      const slug = await readSecret(state, githubAppSecretNames(agent.id).slug);
+      if (!slug) {
+        console.error(`[webhooks] ${agent.id}: no ${githubAppSecretNames(agent.id).slug}; GitHub events are not mapped`);
+        json(res, 200, { ok: true, ignored: true, reason: 'the agent\'s GitHub App slug is not stored' });
+        return;
+      }
+      const mapped = conductorEventFor(githubEvent, input, `${slug}[bot]`);
+      if ('ignored' in mapped) {
+        json(res, 200, { ok: true, ignored: true, reason: mapped.ignored });
+        return;
+      }
+      input = conductorInput(mapped.event, githubEvent, delivery);
+    } else if (githubEvent && input && typeof input === 'object' && !Array.isArray(input)) {
+      input = { ...(input as Record<string, unknown>), githubEvent, ...(delivery ? { githubDelivery: delivery } : {}) };
+    }
+    // One run per delivery per agent: a redelivery (GitHub's retry, or a person's "Redeliver") starts nothing new. GitHub
+    // signs the body, not the delivery id, so an app delivery is also deduplicated on the body's sha256.
+    const deliveries = webhookDeliveries(state);
+    const keys = [...(delivery ? [delivery] : []), ...(viaApp ? [createHash('sha256').update(rawBytes).digest('hex')] : [])];
+    const claimed: string[] = [];
+    let prior: ReturnType<DeliveryLog['claim']>;
+    for (const key of keys) {
+      const seen = deliveries.claim(agent.id, key);
+      if (seen) prior ??= seen;
+      else claimed.push(key);
+    }
+    if (prior) {
+      for (const key of claimed) deliveries.release(agent.id, key);
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'WEBHOOK_DUPLICATE', actor: `webhook:${agent.id}`, ...(delivery ? { requestId: delivery } : {}), ...(prior.runId ? { runId: prior.runId } : {}) });
+      json(res, 200, { ok: true, duplicate: true, ...(prior.runId ? { runId: prior.runId } : {}) });
+      return;
+    }
     const actor = `webhook:${agent.id}`;
-    const out = await createRun(state, agent.id, { actor, trigger: 'webhook', input });
+    let out: Awaited<ReturnType<typeof createRun>>;
+    try {
+      out = await createRun(state, agent.id, { actor, trigger: 'webhook', input });
+    } catch (err) {
+      for (const key of claimed) deliveries.release(agent.id, key);
+      throw err;
+    }
+    const runId = (out.body as { runId?: unknown } | undefined)?.runId;
+    for (const key of claimed) {
+      if (out.status < 300) deliveries.done(agent.id, key, typeof runId === 'string' ? runId : undefined);
+      else deliveries.release(agent.id, key);
+    }
     json(res, out.status, out.body);
     return;
   }
@@ -4791,6 +4884,11 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       json(res, 400, { error: checked.error });
       return;
     }
+    const envError = policyEnvSecretError(state, checked.policy);
+    if (envError) {
+      json(res, 400, { error: envError });
+      return;
+    }
     if (isBuiltin && checked.policy.budgetUsd !== undefined) {
       json(res, 400, {
         error: 'builtin_agents_exempt_from_budget',
@@ -5220,6 +5318,17 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
 
     const recordId = typeof cartridge.id === 'string' ? cartridge.id : agentId;
     const previousAgent = state.agents.get(recordId);
+    const memoryPrefix = (typeof cartridge.persistence === 'object' && cartridge.persistence !== null && 'prefix' in cartridge.persistence)
+      ? (cartridge.persistence as { prefix: string }).prefix
+      : (typeof cartridge.memory === 'object' && cartridge.memory !== null && 'prefix' in cartridge.memory ? (cartridge.memory as { prefix: string }).prefix : agentId);
+    // GAP-263: refuse an invalid mind prefix, or one another agent holds, before anything is recorded.
+    try {
+      ownMindPrefix(state.agents.values(), { id: recordId, memoryPrefix });
+    } catch (err: any) {
+      const taken = /already belongs/.test(err.message);
+      json(res, taken ? 409 : 400, { error: taken ? 'mind_prefix_taken' : 'invalid_mind_prefix', message: err.message });
+      return;
+    }
     const hasCartridgeWrapper = Boolean(body.cartridge && typeof body.cartridge === 'object');
     const rawKind = body.kind !== undefined ? body.kind : cartridge.kind;
     // On re-registration (`previousAgent !== undefined`), `cartridge.accountableLead` inside `body.cartridge` is the
@@ -5390,9 +5499,6 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const ungated = classified.ungated;
     const gated = classified.gated;
     const triggers = (Array.isArray(cartridge.triggers) ? cartridge.triggers : (Array.isArray(body.triggers) ? body.triggers : [])) as Surface['triggers'];
-    const memoryPrefix = (typeof cartridge.persistence === 'object' && cartridge.persistence !== null && 'prefix' in cartridge.persistence)
-      ? (cartridge.persistence as { prefix: string }).prefix
-      : (typeof cartridge.memory === 'object' && cartridge.memory !== null && 'prefix' in cartridge.memory ? (cartridge.memory as { prefix: string }).prefix : agentId);
 
     const warmDownSeconds = (typeof cartridge.runtime === 'object' && cartridge.runtime !== null && 'warmDownSeconds' in cartridge.runtime)
       ? Number((cartridge.runtime as { warmDownSeconds: number }).warmDownSeconds)
@@ -5625,9 +5731,26 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
         },
       };
     }
+    // GAP-255: the run env is policy.set's, never registry.budget.set's: this route keeps the agent's current env and
+    // refuses a different one (the console saves the whole policy it read, env included, unchanged).
+    const currentEnv = state.policies.get(agentId)?.env;
+    if (policyInput && typeof policyInput === 'object' && !Array.isArray(policyInput)) {
+      const { env: sentEnv, ...rest } = policyInput as Record<string, unknown>;
+      const sorted = (e: unknown) => JSON.stringify(e && typeof e === 'object' ? Object.entries(e).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)) : e);
+      if (sentEnv !== undefined && sorted(sentEnv) !== sorted(currentEnv ?? {})) {
+        json(res, 403, { error: 'env is set with PUT /api/v1/agents/:id/policy (policy.set), not the budget route' });
+        return;
+      }
+      policyInput = { ...rest, ...(currentEnv ? { env: currentEnv } : {}) };
+    }
     const checked = validatePolicy(policyInput);
     if (!checked.ok) {
       json(res, 400, { error: checked.error });
+      return;
+    }
+    const budgetEnvError = policyEnvSecretError(state, checked.policy);
+    if (budgetEnvError) {
+      json(res, 400, { error: budgetEnvError });
       return;
     }
     state.policies.set(agentId, checked.policy);
@@ -5830,6 +5953,11 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       json(res, 400, { error: 'wakeAgents are set per agent, never in the global policy' });
       return;
     }
+    // GAP-255: deployment settings are per agent only.
+    if (checked.policy.env !== undefined) {
+      json(res, 400, { error: 'env is set per agent, never in the global policy' });
+      return;
+    }
     state.policies.set('__global__', checked.policy);
     json(res, 200, checked.policy);
     return;
@@ -5872,4 +6000,17 @@ export function createProbeServer(): http.Server {
     if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
     return json(res, 404, { error: 'not_found' });
   });
+}
+
+/**
+ * GAP-255: a deployment setting is never a credential the factory already holds. Checked on every route that writes a
+ * policy's env. Values and secrets shorter than 8 characters are not compared (too many false matches).
+ */
+function policyEnvSecretError(state: FactoryState, policy: AgentPolicy): string | undefined {
+  const values = Object.values(policy.env ?? {}).filter((v) => v.length >= 8);
+  if (!values.length) return undefined;
+  for (const secret of state.secretValues) {
+    if (secret.length >= 8 && values.some((v) => v.includes(secret))) return 'env carries a secret value: set it as the agent\'s secret instead';
+  }
+  return undefined;
 }

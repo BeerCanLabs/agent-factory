@@ -15,6 +15,7 @@ import {
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, createProbeServer, FactoryState, relinkVendorModels } from './app.js';
+import { DeliveryLog } from './github-webhooks.js';
 import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerDeployProvider, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
 import { fireScheduledAction, scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
@@ -239,6 +240,7 @@ const state: FactoryState = {
   policies: new PolicyStore(process.env.FACTORY_POLICIES_DIR || join(DATA_DIR, 'policies'), defaultPolicy()),
   approvals: new ApprovalStore(join(DATA_DIR, 'approvals')),
   fleetState: new FleetStateStore(join(DATA_DIR, 'fleet-state.json')),
+  webhookDeliveries: new DeliveryLog(join(DATA_DIR, 'webhook-deliveries')),
   spendAccounts: new SpendAccountStore(join(DATA_DIR, 'spend-accounts.json')),
   ...(Number(process.env.FACTORY_SPEND_UPDATE_STEP_USD) > 0 ? { spendUpdateStepUsd: Number(process.env.FACTORY_SPEND_UPDATE_STEP_USD) } : {}),
   identityLinks: new IdentityLinkStore(join(DATA_DIR, 'identity-links')),
