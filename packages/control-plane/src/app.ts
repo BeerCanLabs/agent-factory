@@ -120,6 +120,7 @@ import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
 import { decisionDelivery, handleDecisionHolds, holdDecider, parseCapUsd } from './decision-holds.js';
+import { handleFleetState, type FleetStateStore } from './fleet-state.js';
 import { accountForWake, bindRun, chargeAccount, settleRun, type SpendAccountStore } from './spend-accounts.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
@@ -245,6 +246,8 @@ export type FactoryState = {
   schedules?: ScheduleStore;
   /** GAP-088: which person a Discord user is, set by an admin. Absent: nobody is linked. */
   identityLinks?: IdentityLinkStore;
+  /** GAP-260: the fleet's go/stop state; in memory (reads paused until set) when absent. */
+  fleetState?: FleetStateStore;
   /** GAP-261: spend charged to a plan, and who is told; in memory when absent. */
   spendAccounts?: SpendAccountStore;
   /** GAP-261: a plan's owner hears its spend each time it crosses a multiple of this (USD; default 5). */
@@ -3273,6 +3276,8 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (path.startsWith('/api/v1/ingress/') && (await handleChannelApprovals(state, req, res, path))) return;
   // GAP-259: decision holds an agent publishes, and one approval read by id.
   if ((path.includes('/holds/') || path.startsWith('/api/v1/approvals/')) && (await handleDecisionHolds(state, req, res, path))) return;
+  // GAP-260: the fleet's go/stop state.
+  if (path === '/api/v1/fleet/state' && (await handleFleetState(state, req, res, path))) return;
   if (await handleRoleAssignments(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;
