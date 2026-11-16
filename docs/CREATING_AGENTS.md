@@ -190,6 +190,12 @@ Content-Type: application/json
 }
 ```
 
+> **After raising an agent's budget, send RESUME.** The factory owes a parent agent a `helper-run-ended` wake when one of its helper runs ends. If that wake is refused with `budget_exceeded`, `agent_paused` or `agent_isolated`, it is not lost. It stays owed in `helper-wakes.json` and is delivered when the agent is resumed or when the control plane restarts. There are no timers.
+>
+> Raising the budget alone does not deliver the owed wakes. After you raise it, send `POST /api/v1/agents/:id/resume` (CLI: `/resume <agent>`), and the owed wakes are delivered without a restart.
+>
+> RESUME is safe on an agent that is not paused. It also lifts a pause or isolation, and it records a `RESUME` ledger row.
+
 ### Step 5: Deploy & The Activation Smoke Gate (`POST /api/v1/registry/agents/:id/deploy`, `L4`)
 
 Once policy and budget are configured, the agent owner or an admin triggers deployment:
