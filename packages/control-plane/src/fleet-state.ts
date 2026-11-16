@@ -70,6 +70,46 @@ function normalized(raw: FleetState): FleetState {
   return { ...raw, status: 'paused', reason };
 }
 
+/**
+ * The stored `ops` record is outside the API's checks. An unknown state, or a deploy open with no holding run (a lock
+ * nobody can release but an admin), loads as `rolled-back`: effective `deploy-freeze` until an admin clears it. The
+ * file is not rewritten on load. Mutates `fs`; returns what was wrong.
+ */
+function checkedOps(fs: FleetState): string | undefined {
+  const o = fs.ops as unknown;
+  if (o === undefined || o === null) return undefined;
+  const rec = typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, unknown>) : {};
+  const st = rec.state;
+  const runId = typeof rec.runId === 'string' && rec.runId ? rec.runId : null;
+  let issue: string | undefined;
+  if (typeof st !== 'string' || !OPS_STATES.includes(st as OpsState)) issue = 'unknown-state';
+  else if ((st === 'deploying' || st === 'prod-testing') && !runId) issue = 'no-run';
+  if (!issue) return undefined;
+  const shown = typeof st === 'string' ? st : st !== undefined ? JSON.stringify(st) : typeof o === 'object' ? 'missing' : String(o);
+  const was = sanitizeReason(String(shown).slice(0, 40)) ?? '(blank)';
+  const why = issue === 'no-run' ? `stored ops state "${was}" has no holding run` : `stored ops state "${was}" is not an ops state`;
+  console.warn(`[control-plane] fleet state: ${why}; it reads as rolled-back (effective deploy-freeze) until an admin clears it`);
+  fs.ops = { state: 'rolled-back', by: 'system:fleet-state-load', at: now(), reason: sanitizeReason(`The ${why}: treated as rolled-back.`), runId };
+  return issue;
+}
+
+/**
+ * Text a run reads (the top-level reason, ops.reason and ops.by) goes through the one cleaner on load, in memory only:
+ * the file is outside the API's checks. Not text, it reads as null.
+ */
+function cleanText(fs: FleetState): void {
+  const clean = (v: unknown): string | null => (typeof v === 'string' ? sanitizeReason(v) : null);
+  fs.reason = clean(fs.reason);
+  if (fs.ops && typeof fs.ops === 'object' && !Array.isArray(fs.ops)) fs.ops = { ...fs.ops, reason: clean(fs.ops.reason), by: clean(fs.ops.by) };
+}
+
+/** Called once at start, after the ledger is open: an `ops` record repaired on load is audited. */
+export function auditFleetStateLoad(state: FactoryState): void {
+  const issue = state.fleetState?.opsIssue;
+  if (!issue) return;
+  state.ledger.append({ timestamp: now(), agentId: 'factory', type: 'action', action: 'FLEET_OPS_STATE_INVALID', actor: 'system:fleet-state-load', mcpName: `fleet-ops:invalid:${issue}->rolled-back` });
+}
+
 /** One small JSON document, written whole and renamed into place. In memory when no file is given. */
 export class FleetStateStore {
   private current: FleetState | undefined;
@@ -81,7 +121,12 @@ export class FleetStateStore {
     } catch {
       this.current = undefined;
     }
+    if (this.current) cleanText(this.current);
+    this.opsIssue = this.current ? checkedOps(this.current) : undefined;
   }
+
+  /** Why the stored `ops` record was not trusted on load (audited once by `auditFleetStateLoad`). */
+  opsIssue: string | undefined;
 
   get(): FleetState {
     return structuredClone(this.current ?? UNSET);
