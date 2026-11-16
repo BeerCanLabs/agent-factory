@@ -756,6 +756,14 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     }
   });
 
+  it('GAP-268: the ops route takes only an ops agent run token: no credential is 401, every person 403', async () => {
+    const none = await call(port, 'PUT', '/api/v1/fleet/state/ops', 'none', { state: 'deploying' });
+    assert.equal(none.status, 401);
+    for (const cred of ROLES) {
+      assert.equal((await call(port, 'PUT', '/api/v1/fleet/state/ops', cred, { state: 'deploying' })).status, 403, cred);
+    }
+  });
+
   it('MCP lists the tools a role may call and names the role a forbidden call needs', async () => {
     const rpc = async (cred: Role, method: string, params?: unknown) => (await call(port, 'POST', '/mcp', cred, { jsonrpc: '2.0', id: 1, method, params })).body as {
       result?: { tools?: Array<{ name: string }> };

@@ -120,7 +120,7 @@ import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
 import { decisionDelivery, handleDecisionHolds, holdDecider, parseCapUsd } from './decision-holds.js';
-import { handleFleetState, type FleetStateStore } from './fleet-state.js';
+import { handleFleetState, isOpsAgent, setFleetOpsState, type FleetStateStore } from './fleet-state.js';
 import { accountForWake, bindRun, chargeAccount, settleRun, type SpendAccountStore } from './spend-accounts.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
@@ -2451,6 +2451,13 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
         inputSchema: { type: 'object', properties: { subagent: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' } }, required: ['subagent', 'model', 'prompt'] },
       },
     ];
+    if (isOpsAgent(state, run.agentId)) {
+      tools.push({
+        name: 'set_fleet_ops_state',
+        description: "Report the fleet's deploy state as its ops agent: idle, deploying, prod-testing or rolled-back (only an admin clears rolled-back)",
+        inputSchema: { type: 'object', properties: { state: { type: 'string', enum: ['idle', 'deploying', 'prod-testing', 'rolled-back'] }, reason: { type: 'string' } }, required: ['state'] },
+      });
+    }
     if (canManage.allowed) {
       tools.push({
         name: 'set_agent_models',
@@ -2508,6 +2515,13 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
           ],
         },
       };
+    }
+    if (params.name === 'set_fleet_ops_state') {
+      // GAP-268: a refusal (not an ops agent, an admin state, leaving rolled-back) is a JSON-RPC error; a malformed body isError.
+      const out = setFleetOpsState(state, (params.arguments ?? {}) as Record<string, unknown>, run);
+      const body = out.body as Record<string, unknown>;
+      if (out.status === 403) return { jsonrpc: '2.0', id, error: { code: -32001, message: `forbidden: ${String(body.error)}`, data: body } };
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(body) }], ...(out.status >= 400 ? { isError: true } : {}) } };
     }
     if (params.name === 'set_agent_models') {
       if (!canManage.allowed) {
@@ -3277,7 +3291,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   // GAP-259: decision holds an agent publishes, and one approval read by id.
   if ((path.includes('/holds/') || path.startsWith('/api/v1/approvals/')) && (await handleDecisionHolds(state, req, res, path))) return;
   // GAP-260: the fleet's go/stop state.
-  if (path === '/api/v1/fleet/state' && (await handleFleetState(state, req, res, path))) return;
+  if ((path === '/api/v1/fleet/state' || path === '/api/v1/fleet/state/ops') && (await handleFleetState(state, req, res, path))) return;
   if (await handleRoleAssignments(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;

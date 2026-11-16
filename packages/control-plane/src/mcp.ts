@@ -195,9 +195,9 @@ const TOOLS: ToolSpec[] = [
   { name: 'get_fleet_state', description: "Read the fleet's go/stop state (status, coder_app_ready, reason)", privilege: 'agents.read', args: {} },
   {
     name: 'set_fleet_state',
-    description: "Set the fleet's go/stop state: status is running, deploy-freeze, deploying, prod-testing, rolled-back or paused",
+    description: "Set the fleet's go/stop state: status is running, deploy-freeze, deploying, prod-testing, rolled-back or paused; opsAgents lists the agents that report deploy state; ops (null or {state, reason}) sets or clears that report, rolled-back included",
     privilege: 'fleet.state.set',
-    args: { status: { type: 'string' }, coder_app_ready: { type: 'boolean' }, reason: { type: 'string' } },
+    args: { status: { type: 'string' }, coder_app_ready: { type: 'boolean' }, reason: { type: 'string' }, opsAgents: { type: 'array', items: { type: 'string' } }, ops: { type: 'object' } },
     required: ['status'],
   },
   {
