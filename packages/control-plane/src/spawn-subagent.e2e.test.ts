@@ -102,9 +102,9 @@ describe('spawn_subagent (E1.4)', { concurrency: false }, () => {
   });
 
   it('the run MCP tool starts a helper the same way', async () => {
-    const list = await call(port, '/mcp', 'POST', runs.reviewer.token, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const list = await call(port, '/mcp/run', 'POST', runs.reviewer.token, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     assert.ok(list.body.result.tools.some((t: any) => t.name === 'spawn_subagent'));
-    const r = await call(port, '/mcp', 'POST', runs.reviewer.token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'spawn_subagent', arguments: { subagent: 'juror', model: 'grok-4', prompt: 'x' } } });
+    const r = await call(port, '/mcp/run', 'POST', runs.reviewer.token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'spawn_subagent', arguments: { subagent: 'juror', model: 'grok-4', prompt: 'x' } } });
     const out = JSON.parse(r.body.result.content[0].text);
     assert.ok(out.status < 300);
     assert.equal(state.runs.get(out.runId)!.model, 'grok-4');

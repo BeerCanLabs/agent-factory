@@ -683,7 +683,7 @@ describe('M5 Conformance: Model Subscriptions & Owner BYOM', { concurrency: fals
     );
 
     // 3. run-token MCP get_agent_models
-    const runMcpGetRes = await fetch(`http://127.0.0.1:${cpPort}/mcp`, {
+    const runMcpGetRes = await fetch(`http://127.0.0.1:${cpPort}/mcp/run`, {
       method: 'POST',
       headers: { authorization: `Bearer ${runToken}`, 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'get_agent_models', arguments: {} } }),
@@ -695,7 +695,7 @@ describe('M5 Conformance: Model Subscriptions & Owner BYOM', { concurrency: fals
     );
 
     // 4. run-token MCP set_agent_models
-    const runMcpSetRes = await fetch(`http://127.0.0.1:${cpPort}/mcp`, {
+    const runMcpSetRes = await fetch(`http://127.0.0.1:${cpPort}/mcp/run`, {
       method: 'POST',
       headers: { authorization: `Bearer ${runToken}`, 'content-type': 'application/json' },
       body: JSON.stringify({

@@ -77,7 +77,7 @@ describe('helper approved model list (#332)', { concurrency: false }, () => {
   const spawn = (who: string, body: unknown) => call(port, `/api/v1/runs/${runs[who].runId}/subagents/spawn`, 'POST', runs[who].token, body);
   const put = (id: string, approvedModels: unknown) => call(port, `/api/v1/registry/subagents/${id}/models`, 'PUT', ADMIN, { approvedModels });
   const mcp = (who: string, name: string, args: Record<string, unknown>) =>
-    call(port, '/mcp', 'POST', runs[who].token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }).then((r) => JSON.parse(r.body.result.content[0].text));
+    call(port, '/mcp/run', 'POST', runs[who].token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }).then((r) => JSON.parse(r.body.result.content[0].text));
 
   it('a name the factory does not offer is rejected with model_not_offered', async () => {
     const r = await put('juror', ['grok-4', 'gpt-9']);

@@ -185,8 +185,11 @@ describe('who decides what an agent did (TSK-108)', { concurrency: false }, () =
     assert.equal(ok.body.error, undefined);
     assert.equal(JSON.parse(ok.body.result.content[0].text).state, 'approved');
     const refused = await mcp(ALICE, pending('held', { provider: 'discord', id: '42' }));
-    assert.equal(refused.body.error.code, -32001);
-    assert.equal((await mcp(APPROVER, pending('held'))).body.error.code, -32001);
+    assert.equal(refused.body.result?.isError, true);
+    assert.match(refused.body.result?.content?.[0]?.text ?? '', /forbidden/);
+    const approverRes = await mcp(APPROVER, pending('held'));
+    assert.equal(approverRes.body.result?.isError, true);
+    assert.match(approverRes.body.result?.content?.[0]?.text ?? '', /forbidden/);
   });
 
   it('a decision for a bad body is still a 400 for a caller who may decide, after the authorization', async () => {

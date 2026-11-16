@@ -127,7 +127,9 @@ describe('GAP-260 fleet go/stop state', { concurrency: false }, () => {
     const set = await rpc('set_fleet_state', { status: 'paused', reason: 'Holiday' }, ['admin']);
     assert.equal(JSON.parse(set.result!.content[0].text).status, 'paused');
     assert.equal(JSON.parse((await rpc('get_fleet_state', {}, ['viewer'])).result!.content[0].text).reason, 'Holiday');
-    assert.match((await rpc('set_fleet_state', { status: 'running' }, ['operator'])).error!.message, /forbidden/);
+    const opForbidden = await rpc('set_fleet_state', { status: 'running' }, ['operator']);
+    assert.equal(opForbidden.result?.isError, true);
+    assert.match(opForbidden.result!.content[0].text, /forbidden/);
     // A refused change is an MCP error, and the state is unchanged: a typo never reads as success.
     const typo = await rpc('set_fleet_state', { status: 'pasued' }, ['admin']);
     assert.equal(typo.result!.isError, true);
@@ -405,11 +407,17 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
     assert.ok(!(await list(other.run)).includes('set_fleet_ops_state'));
     const took = JSON.parse((await tool(leader.run, { state: 'deploying' })).result!.content[0].text);
     assert.equal(took.ops.runId, leader.run.runId);
-    assert.match((await tool(other.run, { state: 'idle' })).error!.message, /not_an_ops_agent/);
-    assert.match((await tool(leader.run, { state: 'paused' })).error!.message, /admin_state/);
+    const otherRes = await tool(other.run, { state: 'idle' });
+    assert.equal(otherRes.result?.isError, true);
+    assert.match(otherRes.result?.content[0].text ?? '', /not_an_ops_agent/);
+    const pausedRes = await tool(leader.run, { state: 'paused' });
+    assert.equal(pausedRes.result?.isError, true);
+    assert.match(pausedRes.result?.content[0].text ?? '', /admin_state/);
     assert.match((await tool(leader.run, { state: 'idle', runId: 'x' })).result!.content[0].text, /unknown field/);
     const leaderB = await runOf('ops-b');
-    assert.match((await tool(leaderB.run, { state: 'deploying' })).error!.message, /deploy_in_progress/);
+    const leaderBRes = await tool(leaderB.run, { state: 'deploying' });
+    assert.equal(leaderBRes.result?.isError, true);
+    assert.match(leaderBRes.result?.content[0].text ?? '', /deploy_in_progress/);
 
     const rpc = async (name: string, args: Record<string, unknown>, roles: string[]) =>
       (await handleMcp(state, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, { actor: 'mcp-admin', roles } as never)) as {

@@ -745,7 +745,7 @@ describe('Subscription catalog, Owner BYOM, discovery, D24/D15/S24, $0 standing,
       'PUT /api/v1/runs/:id/models',
     );
 
-    const runMcpGetRes = await fetch(`http://127.0.0.1:${cpPort}/mcp`, {
+    const runMcpGetRes = await fetch(`http://127.0.0.1:${cpPort}/mcp/run`, {
       method: 'POST',
       headers: { authorization: `Bearer ${runToken}`, 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'get_agent_models', arguments: {} } }),
@@ -756,7 +756,7 @@ describe('Subscription catalog, Owner BYOM, discovery, D24/D15/S24, $0 standing,
       'run-token MCP get_agent_models',
     );
 
-    const runMcpSetRes = await fetch(`http://127.0.0.1:${cpPort}/mcp`, {
+    const runMcpSetRes = await fetch(`http://127.0.0.1:${cpPort}/mcp/run`, {
       method: 'POST',
       headers: { authorization: `Bearer ${runToken}`, 'content-type': 'application/json' },
       body: JSON.stringify({

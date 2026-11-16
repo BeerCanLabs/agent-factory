@@ -603,15 +603,15 @@ describe('Model Selection & Persistent Failback E2E (TSK-165, TSK-166, GAP-126)'
     assert.equal(getParsed.agentId, 'donna');
     assert.equal(getParsed.currentModel, 'model-b');
 
-    // Viewer cannot call set_agent_models
+    // Viewer cannot call set_agent_models (CL3: refusal with isError: true)
     const setViewer = await call(port, '/mcp', 'POST', VIEWER, {
       jsonrpc: '2.0',
       id: 2,
       method: 'tools/call',
       params: { name: 'set_agent_models', arguments: { id: 'donna', currentModel: 'model-a' } },
     });
-    assert.ok(setViewer.body.error);
-    assert.equal(setViewer.body.error.code, -32001);
+    assert.equal(setViewer.body.result?.isError, true);
+    assert.match(setViewer.body.result?.content?.[0]?.text ?? '', /forbidden/);
 
     // Non-owner cannot call set_agent_models on donna
     const setOther = await call(port, '/mcp', 'POST', OTHER, {
@@ -620,7 +620,8 @@ describe('Model Selection & Persistent Failback E2E (TSK-165, TSK-166, GAP-126)'
       method: 'tools/call',
       params: { name: 'set_agent_models', arguments: { id: 'donna', currentModel: 'model-a' } },
     });
-    assert.ok(setOther.body.error);
+    assert.equal(setOther.body.result?.isError, true);
+    assert.match(setOther.body.result?.content?.[0]?.text ?? '', /forbidden/);
 
     // Owner can call set_agent_models on donna
     const setOwner = await call(port, '/mcp', 'POST', OWNER, {
