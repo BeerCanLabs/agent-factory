@@ -62,9 +62,16 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
   it('builds a prefilled manifest that redirects back to the factory', () => {
     const m = buildManifest('https://f.example', 'archie', 'Archie');
     assert.equal(m.redirect_url, 'https://f.example/api/v1/keymaster/github-app/callback');
-    // GitHub answered "Public cannot be private" to public:false with an inactive hook: send neither.
+    // GitHub answered "Public cannot be private" to public:false with an inactive hook: `public` is never sent.
     assert.equal('public' in m, false);
-    assert.equal('hook_attributes' in m, false);
+    // GAP-249: an active hook on the agent's own webhook, and the fleet's events with the permissions each needs.
+    assert.deepEqual(m.hook_attributes, { url: 'https://f.example/hooks/archie', active: true });
+    assert.deepEqual(m.default_events, ['issues', 'issue_comment', 'pull_request', 'check_suite', 'check_run', 'status']);
+    assert.equal(m.default_permissions.organization_projects, 'write');
+    assert.equal(m.default_permissions.checks, 'read');
+    assert.equal(m.default_permissions.statuses, 'read');
+    assert.equal(m.default_permissions.issues, 'write', 'issue_comment events need issues');
+    assert.equal(m.default_permissions.pull_requests, 'write');
     const allowed = ['name', 'url', 'hook_attributes', 'redirect_url', 'callback_urls', 'setup_url', 'description', 'public', 'default_events', 'default_permissions', 'request_oauth_on_install', 'setup_on_update'];
     for (const k of Object.keys(m)) assert.ok(allowed.includes(k), `undocumented manifest key ${k}`);
     assert.deepEqual(JSON.parse(JSON.stringify(m)), m);

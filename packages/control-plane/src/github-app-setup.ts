@@ -36,12 +36,21 @@ function stateKey(s: FactoryState): Buffer | undefined {
 }
 
 /**
- * The manifest GitHub prefills. Permissions are what a coding agent needs; the admin can narrow them on GitHub.
- * GitHub rejected `public: false` plus an inactive webhook with "Public cannot be private", so the manifest
- * carries neither: GitHub's form then defaults to "Only on this account" (a private app), and the factory has no
- * webhook route for app events. Only documented manifest keys are sent.
+ * GAP-249: the events an agent's app sends to the agent's own webhook (`/hooks/:agentId`, signed with the app's
+ * webhook secret). The SDLC fleet is event-driven only (no timer, no polling): issues and their comments, pull
+ * requests, and CI results (check suites, check runs, commit statuses). Each needs the matching permission below.
  */
-export function buildManifest(publicBase: string, _agentId: string, agentName: string) {
+export const GITHUB_APP_EVENTS = ['issues', 'issue_comment', 'pull_request', 'check_suite', 'check_run', 'status'] as const;
+
+/**
+ * The manifest GitHub prefills. Permissions are what a coding agent needs; the admin can narrow them on GitHub.
+ * GAP-249 (Dale, chat, 2026-11-15): organization Projects (write) for the fleet's board, and checks and statuses
+ * (read) so CI results can be read and delivered as events.
+ * GitHub rejected `public: false` plus an inactive webhook with "Public cannot be private", so the manifest
+ * never sends `public`: GitHub's form then defaults to "Only on this account" (a private app). The webhook is
+ * active and points at the agent's own `/hooks/:agentId`. Only documented manifest keys are sent.
+ */
+export function buildManifest(publicBase: string, agentId: string, agentName: string) {
   return {
     // GitHub App names are global and a created app keeps its name: qualify the agent's name with this factory's
     // host, plus a short random tag so a second Start (after a lost callback, or for a replacement) is never refused
@@ -49,8 +58,17 @@ export function buildManifest(publicBase: string, _agentId: string, agentName: s
     name: `${`${agentName} (${new URL(publicBase).hostname.split('.')[0]})`.slice(0, 29)} ${randomUUID().slice(0, 4)}`,
     url: publicBase,
     redirect_url: `${publicBase}/api/v1/keymaster/github-app/callback`,
-    default_permissions: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' },
-    default_events: [] as string[],
+    hook_attributes: { url: `${publicBase}/hooks/${encodeURIComponent(agentId)}`, active: true },
+    default_permissions: {
+      contents: 'write',
+      pull_requests: 'write',
+      issues: 'write',
+      metadata: 'read',
+      organization_projects: 'write',
+      checks: 'read',
+      statuses: 'read',
+    },
+    default_events: [...GITHUB_APP_EVENTS] as string[],
   };
 }
 
