@@ -1,6 +1,9 @@
-import unittest
 from pathlib import Path
+import sys
 import tempfile
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from session import FactoryClient, empty_state, load_state, save_state, turn
 

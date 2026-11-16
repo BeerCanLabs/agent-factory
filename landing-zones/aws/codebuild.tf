@@ -167,7 +167,7 @@ phases:
       - |
         if [ ! -f cartridge.yaml ] && [[ "$AGENT_ID" =~ ^(factory-manager|agent-builder|personal-trainer)$ ]] && [ -f "agents/staff/$AGENT_ID/cartridge.yaml" ] && [ -f "runtimes/python-staff/Dockerfile" ]; then
           find "agents/staff/$AGENT_ID/tests" -type f \( -name 'test_*.py' -o -name '*_test.py' \) | grep -q . || { echo "ADMISSION REFUSED (no_tests): no tests found for staff agent $AGENT_ID"; exit 3; }
-          python3 -m unittest discover -s "agents/staff/$AGENT_ID/tests" -p 'test_*.py' || { echo "ADMISSION REFUSED (tests_failed)"; exit 4; }
+          (cd "agents/staff/$AGENT_ID" && python3 -m unittest discover -s tests -p 'test_*.py') || { echo "ADMISSION REFUSED (tests_failed)"; exit 4; }
         else
           if [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f setup.py ]; then KIND=python
           elif [ -f package.json ]; then KIND=node

@@ -607,9 +607,9 @@ When an agent has reached the end of its lifecycle, `POST /api/v1/registry/agent
 1. **Built-in Protection**: System built-in agents (`doctor`, `keymaster`, `sdlc-conductor`, etc.) refuse purge with `400 builtin_agent`.
 2. **Runtime Teardown**: Running compute containers are stopped.
 3. **Cloud Infrastructure Teardown**: The property manager executes cloud provider cleanup:
-   - **IAM Execution Roles**: Deletes `agent-<agentId>-execution-role` and detaches attached policies.
+   - **IAM Execution & Task Roles**: Deletes `AgentTaskRole-<agentId>` and `AgentExecutionRole-<agentId>` and detaches attached policies.
    - **ECS Task Definitions**: Deregisters all active revisions in families matching `agent-<agentId>` and `agent-<agentId>-<skillsHash>`.
    - **ECR Container Images**: Batch-deletes all repository tags matching `<agentId>-<commit>` (with optional `<skillsHash>`).
 4. **Credential & OAuth Purge**: Revokes and deletes agent-linked user OAuth tokens in Keymaster.
 5. **Fail-Closed Safety**: If cloud deprovisioning encounters an unexpected error, the call fails closed with `502 cloud_teardown_failed` before deleting agent state or registry entries.
-6. **Result**: On success, the agent is removed from memory and disk configs, returning `200 OK` with `{ ok: true, id: "<agentId>", teardown: { iamRolesDeleted: [...], taskDefinitionsDeregistered: [...], ecrImagesDeleted: [...] } }`.
+6. **Result**: On success, the agent is removed from memory and disk configs, returning `200 OK` with `{ ok: true, id: "<agentId>", teardown: { deletedRoles: [...], deregisteredTaskDefinitions: [...], deletedImageTags: [...] } }`.

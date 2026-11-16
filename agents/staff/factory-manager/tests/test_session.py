@@ -1,7 +1,10 @@
 import json
+from pathlib import Path
+import sys
 import tempfile
 import unittest
-from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import session
 from session import ModelClient, Notebook, add_turn, encode, pending_call_ids, tool_definitions, trim, turn
