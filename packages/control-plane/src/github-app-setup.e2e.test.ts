@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { buildManifest, githubAppSecretNames } from './github-app-setup.js';
+import { appNeeds, buildManifest, githubAppSecretNames } from './github-app-setup.js';
 
 // E5.1a (#315): the manifest flow stores an agent's app id and key in the secret store, never anywhere else.
 const ADMIN = 'admin-token';
@@ -64,20 +64,33 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     assert.equal(m.redirect_url, 'https://f.example/api/v1/keymaster/github-app/callback');
     // GitHub answered "Public cannot be private" to public:false with an inactive hook: `public` is never sent.
     assert.equal('public' in m, false);
-    // GAP-257: an active hook on the agent's own webhook, and the fleet's events with the permissions each needs.
-    assert.deepEqual(m.hook_attributes, { url: 'https://f.example/hooks/archie', active: true });
-    assert.deepEqual(m.default_events, ['issues', 'issue_comment', 'pull_request', 'check_suite', 'check_run', 'status']);
-    assert.equal(m.default_permissions.organization_projects, 'write');
-    assert.equal(m.default_permissions.checks, 'read');
-    assert.equal(m.default_permissions.statuses, 'read');
-    assert.equal(m.default_permissions.issues, 'write', 'issue_comment events need issues');
-    assert.equal(m.default_permissions.pull_requests, 'write');
+    // GAP-257: an agent that declares neither events nor Projects gets the old, narrow manifest.
+    assert.equal('hook_attributes' in m, false);
+    assert.deepEqual(m.default_events, []);
+    assert.deepEqual(m.default_permissions, { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' });
     const allowed = ['name', 'url', 'hook_attributes', 'redirect_url', 'callback_urls', 'setup_url', 'description', 'public', 'default_events', 'default_permissions', 'request_oauth_on_install', 'setup_on_update'];
     for (const k of Object.keys(m)) assert.ok(allowed.includes(k), `undocumented manifest key ${k}`);
     assert.deepEqual(JSON.parse(JSON.stringify(m)), m);
     assert.match(m.name, /^Archie \(f\) [0-9a-f]{4}$/);
     assert.notEqual(buildManifest('https://f.example', 'archie', 'Archie').name, m.name);
     assert.ok(buildManifest('https://f.example', 'a', 'A'.repeat(60)).name.length <= 34);
+  });
+
+  it('GAP-257: only the agents that need them get the hook and events, or organization Projects', () => {
+    const conductor = buildManifest('https://f.example', 'flow bot', 'Flow', appNeeds({ skillIds: ['sdlc-conductor', 'sdlc-merge'] }));
+    assert.deepEqual(conductor.hook_attributes, { url: 'https://f.example/hooks/flow%20bot', active: true }, 'the agent id is URL-encoded');
+    assert.deepEqual(conductor.default_events, ['issues', 'issue_comment', 'pull_request', 'check_suite', 'status']);
+    assert.ok(!conductor.default_events.includes('check_run'), 'check_run is ignored by the factory, so never subscribed');
+    assert.equal(conductor.default_permissions.checks, 'read');
+    assert.equal(conductor.default_permissions.statuses, 'read');
+    assert.equal('organization_projects' in conductor.default_permissions, false);
+    const backlog = buildManifest('https://f.example', 'ops', 'Ops', appNeeds({ skillRoutes: { 'sdlc-backlog-github': ['github'] } }));
+    assert.equal(backlog.default_permissions.organization_projects, 'write');
+    assert.equal('hook_attributes' in backlog, false);
+    assert.deepEqual(backlog.default_events, []);
+    assert.deepEqual(appNeeds({ skillIds: ['sdlc-coder'] }), { events: false, projects: false }, 'a coder takes no app events');
+    assert.deepEqual(appNeeds({}, { events: true, projects: true }), { events: true, projects: true }, 'the admin can declare them');
+    assert.deepEqual(appNeeds({}, { events: 'yes' }), { events: false, projects: false });
   });
 
   it('names secrets per agent', () => {
@@ -143,5 +156,24 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     const r = await cb(`code=bad&state=${encodeURIComponent(s)}`);
     assert.equal(r.status, 502);
     assert.equal(stored.size, 0);
+  });
+  it('GAP-257: an existing app is upgraded by creating it again (replace), which stores the new webhook secret', async () => {
+    const archie = state.agents.get('archie') as any;
+    archie.skillIds = ['sdlc-conductor'];
+    try {
+      stored.set(githubAppSecretNames('archie').slug, 'archie-old-app');
+      assert.equal((await start(ADMIN)).status, 409);
+      const r = await start(ADMIN, { replace: true });
+      assert.equal(r.status, 200);
+      const b = await r.json() as any;
+      assert.deepEqual(b.manifest.hook_attributes, { url: 'https://factory.example.com/hooks/archie', active: true });
+      assert.ok(b.manifest.default_events.includes('pull_request'));
+      assert.equal((await cb(`code=upgrade&state=${encodeURIComponent(b.state)}`)).status, 200);
+      assert.equal(stored.get(githubAppSecretNames('archie').webhookSecret), 'whsec-fake');
+      assert.equal(stored.get(githubAppSecretNames('archie').slug), 'archie-app');
+    } finally {
+      delete archie.skillIds;
+      stored.clear();
+    }
   });
 });
