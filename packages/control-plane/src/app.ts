@@ -91,6 +91,7 @@ import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
 import { allowedSubagents, budgetHolder, handleSubagents, spawnSubagent, type SubagentRecord } from './subagents.js';
+import { wireHelperWakes, type HelperWakeLog } from './helper-wakes.js';
 import { agentConfigForRun, applyAgentOwnershipGrant, deployConfigured, handleAgentCreation, handleConvertAgent, handleRuntimeRoutes, registrationRefusal, resolveAgentOwnershipOnSubmit, type SharedRuntimePin } from './agent-creation.js';
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
@@ -127,13 +128,13 @@ import {
 } from './mcp.js';
 export { handleMcp, handleAgentMcp, redactMcpResponse, SUPPORTED_MCP_PROTOCOL_VERSIONS } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
-import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, conductorEventFor, conductorInput } from './github-webhooks.js';
+import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, OPS_SKILL, conductorEventFor, conductorInput, opsEventFor } from './github-webhooks.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
 import { decisionDelivery, handleDecisionHolds, holdDecider, parseCapUsd } from './decision-holds.js';
-import { dropOpsAgent, handleFleetState, isOpsAgent, setFleetOpsState, type FleetStateStore } from './fleet-state.js';
+import { dropOpsAgent, handleFleetState, isOpsAgent, resumeFleetWakes, setFleetOpsState, type FleetStateStore } from './fleet-state.js';
 import { accountForWake, bindRun, chargeAccount, settleRun, type SpendAccountStore } from './spend-accounts.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
@@ -175,6 +176,13 @@ export type FactoryState = {
   registryDir?: string;
   /** GAP-258: GitHub webhook delivery ids already handled (one run per delivery), kept across restarts. */
   webhookDeliveries?: DeliveryLog;
+  /** #481: the helper runs owed a `helper-run-ended` wake of their parent agent (on disk), else in memory. */
+  helperWakes?: HelperWakeLog;
+  /** #481: told when a run first ends (property-manager `finishRun`), and when the kill switch resumes an agent. */
+  onRunEnded?: (run: Run) => void;
+  onAgentResumed?: (agentId: string) => void;
+  /** #490: an agent's budget was written (every budget route); helper-wakes retries the wakes refused for the budget. */
+  onBudgetChanged?: (agentId: string) => void;
   ledger: LedgerStore;
   auth: AuthProvider;
   /** S5: factory API keys (`fk_`), verified before routing on /api/v1 and /mcp. */
@@ -1953,6 +1961,11 @@ function unblockAffordableRuns(state: FactoryState, agentId: string, limits: Bud
       unblockRun(state, run.runId, 'BLOCKED_BUDGET_EXCEEDED', actor);
     }
   }
+  try {
+    state.onBudgetChanged?.(agentId);
+  } catch (err) {
+    console.error(`[control-plane] budget hook for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 
@@ -2490,7 +2503,7 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
       {
         name: 'spawn_subagent',
         title: 'Spawn Subagent',
-        description: 'Start a helper run: an allowed helper id, one of that helper\'s approvedModels (list_subagents) and the task prompt. Returns the run.',
+        description: 'Start a helper run: an allowed helper id, one of that helper\'s approvedModels (list_subagents) and the task prompt. Returns the run. When it ends, the factory wakes this agent once (trigger helper-run-ended, input event {parentRunId, helperRunId, subagent, state}). That woken run, or the spawning run, reads the result, and the woken run also its sibling helpers (same parentRunId), with GET /api/v1/runs/:id/subagents/runs/:helperRunId. One wake per helper: an early wake (siblings still running) or a wake that queues behind a run that already read the result must be a cheap no-op. Deploy order: this factory must be live before a skill stops polling for helpers.',
         inputSchema: { type: 'object', properties: { subagent: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' } }, required: ['subagent', 'model', 'prompt'] },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
@@ -2499,8 +2512,18 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
       tools.push({
         name: 'set_fleet_ops_state',
         title: 'Set Fleet Ops State',
-        description: "Report the fleet's deploy state as its ops agent: idle, deploying, prod-testing or rolled-back (only an admin clears rolled-back)",
-        inputSchema: { type: 'object', properties: { state: { type: 'string', enum: ['idle', 'deploying', 'prod-testing', 'rolled-back'] }, reason: { type: 'string' } }, required: ['state'] },
+        description:
+          "Report the fleet's deploy state as its ops agent: idle, deploying, prod-testing or rolled-back (only an admin clears rolled-back). Give deploying a deployId; a later run of this agent finishes that deploy with takeover: true and the same deployId once the holding run has ended (an ended holder's deploy reads as deploying until a takeover or an admin clears it). While the fleet is not running, a takeover may only go to idle or rolled-back.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            state: { type: 'string', enum: ['idle', 'deploying', 'prod-testing', 'rolled-back'] },
+            reason: { type: 'string' },
+            deployId: { type: 'string', pattern: '^[A-Za-z0-9._@#/-]{1,128}$' },
+            takeover: { type: 'boolean', enum: [true] },
+          },
+          required: ['state'],
+        },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       });
     }
@@ -3288,6 +3311,10 @@ export function createFactoryServer(state: FactoryState): http.Server {
   wireGrantStoreKindLookup(state);
   tapActAsLedger(state);
   wireSubscriptionRuntime(state);
+  // #481: a helper's end wakes its parent agent (and the wakes a previous control plane owed are finished).
+  wireHelperWakes(state);
+  // #493: finish a fleet-resumed fan-out a previous control plane did not.
+  void resumeFleetWakes(state).catch((err) => console.warn('[control-plane] could not resume fleet-resumed wakes:', err));
   // SK1: follow skill checks a previous control plane started and did not see end.
   void resumeSkillChecks(state).catch((err) => console.warn('[control-plane] could not resume skill checks:', err));
   const discoveryTimer =
@@ -3747,14 +3774,18 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       json(res, 400, { error: 'missing_delivery_id', message: 'a GitHub App delivery carries X-GitHub-Delivery' });
       return;
     }
-    const isConductor = (agent.skillIds ?? []).includes(CONDUCTOR_SKILL) || (state.configs?.current(agent.id)?.skills ?? []).some((sk) => sk.id === CONDUCTOR_SKILL);
-    if (githubEvent && (isConductor || viaApp)) {
-      if (!isConductor) {
+    const adopted = (skill: string) => (agent.skillIds ?? []).includes(skill) || (state.configs?.current(agent.id)?.skills ?? []).some((sk) => sk.id === skill);
+    const isConductor = adopted(CONDUCTOR_SKILL);
+    // #483: the ops leader takes workflow_run completions (a conductor that is also the ops leader keeps its other events).
+    // Either one takes GitHub events only from its own app: a repo webhook or the legacy header maps nothing.
+    const asOps = adopted(OPS_SKILL) && (!isConductor || githubEvent === 'workflow_run');
+    if (githubEvent && (isConductor || asOps || viaApp)) {
+      if (!isConductor && !asOps) {
         json(res, 200, { ok: true, ignored: true, reason: 'this agent takes no GitHub events' });
         return;
       }
       if (!viaApp) {
-        json(res, 200, { ok: true, ignored: true, reason: 'conductor events come only from the agent\'s own GitHub App' });
+        json(res, 200, { ok: true, ignored: true, reason: `${asOps ? 'ops' : 'conductor'} events come only from the agent's own GitHub App` });
         return;
       }
       // Fail closed: without its app's login the conductor cannot tell its own labels and comments, which would loop.
@@ -3764,12 +3795,12 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         json(res, 200, { ok: true, ignored: true, reason: 'the agent\'s GitHub App slug is not stored' });
         return;
       }
-      const mapped = conductorEventFor(githubEvent, input, `${slug}[bot]`);
+      const mapped = asOps ? opsEventFor(githubEvent, input) : conductorEventFor(githubEvent, input, `${slug}[bot]`);
       if ('ignored' in mapped) {
         json(res, 200, { ok: true, ignored: true, reason: mapped.ignored });
         return;
       }
-      input = conductorInput(mapped.event, githubEvent, delivery);
+      input = conductorInput(mapped.event, githubEvent, delivery, asOps ? 'sdlc-ops-deploy' : 'sdlc-on-event');
     } else if (githubEvent && input && typeof input === 'object' && !Array.isArray(input)) {
       input = { ...(input as Record<string, unknown>), githubEvent, ...(delivery ? { githubDelivery: delivery } : {}) };
     }
@@ -3838,13 +3869,20 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   }
 
   // #318: a parent run reads the helper runs it started (E1.5 parent link), with its own run token, and nothing else.
+  // #481 (jury B1): also the factory's `helper-run-ended` wake of that agent for the same spawning run, so it reads the
+  // result and its siblings' (trigger and input are the factory's, so neither can be forged). Nothing else.
   const runHelper = path.match(/^\/api\/v1\/runs\/([^/]+)\/subagents\/runs\/([^/]+)$/);
   if (runHelper && req.method === 'GET') {
     const run = await authenticateRun(req, res, state, runHelper[1]);
     if (!run) return;
     const helper = state.runs.get(decodeURIComponent(runHelper[2]));
     // An unknown id and another run's helper look the same: no existence oracle.
-    if (!helper || helper.parentRunId !== run.runId) return json(res, 403, { error: 'not_your_helper_run' });
+    const wake = run.trigger === 'helper-run-ended' ? (run.input as { event?: { parentRunId?: unknown } } | undefined)?.event : undefined;
+    const mine =
+      helper &&
+      helper.parentRunId &&
+      (helper.parentRunId === run.runId || (wake !== undefined && helper.parentAgentId === run.agentId && wake.parentRunId === helper.parentRunId));
+    if (!helper || !mine) return json(res, 403, { error: 'not_your_helper_run' });
     const { runId, agentId, state: runState, result, error, startedAt, updatedAt } = helper;
     json(res, 200, { runId, agentId, state: runState, ...(result !== undefined ? { result } : {}), ...(error ? { error } : {}), ...(startedAt ? { startedAt } : {}), updatedAt });
     return;

@@ -672,6 +672,13 @@ const FleetStateOpsBodySchema: JsonSchemaObject = jsonSchema.object({
   reason: jsonSchema.string({
     description: 'Deploy state transition justification or error details',
   }),
+  deployId: jsonSchema.string({
+    description: "The deploy's opaque id (#482), given with deploying; a takeover must name the same one",
+    pattern: '^[A-Za-z0-9._@#/-]{1,128}$',
+  }),
+  takeover: jsonSchema.boolean({
+    description: "true: take over this agent's own open deploy (same deployId) once its holding run has ended (#482)",
+  }),
 }, { required: ['state'] });
 
 const FleetStateSetBodySchema: JsonSchemaObject = jsonSchema.object({
@@ -1969,7 +1976,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     operationId: "resume_agent",
     method: "POST",
     pattern: "/api/v1/agents/:id/resume",
-    summary: "Resume agent execution",
+    summary: "Resume a paused or isolated agent",
+    description: "Lifts a pause or isolation and starts the next queued run. 409 agent_not_paused from any other state (#490).",
     staff: "property-manager",
     mcpExposure: "tool-confirm",
     toolset: "agents",
@@ -1978,7 +1986,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     privilege: "agents.resume",
     noRequestBody: true,
     responseSchema: AgentRecordResponseSchema,
-    statusCodes: [200],
+    statusCodes: [200, 409],
   },
   {
     operationId: "isolate_agent",

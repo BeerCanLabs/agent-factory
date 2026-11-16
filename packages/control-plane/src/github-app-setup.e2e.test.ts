@@ -76,6 +76,20 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     assert.ok(buildManifest('https://f.example', 'a', 'A'.repeat(60)).name.length <= 34);
   });
 
+  it('#483: the ops leader also gets workflow_run and actions read; no other agent does', () => {
+    const ops = buildManifest('https://f.example', 'sdlc-ops', 'Ops', appNeeds({ skillIds: ['sdlc-ops'] }));
+    assert.deepEqual(ops.hook_attributes, { url: 'https://f.example/hooks/sdlc-ops', active: true });
+    assert.deepEqual(ops.default_events, ['workflow_run'], 'jury #485 B2: an ops-only app takes only workflow_run');
+    assert.deepEqual(ops.default_permissions, { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', actions: 'read' });
+    const both = buildManifest('https://f.example', 'lead', 'Lead', appNeeds({ skillIds: ['sdlc-conductor', 'sdlc-ops'] }));
+    assert.deepEqual(both.default_events, ['issues', 'issue_comment', 'pull_request', 'check_suite', 'status', 'workflow_run']);
+    assert.deepEqual([both.default_permissions.checks, both.default_permissions.statuses, both.default_permissions.actions], ['read', 'read', 'read']);
+    const conductor = buildManifest('https://f.example', 'flow', 'Flow', appNeeds({ skillIds: ['sdlc-conductor'] }));
+    assert.equal(conductor.default_events.includes('workflow_run'), false);
+    assert.equal('actions' in conductor.default_permissions, false);
+    assert.deepEqual(appNeeds({}, { workflows: true }), { events: false, projects: false, workflows: true }, 'the admin can declare it');
+  });
+
   it('GAP-257: only the agents that need them get the hook and events, or organization Projects', () => {
     const conductor = buildManifest('https://f.example', 'flow bot', 'Flow', appNeeds({ skillIds: ['sdlc-conductor', 'sdlc-merge'] }));
     assert.deepEqual(conductor.hook_attributes, { url: 'https://f.example/hooks/flow%20bot', active: true }, 'the agent id is URL-encoded');

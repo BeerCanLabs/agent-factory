@@ -183,9 +183,9 @@ Content-Type: application/json
   "models": ["claude-sonnet-4-5", "claude-haiku-4-5"],
   "routes": ["models", "tavily"],
   "hosts": [],
-  "budget": {
-    "dailyUsd": 5.00,
-    "monthlyUsd": 50.00
+  "budgetUsd": {
+    "perDay": 5.00,
+    "perMonth": 50.00
   }
 }
 ```
@@ -538,7 +538,7 @@ Content-Type: application/json
 
 Each named agent gets its own apps, and a company's apps and keys stay in its own factory's secret store. Keys never go in the repository.
 
-**GitHub App (one click on GitHub).** On the agent's credentials page, choose **Create GitHub App** (optionally name the org). The factory sends GitHub a prefilled manifest; approve it on GitHub. GitHub redirects back and the factory stores the app id, private key and webhook secret itself (`GITHUB_APP_<AGENT>_*`). Then `POST /api/v1/keymaster/agents/:id/github-app/installations {"orgs": [...]}` records the orgs and returns an install link per org. The gatekeeper-egress mints one-hour installation keys for chosen orgs only. The manifest asks for contents and pull requests and issues (write) only. An agent that takes app events (it adopted `sdlc-conductor`, or the admin sends `"events": true` to start) also gets checks and commit statuses (read), the `issues`, `issue_comment`, `pull_request`, `check_suite` and `status` events, and an active webhook on its own `/hooks/:agentId`, signed with the app's webhook secret. An agent with a backlog skill (`sdlc-backlog-github`, or `"projects": true`) also gets organization Projects (write) (GAP-257). **To upgrade an app created before this** (or one created without a webhook), create it again: **Create GitHub App** with `"replace": true`. GitHub generates the new app's webhook secret and the factory stores it; install the new app on the org and uninstall the old one. Setting a webhook secret by hand on GitHub's settings page does not work, because the factory checks deliveries against the secret it stored.
+**GitHub App (one click on GitHub).** On the agent's credentials page, choose **Create GitHub App** (optionally name the org). The factory sends GitHub a prefilled manifest; approve it on GitHub. GitHub redirects back and the factory stores the app id, private key and webhook secret itself (`GITHUB_APP_<AGENT>_*`). Then `POST /api/v1/keymaster/agents/:id/github-app/installations {"orgs": [...]}` records the orgs and returns an install link per org. The gatekeeper-egress mints one-hour installation keys for chosen orgs only. The manifest asks for contents and pull requests and issues (write) only. An agent that takes app events (it adopted `sdlc-conductor`, or the admin sends `"events": true` to start) also gets checks and commit statuses (read), the `issues`, `issue_comment`, `pull_request`, `check_suite` and `status` events, and an active webhook on its own `/hooks/:agentId`, signed with the app's webhook secret. An agent with a backlog skill (`sdlc-backlog-github`, or `"projects": true`) also gets organization Projects (write) (GAP-257). The fleet's ops leader (it adopted `sdlc-ops`, or `"workflows": true`) gets an active webhook with only the `workflow_run` event and Actions (read), and the conductor's events only if it is also the conductor: a signed `workflow_run` `completed` of a `workflow_dispatch` run (its own deploy or rollback; push CI, pull request, schedule and Dependabot runs start nothing) from its own app (with its slug stored) wakes it with one `workflow-completed` event for `sdlc-ops-deploy` (repo, run and workflow ids, workflow path, head SHA, triggering event, conclusion, attempt), so it dispatches a deploy or rollback, exits, and is woken by the result instead of polling (#483). `requested`, `in_progress`, a malformed payload and any other event start nothing. **Order:** do not add the Workflow run event to an ops app until the agentic-sdlc `workflow-completed` handler is deployed; until then this is dormant. A newly created ops app subscribes at once, so create it only after that handler is live. **To add this to an existing ops app**, on GitHub open the app's settings, Permissions & events: set Actions to Read-only and tick Workflow run, then save. Each installation's owner must accept the new permission (GitHub emails them, or org settings, GitHub Apps, Review request) before GitHub sends the event. An ops app that already has the factory's webhook keeps its secret, so it needs no re-create; one made before the ops leader took events has no webhook, so create it again with `"replace": true` as below. **To upgrade an app created before this** (or one created without a webhook), create it again: **Create GitHub App** with `"replace": true`. GitHub generates the new app's webhook secret and the factory stores it; install the new app on the org and uninstall the old one. Setting a webhook secret by hand on GitHub's settings page does not work, because the factory checks deliveries against the secret it stored.
 
 **Discord bot (as automated as Discord allows).** Discord has no API to create an application, so two steps stay manual in the [Developer Portal](https://discord.com/developers/applications): create the application, then reset and copy the bot token. Paste the token on the agent's credentials page (`POST /api/v1/keymaster/agents/:id/discord-app/token`). The factory checks it with Discord, stores it under the agent's declared Discord `secretRef` (else `<AGENT>_DISCORD_BOT_TOKEN`; an agent on the shared `DISCORD_BOT_TOKEN` must declare its own first), and returns an invite link with the declared permissions (`discord.permissions`, default view channels, send messages, read history). `GET /api/v1/keymaster/agents/:id/discord-app` lists the steps and the invite link; it never returns the token.
 
@@ -568,3 +568,22 @@ This is an intentional optimization (`AM1` runtime shim gate, `TSK-283`). When `
 
 ### 6. What happens if a shared runtime upgrade (`PUT /api/v1/runtime`) fails smoke for one agent in the fleet?
 `PUT /api/v1/runtime` isolates failures per agent (`TSK-280`, `TSK-281`). Every configuration agent whose candidate image passes `runActivationSmoke` upgrades to the new runtime (`status: "updated"`). Any agent whose smoke check fails is automatically rolled back to its previous working image and runtime commit (`status: "smoke_failed"`, ledgered as `AGENT_SMOKE_FAILED` and `AGENT_DEPLOY_FAILED`) and remains online without blocking the rest of the fleet.
+
+## 8. Raising a Running Agent's Budget
+
+This section is for an agent that is already deployed and in service. For a new agent, set its budget in the policy at Step 4 instead.
+
+**Raise the limit.** There are three ways:
+- `PUT /api/v1/budget/agents/:id` with `{ "budgetUsd": { "perDay": 10 } }`. This needs `budget.allocate` and changes only `perDay`/`perMonth`. It rejects `perRun` with a 400.
+- The CLI: `/budget <agent> 10 daily`. This uses `PUT /api/v1/registry/agents/:id/budget` and needs `registry.budget.set`.
+- `PUT /api/v1/agents/:id/policy` (`policy.set`). It replaces the whole policy, so read it first and send it back with `budgetUsd` raised. This is the only route that sets `perRun`.
+
+Runs that were blocked on the budget continue once the agent is back within its limits.
+
+**Owed helper wakes.** The factory owes a parent agent a `helper-run-ended` wake when one of its helper runs ends. A wake that is refused because the agent is over its budget (`budget_exceeded`), paused (`agent_paused`) or isolated (`agent_isolated`) stays owed in `helper-wakes.json`. Any other refusal is final. There are no timers.
+- **Refused for the budget.** Any write of the agent's budget, through any of the three routes above, delivers these wakes once, if the agent is then back within its limits. If it is still over them, the wake stays owed.
+- **Refused because the agent was paused or isolated.** RESUME (`POST /api/v1/agents/:id/resume`, CLI `/resume <agent>`, privilege `agents.resume`) delivers these.
+- **When the day or month budget window rolls over,** nothing fires. To deliver the wakes then, write the agent's budget (the same value works), or they go out at the next control-plane start.
+- **The fleet `paused` state** (`fleet.state.set`) is separate. An agent's RESUME does not change it, and the ops skill refuses a wake that arrives while the fleet is paused.
+
+> **RESUME only lifts a pause or an isolation.** From any other state it returns `409 agent_not_paused` and changes nothing. To clear `ERROR`, or to restart a built-in agent, use reset (`/reset <agent>`). A valid RESUME also starts the agent's next queued run.

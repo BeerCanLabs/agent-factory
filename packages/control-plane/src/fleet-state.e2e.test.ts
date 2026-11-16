@@ -13,7 +13,7 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
-import { FleetStateStore, FLEET_STATUSES, OPS_STATES, auditFleetStateLoad, effectiveOf, sanitizeReason } from './fleet-state.js';
+import { FleetStateStore, FLEET_STATUSES, OPS_STATES, auditFleetStateLoad, effectiveOf, opsStep, resumeFleetWakes, sanitizeReason, setFleetOpsState } from './fleet-state.js';
 import { handleMcp } from './mcp.js';
 
 const VIEWER = 'viewer-fleet-state-e2e';
@@ -305,6 +305,8 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
     assert.deepEqual([odd.reason, odd.ops?.reason, odd.ops?.by], [null, null, null], 'not text reads as null');
     writeFileSync(f, JSON.stringify({ status: 'running', coder_app_ready: true, reason: null, ops: { by: 'x' } }));
     assert.match(new FleetStateStore(f).get().ops?.reason ?? '', /stored ops state "missing" is not an ops state/);
+    writeFileSync(f, JSON.stringify({ status: 'running', coder_app_ready: true, reason: null, ops: { state: 'deploying', by: 'x', at: null, reason: null, runId: 'r', deployId: 'p@abc\u202e' } }));
+    assert.equal(new FleetStateStore(f).get().ops?.deployId, null, 'a stored deployId that is not a deploy id reads as null (#482)');
   });
 
   it('R0: only registered, non-helper, non-retired agents can be listed (400 unknown_agent)', async () => {
@@ -351,7 +353,7 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
     const leader = await runOf('ops-leader');
     state.runs.update(leader.run.runId, { state: 'DONE' });
     assert.equal((await ops(leader.token, { state: 'deploying' })).status, 401);
-    assert.deepEqual((await read(OPS_VIEWER)).ops, { state: 'idle', by: null, at: null, reason: null });
+    assert.deepEqual((await read(OPS_VIEWER)).ops, { state: 'idle', by: null, at: null, reason: null, deployId: null });
   });
 
   it('R1: of concurrent deploying writes exactly one holds the lock and gets its runId back', async () => {
@@ -513,5 +515,360 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
     const set = JSON.parse((await rpc('set_fleet_state', { status: 'running', ops: null, force: true, opsAgents: [] }, ['admin'])).result!.content[0].text);
     assert.deepEqual({ e: set.effective, list: set.opsAgents }, { e: 'running', list: undefined });
     assert.equal((await ops(leader.token, { state: 'deploying' })).status, 403, 'off the list, refused');
+  });
+
+  describe('#482: a later run of the same ops agent takes over its own deploy lock once the holder has ended', () => {
+    const end = (runId: string) => state.runs.update(runId, { state: 'DONE' });
+    const opened = async (deployId?: string) => {
+      const r1 = await runOf('ops-leader');
+      const out = await ops(r1.token, { state: 'deploying', ...(deployId ? { deployId } : {}) });
+      assert.equal(out.status, 200);
+      assert.equal(out.body.ops.deployId, deployId ?? null);
+      return r1;
+    };
+
+    it('R2 of X takes over after R1 ends: 200 with ops.runId R2, ledgered; R1 is then not the holder; R2 writes on without takeover', async () => {
+      const r1 = await opened('p@abc');
+      assert.equal((await read()).ops.deployId, 'p@abc', 'every view shows the deploy id');
+      assert.equal((await read(OPS_VIEWER)).ops.deployId, 'p@abc');
+      end(r1.run.runId);
+      const r2 = await runOf('ops-leader');
+      const out = await ops(r2.token, { state: 'prod-testing', takeover: true, deployId: 'p@abc' });
+      assert.deepEqual({ status: out.status, runId: out.body.ops.runId, state: out.body.ops.state, deployId: out.body.ops.deployId }, { status: 200, runId: r2.run.runId, state: 'prod-testing', deployId: 'p@abc' });
+      const t = rows('FLEET_OPS_LOCK_TAKEOVER').slice(-1);
+      assert.deepEqual(t.map((e) => [e.agentId, e.runId, e.mcpName]), [['ops-leader', r2.run.runId, `fleet-ops-takeover:${r1.run.runId}->${r2.run.runId}:p@abc:prod-testing`]]);
+      // R1's token has ended, so it cannot call; were it to write, the lock is no longer its own.
+      const late = setFleetOpsState(state, { state: 'idle' }, { runId: r1.run.runId, agentId: 'ops-leader' });
+      assert.deepEqual({ status: late.status, error: (late.body as { error: string }).error }, { status: 409, error: 'not_the_deploying_run' });
+      assert.equal((await ops(r2.token, { state: 'prod-testing', reason: 'smoke 1/3' })).status, 200);
+      const done = await ops(r2.token, { state: 'idle' });
+      assert.deepEqual({ s: done.body.ops.state, runId: done.body.ops.runId, deployId: done.body.ops.deployId }, { s: 'idle', runId: null, deployId: null });
+    });
+
+    it('refusals: holder live, another agent, wrong or missing deployId, no open deploy; each 409 and ledgered', async () => {
+      const r1 = await opened('p@abc');
+      const r2 = await runOf('ops-leader');
+      const y = await runOf('ops-b');
+      const denied = () => rows('FLEET_OPS_STATE_DENIED').length;
+      const n = denied();
+      const taken = rows('FLEET_OPS_LOCK_TAKEOVER').length;
+      await expect409(r2.token, { state: 'prod-testing', takeover: true, deployId: 'p@abc' }, 'deploy_in_progress');
+      end(r1.run.runId);
+      await expect409(y.token, { state: 'prod-testing', takeover: true, deployId: 'p@abc' }, 'not_the_deploying_run');
+      await expect409(r2.token, { state: 'prod-testing', takeover: true, deployId: 'p@def' }, 'deploy_id_mismatch');
+      await expect409(r2.token, { state: 'prod-testing', takeover: true }, 'deploy_id_mismatch');
+      assert.equal(denied(), n + 4);
+      assert.equal(rows('FLEET_OPS_STATE_DENIED').at(-1)?.mcpName, 'fleet-ops:deploy_id_mismatch');
+      assert.equal(rows('FLEET_OPS_LOCK_TAKEOVER').length, taken);
+      assert.equal((await ops(r2.token, { state: 'idle', takeover: true, deployId: 'p@abc' })).body.ops.deployId, null, 'a takeover into idle clears the deploy');
+      await expect409(r2.token, { state: 'prod-testing', takeover: true, deployId: 'p@abc' }, 'invalid_transition');
+      for (const bad of [{ deployId: '' }, { deployId: 'x'.repeat(129) }, { deployId: 'a b' }, { takeover: false }, { takeover: 'yes' }]) {
+        assert.equal((await ops(r2.token, { state: 'deploying', ...bad })).status, 400, JSON.stringify(bad));
+      }
+    });
+
+    it('a takeover into rolled-back works; none out of rolled-back; no takeover without a deployId', async () => {
+      for (const from of ['deploying', 'prod-testing']) {
+        await admin({ status: 'running', ops: null, force: true });
+        const r1 = await opened('p@abc');
+        if (from === 'prod-testing') await ops(r1.token, { state: 'prod-testing' });
+        end(r1.run.runId);
+        const r2 = await runOf('ops-leader');
+        const rb = await ops(r2.token, { state: 'rolled-back', reason: 'smoke failed', takeover: true, deployId: 'p@abc' });
+        assert.deepEqual({ status: rb.status, s: rb.body.ops.state, runId: rb.body.ops.runId, e: rb.body.effective }, { status: 200, s: 'rolled-back', runId: r2.run.runId, e: 'deploy-freeze' }, from);
+        end(r2.run.runId);
+        const r3 = await runOf('ops-leader');
+        await expect409(r3.token, { state: 'rolled-back', reason: 'smoke failed', takeover: true, deployId: 'p@abc' }, 'rolled_back_requires_admin');
+        await expect409(r3.token, { state: 'idle', takeover: true, deployId: 'p@abc' }, 'rolled_back_requires_admin');
+      }
+      await admin({ status: 'running', ops: null });
+      const r1 = await opened();
+      end(r1.run.runId);
+      const r2 = await runOf('ops-leader');
+      await expect409(r2.token, { state: 'prod-testing', takeover: true }, 'deploy_id_mismatch');
+      await expect409(r2.token, { state: 'prod-testing', takeover: true, deployId: 'p@abc' }, 'deploy_id_mismatch');
+      await expect409(r2.token, { state: 'prod-testing' }, 'not_the_deploying_run');
+    });
+
+    it('two concurrent takeovers by two runs of X: exactly one gets 200', async () => {
+      const r1 = await opened('p@abc');
+      end(r1.run.runId);
+      const taken = rows('FLEET_OPS_LOCK_TAKEOVER').length;
+      const rs = await Promise.all([runOf('ops-leader'), runOf('ops-leader')]);
+      const outs = await Promise.all(rs.map((r) => ops(r.token, { state: 'prod-testing', takeover: true, deployId: 'p@abc' })));
+      const won = outs.filter((o) => o.status === 200);
+      assert.equal(won.length, 1);
+      assert.deepEqual(outs.filter((o) => o.status !== 200).map((o) => [o.status, o.body.error]), [[409, 'deploy_in_progress']]);
+      assert.equal((await read()).ops.runId, rs[outs.indexOf(won[0])].run.runId);
+      assert.equal(rows('FLEET_OPS_LOCK_TAKEOVER').length, taken + 1);
+    });
+
+    it('jury #484 B1: while the fleet is paused or frozen, a takeover only closes or rolls back (409 fleet_not_running)', async () => {
+      for (const status of ['paused', 'deploy-freeze']) {
+        for (const from of ['deploying', 'prod-testing']) {
+          await admin({ status: 'running', ops: null, force: true });
+          const r1 = await opened('p@abc');
+          if (from === 'prod-testing') await ops(r1.token, { state: 'prod-testing' });
+          end(r1.run.runId);
+          await admin({ status });
+          const r2 = await runOf('ops-leader');
+          for (const t of ['deploying', 'prod-testing']) await expect409(r2.token, { state: t, takeover: true, deployId: 'p@abc' }, 'fleet_not_running');
+          assert.equal((await read()).ops.runId, r1.run.runId, `${status}/${from}: the lock is not moved`);
+          const t = from === 'deploying' ? 'idle' : 'rolled-back';
+          const out = await ops(r2.token, { state: t, takeover: true, deployId: 'p@abc' });
+          assert.deepEqual({ status: out.status, s: out.body.ops.state }, { status: 200, s: t }, `${status}/${from} -> ${t}`);
+        }
+      }
+      await admin({ status: 'running', ops: null, force: true });
+    });
+
+    it('jury #484 B2: a holder naming another deployId is refused; one with none may name it once', async () => {
+      const r1 = await opened('d1');
+      await expect409(r1.token, { state: 'prod-testing', deployId: 'dOTHER' }, 'deploy_id_mismatch');
+      await expect409(r1.token, { state: 'deploying', deployId: 'dOTHER' }, 'deploy_id_mismatch');
+      assert.equal((await read()).ops.deployId, 'd1');
+      assert.equal((await ops(r1.token, { state: 'prod-testing', deployId: 'd1' })).body.ops.deployId, 'd1');
+      await ops(r1.token, { state: 'idle' });
+      const r2 = await opened();
+      const named = await ops(r2.token, { state: 'deploying', deployId: 'dNEW' });
+      assert.deepEqual({ status: named.status, id: named.body.ops.deployId }, { status: 200, id: 'dNEW' });
+      await expect409(r2.token, { state: 'prod-testing', deployId: 'dLATER' }, 'deploy_id_mismatch');
+      end(r2.run.runId);
+      const r3 = await runOf('ops-leader');
+      const out = await ops(r3.token, { state: 'prod-testing', reason: 'smoke', takeover: true, deployId: 'dNEW' });
+      assert.deepEqual({ status: out.status, runId: out.body.ops.runId }, { status: 200, runId: r3.run.runId }, 'the named deploy can be taken over');
+      assert.equal((await ops(r3.token, { state: 'prod-testing', deployId: 'a:b' })).status, 400, "jury #484 B3: no ':' in a deploy id");
+      await ops(r3.token, { state: 'idle' });
+    });
+
+    it('a takeover into the same state records the new holder and its reason, not the ended run\'s', async () => {
+      const r1 = await opened('p@abc');
+      await ops(r1.token, { state: 'deploying', reason: 'v2 by r1' });
+      end(r1.run.runId);
+      const r2 = await runOf('ops-leader');
+      const out = await ops(r2.token, { state: 'deploying', takeover: true, deployId: 'p@abc' });
+      assert.deepEqual({ runId: out.body.ops.runId, reason: out.body.ops.reason }, { runId: r2.run.runId, reason: null });
+      await ops(r2.token, { state: 'idle' });
+    });
+
+    it('unit: takeover into the current state rebinds the lock; without takeover nothing changes', () => {
+      const prior = { status: 'running', coder_app_ready: false, reason: null, ops: { state: 'deploying', by: 'x', at: 't', reason: 'v2', runId: 'r1', deployId: 'p@abc' } } as never;
+      const same = opsStep(prior, 'deploying', 'r2', 'x', undefined, { takeover: true, deployId: 'p@abc', holderLive: false });
+      assert.ok(same.ok && same.ops?.runId === 'r2' && same.ops.deployId === 'p@abc' && same.ops.reason === null && same.takenFrom === 'r1');
+      assert.deepEqual(opsStep(prior, 'prod-testing', 'r2', 'x', undefined, { deployId: 'p@abc' }), { ok: false, error: 'not_the_deploying_run' });
+      assert.deepEqual(opsStep(prior, 'deploying', 'r2', 'x', undefined, { takeover: true, deployId: 'p@abc', holderLive: true }), { ok: false, error: 'deploy_in_progress' });
+    });
+  });
+});
+
+describe('#493: setting the fleet back to running wakes each fleet agent once (fleet-resumed)', { concurrency: false }, () => {
+  let cp: http.Server;
+  let port = 0;
+  let state: FactoryState;
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-resumed-'));
+  const put = async (body: unknown) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/v1/fleet/state`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${ADMIN}` },
+      body: JSON.stringify(body),
+    });
+    return res.status;
+  };
+  /** Lets the fire-and-forget wakes finish (test-only; the factory waits on nothing): until no wake row is still due. */
+  const settled = async () => {
+    const due = () => {
+      const head = rows('FLEET_RESUMED').at(-1)?.mcpName?.split(':');
+      if (!head || head[3] === '-') return false;
+      const t = `fleet-resumed:${head[1]}:`;
+      return rows('FLEET_RESUMED_WAKE').filter((e) => e.mcpName?.startsWith(t)).length < head[3].split(',').length;
+    };
+    for (let i = 0; i < 5000 && due(); i++) await new Promise((r) => setImmediate(r));
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  };
+  const wakes = (agentId: string) => state.runs.list({ agentId }).filter((r) => r.trigger === 'fleet-resumed');
+  const rows = (action: string) => (state.ledger as MemoryLedger).query({}).filter((e) => e.action === action);
+  const FLEET = ['conductor', 'ops-leader', 'reviewer', 'ops-by-skill'];
+  const OTHERS = ['coder', 'plain', 'helper', 'retired'];
+  const counts = (ids: string[]) => ids.map((id) => wakes(id).length);
+  const finishAll = () => {
+    for (const r of state.runs.list({ active: true })) state.runs.update(r.runId, { state: 'DONE' });
+  };
+
+  before(async () => {
+    state = {
+      agents: new Map(),
+      ledger: new MemoryLedger(),
+      auth: bearerAuth([{ name: 'dale', token: ADMIN, roles: ['admin'] }]),
+      version: '0.1.0-test',
+      providers: [],
+      runtime: noopRuntime(),
+      runs: new MemoryRunStore(),
+      runTokens: new RunTokens('fleet-resumed-e2e-run-token-key-0123456789abcdef'),
+      callbacks: { allowedProtocols: ['http:', 'https:'], allowedHostnames: ['127.0.0.1'], allowPrivateIps: true },
+      policies: new PolicyStore(),
+      spend: new SpendTracker(),
+      approvals: new ApprovalStore(),
+      fleetState: new FleetStateStore(join(dir, 'fleet-state.json')),
+      idleMs: 0,
+      idleTimers: new Map(),
+      secretValues: new Set<string>(),
+    } as unknown as FactoryState;
+    const agent = (id: string, extra: Record<string, unknown> = {}) => {
+      state.agents.set(id, { id, name: id, state: 'SLEEPING', roles: [], requires: [], triggers: [], ...extra } as never);
+      state.policies.set(id, { routes: [] } as never);
+    };
+    agent('conductor', { skillIds: ['sdlc-conductor'] });
+    agent('reviewer', { skillIds: ['sdlc-reviewer'] });
+    agent('ops-by-skill', { skillIds: ['sdlc-ops'] });
+    agent('ops-leader');
+    agent('coder', { skillIds: ['sdlc-coder'] });
+    agent('plain');
+    agent('helper', { skillIds: ['sdlc-reviewer'], ephemeral: true });
+    agent('retired', { skillIds: ['sdlc-conductor'], state: 'RETIRED_PENDING_PURGE' });
+    cp = createFactoryServer(state);
+    await new Promise<void>((r) => cp.listen(0, '127.0.0.1', r));
+    port = (cp.address() as { port: number }).port;
+  });
+  after(async () => {
+    cp.closeAllConnections?.();
+    await new Promise<void>((r) => cp.close(() => r()));
+  });
+
+  it('paused -> running: one wake per fleet agent (skills and opsAgents), ledgered; none for other agents', async () => {
+    assert.equal(await put({ status: 'paused', opsAgents: ['ops-leader'] }), 200);
+    await settled();
+    assert.deepEqual(counts([...FLEET, ...OTHERS]), [0, 0, 0, 0, 0, 0, 0, 0], 'paused -> paused wakes nothing');
+    const n = rows('FLEET_RESUMED_WAKE').length;
+    assert.equal(await put({ status: 'running' }), 200);
+    await settled();
+    assert.deepEqual(counts(FLEET), [1, 1, 1, 1]);
+    assert.deepEqual(counts(OTHERS), [0, 0, 0, 0], 'no wake for non-fleet, helper or retired agents');
+    const [run] = wakes('conductor');
+    assert.equal(run.actor, 'factory:fleet-resumed');
+    assert.deepEqual(Object.keys((run.input as { event: Record<string, unknown> }).event).sort(), ['from', 'transition', 'type']);
+    assert.equal((run.input as { event: { from: string } }).event.from, 'paused');
+    const head = rows('FLEET_RESUMED').at(-1)!;
+    assert.match(head.mcpName!, /^fleet-resumed:[0-9a-f-]{36}:paused:conductor,ops-by-skill,ops-leader,reviewer$/);
+    const mine = rows('FLEET_RESUMED_WAKE').slice(n);
+    assert.deepEqual(mine.map((e) => e.agentId).sort(), [...FLEET].sort(), 'exactly one row per agent');
+    for (const e of mine) {
+      assert.equal(e.runId, wakes(e.agentId!)[0].runId);
+      assert.equal(e.mcpName, `${head.mcpName!.split(':').slice(0, 2).join(':')}:woken`);
+    }
+  });
+
+  it('running -> running wakes nothing and writes no FLEET_RESUMED row', async () => {
+    finishAll();
+    const before = counts(FLEET);
+    const r = rows('FLEET_RESUMED').length;
+    assert.equal(await put({ status: 'running', reason: 'still running' }), 200);
+    assert.equal(await put({ status: 'running' }), 200);
+    await settled();
+    assert.deepEqual(counts(FLEET), before);
+    assert.equal(rows('FLEET_RESUMED').length, r);
+  });
+
+  it('deploy-freeze -> running wakes once more; concurrent writes still make one transition', async () => {
+    assert.equal(await put({ status: 'deploy-freeze' }), 200);
+    await settled();
+    const before = counts(FLEET);
+    const r = rows('FLEET_RESUMED').length;
+    const statuses = await Promise.all([put({ status: 'running' }), put({ status: 'running' })]);
+    assert.deepEqual(statuses, [200, 200]);
+    await settled();
+    assert.deepEqual(counts(FLEET), before.map((c) => c + 1), 'one wake per agent per transition');
+    assert.equal(rows('FLEET_RESUMED').length, r + 1);
+    assert.match(rows('FLEET_RESUMED').at(-1)!.mcpName!, /:deploy-freeze:/);
+    assert.deepEqual(counts(OTHERS), [0, 0, 0, 0]);
+  });
+
+  it('jury B1: paused -> deploy-freeze wakes the fleet, and deploy-freeze -> running wakes it again; running -> deploy-freeze does not', async () => {
+    finishAll();
+    assert.equal(await put({ status: 'paused' }), 200);
+    await settled();
+    const before = counts(FLEET);
+    const r = rows('FLEET_RESUMED').length;
+    assert.equal(await put({ status: 'deploy-freeze' }), 200);
+    await settled();
+    assert.deepEqual(counts(FLEET), before.map((c) => c + 1), 'paused -> deploy-freeze: one wake each');
+    assert.match(rows('FLEET_RESUMED').at(-1)!.mcpName!, /:paused:/);
+    finishAll();
+    assert.equal(await put({ status: 'running' }), 200);
+    await settled();
+    assert.deepEqual(counts(FLEET), before.map((c) => c + 2), 'deploy-freeze -> running: one more each');
+    assert.match(rows('FLEET_RESUMED').at(-1)!.mcpName!, /:deploy-freeze:/);
+    finishAll();
+    assert.equal(await put({ status: 'deploy-freeze' }), 200);
+    await settled();
+    assert.deepEqual(counts(FLEET), before.map((c) => c + 2), 'running -> deploy-freeze wakes nothing');
+    assert.equal(rows('FLEET_RESUMED').length, r + 2);
+    assert.deepEqual(counts(OTHERS), [0, 0, 0, 0]);
+  });
+
+  it('jury B2: start-up finishes a cut-short fan-out of the latest transition only, once, one row per agent', async () => {
+    finishAll();
+    assert.equal(await put({ status: 'paused' }), 200);
+    // A transition that was superseded: its missing agent must not be woken.
+    const old = '00000000-0000-4000-8000-000000000001';
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'factory', type: 'action', action: 'FLEET_RESUMED', actor: 'test', mcpName: `fleet-resumed:${old}:paused:plain` });
+    // The cut-short one: conductor woken and ledgered; ops-leader's run exists without its row; reviewer and ops-by-skill never reached.
+    const t = '00000000-0000-4000-8000-000000000002';
+    state.fleetState!.set({ ...state.fleetState!.get(), status: 'running' });
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'factory', type: 'action', action: 'FLEET_RESUMED', actor: 'test', mcpName: `fleet-resumed:${t}:paused:${FLEET.slice().sort().join(',')}` });
+    const c = state.runs.create({ agentId: 'conductor', state: 'DONE', actor: 'factory:fleet-resumed', trigger: 'fleet-resumed', input: { event: { type: 'fleet-resumed', transition: t, from: 'paused' } } } as never);
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'conductor', type: 'action', action: 'FLEET_RESUMED_WAKE', actor: 'factory:fleet-resumed', runId: c.runId, mcpName: `fleet-resumed:${t}:woken` });
+    const o = state.runs.create({ agentId: 'ops-leader', state: 'DONE', actor: 'factory:fleet-resumed', trigger: 'fleet-resumed', input: { event: { type: 'fleet-resumed', transition: t, from: 'paused' } } } as never);
+    const before = counts([...FLEET, ...OTHERS]);
+    const n = rows('FLEET_RESUMED_WAKE').length;
+    const restart = () => resumeFleetWakes({ ...state } as FactoryState);
+    await restart();
+    const after = counts([...FLEET, ...OTHERS]);
+    const added = Object.fromEntries([...FLEET, ...OTHERS].map((id, i) => [id, after[i] - before[i]]));
+    assert.deepEqual(added, { conductor: 0, 'ops-leader': 0, reviewer: 1, 'ops-by-skill': 1, coder: 0, plain: 0, helper: 0, retired: 0 });
+    const mine = rows('FLEET_RESUMED_WAKE').slice(n);
+    assert.deepEqual(mine.map((e) => [e.agentId, e.mcpName!.split(':').slice(2).join(':')]).sort(), [['ops-by-skill', 'recovered'], ['ops-leader', 'recorded'], ['reviewer', 'recovered']]);
+    assert.equal(mine.find((e) => e.agentId === 'ops-leader')!.runId, o.runId);
+    for (const e of mine.filter((x) => x.agentId !== 'ops-leader')) assert.equal((state.runs.get(e.runId!)!.input as { event: { transition: string } }).event.transition, t);
+    // A second restart: everything has its row now.
+    finishAll();
+    await restart();
+    assert.deepEqual(counts([...FLEET, ...OTHERS]), after);
+    assert.equal(rows('FLEET_RESUMED_WAKE').length, n + 3);
+  });
+
+  it('jury B2: nothing at start-up when the fleet now reads paused, or when the latest transition is complete', async () => {
+    finishAll();
+    const t = '00000000-0000-4000-8000-000000000003';
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'factory', type: 'action', action: 'FLEET_RESUMED', actor: 'test', mcpName: `fleet-resumed:${t}:paused:reviewer` });
+    state.fleetState!.set({ ...state.fleetState!.get(), status: 'paused' });
+    const before = counts(FLEET);
+    const n = rows('FLEET_RESUMED_WAKE').length;
+    await resumeFleetWakes({ ...state } as FactoryState);
+    assert.deepEqual(counts(FLEET), before);
+    assert.equal(rows('FLEET_RESUMED_WAKE').length, n);
+    // A real server start on the same stores (the wiring), with the fleet running and that transition complete: nothing.
+    state.fleetState!.set({ ...state.fleetState!.get(), status: 'running' });
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'reviewer', type: 'action', action: 'FLEET_RESUMED_WAKE', actor: 'test', mcpName: `fleet-resumed:${t}:refused:agent_paused` });
+    const again = createFactoryServer({ ...state } as FactoryState);
+    await settled();
+    again.close();
+    assert.deepEqual(counts(FLEET), before, 'a refused wake is final: not retried at start');
+    assert.equal(rows('FLEET_RESUMED_WAKE').length, n + 1);
+  });
+
+  it('a fleet agent that refuses (here paused) is ledgered as refused and not retried', async () => {
+    finishAll();
+    state.agents.get('reviewer')!.state = 'PAUSED';
+    assert.equal(await put({ status: 'paused' }), 200);
+    const before = wakes('reviewer').length;
+    const n = rows('FLEET_RESUMED_WAKE').length;
+    assert.equal(await put({ status: 'running' }), 200);
+    await settled();
+    assert.equal(wakes('reviewer').length, before);
+    const row = rows('FLEET_RESUMED_WAKE').slice(n).find((e) => e.agentId === 'reviewer')!;
+    assert.match(row.mcpName!, /:refused:agent_paused$/);
+    assert.equal(row.runId, undefined);
+    assert.equal(rows('FLEET_RESUMED_WAKE').slice(n).length, FLEET.length);
+    state.agents.get('reviewer')!.state = 'SLEEPING';
   });
 });

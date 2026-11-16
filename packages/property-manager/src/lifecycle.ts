@@ -78,6 +78,10 @@ export type PropertyManagerState = {
   metrics?: FactoryMetrics;
   /** In-memory mailboxes for running tasks to receive follow-up messages while warm. */
   mailboxes?: Map<string, MailboxQueue>;
+  /** #481: told once when a run first reaches a terminal state (after its teardown); must not throw or block. */
+  onRunEnded?: (run: Run) => void;
+  /** #481: told when the kill switch resumes an agent (an event, so owed work can go on without a timer). */
+  onAgentResumed?: (agentId: string) => void;
   /** The model a policy that names none grants (M2): configuration, no code default (GAP-181). */
   defaultModel?: string;
   /**
@@ -507,6 +511,7 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
       startsInFlight.delete(run.runId);
       const failed = state.runs.update(run.runId, { state: 'PRE_FLIGHT_MISSING_SECRET', missing: bound.missing });
       record(state, failed, 'PRE_FLIGHT_MISSING_SECRET', SYSTEM.runtime);
+      ended(state, failed);
       void fireCallback(state, failed);
       const nextQueued = state.runs.list({ agentId: agent.id, active: true }).find((r) => r.state === 'QUEUED');
       if (nextQueued && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED' && !activeRun(state, agent.id)) {
@@ -627,6 +632,14 @@ export async function markRunReady(state: PropertyManagerState, runId: string) {
   await notifyGatekeeperIngress(state, run.agentId, 'available', run.trigger);
 }
 
+function ended(state: PropertyManagerState, run: Run): void {
+  try {
+    state.onRunEnded?.(run);
+  } catch (err) {
+    console.error(`[property-manager] run-ended hook for ${run.runId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 export async function finishRun(
   state: PropertyManagerState,
   runId: string,
@@ -712,6 +725,7 @@ export async function finishRun(
       state.agents.delete(agent.id);
       state.policies.forgetEphemeral?.(agent.id);
     }
+    ended(state, done);
 
     if (cur.trigger !== 'smoke') {
       if (agent && agent.pendingDrain && agent.stagedCommit) {
@@ -839,6 +853,20 @@ export async function applyKillSwitch(
       } as any,
     };
   }
+  // #490: RESUME only lifts a pause or an isolation. From any other state it would skip the deploy and smoke gate (a new
+  // agent) or revive a retired or purged one, so it is refused and nothing changes (no ledger row, no hook).
+  if (command === 'RESUME' && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED') {
+    return {
+      status: 409,
+      body: {
+        error: 'agent_not_paused',
+        state: agent.state,
+        message:
+          `RESUME applies only to a PAUSED or ISOLATED agent; ${id} is ${agent.state}.` +
+          (agent.state === 'ERROR' || isBuiltin ? ` To clear ERROR or restart a built-in agent, use reset (POST /api/v1/agents/${id}/reset).` : ''),
+      } as any,
+    };
+  }
   if (command === 'PAUSE') agent.state = 'PAUSED';
   else if (command === 'ISOLATE') agent.state = 'ISOLATED';
   else agent.state = activeRun(state, id) ? 'WORKING' : 'SLEEPING';
@@ -847,6 +875,13 @@ export async function applyKillSwitch(
   if (command === 'RESUME' && !activeRun(state, id)) {
     const next = state.runs.list({ agentId: id, active: true }).find((r) => r.state === 'QUEUED');
     if (next) await startRun(state, next);
+  }
+  if (command === 'RESUME') {
+    try {
+      state.onAgentResumed?.(id);
+    } catch (err) {
+      console.error(`[property-manager] resume hook for ${id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   return { status: 200, body: agent };
 }
