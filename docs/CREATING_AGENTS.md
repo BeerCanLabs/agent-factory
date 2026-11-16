@@ -183,18 +183,12 @@ Content-Type: application/json
   "models": ["claude-sonnet-4-5", "claude-haiku-4-5"],
   "routes": ["models", "tavily"],
   "hosts": [],
-  "budget": {
-    "dailyUsd": 5.00,
-    "monthlyUsd": 50.00
+  "budgetUsd": {
+    "perDay": 5.00,
+    "perMonth": 50.00
   }
 }
 ```
-
-> **After raising an agent's budget, send RESUME.** The factory owes a parent agent a `helper-run-ended` wake when one of its helper runs ends. If that wake is refused with `budget_exceeded`, `agent_paused` or `agent_isolated`, it is not lost. It stays owed in `helper-wakes.json` and is delivered when the agent is resumed or when the control plane restarts. There are no timers.
->
-> Raising the budget alone does not deliver the owed wakes. After you raise it, send `POST /api/v1/agents/:id/resume` (CLI: `/resume <agent>`), and the owed wakes are delivered without a restart.
->
-> RESUME is safe on an agent that is not paused. It also lifts a pause or isolation, and it records a `RESUME` ledger row.
 
 ### Step 5: Deploy & The Activation Smoke Gate (`POST /api/v1/registry/agents/:id/deploy`, `L4`)
 
@@ -574,3 +568,28 @@ This is an intentional optimization (`AM1` runtime shim gate, `TSK-283`). When `
 
 ### 6. What happens if a shared runtime upgrade (`PUT /api/v1/runtime`) fails smoke for one agent in the fleet?
 `PUT /api/v1/runtime` isolates failures per agent (`TSK-280`, `TSK-281`). Every configuration agent whose candidate image passes `runActivationSmoke` upgrades to the new runtime (`status: "updated"`). Any agent whose smoke check fails is automatically rolled back to its previous working image and runtime commit (`status: "smoke_failed"`, ledgered as `AGENT_SMOKE_FAILED` and `AGENT_DEPLOY_FAILED`) and remains online without blocking the rest of the fleet.
+
+## 8. Raising a Running Agent's Budget
+
+This section is for an agent that is already deployed and in service. For a new agent, set its budget in the policy at Step 4 instead.
+
+**Raise the limit.** There are three ways:
+- `PUT /api/v1/budget/agents/:id` with `{ "budgetUsd": { "perDay": 10 } }`. This needs `budget.allocate` and changes only `budgetUsd`.
+- The CLI: `/budget <agent> 10 daily`.
+- `PUT /api/v1/agents/:id/policy`. This replaces the whole policy, so read it first and send it back with `budgetUsd` (`perRun`, `perDay`, `perMonth`) raised.
+
+Runs that were blocked on the budget continue once the agent is back inside its limits.
+
+**Deliver owed helper wakes with RESUME.** The factory owes a parent agent a `helper-run-ended` wake when one of its helper runs ends.
+- If that wake is refused because the agent is over its budget (`budget_exceeded`), paused (`agent_paused`) or isolated (`agent_isolated`), it stays owed in `helper-wakes.json`. It is delivered on the agent's next RESUME, or when the control plane starts. There are no timers.
+- Raising the budget alone does not deliver owed wakes. Send `POST /api/v1/agents/:id/resume` (CLI: `/resume <agent>`) to deliver them without a restart. RESUME needs the `agents.resume` privilege, which an admin who can change budgets may not hold.
+- Any other refusal is final, and RESUME does not bring that wake back. The fleet-wide kill switch is a separate mechanism, and an agent's RESUME does not lift it.
+
+> **Warning: RESUME changes the agent's state.** It sets the agent to `SLEEPING`, or to `WORKING` if it has an active run, and starts its next queued run, so it can start more than the owed wakes.
+>
+> Send RESUME only to an agent that is deployed and in service: `SLEEPING`, `WORKING`, `PAUSED` or `ISOLATED`.
+>
+> Never send it:
+> - during creation (`PENDING_BUDGET`, `PENDING_DEPLOY`, `DEPLOYING`), because it would skip the Step 5 activation smoke gate;
+> - to an agent in `ERROR`;
+> - to a retired or purged agent (`RETIRED_PENDING_PURGE`, `PURGED`).
