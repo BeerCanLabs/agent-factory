@@ -364,6 +364,15 @@ resource "aws_iam_role_policy" "control_plane_paas" {
         Effect   = "Allow"
         Action   = ["iam:DeleteRolePolicy"]
         Resource = "arn:aws:iam::${var.account_id}:role/AgentExecutionRole-*"
+      },
+      {
+        # GAP-249: aws/iam.ts takes direct model access off agent task roles (AgentTaskRole-<agent id>), on deploy and at
+        # control-plane start: it deletes the old inline BedrockConverseAccess and detaches the managed Bedrock policy
+        # attached by hand, and deletes a helper role's mind policy. Only on agent task roles.
+        Sid      = "RevokeAgentTaskRoleGrants"
+        Effect   = "Allow"
+        Action   = ["iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:ListAttachedRolePolicies"]
+        Resource = "arn:aws:iam::${var.account_id}:role/AgentTaskRole-*"
       }
     ]
   })

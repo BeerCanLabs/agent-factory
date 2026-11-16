@@ -919,7 +919,7 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
   agent.state = 'DEPLOYING';
   registryOf(state).save(agent);
   try {
-    const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, []);
+    const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, [], { memoryPrefix: agent.memoryPrefix ?? agent.id });
     await dp.registerCompute(agent.id, pin.image, [], identity, executionIdentity, agent.memoryPrefix ?? agent.id);
     agent.artifact = pin.image;
     agent.deployedCommit = pin.commit;
@@ -1392,7 +1392,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     };
 
     if (validatedSkills.length === 0) {
-      const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires);
+      const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires, { memoryPrefix: agent.memoryPrefix ?? agent.id });
       await dp.registerCompute(agent.id, pin.image, agent.requires, identity, executionIdentity, agent.memoryPrefix ?? agent.id);
       agent.artifact = pin.image;
       agent.deployedCommit = pin.commit;
@@ -1529,7 +1529,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
   } catch (err: any) {
     if (prevArtifact) {
       try {
-        const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires);
+        const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires, { memoryPrefix: agent.memoryPrefix ?? agent.id });
         await dp.registerCompute(
           agent.id,
           prevArtifact,

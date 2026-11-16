@@ -148,7 +148,7 @@ async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult
     agent.admission = admissionOf(outcome);
     row(state, agentId, 'AGENT_ADMITTED', actor, commit);
     console.log(`[control-plane] Provisioning identity for ${agentId}...`);
-    const { identity, executionIdentity } = await dp.provisionIdentity(agentId, agent.requires);
+    const { identity, executionIdentity } = await dp.provisionIdentity(agentId, agent.requires, { memoryPrefix: agent.memoryPrefix ?? agentId });
     console.log(`[control-plane] Registering compute for ${agentId} with ${imageUri}...`);
     // SK4: the Landlord names where the skills manifest is; what the cartridge does with it is the cartridge's.
     const launchEnv = skills.length ? { [SKILLS_MANIFEST_ENV]: SKILLS_MANIFEST_PATH } : undefined;

@@ -37,6 +37,7 @@ import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
 import { ModelStore } from './models.js';
 import { loadSharedRuntime } from './agent-creation.js';
 import { startTransferSweeper } from './transfers.js';
+import { migrateAgentIdentities } from './identity-migration.js';
 
 export {
   convertLegacyOwners,
@@ -374,6 +375,9 @@ try {
 
 recoverInterruptedDeploys(state);
 await reconcileRuns(state);
+// GAP-249: re-scope every existing agent role to its own mind prefix and strip direct model access. In the
+// background: IAM calls must not hold up the API, and the migration never throws.
+void migrateAgentIdentities(state.agents.values(), deployProvider);
 
 setInterval(() => void checkHealth(state), 15_000).unref();
 // S3b (D15): roll back ownership transfers left pending past their 7-day TTL.

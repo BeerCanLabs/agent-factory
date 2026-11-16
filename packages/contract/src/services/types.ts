@@ -90,6 +90,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/apply.ts',
+      'packages/control-plane/src/identity-migration.ts',
       'packages/control-plane/src/smoke.ts',
     ],
   },

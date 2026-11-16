@@ -196,8 +196,17 @@ export type DeployProvider = {
    * Throws AdmissionRefusedError with the reason when a skill is refused. Returns the image URI.
    */
   buildSkillsImage?(agentId: string, base: { image: string; commit: string }, skills: BuildSkill[]): Promise<string>;
-  /** Provision IAM / roles / service accounts for the agent. */
-  provisionIdentity(agentId: string, secrets: string[]): Promise<{ identity: string; executionIdentity?: string }>;
+  /**
+   * Provision IAM / roles / service accounts for the agent. `memoryPrefix` (GAP-249): the agent's mind prefix (default
+   * the agent id); the identity may reach only that prefix of the mind store.
+   */
+  provisionIdentity(agentId: string, secrets: string[], opts?: { memoryPrefix?: string }): Promise<{ identity: string; executionIdentity?: string }>;
+  /**
+   * GAP-249 migration: bring an existing agent's identity to the current grants (its own mind prefix only, no direct
+   * model-provider access) without a redeploy. The control plane calls it for every registered agent at start.
+   * Optional: a provider without it has nothing to migrate.
+   */
+  reconcileIdentity?(agentId: string, opts: { memoryPrefix?: string }): Promise<{ skipped?: string; revoked: string[] }>;
   /** Register the agent's compute definition (ECS task def, Cloud Run job, etc.). */
   /** `memoryPrefix`: the agent's mind prefix; the runtime must hand it to the shim (MEMORY_STORE_URI + MEMORY_PREFIX). */
   /** `launchEnv`: non-secret environment the Landlord names at launch (SK4: where the skills manifest is). */
