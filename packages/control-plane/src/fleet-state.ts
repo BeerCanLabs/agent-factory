@@ -11,12 +11,17 @@
  * (`opsStep`). The lock is atomic only because the one control-plane process reads and writes it with no `await` in
  * between; a second control-plane writer would need a compare-and-set store.
  * Nothing here polls or schedules: a skill reads it when an event wakes it.
+ *
+ * #493: events that reach a fleet agent while the fleet is paused are spent, so an admin write that moves `status` from
+ * paused or deploy-freeze to running wakes each fleet agent once (trigger `fleet-resumed`), and it catches up by reading
+ * GitHub. The admin write is the trigger: no timer.
  */
 import type http from 'node:http';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
-import { isTerminal } from '@beercanlabs/factory-property-manager';
+import { createRun, isTerminal, type Run } from '@beercanlabs/factory-property-manager';
 import { authorize } from '@beercanlabs/factory-bouncer';
 import type { Principal } from '@beercanlabs/factory-auth';
 import { bearerOf, identify, json, readJson, requirePrivilege, type FactoryState } from './app.js';
@@ -248,7 +253,58 @@ export function setFleetState(state: FactoryState, body: Record<string, unknown>
   const audit = (action: string, mcpName: string) => state.ledger.append({ timestamp: now(), agentId: 'factory', type: 'action', action, actor: principal.actor, mcpName });
   if (JSON.stringify(prior.opsAgents ?? []) !== JSON.stringify(opsAgents)) audit('FLEET_OPS_AGENTS_SET', `fleet-ops-agents:${opsAgents.join(',') || '-'}`);
   if (body.ops !== undefined) audit('FLEET_OPS_STATE_SET', `fleet-ops:${prior.ops?.state ?? 'idle'}->${ops?.state ?? 'idle'}:admin${forced ? ':forced' : ''}`);
+  // #493: decided in this same synchronous write, so one transition is one set of wakes (a second write is running->running).
+  if (status === 'running' && (prior.status === 'paused' || prior.status === 'deploy-freeze')) {
+    const transition = randomUUID();
+    const ids = fleetAgentIds(state, next.opsAgents);
+    audit('FLEET_RESUMED', `fleet-resumed:${transition}:${prior.status}:${ids.join(',') || '-'}`);
+    void wakeFleet(state, ids, transition, prior.status).catch((err) => console.warn('[control-plane] fleet-resumed wakes failed:', err));
+  }
   return { status: 200, body: viewOf(state, next, 'admin') };
+}
+
+/** #493: the skills that make an agent a fleet agent (the conductor, the reviewer, the ops leader). */
+export const FLEET_SKILLS = ['sdlc-conductor', 'sdlc-reviewer', 'sdlc-ops'] as const;
+export const FLEET_RESUMED = 'fleet-resumed';
+
+/** #493: the registered agents (not helpers, not retired or purged) that adopted a fleet skill, plus `opsAgents`. */
+export function fleetAgentIds(state: FactoryState, opsAgents: string[] | undefined): string[] {
+  const out = new Set<string>();
+  for (const a of state.agents.values()) {
+    if (!opsAgentOk(state, a.id)) continue;
+    const skills = new Set([...(a.skillIds ?? []), ...(state.configs?.current(a.id)?.skills ?? []).map((sk) => sk.id)]);
+    if (FLEET_SKILLS.some((sk) => skills.has(sk))) out.add(a.id);
+  }
+  for (const id of opsAgents ?? []) if (opsAgentOk(state, id)) out.add(id);
+  return [...out].sort();
+}
+
+/** One wake per agent through `createRun` (kill switch, budget and policy apply), one ledger row each; never retried. */
+async function wakeFleet(state: FactoryState, ids: string[], transition: string, from: string): Promise<void> {
+  for (const agentId of ids) {
+    let runId: string | undefined;
+    let refused: string | undefined;
+    try {
+      const out = await createRun(state, agentId, {
+        actor: 'factory:fleet-resumed',
+        trigger: FLEET_RESUMED,
+        input: { event: { type: FLEET_RESUMED, transition, from } },
+      });
+      if (out.status < 300) runId = (out.body as Run).runId;
+      else refused = String((out.body as { error?: unknown } | undefined)?.error ?? `status_${out.status}`);
+    } catch (err) {
+      refused = err instanceof Error ? err.name || 'error' : 'error';
+    }
+    state.ledger.append({
+      timestamp: now(),
+      agentId,
+      type: 'action',
+      action: 'FLEET_RESUMED_WAKE',
+      actor: 'factory:fleet-resumed',
+      ...(runId ? { runId } : {}),
+      mcpName: `fleet-resumed:${transition}:${runId ? 'woken' : `refused:${refused}`}`,
+    });
+  }
 }
 
 /** `opsAgents` from an admin: not given keeps it, null or [] clears it; otherwise registered agents (R0), sorted. */
