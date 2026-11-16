@@ -12,9 +12,9 @@
  * between; a second control-plane writer would need a compare-and-set store.
  * Nothing here polls or schedules: a skill reads it when an event wakes it.
  *
- * #493: events that reach a fleet agent while the fleet is paused are spent, so an admin write that moves `status` from
- * paused or deploy-freeze to running wakes each fleet agent once (trigger `fleet-resumed`), and it catches up by reading
- * GitHub. The admin write is the trigger: no timer.
+ * #493: events that reach a fleet agent while the fleet is paused are spent, so an admin write that moves `status` out
+ * of paused, or from deploy-freeze to running, wakes each fleet agent once (trigger `fleet-resumed`), and it catches up
+ * by reading GitHub. The admin write is the trigger (and start-up finishes a cut-short fan-out): no timer.
  */
 import type http from 'node:http';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -254,7 +254,9 @@ export function setFleetState(state: FactoryState, body: Record<string, unknown>
   if (JSON.stringify(prior.opsAgents ?? []) !== JSON.stringify(opsAgents)) audit('FLEET_OPS_AGENTS_SET', `fleet-ops-agents:${opsAgents.join(',') || '-'}`);
   if (body.ops !== undefined) audit('FLEET_OPS_STATE_SET', `fleet-ops:${prior.ops?.state ?? 'idle'}->${ops?.state ?? 'idle'}:admin${forced ? ':forced' : ''}`);
   // #493: decided in this same synchronous write, so one transition is one set of wakes (a second write is running->running).
-  if (status === 'running' && (prior.status === 'paused' || prior.status === 'deploy-freeze')) {
+  // Any move out of paused wakes (deploy-freeze lets review and intake act), and so does deploy-freeze -> running (the ops
+  // leader may deploy again).
+  if ((prior.status === 'paused' && status !== 'paused') || (prior.status === 'deploy-freeze' && status === 'running')) {
     const transition = randomUUID();
     const ids = fleetAgentIds(state, next.opsAgents);
     audit('FLEET_RESUMED', `fleet-resumed:${transition}:${prior.status}:${ids.join(',') || '-'}`);
@@ -279,31 +281,64 @@ export function fleetAgentIds(state: FactoryState, opsAgents: string[] | undefin
   return [...out].sort();
 }
 
-/** One wake per agent through `createRun` (kill switch, budget and policy apply), one ledger row each; never retried. */
-async function wakeFleet(state: FactoryState, ids: string[], transition: string, from: string): Promise<void> {
-  for (const agentId of ids) {
-    let runId: string | undefined;
-    let refused: string | undefined;
-    try {
-      const out = await createRun(state, agentId, {
-        actor: 'factory:fleet-resumed',
-        trigger: FLEET_RESUMED,
-        input: { event: { type: FLEET_RESUMED, transition, from } },
-      });
-      if (out.status < 300) runId = (out.body as Run).runId;
-      else refused = String((out.body as { error?: unknown } | undefined)?.error ?? `status_${out.status}`);
-    } catch (err) {
-      refused = err instanceof Error ? err.name || 'error' : 'error';
-    }
-    state.ledger.append({
-      timestamp: now(),
-      agentId,
-      type: 'action',
-      action: 'FLEET_RESUMED_WAKE',
+/** One wake through `createRun` (kill switch, budget and policy apply) and one ledger row; never retried. */
+async function wakeOne(state: FactoryState, agentId: string, transition: string, from: string, woke: 'woken' | 'recovered'): Promise<void> {
+  let runId: string | undefined;
+  let refused: string | undefined;
+  try {
+    const out = await createRun(state, agentId, {
       actor: 'factory:fleet-resumed',
-      ...(runId ? { runId } : {}),
-      mcpName: `fleet-resumed:${transition}:${runId ? 'woken' : `refused:${refused}`}`,
+      trigger: FLEET_RESUMED,
+      input: { event: { type: FLEET_RESUMED, transition, from } },
     });
+    if (out.status < 300) runId = (out.body as Run).runId;
+    else refused = String((out.body as { error?: unknown } | undefined)?.error ?? `status_${out.status}`);
+  } catch (err) {
+    refused = err instanceof Error ? err.name || 'error' : 'error';
+  }
+  wakeRow(state, agentId, transition, runId ? woke : `refused:${refused}`, runId);
+}
+
+const wakeRow = (state: FactoryState, agentId: string, transition: string, outcome: string, runId?: string) =>
+  state.ledger.append({
+    timestamp: now(),
+    agentId,
+    type: 'action',
+    action: 'FLEET_RESUMED_WAKE',
+    actor: 'factory:fleet-resumed',
+    ...(runId ? { runId } : {}),
+    mcpName: `fleet-resumed:${transition}:${outcome}`,
+  });
+
+async function wakeFleet(state: FactoryState, ids: string[], transition: string, from: string): Promise<void> {
+  for (const agentId of ids) await wakeOne(state, agentId, transition, from, 'woken');
+}
+
+/**
+ * #493 (jury B2): at start, finish a fan-out a previous control plane did not (it awaits one task start per agent). Only
+ * the latest `FLEET_RESUMED` transition counts, and nothing when the fleet now reads paused. A listed agent with neither a
+ * `FLEET_RESUMED_WAKE` row for it nor a run of it is woken (`recovered`); one with a run but no row (a crash between the
+ * two) gets its row (`recorded`) and no second run. One row per agent, never retried, no timer.
+ */
+const recovering = new WeakSet<FactoryState>();
+export async function resumeFleetWakes(state: FactoryState): Promise<void> {
+  if (recovering.has(state)) return;
+  recovering.add(state);
+  if (storeOf(state).get().status === 'paused') return;
+  const all = state.ledger.query();
+  const head = all.filter((e) => e.action === 'FLEET_RESUMED').at(-1);
+  const m = /^fleet-resumed:([0-9a-f-]{36}):([a-z-]+):(.+)$/.exec(String(head?.mcpName ?? ''));
+  if (!m) return;
+  const [, transition, from, list] = m;
+  const ids = list === '-' ? [] : list.split(',');
+  const rowed = new Set(all.filter((e) => e.action === 'FLEET_RESUMED_WAKE' && e.mcpName?.startsWith(`fleet-resumed:${transition}:`)).map((e) => e.agentId));
+  for (const agentId of ids) {
+    if (rowed.has(agentId)) continue;
+    const run = state.runs
+      .list({ agentId })
+      .find((r) => r.trigger === FLEET_RESUMED && (r.input as { event?: { transition?: unknown } } | undefined)?.event?.transition === transition);
+    if (run) wakeRow(state, agentId, transition, 'recorded', run.runId);
+    else await wakeOne(state, agentId, transition, from, 'recovered');
   }
 }
 
