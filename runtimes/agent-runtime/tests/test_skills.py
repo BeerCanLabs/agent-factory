@@ -121,7 +121,7 @@ if __name__ == "__main__":
 
 
 class TestToolErrorsAreLogged(unittest.TestCase):
-    """GAP-262: a failing tool is logged on stderr, with known secret values masked, as well as told to the model."""
+    """GAP-254: a failing tool is logged on stderr, with known secret values masked, as well as told to the model."""
 
     def run_logged(self, handler, raw="{}"):
         err = io.StringIO()
