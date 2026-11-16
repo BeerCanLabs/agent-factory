@@ -876,8 +876,9 @@ describe('S3: Principals & Grants API, admin act-as, private skill assignment, a
       },
       { token: TOKENS.lead },
     );
-    assert.equal(leadMcpDenied.rpc.error.code, -32001);
-    assert.equal(leadMcpDenied.rpc.error.data.requiredRole, 'admin');
+    assert.equal(leadMcpDenied.rpc.result?.isError, true);
+    assert.equal(leadMcpDenied.rpc.result?.structuredContent?.requiredRole, 'admin');
+    assert.match(leadMcpDenied.rpc.result?.content[0].text, /requires admin/);
 
     const leadMcpListGrants = await mcp(
       'tools/call',
@@ -894,54 +895,31 @@ describe('S3: Principals & Grants API, admin act-as, private skill assignment, a
     );
     assert.equal(leadMcpRevoke.rpc.error, undefined);
 
-    // MCP whoami & authz_check + MCP tool-level actAs enforcement & ledgering
+    // CL6, GAP-248: actAs and onBehalfOf impersonation arguments are strictly forbidden over MCP
     const nonAdminMcpActAs = await mcp(
       'tools/call',
       { name: 'whoami', arguments: { actAs: 'user:stephanie' } },
       { token: TOKENS.lead },
     );
-    assert.equal(nonAdminMcpActAs.rpc.error.code, -32001);
-    assert.equal(nonAdminMcpActAs.rpc.error.data.requiredRole, 'admin');
+    assert.equal(nonAdminMcpActAs.rpc.result?.isError, true);
+    assert.equal(nonAdminMcpActAs.rpc.result?.structuredContent?.error, 'act_as_forbidden_over_mcp');
 
     const adminMcpWhoamiActAs = await mcp(
       'tools/call',
       { name: 'whoami', arguments: { actAs: 'user:stephanie' } },
       { token: TOKENS.admin },
     );
-    assert.equal(adminMcpWhoamiActAs.rpc.error, undefined);
-    const mcpWhoPayload = JSON.parse(adminMcpWhoamiActAs.rpc.result.content[0].text);
-    assert.equal(mcpWhoPayload.principal, 'user:stephanie');
-    assert.equal(mcpWhoPayload.onBehalfOf, 'user:stephanie');
+    assert.equal(adminMcpWhoamiActAs.rpc.result?.isError, true);
+    assert.equal(adminMcpWhoamiActAs.rpc.result?.structuredContent?.error, 'act_as_forbidden_over_mcp');
 
-    const adminMcpAuthzCheck = await mcp(
-      'tools/call',
-      {
-        name: 'authz_check',
-        arguments: { privilege: 'agents.converse', agentId: 'higgins', actAs: 'user:stephanie' },
-      },
-      { token: TOKENS.admin },
-    );
-    assert.equal(adminMcpAuthzCheck.rpc.error, undefined);
-    assert.deepEqual(JSON.parse(adminMcpAuthzCheck.rpc.result.content[0].text), {
-      allowed: true,
-      requiredRole: null,
+    // REST actAs continues working
+    const restWhoami = await call('GET', '/api/v1/whoami', {
+      token: TOKENS.admin,
+      actAs: 'user:stephanie',
     });
-
-    // Admin wake_agent via MCP with actAs: 'user:stephanie' sets caller.actor to user:stephanie and ledgers onBehalfOf
-    const adminMcpWakeActAs = await mcp(
-      'tools/call',
-      { name: 'wake_agent', arguments: { id: 'higgins', actAs: 'user:stephanie' } },
-      { token: TOKENS.admin },
-    );
-    assert.equal(adminMcpWakeActAs.rpc.error, undefined, JSON.stringify(adminMcpWakeActAs.rpc));
-    const wokePayload = JSON.parse(adminMcpWakeActAs.rpc.result.content[0].text);
-    const mcpRun = state.runs.get(wokePayload.runId);
-    assert.equal(mcpRun?.caller?.actor, 'user:stephanie');
-    assert.ok(
-      ledger.query({ agent: 'higgins' }).some(
-        (e) => e.runId === wokePayload.runId && e.actor === 'user:admin' && e.onBehalfOf === 'user:stephanie',
-      ),
-    );
+    assert.equal(restWhoami.status, 200);
+    assert.equal(restWhoami.body.principal, 'user:stephanie');
+    assert.equal(restWhoami.body.onBehalfOf, 'user:stephanie');
   });
 
   it('skill content-owner delegates skill-scoped grants within ceiling, D26 applies on agent creation & authz/check, and unhealthy stores fail closed (503)', async () => {

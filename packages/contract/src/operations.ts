@@ -257,6 +257,7 @@ export function buildMcpInputSchema(op: OperationContract): JsonSchemaObject {
   const pathParams = derivePathParamsSchema(op.pattern, op.pathParamsSchema);
   if (pathParams.properties) {
     for (const [k, v] of Object.entries(pathParams.properties)) {
+      if (k === 'actAs' || k === 'onBehalfOf') continue;
       properties[k] = v;
       if (!required.includes(k)) required.push(k);
     }
@@ -265,6 +266,7 @@ export function buildMcpInputSchema(op: OperationContract): JsonSchemaObject {
   // 2. Query parameters
   if (op.querySchema?.properties) {
     for (const [k, v] of Object.entries(op.querySchema.properties)) {
+      if (k === 'actAs' || k === 'onBehalfOf') continue;
       if (properties[k]) {
         // Path parameter already defined with this name; path parameters take precedence
         continue;
@@ -279,6 +281,7 @@ export function buildMcpInputSchema(op: OperationContract): JsonSchemaObject {
   // 3. Request body parameters
   if (op.requestBodySchema?.properties) {
     for (const [k, v] of Object.entries(op.requestBodySchema.properties)) {
+      if (k === 'actAs' || k === 'onBehalfOf') continue;
       if (op.mcpExposure === 'handoff') {
         const lower = k.toLowerCase();
         if (

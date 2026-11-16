@@ -13,7 +13,7 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
-import { FleetStateStore, FLEET_STATUSES, OPS_STATES, effectiveOf, sanitizeReason } from './fleet-state.js';
+import { FleetStateStore, FLEET_STATUSES, OPS_STATES, auditFleetStateLoad, effectiveOf, sanitizeReason } from './fleet-state.js';
 import { handleMcp } from './mcp.js';
 
 const VIEWER = 'viewer-fleet-state-e2e';
@@ -127,7 +127,9 @@ describe('GAP-260 fleet go/stop state', { concurrency: false }, () => {
     const set = await rpc('set_fleet_state', { status: 'paused', reason: 'Holiday' }, ['admin']);
     assert.equal(JSON.parse(set.result!.content[0].text).status, 'paused');
     assert.equal(JSON.parse((await rpc('get_fleet_state', {}, ['viewer'])).result!.content[0].text).reason, 'Holiday');
-    assert.match((await rpc('set_fleet_state', { status: 'running' }, ['operator'])).error!.message, /forbidden/);
+    const opForbidden = await rpc('set_fleet_state', { status: 'running' }, ['operator']);
+    assert.equal(opForbidden.result?.isError, true);
+    assert.match(opForbidden.result!.content[0].text, /forbidden/);
     // A refused change is an MCP error, and the state is unchanged: a typo never reads as success.
     const typo = await rpc('set_fleet_state', { status: 'pasued' }, ['admin']);
     assert.equal(typo.result!.isError, true);
@@ -243,6 +245,66 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
         assert.equal(effectiveOf(fs), want, `${status} + ${o ?? 'none'}`);
       }
     }
+  });
+
+  it('a stored ops record with an unknown state, or an open deploy with no run, loads as rolled-back and is audited', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-ops-load-'));
+    const cases: [unknown, string | undefined, string | null][] = [
+      [{ state: 'frozen\u202e\u200b', by: 'x', at: 'then', reason: null }, 'unknown-state', null],
+      [{ state: 'prod-testing', by: 'ops-leader', at: 'then', reason: null, runId: 'run-9' }, 'unknown-state', 'run-9'],
+      [{ state: 'deploying', by: 'ops-leader', at: 'then', reason: null }, 'no-run', null],
+      [{ state: 'prod-testing', by: 'dale', at: 'then', reason: null, runId: null }, 'no-run', null],
+      ['deploying', 'unknown-state', null],
+      [{ state: 'deploying', by: 'ops-leader', at: 'then', reason: null, runId: 'run-1' }, undefined, 'run-1'],
+      [{ state: 'idle', by: null, at: null, reason: null, runId: null }, undefined, null],
+      [undefined, undefined, null],
+    ];
+    cases[1][0] = { ...(cases[1][0] as object), state: 7 };
+    for (const [i, [stored, issue, runId]] of cases.entries()) {
+      const f = join(dir, `fleet-state-${i}.json`);
+      writeFileSync(f, JSON.stringify({ status: 'running', coder_app_ready: true, reason: null, opsAgents: ['ops-leader'], ...(stored === undefined ? {} : { ops: stored }) }));
+      const before = rows('FLEET_OPS_STATE_INVALID').length;
+      state.fleetState = new FleetStateStore(f);
+      auditFleetStateLoad(state);
+      const view = await read();
+      const label = JSON.stringify(stored);
+      assert.equal(state.fleetState.opsIssue, issue, label);
+      if (!issue) {
+        assert.notEqual(view.ops.state, 'rolled-back', label);
+        assert.equal(rows('FLEET_OPS_STATE_INVALID').length, before, label);
+        continue;
+      }
+      assert.deepEqual({ state: view.ops.state, runId: view.ops.runId, effective: view.effective }, { state: 'rolled-back', runId, effective: 'deploy-freeze' }, label);
+      assert.equal(sanitizeReason(view.ops.reason), view.ops.reason);
+      assert.match(view.ops.reason, issue === 'no-run' ? /has no holding run: treated as rolled-back\.$/ : /is not an ops state: treated as rolled-back\.$/);
+      const audit = rows('FLEET_OPS_STATE_INVALID').slice(before);
+      assert.deepEqual(audit.map((e) => [e.actor, e.mcpName]), [['system:fleet-state-load', `fleet-ops:invalid:${issue}->rolled-back`]], label);
+    }
+    // Fail closed: no run can open a deploy over it; an admin clears it without force (no live holder).
+    state.fleetState = new FleetStateStore(join(dir, 'fleet-state-2.json'));
+    const { token } = await runOf('ops-leader');
+    await expect409(token, { state: 'deploying' }, 'rolled_back_requires_admin');
+    assert.equal((await admin({ status: 'running', ops: null })).status, 200);
+    assert.equal((await read()).effective, 'running');
+  });
+
+  it('text on a valid stored record (reason, ops.reason, ops.by) is cleaned on load; the file is not rewritten', async () => {
+    const f = join(mkdtempSync(join(tmpdir(), 'fleet-ops-text-')), 'fleet-state.json');
+    const dirty = (w: string) => `${w}\u202e\u200b\u{E0041}\u2066 ok`;
+    const stored = JSON.stringify({ status: 'running', coder_app_ready: true, reason: dirty('maintenance'), opsAgents: ['ops-leader'], ops: { state: 'idle', by: dirty('ops-leader'), at: 'then', reason: dirty('deployed'), runId: null } });
+    writeFileSync(f, stored);
+    state.fleetState = new FleetStateStore(f);
+    for (const who of [OPS_ADMIN, OPS_VIEWER]) {
+      const view = await read(who);
+      assert.deepEqual([view.reason, view.ops.reason, view.ops.by], ['maintenance ok', 'deployed ok', 'ops-leader ok'], who);
+    }
+    assert.equal(state.fleetState.opsIssue, undefined, 'a valid record is not repaired or audited');
+    assert.equal(readFileSync(f, 'utf8'), stored, 'the file is not rewritten on load');
+    writeFileSync(f, JSON.stringify({ status: 'running', coder_app_ready: true, reason: 7, ops: { state: 'idle', by: { x: 1 }, at: null, reason: ['x'] } }));
+    const odd = new FleetStateStore(f).get();
+    assert.deepEqual([odd.reason, odd.ops?.reason, odd.ops?.by], [null, null, null], 'not text reads as null');
+    writeFileSync(f, JSON.stringify({ status: 'running', coder_app_ready: true, reason: null, ops: { by: 'x' } }));
+    assert.match(new FleetStateStore(f).get().ops?.reason ?? '', /stored ops state "missing" is not an ops state/);
   });
 
   it('R0: only registered, non-helper, non-retired agents can be listed (400 unknown_agent)', async () => {
@@ -428,11 +490,17 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
     assert.ok(!(await list(other.run)).includes('set_fleet_ops_state'));
     const took = JSON.parse((await tool(leader.run, { state: 'deploying' })).result!.content[0].text);
     assert.equal(took.ops.runId, leader.run.runId);
-    assert.match((await tool(other.run, { state: 'idle' })).error!.message, /not_an_ops_agent/);
-    assert.match((await tool(leader.run, { state: 'paused' })).error!.message, /admin_state/);
+    const otherRes = await tool(other.run, { state: 'idle' });
+    assert.equal(otherRes.result?.isError, true);
+    assert.match(otherRes.result?.content[0].text ?? '', /not_an_ops_agent/);
+    const pausedRes = await tool(leader.run, { state: 'paused' });
+    assert.equal(pausedRes.result?.isError, true);
+    assert.match(pausedRes.result?.content[0].text ?? '', /admin_state/);
     assert.match((await tool(leader.run, { state: 'idle', runId: 'x' })).result!.content[0].text, /unknown field/);
     const leaderB = await runOf('ops-b');
-    assert.match((await tool(leaderB.run, { state: 'deploying' })).error!.message, /deploy_in_progress/);
+    const leaderBRes = await tool(leaderB.run, { state: 'deploying' });
+    assert.equal(leaderBRes.result?.isError, true);
+    assert.match(leaderBRes.result?.content[0].text ?? '', /deploy_in_progress/);
 
     const rpc = async (name: string, args: Record<string, unknown>, roles: string[]) =>
       (await handleMcp(state, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, { actor: 'mcp-admin', roles } as never)) as {

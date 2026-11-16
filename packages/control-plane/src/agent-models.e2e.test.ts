@@ -329,7 +329,7 @@ describe('Agent Run-Token Model Management E2E (TSK-287, GAP-210, M2, E7)', { co
     assert.equal(taintedPut.body.error, 'requester_unauthorized_for_model_switch');
   });
 
-  it('MCP run-token parity on POST /mcp: tools/list and tools/call', async () => {
+  it('MCP run-token separation on POST /mcp/run: tools/list, tools/call, and 401 boundary', async () => {
     // 1. Authorized run
     const run = state.runs.create({
       agentId: 'alpha',
@@ -339,25 +339,40 @@ describe('Agent Run-Token Model Management E2E (TSK-287, GAP-210, M2, E7)', { co
     });
     const token = await tokens.mint({ runId: run.runId, agentId: 'alpha' });
 
+    // Boundary check: run token on /mcp returns 401
+    const runOnPrincipalMcp = await call(port, '/mcp', 'POST', token, { jsonrpc: '2.0', id: 99, method: 'tools/list' });
+    assert.equal(runOnPrincipalMcp.status, 401, 'run token on /mcp must return 401');
+
+    // Boundary check: principal token on /mcp/run returns 401
+    const principalOnRunMcp = await call(port, '/mcp/run', 'POST', ADMIN, { jsonrpc: '2.0', id: 100, method: 'tools/list' });
+    assert.equal(principalOnRunMcp.status, 401, 'principal token on /mcp/run must return 401');
+
+    // Notification check: valid notification on /mcp/run returns 202
+    const notifyRes = await call(port, '/mcp/run', 'POST', token, { jsonrpc: '2.0', method: 'notifications/initialized' });
+    assert.equal(notifyRes.status, 202, 'notification on /mcp/run must return 202');
+
     // initialize
-    const initRes = await call(port, '/mcp', 'POST', token, { jsonrpc: '2.0', id: 1, method: 'initialize' });
+    const initRes = await call(port, '/mcp/run', 'POST', token, { jsonrpc: '2.0', id: 1, method: 'initialize' });
     assert.equal(initRes.status, 200);
     assert.equal(initRes.body.result?.serverInfo?.name, 'agent-factory');
 
     // ping
-    const pingRes = await call(port, '/mcp', 'POST', token, { jsonrpc: '2.0', id: 2, method: 'ping' });
+    const pingRes = await call(port, '/mcp/run', 'POST', token, { jsonrpc: '2.0', id: 2, method: 'ping' });
     assert.equal(pingRes.status, 200);
     assert.deepEqual(pingRes.body.result, {});
 
-    // tools/list: exposed both get_agent_models and set_agent_models for manager
-    const listRes = await call(port, '/mcp', 'POST', token, { jsonrpc: '2.0', id: 3, method: 'tools/list' });
+    // tools/list: exposed both get_agent_models and set_agent_models for manager with annotations
+    const listRes = await call(port, '/mcp/run', 'POST', token, { jsonrpc: '2.0', id: 3, method: 'tools/list' });
     assert.equal(listRes.status, 200);
     const toolNames = listRes.body.result?.tools?.map((t: any) => t.name) ?? [];
     assert.ok(toolNames.includes('get_agent_models'));
     assert.ok(toolNames.includes('set_agent_models'));
+    const getTool = listRes.body.result?.tools?.find((t: any) => t.name === 'get_agent_models');
+    assert.equal(getTool?.title, 'Get Agent Models');
+    assert.equal(getTool?.annotations?.readOnlyHint, true);
 
     // tools/call get_agent_models
-    const callGet = await call(port, '/mcp', 'POST', token, {
+    const callGet = await call(port, '/mcp/run', 'POST', token, {
       jsonrpc: '2.0',
       id: 4,
       method: 'tools/call',
@@ -369,7 +384,7 @@ describe('Agent Run-Token Model Management E2E (TSK-287, GAP-210, M2, E7)', { co
     assert.equal(parsedGet.canManageModels, true);
 
     // tools/call set_agent_models
-    const callSet = await call(port, '/mcp', 'POST', token, {
+    const callSet = await call(port, '/mcp/run', 'POST', token, {
       jsonrpc: '2.0',
       id: 5,
       method: 'tools/call',
@@ -379,15 +394,15 @@ describe('Agent Run-Token Model Management E2E (TSK-287, GAP-210, M2, E7)', { co
     const parsedSet = JSON.parse(callSet.body.result.content[0].text);
     assert.equal(parsedSet.currentModel, 'claude-haiku');
 
-    // tools/call forbidden tool
-    const callForbidden = await call(port, '/mcp', 'POST', token, {
+    // tools/call unknown/forbidden tool -> -32602
+    const callForbidden = await call(port, '/mcp/run', 'POST', token, {
       jsonrpc: '2.0',
       id: 6,
       method: 'tools/call',
       params: { name: 'wake_agent', arguments: { id: 'beta' } },
     });
     assert.equal(callForbidden.status, 200);
-    assert.equal(callForbidden.body.error?.code, -32001);
+    assert.equal(callForbidden.body.error?.code, -32602);
 
     // 2. Unauthorized run
     const guestRun = state.runs.create({
@@ -400,18 +415,21 @@ describe('Agent Run-Token Model Management E2E (TSK-287, GAP-210, M2, E7)', { co
     const guestToken = await tokens.mint({ runId: guestRun.runId, agentId: 'alpha' });
 
     // tools/list: only get_agent_models
-    const guestList = await call(port, '/mcp', 'POST', guestToken, { jsonrpc: '2.0', id: 7, method: 'tools/list' });
+    const guestList = await call(port, '/mcp/run', 'POST', guestToken, { jsonrpc: '2.0', id: 7, method: 'tools/list' });
     const guestToolNames = guestList.body.result?.tools?.map((t: any) => t.name) ?? [];
     assert.ok(guestToolNames.includes('get_agent_models'));
     assert.ok(!guestToolNames.includes('set_agent_models'));
 
-    // Calling set_agent_models directly returns error
-    const guestCallSet = await call(port, '/mcp', 'POST', guestToken, {
+    // Calling set_agent_models directly returns business refusal with isError: true (CL3)
+    const guestCallSet = await call(port, '/mcp/run', 'POST', guestToken, {
       jsonrpc: '2.0',
       id: 8,
       method: 'tools/call',
       params: { name: 'set_agent_models', arguments: { currentModel: 'claude-sonnet' } },
     });
-    assert.equal(guestCallSet.body.error?.code, -32001);
+    assert.equal(guestCallSet.status, 200);
+    assert.equal(guestCallSet.body.result?.isError, true);
+    assert.equal(guestCallSet.body.result?.structuredContent?.error, 'forbidden');
+    assert.match(guestCallSet.body.result?.content[0]?.text, /unauthorized/);
   });
 });
