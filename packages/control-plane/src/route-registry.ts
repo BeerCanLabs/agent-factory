@@ -426,6 +426,13 @@ const AgentPolicyResponseSchema: JsonSchemaObject = jsonSchema.object({
     perDay: jsonSchema.number({ description: 'Daily limit' }),
     perMonth: jsonSchema.number({ description: 'Monthly limit' }),
   }),
+  tools: jsonSchema.object({}, { description: 'Tool permission rules' }),
+  subagents: jsonSchema.array(jsonSchema.string(), { description: 'Permitted helper subagents' }),
+  wakeAgents: jsonSchema.array(jsonSchema.string(), { description: 'Permitted wake agent IDs' }),
+  env: jsonSchema.object({}, {
+    additionalProperties: jsonSchema.string({ description: 'Environment variable value' }),
+    description: 'Non-secret deployment environment variables (UPPER_SNAKE_CASE, e.g. SDLC_*)',
+  }),
 });
 
 const FleetStateRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
@@ -806,8 +813,26 @@ const AgentPolicyBodySchema: JsonSchemaObject = jsonSchema.object({
     perDay: jsonSchema.number({ description: 'Daily budget limit in USD', minimum: 0 }),
     perMonth: jsonSchema.number({ description: 'Monthly budget limit in USD', minimum: 0 }),
   }, { description: 'Agent spend limits' }),
-  tools: jsonSchema.object({}, { description: 'Tool permission flags' }),
+  tools: jsonSchema.object({}, { description: 'Tool permission rules' }),
   subagents: jsonSchema.array(jsonSchema.string(), { description: 'Permitted helper subagents' }),
+  wakeAgents: jsonSchema.array(jsonSchema.string(), { description: 'Permitted wake agent IDs' }),
+  env: jsonSchema.object({}, {
+    additionalProperties: jsonSchema.string({ description: 'Environment variable value' }),
+    description: 'Non-secret deployment environment variables (UPPER_SNAKE_CASE, e.g. SDLC_*)',
+  }),
+});
+
+const GlobalPolicyBodySchema: JsonSchemaObject = jsonSchema.object({
+  budgetUsd: jsonSchema.object({
+    perDay: jsonSchema.number({ description: 'Daily spend ceiling in USD', minimum: 0 }),
+    perMonth: jsonSchema.number({ description: 'Monthly spend ceiling in USD', minimum: 0 }),
+  }, { description: 'Global spend ceiling limits' }),
+  routes: jsonSchema.array(jsonSchema.string(), { description: 'Global allowed egress network routes' }),
+  models: jsonSchema.array(jsonSchema.string(), { description: 'Global allowed AI models' }),
+  hosts: jsonSchema.array(jsonSchema.string(), { description: 'Global allowed network hostnames' }),
+  tools: jsonSchema.object({}, { description: 'Global tool permission rules' }),
+  tokensPerMinute: jsonSchema.integer({ description: 'Global tokens per minute rate limit', minimum: 0 }),
+  grounding: jsonSchema.string({ description: 'Grounding mode', enum: ['warn-once'] }),
 });
 
 const AgentModelsBodySchema: JsonSchemaObject = jsonSchema.object({
@@ -3179,8 +3204,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "spend",
     mcpToolName: "set_system_budget_policy",
     privilege: "policy.budget.set",
-    requestBodySchema: BudgetUsdBodySchema,
-    responseSchema: SuccessResponseSchema,
+    requestBodySchema: GlobalPolicyBodySchema,
+    responseSchema: AgentPolicyResponseSchema,
     statusCodes: [200],
   },
   {

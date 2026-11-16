@@ -90,6 +90,26 @@ describe('OpenAPI 3.1.0 & MCP Schema Endpoints E2E (GAP-249, CL11)', () => {
     const keysPost = doc.paths['/api/v1/keys']?.post;
     assert.ok(keysPost);
     assert.equal(keysPost['x-mcp-exposure'], 'console-or-cli-only');
+
+    // Verify PUT /api/v1/agents/{id}/policy exports env in requestBody
+    const policyPut = doc.paths['/api/v1/agents/{id}/policy']?.put;
+    assert.ok(policyPut);
+    const policyPutBody = policyPut.requestBody?.content?.['application/json']?.schema?.properties;
+    assert.ok(policyPutBody?.env);
+    assert.equal(policyPutBody?.env?.type, 'object');
+    assert.equal((policyPutBody?.env?.additionalProperties as any)?.type, 'string');
+    assert.ok(policyPutBody?.wakeAgents);
+
+    // Verify PUT /api/v1/policies/budget exports GlobalPolicyBodySchema
+    const budgetPut = doc.paths['/api/v1/policies/budget']?.put;
+    assert.ok(budgetPut);
+    const budgetPutBody = budgetPut.requestBody?.content?.['application/json']?.schema?.properties;
+    assert.ok(budgetPutBody?.budgetUsd);
+    assert.ok(budgetPutBody?.routes);
+    assert.ok(budgetPutBody?.models);
+    assert.equal(budgetPutBody?.env, undefined);
+    assert.equal(budgetPutBody?.subagents, undefined);
+    assert.equal(budgetPutBody?.wakeAgents, undefined);
   });
 
   it('GET /api/v1/mcp/schema.json returns 401 without credentials', async () => {
@@ -134,6 +154,14 @@ describe('OpenAPI 3.1.0 & MCP Schema Endpoints E2E (GAP-249, CL11)', () => {
     // Verify CL6: keys issuance and rotate never appear in MCP tools
     assert.ok(!toolNames.has('keys_create'), 'keys_create must not be an MCP tool');
     assert.ok(!toolNames.has('keys_rotate'), 'keys_rotate must not be an MCP tool');
+
+    // Verify set_agent_policy MCP inputSchema has env of type object
+    const setPolicyTool = catalog.tools.find((t) => t.name === 'set_agent_policy');
+    assert.ok(setPolicyTool);
+    const envProp = setPolicyTool.inputSchema.properties?.env;
+    assert.ok(envProp);
+    assert.equal(envProp.type, 'object');
+    assert.equal((envProp.additionalProperties as any)?.type, 'string');
   });
 
   it('live endpoints match deterministic registry exports', () => {

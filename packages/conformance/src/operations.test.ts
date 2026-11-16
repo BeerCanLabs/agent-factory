@@ -321,6 +321,51 @@ describe('Operations Contract & Schema Conformance (GAP-249, CL11, TSK-336)', ()
     assert.ok(setDefaultModel.requestBodySchema?.properties?.name);
   });
 
+  it('Post-sync panel schema fixes: env & wakeAgents in policy schemas and GlobalPolicyBodySchema for budget policy', () => {
+    // 1. set_agent_policy & get_agent_policy
+    const setPolicy = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'set_agent_policy');
+    assert.ok(setPolicy);
+    const policyReqProps = setPolicy.requestBodySchema?.properties;
+    assert.ok(policyReqProps?.env);
+    assert.equal(policyReqProps?.env?.type, 'object');
+    assert.equal((policyReqProps?.env?.additionalProperties as any)?.type, 'string');
+    assert.ok(policyReqProps?.wakeAgents);
+
+    const getPolicy = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'get_agent_policy');
+    assert.ok(getPolicy);
+    const policyResProps = getPolicy.responseSchema?.properties;
+    assert.ok(policyResProps?.env);
+    assert.equal(policyResProps?.env?.type, 'object');
+    assert.equal((policyResProps?.env?.additionalProperties as any)?.type, 'string');
+    assert.ok(policyResProps?.wakeAgents);
+
+    // MCP inputSchema exports env
+    const catalog = getMcpSchemaCatalog();
+    const setPolicyTool = catalog.tools.find((t) => t.name === 'set_agent_policy');
+    assert.ok(setPolicyTool);
+    const toolProps = setPolicyTool.inputSchema.properties;
+    assert.ok(toolProps.env);
+    assert.equal(toolProps.env.type, 'object');
+    assert.equal((toolProps.env.additionalProperties as any)?.type, 'string');
+
+    // 2. set_system_budget_policy (PUT /api/v1/policies/budget)
+    const setBudgetPolicy = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'set_system_budget_policy');
+    assert.ok(setBudgetPolicy);
+    assert.equal(setBudgetPolicy.requestBodySchema?.required, undefined); // none required
+    const globalPolicyProps = setBudgetPolicy.requestBodySchema?.properties;
+    assert.ok(globalPolicyProps?.budgetUsd);
+    assert.ok(globalPolicyProps?.routes);
+    assert.ok(globalPolicyProps?.models);
+    assert.ok(globalPolicyProps?.hosts);
+    assert.ok(globalPolicyProps?.tools);
+    assert.ok(globalPolicyProps?.tokensPerMinute);
+    assert.ok(globalPolicyProps?.grounding);
+    // env, subagents, and wakeAgents are rejected in global policy
+    assert.equal(globalPolicyProps?.env, undefined);
+    assert.equal(globalPolicyProps?.subagents, undefined);
+    assert.equal(globalPolicyProps?.wakeAgents, undefined);
+  });
+
   it('Round 3 Conformance Guard: every noRequestBody: true route is in an audited explicit allowlist of verified bodyless handlers', () => {
     const AUDITED_NO_REQUEST_BODY_OPERATIONS = new Set([
       'logout_session',
