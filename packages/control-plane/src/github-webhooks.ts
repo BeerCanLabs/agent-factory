@@ -11,6 +11,9 @@
  *   is stored (`GITHUB_APP_<AGENT>_SLUG`): without it the conductor cannot tell its own labels and comments, so nothing
  *   is mapped (fail closed). An event with no mapping starts no run. The conductor re-reads live state for every
  *   event, so the mapping only says which handler to wake, never what is true.
+ * - #483: an agent that adopted the `sdlc-ops` skill gets a completed `workflow_run` from its own app (slug stored,
+ *   as above) mapped to one `workflow-completed` event for `sdlc-ops-deploy`, so the ops leader dispatches a deploy,
+ *   exits, and is woken by its completion (only `workflow_dispatch` runs). It re-reads that run from GitHub once before acting.
  * - Each delivery id starts at most one run per agent: a redelivery answers with the first run and starts nothing.
  *   GitHub signs the body, not the id, so an app delivery is also deduplicated on the body's sha256 (same window).
  */
@@ -111,14 +114,47 @@ export function conductorEventFor(event: string, payload: unknown, self?: string
   return { ignored: `${event} is not mapped` };
 }
 
+/** #483: the skill whose agents receive `workflow_run` completions. */
+export const OPS_SKILL = 'sdlc-ops';
+const WORKFLOW_PATH = /^[A-Za-z0-9_.@/-]{1,255}$/;
+const CONCLUSION = /^[a-z_]{1,32}$/;
+
+/** #483: the ops leader's event for one delivery: only a completed workflow run, with every field checked. */
+export function opsEventFor(event: string, payload: unknown): { event: ConductorEvent } | { ignored: string } {
+  const p = obj(payload);
+  const action = str(p.action);
+  if (event === 'ping') return { ignored: 'ping' };
+  if (event !== 'workflow_run') return { ignored: `${event} is not mapped for the ops agent` };
+  if (action !== 'completed') return { ignored: `workflow_run.${action || 'unknown'}` };
+  const repo = str(obj(p.repository).full_name);
+  const w = obj(p.workflow_run);
+  const runId = num(w.id);
+  const sha = str(w.head_sha);
+  if (!REPO.test(repo)) return { ignored: 'no repository' };
+  if (!runId) return { ignored: 'no workflow run id' };
+  if (!SHA.test(sha)) return { ignored: 'no head sha' };
+  const workflowId = num(w.workflow_id);
+  const path = str(w.path);
+  const trigger = str(w.event);
+  const conclusion = str(w.conclusion);
+  const attempt = w.run_attempt === undefined ? 1 : num(w.run_attempt);
+  if (!workflowId || !WORKFLOW_PATH.test(path) || !GITHUB_EVENT.test(trigger) || !CONCLUSION.test(conclusion) || !attempt) return { ignored: 'workflow run fields are missing or malformed' };
+  // Jury #485 B1: only the ops leader's own dispatched runs (deploy, rollback) wake it; push CI, pull requests,
+  // schedules and Dependabot runs would each start a model run the skill then discards.
+  if (trigger !== 'workflow_dispatch') return { ignored: `workflow_run from ${trigger}, not workflow_dispatch` };
+  return {
+    event: { type: 'workflow-completed', repo, run_id: runId, workflow_id: workflowId, workflow_path: path, head_sha: sha, event: trigger, conclusion, run_attempt: attempt },
+  };
+}
+
 /** The run input for a mapped event: the event itself and the instruction the conductor's runtime turn follows. */
-export function conductorInput(ev: ConductorEvent, githubEvent: string, githubDelivery: string | undefined): Record<string, unknown> {
+export function conductorInput(ev: ConductorEvent, githubEvent: string, githubDelivery: string | undefined, tool = 'sdlc-on-event'): Record<string, unknown> {
   const args = { event: ev };
   return {
     ...args,
     githubEvent,
     ...(githubDelivery ? { githubDelivery } : {}),
-    message: `GitHub sent a ${githubEvent} webhook${githubDelivery ? ` (delivery ${githubDelivery})` : ''}.\nCall sdlc-on-event with exactly these arguments, then report its outcome.\n${JSON.stringify(args)}`,
+    message: `GitHub sent a ${githubEvent} webhook${githubDelivery ? ` (delivery ${githubDelivery})` : ''}.\nCall ${tool} with exactly these arguments, then report its outcome.\n${JSON.stringify(args)}`,
   };
 }
 

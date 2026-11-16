@@ -114,7 +114,7 @@ import { clearSkillBindingsForModel, handleSkillModels, skillModelsForAgent } fr
 import { handleMcp, redactMcpResponse, SUPPORTED_MCP_PROTOCOL_VERSIONS, type ToolAnnotations } from './mcp.js';
 export { handleMcp, redactMcpResponse, SUPPORTED_MCP_PROTOCOL_VERSIONS } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
-import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, conductorEventFor, conductorInput } from './github-webhooks.js';
+import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, OPS_SKILL, conductorEventFor, conductorInput, opsEventFor } from './github-webhooks.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
@@ -3727,14 +3727,18 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       json(res, 400, { error: 'missing_delivery_id', message: 'a GitHub App delivery carries X-GitHub-Delivery' });
       return;
     }
-    const isConductor = (agent.skillIds ?? []).includes(CONDUCTOR_SKILL) || (state.configs?.current(agent.id)?.skills ?? []).some((sk) => sk.id === CONDUCTOR_SKILL);
-    if (githubEvent && (isConductor || viaApp)) {
-      if (!isConductor) {
+    const adopted = (skill: string) => (agent.skillIds ?? []).includes(skill) || (state.configs?.current(agent.id)?.skills ?? []).some((sk) => sk.id === skill);
+    const isConductor = adopted(CONDUCTOR_SKILL);
+    // #483: the ops leader takes workflow_run completions (a conductor that is also the ops leader keeps its other events).
+    // Either one takes GitHub events only from its own app: a repo webhook or the legacy header maps nothing.
+    const asOps = adopted(OPS_SKILL) && (!isConductor || githubEvent === 'workflow_run');
+    if (githubEvent && (isConductor || asOps || viaApp)) {
+      if (!isConductor && !asOps) {
         json(res, 200, { ok: true, ignored: true, reason: 'this agent takes no GitHub events' });
         return;
       }
       if (!viaApp) {
-        json(res, 200, { ok: true, ignored: true, reason: 'conductor events come only from the agent\'s own GitHub App' });
+        json(res, 200, { ok: true, ignored: true, reason: `${asOps ? 'ops' : 'conductor'} events come only from the agent's own GitHub App` });
         return;
       }
       // Fail closed: without its app's login the conductor cannot tell its own labels and comments, which would loop.
@@ -3744,12 +3748,12 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         json(res, 200, { ok: true, ignored: true, reason: 'the agent\'s GitHub App slug is not stored' });
         return;
       }
-      const mapped = conductorEventFor(githubEvent, input, `${slug}[bot]`);
+      const mapped = asOps ? opsEventFor(githubEvent, input) : conductorEventFor(githubEvent, input, `${slug}[bot]`);
       if ('ignored' in mapped) {
         json(res, 200, { ok: true, ignored: true, reason: mapped.ignored });
         return;
       }
-      input = conductorInput(mapped.event, githubEvent, delivery);
+      input = conductorInput(mapped.event, githubEvent, delivery, asOps ? 'sdlc-ops-deploy' : 'sdlc-on-event');
     } else if (githubEvent && input && typeof input === 'object' && !Array.isArray(input)) {
       input = { ...(input as Record<string, unknown>), githubEvent, ...(delivery ? { githubDelivery: delivery } : {}) };
     }

@@ -44,26 +44,38 @@ function stateKey(s: FactoryState): Buffer | undefined {
 export const GITHUB_APP_EVENTS = ['issues', 'issue_comment', 'pull_request', 'check_suite', 'status'];
 /** The skills whose agents take app events. */
 export const EVENT_SKILLS = ['sdlc-conductor'];
+/**
+ * #483: the ops leader (`sdlc-ops`) is woken by its deploy and rollback workflows' completion instead of polling, so its
+ * app also subscribes to `workflow_run` and reads Actions. An app made before this needs both added on GitHub (app
+ * settings, Permissions & events: Actions read-only, and the Workflow run event), and each installation's owner must
+ * approve the new permission before GitHub sends the event. Order: add the event only once the agentic-sdlc handler
+ * for `workflow-completed` is deployed (a new ops app subscribes at once). An ops-only app gets `workflow_run` and
+ * Actions (read) and nothing of the conductor's (jury #485 B2).
+ */
+export const WORKFLOW_SKILLS = ['sdlc-ops'];
 
 /** What an agent's app is for, beyond the narrow default. */
-export type AppNeeds = { events?: boolean; projects?: boolean };
+export type AppNeeds = { events?: boolean; projects?: boolean; workflows?: boolean };
 
 /**
  * GAP-257: an agent's needs, from the skills it adopted, or as the admin declares them when starting the app:
  * app events for the conductor, organization Projects for an agent with a backlog skill (`sdlc-backlog-github`).
  */
-export function appNeeds(agent: { skillIds?: string[]; skillRoutes?: Record<string, unknown> }, declared: { events?: unknown; projects?: unknown } = {}): AppNeeds {
+export function appNeeds(agent: { skillIds?: string[]; skillRoutes?: Record<string, unknown> }, declared: { events?: unknown; projects?: unknown; workflows?: unknown } = {}): AppNeeds {
   const skills = new Set([...(agent.skillIds ?? []), ...Object.keys(agent.skillRoutes ?? {})]);
+  const workflows = declared.workflows === true || WORKFLOW_SKILLS.some((id) => skills.has(id));
   return {
     events: declared.events === true || EVENT_SKILLS.some((id) => skills.has(id)),
     projects: declared.projects === true || [...skills].some((id) => /(^|-)backlog(-|$)/.test(id)),
+    ...(workflows ? { workflows: true } : {}),
   };
 }
 
 /**
  * The manifest GitHub prefills. Permissions are what a coding agent needs; the admin can narrow them on GitHub.
  * GAP-257 (Dale, chat, 2026-11-15): only an agent that needs them gets more. An agent that takes app events gets an
- * active hook on its own `/hooks/:agentId`, the events above, and checks and statuses (read) to read CI results; an
+ * active hook on its own `/hooks/:agentId`, the events above, and checks and statuses (read) to read CI results (the
+ * ops leader also `workflow_run` and actions read, #483); an
  * agent with a backlog skill gets organization Projects (write) for the fleet's board.
  * GitHub rejected `public: false` plus an inactive webhook with "Public cannot be private", so the manifest never
  * sends `public` (GitHub's form then defaults to "Only on this account", a private app), and an agent that takes no
@@ -77,7 +89,7 @@ export function buildManifest(publicBase: string, agentId: string, agentName: st
     name: `${`${agentName} (${new URL(publicBase).hostname.split('.')[0]})`.slice(0, 29)} ${randomUUID().slice(0, 4)}`,
     url: publicBase,
     redirect_url: `${publicBase}/api/v1/keymaster/github-app/callback`,
-    ...(needs.events ? { hook_attributes: { url: `${publicBase}/hooks/${encodeURIComponent(agentId)}`, active: true } } : {}),
+    ...(needs.events || needs.workflows ? { hook_attributes: { url: `${publicBase}/hooks/${encodeURIComponent(agentId)}`, active: true } } : {}),
     default_permissions: {
       contents: 'write',
       pull_requests: 'write',
@@ -85,8 +97,9 @@ export function buildManifest(publicBase: string, agentId: string, agentName: st
       metadata: 'read',
       ...(needs.projects ? { organization_projects: 'write' } : {}),
       ...(needs.events ? { checks: 'read', statuses: 'read' } : {}),
+      ...(needs.workflows ? { actions: 'read' } : {}),
     },
-    default_events: needs.events ? [...GITHUB_APP_EVENTS] : [],
+    default_events: [...(needs.events ? GITHUB_APP_EVENTS : []), ...(needs.workflows ? ['workflow_run'] : [])],
   };
 }
 
