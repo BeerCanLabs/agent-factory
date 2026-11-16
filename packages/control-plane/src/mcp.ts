@@ -56,76 +56,139 @@ import {
 } from './grants-routes.js';
 import { checkAgentUpdate } from './updates.js';
 
+export const SUPPORTED_MCP_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'] as const;
+export type McpProtocolVersion = (typeof SUPPORTED_MCP_PROTOCOL_VERSIONS)[number];
+
+export type ToolAnnotations = {
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+};
+
 type ToolSpec = {
   name: string;
+  title: string;
   description: string;
   privilege: Privilege;
   scopedDelegation?: boolean;
   args: Record<string, { type: string; items?: { type: string } }>;
   required?: string[];
+  annotations: ToolAnnotations;
 };
 
-const TOOLS: ToolSpec[] = [
+export function redactMcpSecretText(text: string, secrets?: Iterable<string>): string {
+  let out = text;
+  if (secrets) {
+    const list = [...secrets].filter((s) => typeof s === 'string' && s.length >= 4).sort((a, b) => b.length - a.length);
+    for (const secret of list) {
+      if (!out.includes(secret)) continue;
+      out = out.split(secret).join('[REDACTED]');
+    }
+  }
+  // Sanitize common credential patterns
+  out = out.replace(/\bfk_[A-Za-z0-9_-]{16,}\b/g, '[REDACTED]');
+  out = out.replace(/\bgh[pousr]_[A-Za-z0-9]{30,}\b/g, '[REDACTED]');
+  out = out.replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, '[REDACTED]');
+  return out;
+}
+
+export function redactMcpResponse<T>(res: T, secrets?: Iterable<string>): T {
+  if (!res || typeof res !== 'object') return res;
+  const obj = res as Record<string, unknown>;
+  if (obj.result && typeof obj.result === 'object') {
+    const r = { ...(obj.result as Record<string, unknown>) };
+    if (Array.isArray(r.content)) {
+      r.content = r.content.map((c) => {
+        if (c && typeof c === 'object' && c.type === 'text' && typeof c.text === 'string') {
+          return { ...c, text: redactMcpSecretText(c.text, secrets) };
+        }
+        return c;
+      });
+    }
+    if (r.structuredContent !== undefined) {
+      try {
+        const jsonStr = JSON.stringify(r.structuredContent);
+        r.structuredContent = JSON.parse(redactMcpSecretText(jsonStr, secrets));
+      } catch {
+        // preserve unparsed
+      }
+    }
+    return { ...obj, result: r } as T;
+  }
+  return res;
+}
+
+export const TOOLS: ToolSpec[] = [
   {
     name: 'whoami',
+    title: 'Whoami',
     description: 'Return the verified caller principal, mapped emails, effective grants, and live privileges',
     privilege: 'mcp.use',
-    args: { actAs: { type: 'string' } },
+    args: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'authz_check',
+    title: 'Authorization Check',
     description: 'Side-effect-free authorization preflight check returning { allowed, requiredRole } without ledger denial noise',
     privilege: 'mcp.use',
     args: {
       privilege: { type: 'string' },
       agentId: { type: 'string' },
       skillId: { type: 'string' },
-      actAs: { type: 'string' },
     },
     required: ['privilege'],
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'list_principals',
+    title: 'List Principals',
     description: 'List canonical human principals and their mapped verified emails (or fetch one by id; admin only)',
     privilege: 'grants.manage',
-    args: { id: { type: 'string' }, actAs: { type: 'string' } },
+    args: { id: { type: 'string' } },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'create_principal',
+    title: 'Create Principal',
     description: 'Pre-create a canonical user:<id> principal with 1..N globally unique lowercased emails (admin only)',
     privilege: 'grants.manage',
     args: {
       id: { type: 'string' },
       displayName: { type: 'string' },
       emails: { type: 'array', items: { type: 'string' } },
-      actAs: { type: 'string' },
     },
     required: ['displayName', 'emails'],
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   {
     name: 'add_principal_email',
+    title: 'Add Principal Email',
     description: 'Add a globally unique lowercased verified email alias to an existing principal (admin only)',
     privilege: 'grants.manage',
     args: {
       id: { type: 'string' },
       email: { type: 'string' },
-      actAs: { type: 'string' },
     },
     required: ['id', 'email'],
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'remove_principal_email',
+    title: 'Remove Principal Email',
     description: 'Remove an email alias from a principal while preserving at least one mapped email (admin only)',
     privilege: 'grants.manage',
     args: {
       id: { type: 'string' },
       email: { type: 'string' },
-      actAs: { type: 'string' },
     },
     required: ['id', 'email'],
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'list_grants',
+    title: 'List Grants',
     description: 'List grants (admin fleet-wide, or scoped content-owner / accountable-lead on their own agent or skill)',
     privilege: 'grants.manage',
     scopedDelegation: true,
@@ -134,11 +197,12 @@ const TOOLS: ToolSpec[] = [
       scopeKind: { type: 'string' },
       scopeId: { type: 'string' },
       includeExpired: { type: 'boolean' },
-      actAs: { type: 'string' },
     },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'grant_role',
+    title: 'Grant Role',
     description: 'Create a fleet, agent, or skill role grant subject to delegation ceilings',
     privilege: 'grants.manage',
     scopedDelegation: true,
@@ -150,92 +214,173 @@ const TOOLS: ToolSpec[] = [
       role: { type: 'string' },
       expiresAt: { type: 'string' },
       replaceExisting: { type: 'boolean' },
-      actAs: { type: 'string' },
     },
     required: ['subject', 'scope', 'role'],
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   {
     name: 'revoke_grant',
+    title: 'Revoke Grant',
     description: 'Revoke a grant by id subject to delegation ceilings and last-human-admin protection',
     privilege: 'grants.manage',
     scopedDelegation: true,
     args: {
       id: { type: 'string' },
       grantId: { type: 'string' },
-      actAs: { type: 'string' },
     },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'revoke_all_access',
+    title: 'Revoke All Access',
     description: 'Remove every grant and group membership of a principal and end its sign-in sessions and CLI login tokens (API keys stay) (confirm must equal its id); refused 409 for the last admin',
     privilege: 'grants.manage',
     args: { id: { type: 'string' }, confirm: { type: 'string' } },
     required: ['id', 'confirm'],
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
-  { name: 'list_agents', description: 'List factory cartridges', privilege: 'agents.read', args: {} },
-  { name: 'query_ledger', description: 'Read the execution ledger', privilege: 'ledger.read', args: { agent: { type: 'string' } } },
-  { name: 'get_run', description: 'Get a run by id', privilege: 'runs.read', args: { runId: { type: 'string' } }, required: ['runId'] },
+  {
+    name: 'list_agents',
+    title: 'List Agents',
+    description: 'List factory cartridges',
+    privilege: 'agents.read',
+    args: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: 'query_ledger',
+    title: 'Query Ledger',
+    description: 'Read the execution ledger',
+    privilege: 'ledger.read',
+    args: { agent: { type: 'string' } },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: 'get_run',
+    title: 'Get Run',
+    description: 'Get a run by id',
+    privilege: 'runs.read',
+    args: { runId: { type: 'string' } },
+    required: ['runId'],
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
   {
     name: 'wake_agent',
+    title: 'Wake Agent',
     description: 'Start a run (202 semantics: returns the queued/started run). Optional model pins the run; optional input is passed to it, the same as POST /api/v1/agents/:id/runs.',
     privilege: 'agents.wake',
     args: { id: { type: 'string' }, model: { type: 'string' }, input: { type: 'object' } },
     required: ['id'],
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
-  { name: 'pause_agent', description: 'Pause agent egress', privilege: 'agents.pause', args: { id: { type: 'string' } }, required: ['id'] },
-  { name: 'resume_agent', description: 'Resume agent egress', privilege: 'agents.resume', args: { id: { type: 'string' } }, required: ['id'] },
-  { name: 'isolate_agent', description: 'Isolate agent egress', privilege: 'agents.isolate', args: { id: { type: 'string' } }, required: ['id'] },
+  {
+    name: 'pause_agent',
+    title: 'Pause Agent',
+    description: 'Pause agent egress',
+    privilege: 'agents.pause',
+    args: { id: { type: 'string' } },
+    required: ['id'],
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: 'resume_agent',
+    title: 'Resume Agent',
+    description: 'Resume agent egress',
+    privilege: 'agents.resume',
+    args: { id: { type: 'string' } },
+    required: ['id'],
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: 'isolate_agent',
+    title: 'Isolate Agent',
+    description: 'Isolate agent egress',
+    privilege: 'agents.isolate',
+    args: { id: { type: 'string' } },
+    required: ['id'],
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  },
   {
     name: 'list_approvals',
+    title: 'List Approvals',
     description: 'List pending approvals; kind narrows to tool, held, change or decision (a decision an agent asked for)',
     privilege: 'approvals.read',
     args: { kind: { type: 'string' } },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
-  { name: 'get_approval', description: 'Read one approval by id, pending or decided', privilege: 'approvals.read', args: { approvalId: { type: 'string' } }, required: ['approvalId'] },
-  { name: 'get_fleet_state', description: "Read the fleet's go/stop state (status, coder_app_ready, reason)", privilege: 'agents.read', args: {} },
+  {
+    name: 'get_approval',
+    title: 'Get Approval',
+    description: 'Read one approval by id, pending or decided',
+    privilege: 'approvals.read',
+    args: { approvalId: { type: 'string' } },
+    required: ['approvalId'],
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: 'get_fleet_state',
+    title: 'Get Fleet State',
+    description: "Read the fleet's go/stop state (status, coder_app_ready, reason)",
+    privilege: 'agents.read',
+    args: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
   {
     name: 'set_fleet_state',
+    title: 'Set Fleet State',
     description: "Set the fleet's go/stop state: status is running, paused or deploy-freeze; opsAgents lists the registered agents that report deploy state; ops (null or {state, reason}) sets or clears that report, rolled-back included, and needs force: true while the deploying run is live",
     privilege: 'fleet.state.set',
     args: { status: { type: 'string' }, coder_app_ready: { type: 'boolean' }, reason: { type: 'string' }, opsAgents: { type: 'array', items: { type: 'string' } }, ops: { type: 'object' }, force: { type: 'boolean' } },
     required: ['status'],
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'decide_approval',
+    title: 'Decide Approval',
     description: 'Approve or reject a pending approval; capUsd sets a spending cap when approving a decision hold',
     privilege: 'approvals.decide',
     args: { approvalId: { type: 'string' }, decision: { type: 'string' }, notes: { type: 'string' }, capUsd: { type: 'string' } },
     required: ['approvalId', 'decision'],
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
   {
     name: 'check_agent_update',
+    title: 'Check Agent Update',
     description: 'Check for available cartridge updates from git repository',
     privilege: 'agents.update.read',
     args: { id: { type: 'string' } },
     required: ['id'],
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   {
     name: 'install_agent_update',
+    title: 'Install Agent Update',
     description: 'Install an available cartridge update (mode: drain or restart_now)',
     privilege: 'agents.update.install',
     args: { id: { type: 'string' }, mode: { type: 'string' } },
     required: ['id'],
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
   {
     name: 'list_model_catalog',
+    title: 'List Model Catalog',
     description: 'List offered and staged models in the factory',
     privilege: 'models.read',
     args: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'scan_vendor_models',
+    title: 'Scan Vendor Models',
     description: 'Scan an AI vendor endpoint to discover available models',
     privilege: 'models.manage',
     args: { vendorId: { type: 'string' } },
     required: ['vendorId'],
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   {
     name: 'admit_model',
+    title: 'Admit Model',
     description: 'Admit a model to the factory offering with token pricing. Name its vendor (vendorId): provider, endpoint and credential come from the vendor. provider/region only for cloud model services (bedrock-converse, vertex-*).',
     privilege: 'models.manage',
     args: {
@@ -248,9 +393,11 @@ const TOOLS: ToolSpec[] = [
       outputPerMTok: { type: 'string' },
     },
     required: ['name', 'id'],
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   {
     name: 'update_model_pricing',
+    title: 'Update Model Pricing',
     description: 'Update token pricing per million tokens for an admitted model',
     privilege: 'models.manage',
     args: {
@@ -259,34 +406,42 @@ const TOOLS: ToolSpec[] = [
       outputPerMTok: { type: 'string' },
     },
     required: ['name', 'inputPerMTok', 'outputPerMTok'],
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'retire_vendor_or_model',
+    title: 'Retire Vendor or Model',
     description: 'Retire an admitted model from the factory offering',
     privilege: 'models.manage',
     args: {
       name: { type: 'string' },
     },
     required: ['name'],
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'set_default_model',
+    title: 'Set Default Model',
     description: 'Set the factory default model granted to agents whose policy specifies no models (requires models.manage)',
     privilege: 'models.manage',
     args: {
       model: { type: 'string' },
     },
     required: ['model'],
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'get_agent_models',
+    title: 'Get Agent Models',
     description: 'Get the effective and configured model slots and approved models for an agent',
     privilege: 'agents.models.read',
     args: { id: { type: 'string' } },
     required: ['id'],
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'set_agent_models',
+    title: 'Set Agent Models',
     description: 'Configure approved models and current, primary, and secondary model slots for an agent',
     privilege: 'agents.models.set',
     args: {
@@ -297,39 +452,29 @@ const TOOLS: ToolSpec[] = [
       secondaryModel: { type: 'string' },
     },
     required: ['id'],
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
 ];
 
 function formatOutcomeForMcp(id: unknown, out: RouteOutcome): unknown {
+  const isErr = out.status >= 400;
+  const structured = typeof out.body === 'object' && out.body !== null ? (out.body as Record<string, unknown>) : { value: out.body };
+  let refusalText: string;
   if (out.status === 403) {
     const reqRole = String(out.body.requiredRole ?? out.body.required ?? 'admin');
-    return {
-      jsonrpc: '2.0',
-      id,
-      error: {
-        code: -32001,
-        message: `forbidden: requires ${reqRole}`,
-        data: out.body,
-      },
-    };
-  }
-  if (out.status === 503) {
-    return {
-      jsonrpc: '2.0',
-      id,
-      error: {
-        code: -32003,
-        message: String(out.body.error ?? 'store_unavailable'),
-        data: out.body,
-      },
-    };
+    refusalText = `forbidden: requires ${reqRole}`;
+  } else if (out.status === 503) {
+    refusalText = String(out.body.error ?? 'store_unavailable');
+  } else {
+    refusalText = typeof out.body === 'string' ? out.body : JSON.stringify(out.body);
   }
   return {
     jsonrpc: '2.0',
     id,
     result: {
-      content: [{ type: 'text', text: JSON.stringify(out.body) }],
-      ...(out.status >= 400 ? { isError: true } : {}),
+      content: [{ type: 'text', text: refusalText }],
+      structuredContent: structured,
+      ...(isErr ? { isError: true } : {}),
     },
   };
 }
@@ -615,12 +760,17 @@ export async function handleMcp(
   const id = payload.id ?? 1;
   const method = payload.method;
   if (method === 'initialize') {
+    const params = payload.params as { protocolVersion?: string } | undefined;
+    const clientVer = typeof params?.protocolVersion === 'string' ? params.protocolVersion : undefined;
+    const negotiatedVersion = (clientVer && (SUPPORTED_MCP_PROTOCOL_VERSIONS as readonly string[]).includes(clientVer))
+      ? clientVer
+      : '2025-11-25';
     return {
       jsonrpc: '2.0',
       id,
       result: {
-        protocolVersion: '2024-11-05',
-        capabilities: { tools: {} },
+        protocolVersion: negotiatedVersion,
+        capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'agent-factory', version: state.version },
       },
     };
@@ -637,13 +787,59 @@ export async function handleMcp(
     const evalRoles = principal.onBehalfOf
       ? rolesForSubjectActor(state, evalActor, grantRes.grants)
       : rolesForSubjectActor(state, evalActor, grantRes.grants, principal.roles);
-    const evalPrincipal: Principal = { actor: evalActor, roles: evalRoles };
+    const evalPrincipal: Principal = {
+      actor: evalActor,
+      roles: evalRoles,
+      ...(principal.keyScopes ? { keyScopes: principal.keyScopes } : {}),
+    };
     const ownsAny = checkOwnsAnyAgent(state, evalActor);
     const ownsPersonal = checkOwnsPersonalAgent(state, evalActor);
     const canDelegateScoped = callerMayUseScopedGrantTools(state, evalPrincipal, grantRes.grants);
     const agentGrantList = grantRes.grants?.filter((eg) => eg.grant.scope.kind === 'agent') ?? [];
 
+    const hasAgentScopes = Boolean(evalPrincipal.keyScopes?.agents && evalPrincipal.keyScopes.agents.length > 0);
+    const scopedAgentIds = hasAgentScopes ? evalPrincipal.keyScopes!.agents! : [];
+
     const tools = TOOLS.filter((t) => {
+      if (hasAgentScopes) {
+        // Agent-scoped key: check if permitted fleet-wide (e.g. mcp.use tools whoami/authz_check)
+        if (
+          authorize({
+            principal: evalPrincipal,
+            privilege: t.privilege,
+            resource: {
+              ownsAnyAgent: ownsAny,
+              ownsPersonalAgent: ownsPersonal,
+              ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
+            },
+          }).allowed
+        ) {
+          return true;
+        }
+        // If not permitted fleet-wide, check if permitted on any of the key's scoped agent(s)
+        if (AGENT_SCOPED.has(t.privilege)) {
+          for (const aid of scopedAgentIds) {
+            if (
+              authorize({
+                principal: evalPrincipal,
+                privilege: t.privilege,
+                resource: {
+                  agentId: aid,
+                  agentKind: agentKindOf(state, aid),
+                  owners: ownersOf(state, aid),
+                  grants: grantRes.grants,
+                  ownsAnyAgent: ownsAny,
+                  ownsPersonalAgent: ownsPersonal,
+                },
+              }).allowed
+            ) {
+              return true;
+            }
+          }
+        }
+        return false;
+      }
+
       if (
         authorize({
           principal: evalPrincipal,
@@ -684,8 +880,10 @@ export async function handleMcp(
       return false;
     }).map((t) => ({
       name: t.name,
+      title: t.title,
       description: t.description,
       inputSchema: { type: 'object', properties: t.args, ...(t.required ? { required: t.required } : {}) },
+      annotations: t.annotations,
     }));
     return { jsonrpc: '2.0', id, result: { tools } };
   }
@@ -696,6 +894,9 @@ export async function handleMcp(
       return { jsonrpc: '2.0', id, error: { code: -32003, message: grantRes.error } };
     }
     const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+    if (!params || typeof params.name !== 'string' || !params.name.trim()) {
+      return { jsonrpc: '2.0', id, error: { code: -32602, message: 'Tool name is required and must be a string' } };
+    }
     const spec = TOOLS.find((t) => t.name === params.name);
     if (!spec) {
       return { jsonrpc: '2.0', id, error: { code: -32602, message: `unknown tool ${String(params.name)}` } };
@@ -704,49 +905,25 @@ export async function handleMcp(
       ? (params.arguments as Record<string, unknown>)
       : {};
 
-    let effectivePrincipal = principal;
-    const rawActAs = rawArgs.actAs !== undefined ? rawArgs.actAs : rawArgs.onBehalfOf;
-    if (rawActAs !== undefined && rawActAs !== null) {
-      const resolvedActAs = resolveActAsForPrincipal(state, principal, rawActAs);
-      if (!resolvedActAs.ok) {
-        if (resolvedActAs.status === 403) {
-          return {
-            jsonrpc: '2.0',
-            id,
-            error: {
-              code: -32001,
-              message: 'forbidden: requires admin',
-              data: resolvedActAs.body,
-            },
-          };
-        }
-        return {
-          jsonrpc: '2.0',
-          id,
-          error: {
-            code: resolvedActAs.status === 503 ? -32003 : -32602,
-            message: String(resolvedActAs.body.message ?? resolvedActAs.body.error ?? 'invalid actAs'),
-            data: resolvedActAs.body,
-          },
-        };
-      }
-      if (principal.onBehalfOf && principal.onBehalfOf !== resolvedActAs.onBehalfOf) {
-        return {
-          jsonrpc: '2.0',
-          id,
-          error: {
-            code: -32602,
-            message: 'tool actAs argument conflicts with X-Factory-Act-As header',
-          },
-        };
-      }
-      effectivePrincipal = { ...principal, onBehalfOf: resolvedActAs.onBehalfOf };
+    // CL6, GAP-248: actAs and onBehalfOf impersonation arguments are strictly forbidden over MCP
+    if (rawArgs.actAs !== undefined || rawArgs.onBehalfOf !== undefined) {
+      return redactMcpResponse({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: 'actAs and onBehalfOf impersonation arguments are forbidden over MCP (CL6, GAP-248)' }],
+          structuredContent: { error: 'act_as_forbidden_over_mcp', message: 'actAs and onBehalfOf impersonation arguments are forbidden over MCP' },
+          isError: true,
+        },
+      }, state.secretValues);
     }
+
+    const effectivePrincipal = principal;
 
     const executeCall = async (): Promise<unknown> => {
       if (spec.scopedDelegation) {
         const sharedOut = await dispatchSharedRouteTool(state, spec.name, rawArgs, effectivePrincipal);
-        if (sharedOut) return formatOutcomeForMcp(id, sharedOut);
+        if (sharedOut) return redactMcpResponse(formatOutcomeForMcp(id, sharedOut), state.secretValues);
       }
 
       const targetAgentId =
@@ -794,28 +971,36 @@ export async function handleMcp(
             reason: `mcp:${spec.name}:requires:${requiredRole}`,
           });
         }
-        return {
+        const refusalText = `forbidden: requires ${decision.required}`;
+        return redactMcpResponse({
           jsonrpc: '2.0',
           id,
-          error: {
-            code: -32001,
-            message: `forbidden: requires ${decision.required}`,
-            data: { error: 'forbidden', required: decision.required, requiredRole },
+          result: {
+            content: [{ type: 'text', text: refusalText }],
+            structuredContent: { error: 'forbidden', required: decision.required, requiredRole },
+            isError: true,
           },
-        };
+        }, state.secretValues);
       }
 
       const sharedOut = await dispatchSharedRouteTool(state, spec.name, rawArgs, effectivePrincipal);
       if (sharedOut) {
-        return formatOutcomeForMcp(id, sharedOut);
+        return redactMcpResponse(formatOutcomeForMcp(id, sharedOut), state.secretValues);
       }
 
       const legacyResult = await dispatchLegacyTool(state, spec.name, rawArgs, effectivePrincipal);
-      return {
+      const isErr = Boolean(legacyResult && typeof legacyResult === 'object' && ('error' in (legacyResult as Record<string, unknown>)));
+      const text = typeof legacyResult === 'string' ? legacyResult : JSON.stringify(legacyResult);
+      const structured = (legacyResult && typeof legacyResult === 'object') ? (legacyResult as Record<string, unknown>) : { value: legacyResult };
+      return redactMcpResponse({
         jsonrpc: '2.0',
         id,
-        result: { content: [{ type: 'text', text: JSON.stringify(legacyResult) }] },
-      };
+        result: {
+          content: [{ type: 'text', text }],
+          structuredContent: structured,
+          ...(isErr ? { isError: true } : {}),
+        },
+      }, state.secretValues);
     };
 
     if (effectivePrincipal.onBehalfOf) {

@@ -7,7 +7,8 @@
   "exports": {
     ".": "./dist/index.js",
     "./routes": "./dist/route-registry.js",
-    "./route-registry": "./dist/route-registry.js"
+    "./route-registry": "./dist/route-registry.js",
+    "./mcp": "./dist/mcp.js"
   },
   "scripts": {
     "build": "tsc",

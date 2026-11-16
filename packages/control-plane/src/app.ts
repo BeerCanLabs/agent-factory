@@ -111,8 +111,8 @@ import { handleLoginRoutes, sendLoginPage, verifySession, type SessionStore } fr
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
 import { handleAgentTransfers } from './transfers.js';
 import { clearSkillBindingsForModel, handleSkillModels, skillModelsForAgent } from './skill-models.js';
-import { handleMcp } from './mcp.js';
-export { handleMcp } from './mcp.js';
+import { handleMcp, redactMcpResponse, SUPPORTED_MCP_PROTOCOL_VERSIONS, type ToolAnnotations } from './mcp.js';
+export { handleMcp, redactMcpResponse, SUPPORTED_MCP_PROTOCOL_VERSIONS } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
 import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, conductorEventFor, conductorInput } from './github-webhooks.js';
 import { handleSystems, type SystemsStore } from './systems.js';
@@ -2414,12 +2414,17 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
   const id = payload.id ?? 1;
   const method = payload.method;
   if (method === 'initialize') {
+    const params = payload.params as { protocolVersion?: string } | undefined;
+    const clientVer = typeof params?.protocolVersion === 'string' ? params.protocolVersion : undefined;
+    const negotiatedVersion = (clientVer && (SUPPORTED_MCP_PROTOCOL_VERSIONS as readonly string[]).includes(clientVer))
+      ? clientVer
+      : '2025-11-25';
     return {
       jsonrpc: '2.0',
       id,
       result: {
-        protocolVersion: '2024-11-05',
-        capabilities: { tools: {} },
+        protocolVersion: negotiatedVersion,
+        capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'agent-factory', version: state.version },
       },
     };
@@ -2429,33 +2434,48 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
   }
   const canManage = canRunManageModels(state, run);
   if (method === 'tools/list') {
-    const tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> = [
+    const tools: Array<{
+      name: string;
+      title: string;
+      description: string;
+      inputSchema: Record<string, unknown>;
+      annotations: ToolAnnotations;
+    }> = [
       {
         name: 'get_agent_models',
+        title: 'Get Agent Models',
         description: 'Get the effective and configured model slots and approved models for this agent',
         inputSchema: { type: 'object', properties: { id: { type: 'string' } } },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
       {
         name: 'list_models',
+        title: 'List Models',
         description: 'List the models this factory approves (names only) and the default. With subagent: that helper\'s approved models, the only ones it may be started on',
         inputSchema: { type: 'object', properties: { subagent: { type: 'string' } } },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
       {
         name: 'list_subagents',
+        title: 'List Subagents',
         description: 'List the helper agents (subagents) this agent may start: id, name, description and each helper\'s approvedModels',
         inputSchema: { type: 'object', properties: {} },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
       {
         name: 'spawn_subagent',
+        title: 'Spawn Subagent',
         description: 'Start a helper run: an allowed helper id, one of that helper\'s approvedModels (list_subagents) and the task prompt. Returns the run.',
         inputSchema: { type: 'object', properties: { subagent: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' } }, required: ['subagent', 'model', 'prompt'] },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
     ];
     if (isOpsAgent(state, run.agentId)) {
       tools.push({
         name: 'set_fleet_ops_state',
+        title: 'Set Fleet Ops State',
         description:
-          "Report the fleet's deploy state as its ops agent: idle, deploying, prod-testing or rolled-back (only an admin clears rolled-back). Give deploying a deployId; a later run of this agent finishes that deploy with takeover: true and the same deployId once the holding run has ended.",
+          "Report the fleet's deploy state as its ops agent: idle, deploying, prod-testing or rolled-back (only an admin clears rolled-back). Give deploying a deployId; a later run of this agent finishes that deploy with takeover: true and the same deployId once the holding run has ended (an ended holder's deploy reads as deploying until a takeover or an admin clears it). While the fleet is not running, a takeover may only go to idle or rolled-back.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -2466,11 +2486,13 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
           },
           required: ['state'],
         },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       });
     }
     if (canManage.allowed) {
       tools.push({
         name: 'set_agent_models',
+        title: 'Set Agent Models',
         description: 'Configure current, primary, and secondary model slots for this agent within approved models',
         inputSchema: {
           type: 'object',
@@ -2481,57 +2503,114 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
             secondaryModel: { type: 'string' },
           },
         },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       });
     }
     return { jsonrpc: '2.0', id, result: { tools } };
   }
   if (method === 'tools/call') {
     const params = (payload.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+    if (!params || typeof params.name !== 'string' || !params.name.trim()) {
+      return { jsonrpc: '2.0', id, error: { code: -32602, message: 'Tool name is required and must be a string' } };
+    }
     if (params.name === 'list_models') {
       // #332: for a helper, the parent reads that helper's grant, never the whole catalog.
       const sub = (params.arguments ?? {}).subagent;
       if (typeof sub === 'string' && sub) {
         const h = allowedSubagents(state, run.agentId).find((x) => x.id === sub);
         const body = h ? { subagent: sub, models: h.approvedModels } : { error: 'subagent_not_allowed', subagent: sub };
-        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(body) }], ...(h ? {} : { isError: true }) } };
+        return redactMcpResponse({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [{ type: 'text', text: JSON.stringify(body) }],
+            structuredContent: body,
+            ...(h ? {} : { isError: true }),
+          },
+        }, state.secretValues);
       }
-      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(approvedModels(state, run.agentId)) }] } };
+      const body = approvedModels(state, run.agentId);
+      return redactMcpResponse({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify(body) }],
+          structuredContent: body,
+        },
+      }, state.secretValues);
     }
     if (params.name === 'list_subagents') {
-      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify({ subagents: allowedSubagents(state, run.agentId) }) }] } };
+      const body = { subagents: allowedSubagents(state, run.agentId) };
+      return redactMcpResponse({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify(body) }],
+          structuredContent: body,
+        },
+      }, state.secretValues);
     }
     if (params.name === 'spawn_subagent') {
       const out = await spawnSubagent(state, run, (params.arguments ?? {}) as Record<string, unknown>);
-      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify({ status: out.status, ...out.body }) }], ...(out.status >= 300 ? { isError: true } : {}) } };
+      const body = { status: out.status, ...out.body };
+      return redactMcpResponse({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify(body) }],
+          structuredContent: body,
+          ...(out.status >= 300 ? { isError: true } : {}),
+        },
+      }, state.secretValues);
     }
     if (params.name === 'get_agent_models') {
       const pol = state.policies.get(run.agentId);
       const eff = effectiveAgentModels(pol ?? {}, defaultModelOf(state));
-      return {
+      const body = {
+        agentId: run.agentId,
+        ...eff,
+        models: agentFacingModelsForNames(state, eff.approvedModels),
+        defaultModel: defaultModelOf(state) ?? null,
+        canManageModels: canManage.allowed,
+      };
+      return redactMcpResponse({
         jsonrpc: '2.0',
         id,
         result: {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({
-                agentId: run.agentId,
-                ...eff,
-                models: agentFacingModelsForNames(state, eff.approvedModels),
-                defaultModel: defaultModelOf(state) ?? null,
-                canManageModels: canManage.allowed,
-              }),
+              text: JSON.stringify(body),
             },
           ],
+          structuredContent: body,
         },
-      };
+      }, state.secretValues);
     }
     if (params.name === 'set_fleet_ops_state') {
-      // GAP-268: a 403 or 409 refusal is a JSON-RPC error; a malformed body isError.
       const out = setFleetOpsState(state, (params.arguments ?? {}) as Record<string, unknown>, run);
       const body = out.body as Record<string, unknown>;
-      if (out.status === 403 || out.status === 409) return { jsonrpc: '2.0', id, error: { code: -32001, message: `${out.status === 403 ? 'forbidden' : 'conflict'}: ${String(body.error)}`, data: body } };
-      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(body) }], ...(out.status >= 400 ? { isError: true } : {}) } };
+      if (out.status === 403 || out.status === 409) {
+        const msg = `${out.status === 403 ? 'forbidden' : 'conflict'}: ${String(body.error ?? 'refused')}`;
+        return redactMcpResponse({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [{ type: 'text', text: msg }],
+            structuredContent: body,
+            isError: true,
+          },
+        }, state.secretValues);
+      }
+      return redactMcpResponse({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify(body) }],
+          structuredContent: body,
+          ...(out.status >= 400 ? { isError: true } : {}),
+        },
+      }, state.secretValues);
     }
     if (params.name === 'set_agent_models') {
       if (!canManage.allowed) {
@@ -2544,40 +2623,54 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
           actor: run.actor,
           reason: 'unauthorized_requester',
         });
-        return {
+        return redactMcpResponse({
           jsonrpc: '2.0',
           id,
-          error: { code: -32001, message: 'forbidden: run requester is unauthorized for model switch' },
-        };
+          result: {
+            content: [{ type: 'text', text: 'forbidden: run requester is unauthorized for model switch' }],
+            structuredContent: { error: 'forbidden', message: 'run requester is unauthorized for model switch' },
+            isError: true,
+          },
+        }, state.secretValues);
       }
       const args = (params.arguments ?? {}) as Record<string, unknown>;
       if (args.approvedModels !== undefined) {
-        return {
+        return redactMcpResponse({
           jsonrpc: '2.0',
           id,
-          error: { code: -32602, message: 'Run tokens cannot modify approved models' },
-        };
+          result: {
+            content: [{ type: 'text', text: 'Run tokens cannot modify approved models' }],
+            structuredContent: { error: 'invalid_request', message: 'Run tokens cannot modify approved models' },
+            isError: true,
+          },
+        }, state.secretValues);
       }
       const out = await applyRunModelSwitch(state, run, args, canManage.actor);
       if (out.status >= 400) {
-        return {
+        const msg = (out.body.message as string) || (out.body.error as string);
+        return redactMcpResponse({
           jsonrpc: '2.0',
           id,
-          error: { code: -32602, message: (out.body.message as string) || (out.body.error as string) },
-        };
+          result: {
+            content: [{ type: 'text', text: msg }],
+            structuredContent: out.body,
+            isError: true,
+          },
+        }, state.secretValues);
       }
-      return {
+      return redactMcpResponse({
         jsonrpc: '2.0',
         id,
         result: {
           content: [{ type: 'text', text: JSON.stringify(out.body) }],
+          structuredContent: out.body,
         },
-      };
+      }, state.secretValues);
     }
     return {
       jsonrpc: '2.0',
       id,
-      error: { code: -32001, message: `Tool "${String(params.name)}" not found or unsupported for run tokens` },
+      error: { code: -32602, message: `Tool "${String(params.name)}" not found or unsupported for run tokens` },
     };
   }
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method ${String(method)}` } };
@@ -3222,7 +3315,7 @@ export const requestApiKey = new WeakMap<http.IncomingMessage, ApiKeyRecord>();
 export function verifyApiKeyBeforeRouting(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const path = (req.url ?? '/').split('?')[0];
   // S16: health and metrics take a machine key too, so probes can present one.
-  if (!(path === '/mcp' || path.startsWith('/api/v1/') || path === '/healthz' || path === '/' || path === '/metrics')) return true;
+  if (!(path === '/mcp' || (path.startsWith('/mcp/') && !path.startsWith('/mcp/run')) || path.startsWith('/api/v1/') || path === '/healthz' || path === '/' || path === '/metrics')) return true;
   const plaintext = apiKeyFromAuthorization(req.headers.authorization);
   if (plaintext === undefined) return true;
   const rec = plaintext && state.keys ? state.keys.verify(plaintext) : undefined;
@@ -5301,12 +5394,61 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   }
 
   if (path === '/mcp' && req.method === 'POST') {
-    const who = await identify(req, state);
-    if (who.ok) {
-      const principal = await requirePrivilege(req, res, state, 'mcp.use');
-      if (!principal) return;
-      json(res, 200, await handleMcp(state, await readJson(req), principal));
+    const protoHeader = req.headers['mcp-protocol-version'];
+    if (typeof protoHeader === 'string' && protoHeader.trim()) {
+      const trimmed = protoHeader.trim();
+      if (!(SUPPORTED_MCP_PROTOCOL_VERSIONS as readonly string[]).includes(trimmed)) {
+        json(res, 400, { error: 'unsupported_protocol_version', supported: SUPPORTED_MCP_PROTOCOL_VERSIONS });
+        return;
+      }
+    }
+    const principal = await requirePrivilege(req, res, state, 'mcp.use');
+    if (!principal) return;
+
+    let payload: Record<string, unknown>;
+    try {
+      const raw = await readBody(req);
+      if (!raw.trim()) {
+        json(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request: empty body' } });
+        return;
+      }
+      payload = JSON.parse(raw);
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        json(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request: expected JSON-RPC object' } });
+        return;
+      }
+    } catch {
+      json(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
       return;
+    }
+
+    if (payload.jsonrpc !== '2.0' || typeof payload.method !== 'string') {
+      json(res, 200, { jsonrpc: '2.0', id: payload.id ?? null, error: { code: -32600, message: 'Invalid Request: jsonrpc must be "2.0" and method must be a string' } });
+      return;
+    }
+
+    if (!('id' in payload) || payload.id === undefined) {
+      res.writeHead(202);
+      res.end();
+      return;
+    }
+
+    json(res, 200, await handleMcp(state, payload, principal));
+    return;
+  }
+
+  if (path === '/mcp/run' && req.method === 'POST') {
+    if (apiKeyFromAuthorization(req.headers.authorization) !== undefined) {
+      json(res, 401, { error: 'invalid_run_token', message: 'API keys are not permitted on run endpoints' });
+      return;
+    }
+    const protoHeader = req.headers['mcp-protocol-version'];
+    if (typeof protoHeader === 'string' && protoHeader.trim()) {
+      const trimmed = protoHeader.trim();
+      if (!(SUPPORTED_MCP_PROTOCOL_VERSIONS as readonly string[]).includes(trimmed)) {
+        json(res, 400, { error: 'unsupported_protocol_version', supported: SUPPORTED_MCP_PROTOCOL_VERSIONS });
+        return;
+      }
     }
     const verdict = await verifyRun({
       tokens: state.runTokens,
@@ -5314,12 +5456,40 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       runOf: (id) => state.runs.get(id),
       ended: (r) => isTerminal(r.state),
     });
-    if (verdict.kind === 'ok') {
-      const payload = (await readJson(req)) as Record<string, unknown>;
-      json(res, 200, await handleRunMcp(state, payload, verdict.run));
+    if (verdict.kind !== 'ok') {
+      json(res, 401, { error: 'invalid_run_token' });
       return;
     }
-    await requirePrivilege(req, res, state, 'mcp.use');
+
+    let payload: Record<string, unknown>;
+    try {
+      const raw = await readBody(req);
+      if (!raw.trim()) {
+        json(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request: empty body' } });
+        return;
+      }
+      payload = JSON.parse(raw);
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        json(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request: expected JSON-RPC object' } });
+        return;
+      }
+    } catch {
+      json(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
+      return;
+    }
+
+    if (payload.jsonrpc !== '2.0' || typeof payload.method !== 'string') {
+      json(res, 200, { jsonrpc: '2.0', id: payload.id ?? null, error: { code: -32600, message: 'Invalid Request: jsonrpc must be "2.0" and method must be a string' } });
+      return;
+    }
+
+    if (!('id' in payload) || payload.id === undefined) {
+      res.writeHead(202);
+      res.end();
+      return;
+    }
+
+    json(res, 200, await handleRunMcp(state, payload, verdict.run));
     return;
   }
 

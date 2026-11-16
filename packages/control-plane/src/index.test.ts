@@ -963,8 +963,9 @@ describe('control plane', { concurrency: false }, () => {
         state,
         { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'wake_agent', arguments: { id: 'echo-agent' } } },
         viewer,
-      )) as { error?: { message: string } };
-      assert.match(denied.error?.message ?? '', /forbidden/);
+      )) as { result?: { content: Array<{ text: string }>; isError?: boolean }; error?: { message: string } };
+      assert.equal(denied.result?.isError, true);
+      assert.match(denied.result?.content?.[0]?.text ?? '', /forbidden/);
       assert.equal((await request(port, '/mcp', { method: 'POST', body: { jsonrpc: '2.0', id: 1, method: 'tools/list' } })).status, 401);
     });
   });

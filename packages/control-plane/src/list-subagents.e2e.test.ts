@@ -68,7 +68,7 @@ describe('list_subagents (E1.3)', { concurrency: false }, () => {
   });
 
   const mcp = async (id: string) => {
-    const r = await call(port, '/mcp', 'POST', runs[id].token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_subagents', arguments: {} } });
+    const r = await call(port, '/mcp/run', 'POST', runs[id].token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_subagents', arguments: {} } });
     return JSON.parse(r.body.result.content[0].text);
   };
 
@@ -87,7 +87,7 @@ describe('list_subagents (E1.3)', { concurrency: false }, () => {
   });
 
   it('the run MCP lists the tool; a wrong or missing run token is refused', async () => {
-    const list = await call(port, '/mcp', 'POST', runs.other.token, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const list = await call(port, '/mcp/run', 'POST', runs.other.token, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     assert.ok(list.body.result.tools.some((t: any) => t.name === 'list_subagents'));
     assert.equal((await call(port, `/api/v1/runs/${runs.reviewer.runId}/subagents`, 'GET')).status, 401);
     assert.equal((await call(port, `/api/v1/runs/${runs.reviewer.runId}/subagents`, 'GET', runs.other.token)).status, 401);
