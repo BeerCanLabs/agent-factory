@@ -270,7 +270,7 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal(ctx.run.model, undefined, 'gatekeeper-egress context must not have pinnedModel set');
     });
 
-    it('GAP-263 hands an admin-set policy env to the run, never over the factory\'s own variables, and refuses secrets', async () => {
+    it('GAP-255 hands an admin-set policy env to the run, never over the factory\'s own variables, and refuses secrets', async () => {
       const put = (body: unknown) => request(port, '/api/v1/agents/echo-agent/policy', { method: 'PUT', token: TOKENS.admin, body });
       const fleet = JSON.stringify({ repos: {}, logins: { conductor: 'flow-bot' } });
       assert.equal((await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' } })).status, 200);

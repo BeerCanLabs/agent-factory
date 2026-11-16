@@ -23,13 +23,13 @@ export type AgentPolicy = {
   /** #319: the named agents this agent may wake with its run token. Admin-set, per agent only; none by default. */
   wakeAgents?: string[];
   /**
-   * GAP-263: non-secret deployment settings an admin gives this agent's runs as environment variables (a fleet's
+   * GAP-255: non-secret deployment settings an admin gives this agent's runs as environment variables (a fleet's
    * configuration, a URL it calls back). Never a credential: those are the agent's secrets. Per agent only.
    */
   env?: Record<string, string>;
 };
 
-/** GAP-263: names an admin may set; the factory's own, the platform's and credential-like names are refused. */
+/** GAP-255: names an admin may set; the factory's own, the platform's and credential-like names are refused. */
 export const POLICY_ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 const RESERVED_ENV = /^(FACTORY_|AWS_|ECS_|LD_|PYTHON|NODE_|[A-Z]*_PROXY$|PATH$|HOME$|MEMORY_DIR$|SKILLS_DIR$|TMPDIR$)/;
 const CREDENTIAL_ENV = /(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|API_?KEY|CREDENTIAL)/;
