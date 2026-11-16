@@ -3094,6 +3094,7 @@ export function getKeymaster(state: FactoryState): Keymaster {
 }
 
 import { UI_HTML } from './ui.js';
+import { getOpenApiDocument, getMcpSchemaCatalog } from './route-registry.js';
 
 export function createFactoryServer(state: FactoryState): http.Server {
   wireGrantStoreKindLookup(state);
@@ -3242,6 +3243,26 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       return json(res, 401, { error: 'unauthorized' });
     }
     json(res, 200, healthBody(state, started));
+    return;
+  }
+
+  if (path === '/api/v1/openapi.json' && req.method === 'GET') {
+    const who = await identify(req, state);
+    if (!who.ok) {
+      json(res, 401, { error: 'unauthorized' });
+      return;
+    }
+    json(res, 200, getOpenApiDocument());
+    return;
+  }
+
+  if (path === '/api/v1/mcp/schema.json' && req.method === 'GET') {
+    const who = await identify(req, state);
+    if (!who.ok) {
+      json(res, 401, { error: 'unauthorized' });
+      return;
+    }
+    json(res, 200, getMcpSchemaCatalog());
     return;
   }
 
