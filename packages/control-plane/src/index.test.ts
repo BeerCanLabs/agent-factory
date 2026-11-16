@@ -293,6 +293,8 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal((await budget({ routes: [], budgetUsd: { perDay: 7 } })).status, 200);
       assert.deepEqual(state.policies.get('echo-agent').env, kept, 'a whole-policy save without env keeps it');
       assert.equal((await budget({ routes: [], budgetUsd: { perDay: 8 }, env: kept })).status, 200, 'the same env, as the console sends it back');
+      const reordered = Object.fromEntries(Object.entries(kept).reverse());
+      assert.equal((await budget({ routes: [], budgetUsd: { perDay: 8 }, env: reordered })).status, 200, 'the same env in another key order');
       assert.equal((await budget({ spendLimitUsd: 9, period: 'daily' })).status, 200);
       assert.deepEqual(state.policies.get('echo-agent').env, kept);
       state.secretValues.delete('known-secret-value-for-env-test');

@@ -391,6 +391,12 @@ describe('GAP-255 policy env', () => {
     for (const name of ['SDLC_BOT_TOKEN', 'SDLC_DB_PASSWORD', 'SDLC_GH_PAT', 'SDLC_OPENAI_KEY', 'SDLC_DB_PASS', 'SDLC_DSN', 'SDLC_SESSION']) assert.equal(ok({ [name]: 'x' }), false, name);
     const shaped = ['ghp' + '_' + 'A1'.repeat(10), 'eyJ' + 'abcdef.' + 'eyJabcdef.' + 'sig', 'https://u:' + 'pw' + '@db.example', '-----BEGIN ' + 'PRIVATE KEY-----'];
     for (const value of shaped) assert.equal(ok({ SDLC_X: value }), false, value.slice(0, 12));
+    // Real-looking tokens are refused wherever they start a word; ordinary repo names that merely contain `sk-` are not.
+    const tokens = ['sk' + '-proj' + 'A1b2C3d4E5f6G7h8', 'key=' + 'xai' + '-' + 'Z9y8X7w6V5u4', 'AKIA' + 'ABCDEFGHIJKLMNOP', 'x ' + 'xoxb' + '-1234-5678-abcd', 'github_pat_' + '11ABCDEFG0123456789'];
+    for (const value of tokens) assert.equal(ok({ SDLC_X: value }), false, value.slice(0, 12));
+    for (const repo of ['BeerCanLabs/task-scheduler', 'acme/risk-analysis', 'acme/kiosk-frontend', 'acme/Disk-Cleanup-tool', 'acme/ASK-everything1']) {
+      assert.ok(ok({ SDLC_PLAN_INTAKE_REPO: repo, SDLC_FLEET_CONFIG: JSON.stringify({ repos: { [repo]: {} } }) }), repo);
+    }
     for (const value of ['a\u0000b', 'a\nb', 'a\u001bb']) assert.equal(ok({ SDLC_X: value }), false, JSON.stringify(value));
     assert.equal(ok({ SDLC_X: 1 }), false);
     assert.equal(ok([]), false);

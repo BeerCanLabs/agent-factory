@@ -5618,7 +5618,8 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
     const currentEnv = state.policies.get(agentId)?.env;
     if (policyInput && typeof policyInput === 'object' && !Array.isArray(policyInput)) {
       const { env: sentEnv, ...rest } = policyInput as Record<string, unknown>;
-      if (sentEnv !== undefined && JSON.stringify(sentEnv) !== JSON.stringify(currentEnv ?? {})) {
+      const sorted = (e: unknown) => JSON.stringify(e && typeof e === 'object' ? Object.entries(e).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)) : e);
+      if (sentEnv !== undefined && sorted(sentEnv) !== sorted(currentEnv ?? {})) {
         json(res, 403, { error: 'env is set with PUT /api/v1/agents/:id/policy (policy.set), not the budget route' });
         return;
       }
