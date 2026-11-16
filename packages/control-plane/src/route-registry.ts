@@ -1977,7 +1977,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     operationId: "resume_agent",
     method: "POST",
     pattern: "/api/v1/agents/:id/resume",
-    summary: "Resume agent execution",
+    summary: "Resume a paused or isolated agent",
+    description: "Lifts a pause or isolation and starts the next queued run. 409 agent_not_paused from any other state (#490).",
     staff: "property-manager",
     mcpExposure: "tool-confirm",
     toolset: "agents",
@@ -1986,7 +1987,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     privilege: "agents.resume",
     noRequestBody: true,
     responseSchema: AgentRecordResponseSchema,
-    statusCodes: [200],
+    statusCodes: [200, 409],
   },
   {
     operationId: "isolate_agent",

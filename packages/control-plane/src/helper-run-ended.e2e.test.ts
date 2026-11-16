@@ -257,8 +257,19 @@ describe('helper-run-ended wakes the parent agent (#481)', { concurrency: false 
       assert.equal(rowFor(helper.runId).length, 2);
       assert.equal(state.helperWakes!.get(helper.runId)?.status, 'owed');
       if (how === 'budget') {
-        state.policies.set('reviewer', { routes: [], subagents: ['juror'], budgetUsd: { perDay: 1 } } as never);
-        await resumeHelperWakes(state);
+        // #490: RESUME is refused for an agent that is not paused or isolated, and delivers nothing.
+        const r = await call(port, '/api/v1/agents/reviewer/resume', 'POST', ADMIN);
+        assert.deepEqual([r.status, r.body.error, state.agents.get('reviewer')!.state], [409, 'agent_not_paused', 'SLEEPING']);
+        await settled();
+        assert.equal(rowFor(helper.runId).length, 2, 'a refused RESUME retries nothing');
+        // A budget write still over the limit: one more attempt, still owed (no loop).
+        assert.equal((await call(port, '/api/v1/budget/agents/reviewer', 'PUT', ADMIN, { budgetUsd: { perDay: 0 } })).status, 200);
+        await settled(() => rowFor(helper.runId).length > 2);
+        assert.equal(rowFor(helper.runId).at(-1)!.mcpName, `helper-run-ended:${helper.runId}:DONE:deferred:budget_exceeded`);
+        assert.equal(state.helperWakes!.get(helper.runId)?.status, 'owed');
+        // #490: raising the budget delivers the owed wake itself, without RESUME or a restart.
+        assert.equal((await call(port, '/api/v1/budget/agents/reviewer', 'PUT', ADMIN, { budgetUsd: { perDay: 1 } })).status, 200);
+        await settled(() => rowFor(helper.runId).length > 3);
       } else {
         assert.equal((await applyKillSwitch(state, 'reviewer', 'RESUME', 'test')).status, 200);
         await settled(() => rowFor(helper.runId).length > 2);
@@ -266,11 +277,54 @@ describe('helper-run-ended wakes the parent agent (#481)', { concurrency: false 
       assert.equal(wakes().length, before + 1, `${how}: exactly one wake`);
       assert.equal(rowFor(helper.runId).at(-1)!.mcpName, `helper-run-ended:${helper.runId}:DONE:woken`);
       assert.equal(state.helperWakes!.get(helper.runId)?.status, 'woken');
+      await applyKillSwitch(state, 'reviewer', 'PAUSE', 'test');
       await applyKillSwitch(state, 'reviewer', 'RESUME', 'test');
+      await call(port, '/api/v1/budget/agents/reviewer', 'PUT', ADMIN, { budgetUsd: { perDay: 1 } });
       await resumeHelperWakes(state);
       await settled();
       assert.equal(wakes().length, before + 1, `${how}: once`);
-      assert.equal(rowFor(helper.runId).length, 3);
+      assert.equal(rowFor(helper.runId).length, how === 'budget' ? 4 : 3);
+    }
+  });
+
+  it('#490: a budget raise retries only the wakes refused for the budget, never a paused or isolated one', async () => {
+    reset('reviewer');
+    const parent = await runOf('reviewer');
+    const helper = await spawn(parent);
+    await finishRun(state, parent.runId, 'DONE', { actor: 'test' });
+    assert.equal((await applyKillSwitch(state, 'reviewer', 'PAUSE', 'test')).status, 200);
+    await finishRun(state, helper.runId, 'DONE', { actor: 'test' });
+    await settled(() => rowFor(helper.runId).length > 0);
+    assert.equal(state.helperWakes!.get(helper.runId)?.refused, 'agent_paused');
+    assert.equal((await call(port, '/api/v1/budget/agents/reviewer', 'PUT', ADMIN, { budgetUsd: { perDay: 2 } })).status, 200);
+    await settled();
+    assert.equal(rowFor(helper.runId).length, 1, 'a budget change does not retry a paused wake');
+    assert.equal((await call(port, '/api/v1/agents/reviewer/resume', 'POST', ADMIN)).status, 200);
+    await settled(() => rowFor(helper.runId).length > 1);
+    assert.equal(rowFor(helper.runId).at(-1)!.mcpName, `helper-run-ended:${helper.runId}:DONE:woken`);
+    state.policies.set('reviewer', { routes: [], subagents: ['juror'], budgetUsd: { perDay: 1 } } as never);
+  });
+
+  it('#490: RESUME is 409 unless the agent is PAUSED or ISOLATED; nothing changes and nothing is ledgered', async () => {
+    const refused = ['SLEEPING', 'WORKING', 'RUNNING', 'PENDING_BUDGET', 'PENDING_DEPLOY', 'DEPLOYING', 'ERROR', 'RETIRED_PENDING_PURGE', 'PURGED', 'OUT_OF_BUDGET', 'BLOCKED_FOR_HUMAN', 'TRAINING'];
+    const resumes = () => (state.ledger as MemoryLedger).query({}).filter((e) => e.agentId === 'other' && e.action === 'RESUME').length;
+    reset('other');
+    const agent = state.agents.get('other')!;
+    for (const from of refused) {
+      agent.state = from as never;
+      const n = resumes();
+      const r = await call(port, '/api/v1/agents/other/resume', 'POST', ADMIN);
+      assert.deepEqual([r.status, r.body.error, r.body.state], [409, 'agent_not_paused', from], from);
+      assert.equal(agent.state, from, `${from}: state unchanged`);
+      assert.equal(/\/reset\b/.test(r.body.message), from === 'ERROR', `${from}: points to reset only for ERROR`);
+      assert.equal(resumes(), n, `${from}: no RESUME row`);
+      assert.equal((await applyKillSwitch(state, 'other', 'RESUME', 'test')).status, 409, `${from}: the function refuses too`);
+    }
+    for (const from of ['PAUSED', 'ISOLATED']) {
+      agent.state = from as never;
+      const n = resumes();
+      const r = await call(port, '/api/v1/agents/other/resume', 'POST', ADMIN);
+      assert.deepEqual([r.status, agent.state, resumes()], [200, 'SLEEPING', n + 1], from);
     }
   });
 

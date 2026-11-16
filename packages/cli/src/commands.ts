@@ -113,7 +113,7 @@ export const COMMANDS: CommandSpec[] = [
   },
 
   { name: 'pause', tool: 'pause_agent', usage: '/pause <agent>', summary: 'the kill-switch: stop egress and wake-ups', group: 'Agents', parse: idOf('an agent id') },
-  { name: 'resume', tool: 'resume_agent', usage: '/resume <agent>', summary: 'resume a paused agent', group: 'Agents', parse: idOf('an agent id') },
+  { name: 'resume', tool: 'resume_agent', usage: '/resume <agent>', summary: 'resume a paused or isolated agent', group: 'Agents', parse: idOf('an agent id') },
   { name: 'isolate', tool: 'isolate_agent', usage: '/isolate <agent>', summary: "isolate an agent's egress", group: 'Agents', parse: idOf('an agent id') },
   { name: 'wake', tool: 'wake_agent', usage: '/wake <agent>', summary: 'start a run', group: 'Agents', parse: idOf('an agent id') },
   { name: 'reset', tool: 'reset_agent', usage: '/reset <agent>', summary: "end an agent's runs and put it to sleep", group: 'Agents', parse: idOf('an agent id') },
