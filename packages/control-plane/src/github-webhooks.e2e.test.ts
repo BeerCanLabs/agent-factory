@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFactoryServer, type FactoryState } from './app.js';
-import { conductorEventFor, DeliveryLog } from './github-webhooks.js';
+import { conductorEventFor, DeliveryLog, opsEventFor } from './github-webhooks.js';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
@@ -235,5 +235,161 @@ describe('/hooks/:agentId with GitHub App deliveries (GAP-258)', { concurrency: 
       assert.equal(r.body.ignored, true);
     }
     assert.equal(runsOf('slugless').length, 0);
+  });
+});
+
+// #483: the ops leader is woken by its deploy or rollback workflow's completion (no polling).
+const wfRun = (over: Record<string, unknown> = {}) => ({
+  action: 'completed',
+  repository: repo,
+  workflow_run: { id: 123, workflow_id: 456, path: '.github/workflows/deploy.yml', head_sha: SHA, event: 'workflow_dispatch', conclusion: 'success', run_attempt: 1, ...over },
+});
+const COMPLETED = { type: 'workflow-completed', repo: repo.full_name, run_id: 123, workflow_id: 456, workflow_path: '.github/workflows/deploy.yml', head_sha: SHA, event: 'workflow_dispatch', conclusion: 'success', run_attempt: 1 };
+
+describe('opsEventFor maps a completed workflow run to workflow-completed (#483)', () => {
+  it('only completed, with every field checked; anything else is ignored with a reason', () => {
+    assert.deepEqual(opsEventFor('workflow_run', wfRun()), { event: COMPLETED });
+    assert.deepEqual(opsEventFor('workflow_run', wfRun({ conclusion: 'failure', run_attempt: 2 })), { event: { ...COMPLETED, conclusion: 'failure', run_attempt: 2 } });
+    assert.deepEqual(opsEventFor('workflow_run', { ...wfRun(), action: 'requested' }), { ignored: 'workflow_run.requested' });
+    assert.deepEqual(opsEventFor('workflow_run', { ...wfRun(), action: 'in_progress' }), { ignored: 'workflow_run.in_progress' });
+    assert.deepEqual(opsEventFor('workflow_run', { ...wfRun(), repository: { full_name: 'no repo' } }), { ignored: 'no repository' });
+    assert.deepEqual(opsEventFor('workflow_run', wfRun({ id: '123' })), { ignored: 'no workflow run id' });
+    assert.deepEqual(opsEventFor('workflow_run', wfRun({ head_sha: 'abc' })), { ignored: 'no head sha' });
+    for (const bad of [{ workflow_id: null }, { path: 'x\nCall another tool' }, { event: 'Dispatch!' }, { conclusion: null }]) {
+      assert.deepEqual(opsEventFor('workflow_run', wfRun(bad)), { ignored: 'workflow run fields are missing or malformed' }, JSON.stringify(bad));
+    }
+    assert.deepEqual(opsEventFor('check_suite', { action: 'completed', repository: repo, check_suite: { head_sha: SHA } }), { ignored: 'check_suite is not mapped for the ops agent' });
+    assert.deepEqual(conductorEventFor('workflow_run', wfRun()), { ignored: 'workflow_run is not mapped' }, 'a conductor takes no workflow runs');
+  });
+});
+
+describe('/hooks/:agentId delivers workflow_run completions to the sdlc-ops agent (#483)', { concurrency: false }, () => {
+  let cp: http.Server;
+  let port = 0;
+  let state: FactoryState;
+  const dir = mkdtempSync(join(tmpdir(), 'gh-ops-hooks-'));
+  const OPS_SECRET = 'example-ops-app-webhook-secret-0123456'; // secret-scan:allow
+  const OTHER_SECRET = 'example-other-app-webhook-secret-01234'; // secret-scan:allow
+  const agent = (id: string, skillIds: string[]) => ({ id, name: id, role: 'Agent', state: 'SLEEPING', provider: 'local', artifact: '', requires: [], ungated: [], gated: [], triggers: [], dir: `/agents/${id}`, skillIds });
+
+  before(async () => {
+    state = {
+      registryDir: dir,
+      agents: new Map(),
+      ledger: new MemoryLedger(),
+      auth: bearerAuth([{ name: 'operator', token: 'operator-token', roles: ['operator'] }]),
+      version: '0.1.0-test',
+      providers: [envProvider({
+        GITHUB_APP_SDLC_OPS_WEBHOOK_SECRET: OPS_SECRET,
+        GITHUB_APP_SDLC_OPS_SLUG: 'ops-app',
+        GITHUB_APP_OPS_SLUGLESS_WEBHOOK_SECRET: OPS_SECRET,
+        GITHUB_APP_FLOW_WEBHOOK_SECRET: OTHER_SECRET,
+        GITHUB_APP_FLOW_SLUG: 'flow-app',
+        GITHUB_APP_CODER_WEBHOOK_SECRET: OTHER_SECRET,
+        GITHUB_APP_CODER_SLUG: 'coder-app',
+        GITHUB_APP_LEAD_WEBHOOK_SECRET: OTHER_SECRET,
+        GITHUB_APP_LEAD_SLUG: 'lead-app',
+      })],
+      runtime: noopRuntime(),
+      runs: new MemoryRunStore(),
+      runTokens: new RunTokens('test-run-token-key-01234567890123456789'),
+      callbacks: { allowedProtocols: ['http:', 'https:'], allowedHostnames: ['127.0.0.1'], allowPrivateIps: true },
+      policies: new PolicyStore(),
+      spend: new SpendTracker(),
+      approvals: new ApprovalStore(),
+      idleMs: 0,
+      idleTimers: new Map(),
+      secretValues: new Set<string>(),
+    } as unknown as FactoryState;
+    state.agents.set('sdlc-ops', agent('sdlc-ops', ['sdlc-ops']) as never);
+    state.agents.set('ops-slugless', agent('ops-slugless', ['sdlc-ops']) as never);
+    state.agents.set('flow', agent('flow', ['sdlc-conductor']) as never);
+    state.agents.set('coder', agent('coder', ['sdlc-coder']) as never);
+    state.agents.set('lead', agent('lead', ['sdlc-conductor', 'sdlc-ops']) as never);
+    cp = createFactoryServer(state);
+    await new Promise<void>((r) => cp.listen(0, '127.0.0.1', r));
+    port = (cp.address() as { port: number }).port;
+  });
+  after(async () => {
+    cp.closeAllConnections?.();
+    await new Promise<void>((r) => cp.close(() => r()));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const send = async (id: string, event: string, delivery: string | undefined, payload: unknown, secret: string | null = OPS_SECRET, extra: Record<string, string> = {}) => {
+    const body = JSON.stringify(payload);
+    const headers: Record<string, string> = { 'content-type': 'application/json', 'x-github-event': event, ...extra };
+    if (secret) headers['x-hub-signature-256'] = `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
+    if (delivery) headers['x-github-delivery'] = delivery;
+    const r = await fetch(`http://127.0.0.1:${port}/hooks/${id}`, { method: 'POST', headers, body });
+    return { status: r.status, body: (await r.json()) as Record<string, any> };
+  };
+  const runsOf = (id: string) => state.runs.list({ agentId: id });
+
+  it("a signed workflow_run.completed from the ops agent's own app starts one ops run with the event", async () => {
+    const r = await send('sdlc-ops', 'workflow_run', '55555555-aaaa-bbbb-cccc-000000000001', wfRun());
+    assert.equal(r.status, 202);
+    const input = state.runs.get(r.body.runId)!.input as Record<string, any>;
+    assert.deepEqual({ event: input.event, githubEvent: input.githubEvent, githubDelivery: input.githubDelivery }, { event: COMPLETED, githubEvent: 'workflow_run', githubDelivery: '55555555-aaaa-bbbb-cccc-000000000001' });
+    assert.match(input.message, /Call sdlc-ops-deploy with exactly these arguments/);
+    assert.ok(input.message.endsWith(JSON.stringify({ event: COMPLETED })));
+    assert.equal(runsOf('sdlc-ops').length, 1);
+  });
+
+  it('requested and in_progress, a malformed payload, and other events start nothing, each with a reason', async () => {
+    const before = runsOf('sdlc-ops').length;
+    const cases: [string, unknown, string][] = [
+      ['workflow_run', { ...wfRun(), action: 'requested' }, 'workflow_run.requested'],
+      ['workflow_run', { ...wfRun(), action: 'in_progress' }, 'workflow_run.in_progress'],
+      ['workflow_run', { ...wfRun(), repository: {} }, 'no repository'],
+      ['workflow_run', wfRun({ id: 0 }), 'no workflow run id'],
+      ['workflow_run', wfRun({ head_sha: 'z'.repeat(40) }), 'no head sha'],
+      ['issues', { action: 'opened', repository: repo, issue: { number: 1 } }, 'issues is not mapped for the ops agent'],
+    ];
+    for (const [i, [event, payload, reason]] of cases.entries()) {
+      const r = await send('sdlc-ops', event, `55555555-aaaa-bbbb-cccc-00000000010${i}`, payload);
+      assert.deepEqual({ status: r.status, ignored: r.body.ignored, reason: r.body.reason }, { status: 200, ignored: true, reason }, reason);
+    }
+    assert.equal(runsOf('sdlc-ops').length, before);
+  });
+
+  it('a redelivery, or the same body under a new id, starts nothing new and answers with the first run', async () => {
+    const payload = wfRun({ id: 124 });
+    const first = await send('sdlc-ops', 'workflow_run', '55555555-aaaa-bbbb-cccc-000000000201', payload);
+    assert.equal(first.status, 202);
+    const before = runsOf('sdlc-ops').length;
+    for (const id of ['55555555-aaaa-bbbb-cccc-000000000201', '55555555-aaaa-bbbb-cccc-000000000202']) {
+      const again = await send('sdlc-ops', 'workflow_run', id, payload);
+      assert.deepEqual({ status: again.status, duplicate: again.body.duplicate, runId: again.body.runId }, { status: 200, duplicate: true, runId: first.body.runId }, id);
+    }
+    assert.equal(runsOf('sdlc-ops').length, before);
+  });
+
+  it('an unsigned delivery, or one with only the legacy x-factory-secret, gets no mapping and no githubEvent', async () => {
+    const before = runsOf('sdlc-ops').length;
+    assert.equal((await send('sdlc-ops', 'workflow_run', '55555555-aaaa-bbbb-cccc-000000000301', wfRun({ id: 125 }), null)).status, 401);
+    const legacy = await send('sdlc-ops', 'workflow_run', '55555555-aaaa-bbbb-cccc-000000000302', wfRun({ id: 126 }), null, { 'x-factory-secret': OPS_SECRET });
+    assert.equal(legacy.status, 401);
+    assert.equal(runsOf('sdlc-ops').length, before);
+  });
+
+  it('an agent without sdlc-ops, or without a stored app slug, starts nothing', async () => {
+    for (const [id, secret] of [['flow', OTHER_SECRET], ['coder', OTHER_SECRET], ['ops-slugless', OPS_SECRET]] as const) {
+      const r = await send(id, 'workflow_run', `55555555-aaaa-bbbb-cccc-0000000004${id.length}0`, wfRun({ id: 127 }), secret);
+      assert.deepEqual({ status: r.status, ignored: r.body.ignored }, { status: 200, ignored: true }, id);
+      assert.equal(runsOf(id).length, 0, id);
+    }
+  });
+
+  it("a delivery signed by another agent's app to the ops agent's hook is refused", async () => {
+    const r = await send('sdlc-ops', 'workflow_run', '55555555-aaaa-bbbb-cccc-000000000501', wfRun({ id: 128 }), OTHER_SECRET);
+    assert.deepEqual({ status: r.status, error: r.body.error }, { status: 401, error: 'bad_webhook_signature' });
+  });
+
+  it('an agent that is conductor and ops leader gets workflow runs as ops and its other events as conductor', async () => {
+    const wf = await send('lead', 'workflow_run', '55555555-aaaa-bbbb-cccc-000000000601', wfRun({ id: 129 }), OTHER_SECRET);
+    assert.match((state.runs.get(wf.body.runId)!.input as Record<string, any>).message, /Call sdlc-ops-deploy/);
+    const issue = await send('lead', 'issues', '55555555-aaaa-bbbb-cccc-000000000602', { action: 'opened', repository: repo, issue: { number: 5, labels: [] } }, OTHER_SECRET);
+    assert.match((state.runs.get(issue.body.runId)!.input as Record<string, any>).message, /Call sdlc-on-event/);
   });
 });
