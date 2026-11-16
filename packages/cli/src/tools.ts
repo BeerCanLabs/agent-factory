@@ -8,6 +8,7 @@
  */
 import { authorize, type Privilege } from '@beercanlabs/factory-bouncer';
 import type { Role } from '@beercanlabs/factory-auth';
+import { CLI_OPERATION_MAP } from '@beercanlabs/factory-contract';
 import type { FactoryClient } from './client.js';
 import type { ToolSpec } from './protocol.js';
 
@@ -69,18 +70,24 @@ const obj = (properties: Record<string, unknown>, required: string[] = []): Tool
 });
 const agentId = { type: 'string', description: 'The agent id.' };
 
-const read = (name: string, description: string, privilege: Privilege, parameters: ToolSpec['parameters'], run: Tool['run'], agentScoped = false): Tool => ({
-  spec: { name, description, parameters, mutating: false },
-  privilege,
-  agentScoped,
-  run: async (c, a) => run(c, a),
-});
-const change = (name: string, description: string, privilege: Privilege, parameters: ToolSpec['parameters'], run: Tool['run'], agentScoped = false): Tool => ({
-  spec: { name, description, parameters, mutating: true },
-  privilege,
-  agentScoped,
-  run: async (c, a) => run(c, a),
-});
+/**
+ * Constructs a CLI Tool deriving spec, privilege and agentScoped from the shared factory contract (§6.17 CL11, GAP-249).
+ */
+function cliTool(name: string, run: Tool['run']): Tool {
+  const def = CLI_OPERATION_MAP[name];
+  if (!def) throw new Error(`Unknown CLI operation contract: ${name}`);
+  return {
+    spec: {
+      name: def.name,
+      description: def.description,
+      parameters: def.parameters as ToolSpec['parameters'],
+      mutating: def.mutating,
+    },
+    privilege: def.privilege as Privilege,
+    ...(def.agentScoped ? { agentScoped: true } : {}),
+    run: async (c, a) => run(c, a),
+  };
+}
 
 const SUBJECT = /^(?:user|service|group|domain):[A-Za-z0-9._@+-]{1,200}$/;
 function subject(args: Args, key = 'subject'): string {
@@ -128,228 +135,101 @@ function attested(args: Args): void {
 
 export const TOOLS: Tool[] = [
   // S9: people, grants and keys. Scoped owners and leads may manage grants on their own items, so the factory decides.
-  read('list_principals', 'The people and services the factory knows, with their emails.', 'grants.manage', obj({}), (c) => c.request('GET', '/api/v1/principals')),
-  read('list_grants', 'Role grants, optionally for one subject.', 'grants.manage', obj({ subject: { type: 'string' } }), (c, a) => c.request('GET', `/api/v1/grants${query({ subject: a.subject === undefined ? undefined : subject(a) })}`), true),
-  change('grant_role', 'Grant a role to a subject at fleet, agent:<id> or skill:<id> scope.', 'grants.manage', obj({ subject: { type: 'string' }, role: { type: 'string' }, scope: { type: 'string' } }, ['subject', 'role']), (c, a) => c.request('POST', '/api/v1/grants', { subject: subject(a), role: decodeURIComponent(id(a, 'role')), scope: grantScope(a) }), true),
-  change('revoke_grant', 'Revoke one grant by id.', 'grants.manage', obj({ id: { type: 'string' } }, ['id']), (c, a) => c.request('DELETE', `/api/v1/grants/${id(a, 'id')}`), true),
-  read('list_agents', 'List every agent with its state, budget standing and owners.', 'agents.read', obj({}), (c) => c.request('GET', '/api/v1/agents')),
-  read('get_agent', 'Details and lifecycle state of one agent.', 'agents.read', obj({ id: agentId }, ['id']), (c, a) => c.request('GET', `/api/v1/registry/agents/${id(a, 'id')}`)),
-  read('get_agent_policy', "An agent's policy: granted routes, models and budget.", 'policy.read', obj({ id: agentId }, ['id']), (c, a) => c.request('GET', `/api/v1/agents/${id(a, 'id')}/policy`)),
-  read('factory_metrics', 'Operational snapshot: active runs, agent counts by state, spend today and this month against budgets.', 'metrics.read', obj({}), (c) => c.request('GET', '/api/v1/metrics')),
-  read('get_spend', 'Spend so far, by agent.', 'spend.read', obj({}), (c) => c.request('GET', '/api/v1/spend')),
-  read(
-    'get_spend_report',
-    'The factory spend report (AI and infrastructure) for a calendar month.',
-    'spend.read',
-    obj({ period: { type: 'string', enum: ['current', 'last'], description: 'Which month. Default current.' } }),
-    (c, a) => c.request('GET', `/api/v1/spend/report${query({ period: a.period === 'last' ? 'last' : 'current' })}`),
-  ),
-  read('get_compute_spend', 'Infrastructure (compute) spend.', 'spend.read', obj({}), (c) => c.request('GET', '/api/v1/spend/compute')),
-  read('get_factory_budgets', 'The factory-wide monthly budgets (AI, infrastructure, total) and their history.', 'spend.read', obj({}), (c) => c.request('GET', '/api/v1/spend/budgets')),
-  change(
-    'set_factory_budgets',
-    'Set the factory-wide monthly budgets in dollars. Send only the ones to change. alertAt is a list of fractions such as [0.8, 1].',
-    'spend.budget.set',
-    obj({ aiMonthUsd: { type: 'number' }, infraMonthUsd: { type: 'number' }, totalMonthUsd: { type: 'number' }, alertAt: { type: 'array', items: { type: 'number' } } }),
-    (c, a) => {
-      const body: Args = {};
-      for (const k of ['aiMonthUsd', 'infraMonthUsd', 'totalMonthUsd']) {
-        const v = optionalAmount(a, k);
-        if (v !== undefined) body[k] = v;
-      }
-      if (Array.isArray(a.alertAt)) body.alertAt = a.alertAt;
-      if (Object.keys(body).length === 0) throw new ToolArgumentError('name at least one budget to set');
-      return c.request('PUT', '/api/v1/spend/budgets', body);
-    },
-  ),
-  change(
-    'set_agent_budget',
-    "Set one agent's spend limit in dollars for a day or a month.",
-    'registry.budget.set',
-    obj({ id: agentId, spendLimitUsd: { type: 'number' }, period: { type: 'string', enum: ['daily', 'monthly'] } }, ['id', 'spendLimitUsd', 'period']),
-    (c, a) => {
-      if (a.period !== 'daily' && a.period !== 'monthly') throw new ToolArgumentError('period must be daily or monthly');
-      return c.request('PUT', `/api/v1/registry/agents/${id(a, 'id')}/budget`, { spendLimitUsd: amount(a, 'spendLimitUsd'), period: a.period });
-    },
-  ),
-  read('list_runs', 'Recent runs, optionally for one agent or only the active ones.', 'runs.read', obj({ agent: agentId, active: { type: 'boolean' }, limit: { type: 'integer' } }), (c, a) =>
+  cliTool('list_principals', (c) => c.request('GET', '/api/v1/principals')),
+  cliTool('list_grants', (c, a) => c.request('GET', `/api/v1/grants${query({ subject: a.subject === undefined ? undefined : subject(a) })}`)),
+  cliTool('grant_role', (c, a) => c.request('POST', '/api/v1/grants', { subject: subject(a), role: decodeURIComponent(id(a, 'role')), scope: grantScope(a) })),
+  cliTool('revoke_grant', (c, a) => c.request('DELETE', `/api/v1/grants/${id(a, 'id')}`)),
+  cliTool('list_agents', (c) => c.request('GET', '/api/v1/agents')),
+  cliTool('get_agent', (c, a) => c.request('GET', `/api/v1/registry/agents/${id(a, 'id')}`)),
+  cliTool('get_agent_policy', (c, a) => c.request('GET', `/api/v1/agents/${id(a, 'id')}/policy`)),
+  cliTool('factory_metrics', (c) => c.request('GET', '/api/v1/metrics')),
+  cliTool('get_spend', (c) => c.request('GET', '/api/v1/spend')),
+  cliTool('get_spend_report', (c, a) => c.request('GET', `/api/v1/spend/report${query({ period: a.period === 'last' ? 'last' : 'current' })}`)),
+  cliTool('get_compute_spend', (c) => c.request('GET', '/api/v1/spend/compute')),
+  cliTool('get_factory_budgets', (c) => c.request('GET', '/api/v1/spend/budgets')),
+  cliTool('set_factory_budgets', (c, a) => {
+    const body: Args = {};
+    for (const k of ['aiMonthUsd', 'infraMonthUsd', 'totalMonthUsd']) {
+      const v = optionalAmount(a, k);
+      if (v !== undefined) body[k] = v;
+    }
+    if (Array.isArray(a.alertAt)) body.alertAt = a.alertAt;
+    if (Object.keys(body).length === 0) throw new ToolArgumentError('name at least one budget to set');
+    return c.request('PUT', '/api/v1/spend/budgets', body);
+  }),
+  cliTool('set_agent_budget', (c, a) => {
+    if (a.period !== 'daily' && a.period !== 'monthly') throw new ToolArgumentError('period must be daily or monthly');
+    return c.request('PUT', `/api/v1/registry/agents/${id(a, 'id')}/budget`, { spendLimitUsd: amount(a, 'spendLimitUsd'), period: a.period });
+  }),
+  cliTool('list_runs', (c, a) =>
     c.request('GET', `/api/v1/runs${query({ agent: typeof a.agent === 'string' ? a.agent : undefined, active: a.active === true ? 'true' : undefined, limit: limit(a, 25) })}`),
   ),
-  read('get_run', 'One run: state, trigger, timing and cost.', 'runs.read', obj({ id: { type: 'string' } }, ['id']), (c, a) => c.request('GET', `/api/v1/runs/${id(a, 'id')}`)),
-  read('query_ledger', 'Recent rows of the audit ledger, optionally for one agent.', 'ledger.read', obj({ agent: agentId, limit: { type: 'integer' } }), (c, a) =>
+  cliTool('get_run', (c, a) => c.request('GET', `/api/v1/runs/${id(a, 'id')}`)),
+  cliTool('query_ledger', (c, a) =>
     c.request('GET', `/api/v1/ledger${query({ agent: typeof a.agent === 'string' ? a.agent : undefined, limit: limit(a, 25, 200) })}`),
   ),
-  read('list_approvals', 'Tool calls held for a person to approve.', 'approvals.read', obj({}), (c) => c.request('GET', '/api/v1/approvals?state=pending')),
-  change(
-    'decide_approval',
-    'Approve or reject a held tool call or a decision an agent asked for; capUsd sets a spending cap when approving a decision.',
-    'approvals.decide',
-    obj(
-      {
-        id: { type: 'string' },
-        decision: { type: 'string', enum: ['approve', 'reject'] },
-        notes: { type: 'string' },
-        capUsd: { type: 'string', description: 'A cap in USD, e.g. 2500 or $2,500.00.' },
-      },
-      ['id', 'decision'],
-    ),
-    (c, a) => {
-      if (a.decision !== 'approve' && a.decision !== 'reject') throw new ToolArgumentError('decision must be approve or reject');
-      const cap = typeof a.capUsd === 'string' || typeof a.capUsd === 'number' ? { capUsd: a.capUsd } : {};
-      return c.request('POST', `/api/v1/approvals/${id(a, 'id')}`, { decision: a.decision, ...(typeof a.notes === 'string' ? { notes: a.notes.slice(0, 1000) } : {}), ...cap });
-    },
-    true,
-  ),
-  change('pause_agent', "Pause an agent: the kill-switch. It stops egress and wake-ups until resumed.", 'agents.pause', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/pause`, {}), true),
-  change('resume_agent', 'Resume a paused or isolated agent.', 'agents.resume', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/resume`, {}), true),
-  change('isolate_agent', "Isolate an agent's egress.", 'agents.isolate', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/isolate`, {})),
-  change('wake_agent', 'Wake an agent (start a run).', 'agents.wake', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/wake`, {}), true),
-  change('reset_agent', 'End the agent\'s runs and return it to sleeping.', 'agents.reset', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/reset`, {})),
-  change('cancel_run', 'Cancel an active run.', 'runs.cancel', obj({ id: { type: 'string', description: 'The run id.' } }, ['id']), (c, a) => c.request('POST', `/api/v1/runs/${id(a, 'id')}/cancel`, {})),
-  change('retire_agent', 'Retire an agent (stage 1: compute and triggers off; reversible until purged).', 'registry.retire', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/registry/agents/${id(a, 'id')}/retire`, {})),
-  change('reinstate_agent', 'Bring a retired agent back during its holding period.', 'registry.reinstate', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/registry/agents/${id(a, 'id')}/reinstate`, {})),
-  read('list_models', 'Models the factory offers and the default.', 'models.read', obj({}), (c) => c.request('GET', '/api/v1/models')),
-  read('list_skills', 'The skills catalog.', 'skills.read', obj({}), (c) => c.request('GET', '/api/v1/skills')),
-  read('get_triage', 'Open incidents and faults (the Doctor).', 'triage.read', obj({}), (c) => c.request('GET', '/api/v1/triage')),
-  read('list_schedules', 'Scheduled wake-ups.', 'schedules.read', obj({}), (c) => c.request('GET', '/api/v1/schedules')),
+  cliTool('list_approvals', (c) => c.request('GET', '/api/v1/approvals?state=pending')),
+  cliTool('decide_approval', (c, a) => {
+    if (a.decision !== 'approve' && a.decision !== 'reject') throw new ToolArgumentError('decision must be approve or reject');
+    const cap = typeof a.capUsd === 'string' || typeof a.capUsd === 'number' ? { capUsd: a.capUsd } : {};
+    return c.request('POST', `/api/v1/approvals/${id(a, 'id')}`, { decision: a.decision, ...(typeof a.notes === 'string' ? { notes: a.notes.slice(0, 1000) } : {}), ...cap });
+  }),
+  cliTool('pause_agent', (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/pause`, {})),
+  cliTool('resume_agent', (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/resume`, {})),
+  cliTool('isolate_agent', (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/isolate`, {})),
+  cliTool('wake_agent', (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/wake`, {})),
+  cliTool('reset_agent', (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/reset`, {})),
+  cliTool('cancel_run', (c, a) => c.request('POST', `/api/v1/runs/${id(a, 'id')}/cancel`, {})),
+  cliTool('retire_agent', (c, a) => c.request('POST', `/api/v1/registry/agents/${id(a, 'id')}/retire`, {})),
+  cliTool('reinstate_agent', (c, a) => c.request('POST', `/api/v1/registry/agents/${id(a, 'id')}/reinstate`, {})),
+  cliTool('list_models', (c) => c.request('GET', '/api/v1/models')),
+  cliTool('list_skills', (c) => c.request('GET', '/api/v1/skills')),
+  cliTool('get_triage', (c) => c.request('GET', '/api/v1/triage')),
+  cliTool('list_schedules', (c) => c.request('GET', '/api/v1/schedules')),
 
   // §6.9 M5: subscription connections & BYOM. Agent-scoped so personal agent owners hold access on their own plans, while Bouncer enforces admin privileges on factory plans.
-  read(
-    'list_subscriptions',
-    'Subscription connections, permitted vendor templates with terms, and vendors not offered.',
-    'subscriptions.own',
-    obj({ scope: { type: 'string', enum: ['factory', 'personal'] } }),
-    (c, a) => c.request('GET', `/api/v1/subscriptions${query({ scope: subscriptionScope(a) })}`),
-    true,
-  ),
-  read(
-    'get_subscription_spend',
-    'Subscription token usage today and this UTC month per connection and per agent.',
-    'subscriptions.own',
-    obj({}),
-    (c) => c.request('GET', '/api/v1/subscriptions/spend'),
-    true,
-  ),
-  change(
-    'connect_subscription',
-    'Start device-code sign-in to connect a permitted vendor subscription (personal BYOM or factory-shared). Requires subscriberAttested: true.',
-    'subscriptions.own',
-    obj(
-      {
-        templateId: { type: 'string' },
-        subscriberAttested: { type: 'boolean' },
-        scope: { type: 'string', enum: ['factory', 'personal'] },
-        name: { type: 'string' },
-      },
-      ['templateId', 'subscriberAttested'],
-    ),
-    (c, a) => {
-      attested(a);
-      const scope = subscriptionScope(a);
-      return c.request('POST', '/api/v1/subscriptions/connect', {
-        templateId: decodeURIComponent(id(a, 'templateId')),
-        subscriberAttested: true,
-        ...(scope ? { scope } : {}),
-        ...(a.name !== undefined ? { name: connectionName(a, 'name') } : {}),
-      });
-    },
-    true,
-  ),
-  read(
-    'poll_subscription_signin',
-    'Poll a pending subscription device-code sign-in by signInId until connected.',
-    'subscriptions.own',
-    obj({ id: { type: 'string' } }, ['id']),
-    (c, a) => c.request('GET', `/api/v1/subscriptions/sign-ins/${id(a, 'id')}`),
-    true,
-  ),
-  change(
-    'reconnect_subscription',
-    'Start device-code sign-in to re-authorize an existing subscription connection. Requires subscriberAttested: true.',
-    'subscriptions.own',
-    obj({ id: { type: 'string' }, subscriberAttested: { type: 'boolean' } }, ['id', 'subscriberAttested']),
-    (c, a) => {
-      attested(a);
-      return c.request('POST', `/api/v1/subscriptions/${id(a, 'id')}/reconnect`, { subscriberAttested: true });
-    },
-    true,
-  ),
-  change(
-    'rename_subscription',
-    'Rename a subscription connection (catalog display labels update immediately).',
-    'subscriptions.own',
-    obj({ id: { type: 'string' }, name: { type: 'string' } }, ['id', 'name']),
-    (c, a) => c.request('PATCH', `/api/v1/subscriptions/${id(a, 'id')}`, { name: connectionName(a, 'name') }),
-    true,
-  ),
-  change(
-    'set_subscription_cap',
-    'Set or clear (null) the optional per-agent daily usage cap on a subscription connection.',
-    'subscriptions.own',
-    obj({ id: { type: 'string' }, cap: { type: ['integer', 'null'] } }, ['id', 'cap']),
-    (c, a) => {
-      if (a.cap !== null && (typeof a.cap !== 'number' || !Number.isInteger(a.cap) || a.cap < 1)) {
-        throw new ToolArgumentError('cap must be a positive whole number or null to clear');
-      }
-      return c.request('PATCH', `/api/v1/subscriptions/${id(a, 'id')}`, { dailyTokenCap: a.cap });
-    },
-    true,
-  ),
-  change(
-    'discover_subscription_models',
-    'Discover models offered by the vendor plan on a subscription connection.',
-    'subscriptions.own',
-    obj({ id: { type: 'string' } }, ['id']),
-    (c, a) => c.request('POST', `/api/v1/subscriptions/${id(a, 'id')}/discover`, {}),
-    true,
-  ),
-  change(
-    'add_subscription_model',
-    'Admit a subscription-backed model into the catalog ($0 immutable for personal BYOM; explicit price for factory).',
-    'subscriptions.own',
-    obj(
-      {
-        id: { type: 'string' },
-        name: { type: 'string' },
-        modelId: { type: 'string' },
-        inputPerMTok: { type: 'number' },
-        outputPerMTok: { type: 'number' },
-      },
-      ['id', 'name', 'modelId'],
-    ),
-    (c, a) => {
-      const hasIn = a.inputPerMTok !== undefined;
-      const hasOut = a.outputPerMTok !== undefined;
-      if (hasIn !== hasOut) {
-        throw new ToolArgumentError('give both inputPerMTok and outputPerMTok, or neither for $0 personal BYOM');
-      }
-      const price = hasIn
-        ? { inputPerMTok: amount(a, 'inputPerMTok'), outputPerMTok: amount(a, 'outputPerMTok') }
-        : undefined;
-      return c.request('POST', `/api/v1/subscriptions/${id(a, 'id')}/models`, {
-        name: decodeURIComponent(catalogModelName(a, 'name')),
-        modelId: vendorModelId(a, 'modelId'),
-        ...(price ? { price } : {}),
-      });
-    },
-    true,
-  ),
-  change(
-    'retire_subscription_model',
-    'Retire a subscription-backed model from the catalog.',
-    'subscriptions.own',
-    obj({ id: { type: 'string' }, model: { type: 'string' } }, ['id', 'model']),
-    (c, a) => c.request('DELETE', `/api/v1/subscriptions/${id(a, 'id')}/models/${catalogModelName(a, 'model')}`),
-    true,
-  ),
-  change(
-    'disconnect_subscription',
-    'Disconnect a subscription connection, purge its vault grant, and retire its catalog models.',
-    'subscriptions.own',
-    obj({ id: { type: 'string' } }, ['id']),
-    (c, a) => c.request('DELETE', `/api/v1/subscriptions/${id(a, 'id')}`),
-    true,
-  ),
+  cliTool('list_subscriptions', (c, a) => c.request('GET', `/api/v1/subscriptions${query({ scope: subscriptionScope(a) })}`)),
+  cliTool('get_subscription_spend', (c) => c.request('GET', '/api/v1/subscriptions/spend')),
+  cliTool('connect_subscription', (c, a) => {
+    attested(a);
+    const scope = subscriptionScope(a);
+    return c.request('POST', '/api/v1/subscriptions/connect', {
+      templateId: decodeURIComponent(id(a, 'templateId')),
+      subscriberAttested: true,
+      ...(scope ? { scope } : {}),
+      ...(a.name !== undefined ? { name: connectionName(a, 'name') } : {}),
+    });
+  }),
+  cliTool('poll_subscription_signin', (c, a) => c.request('GET', `/api/v1/subscriptions/sign-ins/${id(a, 'id')}`)),
+  cliTool('reconnect_subscription', (c, a) => {
+    attested(a);
+    return c.request('POST', `/api/v1/subscriptions/${id(a, 'id')}/reconnect`, { subscriberAttested: true });
+  }),
+  cliTool('rename_subscription', (c, a) => c.request('PATCH', `/api/v1/subscriptions/${id(a, 'id')}`, { name: connectionName(a, 'name') })),
+  cliTool('set_subscription_cap', (c, a) => {
+    if (a.cap !== null && (typeof a.cap !== 'number' || !Number.isInteger(a.cap) || a.cap < 1)) {
+      throw new ToolArgumentError('cap must be a positive whole number or null to clear');
+    }
+    return c.request('PATCH', `/api/v1/subscriptions/${id(a, 'id')}`, { dailyTokenCap: a.cap });
+  }),
+  cliTool('discover_subscription_models', (c, a) => c.request('POST', `/api/v1/subscriptions/${id(a, 'id')}/discover`, {})),
+  cliTool('add_subscription_model', (c, a) => {
+    const hasIn = a.inputPerMTok !== undefined;
+    const hasOut = a.outputPerMTok !== undefined;
+    if (hasIn !== hasOut) {
+      throw new ToolArgumentError('give both inputPerMTok and outputPerMTok, or neither for $0 personal BYOM');
+    }
+    const price = hasIn
+      ? { inputPerMTok: amount(a, 'inputPerMTok'), outputPerMTok: amount(a, 'outputPerMTok') }
+      : undefined;
+    return c.request('POST', `/api/v1/subscriptions/${id(a, 'id')}/models`, {
+      name: decodeURIComponent(catalogModelName(a, 'name')),
+      modelId: vendorModelId(a, 'modelId'),
+      ...(price ? { price } : {}),
+    });
+  }),
+  cliTool('retire_subscription_model', (c, a) => c.request('DELETE', `/api/v1/subscriptions/${id(a, 'id')}/models/${catalogModelName(a, 'model')}`)),
+  cliTool('disconnect_subscription', (c, a) => c.request('DELETE', `/api/v1/subscriptions/${id(a, 'id')}`)),
 ];
 
 /** Handled by the CLI itself, not the factory: it moves the person into a conversation with an agent (CL5). */

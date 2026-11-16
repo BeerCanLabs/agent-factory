@@ -26,7 +26,8 @@ import { factoryApi } from '../api/client.js';
 import { PolicyEditor } from '../components/PolicyEditor.js';
 import { ModelsView } from '../components/ModelsView.js';
 import { isPersonalByomModel, isSubscriptionModel, modelDisplayLabel } from '../components/models-model.js';
-import { OwnersEditor } from '../components/OwnersEditor.js';
+import { OwnersEditor, ACTOR_RE } from '../components/OwnersEditor.js';
+export { ACTOR_RE };
 import { AgentSkillsTab } from './skills/AgentSkillsTab.js';
 
 interface AgentWorkbenchProps {

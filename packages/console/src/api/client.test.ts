@@ -63,3 +63,78 @@ it('#434: Rename sends PATCH /api/v1/principals/:id with the trimmed display nam
   assert.equal(calls[0].init?.method, 'PATCH');
   assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { displayName: 'Dale' });
 });
+
+it('verifyLedgerWorm returns ok: true on verified 200 response', async () => {
+  globalThis.fetch = (async (url: string) => {
+    assert.equal(url, '/api/v1/ledger/verify');
+    return new Response(JSON.stringify({ ok: true, checkpointsChecked: 5, worm: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  const result = await factoryApi.verifyLedgerWorm();
+  assert.equal(result.ok, true);
+  assert.equal(result.checkpointsChecked, 5);
+  assert.equal(result.worm, true);
+});
+
+it('GAP-253 / TSK-340: verifyLedgerWorm NEVER returns ok: true on 409 tampered ledger response', async () => {
+  globalThis.fetch = (async (url: string) => {
+    assert.equal(url, '/api/v1/ledger/verify');
+    return new Response(
+      JSON.stringify({ ok: false, reason: 'Hash chain broken at seq 14', checkpointsChecked: 2, worm: true }),
+      {
+        status: 409,
+        headers: { 'content-type': 'application/json' },
+      },
+    );
+  }) as typeof fetch;
+
+  const result = await factoryApi.verifyLedgerWorm();
+  assert.equal(result.ok, false);
+  assert.equal(result.worm, true);
+  assert.equal(result.checkpointsChecked, 2);
+  assert.match(result.reason!, /Hash chain broken/);
+});
+
+it('GAP-253 / TSK-340: verifyLedgerWorm returns ok: false on network or 500 error', async () => {
+  globalThis.fetch = (async () => {
+    return new Response(JSON.stringify({ error: 'Internal sink error' }), {
+      status: 500,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  const result = await factoryApi.verifyLedgerWorm();
+  assert.equal(result.ok, false);
+  assert.equal(result.worm, false);
+});
+
+it('OAuth consents management: listOAuthConsents and revokeOAuthConsent', async () => {
+  const calls: { url: string; method?: string }[] = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    calls.push({ url: String(url), method: init?.method ?? 'GET' });
+    if (init?.method === 'DELETE') {
+      return new Response(JSON.stringify({ ok: true, revoked: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ consents: [{ clientId: 'client_xyz', clientName: 'Cursor AI', scope: 'mcp:full', createdAt: '2026-11-16T12:00:00Z' }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  const list = await factoryApi.listOAuthConsents();
+  assert.equal(calls[0].url, '/api/v1/oauth/consents');
+  assert.equal(calls[0].method, 'GET');
+  assert.equal(list.consents.length, 1);
+  assert.equal(list.consents[0].clientName, 'Cursor AI');
+
+  const revoke = await factoryApi.revokeOAuthConsent('client_xyz');
+  assert.equal(calls[1].url, '/api/v1/oauth/consents/client_xyz');
+  assert.equal(calls[1].method, 'DELETE');
+  assert.equal(revoke.ok, true);
+});

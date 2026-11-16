@@ -116,13 +116,21 @@ export function createConsoleServer(opts: ConsoleOptions): http.Server {
       return r.end();
     }
 
-    // 3. API calls go to the control plane with the caller's own credentials.
-    if (pathname.startsWith('/api/v1/')) {
-      return proxy(req, res, new URL(pathname + parsedUrl.search, cp));
-    }
+    // 3. Transparent proxy to control plane:
+    // API calls, login page (S12), OAuth 2.1 AS endpoints & discovery (TSK-339/TSK-340), and MCP surfaces.
+    const isControlPlaneRoute =
+      pathname.startsWith('/api/v1/') ||
+      pathname === '/login' ||
+      pathname.startsWith('/.well-known/oauth-protected-resource') ||
+      pathname === '/.well-known/oauth-authorization-server' ||
+      pathname === '/authorize' ||
+      pathname === '/token' ||
+      pathname === '/revoke' ||
+      pathname === '/register' ||
+      pathname === '/mcp' ||
+      pathname.startsWith('/mcp/');
 
-    // 4. The factory's own login page (S12) comes from the control plane, with its own minimal inline assets.
-    if (pathname === '/login') {
+    if (isControlPlaneRoute) {
       return proxy(req, res, new URL(pathname + parsedUrl.search, cp));
     }
 

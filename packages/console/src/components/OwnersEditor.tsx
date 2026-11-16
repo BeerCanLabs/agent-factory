@@ -6,6 +6,9 @@ import { useAuth } from '../auth/CloudflareAuth.js';
 
 const MAX_OWNERS = 10;
 
+/** Canonical principal actor regex supporting canonical user:<id>, group:<id>, domain:<domain> and legacy formats. */
+export const ACTOR_RE = /^(user|group|domain|cloudflare|oidc|token|service|cloudflare-service):\S+$/i;
+
 /**
  * TSK-103: an agent's owners, as principal actors (`cloudflare:alice@example.com`). An owner is the person the agent
  * treats as its owner: the factory puts `isOwner` on their caller badge, which is what lets the cartridge answer them
@@ -38,8 +41,8 @@ export const OwnersEditor: React.FC<{ agent: AgentRecord; canEdit: boolean }> = 
   const add = (raw: string) => {
     const actor = raw.trim().toLowerCase();
     if (!actor) return;
-    if (!/^(cloudflare|oidc|token):\S+$/.test(actor)) {
-      setError('An owner is a principal actor such as cloudflare:alice@example.com, oidc:... or token:...');
+    if (!ACTOR_RE.test(actor)) {
+      setError('An owner is a principal actor such as user:alice@example.com, user:alice, group:ops, cloudflare:alice@example.com, oidc:... or token:...');
       return;
     }
     if (owners.length >= MAX_OWNERS) {
@@ -107,7 +110,7 @@ export const OwnersEditor: React.FC<{ agent: AgentRecord; canEdit: boolean }> = 
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && add(draft)}
-              placeholder="cloudflare:alice@example.com"
+              placeholder="user:alice@example.com or cloudflare:alice@example.com"
               aria-label="Owner principal actor"
               className="flex-1 min-w-[16rem] rounded border border-slate-300 dark:border-slate-700 bg-transparent px-2 py-1 font-mono"
             />

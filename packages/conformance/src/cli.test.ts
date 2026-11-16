@@ -164,3 +164,53 @@ describe('§6.17 CL11 the CLI works without the manager', () => {
     assert.match(code('packages/cli/src/main.ts'), /add --yes to run it from a script/);
   });
 });
+
+describe('§6.17 CL11 / GAP-249: CLI tools unified on @beercanlabs/factory-contract operations catalog', () => {
+  it('every CLI tool maps to a valid operation in CLI_OPERATIONS and CONTROL_PLANE_ROUTES with matching privilege and mutating status', async () => {
+    const { TOOLS } = await import('@beercanlabs/factory-cli');
+    const { CLI_OPERATIONS, CLI_OPERATION_MAP } = await import('@beercanlabs/factory-contract');
+    const { CONTROL_PLANE_ROUTES } = await import('@beercanlabs/factory-control-plane/routes');
+
+    assert.ok(TOOLS.length > 0, 'No CLI tools found');
+    assert.equal(TOOLS.length, CLI_OPERATIONS.length, 'CLI tools count must match CLI_OPERATIONS count');
+
+    for (const tool of TOOLS) {
+      const op = CLI_OPERATION_MAP[tool.spec.name];
+      assert.ok(op, `Tool ${tool.spec.name} is not in CLI_OPERATIONS catalog`);
+      assert.equal(tool.privilege, op.privilege, `Tool ${tool.spec.name} privilege mismatch`);
+      assert.equal(tool.spec.mutating, op.mutating, `Tool ${tool.spec.name} mutating flag mismatch`);
+      assert.equal(tool.spec.description, op.description, `Tool ${tool.spec.name} description mismatch`);
+
+      // Match against CONTROL_PLANE_ROUTES
+      const cpRoute = CONTROL_PLANE_ROUTES.find(
+        (r) => r.method === op.method && (r.pattern === op.pathTemplate || r.operationId === op.name),
+      );
+      assert.ok(
+        cpRoute,
+        `Tool ${tool.spec.name} (${op.method} ${op.pathTemplate}) not found in CONTROL_PLANE_ROUTES`,
+      );
+      if (cpRoute.privilege) {
+        const allowedPrivileges = Array.isArray(cpRoute.privilege) ? cpRoute.privilege : [cpRoute.privilege];
+        assert.ok(
+          allowedPrivileges.includes(op.privilege),
+          `Tool ${tool.spec.name} privilege ${op.privilege} not in control plane route privileges [${allowedPrivileges.join(', ')}]`,
+        );
+      } else {
+        assert.ok(cpRoute.exception, `Route for tool ${tool.spec.name} lacks both privilege and exception`);
+      }
+      assert.equal(
+        op.mutating,
+        op.method !== 'GET' && op.method !== 'HEAD',
+        `Tool ${tool.spec.name} mutating mismatch for method ${op.method}`,
+      );
+    }
+  });
+
+  it('CL6: CLI_OPERATIONS never exposes credentials, keys issuance, or raw secret routes', async () => {
+    const { CLI_OPERATIONS } = await import('@beercanlabs/factory-contract');
+    for (const op of CLI_OPERATIONS) {
+      assert.doesNotMatch(op.pathTemplate, /keymaster|credentials|connections|secrets/i);
+      assert.notEqual(`${op.method} ${op.pathTemplate}`, 'POST /api/v1/keys');
+    }
+  });
+});

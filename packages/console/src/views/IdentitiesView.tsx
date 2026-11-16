@@ -74,16 +74,18 @@ const ROLE_BADGE: Record<FactoryRole, string> = {
   ingest: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30',
 };
 
+import { ACTOR_RE } from '../components/OwnersEditor.js';
+
 // In lockstep with Bouncer & Control Plane validation rules (§6.12, packages/bouncer/src/identity.ts)
 const EXTERNAL_ID_REGEX = /^[A-Za-z0-9._-]{1,128}$/;
-const PRINCIPAL_ACTOR_REGEX = /^(cloudflare|oidc|token):\S+$/;
+const PRINCIPAL_ACTOR_REGEX = ACTOR_RE;
 
 function validateActor(actor: string): string | null {
   const trimmed = actor.trim().toLowerCase();
   if (!trimmed) return 'Principal Actor is required.';
   if (trimmed.length > 256) return 'Principal Actor must be 256 characters or less.';
   if (!PRINCIPAL_ACTOR_REGEX.test(trimmed)) {
-    return 'Principal Actor must be in format cloudflare:email@example.com, oidc:subject, or token:name.';
+    return 'Principal Actor must be in format user:id, group:id, domain:name, cloudflare:email@example.com, oidc:subject, or token:name.';
   }
   return null;
 }
