@@ -1,4 +1,4 @@
-import { recoverInterruptedDeploys } from './apply.js';
+import { isDeploying, recoverInterruptedDeploys } from './apply.js';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -16,7 +16,7 @@ import {
 } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, createProbeServer, FactoryState, relinkVendorModels } from './app.js';
 import { DeliveryLog } from './github-webhooks.js';
-import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerDeployProvider, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
+import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerDeployProvider, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, migrateAgentIdentities, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
 import { fireScheduledAction, scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
@@ -30,7 +30,7 @@ import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from '@beercanlabs/factory-gatekeeper/policy';
 import { busSinkFromEnv, createInspector, factoryMetrics } from '@beercanlabs/factory-inspector';
 import { attachEventStream } from './stream.js';
-import { checkRegistry, migrateConfigs, pruneOrphans } from './config-store.js';
+import { checkRegistry, migrateConfigs, pruneOrphans, pruneRefusal } from './config-store.js';
 import { SystemsStore } from './systems.js';
 import { seedBuiltinAiProviders } from './ai-providers.js';
 import { syncPlatformCredentials } from './credentials.js';
@@ -387,6 +387,13 @@ try {
 
 recoverInterruptedDeploys(state);
 await reconcileRuns(state);
+// GAP-263: re-scope existing agent roles. In the background; it never throws. It retires nothing when the registry
+// may be incomplete (the same guard as pruneOrphans), and re-checks membership right before each retire, so an agent
+// registered, re-created or mid-deploy meanwhile keeps its role.
+void migrateAgentIdentities(state.agents.values(), deployProvider, {
+  retireRefusal: pruneRefusal(new Set(state.agents.keys()), BUILTIN_SYSTEM_AGENTS.map((a) => a.id), checkRegistry(REGISTRY_DIR)),
+  isRegistered: (id) => state.agents.has(id) || isDeploying(state, id),
+});
 
 setInterval(() => void checkHealth(state), 15_000).unref();
 // S3b (D15): roll back ownership transfers left pending past their 7-day TTL.

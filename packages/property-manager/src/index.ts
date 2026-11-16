@@ -4,6 +4,8 @@ export {
   AdmissionRefusedError, SKILLS_DIR, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, imageTagFor, memoryRuntime, noopRuntime, skillsHash,
 } from './runtime.js';
 export { checkMindPrefix, duplicateMindPrefixes, effectiveMindPrefix, mindPrefixHolder, MindPrefixRefusedError, ownMindPrefix } from './mind-prefix.js';
+export { migrateAgentIdentities, MIGRATION_RETRY_DELAYS_MS } from './identity-migration.js';
+export type { IdentityMigrationResult } from './identity-migration.js';
 export type { AdmissionRefusal, BuildSkill, DeployProvider, NoopStart, RunContext, Runtime, SourceRef, TaskStatus } from './runtime.js';
 export { dockerApi, dockerDeployProvider, dockerRuntime, parseImageMap } from './runtime-docker.js';
 export type { DockerApi, DockerRuntimeOptions } from './runtime-docker.js';
