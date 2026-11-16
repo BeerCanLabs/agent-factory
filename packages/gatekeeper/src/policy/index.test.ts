@@ -376,3 +376,37 @@ describe('PolicyStore ephemeral policies (E1.4)', () => {
     }
   });
 });
+
+describe('GAP-255 policy env', () => {
+  const ok = (env: unknown) => validatePolicy({ routes: [], env }).ok;
+  it('accepts the SDLC_* settings agentic-sdlc registers', () => {
+    assert.ok(ok({ SDLC_FLEET_CONFIG: '{"repos":{}}', SDLC_APPROVALS_URL: 'https://f/api/v1/agents/c/holds', SDLC_APPROVALS_FALLBACK: 'github', SDLC_GLOBAL_STATE_URL: 'https://f/api/v1/fleet/state' }));
+  });
+  it('is an allow-list: names the factory, runtimes, shim or platform use are refused', () => {
+    for (const name of ['FACTORY_URL', 'PATH', 'GITHUB_BASE_URL', 'DISCORD_BASE_URL', 'OPENAI_BASE_URL', 'MEMORY_PREFIX', 'MEMORY_STORE_URI', 'AGENT_ID', 'GIT_SSH_COMMAND', 'BASH_ENV', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'SDLC_', 'lower']) {
+      assert.equal(ok({ [name]: 'x' }), false, name);
+    }
+  });
+  it('refuses credential-like names and values, control characters, non-text and oversized env', () => {
+    for (const name of ['SDLC_BOT_TOKEN', 'SDLC_DB_PASSWORD', 'SDLC_GH_PAT', 'SDLC_OPENAI_KEY', 'SDLC_DB_PASS', 'SDLC_DSN', 'SDLC_SESSION']) assert.equal(ok({ [name]: 'x' }), false, name);
+    const shaped = ['ghp' + '_' + 'A1'.repeat(10), 'eyJ' + 'abcdef.' + 'eyJabcdef.' + 'sig', 'https://u:' + 'pw' + '@db.example', '-----BEGIN ' + 'PRIVATE KEY-----'];
+    for (const value of shaped) assert.equal(ok({ SDLC_X: value }), false, value.slice(0, 12));
+    // Real-looking tokens are refused wherever they start a word; ordinary repo names that merely contain `sk-` are not.
+    const tokens = ['sk' + '-proj' + 'A1b2C3d4E5f6G7h8', 'key=' + 'xai' + '-' + 'Z9y8X7w6V5u4', 'AKIA' + 'ABCDEFGHIJKLMNOP', 'x ' + 'xoxb' + '-1234-5678-abcd', 'github_pat_' + '11ABCDEFG0123456789'];
+    for (const value of tokens) assert.equal(ok({ SDLC_X: value }), false, value.slice(0, 12));
+    for (const repo of ['BeerCanLabs/task-scheduler', 'acme/risk-analysis', 'acme/kiosk-frontend', 'acme/Disk-Cleanup-tool', 'acme/ASK-everything1']) {
+      assert.ok(ok({ SDLC_PLAN_INTAKE_REPO: repo, SDLC_FLEET_CONFIG: JSON.stringify({ repos: { [repo]: {} } }) }), repo);
+    }
+    for (const value of ['a\u0000b', 'a\nb', 'a\u001bb']) assert.equal(ok({ SDLC_X: value }), false, JSON.stringify(value));
+    assert.equal(ok({ SDLC_X: 1 }), false);
+    assert.equal(ok([]), false);
+    assert.equal(ok({ SDLC_X: 'y'.repeat(6001) }), false);
+    const many = Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`SDLC_V${i}`, 'x']));
+    assert.equal(ok(many), false);
+  });
+  it('counts the size in UTF-8 bytes, not characters', () => {
+    assert.ok(ok({ SDLC_X: 'y'.repeat(5990) }));
+    assert.equal(ok({ SDLC_X: '\u20ac'.repeat(2000) }), false); // 2,000 characters, 6,000 bytes
+    assert.ok(ok({ SDLC_X: '\u20ac'.repeat(1990) }));
+  });
+});

@@ -36,12 +36,40 @@ function stateKey(s: FactoryState): Buffer | undefined {
 }
 
 /**
- * The manifest GitHub prefills. Permissions are what a coding agent needs; the admin can narrow them on GitHub.
- * GitHub rejected `public: false` plus an inactive webhook with "Public cannot be private", so the manifest
- * carries neither: GitHub's form then defaults to "Only on this account" (a private app), and the factory has no
- * webhook route for app events. Only documented manifest keys are sent.
+ * GAP-257: the events an app sends to its agent's own webhook (`/hooks/:agentId`, signed with the app's webhook
+ * secret), for an agent that takes app events: the SDLC conductor is event-driven only (no timer, no polling).
+ * Issues and their comments, pull requests, and CI results (completed check suites, commit statuses). `check_run` is
+ * not subscribed: the factory ignores it (a suite's completion is the one CI event).
  */
-export function buildManifest(publicBase: string, _agentId: string, agentName: string) {
+export const GITHUB_APP_EVENTS = ['issues', 'issue_comment', 'pull_request', 'check_suite', 'status'];
+/** The skills whose agents take app events. */
+export const EVENT_SKILLS = ['sdlc-conductor'];
+
+/** What an agent's app is for, beyond the narrow default. */
+export type AppNeeds = { events?: boolean; projects?: boolean };
+
+/**
+ * GAP-257: an agent's needs, from the skills it adopted, or as the admin declares them when starting the app:
+ * app events for the conductor, organization Projects for an agent with a backlog skill (`sdlc-backlog-github`).
+ */
+export function appNeeds(agent: { skillIds?: string[]; skillRoutes?: Record<string, unknown> }, declared: { events?: unknown; projects?: unknown } = {}): AppNeeds {
+  const skills = new Set([...(agent.skillIds ?? []), ...Object.keys(agent.skillRoutes ?? {})]);
+  return {
+    events: declared.events === true || EVENT_SKILLS.some((id) => skills.has(id)),
+    projects: declared.projects === true || [...skills].some((id) => /(^|-)backlog(-|$)/.test(id)),
+  };
+}
+
+/**
+ * The manifest GitHub prefills. Permissions are what a coding agent needs; the admin can narrow them on GitHub.
+ * GAP-257 (Dale, chat, 2026-11-15): only an agent that needs them gets more. An agent that takes app events gets an
+ * active hook on its own `/hooks/:agentId`, the events above, and checks and statuses (read) to read CI results; an
+ * agent with a backlog skill gets organization Projects (write) for the fleet's board.
+ * GitHub rejected `public: false` plus an inactive webhook with "Public cannot be private", so the manifest never
+ * sends `public` (GitHub's form then defaults to "Only on this account", a private app), and an agent that takes no
+ * events gets no hook at all. Only documented manifest keys are sent.
+ */
+export function buildManifest(publicBase: string, agentId: string, agentName: string, needs: AppNeeds = {}) {
   return {
     // GitHub App names are global and a created app keeps its name: qualify the agent's name with this factory's
     // host, plus a short random tag so a second Start (after a lost callback, or for a replacement) is never refused
@@ -49,8 +77,16 @@ export function buildManifest(publicBase: string, _agentId: string, agentName: s
     name: `${`${agentName} (${new URL(publicBase).hostname.split('.')[0]})`.slice(0, 29)} ${randomUUID().slice(0, 4)}`,
     url: publicBase,
     redirect_url: `${publicBase}/api/v1/keymaster/github-app/callback`,
-    default_permissions: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' },
-    default_events: [] as string[],
+    ...(needs.events ? { hook_attributes: { url: `${publicBase}/hooks/${encodeURIComponent(agentId)}`, active: true } } : {}),
+    default_permissions: {
+      contents: 'write',
+      pull_requests: 'write',
+      issues: 'write',
+      metadata: 'read',
+      ...(needs.projects ? { organization_projects: 'write' } : {}),
+      ...(needs.events ? { checks: 'read', statuses: 'read' } : {}),
+    },
+    default_events: needs.events ? [...GITHUB_APP_EVENTS] : [],
   };
 }
 
@@ -93,7 +129,7 @@ export async function handleGitHubAppSetup(state: FactoryState, req: http.Incomi
     const where = org ? `/organizations/${encodeURIComponent(org)}/settings/apps/new` : '/settings/apps/new';
     const action = `${webBase(state)}${where}?state=${encodeURIComponent(signed)}`;
     state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'GITHUB_APP_SETUP_STARTED', actor: principal.actor, ...(org ? { org } : {}) });
-    json(res, 200, { action, manifest: buildManifest(pub, agentId, agent.name ?? agentId), state: signed });
+    json(res, 200, { action, manifest: buildManifest(pub, agentId, agent.name ?? agentId, appNeeds(agent, body)), state: signed });
     return true;
   }
 

@@ -215,6 +215,7 @@ describe('Convert repository agent in place (TSK-283, CF6, L4, AM1, GAP-209)', {
     const customAgent: AgentRecord = {
       ...skippyAgent,
       id: 'custom-reach-agent',
+      memoryPrefix: 'custom-reach-agent', // GAP-263: a mind prefix names one agent
       egress: { routes: ['models', 'discord', 'custom-legacy-api'], hosts: [] },
       skillRoutes: {},
     };

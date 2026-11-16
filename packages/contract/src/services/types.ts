@@ -42,6 +42,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/mcp.ts',
       'packages/control-plane/src/provenance.ts',
+      'packages/control-plane/src/github-webhooks.ts',
       'packages/gatekeeper/src/policy/index.ts',
       'packages/gatekeeper/src/run-token/index.ts',
       'packages/gatekeeper/src/egress/gatekeeper-egress.ts',
@@ -114,6 +115,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/skill-training.ts',
       'packages/control-plane/src/aws/accountant.ts',
       'packages/control-plane/src/gcp/accountant.ts',
+      'packages/control-plane/src/spend-accounts.ts',
     ],
   },
   bouncer: {
@@ -128,6 +130,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/identity-links.ts',
       'packages/control-plane/src/role-assignments.ts',
       'packages/control-plane/src/channel-approvals.ts',
+      'packages/control-plane/src/decision-holds.ts',
       'packages/control-plane/src/migration-owners.ts',
       'packages/control-plane/src/route-registry.ts',
       'packages/control-plane/src/keys-routes.ts',
@@ -168,6 +171,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/updates.ts',
       'packages/control-plane/src/group-routes.ts',
       'packages/control-plane/src/skill-models.ts',
+      'packages/control-plane/src/fleet-state.ts',
     ],
   },
   inspector: {

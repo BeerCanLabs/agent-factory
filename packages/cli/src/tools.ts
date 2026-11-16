@@ -182,12 +182,21 @@ export const TOOLS: Tool[] = [
   read('list_approvals', 'Tool calls held for a person to approve.', 'approvals.read', obj({}), (c) => c.request('GET', '/api/v1/approvals?state=pending')),
   change(
     'decide_approval',
-    'Approve or reject a held tool call.',
+    'Approve or reject a held tool call or a decision an agent asked for; capUsd sets a spending cap when approving a decision.',
     'approvals.decide',
-    obj({ id: { type: 'string' }, decision: { type: 'string', enum: ['approve', 'reject'] }, notes: { type: 'string' } }, ['id', 'decision']),
+    obj(
+      {
+        id: { type: 'string' },
+        decision: { type: 'string', enum: ['approve', 'reject'] },
+        notes: { type: 'string' },
+        capUsd: { type: 'string', description: 'A cap in USD, e.g. 2500 or $2,500.00.' },
+      },
+      ['id', 'decision'],
+    ),
     (c, a) => {
       if (a.decision !== 'approve' && a.decision !== 'reject') throw new ToolArgumentError('decision must be approve or reject');
-      return c.request('POST', `/api/v1/approvals/${id(a, 'id')}`, { decision: a.decision, ...(typeof a.notes === 'string' ? { notes: a.notes.slice(0, 1000) } : {}) });
+      const cap = typeof a.capUsd === 'string' || typeof a.capUsd === 'number' ? { capUsd: a.capUsd } : {};
+      return c.request('POST', `/api/v1/approvals/${id(a, 'id')}`, { decision: a.decision, ...(typeof a.notes === 'string' ? { notes: a.notes.slice(0, 1000) } : {}), ...cap });
     },
     true,
   ),

@@ -1,4 +1,4 @@
-export type { Approval, ApprovalState, ChangeRequest, ChannelAsk, HeldRequest } from './approvals.js';
+export type { Approval, ApprovalState, ChangeRequest, ChannelAsk, DecisionHold, HeldRequest } from './approvals.js';
 export { ApprovalStore, CHANNEL_ASK_TTL_MS } from './approvals.js';
 export type { ApprovalOutcome, ApprovalRequest, HoldOutcome, HoldRequest } from './wire.js';
 export { HELD_BODY_LIMIT, HELD_HEADERS, HELD_STORED_BODY_LIMIT } from './wire.js';

@@ -40,7 +40,7 @@ import {
   type SkillSource,
   type GroupStore,
 } from '@beercanlabs/factory-registrar';
-import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
+import { AdmissionRefusedError, SYSTEM, ownMindPrefix, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
 import { ZERO_BUDGET_LIMITS, isZeroPrice, checkStanding, spendDetail, type BudgetLimits, type Price, type SpendTracker } from '@beercanlabs/factory-budget';
 import {
   AGENT_SCOPED,
@@ -83,10 +83,10 @@ import {
 import { handleSubscriptionWindows } from './subscription-windows.js';
 import { getSubscriptionCaps } from './subscription-caps.js';
 import { handleCredentials } from './credentials.js';
-import { handleGitHubAppSetup } from './github-app-setup.js';
+import { githubAppSecretNames, handleGitHubAppSetup } from './github-app-setup.js';
 import { handleGitHubAppInstall } from './github-app-install.js';
 import { handleDiscordAppSetup } from './discord-app-setup.js';
-import { handleAppSetup } from './app-setup-providers.js';
+import { handleAppSetup, readSecret } from './app-setup-providers.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
@@ -114,10 +114,14 @@ import { clearSkillBindingsForModel, handleSkillModels, skillModelsForAgent } fr
 import { handleMcp } from './mcp.js';
 export { handleMcp } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
+import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, conductorEventFor, conductorInput } from './github-webhooks.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
+import { decisionDelivery, handleDecisionHolds, holdDecider, parseCapUsd } from './decision-holds.js';
+import { dropOpsAgent, handleFleetState, isOpsAgent, setFleetOpsState, type FleetStateStore } from './fleet-state.js';
+import { accountForWake, bindRun, chargeAccount, settleRun, type SpendAccountStore } from './spend-accounts.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
 import { ModelCatalogError, ModelStore, type EnrichedModelView, type StoredModel, type StagedModel } from './models.js';
@@ -156,6 +160,8 @@ export type FactoryState = {
   /** The model a policy that names none grants (M2): configuration seeded from FACTORY_DEFAULT_MODEL; no code default. */
   defaultModel?: string;
   registryDir?: string;
+  /** GAP-258: GitHub webhook delivery ids already handled (one run per delivery), kept across restarts. */
+  webhookDeliveries?: DeliveryLog;
   ledger: LedgerStore;
   auth: AuthProvider;
   /** S5: factory API keys (`fk_`), verified before routing on /api/v1 and /mcp. */
@@ -240,6 +246,12 @@ export type FactoryState = {
   schedules?: ScheduleStore;
   /** GAP-088: which person a Discord user is, set by an admin. Absent: nobody is linked. */
   identityLinks?: IdentityLinkStore;
+  /** GAP-260: the fleet's go/stop state; in memory (reads paused until set) when absent. */
+  fleetState?: FleetStateStore;
+  /** GAP-261: spend charged to a plan, and who is told; in memory when absent. */
+  spendAccounts?: SpendAccountStore;
+  /** GAP-261: a plan's owner hears its spend each time it crosses a multiple of this (USD; default 5). */
+  spendUpdateStepUsd?: number;
   /** S8: set once the shadow comparison showed zero mismatches and link roles were stripped (grants-only). */
   authCutover?: boolean;
   /** User groups and group membership store (H6, A10, A17, GAP-203). */
@@ -2439,6 +2451,13 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
         inputSchema: { type: 'object', properties: { subagent: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' } }, required: ['subagent', 'model', 'prompt'] },
       },
     ];
+    if (isOpsAgent(state, run.agentId)) {
+      tools.push({
+        name: 'set_fleet_ops_state',
+        description: "Report the fleet's deploy state as its ops agent: idle, deploying, prod-testing or rolled-back (only an admin clears rolled-back)",
+        inputSchema: { type: 'object', properties: { state: { type: 'string', enum: ['idle', 'deploying', 'prod-testing', 'rolled-back'] }, reason: { type: 'string' } }, required: ['state'] },
+      });
+    }
     if (canManage.allowed) {
       tools.push({
         name: 'set_agent_models',
@@ -2496,6 +2515,13 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
           ],
         },
       };
+    }
+    if (params.name === 'set_fleet_ops_state') {
+      // GAP-268: a 403 or 409 refusal is a JSON-RPC error; a malformed body isError.
+      const out = setFleetOpsState(state, (params.arguments ?? {}) as Record<string, unknown>, run);
+      const body = out.body as Record<string, unknown>;
+      if (out.status === 403 || out.status === 409) return { jsonrpc: '2.0', id, error: { code: -32001, message: `${out.status === 403 ? 'forbidden' : 'conflict'}: ${String(body.error)}`, data: body } };
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(body) }], ...(out.status >= 400 ? { isError: true } : {}) } };
     }
     if (params.name === 'set_agent_models') {
       if (!canManage.allowed) {
@@ -2874,6 +2900,10 @@ export function stageDiscovered(state: FactoryState, vendorId: string, discovere
  * not decide is refused whether or not the approval exists.
  */
 /** A configuration change names a person's external identity: only those who may decide it read what it says (CF4). Used by every list. */
+/** GAP-259: what a list may filter on; `tool` is an MCP tool call (an approval with no kind). */
+export const APPROVAL_KINDS = ['tool', 'held', 'change', 'decision'] as const;
+export type ApprovalKind = (typeof APPROVAL_KINDS)[number];
+
 export function visibleApprovals(state: FactoryState, reader: Principal, all: Approval[]): Approval[] {
   return all.map((raw) => {
     // CF4: the code ties a channel reply to an approval; it is the ingress's, never listed.
@@ -2914,7 +2944,15 @@ export function mayDecide(state: FactoryState, principal: { actor: string; roles
   return scoped.allowed ? { ok: true } : { ok: false, required: scoped.required };
 }
 
-export async function decideApproval(state: FactoryState, id: string, decision: unknown, principal: Principal, notes?: unknown, via?: { provider: string; channelId: string }): Promise<Outcome<unknown>> {
+export async function decideApproval(
+  state: FactoryState,
+  id: string,
+  decision: unknown,
+  principal: Principal,
+  notes?: unknown,
+  via?: { provider: string; channelId: string },
+  capUsd?: unknown,
+): Promise<Outcome<unknown>> {
   const actor = principal.actor;
   const grantCheck = effectiveGrantsForActor(state, actor);
   if (!grantCheck.ok) return { status: 503, body: { error: grantCheck.error } };
@@ -2923,13 +2961,28 @@ export async function decideApproval(state: FactoryState, id: string, decision: 
   if (decision !== 'approve' && decision !== 'reject') return { status: 400, body: { error: 'decision must be approve or reject' } };
   if (notes !== undefined && notes !== null && (typeof notes !== 'string' || notes.length > 4000)) return { status: 400, body: { error: 'notes must be text, at most 4000 characters' } };
   const note = typeof notes === 'string' && notes.trim() ? notes.trim() : undefined;
+  // GAP-259: a cap is set only by approving a decision an agent asked for; anything else that carries one is refused.
+  const cap = capUsd === undefined || capUsd === null ? undefined : parseCapUsd(capUsd);
+  if (cap === null) return { status: 400, body: { error: 'capUsd must be a non-negative amount in USD' } };
+  if (cap !== undefined && (decision !== 'approve' || state.approvals.get(id)?.kind !== 'decision')) {
+    return { status: 400, body: { error: 'capUsd is set only when approving a decision hold' } };
+  }
   // CF4: a configuration change is decided only by an admin or an owner of that agent, and applied by the factory.
   const pending = state.approvals.get(id);
   if (pending?.kind === 'change' && !mayApproveChange(state, principal, pending.agentId)) {
     const reqRole = agentKindOf(state, pending.agentId) === 'team' ? 'accountable-lead' : 'content-owner';
     return { status: 403, body: { error: 'forbidden', required: 'agent-owner', requiredRole: reqRole } };
   }
-  const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor, note);
+  // GAP-259: a decision hold is decided only by one of its approvers, by their single linked, non-bot GitHub login, which
+  // is recorded with the decision; one that needs a cap is never approved without one.
+  let githubLogin: string | undefined;
+  if (pending?.kind === 'decision' && pending.state === 'pending') {
+    const who = holdDecider(state, pending, actor);
+    if (!who.ok) return { status: 403, body: { error: 'not_an_approver', message: who.error } };
+    githubLogin = who.login;
+    if (decision === 'approve' && pending.hold?.requiresCap && cap === undefined) return { status: 400, body: { error: 'cap_required', message: 'this hold is approved with a cap: send capUsd' } };
+  }
+  const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor, note, cap, githubLogin);
   if (!decided) return { status: 409, body: { error: 'approval not pending' } };
   state.ledger.append({
     timestamp: new Date().toISOString(),
@@ -2941,6 +2994,8 @@ export async function decideApproval(state: FactoryState, id: string, decision: 
     approvalId: decided.approvalId,
     mcpName: decided.tool,
     route: decided.route,
+    ...(decided.capUsd !== undefined ? { capUsd: decided.capUsd } : {}),
+    ...(decided.hold ? { requestId: decided.hold.requestKey } : {}),
     // CF4: decided in a channel: where, as the ingress attested it, written before anything is allowed.
     ...(via ? { requestId: `${via.provider}:${via.channelId}` } : {}),
   });
@@ -2972,13 +3027,13 @@ export async function decideApproval(state: FactoryState, id: string, decision: 
     }
     return { status: 200, body: { ...decided, applied: applied.status === 200, ...(applied.status === 200 ? {} : { reason: applied.body.error }) } };
   }
-  if (decided.kind === 'held') {
-    // E9: the decision goes to the agent; no run waited for it.
+  if (decided.kind === 'held' || decided.kind === 'decision') {
+    // E9, GAP-259: the decision goes to the agent; no run waited for it.
     const delivered = await deliverDecision(state, decided, actor);
     return { status: 200, body: { ...decided, delivered } };
   }
-  // A pending configuration change (an agent's role request) never holds a run: only tool and route approvals do.
-  if (!state.approvals.list({ state: 'pending', runId: decided.runId }).filter((a) => a.kind !== 'change').length) {
+  // A pending configuration change (an agent's role request) or decision never holds a run: only tool and route approvals do.
+  if (!state.approvals.list({ state: 'pending', runId: decided.runId }).filter((a) => a.kind !== 'change' && a.kind !== 'decision').length) {
     unblockRun(state, decided.runId, 'BLOCKED_FOR_HUMAN', actor);
   }
   return { status: 200, body: decided };
@@ -3017,6 +3072,8 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
     decision: a.state === 'approved' ? 'approved' : 'rejected',
     decidedBy: a.decidedBy,
     decidedAt: a.decidedAt,
+    // GAP-259: a decision hold names itself by the agent's own key, never by text a person wrote.
+    ...(a.hold ? decisionDelivery(a) : {}),
   };
   const full = {
     ...plain,
@@ -3054,6 +3111,18 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
     route: a.route,
   });
   return 'not_delivered';
+}
+
+const deliveryLogs = new WeakMap<FactoryState, DeliveryLog>();
+/** GAP-258: the webhook delivery ids already handled: the factory's own store, or in memory (tests, a bare state). */
+function webhookDeliveries(state: FactoryState): DeliveryLog {
+  if (state.webhookDeliveries) return state.webhookDeliveries;
+  let log = deliveryLogs.get(state);
+  if (!log) {
+    log = new DeliveryLog();
+    deliveryLogs.set(state, log);
+  }
+  return log;
 }
 
 export function bearerOf(req: http.IncomingMessage): string | undefined {
@@ -3220,6 +3289,10 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (await handleRuntimeRoutes(state, req, res, path)) return;
   if (await handleAgentBundle(state, req, res, path)) return;
   if (path.startsWith('/api/v1/ingress/') && (await handleChannelApprovals(state, req, res, path))) return;
+  // GAP-259: decision holds an agent publishes, and one approval read by id.
+  if ((path.includes('/holds/') || path.startsWith('/api/v1/approvals/')) && (await handleDecisionHolds(state, req, res, path))) return;
+  // GAP-260: the fleet's go/stop state.
+  if ((path === '/api/v1/fleet/state' || path === '/api/v1/fleet/state/ops') && (await handleFleetState(state, req, res, path))) return;
   if (await handleRoleAssignments(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;
@@ -3484,27 +3557,42 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     }
     const agent = state.agents.get(hookId);
     const trigger = agent?.triggers.find((t) => t.type === 'webhook');
-    if (!agent || !trigger || trigger.type !== 'webhook' || !trigger.secretRef) {
+    // GAP-258: a GitHub App delivery is signed (HMAC, X-Hub-Signature-256) with the agent's app webhook secret. It is
+    // tried first for any agent that has one, so a conductor with a cartridge trigger still gets its app's deliveries.
+    // An agent with neither an app secret nor a cartridge trigger is refused; the legacy shared-secret header only ever
+    // checks the cartridge trigger's secret.
+    const githubEventHeader = typeof req.headers['x-github-event'] === 'string' ? req.headers['x-github-event'] : undefined;
+    const hasTrigger = Boolean(trigger?.type === 'webhook' && trigger.secretRef);
+    const appSecret = agent && hmacSignature && githubEventHeader ? await readSecret(state, githubAppSecretNames(agent.id).webhookSecret) : undefined;
+    const usableApp = typeof appSecret === 'string' && appSecret.trim() ? appSecret : undefined;
+    if (!agent || (!usableApp && !hasTrigger)) {
       capDrain(req);
       json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
 
-    const bound = await bindSecrets([trigger.secretRef], state.providers);
-    const secret = bound.ok ? bound.env[trigger.secretRef] : undefined;
-    if (!secret || typeof secret !== 'string' || !secret.trim()) {
+    let secret: string | undefined;
+    if (trigger?.type === 'webhook' && trigger.secretRef) {
+      const bound = await bindSecrets([trigger.secretRef], state.providers);
+      secret = bound.ok ? bound.env[trigger.secretRef] : undefined;
+    }
+    if (typeof secret !== 'string' || !secret.trim()) secret = undefined;
+    if (!secret && !usableApp) {
       capDrain(req);
       json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
     const rawBytes = await readBodyBytes(req);
+    let viaApp = false;
     if (hmacSignature) {
-      if (!verifyWebhookHmac(rawBytes, secret, hmacSignature)) {
+      if (usableApp && verifyWebhookHmac(rawBytes, usableApp, hmacSignature)) {
+        viaApp = true;
+      } else if (!secret || !verifyWebhookHmac(rawBytes, secret, hmacSignature)) {
         json(res, 401, { error: 'bad_webhook_signature' });
         return;
       }
     } else if (legacySecret) {
-      if (!safeEqual(legacySecret, secret)) {
+      if (!secret || !safeEqual(legacySecret, secret)) {
         json(res, 401, { error: 'bad_webhook_signature' });
         return;
       }
@@ -3527,8 +3615,71 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         input = raw;
       }
     }
+    // GAP-258: the GitHub event and delivery id travel with the run only for an HMAC-signed delivery (never the legacy
+    // header), and a conductor gets its one mapped event only from its own GitHub App.
+    const githubEvent = hmacSignature && githubEventHeader && GITHUB_EVENT.test(githubEventHeader) ? githubEventHeader : undefined;
+    const rawDelivery = req.headers['x-github-delivery'];
+    const delivery = hmacSignature && typeof rawDelivery === 'string' && DELIVERY_ID.test(rawDelivery) ? rawDelivery : undefined;
+    if (viaApp && !delivery) {
+      json(res, 400, { error: 'missing_delivery_id', message: 'a GitHub App delivery carries X-GitHub-Delivery' });
+      return;
+    }
+    const isConductor = (agent.skillIds ?? []).includes(CONDUCTOR_SKILL) || (state.configs?.current(agent.id)?.skills ?? []).some((sk) => sk.id === CONDUCTOR_SKILL);
+    if (githubEvent && (isConductor || viaApp)) {
+      if (!isConductor) {
+        json(res, 200, { ok: true, ignored: true, reason: 'this agent takes no GitHub events' });
+        return;
+      }
+      if (!viaApp) {
+        json(res, 200, { ok: true, ignored: true, reason: 'conductor events come only from the agent\'s own GitHub App' });
+        return;
+      }
+      // Fail closed: without its app's login the conductor cannot tell its own labels and comments, which would loop.
+      const slug = await readSecret(state, githubAppSecretNames(agent.id).slug);
+      if (!slug) {
+        console.error(`[webhooks] ${agent.id}: no ${githubAppSecretNames(agent.id).slug}; GitHub events are not mapped`);
+        json(res, 200, { ok: true, ignored: true, reason: 'the agent\'s GitHub App slug is not stored' });
+        return;
+      }
+      const mapped = conductorEventFor(githubEvent, input, `${slug}[bot]`);
+      if ('ignored' in mapped) {
+        json(res, 200, { ok: true, ignored: true, reason: mapped.ignored });
+        return;
+      }
+      input = conductorInput(mapped.event, githubEvent, delivery);
+    } else if (githubEvent && input && typeof input === 'object' && !Array.isArray(input)) {
+      input = { ...(input as Record<string, unknown>), githubEvent, ...(delivery ? { githubDelivery: delivery } : {}) };
+    }
+    // One run per delivery per agent: a redelivery (GitHub's retry, or a person's "Redeliver") starts nothing new. GitHub
+    // signs the body, not the delivery id, so an app delivery is also deduplicated on the body's sha256.
+    const deliveries = webhookDeliveries(state);
+    const keys = [...(delivery ? [delivery] : []), ...(viaApp ? [createHash('sha256').update(rawBytes).digest('hex')] : [])];
+    const claimed: string[] = [];
+    let prior: ReturnType<DeliveryLog['claim']>;
+    for (const key of keys) {
+      const seen = deliveries.claim(agent.id, key);
+      if (seen) prior ??= seen;
+      else claimed.push(key);
+    }
+    if (prior) {
+      for (const key of claimed) deliveries.release(agent.id, key);
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'WEBHOOK_DUPLICATE', actor: `webhook:${agent.id}`, ...(delivery ? { requestId: delivery } : {}), ...(prior.runId ? { runId: prior.runId } : {}) });
+      json(res, 200, { ok: true, duplicate: true, ...(prior.runId ? { runId: prior.runId } : {}) });
+      return;
+    }
     const actor = `webhook:${agent.id}`;
-    const out = await createRun(state, agent.id, { actor, trigger: 'webhook', input });
+    let out: Awaited<ReturnType<typeof createRun>>;
+    try {
+      out = await createRun(state, agent.id, { actor, trigger: 'webhook', input });
+    } catch (err) {
+      for (const key of claimed) deliveries.release(agent.id, key);
+      throw err;
+    }
+    const runId = (out.body as { runId?: unknown } | undefined)?.runId;
+    for (const key of claimed) {
+      if (out.status < 300) deliveries.done(agent.id, key, typeof runId === 'string' ? runId : undefined);
+      else deliveries.release(agent.id, key);
+    }
     json(res, out.status, out.body);
     return;
   }
@@ -3593,7 +3744,11 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const body = await readJson(req);
     const badModel = badRunModel(body.model);
     if (badModel) return json(res, 400, { error: badModel });
+    // GAP-261: the plan this work is charged to, named by the waking run or inherited from it.
+    const account = accountForWake(state, run, body.spendAccount);
+    if (account && 'error' in account) return json(res, account.status, { error: account.error });
     const out = await createRun(state, target, { actor, trigger: 'agent', input: body.input, model: body.model as string | undefined });
+    if (account && out.status < 300) bindRun(state, (out.body as Run).runId, account);
     json(res, out.status, out.body);
     return;
   }
@@ -3790,6 +3945,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       result: output,
       ...(typeof body.error === 'string' ? { error: redactSecrets(body.error, state.secretValues) } : {}),
     });
+    await settleRun(state, done);
     json(res, 200, done);
     return;
   }
@@ -4349,6 +4505,8 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         const beforeStanding = checkStanding({ limits: effectiveLimits, spend: state.spend.get(payer.agentId, payer.runId) });
         const before = beforeStanding.inGoodStanding ? undefined : beforeStanding.window;
         state.spend.add(payer.agentId, payer.runId, stored.costUsd, stored.timestamp, spendDetail(stored));
+        // GAP-261: a step's report is fired, not awaited: a model call never waits on waking the plan's owner.
+        chargeAccount(state, run, stored.costUsd).catch((err) => console.error(`[spend-accounts] charge failed: ${err instanceof Error ? err.message : String(err)}`));
         if (stored.credentialMode === 'subscription' && typeof stored.connection === 'string' && stored.connection) {
           let connView = getCachedSubscriptionView(state, stored.connection);
           if (!connView) {
@@ -4795,6 +4953,11 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       json(res, 400, { error: checked.error });
       return;
     }
+    const envError = policyEnvSecretError(state, checked.policy);
+    if (envError) {
+      json(res, 400, { error: envError });
+      return;
+    }
     if (isBuiltin && checked.policy.budgetUsd !== undefined) {
       json(res, 400, {
         error: 'builtin_agents_exempt_from_budget',
@@ -5104,7 +5267,13 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     if (!reader) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
     const st = url.searchParams.get('state') as 'pending' | null;
-    const all = state.approvals.list({ ...(st ? { state: st } : {}), ...(url.searchParams.get('runId') ? { runId: url.searchParams.get('runId')! } : {}) });
+    const kind = url.searchParams.get('kind');
+    if (kind && !APPROVAL_KINDS.includes(kind as ApprovalKind)) return json(res, 400, { error: `kind must be one of ${APPROVAL_KINDS.join(', ')}` });
+    const all = state.approvals.list({
+      ...(st ? { state: st } : {}),
+      ...(url.searchParams.get('runId') ? { runId: url.searchParams.get('runId')! } : {}),
+      ...(kind ? { kind: kind as ApprovalKind } : {}),
+    });
     // A configuration change names a person's external identity: only those who may decide it read what it says.
     json(res, 200, visibleApprovals(state, reader, all));
     return;
@@ -5116,7 +5285,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const who = await identify(req, state);
     if (!who.ok) return json(res, 401, { error: 'unauthorized' });
     const b = await readJson(req);
-    const out = await decideApproval(state, decideMatch[1], b.decision, who.principal, b.notes);
+    const out = await decideApproval(state, decideMatch[1], b.decision, who.principal, b.notes, undefined, b.capUsd);
     json(res, out.status, out.body);
     return;
   }
@@ -5224,6 +5393,17 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
 
     const recordId = typeof cartridge.id === 'string' ? cartridge.id : agentId;
     const previousAgent = state.agents.get(recordId);
+    const memoryPrefix = (typeof cartridge.persistence === 'object' && cartridge.persistence !== null && 'prefix' in cartridge.persistence)
+      ? (cartridge.persistence as { prefix: string }).prefix
+      : (typeof cartridge.memory === 'object' && cartridge.memory !== null && 'prefix' in cartridge.memory ? (cartridge.memory as { prefix: string }).prefix : agentId);
+    // GAP-263: refuse an invalid mind prefix, or one another agent holds, before anything is recorded.
+    try {
+      ownMindPrefix(state.agents.values(), { id: recordId, memoryPrefix });
+    } catch (err: any) {
+      const taken = /already belongs/.test(err.message);
+      json(res, taken ? 409 : 400, { error: taken ? 'mind_prefix_taken' : 'invalid_mind_prefix', message: err.message });
+      return;
+    }
     const hasCartridgeWrapper = Boolean(body.cartridge && typeof body.cartridge === 'object');
     const rawKind = body.kind !== undefined ? body.kind : cartridge.kind;
     // On re-registration (`previousAgent !== undefined`), `cartridge.accountableLead` inside `body.cartridge` is the
@@ -5394,9 +5574,6 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const ungated = classified.ungated;
     const gated = classified.gated;
     const triggers = (Array.isArray(cartridge.triggers) ? cartridge.triggers : (Array.isArray(body.triggers) ? body.triggers : [])) as Surface['triggers'];
-    const memoryPrefix = (typeof cartridge.persistence === 'object' && cartridge.persistence !== null && 'prefix' in cartridge.persistence)
-      ? (cartridge.persistence as { prefix: string }).prefix
-      : (typeof cartridge.memory === 'object' && cartridge.memory !== null && 'prefix' in cartridge.memory ? (cartridge.memory as { prefix: string }).prefix : agentId);
 
     const warmDownSeconds = (typeof cartridge.runtime === 'object' && cartridge.runtime !== null && 'warmDownSeconds' in cartridge.runtime)
       ? Number((cartridge.runtime as { warmDownSeconds: number }).warmDownSeconds)
@@ -5629,9 +5806,26 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
         },
       };
     }
+    // GAP-255: the run env is policy.set's, never registry.budget.set's: this route keeps the agent's current env and
+    // refuses a different one (the console saves the whole policy it read, env included, unchanged).
+    const currentEnv = state.policies.get(agentId)?.env;
+    if (policyInput && typeof policyInput === 'object' && !Array.isArray(policyInput)) {
+      const { env: sentEnv, ...rest } = policyInput as Record<string, unknown>;
+      const sorted = (e: unknown) => JSON.stringify(e && typeof e === 'object' ? Object.entries(e).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)) : e);
+      if (sentEnv !== undefined && sorted(sentEnv) !== sorted(currentEnv ?? {})) {
+        json(res, 403, { error: 'env is set with PUT /api/v1/agents/:id/policy (policy.set), not the budget route' });
+        return;
+      }
+      policyInput = { ...rest, ...(currentEnv ? { env: currentEnv } : {}) };
+    }
     const checked = validatePolicy(policyInput);
     if (!checked.ok) {
       json(res, 400, { error: checked.error });
+      return;
+    }
+    const budgetEnvError = policyEnvSecretError(state, checked.policy);
+    if (budgetEnvError) {
+      json(res, 400, { error: budgetEnvError });
       return;
     }
     state.policies.set(agentId, checked.policy);
@@ -5673,6 +5867,7 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       action: 'AGENT_RETIRED_PENDING_PURGE',
       actor: principal.actor,
     });
+    dropOpsAgent(state, agentId, principal.actor, 'retired');
     registryOf(state).save(agent);
     json(res, 200, agent);
     return;
@@ -5729,6 +5924,7 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       action: 'AGENT_PURGED',
       actor: principal.actor,
     });
+    dropOpsAgent(state, agentId, principal.actor, 'purged');
     // GAP-060: a purged agent leaves no policy or configuration record behind. Both are recoverable: the policy file is
     // moved to policies-orphaned/, the configuration removal is versioned (R1).
     for (const id of state.policies.archive([agentId]).archived) {
@@ -5834,6 +6030,11 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       json(res, 400, { error: 'wakeAgents are set per agent, never in the global policy' });
       return;
     }
+    // GAP-255: deployment settings are per agent only.
+    if (checked.policy.env !== undefined) {
+      json(res, 400, { error: 'env is set per agent, never in the global policy' });
+      return;
+    }
     state.policies.set('__global__', checked.policy);
     json(res, 200, checked.policy);
     return;
@@ -5876,4 +6077,17 @@ export function createProbeServer(): http.Server {
     if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
     return json(res, 404, { error: 'not_found' });
   });
+}
+
+/**
+ * GAP-255: a deployment setting is never a credential the factory already holds. Checked on every route that writes a
+ * policy's env. Values and secrets shorter than 8 characters are not compared (too many false matches).
+ */
+function policyEnvSecretError(state: FactoryState, policy: AgentPolicy): string | undefined {
+  const values = Object.values(policy.env ?? {}).filter((v) => v.length >= 8);
+  if (!values.length) return undefined;
+  for (const secret of state.secretValues) {
+    if (secret.length >= 8 && values.some((v) => v.includes(secret))) return 'env carries a secret value: set it as the agent\'s secret instead';
+  }
+  return undefined;
 }

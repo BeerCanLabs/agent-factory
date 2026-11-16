@@ -322,14 +322,14 @@ resource "aws_iam_role_policy" "agent" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"]
         Resource = "${aws_s3_bucket.mind.arn}/${each.key}/*"
       },
       {
         Effect    = "Allow"
         Action    = ["s3:ListBucket"]
         Resource  = aws_s3_bucket.mind.arn
-        Condition = { StringLike = { "s3:prefix" = ["${each.key}/*", each.key] } }
+        Condition = { StringLike = { "s3:prefix" = ["${each.key}/", "${each.key}/*"] } }
       },
     ]
   })
@@ -364,6 +364,44 @@ resource "aws_iam_role_policy" "control_plane_paas" {
         Effect   = "Allow"
         Action   = ["iam:DeleteRolePolicy"]
         Resource = "arn:aws:iam::${var.account_id}:role/AgentExecutionRole-*"
+      },
+      {
+        # GAP-263: aws/iam.ts strips direct model access and stale mind policies from agent task roles only.
+        Sid      = "RevokeAgentTaskRoleGrants"
+        Effect   = "Allow"
+        Action   = ["iam:DeleteRolePolicy", "iam:ListAttachedRolePolicies"]
+        Resource = "arn:aws:iam::${var.account_id}:role/AgentTaskRole-*"
+      },
+      {
+        # GAP-263: only the direct model-access policies (aws/iam.ts DIRECT_MODEL_MANAGED_POLICIES).
+        Sid      = "DetachDirectModelPolicies"
+        Effect   = "Allow"
+        Action   = ["iam:DetachRolePolicy"]
+        Resource = "arn:aws:iam::${var.account_id}:role/AgentTaskRole-*"
+        Condition = {
+          ArnEquals = {
+            "iam:PolicyARN" = [
+              "arn:aws:iam::${var.account_id}:policy/AgentBedrockModelInvocation",
+              "arn:aws:iam::aws:policy/AmazonBedrockFullAccess",
+              "arn:aws:iam::aws:policy/AmazonBedrockLimitedAccess",
+            ]
+          }
+        }
+      },
+      {
+        # GAP-263: roles with no record, and each task definition's MEMORY_PREFIX. Read-only; neither action supports
+        # resource-level permissions, so "*" is the narrowest resource.
+        Sid      = "ReadAgentIdentities"
+        Effect   = "Allow"
+        Action   = ["iam:ListRoles", "ecs:DescribeTaskDefinition"]
+        Resource = "*"
+      },
+      {
+        # GAP-263: is a prefix already holding data? Key names only, never a notebook's content.
+        Sid      = "ListMindKeys"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.mind.arn
       }
     ]
   })

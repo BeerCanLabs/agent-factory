@@ -52,7 +52,7 @@ export const ROUTE_EXCEPTIONS = {
   'webhook-hooks': {
     id: 'webhook-hooks',
     protection: 'webhook-hmac',
-    rationale: 'Generic agent webhook endpoint verified fail-closed via HMAC signature against agent cartridge secret (D18, D22, S15)',
+    rationale: 'Generic agent webhook endpoint verified fail-closed via HMAC signature against the agent cartridge secret, or for a config-only agent its own GitHub App webhook secret (D18, D22, S15, GAP-258)',
   },
   'authz-check': {
     id: 'authz-check',
@@ -428,6 +428,68 @@ const AgentPolicyResponseSchema: JsonSchemaObject = jsonSchema.object({
   }),
 });
 
+const FleetStateRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  status: jsonSchema.string({ description: 'Administrative fleet status', enum: ['running', 'paused', 'deploy-freeze'] }),
+  effective: jsonSchema.string({ description: 'Effective fleet state', enum: ['running', 'paused', 'deploy-freeze', 'deploying', 'prod-testing'] }),
+  coder_app_ready: jsonSchema.boolean({ description: 'Whether coder app is ready' }),
+  reason: {
+    type: ['string', 'null'],
+    description: 'Fleet status reason or null if cleared',
+  },
+  ops: jsonSchema.object({
+    state: jsonSchema.string({ description: 'Ops deploy state', enum: ['idle', 'deploying', 'prod-testing', 'rolled-back'] }),
+    by: { type: ['string', 'null'], description: 'Actor who set ops state' },
+    at: { type: ['string', 'null'], description: 'ISO timestamp when ops state was set' },
+    reason: { type: ['string', 'null'], description: 'Ops state transition reason' },
+    runId: { type: ['string', 'null'], description: 'Run ID holding the deploy lock' },
+  }),
+});
+
+const ApprovalRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  approvalId: jsonSchema.string({ description: 'Approval unique identifier' }),
+  runId: jsonSchema.string({ description: 'Originating run identifier' }),
+  agentId: jsonSchema.string({ description: 'Target agent ID' }),
+  route: jsonSchema.string({ description: 'Associated route pattern' }),
+  tool: jsonSchema.string({ description: 'Associated MCP tool name' }),
+  argsSha256: jsonSchema.string({ description: 'SHA-256 digest of invocation arguments' }),
+  state: jsonSchema.string({ description: 'Current approval status', enum: ['pending', 'approved', 'rejected', 'consumed', 'expired'] }),
+  requestedAt: jsonSchema.string({ description: 'ISO timestamp when approval was requested' }),
+  kind: jsonSchema.string({ description: 'Approval category', enum: ['tool', 'held', 'change', 'decision'] }),
+  notes: jsonSchema.string({ description: 'Approver justification notes' }),
+  decidedBy: jsonSchema.string({ description: 'Principal ID of deciding user' }),
+  decidedAt: jsonSchema.string({ description: 'ISO timestamp when decided' }),
+  capUsd: jsonSchema.number({ description: 'Spending cap in USD if approved with cap' }),
+});
+
+const DecisionHoldRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  requestKey: jsonSchema.string({ description: 'Unique decision request key' }),
+  approvalId: jsonSchema.string({ description: 'Approval ID' }),
+  agentId: jsonSchema.string({ description: 'Agent requesting decision' }),
+  kind: jsonSchema.string({ description: 'Hold category' }),
+  title: jsonSchema.string({ description: 'Hold title' }),
+  summary: jsonSchema.string({ description: 'Hold summary' }),
+  state: jsonSchema.string({ description: 'Approval state', enum: ['pending', 'approved', 'rejected'] }),
+  approvers: jsonSchema.array(jsonSchema.string(), { description: 'Authorized approver GitHub logins' }),
+  requiresCap: jsonSchema.boolean({ description: 'Whether hold requires a spend cap' }),
+  cap_usd: {
+    type: ['number', 'null'],
+    description: 'Approved spend cap in USD',
+  },
+  by: {
+    type: ['string', 'null'],
+    description: 'GitHub login of the decider',
+  },
+  comment: {
+    type: ['string', 'null'],
+    description: 'Decision notes or comment',
+  },
+  requestedAt: jsonSchema.string({ description: 'ISO timestamp when hold was created' }),
+  link: jsonSchema.string({ description: 'Optional context link' }),
+  payload: jsonSchema.object({}, { description: 'Optional structured payload' }),
+  decidedBy: jsonSchema.string({ description: 'Principal actor who decided' }),
+  decidedAt: jsonSchema.string({ description: 'ISO timestamp when decided' }),
+});
+
 // Reusable Request Body Schemas
 const AgentCreateBodySchema: JsonSchemaObject = jsonSchema.object({
   id: jsonSchema.string({ description: 'Agent slug ID (1 to 128 letters, digits, dot, dash or underscore)' }),
@@ -587,7 +649,81 @@ const SkillUnpublishBodySchema: JsonSchemaObject = jsonSchema.object({
 const ApprovalDecideBodySchema: JsonSchemaObject = jsonSchema.object({
   decision: jsonSchema.string({ description: 'Decision outcome', enum: ['approve', 'reject'] }),
   notes: jsonSchema.string({ description: 'Administrative justification or review notes' }),
+  capUsd: {
+    type: ['number', 'string'],
+    description: 'Optional spend ceiling cap in USD when approving a decision hold',
+  },
 }, { required: ['decision'] });
+
+const FleetStateOpsBodySchema: JsonSchemaObject = jsonSchema.object({
+  state: jsonSchema.string({
+    description: 'Deploy ops state reported by ops leader',
+    enum: ['idle', 'deploying', 'prod-testing', 'rolled-back'],
+  }),
+  reason: jsonSchema.string({
+    description: 'Deploy state transition justification or error details',
+  }),
+}, { required: ['state'] });
+
+const FleetStateSetBodySchema: JsonSchemaObject = jsonSchema.object({
+  status: jsonSchema.string({
+    description: 'Fleet administrative status',
+    enum: ['running', 'paused', 'deploy-freeze'],
+  }),
+  coder_app_ready: jsonSchema.boolean({
+    description: 'Whether coder app is ready',
+  }),
+  reason: {
+    type: ['string', 'null'],
+    description: 'Status explanation or incident rationale, or null to clear',
+  },
+  opsAgents: {
+    type: ['array', 'null'],
+    items: jsonSchema.string({ description: 'Agent ID' }),
+    description: 'List of agent IDs authorized to report ops deploy states, or null to clear',
+  },
+  ops: {
+    type: ['object', 'null'],
+    description: 'Admin override of ops deploy state, or null to reset to idle',
+    properties: {
+      state: jsonSchema.string({ description: 'Ops state', enum: ['idle', 'deploying', 'prod-testing', 'rolled-back'] }),
+      reason: jsonSchema.string({ description: 'Ops state reason' }),
+    },
+    required: ['state'],
+  },
+  force: jsonSchema.boolean({
+    description: 'Force state update even if a live run holds the deploy lock',
+  }),
+}, { required: ['status'] });
+
+const DecisionHoldPublishBodySchema: JsonSchemaObject = jsonSchema.object({
+  title: jsonSchema.string({
+    description: 'Short title of the requested decision',
+  }),
+  summary: jsonSchema.string({
+    description: 'Detailed description of the decision, context, and requested action',
+  }),
+  approvers: jsonSchema.array(jsonSchema.string({ description: 'GitHub login' }), {
+    description: 'GitHub logins of human approvers authorized to decide this hold',
+    minItems: 1,
+  }),
+  id: jsonSchema.string({
+    description: 'Optional request key matching path parameter :requestKey',
+  }),
+  kind: jsonSchema.string({
+    description: 'Decision hold category/kind',
+  }),
+  link: jsonSchema.string({
+    description: 'HTTPS URL for context or review PR/issue',
+    format: 'uri',
+  }),
+  requiresCap: jsonSchema.boolean({
+    description: 'Whether approval requires specifying a spend ceiling cap (capUsd)',
+  }),
+  payload: jsonSchema.object({}, {
+    description: 'Structured parameters or payload for the hold',
+  }),
+}, { required: ['title', 'summary', 'approvers'] });
 
 const SubmissionCreateBodySchema: JsonSchemaObject = jsonSchema.object({
   kind: jsonSchema.string({ description: 'Content kind', enum: ['agent', 'skill'] }),
@@ -1077,6 +1213,7 @@ const RolesQuerySchema: JsonSchemaObject = jsonSchema.object({
 
 const ApprovalsQuerySchema: JsonSchemaObject = jsonSchema.object({
   state: jsonSchema.string({ description: 'Filter approvals by state (pending, approved, rejected)' }),
+  kind: jsonSchema.string({ description: 'Filter approvals by kind', enum: ['tool', 'held', 'change', 'decision'] }),
 });
 
 const ConnectionsStartQuerySchema: JsonSchemaObject = jsonSchema.object({
@@ -1669,8 +1806,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     operationId: "webhook_cartridge_trigger",
     method: "POST",
     pattern: "/api/v1/hooks/:id",
-    summary: "Cartridge webhook trigger",
-    description: "Cartridge webhook trigger (HMAC signature)",
+    summary: "Cartridge webhook trigger, or the agent GitHub App events (HMAC signature)",
+    description: "Cartridge webhook trigger, or the agent GitHub App events (HMAC signature)",
     staff: "gatekeeper",
     mcpExposure: "internal",
     exception: "webhook-hooks",
@@ -2283,6 +2420,18 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     statusCodes: [200],
   },
   {
+    operationId: "set_fleet_ops_state",
+    method: "PUT",
+    pattern: "/api/v1/fleet/state/ops",
+    summary: "Report the fleet's deploy state (an ops agent's live run token, GAP-268)",
+    staff: "executive",
+    mcpExposure: "internal",
+    exception: "run-token",
+    requestBodySchema: FleetStateOpsBodySchema,
+    responseSchema: FleetStateRecordResponseSchema,
+    statusCodes: [200, 409],
+  },
+  {
     operationId: "run_get_approved_models",
     method: "GET",
     pattern: "/api/v1/runs/:id/approved-models",
@@ -2605,6 +2754,33 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     statusCodes: [200],
   },
   {
+    operationId: "get_fleet_state",
+    method: "GET",
+    pattern: "/api/v1/fleet/state",
+    summary: "Fleet go/stop state (a live run by run token, or a reader)",
+    staff: "executive",
+    mcpExposure: "tool",
+    toolset: "systems",
+    mcpToolName: "get_fleet_state",
+    privilege: "agents.read",
+    responseSchema: FleetStateRecordResponseSchema,
+    statusCodes: [200],
+  },
+  {
+    operationId: "set_fleet_state",
+    method: "PUT",
+    pattern: "/api/v1/fleet/state",
+    summary: "Set the fleet go/stop state (admin)",
+    staff: "executive",
+    mcpExposure: "tool-confirm",
+    toolset: "systems",
+    mcpToolName: "set_fleet_state",
+    privilege: "fleet.state.set",
+    requestBodySchema: FleetStateSetBodySchema,
+    responseSchema: FleetStateRecordResponseSchema,
+    statusCodes: [200, 409],
+  },
+  {
     operationId: "list_approvals",
     method: "GET",
     pattern: "/api/v1/approvals",
@@ -2619,10 +2795,24 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     responseSchema: SuccessResponseSchema,
   },
   {
+    operationId: "get_approval_details",
+    method: "GET",
+    pattern: "/api/v1/approvals/:id",
+    summary: "Read one approval",
+    staff: "bouncer",
+    mcpExposure: "tool",
+    toolset: "observe",
+    mcpToolName: "get_approval_details",
+    privilege: "approvals.read",
+    responseSchema: ApprovalRecordResponseSchema,
+    statusCodes: [200],
+  },
+  {
     operationId: "decide_approval",
     method: "POST",
     pattern: "/api/v1/approvals/:id",
-    summary: "Decide tool approval",
+    summary: "Decide an approval (capUsd when approving a decision hold)",
+    description: "Decide an approval (capUsd when approving a decision hold)",
     staff: "bouncer",
     mcpExposure: "human-decision",
     toolset: "observe",
@@ -2631,6 +2821,31 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     privilege: "approvals.decide",
     requestBodySchema: ApprovalDecideBodySchema,
     responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
+  },
+  {
+    operationId: "publish_decision_hold",
+    method: "PUT",
+    pattern: "/api/v1/agents/:id/holds/:requestKey",
+    summary: "Agent publishes a decision hold (run token, idempotent)",
+    staff: "bouncer",
+    mcpExposure: "internal",
+    exception: "run-token",
+    requestBodySchema: DecisionHoldPublishBodySchema,
+    responseSchema: DecisionHoldRecordResponseSchema,
+    statusCodes: [200, 201],
+  },
+  {
+    operationId: "get_agent_decision_hold",
+    method: "GET",
+    pattern: "/api/v1/agents/:id/holds/:requestKey",
+    summary: "Read a decision hold (its agent by run token, or a reader)",
+    staff: "bouncer",
+    mcpExposure: "tool",
+    toolset: "agents",
+    mcpToolName: "get_agent_decision_hold",
+    privilege: "approvals.read",
+    responseSchema: DecisionHoldRecordResponseSchema,
     statusCodes: [200],
   },
   {

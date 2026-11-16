@@ -94,6 +94,9 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/spend/compute', privilege: 'spend.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/spend/budgets', privilege: 'spend.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/approvals', privilege: 'approvals.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/approvals/nope', privilege: 'approvals.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/agents/castle/holds/plan-budget', privilege: 'approvals.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/fleet/state', privilege: 'agents.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/skills', privilege: 'skills.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/skills/defaults', privilege: 'skills.read', role: 'viewer' },
   { method: 'PUT', path: '/api/v1/skills/defaults', privilege: 'skills.defaults.set', role: 'admin', body: { skills: [] } },
@@ -174,6 +177,7 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/gatekeeper-egress/runs/nope/failover', privilege: 'egress.models.failover', role: 'gatekeeper-egress', exclusive: true, body: {} },
   // admin
   { method: 'PUT', path: '/api/v1/runtime', privilege: 'runtime.set', role: 'admin', body: {} },
+  { method: 'PUT', path: '/api/v1/fleet/state', privilege: 'fleet.state.set', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/agents', privilege: 'registry.register', role: 'admin', body: {} },
   { method: 'POST', path: '/api/v1/registry/subagents', privilege: 'registry.register', role: 'admin', body: {} },
   { method: 'PUT', path: '/api/v1/registry/subagents/x/models', privilege: 'registry.register', role: 'admin', body: {} },
@@ -755,6 +759,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       { method: 'POST', path: '/api/v1/runs/nope/subagents/spawn', body: {} },
       { method: 'GET', path: '/api/v1/runs/nope/subagents/runs/h1' },
       { method: 'POST', path: '/api/v1/runs/nope/wake/pr-reviewer', body: {} },
+      { method: 'PUT', path: '/api/v1/agents/castle/holds/plan-budget', body: {} },
       { method: 'POST', path: '/api/v1/keymaster/checkout', body: {} },
     ];
     for (const row of rows) {
@@ -767,13 +772,21 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     }
   });
 
+  it('GAP-268: the ops route takes only an ops agent run token: no credential is 401, every person 403', async () => {
+    const none = await call(port, 'PUT', '/api/v1/fleet/state/ops', 'none', { state: 'deploying' });
+    assert.equal(none.status, 401);
+    for (const cred of ROLES) {
+      assert.equal((await call(port, 'PUT', '/api/v1/fleet/state/ops', cred, { state: 'deploying' })).status, 403, cred);
+    }
+  });
+
   it('MCP lists the tools a role may call and names the role a forbidden call needs', async () => {
     const rpc = async (cred: Role, method: string, params?: unknown) => (await call(port, 'POST', '/mcp', cred, { jsonrpc: '2.0', id: 1, method, params })).body as {
       result?: { tools?: Array<{ name: string }> };
       error?: { code: number; message: string };
     };
     const names = async (cred: Role) => (await rpc(cred, 'tools/list')).result?.tools?.map((t) => t.name).sort();
-    const viewerTools = ['authz_check', 'get_agent_models', 'get_run', 'list_agents', 'list_approvals', 'list_model_catalog', 'query_ledger', 'whoami'];
+    const viewerTools = ['authz_check', 'get_agent_models', 'get_approval', 'get_fleet_state', 'get_run', 'list_agents', 'list_approvals', 'list_model_catalog', 'query_ledger', 'whoami'];
     const operatorTools = ['check_agent_update', 'isolate_agent', 'pause_agent', 'resume_agent', 'wake_agent'];
     const adminTools = [
       'add_principal_email',
@@ -790,6 +803,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       'scan_vendor_models',
       'set_agent_models',
       'set_default_model',
+      'set_fleet_state',
       'update_model_pricing',
     ];
     assert.deepEqual(await names('viewer'), viewerTools);
