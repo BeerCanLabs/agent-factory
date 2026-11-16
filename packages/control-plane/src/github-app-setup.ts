@@ -36,7 +36,7 @@ function stateKey(s: FactoryState): Buffer | undefined {
 }
 
 /**
- * GAP-249: the events an agent's app sends to the agent's own webhook (`/hooks/:agentId`, signed with the app's
+ * GAP-257: the events an agent's app sends to the agent's own webhook (`/hooks/:agentId`, signed with the app's
  * webhook secret). The SDLC fleet is event-driven only (no timer, no polling): issues and their comments, pull
  * requests, and CI results (check suites, check runs, commit statuses). Each needs the matching permission below.
  */
@@ -44,7 +44,7 @@ export const GITHUB_APP_EVENTS = ['issues', 'issue_comment', 'pull_request', 'ch
 
 /**
  * The manifest GitHub prefills. Permissions are what a coding agent needs; the admin can narrow them on GitHub.
- * GAP-249 (Dale, chat, 2026-11-15): organization Projects (write) for the fleet's board, and checks and statuses
+ * GAP-257 (Dale, chat, 2026-11-15): organization Projects (write) for the fleet's board, and checks and statuses
  * (read) so CI results can be read and delivered as events.
  * GitHub rejected `public: false` plus an inactive webhook with "Public cannot be private", so the manifest
  * never sends `public`: GitHub's form then defaults to "Only on this account" (a private app). The webhook is

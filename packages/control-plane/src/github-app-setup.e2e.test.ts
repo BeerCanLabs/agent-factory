@@ -64,7 +64,7 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     assert.equal(m.redirect_url, 'https://f.example/api/v1/keymaster/github-app/callback');
     // GitHub answered "Public cannot be private" to public:false with an inactive hook: `public` is never sent.
     assert.equal('public' in m, false);
-    // GAP-249: an active hook on the agent's own webhook, and the fleet's events with the permissions each needs.
+    // GAP-257: an active hook on the agent's own webhook, and the fleet's events with the permissions each needs.
     assert.deepEqual(m.hook_attributes, { url: 'https://f.example/hooks/archie', active: true });
     assert.deepEqual(m.default_events, ['issues', 'issue_comment', 'pull_request', 'check_suite', 'check_run', 'status']);
     assert.equal(m.default_permissions.organization_projects, 'write');
