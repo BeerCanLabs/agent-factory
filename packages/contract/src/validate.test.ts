@@ -185,6 +185,22 @@ compute:
     }
   });
 
+  it('accepts compute with localCommand and no ref (TSK-342)', () => {
+    const dir = fixture({
+      ...unifiedValid,
+      'cartridge.yaml': unifiedValid['cartridge.yaml'].replace(
+        'compute:\n  kind: oci\n  ref: "ghcr.io/org/test-agent:latest"',
+        'compute:\n  localCommand:\n    - python3\n    - agent.py',
+      ),
+    });
+    try {
+      const result = validateCartridge(dir);
+      assert.equal(result.ok, true, JSON.stringify(result.issues, null, 2));
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
   it('rejects plaintext secrets in cartridge.yaml', () => {
     const dir = fixture({
       ...unifiedValid,

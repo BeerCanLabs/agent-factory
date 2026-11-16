@@ -30,7 +30,13 @@ def main() -> int:
     message = str(payload.get("message") or payload.get("raw_input") or "wake")
     reply = turn(state, message, FactoryClient())
     save_state(state_path, state)
-    result = {"status": "succeeded", "message": reply, "skillId": state.get("skillId")}
+    result = {
+        "status": "succeeded",
+        "message": reply,
+        "reply": reply,
+        "output": {"reply": reply, "message": reply},
+        "skillId": state.get("skillId"),
+    }
     out = Path(os.environ.get("FACTORY_RESULT_FILE", "/tmp/factory-result.json"))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=2), "utf-8")

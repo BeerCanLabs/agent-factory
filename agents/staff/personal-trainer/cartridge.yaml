@@ -24,8 +24,6 @@ memory:
   maxChars: 24000
 
 compute:
-  kind: oci
-  ref: "ghcr.io/beercanlabs/personal-trainer:latest"
   localCommand:
     - python3
     - agent.py

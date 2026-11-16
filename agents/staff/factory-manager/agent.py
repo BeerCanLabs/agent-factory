@@ -97,9 +97,21 @@ def main() -> int:
     if payload.get("factoryKind") == "smoke":
         content = str(payload.get("content") or payload.get("message") or payload.get("text") or "Activation smoke check")
         last = turn({"content": content}, soul, Notebook(memory, "factory:smoke"), model)
+        reply_text = last.get("text", "")
         out = Path(os.environ.get("FACTORY_RESULT_FILE", "/tmp/factory-result.json"))
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({"status": "succeeded", "message": last.get("text", ""), "reply": last.get("text", "")}, indent=2), "utf-8")
+        out.write_text(
+            json.dumps(
+                {
+                    "status": "succeeded",
+                    "message": reply_text,
+                    "reply": reply_text,
+                    "output": {"reply": reply_text, "message": reply_text},
+                },
+                indent=2,
+            ),
+            "utf-8",
+        )
         return 0
 
     last = handle(payload, soul, memory, model)
@@ -125,9 +137,21 @@ def main() -> int:
         last = handle(nxt, soul, memory, model)
         deadline = time.time() + WARM_SECONDS
 
+    reply_text = last.get("text", "")
     out = Path(os.environ.get("FACTORY_RESULT_FILE", "/tmp/factory-result.json"))
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"status": "succeeded", "message": last.get("text", ""), "reply": last.get("text", "")}, indent=2), "utf-8")
+    out.write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "message": reply_text,
+                "reply": reply_text,
+                "output": {"reply": reply_text, "message": reply_text},
+            },
+            indent=2,
+        ),
+        "utf-8",
+    )
     return 0
 
 
