@@ -853,6 +853,14 @@ export async function applyKillSwitch(
       } as any,
     };
   }
+  // #490: RESUME only lifts a pause or an isolation. From any other state it would skip the deploy and smoke gate (a new
+  // agent) or revive a retired or purged one, so it is refused and nothing changes (no ledger row, no hook).
+  if (command === 'RESUME' && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED') {
+    return {
+      status: 409,
+      body: { error: 'agent_not_paused', state: agent.state, message: `RESUME applies only to a PAUSED or ISOLATED agent; ${id} is ${agent.state}.` } as any,
+    };
+  }
   if (command === 'PAUSE') agent.state = 'PAUSED';
   else if (command === 'ISOLATE') agent.state = 'ISOLATED';
   else agent.state = activeRun(state, id) ? 'WORKING' : 'SLEEPING';
