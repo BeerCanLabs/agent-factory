@@ -1,8 +1,9 @@
 /**
  * GAP-260: the fleet's one go/stop state, the resource a fleet's `SDLC_GLOBAL_STATE_URL` points at.
  *
- * `GET /api/v1/fleet/state` answers any live run (its run token) or a person with `agents.read`:
- * `{status, coder_app_ready, reason, ...}`. `PUT` (and MCP `set_fleet_state`) is an admin's alone (`fleet.state.set`).
+ * `GET /api/v1/fleet/state` answers any live run of any agent (its run token; the state is not secret) or a person with
+ * `agents.read`: `{status, coder_app_ready, reason, ...}`. `PUT` (and MCP `set_fleet_state`) is an admin's alone
+ * (`fleet.state.set`); a refused change is a 400, and an MCP error (`isError`) over MCP.
  * Until an admin sets it, it reads `paused`: the fleet's skills fail closed, and so does the factory.
  * Nothing here polls or schedules: a skill reads it when an event wakes it.
  */

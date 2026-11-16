@@ -332,6 +332,8 @@ async function dispatchSharedRouteTool(
   args: Record<string, unknown>,
   principal: Principal,
 ): Promise<RouteOutcome | null> {
+  // GAP-260: a refused change (an unknown status, a bad flag) is an MCP error, never a result that reads as success.
+  if (name === 'set_fleet_state') return setFleetState(state, args, principal) as RouteOutcome;
   if (name === 'whoami') {
     return getWhoami(state, principal);
   }
@@ -406,7 +408,6 @@ async function dispatchLegacyTool(
   if (name === 'query_ledger') return state.ledger.query({ agent: typeof args.agent === 'string' ? args.agent : undefined });
   if (name === 'get_run') return (typeof args.runId === 'string' ? state.runs.get(args.runId) : undefined) ?? { error: 'not_found' };
   if (name === 'get_fleet_state') return fleetStateOf(state);
-  if (name === 'set_fleet_state') return setFleetState(state, args, principal).body;
   if (name === 'list_approvals') return visibleApprovals(state, principal, state.approvals.list({ state: 'pending' }));
   if (name === 'decide_approval') return (await decideApproval(state, String(args.approvalId), String(args.decision), principal, typeof args.notes === 'string' ? args.notes : undefined)).body;
   if (name === 'list_model_catalog') {

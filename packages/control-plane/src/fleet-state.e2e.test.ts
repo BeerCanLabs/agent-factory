@@ -121,12 +121,18 @@ describe('GAP-260 fleet go/stop state', { concurrency: false }, () => {
   it('MCP reads and sets it with the same rules', async () => {
     const rpc = async (name: string, args: Record<string, unknown>, roles: string[]) =>
       (await handleMcp(state, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, { actor: 'mcp-user', roles } as never)) as {
-        result?: { content: Array<{ text: string }> };
+        result?: { content: Array<{ text: string }>; isError?: boolean };
         error?: { message: string };
       };
     const set = await rpc('set_fleet_state', { status: 'paused', reason: 'Holiday' }, ['admin']);
     assert.equal(JSON.parse(set.result!.content[0].text).status, 'paused');
     assert.equal(JSON.parse((await rpc('get_fleet_state', {}, ['viewer'])).result!.content[0].text).reason, 'Holiday');
     assert.match((await rpc('set_fleet_state', { status: 'running' }, ['operator'])).error!.message, /forbidden/);
+    // A refused change is an MCP error, and the state is unchanged: a typo never reads as success.
+    const typo = await rpc('set_fleet_state', { status: 'pasued' }, ['admin']);
+    assert.equal(typo.result!.isError, true);
+    assert.match(JSON.parse(typo.result!.content[0].text).error, /status must be one of/);
+    assert.equal(JSON.parse((await rpc('get_fleet_state', {}, ['viewer'])).result!.content[0].text).status, 'paused');
+    assert.equal(set.result!.isError, undefined);
   });
 });
