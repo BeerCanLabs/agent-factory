@@ -57,18 +57,46 @@ describe('§6.6 mind storage belongs to the shim', () => {
 
 describe('E6 network-enforced (AWS & GCP landing zones)', () => {
   const network = read('landing-zones/aws/network.tf');
-  it('the agent route table has no routes (AWS)', () => {
+  it('the agent route table has no routes, and Terraform owns its route list (AWS)', () => {
     const table = network.match(/resource "aws_route_table" "agents" \{[\s\S]*?\n\}/)?.[0] ?? '';
     assert.ok(table, 'agent route table not found');
     assert.doesNotMatch(table, /\broute\s*\{/);
+    // Without `route = []` a route added by hand, or left behind when a `route` block is deleted, stays live
+    // (the IGW route applied 2026-09-20 survived its removal from the code that way).
+    assert.match(table, /\n\s*route\s*=\s*\[\]\s*\n/);
+    assert.doesNotMatch(network, /resource "aws_route" /);
     assert.doesNotMatch(network, /route_table_id\s*=\s*aws_route_table\.agents\.id[\s\S]{0,200}(gateway_id|nat_gateway_id)/);
   });
   it('agents get no public IP (AWS)', () => {
     assert.match(read('landing-zones/aws/ecs.tf'), /FACTORY_ECS_ASSIGN_PUBLIC_IP", value = "false"/);
   });
-  it('the agent security group has no open egress (AWS)', () => {
-    for (const m of network.matchAll(/resource "aws_vpc_security_group_egress_rule" "[^"]+" \{[\s\S]*?\n\}/g)) {
-      if (/security_group_id\s*=\s*aws_security_group\.agents\.id/.test(m[0])) assert.doesNotMatch(m[0], /0\.0\.0\.0\/0/);
+  it('the agent security group has no open egress, and Terraform owns its whole egress list (AWS)', () => {
+    // Inline egress is authoritative: an apply revokes any rule added outside Terraform. A separate egress-rule
+    // resource on this group would make the list non-authoritative again (and fight the inline blocks).
+    // Every AWS landing-zone file, not only network.tf: a rule anywhere would bypass the authoritative list.
+    for (const f of files('landing-zones/aws', (p) => p.endsWith('.tf'))) {
+      for (const m of read(f).matchAll(/resource "(aws_vpc_security_group_egress_rule|aws_security_group_rule)" "[^"]+" \{[\s\S]*?\n\}/g)) {
+        assert.doesNotMatch(m[0], /security_group_id\s*=\s*aws_security_group\.agents\.id/, `${f}: ${m[0]}`);
+      }
+    }
+    const sg = network.match(/resource "aws_security_group" "agents" \{[\s\S]*?\n\}/)?.[0] ?? '';
+    assert.ok(sg, 'agent security group not found');
+    const rules = [...sg.matchAll(/\n {2}egress \{([\s\S]*?)\n {2}\}/g)].map((m) => m[1]);
+    assert.ok(rules.length > 0, 'agent egress must be declared inline');
+    const allowedCidrs = new Set(['"${cidrhost(aws_vpc.factory.cidr_block, 2)}/32"', '"169.254.170.2/32"']);
+    const allowedGroups = new Set(['aws_security_group.control_plane.id', 'aws_security_group.gatekeeper_egress.id', 'aws_security_group.endpoints.id']);
+    for (const r of rules) {
+      assert.doesNotMatch(r, /0\.0\.0\.0\/0|::\/0|ipv6_cidr_blocks|self\s*=\s*true/, r);
+      assert.match(r, /protocol\s*=\s*"(tcp|udp)"/, `agent egress must name tcp or udp: ${r}`);
+      for (const c of r.match(/cidr_blocks\s*=\s*\[([^\]]*)\]/)?.[1].match(/"[^"]*"/g) ?? []) {
+        assert.ok(allowedCidrs.has(c), `agent egress to ${c} (only the VPC resolver and ECS metadata)`);
+      }
+      for (const g of r.match(/security_groups\s*=\s*\[([^\]]*)\]/)?.[1].split(',').map((x) => x.trim()).filter(Boolean) ?? []) {
+        assert.ok(allowedGroups.has(g), `agent egress to ${g} (only the control plane, gatekeeper-egress and endpoints)`);
+      }
+      for (const pl of r.match(/prefix_list_ids\s*=\s*\[([^\]]*)\]/)?.[1].split(',').map((x) => x.trim()).filter(Boolean) ?? []) {
+        assert.equal(pl, 'aws_vpc_endpoint.s3.prefix_list_id');
+      }
     }
   });
   it('Cloud NAT covers only the services subnetwork, never the agents subnetwork (GCP)', () => {
