@@ -194,6 +194,7 @@ export interface OperationContract {
   readonly pathParamsSchema?: JsonSchemaObject;
   readonly querySchema?: JsonSchemaObject;
   readonly requestBodySchema?: JsonSchemaObject;
+  readonly noRequestBody?: boolean;
   readonly responseSchema?: JsonSchemaObject;
   readonly annotations?: Partial<McpToolAnnotations>;
   readonly statusCodes?: readonly number[];
@@ -245,6 +246,10 @@ export function buildMcpInputSchema(op: OperationContract): JsonSchemaObject {
   // 2. Query parameters
   if (op.querySchema?.properties) {
     for (const [k, v] of Object.entries(op.querySchema.properties)) {
+      if (properties[k]) {
+        // Path parameter already defined with this name; path parameters take precedence
+        continue;
+      }
       properties[k] = v;
       if (op.querySchema.required?.includes(k) && !required.includes(k)) {
         required.push(k);
@@ -268,21 +273,12 @@ export function buildMcpInputSchema(op: OperationContract): JsonSchemaObject {
           continue;
         }
       }
+      if (properties[k]) {
+        // Path or query parameter already defined with this name; path takes precedence
+        continue;
+      }
       properties[k] = v;
       if (op.requestBodySchema.required?.includes(k)) {
-        if (op.mcpExposure === 'handoff') {
-          const lower = k.toLowerCase();
-          if (
-            lower.includes('secret') ||
-            lower.includes('token') ||
-            lower.includes('clientsecret') ||
-            lower.includes('bottoken') ||
-            lower === 'value' ||
-            lower === 'rawsecret'
-          ) {
-            continue;
-          }
-        }
         if (!required.includes(k)) required.push(k);
       }
     }
@@ -472,8 +468,14 @@ export function buildOpenApiDocument(
       if (code === 204) {
         responses[codeStr] = { description: 'Operation completed successfully (no content)' };
       } else {
+        const defaultDesc =
+          code === 201
+            ? 'Resource created successfully'
+            : code === 202
+              ? 'Request accepted for processing'
+              : 'Successful operation';
         responses[codeStr] = {
-          description: op.summary || 'Successful operation',
+          description: op.summary || defaultDesc,
           ...(op.responseSchema
             ? {
                 content: {
@@ -773,6 +775,24 @@ export function validateOperationContract(op: OperationContract): { valid: boole
   if (op.method === 'POST' && (op.pattern === '/api/v1/keys' || op.pattern === '/api/v1/keys/:id/rotate')) {
     if (op.mcpExposure !== 'console-or-cli-only') {
       errors.push(`API key issuance/rotation '${op.method} ${op.pattern}' MUST have mcpExposure: 'console-or-cli-only' per CL6`);
+    }
+  }
+
+  // Mutating operation schema completeness:
+  // Every mutating route (POST, PUT, PATCH) that is exposed (non-internal) MUST declare either a requestBodySchema with properties or explicit noRequestBody: true
+  if (['POST', 'PUT', 'PATCH'].includes(op.method) && op.mcpExposure !== 'internal') {
+    const hasBodyProperties = Boolean(
+      op.requestBodySchema?.properties && Object.keys(op.requestBodySchema.properties).length > 0,
+    );
+    if (!hasBodyProperties && !op.noRequestBody) {
+      errors.push(
+        `Mutating operation '${op.operationId}' (${op.method} ${op.pattern}) must define a requestBodySchema with properties or explicitly set noRequestBody: true`,
+      );
+    }
+    if (op.noRequestBody && op.requestBodySchema) {
+      errors.push(
+        `Operation '${op.operationId}' (${op.method} ${op.pattern}) cannot specify both noRequestBody: true and requestBodySchema`,
+      );
     }
   }
 

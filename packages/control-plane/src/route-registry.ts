@@ -10,6 +10,8 @@ import {
   buildMcpSchemaCatalog,
   validateOperationContract,
   derivePathParamsSchema,
+  jsonSchema,
+  type JsonSchemaObject,
 } from '@beercanlabs/factory-contract';
 
 /**
@@ -254,6 +256,753 @@ export function pathToRegex(pattern: string): RegExp {
  * Declarative CONTROL_PLANE_ROUTES operations and privilege table covering every HTTP route handled by the control plane.
  * Generated and validated from @beercanlabs/factory-contract declarative operations registry (CL11).
  */
+// Reusable Response Schemas
+const SuccessResponseSchema: JsonSchemaObject = jsonSchema.object({
+  ok: jsonSchema.boolean({ description: 'Operation execution status' }),
+});
+
+const AgentRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  id: jsonSchema.string({ description: 'Agent identifier' }),
+  name: jsonSchema.string({ description: 'Agent display name' }),
+  role: jsonSchema.string({ description: 'Agent role' }),
+  state: jsonSchema.string({ description: 'Lifecycle state' }),
+  model: jsonSchema.string({ description: 'Default AI model' }),
+});
+
+const RunRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  runId: jsonSchema.string({ description: 'Run unique identifier' }),
+  agentId: jsonSchema.string({ description: 'Target agent ID' }),
+  state: jsonSchema.string({ description: 'Run state' }),
+});
+
+const ScheduleRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  id: jsonSchema.string({ description: 'Schedule identifier' }),
+  agentId: jsonSchema.string({ description: 'Target agent ID' }),
+  cron: jsonSchema.string({ description: 'Cron schedule expression' }),
+  prompt: jsonSchema.string({ description: 'Task prompt' }),
+  enabled: jsonSchema.boolean({ description: 'Schedule enabled status' }),
+});
+
+const PrincipalRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  principal: jsonSchema.object({
+    id: jsonSchema.string({ description: 'Principal ID' }),
+    displayName: jsonSchema.string({ description: 'Display name' }),
+    emails: jsonSchema.array(jsonSchema.string(), { description: 'Associated emails' }),
+  }),
+});
+
+const GrantRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  grant: jsonSchema.object({
+    id: jsonSchema.string({ description: 'Grant identifier' }),
+    subject: jsonSchema.string({ description: 'Principal or group ID' }),
+    role: jsonSchema.string({ description: 'Role name' }),
+    scope: jsonSchema.object({
+      kind: jsonSchema.string({ description: 'Scope kind' }),
+      id: jsonSchema.string({ description: 'Scope entity ID' }),
+    }),
+  }),
+});
+
+const SubmissionRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  id: jsonSchema.string({ description: 'Submission ID' }),
+  kind: jsonSchema.string({ description: 'Submission kind' }),
+  status: jsonSchema.string({ description: 'Submission status' }),
+});
+
+const SystemRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  system: jsonSchema.object({
+    id: jsonSchema.string({ description: 'System identifier' }),
+    name: jsonSchema.string({ description: 'System display name' }),
+    upstream: jsonSchema.string({ description: 'Upstream URL' }),
+  }),
+});
+
+const GroupRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  group: jsonSchema.object({
+    id: jsonSchema.string({ description: 'Group identifier' }),
+    name: jsonSchema.string({ description: 'Group display name' }),
+    members: jsonSchema.array(jsonSchema.string(), { description: 'Member principal IDs' }),
+  }),
+});
+
+const SubagentRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  id: jsonSchema.string({ description: 'Subagent identifier' }),
+  name: jsonSchema.string({ description: 'Subagent display name' }),
+  description: jsonSchema.string({ description: 'Task specialization' }),
+});
+
+const ApiKeyRecordResponseSchema: JsonSchemaObject = jsonSchema.object({
+  key: jsonSchema.object({
+    id: jsonSchema.string({ description: 'API key ID' }),
+    name: jsonSchema.string({ description: 'Label' }),
+    prefix: jsonSchema.string({ description: 'Key prefix (fk_...)' }),
+  }),
+  secret: jsonSchema.string({ description: 'Full API key plaintext (only returned once at creation/rotation)' }),
+});
+
+const CredentialSetResponseSchema: JsonSchemaObject = jsonSchema.object({
+  agentId: jsonSchema.string({ description: 'Agent identifier' }),
+  name: jsonSchema.string({ description: 'Credential name' }),
+  status: jsonSchema.string({ description: 'Credential status' }),
+});
+
+const TransferResponseSchema: JsonSchemaObject = jsonSchema.object({
+  scope: jsonSchema.object({
+    kind: jsonSchema.string({ description: 'Entity kind' }),
+    id: jsonSchema.string({ description: 'Entity ID' }),
+  }),
+  action: jsonSchema.string({ description: 'Transfer action' }),
+  owner: jsonSchema.string({ description: 'New or current owner' }),
+});
+
+const ConversationTurnResponseSchema: JsonSchemaObject = jsonSchema.object({
+  turnId: jsonSchema.string({ description: 'Turn unique identifier' }),
+  replyTo: jsonSchema.object({
+    channel: jsonSchema.string({ description: 'Reply channel' }),
+  }),
+});
+
+const ConversationRequestsResponseSchema: JsonSchemaObject = jsonSchema.object({
+  turnId: jsonSchema.string({ description: 'Turn identifier' }),
+  request: jsonSchema.object({
+    op: jsonSchema.string({ description: 'Requested operation' }),
+  }),
+});
+
+const ModelScanResponseSchema: JsonSchemaObject = jsonSchema.object({
+  ok: jsonSchema.boolean({ description: 'Status' }),
+  count: jsonSchema.integer({ description: 'Discovered model count' }),
+  staged: jsonSchema.array(jsonSchema.string(), { description: 'Discovered model names' }),
+});
+
+const SubscriptionConnectResponseSchema: JsonSchemaObject = jsonSchema.object({
+  signIn: jsonSchema.object({
+    id: jsonSchema.string({ description: 'Sign-in session ID' }),
+    url: jsonSchema.string({ description: 'OAuth authorization URL' }),
+  }),
+});
+
+const SubscriptionDiscoverResponseSchema: JsonSchemaObject = jsonSchema.object({
+  connection: jsonSchema.string({ description: 'Connection ID' }),
+  listAvailable: jsonSchema.boolean({ description: 'Whether catalog list succeeded' }),
+  models: jsonSchema.array(jsonSchema.string(), { description: 'Discovered models' }),
+});
+
+const RuntimeResponseSchema: JsonSchemaObject = jsonSchema.object({
+  ok: jsonSchema.boolean({ description: 'Rollout status' }),
+  runtime: jsonSchema.object({
+    repo: jsonSchema.string({ description: 'Git repository' }),
+    commit: jsonSchema.string({ description: 'Commit SHA' }),
+    image: jsonSchema.string({ description: 'Container image digest' }),
+  }),
+});
+
+const UpdateCheckResponseSchema: JsonSchemaObject = jsonSchema.object({
+  hasUpdate: jsonSchema.boolean({ description: 'Whether an update is available' }),
+  latestVersion: jsonSchema.string({ description: 'Latest release version' }),
+});
+
+const AgentSettingsResponseSchema: JsonSchemaObject = jsonSchema.object({
+  agentId: jsonSchema.string({ description: 'Agent identifier' }),
+  managed: jsonSchema.boolean({ description: 'Whether settings are config-managed' }),
+  version: jsonSchema.integer({ description: 'Configuration version' }),
+});
+
+const AgentRenameResponseSchema: JsonSchemaObject = jsonSchema.object({
+  agentId: jsonSchema.string({ description: 'Agent identifier' }),
+  name: jsonSchema.string({ description: 'New name' }),
+});
+
+const AgentModelsResponseSchema: JsonSchemaObject = jsonSchema.object({
+  agentId: jsonSchema.string({ description: 'Agent identifier' }),
+  defaultModel: jsonSchema.string({ description: 'Default model name' }),
+  approvedModels: jsonSchema.array(jsonSchema.string(), { description: 'Allowed models' }),
+});
+
+const AgentPolicyResponseSchema: JsonSchemaObject = jsonSchema.object({
+  routes: jsonSchema.array(jsonSchema.string(), { description: 'Allowed routes' }),
+  models: jsonSchema.array(jsonSchema.string(), { description: 'Allowed models' }),
+  budgetUsd: jsonSchema.object({
+    perDay: jsonSchema.number({ description: 'Daily limit' }),
+    perMonth: jsonSchema.number({ description: 'Monthly limit' }),
+  }),
+});
+
+// Reusable Request Body Schemas
+const AgentCreateBodySchema: JsonSchemaObject = jsonSchema.object({
+  name: jsonSchema.string({ description: 'Human-readable agent name' }),
+  id: jsonSchema.string({ description: 'Optional agent slug ID' }),
+  role: jsonSchema.string({ description: 'Agent role or title' }),
+  kind: jsonSchema.string({ description: 'Agent kind', enum: ['personal', 'team'] }),
+  accountableLead: jsonSchema.string({ description: 'Accountable lead principal ID for team agents' }),
+  owners: jsonSchema.array(jsonSchema.string(), { description: 'Owner principal IDs' }),
+  model: jsonSchema.string({ description: 'Initial default model' }),
+  soul: jsonSchema.string({ description: 'Core persona and instructions' }),
+  skills: jsonSchema.array(jsonSchema.object({
+    id: jsonSchema.string({ description: 'Skill ID' }),
+    version: jsonSchema.string({ description: 'Semantic version' }),
+  }), { description: 'Initial adopted skills' }),
+  includeDefaultSkills: jsonSchema.boolean({ description: 'Whether to adopt platform default skills' }),
+  excludeDefaultSkills: jsonSchema.array(jsonSchema.string(), { description: 'Default skill IDs to exclude' }),
+}, { required: ['name'] });
+
+const ScheduleCreateBodySchema: JsonSchemaObject = jsonSchema.object({
+  cron: jsonSchema.string({ description: 'Standard 5-field cron expression' }),
+  prompt: jsonSchema.string({ description: 'Task prompt executed at scheduled times' }),
+  agentId: jsonSchema.string({ description: 'Target agent ID' }),
+  name: jsonSchema.string({ description: 'Human-readable schedule name' }),
+  timezone: jsonSchema.string({ description: 'IANA timezone name' }),
+  enabled: jsonSchema.boolean({ description: 'Whether schedule is enabled' }),
+  channelId: jsonSchema.string({ description: 'Optional ingress channel ID' }),
+}, { required: ['cron', 'prompt'] });
+
+const ScheduleUpdateBodySchema: JsonSchemaObject = jsonSchema.object({
+  cron: jsonSchema.string({ description: 'Standard 5-field cron expression' }),
+  prompt: jsonSchema.string({ description: 'Task prompt executed at scheduled times' }),
+  name: jsonSchema.string({ description: 'Human-readable schedule name' }),
+  timezone: jsonSchema.string({ description: 'IANA timezone name' }),
+  enabled: jsonSchema.boolean({ description: 'Whether schedule is enabled' }),
+  channelId: jsonSchema.string({ description: 'Optional ingress channel ID' }),
+});
+
+const PrincipalCreateBodySchema: JsonSchemaObject = jsonSchema.object({
+  displayName: jsonSchema.string({ description: 'Full human-readable display name' }),
+  emails: jsonSchema.array(jsonSchema.string(), { description: 'Verified email addresses' }),
+  id: jsonSchema.string({ description: 'Optional canonical user ID (user:<slug>)' }),
+}, { required: ['displayName', 'emails'] });
+
+const PrincipalUpdateBodySchema: JsonSchemaObject = jsonSchema.object({
+  displayName: jsonSchema.string({ description: 'Updated display name' }),
+}, { required: ['displayName'] });
+
+const PrincipalEmailBodySchema: JsonSchemaObject = jsonSchema.object({
+  email: jsonSchema.string({ description: 'Email address to associate with principal' }),
+}, { required: ['email'] });
+
+const PrincipalRevokeBodySchema: JsonSchemaObject = jsonSchema.object({
+  confirm: jsonSchema.string({ description: 'Must match principal ID to confirm revocation' }),
+  reason: jsonSchema.string({ description: 'Administrative reason for access revocation' }),
+});
+
+const GrantCreateBodySchema: JsonSchemaObject = jsonSchema.object({
+  subject: jsonSchema.string({ description: 'Target principal or group ID' }),
+  role: jsonSchema.string({ description: 'Factory role granted' }),
+  scope: jsonSchema.object({
+    kind: jsonSchema.string({ description: 'Scope kind', enum: ['fleet', 'agent', 'skill'] }),
+    id: jsonSchema.string({ description: 'Scope entity ID if not fleet' }),
+  }, { required: ['kind'] }),
+  state: jsonSchema.string({ description: 'Grant state', enum: ['active', 'pending'] }),
+  expiresAt: jsonSchema.string({ description: 'ISO-8601 expiration timestamp' }),
+}, { required: ['subject', 'role', 'scope'] });
+
+const BudgetUsdBodySchema: JsonSchemaObject = jsonSchema.object({
+  budgetUsd: jsonSchema.object({
+    perDay: jsonSchema.number({ description: 'Daily spend ceiling in USD', minimum: 0 }),
+    perMonth: jsonSchema.number({ description: 'Monthly spend ceiling in USD', minimum: 0 }),
+  }),
+}, { required: ['budgetUsd'] });
+
+const SpendBudgetsBodySchema: JsonSchemaObject = jsonSchema.object({
+  totalMonthUsd: jsonSchema.number({ description: 'Total monthly spend ceiling in USD for entire factory', minimum: 0 }),
+  alertAt: jsonSchema.array(jsonSchema.number({ minimum: 0, maximum: 1 }), { description: 'Fractional alert thresholds (e.g. 0.5, 0.8, 1.0)' }),
+}, { required: ['totalMonthUsd'] });
+
+const ApprovalDecideBodySchema: JsonSchemaObject = jsonSchema.object({
+  decision: jsonSchema.string({ description: 'Decision outcome', enum: ['approve', 'reject'] }),
+  notes: jsonSchema.string({ description: 'Administrative justification or review notes' }),
+}, { required: ['decision'] });
+
+const SubmissionCreateBodySchema: JsonSchemaObject = jsonSchema.object({
+  kind: jsonSchema.string({ description: 'Content kind', enum: ['agent', 'skill'] }),
+  content: jsonSchema.object({}, { description: 'Complete cartridge manifest or skill package configuration' }),
+}, { required: ['kind', 'content'] });
+
+const InterviewSubmitBodySchema: JsonSchemaObject = jsonSchema.object({
+  answers: jsonSchema.object({}, { description: 'Interview questions and answers map' }),
+  finalize: jsonSchema.boolean({ description: 'Whether to create a formal submission or preview only' }),
+}, { required: ['answers'] });
+
+const AgentSkillAdoptBodySchema: JsonSchemaObject = jsonSchema.object({
+  skillId: jsonSchema.string({ description: 'Skill package identifier' }),
+  version: jsonSchema.string({ description: 'Semantic version of skill to adopt' }),
+  holds: jsonSchema.object({}, { description: 'Hold overrides map (action -> boolean)' }),
+  reason: jsonSchema.string({ description: 'Adoption rationale' }),
+}, { required: ['skillId'] });
+
+const AgentSkillPatchBodySchema: JsonSchemaObject = jsonSchema.object({
+  holds: jsonSchema.object({}, { description: 'Hold overrides map (action -> boolean)' }),
+  version: jsonSchema.string({ description: 'Target version update' }),
+});
+
+const AgentSkillHoldsBodySchema: JsonSchemaObject = jsonSchema.object({
+  holds: jsonSchema.object({}, { description: 'Hold overrides map (action -> boolean)' }),
+}, { required: ['holds'] });
+
+const ConversationTurnBodySchema: JsonSchemaObject = jsonSchema.object({
+  input: jsonSchema.object({}, { description: 'Input payload or structured turn content' }),
+  message: jsonSchema.string({ description: 'Text message from user to agent' }),
+  prompt: jsonSchema.string({ description: 'Prompt or instructions for agent' }),
+  requestedBy: jsonSchema.object({
+    provider: jsonSchema.string({ description: 'External identity provider' }),
+    id: jsonSchema.string({ description: 'External user identifier' }),
+  }, { description: 'Verified external caller identity' }),
+});
+
+const ConversationRequestsBodySchema: JsonSchemaObject = jsonSchema.object({
+  op: jsonSchema.string({ description: 'Operation type', enum: ['list', 'turns'] }),
+  conversation: jsonSchema.string({ description: 'Conversation ID when querying turns' }),
+  limit: jsonSchema.integer({ description: 'Max items to return (1-20)', minimum: 1, maximum: 20 }),
+  subject: jsonSchema.string({ description: 'Principal actor filter' }),
+}, { required: ['op'] });
+
+const RunStartBodySchema: JsonSchemaObject = jsonSchema.object({
+  input: jsonSchema.object({}, { description: 'Initial input payload for container run' }),
+  model: jsonSchema.string({ description: 'AI model override for this run' }),
+  callbackUrl: jsonSchema.string({ description: 'Webhook callback URL on run completion' }),
+  requestedBy: jsonSchema.object({
+    provider: jsonSchema.string({ description: 'External identity provider' }),
+    id: jsonSchema.string({ description: 'External user identifier' }),
+  }, { description: 'Attested caller identity' }),
+});
+
+const RunWakeBodySchema: JsonSchemaObject = jsonSchema.object({
+  input: jsonSchema.object({}, { description: 'Input payload to deliver on agent wake' }),
+  model: jsonSchema.string({ description: 'AI model override' }),
+  requestedBy: jsonSchema.object({
+    provider: jsonSchema.string({ description: 'External identity provider' }),
+    id: jsonSchema.string({ description: 'External user identifier' }),
+  }, { description: 'Attested caller identity' }),
+});
+
+const AgentSettingsBodySchema: JsonSchemaObject = jsonSchema.object({
+  name: jsonSchema.string({ description: 'Updated agent display name' }),
+  settings: jsonSchema.object({}, { description: 'Configuration settings object' }),
+  soul: jsonSchema.string({ description: 'Updated core persona and instructions' }),
+  memory: jsonSchema.object({}, { description: 'Memory configuration block' }),
+  roles: jsonSchema.array(jsonSchema.object({}, { description: 'Role definitions' })),
+});
+
+const AgentRenameBodySchema: JsonSchemaObject = jsonSchema.object({
+  name: jsonSchema.string({ description: 'New display name for the agent' }),
+}, { required: ['name'] });
+
+const AgentPolicyBodySchema: JsonSchemaObject = jsonSchema.object({
+  routes: jsonSchema.array(jsonSchema.string(), { description: 'Allowed egress network routes' }),
+  models: jsonSchema.array(jsonSchema.string(), { description: 'Allowed AI models' }),
+  budgetUsd: jsonSchema.object({
+    perDay: jsonSchema.number({ description: 'Daily budget limit in USD', minimum: 0 }),
+    perMonth: jsonSchema.number({ description: 'Monthly budget limit in USD', minimum: 0 }),
+  }, { description: 'Agent spend limits' }),
+  tools: jsonSchema.object({}, { description: 'Tool permission flags' }),
+  subagents: jsonSchema.array(jsonSchema.string(), { description: 'Permitted helper subagents' }),
+});
+
+const AgentModelsBodySchema: JsonSchemaObject = jsonSchema.object({
+  defaultModel: jsonSchema.string({ description: 'Primary model name' }),
+  allowedModels: jsonSchema.array(jsonSchema.string(), { description: 'List of allowed model names' }),
+  failoverModels: jsonSchema.array(jsonSchema.string(), { description: 'Ordered failover fallback models' }),
+});
+
+const AgentOwnersBodySchema: JsonSchemaObject = jsonSchema.object({
+  owners: jsonSchema.array(jsonSchema.string(), { description: 'Array of principal IDs who co-own the agent' }),
+}, { required: ['owners'] });
+
+const AgentUpdateInstallBodySchema: JsonSchemaObject = jsonSchema.object({
+  mode: jsonSchema.string({ description: 'Update installation mode', enum: ['drain', 'restart_now'] }),
+  commit: jsonSchema.string({ description: 'Target git commit SHA' }),
+  version: jsonSchema.string({ description: 'Target release version' }),
+});
+
+const AgentConvertBodySchema: JsonSchemaObject = jsonSchema.object({
+  settings: jsonSchema.object({}, { description: 'Agent configuration settings' }),
+  soul: jsonSchema.string({ description: 'Agent persona prompt' }),
+  memory: jsonSchema.object({}, { description: 'Memory archetype and bounds' }),
+  skills: jsonSchema.array(jsonSchema.object({
+    id: jsonSchema.string({ description: 'Skill package ID' }),
+    version: jsonSchema.string({ description: 'Skill version' }),
+  })),
+});
+
+const ModelScanBodySchema: JsonSchemaObject = jsonSchema.object({
+  vendorId: jsonSchema.string({ description: 'Vendor identifier to scan for new models' }),
+}, { required: ['vendorId'] });
+
+const ModelAdmitBodySchema: JsonSchemaObject = jsonSchema.object({
+  model: jsonSchema.string({ description: 'Model identifier' }),
+  credentialMode: jsonSchema.string({ description: 'Credential mode (api-key or subscription)' }),
+  connection: jsonSchema.string({ description: 'Connection ID for subscription catalog entries' }),
+  price: jsonSchema.object({
+    inputPerMillion: jsonSchema.number({ description: 'Cost per million input tokens in USD' }),
+    outputPerMillion: jsonSchema.number({ description: 'Cost per million output tokens in USD' }),
+  }, { description: 'Token pricing configuration' }),
+});
+
+const ModelPricingBodySchema: JsonSchemaObject = jsonSchema.object({
+  price: jsonSchema.object({
+    inputPerMillion: jsonSchema.number({ description: 'Cost per million input tokens in USD' }),
+    outputPerMillion: jsonSchema.number({ description: 'Cost per million output tokens in USD' }),
+  }, { description: 'Updated token pricing', required: ['inputPerMillion', 'outputPerMillion'] }),
+}, { required: ['price'] });
+
+const ModelDefaultBodySchema: JsonSchemaObject = jsonSchema.object({
+  model: jsonSchema.string({ description: 'Model identifier' }),
+}, { required: ['model'] });
+
+const RegistryAgentBodySchema: JsonSchemaObject = jsonSchema.object({
+  repo: jsonSchema.string({ description: 'HTTPS Git repository URL' }),
+  commit: jsonSchema.string({ description: 'Pinned 40-character git commit SHA' }),
+  id: jsonSchema.string({ description: 'Optional agent identifier' }),
+  name: jsonSchema.string({ description: 'Human-readable agent name' }),
+  cartridge: jsonSchema.object({}, { description: 'Embedded cartridge configuration' }),
+});
+
+const CredentialValueBodySchema: JsonSchemaObject = jsonSchema.object({
+  value: jsonSchema.string({ description: 'Secret plaintext value to store securely' }),
+}, { required: ['value'] });
+
+const OAuthClientCredentialsBodySchema: JsonSchemaObject = jsonSchema.object({
+  clientId: jsonSchema.string({ description: 'OAuth client ID' }),
+  clientSecret: jsonSchema.string({ description: 'OAuth client secret' }),
+  value: jsonSchema.string({ description: 'Raw client credential value' }),
+});
+
+const AppSetupStepBodySchema: JsonSchemaObject = jsonSchema.object({
+  input: jsonSchema.object({}, { description: 'Setup step input values' }),
+  value: jsonSchema.string({ description: 'Setup step token or credential value' }),
+});
+
+const DiscordTokenBodySchema: JsonSchemaObject = jsonSchema.object({
+  token: jsonSchema.string({ description: 'Discord bot token' }),
+}, { required: ['token'] });
+
+const GitHubAppStartBodySchema: JsonSchemaObject = jsonSchema.object({
+  replace: jsonSchema.boolean({ description: 'Whether to replace an existing GitHub App setup' }),
+});
+
+const GitHubAppInstallationsBodySchema: JsonSchemaObject = jsonSchema.object({
+  orgs: jsonSchema.array(jsonSchema.string(), { description: 'GitHub organization names' }),
+  installationIds: jsonSchema.array(jsonSchema.number(), { description: 'GitHub App installation IDs' }),
+});
+
+const TransferStartBodySchema: JsonSchemaObject = jsonSchema.object({
+  to: jsonSchema.string({ description: 'Recipient principal ID (user:<slug>)' }),
+  notes: jsonSchema.string({ description: 'Transfer message or justification' }),
+}, { required: ['to'] });
+
+const ConnectionImportBodySchema: JsonSchemaObject = jsonSchema.object({
+  credentials: jsonSchema.object({}, { description: 'Provider connection credentials' }),
+  token: jsonSchema.string({ description: 'Access token or API key' }),
+});
+
+const SubscriptionConnectBodySchema: JsonSchemaObject = jsonSchema.object({
+  templateId: jsonSchema.string({ description: 'Subscription template identifier' }),
+  subscriberAttested: jsonSchema.boolean({ description: 'Must be true confirming subscription ownership' }),
+  scope: jsonSchema.string({ description: 'Subscription scope', enum: ['factory', 'personal'] }),
+  name: jsonSchema.string({ description: 'Display name for the subscription connection' }),
+  ownerPrincipalId: jsonSchema.string({ description: 'Owner principal ID for personal subscriptions' }),
+}, { required: ['templateId', 'subscriberAttested'] });
+
+const SubscriptionReconnectBodySchema: JsonSchemaObject = jsonSchema.object({
+  subscriberAttested: jsonSchema.boolean({ description: 'Confirm re-attestation of subscription terms' }),
+});
+
+const SubscriptionModelAdmitBodySchema: JsonSchemaObject = jsonSchema.object({
+  model: jsonSchema.string({ description: 'Model identifier' }),
+  displayName: jsonSchema.string({ description: 'Display name for model' }),
+  price: jsonSchema.object({
+    inputPerMillion: jsonSchema.number({ description: 'Input token cost' }),
+    outputPerMillion: jsonSchema.number({ description: 'Output token cost' }),
+  }),
+}, { required: ['model'] });
+
+const SubscriptionUpdateBodySchema: JsonSchemaObject = jsonSchema.object({
+  name: jsonSchema.string({ description: 'Updated display name for subscription connection' }),
+}, { required: ['name'] });
+
+const IdentityLinkBodySchema: JsonSchemaObject = jsonSchema.object({
+  actor: jsonSchema.string({ description: 'Internal principal actor string' }),
+  name: jsonSchema.string({ description: 'External display name' }),
+  roles: jsonSchema.array(jsonSchema.string(), { description: 'Global roles mapped to this identity' }),
+  agentRoles: jsonSchema.object({}, { description: 'Agent-scoped role mappings' }),
+}, { required: ['actor'] });
+
+const ApiKeyCreateBodySchema: JsonSchemaObject = jsonSchema.object({
+  name: jsonSchema.string({ description: 'Human-readable description or label' }),
+  owner: jsonSchema.string({ description: 'Principal ID who owns the key (defaults to caller)' }),
+  roles: jsonSchema.array(jsonSchema.string(), { description: 'Roles granted to service API key' }),
+  expiresAt: jsonSchema.string({ description: 'ISO-8601 expiration timestamp' }),
+});
+
+const ApiKeyRotateBodySchema: JsonSchemaObject = jsonSchema.object({
+  expiresAt: jsonSchema.string({ description: 'Updated ISO-8601 expiration timestamp' }),
+});
+
+const IdpSetupBodySchema: JsonSchemaObject = jsonSchema.object({
+  providers: jsonSchema.array(jsonSchema.object({
+    id: jsonSchema.string({ description: 'Provider identifier' }),
+    issuer: jsonSchema.string({ description: 'OIDC issuer URL' }),
+    clientId: jsonSchema.string({ description: 'OIDC client ID' }),
+    clientSecret: jsonSchema.string({ description: 'OIDC client secret' }),
+    name: jsonSchema.string({ description: 'Display name' }),
+  }, { required: ['id', 'issuer', 'clientId'] }), { description: 'Identity provider configurations' }),
+}, { required: ['providers'] });
+
+const AuthMigrationImportBodySchema: JsonSchemaObject = jsonSchema.object({
+  reissueKeys: jsonSchema.boolean({ description: 'Whether to reissue API keys during migration' }),
+});
+
+const RuntimeRolloutBodySchema: JsonSchemaObject = jsonSchema.object({
+  repo: jsonSchema.string({ description: 'Git repository URL' }),
+  commit: jsonSchema.string({ description: 'Pinned 40-character commit SHA' }),
+  image: jsonSchema.string({ description: 'Pinned container image digest (image@sha256:...)' }),
+}, { required: ['repo', 'commit', 'image'] });
+
+const AgentImportBodySchema: JsonSchemaObject = jsonSchema.object({
+  bundle: jsonSchema.object({}, { description: 'Agent bundle archive or manifest' }),
+  agent: jsonSchema.object({}, { description: 'Agent definition' }),
+});
+
+const RoleAssignmentBodySchema: JsonSchemaObject = jsonSchema.object({
+  role: jsonSchema.string({ description: 'Role name assigned to subject on agent' }),
+}, { required: ['role'] });
+
+const SkillDefaultsBodySchema: JsonSchemaObject = jsonSchema.object({
+  defaults: jsonSchema.array(jsonSchema.object({
+    id: jsonSchema.string({ description: 'Skill package ID' }),
+    version: jsonSchema.string({ description: 'Semantic version' }),
+    holds: jsonSchema.object({}, { description: 'Hold overrides' }),
+  }, { required: ['id', 'version'] })),
+}, { required: ['defaults'] });
+
+const SkillRegisterBodySchema: JsonSchemaObject = jsonSchema.object({
+  id: jsonSchema.string({ description: 'Skill package identifier' }),
+  version: jsonSchema.string({ description: 'Semantic version string' }),
+  manifest: jsonSchema.object({}, { description: 'Skill manifest specification' }),
+  repo: jsonSchema.string({ description: 'Repository URL' }),
+  commit: jsonSchema.string({ description: 'Commit SHA' }),
+}, { required: ['id', 'version'] });
+
+const DecisionReasonBodySchema: JsonSchemaObject = jsonSchema.object({
+  reason: jsonSchema.string({ description: 'Administrative justification' }),
+});
+
+const TrainingCapBodySchema: JsonSchemaObject = jsonSchema.object({
+  capUsd: jsonSchema.number({ description: 'Training account budget limit in USD', minimum: 0 }),
+}, { required: ['capUsd'] });
+
+const TrainingBaselineBodySchema: JsonSchemaObject = jsonSchema.object({
+  cases: jsonSchema.array(jsonSchema.object({}, { description: 'Evaluation benchmark test cases' })),
+}, { required: ['cases'] });
+
+const TrainingRunBodySchema: JsonSchemaObject = jsonSchema.object({
+  model: jsonSchema.string({ description: 'AI model used for training run' }),
+  costUsd: jsonSchema.number({ description: 'Training run spend' }),
+  outputs: jsonSchema.object({}, { description: 'Training evaluation metrics and outputs' }),
+});
+
+const SkillModelBodySchema: JsonSchemaObject = jsonSchema.object({
+  model: jsonSchema.string({ description: 'Offered model identifier, or null to clear' }),
+});
+
+const SkillGroupBodySchema: JsonSchemaObject = jsonSchema.object({
+  groupId: jsonSchema.string({ description: 'Target group ID' }),
+}, { required: ['groupId'] });
+
+const PublishRequestBodySchema: JsonSchemaObject = jsonSchema.object({
+  notes: jsonSchema.string({ description: 'Publication justification' }),
+});
+
+const GroupCreateBodySchema: JsonSchemaObject = jsonSchema.object({
+  id: jsonSchema.string({ description: 'Group slug identifier' }),
+  name: jsonSchema.string({ description: 'Human-readable group name' }),
+  description: jsonSchema.string({ description: 'Group description' }),
+  members: jsonSchema.array(jsonSchema.string(), { description: 'Initial member principal IDs' }),
+}, { required: ['id'] });
+
+const GroupUpdateBodySchema: JsonSchemaObject = jsonSchema.object({
+  name: jsonSchema.string({ description: 'Updated group name' }),
+  description: jsonSchema.string({ description: 'Updated description' }),
+  members: jsonSchema.array(jsonSchema.string(), { description: 'Updated member list' }),
+});
+
+const GroupMemberAddBodySchema: JsonSchemaObject = jsonSchema.object({
+  member: jsonSchema.string({ description: 'Principal ID to add to group' }),
+}, { required: ['member'] });
+
+const SubagentRegisterBodySchema: JsonSchemaObject = jsonSchema.object({
+  id: jsonSchema.string({ description: 'Subagent identifier' }),
+  name: jsonSchema.string({ description: 'Subagent display name' }),
+  description: jsonSchema.string({ description: 'Task specialization description' }),
+  prompt: jsonSchema.string({ description: 'Subagent system prompt instructions' }),
+  skills: jsonSchema.array(jsonSchema.string(), { description: 'Required skills' }),
+}, { required: ['id'] });
+
+const SubagentModelsBodySchema: JsonSchemaObject = jsonSchema.object({
+  approvedModels: jsonSchema.array(jsonSchema.string(), { description: 'List of offered models allowed for subagent' }),
+}, { required: ['approvedModels'] });
+
+const SystemProposalBodySchema: JsonSchemaObject = jsonSchema.object({
+  id: jsonSchema.string({ description: 'System identifier' }),
+  name: jsonSchema.string({ description: 'System display name' }),
+  upstream: jsonSchema.string({ description: 'Upstream base URL' }),
+  routes: jsonSchema.array(jsonSchema.string(), { description: 'Routes provided by this system' }),
+  credential: jsonSchema.object({
+    secret: jsonSchema.string({ description: 'Platform secret name bound to system' }),
+  }),
+}, { required: ['id'] });
+
+const SystemDecisionBodySchema: JsonSchemaObject = jsonSchema.object({
+  version: jsonSchema.integer({ description: 'Proposal version being decided' }),
+  reason: jsonSchema.string({ description: 'Administrative decision notes' }),
+});
+
+// Internal Mutating Schemas
+const CliTokenExchangeBodySchema: JsonSchemaObject = jsonSchema.object({
+  token: jsonSchema.string({ description: 'One-time CLI token from browser sign-in' }),
+});
+
+const SubagentSpawnBodySchema: JsonSchemaObject = jsonSchema.object({
+  subagentId: jsonSchema.string({ description: 'Subagent identifier to spawn' }),
+  input: jsonSchema.object({}, { description: 'Initial input for subagent' }),
+});
+
+const RunWakeTargetBodySchema: JsonSchemaObject = jsonSchema.object({
+  input: jsonSchema.object({}, { description: 'Input payload' }),
+});
+
+const RunReplyBodySchema: JsonSchemaObject = jsonSchema.object({
+  content: jsonSchema.string({ description: 'Reply text from agent turn' }),
+  turnId: jsonSchema.string({ description: 'Associated turn ID' }),
+}, { required: ['content'] });
+
+const RunRoleRequestsBodySchema: JsonSchemaObject = jsonSchema.object({
+  roles: jsonSchema.array(jsonSchema.string(), { description: 'Roles requested by run' }),
+}, { required: ['roles'] });
+
+const LedgerEventBodySchema: JsonSchemaObject = jsonSchema.object({
+  agentId: jsonSchema.string({ description: 'Agent associated with ledger event' }),
+  type: jsonSchema.string({ description: 'Event category type' }),
+}, { required: ['agentId', 'type'] });
+
+const EgressApprovalBodySchema: JsonSchemaObject = jsonSchema.object({
+  agentId: jsonSchema.string({ description: 'Requesting agent ID' }),
+  route: jsonSchema.string({ description: 'Target egress route' }),
+}, { required: ['agentId', 'route'] });
+
+const EgressHoldBodySchema: JsonSchemaObject = jsonSchema.object({
+  agentId: jsonSchema.string({ description: 'Requesting agent ID' }),
+  skillId: jsonSchema.string({ description: 'Skill holding action' }),
+  action: jsonSchema.string({ description: 'Held action name' }),
+}, { required: ['agentId', 'skillId', 'action'] });
+
+const SecretCheckoutBodySchema: JsonSchemaObject = jsonSchema.object({
+  credential: jsonSchema.string({ description: 'Name of credential to checkout' }),
+}, { required: ['credential'] });
+
+const McpRpcBodySchema: JsonSchemaObject = jsonSchema.object({
+  method: jsonSchema.string({ description: 'JSON-RPC MCP method name' }),
+  params: jsonSchema.object({}, { description: 'JSON-RPC parameters object' }),
+}, { required: ['method'] });
+
+const ConnectionTokenBodySchema: JsonSchemaObject = jsonSchema.object({
+  connection: jsonSchema.string({ description: 'Connection ID' }),
+}, { required: ['connection'] });
+
+const SubscriptionTokenBodySchema: JsonSchemaObject = jsonSchema.object({
+  connection: jsonSchema.string({ description: 'Subscription connection ID' }),
+}, { required: ['connection'] });
+
+const GatekeeperRoutesBodySchema: JsonSchemaObject = jsonSchema.object({
+  routes: jsonSchema.array(jsonSchema.string(), { description: 'Route names' }),
+}, { required: ['routes'] });
+
+const MintGitHubTokenBodySchema: JsonSchemaObject = jsonSchema.object({
+  agentId: jsonSchema.string({ description: 'Agent ID' }),
+}, { required: ['agentId'] });
+
+const GenericObjectBodySchema: JsonSchemaObject = jsonSchema.object({
+  payload: jsonSchema.object({}, { description: 'Generic payload' }),
+});
+
+// Reusable Query Schemas
+const LedgerQuerySchema: JsonSchemaObject = jsonSchema.object({
+  agent: jsonSchema.string({ description: 'Filter by agent ID' }),
+  agentId: jsonSchema.string({ description: 'Filter by agent ID (alias)' }),
+  from: jsonSchema.string({ description: 'Start ISO timestamp' }),
+  to: jsonSchema.string({ description: 'End ISO timestamp' }),
+  limit: jsonSchema.integer({ description: 'Max events to return (1-1000)', minimum: 1, maximum: 1000 }),
+  offset: jsonSchema.integer({ description: 'Pagination offset', minimum: 0 }),
+});
+
+const RunsQuerySchema: JsonSchemaObject = jsonSchema.object({
+  agent: jsonSchema.string({ description: 'Filter by agent ID' }),
+  active: jsonSchema.boolean({ description: 'Filter only active (non-terminal) runs' }),
+  limit: jsonSchema.integer({ description: 'Max runs to return (1-1000)', minimum: 1, maximum: 1000 }),
+  offset: jsonSchema.integer({ description: 'Pagination offset', minimum: 0 }),
+});
+
+const AuthzCheckQuerySchema: JsonSchemaObject = jsonSchema.object({
+  privilege: jsonSchema.string({ description: 'Bouncer privilege name to test' }),
+  agentId: jsonSchema.string({ description: 'Optional agent ID scope for check' }),
+  skillId: jsonSchema.string({ description: 'Optional skill ID scope for check' }),
+}, { required: ['privilege'] });
+
+const RepliesQuerySchema: JsonSchemaObject = jsonSchema.object({
+  after: jsonSchema.integer({ description: 'Return console replies after sequence number' }),
+});
+
+const GrantsQuerySchema: JsonSchemaObject = jsonSchema.object({
+  subject: jsonSchema.string({ description: 'Filter by subject principal or group' }),
+  scopeKind: jsonSchema.string({ description: 'Filter by scope kind (fleet, agent, skill)' }),
+  scopeId: jsonSchema.string({ description: 'Filter by scope entity ID' }),
+  includeExpired: jsonSchema.boolean({ description: 'Include expired grants' }),
+});
+
+const KeysQuerySchema: JsonSchemaObject = jsonSchema.object({
+  owner: jsonSchema.string({ description: 'Filter keys by owner principal ID' }),
+});
+
+const SchedulesQuerySchema: JsonSchemaObject = jsonSchema.object({
+  agent: jsonSchema.string({ description: 'Filter schedules by agent ID' }),
+  agentId: jsonSchema.string({ description: 'Filter schedules by agent ID (alias)' }),
+});
+
+const GroupsQuerySchema: JsonSchemaObject = jsonSchema.object({
+  member: jsonSchema.string({ description: 'Filter groups by member principal ID' }),
+});
+
+const PackageFileQuerySchema: JsonSchemaObject = jsonSchema.object({
+  path: jsonSchema.string({ description: 'Relative file path inside skill package' }),
+}, { required: ['path'] });
+
+const SpendReportQuerySchema: JsonSchemaObject = jsonSchema.object({
+  period: jsonSchema.string({ description: 'Accounting period: current or last', enum: ['current', 'last'] }),
+});
+
+const HealthResponseSchema: JsonSchemaObject = jsonSchema.object({
+  status: jsonSchema.string({ description: 'Service health status' }),
+}, { required: ['status'] });
+
+const RolesQuerySchema: JsonSchemaObject = jsonSchema.object({
+  held: jsonSchema.string({ description: 'Filter by held role name' }),
+});
+
+const ApprovalsQuerySchema: JsonSchemaObject = jsonSchema.object({
+  state: jsonSchema.string({ description: 'Filter approvals by state (pending, approved, rejected)' }),
+});
+
+const ConnectionsStartQuerySchema: JsonSchemaObject = jsonSchema.object({
+  scopes: jsonSchema.string({ description: 'Optional space- or comma-delimited OAuth scopes' }),
+});
+
+const SubscriptionsQuerySchema: JsonSchemaObject = jsonSchema.object({
+  scope: jsonSchema.string({ description: 'Filter by scope: factory or personal', enum: ['factory', 'personal'] }),
+});
+
+const StreamQuerySchema: JsonSchemaObject = jsonSchema.object({
+  agent: jsonSchema.string({ description: 'Filter events by agent ID' }),
+});
+
 export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   {
     operationId: "get_ui",
@@ -264,6 +1013,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     exception: "ui-session",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_login_page",
@@ -274,6 +1024,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     exception: "login-page",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "start_idp_login",
@@ -284,6 +1035,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "bouncer",
     mcpExposure: "internal",
     exception: "login-start",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "callback_idp_login",
@@ -294,6 +1046,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "bouncer",
     mcpExposure: "internal",
     exception: "login-callback",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "exchange_cli_token",
@@ -304,6 +1057,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "bouncer",
     mcpExposure: "internal",
     exception: "login-cli-token",
+    requestBodySchema: CliTokenExchangeBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "logout_session",
@@ -314,6 +1070,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "bouncer",
     mcpExposure: "internal",
     exception: "logout",
+    noRequestBody: true,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_root_health_or_login",
@@ -324,6 +1083,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     exception: "login-page",
+    responseSchema: HealthResponseSchema,
   },
   {
     operationId: "get_healthz",
@@ -335,6 +1095,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "observe",
     mcpToolName: "healthz_probe",
     exception: "health-probe",
+    responseSchema: HealthResponseSchema,
   },
   {
     operationId: "get_health",
@@ -346,6 +1107,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "observe",
     mcpToolName: "health_check",
     exception: "health-probe",
+    responseSchema: HealthResponseSchema,
   },
   {
     operationId: "whoami",
@@ -358,6 +1120,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "whoami",
     inCoreToolset: true,
     exception: "identity-whoami",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_setup_status",
@@ -371,6 +1134,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "get_setup_status",
     inCoreToolset: true,
     exception: "setup-status",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_idp_config",
@@ -383,6 +1147,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "get_idp_config",
     privilege: "grants.manage",
+    responseSchema: IdpSetupBodySchema,
   },
   {
     operationId: "set_idp_config",
@@ -395,6 +1160,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "set_idp_config",
     privilege: "grants.manage",
+    requestBodySchema: IdpSetupBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_api_keys",
@@ -407,6 +1175,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "list_api_keys",
     exception: "keys-self-list",
+    querySchema: KeysQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "create_api_key",
@@ -417,6 +1187,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "bouncer",
     mcpExposure: "console-or-cli-only",
     exception: "keys-self-create",
+    requestBodySchema: ApiKeyCreateBodySchema,
+    responseSchema: ApiKeyRecordResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "rotate_api_key",
@@ -427,6 +1200,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "bouncer",
     mcpExposure: "console-or-cli-only",
     exception: "keys-self-rotate",
+    requestBodySchema: ApiKeyRotateBodySchema,
+    responseSchema: ApiKeyRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "revoke_api_key",
@@ -439,6 +1215,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "revoke_api_key",
     exception: "keys-self-revoke",
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "authz_check",
@@ -452,6 +1230,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "authz_check",
     inCoreToolset: true,
     exception: "authz-check",
+    querySchema: AuthzCheckQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "import_auth_migration",
@@ -464,6 +1244,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "import_auth_migration",
     privilege: "grants.manage",
+    requestBodySchema: AuthMigrationImportBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_auth_migration_readiness",
@@ -476,6 +1259,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "get_auth_migration_readiness",
     privilege: "grants.manage",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "cutover_auth_migration",
@@ -488,6 +1272,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "danger",
     mcpToolName: "cutover_auth_migration",
     privilege: "grants.manage",
+    noRequestBody: true,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_principals",
@@ -500,6 +1287,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "list_principals",
     privilege: "grants.manage",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "create_principal",
@@ -512,6 +1300,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "create_principal",
     privilege: "grants.manage",
+    requestBodySchema: PrincipalCreateBodySchema,
+    responseSchema: PrincipalRecordResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "get_principal",
@@ -524,6 +1315,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "get_principal",
     privilege: "grants.manage",
+    responseSchema: PrincipalRecordResponseSchema,
   },
   {
     operationId: "revoke_principal_access",
@@ -536,6 +1328,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "danger",
     mcpToolName: "revoke_principal_access",
     privilege: "grants.manage",
+    requestBodySchema: PrincipalRevokeBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "update_principal",
@@ -548,6 +1343,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "update_principal",
     privilege: "grants.manage",
+    requestBodySchema: PrincipalUpdateBodySchema,
+    responseSchema: PrincipalRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "add_principal_email",
@@ -560,6 +1358,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "add_principal_email",
     privilege: "grants.manage",
+    requestBodySchema: PrincipalEmailBodySchema,
+    responseSchema: PrincipalRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "remove_principal_email",
@@ -572,6 +1373,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "remove_principal_email",
     privilege: "grants.manage",
+    responseSchema: PrincipalRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_grants",
@@ -585,6 +1388,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "list_grants",
     inCoreToolset: true,
     exception: "grants-scoped-list",
+    querySchema: GrantsQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "create_grant",
@@ -598,6 +1403,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "create_grant",
     inCoreToolset: true,
     exception: "grants-scoped-create",
+    requestBodySchema: GrantCreateBodySchema,
+    responseSchema: GrantRecordResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "revoke_grant",
@@ -611,6 +1419,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "revoke_grant",
     inCoreToolset: true,
     exception: "grants-scoped-revoke",
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_metrics",
@@ -623,6 +1433,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "get_metrics",
     inCoreToolset: true,
     privilege: "metrics.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_prometheus_metrics",
@@ -632,6 +1443,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "inspector",
     mcpExposure: "internal",
     privilege: "metrics.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_fleet_spend",
@@ -644,6 +1456,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "get_fleet_spend",
     inCoreToolset: true,
     privilege: "spend.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_spend_report",
@@ -656,6 +1469,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "get_spend_report",
     inCoreToolset: true,
     privilege: "spend.read",
+    querySchema: SpendReportQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_compute_spend",
@@ -667,6 +1482,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "spend",
     mcpToolName: "get_compute_spend",
     privilege: "spend.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_spend_budgets",
@@ -679,6 +1495,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "get_spend_budgets",
     inCoreToolset: true,
     privilege: "spend.read",
+    responseSchema: SpendBudgetsBodySchema,
   },
   {
     operationId: "set_spend_budgets",
@@ -691,6 +1508,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "set_spend_budgets",
     inCoreToolset: true,
     privilege: "spend.budget.set",
+    requestBodySchema: SpendBudgetsBodySchema,
+    responseSchema: SpendBudgetsBodySchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_triage_queue",
@@ -703,6 +1523,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "get_triage_queue",
     inCoreToolset: true,
     privilege: "triage.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "webhook_github_release",
@@ -713,6 +1534,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     exception: "webhook-github",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "webhook_github_release_alias1",
@@ -723,6 +1547,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     exception: "webhook-github",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "webhook_github_release_alias2",
@@ -733,6 +1560,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     exception: "webhook-github",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "webhook_github_release_alias3",
@@ -743,6 +1573,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     exception: "webhook-github",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "webhook_cartridge_trigger",
@@ -753,6 +1586,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     exception: "webhook-hooks",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "webhook_cartridge_trigger_alias",
@@ -763,6 +1599,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     exception: "webhook-hooks",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_agents",
@@ -775,6 +1614,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "list_agents",
     inCoreToolset: true,
     privilege: "agents.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "create_agent",
@@ -787,6 +1627,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "create_agent",
     inCoreToolset: true,
     privilege: "agents.create",
+    requestBodySchema: AgentCreateBodySchema,
+    responseSchema: AgentRecordResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "import_agent_bundle",
@@ -798,6 +1641,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "import_agent_bundle",
     privilege: "agents.create",
+    requestBodySchema: AgentImportBodySchema,
+    responseSchema: AgentRecordResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "get_runtime_info",
@@ -809,6 +1655,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "get_runtime_info",
     privilege: "agents.read",
+    responseSchema: RuntimeResponseSchema,
   },
   {
     operationId: "rollout_runtime_update",
@@ -820,6 +1667,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "rollout_runtime_update",
     privilege: "runtime.set",
+    requestBodySchema: RuntimeRolloutBodySchema,
+    responseSchema: RuntimeResponseSchema,
+    statusCodes: [200, 202],
   },
   {
     operationId: "start_agent_run",
@@ -832,6 +1682,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "start_agent_run",
     inCoreToolset: true,
     privilege: "agents.wake",
+    requestBodySchema: RunStartBodySchema,
+    responseSchema: RunRecordResponseSchema,
+    statusCodes: [200, 202],
   },
   {
     operationId: "wake_agent",
@@ -844,6 +1697,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "wake_agent",
     inCoreToolset: true,
     privilege: ["agents.wake","runs.attest-requester"],
+    requestBodySchema: RunWakeBodySchema,
+    responseSchema: RunRecordResponseSchema,
+    statusCodes: [200, 202],
   },
   {
     operationId: "pause_agent",
@@ -856,6 +1712,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "pause_agent",
     inCoreToolset: true,
     privilege: "agents.pause",
+    noRequestBody: true,
+    responseSchema: AgentRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "resume_agent",
@@ -868,6 +1727,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "resume_agent",
     inCoreToolset: true,
     privilege: "agents.resume",
+    noRequestBody: true,
+    responseSchema: AgentRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "isolate_agent",
@@ -879,6 +1741,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "danger",
     mcpToolName: "isolate_agent",
     privilege: "agents.isolate",
+    noRequestBody: true,
+    responseSchema: AgentRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "reset_agent",
@@ -890,6 +1755,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "danger",
     mcpToolName: "reset_agent",
     privilege: "agents.reset",
+    noRequestBody: true,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "check_agent_updates",
@@ -901,6 +1769,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "check_agent_updates",
     privilege: "agents.update.read",
+    noRequestBody: true,
+    responseSchema: UpdateCheckResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "install_agent_update",
@@ -912,6 +1783,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "install_agent_update",
     privilege: "agents.update.install",
+    requestBodySchema: AgentUpdateInstallBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "convert_agent_to_config",
@@ -923,6 +1797,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "convert_agent_to_config",
     privilege: "agents.settings.set",
+    requestBodySchema: AgentConvertBodySchema,
+    responseSchema: AgentRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_agent_settings",
@@ -934,6 +1811,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "get_agent_settings",
     privilege: "agents.settings.read",
+    responseSchema: AgentSettingsResponseSchema,
   },
   {
     operationId: "update_agent_settings",
@@ -945,6 +1823,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "update_agent_settings",
     privilege: "agents.settings.set",
+    requestBodySchema: AgentSettingsBodySchema,
+    responseSchema: AgentSettingsResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "rename_agent",
@@ -956,6 +1837,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "rename_agent",
     privilege: "agents.settings.set",
+    requestBodySchema: AgentRenameBodySchema,
+    responseSchema: AgentRenameResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_agent_roles",
@@ -967,6 +1851,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "get_agent_roles",
     privilege: "agents.roles.read",
+    querySchema: RolesQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_agent_role_assignments",
@@ -978,6 +1864,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "get_agent_role_assignments",
     privilege: "agents.roles.assign",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "assign_agent_role",
@@ -989,6 +1876,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "assign_agent_role",
     privilege: "agents.roles.assign",
+    requestBodySchema: RoleAssignmentBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "export_agent_bundle",
@@ -1000,6 +1890,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "export_agent_bundle",
     privilege: "config.export.agent",
+    responseSchema: AgentRecordResponseSchema,
   },
   {
     operationId: "get_agent_models",
@@ -1012,6 +1903,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "get_agent_models",
     inCoreToolset: true,
     privilege: "agents.models.read",
+    responseSchema: AgentModelsResponseSchema,
   },
   {
     operationId: "set_agent_models",
@@ -1024,6 +1916,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "set_agent_models",
     inCoreToolset: true,
     privilege: "agents.models.set",
+    requestBodySchema: AgentModelsBodySchema,
+    responseSchema: AgentModelsResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_agent_policy",
@@ -1036,6 +1931,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "get_agent_policy",
     inCoreToolset: true,
     privilege: "policy.read",
+    responseSchema: AgentPolicyResponseSchema,
   },
   {
     operationId: "set_agent_policy",
@@ -1048,6 +1944,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "set_agent_policy",
     inCoreToolset: true,
     privilege: "policy.set",
+    requestBodySchema: AgentPolicyBodySchema,
+    responseSchema: AgentPolicyResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "set_agent_owners",
@@ -1059,6 +1958,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "set_agent_owners",
     privilege: "agents.owners.set",
+    requestBodySchema: AgentOwnersBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_agent_config",
@@ -1071,6 +1973,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "get_agent_config",
     inCoreToolset: true,
     privilege: "config.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_agent_config_history",
@@ -1082,6 +1985,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "get_agent_config_history",
     privilege: "config.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_agent_config_version",
@@ -1093,6 +1997,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "get_agent_config_version",
     privilege: "config.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "list_agent_skills",
@@ -1105,6 +2010,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "list_agent_skills",
     inCoreToolset: true,
     privilege: "config.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "adopt_agent_skill",
@@ -1117,6 +2023,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "adopt_agent_skill",
     inCoreToolset: true,
     privilege: "skills.adopt.request",
+    requestBodySchema: AgentSkillAdoptBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "remove_agent_skill",
@@ -1129,6 +2038,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "remove_agent_skill",
     inCoreToolset: true,
     privilege: "skills.adopt.remove",
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "merge_agent_skill_holds",
@@ -1141,6 +2052,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "merge_agent_skill_holds",
     privilege: "skills.adopt.request",
+    requestBodySchema: AgentSkillPatchBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "replace_agent_skill_holds",
@@ -1151,6 +2065,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "registrar",
     mcpExposure: "internal",
     privilege: "skills.adopt.request",
+    requestBodySchema: AgentSkillHoldsBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "patch_agent_skill_holds",
@@ -1161,6 +2078,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "registrar",
     mcpExposure: "internal",
     privilege: "skills.adopt.request",
+    requestBodySchema: AgentSkillHoldsBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "approve_agent_skill_adoption",
@@ -1172,6 +2092,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "approve_agent_skill_adoption",
     privilege: "skills.adopt.decide",
+    requestBodySchema: DecisionReasonBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "reject_agent_skill_adoption",
@@ -1183,6 +2106,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "reject_agent_skill_adoption",
     privilege: "skills.adopt.decide",
+    requestBodySchema: DecisionReasonBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "agents_converse",
@@ -1195,6 +2121,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "agents_converse",
     inCoreToolset: true,
     privilege: "agents.converse",
+    requestBodySchema: ConversationTurnBodySchema,
+    responseSchema: ConversationTurnResponseSchema,
+    statusCodes: [200, 202],
   },
   {
     operationId: "manage_conversation_requests",
@@ -1206,6 +2135,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents-converse",
     mcpToolName: "manage_conversation_requests",
     privilege: ["agents.converse","conversations.read-others"],
+    requestBodySchema: ConversationRequestsBodySchema,
+    responseSchema: ConversationRequestsResponseSchema,
+    statusCodes: [200, 202],
   },
   {
     operationId: "poll_conversation_replies",
@@ -1217,6 +2149,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents-converse",
     mcpToolName: "poll_conversation_replies",
     privilege: "agents.converse",
+    querySchema: RepliesQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "list_runs",
@@ -1229,6 +2163,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "list_runs",
     inCoreToolset: true,
     privilege: "runs.read",
+    querySchema: RunsQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_run",
@@ -1241,6 +2177,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "get_run",
     inCoreToolset: true,
     privilege: "runs.read",
+    responseSchema: RunRecordResponseSchema,
   },
   {
     operationId: "cancel_run",
@@ -1253,6 +2190,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "cancel_run",
     inCoreToolset: true,
     privilege: "runs.cancel",
+    noRequestBody: true,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "run_get_approved_models",
@@ -1262,6 +2202,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "executive",
     mcpExposure: "internal",
     exception: "run-token",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "run_get_subagents",
@@ -1271,6 +2212,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "registrar",
     mcpExposure: "internal",
     exception: "run-token",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "run_spawn_subagent",
@@ -1280,6 +2222,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "property-manager",
     mcpExposure: "internal",
     exception: "run-token",
+    requestBodySchema: SubagentSpawnBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "run_get_subagent_run",
@@ -1289,6 +2234,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "property-manager",
     mcpExposure: "internal",
     exception: "run-token",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "run_wake_agent",
@@ -1298,6 +2244,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "property-manager",
     mcpExposure: "internal",
     exception: "run-token",
+    requestBodySchema: RunWakeTargetBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "run_get_models",
@@ -1307,6 +2256,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "executive",
     mcpExposure: "internal",
     exception: "run-token",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "run_set_models",
@@ -1316,6 +2266,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "executive",
     mcpExposure: "internal",
     exception: "run-token",
+    requestBodySchema: SubagentModelsBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "run_get_input",
@@ -1325,6 +2278,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "property-manager",
     mcpExposure: "internal",
     exception: "run-token",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "run_post_result",
@@ -1334,6 +2288,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "property-manager",
     mcpExposure: "internal",
     exception: "run-token",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "run_post_heartbeat",
@@ -1343,6 +2300,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "property-manager",
     mcpExposure: "internal",
     exception: "run-token",
+    noRequestBody: true,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "run_poll_mailbox",
@@ -1352,6 +2312,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "property-manager",
     mcpExposure: "internal",
     exception: "run-token",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "run_post_training",
@@ -1361,6 +2322,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "accountant",
     mcpExposure: "internal",
     exception: "run-token",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "run_post_reply",
@@ -1370,6 +2334,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "property-manager",
     mcpExposure: "internal",
     exception: "run-token",
+    requestBodySchema: RunReplyBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "run_get_agent_config",
@@ -1379,6 +2346,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "registrar",
     mcpExposure: "internal",
     exception: "run-token",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "run_post_role_request",
@@ -1388,6 +2356,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "bouncer",
     mcpExposure: "internal",
     exception: "run-token",
+    requestBodySchema: RunRoleRequestsBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "run_agent_builder",
@@ -1397,6 +2368,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "registrar",
     mcpExposure: "internal",
     exception: "run-token",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "run_stream_events",
@@ -1406,6 +2380,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "inspector",
     mcpExposure: "internal",
     exception: "run-token",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "query_ledger",
@@ -1418,6 +2393,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "query_ledger",
     inCoreToolset: true,
     privilege: "ledger.read",
+    querySchema: LedgerQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "verify_ledger",
@@ -1430,6 +2407,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "verify_ledger",
     inCoreToolset: true,
     privilege: "ledger.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "ingest_ledger_event",
@@ -1439,6 +2417,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "auditor",
     mcpExposure: "internal",
     privilege: "ledger.ingest",
+    requestBodySchema: LedgerEventBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "list_models",
@@ -1451,6 +2432,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "list_models",
     inCoreToolset: true,
     privilege: "models.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_internal_models_catalog",
@@ -1460,6 +2442,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "executive",
     mcpExposure: "internal",
     privilege: "egress.models.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "scan_models",
@@ -1471,6 +2454,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "models",
     mcpToolName: "scan_models",
     privilege: "models.manage",
+    requestBodySchema: ModelScanBodySchema,
+    responseSchema: ModelScanResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "admit_catalog_model",
@@ -1483,6 +2469,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "models",
     mcpToolName: "admit_catalog_model",
     privilege: ["models.manage","subscriptions.own"],
+    requestBodySchema: ModelAdmitBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "set_model_pricing",
@@ -1494,6 +2483,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "models",
     mcpToolName: "set_model_pricing",
     privilege: "models.manage",
+    requestBodySchema: ModelPricingBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "set_default_model",
@@ -1506,6 +2498,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "set_default_model",
     inCoreToolset: true,
     privilege: "models.manage",
+    requestBodySchema: ModelDefaultBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "remove_catalog_model",
@@ -1518,6 +2513,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "models",
     mcpToolName: "remove_catalog_model",
     privilege: ["models.manage","subscriptions.own"],
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_approvals",
@@ -1530,6 +2527,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "list_approvals",
     inCoreToolset: true,
     privilege: "approvals.read",
+    querySchema: ApprovalsQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "decide_approval",
@@ -1542,6 +2541,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "decide_approval",
     inCoreToolset: true,
     privilege: "approvals.decide",
+    requestBodySchema: ApprovalDecideBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "send_approval_prompt",
@@ -1551,6 +2553,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "approvals.channel",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "record_approval_prompt_asked",
@@ -1560,6 +2565,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "approvals.channel",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "record_channel_approval_decision",
@@ -1569,6 +2577,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "approvals.channel",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "mcp_protocol_endpoint",
@@ -1578,6 +2589,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "mcp.use",
+    requestBodySchema: McpRpcBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_registry_agents",
@@ -1589,6 +2603,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "list_registry_agents",
     privilege: "agents.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "register_agent_cartridge",
@@ -1600,6 +2615,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "register_agent_cartridge",
     privilege: "registry.register",
+    requestBodySchema: RegistryAgentBodySchema,
+    responseSchema: AgentRecordResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "get_registry_agent",
@@ -1611,6 +2629,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "get_registry_agent",
     privilege: "agents.read",
+    responseSchema: AgentRecordResponseSchema,
   },
   {
     operationId: "get_interview_questions",
@@ -1623,6 +2642,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "submissions",
     mcpToolName: "get_interview_questions",
     privilege: "content.submit",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "submit_interview_draft",
@@ -1635,6 +2655,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "submissions",
     mcpToolName: "submit_interview_draft",
     privilege: "content.submit",
+    requestBodySchema: InterviewSubmitBodySchema,
+    responseSchema: SubmissionRecordResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "submit_content_draft",
@@ -1647,6 +2670,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "submissions",
     mcpToolName: "submit_content_draft",
     privilege: "content.submit",
+    requestBodySchema: SubmissionCreateBodySchema,
+    responseSchema: SubmissionRecordResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "list_submissions",
@@ -1659,6 +2685,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "submissions",
     mcpToolName: "list_submissions",
     privilege: "content.submit",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_submission",
@@ -1671,6 +2698,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "submissions",
     mcpToolName: "get_submission",
     privilege: "content.submit",
+    responseSchema: SubmissionRecordResponseSchema,
   },
   {
     operationId: "admit_submission",
@@ -1683,6 +2711,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "submissions",
     mcpToolName: "admit_submission",
     privilege: "content.admit",
+    noRequestBody: true,
+    responseSchema: SubmissionRecordResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "allocate_submission_budget",
@@ -1695,6 +2726,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "submissions",
     mcpToolName: "allocate_submission_budget",
     privilege: "budget.allocate",
+    requestBodySchema: BudgetUsdBodySchema,
+    responseSchema: SubmissionRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "allocate_agent_budget",
@@ -1708,6 +2742,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "allocate_agent_budget",
     inCoreToolset: true,
     privilege: "budget.allocate",
+    requestBodySchema: BudgetUsdBodySchema,
+    responseSchema: BudgetUsdBodySchema,
+    statusCodes: [200],
   },
   {
     operationId: "set_registry_agent_budget",
@@ -1717,6 +2754,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "accountant",
     mcpExposure: "internal",
     privilege: "registry.budget.set",
+    requestBodySchema: BudgetUsdBodySchema,
+    responseSchema: BudgetUsdBodySchema,
+    statusCodes: [200],
   },
   {
     operationId: "retire_agent",
@@ -1728,6 +2768,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "retire_agent",
     privilege: "registry.retire",
+    noRequestBody: true,
+    responseSchema: AgentRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "reinstate_agent",
@@ -1739,6 +2782,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "reinstate_agent",
     privilege: "registry.reinstate",
+    noRequestBody: true,
+    responseSchema: AgentRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "purge_agent",
@@ -1750,6 +2796,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "danger",
     mcpToolName: "purge_agent",
     privilege: "registry.purge",
+    noRequestBody: true,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "deploy_agent",
@@ -1761,6 +2810,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "deploy_agent",
     privilege: "registry.deploy",
+    noRequestBody: true,
+    responseSchema: AgentRecordResponseSchema,
+    statusCodes: [200, 202],
   },
   {
     operationId: "post_registry_agent_model",
@@ -1770,6 +2822,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "executive",
     mcpExposure: "internal",
     privilege: "registry.model.set",
+    requestBodySchema: ModelDefaultBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "set_registry_agent_model",
@@ -1781,6 +2836,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "models",
     mcpToolName: "set_registry_agent_model",
     privilege: "registry.model.set",
+    requestBodySchema: ModelDefaultBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "post_approve_registry_agent_models",
@@ -1790,6 +2848,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "executive",
     mcpExposure: "internal",
     privilege: "registry.model.set",
+    requestBodySchema: SubagentModelsBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "approve_registry_agent_models",
@@ -1801,6 +2862,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "models",
     mcpToolName: "approve_registry_agent_models",
     privilege: "registry.model.set",
+    requestBodySchema: SubagentModelsBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "set_system_budget_policy",
@@ -1812,6 +2876,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "spend",
     mcpToolName: "set_system_budget_policy",
     privilege: "policy.budget.set",
+    requestBodySchema: BudgetUsdBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "egress_get_run_policy",
@@ -1821,6 +2888,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.run.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "egress_record_failover",
@@ -1830,6 +2898,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.models.failover",
+    noRequestBody: true,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "egress_request_approval",
@@ -1839,6 +2910,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.approvals.request",
+    requestBodySchema: EgressApprovalBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "egress_create_hold",
@@ -1848,6 +2922,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.holds.create",
+    requestBodySchema: EgressHoldBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "egress_consume_approval",
@@ -1857,6 +2934,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.approvals.consume",
+    noRequestBody: true,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "egress_report_progress",
@@ -1866,6 +2946,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.progress.report",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "egress_query_routes",
@@ -1875,6 +2958,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.routes.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "egress_get_connection_token",
@@ -1884,6 +2968,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.connections.token",
+    requestBodySchema: ConnectionTokenBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "egress_get_github_app_token",
@@ -1893,6 +2980,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.connections.token",
+    requestBodySchema: MintGitHubTokenBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "egress_get_subscription_token",
@@ -1903,6 +2993,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.connections.token",
+    requestBodySchema: SubscriptionTokenBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "egress_get_subscription_windows",
@@ -1913,6 +3006,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.subscription-windows.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "egress_update_subscription_window",
@@ -1923,6 +3017,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "gatekeeper",
     mcpExposure: "internal",
     privilege: "egress.subscription-windows.write",
+    requestBodySchema: GenericObjectBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "checkout_platform_secret",
@@ -1932,6 +3029,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "keymaster",
     mcpExposure: "internal",
     exception: "run-token",
+    requestBodySchema: SecretCheckoutBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "egress_checkout_platform_secret",
@@ -1941,6 +3041,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "keymaster",
     mcpExposure: "internal",
     privilege: "egress.keymaster.checkout",
+    requestBodySchema: SecretCheckoutBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_outstanding_credentials",
@@ -1952,6 +3055,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "get_outstanding_credentials",
     privilege: "credentials.outstanding.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "list_platform_credentials",
@@ -1963,6 +3067,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "list_platform_credentials",
     privilege: "credentials.platform.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "set_platform_credential",
@@ -1974,6 +3079,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "set_platform_credential",
     privilege: "credentials.platform.set",
+    requestBodySchema: CredentialValueBodySchema,
+    responseSchema: CredentialSetResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "update_platform_credential_alias",
@@ -1984,6 +3092,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "keymaster",
     mcpExposure: "internal",
     privilege: "credentials.platform.set",
+    requestBodySchema: CredentialValueBodySchema,
+    responseSchema: CredentialSetResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "list_agent_credentials",
@@ -1995,6 +3106,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "list_agent_credentials",
     privilege: "credentials.agent.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "set_agent_credential",
@@ -2006,6 +3118,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "set_agent_credential",
     privilege: "credentials.agent.set",
+    requestBodySchema: CredentialValueBodySchema,
+    responseSchema: CredentialSetResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "update_agent_credential_alias",
@@ -2016,6 +3131,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "keymaster",
     mcpExposure: "internal",
     privilege: "credentials.agent.set",
+    requestBodySchema: CredentialValueBodySchema,
+    responseSchema: CredentialSetResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "get_provider_client_credential",
@@ -2027,6 +3145,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "get_provider_client_credential",
     privilege: "credentials.provider.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "set_provider_client_credential",
@@ -2038,6 +3157,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "set_provider_client_credential",
     privilege: "credentials.provider.set",
+    requestBodySchema: OAuthClientCredentialsBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "get_agent_app_setup",
@@ -2049,6 +3171,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "get_agent_app_setup",
     privilege: "credentials.agent.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "execute_agent_app_setup_step",
@@ -2060,6 +3183,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "execute_agent_app_setup_step",
     privilege: "credentials.agent.set",
+    requestBodySchema: AppSetupStepBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_discord_app_credential",
@@ -2071,6 +3197,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "get_discord_app_credential",
     privilege: "credentials.agent.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "set_discord_app_token",
@@ -2082,6 +3209,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "set_discord_app_token",
     privilege: "credentials.agent.set",
+    requestBodySchema: DiscordTokenBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "start_github_app_flow",
@@ -2093,6 +3223,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "start_github_app_flow",
     privilege: "credentials.agent.set",
+    requestBodySchema: GitHubAppStartBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "github_app_oauth_callback",
@@ -2103,6 +3236,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "keymaster",
     mcpExposure: "internal",
     exception: "oauth-github-app-callback",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "save_github_app_installations",
@@ -2114,6 +3248,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "save_github_app_installations",
     privilege: "credentials.agent.set",
+    requestBodySchema: GitHubAppInstallationsBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "connections_oauth_callback",
@@ -2124,6 +3261,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "keymaster",
     mcpExposure: "internal",
     exception: "oauth-connections-callback",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_agent_transfer",
@@ -2136,6 +3274,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "get_agent_transfer",
     exception: "agent-transfer-read",
+    responseSchema: TransferResponseSchema,
   },
   {
     operationId: "start_agent_transfer",
@@ -2148,6 +3287,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "start_agent_transfer",
     exception: "agent-transfer-start",
+    requestBodySchema: TransferStartBodySchema,
+    responseSchema: TransferResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "accept_agent_transfer",
@@ -2160,6 +3302,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "accept_agent_transfer",
     exception: "agent-transfer-accept",
+    noRequestBody: true,
+    responseSchema: TransferResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "decline_agent_transfer",
@@ -2172,6 +3317,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "decline_agent_transfer",
     exception: "agent-transfer-decline",
+    noRequestBody: true,
+    responseSchema: TransferResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "cancel_agent_transfer",
@@ -2184,6 +3332,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "cancel_agent_transfer",
     exception: "agent-transfer-cancel",
+    noRequestBody: true,
+    responseSchema: TransferResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_skill_transfer",
@@ -2196,6 +3347,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "get_skill_transfer",
     exception: "skill-transfer-read",
+    responseSchema: TransferResponseSchema,
   },
   {
     operationId: "decline_skill_transfer",
@@ -2208,6 +3360,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "decline_skill_transfer",
     exception: "skill-transfer-decline",
+    noRequestBody: true,
+    responseSchema: TransferResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "start_connection_oauth",
@@ -2219,6 +3374,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "start_connection_oauth",
     privilege: "connections.start",
+    querySchema: ConnectionsStartQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "import_connection_credentials",
@@ -2230,6 +3387,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "import_connection_credentials",
     privilege: "connections.import",
+    requestBodySchema: ConnectionImportBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_agent_connections",
@@ -2241,6 +3401,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "list_agent_connections",
     privilege: "connections.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "list_subscriptions",
@@ -2253,6 +3414,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "list_subscriptions",
     privilege: ["subscriptions.own","subscriptions.read"],
+    querySchema: SubscriptionsQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_subscription_spend",
@@ -2265,6 +3428,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "spend",
     mcpToolName: "get_subscription_spend",
     privilege: ["subscriptions.own","subscriptions.read"],
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "connect_subscription",
@@ -2277,6 +3441,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "connect_subscription",
     privilege: ["subscriptions.own","subscriptions.manage"],
+    requestBodySchema: SubscriptionConnectBodySchema,
+    responseSchema: SubscriptionConnectResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "connect_subscription_alias",
@@ -2287,6 +3454,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "keymaster",
     mcpExposure: "internal",
     privilege: ["subscriptions.own","subscriptions.manage"],
+    requestBodySchema: SubscriptionConnectBodySchema,
+    responseSchema: SubscriptionConnectResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "poll_subscription_sign_in",
@@ -2299,6 +3469,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "poll_subscription_sign_in",
     privilege: ["subscriptions.own","subscriptions.manage"],
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "reconnect_subscription",
@@ -2311,6 +3482,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "reconnect_subscription",
     privilege: ["subscriptions.own","subscriptions.manage"],
+    requestBodySchema: SubscriptionReconnectBodySchema,
+    responseSchema: SubscriptionConnectResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "discover_subscription_models",
@@ -2323,6 +3497,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "discover_subscription_models",
     privilege: ["subscriptions.own","subscriptions.manage"],
+    noRequestBody: true,
+    responseSchema: SubscriptionDiscoverResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "admit_subscription_model",
@@ -2335,6 +3512,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "models",
     mcpToolName: "admit_subscription_model",
     privilege: ["subscriptions.own","models.manage"],
+    requestBodySchema: SubscriptionModelAdmitBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "retire_subscription_model",
@@ -2347,6 +3527,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "models",
     mcpToolName: "retire_subscription_model",
     privilege: ["subscriptions.own","models.manage"],
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "update_subscription_connection",
@@ -2359,6 +3541,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "update_subscription_connection",
     privilege: ["subscriptions.own","subscriptions.manage"],
+    requestBodySchema: SubscriptionUpdateBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "rename_subscription_connection_alias",
@@ -2369,6 +3554,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "keymaster",
     mcpExposure: "internal",
     privilege: ["subscriptions.own","subscriptions.manage"],
+    requestBodySchema: SubscriptionUpdateBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "disconnect_subscription",
@@ -2380,6 +3568,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "credentials",
     mcpToolName: "disconnect_subscription",
     privilege: ["subscriptions.own","subscriptions.manage"],
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "export_factory_config",
@@ -2391,6 +3581,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "export_factory_config",
     privilege: ["config.export","config.export.agent"],
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "list_identity_links",
@@ -2402,6 +3593,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "list_identity_links",
     privilege: "identity.links.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "set_identity_link",
@@ -2413,6 +3605,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "set_identity_link",
     privilege: "identity.links.set",
+    requestBodySchema: IdentityLinkBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "delete_identity_link",
@@ -2424,6 +3619,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "delete_identity_link",
     privilege: "identity.links.set",
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_schedules",
@@ -2436,6 +3633,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     mcpToolName: "list_schedules",
     inCoreToolset: true,
     privilege: "schedules.read",
+    querySchema: SchedulesQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "create_schedule",
@@ -2447,6 +3646,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "schedules",
     mcpToolName: "create_schedule",
     privilege: "schedules.write",
+    requestBodySchema: ScheduleCreateBodySchema,
+    responseSchema: ScheduleRecordResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "post_update_schedule_alias",
@@ -2457,6 +3659,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "timekeeper",
     mcpExposure: "internal",
     privilege: "schedules.write",
+    requestBodySchema: ScheduleUpdateBodySchema,
+    responseSchema: ScheduleRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "update_schedule",
@@ -2468,6 +3673,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "schedules",
     mcpToolName: "update_schedule",
     privilege: "schedules.write",
+    requestBodySchema: ScheduleUpdateBodySchema,
+    responseSchema: ScheduleRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "replace_schedule_alias",
@@ -2478,6 +3686,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "timekeeper",
     mcpExposure: "internal",
     privilege: "schedules.write",
+    requestBodySchema: ScheduleUpdateBodySchema,
+    responseSchema: ScheduleRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "delete_schedule",
@@ -2489,6 +3700,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "schedules",
     mcpToolName: "delete_schedule",
     privilege: "schedules.write",
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_skills",
@@ -2500,6 +3713,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "list_skills",
     privilege: "skills.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_default_skills",
@@ -2511,6 +3725,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "get_default_skills",
     privilege: "skills.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "set_default_skills",
@@ -2522,6 +3737,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "set_default_skills",
     privilege: "skills.defaults.set",
+    requestBodySchema: SkillDefaultsBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_skill",
@@ -2533,6 +3751,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "get_skill",
     privilege: "skills.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_skill_version",
@@ -2544,6 +3763,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "get_skill_version",
     privilege: "skills.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "register_skill",
@@ -2555,6 +3775,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "register_skill",
     privilege: ["skills.register","skills.version.add"],
+    requestBodySchema: SkillRegisterBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "run_skill_checks",
@@ -2566,6 +3789,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "run_skill_checks",
     privilege: "skills.checks.run",
+    noRequestBody: true,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "approve_skill_version",
@@ -2577,6 +3803,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "approve_skill_version",
     privilege: ["skills.decide","skills.decide.private","content.admit"],
+    requestBodySchema: DecisionReasonBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "reject_skill_version",
@@ -2588,6 +3817,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "reject_skill_version",
     privilege: ["skills.decide","skills.decide.private","content.admit"],
+    requestBodySchema: DecisionReasonBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "retire_skill_version",
@@ -2599,6 +3831,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "retire_skill_version",
     privilege: ["skills.retire","skills.retire.force"],
+    requestBodySchema: DecisionReasonBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_skill_adopters",
@@ -2610,6 +3845,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "list_skill_adopters",
     privilege: "skills.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_skill_training",
@@ -2621,6 +3857,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "get_skill_training",
     privilege: "skills.training.run",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "fund_skill_training_account",
@@ -2632,6 +3869,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "fund_skill_training_account",
     privilege: "skills.training.fund",
+    requestBodySchema: TrainingCapBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "set_skill_training_baseline",
@@ -2643,6 +3883,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "set_skill_training_baseline",
     privilege: "skills.training.run",
+    requestBodySchema: TrainingBaselineBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "start_skill_training_run",
@@ -2654,6 +3897,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "start_skill_training_run",
     privilege: "skills.training.run",
+    requestBodySchema: TrainingRunBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_skill_training_recommendation",
@@ -2665,6 +3911,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "get_skill_training_recommendation",
     privilege: "skills.training.run",
+    noRequestBody: true,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_skill_model",
@@ -2677,6 +3926,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "get_skill_model",
     privilege: "skills.package.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "set_skill_model",
@@ -2689,6 +3939,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "set_skill_model",
     privilege: "skills.version.add",
+    requestBodySchema: SkillModelBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "start_skill_transfer",
@@ -2700,6 +3953,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "start_skill_transfer",
     privilege: "skills.transfer",
+    requestBodySchema: TransferStartBodySchema,
+    responseSchema: TransferResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "accept_skill_transfer",
@@ -2711,6 +3967,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "accept_skill_transfer",
     privilege: "skills.register",
+    noRequestBody: true,
+    responseSchema: TransferResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "cancel_skill_transfer",
@@ -2722,6 +3981,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "cancel_skill_transfer",
     privilege: "skills.transfer",
+    noRequestBody: true,
+    responseSchema: TransferResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "admin_transfer_skill",
@@ -2733,6 +3995,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "admin_transfer_skill",
     privilege: "skills.decide",
+    requestBodySchema: TransferStartBodySchema,
+    responseSchema: TransferResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "assign_skill_group",
@@ -2744,6 +4009,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "assign_skill_group",
     privilege: "skills.assign",
+    requestBodySchema: SkillGroupBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "unassign_skill_group",
@@ -2755,6 +4023,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "unassign_skill_group",
     privilege: "skills.assign",
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_skill_package_files",
@@ -2766,6 +4036,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "list_skill_package_files",
     privilege: "skills.package.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "download_skill_package_file",
@@ -2777,6 +4048,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "download_skill_package_file",
     privilege: "skills.package.read",
+    querySchema: PackageFileQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "request_skill_publish",
@@ -2788,6 +4061,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "request_skill_publish",
     privilege: "skills.publish.request",
+    requestBodySchema: PublishRequestBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "decide_skill_publish",
@@ -2799,6 +4075,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "decide_skill_publish",
     privilege: "skills.decide",
+    requestBodySchema: ApprovalDecideBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "unpublish_skill",
@@ -2810,6 +4089,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "unpublish_skill",
     privilege: "skills.unpublish",
+    noRequestBody: true,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "retire_skill",
@@ -2821,6 +4103,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "skills",
     mcpToolName: "retire_skill",
     privilege: ["skills.retire","skills.retire.force"],
+    requestBodySchema: DecisionReasonBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "list_groups",
@@ -2832,6 +4117,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "list_groups",
     privilege: "groups.manage",
+    querySchema: GroupsQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "create_group",
@@ -2843,6 +4130,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "create_group",
     privilege: "groups.manage",
+    requestBodySchema: GroupCreateBodySchema,
+    responseSchema: GroupRecordResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "get_group",
@@ -2854,6 +4144,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "get_group",
     privilege: "groups.manage",
+    responseSchema: GroupRecordResponseSchema,
   },
   {
     operationId: "update_group",
@@ -2865,6 +4156,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "update_group",
     privilege: "groups.manage",
+    requestBodySchema: GroupUpdateBodySchema,
+    responseSchema: GroupRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "delete_group",
@@ -2876,6 +4170,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "delete_group",
     privilege: "groups.manage",
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "add_group_member",
@@ -2887,6 +4183,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "add_group_member",
     privilege: "groups.manage",
+    requestBodySchema: GroupMemberAddBodySchema,
+    responseSchema: GroupRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "post_add_group_member_alias",
@@ -2897,6 +4196,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "bouncer",
     mcpExposure: "internal",
     privilege: "groups.manage",
+    noRequestBody: true,
+    responseSchema: GroupRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "remove_group_member",
@@ -2908,6 +4210,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "access",
     mcpToolName: "remove_group_member",
     privilege: "groups.manage",
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "delete_remove_group_member_alias",
@@ -2918,6 +4222,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "bouncer",
     mcpExposure: "internal",
     privilege: "groups.manage",
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "register_subagent",
@@ -2929,6 +4235,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "register_subagent",
     privilege: "registry.register",
+    requestBodySchema: SubagentRegisterBodySchema,
+    responseSchema: SubagentRecordResponseSchema,
+    statusCodes: [200, 201],
   },
   {
     operationId: "list_registry_subagents",
@@ -2940,6 +4249,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "list_registry_subagents",
     privilege: "agents.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "set_subagent_models",
@@ -2951,6 +4261,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "models",
     mcpToolName: "set_subagent_models",
     privilege: "registry.register",
+    requestBodySchema: SubagentModelsBodySchema,
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "get_registry_subagent",
@@ -2962,6 +4275,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "agents",
     mcpToolName: "get_registry_subagent",
     privilege: "agents.read",
+    responseSchema: SubagentRecordResponseSchema,
   },
   {
     operationId: "list_systems",
@@ -2973,6 +4287,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "systems",
     mcpToolName: "list_systems",
     privilege: "systems.read",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "propose_system",
@@ -2984,6 +4299,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "systems",
     mcpToolName: "propose_system",
     privilege: "systems.propose",
+    requestBodySchema: SystemProposalBodySchema,
+    responseSchema: SystemRecordResponseSchema,
+    statusCodes: [201],
   },
   {
     operationId: "get_system",
@@ -2995,6 +4313,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "systems",
     mcpToolName: "get_system",
     privilege: "systems.read",
+    responseSchema: SystemRecordResponseSchema,
   },
   {
     operationId: "approve_system",
@@ -3006,6 +4325,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "systems",
     mcpToolName: "approve_system",
     privilege: "systems.decide",
+    requestBodySchema: SystemDecisionBodySchema,
+    responseSchema: SystemRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "reject_system",
@@ -3017,6 +4339,9 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "systems",
     mcpToolName: "reject_system",
     privilege: "systems.decide",
+    requestBodySchema: SystemDecisionBodySchema,
+    responseSchema: SystemRecordResponseSchema,
+    statusCodes: [200],
   },
   {
     operationId: "ws_events_stream",
@@ -3026,6 +4351,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     staff: "inspector",
     mcpExposure: "internal",
     privilege: "events.subscribe",
+    querySchema: StreamQuerySchema,
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_openapi_spec",
@@ -3038,6 +4365,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "observe",
     mcpToolName: "get_openapi_spec",
     exception: "schema-openapi",
+    responseSchema: SuccessResponseSchema,
   },
   {
     operationId: "get_mcp_schema_catalog",
@@ -3050,7 +4378,8 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     toolset: "observe",
     mcpToolName: "get_mcp_schema_catalog",
     exception: "schema-mcp",
-  }
+    responseSchema: SuccessResponseSchema,
+  },
 ];
 
 export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = RAW_CONTROL_PLANE_ROUTES.map((r) => {

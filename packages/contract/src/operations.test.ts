@@ -210,9 +210,90 @@ describe('Operations Contract & Schema Generators', () => {
       mcpExposure: 'tool', // INVALID: must be console-or-cli-only
       toolset: 'access',
       mcpToolName: 'create_key',
+      requestBodySchema: jsonSchema.object({ name: jsonSchema.string() }),
     };
     const res = validateOperationContract(badKeyOp);
     assert.equal(res.valid, false);
     assert.ok(res.errors.some((e) => e.includes('console-or-cli-only')));
+
+    // Mutating tool without requestBodySchema and without noRequestBody: true
+    const badMutatingOp: OperationContract = {
+      operationId: 'create_something',
+      method: 'POST',
+      pattern: '/api/v1/something',
+      summary: 'Create something',
+      staff: 'registrar',
+      mcpExposure: 'tool',
+      toolset: 'agents',
+      mcpToolName: 'create_something',
+    };
+    const mutRes = validateOperationContract(badMutatingOp);
+    assert.equal(mutRes.valid, false);
+    assert.ok(mutRes.errors.some((e) => e.includes('must define a requestBodySchema with properties or explicitly set noRequestBody: true')));
+
+    // Genuinely bodyless mutating tool with noRequestBody: true is valid
+    const validBodylessOp: OperationContract = {
+      operationId: 'pause_agent',
+      method: 'POST',
+      pattern: '/api/v1/agents/:id/pause',
+      summary: 'Pause agent execution',
+      staff: 'gatekeeper',
+      mcpExposure: 'tool-confirm',
+      toolset: 'danger',
+      mcpToolName: 'pause_agent',
+      noRequestBody: true,
+    };
+    const bodylessRes = validateOperationContract(validBodylessOp);
+    assert.equal(bodylessRes.valid, true);
+
+    // Contradictory noRequestBody: true and requestBodySchema
+    const contradictoryOp: OperationContract = {
+      operationId: 'confused_op',
+      method: 'POST',
+      pattern: '/api/v1/confused',
+      summary: 'Confused op',
+      staff: 'gatekeeper',
+      mcpExposure: 'tool-confirm',
+      toolset: 'danger',
+      mcpToolName: 'confused_op',
+      noRequestBody: true,
+      requestBodySchema: jsonSchema.object({ name: jsonSchema.string() }),
+    };
+    const contraRes = validateOperationContract(contradictoryOp);
+    assert.equal(contraRes.valid, false);
+    assert.ok(contraRes.errors.some((e) => e.includes('cannot specify both noRequestBody: true and requestBodySchema')));
+  });
+
+  it('buildMcpInputSchema guarantees collision safety with path parameter precedence', () => {
+    const op: OperationContract = {
+      operationId: 'update_item',
+      method: 'PATCH',
+      pattern: '/api/v1/items/:id',
+      summary: 'Update item',
+      staff: 'registrar',
+      mcpExposure: 'tool-confirm',
+      toolset: 'agents',
+      mcpToolName: 'update_item',
+      pathParamsSchema: jsonSchema.object({
+        id: jsonSchema.string({ description: 'Path item id' }),
+      }),
+      querySchema: jsonSchema.object({
+        id: jsonSchema.string({ description: 'Query item id override (should be ignored)' }),
+        filter: jsonSchema.string({ description: 'Filter param' }),
+      }),
+      requestBodySchema: jsonSchema.object({
+        id: jsonSchema.string({ description: 'Body item id override (should be ignored)' }),
+        name: jsonSchema.string({ description: 'New item name' }),
+      }, { required: ['id', 'name'] }),
+    };
+
+    const schema = buildMcpInputSchema(op);
+    assert.equal(schema.type, 'object');
+    // id description should be the path parameter one
+    assert.equal(schema.properties?.id?.description, 'Path item id');
+    assert.equal(schema.properties?.filter?.description, 'Filter param');
+    assert.equal(schema.properties?.name?.description, 'New item name');
+    // id and name should be in required
+    assert.deepEqual(schema.required?.sort(), ['id', 'name'].sort());
   });
 });

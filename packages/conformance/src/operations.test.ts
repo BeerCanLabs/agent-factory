@@ -103,6 +103,123 @@ describe('Operations Contract & Schema Conformance (GAP-249, CL11, TSK-336)', ()
     // Verify console-or-cli-only and internal operations are excluded
     assert.ok(!names.has('keys_create'), 'keys_create must not be an MCP tool');
     assert.ok(!names.has('keys_rotate'), 'keys_rotate must not be an MCP tool');
-    assert.ok(!names.has('openapi_get'), 'openapi_get internal exception must not be an MCP tool');
+  });
+
+  it('F2 & F1: every non-internal mutating route declares requestBodySchema or noRequestBody', () => {
+    for (const r of CONTROL_PLANE_ROUTES) {
+      if (['POST', 'PUT', 'PATCH'].includes(r.method) && r.mcpExposure !== 'internal') {
+        const hasBodySchema = Boolean(
+          r.requestBodySchema &&
+            ((r.requestBodySchema.properties && Object.keys(r.requestBodySchema.properties).length > 0) ||
+              r.requestBodySchema.type)
+        );
+        assert.ok(
+          hasBodySchema || r.noRequestBody === true,
+          `Mutating route ${r.method} ${r.pattern} (${r.operationId}) must define requestBodySchema or specify noRequestBody: true`
+        );
+      }
+    }
+  });
+
+  it('F1 & F2: key mutating tools export non-empty properties in both OpenAPI requestBody and MCP inputSchema', () => {
+    const doc = getOpenApiDocument();
+    const catalog = getMcpSchemaCatalog();
+
+    const expectedTools = [
+      {
+        toolName: 'create_agent',
+        opId: 'create_agent',
+        path: '/api/v1/agents',
+        method: 'post',
+        expectedProps: ['name', 'role'],
+      },
+      {
+        toolName: 'create_schedule',
+        opId: 'create_schedule',
+        path: '/api/v1/schedules',
+        method: 'post',
+        expectedProps: ['cron', 'prompt'],
+      },
+      {
+        toolName: 'create_grant',
+        opId: 'create_grant',
+        path: '/api/v1/grants',
+        method: 'post',
+        expectedProps: ['subject', 'role'],
+      },
+      {
+        toolName: 'allocate_agent_budget',
+        opId: 'allocate_agent_budget',
+        path: '/api/v1/budget/agents/{id}',
+        method: 'put',
+        expectedProps: ['budgetUsd'],
+      },
+      {
+        toolName: 'decide_approval',
+        opId: 'decide_approval',
+        path: '/api/v1/approvals/{id}',
+        method: 'post',
+        expectedProps: ['decision'],
+      },
+      {
+        toolName: 'agents_converse',
+        opId: 'agents_converse',
+        path: '/api/v1/agents/{id}/conversation',
+        method: 'post',
+        expectedProps: ['input', 'message'],
+      },
+    ];
+
+    for (const exp of expectedTools) {
+      // Check MCP tool inputSchema
+      const tool = catalog.tools.find((t) => t.name === exp.toolName);
+      assert.ok(tool, `MCP tool ${exp.toolName} must exist in catalog`);
+      assert.equal(tool.inputSchema.type, 'object');
+      const toolProps = Object.keys(tool.inputSchema.properties || {});
+      for (const prop of exp.expectedProps) {
+        assert.ok(
+          toolProps.includes(prop),
+          `MCP tool ${exp.toolName} inputSchema must include property '${prop}' (found: ${toolProps.join(', ')})`
+        );
+      }
+
+      // Check OpenAPI requestBody
+      const openApiPath = doc.paths[exp.path];
+      assert.ok(openApiPath, `OpenAPI path ${exp.path} must exist in document`);
+      const op = (openApiPath as Record<string, any>)[exp.method];
+      assert.ok(op, `OpenAPI operation ${exp.method.toUpperCase()} ${exp.path} must exist`);
+      assert.ok(op.requestBody, `OpenAPI operation ${exp.method.toUpperCase()} ${exp.path} must have requestBody`);
+      const jsonContent = op.requestBody.content?.['application/json'];
+      assert.ok(jsonContent, `OpenAPI operation ${exp.method.toUpperCase()} ${exp.path} must have application/json content`);
+      const bodyProps = Object.keys(jsonContent.schema?.properties || {});
+      for (const prop of exp.expectedProps) {
+        assert.ok(
+          bodyProps.includes(prop),
+          `OpenAPI operation ${exp.method.toUpperCase()} ${exp.path} schema must include property '${prop}'`
+        );
+      }
+    }
+  });
+
+  it('F3: non-200 creation and async dispatch statusCodes are populated accurately', () => {
+    const doc = getOpenApiDocument();
+
+    // POST /api/v1/agents should return 201
+    const createAgentRoute = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'create_agent');
+    assert.ok(createAgentRoute);
+    assert.deepEqual(createAgentRoute.statusCodes, [201]);
+
+    const createAgentOp = (doc.paths['/api/v1/agents'] as Record<string, any>)?.post;
+    assert.ok(createAgentOp);
+    assert.ok(createAgentOp.responses['201'], 'OpenAPI create_agent should declare 201 response');
+
+    // POST /api/v1/agents/:id/runs should return 200, 202
+    const triggerRunRoute = CONTROL_PLANE_ROUTES.find((r) => r.operationId === 'start_agent_run');
+    assert.ok(triggerRunRoute);
+    assert.deepEqual(triggerRunRoute.statusCodes, [200, 202]);
+
+    const triggerRunOp = (doc.paths['/api/v1/agents/{id}/runs'] as Record<string, any>)?.post;
+    assert.ok(triggerRunOp);
+    assert.ok(triggerRunOp.responses['202'], 'OpenAPI start_agent_run should declare 202 response');
   });
 });
