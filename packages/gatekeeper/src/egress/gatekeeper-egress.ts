@@ -162,7 +162,7 @@ export type ControlClient = {
    * #334: a short-lived GitHub App installation key for the agent's own app on one org. Absent, or any failure: the
    * route's existing credential is used instead.
    */
-  githubAppToken?(req: { runId: string; agentId: string; org: string }): Promise<{ ok: true; accessToken: string; expiresAt: string } | { ok: false; status: number; error: string }>;
+  githubAppToken?(req: { runId: string; agentId: string; org?: string }): Promise<{ ok: true; accessToken: string; expiresAt: string; org?: string } | { ok: false; status: number; error: string }>;
   /**
    * M5(6): the current access token of a subscription connection (the factory's, not an agent's), fetched per call from the
    * Keymaster through the control plane. It goes only to the connection template's inference host. Absent: subscription
@@ -259,6 +259,9 @@ export type GatekeeperEgressOptions = {
 
 const BUILTIN_AGENT_IDS = new Set(['gatekeeper-ingress', 'keymaster', 'doctor', 'coach']);
 
+/** A GitHub org or user login. */
+const GITHUB_ORG = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
 const STRIP = new Set([
   'host',
   'connection',
@@ -274,6 +277,8 @@ const STRIP = new Set([
   'x-api-key',
   'x-factory-run-token',
   'x-upstream-authorization',
+  // GAP-248: the org hint for a GraphQL call is the gatekeeper's, never GitHub's.
+  'x-github-org',
   'accept-encoding',
   'cookie',
 ]);
@@ -882,8 +887,39 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     return route.credential.encoding === 'basic' ? `Basic ${Buffer.from(formatted).toString('base64')}` : formatted;
   }
 
+  /**
+   * GAP-248: the org a GitHub GraphQL call (`POST /graphql`, the only API for Projects v2) is for. GraphQL has no owner
+   * in its path, so the agent names it in an `X-GitHub-Org` header, or the query's own `org`, `owner` or `login`
+   * variable says it. `'*'`: no hint, so the control plane may pick the app's only chosen org. `null`: a hint that is
+   * not a GitHub org name, refused. Keys are still minted only for an org an admin chose for the app.
+   */
+  function githubGraphqlOrg(req: http.IncomingMessage, raw: Buffer): string | null | undefined {
+    const header = req.headers['x-github-org'];
+    if (header !== undefined) return typeof header === 'string' && GITHUB_ORG.test(header.trim()) ? header.trim() : null;
+    const body = tryJson(raw) as { variables?: Record<string, unknown> } | undefined;
+    const vars = body && typeof body === 'object' && body.variables && typeof body.variables === 'object' ? body.variables : {};
+    for (const k of ['org', 'owner', 'login']) {
+      const v = vars[k];
+      // A variable that is not an org name is GitHub's to refuse: the call keeps the route's own credential.
+      if (typeof v === 'string') return GITHUB_ORG.test(v) ? v : undefined;
+    }
+    return '*';
+  }
+
+  /** GAP-248: whether this is a GraphQL call on a GitHub API route (the only place an org hint means anything). */
+  function isGithubGraphql(route: Route, rest: string, req: http.IncomingMessage): boolean {
+    if (!route.upstream || route.connection || req.method !== 'POST') return false;
+    let host = '';
+    try {
+      host = new URL(route.upstream).hostname.toLowerCase();
+    } catch {
+      return false;
+    }
+    return githubAppHosts[host] === 'api' && rest.split('?')[0].replace(/\/+$/, '') === '/graphql';
+  }
+
   /** #334: the GitHub org (owner) a call on a github.com route is for, or undefined (e.g. `/user`). */
-  function githubOrgOf(route: Route, rest: string): string | undefined {
+  function githubOrgOf(route: Route, rest: string, graphql?: { req: http.IncomingMessage; raw: Buffer }): string | undefined {
     if (!route.upstream || route.connection) return undefined;
     let host = '';
     try {
@@ -894,20 +930,21 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     const seg = rest.split('?')[0].split('/').filter(Boolean).map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
     let org: string | undefined;
     const kind = githubAppHosts[host];
+    if (graphql && isGithubGraphql(route, rest, graphql.req)) return githubGraphqlOrg(graphql.req, graphql.raw) ?? undefined;
     if (kind === 'api') org = seg[0] === 'repos' || seg[0] === 'orgs' ? seg[1] : undefined;
     else if (kind === 'git') org = seg[0];
-    return org && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(org) ? org : undefined;
+    return org && GITHUB_ORG.test(org) ? org : undefined;
   }
 
   const githubAppHosts: Record<string, 'api' | 'git'> = opts.githubAppHosts ?? { 'api.github.com': 'api', 'github.com': 'git' };
-  const appCache = new Map<string, { token: string; expiresAtMs: number }>();
+  const appCache = new Map<string, { token: string; expiresAtMs: number; org: string }>();
   /**
    * #334: the agent's GitHub App key for this call, formatted like the route's credential, or undefined to fall back.
    * A helper gets its parent's app key; read-only was already enforced before this, so it can still only read.
    */
-  async function githubAppCredential(route: Route, ctx: RunContext, rest: string): Promise<string | undefined> {
+  async function githubAppCredential(route: Route, ctx: RunContext, rest: string, graphql?: { req: http.IncomingMessage; raw: Buffer }): Promise<{ header: string; org: string } | undefined> {
     if (!opts.control.githubAppToken) return undefined;
-    const org = githubOrgOf(route, rest);
+    const org = githubOrgOf(route, rest, graphql);
     if (!org) return undefined;
     const agentId = ctx.helperOf ?? ctx.run.agentId;
     const key = `${agentId}\u0000${org.toLowerCase()}`;
@@ -915,10 +952,11 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (!hit || hit.expiresAtMs - 60_000 <= Date.now()) {
       hit = undefined;
       try {
-        const r = await opts.control.githubAppToken({ runId: ctx.run.runId, agentId, org });
+        // '*' (a GraphQL call with no org hint) asks without an org: the control plane uses the app's only chosen org.
+        const r = await opts.control.githubAppToken({ runId: ctx.run.runId, agentId, ...(org === '*' ? {} : { org }) });
         if (r.ok) {
           if (r.accessToken.length >= 4) secretValues.add(r.accessToken);
-          hit = { token: r.accessToken, expiresAtMs: Date.parse(r.expiresAt) || Date.now() + 5 * 60_000 };
+          hit = { token: r.accessToken, expiresAtMs: Date.parse(r.expiresAt) || Date.now() + 5 * 60_000, org: org === '*' ? r.org ?? org : org };
           appCache.set(key, hit);
         }
       } catch (err) {
@@ -928,7 +966,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     if (!hit) return undefined;
     const host = new URL(route.upstream!).hostname.toLowerCase();
     // git over HTTPS takes Basic x-access-token:<key>; the REST API takes `token <key>`.
-    return githubAppHosts[host] === 'git' ? `Basic ${Buffer.from(`x-access-token:${hit.token}`).toString('base64')}` : `token ${hit.token}`;
+    const header = githubAppHosts[host] === 'git' ? `Basic ${Buffer.from(`x-access-token:${hit.token}`).toString('base64')}` : `token ${hit.token}`;
+    return { header, org: hit.org };
   }
 
   async function connectionToken(route: Route, ctx: RunContext): Promise<ConnectionTokenResult> {
@@ -2396,11 +2435,17 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       ) return;
       if (route.connection) return await handleConnection(req, res, ctx, route, rest, raw);
       // #334: the agent's own GitHub App key when it has one installed on the target org; else the route's credential.
-      const appCred = await githubAppCredential(route, ctx, rest);
+      // GAP-248: a GraphQL call names its org in X-GitHub-Org (or its variables); a hint that is not an org name is refused.
+      const graphql = { req, raw };
+      if (isGithubGraphql(route, rest, req) && githubGraphqlOrg(req, raw) === null) {
+        return deny(res, ctx, route, 400, 'bad_github_org');
+      }
+      const app = await githubAppCredential(route, ctx, rest, graphql);
+      const appCred = app?.header;
       const cred = appCred ?? (await credential(route, ctx));
       if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
       const status = await forward(req, res, route, rest, raw, cred, undefined, undefined, appCred ? 'authorization' : undefined);
-      if (appCred) ledger(ctx, route, { type: 'action', action: 'GITHUB_APP_KEY_USED', org: githubOrgOf(route, rest) });
+      if (app) ledger(ctx, route, { type: 'action', action: 'GITHUB_APP_KEY_USED', org: app.org });
       if (status === 401 && appCred) for (const k of appCache.keys()) if (k.startsWith(`${ctx.helperOf ?? ctx.run.agentId}\u0000`)) appCache.delete(k);
       // AP3.2: a successful read consults the system; a write, or anything on the Discord route, does not.
       if (status >= 200 && status < 300 && isReadMethod(req.method) && !isDiscordRoute(route)) replies.sawDataRead(ctx.run.runId);
