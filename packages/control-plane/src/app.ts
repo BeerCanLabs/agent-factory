@@ -241,9 +241,9 @@ export type FactoryState = {
   schedules?: ScheduleStore;
   /** GAP-088: which person a Discord user is, set by an admin. Absent: nobody is linked. */
   identityLinks?: IdentityLinkStore;
-  /** GAP-253: spend charged to a plan, and who is told; in memory when absent. */
+  /** GAP-261: spend charged to a plan, and who is told; in memory when absent. */
   spendAccounts?: SpendAccountStore;
-  /** GAP-253: a plan's owner hears its spend each time it crosses a multiple of this (USD; default 5). */
+  /** GAP-261: a plan's owner hears its spend each time it crosses a multiple of this (USD; default 5). */
   spendUpdateStepUsd?: number;
   /** S8: set once the shadow comparison showed zero mismatches and link roles were stripped (grants-only). */
   authCutover?: boolean;
@@ -3577,7 +3577,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const body = await readJson(req);
     const badModel = badRunModel(body.model);
     if (badModel) return json(res, 400, { error: badModel });
-    // GAP-253: the plan this work is charged to, named by the waking run or inherited from it.
+    // GAP-261: the plan this work is charged to, named by the waking run or inherited from it.
     const account = accountForWake(state, run, body.spendAccount);
     if (account && 'error' in account) return json(res, 400, { error: account.error });
     const out = await createRun(state, target, { actor, trigger: 'agent', input: body.input, model: body.model as string | undefined });

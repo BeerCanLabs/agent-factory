@@ -1,4 +1,4 @@
-// DESIGN_AUTHORITY.md GAP-253: spend is charged to a plan through the runs a conductor wakes, and the conductor hears
+// DESIGN_AUTHORITY.md GAP-261: spend is charged to a plan through the runs a conductor wakes, and the conductor hears
 // `budget-update {repo, pr, spent_usd}` when the plan crosses a spend step or a charged run ends. No timer, no poll.
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -28,7 +28,7 @@ async function call(port: number, path: string, method: string, token?: string, 
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
 
-describe('GAP-253 per-plan spend and budget-update', { concurrency: false }, () => {
+describe('GAP-261 per-plan spend and budget-update', { concurrency: false }, () => {
   let cp: http.Server;
   let port = 0;
   let state: FactoryState;

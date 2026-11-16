@@ -1,5 +1,5 @@
 /**
- * GAP-253: spend attributed to a plan, and the `budget-update` event that tells the plan's conductor what it has cost.
+ * GAP-261: spend attributed to a plan, and the `budget-update` event that tells the plan's conductor what it has cost.
  *
  * A run that wakes another (`POST /api/v1/runs/:id/wake/:agent`) may name a spend account, `plan:<owner>/<repo>#<pr>`;
  * the woken run, its helpers and the runs it wakes in turn are charged to it. The waking agent owns the account:
