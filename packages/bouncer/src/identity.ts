@@ -91,7 +91,9 @@ export function normalizeIdentityLink(link: IdentityLink, store?: PrincipalStore
   };
 }
 
-export const PROVIDERS = ['discord', 'slack', 'teams', 'webui', 'cli'] as const;
+// GAP-251: `github` names a person by their GitHub login (who decided a hold, for a fleet that checks GitHub approvers). No
+// surface signs anyone in as a GitHub identity: the link only answers "which login is this person".
+export const PROVIDERS = ['discord', 'slack', 'teams', 'webui', 'cli', 'github'] as const;
 export type IdentityProvider = (typeof PROVIDERS)[number];
 
 export function isProvider(p: string): p is IdentityProvider {

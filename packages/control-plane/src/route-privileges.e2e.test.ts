@@ -94,6 +94,8 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/spend/compute', privilege: 'spend.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/spend/budgets', privilege: 'spend.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/approvals', privilege: 'approvals.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/approvals/nope', privilege: 'approvals.read', role: 'viewer' },
+  { method: 'GET', path: '/api/v1/agents/castle/holds/plan-budget', privilege: 'approvals.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/skills', privilege: 'skills.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/skills/defaults', privilege: 'skills.read', role: 'viewer' },
   { method: 'PUT', path: '/api/v1/skills/defaults', privilege: 'skills.defaults.set', role: 'admin', body: { skills: [] } },
@@ -739,6 +741,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       { method: 'POST', path: '/api/v1/runs/nope/subagents/spawn', body: {} },
       { method: 'GET', path: '/api/v1/runs/nope/subagents/runs/h1' },
       { method: 'POST', path: '/api/v1/runs/nope/wake/pr-reviewer', body: {} },
+      { method: 'PUT', path: '/api/v1/agents/castle/holds/plan-budget', body: {} },
       { method: 'POST', path: '/api/v1/keymaster/checkout', body: {} },
     ];
     for (const row of rows) {
@@ -757,7 +760,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       error?: { code: number; message: string };
     };
     const names = async (cred: Role) => (await rpc(cred, 'tools/list')).result?.tools?.map((t) => t.name).sort();
-    const viewerTools = ['authz_check', 'get_agent_models', 'get_run', 'list_agents', 'list_approvals', 'list_model_catalog', 'query_ledger', 'whoami'];
+    const viewerTools = ['authz_check', 'get_agent_models', 'get_approval', 'get_run', 'list_agents', 'list_approvals', 'list_model_catalog', 'query_ledger', 'whoami'];
     const operatorTools = ['check_agent_update', 'isolate_agent', 'pause_agent', 'resume_agent', 'wake_agent'];
     const adminTools = [
       'add_principal_email',

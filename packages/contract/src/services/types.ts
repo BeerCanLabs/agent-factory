@@ -128,6 +128,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/identity-links.ts',
       'packages/control-plane/src/role-assignments.ts',
       'packages/control-plane/src/channel-approvals.ts',
+      'packages/control-plane/src/decision-holds.ts',
       'packages/control-plane/src/migration-owners.ts',
       'packages/control-plane/src/route-registry.ts',
       'packages/control-plane/src/keys-routes.ts',

@@ -19,6 +19,8 @@ export type LedgerEvent = {
   action?: string;
   payloadSha256?: string;
   costUsd?: number;
+  /** GAP-251: a spending cap in USD set with an approval decision (e.g. a plan's budget). A number, never text. */
+  capUsd?: number;
   route?: string;
   approvalId?: string;
   leaseId?: string;
@@ -146,6 +148,7 @@ const ALLOWED = new Set<keyof LedgerEvent>([
   'action',
   'payloadSha256',
   'costUsd',
+  'capUsd',
   'route',
   'approvalId',
   'leaseId',
@@ -323,6 +326,7 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   if (raw.mcpName !== undefined) event.mcpName = String(raw.mcpName);
   if (raw.action !== undefined) event.action = String(raw.action);
   if (typeof raw.costUsd === 'number' && Number.isFinite(raw.costUsd)) event.costUsd = raw.costUsd;
+  if (typeof raw.capUsd === 'number' && Number.isFinite(raw.capUsd) && raw.capUsd >= 0) event.capUsd = raw.capUsd;
   if (raw.route !== undefined) event.route = String(raw.route);
   if (raw.approvalId !== undefined) event.approvalId = String(raw.approvalId);
   if (raw.leaseId !== undefined) event.leaseId = String(raw.leaseId);
