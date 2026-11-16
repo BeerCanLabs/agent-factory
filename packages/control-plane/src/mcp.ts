@@ -285,7 +285,7 @@ export const TOOLS: ToolSpec[] = [
   {
     name: 'resume_agent',
     title: 'Resume Agent',
-    description: 'Resume agent egress',
+    description: 'Resume a paused or isolated agent (refused with agent_not_paused from any other state)',
     privilege: 'agents.resume',
     args: { id: { type: 'string' } },
     required: ['id'],

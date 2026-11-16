@@ -9,7 +9,8 @@
  * woken only if no `helper-run-ended` run for it exists (and that is ledgered as `recovered`). The wake goes through
  * `createRun`, so the kill switch, budget and policy apply. A refusal an operator can clear (the agent paused or
  * isolated, or out of budget) stays owed and is tried again when the agent is resumed and at start, never on a timer;
- * any other refusal is final. One ledger row per attempt.
+ * any other refusal is final. A budget change also retries the ones refused for the budget (#490). One ledger row per
+ * attempt.
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -26,7 +27,7 @@ type Entry = {
   refused?: string;
   at: number;
 };
-/** Refusals an operator clears (RESUME, a budget change): the wake stays owed. */
+/** Refusals an operator clears (RESUME of a paused or isolated agent, a budget change): the wake stays owed. */
 const OWED = new Set(['agent_paused', 'agent_isolated', 'budget_exceeded']);
 const KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 const KEEP_MAX = 5000;
@@ -169,10 +170,13 @@ export async function wakeParentOfHelper(state: FactoryState, helper: Run, recov
   }
 }
 
-/** The agent was resumed (kill switch): the wakes it was refused while paused, isolated or out of budget. */
-export async function retryOwedWakes(state: FactoryState, agentId: string): Promise<void> {
+/**
+ * The agent was resumed (kill switch): the wakes it was refused while paused, isolated or out of budget. With `only`,
+ * just the wakes refused for that reason (#490: a budget change retries the `budget_exceeded` ones).
+ */
+export async function retryOwedWakes(state: FactoryState, agentId: string, only?: string): Promise<void> {
   for (const [helperRunId, e] of helperWakesOf(state).list()) {
-    if (e.status !== 'owed' || e.parentAgentId !== agentId) continue;
+    if (e.status !== 'owed' || e.parentAgentId !== agentId || (only !== undefined && e.refused !== only)) continue;
     const run = state.runs.get(helperRunId);
     if (run && isTerminal(run.state)) await wakeParentOfHelper(state, run);
   }
@@ -201,6 +205,12 @@ export function wireHelperWakes(state: FactoryState): void {
   state.onAgentResumed = (agentId) => {
     resumed?.(agentId);
     void retryOwedWakes(state, agentId).catch((err) => console.warn('[control-plane] owed helper wakes failed:', err));
+  };
+  // #490: a budget change (every budget route) retries the wakes refused for the budget; createRun decides again.
+  const budgeted = state.onBudgetChanged;
+  state.onBudgetChanged = (agentId) => {
+    budgeted?.(agentId);
+    void retryOwedWakes(state, agentId, 'budget_exceeded').catch((err) => console.warn('[control-plane] owed helper wakes failed:', err));
   };
   void resumeHelperWakes(state).catch((err) => console.warn('[control-plane] could not resume helper wakes:', err));
 }

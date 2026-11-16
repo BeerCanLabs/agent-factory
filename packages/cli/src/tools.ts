@@ -201,7 +201,7 @@ export const TOOLS: Tool[] = [
     true,
   ),
   change('pause_agent', "Pause an agent: the kill-switch. It stops egress and wake-ups until resumed.", 'agents.pause', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/pause`, {}), true),
-  change('resume_agent', 'Resume a paused agent.', 'agents.resume', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/resume`, {}), true),
+  change('resume_agent', 'Resume a paused or isolated agent.', 'agents.resume', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/resume`, {}), true),
   change('isolate_agent', "Isolate an agent's egress.", 'agents.isolate', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/isolate`, {})),
   change('wake_agent', 'Wake an agent (start a run).', 'agents.wake', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/wake`, {}), true),
   change('reset_agent', 'End the agent\'s runs and return it to sleeping.', 'agents.reset', obj({ id: agentId }, ['id']), (c, a) => c.request('POST', `/api/v1/agents/${id(a, 'id')}/reset`, {})),

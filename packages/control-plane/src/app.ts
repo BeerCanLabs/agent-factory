@@ -168,6 +168,8 @@ export type FactoryState = {
   /** #481: told when a run first ends (property-manager `finishRun`), and when the kill switch resumes an agent. */
   onRunEnded?: (run: Run) => void;
   onAgentResumed?: (agentId: string) => void;
+  /** #490: an agent's budget was written (every budget route); helper-wakes retries the wakes refused for the budget. */
+  onBudgetChanged?: (agentId: string) => void;
   ledger: LedgerStore;
   auth: AuthProvider;
   /** S5: factory API keys (`fk_`), verified before routing on /api/v1 and /mcp. */
@@ -1933,6 +1935,11 @@ function unblockAffordableRuns(state: FactoryState, agentId: string, limits: Bud
     if (run.state === 'BLOCKED_BUDGET_EXCEEDED' && checkStanding({ limits, spend: state.spend.get(agentId, run.runId), selectedModelIsZeroPrice }).inGoodStanding) {
       unblockRun(state, run.runId, 'BLOCKED_BUDGET_EXCEEDED', actor);
     }
+  }
+  try {
+    state.onBudgetChanged?.(agentId);
+  } catch (err) {
+    console.error(`[control-plane] budget hook for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
