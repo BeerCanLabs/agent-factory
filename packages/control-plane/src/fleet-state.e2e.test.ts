@@ -286,6 +286,25 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
     assert.equal((await read()).effective, 'running');
   });
 
+  it('text on a valid stored record (reason, ops.reason, ops.by) is cleaned on load; the file is not rewritten', async () => {
+    const f = join(mkdtempSync(join(tmpdir(), 'fleet-ops-text-')), 'fleet-state.json');
+    const dirty = (w: string) => `${w}\u202e\u200b\u{E0041}\u2066 ok`;
+    const stored = JSON.stringify({ status: 'running', coder_app_ready: true, reason: dirty('maintenance'), opsAgents: ['ops-leader'], ops: { state: 'idle', by: dirty('ops-leader'), at: 'then', reason: dirty('deployed'), runId: null } });
+    writeFileSync(f, stored);
+    state.fleetState = new FleetStateStore(f);
+    for (const who of [OPS_ADMIN, OPS_VIEWER]) {
+      const view = await read(who);
+      assert.deepEqual([view.reason, view.ops.reason, view.ops.by], ['maintenance ok', 'deployed ok', 'ops-leader ok'], who);
+    }
+    assert.equal(state.fleetState.opsIssue, undefined, 'a valid record is not repaired or audited');
+    assert.equal(readFileSync(f, 'utf8'), stored, 'the file is not rewritten on load');
+    writeFileSync(f, JSON.stringify({ status: 'running', coder_app_ready: true, reason: 7, ops: { state: 'idle', by: { x: 1 }, at: null, reason: ['x'] } }));
+    const odd = new FleetStateStore(f).get();
+    assert.deepEqual([odd.reason, odd.ops?.reason, odd.ops?.by], [null, null, null], 'not text reads as null');
+    writeFileSync(f, JSON.stringify({ status: 'running', coder_app_ready: true, reason: null, ops: { by: 'x' } }));
+    assert.match(new FleetStateStore(f).get().ops?.reason ?? '', /stored ops state "missing" is not an ops state/);
+  });
+
   it('R0: only registered, non-helper, non-retired agents can be listed (400 unknown_agent)', async () => {
     agent('retired-one', { state: 'RETIRED_PENDING_PURGE' });
     agent('helper-1', { ephemeral: { subagent: 'h', parentRunId: 'r' } });
