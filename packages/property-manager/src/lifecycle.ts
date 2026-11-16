@@ -80,6 +80,8 @@ export type PropertyManagerState = {
   mailboxes?: Map<string, MailboxQueue>;
   /** #481: told once when a run first reaches a terminal state (after its teardown); must not throw or block. */
   onRunEnded?: (run: Run) => void;
+  /** #481: told when the kill switch resumes an agent (an event, so owed work can go on without a timer). */
+  onAgentResumed?: (agentId: string) => void;
   /** The model a policy that names none grants (M2): configuration, no code default (GAP-181). */
   defaultModel?: string;
   /**
@@ -859,6 +861,13 @@ export async function applyKillSwitch(
   if (command === 'RESUME' && !activeRun(state, id)) {
     const next = state.runs.list({ agentId: id, active: true }).find((r) => r.state === 'QUEUED');
     if (next) await startRun(state, next);
+  }
+  if (command === 'RESUME') {
+    try {
+      state.onAgentResumed?.(id);
+    } catch (err) {
+      console.error(`[property-manager] resume hook for ${id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   return { status: 200, body: agent };
 }

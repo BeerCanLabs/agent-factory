@@ -165,8 +165,9 @@ export type FactoryState = {
   webhookDeliveries?: DeliveryLog;
   /** #481: the helper runs owed a `helper-run-ended` wake of their parent agent (on disk), else in memory. */
   helperWakes?: HelperWakeLog;
-  /** #481: told when a run first ends (property-manager `finishRun`). */
+  /** #481: told when a run first ends (property-manager `finishRun`), and when the kill switch resumes an agent. */
   onRunEnded?: (run: Run) => void;
+  onAgentResumed?: (agentId: string) => void;
   ledger: LedgerStore;
   auth: AuthProvider;
   /** S5: factory API keys (`fk_`), verified before routing on /api/v1 and /mcp. */
@@ -2470,7 +2471,7 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
       {
         name: 'spawn_subagent',
         title: 'Spawn Subagent',
-        description: 'Start a helper run: an allowed helper id, one of that helper\'s approvedModels (list_subagents) and the task prompt. Returns the run. When it ends, the factory wakes this agent once (trigger helper-run-ended, input event {parentRunId, helperRunId, subagent, state}); any run of this agent reads the result with GET /api/v1/runs/:id/subagents/runs/:helperRunId.',
+        description: 'Start a helper run: an allowed helper id, one of that helper\'s approvedModels (list_subagents) and the task prompt. Returns the run. When it ends, the factory wakes this agent once (trigger helper-run-ended, input event {parentRunId, helperRunId, subagent, state}). That woken run, or the spawning run, reads the result, and the woken run also its sibling helpers (same parentRunId), with GET /api/v1/runs/:id/subagents/runs/:helperRunId. One wake per helper: an early wake (siblings still running) or a wake that queues behind a run that already read the result must be a cheap no-op. Deploy order: this factory must be live before a skill stops polling for helpers.',
         inputSchema: { type: 'object', properties: { subagent: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' } }, required: ['subagent', 'model', 'prompt'] },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
@@ -3815,14 +3816,19 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   }
 
   // #318: a parent run reads the helper runs it started (E1.5 parent link), with its own run token, and nothing else.
-  // #481: also any run of the same parent agent, so the run a `helper-run-ended` wake starts can read the result.
+  // #481 (jury B1): also the factory's `helper-run-ended` wake of that agent for the same spawning run, so it reads the
+  // result and its siblings' (trigger and input are the factory's, so neither can be forged). Nothing else.
   const runHelper = path.match(/^\/api\/v1\/runs\/([^/]+)\/subagents\/runs\/([^/]+)$/);
   if (runHelper && req.method === 'GET') {
     const run = await authenticateRun(req, res, state, runHelper[1]);
     if (!run) return;
     const helper = state.runs.get(decodeURIComponent(runHelper[2]));
     // An unknown id and another run's helper look the same: no existence oracle.
-    const mine = helper && helper.parentRunId && (helper.parentRunId === run.runId || (helper.parentAgentId !== undefined && helper.parentAgentId === run.agentId));
+    const wake = run.trigger === 'helper-run-ended' ? (run.input as { event?: { parentRunId?: unknown } } | undefined)?.event : undefined;
+    const mine =
+      helper &&
+      helper.parentRunId &&
+      (helper.parentRunId === run.runId || (wake !== undefined && helper.parentAgentId === run.agentId && wake.parentRunId === helper.parentRunId));
     if (!helper || !mine) return json(res, 403, { error: 'not_your_helper_run' });
     const { runId, agentId, state: runState, result, error, startedAt, updatedAt } = helper;
     json(res, 200, { runId, agentId, state: runState, ...(result !== undefined ? { result } : {}), ...(error ? { error } : {}), ...(startedAt ? { startedAt } : {}), updatedAt });

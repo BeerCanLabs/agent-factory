@@ -114,7 +114,7 @@ describe('helper-run-ended wakes the parent agent (#481)', { concurrency: false 
       assert.equal(woken.actor, 'factory:helper-run-ended');
       assert.equal(rowFor(helper.runId).length, 1);
       const row = rowFor(helper.runId)[0];
-      assert.deepEqual({ a: row.agentId, p: row.parentRunId, pa: row.parentAgentId, r: row.runId, m: row.mcpName }, { a: 'reviewer', p: parent.runId, pa: 'reviewer', r: woken.runId, m: `helper-run-ended:${helper.runId}:${end}:woken:${woken.runId}` });
+      assert.deepEqual({ a: row.agentId, p: row.parentRunId, pa: row.parentAgentId, r: row.runId, m: row.mcpName }, { a: 'reviewer', p: parent.runId, pa: 'reviewer', r: woken.runId, m: `helper-run-ended:${helper.runId}:${end}:woken` });
       // A second end report (TIMED_OUT then DONE) and a resume start nothing more.
       await finishRun(state, helper.runId, 'DONE', { actor: 'test' });
       await resumeHelperWakes(state);
@@ -145,6 +145,33 @@ describe('helper-run-ended wakes the parent agent (#481)', { concurrency: false 
     assert.deepEqual([unknown.status, unknown.body], [theirs.status, theirs.body]);
     const notAHelper = await read({ runId: woken.runId, token }, parent.runId);
     assert.deepEqual([notAHelper.status, notAHelper.body], [403, { error: 'not_your_helper_run' }], 'a run that is not a helper is not readable');
+  });
+
+  it('jury #486 B1: only the spawning run, or its helper-run-ended wake, reads its helpers (siblings too); not other runs of the agent', async () => {
+    reset('reviewer');
+    const parent = await runOf('reviewer');
+    const jurors = [await spawn(parent), await spawn(parent), await spawn(parent)];
+    const otherParent = await runOf('reviewer');
+    const stranger = await spawn(otherParent);
+    for (const [i, j] of jurors.entries()) await finishRun(state, j.runId, 'DONE', { actor: 'test', result: { vote: `v${i}` } });
+    await settled(() => jurors.every((j) => rowFor(j.runId).length > 0));
+    const wakeOf = (h: Run) => wakes().find((r) => (r.input as { event: { helperRunId: string } }).event.helperRunId === h.runId)!;
+    const third = wakeOf(jurors[2]);
+    state.runs.update(third.runId, { state: 'WORKING' });
+    const w = { runId: third.runId, token: await tokens.mint({ runId: third.runId, agentId: 'reviewer' }) };
+    for (const [i, j] of jurors.entries()) assert.deepEqual((await read(w, j.runId)).body.result, { vote: `v${i}` }, `the wake reads sibling ${i}`);
+    for (const [i, j] of jurors.entries()) assert.equal((await read(parent, j.runId)).status, 200, `the spawning run reads ${i}`);
+    const deny = [403, { error: 'not_your_helper_run' }];
+    const r = await read(w, stranger.runId);
+    assert.deepEqual([r.status, r.body], deny, "a wake cannot read another spawning run's helper");
+    const webhook = state.runs.create({ agentId: 'reviewer', state: 'WORKING', actor: 'test', trigger: 'webhook', input: { event: { type: 'helper-run-ended', parentRunId: parent.runId } } } as never);
+    const wh = { runId: webhook.runId, token: await tokens.mint({ runId: webhook.runId, agentId: 'reviewer' }) };
+    const r2 = await read(wh, jurors[0].runId);
+    assert.deepEqual([r2.status, r2.body], deny, 'a non-wake run of the same agent (even with a look-alike input) gets 403');
+    const r3 = await read(otherParent, jurors[0].runId);
+    assert.deepEqual([r3.status, r3.body], deny, 'another run of the same agent gets 403');
+    await finishRun(state, stranger.runId, 'DONE', { actor: 'test' });
+    await settled(() => rowFor(stranger.runId).length > 0);
   });
 
   it("another agent's wake never produces helper-run-ended, whatever its input says", async () => {
@@ -198,36 +225,53 @@ describe('helper-run-ended wakes the parent agent (#481)', { concurrency: false 
     raw.note(helper.runId, saved);
     raw.claim(helper.runId, saved);
     state.helperWakes = new HelperWakeLog(join(registryDir, 'w2.json'));
+    const n = rowFor(helper.runId).length;
     await resumeHelperWakes(state);
     assert.equal(wakes().length, before + 1);
     assert.equal(state.helperWakes.get(helper.runId)?.status, 'woken');
+    const rec = rowFor(helper.runId).slice(n);
+    assert.deepEqual(rec.map((e) => [e.mcpName, e.runId]), [[`helper-run-ended:${helper.runId}:DONE:recovered`, wakes().at(-1)!.runId]], 'jury #486 B3: the settle path writes its one row');
     state.helperWakes = new HelperWakeLog(wakeFile);
   });
 
-  it('with the kill switch on or the parent out of budget, nothing starts, the refusal is ledgered, and it is not retried', async () => {
-    for (const how of ['kill', 'budget'] as const) {
+  it('jury #486 B2: a wake refused while paused, isolated or out of budget stays owed; RESUME or the next start wakes once', async () => {
+    for (const how of ['PAUSE', 'ISOLATE', 'budget'] as const) {
       reset('reviewer');
       state.policies.set('reviewer', { routes: [], subagents: ['juror'], budgetUsd: { perDay: 1 } } as never);
       const parent = await runOf('reviewer');
       const helper = await spawn(parent);
       await finishRun(state, parent.runId, 'DONE', { actor: 'test' });
-      if (how === 'kill') assert.equal((await applyKillSwitch(state, 'reviewer', 'PAUSE', 'test')).status, 200);
-      else state.policies.set('reviewer', { routes: [], subagents: ['juror'], budgetUsd: { perDay: 0 } } as never);
+      if (how === 'budget') state.policies.set('reviewer', { routes: [], subagents: ['juror'], budgetUsd: { perDay: 0 } } as never);
+      else assert.equal((await applyKillSwitch(state, 'reviewer', how, 'test')).status, 200);
       const before = wakes().length;
-      const n = rows().length;
       await finishRun(state, helper.runId, 'DONE', { actor: 'test' });
       await settled(() => rowFor(helper.runId).length > 0);
-      assert.equal(wakes().length, before, how);
-      assert.equal(rows().length, n + 1, how);
-      assert.match(rowFor(helper.runId)[0].mcpName!, new RegExp(`^helper-run-ended:${helper.runId}:DONE:refused:`), how);
-      assert.equal(state.helperWakes!.get(helper.runId)?.status, 'refused');
-      await resumeHelperWakes(state);
-      await wakeParentOfHelper(state, state.runs.get(helper.runId)!);
+      const why = how === 'budget' ? 'budget_exceeded' : how === 'PAUSE' ? 'agent_paused' : 'agent_isolated';
+      assert.deepEqual(rowFor(helper.runId).map((e) => e.mcpName), [`helper-run-ended:${helper.runId}:DONE:deferred:${why}`], how);
+      assert.equal(state.helperWakes!.get(helper.runId)?.status, 'owed');
+      assert.equal(wakes().length, before, `${how}: nothing started`);
       await settled();
-      assert.equal(rows().length, n + 1, `${how}: no retry`);
-      if (how === 'kill') await applyKillSwitch(state, 'reviewer', 'RESUME', 'test');
+      assert.equal(rowFor(helper.runId).length, 1, `${how}: no retry loop`);
+      // A start while the cause is still there: one more attempt, ledgered, still owed.
+      await resumeHelperWakes(state);
+      assert.equal(rowFor(helper.runId).length, 2);
+      assert.equal(state.helperWakes!.get(helper.runId)?.status, 'owed');
+      if (how === 'budget') {
+        state.policies.set('reviewer', { routes: [], subagents: ['juror'], budgetUsd: { perDay: 1 } } as never);
+        await resumeHelperWakes(state);
+      } else {
+        assert.equal((await applyKillSwitch(state, 'reviewer', 'RESUME', 'test')).status, 200);
+        await settled(() => rowFor(helper.runId).length > 2);
+      }
+      assert.equal(wakes().length, before + 1, `${how}: exactly one wake`);
+      assert.equal(rowFor(helper.runId).at(-1)!.mcpName, `helper-run-ended:${helper.runId}:DONE:woken`);
+      assert.equal(state.helperWakes!.get(helper.runId)?.status, 'woken');
+      await applyKillSwitch(state, 'reviewer', 'RESUME', 'test');
+      await resumeHelperWakes(state);
+      await settled();
+      assert.equal(wakes().length, before + 1, `${how}: once`);
+      assert.equal(rowFor(helper.runId).length, 3);
     }
-    state.policies.set('reviewer', { routes: [], subagents: ['juror'], budgetUsd: { perDay: 1 } } as never);
   });
 
   it('a helper never wakes a helper: helpers start no helpers, and a helper parent is refused', async () => {
@@ -243,6 +287,10 @@ describe('helper-run-ended wakes the parent agent (#481)', { concurrency: false 
     assert.equal(state.runs.list({ agentId: helper.agentId }).filter((r) => r.trigger === 'helper-run-ended').length, 0);
     assert.match(rows().at(-1)!.mcpName!, /:refused:helpers_start_no_helpers$/);
     assert.equal(rows().length, n + 1);
+    await resumeHelperWakes(state);
+    await applyKillSwitch(state, 'reviewer', 'RESUME', 'test');
+    await settled();
+    assert.equal(rows().filter((e) => e.mcpName?.startsWith(`helper-run-ended:${fake.runId}:`)).length, 1, 'a final refusal is not retried');
     await finishRun(state, helper.runId, 'DONE', { actor: 'test' });
     await settled(() => rowFor(helper.runId).length > 0);
   });

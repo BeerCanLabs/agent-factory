@@ -6,8 +6,10 @@
  *
  * Once per helper, across a restart: a helper is noted `pending` when it starts and claimed (`waking`) before its parent
  * is woken, both on disk. On start the factory finishes the pending ones that ended while it was down; a `waking` one is
- * woken only if no `helper-run-ended` run for it exists. The wake goes through `createRun`, so the kill switch, budget and
- * policy apply; a refusal is ledgered and not retried.
+ * woken only if no `helper-run-ended` run for it exists (and that is ledgered as `recovered`). The wake goes through
+ * `createRun`, so the kill switch, budget and policy apply. A refusal an operator can clear (the agent paused or
+ * isolated, or out of budget) stays owed and is tried again when the agent is resumed and at start, never on a timer;
+ * any other refusal is final. One ledger row per attempt.
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -19,11 +21,13 @@ type Entry = {
   parentAgentId: string;
   parentRunId: string;
   subagent: string;
-  status: 'pending' | 'waking' | 'woken' | 'refused';
+  status: 'pending' | 'waking' | 'woken' | 'owed' | 'refused';
   wokenRunId?: string;
   refused?: string;
   at: number;
 };
+/** Refusals an operator clears (RESUME, a budget change): the wake stays owed. */
+const OWED = new Set(['agent_paused', 'agent_isolated', 'budget_exceeded']);
 const KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 const KEEP_MAX = 5000;
 
@@ -59,7 +63,7 @@ export class HelperWakeLog {
   /** Claims the wake (synchronously, saved before the wake is attempted); false when it was claimed before. */
   claim(helperRunId: string, e: Omit<Entry, 'status' | 'at'>, recovering = false): boolean {
     const cur = this.entries.get(helperRunId);
-    if (cur && cur.status !== 'pending' && !(recovering && cur.status === 'waking')) return false;
+    if (cur && cur.status !== 'pending' && cur.status !== 'owed' && !(recovering && cur.status === 'waking')) return false;
     this.entries.set(helperRunId, { ...e, status: 'waking', at: Date.now() });
     this.save();
     return true;
@@ -68,7 +72,8 @@ export class HelperWakeLog {
   settle(helperRunId: string, outcome: { wokenRunId: string } | { refused: string }): void {
     const cur = this.entries.get(helperRunId);
     if (!cur) return;
-    this.entries.set(helperRunId, { ...cur, ...outcome, status: 'wokenRunId' in outcome ? 'woken' : 'refused', at: Date.now() });
+    const status = 'wokenRunId' in outcome ? 'woken' : OWED.has(outcome.refused) ? 'owed' : 'refused';
+    this.entries.set(helperRunId, { ...cur, ...outcome, status, at: Date.now() });
     this.save();
   }
 
@@ -128,9 +133,13 @@ export async function wakeParentOfHelper(state: FactoryState, helper: Run, recov
       ...(runId ? { runId } : {}),
       mcpName: `helper-run-ended:${helper.runId}:${helper.state}:${outcome}`,
     });
-  // A restart between the claim and the run: the run may already exist.
+  // A restart between the claim and the run: the run may already exist (its row may not).
   const prior = recovering ? woken(state, parentAgentId, helper.runId) : undefined;
-  if (prior) return log.settle(helper.runId, { wokenRunId: prior.runId });
+  if (prior) {
+    log.settle(helper.runId, { wokenRunId: prior.runId });
+    audit('recovered', prior.runId);
+    return;
+  }
   const parent = state.agents.get(parentAgentId);
   let refused: string | undefined;
   let runId: string | undefined;
@@ -151,18 +160,28 @@ export async function wakeParentOfHelper(state: FactoryState, helper: Run, recov
   }
   if (runId) {
     log.settle(helper.runId, { wokenRunId: runId });
-    audit(`woken:${runId}`, runId);
+    audit('woken', runId);
   } else {
-    // Not retried: an event that was refused once is not replayed on a loop.
-    log.settle(helper.runId, { refused: refused ?? 'refused' });
-    audit(`refused:${refused}`);
+    // Never on a loop: an owed wake waits for the agent's RESUME or the next start; any other refusal is final.
+    const why = refused ?? 'refused';
+    log.settle(helper.runId, { refused: why });
+    audit(`${OWED.has(why) ? 'deferred' : 'refused'}:${why}`);
+  }
+}
+
+/** The agent was resumed (kill switch): the wakes it was refused while paused, isolated or out of budget. */
+export async function retryOwedWakes(state: FactoryState, agentId: string): Promise<void> {
+  for (const [helperRunId, e] of helperWakesOf(state).list()) {
+    if (e.status !== 'owed' || e.parentAgentId !== agentId) continue;
+    const run = state.runs.get(helperRunId);
+    if (run && isTerminal(run.state)) await wakeParentOfHelper(state, run);
   }
 }
 
 /** On start: wake for the helpers that ended while no control plane was there to see it (once each). */
 export async function resumeHelperWakes(state: FactoryState): Promise<void> {
   for (const [helperRunId, e] of helperWakesOf(state).list()) {
-    if (e.status !== 'pending' && e.status !== 'waking') continue;
+    if (e.status !== 'pending' && e.status !== 'waking' && e.status !== 'owed') continue;
     const run = state.runs.get(helperRunId);
     if (run && isTerminal(run.state)) await wakeParentOfHelper(state, run, true);
   }
@@ -177,6 +196,11 @@ export function wireHelperWakes(state: FactoryState): void {
   state.onRunEnded = (run) => {
     prior?.(run);
     if (run.parentRunId) void wakeParentOfHelper(state, run).catch((err) => console.warn('[control-plane] helper-run-ended wake failed:', err));
+  };
+  const resumed = state.onAgentResumed;
+  state.onAgentResumed = (agentId) => {
+    resumed?.(agentId);
+    void retryOwedWakes(state, agentId).catch((err) => console.warn('[control-plane] owed helper wakes failed:', err));
   };
   void resumeHelperWakes(state).catch((err) => console.warn('[control-plane] could not resume helper wakes:', err));
 }
