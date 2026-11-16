@@ -43,12 +43,14 @@ function stateKey(s: FactoryState): Buffer | undefined {
  */
 export const GITHUB_APP_EVENTS = ['issues', 'issue_comment', 'pull_request', 'check_suite', 'status'];
 /** The skills whose agents take app events. */
-export const EVENT_SKILLS = ['sdlc-conductor', 'sdlc-ops'];
+export const EVENT_SKILLS = ['sdlc-conductor'];
 /**
  * #483: the ops leader (`sdlc-ops`) is woken by its deploy and rollback workflows' completion instead of polling, so its
  * app also subscribes to `workflow_run` and reads Actions. An app made before this needs both added on GitHub (app
  * settings, Permissions & events: Actions read-only, and the Workflow run event), and each installation's owner must
- * approve the new permission before GitHub sends the event.
+ * approve the new permission before GitHub sends the event. Order: add the event only once the agentic-sdlc handler
+ * for `workflow-completed` is deployed (a new ops app subscribes at once). An ops-only app gets `workflow_run` and
+ * Actions (read) and nothing of the conductor's (jury #485 B2).
  */
 export const WORKFLOW_SKILLS = ['sdlc-ops'];
 
@@ -63,7 +65,7 @@ export function appNeeds(agent: { skillIds?: string[]; skillRoutes?: Record<stri
   const skills = new Set([...(agent.skillIds ?? []), ...Object.keys(agent.skillRoutes ?? {})]);
   const workflows = declared.workflows === true || WORKFLOW_SKILLS.some((id) => skills.has(id));
   return {
-    events: workflows || declared.events === true || EVENT_SKILLS.some((id) => skills.has(id)),
+    events: declared.events === true || EVENT_SKILLS.some((id) => skills.has(id)),
     projects: declared.projects === true || [...skills].some((id) => /(^|-)backlog(-|$)/.test(id)),
     ...(workflows ? { workflows: true } : {}),
   };
@@ -87,7 +89,7 @@ export function buildManifest(publicBase: string, agentId: string, agentName: st
     name: `${`${agentName} (${new URL(publicBase).hostname.split('.')[0]})`.slice(0, 29)} ${randomUUID().slice(0, 4)}`,
     url: publicBase,
     redirect_url: `${publicBase}/api/v1/keymaster/github-app/callback`,
-    ...(needs.events ? { hook_attributes: { url: `${publicBase}/hooks/${encodeURIComponent(agentId)}`, active: true } } : {}),
+    ...(needs.events || needs.workflows ? { hook_attributes: { url: `${publicBase}/hooks/${encodeURIComponent(agentId)}`, active: true } } : {}),
     default_permissions: {
       contents: 'write',
       pull_requests: 'write',
@@ -97,7 +99,7 @@ export function buildManifest(publicBase: string, agentId: string, agentName: st
       ...(needs.events ? { checks: 'read', statuses: 'read' } : {}),
       ...(needs.workflows ? { actions: 'read' } : {}),
     },
-    default_events: needs.events ? [...GITHUB_APP_EVENTS, ...(needs.workflows ? ['workflow_run'] : [])] : [],
+    default_events: [...(needs.events ? GITHUB_APP_EVENTS : []), ...(needs.workflows ? ['workflow_run'] : [])],
   };
 }
 

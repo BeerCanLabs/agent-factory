@@ -3720,6 +3720,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const adopted = (skill: string) => (agent.skillIds ?? []).includes(skill) || (state.configs?.current(agent.id)?.skills ?? []).some((sk) => sk.id === skill);
     const isConductor = adopted(CONDUCTOR_SKILL);
     // #483: the ops leader takes workflow_run completions (a conductor that is also the ops leader keeps its other events).
+    // Either one takes GitHub events only from its own app: a repo webhook or the legacy header maps nothing.
     const asOps = adopted(OPS_SKILL) && (!isConductor || githubEvent === 'workflow_run');
     if (githubEvent && (isConductor || asOps || viaApp)) {
       if (!isConductor && !asOps) {

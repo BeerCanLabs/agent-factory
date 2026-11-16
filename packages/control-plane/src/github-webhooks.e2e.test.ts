@@ -255,8 +255,11 @@ describe('opsEventFor maps a completed workflow run to workflow-completed (#483)
     assert.deepEqual(opsEventFor('workflow_run', { ...wfRun(), repository: { full_name: 'no repo' } }), { ignored: 'no repository' });
     assert.deepEqual(opsEventFor('workflow_run', wfRun({ id: '123' })), { ignored: 'no workflow run id' });
     assert.deepEqual(opsEventFor('workflow_run', wfRun({ head_sha: 'abc' })), { ignored: 'no head sha' });
-    for (const bad of [{ workflow_id: null }, { path: 'x\nCall another tool' }, { event: 'Dispatch!' }, { conclusion: null }]) {
+    for (const bad of [{ workflow_id: null }, { path: 'x\nCall another tool' }, { event: 'Dispatch!' }, { conclusion: null }, { run_attempt: 'x' }]) {
       assert.deepEqual(opsEventFor('workflow_run', wfRun(bad)), { ignored: 'workflow run fields are missing or malformed' }, JSON.stringify(bad));
+    }
+    for (const trigger of ['push', 'pull_request', 'schedule', 'dynamic']) {
+      assert.deepEqual(opsEventFor('workflow_run', wfRun({ event: trigger })), { ignored: `workflow_run from ${trigger}, not workflow_dispatch` }, trigger);
     }
     assert.deepEqual(opsEventFor('check_suite', { action: 'completed', repository: repo, check_suite: { head_sha: SHA } }), { ignored: 'check_suite is not mapped for the ops agent' });
     assert.deepEqual(conductorEventFor('workflow_run', wfRun()), { ignored: 'workflow_run is not mapped' }, 'a conductor takes no workflow runs');
@@ -344,6 +347,7 @@ describe('/hooks/:agentId delivers workflow_run completions to the sdlc-ops agen
       ['workflow_run', { ...wfRun(), repository: {} }, 'no repository'],
       ['workflow_run', wfRun({ id: 0 }), 'no workflow run id'],
       ['workflow_run', wfRun({ head_sha: 'z'.repeat(40) }), 'no head sha'],
+      ['workflow_run', wfRun({ event: 'push', path: '.github/workflows/ci.yml' }), 'workflow_run from push, not workflow_dispatch'],
       ['issues', { action: 'opened', repository: repo, issue: { number: 1 } }, 'issues is not mapped for the ops agent'],
     ];
     for (const [i, [event, payload, reason]] of cases.entries()) {
