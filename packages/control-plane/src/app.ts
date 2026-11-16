@@ -2454,8 +2454,18 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
     if (isOpsAgent(state, run.agentId)) {
       tools.push({
         name: 'set_fleet_ops_state',
-        description: "Report the fleet's deploy state as its ops agent: idle, deploying, prod-testing or rolled-back (only an admin clears rolled-back)",
-        inputSchema: { type: 'object', properties: { state: { type: 'string', enum: ['idle', 'deploying', 'prod-testing', 'rolled-back'] }, reason: { type: 'string' } }, required: ['state'] },
+        description:
+          "Report the fleet's deploy state as its ops agent: idle, deploying, prod-testing or rolled-back (only an admin clears rolled-back). Give deploying a deployId; a later run of this agent finishes that deploy with takeover: true and the same deployId once the holding run has ended.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            state: { type: 'string', enum: ['idle', 'deploying', 'prod-testing', 'rolled-back'] },
+            reason: { type: 'string' },
+            deployId: { type: 'string', pattern: '^[A-Za-z0-9._:@#/-]{1,128}$' },
+            takeover: { type: 'boolean', enum: [true] },
+          },
+          required: ['state'],
+        },
       });
     }
     if (canManage.allowed) {

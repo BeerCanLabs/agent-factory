@@ -27,9 +27,14 @@ export type FleetStatus = (typeof FLEET_STATUSES)[number];
 /** The deploy states the ops leader reports (GAP-268). */
 export const OPS_STATES = ['idle', 'deploying', 'prod-testing', 'rolled-back'] as const;
 export type OpsState = (typeof OPS_STATES)[number];
-/** `runId`: the run holding the deploy (set by `deploying`, kept through `rolled-back`, cleared by `idle` and by an admin). */
-export type OpsRecord = { state: OpsState; by: string | null; at: string | null; reason: string | null; runId?: string | null };
-const NO_OPS: OpsRecord = { state: 'idle', by: null, at: null, reason: null, runId: null };
+/**
+ * `runId`: the run holding the deploy (set by `deploying`, kept through `rolled-back`, cleared by `idle` and by an admin).
+ * `deployId` (#482): the deploy's opaque id, given with `deploying`; with it a later run of the same agent can take the
+ * lock over once the holding run has ended. Kept and cleared with `runId`.
+ */
+export type OpsRecord = { state: OpsState; by: string | null; at: string | null; reason: string | null; runId?: string | null; deployId?: string | null };
+const NO_OPS: OpsRecord = { state: 'idle', by: null, at: null, reason: null, runId: null, deployId: null };
+const DEPLOY_ID = /^[A-Za-z0-9._:@#/-]{1,128}$/;
 export type EffectiveState = 'running' | 'paused' | 'deploy-freeze' | 'deploying' | 'prod-testing';
 export type FleetState = {
   status: FleetStatus;
@@ -100,7 +105,10 @@ function checkedOps(fs: FleetState): string | undefined {
 function cleanText(fs: FleetState): void {
   const clean = (v: unknown): string | null => (typeof v === 'string' ? sanitizeReason(v) : null);
   fs.reason = clean(fs.reason);
-  if (fs.ops && typeof fs.ops === 'object' && !Array.isArray(fs.ops)) fs.ops = { ...fs.ops, reason: clean(fs.ops.reason), by: clean(fs.ops.by) };
+  if (fs.ops && typeof fs.ops === 'object' && !Array.isArray(fs.ops)) {
+    const d = fs.ops.deployId;
+    fs.ops = { ...fs.ops, reason: clean(fs.ops.reason), by: clean(fs.ops.by), deployId: typeof d === 'string' && DEPLOY_ID.test(d) ? d : null };
+  }
 }
 
 /** Called once at start, after the ledger is open: an `ops` record repaired on load is audited. */
@@ -258,20 +266,25 @@ function parseOpsAgents(state: FactoryState, raw: unknown, prior: string[] | und
 /** `ops` from an admin: not given keeps it; null is idle; `{state, reason?}` sets any ops state. The holding run is cleared. */
 function parseAdminOps(raw: unknown, prior: OpsRecord | undefined, actor: string): OpsRecord | undefined | { error: string } {
   if (raw === undefined) return prior;
-  if (raw === null) return { state: 'idle', by: actor, at: now(), reason: null, runId: null };
+  if (raw === null) return { state: 'idle', by: actor, at: now(), reason: null, runId: null, deployId: null };
   if (typeof raw !== 'object' || Array.isArray(raw)) return { error: 'ops must be null or {state, reason?}' };
   const o = raw as Record<string, unknown>;
   const bad = opsBodyError(o);
   if (bad) return { error: bad };
   const r = reasonIn(o.reason);
   if (isErr(r)) return r;
-  return { state: o.state as OpsState, by: actor, at: now(), reason: r ?? null, runId: null };
+  return { state: o.state as OpsState, by: actor, at: now(), reason: r ?? null, runId: null, deployId: null };
 }
 
-function opsBodyError(o: Record<string, unknown>): string | undefined {
+/** An admin's `ops` takes `state` and `reason`; a run's also `deployId` and `takeover: true` (#482). */
+function opsBodyError(o: Record<string, unknown>, run = false): string | undefined {
   if (typeof o.state !== 'string' || !OPS_STATES.includes(o.state as OpsState)) return `state must be one of ${OPS_STATES.join(', ')}`;
-  const extra = Object.keys(o).find((k) => k !== 'state' && k !== 'reason');
-  return extra ? `unknown field ${JSON.stringify(extra.slice(0, 40))}` : undefined;
+  const fields = run ? ['state', 'reason', 'deployId', 'takeover'] : ['state', 'reason'];
+  const extra = Object.keys(o).find((k) => !fields.includes(k));
+  if (extra) return `unknown field ${JSON.stringify(extra.slice(0, 40))}`;
+  if (o.deployId !== undefined && (typeof o.deployId !== 'string' || !DEPLOY_ID.test(o.deployId))) return 'deployId must be 1 to 128 characters of A-Z a-z 0-9 . _ : @ # / -';
+  if (o.takeover !== undefined && o.takeover !== true) return 'takeover must be true when given';
+  return undefined;
 }
 
 /** GAP-268: the one state the fleet acts on. The admin's status first, then what the ops leader reports. */
@@ -292,14 +305,28 @@ function viewOf(state: FactoryState, fs: FleetState, who: 'admin' | 'reader' | '
   return out;
 }
 
-type Step = { ok: true; ops?: OpsRecord; kept?: true } | { ok: false; error: string };
+type Step = { ok: true; ops?: OpsRecord; kept?: true; takenFrom?: string } | { ok: false; error: string };
+/** A run's write: `deployId` and `takeover` (#482); `holderLive` is whether the holding run is still live. */
+export type OpsWrite = { deployId?: string; takeover?: boolean; holderLive?: boolean };
 
 /** GAP-268 R1 to R6 (DESIGN_AUTHORITY.md), against the stored record. A deploy is open in deploying and prod-testing, held by `ops.runId`. */
-export function opsStep(prior: FleetState, t: OpsState, runId: string, agentId: string, reason: string | null | undefined): Step {
+export function opsStep(prior: FleetState, t: OpsState, runId: string, agentId: string, reason: string | null | undefined, w: OpsWrite = {}): Step {
   const o = { ...NO_OPS, ...prior.ops };
   const mine = !!o.runId && o.runId === runId;
-  const rec = (st: OpsState, holder: string | null): OpsRecord => ({ state: st, by: agentId, at: now(), reason: reason ?? null, runId: holder });
   const fail = (error: string): Step => ({ ok: false, error });
+  if (w.takeover && !mine) {
+    // #482: the same agent's later run, on the same deploy, once the holder has ended. Then the step runs as the holder.
+    if (o.state === 'rolled-back') return fail('rolled_back_requires_admin');
+    if (o.state !== 'deploying' && o.state !== 'prod-testing') return fail('invalid_transition');
+    if (o.by !== agentId) return fail('not_the_deploying_run');
+    if (!o.deployId || o.deployId !== w.deployId) return fail('deploy_id_mismatch');
+    if (w.holderLive) return fail('deploy_in_progress');
+    const step = opsStep({ ...prior, ops: { ...o, runId } }, t, runId, agentId, reason);
+    if (!step.ok) return step;
+    return { ok: true, takenFrom: o.runId ?? '', ops: step.ops ?? { ...o, runId, at: now() } };
+  }
+  const keep = { deployId: t === 'deploying' ? (w.deployId ?? null) : (o.deployId ?? null) };
+  const rec = (st: OpsState, holder: string | null): OpsRecord => ({ state: st, by: agentId, at: now(), reason: reason ?? null, runId: holder, deployId: holder ? keep.deployId : null });
   if (o.state === 'rolled-back') return t === 'rolled-back' && mine ? { ok: true, kept: true } : fail('rolled_back_requires_admin');
   if (t === 'idle' && o.state === 'idle') return { ok: true };
   if (t === o.state && mine) return reason === undefined || reason === o.reason ? { ok: true } : { ok: true, ops: { ...o, reason, at: now() } };
@@ -326,21 +353,23 @@ export function setFleetOpsState(state: FactoryState, body: Record<string, unkno
   if ('status' in body || (typeof body.state === 'string' && (FLEET_STATUSES as readonly string[]).includes(body.state))) {
     return deny(403, 'admin_state', 'Only an admin sets the fleet status (running, paused, deploy-freeze)');
   }
-  const bad = opsBodyError(body);
+  const bad = opsBodyError(body, true);
   const r = reasonIn(body.reason);
   if (bad || isErr(r)) {
     audit('FLEET_OPS_STATE_DENIED', 'fleet-ops:bad_request');
     return { status: 400, body: { error: bad ?? (r as { error: string }).error } };
   }
   const t = body.state as OpsState;
-  const step = opsStep(prior, t, run.runId, run.agentId, r);
+  const w: OpsWrite = { deployId: body.deployId as string | undefined, takeover: body.takeover === true, holderLive: runLive(state, prior.ops?.runId) };
+  const step = opsStep(prior, t, run.runId, run.agentId, r, w);
   const was = prior.ops?.state ?? 'idle';
   if (!step.ok) return deny(409, step.error);
   let next = prior;
   if (step.kept) audit('FLEET_OPS_STATE_RETRY', 'fleet-ops:rolled-back:reason-kept');
   else if (step.ops) {
     next = storeOf(state).set({ ...prior, ops: step.ops });
-    audit('FLEET_OPS_STATE_SET', `fleet-ops:${was}->${t}`);
+    if (step.takenFrom !== undefined) audit('FLEET_OPS_LOCK_TAKEOVER', `fleet-ops-takeover:${step.takenFrom || '-'}->${run.runId}:${w.deployId}:${t}`);
+    audit('FLEET_OPS_STATE_SET', `fleet-ops:${was}->${t}${step.takenFrom !== undefined ? ':takeover' : ''}`);
   }
   const view = viewOf(state, next, 'run');
   return { status: 200, body: { ...view, ops: { ...(view.ops as OpsRecord), runId: next.ops?.runId ?? null } } };
