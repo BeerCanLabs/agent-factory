@@ -81,9 +81,9 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 
 ### 8. Headless Observability & Telemetry Surface (Cost, Quantity, Quality)
 - **Description:** The Factory operates strictly on a headless architecture. It does not format PDF reports, build email templates, or render dashboard charts—those are client/UX layer concerns. Instead, the Factory captures structured telemetry (Cost, Quantity of work, and Quality pass rates) as a native byproduct of execution and exposes them via clean, queryable APIs for scheduled or ad-hoc enterprise reporting.
-- **Interface (REST & GraphQL APIs):**
-  - **REST (Real-time snapshots & metrics):** `GET /api/v1/metrics`, `GET /metrics` for cluster/agent health and operational counters.
-  - **GraphQL (Flexible Telemetry & Analytics):** `POST /graphql` provides an expressive query surface allowing reporting engines, dashboards (Garrison, BI tools), and automated crons to pull precisely filtered time-series data without over-fetching:
+- **Interface (Headless REST & MCP APIs):**
+  - **REST (Real-time snapshots, telemetry & spend):** `GET /api/v1/metrics`, `GET /metrics` for operational counters; `GET /api/v1/ledger` for structured audit trail and execution history; `GET /api/v1/spend`, `GET /api/v1/spend/report`, `GET /api/v1/spend/compute` for multi-dimensional cost/token rollups across agents, models, and subscriptions.
+  - **MCP (Model Context Protocol Neck):** `POST /mcp` exposes tools (`query_ledger`, `verify_ledger`, `spend`, `list_runs`, `get_run`, etc.) allowing AI agents, LLM clients, and automated callers to query time-series execution, audit, and spend data with dynamic Bouncer authorization filtering.
     - Multi-dimensional rollups across daily, weekly, or monthly cadences.
     - Cost breakdown by agent, model, department, and tool.
     - Throughput metrics (completed tasks, failed runs, warm-window durations).
@@ -136,7 +136,7 @@ The Factory provides distinct functional domains. External UIs (like Garrison) b
 | **KPF 7: Personal Trainer** | Recommend a model; a person accepts the skill version | 👤 Builder | REST |
 | **KPF 8: Headless Observability** | Query Real-Time Operational Metrics | 👤 SRE | REST / HTTPS |
 | **KPF 8: Headless Observability** | Prometheus Metrics Pull | ⚙️ Monitoring Agent | HTTP (Prometheus scrape) |
-| **KPF 8: Headless Observability** | Deep Telemetry & Multi-Dimensional Query | ⚙️ Analytics System | GraphQL / HTTPS |
+| **KPF 8: Headless Observability** | Deep Telemetry & Multi-Dimensional Query | ⚙️ Analytics System | REST / MCP / HTTPS |
 
 ---
 
