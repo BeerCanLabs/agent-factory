@@ -135,31 +135,35 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
     return tools, problems
 
 
-# GAP-254: a tool that fails is logged (the container's stderr), not only told to the model. The whole line (the label too) is
-# masked before it is cut short: the run token by value, including a cut-off end of it, and anything shaped like a credential.
-# Arguments and results are never logged whole. (RT2: the runtime reads named variables only, so a bound secret is masked by
-# its shape, not by its value.)
+# GAP-254: a tool that fails is logged (the container's stderr), not only told to the model. The line (the label too) is
+# cut to MASK_WINDOW characters, masked whole, then cut to MAX_LOG_CHARS: the run token by value, including a cut-off end
+# of it, and anything shaped like a credential. Every pattern is bounded, so masking is linear in the (bounded) input.
+# Arguments and results are never logged whole. (RT2: the runtime reads named variables only, so a bound secret is masked
+# by its shape, not by its value.)
 CREDENTIAL_SHAPES = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)"  # a PEM private key, even cut off
-    r"|eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*"  # a JWT
-    r"|(?i:bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}"
-    r"|github_pat_\w{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|sk-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{12,}",
+    r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|$)"  # a PEM private key, even cut off
+    r"|(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*"  # a JWT
+    r"|(?i:bearer|token|basic)\s{1,8}[A-Za-z0-9._~+/=-]{8,}"
+    # Provider tokens, case-sensitive and starting a word, so `task-scheduler` or `risk-analysis` are left alone.
+    r"|(?<![A-Za-z0-9])(?:github_pat_\w{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|sk-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{12,})",
     re.DOTALL,
 )
-# `password: x`, `?access_token=x`, `"token": "x"`, `aws_secret_access_key=x`, `Authorization: Basic x`: the name stays.
+# `password: x`, `?access_token=x`, `"token": "x"`, `aws_secret_access_key=x`, `Authorization: Basic x`, `Cookie: x`:
+# the name stays.
 CREDENTIAL_SETTING = re.compile(
-    r"""(?i)([A-Za-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|authorization|private[_-]?key|access[_-]?key|credential)[A-Za-z0-9_.-]*["']?\s*[:=]\s*["']?)"""
-    r"""(?:(?:bearer|basic|token)\s+)?[^\s"'&,;}\]]+"""
+    r"""(?i)([A-Za-z0-9_.-]{0,64}(?:token|secret|password|passwd|api[_-]?key|authorization|private[_-]?key|access[_-]?key|credential|cookie|session)[A-Za-z0-9_.-]{0,64}["']?\s{0,8}[:=]\s{0,8}["']?)"""
+    r"""(?:(?:bearer|basic|token)\s{1,8})?[^\s"'&,;}\]]+"""
 )
-URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@")
+URL_USERINFO = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,30}://)[^/\s@]{1,256}@")
 MAX_LOG_CHARS = 1000
+MASK_WINDOW = 4 * MAX_LOG_CHARS
 
 
 def _mask(text: str) -> str:
     token = os.environ.get("FACTORY_RUN_TOKEN") or ""
     if len(token) >= 8:
         text = text.replace(token, "***")
-        # Text cut short before it reached the runtime can end in the start of the token.
+        # Text cut short (here or before it reached the runtime) can end in the start of the token.
         for n in range(len(token) - 1, 7, -1):
             if text.endswith(token[:n]):
                 text = text[:-n] + "***"
@@ -170,8 +174,9 @@ def _mask(text: str) -> str:
 
 
 def log_tool_error(label: str, what: str) -> None:
-    line = " ".join(_mask(f"[runtime] tool {label} failed: {what}").split())
-    print(line[:MAX_LOG_CHARS], file=sys.stderr, flush=True)
+    head = f"[runtime] tool {label} failed: {what}"[: MASK_WINDOW * 2]
+    line = " ".join(head.split())[:MASK_WINDOW]
+    print(_mask(line)[:MAX_LOG_CHARS], file=sys.stderr, flush=True)
 
 
 def _where(err: BaseException) -> str:

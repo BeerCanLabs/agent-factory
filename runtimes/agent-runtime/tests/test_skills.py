@@ -211,5 +211,32 @@ class TestToolErrorsAreLogged(unittest.TestCase):
         self.assertIn("unknown/***", err.getvalue())
 
 
+    def test_masking_is_fast_on_long_input_on_both_paths(self):
+        import time
+        run_token = "rt" + "-example-" + "ABCDEFGHIJKLMNOPQRSTUV"
+        words = "a" * 200_000
+        with mock.patch.dict(os.environ, {"FACTORY_RUN_TOKEN": run_token}):
+            started = time.monotonic()
+            _, reported = self.run_logged(lambda a, c: f"error: {words}")
+
+            def boom(args, ctx):
+                raise RuntimeError(words + "token_" * 20_000 + run_token)
+
+            _, raised = self.run_logged(boom)
+            elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 2.0)
+        for log in (reported, raised):
+            self.assertLessEqual(len(log.strip()), MAX_LOG_CHARS)
+            self.assertNotIn(run_token[:8], log)
+
+    def test_a_cookie_is_masked_and_ordinary_names_are_not(self):
+        sid = "s3ss10n" + "Value" + "77"
+        _, log = self.run_logged(lambda a, c: f"error: 401 with Cookie: session={sid}; repo BeerCanLabs/task-scheduler")
+        self.assertNotIn(sid, log)
+        for name in ("BeerCanLabs/task-scheduler", "acme/risk-analysis", "acme/kiosk-frontend", "acme/Disk-Cleanup-tool"):
+            self.assertIn(name, self.run_logged(lambda a, c, n=name: f"error: cannot open {n}")[1])
+        key = "sk" + "-" + "proj" + "A1b2C3d4E5f6G7h8"
+        self.assertNotIn(key, self.run_logged(lambda a, c: f"error: bad key {key}")[1])
+
 if __name__ == "__main__":
     unittest.main()
