@@ -15,7 +15,7 @@ const STATE_TTL_MS = 10 * 60 * 1000;
 const LABELS: Record<IdpKind, string> = { google: 'Google', meta: 'Meta', cloudflare: 'Cloudflare', oidc: 'Single sign-on' };
 
 type Session = { email: string; idp: IdpKind; expiresAt: number };
-type Pending = { idp: IdpKind | 'cli'; verifier: string; expiresAt: number; cli?: CliLogin; owner?: string };
+type Pending = { idp: IdpKind | 'cli'; verifier: string; expiresAt: number; cli?: CliLogin; owner?: string; oauthReq?: string };
 /** S13: a CLI sign-in in flight: the loopback port, the CLI's own state, and its PKCE challenge for the key exchange. */
 export type CliLogin = { port: number; state: string; challenge: string };
 const CLI_CODE_TTL_MS = 2 * 60 * 1000;
@@ -60,11 +60,11 @@ export class SessionStore {
     return s;
   }
   /** OAuth state: one-time, short-lived, bound to its IdP and PKCE verifier. */
-  begin(idp: IdpKind, cli?: CliLogin): { state: string; challenge: string } {
+  begin(idp: IdpKind, cli?: CliLogin, oauthReq?: string): { state: string; challenge: string } {
     for (const [k, p] of this.pending) if (p.expiresAt <= this.now()) this.pending.delete(k);
     const state = b64url(randomBytes(24));
     const verifier = b64url(randomBytes(32));
-    this.pending.set(state, { idp, verifier, expiresAt: this.now() + STATE_TTL_MS, ...(cli ? { cli } : {}) });
+    this.pending.set(state, { idp, verifier, expiresAt: this.now() + STATE_TTL_MS, ...(cli ? { cli } : {}), ...(oauthReq ? { oauthReq } : {}) });
     return { state, challenge: b64url(sha256(verifier)) };
   }
   take(state: string, idp: IdpKind | 'cli'): Pending | undefined {
@@ -95,7 +95,17 @@ export function cliLoginOf(q: URLSearchParams): CliLogin | undefined {
   if (!Number.isInteger(port) || port < 1024 || port > 65535 || !B64URL.test(st) || !B64URL.test(challenge)) return undefined;
   return { port, state: st, challenge };
 }
-const cliQuery = (c?: CliLogin) => (c ? `?${new URLSearchParams({ cli_port: String(c.port), cli_state: c.state, cli_challenge: c.challenge })}` : '');
+const authQuery = (c?: CliLogin, oauthReq?: string) => {
+  const p = new URLSearchParams();
+  if (c) {
+    p.set('cli_port', String(c.port));
+    p.set('cli_state', c.state);
+    p.set('cli_challenge', c.challenge);
+  }
+  if (oauthReq) p.set('oauth_req', oauthReq);
+  const s = p.toString();
+  return s ? `?${s}` : '';
+};
 
 export function sessions(state: FactoryState): SessionStore {
   return (state.sessions ??= new SessionStore());
@@ -157,17 +167,17 @@ function cookie(value: string, maxAgeSeconds: number): string {
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 /** The standalone login page: no SPA assets, no status, one button per configured IdP (D19, D22). */
-export function loginPage(state: FactoryState, error?: string, cli?: CliLogin): string {
+export function loginPage(state: FactoryState, error?: string, cli?: CliLogin, oauthReq?: string): string {
   const providers = state.idpConfig?.get().providers ?? [];
   const buttons = providers.length
-    ? providers.map((p) => `<li><a class="b" href="/api/v1/auth/${p.id}/start${esc(cliQuery(cli))}">Sign in with ${esc(LABELS[p.id])}</a></li>`).join('')
+    ? providers.map((p) => `<li><a class="b" href="/api/v1/auth/${p.id}/start${esc(authQuery(cli, oauthReq))}">Sign in with ${esc(LABELS[p.id])}</a></li>`).join('')
     : '<li>No sign-in provider is configured yet.</li>';
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Factory: sign in</title><style>body{font-family:system-ui,sans-serif;max-width:24rem;margin:4rem auto;padding:0 1rem}ul{list-style:none;padding:0}.b{display:block;padding:.7rem 1rem;margin:.5rem 0;border:1px solid #888;border-radius:.4rem;text-decoration:none;color:inherit}.e{color:#b00}</style></head><body><main><h1>Agent Factory</h1>${error ? `<p class="e">${esc(error)}</p>` : ''}<ul>${buttons}</ul></main></body></html>`;
 }
 
-export function sendLoginPage(state: FactoryState, res: http.ServerResponse, status = 200, error?: string, cli?: CliLogin): void {
+export function sendLoginPage(state: FactoryState, res: http.ServerResponse, status = 200, error?: string, cli?: CliLogin, oauthReq?: string): void {
   res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY' });
-  res.end(loginPage(state, error, cli));
+  res.end(loginPage(state, error, cli, oauthReq));
 }
 
 const fetcher = (state: FactoryState) => state.oauthFetch ?? fetch;
@@ -214,7 +224,16 @@ function ledger(state: FactoryState, action: 'SIGN_IN' | 'SIGN_OUT', email: stri
 
 /** GET /login, GET /api/v1/auth/:idp/start, GET /api/v1/auth/:idp/callback, POST /api/v1/auth/logout. */
 export async function handleLoginRoutes(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<boolean> {
-  if (path === '/login' && req.method === 'GET') return sendLoginPage(state, res, 200, undefined, cliLoginOf(new URL(req.url ?? '/', 'http://x').searchParams)), true;
+  if (path === '/login' && req.method === 'GET') {
+    const q = new URL(req.url ?? '/', 'http://x').searchParams;
+    const oauthReq = q.get('oauth_req') ?? undefined;
+    if (oauthReq && sessionEmail(state, req)) {
+      res.writeHead(302, { location: `/authorize?oauth_req=${encodeURIComponent(oauthReq)}`, 'cache-control': 'no-store' });
+      res.end();
+      return true;
+    }
+    return sendLoginPage(state, res, 200, undefined, cliLoginOf(q), oauthReq), true;
+  }
   if (path === '/api/v1/auth/cli/token' && req.method === 'POST') return cliToken(state, req, res);
 
   if (path === '/api/v1/auth/logout' && req.method === 'POST') {
@@ -230,7 +249,10 @@ export async function handleLoginRoutes(state: FactoryState, req: http.IncomingM
   }
 
   const start = path.match(/^\/api\/v1\/auth\/([^/]+)\/start$/);
-  if (start && req.method === 'GET') return beginSignIn(state, res, start[1], cliLoginOf(new URL(req.url ?? '/', 'http://x').searchParams));
+  if (start && req.method === 'GET') {
+    const q = new URL(req.url ?? '/', 'http://x').searchParams;
+    return beginSignIn(state, res, start[1], cliLoginOf(q), q.get('oauth_req') ?? undefined);
+  }
   const cb = path.match(/^\/api\/v1\/auth\/([^/]+)\/callback$/);
   if (cb && req.method === 'GET') return finishSignIn(state, req, res, cb[1]);
   return false;
@@ -245,12 +267,12 @@ async function resolveIdp(state: FactoryState, res: http.ServerResponse, id: str
   return { p, ep };
 }
 
-async function beginSignIn(state: FactoryState, res: http.ServerResponse, id: string, cli?: CliLogin): Promise<boolean> {
+async function beginSignIn(state: FactoryState, res: http.ServerResponse, id: string, cli?: CliLogin, oauthReq?: string): Promise<boolean> {
   const r = await resolveIdp(state, res, id);
   if (!r) return true;
   const { p, ep } = r;
   {
-    const { state: st, challenge } = sessions(state).begin(p.id, cli);
+    const { state: st, challenge } = sessions(state).begin(p.id, cli, oauthReq);
     const u = new URL(ep.authorize);
     u.search = new URLSearchParams({ response_type: 'code', client_id: p.clientId, redirect_uri: callbackUrl(state, p.id), scope: ep.scope, state: st, code_challenge: challenge, code_challenge_method: 'S256' }).toString();
     res.writeHead(302, { location: u.toString(), 'cache-control': 'no-store', 'set-cookie': `${STATE_COOKIE}=${st}; HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=${STATE_TTL_MS / 1000}` });
@@ -291,6 +313,11 @@ async function finishSignIn(state: FactoryState, req: http.IncomingMessage, res:
 
   const sid = sessions(state).create(email, p.id);
   ledger(state, 'SIGN_IN', email, p.id);
+  if (pending?.oauthReq) {
+    res.writeHead(302, { location: `/authorize?oauth_req=${encodeURIComponent(pending.oauthReq)}`, 'set-cookie': cookie(sid, SESSION_TTL_MS / 1000), 'cache-control': 'no-store' });
+    res.end();
+    return true;
+  }
   if (pending?.cli) {
     // S13: hand the CLI a one-time code on its loopback; the key itself only travels in the CLI's own POST.
     const who = await resolveVerifiedPrincipal(state, { actor: `oidc:${email}`, roles: [] }, true);

@@ -26,6 +26,10 @@ export type ApiKeyRecord = {
   revokedBy?: string;
   /** S6: last use, recorded only for the break-glass key (drives the alert until it is rotated). */
   lastUsedAt?: string;
+  secretPrefix?: 'fk_' | 'fk_at_';
+  audience?: string;
+  oauthClientId?: string;
+  oauthClientName?: string;
 };
 
 /** S6: the sealed break-glass machine key's owner. */
@@ -45,7 +49,7 @@ export class ApiKeyStoreError extends Error {
 
 const USER_OWNER = /^user:[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.-]{1,315}$/;
 const SERVICE_OWNER = /^service:[a-z0-9][a-z0-9-]{0,62}$/;
-const DEVICE_FAMILY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const DEVICE_FAMILY = /^(?:[a-z0-9][a-z0-9._-]{0,63}|mcp:[a-z0-9._-]{1,60})$/;
 
 export function publicKeyView(k: ApiKeyRecord): Omit<ApiKeyRecord, 'hash' | 'graceHash'> {
   const { hash: _h, graceHash: _g, ...rest } = k;
@@ -139,6 +143,10 @@ export class ApiKeyStore {
     roles?: Role[];
     expiresAt?: string | null;
     by: string;
+    secretPrefix?: 'fk_' | 'fk_at_';
+    audience?: string;
+    oauthClientId?: string;
+    oauthClientName?: string;
   }): Promise<{ record: ApiKeyRecord; plaintext: string }> {
     return this.serial(async () => {
       this.assertHealthy();
@@ -161,7 +169,7 @@ export class ApiKeyStore {
       }
       const expiresAt = normalizeExpiry(input.expiresAt, this.now());
       const scopes = normalizeScopes(input.scopes);
-      const gen = generateApiKey();
+      const gen = generateApiKey(input.secretPrefix ?? 'fk_');
       const record: ApiKeyRecord = {
         id: 'key_' + gen.hash.slice(0, 16),
         prefix: gen.prefix,
@@ -173,13 +181,28 @@ export class ApiKeyStore {
         expiresAt,
         createdAt: this.now().toISOString(),
         createdBy: input.by,
+        ...(input.secretPrefix ? { secretPrefix: input.secretPrefix } : {}),
+        ...(input.audience ? { audience: input.audience } : {}),
+        ...(input.oauthClientId ? { oauthClientId: input.oauthClientId } : {}),
+        ...(input.oauthClientName ? { oauthClientName: input.oauthClientName } : {}),
       };
       await this.commit(record, input.by);
       return { record: structuredClone(record), plaintext: gen.plaintext };
     });
   }
 
-  rotate(id: string, input: { graceSeconds?: number; by: string }): Promise<{ record: ApiKeyRecord; plaintext: string }> {
+  rotate(
+    id: string,
+    input: {
+      graceSeconds?: number;
+      by: string;
+      expiresAt?: string | null;
+      secretPrefix?: 'fk_' | 'fk_at_';
+      audience?: string;
+      oauthClientId?: string;
+      oauthClientName?: string;
+    },
+  ): Promise<{ record: ApiKeyRecord; plaintext: string }> {
     return this.serial(async () => {
       this.assertHealthy();
       const cur = this.byId.get(id);
@@ -188,9 +211,37 @@ export class ApiKeyStore {
       if (!Number.isFinite(grace) || grace < 0 || grace > 7 * 24 * 3600) {
         throw new ApiKeyStoreError(400, 'invalid_grace', 'graceSeconds must be between 0 and 604800');
       }
-      const gen = generateApiKey();
+      const prefix = input.secretPrefix ?? cur.secretPrefix ?? 'fk_';
+      const gen = generateApiKey(prefix);
       const now = this.now();
-      const next: ApiKeyRecord = { ...structuredClone(cur), hash: gen.hash, prefix: gen.prefix, rotatedAt: now.toISOString() };
+      const expiresAt = input.expiresAt !== undefined ? normalizeExpiry(input.expiresAt, this.now()) : cur.expiresAt;
+      const next: ApiKeyRecord = {
+        ...structuredClone(cur),
+        hash: gen.hash,
+        prefix: gen.prefix,
+        rotatedAt: now.toISOString(),
+        expiresAt,
+        ...(input.secretPrefix !== undefined
+          ? { secretPrefix: input.secretPrefix }
+          : cur.secretPrefix
+            ? { secretPrefix: cur.secretPrefix }
+            : {}),
+        ...(input.audience !== undefined
+          ? { audience: input.audience }
+          : cur.audience
+            ? { audience: cur.audience }
+            : {}),
+        ...(input.oauthClientId !== undefined
+          ? { oauthClientId: input.oauthClientId }
+          : cur.oauthClientId
+            ? { oauthClientId: cur.oauthClientId }
+            : {}),
+        ...(input.oauthClientName !== undefined
+          ? { oauthClientName: input.oauthClientName }
+          : cur.oauthClientName
+            ? { oauthClientName: cur.oauthClientName }
+            : {}),
+      };
       delete next.graceHash;
       delete next.graceUntil;
       if (grace > 0) {

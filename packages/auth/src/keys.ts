@@ -7,8 +7,8 @@ export function hashApiKey(plaintext: string): string {
   return createHash('sha256').update(plaintext, 'utf8').digest('hex');
 }
 
-export function generateApiKey(): { plaintext: string; prefix: string; hash: string } {
-  const plaintext = API_KEY_PREFIX + randomBytes(32).toString('base64url');
+export function generateApiKey(prefix = API_KEY_PREFIX): { plaintext: string; prefix: string; hash: string } {
+  const plaintext = prefix + randomBytes(32).toString('base64url');
   return { plaintext, prefix: plaintext.slice(0, 10), hash: hashApiKey(plaintext) };
 }
 

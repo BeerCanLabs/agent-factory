@@ -22,6 +22,7 @@ import { fireScheduledAction, scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
 import { IdpConfigStore, type IdpConfigDoc } from './idp-config.js';
+import { McpOAuthStore, type McpOAuthDoc } from './mcp-oauth.js';
 import { bootstrapAdmin, drainRecoveryOutbox, type RecoveryOutboxDoc } from './recover.js';
 import { SpendAccountStore, settleOnEnd } from './spend-accounts.js';
 import { ApiKeyStore, ApprovalStore, docBackendFromUri, type ApiKeysDoc, GrantStore, PrincipalStore, type GrantsDoc, type PrincipalsDoc } from '@beercanlabs/factory-bouncer';
@@ -223,6 +224,9 @@ const keys = await ApiKeyStore.open(
 const idpConfig = await IdpConfigStore.open(
   docBackendFromUri<IdpConfigDoc>(process.env.FACTORY_IDP_CONFIG_STORE_URI, join(DATA_DIR, 'auth', 'idp-config')),
 );
+const mcpOAuthStore = await McpOAuthStore.open(
+  docBackendFromUri<McpOAuthDoc>(process.env.FACTORY_MCP_OAUTH_STORE_URI, join(DATA_DIR, 'auth', 'mcp-oauth')),
+);
 const recoveryOutbox = docBackendFromUri<RecoveryOutboxDoc>(process.env.FACTORY_RECOVERY_OUTBOX_URI, join(DATA_DIR, 'auth', 'recovery-outbox'));
 
 const state: FactoryState = {
@@ -259,6 +263,7 @@ const state: FactoryState = {
   auth: authFromEnv(),
   keys,
   idpConfig,
+  mcpOAuthStore,
   // §6.12 A2: FACTORY_ACCESS_TEAM_DOMAIN + FACTORY_ACCESS_AUD; unset disables Access identity (bearer tokens only).
   access: accessAuthFromEnv(),
   version: VERSION,

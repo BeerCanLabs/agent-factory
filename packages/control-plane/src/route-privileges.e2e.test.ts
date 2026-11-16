@@ -19,6 +19,7 @@ import { attachEventStream } from './stream.js';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
+import { McpOAuthStore } from './mcp-oauth.js';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { createTreasury } from './spend.js';
 
@@ -370,6 +371,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       spend: new SpendTracker(),
       treasury: createTreasury(),
       approvals: new ApprovalStore(),
+      mcpOAuthStore: await McpOAuthStore.open(),
       groups: await GroupStore.open(join(tmpDir, 'groups')),
       idleMs: 0,
       idleTimers: new Map(),
@@ -537,6 +539,43 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       }
     } finally {
       state.providers = [];
+    }
+  });
+
+  it('TSK-339: OAuth 2.1 AS discovery metadata, registration, authorize, token, revoke, and consents routes', async () => {
+    // Discovery metadata
+    for (const path of [
+      '/.well-known/oauth-protected-resource',
+      '/.well-known/oauth-protected-resource/mcp',
+      '/.well-known/oauth-authorization-server',
+    ]) {
+      const r = await call(port, 'GET', path, 'none');
+      assert.equal(r.status, 200, `${path} unauthenticated discovery`);
+    }
+
+    // Public / unauthenticated registration, authorize, token, revoke
+    for (const path of [
+      '/api/v1/auth/register',
+      '/register',
+      '/authorize',
+      '/api/v1/auth/oauth/authorize',
+      '/token',
+      '/api/v1/auth/oauth/token',
+      '/revoke',
+      '/api/v1/auth/oauth/revoke',
+    ]) {
+      const isGet = path.includes('authorize');
+      const r = await call(port, isGet ? 'GET' : 'POST', path, 'none', isGet ? undefined : {});
+      assert.ok(r.status !== 404, `${path} route responds`);
+    }
+
+    // Consents management (requires sign-in / verified principal; API keys cannot manage)
+    for (const path of [
+      '/api/v1/oauth/consents',
+      '/api/v1/oauth/consents/client1',
+    ]) {
+      const none = await call(port, path.endsWith('client1') ? 'DELETE' : 'GET', path, 'none');
+      assert.equal(none.status, 401, `${path} without credential`);
     }
   });
 
