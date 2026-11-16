@@ -45,8 +45,14 @@ resource "aws_route_table_association" "service" {
   route_table_id = aws_route_table.service.id
 }
 
+# E6: `route = []` makes Terraform authoritative for this table's routes. Without it, a `route` block deleted from
+# the config is left behind in AWS: the IGW default route that 6f61937 added (applied 2026-09-20) and 85e4ac3 deleted
+# from the code stayed live until this change. With `route = []`, every apply removes any default, NAT or other route
+# added here by hand. The provider ignores the `local` route and S3 endpoint routes (the S3 endpoint below adds
+# its own route through `route_table_ids`), so those stay.
 resource "aws_route_table" "agents" {
   vpc_id = aws_vpc.factory.id
+  route  = []
   tags   = { Name = "${local.name}-agents-no-egress" }
 }
 
@@ -78,9 +84,62 @@ resource "aws_security_group" "gatekeeper_ingress" {
   vpc_id = aws_vpc.factory.id
 }
 
+# E1/E6: the agents' egress is declared inline, so Terraform owns the group's whole egress list. Any rule added by
+# hand (as the all-protocol 0.0.0.0/0 rule added with the AWS CLI on 2026-09-25 was) is revoked by the next apply.
+# Agents reach only the control plane, the gatekeeper-egress, the account-locked VPC endpoints, S3 through its VPC
+# endpoint, the VPC resolver, and the ECS task metadata/credentials address. Nothing else, and never the internet.
 resource "aws_security_group" "agents" {
   name   = "${local.name}-agents"
   vpc_id = aws_vpc.factory.id
+
+  egress {
+    protocol        = "tcp"
+    from_port       = 8088
+    to_port         = 8088
+    security_groups = [aws_security_group.control_plane.id]
+    description     = ""
+  }
+  egress {
+    protocol        = "tcp"
+    from_port       = 8081
+    to_port         = 8081
+    security_groups = [aws_security_group.gatekeeper_egress.id]
+    description     = ""
+  }
+  # One block for both 443 destinations (the interface endpoints and S3 through the gateway endpoint), because
+  # the provider stores rules that share a protocol and port range as one element; two blocks would make the
+  # first apply revoke and re-add them.
+  egress {
+    protocol        = "tcp"
+    from_port       = 443
+    to_port         = 443
+    security_groups = [aws_security_group.endpoints.id]
+    prefix_list_ids = [aws_vpc_endpoint.s3.prefix_list_id]
+    description     = ""
+  }
+  egress {
+    protocol    = "udp"
+    from_port   = 53
+    to_port     = 53
+    cidr_blocks = ["${cidrhost(aws_vpc.factory.cidr_block, 2)}/32"]
+    description = ""
+  }
+  # DNS falls back to TCP when a UDP answer is truncated. Only the VPC resolver.
+  egress {
+    protocol    = "tcp"
+    from_port   = 53
+    to_port     = 53
+    cidr_blocks = ["${cidrhost(aws_vpc.factory.cidr_block, 2)}/32"]
+    description = "VPC resolver, TCP fallback"
+  }
+  # ECS task metadata and IAM task role credentials (link-local, never routed off the host).
+  egress {
+    protocol    = "tcp"
+    from_port   = 80
+    to_port     = 80
+    cidr_blocks = ["169.254.170.2/32"]
+    description = "ECS task metadata and IAM credentials endpoint"
+  }
 }
 
 resource "aws_security_group" "endpoints" {
@@ -134,55 +193,49 @@ resource "aws_vpc_security_group_egress_rule" "service_out" {
   cidr_ipv4         = "0.0.0.0/0"
 }
 
-# Agents: only the control plane, the gatekeeper-egress, the endpoints, and S3 (mind + ECR layers).
-resource "aws_vpc_security_group_egress_rule" "agents_to_cp" {
-  security_group_id            = aws_security_group.agents.id
-  ip_protocol                  = "tcp"
-  from_port                    = 8088
-  to_port                      = 8088
-  referenced_security_group_id = aws_security_group.control_plane.id
+# The agents' egress rules used to be separate resources; they are now the inline `egress` blocks on
+# aws_security_group.agents (same rules, same AWS objects). `destroy = false` drops them from state without revoking
+# them, so the switch never interrupts a running agent; the inline list then owns them.
+removed {
+  from = aws_vpc_security_group_egress_rule.agents_to_cp
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "aws_vpc_security_group_egress_rule" "agents_to_gatekeeper_egress" {
-  security_group_id            = aws_security_group.agents.id
-  ip_protocol                  = "tcp"
-  from_port                    = 8081
-  to_port                      = 8081
-  referenced_security_group_id = aws_security_group.gatekeeper_egress.id
+removed {
+  from = aws_vpc_security_group_egress_rule.agents_to_gatekeeper_egress
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "aws_vpc_security_group_egress_rule" "agents_to_endpoints" {
-  security_group_id            = aws_security_group.agents.id
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-  referenced_security_group_id = aws_security_group.endpoints.id
+removed {
+  from = aws_vpc_security_group_egress_rule.agents_to_endpoints
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "aws_vpc_security_group_egress_rule" "agents_to_s3" {
-  security_group_id = aws_security_group.agents.id
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  prefix_list_id    = aws_vpc_endpoint.s3.prefix_list_id
+removed {
+  from = aws_vpc_security_group_egress_rule.agents_to_s3
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "aws_vpc_security_group_egress_rule" "agents_dns" {
-  security_group_id = aws_security_group.agents.id
-  ip_protocol       = "udp"
-  from_port         = 53
-  to_port           = 53
-  cidr_ipv4         = "${cidrhost(aws_vpc.factory.cidr_block, 2)}/32"
+removed {
+  from = aws_vpc_security_group_egress_rule.agents_dns
+  lifecycle {
+    destroy = false
+  }
 }
 
-# ECS Task Metadata & IAM Task Role Credentials (link-local, non-routable outside host)
-resource "aws_vpc_security_group_egress_rule" "agents_to_ecs_metadata" {
-  security_group_id = aws_security_group.agents.id
-  ip_protocol       = "tcp"
-  from_port         = 80
-  to_port           = 80
-  cidr_ipv4         = "169.254.170.2/32"
-  description       = "ECS task metadata and IAM credentials endpoint"
+removed {
+  from = aws_vpc_security_group_egress_rule.agents_to_ecs_metadata
+  lifecycle {
+    destroy = false
+  }
 }
 
 # ---- endpoints: locked to this account so they cannot become an exfiltration path -----------
