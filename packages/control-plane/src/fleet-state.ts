@@ -55,6 +55,21 @@ const MAX_FLAGS = 20;
 const MAX_REASON = 500;
 const MAX_REASON_INPUT = 8000;
 
+/**
+ * A stored admin status from before GAP-268 (deploying, prod-testing, rolled-back) or any other value that is not an
+ * admin status loads as paused, so `status` and `effective` agree; the next admin write stores it.
+ */
+function normalized(raw: FleetState): FleetState {
+  if ((FLEET_STATUSES as readonly string[]).includes(raw.status)) return raw;
+  // Every part goes through the one reason cleaner: the file is outside the API's checks, and every run reads `reason`.
+  const was = sanitizeReason(String(raw.status).slice(0, 40)) ?? '(blank)';
+  const prior = typeof raw.reason === 'string' ? sanitizeReason(raw.reason) : null;
+  const freeze = was === 'rolled-back' ? ' A rollback freeze was recorded.' : '';
+  console.warn(`[control-plane] fleet state: stored status "${was}" is not running, paused or deploy-freeze; it reads as paused.${freeze}`);
+  const reason = sanitizeReason(`The stored status "${was}" is no longer an admin status: treated as paused.${freeze}${prior ? ` (was: ${prior})` : ''}`);
+  return { ...raw, status: 'paused', reason };
+}
+
 /** One small JSON document, written whole and renamed into place. In memory when no file is given. */
 export class FleetStateStore {
   private current: FleetState | undefined;
@@ -62,7 +77,7 @@ export class FleetStateStore {
     if (!file) return;
     try {
       const raw = JSON.parse(readFileSync(file, 'utf8')) as FleetState;
-      if (raw && typeof raw.status === 'string') this.current = raw;
+      if (raw && typeof raw.status === 'string') this.current = normalized(raw);
     } catch {
       this.current = undefined;
     }

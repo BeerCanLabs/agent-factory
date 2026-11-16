@@ -237,6 +237,8 @@ export type GatekeeperEgressOptions = {
   progress?: ProgressOptions;
   /** How often to refresh routes from control plane (ms); default 10_000. */
   routeRefreshIntervalMs?: number;
+  /** Delays between start-up route fetch attempts (bounded; then routes load lazily on use). Default about 30 s in all. */
+  routeStartRetryMs?: number[];
   /** Tests only: accept factory systems with an http upstream (production systems must be https). */
   allowHttpSystems?: boolean;
   /** Bearer the control plane presents on POST /internal/vendor-models. Absent: that route is not served. */
@@ -460,6 +462,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   const MISS_REFRESH_INTERVAL_MS = Math.min(2_000, ROUTE_REFRESH_INTERVAL_MS);
 
   let inflight: Promise<void> | undefined;
+  /** What the last successful load logged (agent-factory #479): log again only on a change or after a failure. */
+  let lastLoadedSet: string | undefined;
+  let lastIgnored = '';
+  let routesFailed = false;
   const cachedPlatformCredentials = new Set<string>();
   /** Hosts each platform credential may be sent to: the upstreams of the approved systems that hold it (GAP-182). */
   const cachedCredentialHosts = new Map<string, Set<string>>();
@@ -483,6 +489,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     } catch (err) {
       // Keep the last known systems: a control-plane restart must not cut every agent off.
       console.error(`[gatekeeper-egress] system routes refresh: ${err instanceof Error ? err.message : String(err)}`);
+      routesFailed = true;
       return;
     }
     const remote = Array.isArray(remotePayload) ? remotePayload : remotePayload?.routes;
@@ -501,18 +508,44 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     }
     routes.clear();
     for (const [id, r] of staticRoutes) routes.set(id, r);
+    const ignored: string[] = [];
     for (const r of remote) {
       const problem = staticRoutes.has(r?.id) ? 'id is a landing-zone route' : routeProblem(r, true, opts.allowHttpSystems === true);
       if (problem) {
-        console.error(`[gatekeeper-egress] system ${String(r?.id)} ignored: ${problem}`);
+        ignored.push(`[gatekeeper-egress] system ${String(r?.id)} ignored: ${problem}`);
         continue;
       }
       routes.set(r.id, r);
     }
     lastRouteRefresh = Date.now();
+    // Refreshes are lazy and an agent can drive them, so these lines appear on a change (or a recovery), not per refresh.
+    if (ignored.join('\n') !== lastIgnored) for (const line of ignored) console.error(line);
+    lastIgnored = ignored.join('\n');
+    const set = [...routes.keys()].sort().join(',');
+    if (set !== lastLoadedSet || routesFailed) console.log(`[gatekeeper-egress] routes loaded (${routes.size})`);
+    lastLoadedSet = set;
+    routesFailed = false;
   }
 
-  void ensureRoutes();
+  /**
+   * The control plane may be restarting in the same deploy, so the first fetch retries with backoff, a bounded number
+   * of times. After that, routes still load lazily on the next request or health check.
+   */
+  async function loadRoutesAtStart(): Promise<void> {
+    if (!opts.control.systemRoutes) return;
+    const delays = opts.routeStartRetryMs ?? [500, 1_000, 2_000, 4_000, 8_000, 15_000];
+    for (let attempt = 0; ; attempt++) {
+      await ensureRoutes();
+      if (lastRouteRefresh > 0) return;
+      if (attempt >= delays.length) {
+        console.error(`[gatekeeper-egress] routes not loaded after ${attempt + 1} attempts; they load on the next request`);
+        return;
+      }
+      await new Promise<void>((r) => setTimeout(r, delays[attempt]).unref?.());
+    }
+  }
+
+  void loadRoutesAtStart();
 
   let activeCatalog: ModelCatalog = { ...(opts.modelCatalog ?? {}) };
   let activeDefaultModel: string | undefined = opts.defaultModel;
