@@ -137,7 +137,11 @@ def handle(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], payl
     # `factoryKind` is set by the factory and removed from anything a person sends, so only the factory can make one.
     kind = payload.get("factoryKind")
     if kind == "approval":
-        return None  # a decision for an action the agent asked for: the factory applies it, the loop has nothing to say
+        # GAP-259: the answer to a decision the agent asked for (a decision hold) names the event the agent handles, in the
+        # factory's own words; the decider's notes stay out of the model's view. Any other decision the factory applies.
+        if not (isinstance(payload.get("requestKey"), str) and isinstance(payload.get("event"), dict)):
+            return None  # a decision for an action the agent asked for: the factory applies it, the loop has nothing to say
+        return converse(factory, soul, mind, tools, {"message": str(payload.get("message") or ""), "event": payload["event"]})
     if kind == "smoke":
         if payload.get("smoke") == "skill" or payload.get("action"):
             action = str(payload.get("action") or "")

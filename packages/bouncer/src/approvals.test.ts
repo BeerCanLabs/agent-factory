@@ -150,3 +150,41 @@ describe('ApprovalStore configuration changes (CF4)', () => {
     assert.equal(same.approval.approvalId, first.approval.approvalId);
   });
 });
+
+describe('GAP-259 decision holds', () => {
+  const hold = { requestKey: 'plan-budget:o/r#1', kind: 'plan-budget', title: 'Budget', summary: 'Estimate $10' };
+
+  it('is idempotent per agent and key, persists, is never spent, and keeps a cap only when approved', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'decision-'));
+    try {
+      const s = new ApprovalStore(dir);
+      const first = s.holdDecision({ runId: 'r1', agentId: 'a', argsSha256: 'h', hold });
+      assert.equal(first.created, true);
+      assert.equal(first.approval.kind, 'decision');
+      assert.equal(first.approval.tool, 'plan-budget: Budget');
+      const again = s.holdDecision({ runId: 'r2', agentId: 'a', argsSha256: 'h2', hold: { ...hold, title: 'Changed' } });
+      assert.equal(again.created, false);
+      assert.equal(again.approval.approvalId, first.approval.approvalId);
+      assert.equal(s.holdDecision({ runId: 'r3', agentId: 'b', argsSha256: 'h', hold }).created, true, 'another agent asks its own');
+      assert.equal(s.list({ kind: 'decision' }).length, 2);
+      assert.equal(s.list({ kind: 'tool' }).length, 0);
+      const decided = s.decide(first.approval.approvalId, 'approved', 'dale', 'ok', 250);
+      assert.equal(decided?.capUsd, 250);
+      assert.equal(s.consume(first.approval.approvalId), undefined);
+      const reloaded = new ApprovalStore(dir);
+      assert.equal(reloaded.decisionByKey('a', hold.requestKey)?.capUsd, 250);
+      const other = reloaded.decisionByKey('b', hold.requestKey)!;
+      assert.equal(reloaded.decide(other.approvalId, 'rejected', 'dale', undefined, 99)?.capUsd, undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a cap is never kept on a tool-call approval', () => {
+    const s = new ApprovalStore();
+    const { approval } = s.request(key);
+    const decided = s.decide(approval.approvalId, 'approved', 'dale', undefined, 5);
+    assert.equal(decided?.state, 'approved');
+    assert.equal(decided?.capUsd, undefined);
+  });
+});

@@ -30,6 +30,22 @@ export type ChangeRequest = {
   roles: string[];
 };
 
+/**
+ * GAP-259: a decision an agent asks a person for, published through the factory's API and MCP like any other approval.
+ * It holds no request and no run: the agent goes on, and the decision is delivered to it when a person makes it.
+ * `requestKey` is the agent's own idempotency key; the rest is what the person reads before deciding.
+ */
+export type DecisionHold = {
+  requestKey: string;
+  /** The agent's own name for what is asked (e.g. `plan-budget`). */
+  kind: string;
+  title: string;
+  summary: string;
+  link?: string;
+  /** Anything else the agent attached (a budget estimate, a target), shown as data and never interpreted. */
+  payload?: Record<string, unknown>;
+};
+
 /** CF4: asking in a channel. The code ties a reply to this approval; the ingress, not the agent, reads the reply. */
 export type ChannelAsk = {
   code: string;
@@ -52,8 +68,15 @@ export type Approval = {
   argsSha256: string;
   state: ApprovalState;
   requestedAt: string;
-  /** `held`: a request in a person's name (E9), bound to the agent rather than the run. Absent: an MCP tool call. */
-  kind?: 'held' | 'change';
+  /**
+   * `held`: a request in a person's name (E9), bound to the agent rather than the run. `decision`: a decision the agent
+   * asked for (GAP-259), non-blocking, delivered when made. Absent: an MCP tool call.
+   */
+  kind?: 'held' | 'change' | 'decision';
+  /** `decision`: what is asked, as the agent published it. */
+  hold?: DecisionHold;
+  /** `decision`: an approval may set a spending cap in USD (e.g. a plan's budget). */
+  capUsd?: number;
   request?: HeldRequest;
   /** `change`: what is being asked, as the factory stores it. */
   change?: ChangeRequest;
@@ -141,6 +164,37 @@ export class ApprovalStore {
     return { approval: { ...a }, created: true };
   }
 
+  /**
+   * GAP-259: the decision this agent asked for under `requestKey`, or a new pending one. Idempotent by agent and key,
+   * whatever its state: asking again never reopens a decision or changes what was asked.
+   */
+  holdDecision(k: { runId: string; agentId: string; argsSha256: string; hold: DecisionHold }): { approval: Approval; created: boolean } {
+    for (const a of this.items.values()) {
+      if (a.kind === 'decision' && a.agentId === k.agentId && a.hold?.requestKey === k.hold.requestKey) return { approval: structuredClone(a), created: false };
+    }
+    const a: Approval = {
+      runId: k.runId,
+      agentId: k.agentId,
+      route: 'decision',
+      // What a list shows as the approval's name: the agent's kind and title.
+      tool: `${k.hold.kind}: ${k.hold.title}`.slice(0, 160),
+      argsSha256: k.argsSha256,
+      kind: 'decision',
+      hold: structuredClone(k.hold),
+      approvalId: randomUUID(),
+      state: 'pending',
+      requestedAt: new Date().toISOString(),
+    };
+    this.save(a);
+    return { approval: structuredClone(a), created: true };
+  }
+
+  /** GAP-259: the decision an agent asked for under its own key. */
+  decisionByKey(agentId: string, requestKey: string): Approval | undefined {
+    for (const a of this.items.values()) if (a.kind === 'decision' && a.agentId === agentId && a.hold?.requestKey === requestKey) return structuredClone(a);
+    return undefined;
+  }
+
   /** Pending change requests for an agent that have not expired. */
   pendingChanges(agentId: string): Approval[] {
     const now = Date.now();
@@ -184,11 +238,18 @@ export class ApprovalStore {
     return a ? { ...a } : undefined;
   }
 
-  list(filter: { state?: ApprovalState; runId?: string } = {}): Approval[] {
-    return [...this.items.values()].filter((a) => (!filter.state || a.state === filter.state) && (!filter.runId || a.runId === filter.runId));
+  /** `kind`: `tool` for MCP tool calls (no kind), else `held`, `change` or `decision`. */
+  list(filter: { state?: ApprovalState; runId?: string; kind?: 'tool' | 'held' | 'change' | 'decision' } = {}): Approval[] {
+    return [...this.items.values()].filter(
+      (a) =>
+        (!filter.state || a.state === filter.state) &&
+        (!filter.runId || a.runId === filter.runId) &&
+        (!filter.kind || (filter.kind === 'tool' ? a.kind === undefined : a.kind === filter.kind)),
+    );
   }
 
-  decide(id: string, decision: 'approved' | 'rejected', actor: string, notes?: string): Approval | undefined {
+  /** Decided once: anything but a pending approval is left as it is. `capUsd` is kept only on an approved decision. */
+  decide(id: string, decision: 'approved' | 'rejected', actor: string, notes?: string, capUsd?: number): Approval | undefined {
     const a = this.items.get(id);
     if (!a || a.state !== 'pending') return undefined;
     // CF4: a pending change that has run out of time can no longer be decided; it is recorded as expired.
@@ -196,7 +257,8 @@ export class ApprovalStore {
       this.save({ ...a, state: 'expired' });
       return undefined;
     }
-    const next = { ...a, state: decision, decidedBy: actor, decidedAt: new Date().toISOString(), ...(notes ? { notes } : {}) };
+    const cap = a.kind === 'decision' && decision === 'approved' && capUsd !== undefined ? { capUsd } : {};
+    const next = { ...a, state: decision, decidedBy: actor, decidedAt: new Date().toISOString(), ...(notes ? { notes } : {}), ...cap };
     this.save(next);
     return { ...next };
   }
@@ -207,7 +269,8 @@ export class ApprovalStore {
    */
   consume(id: string): Approval | undefined {
     const a = this.items.get(id);
-    if (!a || a.state !== 'approved' || a.kind === 'change') return undefined;
+    // A decision is the agent's to read, never to spend: it stays approved (GAP-259).
+    if (!a || a.state !== 'approved' || a.kind === 'change' || a.kind === 'decision') return undefined;
     const next = { ...a, state: 'consumed' as const };
     this.save(next);
     return { ...next };
