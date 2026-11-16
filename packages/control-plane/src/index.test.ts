@@ -270,6 +270,25 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal(ctx.run.model, undefined, 'gatekeeper-egress context must not have pinnedModel set');
     });
 
+    it('GAP-255 hands an admin-set policy env to the run, never over the factory\'s own variables, and refuses secrets', async () => {
+      const put = (body: unknown) => request(port, '/api/v1/agents/echo-agent/policy', { method: 'PUT', token: TOKENS.admin, body });
+      const fleet = JSON.stringify({ repos: {}, logins: { conductor: 'flow-bot' } });
+      assert.equal((await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' } })).status, 200);
+      const run = (await wake('echo-agent')).json as RunBody;
+      const env = state.runtime.started.at(-1)!.runEnv;
+      assert.equal(env.SDLC_FLEET_CONFIG, fleet);
+      assert.equal(env.SDLC_APPROVALS_URL, 'https://factory.example/api/v1/agents/flow/holds');
+      assert.equal(env.FACTORY_RUN_ID, run.runId);
+      for (const env of [{ FACTORY_RUN_TOKEN: 'x' }, { GITHUB_TOKEN: 'x' }, { lower: 'x' }, { AWS_REGION: 'x' }, { BIG: 'x'.repeat(6001) }, { N: 1 }]) {
+        assert.equal((await put({ routes: [], env })).status, 400, JSON.stringify(env).slice(0, 40));
+      }
+      state.secretValues.add('known-secret-value-for-env-test');
+      assert.equal((await put({ routes: [], env: { SDLC_NOTE: 'has known-secret-value-for-env-test inside' } })).status, 400);
+      state.secretValues.delete('known-secret-value-for-env-test');
+      assert.equal((await request(port, '/api/v1/policies/budget', { method: 'PUT', token: TOKENS.admin, body: { routes: [], env: { SDLC_X: 'y' } } })).status, 400);
+      state.policies.set('echo-agent', { routes: [] });
+    });
+
     it('injects the configured factory default as FACTORY_MODEL when policy names no models (M2, GAP-181)', async () => {
       // The default is configuration, never code: this factory has one configured.
       const prevDefault = state.defaultModel;

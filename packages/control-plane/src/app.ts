@@ -4774,6 +4774,11 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       json(res, 400, { error: checked.error });
       return;
     }
+    // GAP-255: a deployment setting is never a credential the factory already holds.
+    if (Object.values(checked.policy.env ?? {}).some((v) => v.length >= 8 && [...state.secretValues].some((secret) => secret.length >= 8 && v.includes(secret)))) {
+      json(res, 400, { error: 'env carries a secret value: set it as the agent\'s secret instead' });
+      return;
+    }
     if (isBuiltin && checked.policy.budgetUsd !== undefined) {
       json(res, 400, {
         error: 'builtin_agents_exempt_from_budget',
@@ -5811,6 +5816,11 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
     // #319: a wake allow-list is per agent only; a global/default policy may not carry one.
     if (checked.policy.wakeAgents !== undefined) {
       json(res, 400, { error: 'wakeAgents are set per agent, never in the global policy' });
+      return;
+    }
+    // GAP-255: deployment settings are per agent only.
+    if (checked.policy.env !== undefined) {
+      json(res, 400, { error: 'env is set per agent, never in the global policy' });
       return;
     }
     state.policies.set('__global__', checked.policy);

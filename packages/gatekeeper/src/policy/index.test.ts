@@ -376,3 +376,14 @@ describe('PolicyStore ephemeral policies (E1.4)', () => {
     }
   });
 });
+
+describe('GAP-255 policy env', () => {
+  it('accepts non-secret UPPER_SNAKE_CASE settings and refuses reserved, credential-like, oversized or non-text ones', () => {
+    assert.ok(validatePolicy({ routes: [], env: { SDLC_FLEET_CONFIG: '{}', SDLC_GLOBAL_STATE_URL: 'https://f/api/v1/fleet/state' } }).ok);
+    for (const env of [[], 'x', { lower: 'x' }, { FACTORY_URL: 'x' }, { PATH: 'x' }, { SLACK_BOT_TOKEN: 'x' }, { DB_PASSWORD: 'x' }, { X: 1 }, { X: 'y'.repeat(6001) }]) {
+      assert.equal(validatePolicy({ routes: [], env }).ok, false, JSON.stringify(env).slice(0, 40));
+    }
+    const many = Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`SDLC_V${i}`, 'x']));
+    assert.equal(validatePolicy({ routes: [], env: many }).ok, false);
+  });
+});

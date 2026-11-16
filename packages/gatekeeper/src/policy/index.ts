@@ -22,7 +22,37 @@ export type AgentPolicy = {
   subagents?: string[];
   /** #319: the named agents this agent may wake with its run token. Admin-set, per agent only; none by default. */
   wakeAgents?: string[];
+  /**
+   * GAP-255: non-secret deployment settings an admin gives this agent's runs as environment variables (a fleet's
+   * configuration, a URL it calls back). Never a credential: those are the agent's secrets. Per agent only.
+   */
+  env?: Record<string, string>;
 };
+
+/** GAP-255: names an admin may set; the factory's own, the platform's and credential-like names are refused. */
+export const POLICY_ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
+const RESERVED_ENV = /^(FACTORY_|AWS_|ECS_|LD_|PYTHON|NODE_|[A-Z]*_PROXY$|PATH$|HOME$|MEMORY_DIR$|SKILLS_DIR$|TMPDIR$)/;
+const CREDENTIAL_ENV = /(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|API_?KEY|CREDENTIAL)/;
+const MAX_ENV_VARS = 32;
+// A run's environment travels in the task's start request (ECS allows 8 KiB of overrides in all), so it stays small.
+const MAX_ENV_VALUE = 6000;
+const MAX_ENV_TOTAL = 6000;
+
+function validateEnv(v: unknown): string | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return 'env must be an object of names to text values';
+  const entries = Object.entries(v as Record<string, unknown>);
+  if (entries.length > MAX_ENV_VARS) return `env holds at most ${MAX_ENV_VARS} variables`;
+  let total = 0;
+  for (const [name, value] of entries) {
+    if (!POLICY_ENV_NAME.test(name)) return `env name ${JSON.stringify(name.slice(0, 64))} must be UPPER_SNAKE_CASE`;
+    if (RESERVED_ENV.test(name)) return `env name ${name} is the factory's or the platform's`;
+    if (CREDENTIAL_ENV.test(name)) return `env name ${name} looks like a credential: set it as the agent's secret`;
+    if (typeof value !== 'string' || value.length > MAX_ENV_VALUE) return `env.${name} must be text, at most ${MAX_ENV_VALUE} characters`;
+    total += name.length + value.length;
+  }
+  if (total > MAX_ENV_TOTAL) return `env is at most ${MAX_ENV_TOTAL} characters in all`;
+  return undefined;
+}
 
 const EMPTY: AgentPolicy = { routes: [] };
 
@@ -56,13 +86,17 @@ function positive(v: unknown): v is number {
 export function validatePolicy(raw: unknown): { ok: true; policy: AgentPolicy } | { ok: false; error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: 'policy must be an object' };
   const r = raw as Record<string, unknown>;
-  const allowed = new Set(['routes', 'models', 'hosts', 'tools', 'budgetUsd', 'tokensPerMinute', 'grounding', 'currentModel', 'primaryModel', 'secondaryModel', 'subagents', 'wakeAgents']);
+  const allowed = new Set(['routes', 'models', 'hosts', 'tools', 'budgetUsd', 'tokensPerMinute', 'grounding', 'currentModel', 'primaryModel', 'secondaryModel', 'subagents', 'wakeAgents', 'env']);
   for (const k of Object.keys(r)) if (!allowed.has(k)) return { ok: false, error: `unknown policy field ${k}` };
   if (!isStringArray(r.routes ?? [])) return { ok: false, error: 'routes must be an array of route ids' };
   if (r.models !== undefined && !isStringArray(r.models)) return { ok: false, error: 'models must be an array of model ids' };
   if (r.hosts !== undefined && !isStringArray(r.hosts)) return { ok: false, error: 'hosts must be an array of hostnames' };
   if (r.subagents !== undefined && !isStringArray(r.subagents)) return { ok: false, error: 'subagents must be an array of helper ids' };
   if (r.wakeAgents !== undefined && !isStringArray(r.wakeAgents)) return { ok: false, error: 'wakeAgents must be an array of agent ids' };
+  if (r.env !== undefined) {
+    const bad = validateEnv(r.env);
+    if (bad) return { ok: false, error: bad };
+  }
   if (r.tokensPerMinute !== undefined && !positive(r.tokensPerMinute)) return { ok: false, error: 'tokensPerMinute must be >= 0' };
   if (r.grounding !== undefined && r.grounding !== 'warn-once') return { ok: false, error: 'grounding must be "warn-once" when set' };
   if (r.budgetUsd !== undefined) {
