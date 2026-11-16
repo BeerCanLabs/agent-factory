@@ -30,7 +30,7 @@ export type PropertyManagerPolicies = {
     currentModel?: string | null;
     primaryModel?: string | null;
     secondaryModel?: string | null;
-    /** GAP-255: an admin's non-secret deployment settings for the agent's runs. */
+    /** GAP-263: an admin's non-secret deployment settings for the agent's runs. */
     env?: Record<string, string>;
   };
   has(agentId: string): boolean;
@@ -544,7 +544,7 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
         ? state.policies.get(agent.id).models?.[0]
         : state.defaultModel);
     const archetype = state.configs?.current(agent.id)?.agent?.memory?.archetype;
-    // GAP-255: an admin's non-secret deployment settings for this agent, first, so nothing the factory sets is replaced.
+    // GAP-263: an admin's non-secret deployment settings for this agent, first, so nothing the factory sets is replaced.
     const policyEnv = state.policies.has(agent.id) ? (state.policies.get(agent.id).env ?? {}) : {};
     runEnv = {
       ...policyEnv,
