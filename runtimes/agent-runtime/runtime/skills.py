@@ -135,7 +135,7 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
     return tools, problems
 
 
-# GAP-254: a tool that fails is logged (the container's stderr), not only told to the model. The run token and anything
+# GAP-262: a tool that fails is logged (the container's stderr), not only told to the model. The run token and anything
 # shaped like a credential are masked; a line is short. Arguments and results are never logged whole.
 CREDENTIAL_SHAPES = re.compile(
     r"(?i:bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}|github_pat_\w{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|sk-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{12,}"
