@@ -31,6 +31,9 @@ describe('A2 identity is verified, not asserted', () => {
     const consoleTask = ecs.match(/resource "aws_ecs_task_definition" "console" \{[\s\S]*?\n\}/)?.[0] ?? '';
     assert.ok(consoleTask, 'console task definition not found');
     assert.doesNotMatch(consoleTask, /FACTORY_TOKEN|valueFrom/, 'the console task is given a factory credential');
+    const garrisonTask = ecs.match(/resource "aws_ecs_task_definition" "garrison" \{[\s\S]*?\n\}/)?.[0] ?? '';
+    assert.ok(garrisonTask, 'garrison task definition not found');
+    assert.doesNotMatch(garrisonTask, /FACTORY_TOKEN|valueFrom/, 'the garrison task is given a factory credential');
   });
 
   it('no admin is built into code; the landing zone leaves Access identity off by default', () => {

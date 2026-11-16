@@ -329,12 +329,9 @@ resource "aws_ecs_task_definition" "garrison" {
       { name = "NODE_ENV", value = "production" },
       { name = "FACTORY_URL", value = local.cp_url },
       { name = "FACTORY_CONTROL_PLANE_URL", value = local.cp_url },
-      { name = "FACTORY_SECRETS_AWS_PREFIX", value = "factory/${var.environment}/" },
       { name = "AWS_REGION", value = var.aws_region },
     ]
-    secrets = [
-      { name = "FACTORY_TOKEN", valueFrom = local.secret["FACTORY_TOKEN"] },
-    ]
+    # §6.12 A2: no secrets. Garrison forwards each caller's own verified credential; it holds no factory token.
     logConfiguration = local.log["control-plane"]
   }])
 }
