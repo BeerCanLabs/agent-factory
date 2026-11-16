@@ -128,6 +128,8 @@ import {
 } from './mcp.js';
 export { handleMcp, handleAgentMcp, redactMcpResponse, SUPPORTED_MCP_PROTOCOL_VERSIONS } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
+import { handleMcpOAuthRoutes, McpOAuthStore, getOAuthIssuer } from './mcp-oauth.js';
+export { McpOAuthStore, getOAuthIssuer } from './mcp-oauth.js';
 import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, OPS_SKILL, conductorEventFor, conductorInput, opsEventFor } from './github-webhooks.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
@@ -325,6 +327,8 @@ export type FactoryState = {
   mcpChallenges?: Map<string, McpChallengeRecord>;
   /** Session-bound secret handoffs minted over MCP (CL6, 10-minute TTL). */
   mcpHandoffs?: Map<string, McpHandoffRecord>;
+  /** OAuth 2.1 Authorization Server durable store (TSK-339). */
+  mcpOAuthStore?: McpOAuthStore;
   /** Activation smoke budget caps and tracking (§6.12, TSK-281). */
   smokeBudgetUsd?: { perRun?: number; perActivation?: number };
   smokeRunSpend?: Map<string, number>;
@@ -369,7 +373,7 @@ function readBodyBytes(req: http.IncomingMessage, limit = MAX_BODY): Promise<Buf
   });
 }
 
-function readBody(req: http.IncomingMessage, limit = MAX_BODY): Promise<string> {
+export function readBody(req: http.IncomingMessage, limit = MAX_BODY): Promise<string> {
   return readBodyBytes(req, limit).then((b) => b.toString('utf8'));
 }
 
@@ -1708,6 +1712,11 @@ export async function requirePrivilege(
     }
   }
   if (!result.ok) {
+    const path = (req.url ?? '/').split('?')[0];
+    if (path === '/mcp' || (path.startsWith('/mcp/') && !path.startsWith('/mcp/run'))) {
+      const issuer = getOAuthIssuer(state, req);
+      res.setHeader('www-authenticate', `Bearer resource_metadata="${issuer}/.well-known/oauth-protected-resource/mcp"`);
+    }
     json(res, 401, { error: 'unauthorized' });
     return null;
   }
@@ -3361,15 +3370,35 @@ export const requestApiKey = new WeakMap<http.IncomingMessage, ApiKeyRecord>();
  */
 export function verifyApiKeyBeforeRouting(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const path = (req.url ?? '/').split('?')[0];
+  const isMcp = path === '/mcp' || (path.startsWith('/mcp/') && !path.startsWith('/mcp/run'));
   // S16: health and metrics take a machine key too, so probes can present one.
-  if (!(path === '/mcp' || (path.startsWith('/mcp/') && !path.startsWith('/mcp/run')) || path.startsWith('/api/v1/') || path === '/healthz' || path === '/' || path === '/metrics')) return true;
+  if (!(isMcp || path.startsWith('/api/v1/') || path === '/healthz' || path === '/' || path === '/metrics')) return true;
   const plaintext = apiKeyFromAuthorization(req.headers.authorization);
   if (plaintext === undefined) return true;
   const rec = plaintext && state.keys ? state.keys.verify(plaintext) : undefined;
   if (!rec) {
+    if (isMcp) {
+      const issuer = getOAuthIssuer(state, req);
+      res.setHeader('www-authenticate', `Bearer resource_metadata="${issuer}/.well-known/oauth-protected-resource/mcp"`);
+    }
     json(res, 401, { error: 'invalid_key', message: 'API key is unknown, revoked or expired' });
     return false;
   }
+
+  // Audience Binding (RFC 8707)
+  if (rec.audience) {
+    if (!isMcp) {
+      json(res, 401, { error: 'invalid_token_audience', message: 'Token audience does not permit direct API access' });
+      return false;
+    }
+    const issuer = getOAuthIssuer(state, req);
+    const canonicalMcp = `${issuer}/mcp`;
+    if (rec.audience !== canonicalMcp && !rec.audience.endsWith('/mcp')) {
+      json(res, 401, { error: 'invalid_token_audience', message: 'Token audience does not match this resource' });
+      return false;
+    }
+  }
+
   requestApiKey.set(req, rec);
   if (rec.owner === BREAK_GLASS_OWNER) {
     // S6 (R11): every break-glass call is ledgered and raises the alert until the key is rotated.
@@ -3389,6 +3418,8 @@ export function verifyApiKeyBeforeRouting(state: FactoryState, req: http.Incomin
 async function routeInner(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
   const path = (req.url ?? '/').split('?')[0];
   const started = Number(process.env.FACTORY_STARTED_AT ?? Date.now());
+
+  if (await handleMcpOAuthRoutes(state, req, res, path)) return;
 
   if ((path === '/login' || path.startsWith('/api/v1/auth/')) && (await handleLoginRoutes(state, req, res, path))) return;
 
@@ -5480,6 +5511,9 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
 
   function extractMcpClientId(r: http.IncomingMessage): string {
     const apiKey = requestApiKey.get(r);
+    if (apiKey?.oauthClientId) {
+      return apiKey.oauthClientId;
+    }
     if (apiKey?.deviceFamily?.startsWith('mcp:')) {
       const fromFamily = apiKey.deviceFamily.slice(4).trim();
       if (/^[a-zA-Z0-9._-]{1,64}$/.test(fromFamily)) return fromFamily;

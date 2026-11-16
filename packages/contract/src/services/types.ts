@@ -41,6 +41,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
     owns: [
       'packages/control-plane/src/app.ts',
       'packages/control-plane/src/mcp.ts',
+      'packages/control-plane/src/mcp-oauth.ts',
       'packages/control-plane/src/provenance.ts',
       'packages/control-plane/src/github-webhooks.ts',
       'packages/gatekeeper/src/policy/index.ts',
