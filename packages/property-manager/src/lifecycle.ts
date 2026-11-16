@@ -858,7 +858,13 @@ export async function applyKillSwitch(
   if (command === 'RESUME' && agent.state !== 'PAUSED' && agent.state !== 'ISOLATED') {
     return {
       status: 409,
-      body: { error: 'agent_not_paused', state: agent.state, message: `RESUME applies only to a PAUSED or ISOLATED agent; ${id} is ${agent.state}.` } as any,
+      body: {
+        error: 'agent_not_paused',
+        state: agent.state,
+        message:
+          `RESUME applies only to a PAUSED or ISOLATED agent; ${id} is ${agent.state}.` +
+          (agent.state === 'ERROR' || isBuiltin ? ` To clear ERROR or restart a built-in agent, use reset (POST /api/v1/agents/${id}/reset).` : ''),
+      } as any,
     };
   }
   if (command === 'PAUSE') agent.state = 'PAUSED';

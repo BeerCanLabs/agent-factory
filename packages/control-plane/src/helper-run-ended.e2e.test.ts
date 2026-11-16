@@ -316,6 +316,7 @@ describe('helper-run-ended wakes the parent agent (#481)', { concurrency: false 
       const r = await call(port, '/api/v1/agents/other/resume', 'POST', ADMIN);
       assert.deepEqual([r.status, r.body.error, r.body.state], [409, 'agent_not_paused', from], from);
       assert.equal(agent.state, from, `${from}: state unchanged`);
+      assert.equal(/\/reset\b/.test(r.body.message), from === 'ERROR', `${from}: points to reset only for ERROR`);
       assert.equal(resumes(), n, `${from}: no RESUME row`);
       assert.equal((await applyKillSwitch(state, 'other', 'RESUME', 'test')).status, 409, `${from}: the function refuses too`);
     }

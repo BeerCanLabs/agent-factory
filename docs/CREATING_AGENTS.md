@@ -574,22 +574,16 @@ This is an intentional optimization (`AM1` runtime shim gate, `TSK-283`). When `
 This section is for an agent that is already deployed and in service. For a new agent, set its budget in the policy at Step 4 instead.
 
 **Raise the limit.** There are three ways:
-- `PUT /api/v1/budget/agents/:id` with `{ "budgetUsd": { "perDay": 10 } }`. This needs `budget.allocate` and changes only `budgetUsd`.
-- The CLI: `/budget <agent> 10 daily`.
-- `PUT /api/v1/agents/:id/policy`. This replaces the whole policy, so read it first and send it back with `budgetUsd` (`perRun`, `perDay`, `perMonth`) raised.
+- `PUT /api/v1/budget/agents/:id` with `{ "budgetUsd": { "perDay": 10 } }`. This needs `budget.allocate` and changes only `perDay`/`perMonth`. It rejects `perRun` with a 400.
+- The CLI: `/budget <agent> 10 daily`. This uses `PUT /api/v1/registry/agents/:id/budget` and needs `registry.budget.set`.
+- `PUT /api/v1/agents/:id/policy` (`policy.set`). It replaces the whole policy, so read it first and send it back with `budgetUsd` raised. This is the only route that sets `perRun`.
 
-Runs that were blocked on the budget continue once the agent is back inside its limits.
+Runs that were blocked on the budget continue once the agent is back within its limits.
 
-**Deliver owed helper wakes with RESUME.** The factory owes a parent agent a `helper-run-ended` wake when one of its helper runs ends.
-- If that wake is refused because the agent is over its budget (`budget_exceeded`), paused (`agent_paused`) or isolated (`agent_isolated`), it stays owed in `helper-wakes.json`. It is delivered on the agent's next RESUME, or when the control plane starts. There are no timers.
-- Raising the budget alone does not deliver owed wakes. Send `POST /api/v1/agents/:id/resume` (CLI: `/resume <agent>`) to deliver them without a restart. RESUME needs the `agents.resume` privilege, which an admin who can change budgets may not hold.
-- Any other refusal is final, and RESUME does not bring that wake back. The fleet-wide kill switch is a separate mechanism, and an agent's RESUME does not lift it.
+**Owed helper wakes.** The factory owes a parent agent a `helper-run-ended` wake when one of its helper runs ends. A wake that is refused because the agent is over its budget (`budget_exceeded`), paused (`agent_paused`) or isolated (`agent_isolated`) stays owed in `helper-wakes.json`. Any other refusal is final. There are no timers.
+- **Refused for the budget.** Any write of the agent's budget, through any of the three routes above, delivers these wakes once, if the agent is then back within its limits. If it is still over them, the wake stays owed.
+- **Refused because the agent was paused or isolated.** RESUME (`POST /api/v1/agents/:id/resume`, CLI `/resume <agent>`, privilege `agents.resume`) delivers these.
+- **When the day or month budget window rolls over,** nothing fires. To deliver the wakes then, write the agent's budget (the same value works), or they go out at the next control-plane start.
+- **The fleet `paused` state** (`fleet.state.set`) is separate. An agent's RESUME does not change it, and the ops skill refuses a wake that arrives while the fleet is paused.
 
-> **Warning: RESUME changes the agent's state.** It sets the agent to `SLEEPING`, or to `WORKING` if it has an active run, and starts its next queued run, so it can start more than the owed wakes.
->
-> Send RESUME only to an agent that is deployed and in service: `SLEEPING`, `WORKING`, `PAUSED` or `ISOLATED`.
->
-> Never send it:
-> - during creation (`PENDING_BUDGET`, `PENDING_DEPLOY`, `DEPLOYING`), because it would skip the Step 5 activation smoke gate;
-> - to an agent in `ERROR`;
-> - to a retired or purged agent (`RETIRED_PENDING_PURGE`, `PURGED`).
+> **RESUME only lifts a pause or an isolation.** From any other state it returns `409 agent_not_paused` and changes nothing. To clear `ERROR`, or to restart a built-in agent, use reset (`/reset <agent>`). A valid RESUME also starts the agent's next queued run.
