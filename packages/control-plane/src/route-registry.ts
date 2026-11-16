@@ -332,6 +332,7 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'POST', pattern: '/api/v1/runs/:id/cancel', privilege: 'runs.cancel', description: 'Cancel active run' },
 
   // Run-token authenticated agent runtime endpoints (Exceptions)
+  { method: 'PUT', pattern: '/api/v1/fleet/state/ops', exception: 'run-token', description: "Report the fleet's deploy state (an ops agent's live run token, GAP-268)" },
   { method: 'GET', pattern: '/api/v1/runs/:id/approved-models', exception: 'run-token', description: 'Read approved models list (run token)' },
   { method: 'GET', pattern: '/api/v1/runs/:id/subagents', exception: 'run-token', description: 'List allowed subagents (run token)' },
   { method: 'POST', pattern: '/api/v1/runs/:id/subagents/spawn', exception: 'run-token', description: 'Spawn subagent run (run token)' },
@@ -365,8 +366,13 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'DELETE', pattern: '/api/v1/models/:model', privilege: ['models.manage', 'subscriptions.own'], description: 'Remove model from catalog (or retire own personal BYOM entry)' },
 
   // Approvals & MCP
+  { method: 'GET', pattern: '/api/v1/fleet/state', privilege: 'agents.read', description: 'Fleet go/stop state (a live run by run token, or a reader)' },
+  { method: 'PUT', pattern: '/api/v1/fleet/state', privilege: 'fleet.state.set', description: 'Set the fleet go/stop state (admin)' },
   { method: 'GET', pattern: '/api/v1/approvals', privilege: 'approvals.read', description: 'List pending tool approvals' },
-  { method: 'POST', pattern: '/api/v1/approvals/:id', privilege: 'approvals.decide', description: 'Decide tool approval' },
+  { method: 'GET', pattern: '/api/v1/approvals/:id', privilege: 'approvals.read', description: 'Read one approval' },
+  { method: 'POST', pattern: '/api/v1/approvals/:id', privilege: 'approvals.decide', description: 'Decide an approval (capUsd when approving a decision hold)' },
+  { method: 'PUT', pattern: '/api/v1/agents/:id/holds/:requestKey', exception: 'run-token', description: 'Agent publishes a decision hold (run token, idempotent)' },
+  { method: 'GET', pattern: '/api/v1/agents/:id/holds/:requestKey', privilege: 'approvals.read', description: 'Read a decision hold (its agent by run token, or a reader)' },
   { method: 'POST', pattern: '/api/v1/ingress/approval-prompts', privilege: 'approvals.channel', description: 'Send approval prompt to channel' },
   { method: 'POST', pattern: '/api/v1/ingress/approvals/:id/asked', privilege: 'approvals.channel', description: 'Record approval prompt sent' },
   { method: 'POST', pattern: '/api/v1/ingress/approvals/decision', privilege: 'approvals.channel', description: 'Record channel approval decision' },

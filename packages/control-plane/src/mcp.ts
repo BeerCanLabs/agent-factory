@@ -30,10 +30,13 @@ import {
   stageDiscovered,
   vendorTarget,
   visibleApprovals,
+  APPROVAL_KINDS,
+  type ApprovalKind,
   visibleModelsForPrincipal,
   type FactoryState,
 } from './app.js';
 import { ModelCatalogError } from './models.js';
+import { fleetStateOf, setFleetState } from './fleet-state.js';
 import { ownersOf } from './config-store.js';
 import {
   addPrincipalEmail,
@@ -182,12 +185,26 @@ const TOOLS: ToolSpec[] = [
   { name: 'pause_agent', description: 'Pause agent egress', privilege: 'agents.pause', args: { id: { type: 'string' } }, required: ['id'] },
   { name: 'resume_agent', description: 'Resume agent egress', privilege: 'agents.resume', args: { id: { type: 'string' } }, required: ['id'] },
   { name: 'isolate_agent', description: 'Isolate agent egress', privilege: 'agents.isolate', args: { id: { type: 'string' } }, required: ['id'] },
-  { name: 'list_approvals', description: 'List pending tool-call approvals', privilege: 'approvals.read', args: {} },
+  {
+    name: 'list_approvals',
+    description: 'List pending approvals; kind narrows to tool, held, change or decision (a decision an agent asked for)',
+    privilege: 'approvals.read',
+    args: { kind: { type: 'string' } },
+  },
+  { name: 'get_approval', description: 'Read one approval by id, pending or decided', privilege: 'approvals.read', args: { approvalId: { type: 'string' } }, required: ['approvalId'] },
+  { name: 'get_fleet_state', description: "Read the fleet's go/stop state (status, coder_app_ready, reason)", privilege: 'agents.read', args: {} },
+  {
+    name: 'set_fleet_state',
+    description: "Set the fleet's go/stop state: status is running, paused or deploy-freeze; opsAgents lists the registered agents that report deploy state; ops (null or {state, reason}) sets or clears that report, rolled-back included, and needs force: true while the deploying run is live",
+    privilege: 'fleet.state.set',
+    args: { status: { type: 'string' }, coder_app_ready: { type: 'boolean' }, reason: { type: 'string' }, opsAgents: { type: 'array', items: { type: 'string' } }, ops: { type: 'object' }, force: { type: 'boolean' } },
+    required: ['status'],
+  },
   {
     name: 'decide_approval',
-    description: 'Approve or reject a held tool call',
+    description: 'Approve or reject a pending approval; capUsd sets a spending cap when approving a decision hold',
     privilege: 'approvals.decide',
-    args: { approvalId: { type: 'string' }, decision: { type: 'string' }, notes: { type: 'string' } },
+    args: { approvalId: { type: 'string' }, decision: { type: 'string' }, notes: { type: 'string' }, capUsd: { type: 'string' } },
     required: ['approvalId', 'decision'],
   },
   {
@@ -323,6 +340,13 @@ async function dispatchSharedRouteTool(
   args: Record<string, unknown>,
   principal: Principal,
 ): Promise<RouteOutcome | null> {
+  // GAP-259: a refused decision (not an approver, no cap where one is required, not pending) is an MCP error.
+  if (name === 'decide_approval') {
+    const notes = typeof args.notes === 'string' ? args.notes : undefined;
+    return (await decideApproval(state, String(args.approvalId), String(args.decision), principal, notes, undefined, args.capUsd)) as RouteOutcome;
+  }
+  // GAP-260: a refused change (an unknown status, a bad flag) is an MCP error, never a result that reads as success.
+  if (name === 'set_fleet_state') return setFleetState(state, args, principal) as RouteOutcome;
   if (name === 'whoami') {
     return getWhoami(state, principal);
   }
@@ -396,8 +420,16 @@ async function dispatchLegacyTool(
   if (name === 'list_agents') return [...state.agents.values()].filter((a) => !a.ephemeral).map((a) => enrichAgent(state, a));
   if (name === 'query_ledger') return state.ledger.query({ agent: typeof args.agent === 'string' ? args.agent : undefined });
   if (name === 'get_run') return (typeof args.runId === 'string' ? state.runs.get(args.runId) : undefined) ?? { error: 'not_found' };
-  if (name === 'list_approvals') return visibleApprovals(state, principal, state.approvals.list({ state: 'pending' }));
-  if (name === 'decide_approval') return (await decideApproval(state, String(args.approvalId), String(args.decision), principal, typeof args.notes === 'string' ? args.notes : undefined)).body;
+  if (name === 'get_fleet_state') return fleetStateOf(state, principal);
+  if (name === 'list_approvals') {
+    const kind = typeof args.kind === 'string' && args.kind ? args.kind : undefined;
+    if (kind && !APPROVAL_KINDS.includes(kind as ApprovalKind)) return { error: `kind must be one of ${APPROVAL_KINDS.join(', ')}` };
+    return visibleApprovals(state, principal, state.approvals.list({ state: 'pending', ...(kind ? { kind: kind as ApprovalKind } : {}) }));
+  }
+  if (name === 'get_approval') {
+    const a = typeof args.approvalId === 'string' ? state.approvals.get(args.approvalId) : undefined;
+    return a ? visibleApprovals(state, principal, [a])[0] : { error: 'not_found' };
+  }
   if (name === 'list_model_catalog') {
     return {
       offered: visibleModelsForPrincipal(state, principal),

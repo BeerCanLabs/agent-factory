@@ -124,6 +124,8 @@ export const PRIVILEGES = [
   'subscriptions.manage',
   // TSK-332 (M5(4)): personal BYOM subscription connections, held by fleet content.submit roles, personal-agent owners, and admin.
   'subscriptions.own',
+  // TSK-346 (GAP-260): the fleet's one go/stop state (running, deploy-freeze, ..., paused), set only by an admin.
+  'fleet.state.set',
 ] as const;
 
 export type Privilege = (typeof PRIVILEGES)[number];
@@ -343,6 +345,7 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'subscriptions.read',
     'subscriptions.manage',
     'subscriptions.own',
+    'fleet.state.set',
   ],
 };
 
