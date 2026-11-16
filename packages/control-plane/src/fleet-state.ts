@@ -9,8 +9,9 @@
  * GAP-268: an agent an admin lists in `opsAgents` (the fleet's ops leader) reports deploy states with its live run token,
  * `PUT /api/v1/fleet/state/ops` (and run MCP `set_fleet_ops_state`): `{state: idle|deploying|prod-testing|rolled-back,
  * reason?}`, kept apart as `ops: {state, by, at, reason}`. It never sets or clears the admin `status`, and never clears
- * `rolled-back`: only an admin does, through the admin `set_fleet_state` path (`ops`). A read adds `effective`, the
- * one state the fleet acts on; `status` reads as before.
+ * `rolled-back` (409 `rolled_back_requires_admin`): only an admin does, through the admin `set_fleet_state` path (`ops`).
+ * A read always carries `ops` (idle, by and at null, until reported) and adds `effective`, the one state the fleet acts
+ * on; `status` reads as before.
  * Nothing here polls or schedules: a skill reads it when an event wakes it.
  */
 import type http from 'node:http';
@@ -27,7 +28,9 @@ export type FleetStatus = (typeof FLEET_STATUSES)[number];
 /** The deploy states the ops leader reports (GAP-268). */
 export const OPS_STATES = ['idle', 'deploying', 'prod-testing', 'rolled-back'] as const;
 export type OpsState = (typeof OPS_STATES)[number];
-export type OpsRecord = { state: OpsState; by: string; at: string; reason: string | null };
+export type OpsRecord = { state: OpsState; by: string | null; at: string | null; reason: string | null };
+/** What a read shows before anyone has reported. */
+const NO_OPS: OpsRecord = { state: 'idle', by: null, at: null, reason: null };
 export type EffectiveState = 'running' | 'paused' | 'deploy-freeze' | 'deploying' | 'prod-testing';
 export type FleetState = {
   status: FleetStatus;
@@ -146,16 +149,15 @@ function parseOpsAgents(raw: unknown, prior: string[] | undefined): string[] | s
   return [...new Set(raw as string[])].sort();
 }
 
-/** `ops` from an admin: not given keeps it; null clears it (idle); `{state, reason?}` sets any ops state, `rolled-back` cleared included. */
+/** `ops` from an admin: not given keeps it; null is idle; `{state, reason?}` sets any ops state, `rolled-back` cleared included. */
 function parseAdminOps(raw: unknown, prior: OpsRecord | undefined, actor: string): OpsRecord | undefined | string {
   if (raw === undefined) return prior;
-  if (raw === null) return undefined;
+  if (raw === null) return { state: 'idle', by: actor, at: new Date().toISOString(), reason: null };
   if (typeof raw !== 'object' || Array.isArray(raw)) return 'ops must be null or {state, reason?}';
   const o = raw as Record<string, unknown>;
   const bad = opsBodyError(o);
   if (bad) return bad;
   const st = o.state as OpsState;
-  if (st === 'idle' && !o.reason) return undefined;
   return { state: st, by: actor, at: new Date().toISOString(), reason: reasonOf(o.reason) };
 }
 
@@ -177,11 +179,13 @@ export function effectiveOf(fs: Pick<FleetState, 'status' | 'ops'>): EffectiveSt
   return 'running';
 }
 
-const viewOf = (fs: FleetState): FleetState & { effective: EffectiveState } => ({ ...fs, effective: effectiveOf(fs) });
+/** A read: the stored record, `ops` always present (idle until reported), and `effective`. */
+const viewOf = (fs: FleetState): FleetState & { ops: OpsRecord; effective: EffectiveState } => ({ ...fs, ops: fs.ops ?? NO_OPS, effective: effectiveOf(fs) });
 
 /**
- * GAP-268: the ops leader's report, from a live run of an agent in `opsAgents`. 403 for any other agent, for an admin
- * status or field, and for leaving `rolled-back`; 400 for a malformed body. The same state and reason again changes
+ * GAP-268: the ops leader's report, from a live run of an agent in `opsAgents`. 403 for any other agent and for an admin
+ * status or field; 409 `rolled_back_requires_admin` for leaving `rolled-back` (only an admin writes idle then); 400 for
+ * a malformed body. The same state and reason again changes
  * nothing and writes no audit row.
  */
 export function setFleetOpsState(state: FactoryState, body: Record<string, unknown>, run: { runId: string; agentId: string; actor?: string }): { status: number; body: unknown } {
@@ -202,13 +206,12 @@ export function setFleetOpsState(state: FactoryState, body: Record<string, unkno
   const st = body.state as OpsState;
   const was = prior.ops?.state ?? 'idle';
   if (was === 'rolled-back' && st !== 'rolled-back') {
-    audit('FLEET_OPS_STATE_DENIED', 'fleet-ops:rolled_back_needs_admin');
-    return { status: 403, body: { error: 'rolled_back_needs_admin', message: 'Only an admin clears rolled-back, through the admin fleet state' } };
+    audit('FLEET_OPS_STATE_DENIED', 'fleet-ops:rolled_back_requires_admin');
+    return { status: 409, body: { error: 'rolled_back_requires_admin', message: 'The fleet is rolled back: only an admin sets idle, through the admin fleet state' } };
   }
   const reason = reasonOf(body.reason);
   if (was === st && (prior.ops?.reason ?? null) === reason) return { status: 200, body: viewOf(prior) };
-  const { ops: _drop, ...rest } = prior;
-  const next = storeOf(state).set(st === 'idle' && !reason ? rest : { ...rest, ops: { state: st, by: run.agentId, at: new Date().toISOString(), reason } });
+  const next = storeOf(state).set({ ...prior, ops: { state: st, by: run.agentId, at: new Date().toISOString(), reason } });
   audit('FLEET_OPS_STATE_SET', `fleet-ops:${was}->${st}`);
   return { status: 200, body: viewOf(next) };
 }

@@ -112,7 +112,20 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
     state.runs.update(leader.run.runId, { state: 'DONE' });
     assert.equal((await ops(leader.token, { state: 'deploying' })).status, 401, 'an ended run reports nothing');
     assert.equal(rows('FLEET_OPS_STATE_SET').length, before);
-    assert.equal((await read()).ops, undefined);
+    assert.deepEqual((await read()).ops, { state: 'idle', by: null, at: null, reason: null }, 'idle, by nobody, until reported');
+  });
+
+  it('a read carries the ops record top-level beside status and effective, to a run and to a reader', async () => {
+    const { token } = await runOf('ops-leader');
+    await ops(token, { state: 'deploying', reason: 'v9' });
+    for (const who of [token, VIEWER]) {
+      const r = (await call('GET', '/api/v1/fleet/state', who)).body;
+      assert.deepEqual(Object.keys(r.ops).sort(), ['at', 'by', 'reason', 'state']);
+      assert.deepEqual({ state: r.ops.state, by: r.ops.by, reason: r.ops.reason }, { state: 'deploying', by: 'ops-leader', reason: 'v9' });
+      assert.ok(!Number.isNaN(Date.parse(r.ops.at)));
+      assert.deepEqual({ status: r.status, effective: r.effective }, { status: 'running', effective: 'deploying' });
+    }
+    await ops(token, { state: 'idle' });
   });
 
   it('the ops leader reports deploying and prod-testing; status is unchanged and each change is audited once', async () => {
@@ -130,7 +143,7 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
     assert.equal((await ops(token, { state: 'prod-testing' })).body.effective, 'prod-testing');
     assert.equal(rows('FLEET_OPS_STATE_SET').at(-1)?.mcpName, 'fleet-ops:deploying->prod-testing');
     assert.equal((await ops(token, { state: 'idle' })).body.effective, 'running');
-    assert.equal((await read()).ops, undefined);
+    assert.deepEqual({ state: (await read()).ops.state, by: (await read()).ops.by }, { state: 'idle', by: 'ops-leader' });
   });
 
   it('a run token can never set or clear an admin state', async () => {
@@ -155,16 +168,18 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
     const rb = await ops(token, { state: 'rolled-back', reason: 'smoke test failed' });
     assert.equal(rb.body.effective, 'deploy-freeze');
     assert.equal((await read()).status, 'running');
-    for (const s of ['idle', 'deploying', 'prod-testing']) {
+    for (const s of ['deploying', 'prod-testing', 'idle']) {
       const out = await ops(token, { state: s });
-      assert.equal(out.status, 403, s);
-      assert.equal(out.body.error, 'rolled_back_needs_admin');
+      assert.equal(out.status, 409, s);
+      assert.equal(out.body.error, 'rolled_back_requires_admin');
     }
+    assert.equal((await ops(token, { state: 'rolled-back', reason: 'still failing' })).status, 200, 'rolled-back again is allowed');
     assert.equal((await read()).ops.state, 'rolled-back');
+    assert.equal((await read()).ops.reason, 'still failing');
     assert.equal((await call('PUT', '/api/v1/fleet/state', OPERATOR, { status: 'running', ops: null })).status, 403);
     const cleared = await admin({ status: 'running', ops: null });
     assert.equal(cleared.status, 200);
-    assert.equal(cleared.body.ops, undefined);
+    assert.deepEqual({ state: cleared.body.ops.state, by: cleared.body.ops.by }, { state: 'idle', by: 'token:dale' }, 'idle written by an admin');
     assert.equal(cleared.body.effective, 'running');
     const row = rows('FLEET_OPS_STATE_SET').at(-1);
     assert.deepEqual({ actor: row?.actor, name: row?.mcpName }, { actor: 'token:dale', name: 'fleet-ops:rolled-back->idle' });
@@ -188,7 +203,7 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
     assert.match((await tool(leader.run, { state: 'paused' })).error!.message, /admin_state/);
     assert.equal((await tool(leader.run, { state: 'nope' })).result!.isError, true);
     await tool(leader.run, { state: 'rolled-back' });
-    assert.match((await tool(leader.run, { state: 'idle' })).error!.message, /rolled_back_needs_admin/);
+    assert.match((await tool(leader.run, { state: 'idle' })).error!.message, /rolled_back_requires_admin/);
 
     const rpc = async (args: Record<string, unknown>, roles: string[]) =>
       (await handleMcp(state, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'set_fleet_state', arguments: args } }, { actor: 'mcp-admin', roles } as never)) as {

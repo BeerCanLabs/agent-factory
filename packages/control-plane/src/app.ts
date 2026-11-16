@@ -2517,10 +2517,10 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
       };
     }
     if (params.name === 'set_fleet_ops_state') {
-      // GAP-268: a refusal (not an ops agent, an admin state, leaving rolled-back) is a JSON-RPC error; a malformed body isError.
+      // GAP-268: a refusal (403 not an ops agent or an admin state, 409 leaving rolled-back) is a JSON-RPC error; a malformed body isError.
       const out = setFleetOpsState(state, (params.arguments ?? {}) as Record<string, unknown>, run);
       const body = out.body as Record<string, unknown>;
-      if (out.status === 403) return { jsonrpc: '2.0', id, error: { code: -32001, message: `forbidden: ${String(body.error)}`, data: body } };
+      if (out.status === 403 || out.status === 409) return { jsonrpc: '2.0', id, error: { code: -32001, message: `${out.status === 403 ? 'forbidden' : 'conflict'}: ${String(body.error)}`, data: body } };
       return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(body) }], ...(out.status >= 400 ? { isError: true } : {}) } };
     }
     if (params.name === 'set_agent_models') {
