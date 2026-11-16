@@ -100,6 +100,15 @@ class TurnTest(unittest.TestCase):
         turn({"content": "hi", "tools": []}, SOUL, Notebook(Path(self.tmp.name), "person-2"), model)
         self.assertEqual(len(model.seen[1]["messages"]), 2)  # system + this person's one message only
 
+    def test_factory_smoke_turn_handles_payload_without_actor_and_records_smoke_notebook(self):
+        model = FakeModel(says("Activation smoke check reply from manager."))
+        payload = {"factoryKind": "smoke", "smoke": "hello-world", "message": "Activation smoke check", "text": "Activation smoke check"}
+        content = str(payload.get("content") or payload.get("message") or payload.get("text") or "Activation smoke check")
+        reply = turn({"content": content}, SOUL, Notebook(Path(self.tmp.name), "factory:smoke"), model)
+        self.assertEqual(reply["type"], "message")
+        self.assertEqual(reply["text"], "Activation smoke check reply from manager.")
+        self.assertEqual(len(model.seen), 1)
+
 
 class HelpersTest(unittest.TestCase):
     def test_trim_never_starts_on_a_tool_result(self):

@@ -3,10 +3,12 @@ import { promisify } from "node:util";
 import {
   IAMClient,
   CreateRoleCommand,
+  DeleteRoleCommand,
   DeleteRolePolicyCommand,
   DetachRolePolicyCommand,
   GetRoleCommand,
   ListAttachedRolePoliciesCommand,
+  ListRolePoliciesCommand,
   ListRolesCommand,
   PutRolePolicyCommand,
 } from "@aws-sdk/client-iam";
@@ -348,4 +350,105 @@ export async function provisionAgentRoles(
     taskRoleArn,
     executionRoleArn,
   };
+}
+
+/**
+ * TSK-341 (GAP-250): Tears down BOTH AgentTaskRole-${agentId} and AgentExecutionRole-${agentId}:
+ * detaches all attached managed policies, deletes all inline policies, and deletes the role.
+ * Safe agent slug validation guarantees no wildcards or empty strings are accepted.
+ * Handled idempotently at every step (returning role names that existed and were deleted).
+ */
+export async function deleteAgentRoles(
+  agentId: string,
+  opts?: { client?: Pick<IAMClient, 'send'> }
+): Promise<string[]> {
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(agentId)) {
+    throw new Error(`Invalid agent ID for role deletion: ${agentId}`);
+  }
+  const client = opts?.client ?? new IAMClient({});
+  const deletedRoles: string[] = [];
+
+  const roles = [
+    `AgentTaskRole-${agentId}`,
+    `AgentExecutionRole-${agentId}`,
+  ];
+
+  for (const roleName of roles) {
+    let exists = false;
+    try {
+      await client.send(new GetRoleCommand({ RoleName: roleName }));
+      exists = true;
+    } catch (err: any) {
+      if (!isNoSuchEntity(err)) throw err;
+      continue;
+    }
+
+    // 1. List and detach all attached managed policies (with pagination)
+    let isTruncated = true;
+    let marker: string | undefined;
+    while (isTruncated) {
+      let attached: any;
+      try {
+        attached = await client.send(
+          new ListAttachedRolePoliciesCommand({ RoleName: roleName, Marker: marker })
+        );
+      } catch (err: any) {
+        if (isNoSuchEntity(err)) { exists = false; break; }
+        throw err;
+      }
+      for (const policy of attached.AttachedPolicies ?? []) {
+        if (policy.PolicyArn) {
+          try {
+            await client.send(
+              new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: policy.PolicyArn })
+            );
+          } catch (err: any) {
+            if (!isNoSuchEntity(err)) throw err;
+          }
+        }
+      }
+      isTruncated = Boolean(attached.IsTruncated && attached.Marker);
+      marker = attached.Marker;
+    }
+
+    if (!exists) continue;
+
+    // 2. List and delete all inline policies (with pagination)
+    isTruncated = true;
+    marker = undefined;
+    while (isTruncated) {
+      let inline: any;
+      try {
+        inline = await client.send(
+          new ListRolePoliciesCommand({ RoleName: roleName, Marker: marker })
+        );
+      } catch (err: any) {
+        if (isNoSuchEntity(err)) { exists = false; break; }
+        throw err;
+      }
+      for (const policyName of inline.PolicyNames ?? []) {
+        try {
+          await client.send(
+            new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyName })
+          );
+        } catch (err: any) {
+          if (!isNoSuchEntity(err)) throw err;
+        }
+      }
+      isTruncated = Boolean(inline.IsTruncated && inline.Marker);
+      marker = inline.Marker;
+    }
+
+    if (!exists) continue;
+
+    // 3. Delete the role
+    try {
+      await client.send(new DeleteRoleCommand({ RoleName: roleName }));
+      deletedRoles.push(roleName);
+    } catch (err: any) {
+      if (!isNoSuchEntity(err)) throw err;
+    }
+  }
+
+  return deletedRoles;
 }

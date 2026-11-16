@@ -173,6 +173,12 @@ export class AdmissionRefusedError extends Error {
   }
 }
 
+export type PurgeComputeResult = {
+  deletedRoles: string[];
+  deregisteredTaskDefinitions: string[];
+  deletedImageTags: string[];
+};
+
 /**
  * Provider-specific infrastructure provisioning for the /deploy lifecycle.
  * The kernel dispatches through this interface; implementations live in
@@ -214,4 +220,6 @@ export type DeployProvider = {
    * it (AgentRecord.computeId). A provider without it cannot run helpers, and spawning is refused.
    */
   provisionHelperCompute?(computeId: string, imageUri: string): Promise<void>;
+  /** TSK-341 (GAP-250): teardown cloud resources (IAM roles, ECS task definitions, ECR image tags) on agent purge. */
+  purgeCompute?(agentId: string): Promise<PurgeComputeResult>;
 };

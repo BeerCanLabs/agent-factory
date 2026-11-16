@@ -271,4 +271,69 @@ describe('KPF 1: Agent Registry & Lifecycle E2E', { concurrency: false }, () => 
     assert.equal(isolateRes.status, 400);
     assert.equal(isolateRes.body.error, 'builtin_agents_exempt_from_killswitch');
   });
+
+  it('TSK-341: purge invokes deployProvider.purgeCompute, returns teardown, refuses built-in agents, and fails closed with 502 if cloud teardown throws', async () => {
+    // 1. Refuse built-in agent purge with 400
+    const builtinPurge = await http_(cpPort, '/api/v1/registry/agents/gatekeeper-ingress/purge', 'POST', ADMIN);
+    assert.equal(builtinPurge.status, 400);
+    assert.equal(builtinPurge.body.error, 'builtin_agent');
+
+    // 2. Register dynamic agent
+    const agentId = 'purge-cloud-test';
+    const regRes = await http_(cpPort, '/api/v1/registry/agents', 'POST', ADMIN, {
+      id: agentId,
+      name: 'Purge Cloud Test Agent',
+      role: 'Tester',
+      source: { repo: 'https://github.com/example/repo', commit: 'abcdef1234567890abcdef1234567890abcdef12' },
+    });
+    assert.equal(regRes.status, 201);
+
+    // 3. Attach mock deployProvider.purgeCompute that throws
+    let purgeInvokedWith = '';
+    state.deployProvider = {
+      ...state.deployProvider,
+      async buildImage() { return 'img'; },
+      async provisionIdentity() { return { identity: 'id' }; },
+      async registerCompute() {},
+      async purgeCompute(id: string) {
+        purgeInvokedWith = id;
+        throw new Error('ECR batch delete rate exceeded');
+      },
+    };
+
+    // 4. Purge attempt fails with 502 and leaves agent intact
+    const failPurge = await http_(cpPort, `/api/v1/registry/agents/${agentId}/purge`, 'POST', ADMIN);
+    assert.equal(failPurge.status, 502);
+    assert.equal(failPurge.body.error, 'cloud_teardown_failed');
+    assert.match(failPurge.body.message, /ECR batch delete rate exceeded/);
+    assert.equal(purgeInvokedWith, agentId);
+
+    // Verify agent is still in registry so operator can retry
+    const stillThere = await http_(cpPort, `/api/v1/registry/agents/${agentId}`, 'GET', ADMIN);
+    assert.equal(stillThere.status, 200);
+
+    // 5. Successful purgeCompute teardown
+    state.deployProvider.purgeCompute = async (id: string) => {
+      purgeInvokedWith = id;
+      return {
+        deletedRoles: [`AgentTaskRole-${id}`, `AgentExecutionRole-${id}`],
+        deregisteredTaskDefinitions: [`arn:aws:ecs:us-east-1:123:task-definition/agent-${id}:1`],
+        deletedImageTags: [`${id}-abcdef123456`],
+      };
+    };
+
+    const successPurge = await http_(cpPort, `/api/v1/registry/agents/${agentId}/purge`, 'POST', ADMIN);
+    assert.equal(successPurge.status, 200);
+    assert.equal(successPurge.body.ok, true);
+    assert.equal(successPurge.body.action, 'purged');
+    assert.deepEqual(successPurge.body.teardown, {
+      deletedRoles: [`AgentTaskRole-${agentId}`, `AgentExecutionRole-${agentId}`],
+      deregisteredTaskDefinitions: [`arn:aws:ecs:us-east-1:123:task-definition/agent-${agentId}:1`],
+      deletedImageTags: [`${agentId}-abcdef123456`],
+    });
+
+    // Verify agent is now deleted
+    const nowGone = await http_(cpPort, `/api/v1/registry/agents/${agentId}`, 'GET', ADMIN);
+    assert.equal(nowGone.status, 404);
+  });
 });

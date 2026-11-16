@@ -222,7 +222,7 @@ async function hasUserOAuthGrants(state: FactoryState, agentId: string): Promise
 }
 
 /** Purges every `oauth-user` grant on a personal agent (D15). Returns purged and failed providers; never token values. */
-async function purgeUserOAuth(state: FactoryState, agentId: string, actor: string): Promise<{ purged: string[]; failed: string[] }> {
+export async function purgeUserOAuth(state: FactoryState, agentId: string, actor: string): Promise<{ purged: string[]; failed: string[] }> {
   const purged: string[] = [];
   const failed: string[] = [];
   const km = getConnections(state);

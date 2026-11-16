@@ -587,3 +587,29 @@ Runs that were blocked on the budget continue once the agent is back within its 
 - **The fleet `paused` state** (`fleet.state.set`) is separate. An agent's RESUME does not change it, and the ops skill refuses a wake that arrives while the fleet is paused.
 
 > **RESUME only lifts a pause or an isolation.** From any other state it returns `409 agent_not_paused` and changes nothing. To clear `ERROR`, or to restart a built-in agent, use reset (`/reset <agent>`). A valid RESUME also starts the agent's next queued run.
+
+---
+
+## 9. Headless Neck Integration & Fleet Lifecycle (MCP, OpenAPI, Purge Deprovisioning)
+
+### 9.1 The Headless Neck: Unified REST & MCP Projections
+
+Every agent in the fleet is accessible through the **Headless Neck** (`plans/headless-neck.md`):
+- **Canonical REST API**: `/api/v1/*` documented by OpenAPI 3.1 at `GET /api/v1/openapi.json`.
+- **Principal MCP (`POST /mcp`)**: Connect AI clients (Claude Desktop, Cursor, VS Code) to manage the fleet, inspect spend, or converse with agents via the `agents_converse` tool. Tool schema available at `GET /api/v1/mcp/schema.json`.
+- **Conversational Agent MCP (`POST /mcp/agents/:id`)**: Direct MCP server projection for an individual agent.
+- **Run MCP (`POST /mcp/run`)**: Container-scoped MCP server answering requests from running agents holding a `FACTORY_RUN_TOKEN`.
+- **OAuth 2.1 Authorization Server**: Implements RFC 7591 dynamic client registration, RFC 7636 PKCE, RFC 8707 audience-scoped short-lived access tokens (`fk_at_`), rotating refresh tokens (`fk_rt_`), RFC 9728 Protected Resource Metadata at `/.well-known/oauth-protected-resource`, and multi-client `mcp:<client_id>` device families.
+
+### 9.2 Agent Purge & Cloud Deprovisioning (`POST /api/v1/registry/agents/:id/purge`)
+
+When an agent has reached the end of its lifecycle, `POST /api/v1/registry/agents/:id/purge` completely deprovisions its cloud resources and deletes it from the registry:
+1. **Built-in Protection**: System built-in agents (`doctor`, `keymaster`, `sdlc-conductor`, etc.) refuse purge with `400 builtin_agent`.
+2. **Runtime Teardown**: Running compute containers are stopped.
+3. **Cloud Infrastructure Teardown**: The property manager executes cloud provider cleanup:
+   - **IAM Execution Roles**: Deletes `agent-<agentId>-execution-role` and detaches attached policies.
+   - **ECS Task Definitions**: Deregisters all active revisions in families matching `agent-<agentId>` and `agent-<agentId>-<skillsHash>`.
+   - **ECR Container Images**: Batch-deletes all repository tags matching `<agentId>-<commit>` (with optional `<skillsHash>`).
+4. **Credential & OAuth Purge**: Revokes and deletes agent-linked user OAuth tokens in Keymaster.
+5. **Fail-Closed Safety**: If cloud deprovisioning encounters an unexpected error, the call fails closed with `502 cloud_teardown_failed` before deleting agent state or registry entries.
+6. **Result**: On success, the agent is removed from memory and disk configs, returning `200 OK` with `{ ok: true, id: "<agentId>", teardown: { iamRolesDeleted: [...], taskDefinitionsDeregistered: [...], ecrImagesDeleted: [...] } }`.

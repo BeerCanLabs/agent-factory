@@ -93,6 +93,15 @@ def main() -> int:
     soul = (HERE / "soul.md").read_text("utf-8")
     model = ModelClient()
     payload = read_input()
+
+    if payload.get("factoryKind") == "smoke":
+        content = str(payload.get("content") or payload.get("message") or payload.get("text") or "Activation smoke check")
+        last = turn({"content": content}, soul, Notebook(memory, "factory:smoke"), model)
+        out = Path(os.environ.get("FACTORY_RESULT_FILE", "/tmp/factory-result.json"))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"status": "succeeded", "message": last.get("text", ""), "reply": last.get("text", "")}, indent=2), "utf-8")
+        return 0
+
     last = handle(payload, soul, memory, model)
 
     # Stay warm for follow-up turns: the CLI sends tool results and the person's next words here (GAP-176).
@@ -118,7 +127,7 @@ def main() -> int:
 
     out = Path(os.environ.get("FACTORY_RESULT_FILE", "/tmp/factory-result.json"))
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"status": "succeeded", "message": last.get("text", "")}, indent=2), "utf-8")
+    out.write_text(json.dumps({"status": "succeeded", "message": last.get("text", ""), "reply": last.get("text", "")}, indent=2), "utf-8")
     return 0
 
 

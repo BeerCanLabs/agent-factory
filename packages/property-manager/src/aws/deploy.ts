@@ -1,7 +1,8 @@
-import type { BuildSkill, DeployProvider, SourceRef } from '../runtime.js';
+import type { BuildSkill, DeployProvider, PurgeComputeResult, SourceRef } from '../runtime.js';
 import { buildAgentImage, buildSkillsImage } from './codebuild.js';
-import { listAgentTaskRoleIds, provisionAgentRoles, reconcileAgentTaskRole, retireAgentTaskRole } from './iam.js';
-import { registerAgentTaskDefinition } from './ecs.js';
+import { deleteAgentRoles, listAgentTaskRoleIds, provisionAgentRoles, reconcileAgentTaskRole, retireAgentTaskRole } from './iam.js';
+import { deregisterAgentTaskDefinitions, registerAgentTaskDefinition } from './ecs.js';
+import { deleteAgentEcrImages } from './ecr.js';
 
 export function awsDeployProvider(): DeployProvider {
   return {
@@ -37,6 +38,17 @@ export function awsDeployProvider(): DeployProvider {
       launchEnv?: Record<string, string>,
     ): Promise<void> {
       await registerAgentTaskDefinition(agentId, imageUri, secrets, identity, executionIdentity ?? identity, memoryPrefix ?? agentId, launchEnv);
+    },
+
+    async purgeCompute(agentId: string): Promise<PurgeComputeResult> {
+      const deletedRoles = await deleteAgentRoles(agentId);
+      const deregisteredTaskDefinitions = await deregisterAgentTaskDefinitions(agentId);
+      const deletedImageTags = await deleteAgentEcrImages(agentId);
+      return {
+        deletedRoles,
+        deregisteredTaskDefinitions,
+        deletedImageTags,
+      };
     },
   };
 }

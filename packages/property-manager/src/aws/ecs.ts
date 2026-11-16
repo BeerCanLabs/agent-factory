@@ -1,4 +1,9 @@
-import { ECSClient, RegisterTaskDefinitionCommand } from "@aws-sdk/client-ecs";
+import {
+  ECSClient,
+  RegisterTaskDefinitionCommand,
+  ListTaskDefinitionsCommand,
+  DeregisterTaskDefinitionCommand,
+} from "@aws-sdk/client-ecs";
 import { SecretsManagerClient, DescribeSecretCommand } from "@aws-sdk/client-secrets-manager";
 import { agentContainerSecrets } from "./gatekeeper-held.js";
 
@@ -109,4 +114,53 @@ export async function registerAgentTaskDefinition(
 
   const response = await ecsClient.send(command);
   return response.taskDefinition;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * TSK-341 (GAP-250): Lists all active task definition revisions for exact family `agent-${agentId}`
+ * and deregisters them. Uses exact regex matching on returned ARNs so purging `ada` NEVER deregisters `agent-ada-helper:1`!
+ */
+export async function deregisterAgentTaskDefinitions(
+  agentId: string,
+  opts?: { client?: Pick<ECSClient, 'send'> }
+): Promise<string[]> {
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(agentId)) {
+    throw new Error(`Invalid agent ID for task definition deregistration: ${agentId}`);
+  }
+  const client = opts?.client ?? new ECSClient({});
+  const family = `agent-${agentId}`;
+  const familyRe = new RegExp(`[/:]${escapeRegExp(family)}:\\d+$`);
+  const deregistered: string[] = [];
+
+  let nextToken: string | undefined;
+  do {
+    const listRes: any = await client.send(
+      new ListTaskDefinitionsCommand({
+        familyPrefix: family,
+        status: "ACTIVE",
+        nextToken,
+      })
+    );
+
+    const arns = (listRes.taskDefinitionArns ?? []).filter((arn: string) => familyRe.test(arn));
+
+    for (const arn of arns) {
+      try {
+        await client.send(new DeregisterTaskDefinitionCommand({ taskDefinition: arn }));
+        deregistered.push(arn);
+      } catch (err: any) {
+        if (err?.name !== "ClientException" && err?.name !== "InvalidParameterException") {
+          throw err;
+        }
+      }
+    }
+
+    nextToken = listRes.nextToken;
+  } while (nextToken);
+
+  return deregistered;
 }

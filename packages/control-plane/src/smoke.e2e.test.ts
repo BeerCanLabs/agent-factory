@@ -243,6 +243,59 @@ describe('Activation smoke gate (TSK-281, §6.8 L4, §6.14 SK1)', { concurrency:
       assert.ok(smokeRun, 'smoke run was executed for configured agent');
       assert.equal(smokeRun.state, 'DONE');
     });
+
+    it('accepts deterministic agent (model: deterministic) returning { message: ... } without metered llm entry', async () => {
+      state.agents.set('deterministic-staff', {
+        id: 'deterministic-staff',
+        name: 'Deterministic Staff',
+        role: 'Worker',
+        state: 'PENDING_DEPLOY',
+        provider: 'cloud',
+        artifact: '',
+        model: 'deterministic',
+        repo: 'https://github.com/BeerCanLabs/agent-factory',
+        commit: SHA1,
+        requires: [],
+        ungated: [],
+        gated: [],
+        triggers: [],
+        dir: '/tmp/deterministic-staff',
+      });
+      await state.configs!.put({ agentId: 'deterministic-staff', source: { repo: 'https://github.com/BeerCanLabs/agent-factory', commit: SHA1 }, skills: [], policy: { routes: ['models'] }, owners: ['owner'] }, { updatedBy: 'test', reason: 'init' });
+      state.policies.set('deterministic-staff', { routes: ['models'], budgetUsd: { perRun: 1.0, perDay: 10.0, perMonth: 50.0 } });
+
+      state.smokeHandler = async ({ agent, smokeType }) => {
+        if (agent.id === 'deterministic-staff' && smokeType === 'hello-world') {
+          // Returns { status: 'succeeded', message: 'Ready' } without recording llm entry
+          return {
+            ok: true,
+            costUsd: 0,
+            result: { status: 'succeeded', message: 'Deterministic staff ready' },
+          };
+        }
+        return { ok: true };
+      };
+
+      try {
+        const res = await call('/api/v1/registry/agents/deterministic-staff/deploy', 'POST', ADMIN, { commit: SHA1 });
+        assert.equal(res.status, 202, JSON.stringify(res.body));
+
+        for (let i = 0; i < 50; i++) {
+          await sleep(20);
+          if (state.agents.get('deterministic-staff')?.state === 'SLEEPING') break;
+        }
+
+        const agent = state.agents.get('deterministic-staff')!;
+        assert.equal(agent.state, 'SLEEPING');
+        const smokeRun = state.runs.list({ agentId: 'deterministic-staff' }).find((r) => r.trigger === 'smoke');
+        assert.ok(smokeRun);
+        assert.equal(smokeRun.state, 'DONE');
+        const llmEntries = ledger.query().filter((e) => e.agentId === 'deterministic-staff' && e.type === 'llm');
+        assert.equal(llmEntries.length, 0, 'deterministic cartridge does not record llm ledger entry');
+      } finally {
+        delete state.smokeHandler;
+      }
+    });
   });
 
   describe('2. Smoke failure & rollback', () => {

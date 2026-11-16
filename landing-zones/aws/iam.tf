@@ -402,6 +402,48 @@ resource "aws_iam_role_policy" "control_plane_paas" {
         Effect   = "Allow"
         Action   = ["s3:ListBucket"]
         Resource = aws_s3_bucket.mind.arn
+      },
+      {
+        # TSK-341 (GAP-250): teardown agent compute and IAM roles on POST /api/v1/registry/agents/:id/purge.
+        Sid      = "PurgeAgentRoles"
+        Effect   = "Allow"
+        Action   = [
+          "iam:ListRolePolicies",
+          "iam:DeleteRolePolicy",
+          "iam:ListAttachedRolePolicies",
+          "iam:DetachRolePolicy",
+          "iam:DeleteRole"
+        ]
+        Resource = [
+          "arn:aws:iam::${var.account_id}:role/AgentTaskRole-*",
+          "arn:aws:iam::${var.account_id}:role/AgentExecutionRole-*"
+        ]
+      },
+      {
+        # TSK-341: deregister active agent task definitions on purge. ecs:ListTaskDefinitions requires "*".
+        Sid      = "ListTaskDefinitionsForPurge"
+        Effect   = "Allow"
+        Action   = ["ecs:ListTaskDefinitions"]
+        Resource = "*"
+      },
+      {
+        Sid      = "DeregisterAgentTaskDefinitions"
+        Effect   = "Allow"
+        Action   = ["ecs:DeregisterTaskDefinition"]
+        Resource = [
+          "arn:aws:ecs:${var.aws_region}:${var.account_id}:task-definition/agent-*",
+          "arn:aws:ecs:${var.aws_region}:${var.account_id}:task-definition/${local.name}-agent-*"
+        ]
+      },
+      {
+        # TSK-341: delete dynamic agent image tags from ECR on purge.
+        Sid      = "PurgeAgentEcrImages"
+        Effect   = "Allow"
+        Action   = [
+          "ecr:ListImages",
+          "ecr:BatchDeleteImage"
+        ]
+        Resource = aws_ecr_repository.dynamic_agents.arn
       }
     ]
   })

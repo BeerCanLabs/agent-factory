@@ -2,6 +2,7 @@ schemaVersion: "1.0"
 id: personal-trainer
 name: "Personal Trainer"
 role: "House staff: skill training"
+model: deterministic
 prompt: "./soul.md"
 category: user
 
