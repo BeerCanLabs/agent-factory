@@ -124,3 +124,4 @@ export * from './groups.js';
 export * from './skill-ownership.js';
 export * from './skill-publishing.js';
 export * from './subagent.js';
+export * from './operations.js';

@@ -5,6 +5,7 @@ import { createGatekeeperIngressHttp } from './http.js';
 import { createDiscordClient } from './discord.js';
 import { WakeRefusedError, UnauthorizedCallerError, wakeBody, wakeFailure } from './wake.js';
 import { initialPresence } from './presence.js';
+import { installGracefulShutdown } from '../shutdown.js';
 
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const FACTORY_URL = (process.env.FACTORY_URL || 'http://127.0.0.1:8088').replace(/\/$/, '');
@@ -132,6 +133,7 @@ const server = createGatekeeperIngressHttp(door, presenceAuth);
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[gatekeeper-ingress] idle mailbox on :${PORT} (no Discord app required to deploy)`);
 });
+installGracefulShutdown(server, { name: 'gatekeeper-ingress' });
 
 async function pollReconcile() {
   try {

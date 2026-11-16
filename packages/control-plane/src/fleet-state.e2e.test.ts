@@ -3,7 +3,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
@@ -15,7 +15,6 @@ import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { FleetStateStore, FLEET_STATUSES, OPS_STATES, auditFleetStateLoad, effectiveOf, sanitizeReason } from './fleet-state.js';
 import { handleMcp } from './mcp.js';
-import { writeFileSync as writeFile } from 'node:fs';
 
 const VIEWER = 'viewer-fleet-state-e2e';
 const OPERATOR = 'operator-fleet-state-e2e';
@@ -136,6 +135,29 @@ describe('GAP-260 fleet go/stop state', { concurrency: false }, () => {
     assert.equal(JSON.parse((await rpc('get_fleet_state', {}, ['viewer'])).result!.content[0].text).status, 'paused');
     assert.equal(set.result!.isError, undefined);
   });
+
+  it('a legacy status and reason pass through the one sanitizer, and the old reason is kept', async () => {
+    const f = join(mkdtempSync(join(tmpdir(), 'fleet-legacy-')), 'fleet-state.json');
+    writeFileSync(f, JSON.stringify({ status: 'rolled-back\u202e\u200b\u{E0041}', coder_app_ready: false, reason: 'smoke\u001b[31m failed\u202e' }));
+    state.fleetState = new FleetStateStore(f);
+    const read = await call('GET', VIEWER);
+    assert.equal(read.body.reason, 'The stored status "rolled-back" is no longer an admin status: treated as paused. A rollback freeze was recorded. (was: smoke failed)');
+    assert.equal(sanitizeReason(read.body.reason), read.body.reason);
+  });
+
+  it('a stored legacy or unknown admin status loads as paused, so status and effective agree', async () => {
+    for (const legacy of ['deploying', 'prod-testing', 'rolled-back', 'go']) {
+      const f = join(mkdtempSync(join(tmpdir(), 'fleet-legacy-')), 'fleet-state.json');
+      writeFileSync(f, JSON.stringify({ status: legacy, coder_app_ready: true, reason: 'old', pin_merged: true }));
+      state.fleetState = new FleetStateStore(f);
+      const read = await call('GET', VIEWER);
+      assert.deepEqual({ status: read.body.status, effective: read.body.effective, ready: read.body.coder_app_ready, flag: read.body.pin_merged }, { status: 'paused', effective: 'paused', ready: true, flag: true }, legacy);
+      assert.match(read.body.reason, new RegExp(`stored status "${legacy}"`));
+      assert.equal(JSON.parse(readFileSync(f, 'utf8')).status, legacy, 'loading does not rewrite the file');
+      assert.equal((await call('PUT', ADMIN, { status: 'running' })).body.effective, 'running');
+      assert.equal(new FleetStateStore(f).get().status, 'running', 'the next admin write stores a current status');
+    }
+  });
 });
 
 // GAP-268: the ops leader's deploy lock (R0 to R7), the reason sanitizer and `effective`.
@@ -238,7 +260,7 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
     cases[1][0] = { ...(cases[1][0] as object), state: 7 };
     for (const [i, [stored, issue, runId]] of cases.entries()) {
       const f = join(dir, `fleet-state-${i}.json`);
-      writeFile(f, JSON.stringify({ status: 'running', coder_app_ready: true, reason: null, opsAgents: ['ops-leader'], ...(stored === undefined ? {} : { ops: stored }) }));
+      writeFileSync(f, JSON.stringify({ status: 'running', coder_app_ready: true, reason: null, opsAgents: ['ops-leader'], ...(stored === undefined ? {} : { ops: stored }) }));
       const before = rows('FLEET_OPS_STATE_INVALID').length;
       state.fleetState = new FleetStateStore(f);
       auditFleetStateLoad(state);

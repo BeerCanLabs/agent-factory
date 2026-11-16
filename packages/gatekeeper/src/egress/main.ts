@@ -6,6 +6,7 @@ import type { Price } from '@beercanlabs/factory-budget';
 import { parseModelCatalog, type ModelCatalog } from '@beercanlabs/factory-executive';
 import { traceConfigFromEnv } from '@beercanlabs/factory-inspector';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
+import { installGracefulShutdown } from '../shutdown.js';
 
 function required(name: string): string {
   const v = process.env[name];
@@ -225,3 +226,4 @@ const port = parseInt(process.env.PORT || '8081', 10);
 server.listen(port, '0.0.0.0', () => {
   console.log(`[gatekeeper-egress] :${port} routes=${(config.routes ?? []).map((r) => r.id).join(',') || '(none)'} models=${Object.keys(modelCatalog).join(',') || '(none)'}`);
 });
+installGracefulShutdown(server, { name: 'gatekeeper-egress' });
