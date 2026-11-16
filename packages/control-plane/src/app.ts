@@ -121,7 +121,7 @@ import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
 import { decisionDelivery, handleDecisionHolds, holdDecider, parseCapUsd } from './decision-holds.js';
-import { dropOpsAgent, handleFleetState, isOpsAgent, setFleetOpsState, type FleetStateStore } from './fleet-state.js';
+import { dropOpsAgent, handleFleetState, isOpsAgent, resumeFleetWakes, setFleetOpsState, type FleetStateStore } from './fleet-state.js';
 import { accountForWake, bindRun, chargeAccount, settleRun, type SpendAccountStore } from './spend-accounts.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
@@ -3287,6 +3287,8 @@ export function createFactoryServer(state: FactoryState): http.Server {
   wireSubscriptionRuntime(state);
   // #481: a helper's end wakes its parent agent (and the wakes a previous control plane owed are finished).
   wireHelperWakes(state);
+  // #493: finish a fleet-resumed fan-out a previous control plane did not.
+  void resumeFleetWakes(state).catch((err) => console.warn('[control-plane] could not resume fleet-resumed wakes:', err));
   // SK1: follow skill checks a previous control plane started and did not see end.
   void resumeSkillChecks(state).catch((err) => console.warn('[control-plane] could not resume skill checks:', err));
   const discoveryTimer =

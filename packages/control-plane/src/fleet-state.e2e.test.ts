@@ -13,7 +13,7 @@ import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manag
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
-import { FleetStateStore, FLEET_STATUSES, OPS_STATES, auditFleetStateLoad, effectiveOf, opsStep, sanitizeReason, setFleetOpsState } from './fleet-state.js';
+import { FleetStateStore, FLEET_STATUSES, OPS_STATES, auditFleetStateLoad, effectiveOf, opsStep, resumeFleetWakes, sanitizeReason, setFleetOpsState } from './fleet-state.js';
 import { handleMcp } from './mcp.js';
 
 const VIEWER = 'viewer-fleet-state-e2e';
@@ -658,5 +658,217 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
       assert.deepEqual(opsStep(prior, 'prod-testing', 'r2', 'x', undefined, { deployId: 'p@abc' }), { ok: false, error: 'not_the_deploying_run' });
       assert.deepEqual(opsStep(prior, 'deploying', 'r2', 'x', undefined, { takeover: true, deployId: 'p@abc', holderLive: true }), { ok: false, error: 'deploy_in_progress' });
     });
+  });
+});
+
+describe('#493: setting the fleet back to running wakes each fleet agent once (fleet-resumed)', { concurrency: false }, () => {
+  let cp: http.Server;
+  let port = 0;
+  let state: FactoryState;
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-resumed-'));
+  const put = async (body: unknown) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/v1/fleet/state`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${ADMIN}` },
+      body: JSON.stringify(body),
+    });
+    return res.status;
+  };
+  /** Lets the fire-and-forget wakes finish (test-only; the factory waits on nothing): until no wake row is still due. */
+  const settled = async () => {
+    const due = () => {
+      const head = rows('FLEET_RESUMED').at(-1)?.mcpName?.split(':');
+      if (!head || head[3] === '-') return false;
+      const t = `fleet-resumed:${head[1]}:`;
+      return rows('FLEET_RESUMED_WAKE').filter((e) => e.mcpName?.startsWith(t)).length < head[3].split(',').length;
+    };
+    for (let i = 0; i < 5000 && due(); i++) await new Promise((r) => setImmediate(r));
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  };
+  const wakes = (agentId: string) => state.runs.list({ agentId }).filter((r) => r.trigger === 'fleet-resumed');
+  const rows = (action: string) => (state.ledger as MemoryLedger).query({}).filter((e) => e.action === action);
+  const FLEET = ['conductor', 'ops-leader', 'reviewer', 'ops-by-skill'];
+  const OTHERS = ['coder', 'plain', 'helper', 'retired'];
+  const counts = (ids: string[]) => ids.map((id) => wakes(id).length);
+  const finishAll = () => {
+    for (const r of state.runs.list({ active: true })) state.runs.update(r.runId, { state: 'DONE' });
+  };
+
+  before(async () => {
+    state = {
+      agents: new Map(),
+      ledger: new MemoryLedger(),
+      auth: bearerAuth([{ name: 'dale', token: ADMIN, roles: ['admin'] }]),
+      version: '0.1.0-test',
+      providers: [],
+      runtime: noopRuntime(),
+      runs: new MemoryRunStore(),
+      runTokens: new RunTokens('fleet-resumed-e2e-run-token-key-0123456789abcdef'),
+      callbacks: { allowedProtocols: ['http:', 'https:'], allowedHostnames: ['127.0.0.1'], allowPrivateIps: true },
+      policies: new PolicyStore(),
+      spend: new SpendTracker(),
+      approvals: new ApprovalStore(),
+      fleetState: new FleetStateStore(join(dir, 'fleet-state.json')),
+      idleMs: 0,
+      idleTimers: new Map(),
+      secretValues: new Set<string>(),
+    } as unknown as FactoryState;
+    const agent = (id: string, extra: Record<string, unknown> = {}) => {
+      state.agents.set(id, { id, name: id, state: 'SLEEPING', roles: [], requires: [], triggers: [], ...extra } as never);
+      state.policies.set(id, { routes: [] } as never);
+    };
+    agent('conductor', { skillIds: ['sdlc-conductor'] });
+    agent('reviewer', { skillIds: ['sdlc-reviewer'] });
+    agent('ops-by-skill', { skillIds: ['sdlc-ops'] });
+    agent('ops-leader');
+    agent('coder', { skillIds: ['sdlc-coder'] });
+    agent('plain');
+    agent('helper', { skillIds: ['sdlc-reviewer'], ephemeral: true });
+    agent('retired', { skillIds: ['sdlc-conductor'], state: 'RETIRED_PENDING_PURGE' });
+    cp = createFactoryServer(state);
+    await new Promise<void>((r) => cp.listen(0, '127.0.0.1', r));
+    port = (cp.address() as { port: number }).port;
+  });
+  after(async () => {
+    cp.closeAllConnections?.();
+    await new Promise<void>((r) => cp.close(() => r()));
+  });
+
+  it('paused -> running: one wake per fleet agent (skills and opsAgents), ledgered; none for other agents', async () => {
+    assert.equal(await put({ status: 'paused', opsAgents: ['ops-leader'] }), 200);
+    await settled();
+    assert.deepEqual(counts([...FLEET, ...OTHERS]), [0, 0, 0, 0, 0, 0, 0, 0], 'paused -> paused wakes nothing');
+    const n = rows('FLEET_RESUMED_WAKE').length;
+    assert.equal(await put({ status: 'running' }), 200);
+    await settled();
+    assert.deepEqual(counts(FLEET), [1, 1, 1, 1]);
+    assert.deepEqual(counts(OTHERS), [0, 0, 0, 0], 'no wake for non-fleet, helper or retired agents');
+    const [run] = wakes('conductor');
+    assert.equal(run.actor, 'factory:fleet-resumed');
+    assert.deepEqual(Object.keys((run.input as { event: Record<string, unknown> }).event).sort(), ['from', 'transition', 'type']);
+    assert.equal((run.input as { event: { from: string } }).event.from, 'paused');
+    const head = rows('FLEET_RESUMED').at(-1)!;
+    assert.match(head.mcpName!, /^fleet-resumed:[0-9a-f-]{36}:paused:conductor,ops-by-skill,ops-leader,reviewer$/);
+    const mine = rows('FLEET_RESUMED_WAKE').slice(n);
+    assert.deepEqual(mine.map((e) => e.agentId).sort(), [...FLEET].sort(), 'exactly one row per agent');
+    for (const e of mine) {
+      assert.equal(e.runId, wakes(e.agentId!)[0].runId);
+      assert.equal(e.mcpName, `${head.mcpName!.split(':').slice(0, 2).join(':')}:woken`);
+    }
+  });
+
+  it('running -> running wakes nothing and writes no FLEET_RESUMED row', async () => {
+    finishAll();
+    const before = counts(FLEET);
+    const r = rows('FLEET_RESUMED').length;
+    assert.equal(await put({ status: 'running', reason: 'still running' }), 200);
+    assert.equal(await put({ status: 'running' }), 200);
+    await settled();
+    assert.deepEqual(counts(FLEET), before);
+    assert.equal(rows('FLEET_RESUMED').length, r);
+  });
+
+  it('deploy-freeze -> running wakes once more; concurrent writes still make one transition', async () => {
+    assert.equal(await put({ status: 'deploy-freeze' }), 200);
+    await settled();
+    const before = counts(FLEET);
+    const r = rows('FLEET_RESUMED').length;
+    const statuses = await Promise.all([put({ status: 'running' }), put({ status: 'running' })]);
+    assert.deepEqual(statuses, [200, 200]);
+    await settled();
+    assert.deepEqual(counts(FLEET), before.map((c) => c + 1), 'one wake per agent per transition');
+    assert.equal(rows('FLEET_RESUMED').length, r + 1);
+    assert.match(rows('FLEET_RESUMED').at(-1)!.mcpName!, /:deploy-freeze:/);
+    assert.deepEqual(counts(OTHERS), [0, 0, 0, 0]);
+  });
+
+  it('jury B1: paused -> deploy-freeze wakes the fleet, and deploy-freeze -> running wakes it again; running -> deploy-freeze does not', async () => {
+    finishAll();
+    assert.equal(await put({ status: 'paused' }), 200);
+    await settled();
+    const before = counts(FLEET);
+    const r = rows('FLEET_RESUMED').length;
+    assert.equal(await put({ status: 'deploy-freeze' }), 200);
+    await settled();
+    assert.deepEqual(counts(FLEET), before.map((c) => c + 1), 'paused -> deploy-freeze: one wake each');
+    assert.match(rows('FLEET_RESUMED').at(-1)!.mcpName!, /:paused:/);
+    finishAll();
+    assert.equal(await put({ status: 'running' }), 200);
+    await settled();
+    assert.deepEqual(counts(FLEET), before.map((c) => c + 2), 'deploy-freeze -> running: one more each');
+    assert.match(rows('FLEET_RESUMED').at(-1)!.mcpName!, /:deploy-freeze:/);
+    finishAll();
+    assert.equal(await put({ status: 'deploy-freeze' }), 200);
+    await settled();
+    assert.deepEqual(counts(FLEET), before.map((c) => c + 2), 'running -> deploy-freeze wakes nothing');
+    assert.equal(rows('FLEET_RESUMED').length, r + 2);
+    assert.deepEqual(counts(OTHERS), [0, 0, 0, 0]);
+  });
+
+  it('jury B2: start-up finishes a cut-short fan-out of the latest transition only, once, one row per agent', async () => {
+    finishAll();
+    assert.equal(await put({ status: 'paused' }), 200);
+    // A transition that was superseded: its missing agent must not be woken.
+    const old = '00000000-0000-4000-8000-000000000001';
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'factory', type: 'action', action: 'FLEET_RESUMED', actor: 'test', mcpName: `fleet-resumed:${old}:paused:plain` });
+    // The cut-short one: conductor woken and ledgered; ops-leader's run exists without its row; reviewer and ops-by-skill never reached.
+    const t = '00000000-0000-4000-8000-000000000002';
+    state.fleetState!.set({ ...state.fleetState!.get(), status: 'running' });
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'factory', type: 'action', action: 'FLEET_RESUMED', actor: 'test', mcpName: `fleet-resumed:${t}:paused:${FLEET.slice().sort().join(',')}` });
+    const c = state.runs.create({ agentId: 'conductor', state: 'DONE', actor: 'factory:fleet-resumed', trigger: 'fleet-resumed', input: { event: { type: 'fleet-resumed', transition: t, from: 'paused' } } } as never);
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'conductor', type: 'action', action: 'FLEET_RESUMED_WAKE', actor: 'factory:fleet-resumed', runId: c.runId, mcpName: `fleet-resumed:${t}:woken` });
+    const o = state.runs.create({ agentId: 'ops-leader', state: 'DONE', actor: 'factory:fleet-resumed', trigger: 'fleet-resumed', input: { event: { type: 'fleet-resumed', transition: t, from: 'paused' } } } as never);
+    const before = counts([...FLEET, ...OTHERS]);
+    const n = rows('FLEET_RESUMED_WAKE').length;
+    const restart = () => resumeFleetWakes({ ...state } as FactoryState);
+    await restart();
+    const after = counts([...FLEET, ...OTHERS]);
+    const added = Object.fromEntries([...FLEET, ...OTHERS].map((id, i) => [id, after[i] - before[i]]));
+    assert.deepEqual(added, { conductor: 0, 'ops-leader': 0, reviewer: 1, 'ops-by-skill': 1, coder: 0, plain: 0, helper: 0, retired: 0 });
+    const mine = rows('FLEET_RESUMED_WAKE').slice(n);
+    assert.deepEqual(mine.map((e) => [e.agentId, e.mcpName!.split(':').slice(2).join(':')]).sort(), [['ops-by-skill', 'recovered'], ['ops-leader', 'recorded'], ['reviewer', 'recovered']]);
+    assert.equal(mine.find((e) => e.agentId === 'ops-leader')!.runId, o.runId);
+    for (const e of mine.filter((x) => x.agentId !== 'ops-leader')) assert.equal((state.runs.get(e.runId!)!.input as { event: { transition: string } }).event.transition, t);
+    // A second restart: everything has its row now.
+    finishAll();
+    await restart();
+    assert.deepEqual(counts([...FLEET, ...OTHERS]), after);
+    assert.equal(rows('FLEET_RESUMED_WAKE').length, n + 3);
+  });
+
+  it('jury B2: nothing at start-up when the fleet now reads paused, or when the latest transition is complete', async () => {
+    finishAll();
+    const t = '00000000-0000-4000-8000-000000000003';
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'factory', type: 'action', action: 'FLEET_RESUMED', actor: 'test', mcpName: `fleet-resumed:${t}:paused:reviewer` });
+    state.fleetState!.set({ ...state.fleetState!.get(), status: 'paused' });
+    const before = counts(FLEET);
+    const n = rows('FLEET_RESUMED_WAKE').length;
+    await resumeFleetWakes({ ...state } as FactoryState);
+    assert.deepEqual(counts(FLEET), before);
+    assert.equal(rows('FLEET_RESUMED_WAKE').length, n);
+    // A real server start on the same stores (the wiring), with the fleet running and that transition complete: nothing.
+    state.fleetState!.set({ ...state.fleetState!.get(), status: 'running' });
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'reviewer', type: 'action', action: 'FLEET_RESUMED_WAKE', actor: 'test', mcpName: `fleet-resumed:${t}:refused:agent_paused` });
+    const again = createFactoryServer({ ...state } as FactoryState);
+    await settled();
+    again.close();
+    assert.deepEqual(counts(FLEET), before, 'a refused wake is final: not retried at start');
+    assert.equal(rows('FLEET_RESUMED_WAKE').length, n + 1);
+  });
+
+  it('a fleet agent that refuses (here paused) is ledgered as refused and not retried', async () => {
+    finishAll();
+    state.agents.get('reviewer')!.state = 'PAUSED';
+    assert.equal(await put({ status: 'paused' }), 200);
+    const before = wakes('reviewer').length;
+    const n = rows('FLEET_RESUMED_WAKE').length;
+    assert.equal(await put({ status: 'running' }), 200);
+    await settled();
+    assert.equal(wakes('reviewer').length, before);
+    const row = rows('FLEET_RESUMED_WAKE').slice(n).find((e) => e.agentId === 'reviewer')!;
+    assert.match(row.mcpName!, /:refused:agent_paused$/);
+    assert.equal(row.runId, undefined);
+    assert.equal(rows('FLEET_RESUMED_WAKE').slice(n).length, FLEET.length);
+    state.agents.get('reviewer')!.state = 'SLEEPING';
   });
 });
