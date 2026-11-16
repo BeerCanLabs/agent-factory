@@ -1,5 +1,5 @@
 /**
- * GAP-250: GitHub webhooks into an agent's own `/hooks/:agentId`, for the event-driven SDLC fleet (no timer, no poll).
+ * GAP-258: GitHub webhooks into an agent's own `/hooks/:agentId`, for the event-driven SDLC fleet (no timer, no poll).
  *
  * - The delivery's `X-GitHub-Event` and `X-GitHub-Delivery` go into the run input (`githubEvent`, `githubDelivery`).
  * - An agent with no cartridge webhook trigger (a config-only agent, such as the conductor) is reached by its own GitHub

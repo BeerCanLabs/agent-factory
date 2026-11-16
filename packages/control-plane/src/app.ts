@@ -157,7 +157,7 @@ export type FactoryState = {
   /** The model a policy that names none grants (M2): configuration seeded from FACTORY_DEFAULT_MODEL; no code default. */
   defaultModel?: string;
   registryDir?: string;
-  /** GAP-250: GitHub webhook delivery ids already handled (one run per delivery), kept across restarts. */
+  /** GAP-258: GitHub webhook delivery ids already handled (one run per delivery), kept across restarts. */
   webhookDeliveries?: DeliveryLog;
   ledger: LedgerStore;
   auth: AuthProvider;
@@ -3060,7 +3060,7 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
 }
 
 const deliveryLogs = new WeakMap<FactoryState, DeliveryLog>();
-/** GAP-250: the webhook delivery ids already handled: the factory's own store, or in memory (tests, a bare state). */
+/** GAP-258: the webhook delivery ids already handled: the factory's own store, or in memory (tests, a bare state). */
 function webhookDeliveries(state: FactoryState): DeliveryLog {
   if (state.webhookDeliveries) return state.webhookDeliveries;
   let log = deliveryLogs.get(state);
@@ -3478,7 +3478,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     }
     const agent = state.agents.get(hookId);
     const trigger = agent?.triggers.find((t) => t.type === 'webhook');
-    // GAP-250: an agent with no cartridge webhook trigger is reached only by its own GitHub App, signed (HMAC) with the
+    // GAP-258: an agent with no cartridge webhook trigger is reached only by its own GitHub App, signed (HMAC) with the
     // app's webhook secret; the legacy shared-secret header never opens that path.
     const githubEventHeader = typeof req.headers['x-github-event'] === 'string' ? req.headers['x-github-event'] : undefined;
     const viaApp = Boolean(agent && !(trigger?.type === 'webhook' && trigger.secretRef) && hmacSignature && githubEventHeader);
@@ -3530,7 +3530,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         input = raw;
       }
     }
-    // GAP-250: the GitHub event and delivery id travel with the run; a conductor gets the one event it handles.
+    // GAP-258: the GitHub event and delivery id travel with the run; a conductor gets the one event it handles.
     const githubEvent = githubEventHeader && GITHUB_EVENT.test(githubEventHeader) ? githubEventHeader : undefined;
     const rawDelivery = req.headers['x-github-delivery'];
     const delivery = typeof rawDelivery === 'string' && DELIVERY_ID.test(rawDelivery) ? rawDelivery : undefined;

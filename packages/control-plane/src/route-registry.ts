@@ -39,7 +39,7 @@ export const ROUTE_EXCEPTIONS = {
   'webhook-hooks': {
     id: 'webhook-hooks',
     protection: 'webhook-hmac',
-    rationale: 'Generic agent webhook endpoint verified fail-closed via HMAC signature against the agent cartridge secret, or for a config-only agent its own GitHub App webhook secret (D18, D22, S15, GAP-250)',
+    rationale: 'Generic agent webhook endpoint verified fail-closed via HMAC signature against the agent cartridge secret, or for a config-only agent its own GitHub App webhook secret (D18, D22, S15, GAP-258)',
   },
   'authz-check': {
     id: 'authz-check',

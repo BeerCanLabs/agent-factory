@@ -1,4 +1,4 @@
-// GAP-250, TSK-337: GitHub App webhooks into an agent's own /hooks/:agentId: the event and delivery travel with the
+// GAP-258, TSK-344: GitHub App webhooks into an agent's own /hooks/:agentId: the event and delivery travel with the
 // run, a conductor gets one mapped conductor event, the app's webhook secret signs the config-only path, and a
 // delivery id starts at most one run.
 import { describe, it, before, after } from 'node:test';
@@ -71,7 +71,7 @@ describe('DeliveryLog survives a restart and releases a failed claim', () => {
   });
 });
 
-describe('/hooks/:agentId with GitHub App deliveries (GAP-250)', { concurrency: false }, () => {
+describe('/hooks/:agentId with GitHub App deliveries (GAP-258)', { concurrency: false }, () => {
   let cp: http.Server;
   let port = 0;
   let state: FactoryState;
