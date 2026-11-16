@@ -166,7 +166,7 @@ export async function reconcileAgentTaskRole(
   const client = new IAMClient({});
   const role = `AgentTaskRole-${agentId}`;
   if (!(await roleExists(client, role))) return { role, outcome: "no-role", revoked: [] };
-  const prefix = opts.memoryPrefix || agentId;
+  const prefix = opts.memoryPrefix ?? agentId;
   let outcome: ReconcileOutcome = "not-narrowed";
   let detail: string | undefined;
   if (opts.narrow !== false) {
@@ -215,7 +215,7 @@ export async function provisionAgentRoles(
 ): Promise<{ taskRoleArn: string; executionRoleArn: string }> {
   const client = new IAMClient({});
   // GAP-263: checked before anything is written.
-  const mind = opts.memory === false ? false : { bucket: mindBucketName(), prefix: checkMindPrefix(opts.memoryPrefix || agentId) };
+  const mind = opts.memory === false ? false : { bucket: mindBucketName(), prefix: checkMindPrefix(opts.memoryPrefix ?? agentId) };
   if (mind) await assertMindPrefixOwned(agentId, mind.bucket, mind.prefix, opts.probe ?? awsMindProbe());
 
   const assumeRolePolicyDocument = JSON.stringify({
