@@ -446,6 +446,22 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     assert.ok(!String(page.body).includes('uptime') && !String(page.body).includes('version'));
   });
 
+  it('CL11 GAP-249: schema endpoints need a verified principal and answer 200 with OpenAPI and MCP catalogs', async () => {
+    for (const path of ['/api/v1/openapi.json', '/api/v1/mcp/schema.json']) {
+      const unauth = await call(port, 'GET', path, 'none');
+      assert.equal(unauth.status, 401, `${path} without a credential`);
+    }
+    for (const cred of CREDENTIALS.filter((c) => c !== 'none')) {
+      const oas = await call(port, 'GET', '/api/v1/openapi.json', cred);
+      assert.equal(oas.status, 200, `/api/v1/openapi.json as ${cred}`);
+      assert.equal((oas.body as { openapi?: string })?.openapi, '3.1.0');
+
+      const mcp = await call(port, 'GET', '/api/v1/mcp/schema.json', cred);
+      assert.equal(mcp.status, 200, `/api/v1/mcp/schema.json as ${cred}`);
+      assert.equal((mcp.body as { version?: string })?.version, '2024-11-05');
+    }
+  });
+
   it('S12: logout needs no credential and only clears the cookie', async () => {
     for (const cred of CREDENTIALS) assert.equal((await call(port, 'POST', '/api/v1/auth/logout', cred)).status, 200, `logout as ${cred}`);
   });
