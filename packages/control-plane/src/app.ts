@@ -4774,9 +4774,9 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       json(res, 400, { error: checked.error });
       return;
     }
-    // GAP-255: a deployment setting is never a credential the factory already holds.
-    if (Object.values(checked.policy.env ?? {}).some((v) => v.length >= 8 && [...state.secretValues].some((secret) => secret.length >= 8 && v.includes(secret)))) {
-      json(res, 400, { error: 'env carries a secret value: set it as the agent\'s secret instead' });
+    const envError = policyEnvSecretError(state, checked.policy);
+    if (envError) {
+      json(res, 400, { error: envError });
       return;
     }
     if (isBuiltin && checked.policy.budgetUsd !== undefined) {
@@ -5613,9 +5613,25 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
         },
       };
     }
+    // GAP-255: the run env is policy.set's, never registry.budget.set's: this route keeps the agent's current env and
+    // refuses a different one (the console saves the whole policy it read, env included, unchanged).
+    const currentEnv = state.policies.get(agentId)?.env;
+    if (policyInput && typeof policyInput === 'object' && !Array.isArray(policyInput)) {
+      const { env: sentEnv, ...rest } = policyInput as Record<string, unknown>;
+      if (sentEnv !== undefined && JSON.stringify(sentEnv) !== JSON.stringify(currentEnv ?? {})) {
+        json(res, 403, { error: 'env is set with PUT /api/v1/agents/:id/policy (policy.set), not the budget route' });
+        return;
+      }
+      policyInput = { ...rest, ...(currentEnv ? { env: currentEnv } : {}) };
+    }
     const checked = validatePolicy(policyInput);
     if (!checked.ok) {
       json(res, 400, { error: checked.error });
+      return;
+    }
+    const budgetEnvError = policyEnvSecretError(state, checked.policy);
+    if (budgetEnvError) {
+      json(res, 400, { error: budgetEnvError });
       return;
     }
     state.policies.set(agentId, checked.policy);
@@ -5865,4 +5881,17 @@ export function createProbeServer(): http.Server {
     if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
     return json(res, 404, { error: 'not_found' });
   });
+}
+
+/**
+ * GAP-255: a deployment setting is never a credential the factory already holds. Checked on every route that writes a
+ * policy's env. Values and secrets shorter than 8 characters are not compared (too many false matches).
+ */
+function policyEnvSecretError(state: FactoryState, policy: AgentPolicy): string | undefined {
+  const values = Object.values(policy.env ?? {}).filter((v) => v.length >= 8);
+  if (!values.length) return undefined;
+  for (const secret of state.secretValues) {
+    if (secret.length >= 8 && values.some((v) => v.includes(secret))) return 'env carries a secret value: set it as the agent\'s secret instead';
+  }
+  return undefined;
 }

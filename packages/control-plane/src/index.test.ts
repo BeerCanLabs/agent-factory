@@ -279,11 +279,22 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal(env.SDLC_FLEET_CONFIG, fleet);
       assert.equal(env.SDLC_APPROVALS_URL, 'https://factory.example/api/v1/agents/flow/holds');
       assert.equal(env.FACTORY_RUN_ID, run.runId);
-      for (const env of [{ FACTORY_RUN_TOKEN: 'x' }, { GITHUB_TOKEN: 'x' }, { lower: 'x' }, { AWS_REGION: 'x' }, { BIG: 'x'.repeat(6001) }, { N: 1 }]) {
-        assert.equal((await put({ routes: [], env })).status, 400, JSON.stringify(env).slice(0, 40));
+      for (const bad of [{ FACTORY_RUN_TOKEN: 'x' }, { GITHUB_TOKEN: 'x' }, { GITHUB_BASE_URL: 'https://evil.example' }, { MEMORY_PREFIX: 'other' }, { lower: 'x' }, { AWS_REGION: 'x' }, { SDLC_BIG: 'x'.repeat(6001) }, { SDLC_N: 1 }]) {
+        assert.equal((await put({ routes: [], env: bad })).status, 400, JSON.stringify(bad).slice(0, 40));
       }
       state.secretValues.add('known-secret-value-for-env-test');
       assert.equal((await put({ routes: [], env: { SDLC_NOTE: 'has known-secret-value-for-env-test inside' } })).status, 400);
+      // The budget route (registry.budget.set) keeps the env policy.set wrote and cannot change it.
+      const budget = (body: unknown) => request(port, '/api/v1/registry/agents/echo-agent/budget', { method: 'PUT', token: TOKENS.admin, body });
+      const kept = { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' };
+      assert.equal((await budget({ routes: [], env: { SDLC_NOTE: 'has known-secret-value-for-env-test inside' } })).status, 403);
+      assert.equal((await budget({ routes: [], env: { SDLC_FLEET_CONFIG: 'other' } })).status, 403);
+      assert.deepEqual(state.policies.get('echo-agent').env, kept);
+      assert.equal((await budget({ routes: [], budgetUsd: { perDay: 7 } })).status, 200);
+      assert.deepEqual(state.policies.get('echo-agent').env, kept, 'a whole-policy save without env keeps it');
+      assert.equal((await budget({ routes: [], budgetUsd: { perDay: 8 }, env: kept })).status, 200, 'the same env, as the console sends it back');
+      assert.equal((await budget({ spendLimitUsd: 9, period: 'daily' })).status, 200);
+      assert.deepEqual(state.policies.get('echo-agent').env, kept);
       state.secretValues.delete('known-secret-value-for-env-test');
       assert.equal((await request(port, '/api/v1/policies/budget', { method: 'PUT', token: TOKENS.admin, body: { routes: [], env: { SDLC_X: 'y' } } })).status, 400);
       state.policies.set('echo-agent', { routes: [] });

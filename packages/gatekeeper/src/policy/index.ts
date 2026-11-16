@@ -29,28 +29,43 @@ export type AgentPolicy = {
   env?: Record<string, string>;
 };
 
-/** GAP-255: names an admin may set; the factory's own, the platform's and credential-like names are refused. */
+/**
+ * GAP-255: an allow-list. A name must start with one of these prefixes (agentic-sdlc's deployment settings:
+ * SDLC_FLEET_CONFIG, SDLC_APPROVALS_URL, SDLC_APPROVALS_FALLBACK, SDLC_GLOBAL_STATE_URL, ...), so the env can never reach
+ * a name the factory, the runtimes, the memory shim or the platform use (FACTORY_*, MEMORY_*, *_BASE_URL, AGENT_ID,
+ * GIT_SSH_COMMAND, BASH_ENV, SSL_CERT_FILE, PATH, ...). Add a prefix here, in review, for another fleet.
+ */
+export const POLICY_ENV_PREFIXES = ['SDLC_'] as const;
 export const POLICY_ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
-const RESERVED_ENV = /^(FACTORY_|AWS_|ECS_|LD_|PYTHON|NODE_|[A-Z]*_PROXY$|PATH$|HOME$|MEMORY_DIR$|SKILLS_DIR$|TMPDIR$)/;
-const CREDENTIAL_ENV = /(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|API_?KEY|CREDENTIAL)/;
+const CREDENTIAL_ENV = /(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|API_?KEY|CREDENTIAL|COOKIE|SESSION)/;
+const CREDENTIAL_ENV_WORD = /(^|_)(KEY|PAT|PASS|AUTH|DSN)(_|$)/;
+// Values shaped like a credential: provider tokens, a JWT, a PEM private key, a URL with a password in it.
+const CREDENTIAL_VALUE =
+  /github_pat_\w{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|sk-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{12,}|eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|[a-z][a-z0-9+.-]*:\/\/[^/\s@:]+:[^/\s@]+@/i;
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f]/;
 const MAX_ENV_VARS = 32;
-// A run's environment travels in the task's start request (ECS allows 8 KiB of overrides in all), so it stays small.
-const MAX_ENV_VALUE = 6000;
-const MAX_ENV_TOTAL = 6000;
+// A run's environment travels in the task's start request (ECS allows 8 KiB of overrides in all, in bytes), and the
+// factory adds its own FACTORY_* and egress variables to the same request, so the admin's part stays under 6,000 bytes.
+const MAX_ENV_BYTES = 6000;
 
-function validateEnv(v: unknown): string | undefined {
+export function validateEnv(v: unknown): string | undefined {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return 'env must be an object of names to text values';
   const entries = Object.entries(v as Record<string, unknown>);
   if (entries.length > MAX_ENV_VARS) return `env holds at most ${MAX_ENV_VARS} variables`;
   let total = 0;
   for (const [name, value] of entries) {
     if (!POLICY_ENV_NAME.test(name)) return `env name ${JSON.stringify(name.slice(0, 64))} must be UPPER_SNAKE_CASE`;
-    if (RESERVED_ENV.test(name)) return `env name ${name} is the factory's or the platform's`;
-    if (CREDENTIAL_ENV.test(name)) return `env name ${name} looks like a credential: set it as the agent's secret`;
-    if (typeof value !== 'string' || value.length > MAX_ENV_VALUE) return `env.${name} must be text, at most ${MAX_ENV_VALUE} characters`;
-    total += name.length + value.length;
+    if (!POLICY_ENV_PREFIXES.some((p) => name.startsWith(p) && name.length > p.length)) {
+      return `env name ${name} is not allowed: names start with ${POLICY_ENV_PREFIXES.join(' or ')}`;
+    }
+    if (CREDENTIAL_ENV.test(name) || CREDENTIAL_ENV_WORD.test(name)) return `env name ${name} looks like a credential: set it as the agent's secret`;
+    if (typeof value !== 'string') return `env.${name} must be text`;
+    if (CONTROL.test(value)) return `env.${name} must not hold control characters (newlines, NUL)`;
+    if (CREDENTIAL_VALUE.test(value)) return `env.${name} looks like a credential: set it as the agent's secret`;
+    total += Buffer.byteLength(name, 'utf8') + Buffer.byteLength(value, 'utf8');
   }
-  if (total > MAX_ENV_TOTAL) return `env is at most ${MAX_ENV_TOTAL} characters in all`;
+  if (total > MAX_ENV_BYTES) return `env is at most ${MAX_ENV_BYTES} bytes (UTF-8) in all`;
   return undefined;
 }
 

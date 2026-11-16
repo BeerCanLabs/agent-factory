@@ -544,8 +544,11 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
         ? state.policies.get(agent.id).models?.[0]
         : state.defaultModel);
     const archetype = state.configs?.current(agent.id)?.agent?.memory?.archetype;
-    // GAP-255: an admin's non-secret deployment settings for this agent, first, so nothing the factory sets is replaced.
-    const policyEnv = state.policies.has(agent.id) ? (state.policies.get(agent.id).env ?? {}) : {};
+    // GAP-255: an admin's non-secret deployment settings for this agent, first, so nothing the factory sets is replaced,
+    // and never under the name of a secret bound for this run (every runtime lays runEnv over the secrets).
+    const policyEnv = Object.fromEntries(
+      Object.entries(state.policies.has(agent.id) ? (state.policies.get(agent.id).env ?? {}) : {}).filter(([name]) => !Object.hasOwn(env, name)),
+    );
     runEnv = {
       ...policyEnv,
       FACTORY_RUN_ID: run.runId,
